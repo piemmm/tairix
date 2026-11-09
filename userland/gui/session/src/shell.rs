@@ -573,6 +573,13 @@ impl DesktopShell {
         (&mut self.artwork, &mut self.artwork_resolver)
     }
 
+    /// Whether the artwork cache would keep one picture of `bytes` at the
+    /// band in force now.
+    #[must_use]
+    pub fn holds_artwork(&self, bytes: usize) -> bool {
+        self.artwork.holds(bytes)
+    }
+
     /// The active theme and the artwork lookup icons are drawn through, for a
     /// surface the shell does not paint itself — the picker — that needs both
     /// in one paint.
@@ -609,20 +616,17 @@ impl DesktopShell {
     /// The same call runs the window-*content* release ladder
     /// ([`Compositor::release_content_under_pressure`]), which is a policy
     /// rather than a cache: the compositor holds the only copy of a
-    /// window's pixels, so the focused window is spared and every window
-    /// whose pixels do go is queued for a redraw request the embedder
-    /// drains with [`Compositor::pending_redraws`]. The focused window is
-    /// the one the router already tracks, so the shell has a single notion
-    /// of focus rather than a second one for reclaim.
+    /// window's pixels, so only windows nobody can see give theirs back, and
+    /// each is queued for the notice the embedder drains with
+    /// [`Compositor::take_released_notices`].
     pub fn trim_caches(&mut self, compositor: &mut Compositor) -> usize {
-        let focused = self.router.focused();
         self.cursor
             .trim()
             .saturating_add(self.renderer.trim())
             .saturating_add(self.artwork.trim())
             .saturating_add(compositor.trim_chrome())
             .saturating_add(compositor.trim_frost())
-            .saturating_add(compositor.release_content_under_pressure(focused))
+            .saturating_add(compositor.release_content_under_pressure())
     }
 
     /// The desktop session (theme registry + taskbar model).

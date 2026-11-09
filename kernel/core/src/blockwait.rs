@@ -58,7 +58,9 @@ use tairix_log::{Field, FieldValue, Level, Sink};
 use crate::audit::{emit, AuditEvent};
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
-use crate::waitq::{nearest_timed_deadline, wait_arch, IRQ_WAITQ, LATE_WAKE_NS};
+use crate::waitq::{
+    irq_line_key, nearest_timed_deadline, wait_arch, WakeKey, IRQ_WAITQ, LATE_WAKE_NS,
+};
 
 /// How long a device the kernel drives itself may take to answer — a
 /// completion interrupt, or a whole operation — before the kernel records it:
@@ -307,11 +309,16 @@ impl IrqWaiter for IrqParkWaiter {
         // consume the flag.
         // A wait the heap has no room to register could not be woken, so it
         // takes the bounded CPU park instead.
-        if IRQ_WAITQ.register(task, deadline_ns).is_err() {
+        // Under the line's key, so another line's fire leaves this park alone.
+        let key = self
+            .table
+            .line_for(self.handle, self.owner)
+            .map_or(WakeKey::NONE, irq_line_key);
+        if IRQ_WAITQ.register_keyed(key, task, deadline_ns).is_err() {
             return self.fall_back();
         }
         if self.table.ready_for(self.handle) {
-            IRQ_WAITQ.deregister(task);
+            IRQ_WAITQ.deregister_keyed(key, task);
             return Ok(());
         }
         // Arm the one-shot at the nearest pending deadline across every
@@ -323,10 +330,10 @@ impl IrqWaiter for IrqParkWaiter {
             // loop runs its first task, or a host test with no live
             // dispatch loop): take the port's bounded CPU park instead of
             // parking into the void.
-            IRQ_WAITQ.deregister(task);
+            IRQ_WAITQ.deregister_keyed(key, task);
             return self.fall_back();
         }
-        IRQ_WAITQ.deregister(task);
+        IRQ_WAITQ.deregister_keyed(key, task);
         // Re-point the one-shot at the nearest deadline any remaining timed
         // waiter needs (or clear it) so this finished park leaves no stale
         // arming behind.

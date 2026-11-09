@@ -537,7 +537,12 @@ fn drive_to_parent_exit(
         // `wait`.
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
 
-        match wait_producer.poll(ProcessId(0), parent_pid, WaitFlags::empty()) {
+        match wait_producer.poll(
+            ProcessId(0),
+            parent_pid,
+            WaitFlags::empty(),
+            &mut |_| Ok(()),
+        ) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(0) => {
                     // Each role died correctly; each must also have been

@@ -1073,14 +1073,15 @@ Every wake path counts the wakes that **landed**, not the `unpark`s it
 issued, and reaps the row of one that could not — under that row's own
 identity, so a park begun in the meantime survives. Counting issued unparks
 let a single retired task's row swallow a counted wake: `wake_n(_, 1)` over
-it answered "one woken" and released nobody, which on the futex path is a
-lost `FUTEX_WAKE` with a live waiter still parked (D130).
+it answered "one woken" and released nobody, leaving a live waiter parked
+(D130).
 
 Rows are also dropped at the source. A thread that dies inside the kernel
 never unwinds to its own park site's `deregister`, so the one per-thread
 retirement path (`threads::retire`) calls `waitq::retire_task`, which clears
-that thread from every `ALL_QUEUES` entry and every futex key —
-task-major-indexed, so O(log n + rows) rather than a scan. A `SleepLock`'s line
+that thread from every `ALL_QUEUES` entry — task-major-indexed, so
+O(log n + rows) rather than a scan — and clearing its gate unlinks its futex
+waiter. A `SleepLock`'s line
 is embedded in the mount or device that owns it and is reachable from no
 registry; its rows are reaped by the release that next looks at the line, and
 go with their owner when it is dropped.

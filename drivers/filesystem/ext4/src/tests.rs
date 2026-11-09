@@ -3481,7 +3481,8 @@ fn the_served_driver_opens_as_the_kernel_says_and_names_its_generation() {
             .into_block()
             .expect("the volume closes")
     };
-    let mut writable = Served::open(image(), false, budget).expect("opens writable");
+    let mut writable =
+        Served::open(image(), false, budget, &tairix_log::DiscardSink).expect("opens writable");
     assert_eq!(writable.format, writable.fs.generation().format());
     assert_eq!(writable.write_refusal, None);
     assert_eq!(writable.offer().root, writable.fs.root());
@@ -3491,7 +3492,8 @@ fn the_served_driver_opens_as_the_kernel_says_and_names_its_generation() {
         .create(root, b"made", NodeKind::RegularFile, &FILE_RECORD)
         .expect("a writable volume takes a new file");
 
-    let mut read_only = Served::open(image(), true, budget).expect("opens read-only");
+    let mut read_only =
+        Served::open(image(), true, budget, &tairix_log::DiscardSink).expect("opens read-only");
     assert_eq!(
         read_only.write_refusal, None,
         "a volume the kernel serves read-only is no refusal of the format's"

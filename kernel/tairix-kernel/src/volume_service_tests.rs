@@ -988,6 +988,7 @@ type Open<S> = fn(
     GrantedVolume<ServiceAccess>,
     bool,
     WritebackBudget,
+    &'static (dyn tairix_fsserve::Sink + Sync),
 ) -> Result<tairix_fsserve::Opened<S>, DriverError>;
 
 impl Driver {
@@ -1014,7 +1015,7 @@ impl Driver {
         };
         let opened = GrantedVolume::open(ServiceAccess(self.volume)).and_then(|granted| {
             let read_only = granted.info().read_only;
-            open(granted, read_only, budget)
+            open(granted, read_only, budget, &tairix_log::DiscardSink)
         });
         let mut opened = match opened {
             Ok(opened) => opened,
@@ -2028,7 +2029,7 @@ fn a_driver_offering_another_format_is_refused_scenario(
         backing: 1 << 30,
         gauge: &Unpressured,
     };
-    let offer = tairix_drv_fs_fat32::Served::open(copy, false, budget)
+    let offer = tairix_drv_fs_fat32::Served::open(copy, false, budget, &tairix_log::DiscardSink)
         .expect("the copy opens")
         .offer();
     let liar = Driver {

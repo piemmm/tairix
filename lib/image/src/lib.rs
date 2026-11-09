@@ -190,12 +190,14 @@ pub use picture::{
     flatten_row, masked_colour, over, IndexDepth, Picture, PictureError, PictureKind,
     PictureSource, Pixels, Rgba8, SurfacePicture,
 };
+pub use png::defilter_row as defilter_png_row;
 pub use sprite::{
     decode_named, decode_sprite, desktop_palette, find_named, opaque_sprite_writes_back,
     LoneSprite, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry, SpriteLayout,
     SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG, SPRITE_HEADER_LEN,
 };
 pub use sprite_encode::SpriteInput;
+pub use tiff::undo_horizontal_big_endian as undo_tiff_horizontal_big_endian;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
 /// shape [`RasterImage`] and every format decoder here produce.
@@ -2437,7 +2439,10 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{decode, sniff, DecodeError, DecodeLimits, ImageFormat};
+    use super::{
+        decode, defilter_png_row, sniff, undo_tiff_horizontal_big_endian, DecodeError,
+        DecodeLimits, ImageFormat,
+    };
 
     #[test]
     fn sniff_recognises_the_png_signature() {
@@ -2522,6 +2527,64 @@ mod tests {
         assert_eq!(limits.max_height(), 20);
         assert_eq!(limits.max_pixels(), 200);
         assert_eq!(limits.max_progressive_coefficient_bytes(), 4_000);
+    }
+
+    #[test]
+    fn a_png_row_reads_a_byte_its_prior_row_lacks_as_zero() {
+        let mut row = [1u8, 2, 3];
+        defilter_png_row(2, &mut row, Some(&[10u8][..]), 1).expect("a filter type PNG defines");
+        assert_eq!(row, [11, 2, 3]);
+        assert_eq!(
+            defilter_png_row(5, &mut row, None, 1),
+            Err(DecodeError::InvalidFilterType)
+        );
+    }
+
+    #[test]
+    fn tiff_horizontal_differencing_is_undone_over_big_endian_samples() {
+        let mut eight = [1u8, 2, 3, 1, 1, 1];
+        undo_tiff_horizontal_big_endian(&mut eight, 8, 3, 6).expect("a depth it differences");
+        assert_eq!(eight, [1, 2, 3, 2, 3, 4]);
+        let mut sixteen = [0x00u8, 0x01, 0x00, 0x02, 0xff, 0xff];
+        undo_tiff_horizontal_big_endian(&mut sixteen, 16, 1, 3).expect("a depth it differences");
+        assert_eq!(sixteen, [0x00, 0x01, 0x00, 0x03, 0x00, 0x02]);
+        assert_eq!(
+            undo_tiff_horizontal_big_endian(&mut [0x12], 3, 1, 2),
+            Err(DecodeError::TiffInvalidPredictor)
+        );
+    }
+
+    #[test]
+    fn a_row_said_to_hold_more_samples_than_it_does_is_undone_only_as_far_as_it_goes() {
+        // A PDF's `/Columns` reaches this count unchecked against the row.
+        let mut sixteen = [0x00u8, 0x01, 0x00, 0x02];
+        undo_tiff_horizontal_big_endian(&mut sixteen, 16, 1, 1 << 40)
+            .expect("a depth it differences");
+        assert_eq!(sixteen, [0x00, 0x01, 0x00, 0x03]);
+        let mut thirty_two = [0u8, 0, 0, 1, 0, 0, 0, 2];
+        undo_tiff_horizontal_big_endian(&mut thirty_two, 32, 1, usize::MAX)
+            .expect("a depth it differences");
+        assert_eq!(thirty_two, [0, 0, 0, 1, 0, 0, 0, 3]);
+    }
+
+    #[test]
+    fn samples_narrower_than_a_byte_are_differenced_modulo_their_width() {
+        // 1, 2, 3, 4 four bits wide sum to 1, 3, 6, 10.
+        let mut four = [0x12u8, 0x34];
+        undo_tiff_horizontal_big_endian(&mut four, 4, 1, 4).expect("a width PDF differences");
+        assert_eq!(four, [0x13, 0x6a]);
+        // Two bits a sample, two to a pixel: 3, 2 | 3, 3 sum to 3, 2 | 2, 1.
+        let mut two = [0b1110_1111u8];
+        undo_tiff_horizontal_big_endian(&mut two, 2, 2, 4).expect("a width PDF differences");
+        assert_eq!(two, [0b1110_1001]);
+        // One bit wide, a sum is an exclusive or.
+        let mut one = [0b1000_0001u8];
+        undo_tiff_horizontal_big_endian(&mut one, 1, 1, 8).expect("a width PDF differences");
+        assert_eq!(one, [0b1111_1110]);
+        let mut wide = [0xffu8];
+        undo_tiff_horizontal_big_endian(&mut wide, 4, 1, usize::MAX)
+            .expect("a width PDF differences");
+        assert_eq!(wide, [0xfe], "a row is undone only as far as it goes");
     }
 
     /// A minimal, valid 2x2 8-bit greyscale PNG (a single stored-deflate

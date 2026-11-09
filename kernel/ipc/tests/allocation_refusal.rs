@@ -115,9 +115,10 @@ fn a_registration_refused_its_sender_index_binds_nothing() {
     assert!(reg.contains(EndpointId(0x10)));
 }
 
-/// A wait for room whose sender cannot be noted is refused and recorded
-/// nowhere, since the sender's end would never find it to forget; given
-/// room, the next is noted, and the sender's end forgets it.
+/// A wait for room whose sender cannot be noted is recorded nowhere, since
+/// the sender's end would never find it to forget, and is left to the
+/// broadcast the port's next wake carries; given room, the next is noted,
+/// and the sender's end forgets it.
 #[test]
 fn a_room_wait_refused_its_note_records_nothing() {
     let sink = Recorded::new();
@@ -128,16 +129,17 @@ fn a_room_wait_refused_its_note_records_nothing() {
     let watched = reg.lookup(EndpointId(0x11)).expect("bound");
     let first = ProcId::from_raw([7; PROC_ID_LEN]);
     let second = ProcId::from_raw([8; PROC_ID_LEN]);
-    watched.watch_room(0xA, first).expect("noted");
-    assert_eq!(
-        refusing_after(0, || watched.watch_room(0xB, second)),
-        Err(Errno::OutOfMemory)
-    );
+    watched.watch_room(0xA, first);
+    refusing_after(0, || watched.watch_room(0xB, second));
     assert!(watched.leave_room(0xB).is_empty(), "nothing was recorded");
-    watched.watch_room(0xC, second).expect("noted");
+    watched.watch_room(0xC, second);
     reg.sender_ended(second, &sink);
     let waiting: Vec<u64> = watched.room_wake_everyone().tasks().collect();
-    assert_eq!(waiting, [0xA], "its end found the port it waited at");
+    assert_eq!(
+        waiting,
+        [0xA, 0],
+        "its end found the port it waited at, and the unrecorded wait is broadcast to"
+    );
 }
 
 /// A send whose sender cannot be noted is refused for memory, queueing and
@@ -361,4 +363,37 @@ fn a_reply_under_an_allocator_refusing_every_allocation_still_lands() {
         };
         assert_eq!(answer.as_bytes(), b"answer");
     }
+}
+
+/// A watch for a caller's answers the heap has no room to record is left to
+/// the broadcast the next answer carries, once, rather than refused: a wait
+/// set's wait is never failed for want of the record.
+#[test]
+fn a_reply_watch_refused_its_record_is_broadcast_to() {
+    let sink = Recorded::new();
+    let ep = endpoint(0x18);
+    let ticket = ep
+        .post(&task(7), 0x77, b"q", u64::MAX, RLIMIT_INFINITY, &sink)
+        .expect("posted");
+    refusing_after(0, || ep.watch_replies(0x5A, 7));
+    let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+        panic!("the call is received");
+    };
+    let woken = ep.reply(call.ticket, b"a", &sink).expect("answered");
+    assert!(
+        woken.tasks().any(|task| task == 0),
+        "the answer is broadcast"
+    );
+    let ReplyOutcome::Ready(_) = ep.take_reply(7, ticket, 0, &sink) else {
+        panic!("the answer is collected");
+    };
+    let again = ep
+        .post(&task(7), 0x77, b"q", u64::MAX, RLIMIT_INFINITY, &sink)
+        .expect("posted");
+    let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
+        panic!("the call is received");
+    };
+    let woken = ep.reply(call.ticket, b"a", &sink).expect("answered");
+    assert!(!woken.tasks().any(|task| task == 0), "once");
+    drop(ep.take_reply(7, again, 0, &sink));
 }

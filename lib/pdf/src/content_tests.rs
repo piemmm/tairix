@@ -24,7 +24,7 @@ fn list(content: &str, resources: &str) -> DisplayList {
 
 fn try_list(content: &[u8], resources: &str) -> Result<DisplayList, PdfError> {
     let file = one_page(content, resources);
-    let document = Document::open(&file, &OPTIONS)?;
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS)?;
     let page = document.page(0)?;
     page.display_list()
 }
@@ -292,14 +292,28 @@ fn a_tiling_pattern_is_lost_and_an_uncoloured_one_keeps_its_colour() {
 
 /// A one-page document whose resources name form `F0`, written as `form`.
 fn with_form(content: &str, form_entries: &str, form_content: &str) -> DisplayList {
+    formed("", content, form_entries, form_content)
+}
+
+/// As `with_form`, the page stating `page_entries` besides.
+fn formed(
+    page_entries: &str,
+    content: &str,
+    form_entries: &str,
+    form_content: &str,
+) -> DisplayList {
+    let page = format!(
+        "<</Type /Page /MediaBox [0 0 200 100] {page_entries} /Contents 4 0 R /Resources <</XObject <</F0 5 0 R>>>>>>"
+    );
+    let form = format!("/Type /XObject /Subtype /Form {form_entries}");
     let mut pdf = Builder::new();
     pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
         .object(2, "<</Type /Pages /Kids [3 0 R]>>")
-        .object(3, "<</Type /Page /MediaBox [0 0 200 100] /Contents 4 0 R /Resources <</XObject <</F0 5 0 R>>>>>>")
+        .object(3, &page)
         .stream(4, "", content.as_bytes())
-        .stream(5, &format!("/Type /XObject /Subtype /Form {form_entries}"), form_content.as_bytes());
+        .stream(5, &form, form_content.as_bytes());
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let page = document.page(0).expect("a page");
     page.display_list().expect("a display list")
 }
@@ -329,7 +343,7 @@ fn a_transparency_group_is_drawn_as_one_at_the_fill_opacity() {
         .stream(4, "", b"/G0 gs /F0 Do")
         .stream(5, "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Group <</S /Transparency>>", b"0 0 5 5 re f");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -365,7 +379,7 @@ fn a_form_that_paints_itself_is_damage_not_a_loop() {
         )
         .object(6, "<</XObject <</F0 5 0 R>>>>");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -392,7 +406,7 @@ fn hidden_optional_content_paints_nothing() {
         .object(10, "<</Type /OCG>>")
         .object(11, "<</Type /OCG>>");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -407,6 +421,54 @@ fn hidden_optional_content_paints_nothing() {
         })
         .collect();
     assert_eq!(sizes, [1.0, 4.0]);
+}
+
+/// The steps a page with group 10 hidden takes to test what governs its
+/// content: `properties` its resources' optional content names, membership
+/// `9 0 R` naming group 10 two thousand times, painting `content`; and how
+/// many fills it painted.
+fn tested(properties: &str, content: &str) -> (u64, usize) {
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R /OCProperties <</OCGs [10 0 R] /D <</OFF [10 0 R]>>>>>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, &format!("<</Type /Page /MediaBox [0 0 200 100] /Contents 4 0 R /Resources <</Properties {properties}>>>>"))
+        .stream(4, "", content.as_bytes())
+        .object(9, &format!("[{}]", "10 0 R ".repeat(2000)))
+        .object(10, "<</Type /OCG>>");
+    let file = pdf.tabled(1, "");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let painted = document
+        .page(0)
+        .expect("a page")
+        .display_list()
+        .expect("a display list");
+    (
+        crate::limits::MAX_EVALUATION_STEPS - document.work().left(),
+        painted.items.len(),
+    )
+}
+
+#[test]
+fn a_membership_named_in_resources_is_tested_once_however_often_it_governs() {
+    let content = format!(
+        "{}0 0 4 4 re f",
+        "/OC /P0 BDC 0 0 1 1 re f EMC ".repeat(500)
+    );
+    assert_eq!(
+        tested("<</P0 <</Type /OCMD /OCGs 9 0 R>>>>", &content),
+        (2000, 1)
+    );
+}
+
+#[test]
+fn an_inline_membership_is_charged_each_time_it_is_tested() {
+    // Content holds no references, so an inline list names no group and
+    // hides nothing; testing it is still work.
+    let content = format!(
+        "{}0 0 4 4 re f",
+        "/OC <</Type /OCMD /OCGs [1 2 3]>> BDC 0 0 1 1 re f EMC ".repeat(10)
+    );
+    assert_eq!(tested("<<>>", &content), (10 * 3, 11));
 }
 
 #[test]
@@ -447,7 +509,7 @@ fn a_page_past_the_operator_bound_is_too_complex() {
     };
     let run = |operators: usize| {
         let file = one_page("n\n".repeat(operators).as_bytes(), "<<>>");
-        let document = Document::open(&file, &room).expect("a document");
+        let document = Document::open(crate::fixture::kept(&file), &room).expect("a document");
         document
             .page(0)
             .expect("a page")
@@ -467,7 +529,7 @@ fn an_inline_image_counts_against_the_operator_bound() {
     let mut content = "n\n".repeat(super::MAX_OPERATORS);
     content.push_str("BI /W 1 /H 1 /IM true ID \x00 EI");
     let file = one_page(content.as_bytes(), "<<>>");
-    let document = Document::open(&file, &room).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &room).expect("a document");
     let painted = document.page(0).expect("a page").display_list();
     assert_eq!(painted.err(), Some(PdfError::TooComplex));
 }
@@ -479,7 +541,7 @@ fn annotations_are_recorded_as_lost() {
         .object(2, "<</Type /Pages /Kids [3 0 R]>>")
         .object(3, "<</Type /Page /Annots [<</Subtype /Link>>]>>");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -504,7 +566,7 @@ fn a_gradients_own_alpha_mask_becomes_its_stops_alpha() {
             ),
         );
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -549,7 +611,7 @@ fn a_name_means_what_its_own_resources_say() {
         .stream(4, "", b"/CS0 cs 1 0 0 sc /G0 gs 0 0 1 1 re f /F0 Do /CS0 cs 1 0 0 sc /G0 gs 0 0 1 1 re f")
         .stream(5, "/Type /XObject /Subtype /Form /Resources <</ColorSpace <</CS0 /DeviceGray>> /ExtGState <</G0 <</ca 0.25>>>>>>", b"/CS0 cs 1 sc /G0 gs 0 0 1 1 re f");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -589,7 +651,7 @@ fn a_soft_mask_set_again_masks_in_the_space_it_is_set_in() {
             ),
         );
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let painted = document
         .page(0)
         .expect("a page")
@@ -665,7 +727,7 @@ fn with_hidden_group(content: &str, form_content: &str) -> DisplayList {
         .stream(5, "/Type /XObject /Subtype /Form /Resources <</Properties <</Off 10 0 R>>>>", form_content.as_bytes())
         .object(10, "<</Type /OCG /Name (off)>>");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     document
         .page(0)
         .expect("a page")
@@ -707,7 +769,7 @@ fn masked_page(content: &[u8], mask_shading: &str, extra: &[(u32, &str, &[u8])])
         pdf.stream(num, entries, data);
     }
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     document
         .page(0)
         .expect("a page")
@@ -746,7 +808,7 @@ fn a_transparency_group_painted_under_a_soft_mask_records_the_mask_lost() {
 #[test]
 fn a_gradients_stops_count_against_the_display_lists_bound() {
     let file = one_page(b"", "<<>>");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let page = document.page(0).expect("a page");
     let mut interpreter = super::Interpreter::new(&document, &page).expect("room");
     let stop = |offset: f64| crate::display::Stop {
@@ -776,4 +838,157 @@ fn a_gradients_stops_count_against_the_display_lists_bound() {
         })
         .expect("room");
     assert_eq!(interpreter.points, 4 + 3);
+}
+
+/// Run `test` on an interpreter of a blank page and the empty resources its
+/// content is read with, for what no page's content reaches directly.
+fn interpreting(test: impl FnOnce(&mut super::Interpreter<'_>, super::Resources<'_>)) {
+    let file = one_page(b"", "<<>>");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let page = document.page(0).expect("a page");
+    let mut interpreter = super::Interpreter::new(&document, &page).expect("room");
+    let categories = super::Categories::default();
+    let resources = super::Resources {
+        categories: &categories,
+        scope: interpreter.scope().expect("room"),
+    };
+    test(&mut interpreter, resources);
+}
+
+#[test]
+fn content_read_again_through_forms_is_held_to_the_content_bound() {
+    // The page paints A 65 times and A paints F 64 times: F, white space and
+    // no operator, is read 4160 times, past the bound in bytes and far within
+    // it in operators.
+    let page = "/A Do\n".repeat(65);
+    let form = "/F Do\n".repeat(64);
+    let blank = " ".repeat(1 << 16);
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(
+            3,
+            "<</Type /Page /MediaBox [0 0 200 100] /Contents 4 0 R /Resources 7 0 R>>",
+        )
+        .stream(4, "", page.as_bytes())
+        .stream(
+            5,
+            "/Type /XObject /Subtype /Form /Resources 7 0 R",
+            form.as_bytes(),
+        )
+        .stream(6, "/Type /XObject /Subtype /Form", blank.as_bytes())
+        .object(7, "<</XObject <</A 5 0 R /F 6 0 R>>>>");
+    let file = pdf.tabled(1, "");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let painted = document.page(0).expect("a page").display_list();
+    assert_eq!(painted.err(), Some(PdfError::TooComplex));
+}
+
+#[test]
+fn a_clip_placed_past_what_a_number_holds_lets_nothing_through() {
+    // At twice the page's size the clip's transform overflows, and the next
+    // `cm` brings the fill beneath it back within range.
+    let painted = formed(
+        "/UserUnit 2",
+        "1 0 0 1 1.7e308 0 cm -1.7e308 0 100 100 re W n 1 0 0 1 -1.7e308 0 cm 0 0 200 100 re f",
+        "",
+        "",
+    );
+    assert!(painted.items.is_empty(), "{:?}", painted.items);
+    assert!(painted.lost.contains(Lost::Damaged));
+}
+
+#[test]
+fn a_form_box_placed_past_what_a_number_holds_lets_nothing_through() {
+    let painted = formed(
+        "/UserUnit 2",
+        "1 0 0 1 1.7e308 0 cm /F0 Do",
+        "/BBox [0 0 10 10]",
+        "1 0 0 1 -1.7e308 0 cm 0 0 200 100 re f",
+    );
+    assert!(painted.items.is_empty(), "{:?}", painted.items);
+    assert!(painted.lost.contains(Lost::Damaged));
+}
+
+#[test]
+fn a_clip_to_no_path_lets_nothing_through_until_it_is_restored() {
+    let painted = list("q 5 5 m W n 0 0 10 10 re f Q 0 0 1 1 re f", "<<>>");
+    let [Item::Fill { path, .. }] = painted.items.as_slice() else {
+        panic!("only the fill after the restore: {:?}", painted.items);
+    };
+    assert_eq!(path.subpaths[0].elements[0].end(), Point::new(1.0, 0.0));
+    assert!(painted.lost.is_empty(), "{:?}", painted.lost);
+}
+
+#[test]
+fn what_is_painted_past_what_a_number_holds_is_recorded_as_damage() {
+    let painted = list("1e308 0 0 1 0 0 cm 10 0 0 1 0 0 cm 0 0 1 1 re f", "<<>>");
+    assert!(painted.items.is_empty(), "{:?}", painted.items);
+    assert!(painted.lost.contains(Lost::Damaged));
+}
+
+#[test]
+fn a_gradient_placed_past_what_a_number_holds_is_recorded_as_damage() {
+    let painted = list(
+        "0.1 0 0 1 0 0 cm /Pattern cs /P0 scn 0 0 1 1 re f",
+        "<</Pattern <</P0 <</PatternType 2 /Matrix [1e308 0 0 1 0 0] /Shading <</ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function <</FunctionType 2 /Domain [0 1] /N 1>>>>>>>>>>",
+    );
+    assert!(painted.items.is_empty(), "{:?}", painted.items);
+    assert!(painted.lost.contains(Lost::Damaged));
+}
+
+#[test]
+fn every_kind_of_item_counts_against_the_display_lists_bound() {
+    interpreting(|interpreter, _| {
+        let mut items = Vec::with_capacity(crate::limits::MAX_ITEMS);
+        items.extend(core::iter::repeat_n(
+            Item::Ungroup,
+            crate::limits::MAX_ITEMS - 1,
+        ));
+        interpreter.items = items;
+        assert_eq!(interpreter.emit(Item::Group { opacity: 1.0 }), Ok(()));
+        assert_eq!(interpreter.emit(Item::Ungroup), Err(PdfError::TooComplex));
+    });
+}
+
+#[test]
+fn a_path_being_built_counts_against_the_display_lists_bound() {
+    interpreting(|interpreter, resources| {
+        let identity = tairix_bezier::Affine::IDENTITY;
+        interpreter.points = super::MAX_POINTS - 3;
+        assert_eq!(
+            interpreter.run(b"0 0 m 1 1 l 2 2 l", resources, identity),
+            Ok(())
+        );
+        assert_eq!(
+            interpreter.run(b"3 3 l", resources, identity),
+            Err(PdfError::TooComplex)
+        );
+    });
+}
+
+#[test]
+fn an_inline_image_met_again_where_it_lies_is_not_read_there_again() {
+    interpreting(|interpreter, resources| {
+        let identity = tairix_bezier::Affine::IDENTITY;
+        let image: &[u8] = b"BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI";
+        // What lies there the second time would not parse, so its picture can
+        // only be the one read there first.
+        let mut garbled = b"BI".to_vec();
+        garbled.resize(image.len(), b')');
+        interpreter.run(image, resources, identity).expect("a run");
+        interpreter
+            .run(&garbled, resources, identity)
+            .expect("a run");
+        let [Item::Image { picture: first, .. }, Item::Image { picture: again, .. }] =
+            interpreter.items.as_slice()
+        else {
+            panic!(
+                "two pictures: {:?} {:?}",
+                interpreter.items, interpreter.lost
+            );
+        };
+        assert!(alloc::sync::Arc::ptr_eq(first, again));
+        assert!(interpreter.lost.is_empty(), "{:?}", interpreter.lost);
+    });
 }

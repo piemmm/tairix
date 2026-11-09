@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use super::{Document, Options};
 use crate::fixture::{one_page, Builder};
-use crate::limits::MAX_PAGE_TREE_DEPTH;
+use crate::limits::{MAX_PAGE_TREE_DEPTH, MAX_RESOLVE_DEPTH};
 use crate::object::Object;
 use crate::PdfError;
 
@@ -15,8 +15,8 @@ const OPTIONS: Options<'static> = Options {
     budget: 1 << 20,
 };
 
-fn open(file: &[u8]) -> Result<Document<'_>, PdfError> {
-    Document::open(file, &OPTIONS)
+fn open(file: &[u8]) -> Result<Document, PdfError> {
+    Document::open(crate::fixture::kept(file), &OPTIONS).map_err(PdfError::from)
 }
 
 /// A catalog and a page tree whose root lists `kids`, then `pages`.
@@ -35,6 +35,7 @@ fn a_one_page_document_opens() {
     let file = one_page(b"0 0 m 10 10 l S", "<<>>");
     let document = open(&file).expect("a document");
     assert_eq!(document.page_count(), 1);
+    assert!(!document.encrypted());
     assert_eq!(document.page(0).expect("a page").size(), (200.0, 100.0));
     assert_eq!(document.page(1).err(), Some(PdfError::NoSuchPage));
 }
@@ -130,13 +131,13 @@ fn a_reference_cycle_is_malformed() {
     assert_eq!(
         document
             .resolve(&crate::fixture::reference(4))
-            .map(alloc::borrow::Cow::into_owned),
+            .and_then(crate::object::Resolved::into_owned),
         Err(PdfError::Malformed)
     );
     assert_eq!(
         document
             .resolve(&crate::fixture::reference(99))
-            .map(alloc::borrow::Cow::into_owned),
+            .and_then(crate::object::Resolved::into_owned),
         Ok(Object::Null)
     );
 }
@@ -161,7 +162,7 @@ fn a_streams_length_may_be_indirect_or_wrong() {
     for (num, expected) in [(4, &b"q Q"[..]), (6, b"short")] {
         let Ok(Object::Stream(stream)) = document
             .resolve(&crate::fixture::reference(num))
-            .map(alloc::borrow::Cow::into_owned)
+            .and_then(crate::object::Resolved::into_owned)
         else {
             panic!("a stream");
         };
@@ -244,10 +245,10 @@ fn decoding_past_the_budget_is_too_complex() {
         password: None,
         budget: 1000,
     };
-    let document = Document::open(&file, &options).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &options).expect("a document");
     let Ok(Object::Stream(stream)) = document
         .resolve(&crate::fixture::reference(4))
-        .map(alloc::borrow::Cow::into_owned)
+        .and_then(crate::object::Resolved::into_owned)
     else {
         panic!("a stream");
     };
@@ -265,7 +266,7 @@ fn a_stream_in_another_file_is_unsupported() {
     let document = open(&file).expect("a document");
     let Ok(Object::Stream(stream)) = document
         .resolve(&crate::fixture::reference(4))
-        .map(alloc::borrow::Cow::into_owned)
+        .and_then(crate::object::Resolved::into_owned)
     else {
         panic!("a stream");
     };
@@ -392,4 +393,266 @@ fn a_document_states_its_title_and_subject_and_whether_it_holds_more() {
     assert!(about("/Metadata 10 0 R", "", &[(10, "<<>>")]).more_metadata);
     assert!(about("/Outlines 10 0 R", "", &[(10, "<<>>")]).more_parts);
     assert!(about("", "/Info 10 0 R", &[(10, "(not a dictionary)")]).more_metadata);
+}
+
+#[test]
+fn an_object_is_read_once_however_often_it_is_asked_for() {
+    let body = format!("[{}\n1 2 3]", "%".repeat(4096));
+    let file = crate::fixture::with_objects(&[(10, body.as_str())], &[]);
+    let document = open(&file).expect("a document");
+    let lexing = document.lexing.get();
+    for _ in 0..8 {
+        assert_eq!(
+            document
+                .resolve(&crate::fixture::reference(10))
+                .and_then(crate::object::Resolved::into_owned),
+            Ok(Object::Array(alloc::vec![
+                Object::Int(1),
+                Object::Int(2),
+                Object::Int(3)
+            ]))
+        );
+    }
+    let lexed = lexing - document.lexing.get();
+    assert!(lexed < 2 * 4096, "read again: {lexed} bytes lexed");
+}
+
+#[test]
+fn kids_reached_twice_are_walked_once() {
+    // Three nodes share an array of kids holding a page written directly,
+    // the third through a reference to the reference.
+    let file = tree(
+        "4 0 R 5 0 R 6 0 R",
+        &[
+            (4, "<</Type /Pages /Kids 7 0 R>>"),
+            (5, "<</Type /Pages /Kids 7 0 R>>"),
+            (6, "<</Type /Pages /Kids 8 0 R>>"),
+            (7, "[<</Type /Page /MediaBox [0 0 10 20]>>]"),
+            (8, "7 0 R"),
+        ],
+    );
+    let document = open(&file).expect("a document");
+    assert_eq!(document.page_count(), 1);
+    assert_eq!(document.page(0).expect("a page").size(), (10.0, 20.0));
+}
+
+#[test]
+fn the_catalog_is_looked_for_once() {
+    let file = b"%PDF-1.3\n1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n\
+        2 0 obj <</Type /Pages /Kids [3 0 R]>> endobj\n\
+        3 0 obj <</Type /Page>> endobj\n4 0 obj (never needed) endobj\n";
+    let document = open(file).expect("a document");
+    let lexing = document.lexing.get();
+    assert!(!document.about().expect("its information").more_parts);
+    assert_eq!(
+        document.lexing.get(),
+        lexing,
+        "its objects were looked through again"
+    );
+}
+
+#[test]
+fn an_object_stream_that_cannot_be_read_is_decoded_once() {
+    let data = alloc::vec![b' '; 1 << 14];
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, "<</Type /Page>>")
+        // It decodes, but its objects would begin past its end.
+        .stream(
+            10,
+            "/Type /ObjStm /N 1 /First 99999 /Filter /FlateDecode",
+            &crate::fixture::flate(&data),
+        );
+    let placed: Vec<(u32, u32, u32)> = (0..10).map(|index| (20 + index, 10, index)).collect();
+    let at = pdf.xref_stream(11, "/Root 1 0 R", &placed);
+    let file = pdf.finish(at);
+    let document = open(&file).expect("a document");
+    let budget = document.budget.get();
+    for num in 20..30 {
+        assert_eq!(
+            document
+                .resolve(&crate::fixture::reference(num))
+                .and_then(crate::object::Resolved::into_owned),
+            Err(PdfError::Malformed)
+        );
+    }
+    let spent = budget - document.budget.get();
+    assert!(spent < 2 * (1 << 14), "decoded again: {spent} spent");
+}
+
+#[test]
+fn a_bound_met_finding_a_length_is_not_taken_for_no_length() {
+    // Object 4's length ends a chain of references longer than a resolution
+    // follows: past the bound, never read as stating no length.
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, "<</Type /Page>>")
+        .raw(
+            4,
+            b"4 0 obj\n<</Length 10 0 R>>\nstream\nq Q\nendstream\nendobj\n",
+        );
+    let bound = u32::try_from(MAX_RESOLVE_DEPTH).expect("a small bound");
+    for num in 10..10 + bound {
+        pdf.object(num, &format!("{} 0 R", num + 1));
+    }
+    pdf.object(10 + bound, "3");
+    let file = pdf.tabled(1, "");
+    let document = open(&file).expect("a document");
+    assert_eq!(
+        document
+            .resolve(&crate::fixture::reference(4))
+            .and_then(crate::object::Resolved::into_owned),
+        Err(PdfError::TooComplex)
+    );
+}
+
+#[test]
+fn a_length_in_a_cycle_is_read_as_unknown() {
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, "<</Type /Page>>")
+        .raw(
+            4,
+            b"4 0 obj\n<</Length 5 0 R>>\nstream\nq Q\nendstream\nendobj\n",
+        )
+        .object(5, "6 0 R")
+        .object(6, "5 0 R")
+        .raw(
+            7,
+            b"7 0 obj\n<</Length 7 0 R>>\nstream\nB*\nendstream\nendobj\n",
+        );
+    let file = pdf.tabled(1, "");
+    let document = open(&file).expect("a document");
+    for (num, expected) in [(4, &b"q Q"[..]), (7, b"B*")] {
+        let Ok(Object::Stream(stream)) = document
+            .resolve(&crate::fixture::reference(num))
+            .and_then(crate::object::Resolved::into_owned)
+        else {
+            panic!("a stream");
+        };
+        assert_eq!(document.decode(&stream).expect("its bytes").bytes, expected);
+    }
+}
+
+/// A document whose object stream 10 holds object 11, its own length.
+fn own_length_inside() -> Vec<u8> {
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, "<</Type /Page>>")
+        .raw(
+            10,
+            b"10 0 obj\n<</Type /ObjStm /N 1 /First 5 /Length 11 0 R>>\nstream\n11 0 6\nendstream\nendobj\n",
+        );
+    let at = pdf.xref_stream(99, "/Root 1 0 R", &[(11, 10, 0)]);
+    pdf.finish(at)
+}
+
+#[test]
+fn an_object_whose_reading_met_one_under_way_is_read_afresh_later() {
+    // Reached through stream 10's length, object 11 meets 10 under way; read
+    // on its own once 10 is read, it is found.
+    let file = own_length_inside();
+    let document = open(&file).expect("a document");
+    let (stream, length) = (crate::fixture::reference(10), crate::fixture::reference(11));
+    let read = document.resolve(&stream).expect("the stream");
+    assert!(matches!(&*read, Object::Stream(_)));
+    assert_eq!(
+        document.resolve(&length).map(|object| object.as_int()),
+        Ok(Some(6))
+    );
+}
+
+#[test]
+fn damage_met_under_way_holds_for_that_read_alone() {
+    let objects = super::Objects::within(1 << 20);
+    let outer = objects.mark(1).expect("room");
+    let inner = objects.mark(2).expect("room");
+    assert!(
+        matches!(objects.get(1), Some(Err(PdfError::Malformed))),
+        "1 is under way"
+    );
+    objects.settle(2, inner, &Err(PdfError::Malformed));
+    assert!(
+        matches!(objects.get(2), Some(Err(PdfError::Malformed))),
+        "the read under way never walks 2 again"
+    );
+    let object = alloc::sync::Arc::new(Object::Int(7));
+    objects.settle(1, outer, &Ok(object));
+    assert!(objects.get(2).is_none(), "a later read reads 2 afresh");
+    let unrelated = objects.mark(3).expect("room");
+    objects.settle(3, unrelated, &Err(PdfError::Malformed));
+    assert!(
+        matches!(objects.get(3), Some(Err(PdfError::Malformed))),
+        "damage met alone holds for every read"
+    );
+}
+
+#[test]
+fn object_streams_that_need_each_other_are_refused_without_fanning_out() {
+    // Each object stream's filter is a stream whose length lies in the next,
+    // named nine times over: read again each time it is named, the eleven
+    // would take 9^10 decodings.
+    let mut pdf = Builder::new();
+    let mut placed = Vec::new();
+    for level in 0..=10u32 {
+        let (stream, filter, length) = (100 + level, 200 + level, 300 + level);
+        let params = alloc::vec![format!("{filter} 0 R"); 8].join(" ");
+        pdf.stream(
+            stream,
+            &format!("/Type /ObjStm /N 1 /First 4 /Filter {filter} 0 R /DecodeParms [{params}]"),
+            b"1 0 null",
+        )
+        .raw(
+            filter,
+            format!("{filter} 0 obj\n<</Length {length} 0 R>>\nstream\nx\nendstream\nendobj\n")
+                .as_bytes(),
+        );
+        if level < 10 {
+            placed.push((length, stream + 1, 0));
+        }
+    }
+    placed.push((1, 100, 0));
+    let at = pdf.xref_stream(999, "/Root 1 0 R", &placed);
+    let file = pdf.finish(at);
+    assert_eq!(open(&file).err(), Some(PdfError::TooComplex));
+}
+
+#[test]
+fn an_encrypted_file_cut_before_its_trailer_is_never_read_as_plaintext() {
+    let zeros = "00".repeat(32);
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog /Pages 2 0 R>>")
+        .object(2, "<</Type /Pages /Kids [3 0 R]>>")
+        .object(3, "<</Type /Page>>")
+        .object(
+            9,
+            &format!("<</Filter /Standard /V 2 /R 3 /Length 128 /P -4 /O <{zeros}> /U <{zeros}>>>"),
+        );
+    let at = pdf.table(1, "/Encrypt 9 0 R");
+    let whole = pdf.finish(at);
+    assert_eq!(open(&whole).err(), Some(PdfError::NeedsPassword));
+    assert_eq!(
+        open(&whole[..at]).err(),
+        Some(PdfError::NeedsPassword),
+        "its trailer cut off, it is still encrypted"
+    );
+}
+
+#[test]
+fn an_object_kept_is_shared_never_copied_to_be_read() {
+    // Within the share of the budget objects are kept in.
+    let body = format!("[{}]", "1 ".repeat(1_000));
+    let file = crate::fixture::with_objects(&[(10, body.as_str())], &[]);
+    let document = open(&file).expect("a document");
+    let held = crate::fixture::reference(10);
+    let (Ok(crate::object::Resolved::Shared(first)), Ok(crate::object::Resolved::Shared(again))) =
+        (document.resolve(&held), document.resolve(&held))
+    else {
+        panic!("objects read from the file are shared");
+    };
+    assert!(alloc::sync::Arc::ptr_eq(&first, &again));
 }

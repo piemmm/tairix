@@ -23,6 +23,7 @@ impl ServedFormat for Served {
         volume: B,
         read_only: bool,
         _budget: WritebackBudget,
+        _log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<Affs<B>>, DriverError> {
         let mut fs = Affs::open(volume)?;
         let write_refusal = if read_only {

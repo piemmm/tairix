@@ -215,6 +215,8 @@ impl DocumentView for View {
         "svg"
     }
 
+    const PLACES: bool = true;
+
     fn places(&self, at: tairix_geometry::Point, media: &str) -> bool {
         self.layout.canvas.contains(at) && MediaType::from_media_str(media).is_some_and(placeable)
     }

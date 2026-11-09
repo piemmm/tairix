@@ -1,9 +1,17 @@
 //! The floor bring-up's supplies and clock over the protocol-faithful mock
 //! firmware, and its refusals, each recorded.
 
+extern crate std;
+
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use std::sync::Mutex;
+
+use tairix_abi::blkio::BlkReissue;
+use tairix_log::FieldValue;
 
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::supply::{IoRail, PowerRail};
@@ -14,7 +22,9 @@ use tairix_log::{Event, Sink};
 use tairix_vcmailbox::mock::MockFirmware;
 use tairix_vcmailbox::{MailboxError, MailboxTransport};
 
-use super::{base_clock_hz, open, FirmwareSupply, BRING_UP_FAILED};
+use super::{base_clock_hz, open, FailureLog, FirmwareSupply, BRING_UP_FAILED, TRANSFER_FAILED};
+use crate::regs;
+use crate::trace::{FaultReport, Trace, TransferFault, WaitEnd};
 use crate::{CardSupply, SignalVoltage};
 
 const IO_LINE: u8 = 4;
@@ -69,11 +79,22 @@ impl CompletionWait for Unreached {
 
 /// The ids of every event recorded.
 #[derive(Default)]
-struct Recorder(RefCell<Vec<u32>>);
+struct Recorder(Mutex<Vec<u32>>);
 
 impl Sink for Recorder {
     fn write_event(&self, event: &Event<'_>) {
-        self.0.borrow_mut().push(event.id.0);
+        self.0.lock().expect("recorder").push(event.id.0);
+    }
+}
+
+impl Recorder {
+    /// A recorder for the life of the test binary, as a driver keeps its log.
+    fn leaked() -> &'static Self {
+        Box::leak(Box::default())
+    }
+
+    fn ids(&self) -> Vec<u32> {
+        self.0.lock().expect("recorder").clone()
     }
 }
 
@@ -230,20 +251,132 @@ fn a_refused_switch_is_the_firmwares_error() {
 
 #[test]
 fn open_refuses_a_node_naming_no_register_window_and_says_so() {
-    let audit = Recorder::default();
+    let audit = Recorder::leaked();
     let wait: &'static Unreached = Box::leak(Box::new(Unreached));
     let host = BareHost { mmio_map: true };
-    let refused = open(&host, &sd_node(None, None, false), wait, &audit);
+    let refused = open(&host, &sd_node(None, None, false), wait, audit);
     assert_eq!(refused.err(), Some(DriverError::NotFound));
-    assert_eq!(*audit.0.borrow(), [BRING_UP_FAILED.0]);
+    assert_eq!(audit.ids(), [BRING_UP_FAILED.0]);
 }
 
 #[test]
 fn open_refuses_a_host_that_may_not_map_the_window_and_says_so() {
-    let audit = Recorder::default();
+    let audit = Recorder::leaked();
     let wait: &'static Unreached = Box::leak(Box::new(Unreached));
     let host = BareHost { mmio_map: false };
-    let refused = open(&host, &sd_node(None, None, true), wait, &audit);
+    let refused = open(&host, &sd_node(None, None, true), wait, audit);
     assert_eq!(refused.err(), Some(DriverError::PermissionDenied));
-    assert_eq!(*audit.0.borrow(), [BRING_UP_FAILED.0]);
+    assert_eq!(audit.ids(), [BRING_UP_FAILED.0]);
+}
+
+/// Every event recorded, as its id and its fields rendered `key=value`.
+#[derive(Default)]
+struct FieldRecorder(Mutex<Vec<(u32, Vec<String>)>>);
+
+impl Sink for FieldRecorder {
+    fn write_event(&self, event: &Event<'_>) {
+        let fields = event
+            .fields
+            .iter()
+            .map(|field| format!("{}={:?}", field.key, field.value))
+            .collect();
+        self.0.lock().expect("recorder").push((event.id.0, fields));
+    }
+}
+
+impl FieldRecorder {
+    fn leaked() -> &'static Self {
+        Box::leak(Box::default())
+    }
+
+    fn events(&self) -> Vec<(u32, Vec<String>)> {
+        self.0.lock().expect("recorder").clone()
+    }
+}
+
+/// A read of `blocks` at `lba` the bus corrupted on `CMD18`, the controller
+/// back in a known state.
+fn corrupted_read(lba: u64, blocks: u64) -> Trace {
+    Trace::TransferFailed {
+        write: false,
+        lba,
+        blocks,
+        fault: Some(TransferFault {
+            command: 18,
+            report: FaultReport::Wait {
+                register: regs::REG_INTERRUPT,
+                value: regs::INT_ERROR | regs::INT_DATA_CRC,
+                end: WaitEnd::Error,
+            },
+        }),
+        error: DriverError::TransferCorrupted,
+        reissue: BlkReissue::Now,
+    }
+}
+
+#[test]
+fn a_failed_transfer_is_recorded_with_the_step_and_what_the_controller_saw() {
+    let audit = FieldRecorder::leaked();
+    let mut log = FailureLog::new(audit);
+    log.note(&corrupted_read(4096, 512));
+    let events = audit.events();
+    let [(id, fields)] = &events[..] else {
+        panic!("one record, got {events:?}");
+    };
+    assert_eq!(*id, TRANSFER_FAILED.0);
+    let status = u64::from(regs::INT_ERROR | regs::INT_DATA_CRC);
+    let register = regs::REG_INTERRUPT as u64;
+    assert_eq!(
+        *fields,
+        [
+            "op=Str(\"read\")".to_string(),
+            "lba=UnsignedInt(4096)".to_string(),
+            "blocks=UnsignedInt(512)".to_string(),
+            "command=UnsignedInt(18)".to_string(),
+            "report=Str(\"controller\")".to_string(),
+            format!("register=UnsignedInt({register})"),
+            format!("status=UnsignedInt({status})"),
+            format!(
+                "error={:?}",
+                FieldValue::Error(DriverError::TransferCorrupted.as_errno())
+            ),
+            "reissue=Str(\"now\")".to_string(),
+            "failed=UnsignedInt(1)".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn only_a_failed_transfer_is_counted() {
+    let audit = FieldRecorder::leaked();
+    let mut log = FailureLog::new(audit);
+    log.note(&Trace::Command { index: 18, arg: 0 });
+    log.note(&Trace::Response {
+        index: 18,
+        response: 0,
+    });
+    assert!(audit.events().is_empty());
+}
+
+#[test]
+fn a_card_failing_every_transfer_is_recorded_each_time_the_count_doubles() {
+    let audit = FieldRecorder::leaked();
+    let mut log = FailureLog::new(audit);
+    for lba in 0..9 {
+        log.note(&corrupted_read(lba, 1));
+    }
+    let counts: Vec<String> = audit
+        .events()
+        .into_iter()
+        .filter_map(|(_, fields)| fields.into_iter().find(|f| f.starts_with("failed=")))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            "failed=UnsignedInt(1)",
+            "failed=UnsignedInt(2)",
+            "failed=UnsignedInt(4)",
+            "failed=UnsignedInt(8)",
+        ]
+    );
 }

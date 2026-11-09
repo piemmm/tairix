@@ -50,7 +50,7 @@
 extern crate alloc;
 
 use tairix_abi::blkio::{
-    BlkDeviceName, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkTransport,
+    BlkDeviceName, BlkMedium, BlkReissue, BlkRemovability, BlkRemovabilityEvidence, BlkTransport,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
@@ -83,7 +83,7 @@ mod tests;
 pub use bus::{BusMode, Link};
 
 use command::{CardCondition, ResponseKind, SdCommand, BLOCK_SIZE};
-use trace::{Trace, WaitEnd};
+use trace::{FaultReport, Trace, TransferFault, WaitEnd};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5344_5000_0000_0001;
@@ -253,12 +253,13 @@ pub struct Board<'a> {
 
 /// The metal SDHCI host: the capability-gated [`RegisterWindow`], the
 /// host's [`CompletionWait`], which parks on the controller's interrupt line
-/// and times the bring-up's intervals, and — on the fast path — the two DMA
-/// staging slabs.
+/// and times the bring-up's intervals, on the fast path the two DMA staging
+/// slabs, and the trail its failed transfers are recorded on.
 pub struct IrqSdhci<W: CompletionWait> {
     window: RegisterWindow,
     waiter: W,
     dma: Option<Staging>,
+    failures: floor::FailureLog,
 }
 
 /// The data and descriptor-table slabs of the ADMA2 staging.
@@ -269,13 +270,14 @@ struct Staging {
 
 impl<W: CompletionWait> IrqSdhci<W> {
     /// Pair a mapped register `window` with the completion `waiter`, on the
-    /// programmed-I/O path.
+    /// programmed-I/O path, recording failed transfers on `failures`.
     #[must_use]
-    pub fn new(window: RegisterWindow, waiter: W) -> Self {
+    pub fn new(window: RegisterWindow, waiter: W, failures: floor::FailureLog) -> Self {
         Self {
             window,
             waiter,
             dma: None,
+            failures,
         }
     }
 
@@ -284,11 +286,18 @@ impl<W: CompletionWait> IrqSdhci<W> {
     /// interconnect each must be uncached or carry the cache maintenance
     /// [`DmaSlab::sync_range`] invokes.
     #[must_use]
-    pub fn with_dma(window: RegisterWindow, waiter: W, data: DmaSlab, table: DmaSlab) -> Self {
+    pub fn with_dma(
+        window: RegisterWindow,
+        waiter: W,
+        failures: floor::FailureLog,
+        data: DmaSlab,
+        table: DmaSlab,
+    ) -> Self {
         Self {
             window,
             waiter,
             dma: Some(Staging { data, table }),
+            failures,
         }
     }
 }
@@ -342,6 +351,10 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
             staging.data.withhold();
             staging.table.withhold();
         }
+    }
+
+    fn trace(&mut self, record: Trace) {
+        self.failures.note(&record);
     }
 }
 
@@ -474,6 +487,12 @@ pub struct Emmc2<H: SdhciHost> {
     /// A failed transfer's recovery could not prove the card back in `tran`,
     /// so the next data command asks it first.
     card_state_unknown: bool,
+    /// The command the engine issued last, which a failing step ran.
+    command: u8,
+    /// The step the transfer under way failed at.
+    fault: Option<TransferFault>,
+    /// When the transfer that failed may be issued again.
+    reissue: BlkReissue,
 }
 
 impl<H: SdhciHost> Emmc2<H> {
@@ -524,6 +543,9 @@ impl<H: SdhciHost> Emmc2<H> {
             dma_stage_blocks: 0,
             dma_wedged: false,
             card_state_unknown: false,
+            command: 0,
+            fault: None,
+            reissue: BlkReissue::Paced,
         };
         dev.link = dev.init(board)?;
         Ok(dev)
@@ -575,16 +597,34 @@ impl<H: SdhciHost> Emmc2<H> {
             waits: 0,
             end: WaitEnd::Budget,
         });
-        Err(DriverError::DeviceFault)
+        self.fail(
+            FaultReport::Wait {
+                register,
+                value,
+                end: WaitEnd::Budget,
+            },
+            DriverError::DeviceFault,
+        )
+    }
+
+    /// Record `report` as the step the transfer under way failed at, the
+    /// command issued last being the one it ran, and fail it with `error`.
+    fn fail<T>(&mut self, report: FaultReport, error: DriverError) -> Result<T, DriverError> {
+        self.fault = Some(TransferFault {
+            command: self.command,
+            report,
+        });
+        Err(error)
     }
 
     /// Wait for `INTERRUPT` to assert `wanted`, parking on the controller's
-    /// interrupt between reads and failing closed on any error bit.
+    /// interrupt between reads and failing on any error bit, classed by what
+    /// the controller saw ([`error_class`]).
     ///
     /// The wanted bits are cleared before returning, which also lowers the
     /// level-sensitive line for the next wait. A wait that elapses with no
-    /// interrupt fails at once: the controller signals every started
-    /// operation, so a silent one is dead.
+    /// interrupt fails at once as [`DriverError::TimedOut`]: the controller
+    /// signals every started operation, so a silent one never answered.
     fn wait_interrupt(&mut self, wanted: u32) -> Result<(), DriverError> {
         let mut status = 0;
         let mut waits = 0;
@@ -613,7 +653,19 @@ impl<H: SdhciHost> Emmc2<H> {
             waits,
             end,
         });
-        Err(DriverError::DeviceFault)
+        let error = match end {
+            WaitEnd::Error => error_class(status),
+            WaitEnd::Silent => DriverError::TimedOut,
+            WaitEnd::Budget => DriverError::DeviceFault,
+        };
+        self.fail(
+            FaultReport::Wait {
+                register: regs::REG_INTERRUPT,
+                value: status,
+                end,
+            },
+            error,
+        )
     }
 
     /// Issue `cmd` with `arg` and `transfer_mode`, returning the response
@@ -624,6 +676,7 @@ impl<H: SdhciHost> Emmc2<H> {
         arg: u32,
         transfer_mode: u32,
     ) -> Result<[u32; 4], DriverError> {
+        self.command = cmd.index;
         let mut inhibit = regs::STATUS_CMD_INHIBIT;
         if cmd.transfers_data || cmd.response == ResponseKind::ShortBusy {
             inhibit |= regs::STATUS_DAT_INHIBIT;
@@ -767,7 +820,10 @@ impl<H: SdhciHost> Emmc2<H> {
         }
         let status = self.issue(cmd, addr, transfer_mode)?[0];
         if status & command::R1_ERRORS != 0 {
-            return Err(DriverError::DeviceFault);
+            return self.fail(
+                FaultReport::CardStatus(status),
+                command::card_error_class(status),
+            );
         }
         Ok(())
     }
@@ -775,28 +831,34 @@ impl<H: SdhciHost> Emmc2<H> {
     /// Collect the status a write left, the only place the card reports a
     /// block it could not program, waiting out its programming busy.
     fn confirm_write(&mut self) -> Result<(), DriverError> {
-        let confirmed = (|| {
-            for _ in 0..CARD_STATE_ROUNDS {
-                let status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
-                if status & command::R1_ERRORS != 0 {
-                    return Err(DriverError::DeviceFault);
-                }
-                match command::card_condition(status) {
-                    CardCondition::Ready => return Ok(()),
-                    CardCondition::Busy => {
-                        self.issue_awaiting_busy(command::SEND_STATUS_BUSY, self.rca)?;
-                    }
-                    CardCondition::Transferring | CardCondition::Unusable => {
-                        return Err(DriverError::DeviceFault);
-                    }
-                }
-            }
-            Err(DriverError::DeviceFault)
-        })();
+        let confirmed = self.await_programmed();
         if confirmed.is_err() {
             self.card_state_unknown = true;
         }
         confirmed
+    }
+
+    /// Ask the card its status until it has left programming, waiting out its
+    /// busy between asks, for at most [`CARD_STATE_ROUNDS`] rounds.
+    fn await_programmed(&mut self) -> Result<(), DriverError> {
+        let mut status = 0;
+        for _ in 0..CARD_STATE_ROUNDS {
+            status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
+            if status & command::R1_ERRORS != 0 {
+                return self.fail(
+                    FaultReport::CardStatus(status),
+                    command::card_error_class(status),
+                );
+            }
+            match command::card_condition(status) {
+                CardCondition::Ready => return Ok(()),
+                CardCondition::Busy => {
+                    self.issue_awaiting_busy(command::SEND_STATUS_BUSY, self.rca)?;
+                }
+                CardCondition::Transferring | CardCondition::Unusable => break,
+            }
+        }
+        self.fail(FaultReport::CardState(status), DriverError::DeviceFault)
     }
 
     /// Read `buf` from block `addr` over the data port, one command per
@@ -939,20 +1001,27 @@ impl<H: SdhciHost> Emmc2<H> {
     /// data-line reset halts the DMA engine. A failed abort leaves the
     /// transfer's own error standing.
     fn recover_transfer(&mut self, multi: bool) {
+        // What the recovery's own commands report is not why the transfer
+        // failed.
+        let fault = self.fault;
         self.card_state_unknown = true;
         if self.reset_lines().is_err() {
             if self.dma_stage_blocks != 0 {
                 self.dma_wedged = true;
             }
-            return;
+        } else {
+            // The next request proves the card in `tran` before it moves
+            // data, so only the controller had to come back.
+            self.reissue = BlkReissue::Now;
+            if multi
+                && self
+                    .issue_awaiting_busy(command::STOP_TRANSMISSION, 0)
+                    .is_ok()
+            {
+                self.card_state_unknown = false;
+            }
         }
-        if multi
-            && self
-                .issue_awaiting_busy(command::STOP_TRANSMISSION, 0)
-                .is_ok()
-        {
-            self.card_state_unknown = false;
-        }
+        self.fault = fault;
     }
 
     /// Before a data command, prove a card of unknown state back in `tran`
@@ -967,8 +1036,9 @@ impl<H: SdhciHost> Emmc2<H> {
         }
         // Whatever left the state unknown may have left a line error latched.
         self.reset_lines()?;
+        let mut status = 0;
         for _ in 0..CARD_STATE_ROUNDS {
-            let status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
+            status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
             match command::card_condition(status) {
                 CardCondition::Ready => {
                     self.card_state_unknown = false;
@@ -980,10 +1050,10 @@ impl<H: SdhciHost> Emmc2<H> {
                 CardCondition::Busy => {
                     self.issue_awaiting_busy(command::SEND_STATUS_BUSY, self.rca)?;
                 }
-                CardCondition::Unusable => return Err(DriverError::DeviceFault),
+                CardCondition::Unusable => break,
             }
         }
-        Err(DriverError::DeviceFault)
+        self.fail(FaultReport::CardState(status), DriverError::DeviceFault)
     }
 
     /// Reset the command and data lines; the data-line reset also halts the
@@ -997,12 +1067,41 @@ impl<H: SdhciHost> Emmc2<H> {
 
     /// Refuse a transfer while the controller may still be mastering the
     /// staging an earlier one handed it.
-    fn staging_free(&self) -> Result<(), DriverError> {
+    fn staging_free(&mut self) -> Result<(), DriverError> {
         if self.dma_wedged {
-            Err(DriverError::DeviceFault)
+            self.fail(FaultReport::StagingWithheld, DriverError::DeviceFault)
         } else {
             Ok(())
         }
+    }
+
+    /// Forget what an earlier transfer's failure left, so it never speaks for
+    /// this one.
+    fn begin_transfer(&mut self) {
+        self.fault = None;
+        self.reissue = BlkReissue::Paced;
+    }
+
+    /// Report `moved`, the transfer of `len` bytes at `lba`, to the host when
+    /// it failed, with the step it failed at.
+    fn report(
+        &mut self,
+        moved: Result<(), DriverError>,
+        write: bool,
+        lba: u64,
+        len: usize,
+    ) -> Result<(), DriverError> {
+        if let Err(error) = moved {
+            self.host.trace(Trace::TransferFailed {
+                write,
+                lba,
+                blocks: (len / BLOCK_SIZE as usize) as u64,
+                fault: self.fault.take(),
+                error,
+                reissue: self.reissue,
+            });
+        }
+        moved
     }
 
     /// Validate a transfer of `buf_len` bytes at `lba` against the geometry,
@@ -1019,6 +1118,18 @@ impl<H: SdhciHost> Emmc2<H> {
             return Err(DriverError::LengthOutOfRange);
         }
         u32::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)
+    }
+}
+
+/// The class of a step the controller ended on the error bits of `status`: a
+/// card that did not answer in time, an exchange the bus corrupted, or a fault.
+const fn error_class(status: u32) -> DriverError {
+    if status & regs::INT_TIMEOUT_ERRORS != 0 {
+        DriverError::TimedOut
+    } else if status & regs::INT_BUS_ERRORS != 0 {
+        DriverError::TransferCorrupted
+    } else {
+        DriverError::DeviceFault
     }
 }
 
@@ -1056,21 +1167,32 @@ impl<H: SdhciHost> Block for Emmc2<H> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.begin_transfer();
         let addr = self.validate_transfer(lba, buf.len())?;
-        if self.dma_stage_blocks != 0 {
+        let moved = if self.dma_stage_blocks != 0 {
             self.read_blocks_dma(addr, buf)
         } else {
             self.read_blocks_pio(addr, buf)
-        }
+        };
+        self.report(moved, false, lba, buf.len())
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.begin_transfer();
         let addr = self.validate_transfer(lba, buf.len())?;
-        if self.dma_stage_blocks != 0 {
+        let moved = if self.dma_stage_blocks != 0 {
             self.write_blocks_dma(addr, buf)
         } else {
             self.write_blocks_pio(addr, buf)
-        }
+        };
+        self.report(moved, true, lba, buf.len())
+    }
+
+    /// At once once the failed transfer's recovery has the controller back in
+    /// a known state: the next request proves the card in `tran` before it
+    /// moves data.
+    fn reissue(&mut self) -> BlkReissue {
+        core::mem::take(&mut self.reissue)
     }
 
     /// The card's write cache is never enabled, and every write waits for the

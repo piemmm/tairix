@@ -232,10 +232,10 @@ enum State {
     /// over-long, or undecodable asset — which the cache retains just as it
     /// retains artwork.
     Done(Option<Artwork>),
-    /// Collected, and the cache could not keep it: no room the current
-    /// pressure band allows. Held rather than forgotten, because decoding it
-    /// again would only be refused again.
-    Declined,
+    /// Collected, and the cache could not keep its `bytes`: no room the
+    /// current pressure band allows. Held rather than forgotten, because
+    /// decoding it again would only be refused again.
+    Declined(usize),
 }
 
 /// What recording one decode did: whether its answer was kept, and whether the
@@ -855,7 +855,7 @@ impl<S: Clone + Eq> ArtworkDesk<S> {
     /// midway through is left alone: that decode has yet to be answered, and
     /// the refusal will be repeated on the collect that answers it. One the
     /// heap has no room to record goes unrecorded, and is offered again.
-    pub fn decline(&mut self, key: &ArtworkKey, side: u32) {
+    pub fn decline(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
         if self.stopping {
             return;
         }
@@ -868,10 +868,10 @@ impl<S: Clone + Eq> ArtworkDesk<S> {
                 state: State::Running,
                 ..
             }) => {}
-            Some(slot) => slot.state = State::Declined,
+            Some(slot) => slot.state = State::Declined(bytes),
             None => {
                 let declined = Slot {
-                    state: State::Declined,
+                    state: State::Declined(bytes),
                     asked: true,
                 };
                 let _ = self.slots.try_insert(job, declined);
@@ -879,17 +879,22 @@ impl<S: Clone + Eq> ArtworkDesk<S> {
         }
     }
 
-    /// Offer every declined key again, because the pressure band moved and the
-    /// answer may now be retainable, answering whether there was one.
+    /// Offer again every declined key whose size the cache now `holds`, the
+    /// pressure band having moved, answering whether there was one.
     ///
     /// Each is named in the next [`Landed`] as though it had come back: an item
     /// drawing the tier below for want of it is repainted, and asks again —
-    /// nothing else would, since what it shows is already on screen.
-    pub fn retry_declined(&mut self) -> bool {
+    /// nothing else would, since what it shows is already on screen. A key the
+    /// cache would still refuse stays held: offering it would cost a read and a
+    /// decode only to be refused again.
+    pub fn retry_declined(&mut self, holds: impl Fn(usize) -> bool) -> bool {
         let landed = &mut self.landed;
         let mut retried = false;
         self.slots.retain(|job, slot| {
-            if !matches!(slot.state, State::Declined) {
+            let State::Declined(bytes) = slot.state else {
+                return true;
+            };
+            if !holds(bytes) {
                 return true;
             }
             landed.name(job.try_clone());
@@ -1577,8 +1582,8 @@ impl<S: Clone + Eq> ArtworkResolver for ArtworkDesk<S> {
         self.want(key, side);
     }
 
-    fn declined(&mut self, key: &ArtworkKey, side: u32) {
-        self.decline(key, side);
+    fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+        self.decline(key, side, bytes);
     }
 
     fn still_shown(&mut self, key: &ArtworkKey, side: u32) {

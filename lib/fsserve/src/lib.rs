@@ -31,6 +31,8 @@ pub use format::{
 };
 pub use host::{Clock, ServedHost};
 pub use server::{ServedFilesystem, Server, Window};
+/// The log a served format records its diagnostics on.
+pub use tairix_log::Sink;
 pub use volume::{GrantedVolume, VolumeAccess};
 
 #[cfg(all(freestanding, feature = "program"))]

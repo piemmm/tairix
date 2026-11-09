@@ -49,8 +49,9 @@
 //! # Module map
 //!
 //! * [`events`] — stable [`tairix_log::EventId`] constants (`9000` range).
-//! * [`error`] — [`InitError`] (graph-level, fail-closed) and the
-//!   per-service [`StartFailure`] recorded in a [`StartReport`].
+//! * [`error`] — [`InitError`] (fail-closed registration and graph
+//!   defects) and the refusals of the control, activation and notice
+//!   surfaces.
 //! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, the
 //!   [`Spawner`] / [`Reaper`] seams, and the shared manifest →
 //!   capability-set decode.
@@ -65,7 +66,7 @@
 //!   `register_enrolled`, `start_all`, the readiness admission engine
 //!   (`notify`, `satisfy_condition`), on-demand endpoint activation
 //!   (`connect` / `disconnect`, the idle-linger `expire_linger` /
-//!   `expire_grace` one-shot callbacks, and `take_ready_clients`), `reap`,
+//!   `expire_grace` one-shot callbacks, and `drain_released_clients`), `reap`,
 //!   and the two control surfaces — `control` for a service's runtime
 //!   lifecycle and `enrol_control` / `adopt_overrides` for its persistent
 //!   enrolment.
@@ -87,16 +88,21 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 pub mod error;
 pub mod events;
 pub mod manager;
+pub mod parked;
 pub mod scope;
 pub mod service;
 
-pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
+pub use error::{ActivateError, ControlError, InitError, NotifyError};
 pub use manager::{
-    ActivationOutcome, EnrolReport, FailedService, HeartbeatReport, Init, InitConfig, NotifyReport,
-    ParkOutcome, ReleasedClient, StartReport, StartedService,
+    ActivationOutcome, EnrolReport, Init, InitConfig, NoticeAnswer, ParkOutcome, ReleasedClient,
+    ServiceId,
 };
 pub use scope::AuthorityScope;
 pub use service::{

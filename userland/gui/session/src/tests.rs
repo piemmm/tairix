@@ -68,14 +68,14 @@ use crate::{
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
     tool_move_abandoned_event, tool_move_event, AppBarService, AppGroup, ArtworkFileReader,
-    BundleIndex, DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay, FrameContent,
-    FramePacer, FrameReportGate, Handover, InputSource, Launch, LaunchHost, LaunchTable,
-    LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
-    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
-    ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAnswer, UnlockAsk,
-    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
+    BundleIndex, DesktopSession, DesktopShell, DocumentRelay, FrameContent, FramePacer,
+    FrameReportGate, Handover, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget,
+    LockOutcome, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock,
+    SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
+    ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAnswer, UnlockAsk, DESKTOP_REVEALED,
+    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -11227,9 +11227,15 @@ impl crate::wallpaper::WallpaperService for NoGallery {
 pub(crate) struct RefusingRelay;
 
 impl DocumentRelay for RefusingRelay {
-    fn relay(&mut self, _: DocumentAuthority, _: bool, _: ProcId) -> Result<u64, Errno> {
+    fn redeem(&mut self, _: u64, _: ProcId) -> Result<u32, Errno> {
         Err(Errno::NotSupported)
     }
+
+    fn mint(&mut self, _: u32, _: bool, _: ProcId) -> Result<u64, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn close(&mut self, _: u32) {}
 
     fn decline(&mut self, _: u64, _: ProcId) {}
 

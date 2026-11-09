@@ -134,6 +134,35 @@ pub const INT_ERROR: u32 = 1 << 15;
 /// Mask covering every error bit (the upper half of `INTERRUPT`).
 pub const INT_ERROR_MASK: u32 = 0xFFFF_0000;
 
+// --- `INTERRUPT` error bits (SD Host Controller Specification, Error
+// Interrupt Status) -----------------------------------------------------------
+
+/// Command timeout: the card sent no response.
+pub const INT_CMD_TIMEOUT: u32 = 1 << 16;
+/// Command CRC error.
+pub const INT_CMD_CRC: u32 = 1 << 17;
+/// Command end-bit error.
+pub const INT_CMD_END_BIT: u32 = 1 << 18;
+/// Command index error: the response named another command.
+pub const INT_CMD_INDEX: u32 = 1 << 19;
+/// Data timeout: the card sent no data, or held its busy, past the counter.
+pub const INT_DATA_TIMEOUT: u32 = 1 << 20;
+/// Data CRC error.
+pub const INT_DATA_CRC: u32 = 1 << 21;
+/// Data end-bit error.
+pub const INT_DATA_END_BIT: u32 = 1 << 22;
+/// Auto command error: the controller's own `CMD12` or `CMD23` failed.
+pub const INT_AUTO_CMD: u32 = 1 << 24;
+/// ADMA error: the engine could not follow its descriptors.
+pub const INT_ADMA: u32 = 1 << 25;
+
+/// The error bits of a card that did not answer in time.
+pub const INT_TIMEOUT_ERRORS: u32 = INT_CMD_TIMEOUT | INT_DATA_TIMEOUT;
+
+/// The error bits of an exchange the bus corrupted.
+pub const INT_BUS_ERRORS: u32 =
+    INT_CMD_CRC | INT_CMD_END_BIT | INT_CMD_INDEX | INT_DATA_CRC | INT_DATA_END_BIT | INT_AUTO_CMD;
+
 /// The `IRPT_EN` signal-enable mask: the controller asserts its CPU
 /// interrupt line for exactly the sources the engine parks on — command
 /// complete, transfer complete, the PIO buffer-ready events — and every

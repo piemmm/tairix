@@ -834,8 +834,9 @@ copied, never merged into a third place:
   `<name> enabled|disabled` lines, so a system update that ships a different
   vendor default takes effect at once for every service the administrator has
   not spoken about.
-- **`effective` = vendor with the overrides applied**, one pure function
-  (`tairix_enrolment::effective`), so no consumer re-derives the precedence.
+- **The administrator's word where they have spoken, else the vendor's**, one
+  pure query (`tairix_enrolment::enabled`), so no consumer re-derives the
+  precedence.
 - **Applying the administrator layer is bounded by the unlock, and that is
   stated rather than hidden.** Pre-unlock, PID 1 obeys the vendor layer alone;
   the moment the override document becomes readable — announced by the mount

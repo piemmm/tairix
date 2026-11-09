@@ -1,9 +1,9 @@
 //! The objects of ISO 32000-2 §7.3.
 
-use alloc::borrow::Cow;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
-use core::ops::Range;
+use core::ops::{Deref, Range};
 
 use tairix_util::fallible;
 
@@ -109,35 +109,6 @@ impl Dict {
         self.name(b"Type") == Some(kind)
     }
 
-    /// Add every entry of `older` whose key it does not hold: one merge of
-    /// the two sorted lists, however many keys either holds.
-    pub(crate) fn complete_from(&mut self, older: &Self) -> Result<(), PdfError> {
-        let mut merged = Vec::new();
-        merged.try_reserve_exact(self.entries.len() + older.entries.len())?;
-        let mut own = core::mem::take(&mut self.entries).into_iter().peekable();
-        let mut theirs = older.entries.iter().peekable();
-        loop {
-            let take_own = match (own.peek(), theirs.peek()) {
-                (Some(mine), Some(&(key, _))) => mine.0 <= *key,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            if take_own {
-                if let Some(entry) = own.next() {
-                    if theirs.peek().is_some_and(|&(key, _)| *key == entry.0) {
-                        theirs.next();
-                    }
-                    merged.push(entry);
-                }
-            } else if let Some((key, value)) = theirs.next() {
-                merged.push((Name::of(key.as_bytes())?, value.try_clone()?));
-            }
-        }
-        self.entries = merged;
-        Ok(())
-    }
-
     /// A copy of it, every allocation the copy takes refusable.
     pub(crate) fn try_clone(&self) -> Result<Self, PdfError> {
         let mut entries = Vec::new();
@@ -146,6 +117,16 @@ impl Dict {
             entries.push((Name::of(key.as_bytes())?, value.try_clone()?));
         }
         Ok(Self { entries })
+    }
+
+    /// The bytes of heap it holds, its keys' and values' among them.
+    pub(crate) fn held(&self) -> u64 {
+        self.entries
+            .iter()
+            .fold(fallible::held(&self.entries), |held, (key, value)| {
+                held.saturating_add(fallible::held(&key.0))
+                    .saturating_add(value.held())
+            })
     }
 }
 
@@ -237,6 +218,18 @@ impl Object {
         })
     }
 
+    /// The bytes of heap it holds: what keeping it costs.
+    pub(crate) fn held(&self) -> u64 {
+        match self {
+            Self::String(bytes) | Self::Name(Name(bytes)) => fallible::held(bytes),
+            Self::Array(items) => items.iter().fold(fallible::held(items), |held, item| {
+                held.saturating_add(item.held())
+            }),
+            Self::Dict(dict) | Self::Stream(Stream { dict, .. }) => dict.held(),
+            Self::Null | Self::Bool(_) | Self::Int(_) | Self::Real(_) | Self::Ref(_) => 0,
+        }
+    }
+
     /// Its value as a number, an integer or a real.
     pub(crate) const fn as_number(&self) -> Option<f64> {
         match *self {
@@ -313,11 +306,38 @@ pub(crate) const fn real(value: i64) -> f64 {
     value as f64
 }
 
-/// `object` owned: copied, refusably, where it is borrowed.
-pub(crate) fn owned(object: Cow<'_, Object>) -> Result<Object, PdfError> {
-    match object {
-        Cow::Owned(object) => Ok(object),
-        Cow::Borrowed(object) => object.try_clone(),
+/// An object as resolution hands it out: borrowed where it is written in
+/// place, shared with the document's cache where it was read from the file,
+/// and owned where it was made for the caller, so reading an object the
+/// document keeps never copies it.
+#[derive(Debug)]
+pub(crate) enum Resolved<'a> {
+    Borrowed(&'a Object),
+    Shared(Arc<Object>),
+    Owned(Object),
+}
+
+impl Deref for Resolved<'_> {
+    type Target = Object;
+
+    fn deref(&self) -> &Object {
+        match self {
+            Self::Borrowed(object) => object,
+            Self::Shared(object) => object,
+            Self::Owned(object) => object,
+        }
+    }
+}
+
+impl Resolved<'_> {
+    /// It as an object of its own: taken where nothing else holds it, and
+    /// copied, refusably, where something does.
+    pub(crate) fn into_owned(self) -> Result<Object, PdfError> {
+        match self {
+            Self::Owned(object) => Ok(object),
+            Self::Borrowed(object) => object.try_clone(),
+            Self::Shared(object) => Arc::try_unwrap(object).or_else(|shared| shared.try_clone()),
+        }
     }
 }
 

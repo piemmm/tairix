@@ -53,7 +53,7 @@ fn open(archive: &[u8], writable: bool, name: &[u8]) -> Option<Open> {
         backing: 1 << 30,
         gauge: &Unpressured,
     };
-    let opened = Served::open(granted, read_only, budget).ok()?;
+    let opened = Served::open(granted, read_only, budget, &tairix_log::DiscardSink).ok()?;
     Some(Open {
         attachment,
         fs: opened.fs,

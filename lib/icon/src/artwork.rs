@@ -310,19 +310,21 @@ pub trait ArtworkResolver {
     fn prefetch(&mut self, _key: &ArtworkKey, _side: u32) {}
 
     /// The cache could not retain what this resolver produced for `key` at
-    /// `side`: its budget has no room the current pressure band allows.
+    /// `side`, `bytes` of it: its budget has no room the current pressure band
+    /// allows.
     ///
     /// The draw that asked has already fallen back to the built-in glyph. What
     /// matters is the *next* one: a resolver that simply re-answers will have
     /// the same answer refused again, so a desktop redrawing its icons pays a
     /// read and a decode per icon per repaint and never keeps one. A resolver
     /// that defers should therefore stop offering this key until something
-    /// changes the answer — the band relaxing, or a scale change asking for a
-    /// different side.
+    /// changes the answer — the cache coming to hold `bytes`
+    /// ([`ArtworkCache::holds`]), or a scale change asking for a different
+    /// side.
     ///
     /// The default does nothing, which is right for a resolver that produces
     /// on the calling thread: it holds no queue to hold back.
-    fn declined(&mut self, _key: &ArtworkKey, _side: u32) {}
+    fn declined(&mut self, _key: &ArtworkKey, _side: u32, _bytes: usize) {}
 
     /// A surface still shows the picture `key` at `side` is for, though it did
     /// not draw it this pass: a resolver that withdraws work nobody asked
@@ -1417,6 +1419,14 @@ impl ArtworkCache {
         self.entries.enforce_pressure()
     }
 
+    /// Whether one picture of `bytes` would be kept at the band in force now,
+    /// were the cache holding nothing else: the question to ask before
+    /// offering again a decode it refused.
+    #[must_use]
+    pub fn holds(&self, bytes: usize) -> bool {
+        self.entries.holds(1, bytes)
+    }
+
     /// Bytes currently charged for retained artwork, payload plus this cache's
     /// own per-entry bookkeeping.
     #[must_use]
@@ -1829,7 +1839,7 @@ impl ArtworkCache {
         let built = match served {
             Some(Served::Uncached(artwork)) => {
                 if let Some(key) = built_key.take().or_else(|| slot.to_key()) {
-                    resolver.declined(&key.art, slot.side);
+                    resolver.declined(&key.art, slot.side, artwork.payload_bytes());
                 }
                 Slot::Uncached(artwork.artwork)
             }

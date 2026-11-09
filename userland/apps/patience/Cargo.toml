@@ -51,6 +51,9 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The shared reclaim policy decides which card art stays cached under memory
+# pressure.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 
 # The painter's tests draw text through the shared test transport, never a
 # running `fontd`, and the store's tests speak `appdata-v1` to the shared fake

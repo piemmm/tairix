@@ -8,8 +8,6 @@
 //! own constructions over the inputs the file fixes. Revisions 5 and 6 derive
 //! through SHA-2 and AES and decrypt through AES-256.
 
-use core::ops::Range;
-
 use aes::{Aes128, Aes256};
 use cbc::cipher::{Block, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use md5::digest::Output;
@@ -18,6 +16,7 @@ use rc4::{KeyInit as _, Rc4, StreamCipher as _};
 use sha2::{Sha256, Sha384, Sha512};
 use zeroize::Zeroize;
 
+use crate::cipher::AES_BLOCK_LEN;
 use crate::constant_time::ct_eq;
 
 /// The bytes a password is padded with to 32, and the plaintext revisions 2
@@ -33,8 +32,12 @@ const MAX_KEY_LEN: usize = 32;
 /// The longest password revisions 5 and 6 read: the rest is ignored.
 const MODERN_PASSWORD_LEN: usize = 127;
 
-/// An AES block, and the length of an AES-CBC stream's leading IV.
-const BLOCK: usize = 16;
+/// How many times a round of Algorithm 2.B repeats its sequence.
+const ROUND_REPEATS: usize = 64;
+
+/// The longest sequence a round of Algorithm 2.B repeats: the longest
+/// password read, SHA-512's `K` and `/U`.
+const MAX_SEQUENCE: usize = MODERN_PASSWORD_LEN + 64 + 48;
 
 /// A key the handler made: a file's, or one object's. Wiped when dropped.
 pub struct PdfKey {
@@ -294,7 +297,7 @@ pub fn pdf_modern_file_key(
     let mut intermediate = modern_hash(entries.revision, password, salt, udata);
     let mut key = *encrypted;
     let mut decryptor =
-        cbc::Decryptor::<Aes256>::new((&intermediate).into(), (&[0u8; BLOCK]).into());
+        cbc::Decryptor::<Aes256>::new((&intermediate).into(), (&[0u8; AES_BLOCK_LEN]).into());
     intermediate.zeroize();
     decryptor.decrypt_blocks(Block::<Aes256>::slice_as_chunks_mut(&mut key).0);
     let made = PdfKey::of(&key);
@@ -315,9 +318,11 @@ fn modern_hash(revision: u8, password: &[u8], salt: &[u8], udata: &[u8]) -> [u8;
     if revision == 5 {
         return out_of(&mut k);
     }
+    // One buffer for every round, each wiping what it wrote.
+    let mut sequence = [0u8; ROUND_REPEATS * MAX_SEQUENCE];
     let mut round = 0usize;
     loop {
-        let last = rehash(password, &mut k, &mut k_len, udata);
+        let last = rehash(password, &mut k, &mut k_len, udata, &mut sequence);
         round += 1;
         if round >= 64 && usize::from(last) + 32 <= round {
             return out_of(&mut k);
@@ -349,83 +354,59 @@ fn out_of(k: &mut [u8; 64]) -> [u8; 32] {
 /// One round of Algorithm 2.B: `password`, `k`'s first `k_len` bytes and
 /// `udata` repeated 64 times, encrypted with AES-128-CBC under `k`'s first
 /// half as key and second as IV, then hashed with SHA-256, SHA-384 or SHA-512
-/// as the first block's bytes sum to modulo three — the whole streamed a
-/// block at a time. `k` and `k_len` become the hash; answers the last byte
-/// encrypted.
-fn rehash(password: &[u8], k: &mut [u8; 64], k_len: &mut usize, udata: &[u8]) -> u8 {
-    let mut key = [0u8; BLOCK];
-    let mut iv = [0u8; BLOCK];
-    key.copy_from_slice(&k[..BLOCK]);
-    iv.copy_from_slice(&k[BLOCK..2 * BLOCK]);
+/// as the first block's bytes sum to modulo three, built in `sequence`, which
+/// is wiped as far as it was written. `k` and `k_len` become the hash;
+/// answers the last byte encrypted.
+fn rehash(
+    password: &[u8],
+    k: &mut [u8; 64],
+    k_len: &mut usize,
+    udata: &[u8],
+    sequence: &mut [u8; ROUND_REPEATS * MAX_SEQUENCE],
+) -> u8 {
+    let mut key = [0u8; AES_BLOCK_LEN];
+    let mut iv = [0u8; AES_BLOCK_LEN];
+    key.copy_from_slice(&k[..AES_BLOCK_LEN]);
+    iv.copy_from_slice(&k[AES_BLOCK_LEN..2 * AES_BLOCK_LEN]);
     let mut encryptor = cbc::Encryptor::<Aes128>::new((&key).into(), (&iv).into());
     key.zeroize();
     iv.zeroize();
-    let part = password.len() + *k_len + udata.len();
-    let total = part * 64;
-    let mut sequence = password
-        .iter()
-        .chain(&k[..*k_len])
-        .chain(udata)
-        .copied()
-        .cycle();
-    let mut hasher = Rehasher::None;
-    let mut last = 0;
-    let mut block = [0u8; BLOCK];
-    for _ in 0..total / BLOCK {
-        for (slot, byte) in block.iter_mut().zip(&mut sequence) {
-            *slot = byte;
+    let mut len = 0;
+    for _ in 0..ROUND_REPEATS {
+        for part in [password, k.get(..*k_len).unwrap_or_default(), udata] {
+            let end = len + part.len();
+            if let Some(slot) = sequence.get_mut(len..end) {
+                slot.copy_from_slice(part);
+                len = end;
+            }
         }
-        let mut cipher = Block::<Aes128>::from(block);
-        encryptor.encrypt_block(&mut cipher);
-        if matches!(hasher, Rehasher::None) {
-            hasher = Rehasher::chosen(&cipher);
-        }
-        hasher.update(&cipher);
-        last = cipher[BLOCK - 1];
-        cipher.zeroize();
     }
-    block.zeroize();
-    *k_len = hasher.finish(k);
+    // Sixty-four repetitions of any sequence are whole blocks of sixteen.
+    let encrypted = sequence.get_mut(..len).unwrap_or_default();
+    encryptor.encrypt_blocks(Block::<Aes128>::slice_as_chunks_mut(encrypted).0);
+    let last = encrypted.last().copied().unwrap_or(0);
+    *k_len = rehashed_into(encrypted, k);
+    encrypted.zeroize();
     last
 }
 
-/// The SHA-2 a round of Algorithm 2.B hashes with.
-enum Rehasher {
-    None,
-    Sha256(Sha256),
-    Sha384(Sha384),
-    Sha512(Sha512),
+/// `encrypted` hashed into the front of `k` with SHA-256, SHA-384 or SHA-512
+/// as its first block's bytes sum to modulo three, answering the hash's
+/// length.
+fn rehashed_into(encrypted: &[u8], k: &mut [u8; 64]) -> usize {
+    let first = encrypted.get(..AES_BLOCK_LEN).unwrap_or_default();
+    match first.iter().map(|&byte| u32::from(byte)).sum::<u32>() % 3 {
+        0 => hashed_into::<Sha256>(encrypted, k),
+        1 => hashed_into::<Sha384>(encrypted, k),
+        _ => hashed_into::<Sha512>(encrypted, k),
+    }
 }
 
-impl Rehasher {
-    /// The hash a round whose first block encrypted to `first` uses.
-    fn chosen(first: &[u8]) -> Self {
-        let sum: u32 = first.iter().map(|&byte| u32::from(byte)).sum();
-        match sum % 3 {
-            0 => Self::Sha256(Sha256::new()),
-            1 => Self::Sha384(Sha384::new()),
-            _ => Self::Sha512(Sha512::new()),
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::None => {}
-            Self::Sha256(hash) => hash.update(data),
-            Self::Sha384(hash) => hash.update(data),
-            Self::Sha512(hash) => hash.update(data),
-        }
-    }
-
-    /// The hash written into `k`, answering its length.
-    fn finish(self, k: &mut [u8; 64]) -> usize {
-        match self {
-            Self::None => 0,
-            Self::Sha256(hash) => finished_into(hash, k),
-            Self::Sha384(hash) => finished_into(hash, k),
-            Self::Sha512(hash) => finished_into(hash, k),
-        }
-    }
+/// `data` hashed with `D` into the front of `k`, answering the hash's length.
+fn hashed_into<D: Digest>(data: &[u8], k: &mut [u8; 64]) -> usize {
+    let mut hash = D::new();
+    hash.update(data);
+    finished_into(hash, k)
 }
 
 /// `data` decrypted in place with RC4 under `key`.
@@ -433,20 +414,17 @@ pub fn pdf_rc4_decrypt(key: &PdfKey, data: &mut [u8]) {
     rc4_rounds(key.as_bytes(), data, core::iter::once(0));
 }
 
-/// `data` — a 16-byte IV, then AES-CBC ciphertext under `key` — decrypted
-/// in place, answering where the plaintext lies: its padding left out where
-/// well formed and kept where not, a final part block dropped, and nothing
-/// for data shorter than its IV — as other readers decrypt a damaged
-/// stream. `None` for a key of a length AES does not take.
+/// `body`, AES-CBC ciphertext under `key` that follows the IV `iv`, decrypted
+/// in place, answering how long the plaintext leading it is: its padding left
+/// out where well formed and kept where not, and a final part block dropped,
+/// as other readers decrypt a damaged stream. `None` for a key or IV of a
+/// length AES does not take.
 #[must_use]
-pub fn pdf_aes_decrypt(key: &PdfKey, data: &mut [u8]) -> Option<Range<usize>> {
+pub fn pdf_aes_decrypt(key: &PdfKey, iv: &[u8], body: &mut [u8]) -> Option<usize> {
     if !matches!(key.len, 16 | 32) {
         return None;
     }
-    let Some((iv, body)) = data.split_first_chunk_mut::<BLOCK>() else {
-        return Some(0..0);
-    };
-    let whole = body.len() - body.len() % BLOCK;
+    let whole = body.len() - body.len() % AES_BLOCK_LEN;
     let body = &mut body[..whole];
     if key.len == 16 {
         let mut decryptor = cbc::Decryptor::<Aes128>::new_from_slices(key.as_bytes(), iv).ok()?;
@@ -456,12 +434,12 @@ pub fn pdf_aes_decrypt(key: &PdfKey, data: &mut [u8]) -> Option<Range<usize>> {
         decryptor.decrypt_blocks(Block::<Aes256>::slice_as_chunks_mut(body).0);
     }
     let pad = body.last().map_or(0, |&pad| usize::from(pad));
-    let well_formed = (1..=BLOCK).contains(&pad)
+    let well_formed = (1..=AES_BLOCK_LEN).contains(&pad)
         && pad <= whole
         && body[whole - pad..]
             .iter()
             .all(|&byte| usize::from(byte) == pad);
-    Some(BLOCK..BLOCK + if well_formed { whole - pad } else { whole })
+    Some(if well_formed { whole - pad } else { whole })
 }
 
 #[cfg(test)]

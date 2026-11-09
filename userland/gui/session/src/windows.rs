@@ -2809,8 +2809,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 return Err(err);
             }
         };
-        // Relayed read-only, so the kernel refuses a descriptor that can
-        // write: a placed file is read into a document, never written.
+        // Relayed read-only and only as a regular file: a placed file is read
+        // into a document, never written, and a pipe end is no file.
         let relay = &mut *self.relay;
         let mut refused = None;
         let taken = desk.hand_over(app, Activation::Withheld, &mut || {
@@ -3369,6 +3369,16 @@ mod tests {
     }
 
     impl DocumentRelay for WiredRelay {
+        fn redeem(&mut self, _: u64, _: ProcId) -> Result<u32, Errno> {
+            Err(Errno::NotSupported)
+        }
+
+        fn mint(&mut self, _: u32, _: bool, _: ProcId) -> Result<u64, Errno> {
+            Err(Errno::NotSupported)
+        }
+
+        fn close(&mut self, _: u32) {}
+
         fn relay(
             &mut self,
             authority: DocumentAuthority,
@@ -8493,12 +8503,11 @@ mod tests {
     }
 
     #[test]
-    fn trimming_caches_releases_served_window_content_and_spares_the_focused_one() {
+    fn trimming_caches_releases_only_the_served_windows_nobody_can_see() {
         // The desktop's whole answer to a deepened band, driven end to end:
-        // the shell runs the content ladder with the window its own router
-        // focuses, the bar it paints itself is untouched, and every window
-        // whose pixels went is queued for the redraw request the embedder
-        // delivers.
+        // a hidden served window gives its pixels back and its client is told
+        // it may let go too, while every visible window, at every band, and the
+        // bar the session paints itself keep theirs.
         static PRESSURE: ReportedPressure = ReportedPressure::unknown();
         PRESSURE.report(PressureBand::Normal);
         let (mut shell, mut compositor) = crate::tests::desktop_over(
@@ -8511,7 +8520,7 @@ mod tests {
 
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
-        let (focused, background, hidden) = {
+        let (front, background, hidden) = {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
                 compositor: &mut compositor,
@@ -8534,32 +8543,13 @@ mod tests {
             )
         };
         assert!(compositor.set_visible(hidden, false));
-        // The last window opened took focus; move focus to the one under
-        // test the way a user does — a pointer press in its client area.
-        // The cascade puts the first window's client at (48, 48) and the
-        // second at (80, 80), so this point is over the first alone.
-        shell.handle(
-            InputEvent::PointerMoved {
-                to: Point::new(55, 55),
-            },
-            &mut compositor,
-            0,
-        );
-        shell.handle(
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary,
-            },
-            &mut compositor,
-            0,
-        );
-        assert_eq!(shell.router().focused(), Some(focused));
         let _ = compositor.pending_redraws();
 
         let held = |c: &Compositor, id| c.window(id).expect("window").has_content();
 
         // Normal: the desktop gives nothing back.
         assert_eq!(shell.trim_caches(&mut compositor), 0);
-        assert!(held(&compositor, focused));
+        assert!(held(&compositor, front));
         assert!(held(&compositor, background));
         assert!(held(&compositor, hidden));
 
@@ -8571,7 +8561,7 @@ mod tests {
         // its own two copies as well.
         PRESSURE.report(PressureBand::Mild);
         assert!(shell.trim_caches(&mut compositor) > 0);
-        assert!(held(&compositor, focused));
+        assert!(held(&compositor, front));
         assert!(held(&compositor, background));
         assert!(!held(&compositor, hidden));
         assert_eq!(
@@ -8585,31 +8575,24 @@ mod tests {
         // the request goes out at the moment it can be seen.
         assert!(compositor.set_visible(hidden, true));
         assert_eq!(compositor.pending_redraws(), alloc::vec![hidden]);
-        assert!(compositor.set_visible(hidden, false));
 
-        // Critical: the background window too, never the focused one, and
-        // never the bar the session paints itself.
+        // Critical: still nothing visible, and never the bar the session
+        // paints itself. A visible window's present would establish the same
+        // buffer again at once, so releasing one recovers nothing.
         PRESSURE.report(PressureBand::Critical);
-        assert!(shell.trim_caches(&mut compositor) > 0);
-        assert!(
-            held(&compositor, focused),
-            "there would be nothing to show in the focused window's place"
-        );
-        assert!(!held(&compositor, background));
+        let _ = shell.trim_caches(&mut compositor);
+        assert!(held(&compositor, front));
+        assert!(held(&compositor, background));
         assert!(
             held(&compositor, bar),
             "no client would answer a redraw for the session's own bar"
         );
         assert_eq!(
             compositor.pending_redraws(),
-            alloc::vec![background],
-            "a visible window must not be left blank"
-        );
-        assert_eq!(
-            compositor.take_released_notices(),
             alloc::vec![],
-            "a window that was asked to present is not told to let go"
+            "no visible window is asked to present"
         );
+        assert_eq!(compositor.take_released_notices(), alloc::vec![]);
         PRESSURE.report(PressureBand::Normal);
     }
 

@@ -75,6 +75,7 @@ impl ServedArchive for Served {
         mut volume: GrantedVolume<A>,
         read_only: bool,
         _budget: WritebackBudget,
+        _log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<ArchiveFs<A>>, DriverError> {
         let info = *volume.info();
         // The archive is recognised again as the kernel recognised it, by the

@@ -93,6 +93,7 @@
 #define TAIRIX_DRIVER_ERROR_TIMED_OUT ((int32_t)26)
 #define TAIRIX_DRIVER_ERROR_NOT_READY ((int32_t)27)
 #define TAIRIX_DRIVER_ERROR_INTERRUPTED ((int32_t)28)
+#define TAIRIX_DRIVER_ERROR_TRANSFER_CORRUPTED ((int32_t)29)
 
 /* PCI vendor ID assigned to virtio devices (uint16_t; virtio 1.1 sec.4.1.2). */
 #define TAIRIX_VIRTIO_PCI_VENDOR_ID ((uint16_t)0x1af4u)

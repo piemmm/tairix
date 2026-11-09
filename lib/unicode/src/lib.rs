@@ -21,8 +21,9 @@ pub use stringprep::{saslprep, SaslprepError, Unassigned};
 pub use tables::{MAX_DECOMPOSITION, VERSION};
 
 use tables::{
-    BOPO, CYRL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, GREK, HANB, HANG, HANI, HIRA, HNTL,
-    JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS, SET_WORDS, ZINH, ZYYY,
+    BOPO, CANONICAL, CYRL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, GREK, HANB, HANG, HANI,
+    HIRA, HNTL, JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS, SET_WORDS, ZINH,
+    ZYYY,
 };
 
 /// Whether `ch` draws nothing where it stands yet can hide, reorder or break
@@ -121,7 +122,7 @@ impl Faithful {
 /// The nonspacing marks `ch`'s full canonical decomposition is written with,
 /// where it has any.
 fn decomposed_marks(ch: char) -> Option<impl Iterator<Item = char>> {
-    let parts = normalize::canonical_decomposition(ch)?;
+    let parts = CANONICAL.of(ch)?;
     let marks = parts
         .iter()
         .copied()
@@ -134,6 +135,10 @@ fn decomposed_marks(ch: char) -> Option<impl Iterator<Item = char>> {
 
 /// Whether `code` lies in one of `ranges`, sorted and disjoint.
 pub(crate) const fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
+    // Below the first range, as most text is, needs no search.
+    if matches!(ranges, [(least, _), ..] if code < *least) {
+        return false;
+    }
     let (mut low, mut high) = (0, ranges.len());
     while low < high {
         let mid = low + (high - low) / 2;

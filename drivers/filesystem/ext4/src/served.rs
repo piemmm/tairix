@@ -25,6 +25,7 @@ impl ServedFormat for Served {
         volume: B,
         read_only: bool,
         budget: WritebackBudget,
+        _log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<Ext4<B>>, DriverError> {
         let fs = if read_only {
             Ext4::open_read_only(volume)

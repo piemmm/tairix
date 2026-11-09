@@ -11,7 +11,8 @@
 //! * a device served by a user-space driver over a block-service endpoint,
 //!   folded by [`super::BlkClient`] as it posts and reaps each attempt;
 //! * a device the kernel drives itself — the bootstrap-floor disk, which has
-//!   no serving endpoint to fold at — wrapped in [`MeteredBlock`].
+//!   no serving endpoint to fold at — wrapped in [`MeteredBlock`], which for
+//!   the same reason also rides out the device's transient failures.
 //!
 //! [`MeteredBlock`] sits directly over the device it measures and *under* any
 //! cache above it: a cache hit never reaches the medium, so counting one as
@@ -21,7 +22,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::blkio::{
-    BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkOp,
+    BlkDeviceClass, BlkDeviceName, BlkHealth, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkOp,
     BlkQueueCounters, BlkStatus, IoBudget,
 };
 use tairix_abi::driver::block::{
@@ -29,7 +30,7 @@ use tairix_abi::driver::block::{
 };
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
-use tairix_log::{Field, FieldValue, Level, Sink};
+use tairix_log::{Doubling, Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
 use crate::blockwait::SLOW_DEVICE_NS;
@@ -494,7 +495,8 @@ impl DeviceIoMeter {
 }
 
 /// A [`Block`] device the kernel drives itself, with every device operation
-/// folded into a [`DeviceIoMeter`] (`plans/FIX-IO.md` IO5).
+/// folded into a [`DeviceIoMeter`] and every failure the device says may clear
+/// ridden out (`plans/FIX-IO.md` IO3, IO5).
 ///
 /// The bootstrap-floor disk has no serving block-service endpoint, so
 /// nothing on its path would otherwise fold the counters the three
@@ -505,13 +507,22 @@ impl DeviceIoMeter {
 /// counting those as device work would report throughput and utilisation the
 /// disk never did.
 ///
-/// It measures and reports; it decides nothing. Every operation, its result
-/// and its error are the wrapped device's, unchanged.
+/// For the same reason no serving driver stands between the kernel and this
+/// device to ride out a blip, so this wrapper is also where the device's
+/// [`BlkHealth`] grace window runs and where a reissuable failure is issued
+/// again, under the one bounded policy a served device's consumer obeys
+/// ([`IoBudget::reissue_wait_ns`]). A failure that still reaches the caller is
+/// recorded ([`AuditEvent::DeviceOperationFailed`]).
 pub struct MeteredBlock<B: Block> {
     /// The device being measured.
     device: B,
     /// The fold every operation passes through.
     meter: DeviceIoMeter,
+    /// The device's recovery state: the grace window a transient failure
+    /// opens, and its verdict once that window has elapsed.
+    health: BlkHealth,
+    /// The device failures that reached their caller.
+    failed: Doubling,
 }
 
 impl<B: Block> MeteredBlock<B> {
@@ -522,9 +533,15 @@ impl<B: Block> MeteredBlock<B> {
     /// the device is right here, so the meter is fully informed before the
     /// first operation.
     pub fn new(device: B, dev: u64, audit: &'static (dyn Sink + Sync)) -> Self {
+        let medium = device.medium();
         let mut meter = DeviceIoMeter::new(dev, audit);
-        meter.adopt_device(device.medium(), device.device_name());
-        Self { device, meter }
+        meter.adopt_device(medium, device.device_name());
+        Self {
+            device,
+            meter,
+            health: BlkHealth::new(BlkDeviceClass::of(medium)),
+            failed: Doubling::new(),
+        }
     }
 
     /// The shared live-reading handles for this device, for the mount
@@ -534,45 +551,143 @@ impl<B: Block> MeteredBlock<B> {
         self.meter.io_source()
     }
 
-    /// Run one device operation of `op`, folding the attempt.
+    /// Run one device operation of `op`, folding every attempt, and issue it
+    /// again while the device says its failure may clear and the budget
+    /// allows.
     ///
     /// `request.bytes` is how many bytes the operation transfers when it
     /// succeeds; a failed attempt moved none. A direct device call always
     /// answers, so every attempt here is an [`Attempt::Answered`] one —
     /// including a failure, which the device took time to report. The outcome
-    /// is classified through the shared `BlkStatus` mappings — the device's
-    /// own promise on success, the health signal its error carries otherwise —
-    /// so an in-kernel device's buckets mean exactly what a served device's do.
+    /// is classified through the shared `BlkStatus` mappings and the device's
+    /// [`BlkHealth`] — the device's own promise on success, the health signal
+    /// its error carries otherwise — so an in-kernel device's buckets mean
+    /// exactly what a served device's do. A request-level refusal says nothing
+    /// of the device's health and is never issued again.
     ///
-    /// One that took [`SLOW_DEVICE_NS`] or more is recorded
+    /// A reissue the device vouches for goes at once; any other first parks
+    /// the task out the class's pacing, holding the device as a served
+    /// device's consumer holds its window. A caller no scheduler can park is
+    /// answered with the failure rather than spun.
+    ///
+    /// An attempt that took [`SLOW_DEVICE_NS`] or more is recorded
     /// ([`AuditEvent::DeviceOperationSlow`]), from the two readings the fold
     /// takes anyway.
     fn measured<T>(
         &mut self,
         op: BlkOp,
         request: Request,
-        run: impl FnOnce(&mut B) -> Result<T, DriverError>,
+        mut run: impl FnMut(&mut B) -> Result<T, DriverError>,
     ) -> Result<T, DriverError> {
-        let issued_ns = now_ns();
-        self.meter.issued(issued_ns);
-        let outcome = run(&mut self.device);
-        let done_ns = now_ns();
-        let attempt = match &outcome {
-            Ok(_) => Attempt::Answered {
-                status: BlkStatus::for_backing(self.device.backing_availability()),
-                bytes: request.bytes,
-            },
-            Err(err) => Attempt::Answered {
-                status: BlkStatus::for_errno(err.as_errno()),
-                bytes: 0,
-            },
-        };
-        self.meter.completed(op, issued_ns, done_ns, attempt);
-        let elapsed_ns = done_ns.saturating_sub(issued_ns);
-        if elapsed_ns >= SLOW_DEVICE_NS {
-            self.note_slow(request, elapsed_ns, outcome.is_ok());
+        let mut reissues = 0;
+        loop {
+            let issued_ns = now_ns();
+            self.meter.issued(issued_ns);
+            let outcome = run(&mut self.device);
+            let done_ns = now_ns();
+            let (status, wait_ns) = self.judge(outcome.as_ref().err().copied(), done_ns, reissues);
+            let bytes = if outcome.is_ok() { request.bytes } else { 0 };
+            self.meter
+                .completed(op, issued_ns, done_ns, Attempt::Answered { status, bytes });
+            let elapsed_ns = done_ns.saturating_sub(issued_ns);
+            if elapsed_ns >= SLOW_DEVICE_NS {
+                self.note_slow(request, elapsed_ns, outcome.is_ok());
+            }
+            let Err(err) = outcome else {
+                return outcome;
+            };
+            match wait_ns {
+                Some(wait_ns) if wait_ns == 0 || crate::sleep::park_for(wait_ns).is_ok() => {
+                    self.meter.reissued();
+                    reissues += 1;
+                }
+                _ => {
+                    if BlkStatus::for_driver_health(err).is_some() {
+                        self.note_failed(request, err, reissues);
+                    }
+                    return Err(err);
+                }
+            }
         }
-        outcome
+    }
+
+    /// The status an attempt that ended in `failure` (none for a success)
+    /// folds as — the device's own word, not the grace window's verdict on it
+    /// — and, for a failure that verdict lets be issued again, how long to
+    /// wait first after `reissues` reissues.
+    fn judge(
+        &mut self,
+        failure: Option<DriverError>,
+        now_ns: u64,
+        reissues: u32,
+    ) -> (BlkStatus, Option<u64>) {
+        let Some(err) = failure else {
+            let promised = BlkStatus::for_backing(self.device.backing_availability());
+            return (self.health.observe(promised, now_ns), None);
+        };
+        let Some(raw) = BlkStatus::for_driver_health(err) else {
+            return (BlkStatus::for_errno(err.as_errno()), None);
+        };
+        // Asked whatever the verdict, so what the device knew of this failure
+        // never speaks for a later one.
+        let reissue = self.device.reissue();
+        let verdict = self.health.observe(raw, now_ns);
+        let wait_ns = self
+            .health
+            .budget()
+            .reissue_wait_ns(verdict, reissue, reissues);
+        (raw, wait_ns)
+    }
+
+    /// Record a device failure that reached its caller with `err`, `reissues`
+    /// reissues spent on it: the first, then one each time their count
+    /// doubles.
+    fn note_failed(&mut self, request: Request, err: DriverError, reissues: u32) {
+        self.failed.note();
+        let Some(failed) = self.failed.take_due() else {
+            return;
+        };
+        crate::audit::emit(
+            self.meter.audit,
+            Level::Warn,
+            AuditEvent::DeviceOperationFailed,
+            &[
+                Field {
+                    key: "dev",
+                    value: FieldValue::UnsignedInt(self.meter.dev),
+                },
+                Field {
+                    key: "device",
+                    value: FieldValue::Str(self.meter.device.as_str()),
+                },
+                Field {
+                    key: "op",
+                    value: FieldValue::Str(request.kind),
+                },
+                Field {
+                    key: "lba",
+                    value: request
+                        .lba
+                        .map_or(FieldValue::Null, FieldValue::UnsignedInt),
+                },
+                Field {
+                    key: "bytes",
+                    value: FieldValue::UnsignedInt(request.bytes),
+                },
+                Field {
+                    key: "error",
+                    value: FieldValue::Error(err.as_errno()),
+                },
+                Field {
+                    key: "reissues",
+                    value: FieldValue::UnsignedInt(reissues.into()),
+                },
+                Field {
+                    key: "failed",
+                    value: FieldValue::UnsignedInt(failed),
+                },
+            ],
+        );
     }
 
     /// Record `request`, answered `elapsed_ns` after it was issued.

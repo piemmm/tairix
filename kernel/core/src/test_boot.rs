@@ -1109,10 +1109,10 @@ pub fn serve_next(
     let call = crate::callreg::receive_call(
         endpoint,
         server,
-        usize::MAX,
         true,
         &mut crate::waitq::park_calling_task,
         stopped,
+        || Ok(endpoint.recv_call(usize::MAX).into()),
     )?;
     let len = answer(&call, reply);
     if let Ok(woken) = endpoint.reply_with(call, &reply[..len], audit) {
@@ -1146,13 +1146,11 @@ mod tests {
     use std::sync::{mpsc, Arc};
 
     use tairix_kernel_sched_api::TaskId;
-    use tairix_kernel_sec::ProcessId;
 
     use super::{
         advance_clock, claim_cpu, claim_peer_task, claim_scheduler, claim_task, is_claimed_cpu,
         publish_hash_key, HostBoot, HostTask, CLAIMED_CPU_BASE, LOST_WAKE,
     };
-    use crate::futex::FutexKey;
     use crate::sleep::park_on_until;
     use crate::waitq::{park_calling_task, wait_arch, WaitQueue, NO_DEADLINE};
 
@@ -1312,24 +1310,17 @@ mod tests {
         let boot = HostBoot::claim();
         let queue = Arc::new(WaitQueue::new());
         let theirs = Arc::clone(&queue);
-        let (tx, rx) = mpsc::channel();
         let gone = boot.spawn(move || {
             let task = boot.task();
             theirs.register(task, NO_DEADLINE).expect("filed");
-            let key = FutexKey {
-                process: ProcessId(task),
-                uaddr: 0,
-            };
-            let _ = tx.send(crate::futex::register(key, task, NO_DEADLINE));
+            crate::waitq::SLEEP_WAITQ
+                .register(task, NO_DEADLINE)
+                .expect("filed");
         });
         let id = gone.id();
         gone.join();
-        let futex = rx
-            .recv()
-            .expect("the task registered")
-            .expect("the key had a queue");
         assert!(
-            futex.is_empty(),
+            !crate::waitq::SLEEP_WAITQ.arm(id, NO_DEADLINE),
             "retirement dropped the row on a queue the kernel names"
         );
         let hook = wait_arch().expect("a boot's task has the hook");

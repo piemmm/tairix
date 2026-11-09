@@ -573,7 +573,7 @@ fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid
     for _ in 0..MAX_STEPS {
         let _ = tairix_kernel_core::dispatcher_step(sys.sched, BOOT_CPU);
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
-        match wait.poll(ProcessId(0), pid, WaitFlags::empty()) {
+        match wait.poll(ProcessId(0), pid, WaitFlags::empty(), &mut |_| Ok(())) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(code) => return code,
                 WaitStatus::Stopped(_) => qemu_exit::exit_failure(FAIL_PARENT_STOPPED),
@@ -896,7 +896,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                 }
             }
             was_stranded = stranded_now;
-            match wait_producer.poll(ProcessId(0), poll_pid, WaitFlags::empty()) {
+            match wait_producer.poll(ProcessId(0), poll_pid, WaitFlags::empty(), &mut |_| Ok(())) {
                 Ok(reaped) => match reaped.status {
                     WaitStatus::Exited(code) => {
                         exit_code = Some(code);

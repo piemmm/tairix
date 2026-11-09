@@ -324,11 +324,12 @@ something through. PostScript paints no transparency, so a translucent
 colour, gradient, opacity or pixel is written opaque — a pixel shown where it
 is more than half shown — and `Eps::flattened` says it was.
 
-`pdf::read` reads one page of a PDF into a drawing of one layer through
-`lib/pdf`, the page and the password asked for in a `pdf::Request` with the
-bytes the document may decode to, and `pdf::pages` counts a document's pages
-for a chooser and sizes, in points, as many of the first as it is asked
-for. The page's crop box is the
+`pdf::open` opens a PDF once through `lib/pdf`, with a password and the
+bytes the document may decode to, for its pages to be counted, sized in points
+and read (`Opened::page_count`, `Opened::page_size`, `Opened::read`), handing
+the file back on a refusal (`pdf::Refused`) so another password costs no copy;
+`pdf::read` reads the one page a `pdf::Request` asks for. A page is read into
+a drawing of one layer. The page's crop box is the
 drawing's page, in points. Each item of the page's display list becomes an
 object in order: a fill and the stroke of the same path that follows it one
 shape in their style — a stroke as thin as a device draws read as a pixel of
@@ -343,13 +344,17 @@ the drawing's (`Info`). What the page holds that the drawing cannot — soft
 masks, blend modes, tiling patterns, other shadings, unreadable pictures and
 text, annotations, damage — is recorded as `Unkept`, as is what the document
 holds beyond the page: its other pages (`Lost::OtherPages`), its bookmarks,
-attachments and other parts (`Lost::DocumentParts`), and metadata besides
-its title and subject. A PDF Draw wrote holds none of these, so it opens
-writable again. A PDF needing a password, given a wrong one or asked for a
-page it lacks is a `ReadError` of its own. `crate::read` reads a PDF by its
-header (`pdf::recognised`), as it reads a Draw file by its signature, unless
-the bytes begin as markup, whose text may hold a header's characters
-anywhere.
+attachments and other parts (`Lost::DocumentParts`), metadata besides its
+title and subject, and its password protection (`Lost::Protection`), which a
+drawing written from it would be written without. A picture larger than a
+surface, or past what a drawing's pictures hold together, is lost
+(`Lost::Images`), never the page. A PDF Draw wrote holds none of these, so it
+opens writable again. A PDF needing a password, given a wrong one, asked for
+a page it lacks or holding what no reader here reads, such as protection by
+certificate, is a `ReadError` of its own. `format_of` tells a Draw file by
+its signature and a PDF by its header (`pdf::recognised`) — unless the bytes
+begin as markup, whose text may hold a header's characters anywhere — and
+anything else as SVG; `crate::read` reads by it.
 
 A drawing also holds the resolution its raster copies are made at
 (`Drawing::resolution`, `PIXELS_PER_INCH` until it is set, at most

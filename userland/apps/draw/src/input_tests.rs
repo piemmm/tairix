@@ -1722,7 +1722,7 @@ fn a_page_of_a_longer_pdf_is_never_saved_over_its_document() {
         password: None,
         budget: 1 << 20,
     };
-    let read = tairix_drawing::read(&two_page_pdf(), &request, &mut ids).expect("page two");
+    let read = tairix_drawing::read(two_page_pdf(), &request, &mut ids).expect("page two");
     assert!(read.unkept.contains(Lost::OtherPages));
     let view = View::new(
         Document::new(read.drawing, ids, true),

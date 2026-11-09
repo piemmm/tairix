@@ -127,10 +127,10 @@ pub enum RamzipFaultOutcome {
     /// No compressed entry existed (or the tier is not installed): the
     /// fault resolver falls through to the next handler.
     NoEntry,
-    /// The entry was unrecoverable (authentication or decode failure,
-    /// or a restore-time allocation/page-table failure). Fail closed:
-    /// no plaintext was produced. The caller escalates through the VM
-    /// fault policy — the task cannot continue without the page.
+    /// The page could not be restored: its entry failed its check, now or
+    /// at an earlier restore, and its contents are gone; or the restore found
+    /// no frame or page table to restore into, and the entry is kept. No
+    /// plaintext was produced either way.
     Fatal(FaultError),
 }
 

@@ -7,6 +7,7 @@ use core::cell::Cell;
 
 use tairix_collections::try_box;
 use tairix_compress::inflate::Inflater;
+use tairix_image::{defilter_png_row, undo_tiff_horizontal_big_endian};
 use tairix_util::fallible;
 
 use crate::lex::{hex_value, is_white};
@@ -114,17 +115,17 @@ pub(crate) fn chain<'o>(
 ///
 /// # Errors
 ///
-/// [`PdfError::Unsupported`] for a filter this reader does not know,
+/// [`PdfError::Unsupported`] for a filter or predictor this reader does not read,
 /// [`PdfError::Malformed`] for data an ASCII or run-length filter or a
 /// predictor refuses, [`PdfError::TooComplex`] past the budget, and
 /// [`PdfError::OutOfMemory`]. Damaged Flate or LZW data is not refused: what
 /// decoded before the damage is answered, marked damaged.
 pub(crate) fn decode(
-    data: &[u8],
+    data: Cow<'_, [u8]>,
     chain: &[Link<'_>],
     budget: &Cell<u64>,
 ) -> Result<Decoded, PdfError> {
-    let mut bytes: Cow<'_, [u8]> = Cow::Borrowed(data);
+    let mut bytes = data;
     let mut damaged = false;
     let mut image = None;
     for (index, &(name, params)) in chain.iter().enumerate() {
@@ -133,7 +134,7 @@ pub(crate) fn decode(
             Filter::Flate => {
                 let (out, cut) = inflate(&bytes, budget)?;
                 damaged |= cut;
-                predict(out, params, budget)?
+                predict(out, params)?
             }
             Filter::Lzw => {
                 let early = params
@@ -142,12 +143,15 @@ pub(crate) fn decode(
                     != Some(0);
                 let (out, cut) = lzw(&bytes, early, budget)?;
                 damaged |= cut;
-                predict(out, params, budget)?
+                predict(out, params)?
             }
             Filter::AsciiHex => ascii_hex(&bytes, budget)?,
             Filter::Ascii85 => ascii85(&bytes, budget)?,
             Filter::RunLength => run_length(&bytes, budget)?,
-            Filter::Crypt => continue,
+            // Decryption is done before the chain; ISO 32000-2 §7.4.10 puts a
+            // crypt filter first, and one anywhere else would decrypt nothing.
+            Filter::Crypt if index == 0 => continue,
+            Filter::Crypt => return Err(PdfError::Malformed),
             Filter::Image(codec) => {
                 // An image codec ends the chain: anything after it would
                 // decode pixels, which no PDF filter does.
@@ -188,12 +192,12 @@ fn copy(data: &[u8], budget: &Cell<u64>) -> Result<Vec<u8>, PdfError> {
     fallible::copied(data).ok_or(PdfError::OutOfMemory)
 }
 
-/// `bytes` pushed onto `out`, charged to `budget`.
+/// `bytes` pushed onto `out`, charged to `budget`. Its room doubles as it
+/// fills, so a stream decoded a few bytes at a time is not copied whole for
+/// each piece.
 fn extend(out: &mut Vec<u8>, bytes: &[u8], budget: &Cell<u64>) -> Result<(), PdfError> {
     charge(budget, bytes.len())?;
-    if !fallible::reserve(out, bytes.len()) {
-        return Err(PdfError::OutOfMemory);
-    }
+    out.try_reserve(bytes.len())?;
     out.extend_from_slice(bytes);
     Ok(())
 }
@@ -256,9 +260,9 @@ fn lzw(data: &[u8], early: bool, budget: &Cell<u64>) -> Result<(Vec<u8>, bool), 
     }
 }
 
-/// The predictor `params` names undone over `data`: none, TIFF's horizontal
-/// differencing, or PNG's per-row filters.
-fn predict(data: Vec<u8>, params: Option<&Dict>, budget: &Cell<u64>) -> Result<Vec<u8>, PdfError> {
+/// The predictor `params` names undone over `data` in place: none, or the
+/// TIFF or PNG predictor, by `lib/image`'s own row routines.
+fn predict(data: Vec<u8>, params: Option<&Dict>) -> Result<Vec<u8>, PdfError> {
     let Some(params) = params else {
         return Ok(data);
     };
@@ -286,100 +290,57 @@ fn predict(data: Vec<u8>, params: Option<&Dict>, budget: &Cell<u64>) -> Result<V
     let row = row_bits.div_ceil(8);
     let pixel = (colors * bits).div_ceil(8);
     match predictor {
-        2 => tiff_predict(data, (row, pixel, bits, colors)),
-        10..=15 => png_predict(&data, row, pixel, budget),
+        2 => tiff_predict(data, row, bits, colors, columns),
+        10..=15 => png_predict(data, row, pixel),
         _ => Err(PdfError::Unsupported),
     }
 }
 
-/// TIFF predictor 2 undone in place: each sample the sum of itself and the
-/// same component of the pixel before it, at 8 or 16 bits.
+/// TIFF predictor 2 undone in place, a row at a time: each sample the sum of
+/// itself and the same component of the pixel before it.
 fn tiff_predict(
     mut data: Vec<u8>,
-    (row, pixel, bits, colors): (usize, usize, usize, usize),
+    row: usize,
+    bits: usize,
+    colors: usize,
+    columns: usize,
 ) -> Result<Vec<u8>, PdfError> {
-    match bits {
-        8 => {
-            for line in data.chunks_mut(row) {
-                for at in pixel..line.len() {
-                    line[at] = line[at].wrapping_add(line[at - pixel]);
-                }
-            }
-        }
-        16 => {
-            let step = 2 * colors;
-            for line in data.chunks_mut(row) {
-                let mut at = step;
-                while at + 1 < line.len() {
-                    let before = u16::from_be_bytes([line[at - step], line[at - step + 1]]);
-                    let here = u16::from_be_bytes([line[at], line[at + 1]]);
-                    line[at..at + 2].copy_from_slice(&here.wrapping_add(before).to_be_bytes());
-                    at += 2;
-                }
-            }
-        }
-        _ => return Err(PdfError::Unsupported),
+    let bits = u32::try_from(bits).map_err(|_| PdfError::Malformed)?;
+    let samples = colors.checked_mul(columns).ok_or(PdfError::Malformed)?;
+    for line in data.chunks_mut(row) {
+        undo_tiff_horizontal_big_endian(line, bits, colors, samples)
+            .map_err(|_| PdfError::Unsupported)?;
     }
     Ok(data)
 }
 
-/// The PNG predictors undone: each row led by its own filter byte, which may
-/// differ from the predictor the parameters name.
-fn png_predict(
-    data: &[u8],
-    row: usize,
-    pixel: usize,
-    budget: &Cell<u64>,
-) -> Result<Vec<u8>, PdfError> {
-    let rows = data.len() / (row + 1);
-    let size = rows.checked_mul(row).ok_or(PdfError::TooComplex)?;
-    charge(budget, size)?;
-    let mut out = fallible::zeroed(size).ok_or(PdfError::OutOfMemory)?;
+/// The PNG predictors undone in place: each row led by its own filter byte,
+/// which may differ from the predictor the parameters name, the filter bytes
+/// then dropped, and a part row at the end with them.
+fn png_predict(mut data: Vec<u8>, row: usize, pixel: usize) -> Result<Vec<u8>, PdfError> {
+    let stride = row.checked_add(1).ok_or(PdfError::Malformed)?;
+    let rows = data.len() / stride;
     for index in 0..rows {
-        let source = &data[index * (row + 1)..(index + 1) * (row + 1)];
-        let (filter, line) = (source[0], &source[1..]);
-        let (done, here) = out.split_at_mut(index * row);
-        let above = done
-            .get(done.len().saturating_sub(row)..)
-            .filter(|_| index > 0);
-        let here = &mut here[..row];
-        for at in 0..row {
-            let left = if at >= pixel { here[at - pixel] } else { 0 };
-            let up = above.map_or(0, |above| above[at]);
-            let corner = if at >= pixel {
-                above.map_or(0, |above| above[at - pixel])
-            } else {
-                0
-            };
-            let predicted = match filter {
-                0 => 0,
-                1 => left,
-                2 => up,
-                3 => left.midpoint(up),
-                4 => paeth(left, up, corner),
-                _ => return Err(PdfError::Malformed),
-            };
-            here[at] = line[at].wrapping_add(predicted);
-        }
+        let start = index * stride;
+        let Some((done, rest)) = data.split_at_mut_checked(start) else {
+            break;
+        };
+        let Some(line) = rest.get_mut(..stride) else {
+            break;
+        };
+        let Some((&mut filter, samples)) = line.split_first_mut() else {
+            break;
+        };
+        // Each row before is already undone and moved down over the filter
+        // bytes, so the one above ends before this one begins.
+        let above = index
+            .checked_sub(1)
+            .and_then(|before| done.get(before * row..index * row));
+        defilter_png_row(filter, samples, above, pixel).map_err(|_| PdfError::Malformed)?;
+        data.copy_within(start + 1..start + stride, index * row);
     }
-    Ok(out)
-}
-
-/// The Paeth predictor of PNG.
-fn paeth(left: u8, up: u8, corner: u8) -> u8 {
-    let estimate = i16::from(left) + i16::from(up) - i16::from(corner);
-    let (to_left, to_up, to_corner) = (
-        (estimate - i16::from(left)).abs(),
-        (estimate - i16::from(up)).abs(),
-        (estimate - i16::from(corner)).abs(),
-    );
-    if to_left <= to_up && to_left <= to_corner {
-        left
-    } else if to_up <= to_corner {
-        up
-    } else {
-        corner
-    }
+    data.truncate(rows * row);
+    Ok(data)
 }
 
 /// `ASCIIHex`: pairs of hexadecimal digits up to `>`, white space skipped and

@@ -2,11 +2,11 @@
 //! the UCD states and to UTS #39's own examples.
 
 use super::tables::{
-    DECOMPOSITIONS, DECOMPOSITION_POOL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS,
-    NONSPACING_MARKS, SCRIPTS,
+    CANONICAL, COMPATIBILITY, COMPOSING_SECONDS, COMPOSITIONS, DEFAULT_IGNORABLE, EXTENSIONS,
+    EXTENSION_SETS, MAX_CANONICAL_DECOMPOSITION, NONSPACING_MARKS, SCRIPTS,
 };
 use super::{
-    augmented, decomposed_marks, is_default_ignorable, is_hidden, is_nonspacing_mark,
+    augmented, decomposed_marks, in_ranges, is_default_ignorable, is_hidden, is_nonspacing_mark,
     restriction_level, script, Faithful, MarkRun, RestrictionLevel, Scripts, BOPO, CYRL, GREK,
     HANB, HANI, HNTL, JPAN, KORE, LATN, MAX_MARKS, VERSION,
 };
@@ -252,20 +252,24 @@ fn a_faithful_rendering_escapes_each_hidden_character_and_each_mark_past_the_lim
 
 #[test]
 fn the_tables_are_sorted_disjoint_and_complete() {
-    assert!(DECOMPOSITIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
-    for &(code, canonical_at, canonical_len, compatibility_at, compatibility_len) in DECOMPOSITIONS
-    {
-        let span = |at: u16, len: u8| {
-            DECOMPOSITION_POOL
-                .get(usize::from(at)..usize::from(at) + usize::from(len))
-                .expect("in the pool")
-        };
-        assert!(!span(compatibility_at, compatibility_len).is_empty());
+    for table in [CANONICAL, COMPATIBILITY] {
+        assert!(table.keys.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(table.starts.len(), table.keys.len() + 1);
+        assert_eq!(table.starts.first(), Some(&0));
+        assert!(
+            table.starts.windows(2).all(|pair| pair[0] < pair[1]),
+            "no decomposition is empty"
+        );
+        assert_eq!(
+            table.starts.last().map(|&end| usize::from(end)),
+            Some(table.parts.len())
+        );
+    }
+    for &code in CANONICAL.keys {
         let ch = char::from_u32(code).expect("a scalar value");
-        if canonical_len == 0 {
-            continue;
-        }
-        let marks = span(canonical_at, canonical_len)
+        let parts = CANONICAL.of(ch).expect("listed");
+        assert!(parts.len() <= MAX_CANONICAL_DECOMPOSITION);
+        let marks = parts
             .iter()
             .filter(|&&part| is_nonspacing_mark(part))
             .count();
@@ -274,11 +278,21 @@ fn the_tables_are_sorted_disjoint_and_complete() {
         assert!(run.admit(ch), "U+{code:04X} passes alone");
         assert!(marks <= MAX_MARKS);
     }
+    assert!(COMPOSITIONS
+        .iter()
+        .all(|&(_, second, _)| in_ranges(COMPOSING_SECONDS, second)));
+    for &(first, last) in COMPOSING_SECONDS {
+        assert!(
+            (first..=last)
+                .all(|second| COMPOSITIONS.iter().any(|&(_, listed, _)| listed == second)),
+            "U+{first:04X} to U+{last:04X} each follow another in a composite"
+        );
+    }
     assert_eq!(SCRIPTS.first().map(|&(first, _)| first), Some(0));
     assert!(SCRIPTS
         .windows(2)
         .all(|pair| pair[0].0 < pair[1].0 && pair[0].1 != pair[1].1));
-    for ranges in [DEFAULT_IGNORABLE, NONSPACING_MARKS] {
+    for ranges in [DEFAULT_IGNORABLE, NONSPACING_MARKS, COMPOSING_SECONDS] {
         assert!(ranges.iter().all(|&(first, last)| first <= last));
         assert!(ranges.windows(2).all(|pair| pair[0].1 + 1 < pair[1].0));
     }
@@ -289,4 +303,28 @@ fn the_tables_are_sorted_disjoint_and_complete() {
     assert!(EXTENSION_SETS
         .iter()
         .all(|&set| Scripts(set) != Scripts([0; super::SET_WORDS])));
+}
+
+/// A character has one decomposition mapping, canonical or compatibility, so
+/// the two tables share no character, and the canonical one, which the mark
+/// checks read, holds no compatibility data.
+#[test]
+fn the_canonical_and_compatibility_decompositions_are_apart() {
+    assert!(CANONICAL
+        .keys
+        .iter()
+        .all(|key| COMPATIBILITY.keys.binary_search(key).is_err()));
+    assert_eq!(
+        CANONICAL.of('\u{fb01}'),
+        None,
+        "a ligature's mapping is a compatibility one"
+    );
+    assert_eq!(COMPATIBILITY.of('\u{fb01}'), Some(&['f', 'i'][..]));
+    assert_eq!(CANONICAL.of('\u{1e9b}'), Some(&['\u{17f}', '\u{307}'][..]));
+    assert_eq!(
+        COMPATIBILITY.of('\u{1e9b}'),
+        None,
+        "it decomposes by compatibility through its canonical parts"
+    );
+    assert_eq!(COMPATIBILITY.of('\u{17f}'), Some(&['s'][..]));
 }

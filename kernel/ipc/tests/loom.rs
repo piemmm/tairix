@@ -230,7 +230,7 @@ fn loom_a_drain_never_misses_a_sender_parked_for_room() {
                 names(&freed, PARKED)
             })
         };
-        port.watch_room(PARKED, instance).expect("recorded");
+        port.watch_room(PARKED, instance);
         let room = port.room_for(&sender, PARKED, u64::MAX) == Room::Free;
         let named = receiver.join().expect("receiver joined");
 
@@ -289,7 +289,7 @@ const SIBLING: u64 = 0x78;
 /// One look of a thread waiting for room in a port: record the wait, then
 /// send as itself; a send that lands has used its slot.
 fn look_by_sending(port: &Port, waiter: u64, sender: &TaskCapabilities) -> bool {
-    port.watch_room(waiter, sender.proc_id()).expect("recorded");
+    port.watch_room(waiter, sender.proc_id());
     port.send(sender, waiter, b"x", RLIMIT_INFINITY, &DiscardSink)
         .is_ok()
 }
@@ -315,7 +315,7 @@ fn port_with_waiting(id: u64, waiters: &[u64]) -> (Arc<Port>, ProcId) {
     port.send(&sender, 0, b"full", RLIMIT_INFINITY, &DiscardSink)
         .expect("fills the lane");
     for &waiter in waiters {
-        port.watch_room(waiter, instance).expect("recorded");
+        port.watch_room(waiter, instance);
     }
     (port, instance)
 }
@@ -364,10 +364,7 @@ fn posted(ep: &CallEndpoint, poster: u64, caller: &TaskCapabilities) -> bool {
 /// One look of a thread blocked in a call for room: it posts once its look
 /// finds a slot it holds.
 fn look_by_posting(ep: &CallEndpoint, waiter: u64, caller: &TaskCapabilities) -> bool {
-    let room = ep
-        .room_or_wait(waiter, caller.process().0)
-        .expect("recorded");
-    room && posted(ep, waiter, caller)
+    ep.room_or_wait(waiter, caller.process().0) && posted(ep, waiter, caller)
 }
 
 /// A call endpoint of depth one whose caller has its depth in service, with
@@ -394,7 +391,7 @@ fn endpoint_with_waiting(id: u64, waiters: &[u64]) -> (Arc<CallEndpoint>, Receiv
         panic!("the posted call is received");
     };
     for &waiter in waiters {
-        assert!(!ep.room_or_wait(waiter, 7).expect("recorded"));
+        assert!(!ep.room_or_wait(waiter, 7));
     }
     (ep, call)
 }
@@ -439,7 +436,7 @@ fn loom_a_designated_caller_leaving_unused_hands_the_slot_on() {
         drop(ep.reply(call.ticket, b"r", &DiscardSink).expect("replied"));
         let sibling = {
             let ep = ep.clone();
-            thread::spawn(move || ep.room_or_wait(SIBLING, 7).expect("recorded"))
+            thread::spawn(move || ep.room_or_wait(SIBLING, 7))
         };
         let handed = ep.leave_room_wait(PARKED);
         let found = sibling.join().expect("sibling joined");
@@ -463,7 +460,7 @@ fn loom_an_owing_sender_released_by_its_next_wait_hands_the_slot_on() {
             let port = port.clone();
             let caps = make_sender().with_proc_id(instance);
             thread::spawn(move || {
-                port.watch_room(SIBLING, instance).expect("recorded");
+                port.watch_room(SIBLING, instance);
                 port.room_for(&caps, SIBLING, u64::MAX) == Room::Free
             })
         };
@@ -565,7 +562,7 @@ fn loom_an_abandoned_await_never_strands_the_answer() {
             )
             .expect("posted");
         assert_eq!(ep.await_by(7, ticket, AWAITER), Ok(u64::MAX));
-        ep.watch_replies(WATCHER, 7).expect("recorded");
+        ep.watch_replies(WATCHER, 7);
         let RecvCall::Received(call) = ep.recv_call(usize::MAX) else {
             panic!("the posted call is received");
         };

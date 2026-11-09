@@ -36,14 +36,22 @@
 //! unload path, none of which own the others. A global keyed by the minted
 //! handle is the natural rendezvous and avoids threading another map through
 //! `KernelState`'s cross-crate wiring.
+//!
+//! The registry's lock is held only to find a set: each set has a lock of its
+//! own, so one process's waits never queue behind another's, and a process's
+//! teardown finds its sets through an index of their owners rather than by
+//! walking every process's.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::{Errno, WaitSourceKind};
+use tairix_kernel_ipc::CallEndpoint;
 use tairix_kernel_sec::Charge;
 use tairix_sync::SpinLock;
+
+use crate::waitq::WakeKey;
 
 /// One registered source of a wait-set.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +85,15 @@ pub struct Member {
     pub pin: Option<crate::fs::NodeRef>,
 }
 
+/// Whether a wait on `members` hears requests: only one holding an endpoint
+/// or a port joins the queue a post wakes, so a post wakes no other wait.
+#[must_use]
+pub fn hears_requests(members: &[Member]) -> bool {
+    members
+        .iter()
+        .any(|m| matches!(m.kind, WaitSourceKind::Endpoint | WaitSourceKind::Port))
+}
+
 /// A volume's watch table held by a member; two are equal only when they are
 /// the same table.
 #[derive(Clone)]
@@ -96,13 +113,19 @@ impl core::fmt::Debug for WatchTable {
     }
 }
 
-/// A caller-owned wait-set: the owning process, its growable membership, and
-/// the round-robin position that keeps the membership fair.
-struct WaitSet {
+/// A wait-set as the registry holds it: its owner, fixed for its life and so
+/// read without the set's lock, and the set behind a lock of its own.
+struct Held {
     /// Process that created the set, whose teardown releases it. Only its
     /// threads may add/remove members, wait on it, or have it observed; every
     /// entry point owner-checks against it (no ambient authority).
     owner: u64,
+    set: SpinLock<WaitSet>,
+}
+
+/// A caller-owned wait-set: its growable membership and the round-robin
+/// position that keeps the membership fair.
+struct WaitSet {
     members: Vec<Member>,
     /// The `(kind, id)` the previous successful wait reported, so the next
     /// scan resumes *after* it.
@@ -117,6 +140,214 @@ struct WaitSet {
     _set_charge: Charge,
     /// What the owner is charged for the set's members, one unit each.
     member_charge: Charge,
+    /// The buffers a wait works in, room for every member reserved as each
+    /// is added; out while a wait holds it.
+    scratch: Option<WaitScratch>,
+    /// Set once the registry has let go of it, so a call that found it just
+    /// before is refused as though it had not.
+    closed: bool,
+}
+
+/// A wait-queue a wait on a set files rows on.
+#[derive(Clone, Copy)]
+enum Pledged {
+    Serve,
+    Irq,
+    ProcWait,
+    SeatInput,
+    Stream,
+    Console,
+    Signal,
+    PeerExit,
+    Notice,
+    Foreground,
+    HwTree,
+    ConsoleDamage,
+    PortRoom,
+    Budget,
+    Call,
+    FsWatch,
+}
+
+impl Pledged {
+    const ALL: [Self; 16] = [
+        Self::Serve,
+        Self::Irq,
+        Self::ProcWait,
+        Self::SeatInput,
+        Self::Stream,
+        Self::Console,
+        Self::Signal,
+        Self::PeerExit,
+        Self::Notice,
+        Self::Foreground,
+        Self::HwTree,
+        Self::ConsoleDamage,
+        Self::PortRoom,
+        Self::Budget,
+        Self::Call,
+        Self::FsWatch,
+    ];
+
+    fn queue(self) -> &'static crate::waitq::WaitQueue {
+        use crate::waitq as q;
+        match self {
+            Self::Serve => &q::SERVE_WAITQ,
+            Self::Irq => &q::IRQ_WAITQ,
+            Self::ProcWait => &q::PROCWAIT_WAITQ,
+            Self::SeatInput => &q::SEAT_INPUT_WAITQ,
+            Self::Stream => &q::STREAM_WAITQ,
+            Self::Console => &q::CONSOLE_WAITQ,
+            Self::Signal => &q::SIGNAL_INTAKE_WAITQ,
+            Self::PeerExit => &q::PEER_EXIT_WAITQ,
+            Self::Notice => &q::NOTICE_WAITQ,
+            Self::Foreground => &q::FOREGROUND_WAITQ,
+            Self::HwTree => &q::HW_TREE_WAITQ,
+            Self::ConsoleDamage => &q::CONSOLE_DAMAGE_WAITQ,
+            Self::PortRoom => &q::PORT_ROOM_WAITQ,
+            Self::Budget => &q::BUDGET_WAITQ,
+            Self::Call => &q::CALL_WAITQ,
+            Self::FsWatch => &q::FSWATCH_WAITQ,
+        }
+    }
+}
+
+/// The rows a wait on `members` files on each queue: the wait's own timer
+/// row, one row a queue where every member of a kind shares the wait's, and
+/// one a member where each files its own.
+fn rows_for<'a>(members: impl IntoIterator<Item = &'a Member>) -> [usize; Pledged::ALL.len()] {
+    let mut rows = [0usize; Pledged::ALL.len()];
+    rows[Pledged::Irq as usize] = 1;
+    let mut shared = [false; Pledged::ALL.len()];
+    for m in members {
+        let (share, own): (&[Pledged], Option<Pledged>) = match m.kind {
+            WaitSourceKind::Endpoint | WaitSourceKind::Port => (&[Pledged::Serve], None),
+            WaitSourceKind::Irq => (&[], Some(Pledged::Irq)),
+            WaitSourceKind::Child => (&[Pledged::ProcWait], None),
+            WaitSourceKind::SeatInput => (&[Pledged::SeatInput], None),
+            WaitSourceKind::Stream => (
+                &[Pledged::Console, Pledged::Foreground],
+                Some(Pledged::Stream),
+            ),
+            WaitSourceKind::StreamRoom => (&[], Some(Pledged::Stream)),
+            WaitSourceKind::Signal => (&[Pledged::Signal], None),
+            WaitSourceKind::PeerExit => (&[Pledged::PeerExit], None),
+            WaitSourceKind::SystemNotice => (&[], Some(Pledged::Notice)),
+            WaitSourceKind::Foreground => (&[Pledged::Foreground], None),
+            WaitSourceKind::HardwareTree => (&[Pledged::HwTree], None),
+            WaitSourceKind::ConsoleDamage => (&[Pledged::ConsoleDamage], None),
+            WaitSourceKind::PortRoom => (&[Pledged::PortRoom, Pledged::Budget], None),
+            WaitSourceKind::CallReply => (&[Pledged::Call], None),
+            WaitSourceKind::File | WaitSourceKind::DirWatch => (&[], Some(Pledged::FsWatch)),
+        };
+        for &queue in share {
+            shared[queue as usize] = true;
+        }
+        if let Some(queue) = own {
+            rows[queue as usize] += 1;
+        }
+    }
+    for (rows, shared) in rows.iter_mut().zip(shared) {
+        *rows = (*rows).max(usize::from(shared));
+    }
+    rows
+}
+
+/// Rows pledged on each queue a wait files on ([`WaitQueue::pledge`]),
+/// given back when dropped.
+///
+/// [`WaitQueue::pledge`]: crate::waitq::WaitQueue::pledge
+#[derive(Default)]
+pub struct Pledges {
+    rows: [usize; Pledged::ALL.len()],
+}
+
+impl Pledges {
+    /// Whether any row is pledged: the set's own scratch holds its pledges,
+    /// and the fresh buffers lent to a concurrent wait hold none.
+    #[must_use]
+    pub fn held(&self) -> bool {
+        self.rows.iter().any(|&rows| rows > 0)
+    }
+
+    /// Pledge whatever `wanted` asks beyond what is held.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when a queue cannot keep the room; nothing more
+    /// is pledged.
+    fn reach(&mut self, wanted: &[usize; Pledged::ALL.len()]) -> Result<(), Errno> {
+        let before = self.rows;
+        for (at, queue) in Pledged::ALL.iter().enumerate() {
+            let short = wanted[at].saturating_sub(self.rows[at]);
+            if short == 0 {
+                continue;
+            }
+            if queue.queue().pledge(short).is_err() {
+                self.trim(&before);
+                return Err(Errno::OutOfMemory);
+            }
+            self.rows[at] += short;
+        }
+        Ok(())
+    }
+
+    /// Give back whatever is held beyond `wanted`.
+    fn trim(&mut self, wanted: &[usize; Pledged::ALL.len()]) {
+        for (at, queue) in Pledged::ALL.iter().enumerate() {
+            let excess = self.rows[at].saturating_sub(wanted[at]);
+            if excess > 0 {
+                queue.queue().unpledge(excess);
+                self.rows[at] -= excess;
+            }
+        }
+    }
+}
+
+impl Drop for Pledges {
+    fn drop(&mut self) {
+        self.trim(&[0; Pledged::ALL.len()]);
+    }
+}
+
+/// The buffers one wait on a set works in, sized as members are added so the
+/// wait itself allocates nothing: a wait that cannot have memory under
+/// pressure would return at once rather than park. The set's own buffers also
+/// hold the room every wait-queue row the wait files is pledged ([`Pledges`]),
+/// so the wait files them all without the heap.
+#[derive(Default)]
+pub struct WaitScratch {
+    /// The rows pledged for a wait over these members.
+    pub pledges: Pledges,
+    /// The members, rotated to resume after the one last reported.
+    pub members: Vec<Member>,
+    /// The stream wake keys the members name.
+    pub stream_keys: Vec<WakeKey>,
+    /// The endpoint each `CallReply` member watches, in member order.
+    pub replies: Vec<Option<Arc<CallEndpoint>>>,
+    /// The watched-node keys the members name, each once.
+    pub watch_keys: Vec<WakeKey>,
+}
+
+impl WaitScratch {
+    /// Make room for `members` members in every buffer, emptied.
+    fn reserve(&mut self, members: usize) -> Result<(), Errno> {
+        self.clear();
+        self.members
+            .try_reserve_exact(members)
+            .and(self.stream_keys.try_reserve_exact(members))
+            .and(self.replies.try_reserve_exact(members))
+            .and(self.watch_keys.try_reserve_exact(members))
+            .map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// Empty every buffer, letting go of what the last wait held.
+    fn clear(&mut self) {
+        self.members.clear();
+        self.stream_keys.clear();
+        self.replies.clear();
+        self.watch_keys.clear();
+    }
 }
 
 /// The lock-guarded registry state.
@@ -127,7 +358,9 @@ struct Inner {
     next_handle: u64,
     /// Fallible to grow, so a refused heap fails the create rather than the
     /// kernel.
-    sets: tairix_collections::RadixTree<WaitSet>,
+    sets: tairix_collections::RadixTree<Arc<Held>>,
+    /// Every set's `(owner, handle)`.
+    by_owner: tairix_collections::OrderedSet<(u64, u64)>,
 }
 
 /// What a thread owes since its wait reported a port's room ready.
@@ -202,11 +435,7 @@ impl RoomDebt {
 
 /// The global wait-set registry. Pure data behind a [`SpinLock`]; see the
 /// module docs for why it is global.
-static WAIT_SETS: SpinLock<Inner> = SpinLock::new(Inner {
-    // Start above zero so a caller-zeroed handle slot is never a live set.
-    next_handle: 1,
-    sets: tairix_collections::RadixTree::new(),
-});
+static WAIT_SETS: SpinLock<Inner> = SpinLock::new(Inner::new());
 
 /// Mint a fresh, empty wait-set owned by `owner`, returning its handle. It
 /// holds `set_charge` for itself and grows `member_charge` by a unit for each
@@ -221,6 +450,16 @@ pub fn create(owner: u64, set_charge: Charge, member_charge: Charge) -> Result<u
 }
 
 impl Inner {
+    const fn new() -> Self {
+        Self {
+            // Start above zero so a caller-zeroed handle slot is never a live
+            // set.
+            next_handle: 1,
+            sets: tairix_collections::RadixTree::new(),
+            by_owner: tairix_collections::OrderedSet::new(),
+        }
+    }
+
     /// [`create`] against this registry.
     fn create(
         &mut self,
@@ -229,18 +468,37 @@ impl Inner {
         member_charge: Charge,
     ) -> Result<u64, Errno> {
         let handle = self.next_handle;
-        let set = WaitSet {
+        let mut scratch = WaitScratch::default();
+        scratch.pledges.reach(&rows_for([]))?;
+        let held = Arc::try_new(Held {
             owner,
-            members: Vec::new(),
-            resume_after: None,
-            _set_charge: set_charge,
-            member_charge,
-        };
-        self.sets
-            .try_insert(handle, set)
+            set: SpinLock::new(WaitSet {
+                members: Vec::new(),
+                resume_after: None,
+                _set_charge: set_charge,
+                member_charge,
+                scratch: Some(scratch),
+                closed: false,
+            }),
+        })
+        .map_err(|_| Errno::OutOfMemory)?;
+        self.by_owner
+            .try_insert((owner, handle))
             .map_err(|_| Errno::OutOfMemory)?;
+        if self.sets.try_insert(handle, held).is_err() {
+            self.by_owner.remove(&(owner, handle));
+            return Err(Errno::OutOfMemory);
+        }
         self.next_handle = self.next_handle.wrapping_add(1);
         Ok(handle)
+    }
+
+    /// Let go of the set `handle` if `owner` owns it.
+    fn take(&mut self, owner: u64, handle: u64) -> Option<Arc<Held>> {
+        if !self.by_owner.remove(&(owner, handle)) {
+            return None;
+        }
+        self.sets.remove(handle)
     }
 }
 
@@ -251,14 +509,30 @@ impl Inner {
 /// another task — a forged or foreign handle resolves to nothing (identify
 /// before acting, fail closed).
 fn with_owned<R>(owner: u64, handle: u64, f: impl FnOnce(&mut WaitSet) -> R) -> Result<R, Errno> {
-    let mut g = WAIT_SETS.lock();
-    let Some(set) = g.sets.get_mut(handle) else {
-        return Err(Errno::NotFound);
-    };
-    if set.owner != owner {
-        return Err(Errno::NotFound);
+    lookup(owner, handle)?.with(f)
+}
+
+/// The set `handle` if `owner` owns it, held so the registry's lock is down
+/// before the set's own is taken.
+fn lookup(owner: u64, handle: u64) -> Result<Arc<Held>, Errno> {
+    WAIT_SETS
+        .lock()
+        .sets
+        .get(handle)
+        .filter(|held| held.owner == owner)
+        .map(Arc::clone)
+        .ok_or(Errno::NotFound)
+}
+
+impl Held {
+    /// Run `f` against the set, unless it has closed since it was found.
+    fn with<R>(&self, f: impl FnOnce(&mut WaitSet) -> R) -> Result<R, Errno> {
+        let mut set = self.set.lock();
+        if set.closed {
+            return Err(Errno::NotFound);
+        }
+        Ok(f(&mut set))
     }
-    Ok(f(set))
 }
 
 /// Add `member` to the owner's wait-set `handle`.
@@ -286,7 +560,17 @@ pub fn add(owner: u64, handle: u64, member: Member, member_limit: u64) -> Result
             return Err(Errno::AlreadyExists);
         }
         set.members.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let members = set.members.len() + 1;
+        let wanted = rows_for(set.members.iter().chain(core::iter::once(&member)));
+        // A wait under way holds the buffers and their pledges: the next one
+        // gets its own now, and the lent one is dropped when it comes back.
+        let scratch = set.scratch.get_or_insert_with(WaitScratch::default);
+        scratch.reserve(members)?;
         set.member_charge.grow(1, member_limit)?;
+        if let Err(refused) = scratch.pledges.reach(&wanted) {
+            set.member_charge.shrink(1);
+            return Err(refused);
+        }
         set.members.push(member);
         Ok(())
     })?
@@ -309,7 +593,12 @@ pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<
             .position(|m| m.kind == kind && m.id == id)
             .ok_or(Errno::NotFound)?;
         set.member_charge.shrink(1);
-        Ok::<_, Errno>(set.members.remove(at))
+        let removed = set.members.remove(at);
+        let wanted = rows_for(&set.members);
+        if let Some(scratch) = &mut set.scratch {
+            scratch.pledges.trim(&wanted);
+        }
+        Ok::<_, Errno>(removed)
     })??;
     release_file_member(&removed);
     Ok(())
@@ -376,31 +665,20 @@ fn find(set: &mut WaitSet, kind: WaitSourceKind, id: u64) -> Option<&mut Member>
         .find(|m| m.kind == kind && m.id == id)
 }
 
-/// Snapshot the members of the owner's wait-set `handle`, in the order the
-/// next wait must scan them.
-///
-/// Returns an owned copy so the syscall handler can scan readiness (which
-/// reaches into the call-endpoint registry and IRQ table) without holding this
-/// registry's lock. Membership can only be mutated by the owning task, which
-/// is parked inside its own `waitset_wait` while this snapshot is in use, so a
-/// single snapshot per wait is stable.
-///
-/// # Ordering discipline
-///
-/// The snapshot is rotated to begin just after the member
-/// [`note_reported`] last recorded, so successive waits hand the ready
-/// members out round-robin rather than always awarding the first-registered
-/// one. That is what bounds the wait to a fair share per source: the scan
-/// itself still takes the first ready member it meets, but *which* member it
-/// meets first advances every time one is reported. Registration order is
-/// preserved within a rotation, and a set whose last-reported member has
-/// since been removed falls back to registration order.
+/// Lend a wait on the owner's set `handle` its scratch, the members in it
+/// rotated to begin just after the member [`note_reported`] last recorded, so
+/// successive waits hand the ready members out round-robin rather than always
+/// awarding the first-registered one. Registration order is kept within a
+/// rotation, and a set whose last-reported member has since gone falls back to
+/// it. The wait scans without this registry's lock held, and gives the scratch
+/// back with [`checkin`]; a second concurrent wait on the set is lent fresh
+/// buffers.
 ///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`;
-/// [`Errno::OutOfMemory`] if the snapshot cannot be had.
-pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
+/// [`Errno::OutOfMemory`] if fresh buffers cannot be had.
+pub fn checkout(owner: u64, handle: u64) -> Result<WaitScratch, Errno> {
     with_owned(owner, handle, |set| {
         let resume = set
             .resume_after
@@ -410,17 +688,41 @@ pub fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
                     .position(|m| m.kind == kind && m.id == id)
             })
             .map_or(0, |at| at + 1);
-        let mut scan = Vec::new();
-        scan.try_reserve_exact(set.members.len())
-            .map_err(|_| Errno::OutOfMemory)?;
-        scan.extend_from_slice(&set.members[resume..]);
-        scan.extend_from_slice(&set.members[..resume]);
-        Ok(scan)
+        let mut scratch = set.scratch.take().unwrap_or_default();
+        if let Err(refused) = scratch.reserve(set.members.len()) {
+            set.scratch = Some(scratch);
+            return Err(refused);
+        }
+        scratch.members.extend_from_slice(&set.members[resume..]);
+        scratch.members.extend_from_slice(&set.members[..resume]);
+        Ok(scratch)
     })?
 }
 
+/// Take back the scratch [`checkout`] lent a wait on the owner's set `handle`,
+/// emptied and its pledges matched to the members; one the set no longer
+/// needs, or a set that has gone, drops it. The set keeps buffers holding
+/// pledges over buffers holding none.
+pub fn checkin(owner: u64, handle: u64, mut scratch: WaitScratch) {
+    scratch.clear();
+    let _ = with_owned(owner, handle, move |set| {
+        let keep = set
+            .scratch
+            .as_ref()
+            .is_none_or(|home| !home.pledges.held() && scratch.pledges.held());
+        if keep {
+            let wanted = rows_for(&set.members);
+            scratch.pledges.trim(&wanted);
+            // Buffers lent without pledges take them where the heap allows;
+            // where it does not, the pledged buffers replace them on return.
+            let _ = scratch.pledges.reach(&wanted);
+            set.scratch = Some(scratch);
+        }
+    });
+}
+
 /// Record `(kind, id)` as the member the wait just reported, so the next
-/// [`members`] snapshot resumes after it.
+/// [`checkout`] snapshot resumes after it.
 ///
 /// # Errors
 ///
@@ -442,15 +744,11 @@ pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> 
 ///
 /// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
 pub fn close(owner: u64, handle: u64) -> Result<(), Errno> {
-    let set = {
-        let mut g = WAIT_SETS.lock();
-        match g.sets.get(handle) {
-            Some(set) if set.owner == owner => g.sets.remove(handle),
-            _ => None,
-        }
-    }
-    .ok_or(Errno::NotFound)?;
-    release(&set);
+    let held = WAIT_SETS
+        .lock()
+        .take(owner, handle)
+        .ok_or(Errno::NotFound)?;
+    retire(&held);
     Ok(())
 }
 
@@ -462,36 +760,37 @@ pub fn close(owner: u64, handle: u64) -> Result<(), Errno> {
 /// dropping the sets is the whole reclamation. Idempotent.
 pub fn release_owned_by(owner: u64) -> usize {
     // One set at a time, so a teardown allocates nothing; each set's file
-    // watches are released after the lock is dropped. Handles only grow, so
-    // each search resumes past the last set removed and the whole teardown
-    // walks the registry once.
+    // watches are released after the lock is dropped.
     let mut removed = 0;
-    let mut after = 0;
     loop {
-        let set = {
+        let held = {
             let mut g = WAIT_SETS.lock();
-            let handle = g
-                .sets
-                .iter_from(after)
-                .find(|(_, set)| set.owner == owner)
-                .map(|(handle, _)| handle);
-            handle.and_then(|handle| {
-                after = handle;
-                g.sets.remove(handle)
-            })
+            let next = g
+                .by_owner
+                .range((owner, 0)..=(owner, u64::MAX))
+                .next()
+                .copied();
+            next.and_then(|(_, handle)| g.take(owner, handle))
         };
-        let Some(set) = set else {
+        let Some(held) = held else {
             return removed;
         };
         removed += 1;
-        release(&set);
+        retire(&held);
     }
 }
 
-/// Release what a removed set's members hold, after the registry lock is
-/// dropped.
-fn release(set: &WaitSet) {
-    for member in &set.members {
+/// End a set the registry has let go of: closed under its own lock, so a call
+/// that found it just before is refused, and its members' watches released
+/// once that lock is down.
+fn retire(held: &Held) {
+    let members = {
+        let mut set = held.set.lock();
+        set.closed = true;
+        set.scratch = None;
+        core::mem::take(&mut set.members)
+    };
+    for member in &members {
         release_file_member(member);
     }
 }
@@ -500,16 +799,20 @@ fn release(set: &WaitSet) {
 /// observer.
 #[must_use]
 pub fn owned_by(owner: u64, handle: u64) -> bool {
-    WAIT_SETS
-        .lock()
-        .sets
-        .get(handle)
-        .is_some_and(|set| set.owner == owner)
+    WAIT_SETS.lock().by_owner.get(&(owner, handle)).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The members a wait would scan, in its order.
+    fn members(owner: u64, handle: u64) -> Result<Vec<Member>, Errno> {
+        let scratch = checkout(owner, handle)?;
+        let members = scratch.members.clone();
+        checkin(owner, handle, scratch);
+        Ok(members)
+    }
     use alloc::sync::Arc;
     use tairix_abi::{LimitKind, RLIMIT_INFINITY};
     use tairix_kernel_sec::ResourceCharges;
@@ -573,26 +876,67 @@ mod tests {
         assert_eq!(release_owned_by(0xD472), 1);
     }
 
-    /// A membership snapshot the heap has no room for is refused for memory
-    /// rather than aborting the kernel.
+    /// A wait works in buffers reserved as its members were added, so a heap
+    /// that refuses everything still lends it its snapshot; only a second
+    /// wait while the first holds them needs buffers of its own, and is
+    /// refused for memory rather than aborting the kernel.
     #[test]
-    fn a_snapshot_the_heap_refuses_is_refused_for_memory() {
+    fn a_wait_needs_no_memory_once_its_members_are_added() {
         let h = new_set(0xD473);
         assert_eq!(put(0xD473, h, ep(7, 70)), Ok(()));
-        let refused = std::thread::scope(|scope| {
+        let (lent, second) = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     crate::test_alloc::refuse_allocations_on_current_thread(true);
-                    let snapshot = members(0xD473, h).map(|m| m.len());
+                    let first = checkout(0xD473, h);
+                    let second = checkout(0xD473, h).map(|scratch| scratch.members.len());
+                    let lent = first.map(|scratch| {
+                        let members = scratch.members.len();
+                        checkin(0xD473, h, scratch);
+                        members
+                    });
                     crate::test_alloc::refuse_allocations_on_current_thread(false);
-                    snapshot
+                    (lent, second)
                 })
                 .join()
                 .expect("the waiting thread ends")
         });
-        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(lent, Ok(1));
+        assert_eq!(second, Err(Errno::OutOfMemory));
         assert_eq!(members(0xD473, h).map(|m| m.len()), Ok(1));
         assert_eq!(release_owned_by(0xD473), 1);
+    }
+
+    /// A member added while a wait holds the set's buffers gets room of its own
+    /// for the next wait, which then needs no memory; the buffers the first
+    /// wait hands back are dropped rather than kept too small.
+    ///
+    /// Regression: such an add reserved nothing, so the next wait found its
+    /// buffers short and asked the heap for them.
+    #[test]
+    fn a_member_added_during_a_wait_is_room_for_the_next() {
+        let h = new_set(0xD474);
+        assert_eq!(put(0xD474, h, ep(7, 70)), Ok(()));
+        let lent = checkout(0xD474, h).expect("the first wait's buffers");
+        assert_eq!(put(0xD474, h, ep(8, 80)), Ok(()));
+        checkin(0xD474, h, lent);
+        let next = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    crate::test_alloc::refuse_allocations_on_current_thread(true);
+                    let next = checkout(0xD474, h).map(|scratch| {
+                        let members = scratch.members.len();
+                        checkin(0xD474, h, scratch);
+                        members
+                    });
+                    crate::test_alloc::refuse_allocations_on_current_thread(false);
+                    next
+                })
+                .join()
+                .expect("the waiting thread ends")
+        });
+        assert_eq!(next, Ok(2));
+        assert_eq!(release_owned_by(0xD474), 1);
     }
 
     /// A registry the heap refuses room in fails the create closed, the
@@ -601,10 +945,7 @@ mod tests {
     #[test]
     fn a_create_the_heap_refuses_fails_closed_and_returns_its_charges() {
         let charges = Arc::new(ResourceCharges::new());
-        let mut registry = Inner {
-            next_handle: 1,
-            sets: tairix_collections::RadixTree::new(),
-        };
+        let mut registry = Inner::new();
         let refused = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -623,6 +964,10 @@ mod tests {
         assert_eq!(refused, Err(Errno::OutOfMemory));
         assert_eq!(charges.held(LimitKind::WaitSets), 0, "its charge returned");
         assert_eq!(registry.next_handle, 1, "no handle spent");
+        assert!(
+            registry.by_owner.get(&(0xD471, 1)).is_none(),
+            "no owner entry left for the set never made"
+        );
         let set = charges
             .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
             .expect("unlimited");
@@ -634,9 +979,105 @@ mod tests {
         add(owner, handle, member, RLIMIT_INFINITY)
     }
 
+    /// A call that found a set just before it closed is refused once the set
+    /// has closed, so nothing it would have added outlives the set's teardown.
+    #[test]
+    fn a_set_found_before_it_closed_refuses_the_call_that_found_it() {
+        let owner = 0xD475;
+        let h = new_set(owner);
+        put(owner, h, ep(1, 10)).expect("added");
+        let found = lookup(owner, h).expect("found");
+        close(owner, h).expect("closed");
+        assert_eq!(
+            found.with(|set| set.members.push(ep(2, 20))),
+            Err(Errno::NotFound)
+        );
+        let set = found.set.lock();
+        assert!(set.members.is_empty(), "the teardown took every member");
+        assert!(set.scratch.is_none(), "and let go of the wait's buffers");
+    }
+
     fn ep(id: u64, token: u64) -> Member {
+        of(WaitSourceKind::Endpoint, id, token)
+    }
+
+    /// A wait files the timer row always, one row a queue its members share,
+    /// and one a member where each files its own.
+    #[test]
+    fn a_wait_files_the_rows_its_members_name() {
+        let rows = |members: &[Member]| rows_for(members);
+        let mut empty = [0; Pledged::ALL.len()];
+        empty[Pledged::Irq as usize] = 1;
+        assert_eq!(rows(&[]), empty, "a sleep files its timer");
+        let set = [
+            ep(1, 0),
+            of(WaitSourceKind::Port, 2, 0),
+            of(WaitSourceKind::Irq, 3, 0),
+            of(WaitSourceKind::Irq, 4, 0),
+            of(WaitSourceKind::Stream, 5, 0),
+            of(WaitSourceKind::StreamRoom, 6, 0),
+            of(WaitSourceKind::SystemNotice, 7, 0),
+            of(WaitSourceKind::PortRoom, 8, 0),
+            of(WaitSourceKind::PortRoom, 9, 0),
+            of(WaitSourceKind::File, 10, 0),
+            of(WaitSourceKind::DirWatch, 11, 0),
+        ];
+        let filed = rows(&set);
+        let at = |queue: Pledged| filed[queue as usize];
+        assert_eq!(at(Pledged::Serve), 1, "endpoints and ports share one row");
+        assert_eq!(at(Pledged::Irq), 3, "the timer and a row a line");
+        assert_eq!(at(Pledged::Stream), 2);
+        assert_eq!((at(Pledged::Console), at(Pledged::Foreground)), (1, 1));
+        assert_eq!(at(Pledged::Notice), 1);
+        assert_eq!((at(Pledged::PortRoom), at(Pledged::Budget)), (1, 1));
+        assert_eq!(at(Pledged::FsWatch), 2);
+        assert_eq!(at(Pledged::Call), 0);
+    }
+
+    /// A set's own buffers hold exactly the pledges its members want, from its
+    /// creation through every add and remove; buffers lent to a concurrent
+    /// wait hold none, and the set's own come back trimmed to what is left.
+    #[test]
+    fn a_sets_pledges_follow_its_members() {
+        let owner = crate::test_boot::claim_task();
+        let handle = new_set(owner);
+        let pledged = |owner, handle| {
+            lookup(owner, handle)
+                .expect("found")
+                .set
+                .lock()
+                .scratch
+                .as_ref()
+                .map(|scratch| scratch.pledges.rows)
+        };
+        assert_eq!(pledged(owner, handle), Some(rows_for([])));
+        let stream = of(WaitSourceKind::Stream, 5, 0);
+        let notice = of(WaitSourceKind::SystemNotice, 7, 0);
+        add(owner, handle, stream.clone(), u64::MAX).expect("added");
+        add(owner, handle, notice.clone(), u64::MAX).expect("added");
+        assert_eq!(pledged(owner, handle), Some(rows_for([&stream, &notice])));
+        let lent = checkout(owner, handle).expect("lent");
+        assert!(lent.pledges.held());
+        let concurrent = checkout(owner, handle).expect("lent");
+        assert!(
+            !concurrent.pledges.held(),
+            "a concurrent wait files unpledged"
+        );
+        remove(owner, handle, WaitSourceKind::Stream, 5).expect("removed");
+        checkin(owner, handle, concurrent);
+        assert_eq!(
+            pledged(owner, handle),
+            Some(rows_for([&notice])),
+            "buffers that came back unpledged take the pledges"
+        );
+        checkin(owner, handle, lent);
+        assert_eq!(pledged(owner, handle), Some(rows_for([&notice])));
+        close(owner, handle).expect("closed");
+    }
+
+    fn of(kind: WaitSourceKind, id: u64, token: u64) -> Member {
         Member {
-            kind: WaitSourceKind::Endpoint,
+            kind,
             id,
             token,
             node: 0,
@@ -644,6 +1085,28 @@ mod tests {
             pacing: crate::fswatch::Pacing::default(),
             table: None,
             pin: None,
+        }
+    }
+
+    /// Only a wait holding an endpoint or a port hears requests, so a post
+    /// wakes no wait on a stream, a line, a child or a notice.
+    ///
+    /// Regression: every wait joined the queue posts wake, so each request to
+    /// any server unparked every wait-set waiter on the machine.
+    #[test]
+    fn only_an_endpoint_or_port_member_hears_requests() {
+        let quiet = [
+            of(WaitSourceKind::Stream, 3, 1),
+            of(WaitSourceKind::Irq, 4, 2),
+            of(WaitSourceKind::Child, 0, 3),
+            of(WaitSourceKind::SystemNotice, 1, 4),
+        ];
+        assert!(!hears_requests(&quiet));
+        assert!(!hears_requests(&[]));
+        for kind in [WaitSourceKind::Endpoint, WaitSourceKind::Port] {
+            let mut members = quiet.to_vec();
+            members.push(of(kind, 9, 5));
+            assert!(hears_requests(&members), "{kind:?}");
         }
     }
 

@@ -7,7 +7,9 @@
 //! tables generated here out of the Unicode Character Database files and the
 //! RFC committed in `lib/unicode/assets/`. Each is byte-identical to its
 //! upstream release and pinned by SHA-256, so anyone can check the snapshot
-//! against upstream and nothing reaches the tables unreviewed.
+//! against upstream and nothing reaches the tables unreviewed. The RFC lets a
+//! work derived from it be distributed only carrying its copyright notice, so
+//! the tables carry it and `assets/LICENSE` must.
 //!
 //! - `cargo xtask unicode` (part of `cargo xtask ci`) regenerates the tables in
 //!   memory and fails closed if `lib/unicode/src/tables.rs` has drifted.
@@ -25,6 +27,8 @@ use crate::Context;
 
 const ASSETS: &str = "lib/unicode/assets";
 const TABLES: &str = "lib/unicode/src/tables.rs";
+/// The assets' licence file, which must carry RFC 3454's notice.
+const LICENSE: &str = "LICENSE";
 
 /// The Unicode version the assets are.
 const VERSION: (u8, u8, u8) = (18, 0, 0);
@@ -433,6 +437,17 @@ impl Data {
         if mapped.flatten().any(|&cp| (first..=last).contains(&cp)) {
             return Err("unicode: a decomposition mapping holds a Hangul syllable".to_string());
         }
+        // The runtime decomposes by compatibility only the starters among a
+        // canonical decomposition's parts.
+        if let Some(code) = data
+            .compatibility
+            .keys()
+            .find(|code| data.classes.contains_key(code))
+        {
+            return Err(format!(
+                "unicode: U+{code:04X} is a combining mark with a compatibility mapping"
+            ));
+        }
         Ok(data)
     }
 
@@ -469,32 +484,23 @@ impl Data {
         Ok(())
     }
 
-    /// Every decomposable character's full decompositions.
-    fn decompositions(&self) -> Result<Vec<Decomposition>, String> {
-        let codes: std::collections::BTreeSet<u32> = self
-            .canonical
+    /// The full decomposition of every character whose mapping is a
+    /// compatibility one where `compatibility`, a canonical one otherwise, by
+    /// code point.
+    fn full_decompositions(&self, compatibility: bool) -> Result<Vec<(u32, Vec<u32>)>, String> {
+        let mappings = if compatibility {
+            &self.compatibility
+        } else {
+            &self.canonical
+        };
+        mappings
             .keys()
-            .chain(self.compatibility.keys())
-            .copied()
-            .collect();
-        let mut out = Vec::with_capacity(codes.len());
-        for code in codes {
-            let canonical = if self.canonical.contains_key(&code) {
+            .map(|&code| {
                 let mut full = Vec::new();
-                self.expand(code, false, &mut full, 0)?;
-                Some(full)
-            } else {
-                None
-            };
-            let mut compatibility = Vec::new();
-            self.expand(code, true, &mut compatibility, 0)?;
-            out.push(Decomposition {
-                code,
-                canonical,
-                compatibility,
-            });
-        }
-        Ok(out)
+                self.expand(code, compatibility, &mut full, 0)?;
+                Ok((code, full))
+            })
+            .collect()
     }
 
     /// Every primary composite (UAX #15 D114) as `(first, second, composite)`
@@ -541,15 +547,6 @@ impl Data {
         }
         out
     }
-}
-
-/// A decomposable character's full decompositions: the canonical one, which
-/// a character with only a compatibility mapping lacks, and the compatibility
-/// one.
-struct Decomposition {
-    code: u32,
-    canonical: Option<Vec<u32>>,
-    compatibility: Vec<u32>,
 }
 
 /// The code points `CompositionExclusions.txt` lists.
@@ -602,53 +599,110 @@ fn decomposed_in_stringprep(text: &str, data: &Data) -> Result<Vec<(u32, u32)>, 
     Ok(out)
 }
 
-/// The full decompositions with each distinct sequence held once.
-struct Pooled {
-    /// `(code point, canonical first, canonical len, compatibility first,
-    /// compatibility len)` into `pool`.
-    entries: Vec<(u32, u16, u8, u16, u8)>,
-    pool: Vec<u32>,
+/// Whether `code` lies in one of `ranges`, sorted and disjoint.
+fn within(ranges: &[(u32, u32)], code: u32) -> bool {
+    let after = ranges.partition_point(|&(first, _)| first <= code);
+    after
+        .checked_sub(1)
+        .and_then(|index| ranges.get(index))
+        .is_some_and(|&(_, last)| code <= last)
 }
 
-fn pooled(decompositions: &[Decomposition]) -> Result<Pooled, String> {
-    let mut pool = Vec::new();
-    let mut placed = BTreeMap::new();
-    let mut entries = Vec::with_capacity(decompositions.len());
-    for decomposition in decompositions {
-        let (canonical_at, canonical_len) = match &decomposition.canonical {
-            Some(parts) => place(parts, &mut pool, &mut placed)?,
-            None => (0, 0),
-        };
-        let (compatibility_at, compatibility_len) =
-            place(&decomposition.compatibility, &mut pool, &mut placed)?;
-        entries.push((
-            decomposition.code,
-            canonical_at,
-            canonical_len,
-            compatibility_at,
-            compatibility_len,
+/// Refuse tables in which a character Unicode 3.2 assigns decomposes or
+/// composes to one it does not, as `unassigned` lists them: the runtime asks
+/// whether a character is unassigned only as it reads one.
+fn keep_3_2_closed(
+    unassigned: &[(u32, u32)],
+    decompositions: &[(u32, Vec<u32>)],
+    compositions: &[(u32, u32, u32)],
+) -> Result<(), String> {
+    let assigned = |code: u32| !within(unassigned, code);
+    for (code, parts) in decompositions {
+        if !assigned(*code) {
+            continue;
+        }
+        if let Some(part) = parts.iter().find(|&&part| !assigned(part)) {
+            return Err(format!(
+                "unicode: U+{code:04X} decomposes to U+{part:04X}, which Unicode 3.2 does not assign"
+            ));
+        }
+    }
+    let stray = compositions.iter().find(|&&(first, second, composite)| {
+        assigned(first) && assigned(second) && !assigned(composite)
+    });
+    if let Some((first, second, composite)) = stray {
+        return Err(format!(
+            "unicode: U+{first:04X} and U+{second:04X} compose to U+{composite:04X}, which Unicode 3.2 does not assign"
         ));
     }
-    Ok(Pooled { entries, pool })
+    Ok(())
 }
 
-/// Where `parts` stands in `pool`, appended unless `placed` says it already
-/// stands there, and its length.
-fn place<'a>(
-    parts: &'a [u32],
-    pool: &mut Vec<u32>,
-    placed: &mut BTreeMap<&'a [u32], u16>,
-) -> Result<(u16, u8), String> {
-    let len = u8::try_from(parts.len())
-        .map_err(|_| "unicode: a decomposition is longer than a byte counts".to_string())?;
-    if let Some(&at) = placed.get(parts) {
-        return Ok((at, len));
+/// The most characters one character fully decomposes to, a character with a
+/// canonical mapping decomposing by compatibility through its canonical parts,
+/// as the runtime decomposes it.
+fn longest_decomposition(
+    canonical: &[(u32, Vec<u32>)],
+    compatibility: &[(u32, Vec<u32>)],
+) -> usize {
+    let by_compatibility = |part: &u32| {
+        compatibility
+            .binary_search_by_key(part, |(code, _)| *code)
+            .ok()
+            .and_then(|index| compatibility.get(index))
+            .map_or(1, |(_, parts)| parts.len())
+    };
+    canonical
+        .iter()
+        .map(|(_, parts)| parts.iter().map(by_compatibility).sum::<usize>())
+        .chain(compatibility.iter().map(|(_, parts)| parts.len()))
+        .max()
+        .unwrap_or(1)
+}
+
+/// Emit `name`, the full decompositions `decompositions` lists, as a
+/// `Decompositions`: the characters, where each one's parts begin among the
+/// parts laid end to end, and the parts.
+fn push_decompositions(
+    out: &mut String,
+    name: &str,
+    decompositions: &[(u32, Vec<u32>)],
+) -> Result<(), String> {
+    let mut starts = vec![0u16];
+    let mut end = 0usize;
+    for (_, parts) in decompositions {
+        end += parts.len();
+        let start = u16::try_from(end)
+            .map_err(|_| format!("unicode: {name} holds more parts than a u16 indexes"))?;
+        starts.push(start);
     }
-    let at = u16::try_from(pool.len())
-        .map_err(|_| "unicode: the decompositions overflow their pool".to_string())?;
-    pool.extend_from_slice(parts);
-    placed.insert(parts, at);
-    Ok((at, len))
+    let _ = writeln!(
+        out,
+        "pub(crate) const {name}: Decompositions = Decompositions {{\n    keys: &["
+    );
+    for row in decompositions.chunks(8) {
+        let keys: Vec<String> = row
+            .iter()
+            .map(|(code, _)| literal(u64::from(*code), 4))
+            .collect();
+        let _ = writeln!(out, "        {},", keys.join(", "));
+    }
+    out.push_str("    ],\n    starts: &[\n");
+    for row in starts.chunks(16) {
+        let numbers: Vec<String> = row.iter().map(u16::to_string).collect();
+        let _ = writeln!(out, "        {},", numbers.join(", "));
+    }
+    out.push_str("    ],\n    parts: &[\n");
+    let parts: Vec<u32> = decompositions
+        .iter()
+        .flat_map(|(_, parts)| parts.iter().copied())
+        .collect();
+    for row in parts.chunks(8) {
+        let chars: Vec<String> = row.iter().map(|cp| format!("'\\u{{{cp:04X}}}'")).collect();
+        let _ = writeln!(out, "        {},", chars.join(", "));
+    }
+    out.push_str("    ],\n};\n");
+    Ok(())
 }
 
 /// One line of an RFC 3454 table: a code point or a `first-last` range, then
@@ -743,7 +797,50 @@ impl Stringprep {
     }
 }
 
+/// RFC 3454's Full Copyright Statement, unindented: the notice and the
+/// paragraph after it, which the RFC asks every work derived from it to carry,
+/// then the rest of the statement.
+fn rfc_notice(text: &str) -> Result<Vec<&str>, String> {
+    let mut notice: Vec<&str> = text
+        .lines()
+        .skip_while(|line| line.trim() != "Full Copyright Statement")
+        .skip(1)
+        .take_while(|line| line.trim() != "Acknowledgement")
+        .map(str::trim)
+        .skip_while(|line| line.is_empty())
+        .collect();
+    while notice.last().is_some_and(|line| line.is_empty()) {
+        notice.pop();
+    }
+    if notice
+        .first()
+        .is_some_and(|line| line.starts_with("Copyright (C) The Internet Society"))
+    {
+        Ok(notice)
+    } else {
+        Err("unicode: RFC 3454 holds no Full Copyright Statement".to_string())
+    }
+}
+
+/// Refuse a licence file that does not carry `notice` line for line.
+fn carried(license: &str, notice: &[&str]) -> Result<(), String> {
+    if license.contains(&notice.join("\n")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unicode: {ASSETS}/{LICENSE} does not carry RFC 3454's copyright notice"
+        ))
+    }
+}
+
 fn generate(root: &Path) -> Result<String, String> {
+    let rfc = read(root, &STRINGPREP)?;
+    let notice = rfc_notice(&rfc)?;
+    let path = root.join(ASSETS).join(LICENSE);
+    let license = std::fs::read_to_string(&path)
+        .map_err(|e| format!("unicode: cannot read {}: {e}", path.display()))?;
+    carried(&license, &notice)?;
+    let stringprep = Stringprep::read(&rfc)?;
     let scripts = Scripts::read(&read(root, &ALIASES)?)?;
     let script_table = script_entries(&read(root, &SCRIPTS)?, &scripts)?;
     let extensions = extension_entries(&read(root, &EXTENSIONS)?, &scripts)?;
@@ -764,30 +861,8 @@ fn generate(root: &Path) -> Result<String, String> {
         ));
     }
 
-    let (major, minor, update) = VERSION;
     let mut out = String::new();
-    let _ = write!(
-        out,
-        "// GENERATED FILE — DO NOT EDIT.\n\
-         //\n\
-         // Emitted by `cargo xtask unicode --write` from the Unicode \
-         {major}.{minor}.{update}\n\
-         // character database in `lib/unicode/assets/` (Unicode License V3; see\n\
-         // `LICENSE` there), the Recommended Scripts of UAX #31 revision 45, and\n\
-         // the tables of RFC 3454 (stringprep) in `rfc3454.txt` there.\n\
-         // `cargo xtask unicode` (run by `ci`) fails closed if this file drifts\n\
-         // from a fresh generation.\n\
-         \n\
-         //! The generated property tables, pure data read by the lookups in\n\
-         //! `lib.rs`.\n\
-         \n\
-         /// The Unicode version the tables describe.\n\
-         pub const VERSION: (u8, u8, u8) = ({major}, {minor}, {update});\n\
-         \n\
-         /// The words of a script set.\n\
-         pub(crate) const SET_WORDS: usize = {SET_WORDS};\n\
-         \n"
-    );
+    push_banner(&mut out, &notice);
     for code in NAMED {
         let _ = writeln!(
             out,
@@ -832,28 +907,75 @@ fn generate(root: &Path) -> Result<String, String> {
     push_ranges(&mut out, "NONSPACING_MARKS", &marks);
     out.push_str("\n/// The `Default_Ignorable_Code_Point` code points.\n");
     push_ranges(&mut out, "DEFAULT_IGNORABLE", &ignorable);
-    emit_normalization(&mut out, root, &data)?;
-    emit_stringprep(&mut out, root, &data)?;
+    emit_normalization(&mut out, root, &data, &stringprep.unassigned)?;
+    emit_stringprep(&mut out, root, &data, &stringprep)?;
     Ok(out)
 }
 
+/// Emit the file's banner, which carries RFC 3454's `notice`, and the items
+/// that open the file.
+fn push_banner(out: &mut String, notice: &[&str]) {
+    let (major, minor, update) = VERSION;
+    let _ = write!(
+        out,
+        "// GENERATED FILE — DO NOT EDIT.\n\
+         //\n\
+         // Emitted by `cargo xtask unicode --write` from the Unicode \
+         {major}.{minor}.{update}\n\
+         // character database in `lib/unicode/assets/` (Unicode License V3; see\n\
+         // `LICENSE` there), the Recommended Scripts of UAX #31 revision 45, and\n\
+         // the tables of RFC 3454 (stringprep) in `rfc3454.txt` there, under the\n\
+         // copyright notice the RFC asks every work derived from it to carry:\n\
+         //\n"
+    );
+    for line in notice {
+        if line.is_empty() {
+            out.push_str("//\n");
+        } else {
+            let _ = writeln!(out, "// {line}");
+        }
+    }
+    let _ = write!(
+        out,
+        "//\n\
+         // `cargo xtask unicode` (run by `ci`) fails closed if this file drifts\n\
+         // from a fresh generation.\n\
+         \n\
+         //! The generated property tables, pure data read by the crate's\n\
+         //! lookups.\n\
+         \n\
+         use crate::normalize::Decompositions;\n\
+         \n\
+         /// The Unicode version the tables describe.\n\
+         pub const VERSION: (u8, u8, u8) = ({major}, {minor}, {update});\n\
+         \n\
+         /// The words of a script set.\n\
+         pub(crate) const SET_WORDS: usize = {SET_WORDS};\n\
+         \n"
+    );
+}
+
 /// Emit the normalization tables (UAX #15): the combining classes, the full
-/// decompositions and the primary composites `data` and the composition
-/// exclusions make.
-fn emit_normalization(out: &mut String, root: &Path, data: &Data) -> Result<(), String> {
-    let decompositions = data.decompositions()?;
-    let pooled = pooled(&decompositions)?;
-    let longest = decompositions
+/// decompositions of each kind and the primary composites `data` and the
+/// composition exclusions make, refused where they take a character Unicode
+/// 3.2 assigns to one `unassigned` lists.
+fn emit_normalization(
+    out: &mut String,
+    root: &Path,
+    data: &Data,
+    unassigned: &[(u32, u32)],
+) -> Result<(), String> {
+    let canonical = data.full_decompositions(false)?;
+    let compatibility = data.full_decompositions(true)?;
+    let compositions = data.compositions(&exclusions(&read(root, &EXCLUSIONS)?)?)?;
+    keep_3_2_closed(unassigned, &canonical, &compositions)?;
+    keep_3_2_closed(unassigned, &compatibility, &[])?;
+    let longest = longest_decomposition(&canonical, &compatibility);
+    let longest_canonical = canonical
         .iter()
-        .map(|decomposition| decomposition.compatibility.len())
+        .map(|(_, parts)| parts.len())
         .max()
         .unwrap_or(1);
-    let compositions = data.compositions(&exclusions(&read(root, &EXCLUSIONS)?)?)?;
-    let least_composing = compositions
-        .iter()
-        .map(|&(_, second, _)| second)
-        .min()
-        .ok_or_else(|| "unicode: no character composes".to_string())?;
     let classes = data.class_ranges();
     let least_combining = classes
         .first()
@@ -865,6 +987,9 @@ fn emit_normalization(out: &mut String, root: &Path, data: &Data) -> Result<(), 
         out,
         "\n/// The most characters one character fully decomposes to.\n\
          pub const MAX_DECOMPOSITION: usize = {longest};\n\
+         \n\
+         /// The most characters one of [`CANONICAL`]'s decompositions holds.\n\
+         pub(crate) const MAX_CANONICAL_DECOMPOSITION: usize = {longest_canonical};\n\
          \n\
          /// The Hangul syllables, which decompose and compose by arithmetic.\n\
          pub(crate) const SYLLABLES: (u32, u32) = ({}, {});\n\
@@ -888,41 +1013,40 @@ fn emit_normalization(out: &mut String, root: &Path, data: &Data) -> Result<(), 
     }
     out.push_str(
         "];\n\n\
-         /// Every character with a decomposition mapping but the Hangul syllables, as\n\
-         /// `(code point, canonical first, canonical len, compatibility first,\n\
-         /// compatibility len)` into [`DECOMPOSITION_POOL`], where its full\n\
-         /// decompositions stand: a canonical len of 0 for one whose mapping is a\n\
-         /// compatibility mapping alone.\n\
-         pub(crate) const DECOMPOSITIONS: &[(u32, u16, u8, u16, u8)] = &[\n",
+         /// Every character with a canonical decomposition mapping, and its full\n\
+         /// canonical decomposition: the Hangul syllables decompose by arithmetic\n\
+         /// and are not listed.\n",
     );
-    for (code, canonical_at, canonical_len, compatibility_at, compatibility_len) in &pooled.entries
-    {
-        let _ = writeln!(
-            out,
-            "    ({}, {canonical_at}, {canonical_len}, {compatibility_at}, {compatibility_len}),",
-            literal(u64::from(*code), 4)
-        );
-    }
+    push_decompositions(out, "CANONICAL", &canonical)?;
     out.push_str(
-        "];\n\n/// The full decompositions [`DECOMPOSITIONS`] points into.\n\
-         pub(crate) const DECOMPOSITION_POOL: &[char] = &[\n",
+        "\n/// Every character whose decomposition mapping is a compatibility mapping,\n\
+         /// and its full compatibility decomposition. One with a canonical mapping\n\
+         /// decomposes by compatibility through its canonical parts.\n",
     );
-    for row in pooled.pool.chunks(8) {
-        let chars: Vec<String> = row.iter().map(|cp| format!("'\\u{{{cp:04X}}}'")).collect();
-        let _ = writeln!(out, "    {},", chars.join(", "));
+    push_decompositions(out, "COMPATIBILITY", &compatibility)?;
+    push_compositions(out, &compositions)
+}
+
+/// Emit the primary composites `compositions` lists, and the characters that
+/// follow another in one's pair.
+fn push_compositions(out: &mut String, compositions: &[(u32, u32, u32)]) -> Result<(), String> {
+    let seconds = merged(
+        compositions
+            .iter()
+            .map(|&(_, second, _)| (second, second))
+            .collect(),
+    );
+    if seconds.is_empty() {
+        return Err("unicode: no character composes".to_string());
     }
-    let _ = write!(
-        out,
-        "];\n\n\
-         /// The least character to follow another in a primary composite's pair.\n\
-         pub(crate) const LEAST_COMPOSING: u32 = {};\n\
-         \n\
-         /// Every primary composite, as `(first, second, composite)` sorted by the\n\
+    out.push_str("\n/// The characters that follow another in a primary composite's pair.\n");
+    push_ranges(out, "COMPOSING_SECONDS", &seconds);
+    out.push_str(
+        "\n/// Every primary composite, as `(first, second, composite)` sorted by the\n\
          /// pair.\n\
          pub(crate) const COMPOSITIONS: &[(u32, u32, u32)] = &[\n",
-        literal(u64::from(least_composing), 4)
     );
-    for (first, second, composite) in &compositions {
+    for (first, second, composite) in compositions {
         let _ = writeln!(
             out,
             "    ({}, {}, {}),",
@@ -931,19 +1055,28 @@ fn emit_normalization(out: &mut String, root: &Path, data: &Data) -> Result<(), 
             literal(u64::from(*composite), 4)
         );
     }
+    out.push_str("];\n");
     Ok(())
 }
 
 /// Emit stringprep's tables (RFC 3454) as SASLprep reads them, and the
 /// decompositions Unicode 3.2 held that `data` holds corrected.
-fn emit_stringprep(out: &mut String, root: &Path, data: &Data) -> Result<(), String> {
+fn emit_stringprep(
+    out: &mut String,
+    root: &Path,
+    data: &Data,
+    stringprep: &Stringprep,
+) -> Result<(), String> {
     let corrected = decomposed_in_stringprep(&read(root, &CORRECTIONS)?, data)?;
-    let stringprep = Stringprep::read(&read(root, &STRINGPREP)?)?;
+    let originals: Vec<(u32, Vec<u32>)> = corrected
+        .iter()
+        .map(|&(code, original)| (code, vec![original]))
+        .collect();
+    keep_3_2_closed(&stringprep.unassigned, &originals, &[])?;
     let (major, minor, update) = STRINGPREP_VERSION;
     let _ = write!(
         out,
-        "];\n\n\
-         /// The decompositions Unicode {major}.{minor}.{update} held that a later release\n\
+        "\n/// The decompositions Unicode {major}.{minor}.{update} held that a later release\n\
          /// corrected (`NormalizationCorrections.txt`), as `(code point, decomposition)`.\n\
          pub(crate) const DECOMPOSED_IN_3_2: &[(u32, u32)] = &[\n"
     );
@@ -1052,35 +1185,30 @@ mod tests {
         let data = Data::read(FRAGMENT).expect("well-formed");
         assert_eq!(data.marks, [(0x302, 0x302), (0x323, 0x323), (0x344, 0x344)]);
         assert_eq!(data.syllables, (0xac00, 0xd7a3));
-        let decompositions = data.decompositions().expect("acyclic");
-        let of = |code: u32| {
-            decompositions
-                .iter()
-                .find(|decomposition| decomposition.code == code)
-                .map(|decomposition| {
-                    (
-                        decomposition.canonical.clone(),
-                        decomposition.compatibility.clone(),
-                    )
-                })
-        };
+        let canonical = data.full_decompositions(false).expect("acyclic");
         assert_eq!(
-            of(0x1ec7),
-            Some((Some(vec![0x65, 0x323, 0x302]), vec![0x65, 0x323, 0x302]))
+            canonical,
+            [
+                (0x344, vec![0x302, 0x323]),
+                (0x1eb9, vec![0x65, 0x323]),
+                (0x1ec7, vec![0x65, 0x323, 0x302]),
+                (0x212b, vec![0x65, 0x323]),
+            ]
         );
+        let compatibility = data.full_decompositions(true).expect("acyclic");
         assert_eq!(
-            of(0x3392),
-            Some((None, vec![0x65, 0x323, 0x302, 0x48])),
-            "a compatibility mapping is no canonical one, yet expands through them"
+            compatibility,
+            [(0x3392, vec![0x65, 0x323, 0x302, 0x48])],
+            "a compatibility mapping expands through the canonical ones, and a character \
+             with a canonical mapping is listed with those alone"
         );
-        assert_eq!(of(0x65), None);
-        let pooled = pooled(&decompositions).expect("fits");
-        let at = pooled
-            .entries
-            .iter()
-            .find(|entry| entry.0 == 0x1ec7)
-            .expect("listed");
-        assert_eq!((at.1, at.2), (at.3, at.4), "one sequence is pooled once");
+        assert_eq!(longest_decomposition(&canonical, &compatibility), 4);
+        let spaced: [(u32, Vec<u32>); 1] = [(0xa8, vec![0x20, 0x308])];
+        assert_eq!(
+            longest_decomposition(&[(0x385, vec![0xa8, 0x301])], &spaced),
+            3,
+            "a canonical part decomposes by compatibility in turn"
+        );
     }
 
     #[test]
@@ -1113,7 +1241,7 @@ mod tests {
                     AC00;<Hangul Syllable, First>;Lo;0;L;;;;;N;;;;;\n\
                     D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n";
         let data = Data::read(text).expect("well-formed");
-        assert!(data.decompositions().is_err());
+        assert!(data.full_decompositions(false).is_err());
     }
 
     #[test]
@@ -1124,6 +1252,11 @@ mod tests {
         assert!(Data::read(&into_a_syllable).is_err());
         let three = format!("00C0;X;Lu;0;L;0041 0300 0301;;;;N;;;;;\n{syllables}");
         assert!(Data::read(&three).is_err());
+        let mark = format!("0301;X;Mn;230;NSM;<compat> 0020;;;;N;;;;;\n{syllables}");
+        assert!(
+            Data::read(&mark).is_err(),
+            "a combining mark with a compatibility mapping"
+        );
         assert!(
             Data::read("0041;A;Lu;0;L;;;;;N;;;;;\n").is_err(),
             "no syllables"
@@ -1176,6 +1309,85 @@ mod tests {
         assert_eq!(
             merged(vec![(5, 6), (0, 2), (3, 4), (8, 9)]),
             [(0, 6), (8, 9)]
+        );
+    }
+
+    #[test]
+    fn decompositions_are_laid_end_to_end() {
+        let decompositions: [(u32, Vec<u32>); 2] =
+            [(0xc0, vec![0x41, 0x300]), (0x212b, vec![0x1_d15e])];
+        let mut out = String::new();
+        push_decompositions(&mut out, "X", &decompositions).expect("fits");
+        let expected = [
+            "pub(crate) const X: Decompositions = Decompositions {",
+            "    keys: &[",
+            "        0x00C0, 0x212B,",
+            "    ],",
+            "    starts: &[",
+            "        0, 2, 3,",
+            "    ],",
+            "    parts: &[",
+            "        '\\u{0041}', '\\u{0300}', '\\u{1D15E}',",
+            "    ],",
+            "};",
+            "",
+        ];
+        assert_eq!(out, expected.join("\n"));
+        let long: [(u32, Vec<u32>); 1] = [(0xc0, vec![0x41; 1 << 16])];
+        assert!(
+            push_decompositions(&mut String::new(), "X", &long).is_err(),
+            "more parts than a u16 indexes"
+        );
+    }
+
+    #[test]
+    fn tables_taking_what_unicode_3_2_assigns_to_what_it_does_not_are_refused() {
+        let unassigned = [(0x221, 0x221)];
+        let assigned: [(u32, Vec<u32>); 1] = [(0xc0, vec![0x41, 0x300])];
+        assert_eq!(
+            keep_3_2_closed(&unassigned, &assigned, &[(0x41, 0x300, 0xc0)]),
+            Ok(())
+        );
+        let into_unassigned: [(u32, Vec<u32>); 1] = [(0xc0, vec![0x41, 0x221])];
+        assert!(keep_3_2_closed(&unassigned, &into_unassigned, &[]).is_err());
+        let from_unassigned: [(u32, Vec<u32>); 1] = [(0x221, vec![0x222])];
+        assert_eq!(
+            keep_3_2_closed(&unassigned, &from_unassigned, &[]),
+            Ok(()),
+            "what Unicode 3.2 does not assign is never decomposed"
+        );
+        assert!(keep_3_2_closed(&unassigned, &assigned, &[(0x41, 0x300, 0x221)]).is_err());
+        assert!(within(&unassigned, 0x221));
+        assert!(!within(&unassigned, 0x220) && !within(&unassigned, 0x222));
+    }
+
+    #[test]
+    fn the_rfcs_notice_is_its_full_copyright_statement_and_the_licence_carries_it() {
+        let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        root.pop();
+        root.pop();
+        let rfc = read(&root, &STRINGPREP).expect("the pinned RFC");
+        let notice = rfc_notice(&rfc).expect("its Full Copyright Statement");
+        assert_eq!(
+            notice.first(),
+            Some(&"Copyright (C) The Internet Society (2002).  All Rights Reserved.")
+        );
+        assert!(
+            notice
+                .contains(&"kind, provided that the above copyright notice and this paragraph are"),
+            "the paragraph that asks for the notice"
+        );
+        assert_eq!(
+            notice.last(),
+            Some(&"MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.")
+        );
+        let license =
+            std::fs::read_to_string(root.join(ASSETS).join(LICENSE)).expect("the assets' licence");
+        assert_eq!(carried(&license, &notice), Ok(()));
+        assert!(carried("UNICODE LICENSE V3\n", &notice).is_err());
+        assert!(
+            rfc_notice("RFC 3454\n\nAcknowledgement\n").is_err(),
+            "a text without the statement"
         );
     }
 }

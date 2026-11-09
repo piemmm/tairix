@@ -96,46 +96,43 @@ pub enum Target {
     },
 }
 
+const fn wider(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// Widest reply any *pull* answers with, and so the one buffer every pull is
 /// answered into ([`WindowClient::pull_reply`]).
 ///
 /// Derived from the pulls the channel has rather than from whichever is
 /// widest today, so a pull whose reply outgrew the buffer could not slip
 /// past.
-const PULL_REPLY_MAX: usize = {
-    const fn wider(a: usize, b: usize) -> usize {
-        if a > b {
-            a
-        } else {
-            b
-        }
-    }
+const PULL_REPLY_MAX: usize = wider(
+    wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_MENU_TEXT_REPLY_MAX),
     wider(
-        wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_MENU_TEXT_REPLY_MAX),
+        WINDOW_WALLPAPERS_REPLY_MAX,
         wider(
-            WINDOW_WALLPAPERS_REPLY_MAX,
+            WINDOW_CLIPBOARD_REPLY_LEN,
             wider(
-                WINDOW_CLIPBOARD_REPLY_LEN,
+                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
                 wider(
-                    wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
                     wider(
-                        wider(
-                            WINDOW_DROP_TARGET_REPLY_MAX,
-                            wider(
-                                WINDOW_DRAG_SPOT_REPLY_MAX,
-                                wider(
-                                    WINDOW_OFFERED_ITEMS_REPLY_MAX,
-                                    WINDOW_OFFERED_FILE_REPLY_MAX,
-                                ),
-                            ),
-                        ),
-                        WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+                        WINDOW_DROP_TARGET_REPLY_MAX,
+                        wider(WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX),
                     ),
+                    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
                 ),
             ),
         ),
-    )
-};
+    ),
+);
+
+/// Widest reply a posted request is answered with: a status, or the media
+/// type a posted read carries back.
+const POSTED_REPLY_MAX: usize = wider(WINDOW_CREATE_REPLY_LEN, WINDOW_OFFERED_FILE_REPLY_MAX);
 
 /// Why a round of input repaints, which is what decides the rectangle it
 /// presents (see [`present_damage`]).
@@ -670,9 +667,18 @@ pub enum PostedRequest {
     /// [`WindowClient::end_landing`], for the drop it numbers: each drop's
     /// end is its own, never folded into another's.
     LandingEnded(u32),
+    /// [`WindowClient::ask_offered_file`], for the offer it asks about: a
+    /// newer ask over the same window replaces one not yet sent.
+    OfferedFile(u32),
 }
 
 impl PostedRequest {
+    /// Whether an ask of kind `asked` is held behind an unanswered one of
+    /// this kind over the same window, as the newest wanted.
+    fn folds(self, asked: Self) -> bool {
+        matches!((self, asked), (Self::OfferedFile(_), Self::OfferedFile(_))) || self == asked
+    }
+
     const fn what(self) -> &'static str {
         match self {
             Self::Resize => "a resize",
@@ -686,8 +692,22 @@ impl PostedRequest {
             Self::Sizing => "a resize range",
             Self::Present => "a frame",
             Self::LandingEnded(_) => "a drop's end",
+            Self::OfferedFile(_) => "a file offer's media type",
         }
     }
+}
+
+/// The media type [`WindowClient::ask_offered_file`] asked for, as the
+/// session answered it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferedMedia {
+    /// The window the offer was over.
+    pub window_id: u64,
+    /// The offer asked about.
+    pub serial: u32,
+    /// The offered file's media type: [`Errno::NotFound`] once the offer no
+    /// longer stood, or how the read failed.
+    pub media: Result<String, Errno>,
 }
 
 /// A posted request the session refused, handed to the application once its
@@ -728,6 +748,7 @@ enum Asked {
     Sizing(WindowSizing),
     Present(u32, DamageList),
     LandingEnded(u32),
+    OfferedFile(u32),
 }
 
 impl Asked {
@@ -743,6 +764,7 @@ impl Asked {
             Self::Sizing(_) => PostedRequest::Sizing,
             Self::Present(..) => PostedRequest::Present,
             Self::LandingEnded(serial) => PostedRequest::LandingEnded(*serial),
+            Self::OfferedFile(serial) => PostedRequest::OfferedFile(*serial),
         }
     }
 
@@ -786,6 +808,7 @@ impl Asked {
                 serial,
                 step: LandingStep::Ended,
             },
+            Self::OfferedFile(serial) => WindowRequest::OfferedFile { window_id, serial },
         }
     }
 }
@@ -908,6 +931,8 @@ pub struct WindowClient<T: WindowTransport> {
     owed: VecDeque<WindowEvent>,
     /// The session's endpoint has gone: nothing posted will be answered.
     lost: bool,
+    /// Media types read and not yet taken by the application.
+    media: VecDeque<OfferedMedia>,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
@@ -923,6 +948,7 @@ impl<T: WindowTransport> WindowClient<T> {
             refused: VecDeque::new(),
             owed: VecDeque::new(),
             lost: false,
+            media: VecDeque::new(),
         }
     }
 
@@ -1368,22 +1394,23 @@ impl<T: WindowTransport> WindowClient<T> {
                 self.posted.remove(index);
                 if let Some(held) = posting.held {
                     let answer = self.status_call(&held.request(window_id));
-                    self.settle(&posting, answer);
+                    self.settle_status(&posting, answer);
                 }
                 continue;
             };
             let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-            let answer = match self.transport.await_reply(ticket, &mut reply) {
-                Ok(len) => decode_status_reply(&reply[..len]),
+            let len = match self.transport.await_reply(ticket, &mut reply) {
+                Ok(len) => Ok(len),
                 // A call still live when its await ends is a reaper's again;
                 // forgotten, its answer would keep the reply member ready for
                 // ever.
                 Err(errno) => match self.transport.reap(ticket, &mut reply) {
                     Ok(None) => return Err(errno),
-                    Ok(Some(len)) => decode_status_reply(&reply[..len]),
+                    Ok(Some(len)) => Ok(len),
                     Err(over) => Err(over),
                 },
             };
+            let answer = len.and_then(|len| reply.get(..len).ok_or(Errno::BufferTooSmall));
             let _ = self.answered(index, answer);
         }
         Ok(())
@@ -1441,6 +1468,7 @@ impl<T: WindowTransport> WindowClient<T> {
                 posting.orphaned = true;
             }
         }
+        self.media.retain(|read| read.window_id != window_id);
         closed
     }
 
@@ -1698,17 +1726,26 @@ impl<T: WindowTransport> WindowClient<T> {
         self.post_or_hold(window_id, Asked::FileOfferAnswer(serial, places))
     }
 
-    /// The media type of the one file the [`WindowEvent::FileOffered`]
-    /// numbered `serial` holds over window `window_id`.
+    /// Ask for the media type of the one file the [`WindowEvent::FileOffered`]
+    /// numbered `serial` holds over window `window_id`, never waiting: the
+    /// answer is taken with [`WindowClient::take_offered_media`] once it lands,
+    /// and [`WindowEvents::wait`] returns, unparked, while one is untaken.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] once that offer no longer stands, a transport
-    /// failure, or a corrupt reply.
+    /// A request the wire cannot carry, or a transport failure.
     ///
     /// [`WindowEvent::FileOffered`]: tairix_abi::window_ipc::WindowEvent::FileOffered
-    pub fn offered_file(&mut self, window_id: u64, serial: u32) -> Result<&str, Errno> {
-        decode_offered_file_reply(self.pull(&WindowRequest::OfferedFile { window_id, serial })?)
+    pub fn ask_offered_file(&mut self, window_id: u64, serial: u32) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::OfferedFile(serial))
+    }
+
+    /// The oldest media type asked with [`WindowClient::ask_offered_file`]
+    /// that has landed, of a window still open. Answers land as every other
+    /// posted request's do, with [`WindowClient::reap_posted`], which each
+    /// event drain runs.
+    pub fn take_offered_media(&mut self) -> Option<OfferedMedia> {
+        self.media.pop_front()
     }
 
     /// Hand the file window `window_id`'s drag placed to the window it was
@@ -1718,8 +1755,8 @@ impl<T: WindowTransport> WindowClient<T> {
     /// # Errors
     ///
     /// [`Errno::NotFound`] when the drag placed nothing or its drop was handed
-    /// over already, a refused relay — a descriptor that is not read-only
-    /// among them — a transport failure, or a corrupt reply.
+    /// over already, a refused relay — a descriptor that is not a read-only
+    /// regular file among them — a transport failure, or a corrupt reply.
     pub fn place_dropped(
         &mut self,
         window_id: u64,
@@ -2557,7 +2594,7 @@ impl<T: WindowTransport> WindowClient<T> {
         if let Some(posting) = self
             .posted
             .iter_mut()
-            .find(|posting| posting.window_id == window_id && posting.kind == kind)
+            .find(|posting| posting.window_id == window_id && posting.kind.folds(kind))
         {
             posting.held = Some(asked);
             return Ok(());
@@ -2592,13 +2629,13 @@ impl<T: WindowTransport> WindowClient<T> {
                 index += 1;
                 continue;
             };
-            let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+            let mut reply = [0u8; POSTED_REPLY_MAX];
             let answer = match self.transport.reap(ticket, &mut reply) {
                 Ok(None) => {
                     index += 1;
                     continue;
                 }
-                Ok(Some(len)) => decode_status_reply(&reply[..len]),
+                Ok(Some(len)) => reply.get(..len).ok_or(Errno::BufferTooSmall),
                 Err(err) => {
                     self.lost |= err == Errno::BrokenPipe;
                     Err(err)
@@ -2616,7 +2653,7 @@ impl<T: WindowTransport> WindowClient<T> {
 
     /// Act on `answer` to the posting at `index`, posting the newest request
     /// held behind it in its place, and answer whether a posting stays there.
-    fn answered(&mut self, index: usize, answer: Result<(), Errno>) -> bool {
+    fn answered(&mut self, index: usize, answer: Result<&[u8], Errno>) -> bool {
         let Some(&posting) = self.posted.get(index) else {
             return false;
         };
@@ -2624,6 +2661,10 @@ impl<T: WindowTransport> WindowClient<T> {
         let Some(held) = posting.held else {
             self.posted.remove(index);
             return false;
+        };
+        let posting = Posting {
+            kind: held.kind(),
+            ..posting
         };
         let ticket = match self.post(&held.request(posting.window_id)) {
             Ok(ticket) => Some(ticket),
@@ -2652,6 +2693,10 @@ impl<T: WindowTransport> WindowClient<T> {
             let (None, Some(held)) = (posting.ticket, posting.held) else {
                 index += 1;
                 continue;
+            };
+            let posting = Posting {
+                kind: held.kind(),
+                ..posting
             };
             match self.post(&held.request(posting.window_id)) {
                 Ok(ticket) => {
@@ -2697,8 +2742,23 @@ impl<T: WindowTransport> WindowClient<T> {
         }
     }
 
-    /// Act on `answer` to `posting`.
-    fn settle(&mut self, posting: &Posting, answer: Result<(), Errno>) {
+    /// Act on the reply `answer` to `posting`, as its kind reads one.
+    fn settle(&mut self, posting: &Posting, answer: Result<&[u8], Errno>) {
+        if let PostedRequest::OfferedFile(serial) = posting.kind {
+            if !posting.orphaned {
+                self.media.push_back(OfferedMedia {
+                    window_id: posting.window_id,
+                    serial,
+                    media: answer.and_then(decode_offered_file_reply).map(String::from),
+                });
+            }
+            return;
+        }
+        self.settle_status(posting, answer.and_then(decode_status_reply));
+    }
+
+    /// Act on the status `answer` to `posting`.
+    fn settle_status(&mut self, posting: &Posting, answer: Result<(), Errno>) {
         if matches!(posting.kind, PostedRequest::LandingEnded(_)) {
             return;
         }
@@ -3107,6 +3167,10 @@ impl<S: EventSource> WindowEvents<S> {
     /// wait-set's reply member stays ready until it is, and a park reporting
     /// it again would return at once, for ever.
     ///
+    /// It answers `None` with no event when the park was interrupted, the
+    /// loop owning what woke it, or once a read the application asked has
+    /// landed for it to take ([`WindowClient::take_offered_media`]).
+    ///
     /// # Errors
     ///
     /// [`EventError::Mailbox`] for a source failure or a session that has
@@ -3123,6 +3187,9 @@ impl<S: EventSource> WindowEvents<S> {
             return Ok(Some(event));
         }
         loop {
+            if !client.media.is_empty() {
+                return Ok(None);
+            }
             match self.source.park().map_err(EventError::Mailbox)? {
                 Parked::Served => {}
                 // The loop owns what woke it and has no event to handle.

@@ -39,7 +39,7 @@ use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::{CapTable, ProcessId, Removed};
 use tairix_sync::{RwLock, SpinLock};
 
-use crate::waitq::{wait_arch, WaitQueue, WaitRefused, NO_DEADLINE};
+use crate::waitq::{wait_arch, PEER_EXIT_WAITQ};
 
 /// One watching thread's watches and the exits it has not taken.
 struct Watcher {
@@ -75,7 +75,6 @@ impl Registry {
 pub struct PeerWatch {
     /// Built at the first watch.
     registry: SpinLock<Option<Registry>>,
-    parked: WaitQueue,
 }
 
 impl Default for PeerWatch {
@@ -90,7 +89,6 @@ impl PeerWatch {
     pub const fn new() -> Self {
         Self {
             registry: SpinLock::new(None),
-            parked: WaitQueue::new(),
         }
     }
 
@@ -226,19 +224,9 @@ impl PeerWatch {
             .is_some_and(|record| !record.exits.is_empty())
     }
 
-    /// Park `watcher` for its next exit, alongside its wait-set's other
-    /// sources. Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// [`WaitRefused`] when there is no room to register; nothing is.
-    pub fn join(&self, watcher: TaskId) -> Result<(), WaitRefused> {
-        self.parked.register(watcher, NO_DEADLINE)
-    }
-
     /// Stop parking `watcher` for an exit.
     pub fn leave(&self, watcher: TaskId) {
-        self.parked.deregister(watcher);
+        PEER_EXIT_WAITQ.deregister(watcher);
     }
 
     /// Queue `peer`'s exit for every thread watching it and wake each.
@@ -264,7 +252,7 @@ impl PeerWatch {
         // A thread not parked finds the exit on its next wait.
         if let Some(arch) = wait_arch() {
             for task in watchers {
-                let _ = self.parked.wake_task(arch, task);
+                let _ = PEER_EXIT_WAITQ.wake_task(arch, task);
             }
         }
     }
@@ -273,7 +261,7 @@ impl PeerWatch {
     /// its place in the queue. Driven by the thread's teardown, so a later
     /// thread drawing its id inherits nothing.
     pub fn forget_watcher(&self, watcher: TaskId) {
-        self.parked.deregister_task(watcher);
+        PEER_EXIT_WAITQ.deregister_task(watcher);
         let mut guard = self.registry.lock();
         let Some(registry) = guard.as_mut() else {
             return;

@@ -5,7 +5,7 @@
 //! A [`Pipe`] is pure data behind a `SpinLock`: a bounded byte ring plus
 //! live-end counts. It never itself parks or switches context — the syscall
 //! handler drives the park loop (the [`crate::waitq`] discipline), calling
-//! the non-blocking [`PipeEnd::try_read`] / [`PipeEnd::try_write`] steps and
+//! the non-blocking [`PipeEnd::read_with`] / [`PipeEnd::try_write`] steps and
 //! parking on [`crate::waitq::STREAM_WAITQ`] when a step reports
 //! [`ReadStep::Empty`] / [`WriteStep::Full`], under the [`RingWaits`] key of
 //! the ring side it blocked on so a transfer here never unparks another
@@ -151,13 +151,49 @@ pub struct Pipe {
 /// Outcome of one non-blocking read step.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ReadStep {
-    /// `n` bytes were copied out (`1..=out.len()`).
+    /// `n` bytes were delivered and taken (`1..=max`).
     Read(usize),
     /// The pipe is empty and every write end is closed: end-of-stream.
     Eof,
     /// The pipe is empty but a writer is still live: the caller parks and
     /// retries after a wake.
     Empty,
+}
+
+/// Hand the first `n` bytes of `ring` to `visit`, one ring segment at a time
+/// with the segment's offset in the run, stopping at the first refusal: two
+/// bulk segments, never a byte at a time, since a stream carries whole
+/// documents between processes. Takes nothing; a reader takes the run only
+/// once every segment is delivered.
+///
+/// # Errors
+///
+/// What `visit` refused with.
+pub(crate) fn visit_front<E>(
+    ring: &VecDeque<u8>,
+    n: usize,
+    mut visit: impl FnMut(usize, &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let n = n.min(ring.len());
+    let (front, back) = ring.as_slices();
+    let head = front.len().min(n);
+    if head > 0 {
+        visit(0, &front[..head])?;
+    }
+    if n > head {
+        visit(head, &back[..n - head])?;
+    }
+    Ok(())
+}
+
+/// Test-only: one read step of `end` delivered into `out`.
+#[cfg(test)]
+pub(crate) fn read_into(end: &PipeEnd, out: &mut [u8]) -> ReadStep {
+    let step = end.read_with(out.len(), |at, bytes| {
+        out[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok::<(), ()>(())
+    });
+    step.unwrap_or(ReadStep::Empty)
 }
 
 /// Outcome of one non-blocking write step.
@@ -180,9 +216,14 @@ impl Pipe {
     ///
     /// [`Errno::OutOfMemory`] when the pipe cannot be allocated.
     pub fn create() -> Result<(PipeEnd, PipeEnd), Errno> {
+        // A page of ring up front, so a short write — a worker's nudge among
+        // them — never waits on memory the ring would have to grow into.
+        let mut buf = VecDeque::new();
+        buf.try_reserve_exact(tairix_abi::PAGE_SIZE)
+            .map_err(|_| Errno::OutOfMemory)?;
         let pipe = Arc::try_new(Pipe {
             state: SpinLock::new(PipeState {
-                buf: VecDeque::new(),
+                buf,
                 readers: 1,
                 writers: 1,
             }),
@@ -248,40 +289,41 @@ impl PipeEnd {
         }
     }
 
-    /// One non-blocking read step: drain up to `out.len()` bytes.
+    /// One non-blocking read step: hand up to `max` buffered bytes to
+    /// `deliver`, and take them from the pipe only once it has them all, so a
+    /// delivery that fails — the reader's buffer refusing the copy — leaves
+    /// them for the next read rather than losing them.
     ///
     /// Returns [`ReadStep::Empty`] when the caller should park and retry,
-    /// [`ReadStep::Eof`] at end-of-stream. A zero-length `out` reads zero
-    /// bytes (`ReadStep::Read(0)` is never produced for a non-empty
-    /// `out`). Calling on a write end drains nothing and reports `Empty`;
-    /// the handler rejects the direction before reaching here (defence in
-    /// depth: a mis-routed call starves rather than corrupts).
-    #[must_use]
-    pub fn try_read(&self, out: &mut [u8]) -> ReadStep {
+    /// [`ReadStep::Eof`] at end-of-stream. A zero `max` reads zero bytes
+    /// (`ReadStep::Read(0)` is never produced for a non-zero `max`). Calling
+    /// on a write end delivers nothing and reports `Empty`; the handler
+    /// rejects the direction before reaching here (defence in depth: a
+    /// mis-routed call starves rather than corrupts).
+    ///
+    /// # Errors
+    ///
+    /// What `deliver` refused with; nothing is taken.
+    pub fn read_with<E>(
+        &self,
+        max: usize,
+        deliver: impl FnMut(usize, &[u8]) -> Result<(), E>,
+    ) -> Result<ReadStep, E> {
         if self.role != PipeRole::Read {
-            return ReadStep::Empty;
+            return Ok(ReadStep::Empty);
         }
         let mut state = self.pipe.state.lock();
         if state.buf.is_empty() {
-            return if state.writers == 0 {
+            return Ok(if state.writers == 0 {
                 ReadStep::Eof
             } else {
                 ReadStep::Empty
-            };
+            });
         }
-        if out.is_empty() {
-            return ReadStep::Read(0);
-        }
-        let n = out.len().min(state.buf.len());
-        // Two bulk copies, one per ring segment: a byte-at-a-time drain
-        // would make every megabyte a million bounds-checked pops on a
-        // path that carries whole documents between processes.
-        let (front, back) = state.buf.as_slices();
-        let head = front.len().min(n);
-        out[..head].copy_from_slice(&front[..head]);
-        out[head..n].copy_from_slice(&back[..n - head]);
+        let n = max.min(state.buf.len());
+        visit_front(&state.buf, n, deliver)?;
         state.buf.drain(..n);
-        ReadStep::Read(n)
+        Ok(ReadStep::Read(n))
     }
 
     /// Whether a read on this end would complete without parking: buffered
@@ -290,7 +332,7 @@ impl PipeEnd {
     /// wait-set scan can report readiness and leave the bytes for the woken
     /// owner's read (`plans/APPWIN.md` AW4). On a write end it is always
     /// `false` (a write end can never be read; fail closed, matching
-    /// [`Self::try_read`]'s direction guard).
+    /// [`Self::read_with`]'s direction guard).
     #[must_use]
     pub fn readable(&self) -> bool {
         if self.role != PipeRole::Read {
@@ -305,7 +347,7 @@ impl PipeEnd {
     /// Returns [`WriteStep::Full`] when the caller should park and retry,
     /// [`WriteStep::Broken`] when no read end remains. A zero-length
     /// `data` writes zero bytes. Calling on a read end appends nothing and
-    /// reports `Full` (defence in depth, as for [`Self::try_read`]).
+    /// reports `Full` (defence in depth, as for [`Self::read_with`]).
     #[must_use]
     pub fn try_write(&self, data: &[u8]) -> WriteStep {
         if self.role != PipeRole::Write {
@@ -442,16 +484,55 @@ mod tests {
         assert_eq!(made.err(), Some(Errno::OutOfMemory));
     }
 
+    /// A read whose delivery fails takes nothing: the bytes are all there for
+    /// the next read, in order.
+    ///
+    /// Regression: the bytes were taken into a staging buffer before the copy
+    /// to the reader, so a copy the reader's buffer refused lost them.
+    #[test]
+    fn a_read_whose_delivery_fails_takes_nothing() {
+        let (read, write) = pipe();
+        assert_eq!(write.try_write(b"abcdefgh"), WriteStep::Wrote(8));
+        assert_eq!(read.read_with(8, |_, _| Err("refused")), Err("refused"));
+        let mut out = [0u8; 8];
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(8));
+        assert_eq!(&out, b"abcdefgh");
+    }
+
+    /// A run wrapped across the ring's end is visited as its two segments, in
+    /// order, each at its offset in the run, and a refusal stops the visit.
+    #[test]
+    fn a_wrapped_run_is_visited_as_two_segments() {
+        let mut ring = VecDeque::with_capacity(8);
+        ring.extend(b"xxxxabcd".iter().copied());
+        ring.drain(..4);
+        ring.extend(b"efgh".iter().copied());
+        assert_eq!(ring.as_slices().1.len(), 4, "the run wraps");
+        let mut seen = vec![];
+        let visited = visit_front(&ring, 7, |at, bytes| {
+            seen.push((at, bytes.to_vec()));
+            Ok::<(), ()>(())
+        });
+        assert_eq!(visited, Ok(()));
+        assert_eq!(seen, [(0, b"abcd".to_vec()), (4, b"efg".to_vec())]);
+        let mut calls = 0;
+        let refused = visit_front(&ring, 8, |_, _| {
+            calls += 1;
+            Err(())
+        });
+        assert_eq!((refused, calls), (Err(()), 1));
+    }
+
     #[test]
     fn bytes_flow_in_order_through_the_ring() {
         let (read, write) = pipe();
         assert_eq!(write.try_write(b"hello "), WriteStep::Wrote(6));
         assert_eq!(write.try_write(b"world"), WriteStep::Wrote(5));
         let mut out = [0u8; 16];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(11));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(11));
         assert_eq!(&out[..11], b"hello world");
         // Drained: a live writer means the reader parks, not EOF.
-        assert_eq!(read.try_read(&mut out), ReadStep::Empty);
+        assert_eq!(read_into(&read, &mut out), ReadStep::Empty);
     }
 
     #[test]
@@ -463,7 +544,7 @@ mod tests {
         assert_eq!(write.try_write(b"x"), WriteStep::Full);
         // A partial write accepts exactly the free space.
         let mut out = vec![0u8; 100];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(100));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(100));
         assert_eq!(write.try_write(&chunk), WriteStep::Wrote(100));
     }
 
@@ -479,7 +560,7 @@ mod tests {
         // ring's end and its start.
         let mut drained = vec![0u8; PIPE_CAPACITY / 2];
         assert_eq!(
-            read.try_read(&mut drained),
+            read_into(&read, &mut drained),
             ReadStep::Read(PIPE_CAPACITY / 2)
         );
         let tail: alloc::vec::Vec<u8> = (0..PIPE_CAPACITY / 2)
@@ -488,13 +569,17 @@ mod tests {
         assert_eq!(write.try_write(&tail), WriteStep::Wrote(tail.len()));
 
         let mut out = vec![0u8; PIPE_CAPACITY];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(PIPE_CAPACITY));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(PIPE_CAPACITY));
         assert!(
             out[..PIPE_CAPACITY / 2].iter().all(|&b| b == 0xEE),
             "the bytes before the seam are unchanged"
         );
         assert_eq!(&out[PIPE_CAPACITY / 2..], &tail[..], "and those after it");
-        assert_eq!(read.try_read(&mut out), ReadStep::Empty, "nothing is left");
+        assert_eq!(
+            read_into(&read, &mut out),
+            ReadStep::Empty,
+            "nothing is left"
+        );
     }
 
     #[test]
@@ -504,9 +589,9 @@ mod tests {
         drop(write);
         // Buffered bytes are still readable after the writer is gone…
         let mut out = [0u8; 8];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(4));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(4));
         // …and only then does the stream end.
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(read_into(&read, &mut out), ReadStep::Eof);
     }
 
     #[test]
@@ -523,9 +608,9 @@ mod tests {
         drop(write);
         // One write end still lives: the empty pipe means park, not EOF.
         let mut out = [0u8; 4];
-        assert_eq!(read.try_read(&mut out), ReadStep::Empty);
+        assert_eq!(read_into(&read, &mut out), ReadStep::Empty);
         drop(write2);
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(read_into(&read, &mut out), ReadStep::Eof);
         // The read side mirrors it.
         let (read_a, write_b) = pipe();
         let read_b = read_a.clone();
@@ -540,7 +625,7 @@ mod tests {
         let (read, write) = pipe();
         // A mis-routed step starves fail-closed rather than crossing the
         // direction: the handler rejects it before ever parking.
-        assert_eq!(write.try_read(&mut [0u8; 4]), ReadStep::Empty);
+        assert_eq!(read_into(&write, &mut [0u8; 4]), ReadStep::Empty);
         assert_eq!(read.try_write(b"z"), WriteStep::Full);
     }
 
@@ -549,9 +634,9 @@ mod tests {
         let (read, write) = pipe();
         assert_eq!(write.try_write(b""), WriteStep::Wrote(0));
         assert_eq!(write.try_write(b"a"), WriteStep::Wrote(1));
-        assert_eq!(read.try_read(&mut []), ReadStep::Read(0));
+        assert_eq!(read_into(&read, &mut []), ReadStep::Read(0));
         let mut out = [0u8; 1];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(1));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(1));
         assert_eq!(out[0], b'a');
     }
 
@@ -565,12 +650,12 @@ mod tests {
         assert!(read.readable());
         assert!(read.readable());
         let mut out = [0u8; 4];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(2));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(2));
         assert!(!read.readable());
         // Every write end closed: readable (the read observes EOF).
         drop(write);
         assert!(read.readable());
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(read_into(&read, &mut out), ReadStep::Eof);
         // A write end is never readable, buffered bytes or not.
         let (read_b, write_b) = pipe();
         assert_eq!(write_b.try_write(b"x"), WriteStep::Wrote(1));
@@ -590,7 +675,7 @@ mod tests {
         assert!(!write.writable());
         // A drain frees room again.
         let mut out = vec![0u8; 16];
-        assert_eq!(read.try_read(&mut out), ReadStep::Read(16));
+        assert_eq!(read_into(&read, &mut out), ReadStep::Read(16));
         assert!(write.writable());
         // A read end is never writable, room or not.
         assert!(!read.writable());

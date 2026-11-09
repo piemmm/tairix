@@ -483,6 +483,14 @@ pub enum AuditEvent {
     ///
     /// Emitted by the in-kernel device meter, in task context.
     DeviceOperationSlow,
+    /// An operation on a device the kernel drives itself, `device` (`dev`),
+    /// failed back to its caller with `error`: an `op` at block `lba` of
+    /// `bytes`, after `reissues` reissues of a failure the device said may
+    /// clear. `failed` counts every such failure; the first is recorded and
+    /// then one each time that count doubles.
+    ///
+    /// Emitted by the in-kernel device meter, in task context.
+    DeviceOperationFailed,
     /// A contended acquire of the sleeping lock taken at `site` waited
     /// `waited_ms` for it; `handoff_ms` is how late the task ran once the
     /// prior holder had handed it the lock, and `from` the site that holder
@@ -881,6 +889,7 @@ impl AuditEvent {
             Self::IrqWakeLate => 4073,
             Self::IrqCompletionOverdue => 4074,
             Self::DeviceOperationSlow => 4075,
+            Self::DeviceOperationFailed => 4314,
             Self::LockAcquiredLate => 4076,
             Self::LockReleasedLate => 4069,
             Self::KernelYieldLate => 4077,
@@ -986,6 +995,7 @@ impl AuditEvent {
             Self::IrqWakeLate => "device interrupt reached its waiter late",
             Self::IrqCompletionOverdue => "device completion interrupt overdue",
             Self::DeviceOperationSlow => "kernel-driven device operation slow",
+            Self::DeviceOperationFailed => "kernel-driven device operation failed",
             Self::LockAcquiredLate => "sleeping lock acquired late",
             Self::LockReleasedLate => "sleeping lock released late",
             Self::KernelYieldLate => "in-kernel yield resumed late",
@@ -1127,6 +1137,7 @@ mod tests {
         AuditEvent::IrqWakeLate,
         AuditEvent::IrqCompletionOverdue,
         AuditEvent::DeviceOperationSlow,
+        AuditEvent::DeviceOperationFailed,
         AuditEvent::LockAcquiredLate,
         AuditEvent::LockReleasedLate,
         AuditEvent::KernelYieldLate,
@@ -1184,7 +1195,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 96, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 97, "a new event belongs in `ALL`");
     }
 
     #[test]

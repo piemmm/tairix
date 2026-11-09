@@ -139,6 +139,7 @@ mod program {
         StopReason,
     };
     use tairix_desktop_session::desktop::{LandingOffer, LandingWork};
+    use tairix_desktop_session::drag::PlaceRefused;
     use tairix_desktop_session::effects::{
         load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk, MAX_HELD_CALLS,
     };
@@ -5527,12 +5528,11 @@ mod program {
                         &mut apps.service,
                         &mut menu,
                     );
-                    // A band that refused to keep a decode may now allow it,
-                    // and a band that has just tightened will refuse it once
-                    // more and be recorded again. Either way the decision is
-                    // remade here, on the band's own wake, rather than by
-                    // every repaint in between.
-                    artworks.retry_declined();
+                    // A band that refused to keep a decode may now allow it:
+                    // where the cache would keep one, it is asked for again,
+                    // here on the band's own wake rather than by every
+                    // repaint in between.
+                    artworks.retry_declined(|bytes| shell.holds_artwork(bytes));
                     deliver_pending_redraws(
                         &mut server,
                         &mut sink,
@@ -7432,10 +7432,10 @@ mod program {
             }
         }
 
-        /// Note that the cache refused to keep this decode, so nothing asks for
-        /// it again until the band moves.
-        fn decline(&self, key: &ArtworkKey, side: u32) {
-            self.work.lock().desk.decline(key, side);
+        /// Note that the cache refused to keep this decode's `bytes`, so
+        /// nothing asks for it again until the cache would.
+        fn decline(&self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.work.lock().desk.decline(key, side, bytes);
         }
 
         /// Hold back the decodes of what a drop is writing, and picture again
@@ -7459,10 +7459,10 @@ mod program {
             }
         }
 
-        /// The band moved: offer the refused decodes again, waking the loop to
-        /// repaint what was drawn without them.
-        fn retry_declined(&self) {
-            if self.work.lock().desk.retry_declined() {
+        /// The band moved: offer again the refused decodes the cache now
+        /// `holds`, waking the loop to repaint what was drawn without them.
+        fn retry_declined(&self, holds: impl Fn(usize) -> bool) {
+            if self.work.lock().desk.retry_declined(holds) {
                 self.wake.nudge();
             }
         }
@@ -7534,8 +7534,8 @@ mod program {
             self.0.want(key, side);
         }
 
-        fn declined(&mut self, key: &ArtworkKey, side: u32) {
-            self.0.decline(key, side);
+        fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.0.decline(key, side, bytes);
         }
 
         fn bundle_version(
@@ -9711,6 +9711,7 @@ mod program {
             file.fd(),
             tairix_abi::syscall::GRANT_EXTENT_INHERIT,
             recorder,
+            0,
         ));
         drop(file);
         match granted {
@@ -13123,7 +13124,7 @@ mod program {
         if usize::try_from(stat.size).map_or(true, |len| len > tairix_soundtheme::MAX_SOUND_BYTES) {
             return Err(Errno::LengthOutOfRange);
         }
-        Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, to))
+        Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, to, 0))
     }
 
     /// Hand `work` to the sound-choices worker, adopting at once what ran here
@@ -14598,10 +14599,7 @@ mod program {
         compositor: &mut Compositor,
     ) {
         if let Err(err) = made {
-            app::report(
-                APP_NAME,
-                format_args!("{path} could not be created ({err})"),
-            );
+            desktop.refuse(GestureRefusal::unmade(path, err));
             return;
         }
         show_unreported(Some(path), desktop, shell, compositor);
@@ -14650,8 +14648,10 @@ mod program {
     /// Settle a desktop call the file worker carried out.
     ///
     /// A document launches its application with the descriptor opened for it;
-    /// a folder or shortcut made is shown. A refusal is stated on `stderr`
-    /// with the kernel's own reason and leaves the desktop as it was.
+    /// a folder or shortcut made is shown; a file placed is handed to the
+    /// window it was dropped on, or why it could not be is held for the desktop
+    /// to state. Any other refusal is stated on `stderr` with the kernel's own
+    /// reason and leaves the desktop as it was.
     fn settle_desktop_call<S: DirectorySource>(
         done: DesktopAnswer,
         desktop: &mut Desktop<S>,
@@ -14672,18 +14672,17 @@ mod program {
                         let _ = launch
                             .launch_document(shell, compositor, &run_path, &label, name, &opened);
                     }
-                    Err(err) => {
-                        app::report(APP_NAME, format_args!("cannot open '{name}' ({err})"));
-                    }
+                    Err(err) => desktop.refuse(GestureRefusal::unopened(name, err)),
                 }
             }
-            DesktopAnswer::Placed { placed, opened } => match opened {
-                Ok(opened) => launch.place_document(&placed, &opened),
-                Err(err) => app::report(
-                    APP_NAME,
-                    format_args!("cannot place '{}' ({err})", placed.name.as_str()),
-                ),
-            },
+            DesktopAnswer::Placed { placed, opened } => {
+                let handed = opened
+                    .map_err(PlaceRefused::Unopened)
+                    .and_then(|opened| launch.place_document(&placed, &opened));
+                if let Err(why) = handed {
+                    desktop.refuse(placed.refusal(why));
+                }
+            }
             DesktopAnswer::Made { path, made } => {
                 settle_desktop_create(&path, made, desktop, shell, compositor);
             }
@@ -15404,27 +15403,28 @@ mod program {
     }
 
     impl DocumentRelay for RtDocumentRelay {
-        fn relay(
-            &mut self,
-            authority: DocumentAuthority,
-            writable: bool,
-            app: ProcId,
-        ) -> Result<u64, Errno> {
+        fn redeem(&mut self, grant: u64, from: ProcId) -> Result<u32, Errno> {
+            let fd = Errno::syscall_result(tairix_rt::fd_redeem_from(grant, from))?;
+            u32::try_from(fd).map_err(|_| Errno::OutOfRange)
+        }
+
+        fn mint(&mut self, fd: u32, writable: bool, app: ProcId) -> Result<u64, Errno> {
             let ceiling = tairix_browse::document::grant_ceiling(writable);
-            let minted = match authority {
-                DocumentAuthority::Delegated { grant, from } => {
-                    let relayed = tairix_rt::File::from_delegation_by(grant, from)
-                        .map_err(Errno::from_syscall)?;
-                    tairix_rt::fd_grant(relayed.fd(), ceiling, app)
-                }
-                DocumentAuthority::Held { fd } => tairix_rt::fd_grant(fd, ceiling, app),
-            };
-            let handle = Errno::syscall_result(minted)?;
+            let handle = Errno::syscall_result(tairix_rt::fd_grant(
+                fd,
+                ceiling,
+                app,
+                tairix_abi::GRANT_FILE_ONLY,
+            ))?;
             // Handle zero is the kernel's reserved invalid value, never a mint.
             if handle == 0 {
                 return Err(Errno::OutOfRange);
             }
             Ok(handle)
+        }
+
+        fn close(&mut self, fd: u32) {
+            drop(tairix_rt::File::adopt(fd));
         }
 
         fn decline(&mut self, grant: u64, from: ProcId) {
@@ -15533,25 +15533,19 @@ mod program {
 
         /// Hand the file `opened` read-only to the window `placed` names, to be
         /// placed in its document: queued for the application owning it, or
-        /// stated where it has gone.
+        /// answering why it could not be.
         fn place_document(
             &mut self,
             placed: &PlacedItem,
             opened: &tairix_browse::document::Opened,
-        ) {
+        ) -> Result<(), PlaceRefused> {
             let PlacedItem {
                 placement, name, ..
             } = placed;
-            let Some(app) = self.server.owner_of(placement.window_id) else {
-                app::report(
-                    APP_NAME,
-                    format_args!(
-                        "'{}' was dropped on a window that has since closed",
-                        name.as_str()
-                    ),
-                );
-                return;
-            };
+            let app = self
+                .server
+                .owner_of(placement.window_id)
+                .ok_or(PlaceRefused::WindowClosed)?;
             let fd = opened.file.fd();
             let handed =
                 self.server
@@ -15564,12 +15558,7 @@ mod program {
                             grant,
                         })
                     });
-            if let Err(err) = handed {
-                app::report(
-                    APP_NAME,
-                    format_args!("cannot place '{}' ({err:?})", name.as_str()),
-                );
-            }
+            handed.map_err(PlaceRefused::Untaken)
         }
 
         /// Hand the desktop's file manager `target`, starting it again with
@@ -16164,7 +16153,7 @@ mod program {
     ) -> Option<u64> {
         let owner = server.owner_of(window_id)?;
         let ceiling = tairix_browse::document::grant_ceiling(opened.writable);
-        let handle = tairix_rt::fd_grant(opened.file.fd(), ceiling, owner);
+        let handle = tairix_rt::fd_grant(opened.file.fd(), ceiling, owner, 0);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
     }
 

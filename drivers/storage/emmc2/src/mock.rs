@@ -39,10 +39,10 @@ pub(crate) const TABLE_SLAB_BYTES: usize = 4096;
 
 /// The status a command the card never answers leaves: the error summary
 /// plus the command-timeout error bit.
-pub(crate) const CMD_TIMEOUT: u32 = regs::INT_ERROR | (1 << 16);
+pub(crate) const CMD_TIMEOUT: u32 = regs::INT_ERROR | regs::INT_CMD_TIMEOUT;
 
 /// The status a data block whose CRC failed leaves.
-const DATA_CRC: u32 = regs::INT_ERROR | (1 << 21);
+pub(crate) const DATA_CRC: u32 = regs::INT_ERROR | regs::INT_DATA_CRC;
 
 /// `DAT[3:0]` all high in the present-state register.
 const DAT_LINES_HIGH: u32 = 0xF << 20;
@@ -472,6 +472,12 @@ impl MockSdhci {
         self.card_1v8
     }
 
+    /// Make the board unable to carry data at the mode the card is in now, so
+    /// every data block fails its CRC.
+    pub(crate) fn corrupt_data_path(&mut self) {
+        self.broken_modes |= 1 << self.card_bus_mode().function_index();
+    }
+
     /// Whether the host's timing is the one the card's mode needs: its
     /// signalling, UHS mode select, High Speed output timing and bus width.
     fn host_timing_matches(&self) -> bool {
@@ -604,7 +610,7 @@ impl MockSdhci {
             "a DMA command requires ADMA2 selected"
         );
         if self.dma_fails {
-            self.raise(regs::INT_ERROR | (1 << 25));
+            self.raise(regs::INT_ERROR | regs::INT_ADMA);
             return;
         }
         let blocks = ((self.blksizecnt >> 16) & 0xFFFF) as usize;

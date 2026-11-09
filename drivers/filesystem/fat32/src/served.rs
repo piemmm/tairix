@@ -23,6 +23,7 @@ impl ServedFormat for Served {
         volume: B,
         read_only: bool,
         _budget: WritebackBudget,
+        _log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<Fat32<B>>, DriverError> {
         let mut fs = Fat32::open(volume)?;
         if read_only {

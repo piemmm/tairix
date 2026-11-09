@@ -165,6 +165,11 @@ pub fn waiting(
 /// The baize over `area`, copied from the one `art` keeps; shaded straight
 /// onto the frame when there is no memory to keep one.
 fn felt(surface: &mut Surface, area: Rect, art: &mut CardArt) {
+    // A paint covering none of it, a status-line tick, must neither shade nor
+    // make the baize.
+    if !admits(surface, area) {
+        return;
+    }
     let palette = *art.palette();
     let kept = art.baize(area.width, area.height, |baize| {
         shade_felt(baize, Rect::new(0, 0, area.width, area.height), &palette);

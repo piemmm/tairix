@@ -33,6 +33,8 @@ pub use host::*;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod members;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
+mod offers;
+#[cfg(any(test, all(freestanding, feature = "rt")))]
 mod refit;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod scroll;
@@ -381,6 +383,11 @@ pub trait DocumentView: SavedDocument {
     fn refuse_save(&self, _name: &str, _target: SaveTarget) -> Option<String> {
         None
     }
+
+    /// Whether any file dropped on the document can be read into it: a view
+    /// that places none is never asked [`places`](Self::places), and files
+    /// offered over its windows go unanswered, which places nothing.
+    const PLACES: bool = false;
 
     /// Whether a file of media type `media` dropped at window-local `at` is
     /// read into the document there, as an import is; a drop it is not is

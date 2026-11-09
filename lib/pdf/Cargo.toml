@@ -15,7 +15,8 @@ tairix-bezier = { path = "../bezier", version = "=0.0.0" }
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 # Flate's DEFLATE: the one inflater the tree has.
 tairix-compress = { path = "../compress", version = "=0.0.0" }
-# LZW in the dialect TIFF and PDF share, and the JPEG decoder.
+# LZW in the dialect TIFF and PDF share, the JPEG decoder, and the PNG and
+# TIFF predictors' row routines.
 tairix-image = { path = "../image", version = "=0.0.0" }
 # The standard security handler's key derivation, RC4 and AES-CBC: the
 # tree's one cryptography crate.

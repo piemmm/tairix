@@ -2,16 +2,19 @@
 //! PostScript calculator, mapping inputs to outputs for shadings and tint
 //! transforms.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+use tairix_collections::try_arc;
 use tairix_inline::ArrayVec;
-use tairix_util::fallible::try_push;
+use tairix_util::fallible::{self, try_push};
 use tairix_util::mathf;
 
 use crate::document::Document;
 use crate::lex::{Lexer, Token};
-use crate::limits::MAX_FUNCTION_STEPS;
+use crate::limits::{MAX_EVALUATION_STEPS, MAX_FUNCTION_NODES};
+use crate::memo::{Bounds, Memo, Node, Walk};
 use crate::object::{real, Dict, Object};
 use crate::PdfError;
 
@@ -37,13 +40,15 @@ const MAX_INTERPOLATED_INPUTS: usize = 8;
 const MAX_PROGRAM: usize = 65_536;
 const MAX_STACK: usize = 100;
 
-/// The steps a document's functions may still take: every evaluation is
-/// charged its cost, so no file can make its colours unbounded work.
+/// The steps a document's evaluations may still take: every function read
+/// and run, and every optional content membership and expression tested, is
+/// charged its cost, so no file can make its colours or its visibility
+/// unbounded work.
 pub(crate) struct Work(Cell<u64>);
 
 impl Work {
     pub(crate) const fn new() -> Self {
-        Self(Cell::new(MAX_FUNCTION_STEPS))
+        Self(Cell::new(MAX_EVALUATION_STEPS))
     }
 
     /// Take `steps` from what is left.
@@ -79,6 +84,8 @@ pub(crate) struct Function {
     domain: Vec<(f64, f64)>,
     range: Option<Vec<(f64, f64)>>,
     kind: Kind,
+    /// How many stitching levels it nests beneath itself.
+    nested: usize,
 }
 
 #[derive(Debug)]
@@ -98,48 +105,93 @@ enum Kind {
         exponent: f64,
     },
     Stitching {
-        functions: Vec<Function>,
+        functions: Vec<Arc<Function>>,
         bounds: Vec<f64>,
         encode: Vec<(f64, f64)>,
     },
     Calculator(Vec<Op>),
 }
 
-impl Function {
-    /// The function `object` is: a dictionary or a stream.
-    pub(crate) fn load(document: &Document<'_>, object: &Object) -> Result<Self, PdfError> {
-        Self::load_at(document, object, 0)
-    }
+/// The function objects a document has read, by object number: one shared
+/// however many times over, by stitching functions or by colour spaces read
+/// again, is read once.
+pub(crate) type Functions = Memo<Arc<Function>>;
 
-    fn load_at(document: &Document<'_>, object: &Object, depth: usize) -> Result<Self, PdfError> {
-        // Stitching nests no deeper in any file written in earnest: past it
-        // lies a function that stitches itself.
-        if depth > MAX_FUNCTION_DEPTH {
-            return Err(PdfError::Malformed);
-        }
-        let object = document.resolve(object)?;
-        let dict = object.as_dict().ok_or(PdfError::Malformed)?;
-        let domain =
-            pairs(document, dict, b"Domain", MAX_COMPONENTS)?.ok_or(PdfError::Malformed)?;
-        let range = pairs(document, dict, b"Range", MAX_COMPONENTS)?;
-        let kind = match document.get(dict, b"FunctionType")?.as_int() {
-            Some(0) => sampled(document, &object, dict, &domain, range.as_deref())?,
-            Some(2) => exponential(document, dict, domain.len())?,
-            Some(3) => stitching(document, dict, &domain, depth)?,
-            Some(4) => {
-                let stream = object.as_stream().ok_or(PdfError::Malformed)?;
-                Kind::Calculator(compile(&document.decode(stream)?.bytes)?)
-            }
-            _ => return Err(PdfError::Unsupported),
-        };
-        if domain.is_empty() || domain.len() > MAX_COMPONENTS {
-            return Err(PdfError::Malformed);
-        }
-        Ok(Self {
-            domain,
-            range,
-            kind,
+impl Node for Arc<Function> {
+    fn nested(&self) -> usize {
+        self.nested
+    }
+}
+
+/// What a function and the functions it is built of are read within:
+/// stitching nests no deeper in any file written in earnest, and evaluation
+/// recurses as deep as it nests.
+const BOUNDS: Bounds = Bounds {
+    depth: MAX_FUNCTION_DEPTH,
+    nodes: MAX_FUNCTION_NODES,
+};
+
+/// The function `object` is, met `depth` stitching levels down `walk`.
+fn load_at(
+    document: &Document,
+    object: &Object,
+    depth: usize,
+    walk: &mut Walk,
+) -> Result<Arc<Function>, PdfError> {
+    document.work().charge(1)?;
+    document
+        .functions()
+        .node(object, depth, &BOUNDS, walk, |walk| {
+            read(document, object, depth, walk)
         })
+}
+
+/// The function `object` is, read from the file, met `depth` stitching levels
+/// down `walk`.
+fn read(
+    document: &Document,
+    object: &Object,
+    depth: usize,
+    walk: &mut Walk,
+) -> Result<Arc<Function>, PdfError> {
+    let object = document.resolve(object)?;
+    let dict = object.as_dict().ok_or(PdfError::Malformed)?;
+    let domain = pairs(document, dict, b"Domain", MAX_COMPONENTS)?.ok_or(PdfError::Malformed)?;
+    if domain.is_empty() {
+        return Err(PdfError::Malformed);
+    }
+    let range = pairs(document, dict, b"Range", MAX_COMPONENTS)?;
+    let kind = match document.get(dict, b"FunctionType")?.as_int() {
+        Some(0) => sampled(document, &object, dict, &domain, range.as_deref())?,
+        Some(2) => exponential(document, dict, domain.len())?,
+        Some(3) => stitching(document, dict, &domain, depth, walk)?,
+        Some(4) => {
+            let stream = object.as_stream().ok_or(PdfError::Malformed)?;
+            Kind::Calculator(compile(&document.decode(stream)?.bytes)?)
+        }
+        _ => return Err(PdfError::Unsupported),
+    };
+    let nested = match &kind {
+        Kind::Stitching { functions, .. } => functions
+            .iter()
+            .map(|function| function.nested + 1)
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    };
+    Ok(try_arc(Function {
+        domain,
+        range,
+        kind,
+        nested,
+    })?)
+}
+
+impl Function {
+    /// The function `object` is: a dictionary or a stream. A function object
+    /// met again is the one read before, wherever it is met.
+    pub(crate) fn load(document: &Document, object: &Object) -> Result<Arc<Self>, PdfError> {
+        load_at(document, object, 0, &mut Walk::default())
     }
 
     /// How many inputs it takes.
@@ -215,7 +267,7 @@ impl Function {
                     encode,
                     decode,
                 };
-                work.charge(grid.corners() * decode.len())?;
+                work.charge(grid.steps())?;
                 *outputs = sample(&clipped, &grid, samples, *full);
             }
             Kind::Exponential { c0, c1, exponent } => {
@@ -283,16 +335,45 @@ pub(crate) fn interpolate(x: f64, x0: f64, x1: f64, y0: f64, y1: f64) -> f64 {
     }
 }
 
-/// `key`'s array of numbers in `dict`, resolved.
+/// `key`'s array of at most `most` numbers in `dict`, resolved: a longer one
+/// is refused before any is resolved, so no array costs more than its reader
+/// can use.
+///
+/// # Errors
+///
+/// [`PdfError::Malformed`] for a longer array or one not all numbers.
 pub(crate) fn numbers(
-    document: &Document<'_>,
+    document: &Document,
     dict: &Dict,
     key: &[u8],
+    most: usize,
 ) -> Result<Option<Vec<f64>>, PdfError> {
     let object = document.get(dict, key)?;
     let Some(items) = object.as_array() else {
         return Ok(None);
     };
+    if items.len() > most {
+        return Err(PdfError::Malformed);
+    }
+    resolved(document, items).map(Some)
+}
+
+/// [`numbers`] as a function reads it, every number read charged to the
+/// document's work, since a function set inline is read again wherever what
+/// holds it is.
+fn bounded(
+    document: &Document,
+    dict: &Dict,
+    key: &[u8],
+    most: usize,
+) -> Result<Option<Vec<f64>>, PdfError> {
+    let read = numbers(document, dict, key, most)?;
+    document.work().charge(read.as_ref().map_or(0, Vec::len))?;
+    Ok(read)
+}
+
+/// `items`, each resolved to a finite number.
+fn resolved(document: &Document, items: &[Object]) -> Result<Vec<f64>, PdfError> {
     let mut values = Vec::new();
     values.try_reserve_exact(items.len())?;
     for item in items {
@@ -305,34 +386,34 @@ pub(crate) fn numbers(
         }
         values.push(value);
     }
-    Ok(Some(values))
+    Ok(values)
 }
 
 /// `key`'s array of numbers in `dict` read as pairs, at most `most` of them.
 fn pairs(
-    document: &Document<'_>,
+    document: &Document,
     dict: &Dict,
     key: &[u8],
     most: usize,
 ) -> Result<Option<Vec<(f64, f64)>>, PdfError> {
-    let Some(values) = numbers(document, dict, key)? else {
+    let Some(values) = bounded(document, dict, key, most.saturating_mul(2))? else {
         return Ok(None);
     };
-    if values.len() % 2 != 0 || values.len() / 2 > most {
+    if values.len() % 2 != 0 {
         return Err(PdfError::Malformed);
     }
-    Ok(Some(
-        values
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&[low, high]| (low, high))
-            .collect(),
-    ))
+    let split = values
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[low, high]| (low, high));
+    fallible::collected(values.len() / 2, split)
+        .map(Some)
+        .ok_or(PdfError::OutOfMemory)
 }
 
 fn sampled(
-    document: &Document<'_>,
+    document: &Document,
     object: &Object,
     dict: &Dict,
     domain: &[(f64, f64)],
@@ -460,10 +541,16 @@ impl Grid<'_> {
             1
         }
     }
+
+    /// The steps an evaluation takes: each corner found across every input
+    /// and read into every output.
+    fn steps(&self) -> usize {
+        self.corners() * (self.domain.len() + self.decode.len())
+    }
 }
 
 /// A sampled function's outputs at `inputs`, interpolated linearly between
-/// the samples about them.
+/// the samples about them, each corner found once for every output.
 fn sample(inputs: &[f64], grid: &Grid<'_>, samples: &[u32], full: f64) -> Values {
     let Grid {
         domain,
@@ -471,13 +558,12 @@ fn sample(inputs: &[f64], grid: &Grid<'_>, samples: &[u32], full: f64) -> Values
         encode,
         decode,
     } = *grid;
-    let outputs = decode.len();
     // Each input's sample below it and how far towards the next it lies.
     let mut cells: ArrayVec<(usize, f64), MAX_COMPONENTS> = ArrayVec::new();
-    for (index, &input) in inputs.iter().enumerate() {
-        let (low, high) = domain[index];
-        let (e0, e1) = encode[index];
-        let last = f64::from(size[index] - 1);
+    for (((&input, &(low, high)), &(e0, e1)), &extent) in
+        inputs.iter().zip(domain).zip(encode).zip(size)
+    {
+        let last = f64::from(extent - 1);
         let at = clamp(interpolate(input, low, high, e0, e1), 0.0, last);
         let below = mathf::floor(at).min(last - 1.0).max(0.0);
         let _ = cells.try_push((
@@ -486,35 +572,37 @@ fn sample(inputs: &[f64], grid: &Grid<'_>, samples: &[u32], full: f64) -> Values
         ));
     }
     let interpolated = inputs.len() <= MAX_INTERPOLATED_INPUTS;
-    let corners = grid.corners();
-    let mut values = Values::new();
-    for (output, &(d0, d1)) in decode.iter().enumerate() {
-        let mut total = 0.0;
-        for corner in 0..corners {
-            let mut weight = 1.0;
-            let mut offset = 0usize;
-            let mut stride = outputs;
-            for (index, &(below, fraction)) in cells.iter().enumerate() {
-                let (step, share) = if !interpolated {
-                    (usize::from(fraction >= 0.5), 1.0)
-                } else if corner >> index & 1 == 1 {
-                    (1, fraction)
-                } else {
-                    (0, 1.0 - fraction)
-                };
-                let extent = size[index] as usize;
-                offset += (below + step).min(extent - 1) * stride;
-                stride *= extent;
-                weight *= share;
-            }
-            if weight > 0.0 {
-                total +=
-                    weight * f64::from(samples.get(offset + output).copied().unwrap_or(0)) / full;
+    let mut totals = values(core::iter::repeat_n(0.0, decode.len()));
+    for corner in 0..grid.corners() {
+        let mut weight = 1.0;
+        let mut offset = 0usize;
+        let mut stride = decode.len();
+        for (index, (&(below, fraction), &extent)) in cells.iter().zip(size).enumerate() {
+            let (step, share) = if !interpolated {
+                (usize::from(fraction >= 0.5), 1.0)
+            } else if corner >> index & 1 == 1 {
+                (1, fraction)
+            } else {
+                (0, 1.0 - fraction)
+            };
+            let extent = extent as usize;
+            offset += (below + step).min(extent - 1) * stride;
+            stride *= extent;
+            weight *= share;
+        }
+        if weight > 0.0 {
+            let held = samples.get(offset..).unwrap_or_default();
+            for (total, &value) in totals.iter_mut().zip(held) {
+                *total += weight * f64::from(value);
             }
         }
-        let _ = values.try_push(d0 + total * (d1 - d0));
     }
-    values
+    values(
+        decode
+            .iter()
+            .zip(&totals)
+            .map(|(&(d0, d1), &total)| d0 + total / full * (d1 - d0)),
+    )
 }
 
 /// `below`, a sample position already floored and held within a size, as an
@@ -528,20 +616,17 @@ fn sample_index(below: f64) -> usize {
     below as usize
 }
 
-fn exponential(document: &Document<'_>, dict: &Dict, inputs: usize) -> Result<Kind, PdfError> {
+fn exponential(document: &Document, dict: &Dict, inputs: usize) -> Result<Kind, PdfError> {
     if inputs != 1 {
         return Err(PdfError::Malformed);
     }
     let read = |key: &[u8], default: f64| -> Result<Vec<f64>, PdfError> {
-        match numbers(document, dict, key)? {
-            Some(read) if read.len() <= MAX_COMPONENTS => Ok(read),
-            Some(_) => Err(PdfError::Malformed),
-            None => {
-                let mut one = Vec::new();
-                try_push(&mut one, default)?;
-                Ok(one)
-            }
+        if let Some(read) = bounded(document, dict, key, MAX_COMPONENTS)? {
+            return Ok(read);
         }
+        let mut one = Vec::new();
+        try_push(&mut one, default)?;
+        Ok(one)
     };
     let (c0, c1) = (read(b"C0", 0.0)?, read(b"C1", 1.0)?);
     let exponent = document
@@ -555,10 +640,11 @@ fn exponential(document: &Document<'_>, dict: &Dict, inputs: usize) -> Result<Ki
 }
 
 fn stitching(
-    document: &Document<'_>,
+    document: &Document,
     dict: &Dict,
     domain: &[(f64, f64)],
     depth: usize,
+    walk: &mut Walk,
 ) -> Result<Kind, PdfError> {
     if domain.len() != 1 {
         return Err(PdfError::Malformed);
@@ -571,22 +657,25 @@ fn stitching(
     if listed.len() > MAX_STITCHED {
         return Err(PdfError::TooComplex);
     }
-    let mut functions = Vec::new();
-    functions.try_reserve_exact(listed.len())?;
-    for function in listed {
-        let function = Function::load_at(document, function, depth + 1)?;
-        if function.inputs() != 1 {
-            return Err(PdfError::Malformed);
-        }
-        functions.push(function);
-    }
-    let bounds = numbers(document, dict, b"Bounds")?.ok_or(PdfError::Malformed)?;
-    let encode = pairs(document, dict, b"Encode", MAX_STITCHED)?.ok_or(PdfError::Malformed)?;
-    if bounds.len() + 1 != functions.len() || encode.len() != functions.len() {
+    // Checked before any piece is read: a stitching that cannot stand costs
+    // none of its pieces.
+    let bounds =
+        bounded(document, dict, b"Bounds", listed.len() - 1)?.ok_or(PdfError::Malformed)?;
+    let encode = pairs(document, dict, b"Encode", listed.len())?.ok_or(PdfError::Malformed)?;
+    if bounds.len() + 1 != listed.len() || encode.len() != listed.len() {
         return Err(PdfError::Malformed);
     }
     if bounds.windows(2).any(|pair| pair[0] > pair[1]) {
         return Err(PdfError::Malformed);
+    }
+    let mut functions = Vec::new();
+    functions.try_reserve_exact(listed.len())?;
+    for function in listed {
+        let function = load_at(document, function, depth + 1, walk)?;
+        if function.inputs() != 1 {
+            return Err(PdfError::Malformed);
+        }
+        functions.push(function);
     }
     Ok(Kind::Stitching {
         functions,
@@ -943,16 +1032,16 @@ fn arrange(op: Op, stack: &mut Stack) -> Option<()> {
         }
         Op::Copy => {
             let count = usize::try_from(integer(stack.pop()?.number()?)?).ok()?;
-            let start = stack.len().checked_sub(count)?;
-            for at in start..start + count {
-                let value = stack[at];
+            let end = stack.len();
+            for at in end.checked_sub(count)?..end {
+                let value = *stack.get(at)?;
                 stack.try_push(value).ok()?;
             }
         }
         Op::Index => {
             let depth = usize::try_from(integer(stack.pop()?.number()?)?).ok()?;
-            let at = stack.len().checked_sub(depth + 1)?;
-            let value = stack[at];
+            let at = stack.len().checked_sub(depth.checked_add(1)?)?;
+            let value = *stack.get(at)?;
             stack.try_push(value).ok()?;
         }
         _ => {
@@ -961,7 +1050,7 @@ fn arrange(op: Op, stack: &mut Stack) -> Option<()> {
             let start = stack.len().checked_sub(count)?;
             if count > 0 {
                 let turn = usize::try_from(shift.rem_euclid(i64::try_from(count).ok()?)).ok()?;
-                stack[start..].rotate_right(turn);
+                stack.get_mut(start..)?.rotate_right(turn);
             }
         }
     }

@@ -187,7 +187,7 @@ fn aes(revision_six: bool) -> Vec<u8> {
 /// Open `file` and interpret every page, answering how many items they made.
 fn read_whole(file: &[u8], password: Option<&[u8]>) -> Result<usize, PdfError> {
     let document = Document::open(
-        file,
+        file.to_vec(),
         &Options {
             password,
             budget: BUDGET,

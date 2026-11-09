@@ -27,7 +27,7 @@ fn page_file(node: &str, page: &str) -> alloc::vec::Vec<u8> {
 
 fn size(node: &str, page: &str) -> Result<(f64, f64), PdfError> {
     let file = page_file(node, page);
-    let document = Document::open(&file, &OPTIONS)?;
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS)?;
     Ok(document.page(0)?.size())
 }
 
@@ -48,7 +48,7 @@ fn a_page_inherits_its_box_and_rotation_from_the_tree() {
 #[test]
 fn a_page_inherits_its_resources() {
     let file = page_file("/Resources 5 0 R", "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let page = document.page(0).expect("a page");
     let resources = page.resources().expect("its resources");
     assert!(resources.get(b"Font").is_some());
@@ -139,7 +139,7 @@ fn the_transform_puts_the_crop_box_top_left_at_the_origin_for_every_turn() {
             "",
             &format!("/MediaBox [10 20 110 70] /Rotate {}", turns * 90),
         );
-        let document = Document::open(&file, &OPTIONS).expect("a document");
+        let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
         let transform = document.page(0).expect("a page").transform();
         for (&(x, y), &(ex, ey)) in corners.iter().zip(expected) {
             let mapped = transform.map(Point::new(x, y));

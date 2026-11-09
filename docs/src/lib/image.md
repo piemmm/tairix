@@ -1033,6 +1033,13 @@ it.
   `tairix_compress::zlib::Error`, the fax code, row-overflow, truncation,
   missing-sync and uncompressed-mode refusals, and a JPEG unit of the wrong
   size; plus `OutOfMemory` for a buffer the allocator refused.
+- `defilter_png_row(filter_type, samples, prior, bpp)` and
+  `undo_tiff_horizontal_big_endian(row, bits, stride, count)` — one row's PNG
+  filter, and one row's TIFF horizontal differencing over big-endian samples
+  of 1, 2, 4, 8, 16 or 32 bits (those narrower than a byte packed from its
+  high bit down, summed modulo their width), undone in place and never past
+  the row's own bytes: the predictors a PDF stream's `/DecodeParms` name,
+  which `lib/pdf` undoes through these rather than a second copy.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by

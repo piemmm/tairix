@@ -398,7 +398,7 @@ impl<'a> Page<'a> {
             // A subsampled page stores blocks rather than rows of samples,
             // so there is no row for a predictor to run along.
             _ if subsampled => return Err(DecodeError::TiffInvalidPredictor),
-            PREDICTOR_HORIZONTAL if matches!(samples.bits, 8 | 16 | 32) => {}
+            PREDICTOR_HORIZONTAL if differenced(samples.bits) => {}
             PREDICTOR_FLOAT if samples.format == SampleFormat::Float => {}
             _ => return Err(DecodeError::TiffInvalidPredictor),
         }
@@ -831,8 +831,61 @@ fn decompress(
     }
 }
 
+/// Whether the horizontal predictor differences samples `bits` wide.
+const fn differenced(bits: u32) -> bool {
+    matches!(bits, 8 | 16 | 32)
+}
+
+/// Undo the horizontal predictor over a row of `count` big-endian samples of
+/// `bits` each, `stride` to a pixel, as PDF's predictor 2 stores them: each
+/// the sum of itself and the same sample of the pixel before, modulo its
+/// width, a sample narrower than a byte packed from the high bit down (ISO
+/// 32000-2 §7.4.4.4). A row shorter than `count` samples is undone as far as
+/// it goes.
+///
+/// # Errors
+///
+/// [`DecodeError::TiffInvalidPredictor`] for samples the predictor does not
+/// difference: other than 1, 2, 4, 8, 16 or 32 bits wide.
+pub fn undo_horizontal_big_endian(
+    row: &mut [u8],
+    bits: u32,
+    stride: usize,
+    count: usize,
+) -> Result<(), DecodeError> {
+    match bits {
+        1 | 2 | 4 => undo_horizontal_packed(row, bits, stride, count),
+        _ if differenced(bits) => undo_horizontal(row, Endian::Big, bits, stride, count),
+        _ => return Err(DecodeError::TiffInvalidPredictor),
+    }
+    Ok(())
+}
+
+/// [`undo_horizontal`] over samples of `bits` less than a byte, packed from
+/// each byte's high bit down.
+fn undo_horizontal_packed(row: &mut [u8], bits: u32, stride: usize, count: usize) {
+    let per_byte = 8 / bits as usize;
+    let count = count.min(row.len().saturating_mul(per_byte));
+    let mask = (1u8 << bits) - 1;
+    let place = |index: usize| (index / per_byte, 8 - bits as usize * (index % per_byte + 1));
+    for index in stride..count {
+        let (from, from_shift) = place(index - stride);
+        let (to, to_shift) = place(index);
+        let (Some(&previous), Some(&current)) = (row.get(from), row.get(to)) else {
+            return;
+        };
+        let sum = (((current >> to_shift) & mask) + ((previous >> from_shift) & mask)) & mask;
+        if let Some(byte) = row.get_mut(to) {
+            *byte = current & !(mask << to_shift) | sum << to_shift;
+        }
+    }
+}
+
 /// Undo the horizontal predictor over one row's samples.
 fn undo_horizontal(row: &mut [u8], endian: Endian, bits: u32, stride: usize, count: usize) {
+    // A row holds no more samples than its bytes do, whatever it is said to.
+    let width = usize::try_from(bits / 8).map_or(1, |width| width.max(1));
+    let count = count.min(row.len() / width);
     match bits {
         16 => {
             for index in stride..count {
@@ -902,14 +955,7 @@ fn undo_floating_point(
     width: usize,
     stride: usize,
 ) -> Result<(), DecodeError> {
-    for index in stride..row.len() {
-        let Some(&previous) = row.get(index - stride) else {
-            return Ok(());
-        };
-        if let Some(byte) = row.get_mut(index) {
-            *byte = byte.wrapping_add(previous);
-        }
-    }
+    undo_horizontal(row, endian, 8, stride, row.len());
     let samples = row.len() / width;
     if !fallible::grow_to(shuffle, row.len(), 0u8) {
         return Err(DecodeError::OutOfMemory);

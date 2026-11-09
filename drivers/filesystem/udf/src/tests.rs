@@ -2236,12 +2236,22 @@ fn the_served_driver_states_a_refusal_only_for_a_volume_it_was_asked_to_write() 
         backing: 1 << 30,
         gauge: &tairix_reclaim::Unpressured,
     };
-    let writable = crate::Served::open(formatted(512, 0x0201).into_device(), false, budget)
-        .expect("opens writable");
+    let writable = crate::Served::open(
+        formatted(512, 0x0201).into_device(),
+        false,
+        budget,
+        &tairix_log::DiscardSink,
+    )
+    .expect("opens writable");
     assert_eq!(writable.format, tairix_abi::volume::FormatName::Udf);
     assert_eq!(writable.write_refusal, None);
-    let read_only = crate::Served::open(formatted(512, 0x0201).into_device(), true, budget)
-        .expect("opens read-only");
+    let read_only = crate::Served::open(
+        formatted(512, 0x0201).into_device(),
+        true,
+        budget,
+        &tairix_log::DiscardSink,
+    )
+    .expect("opens read-only");
     assert_eq!(read_only.write_refusal, None);
 }
 

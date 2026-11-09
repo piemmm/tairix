@@ -126,10 +126,10 @@ struct Backdrop {
 /// A window: a [`Surface`] placed at a screen [`Point`] with a
 /// per-window opacity, corner style, and pointer-cursor hint.
 ///
-/// The content pixels of an *app-presented* window
+/// The content pixels of a hidden *app-presented* window
 /// ([`is_app_presented`](Self::is_app_presented)) are **releasable**: the
 /// compositor may hand them back to the machine under memory pressure and
-/// ask the owning app to present again
+/// ask the owning app to present again once the window is shown
 /// ([`Compositor::release_content_under_pressure`]). A released window
 /// keeps everything that makes it a window — its client size, origin,
 /// furniture, cursor hint, viewport, focus and size state — and simply

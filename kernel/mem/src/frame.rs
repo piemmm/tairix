@@ -665,6 +665,22 @@ impl FrameAllocatorState {
             .saturating_sub(self.reserve_frames.saturating_add(self.committed_frames))
     }
 
+    /// Frames a kernel-path draw charged to `class` may take. No draw takes a
+    /// frame a user commitment is owed. The kernel's own structures may take
+    /// the whole reserve; memory drawn on a process's demand — a restored
+    /// page, a file page, the compressed store — only its upper half, so the
+    /// kernel keeps a share no process can drain.
+    fn kernel_headroom(&self, class: MemoryClass) -> usize {
+        let floor = match class {
+            MemoryClass::PageTable | MemoryClass::Kernel | MemoryClass::Dma => 0,
+            MemoryClass::UserAnon | MemoryClass::UserFile | MemoryClass::Compressed => {
+                self.reserve_frames / 2
+            }
+        };
+        self.free_frames
+            .saturating_sub(self.committed_frames.saturating_add(floor))
+    }
+
     /// The bitmap slots frames `[start, start + count)` occupy, or `None` when
     /// the run leaves the usable span the bitmap represents.
     fn slot_run(&self, start: usize, count: usize) -> Option<SlotRun> {
@@ -1416,18 +1432,26 @@ impl FrameAllocator {
     /// Allocate `2^order` contiguous frames, aligned to that boundary and
     /// charged to `class`.
     ///
-    /// This is the **kernel-internal** path: it draws the whole free pool,
-    /// including the reserve, so the kernel can always make progress (grow
-    /// its heap, build page tables, service a fault) even under user memory
-    /// pressure. A *user* commit must use [`Self::alloc_order_user`].
+    /// This is the **kernel-internal** path: it may draw into the reserve,
+    /// so the kernel can make progress (grow its heap, build page tables,
+    /// service a fault) under user memory pressure, but never a frame a user
+    /// commitment is owed, and a draw on a process's demand only into the
+    /// reserve's upper half. A *user* commit must use
+    /// [`Self::alloc_order_user`].
     ///
     /// # Errors
     ///
     /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
-    /// - [`AllocError::OutOfMemory`] if no block of any order ≥ `order`
-    ///   is available.
+    /// - [`AllocError::OutOfMemory`] if `class` may not take `2^order` more
+    ///   frames, or no block of any order ≥ `order` is available.
     pub fn alloc_order(&self, class: MemoryClass, order: u32) -> Result<Frame, AllocError> {
+        if order > MAX_ORDER {
+            return Err(AllocError::SizeUnsupported);
+        }
         let mut g = self.inner.lock();
+        if (1usize << order) > g.kernel_headroom(class) {
+            return Err(AllocError::OutOfMemory);
+        }
         g.alloc_order(class, order).map(Frame)
     }
 
@@ -2704,6 +2728,41 @@ mod tests {
         assert_eq!(orders, [3, 0, 0, 0]);
         a.free_chunks(&chunks);
         assert_eq!(a.free_frames(), 12);
+    }
+
+    /// The reserve is the kernel's: memory drawn on a process's demand stops
+    /// at its upper half, the kernel's own structures may take the rest, and
+    /// no kernel draw takes a frame a user commitment is owed.
+    #[test]
+    fn a_process_s_demand_leaves_the_kernel_its_half_of_the_reserve() {
+        let a = FrameAllocator::new(&small_map(4 * RESERVE_DIVISOR)).unwrap();
+        let reserve = a.reserve_frames();
+        assert!(reserve >= 2);
+        a.commit(5).unwrap();
+        let mut held = Vec::new();
+        while let Ok(frame) = a.alloc(MemoryClass::Compressed) {
+            held.push(frame);
+        }
+        assert_eq!(
+            a.free_frames(),
+            5 + reserve / 2,
+            "a restore stops at the kernel's half"
+        );
+        assert_eq!(
+            a.alloc(MemoryClass::UserFile).err(),
+            Some(AllocError::OutOfMemory)
+        );
+        while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
+            held.push(frame);
+        }
+        assert_eq!(a.free_frames(), 5, "the kernel stops at what is promised");
+        held.push(
+            a.alloc_user_committed()
+                .expect("a committed page still finds its frame"),
+        );
+        for frame in held {
+            a.free(frame).unwrap();
+        }
     }
 
     #[test]

@@ -123,6 +123,13 @@ pub enum Errno {
     /// oracle to probe the kernel's memory layout (fail
     /// closed;). It is also the fail-closed result when the caller
     /// has no registered address space at all (e.g. a kernel task).
+    ///
+    /// A buffer that is the caller's but has no page resident is backed as
+    /// a fault would back it, and one that cannot be is never this: the
+    /// copy answers [`OutOfMemory`](Self::OutOfMemory) for a machine with no
+    /// memory to back it, [`DeviceFault`](Self::DeviceFault) for a file page
+    /// the storage could not supply, and [`MediumError`](Self::MediumError)
+    /// for a page whose contents were lost.
     BadAddress = 18,
     /// A non-blocking operation has nothing to return right now and
     /// would have to block to make progress.
@@ -141,7 +148,10 @@ pub enum Errno {
     /// The TAIRiX equivalent of POSIX `ENOMEM`. Emitted by the anonymous
     /// `mem_map` syscall (`plans/SPAWN.md` SP5) when the kernel cannot map
     /// a fresh region into the caller's address space because physical
-    /// frames are exhausted. It is the deterministic, fail-closed result
+    /// frames are exhausted, and by any call that copies to or from a
+    /// buffer of the caller's whose page the machine has no memory to back,
+    /// or reclaims again before the copy can use it. It is the
+    /// deterministic, fail-closed result
     /// of out-of-memory: allocation failure is always a `Result`, never a
     /// panic. It is distinct from
     /// [`NoSpace`](Self::NoSpace), which is a *storage* backend running out
@@ -345,7 +355,9 @@ pub enum Errno {
     /// from the retryable transient classes: the data at that block is
     /// gone, so the block layer surfaces it as a hard I/O error rather
     /// than reissuing the transfer. Emitted on the block-service
-    /// completion seam ([`crate::blkio`]).
+    /// completion seam ([`crate::blkio`]), and by a call that copies to or
+    /// from a page of the caller's memory whose contents were lost, which
+    /// also ends the caller as its own touch of the page would.
     MediumError = 39,
     /// The device is present but unresponsive, or has been surprise-removed.
     ///

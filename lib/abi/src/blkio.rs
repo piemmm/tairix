@@ -488,8 +488,9 @@ impl BlkStatus {
     /// reasons, and only one of them is about the device's health. A bad
     /// sector ([`DriverError::MediumError`]), a gone/unresponsive device
     /// ([`DriverError::DeviceOffline`]), a busy device or a recovered stall
-    /// ([`DriverError::Busy`] / [`DriverError::EndpointStalled`]), a device
-    /// that did not answer in time ([`DriverError::TimedOut`]), and an
+    /// ([`DriverError::Busy`] / [`DriverError::EndpointStalled`]), a transfer
+    /// the bus corrupted ([`DriverError::TransferCorrupted`]), a device that
+    /// did not answer in time ([`DriverError::TimedOut`]), and an
     /// unrecoverable hardware fault ([`DriverError::DeviceFault`]) all speak
     /// to the *device* and are folded into [`BlkHealth`]. A rejected request
     /// — an out-of-range LBA, a write to a read-only unit, an unsupported op
@@ -500,7 +501,7 @@ impl BlkStatus {
         match err {
             DriverError::MediumError => Some(Self::MediumError),
             DriverError::DeviceOffline => Some(Self::Offline),
-            DriverError::Busy => Some(Self::TransientError),
+            DriverError::Busy | DriverError::TransferCorrupted => Some(Self::TransientError),
             DriverError::EndpointStalled => Some(Self::Reset),
             DriverError::TimedOut => Some(Self::Timeout),
             DriverError::DeviceFault => Some(Self::Fatal),
@@ -1305,17 +1306,23 @@ impl IoBudget {
         self.grace_ns / (self.max_retries as u64 + 1)
     }
 
-    /// How long a consumer waits before reissuing `outcome`, its `attempts`
-    /// reissues made, or `None` when it must fail the request instead: the
-    /// bounded policy of [`Self::should_reissue`], at once when the serving
-    /// driver says its recovery has worked ([`BlkReissue::Now`]) and after
-    /// the class's pacing otherwise.
+    /// How long a consumer waits before reissuing a request answered `status`
+    /// with the driver's `reissue`, its `attempts` reissues made, or `None`
+    /// when it must fail the request instead: the bounded policy of
+    /// [`Self::should_reissue`], at once when the serving driver says its
+    /// recovery has worked ([`BlkReissue::Now`]) and after the class's pacing
+    /// otherwise.
     #[must_use]
-    pub const fn reissue_wait_ns(self, outcome: &BlkOutcome, attempts: u32) -> Option<u64> {
-        if !self.should_reissue(outcome.status, attempts) {
+    pub const fn reissue_wait_ns(
+        self,
+        status: BlkStatus,
+        reissue: BlkReissue,
+        attempts: u32,
+    ) -> Option<u64> {
+        if !self.should_reissue(status, attempts) {
             return None;
         }
-        Some(match outcome.reissue {
+        Some(match reissue {
             BlkReissue::Now => 0,
             BlkReissue::Paced => self.reissue_pacing_ns(),
         })
@@ -4245,6 +4252,7 @@ mod tests {
             (DriverError::MediumError, BlkStatus::MediumError),
             (DriverError::DeviceOffline, BlkStatus::Offline),
             (DriverError::Busy, BlkStatus::TransientError),
+            (DriverError::TransferCorrupted, BlkStatus::TransientError),
             (DriverError::EndpointStalled, BlkStatus::Reset),
             (DriverError::TimedOut, BlkStatus::Timeout),
             (DriverError::DeviceFault, BlkStatus::Fatal),
@@ -5438,30 +5446,21 @@ mod tests {
     #[test]
     fn a_reissue_waits_out_the_pacing_unless_its_driver_vouches_for_it() {
         let budget = BlkDeviceClass::Rotational.budget();
-        let outcome = |status, reissue| BlkOutcome {
-            status,
-            geometry: BlkCompletion::default(),
-            error: status.default_errno(),
-            reissue,
-        };
         assert_eq!(
-            budget.reissue_wait_ns(&outcome(BlkStatus::Reset, BlkReissue::Now), 0),
+            budget.reissue_wait_ns(BlkStatus::Reset, BlkReissue::Now, 0),
             Some(0)
         );
         assert_eq!(
-            budget.reissue_wait_ns(&outcome(BlkStatus::Reset, BlkReissue::Paced), 0),
+            budget.reissue_wait_ns(BlkStatus::Reset, BlkReissue::Paced, 0),
             Some(budget.reissue_pacing_ns())
         );
         // A driver's word buys no reissue the budget does not allow.
         assert_eq!(
-            budget.reissue_wait_ns(
-                &outcome(BlkStatus::Reset, BlkReissue::Now),
-                budget.max_retries
-            ),
+            budget.reissue_wait_ns(BlkStatus::Reset, BlkReissue::Now, budget.max_retries),
             None
         );
         assert_eq!(
-            budget.reissue_wait_ns(&outcome(BlkStatus::Offline, BlkReissue::Now), 0),
+            budget.reissue_wait_ns(BlkStatus::Offline, BlkReissue::Now, 0),
             None
         );
     }

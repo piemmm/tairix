@@ -117,15 +117,16 @@ use tairix_collections::RangeError;
 use tairix_inline::ArrayVec;
 use tairix_kernel_ipc::{
     CallEndpoint, CallEndpointLimits, CallTicket, Collector, EndpointId, PortRegistry,
-    ReplyOutcome, Room, RoomWake,
+    RecvDelivered, ReplyOutcome, Room, RoomWake,
 };
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
 use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
-    copy_in, copy_out, AllocError, DmaCustodian, DmaError, FrameAllocator, PageCandidate, PhysMap,
-    RamzipFaultOutcome, Retire, SharedMemory, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    copy_in, copy_out, next_unmapped_page, AllocError, DmaCustodian, DmaError, FrameAllocator,
+    PageCandidate, PhysMap, RamzipFaultOutcome, Retire, SharedMemory, UaccessError,
+    UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
@@ -151,8 +152,9 @@ use crate::aspace::{
     FileRegion, LoadedDriver, OpenBacking, SnapshotRetire,
 };
 use crate::audit::AuditEvent;
+use crate::backing::{Backing, Unbacked};
 use crate::bootinfo::KernelArch;
-use crate::console::{ConsoleDevice, ConsoleWrite, NO_CONSOLES};
+use crate::console::{ConsoleDevice, ConsoleWrite, CONSOLE_READ_MAX, NO_CONSOLES};
 use crate::devres::{
     addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
     DmaQuarantineFacility, MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility,
@@ -172,7 +174,7 @@ use crate::kthread::{reschedule_current, spawn_kthread_with_stack_parked, Yielde
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::peerwatch::PeerWatch;
 use crate::procsignal::{ProcessSignal, NULL_PROCESS_SIGNAL};
-use crate::procwait::{ChildPeek, ProcessWait, NULL_PROCESS_WAIT};
+use crate::procwait::{ChildPeek, ProcessWait, WaitedChild, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::seat::{InputKind, SeatRegistry, NULL_SEAT_REGISTRY};
@@ -225,6 +227,10 @@ fn served_endpoint(
 fn stage_buffer(len: usize) -> Result<Vec<u8>, Errno> {
     tairix_util::fallible::zeroed(len).ok_or(Errno::OutOfMemory)
 }
+
+/// The stage a stream transfer falls back to on the kernel stack when the heap
+/// refuses a larger one: a worker's nudge, or a short read, needs no more.
+const SMALL_STAGE_BYTES: usize = 256;
 
 /// Whom a seat lease `caller` takes or presents names: its process. A lease is
 /// per-process authority the process teardown releases, and a thread's own id
@@ -605,14 +611,38 @@ where
 /// object ([`crate::pipe::ReadStep`], [`crate::pty::PtyReadStep`]) maps into
 /// this at the call site.
 enum StreamReadStep {
-    /// `n` bytes were copied into the staging buffer (`0..=len`).
+    /// `n` bytes were delivered to the reader and taken (`0..=len`).
     Read(usize),
     /// The ring is empty and every peer end is closed: end-of-stream.
     Eof,
     /// The ring is empty but a peer is still live: park and retry.
     Empty,
-    /// The reader may not read the stream now; nothing was taken.
-    Refused(Errno),
+}
+
+/// Where one stream read step delivers: the caller's buffer of `len` bytes at
+/// `buf`, reached through its address space as one attempt of a fault-aware
+/// copy sees it.
+struct StreamDelivery<'a> {
+    space: &'a dyn UserAddressSpace,
+    physmap: &'a dyn PhysMap,
+    buf: u64,
+    len: usize,
+}
+
+impl StreamDelivery<'_> {
+    /// The most bytes the read may deliver.
+    const fn max(&self) -> usize {
+        self.len
+    }
+
+    /// Copy `bytes` to the caller's buffer at offset `at`.
+    fn deliver(&mut self, at: usize, bytes: &[u8]) -> Result<(), UaccessError> {
+        let to = self
+            .buf
+            .checked_add(at as u64)
+            .ok_or(UaccessError::LengthOverflow)?;
+        copy_out(self.space, self.physmap, VirtAddr::new(to), bytes)
+    }
 }
 
 /// The outcome of one non-blocking write step over a byte-stream backing,
@@ -1089,6 +1119,720 @@ impl<'a, A> KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
 {
+    /// [`Self::waitset_wait`]'s wait, in the set's lent `scratch`.
+    // The single park loop: register on every wake channel the set's members
+    // need, scan readiness, park, and consume the winner's edge in one place
+    // so the register-before-park lost-wake interlock is not split apart.
+    #[allow(clippy::too_many_lines)]
+    fn waitset_wait_in(
+        &self,
+        caller: &CallerContext<'_>,
+        set: u64,
+        timeout_ns: u64,
+        token_out: u64,
+        scratch: &mut crate::waitset::WaitScratch,
+    ) -> SyscallResult {
+        let crate::waitset::WaitScratch {
+            pledges,
+            members,
+            stream_keys,
+            replies,
+            watch_keys,
+        } = scratch;
+        let members: &[crate::waitset::Member] = members;
+
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let sched_task = caller.task_id.0;
+        // Every row this wait files was pledged as its member was added, so
+        // the wait needs no memory; a concurrent wait lent buffers of its own
+        // holds no pledges, and files as any wait would.
+        let pledged = pledges.held();
+        let file = |queue: &crate::waitq::WaitQueue, key: WakeKey, deadline: u64| {
+            if pledged {
+                queue.register_pledged(key, sched_task, deadline)
+            } else {
+                queue.register_keyed(key, sched_task, deadline)
+            }
+        };
+        // One saturating add from the clock so a `u64::MAX` timeout stays
+        // `NO_DEADLINE` (explicit wake only) rather than wrapping to a tiny
+        // value (fail closed) — exactly as `irq_wait` computes it.
+        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
+
+        // Register on the wake channels *before* the first scan so an
+        // event arriving in the register/park window is not lost:
+        // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
+        // `NO_DEADLINE`) and `IRQ_WAITQ` (a member line firing, plus the timed
+        // sweep that enforces the timeout). `register` is idempotent.
+        // `SEAT_INPUT_WAITQ` is joined only by a set that actually holds a
+        // `SeatInput` member, so the pointer-rate wakes a drag produces never
+        // touch an unrelated waitset waiter.
+        let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
+        // `PROCWAIT_WAITQ` only by a set holding a `Child` member, under the
+        // caller's own process key: a child's exit or stop wakes its parent's
+        // waiters, never every waiter on the machine.
+        let child_key = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::Child)
+            .then(|| crate::waitq::procwait_key(caller.process()));
+        // `STREAM_WAITQ` is joined once per `Stream` or `StreamRoom` member,
+        // under that descriptor's own readable- or writable-side key, so
+        // traffic on any other stream — every other pipe and pty on the
+        // machine — never wakes this waiter. Both kinds register here
+        // because both sides of a ring are that one queue's keys: a peer's
+        // drain releases the space a room member waits on exactly as an
+        // append releases the bytes a read member waits on. A member whose
+        // descriptor no longer resolves registers nothing: it can never
+        // report ready either.
+        //
+        // The stream a member names is resolved *once*, here, so the wait
+        // follows the object this descriptor held at entry. A sibling thread
+        // of the same process could close that number and open something else
+        // at it mid-wait; the readiness scan re-resolves the number and so
+        // stops reporting the retired stream, and the wait's own deadline
+        // bounds it. Following a replacement is not expressible anyway: the
+        // swap can always land between a re-resolution and the peer's write.
+        {
+            let aspaces = self.aspaces.read();
+            stream_keys.extend(members.iter().filter_map(|m| {
+                let fd = u32::try_from(m.id).ok()?;
+                match m.kind {
+                    WaitSourceKind::Stream => aspaces.stream_read_wait_key(caller.process(), fd),
+                    WaitSourceKind::StreamRoom => {
+                        aspaces.stream_write_wait_key(caller.process(), fd)
+                    }
+                    _ => None,
+                }
+            }));
+        }
+        // A slot this thread owed a port's room since its last wait is let go
+        // of unless this wait watches the port again; a budget release that
+        // wait kept passes on, since this thread is waiting again. Taken after
+        // every step that refuses the wait outright, so such a refusal leaves
+        // the debt as it was.
+        let earlier = crate::procsignal::with_gate(sched_task, |gate| gate.room_debt().take());
+        if let Some(owed) = earlier.flatten() {
+            let watched = members
+                .iter()
+                .any(|m| m.kind == WaitSourceKind::PortRoom && m.id == owed.port);
+            if !watched {
+                self.release_room(sched_task, owed.port);
+            }
+            if let Some(chosen) = owed.budget {
+                crate::waitq::budget_pass_on(chosen);
+            }
+        }
+        // A `Stream` member on a console joins `CONSOLE_WAITQ`, which every
+        // push of console input flags, and `FOREGROUND_WAITQ`, since its input
+        // shows only while the caller may read it. A backing no interrupt
+        // feeds is re-polled at its own interval instead.
+        let mut observes_console = false;
+        let mut console_repoll_ns: Option<u64> = None;
+        for m in members.iter().filter(|m| m.kind == WaitSourceKind::Stream) {
+            let Some(device) = u32::try_from(m.id)
+                .ok()
+                .and_then(|fd| self.read_console(caller, fd))
+            else {
+                continue;
+            };
+            observes_console = true;
+            if let Some(interval) = device.read.poll_interval_ns() {
+                console_repoll_ns = Some(console_repoll_ns.map_or(interval, |n| n.min(interval)));
+            }
+        }
+        // `SIGNAL_INTAKE_WAITQ` is likewise joined only by a set that
+        // actually holds a `Signal` member, and its wake is targeted at the
+        // opted-in task, so signal traffic never disturbs another waiter.
+        let observes_signal = members.iter().any(|m| m.kind == WaitSourceKind::Signal);
+        // The peer-exit queue the same way, woken only for the watching thread.
+        let peer_watch = self
+            .peer_watch
+            .filter(|_| members.iter().any(|m| m.kind == WaitSourceKind::PeerExit));
+        // `CALL_WAITQ` is joined only by a set holding a `CallReply` member: a
+        // reply completing wakes the threads its endpoint recorded watching
+        // for the claimant's answers. A CallReply member also carries a *time* edge — its
+        // per-request deadline — so unlike the other reply/message channels
+        // its registration is armed with the nearest such deadline (folded in
+        // below), letting a wedged callee's timeout wake the reaper exactly
+        // like a real completion, never a busy poll.
+        let observes_callreply = members.iter().any(|m| m.kind == WaitSourceKind::CallReply);
+        // `NOTICE_WAITQ` is joined only by a set holding a `SystemNotice`
+        // member, under each topic it observes. Its wake is flagged from
+        // inside whatever published the topic — an allocation path for the
+        // band, a mount mutation for the table, a syscall for the desktop —
+        // and drained at the next dispatcher-context point, so a topic moving
+        // wakes only that topic's subscribers.
+        let observes_notice = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::SystemNotice);
+        // `PORT_ROOM_WAITQ` is joined only by a set holding a `PortRoom`
+        // member: a drained mailbox wakes the senders that port recorded,
+        // and a torn-down port wakes them all, so ordinary mailbox traffic
+        // never disturbs a waiter that did not ask about room.
+        let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
+        // `FOREGROUND_WAITQ` is joined only by a set holding a `Foreground`
+        // or console member, and woken only when some terminal changes hands.
+        let observes_foreground =
+            observes_console || members.iter().any(|m| m.kind == WaitSourceKind::Foreground);
+        // `HW_TREE_WAITQ` is joined only by a set holding a `HardwareTree`
+        // member, and woken by every generation bump of the tree.
+        let observes_tree = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::HardwareTree);
+        // `CONSOLE_DAMAGE_WAITQ` is joined only by the console's host, and
+        // woken when rows become owed to it.
+        let observes_hosted = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::ConsoleDamage);
+        // A registration that could not be recorded leaves the wait unable to
+        // hear its event, so the wait fails closed rather than park deaf.
+        let mut deaf = false;
+        let mut hear = |filed: Result<(), crate::waitq::WaitRefused>| deaf |= filed.is_err();
+        // A post to a member endpoint or a message to a member port wakes its
+        // server here, so only a set holding one joins.
+        if crate::waitset::hears_requests(members) {
+            hear(file(
+                &crate::waitq::SERVE_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        // The unkeyed row is the wait's timer; each member line waits under its
+        // own key, so another line's fire leaves this wait parked.
+        hear(file(&crate::waitq::IRQ_WAITQ, WakeKey::NONE, deadline_ns));
+        for m in members.iter().filter(|m| m.kind == WaitSourceKind::Irq) {
+            if let Some(line) = self
+                .irq
+                .line_for(IrqHandle::from_raw(m.id), caller.process())
+            {
+                hear(file(
+                    &crate::waitq::IRQ_WAITQ,
+                    crate::waitq::irq_line_key(line),
+                    crate::waitq::NO_DEADLINE,
+                ));
+            }
+        }
+        if let Some(key) = child_key {
+            hear(file(
+                &crate::waitq::PROCWAIT_WAITQ,
+                key,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_seat {
+            hear(file(
+                &crate::waitq::SEAT_INPUT_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        for &key in stream_keys.iter() {
+            hear(file(
+                &crate::waitq::STREAM_WAITQ,
+                key,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_console {
+            hear(file(
+                &crate::waitq::CONSOLE_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_signal {
+            hear(file(
+                &crate::waitq::SIGNAL_INTAKE_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if peer_watch.is_some() {
+            hear(file(
+                &crate::waitq::PEER_EXIT_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        for topic in members
+            .iter()
+            .filter(|m| m.kind == WaitSourceKind::SystemNotice)
+            .filter_map(|m| NoticeTopic::from_u64(m.id).ok())
+        {
+            hear(file(
+                &crate::waitq::NOTICE_WAITQ,
+                crate::waitq::notice_key(topic),
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_foreground {
+            hear(file(
+                &crate::waitq::FOREGROUND_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_tree {
+            hear(file(
+                &crate::waitq::HW_TREE_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        if observes_hosted {
+            hear(file(
+                &crate::waitq::CONSOLE_DAMAGE_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        // The endpoint each `CallReply` member watches, in member order,
+        // resolved once: the snapshot is stable for the whole wait.
+        replies.extend(
+            members
+                .iter()
+                .filter(|m| m.kind == WaitSourceKind::CallReply)
+                .map(|m| crate::callreg::lookup(EndpointId(m.id))),
+        );
+        if observes_room {
+            hear(file(
+                &crate::waitq::PORT_ROOM_WAITQ,
+                WakeKey::NONE,
+                crate::waitq::NO_DEADLINE,
+            ));
+        }
+        // Set once a scan finds a member short of budget: from then on the
+        // task also waits under its process on the budget queue.
+        let mut budget_watched = false;
+        // Records this task with each observed port as waiting for room in its
+        // own process's lane before every scan, keeping its place in line and
+        // any slot it holds: a port that went and came back, or took every
+        // record at once, finds it waiting again. A record the heap cannot
+        // hold leaves the wait to the port's broadcast.
+        let watch_rooms = || {
+            let ipc = self.ipc.read();
+            let sender = caller.caps.proc_id();
+            for m in members {
+                if m.kind == WaitSourceKind::PortRoom {
+                    if let Some(port) = ipc.lookup(EndpointId(m.id)) {
+                        port.watch_room(sched_task, sender);
+                    }
+                }
+            }
+        };
+        // Records this task with each observed endpoint as watching for the
+        // answers its process awaits, before every scan: an answer takes the
+        // records it wakes, and the thread that posted need not be this one.
+        let watch_replies = || {
+            let claimant = caller.caps.process().0;
+            for ep in replies.iter().flatten() {
+                ep.watch_replies(sched_task, claimant);
+            }
+        };
+        if observes_callreply {
+            let claimant = caller.caps.process().0;
+            let call_deadline = replies
+                .iter()
+                .flatten()
+                .map(|ep| ep.next_deadline_for(claimant))
+                .fold(crate::waitq::NO_DEADLINE, u64::min);
+            hear(file(
+                &crate::waitq::CALL_WAITQ,
+                WakeKey::NONE,
+                call_deadline,
+            ));
+        }
+        let paced = members.iter().any(|m| m.kind == WaitSourceKind::DirWatch);
+        // File and DirWatch members wait on `FSWATCH_WAITQ` under the key of
+        // the node each watches, registered *before* the first scan so a
+        // change in the register/park window is not lost; a mount move wakes
+        // the whole queue. The scan marks a node parked only while its member
+        // has nothing pending, so a storm of changes wakes this task once, not
+        // once per change. A key that cannot be recorded fails the wait rather
+        // than leaving it to park deaf to that key.
+        let node_keys = members
+            .iter()
+            .filter(|m| matches!(m.kind, WaitSourceKind::File | WaitSourceKind::DirWatch))
+            .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.node)));
+        for key in node_keys {
+            if watch_keys.contains(&key) {
+                continue;
+            }
+            watch_keys.push(key);
+            if file(&crate::waitq::FSWATCH_WAITQ, key, crate::waitq::NO_DEADLINE).is_err() {
+                deaf = true;
+                break;
+            }
+        }
+
+        // A surface's frame obligation runs from one event wait to the
+        // next, so this wait is where a watched thread stops owing one — and
+        // the wait's own cost is never charged to it. A *memberless* wait
+        // with a finite timeout is not an event wait at all but a sleep, and
+        // a sleep on the frame path is one of the stalls the watch exists to
+        // catch, so it deliberately leaves the span open.
+        #[cfg(feature = "watchdog-diagnostics")]
+        let event_wait = !members.is_empty() || timeout_ns == crate::waitq::NO_DEADLINE;
+        #[cfg(feature = "watchdog-diagnostics")]
+        if event_wait {
+            crate::latency::close_span(cpu, sched_task);
+        }
+
+        // `(kind, id, token)` of the ready member; `id`/`kind` drive the
+        // post-write IRQ-edge consume.
+        let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
+            if deaf {
+                break Err(Errno::OutOfMemory);
+            }
+            if observes_room {
+                watch_rooms();
+            }
+            if observes_callreply {
+                watch_replies();
+            }
+            let now = self.arch.monotonic_ns(cpu);
+            // A quarantined IRQ member is terminal: the runaway-interrupt
+            // safety net disabled its line, so it will never fire again.
+            // Fail the whole wait closed with `DeviceFault` (recording the
+            // disable) rather than parking forever on a dead line or
+            // re-arming it into another storm. Checked before the readiness
+            // scan so a quarantine that lands mid-wait is caught promptly.
+            let quarantined_line = members.iter().find_map(|m| {
+                if m.kind != WaitSourceKind::Irq {
+                    return None;
+                }
+                let handle = IrqHandle::from_raw(m.id);
+                if self.irq.is_quarantined(handle, caller.process()) {
+                    self.irq.line_for(handle, caller.process())
+                } else {
+                    None
+                }
+            });
+            if let Some(line) = quarantined_line {
+                self.emit_irq_quarantined(Some(line), sched_task);
+                break Err(Errno::DeviceFault);
+            }
+            // A member admitted while bound whose binding is gone was revoked
+            // with its device, and its line will never report again.
+            if members.iter().any(|m| {
+                m.kind == WaitSourceKind::Irq
+                    && self
+                        .irq
+                        .line_for(IrqHandle::from_raw(m.id), caller.process())
+                        .is_none()
+            }) {
+                break Err(Errno::NotFound);
+            }
+            let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
+            // A DirWatch change held back by its latency is due no later
+            // than this; the park below wakes for it as for the timeout.
+            let mut held_until = crate::waitq::NO_DEADLINE;
+            let mounts = if paced {
+                self.filesystem.mount_epoch()
+            } else {
+                0
+            };
+            let limit = if observes_room {
+                self.soft_limit(caller, LimitKind::IpcQueueBytes)
+            } else {
+                0
+            };
+            let mut short_of_budget = false;
+            // First ready in the rotated snapshot wins. Each member's
+            // readiness is the non-consuming, caller-re-checked peek of
+            // `waitset_member_state`, so a faulting `token_out` below never
+            // drops a delivered event and a torn-down resource simply is
+            // not ready.
+            let mut resolved = replies.iter();
+            for m in members {
+                let reply = if m.kind == WaitSourceKind::CallReply {
+                    resolved.next().and_then(Option::as_deref)
+                } else {
+                    None
+                };
+                match self.waitset_member_state(caller, m, reply, now, mounts, limit) {
+                    crate::fswatch::MemberState::Ready => {
+                        ready = Some((m.kind, m.id, m.token));
+                        break;
+                    }
+                    crate::fswatch::MemberState::Due(at) => held_until = held_until.min(at),
+                    crate::fswatch::MemberState::OverBudget => short_of_budget = true,
+                    crate::fswatch::MemberState::Idle => {}
+                }
+            }
+
+            if let Some(found) = ready {
+                break Ok(found);
+            }
+            if now >= deadline_ns {
+                break Err(Errno::TimedOut);
+            }
+            // Recorded before the look that parks, so a release of the
+            // process's budget since this scan is seen by the next.
+            if short_of_budget && !budget_watched {
+                if crate::waitq::budget_watch(caller.process(), sched_task, pledged).is_err() {
+                    break Err(Errno::OutOfMemory);
+                }
+                budget_watched = true;
+                continue;
+            }
+            // A release that woke this wait to no room it can take passes to
+            // the process's next budget waiter.
+            if budget_watched {
+                crate::waitq::budget_pass(caller.process(), sched_task);
+            }
+            let repoll_at = console_repoll_ns.map_or(crate::waitq::NO_DEADLINE, |interval| {
+                now.saturating_add(interval)
+            });
+            if paced || console_repoll_ns.is_some() {
+                let due = deadline_ns.min(held_until).min(repoll_at);
+                if crate::waitq::IRQ_WAITQ.register(sched_task, due).is_err() {
+                    break Err(Errno::OutOfMemory);
+                }
+            }
+
+            // Re-arm every IRQ member's line before parking: a user-space
+            // driver holds no controller access, so the kernel routes + unmasks
+            // the line on its behalf (mask-before-wake). Best-effort and
+            // idempotent — a refusal leaves the line as-is and the deadline
+            // still bounds the wait.
+            for m in members.iter().filter(|m| m.kind == WaitSourceKind::Irq) {
+                let handle = IrqHandle::from_raw(m.id);
+                let _ = self
+                    .irq
+                    .rearm(handle, caller.process(), self.irq_controller);
+            }
+            // Arm the one-shot to the nearest pending deadline across every
+            // timed wait-queue (which includes this wait's, and never drops
+            // another queue's earlier wake), then *park* off the run queue until
+            // woken by an endpoint post (`serve_wake`), a member line firing
+            // (`irq_wake`), or the timed sweep — never a busy spin. The
+            // wake-pending token closes the poll/park race exactly as
+            // `call_recv` / `irq_wait` rely on.
+            self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
+            // Park keyed to the CPU this task occupies right now
+            // (`park_current_task` reads it live, so a mid-wait migration is
+            // handled).
+            if !park_current_task(self.arch) {
+                break Err(Errno::NotImplemented);
+            }
+            // A doomed waiter never re-parks: a termination deferred against
+            // this task unwinds the wait so the kill lands at the syscall
+            // boundary (the errno never reaches user space).
+            if crate::procsignal::kill_pending(sched_task) {
+                break Err(Errno::Interrupted);
+            }
+        };
+
+        crate::waitq::SERVE_WAITQ.deregister(sched_task);
+        crate::waitq::IRQ_WAITQ.deregister_task(sched_task);
+        if let Some(key) = child_key {
+            crate::waitq::PROCWAIT_WAITQ.deregister_keyed(key, sched_task);
+        }
+        if observes_seat {
+            crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
+        }
+        for &key in stream_keys.iter() {
+            crate::waitq::STREAM_WAITQ.deregister_keyed(key, sched_task);
+        }
+        if observes_console {
+            crate::waitq::CONSOLE_WAITQ.deregister(sched_task);
+        }
+        if observes_signal {
+            crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
+        }
+        if let Some(peers) = peer_watch {
+            peers.leave(sched_task);
+        }
+        if observes_notice {
+            crate::waitq::NOTICE_WAITQ.deregister_task(sched_task);
+        }
+        if observes_foreground {
+            crate::waitq::FOREGROUND_WAITQ.deregister(sched_task);
+        }
+        if observes_tree {
+            crate::waitq::HW_TREE_WAITQ.deregister(sched_task);
+        }
+        if observes_hosted {
+            crate::waitq::CONSOLE_DAMAGE_WAITQ.deregister(sched_task);
+        }
+        if observes_callreply {
+            crate::waitq::CALL_WAITQ.deregister(sched_task);
+            let claimant = caller.caps.process().0;
+            for ep in replies.iter().flatten() {
+                ep.unwatch_replies(sched_task, claimant);
+            }
+        }
+        if observes_room {
+            crate::waitq::PORT_ROOM_WAITQ.deregister(sched_task);
+            // The member reported ready keeps the slot its thread holds there,
+            // and the budget release it may have been woken for, until its
+            // next call other than the send; every other port's slot is let go
+            // of.
+            let owing = match outcome {
+                Ok((WaitSourceKind::PortRoom, id, _)) => Some(id),
+                _ => None,
+            };
+            let budget = match (budget_watched, owing) {
+                (true, Some(_)) => crate::waitq::budget_spent(caller.process(), sched_task),
+                (true, None) => {
+                    crate::waitq::budget_unwatch(caller.process(), sched_task);
+                    None
+                }
+                (false, _) => None,
+            };
+            let owed = owing.map(|port| crate::waitset::OwedRoom { port, budget });
+            self.end_room_waits(sched_task, members, owed);
+        }
+        for &key in watch_keys.iter() {
+            crate::waitq::FSWATCH_WAITQ.deregister_keyed(key, sched_task);
+        }
+        // Re-point the one-shot at the nearest deadline any remaining waiter
+        // on *any* timed wait-queue needs (or clear it) so a finished wait
+        // leaves no stale arming and drops no other queue's pending wake.
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
+
+        // The wait has returned, so the surface owes an answer from here —
+        // whichever way this call ends, since a refused wait still hands the
+        // thread back to user code.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if event_wait {
+            crate::latency::open_span(cpu, sched_task, self.arch.monotonic_ns(cpu));
+        }
+
+        let (kind, id, token) = outcome?;
+
+        // Write the ready member's token through the validated boundary
+        // *before* consuming an IRQ edge, so a faulting `token_out` (a buggy
+        // caller) fails closed `BadAddress` without dropping a delivered
+        // interrupt.
+        let token_bytes = token.to_le_bytes();
+        self.copy_out_user(caller, token_out, &token_bytes)?;
+
+        // Consume an IRQ winner's edge now (the same `swap` `irq_wait`
+        // performs) so the next wait re-arms and parks rather than
+        // re-reporting the same fire; an endpoint winner is left for
+        // `call_recv` to drain and a child winner for the non-blocking
+        // `wait` to reap (the scan only peeked them). A `u64::MAX`
+        // deadline means `try_wait_step` never returns `TimedOut` here; a
+        // binding torn down between the scan and now resolves to nothing and
+        // consumes nothing (harmless).
+        if kind == WaitSourceKind::Irq {
+            let now = self.arch.monotonic_ns(cpu);
+            let _ =
+                self.irq
+                    .try_wait_step(IrqHandle::from_raw(id), caller.process(), now, u64::MAX);
+        }
+        // Consume a File winner's edge: advance the member's observed
+        // generation to the node's current one, so the next wait blocks until
+        // the node changes *again* rather than re-reporting the same change.
+        // The watcher always reads to end-of-file, so advancing past a change
+        // that raced in after the scan loses no data.
+        if kind == WaitSourceKind::File {
+            if let Some(m) = members
+                .iter()
+                .find(|m| m.kind == WaitSourceKind::File && m.id == id)
+            {
+                let generation = m
+                    .table
+                    .as_ref()
+                    .map_or(0, |table| table.0.generation(m.node));
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::File,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Consume a DirWatch winner's edge and start its latency: the next
+        // report waits for a change after this one, and no sooner than the
+        // latency from now. The drain reads whatever has been recorded by
+        // then, so advancing past a change that raced in loses nothing.
+        if kind == WaitSourceKind::DirWatch {
+            if let Some(m) = members
+                .iter()
+                .find(|m| m.kind == WaitSourceKind::DirWatch && m.id == id)
+            {
+                let mounts = self.filesystem.mount_epoch();
+                let seq = m
+                    .table
+                    .as_ref()
+                    .map_or(0, |table| table.0.journal_seq(m.node));
+                let _ = crate::waitset::advance_paced(
+                    caller.process().0,
+                    set,
+                    id,
+                    seq,
+                    mounts,
+                    self.arch.monotonic_ns(cpu),
+                );
+            }
+        }
+        // Consume a SystemNotice winner's edge: advance the member's observed
+        // generation to the topic's current one, so the next wait blocks until
+        // the topic moves *again*. Advancing to the generation as it stands
+        // now (not the one the scan saw) is deliberate: the caller reads the
+        // topic for itself after this returns, so a move that raced in between
+        // is already in what it will read, and re-reporting it would be a
+        // spurious wake with nothing to do.
+        if kind == WaitSourceKind::SystemNotice {
+            if let Ok(topic) = NoticeTopic::from_u64(id) {
+                let generation = crate::notice::generation(topic, self.seat_registry);
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::SystemNotice,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Consume a Foreground winner's edge the same way: the caller asks
+        // where it stands after this returns, so a change that raced in is
+        // already in its answer.
+        if kind == WaitSourceKind::Foreground {
+            let generation = u32::try_from(id).ok().and_then(|fd| {
+                self.with_terminal_ownership(
+                    caller,
+                    fd,
+                    crate::foreground::ForegroundOwnership::generation,
+                )
+                .ok()
+            });
+            if let Some(generation) = generation {
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::Foreground,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Consume a HardwareTree winner's edge: the caller reads the tree for
+        // itself after this returns, so a bump that raced in is already in
+        // what it reads.
+        if kind == WaitSourceKind::HardwareTree {
+            if let Ok(generation) = self.hw_tree.generation() {
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::HardwareTree,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Advance the round robin past the member just reported, so the next
+        // wait scans the rest of the set first. Recorded only once the token
+        // has actually reached the caller: a wait that failed to report
+        // reported nothing, and must not cost the member its turn.
+        let _ = crate::waitset::note_reported(caller.process().0, set, kind, id);
+        Ok(0)
+    }
+
     // The `'a` lifetime appears in the constructor parameters; it is
     // not elidable there even though `clippy::elidable_lifetime_names`
     // would suggest it could be. The methods that follow take `&self`
@@ -1389,14 +2133,11 @@ where
             // A post charges, copies and audits, so only a slot this thread
             // holds is posted into; a look that finds none keeps its place in
             // its process's line before it parks.
-            match ep.room_or_wait(sched_task, process) {
-                Ok(true) => match post() {
+            if ep.room_or_wait(sched_task, process) {
+                match post() {
                     Err(Errno::WouldBlock) => continue,
                     posted => break posted,
-                },
-                // Never parked where nothing would wake it.
-                Err(err) => break Err(err),
-                Ok(false) => {}
+                }
             }
             if !park_current_task(self.arch) {
                 break Err(Errno::NotImplemented);
@@ -1520,54 +2261,67 @@ where
         }
     }
 
-    /// Hand `caller` the settled `outcome` of a reap of `claimant`'s call:
-    /// the reply copied into `reply`, or the refusal the outcome is.
-    fn deliver_reply(
+    /// Claim the answer to `claimant`'s call `ticket` on `ep` as of `now`,
+    /// delivering a ready one to the caller's `reply` buffer of `reply_cap`
+    /// bytes before its ticket is retired, a page of the buffer not yet
+    /// resident backed first. An answer the buffer cannot hold is refused
+    /// rather than truncated.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for an answer longer than `reply_cap`, and
+    /// what [`Self::copy_user`] answers for a buffer the copy cannot use; the
+    /// answer and its ticket stay, for a claim that can take it.
+    fn claim_answer(
         &self,
         caller: &CallerContext<'_>,
-        claimant: u64,
-        outcome: ReplyOutcome,
+        (ep, claimant, ticket, now): (&CallEndpoint, u64, CallTicket, u64),
         (reply, reply_cap): (u64, usize),
-    ) -> SyscallResult {
-        // A call that timed out unanswered handed the slot it held to a thread
-        // of this process parked for one; a collected answer held none.
-        if let ReplyOutcome::TimedOut(freed) = &outcome {
-            wake_call_room(freed);
+    ) -> Result<ReplyOutcome, Errno> {
+        /// Why a ready answer was left for another claim.
+        enum Refused {
+            TooLong,
+            Copy(UaccessError),
         }
-        // Either way the call gave back what it held of the process's budget.
-        if matches!(outcome, ReplyOutcome::Ready(_) | ReplyOutcome::TimedOut(_)) {
-            crate::waitq::budget_released(ProcessId(claimant));
-        }
-        match outcome {
-            ReplyOutcome::Ready(answer) => {
-                self.copy_answer_out(caller, (reply, reply_cap), &answer)
+        self.copy_user(caller, reply_cap, |space, physmap| {
+            let claimed = ep.take_reply_with(claimant, ticket, now, self.audit, |answer| {
+                if answer.is_too_long() || answer.len() > reply_cap {
+                    return Err(Refused::TooLong);
+                }
+                copy_out(space, physmap, VirtAddr::new(reply), answer).map_err(Refused::Copy)
+            });
+            match claimed {
+                Ok(outcome) => Ok(Ok(outcome)),
+                Err(Refused::TooLong) => Ok(Err(Errno::BufferTooSmall)),
+                Err(Refused::Copy(fault)) => Err(fault),
             }
-            // Non-ready outcomes are the non-blocking signals the client event
-            // loop acts on: retry (still pending), fail closed on a timeout
-            // (the ticket is already retired), stop on an endpoint that has
-            // gone, and abandon a foreign ticket (no existence oracle).
-            ReplyOutcome::Pending => Err(Errno::WouldBlock),
-            ReplyOutcome::TimedOut(_) => Err(Errno::TimedOut),
-            ReplyOutcome::Cancelled => Err(Errno::BrokenPipe),
-            ReplyOutcome::Unknown => Err(Errno::NotFound),
-        }
+        })?
     }
 
-    /// Copy `answer` out to the caller's `reply` buffer of `reply_cap` bytes,
-    /// answering its length. One the buffer cannot hold is refused rather than
-    /// truncated: its ticket is retired, so the caller re-issues the call with
-    /// the buffer its endpoint's protocol bounds.
-    fn copy_answer_out(
+    /// Back every page of the caller's `len` bytes at `uaddr` a copy writing
+    /// them would need, before the call commits to work whose answer a page
+    /// the machine cannot back would otherwise lose.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::back_user_range`]; [`Errno::BadAddress`] for a range off the
+    /// end of the address space or a caller with no address space.
+    fn back_user_buffer(
         &self,
         caller: &CallerContext<'_>,
-        (reply, reply_cap): (u64, usize),
-        answer: &tairix_kernel_ipc::CallPayload,
-    ) -> SyscallResult {
-        if answer.is_too_long() || answer.len() > reply_cap {
-            return Err(Errno::BufferTooSmall);
+        uaddr: u64,
+        len: usize,
+    ) -> Result<(), Errno> {
+        let end = uaddr.checked_add(len as u64).ok_or(Errno::BadAddress)?;
+        let first = self
+            .with_caller_aspace(caller, |space, _| {
+                next_unmapped_page(space, uaddr, end, true)
+            })
+            .ok_or(Errno::BadAddress)?;
+        match first {
+            Some(va) => self.back_user_range(caller, va, end, true, &mut backing_budget(len)),
+            None => Ok(()),
         }
-        self.copy_out_user(caller, reply, answer)
-            .map(|()| answer.len() as u64)
     }
 
     /// Make `apply` to `process`'s level under `change` and bring each of the
@@ -2994,56 +3748,73 @@ where
         );
     }
 
-    /// Run `copy`, user copies over the caller's address space moving `len`
-    /// bytes in `buffers` separate buffers, backing each not-resident page it
-    /// meets as a hardware fault would and running it again — the one
-    /// fault-aware copy every syscall handler that reaches user memory uses.
+    /// Run `copy`, a user copy over the caller's address space moving `len`
+    /// bytes of one buffer, backing every not-resident page it needs as a
+    /// hardware fault would and running it again — the one fault-aware copy
+    /// every syscall handler that reaches user memory uses.
     ///
     /// A page the process reserved but has not touched, one an untouched
     /// `file_map` region covers, one on a not-yet-grown stack, and one the
     /// compressed tier parked are all valid memory with no resident frame, so
-    /// the plain copy walk reports [`UaccessError::NotMapped`] with the
-    /// failing page's base. That page is offered to the shared miss resolver —
-    /// the same resolvers, in the same order, the hardware fault path uses —
-    /// with the registry read guard released (the resolver re-freezes through
-    /// the write lock), and `copy` runs again whole, so it must be safe to
-    /// repeat. The retries are bounded by one resolution per touched page
-    /// plus each buffer's unaligned ends, so a hostile or shrinking mapping
-    /// can never spin.
+    /// the copy walk stops at the first with [`UaccessError::NotMapped`]. That
+    /// page and every later one the copy needs are backed through the shared
+    /// resolver chain ([`Self::back_user_range`]) with the registry read guard
+    /// released (each resolution re-publishes through the write lock), and
+    /// `copy` runs again whole, so it must be safe to repeat. Backing them all
+    /// before the next run keeps a copy over `n` untouched pages at two runs,
+    /// not `n`. Every page the buffer spans may be backed twice before the
+    /// copy gives up, so a hostile or shrinking mapping can never spin.
     ///
     /// # Errors
     ///
-    /// [`Errno::BadAddress`] when the caller has no registered address space,
-    /// a miss cannot be resolved, or the budget runs out;
-    /// [`Errno::OutOfMemory`] when its suspended snapshot cannot be re-frozen;
-    /// any other copy fault as [`copy_fault_errno`] maps it.
+    /// [`Errno::BadAddress`] when the caller has no registered address space
+    /// or the buffer is not its to copy; [`Errno::OutOfMemory`] when the
+    /// machine has no memory to back a page of it, or its suspended snapshot
+    /// cannot be re-frozen; [`Errno::DeviceFault`] when the storage behind a
+    /// page cannot be read; [`Errno::MediumError`] when a page's contents
+    /// were lost, the process then ending as its own touch would end it.
     fn copy_user<R>(
         &self,
         caller: &CallerContext<'_>,
-        (len, buffers): (usize, usize),
+        len: usize,
         mut copy: impl FnMut(&dyn UserAddressSpace, &dyn PhysMap) -> Result<R, UaccessError>,
     ) -> Result<R, Errno> {
-        let mut budget = len / PAGE_SIZE + 2 * buffers;
-        let mut refrozen = false;
+        let mut attempts = CopyAttempts::new(len);
         loop {
-            match self.with_caller_aspace(caller, &mut copy) {
-                None if !refrozen && self.aspaces.read().is_suspended(caller.process()) => {
-                    refrozen = true;
-                    self.refreeze_task_aspace(caller.process());
-                }
-                None if self.aspaces.read().is_suspended(caller.process()) => {
-                    return Err(Errno::OutOfMemory);
-                }
-                None => return Err(Errno::BadAddress),
-                Some(Ok(done)) => return Ok(done),
-                Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
-                    budget -= 1;
-                    if !self.resolve_user_miss(caller, va) {
-                        return Err(Errno::BadAddress);
-                    }
-                }
-                Some(Err(err)) => return Err(copy_fault_errno(err)),
+            if let Some(done) = self.copy_attempt(caller, &mut attempts, &mut copy)? {
+                return Ok(done);
             }
+        }
+    }
+
+    /// One run of `copy`, as [`Self::copy_user`] runs it: [`None`] when a page
+    /// it needed was backed, or its suspended snapshot re-frozen, and it is to
+    /// run again — so a caller that must look again between runs, at a gate
+    /// whose lock may not nest inside the registry's, can.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::copy_user`].
+    fn copy_attempt<R>(
+        &self,
+        caller: &CallerContext<'_>,
+        attempts: &mut CopyAttempts,
+        copy: impl FnOnce(&dyn UserAddressSpace, &dyn PhysMap) -> Result<R, UaccessError>,
+    ) -> Result<Option<R>, Errno> {
+        match self.with_caller_aspace(caller, copy) {
+            None if !attempts.refrozen && self.aspaces.read().is_suspended(caller.process()) => {
+                attempts.refrozen = true;
+                self.refreeze_task_aspace(caller.process());
+                Ok(None)
+            }
+            None if self.aspaces.read().is_suspended(caller.process()) => Err(Errno::OutOfMemory),
+            None => Err(Errno::BadAddress),
+            Some(Ok(done)) => Ok(Some(done)),
+            Some(Err(UaccessError::NotMapped { va, end, write })) => {
+                self.back_user_range(caller, va, end, write, &mut attempts.backings)?;
+                Ok(None)
+            }
+            Some(Err(err)) => Err(copy_fault_errno(err)),
         }
     }
 
@@ -3062,7 +3833,7 @@ where
         uaddr: u64,
         dst: &mut [u8],
     ) -> Result<(), Errno> {
-        self.copy_user(caller, (dst.len(), 1), |space, physmap| {
+        self.copy_user(caller, dst.len(), |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(uaddr), dst)
         })
     }
@@ -3104,7 +3875,7 @@ where
         uaddr: u64,
         src: &[u8],
     ) -> Result<(), Errno> {
-        self.copy_user(caller, (src.len(), 1), |space, physmap| {
+        self.copy_user(caller, src.len(), |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(uaddr), src)
         })
     }
@@ -3170,23 +3941,33 @@ where
         if len < wire_len {
             return Err(Errno::BufferTooSmall);
         }
-        // A key or touch record can carry what was typed, so the staging copy
-        // is wiped on every exit.
-        let mut staged = [0u8; InputKind::WIDEST];
-        let record = &mut staged[..wire_len];
-        let read = match self
+        // Copied straight from the channel to the caller, and taken only once
+        // it has landed: a key or touch record can carry what was typed, so it
+        // is staged nowhere, and a copy the buffer refuses loses nothing.
+        let owner = seat_owner(caller);
+        // A refusal or an empty channel answers before the caller's memory is
+        // reached at all.
+        if !self
             .seat_registry
-            .read(seat, seat_owner(caller), kind, record)
+            .read_with(seat, owner, kind, &mut |_| false)?
         {
-            Ok(Some(lease)) => self
-                .copy_out_user(caller, buf, record)
-                .map(|()| wire_len as u64)
-                .inspect_err(|_| self.seat_registry.restore(seat, lease, kind, record)),
-            Ok(None) => Ok(0),
-            Err(err) => Err(err),
-        };
-        staged.zeroize();
-        read
+            return Ok(0);
+        }
+        let held = self.copy_user(caller, wire_len, |space, physmap| {
+            let mut refused = None;
+            let held = self
+                .seat_registry
+                .read_with(seat, owner, kind, &mut |record| {
+                    let copied = copy_out(space, physmap, VirtAddr::new(buf), record);
+                    refused = copied.err();
+                    refused.is_none()
+                });
+            match (held, refused) {
+                (Ok(_), Some(fault)) => Err(fault),
+                (held, _) => Ok(held),
+            }
+        })??;
+        Ok(if held { wire_len as u64 } else { 0 })
     }
 
     /// Resolve `fd` to its advisory-lock owner and the node it is bound to.
@@ -3313,41 +4094,120 @@ where
         Ok(0)
     }
 
-    /// Back the not-resident user page containing `va` for `caller`, offering
-    /// the resolvers in the **same order** the hardware fault path uses.
+    /// Back the not-resident page of `process` holding `va` for `thread`'s
+    /// read or `write` — the one resolver chain the hardware fault path and
+    /// the kernel copy path share, so the two cannot drift apart.
     ///
-    /// The order is load-bearing, not stylistic. A page the compressed
-    /// (`ramzip`) tier parked is still *reserved* anonymous memory, so
-    /// [`Self::resolve_anon_fault`] would map a freshly zeroed frame over it
-    /// and destroy the contents: the compressed tier must therefore be offered
-    /// first, exactly as the hardware fault path (`resolve_user_fault`) does.
-    /// Sharing one definition between the copy path and the trap path is what
-    /// keeps the two from drifting apart again — before this, the copy path
-    /// offered the compressed tier *nowhere*, so a syscall staging a buffer
-    /// from a parked page silently read a freshly zeroed frame.
+    /// Stack growth goes first, so a growth fault is never mistaken for
+    /// anything else. The compressed tier goes before plain anonymous memory:
+    /// a page it parked is still reserved anonymous memory, which the
+    /// anonymous resolver would back with a zeroed frame over the contents.
+    /// File backing goes last and serves only a read, since file mappings are
+    /// read-only and a write backed there would fault again forever. `mark`
+    /// hears each step as it is taken.
     ///
-    /// Returns `false` when the miss is not resolvable, so the caller fails
-    /// closed rather than retrying forever.
-    fn resolve_user_miss(&self, caller: &CallerContext<'_>, va: u64) -> bool {
-        let process = caller.process();
-        if self.resolve_file_fault(process, va) {
-            return true;
+    /// # Errors
+    ///
+    /// Why the page could not be backed; [`Unbacked::Invalid`] when no
+    /// mapping the process holds covers it.
+    fn back_user_page(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        va: u64,
+        write: bool,
+        mark: &mut dyn FnMut(crate::watchdog::KernelBreadcrumb),
+    ) -> Result<(), Unbacked> {
+        use crate::watchdog::KernelBreadcrumb;
+        mark(KernelBreadcrumb::FaultStack);
+        let mut backing = self.resolve_stack_fault(process, thread, va);
+        if backing == Backing::Elsewhere {
+            mark(KernelBreadcrumb::FaultRamzip);
+            backing = self.resolve_ramzip_fault(process, va);
         }
-        if self.resolve_stack_fault(process, caller.task_id, va) {
-            return true;
+        if backing == Backing::Elsewhere {
+            mark(KernelBreadcrumb::FaultAnon);
+            backing = self.resolve_anon_fault(process, thread, va);
         }
-        match self.resolve_ramzip_fault(process, va) {
-            RamzipFaultOutcome::Handled => return true,
-            // An unrecoverable entry (already audited) must not fall through
-            // to the anonymous handler, which would zero the page and turn a
-            // detected integrity failure into silent corruption.
-            RamzipFaultOutcome::Fatal(_) => return false,
-            // `NoEntry` — and any future (`#[non_exhaustive]`) outcome — falls
-            // through to the anonymous handler, which fails closed on a page
-            // no reservation covers.
-            _ => {}
+        if backing == Backing::Elsewhere && !write {
+            mark(KernelBreadcrumb::FaultFile);
+            backing = self.resolve_file_fault(process, va);
         }
-        self.resolve_anon_fault(process, caller.task_id, va)
+        match backing {
+            Backing::Backed => Ok(()),
+            Backing::Refused(cause) => Err(cause),
+            Backing::Elsewhere => Err(Unbacked::Invalid),
+        }
+    }
+
+    /// Back the caller's page at `va` and every later page of `[va, end)` a
+    /// copy that `write`s or reads it will need, spending one of `backings`
+    /// on each, so the copy then runs once more instead of once per page.
+    ///
+    /// No reclaim runs first, as it does for a hardware fault: a copy reaches
+    /// the pages it has passed through the kernel's own map, which marks none
+    /// of them used, so a reclaim here would take back the buffer the copy is
+    /// filling.
+    ///
+    /// # Errors
+    ///
+    /// What a page that could not be backed answers ([`Self::copy_refused`]);
+    /// [`Errno::OutOfMemory`] once `backings` is spent — the pages the copy
+    /// backed left again, reclaimed under memory pressure, before it could
+    /// use them.
+    fn back_user_range(
+        &self,
+        caller: &CallerContext<'_>,
+        va: u64,
+        end: u64,
+        write: bool,
+        backings: &mut usize,
+    ) -> Result<(), Errno> {
+        let mut page = va;
+        loop {
+            *backings = backings.checked_sub(1).ok_or(Errno::OutOfMemory)?;
+            self.back_user_page(caller.process(), caller.task_id, page, write, &mut |_| {})
+                .map_err(|cause| self.copy_refused(caller, page, write, cause))?;
+            let next = page.checked_add(PAGE_SIZE as u64).and_then(|from| {
+                self.with_caller_aspace(caller, |space, _| {
+                    next_unmapped_page(space, from, end, write)
+                })
+                .flatten()
+            });
+            match next {
+                Some(next) => page = next,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// What a copy answers for the caller's page at `va` that could not be
+    /// backed for a read or `write`. A page whose contents were lost ends the
+    /// process exactly as its own touch of the page would: recorded as the
+    /// fault it is, the death landing as the call returns.
+    fn copy_refused(
+        &self,
+        caller: &CallerContext<'_>,
+        va: u64,
+        write: bool,
+        cause: Unbacked,
+    ) -> Errno {
+        if cause == Unbacked::Lost && !crate::procsignal::kill_pending(caller.task_id.0) {
+            let process = caller.process();
+            self.record_fault(
+                process,
+                caller.task_id,
+                FaultAccess::Data { va, write },
+                cause,
+                None,
+            );
+            self.process_signal.terminate_process(
+                process,
+                caller.task_id,
+                tairix_abi::FAULT_EXIT_STATUS,
+            );
+        }
+        cause.errno()
     }
 
     /// Validate and stage `spawn`'s optional startup-strings block from the
@@ -3742,14 +4602,56 @@ where
         }
     }
 
-    /// Record a fault-kill of `task` and reclaim its kernel resources —
+    /// End the fault `thread` took at `access`, which could not be backed for
+    /// `cause`: recorded fatal to the process and the thread landed down
+    /// ([`Self::record_fault_exit`]), unless a death owed to the thread
+    /// meanwhile — perhaps what abandoned the backing — is to end it instead,
+    /// as itself rather than as a fault of its own. Reports whether the fault
+    /// ended the thread.
+    pub(crate) fn end_fault(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        access: FaultAccess,
+        cause: Unbacked,
+        regs: Option<&UserRegisterFrame>,
+    ) -> bool {
+        if crate::procsignal::kill_pending(thread.0) {
+            return false;
+        }
+        self.record_fault_exit(process, thread, access, cause, regs);
+        true
+    }
+
+    /// Record a fault-kill of `thread`'s process and land the thread down —
     /// the involuntary sibling of the `exit` handler, driven by the
     /// user-fault resolver when an abort is fatal to the task.
     ///
     /// The exit code is [`tairix_abi::FAULT_EXIT_STATUS`] (the `128 + SIGSEGV` shell
     /// convention), so a parent reaping the crashed child observes a
     /// crash, not a clean exit. The scheduler reap itself is driven by the
-    /// port's `Exit` suspension, exactly as for the `exit` syscall.
+    /// port's `Exit` suspension, exactly as for the `exit` syscall. The
+    /// record is [`Self::record_fault`]'s.
+    pub(crate) fn record_fault_exit(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        access: FaultAccess,
+        cause: Unbacked,
+        regs: Option<&UserRegisterFrame>,
+    ) {
+        self.record_fault(process, thread, access, cause, regs);
+        // A fault kills the whole process, so its siblings stop first and the
+        // teardown lands only once the group's last thread is down: reclaiming
+        // the address space while a sibling still executes on another CPU would
+        // free its page-table root from under it.
+        self.process_signal
+            .terminate_siblings(process, thread, tairix_abi::FAULT_EXIT_STATUS);
+        self.land_thread_down(process, thread, Some(tairix_abi::FAULT_EXIT_STATUS));
+    }
+
+    /// Record the fault fatal to `thread`'s process: its `access` and
+    /// `cause`, on the audit log and in the crash store.
     ///
     /// The kill is audited with a stable event id
     /// ([`AuditEvent::TaskFaultKilled`]) so a crashing program is visible
@@ -3774,6 +4676,11 @@ where
     ///   end-of-file), `anon` (a miss inside a reserved anonymous region),
     ///   `wild` (outside every mapping), or `instruction` (the instruction
     ///   itself was unexecutable, so no data address was involved).
+    /// * `cause` — why the page could not be backed ([`Unbacked::as_str`]):
+    ///   `invalid` for the program's own access, `no_memory` for a page the
+    ///   machine had no memory for, `unreadable` for storage that failed,
+    ///   `lost` for a page whose contents were lost — so a kill for want of
+    ///   memory never reads as a bug in the program.
     /// * `fault_offset` — a coarse, **non-leaking** locality bucket
     ///   ([`crate::aspace::FaultLocality`]): `null_page` (a null-pointer
     ///   dereference), `below_stack_guard` (an overflow past the stack
@@ -3806,11 +4713,12 @@ where
     // build the crash record under the caps guard — that reads most clearly
     // in one place; splitting it would only scatter the two guard scopes.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn record_fault_exit(
+    pub(crate) fn record_fault(
         &self,
         process: ProcessId,
         thread: SecTaskId,
         access: FaultAccess,
+        cause: Unbacked,
         regs: Option<&UserRegisterFrame>,
     ) {
         // The crash record's backtrace, filled allocation-free on the stack:
@@ -3936,6 +4844,10 @@ where
                     value: tairix_log::FieldValue::Str(fault_class),
                 },
                 Field {
+                    key: "cause",
+                    value: tairix_log::FieldValue::Str(cause.as_str()),
+                },
+                Field {
                     key: "fault_offset",
                     value: tairix_log::FieldValue::Str(locality.bucket()),
                 },
@@ -3945,7 +4857,7 @@ where
                 },
             ];
             let field_count = if let Some(offset) = locality.offset() {
-                fields[6].value = tairix_log::FieldValue::UnsignedInt(offset);
+                fields[7].value = tairix_log::FieldValue::UnsignedInt(offset);
                 fields.len()
             } else {
                 fields.len() - 1
@@ -4002,13 +4914,6 @@ where
                 self.crashes.record(crash);
             }
         }
-        // A fault kills the whole process, so its siblings stop first and the
-        // teardown lands only once the group's last thread is down: reclaiming
-        // the address space while a sibling still executes on another CPU would
-        // free its page-table root from under it.
-        self.process_signal
-            .terminate_siblings(process, thread, tairix_abi::FAULT_EXIT_STATUS);
-        self.land_thread_down(process, thread, Some(tairix_abi::FAULT_EXIT_STATUS));
     }
 
     /// Render one interactive-surface frame-budget overrun through the
@@ -4242,34 +5147,36 @@ where
         }
     }
 
-    /// Resolve a user-mode data abort at `fault_va` as demand-paged file
-    /// backing for `task`, returning `true` when the faulting page is now
-    /// resident and the access should simply be retried.
+    /// Back the page holding `fault_va` as demand-paged file backing for
+    /// `process`, reporting [`Backing::Backed`] when it is resident and the
+    /// access should simply be retried.
     ///
     /// The demand-paging heart of `file_map`: if `fault_va` lies inside a
-    /// region the task mapped, the single covering page is read as the
+    /// region the process mapped, the single covering page is read as the
     /// descriptor it was mapped from would read it — as the process's live
     /// identity for its own descriptor, as the captured identity of one
-    /// conferred or granted — and mapped read-only into the task's live
-    /// space. The filesystem capability and the node's mode and ACL are
-    /// checked at every fault, so a narrowing reaches every page not yet
-    /// resident. Everything else is refused (fail closed): an
-    /// address outside every region, a page wholly at/past end-of-file
-    /// (the `SIGBUS` analogue), a filesystem error, a page the heap has no
-    /// room to stage, or frame exhaustion all report `false`, and the arch
-    /// port terminates the task rather than back memory it cannot vouch for.
-    /// A page that became resident
-    /// since the fault (a concurrent resolution) is a benign race and
-    /// reports `true`.
+    /// conferred or granted — and mapped read-only into its live space. The
+    /// filesystem capability and the node's mode and ACL are checked at every
+    /// fault, so a narrowing reaches every page not yet resident. A page that
+    /// became resident since the fault (a concurrent resolution) is a benign
+    /// race and reports backed.
     ///
-    /// `task` is the kernel-trusted current task of the faulting CPU,
-    /// never a caller-supplied value.
+    /// An address outside every region is [`Backing::Elsewhere`]. Inside one,
+    /// a page wholly at or past end-of-file (the `SIGBUS` analogue) and a
+    /// mapping whose authority was withdrawn are [`Unbacked::Invalid`]; a page
+    /// the heap has no room to stage or no frame to land in is
+    /// [`Unbacked::NoMemory`]; a read the filesystem fails is
+    /// [`Unbacked::Unreadable`]; and a read abandoned for a death owed to the
+    /// faulting thread is [`Unbacked::Interrupted`].
+    ///
+    /// `process` is the kernel-trusted faulting process, never a
+    /// caller-supplied value.
     #[must_use]
-    pub fn resolve_file_fault(&self, process: ProcessId, fault_va: u64) -> bool {
+    pub fn resolve_file_fault(&self, process: ProcessId, fault_va: u64) -> Backing {
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
         let Some((file_offset, region)) = self.aspaces.read().file_page_source(process, page_va)
         else {
-            return false;
+            return Backing::Elsewhere;
         };
         // Copied out, so no table lock is held across the read.
         let Some((uid, caps)) = self
@@ -4278,62 +5185,66 @@ where
             .caps_of_process(process)
             .map(|record| (record.owner().0, *record.effective()))
         else {
-            return false;
+            return Backing::Refused(Unbacked::Invalid);
         };
         let authority = NodeAuthority::acting_on(&region.handle, uid, &caps);
         if authority.admit().is_err() {
-            return false;
+            return Backing::Refused(Unbacked::Invalid);
         }
         let Ok(mut page) = stage_buffer(PAGE_SIZE) else {
-            return false;
+            return Backing::Refused(Unbacked::NoMemory);
         };
         let read =
             self.filesystem
                 .read_node(&region.handle, &authority.acting(), file_offset, &mut page);
-        match read {
-            // A page wholly at/past end-of-file is never backed; a short
-            // read is the page straddling end-of-file, zero-filled past it
-            // by the producer.
-            Ok(0) | Err(_) => false,
-            Ok(n) => match self.file_map.map_page(page_va, &page[..n]) {
-                Ok(()) => {
-                    // The fault backed exactly this page; publish that one
-                    // page so the copy path can see it. Re-freezing the whole
-                    // snapshot here would make reading an N-page mapping
-                    // O(N²) — each fault rebuilding every page faulted before
-                    // it — which is the whole reason the delta exists.
-                    self.publish_region_mapping(process, page_va, 1);
-                    true
-                }
-                // Already resident: another resolution won the race; the
-                // retried access succeeds as-is.
-                Err(Errno::BadAddress) => true,
-                Err(_) => false,
-            },
+        let n = match read {
+            // A short read is the page straddling end-of-file, zero-filled
+            // past it by the producer; one wholly past it is never backed.
+            Ok(n) if n > 0 => n,
+            Ok(_) | Err(Errno::PermissionDenied) => return Backing::Refused(Unbacked::Invalid),
+            Err(Errno::OutOfMemory) => return Backing::Refused(Unbacked::NoMemory),
+            Err(Errno::Interrupted) => return Backing::Refused(Unbacked::Interrupted),
+            Err(_) => return Backing::Refused(Unbacked::Unreadable),
+        };
+        match self.file_map.map_page(page_va, &page[..n]) {
+            Ok(()) => {
+                // The fault backed exactly this page; publish that one
+                // page so the copy path can see it. Re-freezing the whole
+                // snapshot here would make reading an N-page mapping
+                // O(N²) — each fault rebuilding every page faulted before
+                // it — which is the whole reason the delta exists.
+                self.publish_region_mapping(process, page_va, 1);
+                Backing::Backed
+            }
+            // Already resident: another resolution won the race; the
+            // retried access succeeds as-is.
+            Err(Errno::BadAddress) => Backing::Backed,
+            Err(refused) => Backing::Refused(refusal_unbacked(refused)),
         }
     }
 
-    /// Resolve a user-mode data abort at `fault_va` as demand-paged
-    /// anonymous backing for `thread` of `process`, returning `true` when the
-    /// faulting page is now resident and the access should simply be retried.
+    /// Back the page holding `fault_va` as demand-paged anonymous memory for
+    /// `thread` of `process`, reporting [`Backing::Backed`] when it is
+    /// resident and the access should simply be retried.
     ///
     /// The demand-paging heart of `mem_map`: anonymous memory is reserved
     /// by address space (`mem_map` maps no frames), so the first touch of
-    /// any page faults. If `fault_va` lies inside a region the task
+    /// any page faults. If `fault_va` lies inside a region the process
     /// reserved, the single covering page is backed with a fresh **zeroed**
     /// `RW|USER` frame — drawn through the reserve-gated user path, so a
-    /// greedy process that would starve the kernel's own frame reserve
-    /// fails closed here (frame exhaustion reports `false`, and the port
-    /// terminates only that task — deterministic OOM, never a panic).
-    /// Offered for reads and writes alike (anonymous memory is writable).
-    /// Everything outside every reserved region is refused (fail closed):
-    /// the anonymous fault path never materialises memory the task did not
+    /// greedy process that would starve the kernel's own frame reserve is
+    /// refused [`Unbacked::NoMemory`] here (deterministic OOM, never a
+    /// panic). Offered for reads and writes alike (anonymous memory is
+    /// writable). An address no reservation covers is [`Backing::Elsewhere`]:
+    /// the anonymous fault path never materialises memory the process did not
     /// map. A page that became resident since the fault (a concurrent
-    /// resolution) is a benign race and reports `true`.
+    /// resolution) is a benign race and reports backed.
     ///
     /// A page a sibling's `mem_unmap` has taken is neither: the fault parks
     /// until that release ends and asks again, so a release that fails and
-    /// gives the page back leaves it backed rather than the task killed.
+    /// gives the page back leaves it backed rather than the task killed. A
+    /// death owed to `thread` meanwhile abandons the fault
+    /// ([`Unbacked::Interrupted`]).
     ///
     /// Per-fault kernel work is exactly one page, so a task touching a large
     /// mapping is preemptible between faults — the lock-up a single
@@ -4342,7 +5253,12 @@ where
     /// `process` and `thread` are the kernel-trusted faulting task, never
     /// caller-supplied values.
     #[must_use]
-    pub fn resolve_anon_fault(&self, process: ProcessId, thread: SecTaskId, fault_va: u64) -> bool {
+    pub fn resolve_anon_fault(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        fault_va: u64,
+    ) -> Backing {
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
         let (waits, key) = (
             &crate::aspace::ANON_RELEASE_WAITQ,
@@ -4355,15 +5271,14 @@ where
             // can fail, and it fails closed. The holding is asked under the
             // space's own lock, so a sibling's `mem_unmap` cannot take the
             // page between the answer and the mapping.
-            let releasing = core::cell::Cell::new(false);
+            let releasing = core::cell::Cell::new(None);
             let held = || match self.aspaces.read().anon_page(process, fault_va) {
                 crate::aspace::AnonPage::Held => true,
                 crate::aspace::AnonPage::Releasing => {
                     // Registered before the registry is let go, so the
-                    // release's end, which takes it exclusively, wakes it; a
-                    // wait the heap cannot register fails the fault.
+                    // release's end, which takes it exclusively, wakes it.
                     let filed = waits.register_keyed(key, thread.0, crate::waitq::NO_DEADLINE);
-                    releasing.set(filed.is_ok());
+                    releasing.set(Some(filed.is_ok()));
                     false
                 }
                 crate::aspace::AnonPage::Unheld => false,
@@ -4376,18 +5291,28 @@ where
                 // a large mapping O(N²).
                 Ok(()) | Err(Errno::BadAddress) => {
                     self.publish_region_mapping(process, page_va, 1);
-                    return true;
+                    return Backing::Backed;
                 }
-                Err(Errno::NotFound) if releasing.get() => {
-                    let parked = crate::waitq::park_calling_task();
-                    waits.deregister_keyed(key, thread.0);
-                    if !parked || crate::procsignal::kill_pending(thread.0) {
-                        return false;
+                Err(Errno::NotFound) => match releasing.get() {
+                    None => return Backing::Elsewhere,
+                    // A wait the heap had no room to file would never wake.
+                    Some(false) => return Backing::Refused(Unbacked::NoMemory),
+                    Some(true) => {
+                        let parked = crate::waitq::park_calling_task();
+                        waits.deregister_keyed(key, thread.0);
+                        if crate::procsignal::kill_pending(thread.0) {
+                            return Backing::Refused(Unbacked::Interrupted);
+                        }
+                        // With nothing to wait on, the release is taken as
+                        // having gone through.
+                        if !parked {
+                            return Backing::Refused(Unbacked::Invalid);
+                        }
                     }
-                }
-                // Frame exhaustion or an uninstalled producer: fatal to the
-                // task and only the task (deterministic OOM, never a panic).
-                Err(_) => return false,
+                },
+                Err(Errno::OutOfMemory) => return Backing::Refused(Unbacked::NoMemory),
+                // An uninstalled producer backs nothing.
+                Err(_) => return Backing::Elsewhere,
             }
         }
     }
@@ -4402,11 +5327,11 @@ where
     /// path) and it holds an entry for the faulting page, the page is
     /// decrypted, authenticated, decompressed, and remapped, and the
     /// restored page is republished to the registry snapshot exactly as
-    /// the anonymous path does. [`RamzipFaultOutcome::NoEntry`] (no
-    /// entry, or no installed tier) falls through;
-    /// [`RamzipFaultOutcome::Fatal`] means the entry was unrecoverable
-    /// (fail closed, no plaintext, already audited) and the task is
-    /// terminated by the resolver.
+    /// the anonymous path does. No entry, or no installed tier, is
+    /// [`Backing::Elsewhere`]. An entry that failed its check, now or before
+    /// (already audited, no plaintext), is [`Unbacked::Lost`]; one the
+    /// restore had no frame or page table for is kept and
+    /// [`Unbacked::NoMemory`].
     ///
     /// After a successful restore, and only while free memory is
     /// comfortably above the warm-up watermark, two bounded
@@ -4418,11 +5343,12 @@ where
     /// charge it to the task that is resuming, not a daemon; any pages
     /// they bring back are republished with the faulted page.
     ///
-    /// `task` is the kernel-trusted current task of the faulting CPU.
+    /// `process` is the kernel-trusted faulting process; its space is the
+    /// one live on this CPU.
     #[must_use]
-    pub fn resolve_ramzip_fault(&self, process: ProcessId, fault_va: u64) -> RamzipFaultOutcome {
+    pub fn resolve_ramzip_fault(&self, process: ProcessId, fault_va: u64) -> Backing {
         let Some(tier) = tairix_kernel_mem::ramzip::global() else {
-            return RamzipFaultOutcome::NoEntry;
+            return Backing::Elsewhere;
         };
         let cpu = SchedulerArch::current_cpu(self.arch);
         let outcome = crate::kthread::with_current_live_space(cpu, |live| {
@@ -4462,12 +5388,12 @@ where
                 } else {
                     self.publish_region_mapping(process, page_va, 1);
                 }
-                RamzipFaultOutcome::Handled
+                Backing::Backed
             }
-            Some(fatal @ RamzipFaultOutcome::Fatal(_)) => fatal,
+            Some(RamzipFaultOutcome::Fatal(failure)) => Backing::Refused(ramzip_unbacked(failure)),
             // No entry, no live space on this CPU, or any future
             // non-restoring outcome: fall through to the anon handler.
-            _ => RamzipFaultOutcome::NoEntry,
+            _ => Backing::Elsewhere,
         }
     }
 
@@ -4545,8 +5471,8 @@ where
         });
     }
 
-    /// Resolve a user-mode fault at `fault_va` as demand-grown stack for
-    /// `task`, returning `true` when the faulting page is now resident and
+    /// Back the page holding `fault_va` as demand-grown stack for `thread`
+    /// of `process`, reporting [`Backing::Backed`] when it is resident and
     /// the access should simply be retried.
     ///
     /// The growth half of the demand-grown user stack (`plans/SPAWN.md`
@@ -4567,29 +5493,30 @@ where
     /// (span top minus the faulting page base — with contiguous growth,
     /// exactly the bytes that will be resident) must fit inside the bound,
     /// so a lowered `ulimit` stack bound stops growth exactly where it
-    /// says (fail closed). Everything else is refused: a fault outside the
-    /// span or at/above the committed base (the guard page below the span
-    /// stays fatal), a past-limit fault, and frame exhaustion all report
-    /// `false`, and the arch port terminates the task. A page that became
+    /// says (fail closed). A fault outside the span's growth room is
+    /// [`Backing::Elsewhere`] (the guard page below the span stays fatal);
+    /// growth past the stack or address-space bound is
+    /// [`Unbacked::Invalid`], and growth the machine has no memory for
+    /// [`Unbacked::NoMemory`]. A page that became
     /// resident since the fault (a concurrent resolution) is a benign race
     /// folded per page: the walk commits it and moves on. Frame exhaustion
     /// part-way leaves the low-water mark naming exactly the pages that
     /// are resident (never a claim on frames the task does not hold) and
     /// reports the fault unresolvable.
     ///
-    /// `task` is the kernel-trusted current task of the faulting CPU,
-    /// never a caller-supplied value.
+    /// `process` and `thread` are the kernel-trusted faulting task, never
+    /// caller-supplied values.
     #[must_use]
     pub fn resolve_stack_fault(
         &self,
         process: ProcessId,
         thread: SecTaskId,
         fault_va: u64,
-    ) -> bool {
+    ) -> Backing {
         let (span, soft) = {
             let aspaces = self.aspaces.read();
             let Some(span) = aspaces.stack_span(thread) else {
-                return false;
+                return Backing::Elsewhere;
             };
             (
                 span,
@@ -4597,13 +5524,13 @@ where
             )
         };
         if !span.in_growth_room(fault_va) {
-            return false;
+            return Backing::Elsewhere;
         }
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
         // Enforce the bounds before touching any state. Cannot overflow:
         // `page_va < span.top()` inside the growth room.
         if span.top() - page_va > soft {
-            return false;
+            return Backing::Refused(Unbacked::Invalid);
         }
         // The new pages join the process's mapped footprint, which the
         // `AddressSpaceBytes` ceiling and, while pinned, the pinned budget
@@ -4611,13 +5538,12 @@ where
         // map is credited back. Cannot underflow: `page_va < committed_base`
         // inside the growth room.
         let growth_bytes = span.committed_base() - page_va;
-        if self
+        let charged = self
             .aspaces
             .write()
-            .try_charge_aspace_bytes(process, growth_bytes)
-            .is_err()
-        {
-            return false;
+            .try_charge_aspace_bytes(process, growth_bytes);
+        if let Err(refused) = charged {
+            return Backing::Refused(refusal_unbacked(refused));
         }
         // Reserve physical headroom for every growth page this fault will
         // back, *before* touching any page table: stack growth is subject to
@@ -4632,9 +5558,9 @@ where
         let uncharge = |unmapped: u64| {
             self.aspaces.write().credit_aspace_bytes(process, unmapped);
         };
-        if self.mem_map.commit(growth_pages).is_err() {
+        if let Err(refused) = self.mem_map.commit(growth_pages) {
             uncharge(growth_bytes);
-            return false;
+            return Backing::Refused(refusal_unbacked(refused));
         }
         // Walk downward from the page below the committed base to the
         // faulting page, committing each page as it is backed so the
@@ -4651,13 +5577,12 @@ where
                 Ok(_) | Err(Errno::BadAddress) => {
                     committed += self.aspaces.write().commit_stack_page(thread, next);
                 }
-                // Frame exhaustion or an uninstalled producer: fatal to
-                // the task and only the task — deterministic OOM, never a
-                // panic. Pages already committed above stay resident and
-                // recorded; the rest of the charge is given back.
-                Err(_) => {
+                // Frame exhaustion or an uninstalled producer, never a panic.
+                // Pages already committed above stay resident and recorded;
+                // the rest of the charge is given back.
+                Err(refused) => {
                     uncharge(growth_bytes - committed);
-                    return false;
+                    return Backing::Refused(refusal_unbacked(refused));
                 }
             }
             if next == page_va {
@@ -4671,7 +5596,7 @@ where
         // The walk backed exactly the pages it reserved room for, so publish
         // that range rather than the caller's whole resident set.
         self.publish_region_mapping(process, page_va, growth_pages);
-        true
+        Backing::Backed
     }
 
     /// Reclaim every kernel-held resource of a task that has terminated —
@@ -5078,8 +6003,74 @@ where
     /// learns when keys are pressed.
     fn console_input_ready(&self, caller: &CallerContext<'_>, fd: u32) -> bool {
         self.read_console(caller, fd).is_some_and(|device| {
-            self.check_console_foreground(caller, device).is_ok() && device.read.input_ready()
+            self.check_console_foreground(caller, device).is_ok() && device.input_pending()
         })
+    }
+
+    /// `device`'s held input for a read bounded by `timeout_ns`, none when it
+    /// is zero, with what is left of the bound: taken at once when no other
+    /// reader holds it, else waited for on the console's queue — woken by
+    /// input, by a reader letting go with input left, and by the console
+    /// changing hands — no longer than the bound.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::TimedOut`] once the bound elapses with another reader still
+    /// holding the input; [`Errno::OutOfMemory`] when the wait cannot be
+    /// registered; [`Errno::NotImplemented`] on a caller that cannot park;
+    /// [`Errno::Interrupted`] once a death is owed to it; the foreground
+    /// gate's refusal once the console has passed to another owner.
+    fn held_input_within<'d>(
+        &self,
+        caller: &CallerContext<'_>,
+        device: &'d ConsoleDevice,
+        timeout_ns: u64,
+    ) -> Result<(crate::console::HeldInputGuard<'d>, Option<u64>), Errno> {
+        let task = caller.task_id.0;
+        let deadline = match timeout_ns {
+            0 => crate::waitq::NO_DEADLINE,
+            _ => crate::waitq::wait_now_ns().map_or(crate::waitq::NO_DEADLINE, |now| {
+                now.saturating_add(timeout_ns)
+            }),
+        };
+        let left = || {
+            (timeout_ns != 0).then(|| {
+                crate::waitq::wait_now_ns().map_or(timeout_ns, |now| deadline.saturating_sub(now))
+            })
+        };
+        let mut filed = false;
+        let held = loop {
+            if let Some(held) = device.try_held_input() {
+                break Ok(held);
+            }
+            if !filed {
+                // Registered before the look that parks, so a release in
+                // between still wakes this reader.
+                if let Err(refused) = crate::waitq::CONSOLE_WAITQ.register(task, deadline) {
+                    break Err(refused.into());
+                }
+                filed = true;
+                crate::waitq::rearm_timed_wakeup();
+                continue;
+            }
+            if left() == Some(0) {
+                break Err(Errno::TimedOut);
+            }
+            if !park_current_task(self.arch) {
+                break Err(Errno::NotImplemented);
+            }
+            if crate::procsignal::kill_pending(task) {
+                break Err(Errno::Interrupted);
+            }
+            if let Err(refused) = self.check_console_foreground(caller, device) {
+                break Err(refused);
+            }
+        };
+        if filed {
+            crate::waitq::CONSOLE_WAITQ.deregister(task);
+            crate::waitq::rearm_timed_wakeup();
+        }
+        Ok((held?, left()))
     }
 
     /// The terminal `fd` names for the caller: a pty slave of the caller, or
@@ -5500,31 +6491,33 @@ where
     /// the stream is empty with a live peer (`plans/SPAWN.md` SP10,
     /// `plans/PTY.md` — never a busy loop).
     ///
-    /// `step` runs the backing's own non-blocking read into the staging
-    /// buffer and reports a normalised [`StreamReadStep`]; `waits` names the
+    /// `step` runs the backing's own non-blocking read, handing up to `len`
+    /// bytes from its ring straight to the caller's buffer through the
+    /// deliver callback it is given and taking them only once they are all
+    /// delivered, and reports a normalised [`StreamReadStep`]. A buffer page
+    /// not yet resident is backed and the step run again ([`Self::copy_user`]),
+    /// so a copy the buffer refuses — or the machine has no memory to back —
+    /// takes nothing: the bytes stay for the next read. `waits` names the
     /// backing's own ring sides ([`crate::pipe::StreamWaits`]) so the park and
     /// the wake reach that stream and no other. This loop owns the
-    /// stage/wake/deadline/park discipline so a pipe end and a pty end never
-    /// carry a second copy of it. End-of-stream (every peer end closed, ring
-    /// drained) is a zero-length read. `timeout_ns` bounds the wait (`0` =
-    /// indefinite, the `stream_read` convention); an elapsed bound is
-    /// `TimedOut`. A build with no resumable user kthread published (a park
-    /// that cannot happen) fails closed with `NotImplemented` rather than
-    /// spinning.
+    /// wake/deadline/park discipline so a pipe end and a pty end never carry a
+    /// second copy of it. End-of-stream (every peer end closed, ring drained)
+    /// is a zero-length read. `timeout_ns` bounds the wait (`0` = indefinite,
+    /// the `stream_read` convention); an elapsed bound is `TimedOut`. A build
+    /// with no resumable user kthread published (a park that cannot happen)
+    /// fails closed with `NotImplemented` rather than spinning.
     ///
     /// Every backing this loop serves buffers at most
-    /// [`crate::pipe::PIPE_CAPACITY`], so staging more than that could never
-    /// be filled: a caller asking for a megabyte is answered from one ring's
-    /// worth and loops. A backing with a deeper ring would have to raise the
-    /// stage with it.
+    /// [`crate::pipe::PIPE_CAPACITY`], so a caller asking for a megabyte is
+    /// answered from one ring's worth and loops.
     fn parked_stream_read(
         &self,
         caller: &CallerContext<'_>,
-        buf: u64,
-        len: usize,
+        (buf, len): (u64, usize),
         timeout_ns: u64,
         waits: crate::pipe::StreamWaits,
-        mut step: impl FnMut(&mut [u8]) -> StreamReadStep,
+        gate: impl Fn() -> Result<(), Errno>,
+        mut step: impl FnMut(&mut StreamDelivery<'_>) -> Result<StreamReadStep, UaccessError>,
     ) -> SyscallResult {
         // Cap the per-call transfer at what one step can actually supply
         // (short reads are valid; the caller loops). A zero-length read is
@@ -5533,7 +6526,6 @@ where
         if len == 0 {
             return Ok(0);
         }
-        let mut data = stage_buffer(len)?;
         // The absolute monotonic deadline of a bounded wait. With no
         // installed wait clock nothing can park either, so the untimed
         // sentinel keeps the fail-closed park path authoritative.
@@ -5544,34 +6536,49 @@ where
                 now.saturating_add(timeout_ns)
             })
         };
-        // Register on the wake queue *before* the first poll, and stay
-        // registered across every re-poll until the read leaves this loop. A
-        // wake carries no state: `stream_wake` unparks whoever is registered
-        // on that ring side at that instant and is otherwise dropped.
-        // Registering only once the poll has already reported nothing leaves a
-        // window in which a peer can produce its bytes, wake nobody, and leave
-        // this task to park on data that has already arrived — a read that
-        // sleeps until the *next* write, or forever if none comes. Registering
-        // first makes the wake and the poll overlap, so one of the two always
-        // observes the bytes.
-        crate::waitq::STREAM_WAITQ.register_keyed(waits.park(), caller.task_id.0, deadline)?;
-        if deadline != crate::waitq::NO_DEADLINE {
-            crate::waitq::rearm_timed_wakeup();
-        }
+        // A wake carries no state, so the read is registered on the wake queue
+        // before the poll that precedes a park and stays registered until it
+        // leaves this loop; a stream with bytes or at its end needs no
+        // registration at all.
+        let mut filed = false;
+        let mut attempts = CopyAttempts::new(len);
         let outcome = loop {
-            match step(&mut data) {
-                StreamReadStep::Read(n) => {
-                    // Space freed: a writer parked on the full ring can
-                    // proceed. Wake before the copy-out so the producer
-                    // overlaps with the consumer's copy.
+            // Asked before every attempt, so a reader whose step waited for a
+            // page takes nothing it may no longer read.
+            if let Err(refused) = gate() {
+                break Err(refused);
+            }
+            let stepped = self.copy_attempt(caller, &mut attempts, |space, physmap| {
+                step(&mut StreamDelivery {
+                    space,
+                    physmap,
+                    buf,
+                    len,
+                })
+            });
+            match stepped {
+                Err(refused) => break Err(refused),
+                Ok(None) => {}
+                // Space freed: a writer parked on the full ring can proceed.
+                Ok(Some(StreamReadStep::Read(n))) => {
                     waits.wake_progress();
-                    break self
-                        .copy_out_user(caller, buf, &data[..n])
-                        .map(|()| n as u64);
+                    break Ok(n as u64);
                 }
-                StreamReadStep::Eof => break Ok(0),
-                StreamReadStep::Refused(err) => break Err(err),
-                StreamReadStep::Empty => {
+                Ok(Some(StreamReadStep::Eof)) => break Ok(0),
+                Ok(Some(StreamReadStep::Empty)) if !filed => {
+                    if let Err(refused) = crate::waitq::STREAM_WAITQ.register_keyed(
+                        waits.park(),
+                        caller.task_id.0,
+                        deadline,
+                    ) {
+                        break Err(refused.into());
+                    }
+                    filed = true;
+                    if deadline != crate::waitq::NO_DEADLINE {
+                        crate::waitq::rearm_timed_wakeup();
+                    }
+                }
+                Ok(Some(StreamReadStep::Empty)) => {
                     // A bounded wait that has elapsed reports `TimedOut`
                     // only after the re-check above found nothing, so a
                     // byte racing the deadline is still delivered.
@@ -5602,9 +6609,11 @@ where
                 }
             }
         };
-        crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
-        if deadline != crate::waitq::NO_DEADLINE {
-            crate::waitq::rearm_timed_wakeup();
+        if filed {
+            crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
+            if deadline != crate::waitq::NO_DEADLINE {
+                crate::waitq::rearm_timed_wakeup();
+            }
         }
         outcome
     }
@@ -5639,22 +6648,24 @@ where
             return Ok(0);
         }
         // Stage the caller's bytes in once, before any stream state is
-        // touched (a faulting buffer writes nothing).
-        let mut data = stage_buffer(len)?;
-        self.copy_in_user(caller, buf, &mut data)?;
-        // Register before the first poll and stay registered for the whole
-        // loop, exactly as the read path does: a wake unparks only tasks that
-        // are registered at that instant, so a peer that drains the ring in
-        // the window between a `Full` poll and the registration would wake
-        // nobody and leave this task parked on space that has already freed —
-        // an untimed sleep no further write to *this* stream can end.
-        crate::waitq::STREAM_WAITQ.register_keyed(
-            waits.park(),
-            caller.task_id.0,
-            crate::waitq::NO_DEADLINE,
-        )?;
+        // touched (a faulting buffer writes nothing). A stage the heap refuses
+        // is a small one on the stack, so the write is shorter, not refused.
+        let mut small = [0u8; SMALL_STAGE_BYTES];
+        let mut staged;
+        let data: &mut [u8] = match stage_buffer(len) {
+            Ok(buffer) => {
+                staged = buffer;
+                &mut staged
+            }
+            Err(_) => &mut small[..len.min(SMALL_STAGE_BYTES)],
+        };
+        self.copy_in_user(caller, buf, data)?;
+        // Registered before the poll that precedes a park and for the rest of
+        // the loop, as the read path is: a wake unparks only tasks registered
+        // at that instant. A ring with room needs no registration at all.
+        let mut filed = false;
         let outcome = loop {
-            match step(&data) {
+            match step(data) {
                 StreamWriteStep::Wrote(n) => {
                     // Bytes arrived: a reader parked on the empty ring can
                     // proceed.
@@ -5662,6 +6673,16 @@ where
                     break Ok(n as u64);
                 }
                 StreamWriteStep::Broken => break Err(Errno::BrokenPipe),
+                StreamWriteStep::Full if !filed => {
+                    if let Err(refused) = crate::waitq::STREAM_WAITQ.register_keyed(
+                        waits.park(),
+                        caller.task_id.0,
+                        crate::waitq::NO_DEADLINE,
+                    ) {
+                        break Err(refused.into());
+                    }
+                    filed = true;
+                }
                 StreamWriteStep::Full => {
                     let cpu = SchedulerArch::current_cpu(self.arch);
                     let parked = crate::kthread::reschedule_current(cpu, RescheduleAction::Park);
@@ -5678,7 +6699,9 @@ where
                 }
             }
         };
-        crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
+        if filed {
+            crate::waitq::STREAM_WAITQ.deregister_keyed(waits.park(), caller.task_id.0);
+        }
         outcome
     }
 
@@ -5694,13 +6717,22 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         use crate::pipe::ReadStep;
-        self.parked_stream_read(caller, buf, len, timeout_ns, end.waits(), |data| match end
-            .try_read(data)
-        {
-            ReadStep::Read(n) => StreamReadStep::Read(n),
-            ReadStep::Eof => StreamReadStep::Eof,
-            ReadStep::Empty => StreamReadStep::Empty,
-        })
+        self.parked_stream_read(
+            caller,
+            (buf, len),
+            timeout_ns,
+            end.waits(),
+            || Ok(()),
+            |to| {
+                Ok(
+                    match end.read_with(to.max(), |at, bytes| to.deliver(at, bytes))? {
+                        ReadStep::Read(n) => StreamReadStep::Read(n),
+                        ReadStep::Eof => StreamReadStep::Eof,
+                        ReadStep::Empty => StreamReadStep::Empty,
+                    },
+                )
+            },
+        )
     }
 
     /// Serve a write to a pipe-backed descriptor — the pipe backing driven
@@ -5737,14 +6769,18 @@ where
         use crate::pty::PtyReadStep;
         self.parked_stream_read(
             caller,
-            buf,
-            len,
+            (buf, len),
             timeout_ns,
             end.read_waits(),
-            |data| match end.read(data) {
-                PtyReadStep::Read(n) => StreamReadStep::Read(n),
-                PtyReadStep::Eof => StreamReadStep::Eof,
-                PtyReadStep::Empty => StreamReadStep::Empty,
+            || Ok(()),
+            |to| {
+                Ok(
+                    match end.read_with(to.max(), |at, bytes| to.deliver(at, bytes))? {
+                        PtyReadStep::Read(n) => StreamReadStep::Read(n),
+                        PtyReadStep::Eof => StreamReadStep::Eof,
+                        PtyReadStep::Empty => StreamReadStep::Empty,
+                    },
+                )
             },
         )
     }
@@ -5804,16 +6840,23 @@ where
         // Asked before every byte is taken, so a reader parked before the
         // terminal changed hands takes nothing after: only the foreground
         // reads a terminal, exactly as on the console.
-        self.parked_stream_read(caller, buf, len, timeout_ns, end.read_waits(), |data| {
-            if let Err(refused) = self.check_terminal_foreground(caller, end.pty().foreground()) {
-                return StreamReadStep::Refused(refused);
-            }
-            match end.read(data) {
-                PtyReadStep::Read(n) => StreamReadStep::Read(n),
-                PtyReadStep::Eof => StreamReadStep::Eof,
-                PtyReadStep::Empty => StreamReadStep::Empty,
-            }
-        })
+        let gate = || self.check_terminal_foreground(caller, end.pty().foreground());
+        self.parked_stream_read(
+            caller,
+            (buf, len),
+            timeout_ns,
+            end.read_waits(),
+            gate,
+            |to| {
+                Ok(
+                    match end.read_with(to.max(), |at, bytes| to.deliver(at, bytes))? {
+                        PtyReadStep::Read(n) => StreamReadStep::Read(n),
+                        PtyReadStep::Eof => StreamReadStep::Eof,
+                        PtyReadStep::Empty => StreamReadStep::Empty,
+                    },
+                )
+            },
+        )
     }
 
     /// Serve a write to a pty **slave** descriptor: cook program output
@@ -6694,27 +7737,97 @@ fn hosted_console_mode(width: u32, height: u32) -> Result<DisplayMode, Errno> {
 enum Undelivered {
     /// Refused for good this time: answered to the receiver as this.
     Refused(Errno),
-    /// The caller's buffer reaches the page at this address, reserved but not
-    /// yet resident: backed, and the receive runs again.
-    Missing(u64),
+    /// The caller's buffer reaches a page not yet resident: it and the rest
+    /// the copy needs are backed, and the receive runs again.
+    Missing {
+        /// The page's base.
+        va: u64,
+        /// One past the last byte of the range being copied.
+        end: u64,
+    },
 }
 
 impl Undelivered {
-    /// What `err`, a refused copy, leaves the message waiting for.
+    /// What `err`, a refused copy-out, leaves the message waiting for.
     fn of(err: UaccessError) -> Self {
         match err {
-            UaccessError::NotMapped { va } => Self::Missing(va),
+            UaccessError::NotMapped { va, end, .. } => Self::Missing { va, end },
             err => Self::Refused(copy_fault_errno(err)),
         }
     }
+}
 
-    /// What the receiver is told: every fault is the one `BadAddress`, so a
-    /// faulting pointer cannot be used as a memory-layout oracle.
-    fn errno(self) -> Errno {
-        match self {
-            Self::Refused(errno) => errno,
-            Self::Missing(_) => Errno::BadAddress,
+/// How many page backings a copy of `len` bytes may spend: every page an
+/// unaligned buffer of that length can span, backed twice, which rides out
+/// one round of its pages being reclaimed before the copy reaches them.
+const fn backing_budget(len: usize) -> usize {
+    2 * (len / PAGE_SIZE + 2)
+}
+
+/// What one fault-aware copy has spent across its runs.
+struct CopyAttempts {
+    /// Page backings it may still make ([`backing_budget`]).
+    backings: usize,
+    /// Its suspended snapshot was re-frozen once already.
+    refrozen: bool,
+}
+
+impl CopyAttempts {
+    const fn new(len: usize) -> Self {
+        Self {
+            backings: backing_budget(len),
+            refrozen: false,
         }
+    }
+}
+
+/// What a refusal to back a page comes to: the machine short of memory, or
+/// the page not one the process may have — past a bound of its own, or with
+/// no producer installed to back anything.
+fn refusal_unbacked(refused: Errno) -> Unbacked {
+    if refused == Errno::OutOfMemory {
+        Unbacked::NoMemory
+    } else {
+        Unbacked::Invalid
+    }
+}
+
+/// Why the compressed tier could not restore a page: its contents gone for
+/// good, or kept for a restore the machine had no memory for.
+fn ramzip_unbacked(failure: tairix_kernel_mem::FaultError) -> Unbacked {
+    use tairix_kernel_mem::{FaultError, PageTableError};
+    match failure {
+        FaultError::Authentication | FaultError::Corrupt | FaultError::Lost => Unbacked::Lost,
+        FaultError::OutOfMemory
+        | FaultError::PhysUnmapped
+        | FaultError::PageTable(PageTableError::AllocFailed(_)) => Unbacked::NoMemory,
+        _ => Unbacked::Invalid,
+    }
+}
+
+/// Answer what a claim of a call's answer came to: the length of an
+/// answer delivered, and the call's hold on its slot and its process's
+/// budget handed on once its ticket is retired.
+fn deliver_reply(claimant: u64, outcome: ReplyOutcome) -> SyscallResult {
+    // A call that timed out unanswered handed the slot it held to a thread
+    // of this process parked for one; a collected answer held none.
+    if let ReplyOutcome::TimedOut(freed) = &outcome {
+        wake_call_room(freed);
+    }
+    // Either way the call gave back what it held of the process's budget.
+    if matches!(outcome, ReplyOutcome::Ready(_) | ReplyOutcome::TimedOut(_)) {
+        crate::waitq::budget_released(ProcessId(claimant));
+    }
+    match outcome {
+        ReplyOutcome::Ready(answer) => Ok(answer.len() as u64),
+        // Non-ready outcomes are the non-blocking signals the client event
+        // loop acts on: retry (still pending), fail closed on a timeout
+        // (the ticket is already retired), stop on an endpoint that has
+        // gone, and abandon a foreign ticket (no existence oracle).
+        ReplyOutcome::Pending => Err(Errno::WouldBlock),
+        ReplyOutcome::TimedOut(_) => Err(Errno::TimedOut),
+        ReplyOutcome::Cancelled => Err(Errno::BrokenPipe),
+        ReplyOutcome::Unknown => Err(Errno::NotFound),
     }
 }
 
@@ -6842,9 +7955,7 @@ fn region_errno(err: RangeError) -> Errno {
 /// Wake the senders parked for room that a port named: only those waiting as
 /// the sender whose lane gained room, or every waiter of a port that went.
 fn wake_port_room(woken: &RoomWake<ProcId>) {
-    for task in woken.tasks() {
-        crate::waitq::port_room_wake_task(task);
-    }
+    crate::waitq::port_room_wake_named(woken.tasks());
 }
 
 /// Tear down every port `owner` bound, a port at a time, waking the senders
@@ -6876,9 +7987,7 @@ fn teardown_ports_owned_by(ipc: &RwLock<PortRegistry>, owner: u64, audit: &(dyn 
 /// Wake the callers' threads parked in a blocking call for room, by the same
 /// rule as [`wake_port_room`].
 fn wake_call_room(woken: &RoomWake<u64>) {
-    for task in woken.tasks() {
-        crate::waitq::call_wake_task(task);
-    }
+    crate::waitq::call_wake_named(woken.tasks());
 }
 
 /// Withdraw `claimant`'s call `ticket`, waking whoever the withdrawal
@@ -6915,17 +8024,6 @@ const RANDOM_STAGE_CHUNK: usize = 256;
 /// banner line is far smaller than this, so the common path never
 /// iterates.
 const CONSOLE_WRITE_MAX: usize = 4096;
-
-/// Upper bound, in bytes, on a single `stream_read` call.
-///
-/// `stream_read` reads into one kernel-owned staging buffer before
-/// copying it out to the caller, so an unbounded `len` would let a caller
-/// force an arbitrarily large kernel allocation whose failure path could
-/// OOM (deterministic OOM behaviour). The call therefore
-/// reads at most this many bytes and returns the count; a caller wanting
-/// more loops, exactly as POSIX `read` allows. A line of console input is
-/// far smaller than this, so the common path never iterates.
-const CONSOLE_READ_MAX: usize = 4096;
 
 /// Upper bound, in bytes, on the program path a single `spawn` call may
 /// pass.
@@ -7129,7 +8227,7 @@ where
         // A page of either buffer the caller has yet to touch is backed and the
         // receive run again, as `copy_user` runs a copy, the message staying
         // queued in between.
-        let mut budget = len / PAGE_SIZE + 2 + tairix_abi::ORIGIN_WIRE_LEN / PAGE_SIZE + 2;
+        let mut backings = backing_budget(len) + backing_budget(tairix_abi::ORIGIN_WIRE_LEN);
         loop {
             // resolve the destination endpoint against the live
             // named-port registry. An endpoint that is not currently bound
@@ -7212,17 +8310,14 @@ where
                 Some(Some(Ok((n, message, freed)))) => (Ok(n as u64), Some((message, freed))),
                 // A page the caller reserved but has not touched: back it with
                 // every lock released, the message still queued, and look again.
-                Some(Some(Err(Undelivered::Missing(va)))) if budget > 0 => {
+                Some(Some(Err(Undelivered::Missing { va, end }))) => {
                     drop(ipc);
-                    budget -= 1;
-                    if !self.resolve_user_miss(caller, va) {
-                        return Err(Errno::BadAddress);
-                    }
+                    self.back_user_range(caller, va, end, true, &mut backings)?;
                     continue;
                 }
                 // Copy-out fault or undersized buffer: the message stays
                 // queued (`recv_with` did not commit).
-                Some(Some(Err(undelivered))) => (Err(undelivered.errno()), None),
+                Some(Some(Err(Undelivered::Refused(errno)))) => (Err(errno), None),
             };
             drop(ipc);
             if let Some((message, freed)) = taken {
@@ -7524,22 +8619,39 @@ where
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
         let deadline_ns = crate::waitq::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
+        // Every admitted user thread has one; a caller without is no thread
+        // the scheduler can park.
+        let Some(waiter) =
+            crate::procsignal::with_gate(task, |gate| alloc::sync::Arc::clone(gate.futex_waiter()))
+        else {
+            return Err(Errno::NotImplemented);
+        };
+        let deadlines = &crate::waitq::FUTEX_TIMER_WAITQ;
+        let timed = deadline_ns != crate::waitq::NO_DEADLINE;
+        if timed && !deadlines.arm(task, deadline_ns) {
+            return Err(Errno::NotImplemented);
+        }
 
-        // Register *before* reading the word, so a wake landing in the window
-        // between the read and the park is not lost: the waker then unparks a
-        // task the scheduler's wake-pending token re-readies at its park
-        // commit.
-        let queue = crate::futex::register(key, task, deadline_ns)?;
-        if deadline_ns != crate::waitq::NO_DEADLINE {
+        // Linked *before* the word is read, so a wake landing between the read
+        // and the park is not lost: the waker then unparks a task the
+        // scheduler's wake-pending token re-readies at its park commit.
+        crate::futex::file(&waiter, key);
+        if timed {
             crate::waitq::rearm_timed_wakeup();
         }
-        let outcome = self.futex_park(caller, uaddr, expected, deadline_ns);
-        drop(queue);
-        crate::futex::deregister(key, task);
-        if deadline_ns != crate::waitq::NO_DEADLINE {
+        let parked = self.futex_park(caller, uaddr, expected, deadline_ns);
+        let woken = !crate::futex::unfile(&waiter);
+        if timed {
+            let _ = deadlines.arm(task, crate::waitq::NO_DEADLINE);
             crate::waitq::rearm_timed_wakeup();
         }
-        outcome
+        // A wake that unlinked this waiter was delivered to it, so it is the
+        // answer even when the deadline passed as it landed: reporting a
+        // timeout instead would lose the wake its waker counted.
+        match parked {
+            Err(Errno::TimedOut) if woken => Ok(0),
+            other => other,
+        }
     }
 
     fn futex_wake(&self, caller: &CallerContext<'_>, uaddr: u64, count: u32) -> SyscallResult {
@@ -7698,13 +8810,19 @@ where
         // tiny value (fail closed). `block_until_ready`
         // recomputes the identical deadline from its own first reading.
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
-        crate::waitq::IRQ_WAITQ.register(task, deadline_ns)?;
+        // Under the line's key, so another line's fire leaves it parked; a
+        // handle naming no line of the caller's is refused by the wait itself.
+        let key = self
+            .irq
+            .line_for(handle, caller.process())
+            .map_or(crate::waitq::WakeKey::NONE, crate::waitq::irq_line_key);
+        crate::waitq::IRQ_WAITQ.register_keyed(key, task, deadline_ns)?;
         let outcome = block_until_ready(self.irq, handle, caller.process(), timeout_ns, &waiter);
         // Leave the wait set and re-point the one-shot at the nearest
         // deadline any remaining waiter on *any* timed wait-queue needs (or
         // clear it if none) so a finished wait never leaves a stale arming
         // behind and drops no other queue's pending wake.
-        crate::waitq::IRQ_WAITQ.deregister(task);
+        crate::waitq::IRQ_WAITQ.deregister_keyed(key, task);
         self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
 
         match outcome {
@@ -7912,57 +9030,36 @@ where
         if len == 0 {
             return Ok(0);
         }
-        // Bound the staging allocation so a hostile `len` cannot force an
-        // arbitrarily large kernel buffer. Reading a
-        // prefix and reporting the count is valid short-read behaviour;
-        // the caller loops for the remainder.
+        // A read takes at most `CONSOLE_READ_MAX` from the device; a caller
+        // wanting more loops, as a short read allows.
         let take = core::cmp::min(len, CONSOLE_READ_MAX);
-
-        // Read from the descriptor's console input source into the
-        // kernel staging buffer first. A faulting device surfaces its
-        // `Errno` here before any user memory is touched. A zero
-        // `timeout_ns` waits indefinitely (the interactive default); a
-        // non-zero bound parks at most that long and surfaces the
-        // backing's `TimedOut` when it elapses with no input.
-        let mut payload = stage_buffer(take)?;
-        // The gate is asked again before every byte is taken, so a reader
-        // parked before the console changed hands takes nothing after.
-        let read = device.read.read_while(
-            &mut payload,
-            (timeout_ns != 0).then_some(timeout_ns),
-            &|| self.check_console_foreground(caller, device),
-        )?;
-        // A correct device never reports more than the buffer it was
-        // handed; clamp defensively so a buggy source cannot drive an
-        // out-of-bounds copy (validate every input,
-        // including from the device side of the seam).
-        let read = core::cmp::min(read, take);
-        if read == 0 {
-            // No input was pending: report a zero-length read without
-            // touching the caller's buffer. The production init pipeline
-            // wraps the installed device in `BlockingConsoleRead`, which
-            // parks the caller until input arrives instead of returning
-            // zero; this branch remains for a bare
-            // non-blocking device (host tests), whose caller loops.
+        // Input taken and never delivered goes first, let go of only once a
+        // copy delivers it; the gate is asked again with the hold taken, since
+        // the console may have changed hands while this reader waited.
+        let (mut held, bound) = self.held_input_within(caller, device, timeout_ns)?;
+        self.check_console_foreground(caller, device)?;
+        if held.bytes().is_empty() {
+            let read = device.read.read_while(held.room(take), bound, &|| {
+                self.check_console_foreground(caller, device)
+            })?;
+            // A correct device never reports more than the buffer it was
+            // handed; clamp so a buggy source cannot drive an out-of-bounds
+            // copy (validate every input, including from the device side).
+            held.took(core::cmp::min(read, take));
+            device.echo_bytes(held.bytes());
+        }
+        let n = core::cmp::min(held.bytes().len(), take);
+        if n == 0 {
+            // No input was pending: a bare non-blocking device (host tests)
+            // answers zero; production wraps it in `BlockingConsoleRead`,
+            // which parks for input instead.
             return Ok(0);
         }
-
-        // Echo the consumed bytes back to this console's own output when
-        // terminal echo is enabled (local echo), so an
-        // interactive user sees what they type. The kernel owns the read
-        // line discipline, so this needs no separate `CAP_CONSOLE_WRITE`;
-        // it is a no-op while a caller has selected the secret or raw
-        // discipline (`stream_input_mode`). Best-effort and cosmetic — it
-        // never fails the read the caller asked for.
-        device.echo_bytes(&payload[..read]);
-
-        // Copy the bytes actually read out to the caller's address space
-        // through the validated `copy_to_user` boundary. `with_caller_aspace` yields `None` when the caller has
-        // no registered address space (a kernel task, or one withdrawn on
-        // `exit`) — fail closed with the same `BadAddress` an actual
-        // fault produces, never leaking which case occurred.
-        self.copy_out_user(caller, buf, &payload[..read])
-            .map(|()| read as u64)
+        let delivered = self.copy_out_user(caller, buf, &held.bytes()[..n]);
+        if delivered.is_ok() {
+            held.delivered(n);
+        }
+        delivered.map(|()| n as u64)
     }
 
     // Mirrors the trait's register-shaped signature (see the trait's
@@ -9827,24 +10924,22 @@ where
         // report) without ever parking the caller. Cleared, `wait` blocks
         // the caller until an event arrives (never busy-polls). `STOPPED`
         // additionally reports a freshly stopped child without reaping it.
-        // A `WouldBlock` leaves `status` untouched — the `?` returns before
-        // the copy-out below — so a poll that finds nothing writes nothing.
+        //
+        // The status record reaches the caller before the child is taken, so
+        // a copy-out the caller's buffer or the machine's memory refuses
+        // leaves the child to report again rather than losing its exit.
+        let mut deliver = |reported: WaitedChild| {
+            let status_bytes = tairix_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
+            self.copy_out_user(caller, status, &status_bytes)
+        };
         let reported = if flags.is_nonblock() {
-            self.process_wait.poll(caller.process(), pid, flags)?
+            self.process_wait
+                .poll(caller.process(), pid, flags, &mut deliver)?
         } else {
             self.process_wait
-                .wait(caller.process(), caller.task_id, pid, flags)?
+                .wait(caller.process(), caller.task_id, pid, flags, &mut deliver)?
         };
-
-        // Copy the typed status record out to the caller's `status` pointer
-        // through the validated `copy_to_user` boundary
-        // *before* reporting success, so a faulting `status` is the same
-        // fail-closed `BadAddress` an actual fault produces and never leaks
-        // which case occurred. `with_caller_aspace` yields `None`
-        // when the caller has no registered address space; fail closed.
-        let status_bytes = tairix_abi::WaitStatusRecord::encode(reported.status).to_ne_bytes();
-        self.copy_out_user(caller, status, &status_bytes)
-            .map(|()| reported.pid)
+        Ok(reported.pid)
     }
 
     fn signal(&self, caller: &CallerContext<'_>, pid: i64, signal: Signal) -> SyscallResult {
@@ -10718,6 +11813,11 @@ where
         // `BadAddress` a fault produces, never leaking which case occurred.
         let mut payload = alloc_sensitive(request_len).map_err(AllocError::as_errno)?;
         self.copy_in_user(caller, request, payload.as_bytes_mut())?;
+        // A synchronous call holds no ticket its caller could claim the answer
+        // by again, so the room the answer lands in is backed before any work
+        // is asked for.
+        let room = reply_cap.min(usize::try_from(ep.max_reply()).unwrap_or(usize::MAX));
+        self.back_user_buffer(caller, reply, room)?;
 
         // Post the request. `CallEndpoint::post_within` performs the per-call
         // capability check against the caller's effective set (no ambient
@@ -10767,21 +11867,27 @@ where
         let outcome = loop {
             // `now` is dead input: a call posted with no deadline never times
             // out.
-            match ep.take_reply(claimant, ticket, 0, self.audit) {
-                ReplyOutcome::Ready(bytes) => break Ok(bytes),
+            match self.claim_answer(caller, (&*ep, claimant, ticket, 0), (reply, reply_cap)) {
+                Ok(ReplyOutcome::Ready(answer)) => break Ok(answer.len() as u64),
+                // An answer no claim can take now has no ticket to be claimed
+                // by later: the call goes, and answers why.
+                Err(undelivered) => {
+                    withdraw(&ep, claimant, ticket);
+                    break Err(undelivered);
+                }
                 // The endpoint was torn down, or the ticket is no longer
                 // ours: abandon the call fail-closed, answering what a call
                 // to an endpoint already gone answers, the detach its callers
                 // act on.
-                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                Ok(ReplyOutcome::Cancelled | ReplyOutcome::Unknown) => break Err(Errno::NotFound),
                 // Unreachable with no deadline, but fails closed, handing on
                 // what the call held.
-                ReplyOutcome::TimedOut(freed) => {
+                Ok(ReplyOutcome::TimedOut(freed)) => {
                     wake_call_room(&freed);
                     crate::waitq::budget_released(caller.caps.process());
                     break Err(Errno::TimedOut);
                 }
-                ReplyOutcome::Pending => {
+                Ok(ReplyOutcome::Pending) => {
                     // Park off the run queue until woken, keyed to the CPU
                     // this task occupies right now (`park_current_task` reads
                     // it live, so a mid-wait migration is handled).
@@ -10805,9 +11911,7 @@ where
         if outcome.is_ok() {
             crate::waitq::budget_released(caller.caps.process());
         }
-
-        let answer = outcome?;
-        self.copy_answer_out(caller, (reply, reply_cap), &answer)
+        outcome
     }
 
     fn call_post(
@@ -10887,8 +11991,9 @@ where
         let claimant = caller.caps.process().0;
         let cpu = SchedulerArch::current_cpu(self.arch);
         let now = self.arch.monotonic_ns(cpu);
-        let outcome = ep.take_reply(claimant, CallTicket(ticket), now, self.audit);
-        self.deliver_reply(caller, claimant, outcome, (reply, reply_cap))
+        let claim = (&*ep, claimant, CallTicket(ticket), now);
+        let outcome = self.claim_answer(caller, claim, (reply, reply_cap))?;
+        deliver_reply(claimant, outcome)
     }
 
     fn call_await(
@@ -10920,9 +12025,10 @@ where
         let settled = loop {
             let cpu = SchedulerArch::current_cpu(self.arch);
             let now = self.arch.monotonic_ns(cpu);
-            match ep.take_reply(claimant, CallTicket(ticket), now, self.audit) {
-                ReplyOutcome::Pending => {}
-                outcome => break Ok(outcome),
+            let claim = (&*ep, claimant, CallTicket(ticket), now);
+            match self.claim_answer(caller, claim, (reply, reply_cap)) {
+                Ok(ReplyOutcome::Pending) => {}
+                claimed => break claimed,
             }
             // The call stays the caller's to reap or withdraw.
             if !park_current_task(self.arch) {
@@ -10943,7 +12049,7 @@ where
             // answer already in.
             crate::waitq::call_woken(&ep.abandon_await(claimant, CallTicket(ticket), sched_task));
         })?;
-        self.deliver_reply(caller, claimant, outcome, (reply, reply_cap))
+        deliver_reply(claimant, outcome)
     }
 
     fn call_cancel(&self, caller: &CallerContext<'_>, endpoint: u64, ticket: u64) -> SyscallResult {
@@ -11145,43 +12251,41 @@ where
         // rather than parking: a wait-set event loop's readiness peek is not a
         // guarantee — the queued call may have been cancelled by its poster's
         // exit — and a loop serving several sources must never park on one.
+        //
+        // The request and its ticket are delivered through the validated
+        // `copy_to_user` boundary before the call is taken into service, its
+        // room kept for the answer in the same step: a server buffer that
+        // refuses the copy, or a page of it the machine cannot back, leaves the
+        // call queued for the next receive rather than lost.
         let sched_task = caller.task_id.0;
-        let call = crate::callreg::receive_call(
+        let mut attempts = CopyAttempts::new(buf_cap);
+        let len = crate::callreg::receive_call(
             &ep,
             sched_task,
-            buf_cap,
             !flags.is_non_blocking(),
             &mut || park_current_task(self.arch),
             &|| crate::procsignal::kill_pending(sched_task),
+            || {
+                let looked = self.copy_attempt(caller, &mut attempts, |space, physmap| {
+                    ep.recv_call_with(buf_cap, |ticket, request| {
+                        copy_out(space, physmap, VirtAddr::new(buf), request)?;
+                        copy_out(
+                            space,
+                            physmap,
+                            VirtAddr::new(ticket_out),
+                            &ticket.0.to_le_bytes(),
+                        )
+                    })
+                })?;
+                Ok(match looked {
+                    None => crate::callreg::Receive::Again,
+                    Some(RecvDelivered::Empty) => crate::callreg::Receive::Empty,
+                    Some(RecvDelivered::TooLarge { .. }) => crate::callreg::Receive::TooLarge,
+                    Some(RecvDelivered::Call { len, .. }) => crate::callreg::Receive::Taken(len),
+                })
+            },
         )?;
-
-        // Deliver the request, then the ticket, through the validated
-        // `copy_to_user` boundary, keeping the room for the answer between the
-        // two: once the ticket is out a sibling thread of the server may answer
-        // at once, and its answer must find the room.
-        let len = call.request.len();
-        if let Err(err) = self.copy_out_user(caller, buf, &call.request) {
-            // The call is already in service, so a faulting server buffer must
-            // not leave a ticket the server never saw blocking its caller: it
-            // is answered empty in its own room (its protocol decoder rejects
-            // the truncated reply) and the server told `BadAddress`.
-            if let Ok(woken) = ep.reply_with(call, &[], self.audit) {
-                crate::waitq::call_woken(&woken);
-            }
-            return Err(err);
-        }
-        let ticket = call.ticket;
-        ep.keep_room(call);
-        match self.copy_out_user(caller, ticket_out, &ticket.0.to_le_bytes()) {
-            Ok(()) => Ok(len as u64),
-            // Answered empty the same way, in the room just kept.
-            Err(err) => {
-                if let Ok(woken) = ep.reply(ticket, &[], self.audit) {
-                    crate::waitq::call_woken(&woken);
-                }
-                Err(err)
-            }
-        }
+        Ok(len as u64)
     }
 
     fn call_reply(
@@ -11210,7 +12314,7 @@ where
         // watchers should neither watch for it — and the one the slot it freed
         // was handed to. The endpoint re-checks the ticket and size and fails
         // closed on an unknown or already-answered ticket.
-        let woken = self.copy_user(caller, (reply_len, 1), |space, physmap| {
+        let woken = self.copy_user(caller, reply_len, |space, physmap| {
             ep.reply_from(CallTicket(ticket), reply_len, self.audit, |room| {
                 copy_in(space, physmap, VirtAddr::new(reply), room)
             })
@@ -12160,29 +13264,14 @@ where
             }
         };
         self.publish_region_mapping(caller.process(), made.base_va, made.pages);
-        let written = self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(
-                space,
-                physmap,
-                VirtAddr::new(id_out),
-                &made.id.to_le_bytes(),
-            )?;
-            copy_out(
-                space,
-                physmap,
-                VirtAddr::new(device_out),
-                &device_addr.to_le_bytes(),
-            )
-        });
+        let written = self
+            .copy_out_user(caller, id_out, &made.id.to_le_bytes())
+            .and_then(|()| self.copy_out_user(caller, device_out, &device_addr.to_le_bytes()));
         match written {
-            Some(Ok(())) => {}
-            Some(Err(err)) => {
+            Ok(()) => {}
+            Err(err) => {
                 self.release_shared_mapping(caller.process(), made.base_va);
-                return Err(copy_fault_errno(err));
-            }
-            None => {
-                self.release_shared_mapping(caller.process(), made.base_va);
-                return Err(Errno::BadAddress);
+                return Err(err);
             }
         }
         self.hand_over_untranslated(caller.process(), &terms);
@@ -12726,10 +13815,6 @@ where
         }
     }
 
-    // The single park loop: register on every wake channel the set's members
-    // need, scan readiness, park, and consume the winner's edge in one place
-    // so the register-before-park lost-wake interlock is not split apart.
-    #[allow(clippy::too_many_lines)]
     fn waitset_wait(
         &self,
         caller: &CallerContext<'_>,
@@ -12737,649 +13822,15 @@ where
         timeout_ns: u64,
         token_out: u64,
     ) -> SyscallResult {
-        // Owner-checked membership snapshot (a forged/foreign handle fails
-        // closed `NotFound`). Membership can be mutated only by this same
-        // task, which is about to park inside this call, so one snapshot is
-        // stable for the whole wait. The registry rotates it to resume after
-        // the member the previous wait reported, which is what makes the
-        // first-ready scan below a fair round robin rather than a fixed
-        // priority by registration order.
-        let members = crate::waitset::members(caller.process().0, set)?;
-
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        let sched_task = caller.task_id.0;
-        // One saturating add from the clock so a `u64::MAX` timeout stays
-        // `NO_DEADLINE` (explicit wake only) rather than wrapping to a tiny
-        // value (fail closed) — exactly as `irq_wait` computes it.
-        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
-
-        // Register on the wake channels *before* the first scan so an
-        // event arriving in the register/park window is not lost:
-        // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
-        // `NO_DEADLINE`) and `IRQ_WAITQ` (a member line firing, plus the timed
-        // sweep that enforces the timeout). `register` is idempotent.
-        // `SEAT_INPUT_WAITQ` is joined only by a set that actually holds a
-        // `SeatInput` member, so the pointer-rate wakes a drag produces never
-        // touch an unrelated waitset waiter.
-        let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
-        // `PROCWAIT_WAITQ` only by a set holding a `Child` member, under the
-        // caller's own process key: a child's exit or stop wakes its parent's
-        // waiters, never every waiter on the machine.
-        let child_key = members
-            .iter()
-            .any(|m| m.kind == WaitSourceKind::Child)
-            .then(|| crate::waitq::procwait_key(caller.process()));
-        // `STREAM_WAITQ` is joined once per `Stream` or `StreamRoom` member,
-        // under that descriptor's own readable- or writable-side key, so
-        // traffic on any other stream — every other pipe and pty on the
-        // machine — never wakes this waiter. Both kinds register here
-        // because both sides of a ring are that one queue's keys: a peer's
-        // drain releases the space a room member waits on exactly as an
-        // append releases the bytes a read member waits on. A member whose
-        // descriptor no longer resolves registers nothing: it can never
-        // report ready either.
-        //
-        // The stream a member names is resolved *once*, here, so the wait
-        // follows the object this descriptor held at entry. A sibling thread
-        // of the same process could close that number and open something else
-        // at it mid-wait; the readiness scan re-resolves the number and so
-        // stops reporting the retired stream, and the wait's own deadline
-        // bounds it. Following a replacement is not expressible anyway: the
-        // swap can always land between a re-resolution and the peer's write.
-        let stream_keys: Vec<crate::waitq::WakeKey> = {
-            let aspaces = self.aspaces.read();
-            let keys = members.iter().filter_map(|m| {
-                let fd = u32::try_from(m.id).ok()?;
-                match m.kind {
-                    WaitSourceKind::Stream => aspaces.stream_read_wait_key(caller.process(), fd),
-                    WaitSourceKind::StreamRoom => {
-                        aspaces.stream_write_wait_key(caller.process(), fd)
-                    }
-                    _ => None,
-                }
-            });
-            collected(members.len(), keys).ok_or(Errno::OutOfMemory)?
-        };
-        // A slot this thread owed a port's room since its last wait is let go
-        // of unless this wait watches the port again; a budget release that
-        // wait kept passes on, since this thread is waiting again. Taken after
-        // every step that refuses the wait outright, so such a refusal leaves
-        // the debt as it was.
-        let earlier = crate::procsignal::with_gate(sched_task, |gate| gate.room_debt().take());
-        if let Some(owed) = earlier.flatten() {
-            let watched = members
-                .iter()
-                .any(|m| m.kind == WaitSourceKind::PortRoom && m.id == owed.port);
-            if !watched {
-                self.release_room(sched_task, owed.port);
-            }
-            if let Some(chosen) = owed.budget {
-                crate::waitq::budget_pass_on(chosen);
-            }
-        }
-        // A `Stream` member on a console joins `CONSOLE_WAITQ`, which every
-        // push of console input flags, and `FOREGROUND_WAITQ`, since its input
-        // shows only while the caller may read it. A backing no interrupt
-        // feeds is re-polled at its own interval instead.
-        let mut observes_console = false;
-        let mut console_repoll_ns: Option<u64> = None;
-        for m in members.iter().filter(|m| m.kind == WaitSourceKind::Stream) {
-            let Some(device) = u32::try_from(m.id)
-                .ok()
-                .and_then(|fd| self.read_console(caller, fd))
-            else {
-                continue;
-            };
-            observes_console = true;
-            if let Some(interval) = device.read.poll_interval_ns() {
-                console_repoll_ns = Some(console_repoll_ns.map_or(interval, |n| n.min(interval)));
-            }
-        }
-        // `SIGNAL_INTAKE_WAITQ` is likewise joined only by a set that
-        // actually holds a `Signal` member, and its wake is targeted at the
-        // opted-in task, so signal traffic never disturbs another waiter.
-        let observes_signal = members.iter().any(|m| m.kind == WaitSourceKind::Signal);
-        // The peer-exit queue the same way, woken only for the watching thread.
-        let peer_watch = self
-            .peer_watch
-            .filter(|_| members.iter().any(|m| m.kind == WaitSourceKind::PeerExit));
-        // `CALL_WAITQ` is joined only by a set holding a `CallReply` member: a
-        // reply completing wakes the threads its endpoint recorded watching
-        // for the claimant's answers. A CallReply member also carries a *time* edge — its
-        // per-request deadline — so unlike the other reply/message channels
-        // its registration is armed with the nearest such deadline (folded in
-        // below), letting a wedged callee's timeout wake the reaper exactly
-        // like a real completion, never a busy poll.
-        let observes_callreply = members.iter().any(|m| m.kind == WaitSourceKind::CallReply);
-        // `NOTICE_WAITQ` is joined only by a set holding a `SystemNotice`
-        // member. Its wake is flagged from inside whatever published the
-        // topic — an allocation path for the band, a mount mutation for the
-        // table, a syscall for the desktop — and drained at the next
-        // dispatcher-context point, so a topic moving never disturbs a
-        // waiter that holds no notice member at all.
-        let observes_notice = members
-            .iter()
-            .any(|m| m.kind == WaitSourceKind::SystemNotice);
-        // `PORT_ROOM_WAITQ` is joined only by a set holding a `PortRoom`
-        // member: a drained mailbox wakes the senders that port recorded,
-        // and a torn-down port wakes them all, so ordinary mailbox traffic
-        // never disturbs a waiter that did not ask about room.
-        let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
-        // `FOREGROUND_WAITQ` is joined only by a set holding a `Foreground`
-        // or console member, and woken only when some terminal changes hands.
-        let observes_foreground =
-            observes_console || members.iter().any(|m| m.kind == WaitSourceKind::Foreground);
-        // `HW_TREE_WAITQ` is joined only by a set holding a `HardwareTree`
-        // member, and woken by every generation bump of the tree.
-        let observes_tree = members
-            .iter()
-            .any(|m| m.kind == WaitSourceKind::HardwareTree);
-        // `CONSOLE_DAMAGE_WAITQ` is joined only by the console's host, and
-        // woken when rows become owed to it.
-        let observes_hosted = members
-            .iter()
-            .any(|m| m.kind == WaitSourceKind::ConsoleDamage);
-        // A registration that could not be recorded leaves the wait unable to
-        // hear its event, so the wait fails closed rather than park deaf.
-        let mut deaf = false;
-        let mut hear = |filed: Result<(), crate::waitq::WaitRefused>| deaf |= filed.is_err();
-        hear(crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        hear(crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns));
-        if let Some(key) = child_key {
-            hear(crate::waitq::PROCWAIT_WAITQ.register_keyed(
-                key,
-                sched_task,
-                crate::waitq::NO_DEADLINE,
-            ));
-        }
-        if observes_seat {
-            hear(crate::waitq::SEAT_INPUT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        for &key in &stream_keys {
-            hear(crate::waitq::STREAM_WAITQ.register_keyed(
-                key,
-                sched_task,
-                crate::waitq::NO_DEADLINE,
-            ));
-        }
-        if observes_console {
-            hear(crate::waitq::CONSOLE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        if observes_signal {
-            hear(crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        if let Some(peers) = peer_watch {
-            hear(peers.join(sched_task));
-        }
-        if observes_notice {
-            hear(crate::waitq::NOTICE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        if observes_foreground {
-            hear(crate::waitq::FOREGROUND_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        if observes_tree {
-            hear(crate::waitq::HW_TREE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE));
-        }
-        if observes_hosted {
-            hear(
-                crate::waitq::CONSOLE_DAMAGE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE),
-            );
-        }
-        // The endpoint each `CallReply` member watches, in member order,
-        // resolved once: the snapshot is stable for the whole wait.
-        let mut replies = Vec::new();
-        let calls = members
-            .iter()
-            .filter(|m| m.kind == WaitSourceKind::CallReply);
-        if replies.try_reserve_exact(calls.clone().count()).is_ok() {
-            replies.extend(calls.map(|m| crate::callreg::lookup(EndpointId(m.id))));
-        } else {
-            deaf = true;
-        }
-        if observes_room {
-            deaf |= crate::waitq::PORT_ROOM_WAITQ
-                .register(sched_task, crate::waitq::NO_DEADLINE)
-                .is_err();
-        }
-        // Set once a scan finds a member short of budget: from then on the
-        // task also waits under its process on the budget queue.
-        let mut budget_watched = false;
-        // Records this task with each observed port as waiting for room in its
-        // own process's lane before every scan, keeping its place in line and
-        // any slot it holds: a port that went and came back, or took every
-        // record at once, finds it waiting again.
-        let watch_rooms = || {
-            let ipc = self.ipc.read();
-            let sender = caller.caps.proc_id();
-            let mut recorded = true;
-            for m in &members {
-                if m.kind == WaitSourceKind::PortRoom {
-                    if let Some(port) = ipc.lookup(EndpointId(m.id)) {
-                        recorded &= port.watch_room(sched_task, sender).is_ok();
-                    }
-                }
-            }
-            recorded
-        };
-        // Records this task with each observed endpoint as watching for the
-        // answers its process awaits, before every scan: an answer takes the
-        // records it wakes, and the thread that posted need not be this one.
-        let watch_replies = || {
-            let claimant = caller.caps.process().0;
-            replies
-                .iter()
-                .flatten()
-                .all(|ep| ep.watch_replies(sched_task, claimant).is_ok())
-        };
-        if observes_callreply {
-            let claimant = caller.caps.process().0;
-            let call_deadline = replies
-                .iter()
-                .flatten()
-                .map(|ep| ep.next_deadline_for(claimant))
-                .fold(crate::waitq::NO_DEADLINE, u64::min);
-            deaf |= crate::waitq::CALL_WAITQ
-                .register(sched_task, call_deadline)
-                .is_err();
-        }
-        let paced = members.iter().any(|m| m.kind == WaitSourceKind::DirWatch);
-        // File and DirWatch members wait on `FSWATCH_WAITQ` under the key of
-        // the node each watches, registered *before* the first scan so a
-        // change in the register/park window is not lost; a mount move wakes
-        // the whole queue. The scan marks a node parked only while its member
-        // has nothing pending, so a storm of changes wakes this task once, not
-        // once per change. A key that cannot be recorded fails the wait rather
-        // than leaving it to park deaf to that key.
-        let node_keys = members
-            .iter()
-            .filter(|m| matches!(m.kind, WaitSourceKind::File | WaitSourceKind::DirWatch))
-            .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.node)));
-        let mut watch_keys: Vec<crate::waitq::WakeKey> = Vec::new();
-        for key in node_keys {
-            if watch_keys.contains(&key) {
-                continue;
-            }
-            if watch_keys.try_reserve(1).is_err() {
-                deaf = true;
-                break;
-            }
-            watch_keys.push(key);
-            if crate::waitq::FSWATCH_WAITQ
-                .register_keyed(key, sched_task, crate::waitq::NO_DEADLINE)
-                .is_err()
-            {
-                deaf = true;
-                break;
-            }
-        }
-
-        // A surface's frame obligation runs from one event wait to the
-        // next, so this wait is where a watched thread stops owing one — and
-        // the wait's own cost is never charged to it. A *memberless* wait
-        // with a finite timeout is not an event wait at all but a sleep, and
-        // a sleep on the frame path is one of the stalls the watch exists to
-        // catch, so it deliberately leaves the span open.
-        #[cfg(feature = "watchdog-diagnostics")]
-        let event_wait = !members.is_empty() || timeout_ns == crate::waitq::NO_DEADLINE;
-        #[cfg(feature = "watchdog-diagnostics")]
-        if event_wait {
-            crate::latency::close_span(cpu, sched_task);
-        }
-
-        // `(kind, id, token)` of the ready member; `id`/`kind` drive the
-        // post-write IRQ-edge consume.
-        let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
-            if deaf {
-                break Err(Errno::OutOfMemory);
-            }
-            let unrecorded =
-                (observes_room && !watch_rooms()) || (observes_callreply && !watch_replies());
-            let now = self.arch.monotonic_ns(cpu);
-            // A quarantined IRQ member is terminal: the runaway-interrupt
-            // safety net disabled its line, so it will never fire again.
-            // Fail the whole wait closed with `DeviceFault` (recording the
-            // disable) rather than parking forever on a dead line or
-            // re-arming it into another storm. Checked before the readiness
-            // scan so a quarantine that lands mid-wait is caught promptly.
-            let quarantined_line = members.iter().find_map(|m| {
-                if m.kind != WaitSourceKind::Irq {
-                    return None;
-                }
-                let handle = IrqHandle::from_raw(m.id);
-                if self.irq.is_quarantined(handle, caller.process()) {
-                    self.irq.line_for(handle, caller.process())
-                } else {
-                    None
-                }
-            });
-            if let Some(line) = quarantined_line {
-                self.emit_irq_quarantined(Some(line), sched_task);
-                break Err(Errno::DeviceFault);
-            }
-            // A member admitted while bound whose binding is gone was revoked
-            // with its device, and its line will never report again.
-            if members.iter().any(|m| {
-                m.kind == WaitSourceKind::Irq
-                    && self
-                        .irq
-                        .line_for(IrqHandle::from_raw(m.id), caller.process())
-                        .is_none()
-            }) {
-                break Err(Errno::NotFound);
-            }
-            let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
-            // A DirWatch change held back by its latency is due no later
-            // than this; the park below wakes for it as for the timeout.
-            let mut held_until = crate::waitq::NO_DEADLINE;
-            let mounts = if paced {
-                self.filesystem.mount_epoch()
-            } else {
-                0
-            };
-            let limit = if observes_room {
-                self.soft_limit(caller, LimitKind::IpcQueueBytes)
-            } else {
-                0
-            };
-            let mut short_of_budget = false;
-            // First ready in the rotated snapshot wins. Each member's
-            // readiness is the non-consuming, caller-re-checked peek of
-            // `waitset_member_state`, so a faulting `token_out` below never
-            // drops a delivered event and a torn-down resource simply is
-            // not ready.
-            let mut resolved = replies.iter();
-            for m in &members {
-                let reply = if m.kind == WaitSourceKind::CallReply {
-                    resolved.next().and_then(Option::as_deref)
-                } else {
-                    None
-                };
-                match self.waitset_member_state(caller, m, reply, now, mounts, limit) {
-                    crate::fswatch::MemberState::Ready => {
-                        ready = Some((m.kind, m.id, m.token));
-                        break;
-                    }
-                    crate::fswatch::MemberState::Due(at) => held_until = held_until.min(at),
-                    crate::fswatch::MemberState::OverBudget => short_of_budget = true,
-                    crate::fswatch::MemberState::Idle => {}
-                }
-            }
-
-            if let Some(found) = ready {
-                break Ok(found);
-            }
-            if now >= deadline_ns {
-                break Err(Errno::TimedOut);
-            }
-            // A room this task could not record itself as waiting for would
-            // never wake it.
-            if unrecorded {
-                break Err(Errno::OutOfMemory);
-            }
-            // Recorded before the look that parks, so a release of the
-            // process's budget since this scan is seen by the next.
-            if short_of_budget && !budget_watched {
-                if crate::waitq::budget_watch(caller.process(), sched_task).is_err() {
-                    break Err(Errno::OutOfMemory);
-                }
-                budget_watched = true;
-                continue;
-            }
-            // A release that woke this wait to no room it can take passes to
-            // the process's next budget waiter.
-            if budget_watched {
-                crate::waitq::budget_pass(caller.process(), sched_task);
-            }
-            let repoll_at = console_repoll_ns.map_or(crate::waitq::NO_DEADLINE, |interval| {
-                now.saturating_add(interval)
-            });
-            if paced || console_repoll_ns.is_some() {
-                let due = deadline_ns.min(held_until).min(repoll_at);
-                if crate::waitq::IRQ_WAITQ.register(sched_task, due).is_err() {
-                    break Err(Errno::OutOfMemory);
-                }
-            }
-
-            // Re-arm every IRQ member's line before parking: a user-space
-            // driver holds no controller access, so the kernel routes + unmasks
-            // the line on its behalf (mask-before-wake). Best-effort and
-            // idempotent — a refusal leaves the line as-is and the deadline
-            // still bounds the wait.
-            for m in members.iter().filter(|m| m.kind == WaitSourceKind::Irq) {
-                let handle = IrqHandle::from_raw(m.id);
-                let _ = self
-                    .irq
-                    .rearm(handle, caller.process(), self.irq_controller);
-            }
-            // Arm the one-shot to the nearest pending deadline across every
-            // timed wait-queue (which includes this wait's, and never drops
-            // another queue's earlier wake), then *park* off the run queue until
-            // woken by an endpoint post (`serve_wake`), a member line firing
-            // (`irq_wake`), or the timed sweep — never a busy spin. The
-            // wake-pending token closes the poll/park race exactly as
-            // `call_recv` / `irq_wait` rely on.
-            self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-            // Park keyed to the CPU this task occupies right now
-            // (`park_current_task` reads it live, so a mid-wait migration is
-            // handled).
-            if !park_current_task(self.arch) {
-                break Err(Errno::NotImplemented);
-            }
-            // A doomed waiter never re-parks: a termination deferred against
-            // this task unwinds the wait so the kill lands at the syscall
-            // boundary (the errno never reaches user space).
-            if crate::procsignal::kill_pending(sched_task) {
-                break Err(Errno::Interrupted);
-            }
-        };
-
-        crate::waitq::SERVE_WAITQ.deregister(sched_task);
-        crate::waitq::IRQ_WAITQ.deregister(sched_task);
-        if let Some(key) = child_key {
-            crate::waitq::PROCWAIT_WAITQ.deregister_keyed(key, sched_task);
-        }
-        if observes_seat {
-            crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
-        }
-        for &key in &stream_keys {
-            crate::waitq::STREAM_WAITQ.deregister_keyed(key, sched_task);
-        }
-        if observes_console {
-            crate::waitq::CONSOLE_WAITQ.deregister(sched_task);
-        }
-        if observes_signal {
-            crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
-        }
-        if let Some(peers) = peer_watch {
-            peers.leave(sched_task);
-        }
-        if observes_notice {
-            crate::waitq::NOTICE_WAITQ.deregister(sched_task);
-        }
-        if observes_foreground {
-            crate::waitq::FOREGROUND_WAITQ.deregister(sched_task);
-        }
-        if observes_tree {
-            crate::waitq::HW_TREE_WAITQ.deregister(sched_task);
-        }
-        if observes_hosted {
-            crate::waitq::CONSOLE_DAMAGE_WAITQ.deregister(sched_task);
-        }
-        if observes_callreply {
-            crate::waitq::CALL_WAITQ.deregister(sched_task);
-            let claimant = caller.caps.process().0;
-            for ep in replies.iter().flatten() {
-                ep.unwatch_replies(sched_task, claimant);
-            }
-        }
-        if observes_room {
-            crate::waitq::PORT_ROOM_WAITQ.deregister(sched_task);
-            // The member reported ready keeps the slot its thread holds there,
-            // and the budget release it may have been woken for, until its
-            // next call other than the send; every other port's slot is let go
-            // of.
-            let owing = match outcome {
-                Ok((WaitSourceKind::PortRoom, id, _)) => Some(id),
-                _ => None,
-            };
-            let budget = match (budget_watched, owing) {
-                (true, Some(_)) => crate::waitq::budget_spent(caller.process(), sched_task),
-                (true, None) => {
-                    crate::waitq::budget_unwatch(caller.process(), sched_task);
-                    None
-                }
-                (false, _) => None,
-            };
-            let owed = owing.map(|port| crate::waitset::OwedRoom { port, budget });
-            self.end_room_waits(sched_task, &members, owed);
-        }
-        for &key in &watch_keys {
-            crate::waitq::FSWATCH_WAITQ.deregister_keyed(key, sched_task);
-        }
-        // Re-point the one-shot at the nearest deadline any remaining waiter
-        // on *any* timed wait-queue needs (or clear it) so a finished wait
-        // leaves no stale arming and drops no other queue's pending wake.
-        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
-
-        // The wait has returned, so the surface owes an answer from here —
-        // whichever way this call ends, since a refused wait still hands the
-        // thread back to user code.
-        #[cfg(feature = "watchdog-diagnostics")]
-        if event_wait {
-            crate::latency::open_span(cpu, sched_task, self.arch.monotonic_ns(cpu));
-        }
-
-        let (kind, id, token) = outcome?;
-
-        // Write the ready member's token through the validated boundary
-        // *before* consuming an IRQ edge, so a faulting `token_out` (a buggy
-        // caller) fails closed `BadAddress` without dropping a delivered
-        // interrupt.
-        let token_bytes = token.to_le_bytes();
-        self.copy_out_user(caller, token_out, &token_bytes)?;
-
-        // Consume an IRQ winner's edge now (the same `swap` `irq_wait`
-        // performs) so the next wait re-arms and parks rather than
-        // re-reporting the same fire; an endpoint winner is left for
-        // `call_recv` to drain and a child winner for the non-blocking
-        // `wait` to reap (the scan only peeked them). A `u64::MAX`
-        // deadline means `try_wait_step` never returns `TimedOut` here; a
-        // binding torn down between the scan and now resolves to nothing and
-        // consumes nothing (harmless).
-        if kind == WaitSourceKind::Irq {
-            let now = self.arch.monotonic_ns(cpu);
-            let _ =
-                self.irq
-                    .try_wait_step(IrqHandle::from_raw(id), caller.process(), now, u64::MAX);
-        }
-        // Consume a File winner's edge: advance the member's observed
-        // generation to the node's current one, so the next wait blocks until
-        // the node changes *again* rather than re-reporting the same change.
-        // The watcher always reads to end-of-file, so advancing past a change
-        // that raced in after the scan loses no data.
-        if kind == WaitSourceKind::File {
-            if let Some(m) = members
-                .iter()
-                .find(|m| m.kind == WaitSourceKind::File && m.id == id)
-            {
-                let generation = m
-                    .table
-                    .as_ref()
-                    .map_or(0, |table| table.0.generation(m.node));
-                let _ = crate::waitset::advance_observed(
-                    caller.process().0,
-                    set,
-                    WaitSourceKind::File,
-                    id,
-                    generation,
-                );
-            }
-        }
-        // Consume a DirWatch winner's edge and start its latency: the next
-        // report waits for a change after this one, and no sooner than the
-        // latency from now. The drain reads whatever has been recorded by
-        // then, so advancing past a change that raced in loses nothing.
-        if kind == WaitSourceKind::DirWatch {
-            if let Some(m) = members
-                .iter()
-                .find(|m| m.kind == WaitSourceKind::DirWatch && m.id == id)
-            {
-                let mounts = self.filesystem.mount_epoch();
-                let seq = m
-                    .table
-                    .as_ref()
-                    .map_or(0, |table| table.0.journal_seq(m.node));
-                let _ = crate::waitset::advance_paced(
-                    caller.process().0,
-                    set,
-                    id,
-                    seq,
-                    mounts,
-                    self.arch.monotonic_ns(cpu),
-                );
-            }
-        }
-        // Consume a SystemNotice winner's edge: advance the member's observed
-        // generation to the topic's current one, so the next wait blocks until
-        // the topic moves *again*. Advancing to the generation as it stands
-        // now (not the one the scan saw) is deliberate: the caller reads the
-        // topic for itself after this returns, so a move that raced in between
-        // is already in what it will read, and re-reporting it would be a
-        // spurious wake with nothing to do.
-        if kind == WaitSourceKind::SystemNotice {
-            if let Ok(topic) = NoticeTopic::from_u64(id) {
-                let generation = crate::notice::generation(topic, self.seat_registry);
-                let _ = crate::waitset::advance_observed(
-                    caller.process().0,
-                    set,
-                    WaitSourceKind::SystemNotice,
-                    id,
-                    generation,
-                );
-            }
-        }
-        // Consume a Foreground winner's edge the same way: the caller asks
-        // where it stands after this returns, so a change that raced in is
-        // already in its answer.
-        if kind == WaitSourceKind::Foreground {
-            let generation = u32::try_from(id).ok().and_then(|fd| {
-                self.with_terminal_ownership(
-                    caller,
-                    fd,
-                    crate::foreground::ForegroundOwnership::generation,
-                )
-                .ok()
-            });
-            if let Some(generation) = generation {
-                let _ = crate::waitset::advance_observed(
-                    caller.process().0,
-                    set,
-                    WaitSourceKind::Foreground,
-                    id,
-                    generation,
-                );
-            }
-        }
-        // Consume a HardwareTree winner's edge: the caller reads the tree for
-        // itself after this returns, so a bump that raced in is already in
-        // what it reads.
-        if kind == WaitSourceKind::HardwareTree {
-            if let Ok(generation) = self.hw_tree.generation() {
-                let _ = crate::waitset::advance_observed(
-                    caller.process().0,
-                    set,
-                    WaitSourceKind::HardwareTree,
-                    id,
-                    generation,
-                );
-            }
-        }
-        // Advance the round robin past the member just reported, so the next
-        // wait scans the rest of the set first. Recorded only once the token
-        // has actually reached the caller: a wait that failed to report
-        // reported nothing, and must not cost the member its turn.
-        let _ = crate::waitset::note_reported(caller.process().0, set, kind, id);
-        Ok(0)
+        // Owner-checked (a forged/foreign handle fails closed `NotFound`), and
+        // in buffers reserved as the members were added, so the wait needs no
+        // memory. The snapshot resumes after the member the previous wait
+        // reported, which makes the first-ready scan a fair round robin.
+        let owner = caller.process().0;
+        let mut scratch = crate::waitset::checkout(owner, set)?;
+        let waited = self.waitset_wait_in(caller, set, timeout_ns, token_out, &mut scratch);
+        crate::waitset::checkin(owner, set, scratch);
+        waited
     }
 
     fn fs_open(
@@ -13601,7 +14052,11 @@ where
         write_ceiling: u64,
         recipient: u64,
         recipient_len: usize,
+        flags: u64,
     ) -> SyscallResult {
+        if flags & !tairix_abi::GRANT_FILE_ONLY != 0 {
+            return Err(Errno::OutOfRange);
+        }
         // Step 2 (capability) was enforced by the dispatcher: the
         // `fd_grant` spec carries `CAP_FS_ACCESS` whatever the descriptor
         // proves to be, and the mint is dispatcher-audited. Step 3 (validate
@@ -13620,6 +14075,14 @@ where
         // position the recipient never named.
         let access = handle.flags.access();
         if access.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        // Judged from the node the descriptor pinned, so the check reads no
+        // volume.
+        let regular = handle
+            .node()
+            .is_some_and(|node| node.node.kind() == NodeKind::RegularFile);
+        if flags & tairix_abi::GRANT_FILE_ONLY != 0 && !regular {
             return Err(Errno::OutOfRange);
         }
         // A writable file's reach is asked for — a stated bound, or the
@@ -13658,18 +14121,7 @@ where
             return Err(Errno::BufferTooSmall);
         }
         let mut instance_bytes = [0u8; PROC_ID_LEN];
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(
-                space,
-                physmap,
-                VirtAddr::new(recipient),
-                &mut instance_bytes,
-            )
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(copy_fault_errno(err)),
-            None => return Err(Errno::BadAddress),
-        }
+        self.copy_in_user(caller, recipient, &mut instance_bytes)?;
         let instance = ProcId::from_raw(instance_bytes);
         // Resolved and minted under one hold of the instance, so the grant
         // cannot land in the table of a successor that drew the recipient's
@@ -13797,15 +14249,29 @@ where
         }
         let mut bytes = [0u8; PROC_ID_LEN];
         self.copy_in_user(caller, grantor, &mut bytes)?;
-        let path = self.aspaces.write().redeem_fd_location(
+        let (task, instance, from) = (
             caller.process(),
             caller.caps.proc_id(),
-            handle,
             ProcId::from_raw(bytes),
+        );
+        let path = self.aspaces.write().fd_location(
+            task,
+            instance,
+            handle,
+            from,
             caller.caps.owner().0,
             out_cap,
         )?;
+        // Delivered before it is taken, so a copy the buffer refuses leaves
+        // the location for another redemption.
         self.copy_out_user(caller, out, path.as_bytes())?;
+        if !self
+            .aspaces
+            .write()
+            .take_fd_location(task, instance, handle, from)
+        {
+            return Err(Errno::NotFound);
+        }
         Ok(path.len() as u64)
     }
 
@@ -15014,10 +15480,6 @@ fn reclaim_process_bookkeeping(
             crate::procsignal::clear_kill_gate(thread.0);
         }
     }
-    // Drop every futex key the process held. A thread still registered on one
-    // is already dead, so nothing is woken; leaving the queues behind would
-    // strand kernel memory against a process that no longer exists.
-    crate::futex::release_process(process);
     // Prune the dead process's own child rows from the wait bookkeeping: a
     // dead parent can never reap, so a row it never collected — a running
     // orphan's link or an unreaped zombie — would be stranded forever.
@@ -17483,30 +17945,29 @@ where
     A: KernelArch + 'static,
 {
     /// Resolve a user-mode data abort at `fault_va` for `thread` of
-    /// `process`, the faulting thread identified on `cpu`: back the page and
-    /// retry, or record the fault fatal to the thread. Runs inside the kill
-    /// gate's in-kernel window.
+    /// `process`: back the page and retry, or record the fault fatal to the
+    /// process. Runs inside the kill gate's in-kernel window.
     fn resolve_attributed_fault(
         &self,
-        cpu: CpuId,
         process: ProcessId,
         thread: SecTaskId,
         fault_va: u64,
         write: bool,
         regs: Option<&UserRegisterFrame>,
     ) -> UserFaultOutcome {
-        // Kernel-activity breadcrumb: the fault resolver runs in the
-        // data-abort exception handler with IRQ masked (only the `svc`
-        // syscall path re-enables IRQ), so a CPU that wedges here can be
-        // sampled by neither its own watchdog IRQ nor a buddy IPI — its
-        // watchdog context goes stale (`pre_silence`). Stamping the phase as
-        // the resolver advances leaves a fresh breadcrumb naming exactly
-        // which phase the CPU is stuck in (`k_site=fault_* k_detail=<va>`).
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultEntry,
-            fault_va,
-        );
+        // The resolver runs in the data-abort handler with IRQ masked, so a
+        // CPU wedged here can be sampled by neither its own watchdog nor a
+        // buddy IPI: each phase leaves a breadcrumb naming where it stuck, on
+        // the CPU it runs on now, since a file read may park and resume
+        // elsewhere.
+        let mut mark = |site| {
+            crate::watchdog::note_kernel_breadcrumb(
+                SchedulerArch::current_cpu(self.arch),
+                site,
+                fault_va,
+            );
+        };
+        mark(crate::watchdog::KernelBreadcrumb::FaultEntry);
         // Foreground direct reclaim: before this fault commits another
         // frame, compress a bounded batch of the faulting task's own cold
         // anonymous pages out into the `ramzip` tier if memory pressure
@@ -17514,103 +17975,30 @@ where
         // A no-op costing at most one pressure sample at shallow pressure,
         // for a pinned/real-time task, on a port with no referenced bit, or
         // before boot wires the tier — never a spin.
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultReclaim,
-            fault_va,
-        );
+        mark(crate::watchdog::KernelBreadcrumb::FaultReclaim);
         self.handlers.ramzip_direct_reclaim(process);
-        // Stack growth is offered first, for reads and writes alike (a
-        // stack push is a write), so the write-fatal file rule below can
-        // never kill a legitimate growth fault. The resolver itself bounds
-        // growth by the recorded span and the task's `StackBytes` soft
-        // limit (fail closed).
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultStack,
-            fault_va,
-        );
-        if self.handlers.resolve_stack_fault(process, thread, fault_va) {
+        let backed = self
+            .handlers
+            .back_user_page(process, thread, fault_va, write, &mut mark);
+        let Err(cause) = backed else {
             return UserFaultOutcome::Resolved;
-        }
-        // A page the compressed-memory tier parked is offered **before**
-        // plain anonymous backing: a compressed page is reserved anonymous
-        // memory, so `resolve_anon_fault` would otherwise re-zero it and
-        // destroy the compressed contents. A restore makes the page
-        // resident (retry); an unrecoverable entry (authentication or
-        // decode failure, already audited) is fatal to the task, exactly
-        // as a wild access is; no entry (or no installed tier) falls
-        // through to the anonymous handler.
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultRamzip,
-            fault_va,
-        );
-        match self.handlers.resolve_ramzip_fault(process, fault_va) {
-            RamzipFaultOutcome::Handled => return UserFaultOutcome::Resolved,
-            RamzipFaultOutcome::Fatal(_) => {
-                self.handlers.record_fault_exit(
-                    process,
-                    thread,
-                    FaultAccess::Data {
-                        va: fault_va,
-                        write,
-                    },
-                    regs,
-                );
-                return UserFaultOutcome::Terminated { cpu };
+        };
+        mark(crate::watchdog::KernelBreadcrumb::FaultFatal);
+        let access = FaultAccess::Data {
+            va: fault_va,
+            write,
+        };
+        if self
+            .handlers
+            .end_fault(process, thread, access, cause, regs)
+        {
+            UserFaultOutcome::Terminated {
+                cpu: SchedulerArch::current_cpu(self.arch),
             }
-            // NoEntry (and any future non-restoring outcome): fall through.
-            _ => {}
+        } else {
+            // The death owed takes the thread at the fault's boundary.
+            UserFaultOutcome::Resolved
         }
-        // Demand-paged anonymous memory (`mem_map`) is offered next, for
-        // reads and writes alike (anonymous memory is writable), so the
-        // write-fatal file rule below never kills a legitimate first-touch
-        // of a reserved anonymous page. The resolver backs only a page
-        // inside a region the task reserved (fail closed otherwise).
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultAnon,
-            fault_va,
-        );
-        if self.handlers.resolve_anon_fault(process, thread, fault_va) {
-            return UserFaultOutcome::Resolved;
-        }
-        // A write is never resolved as file backing: file mappings are
-        // read-only, so mapping the page would retry the store forever
-        // against a resident page. It is fatal to the task below — the one
-        // shared policy every port's write gate feeds.
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultFile,
-            fault_va,
-        );
-        if !write && self.handlers.resolve_file_fault(process, fault_va) {
-            return UserFaultOutcome::Resolved;
-        }
-        // A wild access, a page at/past end-of-file, an unresolvable
-        // read, or any write: fatal to the task and only the task. Record
-        // the crash exit so a waiting parent reaps a real status (and the
-        // audit log gets its stable fault-kill record), reclaim exactly
-        // what a clean exit or a signal kill reclaims, and hand the port
-        // the CPU to suspend the task on. A file read that parked may have
-        // resumed this thread on another core.
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        crate::watchdog::note_kernel_breadcrumb(
-            cpu,
-            crate::watchdog::KernelBreadcrumb::FaultFatal,
-            fault_va,
-        );
-        self.handlers.record_fault_exit(
-            process,
-            thread,
-            FaultAccess::Data {
-                va: fault_va,
-                write,
-            },
-            regs,
-        );
-        UserFaultOutcome::Terminated { cpu }
     }
 }
 
@@ -17807,10 +18195,8 @@ where
         // The resolvers read through the filesystem and park there, so a fault
         // is a kernel body like a syscall: a death is taken at its boundary,
         // never inside it, and one already owed skips the resolution.
-        let outcome = crate::procsignal::enter_body(&gate).then(|| {
-            let cpu = SchedulerArch::current_cpu(self.arch);
-            self.resolve_attributed_fault(cpu, process, thread, fault_va, write, regs)
-        });
+        let outcome = crate::procsignal::enter_body(&gate)
+            .then(|| self.resolve_attributed_fault(process, thread, fault_va, write, regs));
         let returning = matches!(outcome, Some(UserFaultOutcome::Resolved));
         let owed = crate::procsignal::leave_body(&gate, returning);
         // A resolver that parked, or a stop taken at either edge, may have
@@ -17870,8 +18256,13 @@ where
             crate::watchdog::KernelBreadcrumb::FaultFatal,
             fault_pc,
         );
-        self.handlers
-            .record_fault_exit(process, thread, FaultAccess::Instruction, regs);
+        self.handlers.record_fault_exit(
+            process,
+            thread,
+            FaultAccess::Instruction,
+            Unbacked::Invalid,
+            regs,
+        );
         UserFaultOutcome::Terminated { cpu }
     }
 }
@@ -18301,11 +18692,12 @@ mod tests {
         assert!(table.read().is_empty());
     }
 
-    /// The state a `thread_create` / futex handler test needs: a caller whose
-    /// address space maps exactly one readable user page at `0x1000` (holding
-    /// `payload`), so a probe of an address inside it succeeds and one outside
-    /// it fails closed.
+    /// The state a `thread_create` / futex handler test needs: a gated caller
+    /// whose address space maps exactly one readable user page at `0x1000`
+    /// (holding `payload`), so a probe of an address inside it succeeds and one
+    /// outside it fails closed.
     struct ThreadFixture {
+        task: u64,
         table: RwLock<CapTable>,
         ipc: RwLock<PortRegistry>,
         aspaces: RwLock<AddressSpaceRegistry>,
@@ -18313,6 +18705,12 @@ mod tests {
         irq: IrqTable,
         ctl: UnsupportedController,
         caps: TaskCapabilities,
+    }
+
+    impl Drop for ThreadFixture {
+        fn drop(&mut self) {
+            crate::procsignal::clear_kill_gate(self.task);
+        }
     }
 
     /// The one mapped user address a thread-handler test probes through.
@@ -18335,7 +18733,9 @@ mod tests {
                 .write()
                 .register(ProcessId(task), space, physmap)
                 .expect("a fresh process registers once");
+            crate::procsignal::install_gate(task, ProcessId(task)).expect("a gate installs");
             Self {
+                task,
                 table,
                 ipc: RwLock::new(PortRegistry::new()),
                 aspaces,
@@ -18554,13 +18954,15 @@ mod tests {
         assert_eq!(h.futex_wake(&ctx, THREAD_MAPPED, u32::MAX), Ok(0));
     }
 
-    /// A wait the heap cannot register is refused `OutOfMemory` at each of its
-    /// allocations, leaving nothing registered, and never aborts.
+    /// A futex wait, timed or not, links only what its thread was admitted
+    /// with, so a heap that refuses every allocation still reaches the park —
+    /// here the refusal a host gives — and leaves nothing linked.
     ///
-    /// Regression: registration filed the waiter in B-tree indices whose
-    /// insertion aborts on a refused node (`plans/OPEN-DEFECTS.md` D1682).
+    /// Regression: a key's first waiter allocated its key a queue, its place
+    /// in the bucket and its row, so under memory pressure a contended lock was
+    /// refused `OutOfMemory` at once and its caller spun.
     #[test]
-    fn futex_wait_on_an_exhausted_heap_is_refused_and_registers_nothing() {
+    fn futex_wait_needs_no_memory() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -18568,14 +18970,12 @@ mod tests {
         let fixture = ThreadFixture::new(65, &5u32.to_le_bytes(), sink);
         let ctx = fixture.context(65);
         let h = fixture.handlers(&sched, &arch, sink);
-        let answer = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
-            h.futex_wait(&ctx, THREAD_MAPPED, 5, u64::MAX)
-        });
-        assert_eq!(
-            answer,
-            Err(Errno::NotImplemented),
-            "registered once the heap had room, then refused the park a host cannot take"
-        );
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let untimed = h.futex_wait(&ctx, THREAD_MAPPED, 5, u64::MAX);
+        let timed = h.futex_wait(&ctx, THREAD_MAPPED, 5, 1_000_000);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(untimed, Err(Errno::NotImplemented));
+        assert_eq!(timed, Err(Errno::NotImplemented));
         assert_eq!(h.futex_wake(&ctx, THREAD_MAPPED, u32::MAX), Ok(0));
     }
 
@@ -18671,7 +19071,8 @@ mod tests {
                 wait,
                 ProcessId(2),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Err(Errno::WouldBlock),
             "a parent must not reap a child whose thread group is still alive"
@@ -18693,7 +19094,8 @@ mod tests {
                 wait,
                 ProcessId(2),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(crate::procwait::WaitedChild {
                 pid: 40,
@@ -18746,7 +19148,8 @@ mod tests {
                 wait,
                 ProcessId(2),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Err(Errno::NotFound),
             "no status was owed, so the parent has no child left to wait for"
@@ -18832,8 +19235,8 @@ mod tests {
             panic!("the peer's stdin is pipe-backed");
         };
         let mut buf = [0u8; 4];
-        assert_eq!(end.try_read(&mut buf), ReadStep::Read(2));
-        assert_eq!(end.try_read(&mut buf), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(end, &mut buf), ReadStep::Read(2));
+        assert_eq!(crate::pipe::read_into(end, &mut buf), ReadStep::Eof);
     }
 
     /// `SP2b` (`plans/SPAWN.md` SP2): the producer maps exactly the two
@@ -24849,6 +25252,7 @@ mod tests {
             _waiter: SecTaskId,
             _pid: i64,
             _flags: WaitFlags,
+            _deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
@@ -25067,7 +25471,12 @@ mod tests {
         assert!(denied_for(&sink.0, "out_of_memory"));
         assert_eq!(table.read().len(), 1, "no record survives the refusal");
         assert_eq!(
-            wait.poll(ProcessId(1), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(
+                ProcessId(1),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
         aspaces
@@ -25420,7 +25829,12 @@ mod tests {
         assert_eq!(pty.foreground().current(), Some(stranger));
         assert!(table.read().is_empty(), "no record survives the refusal");
         assert_eq!(
-            wait.poll(ProcessId(1), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(
+                ProcessId(1),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
         aspaces
@@ -25444,6 +25858,7 @@ mod tests {
             _waiter: SecTaskId,
             _pid: i64,
             _flags: WaitFlags,
+            _deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
@@ -25548,7 +25963,14 @@ mod tests {
             task_id: SecTaskId(40),
             caps: &caps,
         };
-        let poll = || wait.poll(ProcessId(2), tairix_abi::WAIT_PID_ANY, WaitFlags::empty());
+        let poll = || {
+            wait.poll(
+                ProcessId(2),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(()),
+            )
+        };
 
         assert_eq!(h.exit(&leader, 5), Ok(0));
         assert_eq!(
@@ -26400,13 +26822,14 @@ mod tests {
         );
     }
 
-    /// A stream writer is on the stream wait queue, *under its own ring's
-    /// key*, before its first poll, so a peer that drains the ring between the
-    /// poll and the park cannot wake nobody and strand it. `wake_waiter`
-    /// reports whether that exact `(key, task)` is registered, which is both
-    /// questions at once.
+    /// A stream writer that finds its ring full joins the stream wait queue,
+    /// *under its own ring's key*, before the poll that precedes its park, so a
+    /// peer that drains the ring between that poll and the park cannot wake
+    /// nobody and strand it; a writer that never has to park joins nothing.
+    /// `wake_waiter` reports whether that exact `(key, task)` is registered,
+    /// which is both questions at once.
     #[test]
-    fn a_stream_write_registers_for_the_wake_before_its_first_poll() {
+    fn a_stream_write_registers_for_the_wake_before_the_poll_it_parks_after() {
         /// A `WaitQueueArch` that only has to exist: the assertion is
         /// `wake_task`'s registered/not-registered answer, not the unpark.
         struct Inert;
@@ -26450,17 +26873,22 @@ mod tests {
         let ring_keys = crate::pipe::RingWaits::mint();
         let waits = crate::pipe::StreamWaits::new(ring_keys.space, ring_keys.data);
         let mut polls = 0usize;
-        // `Broken` ends the loop on the first poll, so the registration this
-        // observes is the one that was live *before* any step ran.
+        // The first poll finds the ring full; the second, the one a park would
+        // follow, ends the loop with `Broken`.
         let outcome = h.parked_stream_write(&ctx, 0x1000, 4, waits, |_| {
             polls += 1;
+            let registered = crate::waitq::STREAM_WAITQ.wake_waiter(&inert, ring_keys.space, task);
+            if polls == 1 {
+                assert!(!registered, "a writer that may not park joins nothing");
+                return StreamWriteStep::Full;
+            }
             assert!(
-                crate::waitq::STREAM_WAITQ.wake_waiter(&inert, ring_keys.space, task),
-                "the writer must already be registered when its first poll runs"
+                registered,
+                "the writer must be registered when the poll before its park runs"
             );
             StreamWriteStep::Broken
         });
-        assert_eq!(polls, 1, "the step ran once");
+        assert_eq!(polls, 2, "a full ring is polled again once registered");
         assert_eq!(outcome, Err(Errno::BrokenPipe));
         assert!(
             !crate::waitq::STREAM_WAITQ.wake_waiter(&inert, ring_keys.space, task),
@@ -26468,11 +26896,11 @@ mod tests {
         );
     }
 
-    /// A stream transfer whose stage the heap refuses is refused for memory
-    /// before any stream state is touched. Regression: the stage was an
-    /// infallible `vec!`, so an exhausted heap aborted the kernel there.
+    /// A stream transfer whose stage the heap refuses steps on a small stage
+    /// of its own instead, so an exhausted heap neither aborts the kernel —
+    /// the stage was once an infallible `vec!` — nor refuses a ready stream.
     #[test]
-    fn a_stream_transfer_refused_its_stage_touches_no_stream() {
+    fn a_stream_transfer_refused_its_stage_steps_on_a_small_one() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -26499,22 +26927,26 @@ mod tests {
         );
         let ring_keys = crate::pipe::RingWaits::mint();
         let waits = crate::pipe::StreamWaits::new(ring_keys.space, ring_keys.data);
-        let mut steps = 0usize;
+        let mut staged = Vec::with_capacity(2);
         crate::test_alloc::refuse_allocations_on_current_thread(true);
-        let wrote = h.parked_stream_write(&ctx, 0x1000, 4, waits, |_| {
-            steps += 1;
+        let wrote = h.parked_stream_write(&ctx, 0x1000, 4, waits, |data| {
+            staged.push(data.len());
             StreamWriteStep::Broken
         });
-        let read = h.parked_stream_read(&ctx, 0x1000, 4, 0, waits, |_| {
-            steps += 1;
-            StreamReadStep::Eof
-        });
-        crate::test_alloc::refuse_allocations_on_current_thread(false);
-        assert_eq!(
-            (wrote, read),
-            (Err(Errno::OutOfMemory), Err(Errno::OutOfMemory))
+        let read = h.parked_stream_read(
+            &ctx,
+            (0x1000, 4),
+            0,
+            waits,
+            || Ok(()),
+            |to| {
+                staged.push(to.max());
+                Ok(StreamReadStep::Eof)
+            },
         );
-        assert_eq!(steps, 0, "no stream was touched");
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!((wrote, read), (Err(Errno::BrokenPipe), Ok(0)));
+        assert_eq!(staged, [4, 4], "each transfer stepped its whole length");
     }
 
     /// A volume attach request the heap has no room to stage is refused for
@@ -26664,7 +27096,7 @@ mod tests {
             .open_file_entry(ProcessId(2), read_fd)
             .expect("the read end");
         assert_eq!(
-            reader.pipe().expect("a pipe end").try_read(&mut [0u8; 1]),
+            crate::pipe::read_into(reader.pipe().expect("a pipe end"), &mut [0u8; 1]),
             crate::pipe::ReadStep::Eof
         );
     }
@@ -26717,12 +27149,17 @@ mod tests {
         let task = ctx.task_id.0;
         let mine = crate::pipe::RingWaits::mint();
         let theirs = crate::pipe::RingWaits::mint();
+        let mut polls = 0usize;
         let outcome = h.parked_stream_write(
             &ctx,
             0x1000,
             4,
             crate::pipe::StreamWaits::new(mine.space, mine.data),
             |_| {
+                polls += 1;
+                if polls == 1 {
+                    return StreamWriteStep::Full;
+                }
                 assert!(
                     crate::waitq::STREAM_WAITQ.wake_waiter(&inert, mine.space, task),
                     "the writer waits on the space of the ring it is writing"
@@ -26769,6 +27206,57 @@ mod tests {
     /// `fs_read`; a drained pipe whose write end closed is end-of-stream,
     /// and a write with no reader fails closed with `BrokenPipe`
     /// (`plans/SPAWN.md` SP10).
+    /// A pipe holding bytes is read, and one with room written, though the
+    /// heap refuses every allocation: a worker's nudge is drained, never left
+    /// standing to report its wait-set member ready again at once.
+    #[test]
+    fn a_pipe_is_read_and_written_with_no_memory_to_spare() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.pipe_create(&ctx, 0x1800), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let read_fd = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        let write_fd = u32::from_ne_bytes([fds[4], fds[5], fds[6], fds[7]]);
+
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let wrote = h.fs_write(&ctx, write_fd, 0, 0x1000, 4);
+        let read = h.fs_read(&ctx, read_fd, 0, 0x1100, 4);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!((wrote, read), (Ok(4), Ok(4)));
+        let mut out = [0u8; 4];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut out).expect("readable");
+        })
+        .expect("caller has a space");
+        assert_eq!(&out, b"ping");
+    }
+
     #[test]
     fn pipe_create_mints_a_pair_that_round_trips_bytes() {
         install_trace_filter();
@@ -27842,7 +28330,7 @@ mod tests {
             .expect("master entry");
         let mut seen = [0u8; 8];
         assert_eq!(
-            master.pty_master().expect("master end").read(&mut seen),
+            crate::pty::ReadInto::read(master.pty_master().expect("master end"), &mut seen),
             crate::pty::PtyReadStep::Read(3)
         );
         assert_eq!(&seen[..3], b"out");
@@ -29207,6 +29695,210 @@ mod tests {
         assert_eq!(echo.written.lock().as_slice(), b"hi\r\n");
     }
 
+    /// What a bounded console read of up to 16 bytes into `0x1000` answers,
+    /// and what landed there, when another task holds the console's input
+    /// from before the read and runs `holder` with the hold once the reader
+    /// is blocked. A hold `holder` gives back is kept until the reader has
+    /// answered.
+    fn read_behind_a_holder(
+        timeout_ns: u64,
+        holder: impl FnOnce(
+                &'static HostBoot,
+                u64,
+                &'static ConsoleDevice,
+                crate::console::HeldInputGuard<'static>,
+            ) -> Option<crate::console::HeldInputGuard<'static>>
+            + Send
+            + 'static,
+    ) -> (Result<u64, Errno>, [u8; 16]) {
+        install_trace_filter();
+        let sink = make_sink();
+        let boot = HostBoot::claim();
+        let arch = Arc::new(TestArch::on_cpu(boot.cpu()));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(boot.task()),
+            caps: &caps,
+        };
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"")));
+        let consoles: &'static [ConsoleDevice] =
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(ProcessId(2), DescriptorTable::standard())
+            .unwrap();
+        let reader = boot.task();
+        crate::procsignal::clear_kill_gate(reader);
+        crate::procsignal::install_gate(reader, ProcessId(2)).expect("a gate installs");
+        let (taking, taken) = std::sync::mpsc::channel();
+        let (answering, answered) = std::sync::mpsc::channel();
+        let holder = boot.spawn(move || {
+            let hold = consoles[0].try_held_input().expect("no reader holds it");
+            taking.send(()).expect("the reader waits for the hold");
+            boot.until_blocked(reader);
+            let kept = holder(boot, reader, &consoles[0], hold);
+            answered.recv().expect("the reader answers");
+            drop(kept);
+        });
+        taken.recv().expect("the holder holds the input");
+        let answer = h.stream_read(&ctx, STDIN, 0x1000, 16, timeout_ns);
+        answering.send(()).expect("the holder waits for the answer");
+        holder.join();
+        crate::procsignal::clear_kill_gate(reader);
+        let mut landed = [0u8; 16];
+        h.copy_in_user(&ctx, 0x1000, &mut landed).expect("readable");
+        (answer, landed)
+    }
+
+    /// A bounded console read waits for another reader's turn no longer than
+    /// its bound.
+    ///
+    /// Regression: it queued behind the other reader's hold, which may last
+    /// until input arrives, so its bound did not bound it.
+    #[test]
+    fn a_bounded_console_read_waits_for_another_readers_turn_within_its_bound() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (answer, _) = read_behind_a_holder(1_000_000_000, |boot, _, _, hold| {
+            boot.advance_clock(1_000_000_000);
+            Some(hold)
+        });
+        assert_eq!(answer, Err(Errno::TimedOut));
+    }
+
+    /// Input another reader leaves held when it lets go reaches a bounded
+    /// reader waiting for its turn, within the bound.
+    #[test]
+    fn input_another_reader_leaves_held_reaches_a_bounded_reader() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (answer, landed) = read_behind_a_holder(1_000_000_000, |_, _, _, mut hold| {
+            hold.room(2).copy_from_slice(b"hi");
+            hold.took(2);
+            None
+        });
+        assert_eq!(answer, Ok(2));
+        assert_eq!(&landed[..2], b"hi");
+    }
+
+    /// A console read with no bound waiting for another reader's turn ends
+    /// once a death is owed to it.
+    ///
+    /// Regression: it queued on the hold itself, which only the holder's
+    /// release ends, so a killed reader waited for someone to type.
+    #[test]
+    fn an_unbounded_console_read_waiting_for_its_turn_is_killable() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (answer, _) = read_behind_a_holder(0, |_, reader, _, hold| {
+            crate::procsignal::ProcessSignal::terminate_process(
+                &crate::procsignal::NullProcessSignal,
+                ProcessId(2),
+                SecTaskId(reader),
+                137,
+            );
+            if let Some(arch) = crate::waitq::wait_arch() {
+                crate::waitq::CONSOLE_WAITQ.wake_all(arch);
+            }
+            Some(hold)
+        });
+        assert_eq!(answer, Err(Errno::Interrupted));
+    }
+
+    /// A read woken for its turn after the console changed hands takes
+    /// nothing, the input it would have taken left for the new owner.
+    ///
+    /// Regression: an unbounded read was handed the hold and delivered what
+    /// it held without asking the gate again.
+    #[test]
+    fn a_read_whose_console_changed_hands_while_it_waited_takes_nothing() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (answer, landed) = read_behind_a_holder(0, |_, _, console, mut hold| {
+            let other = crate::foreground::ProcessInstance {
+                process: ProcessId(9),
+                instance: ProcId::KERNEL,
+            };
+            console
+                .foreground_ownership()
+                .grant(other, other)
+                .expect("an unowned console is granted");
+            hold.room(2).copy_from_slice(b"hi");
+            hold.took(2);
+            None
+        });
+        assert_eq!(answer, Err(Errno::NotForeground));
+        assert_eq!(landed, [0; 16]);
+    }
+
+    /// Console input a read took but could not copy to its reader stays with
+    /// the console, first for the next read, and is echoed once, as taken.
+    ///
+    /// Regression: the bytes were taken into a staging buffer and dropped
+    /// when the copy failed, so the keystrokes were echoed and lost.
+    #[test]
+    fn console_input_a_read_could_not_deliver_stays_for_the_next() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"hi\r")));
+        let consoles: &'static [ConsoleDevice] =
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(ProcessId(2), DescriptorTable::standard())
+            .unwrap();
+
+        assert_eq!(
+            h.stream_read(&ctx, STDIN, 0x9999_0000, 16, 0),
+            Err(Errno::BadAddress)
+        );
+        assert!(consoles[0].input_pending(), "the console still has it");
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 2, 0), Ok(2));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1002, 16, 0), Ok(1));
+        let mut got = [0u8; 3];
+        h.copy_in_user(&ctx, 0x1000, &mut got).expect("readable");
+        assert_eq!(&got, b"hi\r");
+        assert_eq!(echo.written.lock().as_slice(), b"hi\r\n", "echoed once");
+    }
+
     /// `stream_input_mode` selecting the secret discipline on the read
     /// descriptor's console stops a subsequent `stream_read` from echoing
     /// (the password-read contract — never render a credential).
@@ -29418,7 +30110,12 @@ mod tests {
         // The parent reaps the signalled exit with Terminate's `128 + n`
         // status, exactly as the immediate terminate path records it.
         assert_eq!(
-            wait.poll(ProcessId(2), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(
+                ProcessId(2),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Ok(crate::procwait::WaitedChild {
                 pid: 9,
                 status: tairix_abi::WaitStatus::Exited(143)
@@ -31350,9 +32047,8 @@ mod tests {
         // The evicted owner's next owner-gated calls fail closed with the
         // distinct refusal: the drain observes it, the release acknowledges
         // it once, and afterwards the task is a plain non-owner.
-        let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
-            seat.read(SEAT_PRIMARY, SeatOwner(2), InputKind::Key, &mut buf),
+            seat.read_with(SEAT_PRIMARY, SeatOwner(2), InputKind::Key, &mut |_| true),
             Err(Errno::SeatRevoked)
         );
         assert_eq!(
@@ -32637,6 +33333,11 @@ mod tests {
         /// What lands just before a fault takes the space's lock: a sibling's
         /// release, for the race the held mapping closes.
         before_held: tairix_sync::SpinLock<Option<Box<dyn FnOnce() + Send>>>,
+        /// Every page a held fault backed, in order.
+        held: tairix_sync::SpinLock<Vec<u64>>,
+        /// What a held fault the space still holds is refused with, if
+        /// anything: the machine short of memory.
+        held_refusal: tairix_sync::SpinLock<Option<Errno>>,
     }
     impl RecordingMemMap {
         fn new() -> Self {
@@ -32645,6 +33346,8 @@ mod tests {
                 mapping: tairix_sync::SpinLock::new(None),
                 release: tairix_sync::SpinLock::new(None),
                 before_held: tairix_sync::SpinLock::new(None),
+                held: tairix_sync::SpinLock::new(Vec::new()),
+                held_refusal: tairix_sync::SpinLock::new(None),
             }
         }
     }
@@ -32682,6 +33385,10 @@ mod tests {
             if !holds() {
                 return Err(Errno::NotFound);
             }
+            if let Some(refusal) = *self.held_refusal.lock() {
+                return Err(refusal);
+            }
+            self.held.lock().push(page_va);
             self.map(PAGE_SIZE, tairix_abi::MapFlags::FIXED, page_va)
                 .map(drop)
         }
@@ -33986,7 +34693,10 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0x3000, 0x2000).expect("maps");
 
         // A fault mid-way into the region's second page.
-        assert!(h.resolve_file_fault(ProcessId(2), base + 0x1000 + 5));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), base + 0x1000 + 5),
+            Backing::Backed
+        );
         assert_eq!(*fm.pages.lock(), std::vec![(base + 0x1000, 100)]);
         // The read hit the file at region offset + page offset (0x3000 +
         // 0x1000), for one whole page, under the recorded path.
@@ -33997,14 +34707,18 @@ mod tests {
         assert!(read_call.contains("len=4096"), "got: {read_call}");
     }
 
-    /// Everything outside a live region fails closed: an unmapped address,
-    /// a foreign task's address, a released region, and a page wholly past
-    /// end-of-file (the `SIGBUS` analogue) are all refused.
+    /// Nothing outside a live region is backed: an unmapped address, a
+    /// foreign task's address and a released region are another resolver's
+    /// to answer, and a page wholly past end-of-file (the `SIGBUS` analogue)
+    /// is refused as the process's own fault.
     #[test]
     fn resolve_file_fault_refuses_everything_outside_live_backing() {
         let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         // No region at all.
-        assert!(!h.resolve_file_fault(ProcessId(2), 0x9999_0000));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), 0x9999_0000),
+            Backing::Elsewhere
+        );
         let fd = u32::try_from(
             h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
                 .expect("open"),
@@ -34013,12 +34727,15 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0, 0x2000).expect("maps");
         // Empty `read_data` means the file reads as zero bytes: the page is
         // wholly past end-of-file and is never backed.
-        assert!(!h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), base),
+            Backing::Refused(Unbacked::Invalid)
+        );
         // Another task faulting on this task's region resolves nothing.
-        assert!(!h.resolve_file_fault(ProcessId(3), base));
+        assert_eq!(h.resolve_file_fault(ProcessId(3), base), Backing::Elsewhere);
         // A released region stops resolving.
         assert_eq!(h.file_unmap(&ctx, base, 0x2000), Ok(0));
-        assert!(!h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(h.resolve_file_fault(ProcessId(2), base), Backing::Elsewhere);
         assert!(fm.pages.lock().is_empty());
     }
 
@@ -34035,9 +34752,12 @@ mod tests {
         .unwrap();
         let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
         *fm.map_page_result.lock() = Err(Errno::BadAddress);
-        assert!(h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(h.resolve_file_fault(ProcessId(2), base), Backing::Backed);
         *fm.map_page_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), base),
+            Backing::Refused(Unbacked::NoMemory)
+        );
     }
 
     /// A fault the heap has no room to stage a page for backs and reads
@@ -34057,10 +34777,14 @@ mod tests {
         crate::test_alloc::refuse_allocations_on_current_thread(true);
         let resolved = h.resolve_file_fault(ProcessId(2), base);
         crate::test_alloc::refuse_allocations_on_current_thread(false);
-        assert!(!resolved, "a page the heap cannot stage is not backed");
+        assert_eq!(
+            resolved,
+            Backing::Refused(Unbacked::NoMemory),
+            "a page the heap cannot stage is not backed"
+        );
         assert!(fm.pages.lock().is_empty());
         assert_eq!(fs.calls().len(), reads, "nor is the file read");
-        assert!(h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(h.resolve_file_fault(ProcessId(2), base), Backing::Backed);
         assert_eq!(*fm.pages.lock(), std::vec![(base, 100)]);
     }
 
@@ -34086,7 +34810,10 @@ mod tests {
                 sink,
             ))
             .expect("inserted");
-        assert!(h.resolve_file_fault(ProcessId(2), base + page));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), base + page),
+            Backing::Backed
+        );
         let calls = fs.calls();
         let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
         assert!(read_call.contains("uid=3000"), "got: {read_call}");
@@ -34094,7 +34821,10 @@ mod tests {
             .write()
             .insert(make_caps_record(2, &[], sink))
             .expect("inserted");
-        assert!(!h.resolve_file_fault(ProcessId(2), base + 2 * page));
+        assert_eq!(
+            h.resolve_file_fault(ProcessId(2), base + 2 * page),
+            Backing::Refused(Unbacked::Invalid)
+        );
         assert_eq!(*fm.pages.lock(), std::vec![(base + page, PAGE_SIZE)]);
     }
 
@@ -34127,7 +34857,7 @@ mod tests {
             )
             .is_ok());
         let base = h.file_map(&child, 0, 0, 0x1000).expect("maps");
-        assert!(h.resolve_file_fault(ProcessId(2), base));
+        assert_eq!(h.resolve_file_fault(ProcessId(2), base), Backing::Backed);
         assert_eq!(*fm.pages.lock(), std::vec![(base, PAGE_SIZE)]);
         let calls = fs.calls();
         let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
@@ -34137,8 +34867,10 @@ mod tests {
     /// A `copy_in_user` miss inside a live file region is offered to the
     /// fault resolver (the same region table and identity the hardware
     /// path uses), and the retry loop is bounded: the recording producer
-    /// never installs a translation, so the copy must terminate through
-    /// its budget with the stable `BadAddress` — never a spin.
+    /// never installs a translation, so every page the copy backs is gone
+    /// again when it runs, and it ends through its budget — every page a
+    /// buffer of its length can span, backed twice — with `OutOfMemory`,
+    /// never a spin.
     #[test]
     fn copy_in_user_offers_the_miss_to_the_file_resolver_and_stays_bounded() {
         let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xEE; PAGE_SIZE]);
@@ -34149,14 +34881,13 @@ mod tests {
         .unwrap();
         let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
         let mut buf = [0u8; 16];
-        assert_eq!(h.copy_in_user(&ctx, base, &mut buf), Err(Errno::BadAddress));
-        // Each retry resolved the covering page once (the producer records
-        // it and the VFS read hit the file), and the budget for a 16-byte
-        // copy is exactly two resolutions.
         assert_eq!(
-            *fm.pages.lock(),
-            std::vec![(base, PAGE_SIZE), (base, PAGE_SIZE)]
+            h.copy_in_user(&ctx, base, &mut buf),
+            Err(Errno::OutOfMemory)
         );
+        // Each retry resolved the covering page once (the producer records
+        // it and the VFS read hit the file), four times for a 16-byte copy.
+        assert_eq!(*fm.pages.lock(), std::vec![(base, PAGE_SIZE); 4]);
         let calls = fs.calls();
         let read_call = calls.iter().rev().find(|c| c.starts_with("read")).unwrap();
         assert!(read_call.contains("path=/big"), "got: {read_call}");
@@ -34180,6 +34911,280 @@ mod tests {
             .expect("resident copy");
         assert_eq!(&buf, b"/big");
         assert!(fm.pages.lock().is_empty());
+    }
+
+    /// A copy that writes a file mapping, read-only by design, is refused
+    /// without reading the file: file backing serves reads alone.
+    ///
+    /// Regression: the copy path offered the file resolver writes too, so
+    /// each miss read a page from the disk and mapped it for a copy that
+    /// could never use it.
+    #[test]
+    fn a_copy_writing_a_file_mapping_reads_nothing_from_the_file() {
+        let (fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(std::vec![0xEE; PAGE_SIZE]);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/big".len(), OpenFlags::READ, 0)
+                .expect("open"),
+        )
+        .unwrap();
+        let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
+        let calls = fs.calls().len();
+        assert_eq!(
+            h.copy_out_user(&ctx, base, &[1, 2, 3]),
+            Err(Errno::BadAddress)
+        );
+        assert!(fm.pages.lock().is_empty());
+        assert_eq!(fs.calls().len(), calls, "the file is not read");
+    }
+
+    /// A handler fixture over an empty address space for process 2, whose
+    /// `pages`-page anonymous region at [`ANON_BASE`] is reserved through the
+    /// returned producer and none of it resident.
+    fn anon_copy_fixture(
+        arch: Arc<TestArch>,
+        pages: u64,
+    ) -> (
+        &'static RecordingMemMap,
+        &'static TestSink,
+        KernelSyscallHandlers<'static, TestArch>,
+        TaskCapabilities,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let sched: &'static _ = crate::forever(Box::new(make_sched(arch.clone())));
+        let table: &'static _ = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc: &'static _ = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng: &'static _ = crate::forever(Box::new(unseeded_rng()));
+        let irq: &'static _ = crate::forever(Box::new(IrqTable::new(31)));
+        let arch: &'static Arc<TestArch> = crate::forever(Box::new(arch));
+        let snapshot = AddressSpace::new(HostPageTable::new()).freeze().unwrap();
+        aspaces
+            .write()
+            .register(
+                ProcessId(2),
+                Box::new(snapshot),
+                Box::new(SimPhysMap::new(
+                    PhysAddr::new(ANON_FRAME as u64 * PAGE_SIZE as u64),
+                    usize::try_from(pages).unwrap() * PAGE_SIZE,
+                )),
+            )
+            .expect("registered");
+        aspaces
+            .write()
+            .record_anon_region(ProcessId(2), ANON_BASE, pages)
+            .expect("a disjoint extent is recorded");
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            sched,
+            table,
+            arch,
+            sink,
+            irq,
+            &UnsupportedController,
+            ipc,
+            aspaces,
+            rng,
+        )
+        .with_mem_map(producer);
+        (producer, sink, h, make_caps_record(2, &[], sink))
+    }
+
+    /// Where [`anon_copy_fixture`] reserves its region, and the first frame
+    /// its live pages are given.
+    const ANON_BASE: u64 = 0x30_0000;
+    const ANON_FRAME: usize = 16;
+
+    /// A copy into or out of memory the process reserved, which the machine
+    /// has no frame to back, answers `OutOfMemory`; a buffer outside every
+    /// mapping still answers `BadAddress`, so a caller can tell a short
+    /// machine from its own mistake.
+    ///
+    /// Regression: both answered `BadAddress`.
+    #[test]
+    fn a_copy_the_machine_cannot_back_answers_out_of_memory() {
+        let (producer, _sink, h, caps) = anon_copy_fixture(Arc::new(TestArch::with_cpus(1)), 4);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        *producer.held_refusal.lock() = Some(Errno::OutOfMemory);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            h.copy_in_user(&ctx, ANON_BASE + 8, &mut buf),
+            Err(Errno::OutOfMemory)
+        );
+        assert_eq!(
+            h.copy_out_user(&ctx, ANON_BASE + 8, &buf),
+            Err(Errno::OutOfMemory)
+        );
+        assert_eq!(
+            h.copy_in_user(&ctx, ANON_BASE + 4 * PAGE_SIZE as u64, &mut buf),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// A copy over a buffer none of whose pages is resident backs every page
+    /// once and runs twice, however many pages it spans.
+    ///
+    /// Regression: each miss backed one page and ran the copy again from the
+    /// start, so a buffer of `n` untouched pages cost `n + 1` runs and `n²`
+    /// page copies.
+    #[test]
+    fn a_copy_over_untouched_pages_backs_them_all_before_running_again() {
+        const PAGES: u64 = 8;
+        let cpu = crate::test_boot::claim_cpu();
+        let (producer, _sink, h, caps) = anon_copy_fixture(Arc::new(TestArch::on_cpu(cpu)), PAGES);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        // The live space holds each page the producer backs, which the
+        // resolver publishes to the snapshot the copy walks.
+        let mut live_space = AddressSpace::new(HostPageTable::new());
+        for (i, frame) in (0..PAGES).zip(ANON_FRAME..) {
+            let page =
+                Page::from_addr(VirtAddr::new(ANON_BASE + i * PAGE_SIZE as u64)).expect("aligned");
+            live_space
+                .map(
+                    page,
+                    Frame(frame),
+                    MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+                )
+                .expect("map");
+        }
+        let (live, _observer) = PublishedLive::published(live_space);
+        let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
+
+        let mut buf = std::vec![0u8; usize::try_from(PAGES).unwrap() * PAGE_SIZE];
+        let mut runs = 0;
+        h.copy_user(&ctx, buf.len(), |space, physmap| {
+            runs += 1;
+            copy_in(space, physmap, VirtAddr::new(ANON_BASE), &mut buf)
+        })
+        .expect("copied");
+        assert_eq!(runs, 2);
+        let every_page: Vec<u64> = (0..PAGES)
+            .map(|i| ANON_BASE + i * PAGE_SIZE as u64)
+            .collect();
+        assert_eq!(*producer.held.lock(), every_page, "each page backed once");
+    }
+
+    /// A copy that meets a page whose contents were lost ends the process as
+    /// the process's own touch of it would: the fault is recorded, the
+    /// caller's death is owed where the call returns, and the call answers
+    /// that the data is gone. A cause short of that ends nothing.
+    #[test]
+    fn a_copy_meeting_a_lost_page_ends_the_process_as_a_fault() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (_producer, sink, h, caps) = anon_copy_fixture(Arc::new(TestArch::with_cpus(1)), 1);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        crate::procsignal::clear_kill_gate(2);
+        crate::procsignal::install_gate(2, ProcessId(2)).expect("a gate installs");
+        let kills = || {
+            sink.snapshot()
+                .into_iter()
+                .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
+                .count()
+        };
+
+        assert_eq!(
+            h.copy_refused(&ctx, ANON_BASE, false, Unbacked::NoMemory),
+            Errno::OutOfMemory
+        );
+        assert!(!crate::procsignal::kill_pending(2));
+        assert_eq!(kills(), 0);
+
+        assert_eq!(
+            h.copy_refused(&ctx, ANON_BASE, true, Unbacked::Lost),
+            Errno::MediumError
+        );
+        assert!(crate::procsignal::kill_pending(2), "the death is owed");
+        assert_eq!(kills(), 1);
+        assert_eq!(
+            crate::procsignal::take_owed_kill(2),
+            Some(crate::procsignal::DeferredTeardown::Exit {
+                process: ProcessId(2),
+                status: tairix_abi::FAULT_EXIT_STATUS,
+            })
+        );
+        crate::procsignal::clear_kill_gate(2);
+    }
+
+    /// A fault no resolver could back ends the process as a fault of its own,
+    /// unless a death was owed to the thread meanwhile: that death ends it,
+    /// and no crash is recorded for it.
+    ///
+    /// Regression: a thread killed while its fault waited on a release or a
+    /// slow disk was recorded as having crashed, and its parent reaped the
+    /// fault's status in place of the kill's.
+    #[test]
+    fn a_fault_a_death_overtook_is_not_recorded_as_a_crash() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        let (_producer, sink, h, _caps) = anon_copy_fixture(Arc::new(TestArch::with_cpus(1)), 1);
+        let access = FaultAccess::Data {
+            va: ANON_BASE,
+            write: false,
+        };
+        let thread = 0x00c0_ffd3;
+        crate::procsignal::clear_kill_gate(thread);
+        crate::procsignal::install_gate(thread, ProcessId(thread)).expect("a gate installs");
+        let claims = crate::procsignal::claimed_kills(
+            None,
+            crate::procsignal::DeferredTeardown::Exit {
+                process: ProcessId(thread),
+                status: 137,
+            },
+            None,
+        );
+        assert_eq!(claims.len(), 1);
+        assert!(!h.end_fault(
+            ProcessId(thread),
+            SecTaskId(thread),
+            access,
+            Unbacked::Interrupted,
+            None
+        ));
+        let kills = || {
+            sink.snapshot()
+                .into_iter()
+                .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
+                .count()
+        };
+        assert_eq!(kills(), 0, "no crash is recorded");
+        crate::procsignal::clear_kill_gate(thread);
+        assert!(h.end_fault(ProcessId(2), SecTaskId(2), access, Unbacked::NoMemory, None));
+        assert_eq!(kills(), 1);
+    }
+
+    /// The compressed tier's failures answer as what they are: a page whose
+    /// check failed, now or before, is lost; one the restore had no memory
+    /// for is kept, and the machine short of memory.
+    #[test]
+    fn the_compressed_tiers_failures_answer_as_lost_or_short_of_memory() {
+        use tairix_kernel_mem::{AllocError, FaultError, PageTableError};
+        for lost in [
+            FaultError::Authentication,
+            FaultError::Corrupt,
+            FaultError::Lost,
+        ] {
+            assert_eq!(ramzip_unbacked(lost), Unbacked::Lost, "{lost:?}");
+        }
+        for short in [
+            FaultError::OutOfMemory,
+            FaultError::PhysUnmapped,
+            FaultError::PageTable(PageTableError::AllocFailed(AllocError::OutOfMemory)),
+        ] {
+            assert_eq!(ramzip_unbacked(short), Unbacked::NoMemory, "{short:?}");
+        }
+        assert_eq!(
+            ramzip_unbacked(FaultError::PageTable(PageTableError::InvalidFlags)),
+            Unbacked::Invalid
+        );
     }
 
     /// The anonymous fault resolver backs exactly the faulting page — one
@@ -34216,14 +35221,20 @@ mod tests {
         // Outside every reserved region: refused, and the producer is never
         // reached (no memory materialised for an address the task did not
         // map).
-        assert!(!h.resolve_anon_fault(ProcessId(2), SecTaskId(2), base + 4 * PAGE_SIZE as u64));
+        assert_eq!(
+            h.resolve_anon_fault(ProcessId(2), SecTaskId(2), base + 4 * PAGE_SIZE as u64),
+            Backing::Elsewhere
+        );
         assert!(producer.mapping.lock().is_none());
 
         // Inside the region: the covering page is backed — one page, FIXED,
         // at the page-aligned base of the faulting address.
         let fault = base + PAGE_SIZE as u64 + 5;
         let page_va = base + PAGE_SIZE as u64;
-        assert!(h.resolve_anon_fault(ProcessId(2), SecTaskId(2), fault));
+        assert_eq!(
+            h.resolve_anon_fault(ProcessId(2), SecTaskId(2), fault),
+            Backing::Backed
+        );
         assert_eq!(
             *producer.mapping.lock(),
             Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va))
@@ -34263,17 +35274,31 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, aspaces, &rng,
         )
         .with_mem_map(producer);
-        assert!(!h.resolve_anon_fault(ProcessId(2), SecTaskId(2), base + 5));
+        assert_eq!(
+            h.resolve_anon_fault(ProcessId(2), SecTaskId(2), base + 5),
+            Backing::Refused(Unbacked::Invalid)
+        );
         assert!(
             producer.mapping.lock().is_none(),
             "no page is backed in a range a release has taken"
         );
     }
 
+    /// What becomes of the release a fault is waiting for.
+    #[derive(Clone, Copy)]
+    enum ReleaseEnd {
+        /// It fails, and gives the page back.
+        Fails,
+        /// It goes through.
+        Succeeds,
+        /// It stays in flight, and the faulting thread is killed meanwhile.
+        Outlived,
+    }
+
     /// A fault of `process` on a page a sibling's release has in flight, the
-    /// release ending as `released` once the fault has parked: answers whether
-    /// the fault backed the page.
-    fn a_fault_during_a_release(process: ProcessId, released: bool) -> bool {
+    /// release ending as `end` once the fault has parked: answers what the
+    /// fault made of the page.
+    fn a_fault_during_a_release(process: ProcessId, end: ReleaseEnd) -> Backing {
         install_trace_filter();
         let sink = make_sink();
         let boot = HostBoot::claim();
@@ -34301,15 +35326,29 @@ mod tests {
         )
         .with_mem_map(producer);
         let faulter = boot.task();
+        crate::procsignal::clear_kill_gate(faulter);
+        crate::procsignal::install_gate(faulter, process).expect("a gate installs");
         let sibling = boot.spawn(move || {
             boot.until_blocked(faulter);
-            aspaces.write().end_anon_release(process, base, 4, released);
+            match end {
+                ReleaseEnd::Fails | ReleaseEnd::Succeeds => {
+                    let released = matches!(end, ReleaseEnd::Succeeds);
+                    aspaces.write().end_anon_release(process, base, 4, released);
+                }
+                ReleaseEnd::Outlived => crate::procsignal::ProcessSignal::terminate_process(
+                    &crate::procsignal::NullProcessSignal,
+                    process,
+                    SecTaskId(faulter),
+                    137,
+                ),
+            }
             crate::aspace::anon_release_wake(process);
         });
         let backed = h.resolve_anon_fault(process, SecTaskId(faulter), base + 5);
         assert!(boot.waits(faulter) > 0, "the fault waited for the release");
-        assert_eq!(producer.mapping.lock().is_some(), backed);
+        assert_eq!(producer.mapping.lock().is_some(), backed == Backing::Backed);
         sibling.join();
+        crate::procsignal::clear_kill_gate(faulter);
         backed
     }
 
@@ -34320,21 +35359,45 @@ mod tests {
     /// taken, though the release then failed and the task held the page again.
     #[test]
     fn a_fault_held_off_by_a_release_that_fails_is_backed() {
-        assert!(a_fault_during_a_release(ProcessId(60), false));
+        let _g = crate::procsignal::running_kill_test_lock();
+        assert_eq!(
+            a_fault_during_a_release(ProcessId(60), ReleaseEnd::Fails),
+            Backing::Backed
+        );
     }
 
     /// A fault on a page a release has in flight waits for the release, and
-    /// is refused once the page is gone for good.
+    /// finds no anonymous memory there once the page is gone for good.
     #[test]
     fn a_fault_held_off_by_a_release_that_succeeds_is_refused() {
-        assert!(!a_fault_during_a_release(ProcessId(61), true));
+        let _g = crate::procsignal::running_kill_test_lock();
+        assert_eq!(
+            a_fault_during_a_release(ProcessId(61), ReleaseEnd::Succeeds),
+            Backing::Elsewhere
+        );
+    }
+
+    /// A death owed to a thread whose fault waits on a release abandons the
+    /// fault for that death, rather than refusing it as the thread's own
+    /// fault.
+    ///
+    /// Regression: the abandoned fault read as one no resolver could back, so
+    /// the killed thread was recorded as having crashed.
+    #[test]
+    fn a_death_owed_during_a_release_wait_abandons_the_fault() {
+        let _g = crate::procsignal::running_kill_test_lock();
+        assert_eq!(
+            a_fault_during_a_release(ProcessId(62), ReleaseEnd::Outlived),
+            Backing::Refused(Unbacked::Interrupted)
+        );
     }
 
     /// A fault-kill emits the stable `TaskFaultKilled` audit record naming
     /// the task, its identity, the read/write flag, the coarse fault class
     /// — `file_region` for a miss the resolver refused inside a live
-    /// mapping, `wild` for an address outside every mapping — and a coarse
-    /// `fault_offset` bucket, and never the raw faulting address.
+    /// mapping, `wild` for an address outside every mapping — why the page
+    /// could not be backed, and a coarse `fault_offset` bucket, and never the
+    /// raw faulting address.
     #[test]
     fn record_fault_exit_audits_the_kill_with_a_fault_class() {
         let (_fs, _fm, _aspaces, h, ctx, sink) = file_map_fixture(Vec::new());
@@ -34346,32 +35409,39 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
         sink.clear();
         // A refused read miss inside the live region (the empty file reads
-        // as zero bytes, so the page is past end-of-file), then a wild
-        // write.
-        h.record_fault_exit(
-            ProcessId(2),
-            SecTaskId(2),
-            FaultAccess::Data {
-                va: base,
-                write: false,
-            },
-            None,
-        );
-        h.record_fault_exit(
-            ProcessId(2),
-            SecTaskId(2),
-            FaultAccess::Data {
-                va: 0x9999_0000,
-                write: true,
-            },
-            None,
-        );
+        // as zero bytes, so the page is past end-of-file), the same miss the
+        // machine had no memory for, then a wild write.
+        for (va, write, cause) in [
+            (base, false, Unbacked::Invalid),
+            (base, false, Unbacked::NoMemory),
+            (0x9999_0000, true, Unbacked::Invalid),
+        ] {
+            h.record_fault_exit(
+                ProcessId(2),
+                SecTaskId(2),
+                FaultAccess::Data { va, write },
+                cause,
+                None,
+            );
+        }
         let kills: Vec<_> = sink
             .snapshot()
             .into_iter()
             .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
             .collect();
-        assert_eq!(kills.len(), 2);
+        assert_eq!(kills.len(), 3);
+        // A kill for want of memory never reads as the program's own bug.
+        let cause = |kill: usize| {
+            kills[kill]
+                .fields
+                .iter()
+                .find(|(k, _)| k == "cause")
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(cause(0).as_deref(), Some("invalid"));
+        assert_eq!(cause(1).as_deref(), Some("no_memory"));
+        assert_eq!(cause(2).as_deref(), Some("invalid"));
+        let kills = [kills[0].clone(), kills[2].clone()];
         assert_eq!(kills[0].level, tairix_log::Level::Warn);
         for kill in &kills {
             assert!(kill
@@ -34523,24 +35593,18 @@ mod tests {
         // Task 2: a null-pointer write. Task 3: a bounded read run 0x40
         // past its region's end.
         let region_end = region_base + PAGE_SIZE as u64;
-        h.record_fault_exit(
-            ProcessId(2),
-            SecTaskId(2),
-            FaultAccess::Data {
-                va: 0x18,
-                write: true,
-            },
-            None,
-        );
-        h.record_fault_exit(
-            ProcessId(3),
-            SecTaskId(3),
-            FaultAccess::Data {
-                va: region_end + 0x40,
-                write: false,
-            },
-            None,
-        );
+        let wild = |task, va, write| {
+            let access = FaultAccess::Data { va, write };
+            h.record_fault_exit(
+                ProcessId(task),
+                SecTaskId(task),
+                access,
+                Unbacked::Invalid,
+                None,
+            );
+        };
+        wild(2, 0x18, true);
+        wild(3, region_end + 0x40, false);
 
         let kills: Vec<_> = sink
             .snapshot()
@@ -34638,7 +35702,13 @@ mod tests {
         let text_like = STACK_RESERVE_BASE - 0x40;
 
         // Task 2: an instruction the CPU refused, whose pc is `text_like`.
-        h.record_fault_exit(ProcessId(2), SecTaskId(2), FaultAccess::Instruction, None);
+        h.record_fault_exit(
+            ProcessId(2),
+            SecTaskId(2),
+            FaultAccess::Instruction,
+            Unbacked::Invalid,
+            None,
+        );
         let instruction_crash = store.latest().expect("a crash record was stored");
         // Task 3: a genuine data read of that same address.
         h.record_fault_exit(
@@ -34648,6 +35718,7 @@ mod tests {
                 va: text_like,
                 write: false,
             },
+            Unbacked::Invalid,
             None,
         );
         let data_crash = store.latest().expect("a crash record was stored");
@@ -34735,6 +35806,7 @@ mod tests {
                 va: 0x18,
                 write: true,
             },
+            Unbacked::Invalid,
             Some(&frame),
         );
 
@@ -34799,6 +35871,7 @@ mod tests {
                 va: 0x18,
                 write: false,
             },
+            Unbacked::Invalid,
             Some(&frame2),
         );
         let crash2 = store2.latest().expect("stored");
@@ -34934,7 +36007,10 @@ mod tests {
         let (producer, aspaces, h, _sink) = stack_fault_fixture();
         let fault = STACK_COMMITTED_BASE - 5;
         let page_va = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault),
+            Backing::Backed
+        );
         assert_eq!(
             *producer.maps.lock(),
             std::vec![(PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va)]
@@ -34948,7 +36024,10 @@ mod tests {
         // A deeper fault keeps growing; a shallower re-fault (the resident
         // race through the registry) never raises the base back up.
         let deep = STACK_RESERVE_BASE + PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), deep));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), deep),
+            Backing::Backed
+        );
         assert_eq!(
             aspaces
                 .read()
@@ -34973,7 +36052,10 @@ mod tests {
         let page = PAGE_SIZE as u64;
 
         // The leader's span: one page down, one page charged.
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1),
+            Backing::Backed
+        );
         assert_eq!(*producer.commits.lock(), std::vec![1]);
 
         // A `thread_create` stack: the same rule, and a three-page jump charges
@@ -34994,7 +36076,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(3), STACK_COMMITTED_BASE - 3 * page));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(3), STACK_COMMITTED_BASE - 3 * page),
+            Backing::Backed
+        );
         assert_eq!(*producer.commits.lock(), std::vec![1, 3]);
     }
 
@@ -35017,11 +36102,10 @@ mod tests {
         aspaces.write().set_pinned(ProcessId(2)).unwrap();
         // Two growth pages would cross the budget: refused closed, no
         // page mapped, committed base unchanged.
-        assert!(!h.resolve_stack_fault(
-            ProcessId(2),
-            SecTaskId(2),
-            STACK_COMMITTED_BASE - page - 1
-        ));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            Backing::Refused(Unbacked::Invalid)
+        );
         assert_eq!(
             aspaces
                 .read()
@@ -35031,7 +36115,10 @@ mod tests {
             STACK_COMMITTED_BASE
         );
         // One growth page fits the budget exactly.
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1),
+            Backing::Backed
+        );
         assert_eq!(
             aspaces
                 .read()
@@ -35041,15 +36128,17 @@ mod tests {
             STACK_COMMITTED_BASE - page
         );
         // At the budget, even the next single-page growth is refused …
-        assert!(!h.resolve_stack_fault(
-            ProcessId(2),
-            SecTaskId(2),
-            STACK_COMMITTED_BASE - page - 1
-        ));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            Backing::Refused(Unbacked::Invalid)
+        );
         // … and unpinning restores the ordinary rule (the fixture span is
         // far inside the default `StackBytes` bound).
         aspaces.write().clear_pinned(ProcessId(2));
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            Backing::Backed
+        );
     }
 
     /// Stack growth joins the process's mapped footprint, so the
@@ -35066,18 +36155,23 @@ mod tests {
             .write()
             .set_limit(ProcessId(2), LimitKind::AddressSpaceBytes, bound)
             .unwrap();
-        assert!(
-            !h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            Backing::Refused(Unbacked::Invalid),
             "two growth pages pass the ceiling"
         );
         assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), committed);
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1),
+            Backing::Backed
+        );
         assert_eq!(
             aspaces.read().mapped_aspace_bytes(ProcessId(2)),
             committed + page
         );
-        assert!(
-            !h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            Backing::Refused(Unbacked::Invalid),
             "at the ceiling, no further page"
         );
         assert_eq!(
@@ -35101,7 +36195,10 @@ mod tests {
             )
         };
         // A page a racing growth already committed is not charged again.
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1),
+            Backing::Backed
+        );
         aspaces
             .write()
             .try_charge_aspace_bytes(ProcessId(2), page)
@@ -35118,11 +36215,10 @@ mod tests {
         assert_eq!(total, stack);
         // An exhaustion part-way gives back what it did not commit.
         *producer.map_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_stack_fault(
-            ProcessId(2),
-            SecTaskId(2),
-            STACK_COMMITTED_BASE - 4 * page
-        ));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 4 * page),
+            Backing::Refused(Unbacked::NoMemory)
+        );
         let (total, stack) = mapped(aspaces);
         assert_eq!(total, stack, "the refused walk left no charge behind");
     }
@@ -35141,7 +36237,10 @@ mod tests {
         let page = PAGE_SIZE as u64;
         // Three pages below the committed base in one jump.
         let fault_page = STACK_COMMITTED_BASE - 3 * page;
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page + 7));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page + 7),
+            Backing::Backed
+        );
         // The walk backed the two skipped pages and the faulting page,
         // top-down, so the mark stayed truthful at every step.
         assert_eq!(
@@ -35187,12 +36286,21 @@ mod tests {
     fn resolve_stack_fault_refuses_everything_outside_the_growth_room() {
         let (producer, _aspaces, h, _sink) = stack_fault_fixture();
         // The unmapped guard page immediately below the reserved span.
-        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_RESERVE_BASE - 1));
-        // At and above the committed base (already-mapped territory).
-        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE));
-        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_TOP - 1));
-        // A task with no recorded span has no growable stack.
-        assert!(!h.resolve_stack_fault(ProcessId(3), SecTaskId(3), STACK_COMMITTED_BASE - 5));
+        let outside = [
+            (2, STACK_RESERVE_BASE - 1),
+            // At and above the committed base (already-mapped territory).
+            (2, STACK_COMMITTED_BASE),
+            (2, STACK_TOP - 1),
+            // A task with no recorded span has no growable stack.
+            (3, STACK_COMMITTED_BASE - 5),
+        ];
+        for (task, va) in outside {
+            assert_eq!(
+                h.resolve_stack_fault(ProcessId(task), SecTaskId(task), va),
+                Backing::Elsewhere,
+                "{va:#x}"
+            );
+        }
         assert!(producer.maps.lock().is_empty());
     }
 
@@ -35216,11 +36324,17 @@ mod tests {
             .unwrap();
         // Two pages below the committed base: past the bound, refused.
         let too_deep = STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64;
-        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), too_deep));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), too_deep),
+            Backing::Refused(Unbacked::Invalid)
+        );
         assert!(producer.maps.lock().is_empty());
         // One page below: exactly at the bound, admitted.
         let allowed = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), allowed));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), allowed),
+            Backing::Backed
+        );
         assert_eq!(producer.maps.lock().len(), 1);
         assert_eq!(aspaces.read().stack_committed_bytes(ProcessId(2)), soft);
     }
@@ -35236,7 +36350,10 @@ mod tests {
         let (producer, aspaces, h, _sink) = stack_fault_fixture();
         let fault = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
         *producer.map_result.lock() = Err(Errno::BadAddress);
-        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault),
+            Backing::Backed
+        );
         assert_eq!(
             aspaces
                 .read()
@@ -35247,11 +36364,14 @@ mod tests {
             "a resident race page is committed — it is backed, whoever won"
         );
         *producer.map_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_stack_fault(
-            ProcessId(2),
-            SecTaskId(2),
-            STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64
-        ));
+        assert_eq!(
+            h.resolve_stack_fault(
+                ProcessId(2),
+                SecTaskId(2),
+                STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64
+            ),
+            Backing::Refused(Unbacked::NoMemory)
+        );
     }
 
     /// Frame exhaustion part-way through a multi-page walk fails the fault
@@ -35266,7 +36386,10 @@ mod tests {
         // it exhausts.
         *producer.fail_from.lock() = Some(1);
         let fault_page = STACK_COMMITTED_BASE - 3 * page;
-        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page));
+        assert_eq!(
+            h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page),
+            Backing::Refused(Unbacked::NoMemory)
+        );
         // Exactly one page was backed (the one just below the old base);
         // the mark lowered to it and no further.
         assert_eq!(producer.maps.lock().len(), 2, "one success, one refusal");
@@ -35320,6 +36443,7 @@ mod tests {
                 va: STACK_COMMITTED_BASE - PAGE_SIZE as u64,
                 write: true,
             },
+            Unbacked::Invalid,
             None,
         );
         // Tightened bound (task 3): the same depth is past the limit.
@@ -35330,6 +36454,7 @@ mod tests {
                 va: STACK_COMMITTED_BASE - PAGE_SIZE as u64,
                 write: true,
             },
+            Unbacked::Invalid,
             None,
         );
         // The guard page below the span is outside every mapping (task 4).
@@ -35340,6 +36465,7 @@ mod tests {
                 va: STACK_RESERVE_BASE - 1,
                 write: true,
             },
+            Unbacked::Invalid,
             None,
         );
         let kills: Vec<_> = sink
@@ -35688,7 +36814,10 @@ mod tests {
 
         // First touch of the reserved region: the fault path backs the page
         // and publishes it.
-        assert!(h.resolve_anon_fault(ProcessId(2), SecTaskId(2), 0x5000_4000 + 0x40));
+        assert_eq!(
+            h.resolve_anon_fault(ProcessId(2), SecTaskId(2), 0x5000_4000 + 0x40),
+            Backing::Backed
+        );
 
         // The page now resolves through the registry, so a subsequent
         // `copy_in` (e.g. `spawn`'s path argument) reaches it.
@@ -38409,24 +39538,30 @@ mod tests {
             waiter: SecTaskId,
             pid: i64,
             flags: WaitFlags,
+            deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
             *self.last_waiter.lock() = Some(waiter.0);
             *self.last_flags.lock() = Some(flags);
-            self.result
+            let child = self.result?;
+            deliver(child)?;
+            Ok(child)
         }
         fn poll(
             &self,
             parent: ProcessId,
             pid: i64,
             flags: WaitFlags,
+            deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             // Record the poll arguments in a *separate* slot so a test can
             // prove the handler took the non-blocking branch (and never the
             // blocking `wait`) when `WaitFlags::NONBLOCK` is set.
             *self.last_poll.lock() = Some((parent.0, pid));
             *self.last_flags.lock() = Some(flags);
-            self.result
+            let child = self.result?;
+            deliver(child)?;
+            Ok(child)
         }
         fn record_exit(&self, task: ProcessId, code: i32) -> bool {
             *self.last_exit.lock() = Some((task.0, code));
@@ -42705,6 +43840,7 @@ mod tests {
             _waiter: SecTaskId,
             _pid: i64,
             _flags: WaitFlags,
+            _deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
@@ -46986,7 +48122,9 @@ mod tests {
     }
 
     /// A reply longer than the await's buffer is refused, never truncated, and
-    /// is gone with its ticket.
+    /// stays with its ticket for a claim with room for it.
+    ///
+    /// Regression: it went with its ticket, so the answer was lost.
     #[test]
     fn call_await_refuses_a_reply_longer_than_its_buffer() {
         with_await_endpoint(0xCA11_2104, u64::MAX, |h, ctx, ep, post, _| {
@@ -47003,7 +48141,7 @@ mod tests {
             );
             assert_eq!(
                 h.call_reap(ctx, ep.id().0, ticket, 0x2000, 64),
-                Err(Errno::NotFound)
+                Ok(b"a long reply".len() as u64)
             );
         });
     }
@@ -47426,32 +48564,9 @@ mod tests {
         (Box::new(space), Box::new(sim))
     }
 
-    /// An address space that runs `on` the first time `watched` is translated:
-    /// a sibling thread acting the moment a copy reaches that page.
-    struct OnFirstTouch<F> {
-        inner: Box<dyn UserAddressSpace + Send + Sync>,
-        watched: Page,
-        fired: core::sync::atomic::AtomicBool,
-        on: F,
-    }
-
-    impl<F: Fn() + Send + Sync> UserAddressSpace for OnFirstTouch<F> {
-        fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {
-            let first = || !self.fired.swap(true, core::sync::atomic::Ordering::AcqRel);
-            if page == self.watched && first() {
-                (self.on)();
-            }
-            self.inner.translate(page)
-        }
-
-        fn mapped_pages(&self) -> usize {
-            self.inner.mapped_pages()
-        }
-    }
-
-    /// `call_recv` keeps the call's room before it writes the ticket out, so
-    /// a sibling server thread answering the moment the ticket lands needs no
-    /// memory to do it.
+    /// `call_recv` takes a call into service with its room kept in the same
+    /// step that delivers the ticket, so a sibling server thread answering the
+    /// moment the ticket lands needs no memory to do it.
     #[test]
     fn call_recv_keeps_the_room_before_it_writes_the_ticket() {
         let _registry = crate::callreg::registry_guard();
@@ -47497,28 +48612,10 @@ mod tests {
                 sink,
             )
             .expect("posted");
-        let answered = Arc::new(std::sync::Mutex::new(None));
-        let sibling = {
-            let (ep, answered) = (Arc::clone(&ep), Arc::clone(&answered));
-            move || {
-                crate::test_alloc::refuse_allocations_on_current_thread(true);
-                let reply = ep.reply(ticket, b"pong", &NULL_LOG_SINK).map(drop);
-                crate::test_alloc::refuse_allocations_on_current_thread(false);
-                *answered
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reply);
-            }
-        };
         let (space, physmap) = server_aspace(b"");
-        let watched = OnFirstTouch {
-            inner: space,
-            watched: page(2),
-            fired: core::sync::atomic::AtomicBool::new(false),
-            on: sibling,
-        };
         aspaces
             .write()
-            .register(ProcessId(server), Box::new(watched), physmap)
+            .register(ProcessId(server), space, physmap)
             .expect("registration succeeds");
         let ctx = CallerContext {
             task_id: SecTaskId(server),
@@ -47531,15 +48628,96 @@ mod tests {
             h.call_recv(&ctx, id, 0x1000, 64, 0x2000, CallRecvFlags::empty()),
             Ok(4)
         );
-        let answer = answered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        assert_eq!(answer, Some(Ok(())), "answered with nothing allocated");
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let answer = ep.reply(ticket, b"pong", &NULL_LOG_SINK).map(drop);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(answer, Ok(()), "answered with nothing allocated");
         assert!(matches!(
             ep.take_reply(client, ticket, 0, sink),
             ReplyOutcome::Ready(_)
         ));
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A request a server's buffer refuses stays queued for the next receive,
+    /// and its caller is not answered.
+    ///
+    /// Regression: the call was taken into service before the copy, so a
+    /// refused copy answered the caller empty and the request was lost.
+    #[test]
+    fn a_request_the_servers_buffer_refuses_stays_queued() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let server = crate::test_boot::claim_task();
+        let client = crate::test_boot::claim_peer_task();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let id = 0xCA11_3012;
+        let server_caps = make_caps_record(server, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &server_caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    per_sender: 4,
+                },
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone(), sink).expect("registered");
+        let client_caps = make_caps_record(client, &[], sink);
+        let ticket = ep
+            .post(
+                &client_caps,
+                client,
+                b"ping",
+                u64::MAX,
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
+            .expect("posted");
+        let (space, physmap) = server_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(server), space, physmap)
+            .expect("registration succeeds");
+        let ctx = CallerContext {
+            task_id: SecTaskId(server),
+            caps: &server_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let nonblocking = CallRecvFlags::NON_BLOCKING;
+        assert_eq!(
+            h.call_recv(&ctx, id, 0x9999_0000, 64, 0x2000, nonblocking),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(
+            h.call_recv(&ctx, id, 0x1000, 64, 0x9999_0000, nonblocking),
+            Err(Errno::BadAddress)
+        );
+        assert!(matches!(
+            ep.take_reply(client, ticket, 0, sink),
+            ReplyOutcome::Pending
+        ));
+        assert_eq!(
+            h.call_recv(&ctx, id, 0x1000, 64, 0x2000, nonblocking),
+            Ok(4)
+        );
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -49291,6 +50469,7 @@ mod tests {
                 ceiling,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
         };
 
@@ -49350,22 +50529,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_STRANGER_AT), PROC_ID_LEN),
+            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_STRANGER_AT), PROC_ID_LEN, 0),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_SENTINEL_AT), PROC_ID_LEN),
+            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_SENTINEL_AT), PROC_ID_LEN, 0),
             Err(Errno::NotFound)
         );
         // A buffer too short to hold a whole identity fails closed rather
         // than decoding a partial one.
         assert_eq!(
-            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN - 1),
+            h.fd_grant(
+                &ctx,
+                fd,
+                0,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN - 1,
+                0
+            ),
             Err(Errno::BufferTooSmall)
         );
         // An unreadable identity is a fault, never a guess.
         assert_eq!(
-            h.fd_grant(&ctx, fd, 0, 0xDEAD_0000, PROC_ID_LEN),
+            h.fd_grant(&ctx, fd, 0, 0xDEAD_0000, PROC_ID_LEN, 0),
             Err(Errno::BadAddress)
         );
         let _recipient = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
@@ -49392,6 +50578,54 @@ mod tests {
         .unwrap();
         assert_eq!(to_recipient(rw, 0), Err(Errno::OutOfRange));
         assert!(to_recipient(rw, 4096).expect("bounded writable grant mints") >= 1);
+    }
+
+    /// A grant asked to carry only a regular file refuses a pipe end, and a
+    /// flag no grant defines, judging the descriptor alone.
+    ///
+    /// Regression: the session relayed a document only after asking the
+    /// file's volume what it was, a call that waits behind every other
+    /// operation on that volume, on the loop that draws the desktop.
+    #[test]
+    fn a_file_only_grant_carries_a_regular_file_and_nothing_else() {
+        let rig = GrantRig::new(b"/f");
+        let ctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let _recipient = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
+        let grant = |fd: u32, flags: u64| {
+            h.fd_grant(
+                &ctx,
+                fd,
+                0,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+                flags,
+            )
+        };
+        let file = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
+                .expect("open read-only"),
+        )
+        .unwrap();
+        let (read_end, write_end) = rig
+            .aspaces
+            .write()
+            .open_pipe(ProcessId(2))
+            .expect("a pipe opens");
+        for end in [read_end, write_end] {
+            assert_eq!(
+                grant(end, tairix_abi::GRANT_FILE_ONLY),
+                Err(Errno::OutOfRange)
+            );
+        }
+        assert_eq!(
+            grant(file, 2),
+            Err(Errno::OutOfRange),
+            "a flag no grant defines"
+        );
+        assert!(grant(file, tairix_abi::GRANT_FILE_ONLY).expect("a regular file") >= 1);
+        assert!(grant(read_end, 0).expect("a pipe end, unasked") >= 1);
     }
 
     /// Another reference to the pipe end `process` holds at `fd`.
@@ -49450,6 +50684,7 @@ mod tests {
                 ceiling,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
         };
         assert_eq!(
@@ -49475,7 +50710,7 @@ mod tests {
         assert_eq!(h.fs_write(&rctx, rfd, 0, 0x1000, 4), Ok(4));
         let reader = pipe_end_at(&rig.aspaces, ProcessId(2), read_fd);
         let mut out = [0u8; 4];
-        assert_eq!(reader.try_read(&mut out), ReadStep::Read(4));
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Read(4));
         assert_eq!(&out, b"ping");
         assert_eq!(
             h.fs_read(&rctx, rfd, 0, 0x1000, 4),
@@ -49513,6 +50748,7 @@ mod tests {
                 0,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("the read end is delegated");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
@@ -49573,6 +50809,7 @@ mod tests {
                     0,
                     grant_addr(GRANT_RECIPIENT_AT),
                     PROC_ID_LEN,
+                    0,
                 )
                 .expect("the write end is delegated");
             assert_eq!(h.fs_close(&gctx, write_fd), Ok(0));
@@ -49581,25 +50818,25 @@ mod tests {
         let mut out = [0u8; 4];
 
         let (reader, handle) = hand_over();
-        assert_eq!(reader.try_read(&mut out), ReadStep::Empty);
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Empty);
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
-        assert_eq!(reader.try_read(&mut out), ReadStep::Empty);
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Empty);
         let close = || assert_eq!(h.fs_close(&rctx, rfd), Ok(0));
         assert!(
             wakes_a_waiter_on(&reader, close),
             "the last writer's close wakes the reader"
         );
-        assert_eq!(reader.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Eof);
 
         let (reader, _pending) = hand_over();
         let withdrawn = rig.aspaces.write().withdraw(ProcessId(3));
         assert_eq!(
-            reader.try_read(&mut out),
+            crate::pipe::read_into(&reader, &mut out),
             ReadStep::Empty,
             "the withdrawn end is the caller's to let go once the lock is"
         );
         assert!(wakes_a_waiter_on(&reader, || drop(withdrawn)));
-        assert_eq!(reader.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Eof);
     }
 
     /// A grantor's exit lets the pipe ends it has in flight go as its close
@@ -49624,7 +50861,14 @@ mod tests {
             .open_pipe(ProcessId(2))
             .expect("a pipe opens");
         let to_reader = h
-            .fd_grant(&gctx, read_fd, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+            .fd_grant(
+                &gctx,
+                read_fd,
+                0,
+                grant_addr(GRANT_ONWARD_AT),
+                PROC_ID_LEN,
+                0,
+            )
             .expect("the read end is delegated");
         let rfd =
             u32::try_from(h.fd_redeem(&octx, to_reader).expect("the reader redeems")).unwrap();
@@ -49635,25 +50879,26 @@ mod tests {
                 0,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("the write end is delegated");
         assert_eq!(h.fs_close(&gctx, write_fd), Ok(0));
         let reader = pipe_end_at(&rig.aspaces, ProcessId(4), rfd);
         let mut out = [0u8; 4];
         assert_eq!(
-            reader.try_read(&mut out),
+            crate::pipe::read_into(&reader, &mut out),
             ReadStep::Empty,
             "the end in flight writes"
         );
 
         let withdrawn = rig.aspaces.write().withdraw(ProcessId(2));
         assert_eq!(
-            reader.try_read(&mut out),
+            crate::pipe::read_into(&reader, &mut out),
             ReadStep::Empty,
             "until the withdrawn record is let go"
         );
         assert!(wakes_a_waiter_on(&reader, || drop(withdrawn)));
-        assert_eq!(reader.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&reader, &mut out), ReadStep::Eof);
     }
 
     /// A read end in flight holds its pipe open for reading; let go
@@ -49678,6 +50923,7 @@ mod tests {
                 0,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("the read end is delegated");
         assert_eq!(h.fs_close(&gctx, read_fd), Ok(0));
@@ -49720,7 +50966,7 @@ mod tests {
         )
         .unwrap();
         let handle = h
-            .fd_grant(&ctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&ctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("grant mints a handle");
 
         // The grantor itself cannot redeem the handle it minted for the
@@ -49807,7 +51053,7 @@ mod tests {
         )
         .unwrap();
         let handle = h
-            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("grant mints a handle");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
@@ -49846,7 +51092,7 @@ mod tests {
         // rest of its records: a second grant minted to the recipient dies
         // with it and can never be redeemed by a later task.
         let second = h
-            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("second grant mints");
         drop(rig.aspaces.write().withdraw(ProcessId(3)));
         assert_eq!(
@@ -49912,7 +51158,7 @@ mod tests {
         )
         .unwrap();
         let first = h
-            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("grant mints a handle");
         // Redeemed as the relay does: bound to the process it relays for.
         let held = u32::try_from(
@@ -49924,12 +51170,19 @@ mod tests {
         // A read-only delegation still has no extent to bound, so the relay
         // may not invent one — and the relayed record is the one it holds.
         assert_eq!(
-            h.fd_grant(&rctx, held, 4096, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN),
+            h.fd_grant(
+                &rctx,
+                held,
+                4096,
+                grant_addr(GRANT_ONWARD_AT),
+                PROC_ID_LEN,
+                0
+            ),
             Err(Errno::OutOfRange),
             "a relay must not widen a read-only delegation into a writable one"
         );
         let onward = h
-            .fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+            .fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN, 0)
             .expect("the relay hands the delegation on");
         let ofd = u32::try_from(h.fd_redeem(&octx, onward).expect("onward redeems")).unwrap();
         let entry = rig
@@ -49992,6 +51245,7 @@ mod tests {
                 tairix_abi::GRANT_EXTENT_INHERIT,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("an inheriting writable grant mints");
         let held = u32::try_from(h.fd_redeem(&hctx, handle).expect("redeems")).unwrap();
@@ -50005,7 +51259,7 @@ mod tests {
         assert_eq!(frozen.uid, 1000, "operated on as the grantor");
         assert_eq!(ceiling_of(&frozen), Some(tairix_abi::GRANT_EXTENT_INHERIT));
         assert_eq!(
-            h.fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN),
+            h.fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0),
             Err(Errno::OutOfRange),
             "a writable delegation's reach is asked for, never implied"
         );
@@ -50052,7 +51306,14 @@ mod tests {
         )
         .unwrap();
         let first = h
-            .fd_grant(&gctx, fd, HELD, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(
+                &gctx,
+                fd,
+                HELD,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+                0,
+            )
             .expect("bounded writable grant mints");
         let held = u32::try_from(
             h.fd_redeem_from(&rctx, first, grantor_at, PROC_ID_LEN)
@@ -50061,13 +51322,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            h.fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN),
+            h.fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN, 0),
             Err(Errno::OutOfRange),
             "a writable delegation is handed on bounded or not at all"
         );
         let onward_ceiling = |asked: u64| {
             let handle = h
-                .fd_grant(&rctx, held, asked, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+                .fd_grant(
+                    &rctx,
+                    held,
+                    asked,
+                    grant_addr(GRANT_ONWARD_AT),
+                    PROC_ID_LEN,
+                    0,
+                )
                 .expect("the relay hands the delegation on");
             let ofd = u32::try_from(h.fd_redeem(&octx, handle).expect("onward redeems")).unwrap();
             let entry = rig
@@ -50115,7 +51383,7 @@ mod tests {
         )
         .unwrap();
         let handle = h
-            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("grant mints a handle");
 
         assert_eq!(
@@ -50200,6 +51468,13 @@ mod tests {
         assert_eq!(
             h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 1),
             Err(Errno::BufferTooSmall)
+        );
+        // Regression: the location was taken before its path was delivered,
+        // so a buffer that refused the copy lost it.
+        assert_eq!(
+            h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, 0x9999_0000, 64),
+            Err(Errno::BadAddress),
+            "a path the buffer refuses stays to be told"
         );
         assert_eq!(
             h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 64),
@@ -50322,7 +51597,7 @@ mod tests {
         )
         .unwrap();
         let file = h
-            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN, 0)
             .expect("the file is delegated");
         assert_eq!(
             h.fd_redeem_location(&holder, file, grantor_at, PROC_ID_LEN, out, 64),
@@ -50410,6 +51685,7 @@ mod tests {
                 CEILING,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("bounded writable grant mints");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
@@ -50499,6 +51775,7 @@ mod tests {
                 CEILING,
                 grant_addr(GRANT_RECIPIENT_AT),
                 PROC_ID_LEN,
+                0,
             )
             .expect("bounded writable grant mints");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
@@ -50587,6 +51864,7 @@ mod tests {
                     ceiling,
                     grant_addr(GRANT_RECIPIENT_AT),
                     PROC_ID_LEN,
+                    0,
                 )
                 .expect("the delegation mints");
             u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap()
@@ -52427,6 +53705,7 @@ mod tests {
             _waiter: SecTaskId,
             _pid: i64,
             _flags: WaitFlags,
+            _deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
         }
@@ -52436,9 +53715,18 @@ mod tests {
             parent: ProcessId,
             pid: i64,
             flags: WaitFlags,
+            deliver: &mut crate::procwait::Deliver<'_>,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
-            match self.0.lock().reap(parent, pid, flags.is_stopped()) {
-                crate::procwait::Reap::Ready(child) => Ok(child),
+            let report = self.0.lock().peek_report(parent, pid, flags.is_stopped());
+            match report {
+                crate::procwait::Reap::Ready(child) => {
+                    deliver(child)?;
+                    if self.0.lock().take_report(parent, &child) {
+                        Ok(child)
+                    } else {
+                        Err(Errno::WouldBlock)
+                    }
+                }
                 crate::procwait::Reap::Blocked => Err(Errno::WouldBlock),
                 crate::procwait::Reap::NoChild => Err(Errno::NotFound),
             }
@@ -54836,7 +56124,7 @@ mod tests {
         let sibling = crate::test_boot::claim_peer_task();
         let instance = caps.proc_id();
         port(&|port| {
-            port.watch_room(sibling, instance).expect("recorded");
+            port.watch_room(sibling, instance);
         });
         crate::waitq::PORT_ROOM_WAITQ
             .register(sibling, crate::waitq::NO_DEADLINE)
@@ -54916,7 +56204,7 @@ mod tests {
         let sibling = crate::test_boot::claim_peer_task();
         let instance = caps.proc_id();
         port(&|port| {
-            port.watch_room(sibling, instance).expect("recorded");
+            port.watch_room(sibling, instance);
         });
         crate::waitq::PORT_ROOM_WAITQ
             .register(sibling, crate::waitq::NO_DEADLINE)
@@ -54965,8 +56253,8 @@ mod tests {
         let (_, owner) = crate::test_boot::claim_scheduler();
         let sibling = crate::test_boot::claim_peer_task();
         let process = ProcessId(owner);
-        crate::waitq::budget_watch(process, owner).expect("filed");
-        crate::waitq::budget_watch(process, sibling).expect("filed");
+        crate::waitq::budget_watch(process, owner, false).expect("filed");
+        crate::waitq::budget_watch(process, sibling, false).expect("filed");
         crate::waitq::budget_released(process);
         let budget = crate::waitq::budget_spent(process, owner);
         assert!(budget.is_some(), "the release chose the oldest waiter");
@@ -55008,8 +56296,8 @@ mod tests {
         let (_, owner) = crate::test_boot::claim_scheduler();
         let sibling = crate::test_boot::claim_peer_task();
         let process = ProcessId(owner);
-        crate::waitq::budget_watch(process, owner).expect("filed");
-        crate::waitq::budget_watch(process, sibling).expect("filed");
+        crate::waitq::budget_watch(process, owner, false).expect("filed");
+        crate::waitq::budget_watch(process, sibling, false).expect("filed");
         crate::waitq::budget_released(process);
         let budget = crate::waitq::budget_spent(process, owner);
         let owed = crate::waitset::OwedRoom {
@@ -55068,12 +56356,12 @@ mod tests {
             let ipc = ipc.read();
             let port = ipc.lookup(EndpointId(id)).expect("bound");
             drop(port.recv());
-            port.watch_room(owner, caps.proc_id()).expect("recorded");
+            port.watch_room(owner, caps.proc_id());
             assert!(port.own_room(owner), "its wait reported the room ready");
         }
         let process = ProcessId(owner);
-        crate::waitq::budget_watch(process, owner).expect("filed");
-        crate::waitq::budget_watch(process, sibling).expect("filed");
+        crate::waitq::budget_watch(process, owner, false).expect("filed");
+        crate::waitq::budget_watch(process, sibling, false).expect("filed");
         crate::waitq::budget_released(process);
         let budget = crate::waitq::budget_spent(process, owner);
         assert!(budget.is_some(), "the release chose the oldest waiter");
@@ -55102,9 +56390,10 @@ mod tests {
     /// thread owed as it was: the slot stays held from its siblings, and the
     /// thread's next call that is not a send hands it on.
     ///
-    /// Regression: the debt was taken before the wait's stream keys were
-    /// collected, so a refusal there dropped the record while the port kept
-    /// the slot held, and no later call or end of the thread let it go.
+    /// Regression: the debt was taken before a step that can refuse the wait,
+    /// so a refusal there dropped the record while the port kept the slot
+    /// held, and no later call or end of the thread let it go. The one such
+    /// step left is a wait that needs buffers of its own.
     #[test]
     fn a_wait_refused_for_memory_leaves_its_threads_debt_as_it_was() {
         install_trace_filter();
@@ -55155,15 +56444,17 @@ mod tests {
         let sibling = crate::test_boot::claim_peer_task();
         let instance = caps.proc_id();
         port(&|port| {
-            port.watch_room(sibling, instance).expect("recorded");
+            port.watch_room(sibling, instance);
         });
         crate::waitq::PORT_ROOM_WAITQ
             .register(sibling, crate::waitq::NO_DEADLINE)
             .expect("filed");
-        // The wait's snapshot is granted; the stream keys after it are not.
-        crate::test_alloc::grant_allocations_on_current_thread(1);
+        // Another wait holds the set's buffers, and the heap has none to spare.
+        let lent = crate::waitset::checkout(owner, watching).expect("lent");
+        crate::test_alloc::grant_allocations_on_current_thread(0);
         let refused = h.waitset_wait(&ctx, watching, 0, 0x2000);
         crate::test_alloc::grant_allocations_on_current_thread(usize::MAX);
+        crate::waitset::checkin(owner, watching, lent);
         assert_eq!(refused, Err(Errno::OutOfMemory));
         assert_eq!(
             send(sibling),
@@ -55234,15 +56525,15 @@ mod tests {
         {
             let ipc = ipc.read();
             let port = ipc.lookup(EndpointId(id)).expect("bound");
-            port.watch_room(owner, caps.proc_id()).expect("recorded");
-            port.watch_room(sibling, caps.proc_id()).expect("recorded");
+            port.watch_room(owner, caps.proc_id());
+            port.watch_room(sibling, caps.proc_id());
         }
         crate::waitq::PORT_ROOM_WAITQ
             .register(sibling, crate::waitq::NO_DEADLINE)
             .expect("filed");
         let process = ProcessId(owner);
-        crate::waitq::budget_watch(process, owner).expect("filed");
-        crate::waitq::budget_watch(process, waiter).expect("filed");
+        crate::waitq::budget_watch(process, owner, false).expect("filed");
+        crate::waitq::budget_watch(process, waiter, false).expect("filed");
         crate::waitq::budget_released(process);
         let budget = crate::waitq::budget_spent(process, owner);
         assert!(budget.is_some(), "the release chose the oldest waiter");
@@ -55507,7 +56798,7 @@ mod tests {
             .send(&from, 0, &[0xEE; 4], tairix_abi::RLIMIT_INFINITY, sink)
             .expect("sent");
         for waiter in [sender, bystander] {
-            crate::waitq::budget_watch(ProcessId(waiter), waiter).expect("filed");
+            crate::waitq::budget_watch(ProcessId(waiter), waiter, false).expect("filed");
         }
         let _ = crate::test_boot::take_unparked();
         assert_eq!(h.ipc_recv(&ctx, id, 0x1000, 64, 0x1800), Ok(4));
@@ -55558,7 +56849,7 @@ mod tests {
                 .expect("bound")
                 .send(&from, 0, &[0xEE; 4], tairix_abi::RLIMIT_INFINITY, sink)
                 .expect("sent");
-            crate::waitq::budget_watch(ProcessId(sender), sender).expect("filed");
+            crate::waitq::budget_watch(ProcessId(sender), sender, false).expect("filed");
             let _ = crate::test_boot::take_unparked();
             discard();
             crate::waitq::budget_unwatch(ProcessId(sender), sender);
@@ -55595,7 +56886,7 @@ mod tests {
             let parked_for_budget = || {
                 let waiter = boot.spawn(move || {
                     let me = HostBoot::current().task();
-                    crate::waitq::budget_watch(process, me).expect("filed");
+                    crate::waitq::budget_watch(process, me, false).expect("filed");
                     let _ = crate::waitq::park_calling_task();
                     crate::waitq::budget_unwatch(process, me);
                 });
@@ -55696,7 +56987,7 @@ mod tests {
             [owner, sibling].map(|waiter| woken.contains(&waiter))
         };
         for waiter in [owner, sibling] {
-            crate::waitq::budget_watch(ProcessId(owner), waiter).expect("filed");
+            crate::waitq::budget_watch(ProcessId(owner), waiter, false).expect("filed");
         }
         assert_eq!(
             woken(LimitKind::Processes),
@@ -55990,7 +57281,10 @@ mod tests {
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = [0u8; 8];
-        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(3));
+        assert_eq!(
+            crate::pipe::read_into(&read_end, &mut out),
+            crate::pipe::ReadStep::Read(3)
+        );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         // Closing every write end leaves the member ready for its EOF
@@ -56001,7 +57295,10 @@ mod tests {
             .close_file(ProcessId(owner), write_fd)
             .is_some());
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
-        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Eof);
+        assert_eq!(
+            crate::pipe::read_into(&read_end, &mut out),
+            crate::pipe::ReadStep::Eof
+        );
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
@@ -56430,7 +57727,10 @@ mod tests {
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = alloc::vec![0u8; 64];
-        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(64));
+        assert_eq!(
+            crate::pipe::read_into(&read_end, &mut out),
+            crate::pipe::ReadStep::Read(64)
+        );
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
 
         // Refill, then close every read end: a broken stream reports ready
@@ -56662,7 +57962,8 @@ mod tests {
             pw.poll(
                 ProcessId(owner),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::NONBLOCK
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
             ),
             Ok(crate::procwait::WaitedChild {
                 pid: 21,
@@ -57487,7 +58788,9 @@ mod tests {
         assert_eq!(ask(exiting), Err(Errno::NotFound), "exited, unreaped");
         let parent = world.parent.process();
         let pid = exiting.cast_signed();
-        let reaped = world.wait.poll(parent, pid, WaitFlags::empty());
+        let reaped = world
+            .wait
+            .poll(parent, pid, WaitFlags::empty(), &mut |_| Ok(()));
         assert_eq!(reaped.map(|child| child.pid), Ok(exiting));
 
         for (pid, what) in [
@@ -59904,7 +61207,8 @@ mod tests {
     /// A path answer bound for a page the caller reserved but never touched
     /// is offered to the fault resolvers, as a store to that page would be,
     /// rather than refused out of hand. The recording producer installs no
-    /// translation, so each copy still ends at its retry budget.
+    /// translation, so each copy ends with its backings spent, answering
+    /// `OutOfMemory`.
     #[test]
     fn a_path_answer_for_an_untouched_page_offers_the_miss_to_the_resolvers() {
         install_trace_filter();
@@ -59945,11 +61249,11 @@ mod tests {
         .with_mem_map(producer);
 
         let offered = Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), untouched));
-        assert_eq!(h.fs_getcwd(&ctx, untouched, 64), Err(Errno::BadAddress));
+        assert_eq!(h.fs_getcwd(&ctx, untouched, 64), Err(Errno::OutOfMemory));
         assert_eq!(producer.mapping.lock().take(), offered, "fs_getcwd");
         assert_eq!(
             h.fs_readlink(&ctx, FD_CWD, 0x1000, "/alias".len(), untouched, 64),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(producer.mapping.lock().take(), offered, "fs_readlink");
         assert_eq!(
@@ -59962,7 +61266,7 @@ mod tests {
                 64,
                 tairix_abi::RealpathMode::Final,
             ),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(producer.mapping.lock().take(), offered, "fs_realpath");
     }
@@ -59973,7 +61277,7 @@ mod tests {
     /// clock reading, the caller's own origin, a received message — and a
     /// message whose copy ends at the budget stays queued for the next
     /// receive. The recording producer installs no translation, so each copy
-    /// still ends at its retry budget.
+    /// ends with its backings spent, answering `OutOfMemory`.
     ///
     /// Regression: these paths copied without resolving a miss, so a valid
     /// buffer on a page the process had yet to touch was refused out of hand.
@@ -60014,14 +61318,17 @@ mod tests {
 
         assert_eq!(
             h.random_get(&ctx, untouched, 32, RandomFlags::empty()),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(producer.mapping.lock().take(), offered, "random_get");
-        assert_eq!(h.wall_time_get(&ctx, untouched, 64), Err(Errno::BadAddress));
+        assert_eq!(
+            h.wall_time_get(&ctx, untouched, 64),
+            Err(Errno::OutOfMemory)
+        );
         assert_eq!(producer.mapping.lock().take(), offered, "wall_time_get");
         assert_eq!(
             h.self_origin(&ctx, untouched, tairix_abi::ORIGIN_WIRE_LEN),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(producer.mapping.lock().take(), offered, "self_origin");
 
@@ -60035,7 +61342,7 @@ mod tests {
             .expect("queued");
         assert_eq!(
             h.ipc_recv(&ctx, id, untouched, 64, 0x1000),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(producer.mapping.lock().take(), offered, "ipc_recv");
         assert_eq!(
@@ -60048,13 +61355,13 @@ mod tests {
     }
 
     /// A call's reply bound for a page the caller reserved but never touched
-    /// is offered to the fault resolvers before it is answered for: the
-    /// ticket is retired as the reply is claimed, so a reply the copy cannot
-    /// land is gone.
+    /// is offered to the fault resolvers before it is answered for, and a
+    /// reply the copy cannot land stays with its ticket for the next claim.
     ///
     /// Regression: the reply was copied without resolving a miss, so a
     /// mount list past one page of a fresh heap buffer was refused
-    /// `BadAddress` and lost with its ticket.
+    /// `BadAddress` and lost with its ticket. The recording producer installs
+    /// no translation, so the copy ends with its backings spent.
     #[test]
     fn a_call_reply_for_an_untouched_page_offers_the_miss_to_the_resolvers() {
         let principal = crate::test_boot::claim_task();
@@ -60105,12 +61412,14 @@ mod tests {
             .expect("reply");
         assert_eq!(
             h.call_reap(&ctx, id, ticket, untouched, 64),
-            Err(Errno::BadAddress)
+            Err(Errno::OutOfMemory)
         );
         assert_eq!(
             producer.mapping.lock().take(),
             Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), untouched))
         );
+        // The answer the copy could not land stays with its ticket.
+        assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
         crate::callreg::unregister(EndpointId(id));
     }
 

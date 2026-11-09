@@ -14,15 +14,15 @@ use alloc::vec::Vec;
 use tairix_bezier::{Affine, Bounds, FillRule, Path, Point};
 use tairix_collections::{try_arc, OrderedMap, SharedSlice, SharedStr};
 use tairix_colour::Rgba;
-use tairix_pdf::{About, DisplayList, Document, Item, Losses, Options, PdfError};
-use tairix_raster::{Pyramid, Surface};
+use tairix_pdf::{About, DisplayList, Document, Item, Losses, Options, PdfError, Refused};
+use tairix_raster::{Pyramid, Surface, MAX_SURFACE_PIXELS};
 use tairix_util::fallible::try_push;
 
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Info, Page, Unit};
 use crate::id::Ids;
 use crate::image::{Encoding, Image, Source};
-use crate::limits::{MAX_DASH_ENTRIES, MAX_DEPTH, MAX_STOPS};
+use crate::limits::{MAX_DASH_ENTRIES, MAX_DEPTH, MAX_STOPS, MAX_TOTAL_IMAGE_PIXELS};
 use crate::node::{Kind, Node};
 use crate::shape::{PathShape, Shape};
 use crate::style::{
@@ -59,7 +59,8 @@ pub fn recognised(bytes: &[u8]) -> bool {
 
 const fn read_error(error: PdfError) -> ReadError {
     match error {
-        PdfError::Malformed | PdfError::Unsupported => ReadError::Malformed,
+        PdfError::Malformed => ReadError::Malformed,
+        PdfError::Unsupported => ReadError::Unsupported,
         PdfError::NeedsPassword => ReadError::NeedsPassword,
         PdfError::WrongPassword => ReadError::WrongPassword,
         PdfError::TooComplex => ReadError::TooComplex,
@@ -68,86 +69,116 @@ const fn read_error(error: PdfError) -> ReadError {
     }
 }
 
-fn open<'f>(bytes: &'f [u8], request: &Request<'_>) -> Result<Document<'f>, ReadError> {
-    let options = Options {
-        password: request.password,
-        budget: request.budget,
-    };
-    Document::open(bytes, &options).map_err(read_error)
+/// The longest password a PDF is tried with, in bytes: what every password
+/// typed for one is held to.
+pub use tairix_pdf::MAX_PASSWORD_BYTES;
+
+/// A PDF opened once: its pages counted, sized and read from the one
+/// document, so choosing a page costs no second open.
+pub struct Opened {
+    document: Document,
 }
 
-/// The pages of `bytes`, a PDF, as a chooser lists them: how many it has,
-/// and the width and height, in points, its first `most` are shown at.
-/// `request`'s page is not consulted.
+/// `file`, a PDF, opened with `password` where the empty one does not open
+/// it, its streams decoding to at most `budget` bytes together. The opened
+/// document keeps `file`.
 ///
 /// # Errors
 ///
-/// As [`read`], short of reading any page's content.
-pub fn pages(
-    bytes: &[u8],
-    request: &Request<'_>,
-    most: usize,
-) -> Result<(usize, Vec<(f64, f64)>), ReadError> {
-    let document = open(bytes, request)?;
-    let listed = document.page_count().min(most);
-    let mut sizes = Vec::new();
-    sizes.try_reserve_exact(listed)?;
-    for index in 0..listed {
-        sizes.push(document.page(index).map_err(read_error)?.size());
+/// [`Refused`], handing `file` back to be tried again, for the reasons
+/// [`read`] gives short of reading any page.
+pub fn open(
+    file: Vec<u8>,
+    password: Option<&[u8]>,
+    budget: u64,
+) -> Result<Opened, Refused<ReadError>> {
+    if !recognised(&file) {
+        return Err(Refused {
+            error: ReadError::Unrecognised,
+            file,
+        });
     }
-    Ok((document.page_count(), sizes))
+    let options = Options { password, budget };
+    let document = Document::open(file, &options).map_err(|refused| refused.map(read_error))?;
+    Ok(Opened { document })
 }
 
-/// Read page `request.page` of `bytes`, a PDF, into a drawing of one layer,
+/// Read page `request.page` of `file`, a PDF, into a drawing of one layer,
 /// issuing its objects' identities from `ids`.
 ///
 /// # Errors
 ///
 /// [`ReadError::Unrecognised`] for bytes that are no PDF,
 /// [`ReadError::Malformed`] for one damaged past repair,
+/// [`ReadError::Unsupported`] for one holding what this reader does not read,
 /// [`ReadError::NeedsPassword`] and [`ReadError::WrongPassword`] for one the
 /// password given does not open, [`ReadError::NoSuchPage`] for a page it does
 /// not have, [`ReadError::TooComplex`] past a bound of the file's or the
 /// drawing's, and [`ReadError::OutOfMemory`]. A page's damaged parts are
 /// passed over and recorded, not refused.
-pub fn read(bytes: &[u8], request: &Request<'_>, ids: &mut Ids) -> Result<Read, ReadError> {
-    if !recognised(bytes) {
-        return Err(ReadError::Unrecognised);
+pub fn read(file: Vec<u8>, request: &Request<'_>, ids: &mut Ids) -> Result<Read, ReadError> {
+    open(file, request.password, request.budget)
+        .map_err(|refused| refused.error)?
+        .read(request.page, ids)
+}
+
+impl Opened {
+    /// How many pages it has.
+    #[must_use]
+    pub fn page_count(&self) -> usize {
+        self.document.page_count()
     }
-    let document = open(bytes, request)?;
-    let page = document.page(request.page).map_err(read_error)?;
-    let list = page.display_list().map_err(read_error)?;
-    drop(page);
-    let DisplayList { size, items, lost } = list;
-    let mut builder = Builder {
-        ids,
-        open: Vec::new(),
-        pending: None,
-        unkept: unkept_of(lost),
-        pyramids: OrderedMap::new(),
-    };
-    try_push(&mut builder.open, Open::layer())?;
-    for item in items {
-        builder.item(item)?;
+
+    /// The width and height, in points, page `page` is shown at.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::NoSuchPage`] for a page it does not have, and as
+    /// [`read`] for one that cannot be read.
+    pub fn page_size(&self, page: usize) -> Result<(f64, f64), ReadError> {
+        Ok(self.document.page(page).map_err(read_error)?.size())
     }
-    let (layer, mut unkept) = builder.finish()?;
-    let page = Page {
-        width: size.0,
-        height: size.1,
-        unit: Unit::Pt,
-        background: None,
-    };
-    let drawing = Drawing::new(
-        page,
-        Children::single(try_arc(layer)?)?,
-        SharedSlice::new(),
-        Grid::default(),
-    )?;
-    if document.page_count() > 1 {
-        unkept.insert(Lost::OtherPages);
+
+    /// Page `page` read into a drawing of one layer, its objects' identities
+    /// issued from `ids`. A protected document's protection is recorded as
+    /// lost: a drawing written from it would be written without it.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`].
+    pub fn read(&self, page: usize, ids: &mut Ids) -> Result<Read, ReadError> {
+        let document = &self.document;
+        let shown = document.page(page).map_err(read_error)?;
+        let list = shown.display_list().map_err(read_error)?;
+        drop(shown);
+        let DisplayList { size, items, lost } = list;
+        let mut unkept = unkept_of(lost);
+        if document.encrypted() {
+            unkept.insert(Lost::Protection);
+        }
+        let mut builder = Builder::new(ids, unkept)?;
+        for item in items {
+            builder.item(item)?;
+        }
+        let (layer, mut unkept) = builder.finish()?;
+        let page = Page {
+            width: size.0,
+            height: size.1,
+            unit: Unit::Pt,
+            background: None,
+        };
+        let drawing = Drawing::new(
+            page,
+            Children::single(try_arc(layer)?)?,
+            SharedSlice::new(),
+            Grid::default(),
+        )?;
+        if document.page_count() > 1 {
+            unkept.insert(Lost::OtherPages);
+        }
+        let drawing = described(drawing, document.about().map_err(read_error)?, &mut unkept)?;
+        Ok(Read { drawing, unkept })
     }
-    let drawing = described(drawing, document.about().map_err(read_error)?, &mut unkept)?;
-    Ok(Read { drawing, unkept })
 }
 
 /// `drawing` given the title and subject `about` states, and `unkept` what
@@ -203,6 +234,9 @@ struct Open {
     children: Vec<Arc<Node>>,
     clip: Option<Node>,
     opacity: Option<f64>,
+    /// A clip the drawing cannot hold: nothing drawn beneath it is kept, as
+    /// none of it is known to show.
+    refused: bool,
 }
 
 impl Open {
@@ -211,6 +245,7 @@ impl Open {
             children: Vec::new(),
             clip: None,
             opacity: None,
+            refused: false,
         }
     }
 }
@@ -226,15 +261,34 @@ struct Pending {
 struct Builder<'a> {
     ids: &'a mut Ids,
     open: Vec<Open>,
+    /// How many refused clips are open.
+    refusing: usize,
     pending: Option<Pending>,
     unkept: Unkept,
     /// The pixels of each picture made, by the picture's address, so a
     /// picture shown many times is held once; the picture is held with them,
     /// so no other takes its address while it is a key.
     pyramids: OrderedMap<usize, (Arc<tairix_pdf::Picture>, Arc<Pyramid>)>,
+    /// The pixels the pictures made hold together, each counted once.
+    pixels: u64,
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
+    /// A builder of the page's one layer, `unkept` lost already.
+    fn new(ids: &'a mut Ids, unkept: Unkept) -> Result<Self, ReadError> {
+        let mut open = Vec::new();
+        try_push(&mut open, Open::layer())?;
+        Ok(Self {
+            ids,
+            open,
+            refusing: 0,
+            pending: None,
+            unkept,
+            pyramids: OrderedMap::new(),
+            pixels: 0,
+        })
+    }
+
     fn item(&mut self, item: Item) -> Result<(), ReadError> {
         if let Item::Stroke {
             path,
@@ -285,32 +339,7 @@ impl Builder<'_> {
                 path,
                 rule,
                 transform,
-            } => {
-                if self.open.len() >= MAX_DEPTH - 1 {
-                    return Err(ReadError::TooComplex);
-                }
-                let style = Style {
-                    fill_rule: rule,
-                    ..Style::default()
-                };
-                let clip = match self.shape_node(&path, style, transform) {
-                    Ok(node) => Some(node),
-                    Err(DrawingError::Invalid) => {
-                        self.unkept.insert(Lost::Damage);
-                        None
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                try_push(
-                    &mut self.open,
-                    Open {
-                        children: Vec::new(),
-                        clip,
-                        opacity: None,
-                    },
-                )?;
-                Ok(())
-            }
+            } => self.clip(&path, rule, transform),
             Item::Group { opacity } => {
                 if self.open.len() >= MAX_DEPTH - 1 {
                     return Err(ReadError::TooComplex);
@@ -321,6 +350,7 @@ impl Builder<'_> {
                         children: Vec::new(),
                         clip: None,
                         opacity: Some(opacity),
+                        refused: false,
                     },
                 )?;
                 Ok(())
@@ -333,6 +363,38 @@ impl Builder<'_> {
             } => self.image(&picture, transform, opacity),
             Item::Stroke { .. } => Ok(()),
         }
+    }
+
+    /// A group clipped to `path` opened; a clip the drawing cannot hold is
+    /// recorded as damage, and what is drawn beneath it is not kept.
+    fn clip(&mut self, path: &Path, rule: FillRule, transform: Affine) -> Result<(), ReadError> {
+        if self.open.len() >= MAX_DEPTH - 1 {
+            return Err(ReadError::TooComplex);
+        }
+        let style = Style {
+            fill_rule: rule,
+            ..Style::default()
+        };
+        let clip = match self.shape_node(path, style, transform) {
+            Ok(node) => Some(node),
+            Err(DrawingError::Invalid) => {
+                self.unkept.insert(Lost::Damage);
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let refused = clip.is_none();
+        try_push(
+            &mut self.open,
+            Open {
+                children: Vec::new(),
+                clip,
+                opacity: None,
+                refused,
+            },
+        )?;
+        self.refusing += usize::from(refused);
+        Ok(())
     }
 
     /// The pending fill made a shape of its own.
@@ -358,10 +420,12 @@ impl Builder<'_> {
             children,
             clip,
             opacity,
+            refused,
         }) = self.open.pop()
         else {
             return Ok(());
         };
+        self.refusing -= usize::from(refused);
         if children.is_empty() {
             return Ok(());
         }
@@ -397,6 +461,9 @@ impl Builder<'_> {
     }
 
     fn add(&mut self, node: Node) -> Result<(), ReadError> {
+        if self.refusing > 0 {
+            return Ok(());
+        }
         let node = try_arc(node)?;
         if let Some(open) = self.open.last_mut() {
             try_push(&mut open.children, node)?;
@@ -560,11 +627,20 @@ impl Builder<'_> {
         let pyramid = if let Some((_, pyramid)) = self.pyramids.get(&key) {
             Arc::clone(pyramid)
         } else {
+            // A picture larger than a surface, or past what a drawing's
+            // pictures hold together, is lost, not the page.
+            let count = u64::from(picture.width) * u64::from(picture.height);
+            let held = self.pixels.saturating_add(count);
+            if count > MAX_SURFACE_PIXELS as u64 || held > MAX_TOTAL_IMAGE_PIXELS {
+                self.unkept.insert(Lost::Images);
+                return Ok(());
+            }
             let surface = Surface::from_rgba8(picture.width, picture.height, &picture.pixels)
                 .ok_or(ReadError::OutOfMemory)?;
             let pyramid = try_arc(Pyramid::new(surface).ok_or(ReadError::OutOfMemory)?)?;
             self.pyramids
                 .try_insert(key, (Arc::clone(picture), Arc::clone(&pyramid)))?;
+            self.pixels = held;
             pyramid
         };
         let source = picture.jpeg.as_ref().and_then(|bytes| {

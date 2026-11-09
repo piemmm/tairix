@@ -33,6 +33,7 @@ mod function;
 mod image;
 mod lex;
 mod limits;
+mod memo;
 mod object;
 mod optional;
 mod page;
@@ -45,5 +46,6 @@ pub use display::{
     DisplayList, Gradient, GradientKind, Item, Losses, Lost, Paint, Pen, Picture, Stop,
 };
 pub use document::{recognised, About, Document, Options};
-pub use error::PdfError;
+pub use error::{PdfError, Refused};
+pub use limits::MAX_PASSWORD_BYTES;
 pub use page::Page;

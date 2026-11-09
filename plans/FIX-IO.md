@@ -480,22 +480,26 @@ answered reissuably, so it never stalls an unrelated LUN. `virtio_blk`/`emmc2`
 inherit the same primitive when brought up as user-space serve processes,
 mapping `Reset` to their own queue/controller re-init.
 
+The bootstrap-floor devices (`virtio_blk`, `emmc2`) are consumed in-kernel,
+with no serve process between the kernel and them, so the floor's innermost
+wrapper, `MeteredBlock` (`kernel/core/src/fs/blkmeter.rs`), is where their
+`BlkHealth` grace window runs and where a failure the device says may clear is
+issued again — under the same `IoBudget::reissue_wait_ns` policy the served
+consumer obeys: at once when the driver's `Block::reissue` vouches for its
+recovery, after the class's pacing otherwise, never past `max_retries` or the
+window. A device failure that still reaches its caller is recorded
+(`DEVICE_OPERATION_FAILED`), the first and then one per doubling of the count.
+Each floor driver's `Block` reports the honest per-request class (root cause
+#3): `virtio_blk` decodes the request status byte through `status_to_result`
+(`VIRTIO_BLK_S_IOERR` → `MediumError`, `VIRTIO_BLK_S_UNSUPP` → `Unsupported`,
+anything undefined → `DeviceFault`), and `emmc2` classes the controller's error
+bits — timeouts `TimedOut`, CRC/end-bit/index/auto-command errors
+`TransferCorrupted`, an uncorrectable ECC status `MediumError`, the rest
+`DeviceFault` — vouching for an immediate reissue once its line reset confirmed.
+A user-space serve process for either, when one is brought up, reuses
+`serve_request_recovering` rather than copying it.
+
 Remaining:
-- `virtio_blk` and `emmc2` are currently consumed **in-kernel** (root-unlock)
-  and expose only their `Block` implementation — they are not yet brought up as
-  user-space serving processes with their own serve loops. When either is, it
-  reuses the shared `blkio::serve_request_recovering` engine (above) rather than
-  copying it, so there is nothing to "adopt" separately; the shared engine is
-  the single definition (§2.2). Bringing those serve processes up is tracked
-  with their user-space driver-process work, not this stage. Even in the
-  in-kernel form, each driver's `Block` already reports the honest per-request
-  health class (root cause #3): `virtio_blk` decodes the `virtio_blk_req` status
-  byte through one shared `status_to_result` — `VIRTIO_BLK_S_IOERR` → a
-  per-request `DriverError::MediumError` (recovered/repaired by a consumer, not a
-  whole-device drop), `VIRTIO_BLK_S_UNSUPP` → `Unsupported`, any undefined status
-  → a fail-closed `DeviceFault` — so no consumer (a RAID member, the kernel block
-  client) drops a whole device over a single bad sector, before the serve-loop
-  wrapping even exists.
 - The consumer marking the affected volume degraded landed in IO2 above (the
   kernel `BlkClient` overlay surfaced through `MountAvailability::{Degraded,
   Recovering}`); the remaining observability is the audit-log health trail

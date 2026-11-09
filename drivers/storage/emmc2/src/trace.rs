@@ -5,9 +5,43 @@
 //! A host that records nothing keeps [`crate::SdhciHost::trace`]'s default;
 //! the bring-up tests read the records to check each step the engine took.
 
+use tairix_abi::blkio::BlkReissue;
+use tairix_abi::DriverError;
+
 use crate::bus::{Link, Rung};
 use crate::card::SCR_BYTES;
 use crate::BringUpStage;
+
+/// What reported a step's failure.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FaultReport {
+    /// A wait on a controller register ended without what it wanted.
+    Wait {
+        /// The register's offset.
+        register: usize,
+        /// The register's last value: for `INTERRUPT`, its error bits say
+        /// what the controller saw.
+        value: u32,
+        /// Why it ended.
+        end: WaitEnd,
+    },
+    /// The card's status reported the command, or the transfer it started,
+    /// failed.
+    CardStatus(u32),
+    /// The card's status put it in no state a transfer can start from.
+    CardState(u32),
+    /// The staging is held back from a controller that may still master it.
+    StagingWithheld,
+}
+
+/// The step a transfer failed at, as the controller or the card reported it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TransferFault {
+    /// The command the step ran, `CMDn`.
+    pub command: u8,
+    /// What reported the failure.
+    pub report: FaultReport,
+}
 
 /// How a wait on the controller ended without what it wanted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -116,4 +150,19 @@ pub enum Trace {
     },
     /// Bring-up finished on this link.
     Ready(Link),
+    /// A transfer the block layer asked for failed.
+    TransferFailed {
+        /// It was a write.
+        write: bool,
+        /// Its first block.
+        lba: u64,
+        /// Its length, in blocks.
+        blocks: u64,
+        /// The step it failed at, where the controller or card said.
+        fault: Option<TransferFault>,
+        /// What it failed with.
+        error: DriverError,
+        /// When it may be issued again, as its recovery left the controller.
+        reissue: BlkReissue,
+    },
 }

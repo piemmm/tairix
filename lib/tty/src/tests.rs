@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use tairix_abi::{Errno, Signal};
 
 use super::{
-    is_line_delimiter, job_control_signal, read_bounded, write_cooked, EchoLine, INTERRUPT_BYTE,
-    STOP_BYTE,
+    bounded_len, is_line_delimiter, job_control_signal, read_bounded, write_cooked, EchoLine,
+    INTERRUPT_BYTE, STOP_BYTE,
 };
 
 /// A queue that hands out bytes destructively, like a terminal's input ring.
@@ -71,6 +71,27 @@ fn read_bounded_returns_a_partial_line_when_no_delimiter_is_queued() {
     let taken = read_bounded(&mut out, || input.pop_front());
     assert_eq!(&out[..taken], b"desk");
     assert!(input.is_empty());
+}
+
+/// A peek at a queue counts what a read would take, under the same bound,
+/// and looks at no byte past the last it counts.
+#[test]
+fn bounded_len_counts_what_a_read_takes_and_looks_no_further() {
+    for (queued, room) in [
+        (&b"ls -l\rcd /\r"[..], 32),
+        (&b"desk"[..], 32),
+        (&b"abcdef\n"[..], 3),
+        (&b"\n"[..], 4),
+        (&b""[..], 4),
+    ] {
+        let mut pulled = 0;
+        let counted = bounded_len(queued.iter().copied().inspect(|_| pulled += 1), room);
+        let mut input = queue(queued);
+        let mut out = [0u8; 32];
+        let taken = read_bounded(&mut out[..room], || input.pop_front());
+        assert_eq!(counted, taken, "{queued:?}");
+        assert_eq!(pulled, counted, "{queued:?}");
+    }
 }
 
 #[test]

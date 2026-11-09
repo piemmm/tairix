@@ -309,6 +309,29 @@ impl GestureRefusal {
     pub fn line(&self) -> String {
         format!("desktop: {}: {}\n", self.headline, self.detail)
     }
+
+    /// The document `name` that could not be opened, for `err`.
+    #[must_use]
+    pub fn unopened(name: &str, err: Errno) -> Self {
+        Self::new(
+            tairix_util::utf8::refusal_headline(name, "opened"),
+            unopened_detail(err),
+        )
+    }
+
+    /// What the desktop could not make at `path`, for `err`.
+    #[must_use]
+    pub fn unmade(path: &str, err: Errno) -> Self {
+        Self::new(
+            tairix_util::utf8::refusal_headline(tairix_browse::leaf_name(path), "made"),
+            format!("The desktop's folder refused it ({err})."),
+        )
+    }
+}
+
+/// Why a document was not opened to be read, for `err`, as a sentence.
+pub(crate) fn unopened_detail(err: Errno) -> String {
+    format!("It could not be opened to be read ({err}).")
 }
 
 /// The work a change to the *backdrop* implies: the wallpaper, and the icons

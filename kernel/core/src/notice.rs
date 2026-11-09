@@ -107,7 +107,7 @@ static MOUNT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// attaches, re-backs, or removes a mount can forget to.
 pub fn mounts_changed() {
     MOUNT_GENERATION.fetch_add(1, Ordering::Release);
-    crate::waitq::notice_wake();
+    crate::waitq::notice_wake(NoticeTopic::Mounts);
 }
 
 /// Whether the process `observer` may read `topic` or be woken by it.
@@ -259,7 +259,7 @@ pub fn publish(notice: &Notice) -> Result<bool, Errno> {
         }
     };
     if moved {
-        crate::waitq::notice_wake();
+        crate::waitq::notice_wake(topic);
     }
     Ok(moved)
 }

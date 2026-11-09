@@ -80,7 +80,8 @@ pub const BUNDLE_PURPOSE_MAX: usize = 96;
 /// Maximum length, in bytes, of a bundle's author attribution.
 pub const BUNDLE_AUTHOR_MAX: usize = 64;
 
-/// Maximum length, in bytes, of one declared MIME-type string.
+/// Maximum length, in bytes, of one MIME (media) type string: one a manifest
+/// declares, and one the window channel names an offered file by.
 pub const MIME_TYPE_MAX: usize = 64;
 
 /// Encoded length of one MIME-type body entry: a length byte plus a

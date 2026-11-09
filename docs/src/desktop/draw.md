@@ -164,26 +164,37 @@ validated as the drawing is rebuilt. What a drawing cannot keep is listed as
 it is read (`tairix_drawing::unkept`), and a document that lost anything opens
 read-only and says what.
 
-A PDF is read through `lib/pdf` (`plans/PDF.md`). The load worker first asks
-the sandbox worker for its pages (`read_pages`); one of several pages, unless
-a page was already chosen, comes back as a question (`LoadAnswer::Asks`), and
-so does one protected by a password: the empty password is always tried
-first, so a file encrypted only to state its permissions opens without asking.
-A question opens a dialog window of Draw's own (`pdfopen::OpenPdf`, one kind
-of `appwindow::DrawWindow` beside the settings window) over the document's
+A PDF is read through `lib/pdf` (`plans/PDF.md`). The load worker opens it
+in a sandbox worker of its own (`drawedit::open_drawing`); one of several
+pages comes back as a question (`LoadAnswer::Asks`), and so does one
+protected by a password: the empty password is always tried first, so a file
+encrypted only to state its permissions opens without asking. The worker that
+opened it keeps it until the question is answered or let go — its bytes while
+the password is asked, the document opened while a page is chosen — so no
+answer reads the file, uploads it or opens it again. A question opens a
+dialog window of Draw's own (`pdfopen::OpenPdf`, one kind of
+`appwindow::DrawWindow` beside the settings window) over the document's
 loading window, asked on its behalf, so it closes with that window
-(`Host::open_app_window`): *Page* takes a number, its size in points described
-beneath it, or *Password* a secret field of the most a request carries
-(`drawedit::MAX_PASSWORD_BYTES`). A page typed past the document's is held to
-them and shown before anything opens, and Open with no password typed, or more
-than a password can be, opens nothing and says why. Open queues the read again
-with the answer, and Cancel or closing the window gives the load up without an
-alert (`Host::not_wanted`). A password is held in a buffer erased when
-dropped, travels to the worker in a request erased once sent and once read, and
-is never kept, logged or shown; a wrong one asks again, saying so. The page
-opens as a drawing of its own, its crop box the page, in points. A page of a
-PDF of several, or of one holding bookmarks, attachments or other parts, opens
-read-only, so Save never writes one page back over the whole. Text a PDF sets
+(`Host::open_app_window`), the document's name shown as
+`tairix_util::utf8::shown` shows it: *Page* takes a number, its size in points
+described beneath it once the worker has said it (`LoadWork::PageSize`, one
+page at a time, the latest page wanted winning), or *Password* a secret field
+of the most a request carries (`drawedit::MAX_PASSWORD_BYTES`). A page typed
+past the document's is held to them and shown before anything opens, and Open
+with no password typed, or more than a password can be, opens nothing and
+says why. Open hands the answer to the worker keeping the document
+(`LoadWork::Answer`); Cancel, closing the window, or a question window that
+cannot open — whose refusal the host has already said — lets that worker go
+(`LoadWork::Forget`) and gives the load up without an alert of Draw's
+(`Host::not_wanted`). A password is held in a buffer erased when dropped,
+travels to the worker in a request erased once sent and once read, and is
+held by Draw only until that request is made: the worker keeps the document
+it opened, never the password, and nothing logs or shows it. A wrong one asks
+again, saying so. The page opens as a drawing of its own, its crop box the
+page, in points. A page of a PDF of several, or of one holding bookmarks,
+attachments or other parts, or of one protected by a password, opens
+read-only, so Save never writes one page back over the whole nor a protected
+document back unprotected. Text a PDF sets
 in its fonts is not yet read (`plans/PDF.md` PDF5), so a page showing any opens
 read-only, as does one holding a soft mask, blend mode, tiling pattern, other
 shading, unreadable picture, annotation or damage.

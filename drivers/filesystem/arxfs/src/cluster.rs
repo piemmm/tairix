@@ -36,6 +36,16 @@ use crate::{
 };
 use zeroize::Zeroize;
 
+/// Why a stored run could not be read back: the device could not read it, or
+/// what it read failed an integrity layer at block `phys`.
+enum ReadFault {
+    /// The device refused the read, with its own error.
+    Device(DriverError),
+    /// What the device read failed verification, or a buffer to judge it in
+    /// was refused.
+    Data { phys: u64, fault: DataFault },
+}
+
 impl<B: Block> ARXFS<B> {
     /// Allocate `run` physically contiguous free data blocks, scanning upward
     /// from the low end exactly like the single-block data allocator and, like
@@ -148,31 +158,47 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
+    /// The device's own error when it could not read the run,
     /// [`DriverError::OutOfMemory`] when a buffer the read needs is refused,
-    /// [`DriverError::DeviceFault`] on any read, integrity, shape, or
-    /// decompression failure (fail closed, never a panic).
+    /// and [`DriverError::DeviceFault`] on any integrity, shape, or
+    /// decompression failure (fail closed, never a panic), which is recorded.
     pub(crate) fn read_data_cluster(&mut self, ext: &Extent) -> Result<Vec<u8>, DriverError> {
-        self.read_data_cluster_classified(ext)
-            .map_err(DriverError::from)
+        match self.read_cluster(ext) {
+            Ok(plain) => Ok(plain),
+            Err(ReadFault::Device(err)) => Err(err),
+            Err(ReadFault::Data { phys, fault }) => Err(self.integrity_fault(phys, fault)),
+        }
     }
 
     /// As [`read_data_cluster`](Self::read_data_cluster), but reports *which*
     /// integrity layer rejected the cluster (the scrub seam). A shape
     /// mismatch — wrong stored form or position, a frame length that
     /// disagrees with the extent, or a wrong decompressed size — classifies
-    /// as a logical fault; a buffer refused is no layer's verdict.
+    /// as a logical fault; a buffer refused is no layer's verdict, and a run
+    /// the device could not read is the medium's.
     pub(crate) fn read_data_cluster_classified(
         &mut self,
         ext: &Extent,
     ) -> Result<Vec<u8>, DataFault> {
+        self.read_cluster(ext).map_err(|fault| match fault {
+            ReadFault::Device(err) => DataFault::of_read(err),
+            ReadFault::Data { fault, .. } => fault,
+        })
+    }
+
+    fn read_cluster(&mut self, ext: &Extent) -> Result<Vec<u8>, ReadFault> {
+        let refused = ReadFault::Data {
+            phys: ext.phys,
+            fault: DataFault::OutOfMemory,
+        };
         let capu = as_usize(self.data_capacity());
         // Both buffers are had before anything is read, so a refusal leaves
         // nothing decrypted behind.
         let Some(mut frame) = tairix_util::fallible::zeroed(as_usize(ext.stored) * capu) else {
-            return Err(DataFault::OutOfMemory);
+            return Err(refused);
         };
         let Some(mut plain) = tairix_util::fallible::zeroed(as_usize(ext.len) * capu) else {
-            return Err(DataFault::OutOfMemory);
+            return Err(refused);
         };
         let frame_len = match self.read_cluster_frame(ext, capu, &mut frame) {
             Ok(frame_len) => frame_len,
@@ -189,7 +215,10 @@ impl<B: Block> ARXFS<B> {
             Ok(produced) if produced == plain.len() => Ok(plain),
             _ => {
                 xform::scrub(plain);
-                Err(DataFault::Logical)
+                Err(ReadFault::Data {
+                    phys: ext.phys,
+                    fault: DataFault::Logical,
+                })
             }
         }
     }
@@ -204,7 +233,7 @@ impl<B: Block> ARXFS<B> {
         ext: &Extent,
         capu: usize,
         frame: &mut [u8],
-    ) -> Result<usize, DataFault> {
+    ) -> Result<usize, ReadFault> {
         let stored = as_usize(ext.stored);
         let block_size = self.block_size;
         let mut frame_len = 0usize;
@@ -215,21 +244,23 @@ impl<B: Block> ARXFS<B> {
         while done < stored {
             let run = stage.blocks().min(stored - done);
             self.read_block_run(ext.phys + done as u64, run, stage.buf())
-                .map_err(DataFault::of_read)?;
+                .map_err(ReadFault::Device)?;
             for slot in 0..run {
                 let at = done + slot;
+                let phys = ext.phys + at as u64;
+                let rejected = |fault| ReadFault::Data { phys, fault };
                 let block = &mut stage.buf()[slot * block_size..(slot + 1) * block_size];
-                let form = self.verify_data_block(ext.phys + at as u64, block)?;
+                let form = self.verify_data_block(phys, block).map_err(rejected)?;
                 match (at, form) {
                     (0, StoredForm::ClusterHead { frame_len: len }) => {
                         frame_len = as_usize(u64::from(len));
                         if frame_len.div_ceil(capu) != stored {
-                            return Err(DataFault::Logical);
+                            return Err(rejected(DataFault::Logical));
                         }
                     }
                     (at, StoredForm::ClusterPart { index })
                         if at > 0 && as_usize(u64::from(index)) == at => {}
-                    _ => return Err(DataFault::Logical),
+                    _ => return Err(rejected(DataFault::Logical)),
                 }
                 frame[at * capu..(at + 1) * capu].copy_from_slice(&block[..capu]);
             }

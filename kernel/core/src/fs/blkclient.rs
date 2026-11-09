@@ -105,13 +105,6 @@ pub struct BlkClient {
     meter: DeviceIoMeter,
 }
 
-/// Park the calling task for `ns`, the pacing a reissue waits out, answering
-/// whether it could.
-fn pause(ns: u64) -> bool {
-    wait_arch()
-        .is_some_and(|hook| crate::sleep::park_until(hook.now_ns().saturating_add(ns)).is_ok())
-}
-
 impl BlkClient {
     /// Connect to the block service on `endpoint`, moving data through
     /// `window`, and validate the device geometry.
@@ -302,12 +295,16 @@ impl BlkClient {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
-            let Some(wait_ns) = self.meter.budget().reissue_wait_ns(&outcome, attempts) else {
+            let Some(wait_ns) =
+                self.meter
+                    .budget()
+                    .reissue_wait_ns(outcome.status, outcome.reissue, attempts)
+            else {
                 return outcome.data();
             };
             self.meter.reissued();
             attempts += 1;
-            if wait_ns > 0 && !pause(wait_ns) {
+            if wait_ns > 0 && crate::sleep::park_for(wait_ns).is_err() {
                 return Err(Errno::NotImplemented);
             }
         }

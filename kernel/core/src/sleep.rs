@@ -9,7 +9,7 @@
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
-use crate::waitq::{nearest_timed_deadline, wait_arch, WaitQueue, SLEEP_WAITQ};
+use crate::waitq::{deadline_for, nearest_timed_deadline, wait_arch, WaitQueue, SLEEP_WAITQ};
 
 /// The caller cannot be parked — the boot flow before the dispatch loop runs,
 /// a context with no wait hook, or a wait the heap has no room to register —
@@ -27,6 +27,16 @@ pub struct NotParkable;
 /// leaves no registration behind and has not slept to the deadline.
 pub fn park_until(deadline_ns: u64) -> Result<(), NotParkable> {
     park_on_until(&SLEEP_WAITQ, deadline_ns, || false).map(|_| ())
+}
+
+/// Park the calling task for `span_ns` of the monotonic clock.
+///
+/// # Errors
+///
+/// As [`park_until`].
+pub fn park_for(span_ns: u64) -> Result<(), NotParkable> {
+    let hook = wait_arch().ok_or(NotParkable)?;
+    park_until(deadline_for(hook.now_ns(), span_ns))
 }
 
 /// Park the calling task on `queue` until `ready` holds or the monotonic
@@ -97,6 +107,13 @@ mod tests {
             "the failed park deregistered itself"
         );
         assert!(test_boot::take_unparked().is_empty());
+    }
+
+    #[test]
+    fn an_empty_span_needs_no_park_and_one_that_cannot_be_parked_is_told_so() {
+        let _ = test_boot::claim_scheduler();
+        assert_eq!(park_for(0), Ok(()));
+        assert_eq!(park_for(1), Err(NotParkable));
     }
 
     #[test]

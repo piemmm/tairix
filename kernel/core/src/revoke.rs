@@ -230,7 +230,7 @@ impl Revoker<'_> {
             }
         }
         if released {
-            crate::waitq::irq_wake();
+            crate::waitq::irq_wake_all();
         }
     }
 

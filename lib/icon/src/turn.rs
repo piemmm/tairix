@@ -143,8 +143,8 @@ impl ArtworkResolver for ByTurn {
         self.resolver.prefetch(key, side);
     }
 
-    fn declined(&mut self, key: &ArtworkKey, side: u32) {
-        self.resolver.declined(key, side);
+    fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+        self.resolver.declined(key, side, bytes);
     }
 
     fn still_shown(&mut self, key: &ArtworkKey, side: u32) {

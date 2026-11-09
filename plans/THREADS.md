@@ -234,19 +234,20 @@ the machine overcommit.
 **`kernel/core`:** decision 9's cloneable per-process `ProcessResume` hook and
 `UserThreadEntry`, so no per-arch producer is involved in creating a thread;
 `threads.rs` (the reservation, the recorded span, the born-parked ordering, and
-the teardown); `futex.rs` (a per-CPU-sized bucket array of on-demand `WaitQueue`s,
-`wake_n`, enrolment in the timed sweep and the nearest-deadline arming, and
-per-process key teardown — the bucket table is fixed by its first use, so boot
-sizes it before any thread can wait and a later sizing is refused rather than
-stranding a live key's waiters in a bucket no waker looks in); the four
+the teardown); `futex.rs` (each thread's `FutexWaiter`, made with its gate and
+linked into the arrival-ordered chain of a per-CPU-sized bucket array, so a
+wait needs no memory; timeouts arm the thread's own row on
+`FUTEX_TIMER_WAITQ`; the bucket table is fixed by its first use, so boot sizes
+it before any thread can wait and a later sizing is refused rather than
+stranding a linked waiter in a bucket no waker looks in); the four
 handlers, each validating its addresses through the fault-aware copy boundary;
 and decision 10's group fan-out.
 
 **Defects fixed on the way:** `copy_in_user` offered the compressed-tier
 (`ramzip`) resolver **nowhere**, so a syscall staging a buffer from a parked page
 got `resolve_anon_fault`'s freshly zeroed frame instead of the data — silent
-corruption. Both copy directions now share one `resolve_user_miss` that offers
-the resolvers in the same order the hardware fault path does, and `copy_out_user`
+corruption. Both copy directions now back a miss through `back_user_page`, the
+one resolver chain the hardware fault path also uses, and `copy_out_user`
 was added as its write counterpart (the thread-exit clear word cannot tolerate a
 dropped store: a joiner would wait forever).
 

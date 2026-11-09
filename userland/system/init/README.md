@@ -39,8 +39,8 @@ Fails closed at the first problem (`AGENTS.md` §5.4.5):
 
 When the graph is sound, init starts every service it can; a service that
 fails is recorded and its transitive dependents are skipped, without
-aborting independent services. The outcome is a `StartReport`
-(`started` + `failed`).
+aborting independent services. Every start, refusal and skip is recorded on
+the audit sink, which PID 1 also states at the console.
 
 ## Capability authority (`AGENTS.md` §5.2)
 

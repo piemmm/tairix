@@ -155,29 +155,67 @@ pub trait LaunchHost {
 /// The session's one-shot document relay: how a launched document's
 /// authority reaches the instance that will show it.
 ///
-/// A seam because it is three syscalls under a decision that is host-tested.
-/// Nothing here opens a path: a delegated grant is one the *asking* process
-/// minted from a descriptor it opened itself, so the session lends none of
-/// its own, larger filesystem reach to another application's request.
+/// A seam over a few syscalls, made in the order [`relay`](Self::relay)
+/// makes them. Nothing here opens a path: a delegated grant
+/// is one the *asking* process minted from a descriptor it opened itself, so
+/// the session lends none of its own, larger filesystem reach to another
+/// application's request.
 pub trait DocumentRelay {
-    /// Mint `app` a fresh one-shot delegation of the document `authority`
-    /// reaches — read-only, or when `writable` with the reach its opener held
-    /// — answering the handle `app` redeems.
-    ///
-    /// A delegated grant is redeemed and its descriptor closed either way; a
-    /// held descriptor stays open for its holder.
+    /// Redeem `grant`, minted to this process by `from`, as a descriptor this
+    /// process holds until it [closes](Self::close) it.
     ///
     /// # Errors
     ///
     /// Whatever the kernel refused — among it a grant `from` did not mint.
-    /// Nothing is delegated on a refusal, so a caller reads it as "the
-    /// instance did not get it".
+    fn redeem(&mut self, grant: u64, from: ProcId) -> Result<u32, Errno>;
+
+    /// Mint `app` a fresh one-shot delegation of the regular file `fd` holds
+    /// — read-only, or when `writable` with the reach its opener held —
+    /// answering the handle `app` redeems. The kernel refuses to delegate
+    /// anything but a regular file, judging it from the descriptor alone.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the kernel refused: [`Errno::OutOfRange`] for anything but a
+    /// regular file, and a writable file asked for read-only among it;
+    /// nothing is delegated on a refusal.
+    fn mint(&mut self, fd: u32, writable: bool, app: ProcId) -> Result<u64, Errno>;
+
+    /// Close `fd`, a document [redeemed](Self::redeem) here.
+    fn close(&mut self, fd: u32);
+
+    /// Mint `app` a fresh one-shot delegation of the document `authority`
+    /// reaches — read-only, or when `writable` with the reach its opener held
+    /// — answering the handle `app` redeems.
+    ///
+    /// A delegated grant is redeemed and its descriptor closed either way,
+    /// and relayed only as a regular file, which the [mint](Self::mint)
+    /// insists on: a grant may carry a pipe end, which the application handed
+    /// it could write through, or be fed through and never closed. A held
+    /// descriptor stays open for its holder.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a delegated grant holding anything but a
+    /// regular file, otherwise whatever the kernel refused — among it a grant
+    /// `from` did not mint. Nothing is delegated on a refusal, so a caller
+    /// reads it as "the instance did not get it".
     fn relay(
         &mut self,
         authority: DocumentAuthority,
         writable: bool,
         app: ProcId,
-    ) -> Result<u64, Errno>;
+    ) -> Result<u64, Errno> {
+        match authority {
+            DocumentAuthority::Held { fd } => self.mint(fd, writable, app),
+            DocumentAuthority::Delegated { grant, from } => {
+                let fd = self.redeem(grant, from)?;
+                let minted = self.mint(fd, writable, app);
+                self.close(fd);
+                minted
+            }
+        }
+    }
 
     /// Redeem `grant`, minted to this process by `from`, and close it
     /// unread: a hand-over nothing took leaves no delegation pending in this
@@ -783,6 +821,16 @@ mod tests {
     }
 
     impl DocumentRelay for TallyRelay {
+        fn redeem(&mut self, _: u64, _: ProcId) -> Result<u32, Errno> {
+            Err(Errno::NotSupported)
+        }
+
+        fn mint(&mut self, _: u32, _: bool, _: ProcId) -> Result<u64, Errno> {
+            Err(Errno::NotSupported)
+        }
+
+        fn close(&mut self, _: u32) {}
+
         fn relay(
             &mut self,
             authority: DocumentAuthority,
@@ -801,6 +849,84 @@ mod tests {
         fn locate(&mut self, _: u64, _: ProcId) -> Result<String, Errno> {
             Err(Errno::NotSupported)
         }
+    }
+
+    /// A relay whose redeemed grants hold a regular file or not, its mint
+    /// refusing anything else as the kernel's does, recording what it mints
+    /// from and closes.
+    struct KindRelay {
+        regular: bool,
+        minted: Vec<u32>,
+        closed: Vec<u32>,
+    }
+
+    impl DocumentRelay for KindRelay {
+        fn redeem(&mut self, _: u64, _: ProcId) -> Result<u32, Errno> {
+            Ok(9)
+        }
+
+        fn mint(&mut self, fd: u32, _: bool, _: ProcId) -> Result<u64, Errno> {
+            if fd == 9 && !self.regular {
+                return Err(Errno::OutOfRange);
+            }
+            self.minted.push(fd);
+            Ok(80)
+        }
+
+        fn close(&mut self, fd: u32) {
+            self.closed.push(fd);
+        }
+
+        fn decline(&mut self, _: u64, _: ProcId) {}
+
+        fn locate(&mut self, _: u64, _: ProcId) -> Result<String, Errno> {
+            Err(Errno::NotSupported)
+        }
+    }
+
+    /// A delegated document is relayed only where the mint takes it as a
+    /// regular file — a grant may carry a pipe end — and is closed either
+    /// way; a held one is minted from and left open.
+    #[test]
+    fn only_a_regular_file_is_relayed_as_a_delegated_document() {
+        let delegated = DocumentAuthority::Delegated {
+            grant: 5,
+            from: APP,
+        };
+        for regular in [true, false] {
+            let mut relay = KindRelay {
+                regular,
+                minted: Vec::new(),
+                closed: Vec::new(),
+            };
+            let relayed = relay.relay(delegated, false, APP);
+            if regular {
+                assert_eq!(relayed, Ok(80));
+                assert_eq!(relay.minted, [9]);
+            } else {
+                assert_eq!(relayed, Err(Errno::OutOfRange));
+                assert!(relay.minted.is_empty(), "nothing is handed on");
+            }
+            assert_eq!(
+                relay.closed,
+                [9],
+                "the redeemed descriptor is closed either way"
+            );
+        }
+        let mut relay = KindRelay {
+            regular: false,
+            minted: Vec::new(),
+            closed: Vec::new(),
+        };
+        assert_eq!(
+            relay.relay(DocumentAuthority::Held { fd: 4 }, false, APP),
+            Ok(80)
+        );
+        assert_eq!(relay.minted, [4]);
+        assert!(
+            relay.closed.is_empty(),
+            "a held descriptor stays its holder's"
+        );
     }
 
     #[test]

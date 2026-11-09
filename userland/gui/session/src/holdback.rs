@@ -78,8 +78,9 @@
 //!
 //! Overflow evicts the oldest *input* event — a drag's report and a save's
 //! offer among them, each superseded by the next — never a state edge, a pick
-//! conclusion, a move's or an offer's end or a press's end — and that is
-//! total, not a preference. A held press is shed together with its end, so the app learns
+//! conclusion, a move's or an offer's end, a press's end, or the offer a held
+//! drop is of, which the window reads the drop by — and that is total, not a
+//! preference. A held press is shed together with its end, so the app learns
 //! of neither rather than holding a press it is never told is over. A window
 //! holds one press at a time, so the only end left without its press is the
 //! one ending a press already delivered. Folding therefore leaves a window
@@ -87,11 +88,12 @@
 //! authorisation's (a second of either is refused before it reaches the
 //! sink), at most one move's end, at most one such press's end, and of a save
 //! offer's ends and an items offer's each, at most one that only left, each
-//! superseding the one before, and at most one drop's: a window has every
-//! event held before a drag's offer by the time it can answer it, so a second
-//! drop is held behind a first only for a window answering an offer it was
-//! never shown, and then supersedes it. A queue at capacity therefore always
-//! holds an input event to shed.
+//! superseding the one before, and at most one drop's, an items drop with the
+//! one offer it is of, as items and as a file: a window has every event held
+//! before a drag's offer by the time it can answer it, so a second drop is
+//! held behind a first only for a window answering an offer it was never
+//! shown, and then supersedes it. A queue at capacity therefore always holds
+//! an input event to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -109,8 +111,8 @@ use crate::shell::continues;
 ///
 /// A security bound rather than a scalable capacity: it is the ceiling on
 /// what a client that stops draining can make the session hold. Comfortably
-/// above the eleven slots folding can leave un-shed, and above the input a
-/// user produces in the seconds before the owner is declared unresponsive.
+/// above the few slots folding can leave un-shed, and above the input a user
+/// produces in the seconds before the owner is declared unresponsive.
 pub const HOLD_BACK_CAPACITY: usize = 64;
 
 /// What became of one event offered to the hold-back.
@@ -559,36 +561,32 @@ fn fold_offer(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
 ///
 /// An items offer's end follows the save offer's rule for the ends held
 /// before it, a window holding one offer at a time, and an end that only left
-/// takes every offer held since the last drop. The offers before a drop stay:
-/// the drop is of the newest of them, which a window may answer as late as it
-/// reads it.
+/// takes every offer held since the last drop. A drop takes every offer but
+/// the one it is of, numbered as it is, which a window may answer as late as it
+/// reads it and reads the drop by.
 fn withdraw_superseded(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     match next {
         WindowEvent::ToolMoved { ended: true, .. } => {
             queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
         }
-        WindowEvent::ItemsOfferEnded { dropped, .. } => {
+        WindowEvent::ItemsOfferEnded {
+            serial, dropped, ..
+        } => {
             let drop = dropped.is_some();
-            let after_drop = queue
-                .iter()
-                .rposition(|held| {
-                    matches!(
-                        held,
-                        WindowEvent::ItemsOfferEnded {
-                            dropped: Some(_),
-                            ..
-                        }
-                    )
-                })
-                .map_or(0, |at| at + 1);
+            let after_drop = after_held_drop(queue);
             let mut at = 0;
             queue.retain(|held| {
                 let since_drop = at >= after_drop;
                 at += 1;
                 match held {
                     WindowEvent::ItemsOfferEnded { dropped, .. } => dropped.is_some() && !drop,
-                    WindowEvent::ItemsOffered { .. } | WindowEvent::FileOffered { .. } => {
-                        drop || !since_drop
+                    WindowEvent::ItemsOffered { serial: offer, .. }
+                    | WindowEvent::FileOffered { serial: offer, .. } => {
+                        if drop {
+                            offer == serial
+                        } else {
+                            !since_drop
+                        }
                     }
                     _ => true,
                 }
@@ -691,18 +689,36 @@ const fn ends_press(event: &WindowEvent) -> bool {
     )
 }
 
+/// Where what follows the drop `queue` holds begins, or its start where it
+/// holds none: an offer before a held drop is the one it is of.
+fn after_held_drop(queue: &VecDeque<WindowEvent>) -> usize {
+    queue
+        .iter()
+        .rposition(|held| {
+            matches!(
+                held,
+                WindowEvent::ItemsOfferEnded {
+                    dropped: Some(_),
+                    ..
+                }
+            )
+        })
+        .map_or(0, |at| at + 1)
+}
+
 /// Make room in a queue at capacity by shedding its oldest input event other
-/// than a press's end, and a held press together with its end.
+/// than a press's end or the offer a held drop is of, and a held press together
+/// with its end.
 ///
 /// A window holds one press at a time, so the first end after a held press is
 /// that press's own. The module's bound argument is why a full queue always
 /// holds something to shed; the `None` arm cannot be reached from a queue this
 /// module built, and shedding nothing is the fail-safe answer if it ever were.
 fn shed_oldest_input(queue: &mut VecDeque<WindowEvent>) {
-    let Some(oldest) = queue
-        .iter()
-        .position(|event| is_input(event) && !ends_press(event))
-    else {
+    let after_drop = after_held_drop(queue);
+    let Some(oldest) = queue.iter().enumerate().position(|(at, event)| {
+        is_input(event) && !ends_press(event) && (at >= after_drop || !is_offer(event))
+    }) else {
         return;
     };
     if queue.get(oldest).is_some_and(holds_press) {

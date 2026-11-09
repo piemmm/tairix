@@ -62,7 +62,7 @@ use tairix_abi::{Errno, InputMode, Signal, TerminalSize};
 use tairix_sync::SpinLock;
 
 use crate::foreground::{ForegroundOwnership, HandOver, ProcessInstance};
-use crate::pipe::{RingWaits, StreamWaits, PIPE_CAPACITY};
+use crate::pipe::{visit_front, RingWaits, StreamWaits, PIPE_CAPACITY};
 use crate::waitq::WakeKey;
 
 /// Which end of the pty a handle grants.
@@ -414,12 +414,26 @@ impl PtyMasterEnd {
         MasterWriteStep::Wrote { consumed, signals }
     }
 
-    /// One non-blocking master read step: drain the (cooked) program output.
-    #[must_use]
-    pub fn read(&self, out: &mut [u8]) -> PtyReadStep {
+    /// One non-blocking master read step: hand up to `max` bytes of the
+    /// (cooked) program output to `deliver`, taken only once it has them.
+    ///
+    /// # Errors
+    ///
+    /// What `deliver` refused with; nothing is taken.
+    pub fn read_with<E>(
+        &self,
+        max: usize,
+        deliver: impl FnMut(usize, &[u8]) -> Result<(), E>,
+    ) -> Result<PtyReadStep, E> {
         let mut state = self.pty.state.lock();
         let slaves = state.slaves;
-        drain(&mut state.output, slaves, out, DrainBound::Available)
+        let n = match deliverable(&state.output, slaves, max, DrainBound::Available) {
+            Ok(n) => n,
+            Err(step) => return Ok(step),
+        };
+        visit_front(&state.output, n, deliver)?;
+        state.output.drain(..n);
+        Ok(PtyReadStep::Read(n))
     }
 
     /// Whether a master read would complete without parking: buffered output,
@@ -503,31 +517,48 @@ impl PtySlaveEnd {
         [self.pty.output_waits.data, self.pty.input_waits.space]
     }
 
-    /// One non-blocking slave read step: drain **at most one line** of the
-    /// input ring into `out`, then, in the cooked (echoing) mode, echo the
-    /// consumed bytes onto the output ring (best-effort — a full output ring
-    /// drops the echo rather than failing the read).
+    /// One non-blocking slave read step: hand **at most one line** of the
+    /// input ring, up to `max` bytes, to `deliver`, and only once it has them
+    /// take them and, in the cooked (echoing) mode, echo them onto the output
+    /// ring (best-effort — a full output ring drops the echo rather than
+    /// failing the read). A delivery that fails takes and echoes nothing.
     ///
     /// The slave end is a terminal, so its input carries the same read bound
     /// the console's type-ahead queue applies
-    /// ([`tairix_tty::read_bounded`]): a shell reading its prompt cannot take
+    /// ([`tairix_tty::bounded_len`]): a shell reading its prompt cannot take
     /// the keystrokes typed ahead for the child it is about to run.
-    #[must_use]
-    pub fn read(&self, out: &mut [u8]) -> PtyReadStep {
+    ///
+    /// # Errors
+    ///
+    /// What `deliver` refused with; nothing is taken.
+    pub fn read_with<E>(
+        &self,
+        max: usize,
+        deliver: impl FnMut(usize, &[u8]) -> Result<(), E>,
+    ) -> Result<PtyReadStep, E> {
         let mut state = self.pty.state.lock();
         let masters = state.masters;
-        let step = drain(&mut state.input, masters, out, DrainBound::Line);
-        if let PtyReadStep::Read(n) = step {
-            if state.mode.echoes() && n > 0 {
-                let PtyState {
-                    ref mut echo,
-                    ref mut output,
-                    ..
-                } = *state;
-                echo.echo(&out[..n], |echoed| push_bounded(output, echoed));
-            }
+        let n = match deliverable(&state.input, masters, max, DrainBound::Line) {
+            Ok(n) => n,
+            Err(step) => return Ok(step),
+        };
+        let PtyState {
+            ref mut input,
+            ref mut echo,
+            ref mut output,
+            ref mode,
+            ..
+        } = *state;
+        visit_front(input, n, deliver)?;
+        if mode.echoes() {
+            let echoed = visit_front(input, n, |_, bytes| {
+                echo.echo(bytes, |echoed| push_bounded(output, echoed));
+                Ok::<(), core::convert::Infallible>(())
+            });
+            let Ok(()) = echoed;
         }
-        step
+        input.drain(..n);
+        Ok(PtyReadStep::Read(n))
     }
 
     /// One non-blocking slave write step: cook program `data` (`ONLCR`) onto the
@@ -590,34 +621,27 @@ enum DrainBound {
     Available,
 }
 
-/// Drain from `ring` into `out` under `bound`, reporting end-of-stream when the
-/// ring is empty and `peers` (the count of live peer ends that could still
+/// How many bytes of `ring` one read step with room for `max` may take under
+/// `bound`, or the step itself when there is nothing to take: end-of-stream
+/// when the ring is empty and `peers` (the live peer ends that could still
 /// produce) is zero. Shared by both read directions.
-fn drain(ring: &mut VecDeque<u8>, peers: usize, out: &mut [u8], bound: DrainBound) -> PtyReadStep {
+fn deliverable(
+    ring: &VecDeque<u8>,
+    peers: usize,
+    max: usize,
+    bound: DrainBound,
+) -> Result<usize, PtyReadStep> {
     if ring.is_empty() {
-        return if peers == 0 {
+        return Err(if peers == 0 {
             PtyReadStep::Eof
         } else {
             PtyReadStep::Empty
-        };
+        });
     }
-    if out.is_empty() {
-        return PtyReadStep::Read(0);
-    }
-    let n = match bound {
-        DrainBound::Line => tairix_tty::read_bounded(out, || ring.pop_front()),
-        DrainBound::Available => {
-            let n = out.len().min(ring.len());
-            for slot in out.iter_mut().take(n) {
-                match ring.pop_front() {
-                    Some(byte) => *slot = byte,
-                    None => break,
-                }
-            }
-            n
-        }
-    };
-    PtyReadStep::Read(n)
+    Ok(match bound {
+        DrainBound::Line => tairix_tty::bounded_len(ring.iter().copied(), max),
+        DrainBound::Available => max.min(ring.len()),
+    })
 }
 
 /// Append as many of `bytes` as fit under [`PIPE_CAPACITY`] to `ring`, dropping
@@ -708,6 +732,36 @@ impl PartialEq for PtySlaveEnd {
 
 impl Eq for PtySlaveEnd {}
 
+/// Test-only: one read step of an end delivered into a buffer.
+#[cfg(test)]
+pub(crate) trait ReadInto {
+    fn read(&self, out: &mut [u8]) -> PtyReadStep;
+}
+
+#[cfg(test)]
+fn into(out: &mut [u8]) -> impl FnMut(usize, &[u8]) -> Result<(), ()> + '_ {
+    |at, bytes| {
+        out[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl ReadInto for PtyMasterEnd {
+    fn read(&self, out: &mut [u8]) -> PtyReadStep {
+        let max = out.len();
+        self.read_with(max, into(out)).unwrap_or(PtyReadStep::Empty)
+    }
+}
+
+#[cfg(test)]
+impl ReadInto for PtySlaveEnd {
+    fn read(&self, out: &mut [u8]) -> PtyReadStep {
+        let max = out.len();
+        self.read_with(max, into(out)).unwrap_or(PtyReadStep::Empty)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +771,31 @@ mod tests {
 
     fn pty() -> (PtyMasterEnd, PtySlaveEnd) {
         Pty::create(TerminalSize::new(24, 80).unwrap()).unwrap()
+    }
+
+    /// A read whose delivery fails takes nothing, and a slave read echoes
+    /// nothing: the keystrokes, and the program output, are there for the
+    /// next read.
+    ///
+    /// Regression: both were taken into a staging buffer, and the keystrokes
+    /// echoed, before the copy to the reader, so a copy its buffer refused
+    /// lost them.
+    #[test]
+    fn a_read_whose_delivery_fails_takes_and_echoes_nothing() {
+        let (m, s) = pty();
+        assert_eq!(wrote(m.write(b"ls\r", true)).0, 3);
+        assert_eq!(s.read_with(16, |_, _| Err("refused")), Err("refused"));
+        let mut out = [0u8; 16];
+        assert_eq!(m.read(&mut out), PtyReadStep::Empty, "nothing was echoed");
+        assert_eq!(s.read(&mut out), PtyReadStep::Read(3));
+        assert_eq!(&out[..3], b"ls\r");
+        let _ = s.write(b"out");
+        let mut echoed = [0u8; 64];
+        let _ = m.read(&mut echoed);
+        let _ = s.write(b"put");
+        assert_eq!(m.read_with(16, |_, _| Err("refused")), Err("refused"));
+        assert_eq!(m.read(&mut out), PtyReadStep::Read(3));
+        assert_eq!(&out[..3], b"put");
     }
 
     /// A pty the heap cannot hold is refused as a value.

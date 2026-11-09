@@ -61,25 +61,49 @@ pub use text::{
 
 pub use tairix_collections::{SharedSlice, SharedStr};
 
+use alloc::vec::Vec;
+
 use tairix_bezier::boolean::BooleanError;
 use tairix_bezier::fit::FitError;
 use tairix_collections::TryReserveError;
 
-/// Read `bytes`, a drawing in any format the crate reads, told apart by its
-/// content rather than its name: a RISC OS Draw file by its signature, a PDF
-/// by its header — its page and password as `pdf` asks — and any other
-/// document as SVG. Its objects' identities are issued from `ids`.
+/// A format the crate reads drawings in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Format {
+    /// A RISC OS Draw file.
+    RiscOs,
+    /// A PDF, read a page at a time.
+    Pdf,
+    /// SVG, which any other document is read as.
+    Svg,
+}
+
+/// The format `bytes` are read in, told apart by their content rather than
+/// a name: a RISC OS Draw file by its signature, a PDF by its header, and
+/// any other document as SVG.
+#[must_use]
+pub fn format_of(bytes: &[u8]) -> Format {
+    if riscos::recognised(bytes) {
+        Format::RiscOs
+    } else if pdf::recognised(bytes) {
+        Format::Pdf
+    } else {
+        Format::Svg
+    }
+}
+
+/// Read `bytes`, a drawing in any format the crate reads, as [`format_of`]
+/// tells it — a PDF at the page and with the password `pdf` asks. Its
+/// objects' identities are issued from `ids`.
 ///
 /// # Errors
 ///
 /// As the format's own reader.
-pub fn read(bytes: &[u8], pdf: &pdf::Request<'_>, ids: &mut Ids) -> Result<Read, ReadError> {
-    if riscos::recognised(bytes) {
-        riscos::read(bytes, ids)
-    } else if pdf::recognised(bytes) {
-        pdf::read(bytes, pdf, ids)
-    } else {
-        svg::read(bytes, ids)
+pub fn read(bytes: Vec<u8>, pdf: &pdf::Request<'_>, ids: &mut Ids) -> Result<Read, ReadError> {
+    match format_of(&bytes) {
+        Format::RiscOs => riscos::read(&bytes, ids),
+        Format::Pdf => pdf::read(bytes, pdf, ids),
+        Format::Svg => svg::read(&bytes, ids),
     }
 }
 
@@ -277,6 +301,9 @@ pub enum ReadError {
     WrongPassword,
     /// The page asked for is not one it has.
     NoSuchPage,
+    /// It holds something no reader here reads, such as protection by
+    /// certificate rather than password.
+    Unsupported,
 }
 
 impl From<DrawingError> for ReadError {

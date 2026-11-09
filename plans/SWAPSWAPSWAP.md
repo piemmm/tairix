@@ -389,7 +389,9 @@ The cryptographic rules are:
 - Prefer AEAD/authenticated encryption per entry. Encryption without
   authentication requires a benchmark-backed and security-reviewed exception.
 - Authentication failure must never return plaintext. It fails closed, logs the
-  event, and escalates through the memory-fault/OOM policy.
+  event once, keeps the entry as lost until its range is released (so the
+  page is never later backed as zeroes), and ends the owning process as its
+  own touch of the page would.
 - Temporary plaintext and compressed plaintext buffers must be zeroed before
   reuse or free.
 - Metadata that can affect bounds, ownership, nonce selection, or page identity

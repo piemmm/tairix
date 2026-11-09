@@ -24,6 +24,8 @@ tairix-drv-fs-archive = { path = "../../../drivers/filesystem/archive", version 
 tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0", features = ["test-util"] }
 # The memory gauge the write-back budget reads.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The log the archive is opened with, which keeps nothing.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # DEFLATE and bzip2, which the streams are packed with.
 tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
 # The CRC-32 a gzip member ends with.

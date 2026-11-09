@@ -11,17 +11,19 @@
 
 use alloc::boxed::Box;
 
+use tairix_abi::blkio::BlkReissue;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::mailbox::MailboxChannel;
 use tairix_abi::driver::sole_register_window;
 use tairix_abi::driver::supply::{IoRail, PowerRail};
 use tairix_abi::driver::timing::{CompletionWait, Delay};
 use tairix_abi::{DriverError, DriverHost, HwNode};
-use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_log::{log, Doubling, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_vcmailbox::{
     query_clock_rate, set_gpio_state, ClockRateQuery, FirmwareClock, MailboxError,
 };
 
+use crate::trace::{FaultReport, Trace, WaitEnd};
 use crate::{
     wiring, Board, BringUpFault, BringUpStage, CardSupply, Link, SignalVoltage, DMA_DATA_BYTES,
     DMA_TABLE_BYTES,
@@ -39,9 +41,13 @@ pub const LINK_SETTLED: EventId = EventId(24_940);
 /// record names.
 pub const BRING_UP_FAILED: EventId = EventId(24_941);
 
+/// Audit event: a transfer the block layer asked for failed, with the step it
+/// failed at and what the controller or card reported there.
+pub const TRANSFER_FAILED: EventId = EventId(24_942);
+
 /// Open the SD card `node` describes over `host`, parking on `wait` for the
-/// controller's completions and timed intervals, and record the outcome on
-/// `audit`.
+/// controller's completions and timed intervals, and record the outcome, and
+/// every transfer that fails afterwards ([`FailureLog`]), on `audit`.
 ///
 /// The host's firmware channel is asked for the controller's base clock and
 /// switches the card's supplies on the lines `node`'s rails name. Without a
@@ -62,7 +68,7 @@ pub fn open(
     host: &dyn DriverHost,
     node: &HwNode,
     wait: &'static dyn CompletionWait,
-    audit: &dyn Sink,
+    audit: &'static (dyn Sink + Sync),
 ) -> Result<Box<dyn Block>, DriverError> {
     let opened = sole_register_window(node.resources())
         .map_err(|error| BringUpFault {
@@ -76,7 +82,7 @@ pub fn open(
                 base_clock_hz: channel.and_then(base_clock_hz),
                 supply: supply.as_mut().map(|supply| supply as &mut dyn CardSupply),
             };
-            wiring::open_discovered(host, regs_phys, wait, board)
+            wiring::open_discovered(host, regs_phys, wait, board, FailureLog::new(audit))
         });
     match opened {
         Ok(device) => {
@@ -248,6 +254,140 @@ fn note_failure(audit: &dyn Sink, fault: BringUpFault) {
             ],
         },
     );
+}
+
+/// The audit trail of the transfers a card failed: every one counted, the
+/// first recorded and then one each time the count has doubled, so a card that
+/// fails every transfer costs the log a record per doubling rather than one
+/// per transfer.
+pub struct FailureLog {
+    audit: &'static (dyn Sink + Sync),
+    failed: Doubling,
+}
+
+impl FailureLog {
+    /// A trail recording on `audit`, nothing failed yet.
+    #[must_use]
+    pub const fn new(audit: &'static (dyn Sink + Sync)) -> Self {
+        Self {
+            audit,
+            failed: Doubling::new(),
+        }
+    }
+
+    /// Count `record` when it is a failed transfer, recording it when the
+    /// count is due.
+    pub(crate) fn note(&mut self, record: &Trace) {
+        let Trace::TransferFailed {
+            write,
+            lba,
+            blocks,
+            fault,
+            error,
+            reissue,
+        } = *record
+        else {
+            return;
+        };
+        self.failed.note();
+        let Some(failed) = self.failed.take_due() else {
+            return;
+        };
+        let (command, [report, register, status]) = match fault {
+            Some(fault) => (
+                FieldValue::UnsignedInt(fault.command.into()),
+                report_fields(fault.report),
+            ),
+            None => (FieldValue::Null, [FieldValue::Null; 3]),
+        };
+        log(
+            self.audit,
+            &Event {
+                level: Level::Warn,
+                id: TRANSFER_FAILED,
+                message: "emmc2: transfer failed",
+                fields: &[
+                    Field {
+                        key: "op",
+                        value: FieldValue::Str(if write { "write" } else { "read" }),
+                    },
+                    Field {
+                        key: "lba",
+                        value: FieldValue::UnsignedInt(lba),
+                    },
+                    Field {
+                        key: "blocks",
+                        value: FieldValue::UnsignedInt(blocks),
+                    },
+                    Field {
+                        key: "command",
+                        value: command,
+                    },
+                    Field {
+                        key: "report",
+                        value: report,
+                    },
+                    Field {
+                        key: "register",
+                        value: register,
+                    },
+                    Field {
+                        key: "status",
+                        value: status,
+                    },
+                    Field {
+                        key: "error",
+                        value: FieldValue::Error(error.as_errno()),
+                    },
+                    Field {
+                        key: "reissue",
+                        value: FieldValue::Str(match reissue {
+                            BlkReissue::Now => "now",
+                            BlkReissue::Paced => "paced",
+                        }),
+                    },
+                    Field {
+                        key: "failed",
+                        value: FieldValue::UnsignedInt(failed),
+                    },
+                ],
+            },
+        );
+    }
+}
+
+/// What reported a failure, the register it read, and the value it read there
+/// or the card's status.
+fn report_fields(report: FaultReport) -> [FieldValue<'static>; 3] {
+    let card = |what, status: u32| {
+        [
+            FieldValue::Str(what),
+            FieldValue::Null,
+            FieldValue::UnsignedInt(status.into()),
+        ]
+    };
+    match report {
+        FaultReport::Wait {
+            register,
+            value,
+            end,
+        } => [
+            FieldValue::Str(match end {
+                WaitEnd::Error => "controller",
+                WaitEnd::Silent => "silent",
+                WaitEnd::Budget => "budget",
+            }),
+            FieldValue::UnsignedInt(register as u64),
+            FieldValue::UnsignedInt(value.into()),
+        ],
+        FaultReport::CardStatus(status) => card("card_status", status),
+        FaultReport::CardState(status) => card("card_state", status),
+        FaultReport::StagingWithheld => [
+            FieldValue::Str("staging_withheld"),
+            FieldValue::Null,
+            FieldValue::Null,
+        ],
+    }
 }
 
 /// A fault's step and error as field values, both null for none.

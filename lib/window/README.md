@@ -357,7 +357,9 @@ server and every app's client can never drift apart.
   whether it writes the document's own file or another (`SaveTarget`), since
   only the document's own file records a format its name may not say; the
   media type of a file another application offers is read once per drag for
-  every window it is offered to.
+  every window it is offered to, posted rather than waited on, and the offer
+  answered once it lands (`docapp::offers`). A view that places no file
+  (`DocumentView::PLACES`) reads nothing and leaves its offers unanswered.
   `docapp::settings` (feature `settings`) is the settings window itself: the
   shared `SettingsFrame` over an application's closed registry implementing
   `docapp::settings::Preferences`, each event one `SettingsRequest` — the

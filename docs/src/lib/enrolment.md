@@ -19,9 +19,13 @@ record.
   was *changed* from the image's default, so an update shipping a new
   default applies at once to everything the administrator never touched.
 
-`effective(vendor, overrides)` folds the pair, so no consumer re-derives the
-precedence, and `overrides_for(vendor, desired)` writes back only what
-differs.
+`enabled(vendor, overrides, name)` is the one precedence — the
+administrator's word where they have spoken about a service, else the
+image's — and a query, so asking it allocates nothing.
+`EnrolmentOverride::set(vendor, name, wanted)` makes one service's change in
+place, holding an entry only where it differs from the image's, and returns
+the `Change` that `EnrolmentOverride::undo` takes back without the heap, so a
+change whose write is refused is restored rather than left recorded.
 
 ## Fail closed, and no authority
 
@@ -30,7 +34,9 @@ every `/System/Settings` document shares (`tairix_util::conf`). A malformed
 one — a bad name, a duplicate, a missing or unknown disposition, one past
 `MAX_DOCUMENT_LEN` — is refused whole with `EnrolError`, carrying the line
 that raised it, and a refused document is answered as a missing one is: the
-image's layer stands. `to_store_text` holds the writer to the same bound, so
+image's layer stands. A document the heap cannot hold is refused as
+`EnrolError::OutOfMemory`, which a reader tries again later rather than
+answering as a missing one. `to_store_text` holds the writer to the same bound, so
 no change can produce a document every reader would refuse. The manager
 writes the document beside itself and renames it into place, so a crash never
 leaves a torn one to be refused, and it does so before it starts or stops the
@@ -39,8 +45,7 @@ service the change is about.
 identifier, so a traversal- or case-collision-shaped token can never be
 enrolled, and a service not positively enrolled never starts.
 
-`enrol` and `unenrol` are pure record transforms: they decide eligibility,
-never authority. The kernel derives a service's capabilities from its signed
+A change to the record decides eligibility, never authority. The kernel derives a service's capabilities from its signed
 bundle and its account's ceiling at spawn, whatever this record says.
 
 Consumers: the service manager, and `lib/syntax`, which validates an

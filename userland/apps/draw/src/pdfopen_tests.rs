@@ -1,14 +1,14 @@
 //! The PDF question window: the page asked for, the password typed, and
 //! turning it down.
 
-use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_geometry::{Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_theme::ThemeRegistry;
 use tairix_window::docapp::{AppRequest, AppView, Relayout};
 
-use super::{Answered, Asked, OpenPdf, Unoffered};
+use super::{Answered, Asked, Given, OpenPdf, Unoffered};
 use crate::layout::Faces;
 use tairix_sandbox::drawedit::MAX_PASSWORD_BYTES;
 
@@ -60,9 +60,55 @@ impl Fixture {
             .lay_out(width, height, theme, Scale::ONE, faces, &mut Region::new());
     }
 
-    fn typed(&mut self, text: &str) {
+    /// Type `text`, answering the pages whose sizes typing asked for.
+    fn typed(&mut self, text: &str) -> Vec<u32> {
+        let mut asked = Vec::new();
         for c in text.chars() {
-            assert!(self.key(Key::Char(c)).is_none(), "typing answers nothing");
+            match self.key(Key::Char(c)) {
+                None => {}
+                Some(Answered::Size(page)) => asked.push(page),
+                Some(_) => panic!("typing answers nothing"),
+            }
+        }
+        asked
+    }
+
+    /// The page chosen backed out and `page` typed, counting from 1,
+    /// answering the pages whose sizes that asked for.
+    fn choose(&mut self, page: &str) -> Vec<u32> {
+        let mut asked = Vec::new();
+        if let Some(Answered::Size(page)) = self.key(Key::Named(NamedKey::Backspace)) {
+            asked.push(page);
+        }
+        asked.extend(self.typed(page));
+        asked
+    }
+
+    /// Page `page`'s size come back as `size`, answering what that asks.
+    fn sized(&mut self, page: u32, size: Option<(f64, f64)>) -> Option<Answered<u8>> {
+        let answer = self.window.sized(page, size, &mut Region::new());
+        if answer.relayout != Relayout::None {
+            self.held_to_its_least();
+        }
+        match answer.request {
+            Some(AppRequest::Own(answered)) => Some(answered),
+            Some(AppRequest::Close) | None => None,
+        }
+    }
+
+    /// The size the page row states beside its number.
+    fn described(&self) -> Option<&str> {
+        self.window.group.rows().first()?.description()
+    }
+
+    /// The page the window opens: its answer to Enter.
+    fn opened(&mut self) -> u32 {
+        match self.key(Key::Named(NamedKey::Enter)) {
+            Some(Answered::Open {
+                given: Given::Page(page),
+                ..
+            }) => page,
+            _ => panic!("a page opened"),
         }
     }
 }
@@ -70,34 +116,99 @@ impl Fixture {
 fn pages(count: u32) -> Asked {
     Asked::Page {
         count,
-        sizes: vec![(595.0, 842.0), (842.0, 595.0), (612.0, 792.0)],
+        first: Some((595.0, 842.0)),
     }
 }
 
 #[test]
 fn enter_opens_the_first_page_unless_another_is_chosen() {
     let mut fixture = Fixture::asking(pages(3));
+    assert_eq!(fixture.described(), Some("595 \u{d7} 842 points"));
     let Some(Answered::Open {
         ticket,
-        page,
-        password,
+        given: Given::Page(page),
     }) = fixture.key(Key::Named(NamedKey::Enter))
     else {
         panic!("an answer");
     };
-    assert_eq!((ticket, page), (7, Some(0)));
-    assert!(password.is_none());
+    assert_eq!((ticket, page), (7, 0));
+}
+
+#[test]
+fn a_pages_size_is_asked_for_as_its_number_comes_to_it_and_shown_once_known() {
+    let mut fixture = Fixture::asking(pages(3));
+    assert_eq!(fixture.choose("3"), [2]);
+    assert_eq!(fixture.described(), None, "unknown until it comes back");
+    assert!(fixture.sized(2, Some((842.0, 595.0))).is_none());
+    assert_eq!(fixture.described(), Some("842 \u{d7} 595 points"));
+    assert_eq!(fixture.opened(), 2);
+}
+
+#[test]
+fn one_size_is_asked_for_at_a_time_and_the_page_chosen_last_wins() {
+    let mut fixture = Fixture::asking(pages(5));
+    assert_eq!(fixture.choose("2"), [1]);
+    assert_eq!(
+        fixture.choose("4"),
+        [],
+        "the first size is still being fetched"
+    );
+    let next = fixture.sized(1, Some((100.0, 200.0)));
+    assert!(matches!(next, Some(Answered::Size(3))), "{next:?}");
+    assert_eq!(fixture.described(), None, "page two is no longer chosen");
+    assert!(
+        fixture.sized(1, Some((1.0, 1.0))).is_none(),
+        "an answer no one awaits"
+    );
+    assert!(fixture.sized(3, Some((300.0, 400.0))).is_none());
+    assert_eq!(fixture.described(), Some("300 \u{d7} 400 points"));
+}
+
+#[test]
+fn a_size_that_could_not_be_had_is_not_asked_for_again_until_another_is_chosen() {
+    let mut fixture = Fixture::asking(pages(3));
+    assert_eq!(fixture.choose("2"), [1]);
+    assert!(fixture.sized(1, None).is_none());
+    assert_eq!(fixture.described(), None);
+    assert_eq!(fixture.choose("2"), [], "not asked again");
+    assert_eq!(fixture.choose("3"), [2]);
+    assert_eq!(fixture.opened(), 2, "a page of no known size still opens");
+}
+
+#[test]
+fn a_first_page_of_no_size_known_is_shown_without_one_and_another_still_asked() {
+    let mut fixture = Fixture::asking(Asked::Page {
+        count: 3,
+        first: None,
+    });
+    assert_eq!(fixture.described(), None);
+    assert_eq!(fixture.choose("1"), [], "not asked again");
+    assert_eq!(fixture.choose("2"), [1]);
+    assert!(fixture.sized(1, Some((10.0, 20.0))).is_none());
+    assert_eq!(fixture.described(), Some("10 \u{d7} 20 points"));
+}
+
+#[test]
+fn the_name_asked_about_is_shown_with_what_hides_in_it_made_visible() {
+    let fixture = Fixture {
+        registry: ThemeRegistry::with_builtins(),
+        window: OpenPdf::new("photo\u{202e}fdp.exe", pages(2), 7),
+        size: (0, 0),
+    };
+    assert!(
+        !fixture.window.title().contains('\u{202e}'),
+        "{}",
+        fixture.window.title()
+    );
+    let message = fixture.window.dialog.message().unwrap_or_default();
+    assert!(!message.contains('\u{202e}'), "{message}");
 }
 
 #[test]
 fn a_page_number_typed_is_the_page_opened() {
     let mut fixture = Fixture::asking(pages(3));
-    let _ = fixture.key(Key::Named(NamedKey::Backspace));
-    fixture.typed("3");
-    let Some(Answered::Open { page, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
-        panic!("an answer");
-    };
-    assert_eq!(page, Some(2));
+    let _ = fixture.choose("3");
+    assert_eq!(fixture.opened(), 2);
 }
 
 /// A page out of range blocks Open: it is held to the range and shown, and
@@ -106,44 +217,38 @@ fn a_page_number_typed_is_the_page_opened() {
 fn a_page_past_the_last_is_held_to_it_before_it_opens() {
     for (count, typed, held) in [(3, "9", 2), (200, "250", 199), (3, "0", 0)] {
         let mut fixture = Fixture::asking(pages(count));
-        let _ = fixture.key(Key::Named(NamedKey::Backspace));
-        fixture.typed(typed);
+        let _ = fixture.choose(typed);
         assert!(
-            fixture.key(Key::Named(NamedKey::Enter)).is_none(),
+            matches!(
+                fixture.key(Key::Named(NamedKey::Enter)),
+                None | Some(Answered::Size(_))
+            ),
             "{typed} is shown corrected first"
         );
-        let Some(Answered::Open { page, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
-            panic!("an answer");
-        };
-        assert_eq!(page, Some(held), "{typed}");
+        assert_eq!(fixture.opened(), held, "{typed}");
     }
 }
 
 #[test]
 fn a_page_typed_and_left_unfinished_still_opens_as_typed() {
     let mut fixture = Fixture::asking(pages(3));
-    let _ = fixture.key(Key::Named(NamedKey::Backspace));
-    fixture.typed("2");
-    let Some(Answered::Open { page, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
-        panic!("an answer");
-    };
-    assert_eq!(page, Some(1));
+    let _ = fixture.choose("2");
+    assert_eq!(fixture.opened(), 1);
 }
 
 #[test]
 fn the_password_typed_is_handed_over() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
-    fixture.typed("s3cret");
+    let _ = fixture.typed("s3cret");
     let Some(Answered::Open {
         ticket,
-        page,
-        password,
+        given: Given::Password(password),
     }) = fixture.key(Key::Named(NamedKey::Enter))
     else {
         panic!("an answer");
     };
-    assert_eq!((ticket, page), (7, None));
-    assert_eq!(password.as_deref(), Some(&b"s3cret"[..]));
+    assert_eq!(ticket, 7);
+    assert_eq!(&*password, b"s3cret");
 }
 
 #[test]
@@ -163,8 +268,9 @@ fn escape_turns_the_document_down_and_answers_once() {
 #[test]
 fn a_window_closed_unanswered_hands_its_ticket_back() {
     let mut fixture = Fixture::asking(pages(2));
+    assert_eq!(fixture.window.ticket(), Some(&7));
     assert_eq!(fixture.window.take_ticket(), Some(7));
-    assert_eq!(fixture.window.asked, pages(2));
+    assert_eq!(fixture.window.ticket(), None);
 }
 
 #[test]
@@ -172,12 +278,16 @@ fn no_password_typed_answers_nothing_and_says_why() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
     assert!(fixture.key(Key::Named(NamedKey::Enter)).is_none());
     assert_eq!(fixture.window.dialog.reason(), Some(Unoffered::Empty.why()));
-    fixture.typed("k");
+    let _ = fixture.typed("k");
     assert_eq!(fixture.window.dialog.reason(), None, "typing takes it down");
-    let Some(Answered::Open { password, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
+    let Some(Answered::Open {
+        given: Given::Password(password),
+        ..
+    }) = fixture.key(Key::Named(NamedKey::Enter))
+    else {
         panic!("an answer");
     };
-    assert_eq!(password.as_deref(), Some(&b"k"[..]));
+    assert_eq!(&*password, b"k");
 }
 
 /// More than a password can be is never offered as its prefix: it is said,
@@ -185,29 +295,37 @@ fn no_password_typed_answers_nothing_and_says_why() {
 #[test]
 fn a_password_past_the_bound_is_refused_and_typed_again() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
-    fixture.typed(&"x".repeat(MAX_PASSWORD_BYTES + 1));
+    let _ = fixture.typed(&"x".repeat(MAX_PASSWORD_BYTES + 1));
     assert!(fixture.key(Key::Named(NamedKey::Enter)).is_none());
     assert_eq!(
         fixture.window.dialog.reason(),
         Some(Unoffered::TooLong.why())
     );
-    fixture.typed("right");
+    let _ = fixture.typed("right");
     assert_eq!(fixture.window.dialog.reason(), None);
-    let Some(Answered::Open { password, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
+    let Some(Answered::Open {
+        given: Given::Password(password),
+        ..
+    }) = fixture.key(Key::Named(NamedKey::Enter))
+    else {
         panic!("an answer");
     };
-    assert_eq!(password.as_deref(), Some(&b"right"[..]));
+    assert_eq!(&*password, b"right");
 }
 
 #[test]
 fn a_password_as_long_as_the_bound_is_offered_whole() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
     let longest = "y".repeat(MAX_PASSWORD_BYTES);
-    fixture.typed(&longest);
-    let Some(Answered::Open { password, .. }) = fixture.key(Key::Named(NamedKey::Enter)) else {
+    let _ = fixture.typed(&longest);
+    let Some(Answered::Open {
+        given: Given::Password(password),
+        ..
+    }) = fixture.key(Key::Named(NamedKey::Enter))
+    else {
         panic!("an answer");
     };
-    assert_eq!(password.as_deref(), Some(longest.as_bytes()));
+    assert_eq!(&*password, longest.as_bytes());
 }
 
 /// The password field's marker moves only while the window keeps its time.
@@ -215,7 +333,7 @@ fn a_password_as_long_as_the_bound_is_offered_whole() {
 fn the_window_keeps_its_fields_time() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
     assert_eq!(fixture.window.deadline_ns(0), None);
-    fixture.typed("a");
+    let _ = fixture.typed("a");
     let due = fixture.window.deadline_ns(0).expect("the marker moves");
     let mut damage = Region::new();
     let theme = fixture.registry.active();
@@ -232,7 +350,7 @@ fn the_window_keeps_its_fields_time() {
 #[test]
 fn a_window_too_small_for_its_form_still_keeps_time() {
     let mut fixture = Fixture::asking(Asked::Password { wrong: false });
-    fixture.typed("a");
+    let _ = fixture.typed("a");
     let due = fixture.window.deadline_ns(0).expect("the marker moves");
     let theme = fixture.registry.active();
     fixture

@@ -142,7 +142,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  86 | `fs_attr_list` | `u32 fd`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler, as `fs_attr_get`) | no |
 |  87 | `fs_attr_remove` | `u32 fd`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
-|  90 | `fd_grant`     | `u32 fd`, `u64 write_ceiling`, `*const ProcId recipient`, `usize len` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
+|  90 | `fd_grant`     | `u32 fd`, `u64 write_ceiling`, `*const ProcId recipient`, `usize len`, `u64 flags` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
 |  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
@@ -524,7 +524,9 @@ when it happened: the stated device time, else its arrival) per call, gated on
 `CAP_INPUT_READ` **and** owner-gated against the live seat lease exactly like
 `keyboard_read` — a non-owner (even one holding the capability) is refused
 with `SeatNotOwner`/`SeatRevoked`, so no other session can observe the pointer
-stream. Both are unaudited per event like the other high-volume stream
+stream. Every seat read copies its record straight from the channel to the
+reader and takes it only once it has landed, so a record the reader's buffer
+refuses stays first in the channel. Both are unaudited per event like the other high-volume stream
 calls; the first delivered event of each input kind emits that kind's
 one-shot `INPUT_DELIVERED` liveness witness (`kind=key` / `kind=pointer`,
 at most one each). Wrappers: `tairix_rt::pointer_inject` /
@@ -612,6 +614,10 @@ file created and then made read-only. A grant never has the exemption, so the
 owner's chmod revokes it. Search permission above a held node is never
 re-checked: a descriptor is not a name. `fs_readdir` keeps its blanket gate,
 because `fd_grant` refuses a directory and so no delegated listing exists.
+`fd_grant`'s `flags` holds `GRANT_FILE_ONLY` to delegate only a regular file,
+refusing a pipe end or anything else with `OutOfRange`, judged from the node
+the descriptor pinned, so the check reads no volume: what a relay that
+promises its recipient a document mints with. Any other bit is refused.
 
 **Every descriptor counts against `open-files`.** The `LimitKind::OpenFiles`
 soft bound — one descriptor per 64 KiB of installed RAM, at least 1024, by
@@ -1146,9 +1152,12 @@ supplier's block is bindable only by the holder of the node's duty naming it,
 whatever the role (`plans/SUPPLIERS.md` SL1), and the endpoint registry
 reports each such bind and unbind to the hardware tree, whose node then states
 whether it serves that role (`HwNode::serves`). `call_recv`
-blocks until a request is posted, copies it into the server's buffer (a
-request larger than the buffer is left queued and refused `BufferTooSmall`,
-never lost), and writes the per-call ticket; its `CallRecvFlags` word
+blocks until a request is posted, copies it into the server's buffer and
+writes the per-call ticket, and only then takes the call into service, its
+room kept for the answer in the same step — a request larger than the buffer
+is left queued and refused `BufferTooSmall`, and one the buffers refuse, or
+the machine has no memory to back, is left queued for the next receive, never
+lost and its caller never answered for it; its `CallRecvFlags` word
 selects the mode — `NON_BLOCKING` answers an empty queue with `WouldBlock`
 instead of parking, the mode a wait-set-driven event loop uses because a
 queued call the readiness peek reported may have been cancelled by its
@@ -1188,7 +1197,10 @@ non-blocking claim
 (`WouldBlock` while pending, `TimedOut`
 once the deadline elapses — the ticket is then retired, `BrokenPipe` once the
 endpoint has gone, `NotFound` for a cancelled or foreign ticket, the reply
-bytes otherwise). No endpoint issues `CALL_TICKET_NONE`, so a reap of it
+bytes otherwise). An answer is retired only once it has landed in the
+caller's buffer: one longer than the buffer (`BufferTooSmall`), or one the
+buffer refuses or the machine has no memory to back, stays with its ticket
+for the next reap. No endpoint issues `CALL_TICKET_NONE`, so a reap of it
 takes nothing and answers only whether the endpoint can still answer —
 `NotFound` while it lives, `BrokenPipe` once it has gone — which is how a
 client woken by a `CallReply` member with no call outstanding learns its
@@ -1202,7 +1214,11 @@ ready for *any* of the process's replies on that endpoint that no thread
 awaits, so a caller that wants one call's answer awaits it with `call_await`
 (no. 167) instead: the reap's outcomes, less `WouldBlock`, with the thread
 parked until that call alone is answered, its deadline passes, or the endpoint
-ends — `Interrupted` once the process is being killed. The reply wakes
+ends — `Interrupted` once the process is being killed. A blocking `ipc_call`,
+which holds no ticket its caller could reap by, backs the room its answer
+lands in before it posts, so the machine running short refuses the call
+before any work is asked for; an answer that still cannot be delivered
+withdraws the call and answers why. The reply wakes
 whichever of the process's threads awaits it, and its poster; a call is
 awaited by one thread at a time, so a second thread awaiting it is refused
 `Busy`. An awaited answer, and a blocking `ipc_call`'s, wakes no other thread
@@ -1535,9 +1551,10 @@ the decision it feeds is the server's to record. Wrapper
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **descriptor** delegation (`plans/CAPABILITY_USE.md` CU6,
 `plans/APPWIN.md` AW5 — the desktop's trusted-picker hand-off).
-`fd_grant(fd, write_ceiling, recipient, len)` requires `CAP_FS_ACCESS` and
-delegates one of the caller's **own** descriptors: a plain non-directory file,
-or a pipe end. A pty end, resource, catalog or directory is refused with
+`fd_grant(fd, write_ceiling, recipient, len, flags)` requires
+`CAP_FS_ACCESS` and delegates one of the caller's **own** descriptors: a plain
+non-directory file, or a pipe end, or under `GRANT_FILE_ONLY` a regular file
+alone. A pty end, resource, catalog or directory is refused with
 `OutOfRange`, each answering to an authority a hand-off cannot carry; a
 delegation the caller was itself given is handed on as it was captured, so a
 relay widens nothing.
@@ -1657,7 +1674,9 @@ unaudited, since it discloses nothing until a reader the kernel admits redeems
 it, and the redemption is audited. A location shares a delegation's handle
 space, duplicate suppression and per-recipient bound, and each is redeemed only
 as what it is: `fd_redeem` refuses a location and `fd_redeem_location` a
-delegated file or pipe end, both with `OutOfRange`, leaving it pending. Wrappers
+delegated file or pipe end, both with `OutOfRange`, leaving it pending. A
+location is taken only once its path has landed in the reader's buffer, so a
+buffer that refuses the copy leaves it pending too. Wrappers
 `tairix_rt::fd_grant_location` / `tairix_rt::fd_redeem_location`; C stubs
 `tairix_sys_fd_grant_location` / `tairix_sys_fd_redeem_location`.
 
@@ -1680,6 +1699,16 @@ lap, the cursor moves only when a token actually reached the caller (a
 wait that failed to report costs the member nothing), and a member removed
 in the meantime simply falls back to registration order.
 
+A wait never needs memory, so a machine short of it never refuses one. Each
+member pledges, as it is added, the room for every wait-queue row a wait on
+it files (`WaitQueue::pledge`, as `epoll` takes its entries at
+`EPOLL_CTL_ADD`); the set's own wait buffers hold those pledges, and a wait
+spends them. The records an endpoint or a port keeps of the threads watching
+for an answer or for room degrade instead of failing: one the heap cannot hold
+leaves its thread to a broadcast on that queue, which the next answer or the
+next slot freed carries. A second thread waiting on the same set at once is
+lent buffers of its own, and files its rows as any wait would.
+
 A wait-set is its creator's **process's**, as are the endpoints, ports, and
 seat leases it may watch: any thread of the process may add to it or wait on
 it, and `waitset_close` (no. 142) or the process teardown releases it. Each
@@ -1687,6 +1716,19 @@ set counts against the process's `wait-sets` limit and each member against its
 `wait-set-members` limit. A wait another thread has under way on a set that is
 closed ends at its next event or deadline, as an `epoll_wait` on a descriptor
 closed under it does. A park still names the waiting thread.
+
+A wait takes no memory of its own: the room its snapshot of the members and
+what they watch needs is taken when each member is added, and a wait borrows
+it, so a set refuses an add rather than a wait for want of memory. A second
+thread waiting on the same set at once makes its own. Each set has a lock of
+its own, so one process's waits never queue behind another's; the registry's
+lock is held only to find the set, and a process's exit finds its sets by
+owner rather than by walking everyone's. The rows a wait files on
+the wake queues are held in room those queues keep, so only a queue holding
+more waiters than ever before can still refuse one. Each wake reaches only
+the waiters of what changed: a line firing wakes the waits holding that line,
+a notice topic moving the waits watching that topic, and an endpoint or port
+post the waits holding an endpoint or port, never every wait on the machine.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
@@ -1956,7 +1998,9 @@ process-scoped state in the per-task registry: never inherited across
 `spawn` (a child starts unpinned even when its parent is pinned) and
 cleared on exit. Pinning grants no residency promise beyond "never enters
 a swap tier": pages still fault in lazily, zero-on-free and encryption
-guarantees are unchanged, and the process stays killable. First-party
+guarantees are unchanged, and the process stays killable. The `tairix_rt`
+wrappers tell the process's heap too, which then gives back no page it has
+mapped until the unpin. First-party
 Rust wrappers are `tairix_rt::mem_pin` / `tairix_rt::mem_unpin`; C stubs
 `tairix_sys_mem_pin` / `tairix_sys_mem_unpin`.
 
@@ -2024,8 +2068,9 @@ parking. It reaps an already-exited child (returning its PID and copying
 the exit code out, exactly as the blocking form does), or — when a matching
 child is still running — returns `WouldBlock` (the `abi-v1` "nothing yet,
 retry" signal) without parking the caller, leaving `status` untouched. The
-producer serves the poll through the same single `ProcessTable::reap`
-primitive the blocking loop uses, so the two can never diverge, and a
+producer serves the poll through the same report-then-take primitive the
+blocking loop uses (`ProcessTable::peek_report`, `ProcessTable::take_report`),
+so the two can never diverge, and a
 poll that finds nothing reapable is audited as the benign
 `SYSCALL_HANDLER_WOULD_BLOCK` (Debug), not an ERROR — so a polling
 job-control loop never floods the log (`AGENTS.md` §2.1 / §19.4). The
@@ -2559,7 +2604,10 @@ backing does the strongest thing it can:
 Every backing also discards input queued but not yet read (the type-ahead
 ring is re-initialised, so no copy of a mistyped credential is left in
 kernel memory) and returns the read line discipline to `Cooked`, which
-also clears the secret-entry marker.
+also clears the secret-entry marker. A console's input a read took but could
+not deliver ends with the session too: it is wiped at once where no reader
+holds it, and otherwise before the next reader is given it, so it is never
+delivered after the purge.
 
 It needs **both** halves' authority: the dispatcher checks
 `CAP_CONSOLE_WRITE` (retained output is destroyed) and the handler checks
@@ -2805,7 +2853,7 @@ re-validates arguments — the dispatcher does that first.
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload`, or a message the sender's whole `ipc-queue-bytes` limit could not hold → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `port_admit`    | `PortRegistry::lookup(port)`; the caller must be the port's owner; then `callreg::lookup(server)` and its `owner_instance` handed to `Port::admit`, which discards every queued message another instance sent and which `Port::send` checks under the mailbox lock; senders parked for the room that frees are woken | Unbound port or endpoint → `NotFound`. Another process's port → `PermissionDenied`. |
 | `port_unbind`   | `PortRegistry::lookup(endpoint)` under the registry write lock; the caller must be the port's owner; then `PortRegistry::unregister`, which withdraws its names and destroys it, dropping its queue charge; the senders it recorded as parked for room are woken to find it gone | Unbound port → `NotFound`. Another process's port → `PermissionDenied`. |
-| `waitset_close` | `waitset::close(caller.process(), set)`: removes the owned set, releases its file members after the registry lock drops, and drops the set's charges | Not a set of the caller → `NotFound`. |
+| `waitset_close` | `waitset::close(caller.process(), set)`: removes the owned set, closes it under its own lock — refusing a call that found it just before — releases its file members once that lock drops, and drops the set's charges | Not a set of the caller → `NotFound`. |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::narrow(caller, target, set, audit)`: the caller itself or a live child of it, any other process only with `CAP_USER_ADMIN` | Faulting `set_ptr` / no registered address space → `BadAddress`. A target the caller has no authority over, known or not → `PermissionDenied`. Unknown `target` named by an administrator → `NotFound`. A widening request → `DelegationWiden`. |
@@ -2814,15 +2862,15 @@ re-validates arguments — the dispatcher does that first.
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`, once a live `Irq` grant of the caller names `line`, the controller has activated it and set its trigger | No grant naming `line` → `PermissionDenied`; activation `OutOfRange` / `Exhausted` → `OutOfRange`, `Unroutable` → `NotSupported`; a trigger the controller cannot set → `NotSupported`; `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, **parking** the caller off the run queue between iterations (`reschedule_current`, never a yield that leaves it runnable) | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; a caller that cannot be parked → `NotImplemented`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `tairix_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
-| `stream_write` | routes **any** descriptor the caller holds — a file, resource, pipe end, or pty end, at a standard number (a spawn attach block wired it, `plans/SPAWN.md` SP10) or an ordinary one an open/create call minted — to its open entry first, through the *same* `descriptor_write` path `fs_write` uses (the two traps differ only in `StreamPos`: an explicit offset vs the shared cursor), so their direction gate, capability checks, and copy boundary cannot drift. The entry's own `OpenFlags` gate the direction, a path-backed stream writes at the shared open-file-description cursor (honouring `APPEND`), a pipe end parks while full with a live reader and fails closed with `BrokenPipe` once none remains, and **no console capability applies**. Otherwise — only a standard number with no open entry can reach here — it resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the in-handler `CAP_CONSOLE_WRITE` check, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_WRITE` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. A heap with no room to stage the bytes → `OutOfMemory`, nothing written. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
-| `stream_read` | routes **any** descriptor the caller holds to its open entry first, through the same `descriptor_read` path `fs_read` uses (as `stream_write`: the entry's flags gate the direction; a pipe end parks on `STREAM_WAITQ` under its own ring's wake key while empty with a live writer, honours the `timeout_ns` bound, and reports end-of-stream once no writer remains; **no console capability applies**), otherwise resolves `fd` against the caller's per-process descriptor table — direction first, then the in-handler `CAP_CONSOLE_READ` check, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user`. A non-zero `timeout_ns` (arg 3) bounds the park: the reader registers a one-shot deadline on the console wait queue (tickless — an unbounded read still arms no timer at all) and an elapsed bound surfaces as `TimedOut`, so a full-screen program refreshes a clock or status figure without a busy poll | `fd` not a readable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_READ` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. A heap with no room to stage the read → `OutOfMemory`, no input taken. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`); a non-zero `timeout_ns` elapsing with no input → `TimedOut`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
+| `stream_write` | routes **any** descriptor the caller holds — a file, resource, pipe end, or pty end, at a standard number (a spawn attach block wired it, `plans/SPAWN.md` SP10) or an ordinary one an open/create call minted — to its open entry first, through the *same* `descriptor_write` path `fs_write` uses (the two traps differ only in `StreamPos`: an explicit offset vs the shared cursor), so their direction gate, capability checks, and copy boundary cannot drift. The entry's own `OpenFlags` gate the direction, a path-backed stream writes at the shared open-file-description cursor (honouring `APPEND`), a pipe end parks while full with a live reader and fails closed with `BrokenPipe` once none remains, and **no console capability applies**. Otherwise — only a standard number with no open entry can reach here — it resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the in-handler `CAP_CONSOLE_WRITE` check, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's output line discipline (`ConsoleDevice::write_output`), which cooks a bare line feed to CR-LF (the ONLCR output translation, the counterpart to the input echo half) so a program that writes `\n` has the cursor return to column zero as it drops a line, then writes to the `ConsoleWrite` device | An **unattached** `stdinfo` (fd 3 `Closed`) → `Ok(len)` with the bytes discarded (advisory best-effort, `AGENTS.md` §20.1 — never a device fallback). Any other `fd` not a writable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_WRITE` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. A heap with no room to stage the bytes → `OutOfMemory`, nothing written — except on a pipe or pty end, which stages on the stack instead and accepts fewer bytes, so a stream never refuses for want of memory. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(input_bytes_consumed)` — the input count, not the larger device count a cooked newline expands to. |
+| `stream_read` | routes **any** descriptor the caller holds to its open entry first, through the same `descriptor_read` path `fs_read` uses (as `stream_write`: the entry's flags gate the direction; a pipe end parks on `STREAM_WAITQ` under its own ring's wake key while empty with a live writer, honours the `timeout_ns` bound, and reports end-of-stream once no writer remains; **no console capability applies**), otherwise resolves `fd` against the caller's per-process descriptor table — direction first, then the in-handler `CAP_CONSOLE_READ` check, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into the console's own held-input buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user`, letting go of them only once delivered: input taken from the device that a copy fails to deliver stays with the console, first for the next read, echoed once. A pipe or pty end copies straight from its ring to the caller and takes only what landed, so a copy the buffer refuses, or a page the machine cannot back, takes nothing. A non-zero `timeout_ns` (arg 3) bounds the park: the reader registers a one-shot deadline on the console wait queue (tickless — an unbounded read still arms no timer at all) and an elapsed bound surfaces as `TimedOut`, so a full-screen program refreshes a clock or status figure without a busy poll. A reader that finds the console's input held by another waits for its turn on the console wait queue — woken by input, by a reader letting go with input left, and by the console changing hands; killable, and asking the foreground gate again after every wake and once it has the input — rather than queueing behind a hold that may last until the next keystroke, and a bound covers that wait too | `fd` not a readable inherited stream → `NotFound`. Console-backed without `CAP_CONSOLE_READ` → `PermissionDenied`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. A read stages nothing on the heap, so none is refused for want of memory to stage. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`); a non-zero `timeout_ns` elapsing with no input, or with another reader still holding the console's input → `TimedOut`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
 | `spawn`         | stages and parses the optional `SpawnAttach` block fail-closed (`stage_spawn_attach`; a zero pointer = full inherit, `plans/SPAWN.md` SP10), lowers the child's inherited limits by the block's `limits` at admission (each intersected with the inherited one, never raised; `docs/src/architecture/resource-limits.md`), resolves its session selector against the caller's own session before any child state exists (`docs/src/architecture/sessions.md`), then its console selector (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), applies the per-descriptor wires onto that base (`apply_attach_wires`) — `Closed` and a slot-only `InheritSlot` reshape the console table; an inheriting wire over the caller's *own* base also clones the open entry wired behind that standard slot (a pty or pipe end), because the console table records console-backed slots only and a wired slot's is closed, so a command a pty-hosted shell spawns writes to the same terminal instead of a denied stream; every `Handle` wire resolves owner-checked against the caller's own open table into a cloned entry (direction-checked for its slot, and a **directory** handle refused — a standard slot is a byte stream, and `is_read()` alone would admit a directory, which is legitimately opened readable; the same reason `fd_grant` declines one); every resolved entry bound to a node is conferred rather than copied (`OpenFile::conferred_to_child` gives the child's entry the same node acting under the spawning parent's uid and effective set captured at the spawn, sharing the one open file description, because an own descriptor acts as whoever holds it and a child handed a document is meant to need no filesystem capability — an entry already acting under a frozen authority passes through with it, so a spawn never launders authority); and each resolved entry is installed at the child's fd 0–3 with its console slot closed, so exactly one authority backs each descriptor and a pipe/pty-end clone registers one more live end — copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry` (the x86_64/riscv64 §18.6 boot floor) or — for an absolute `…/<Name>.app/Run` store-bundle path with an installed `AppStore` — loads and verifies the on-disk bundle through the shared `tairix_appload` gate (signature against the embedded app trust anchor, content hash, ABI/syscall hash), the bundle read running through the secured VFS under the caller's kernel-attested identity and a spawn racing the boot mount parking on the store's readiness latch (`plans/APPS.md` deliverable 8), then resolves the child's kernel-attested **credential** from the block's `target_uid` (`SPAWN_UID_INHERIT` → snapshot the caller's own credential; else, gated by `CAP_SPAWN_AS_USER`, resolve the target user's uid/gid/groups from the authoritative identity table — spawn-as-user), resolves a working directory the block names as that credential from where its path starts for the caller, pinned for the child (so a spawner may start a child where only the child may go), and hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table, wired entries, and credential) through `SpawnCtx::admit_process`, placed in its session at admission's last step, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Malformed / wrong-length attach block → `LengthOutOfRange` / `BadMagic` / `OutOfRange`. A join that cannot be honoured — naming no live instance within the caller's session, or one whose session is ending — → `NotFound`, whatever the cause; any other placement whose session is ending → `Interrupted`; the nesting bound → `LimitExceeded`. Console index with no installed console → `NotFound`. A `Handle` wire naming no descriptor of the caller → `NotFound`; one whose direction cannot serve its slot → `PermissionDenied`; a directory handle → `OutOfRange`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. A working directory the child may not search, or that names no directory → the resolution's refusal (`NotFound`, `PermissionDenied`, `NotADirectory`, `LinkLoop`), the child never existing; one on a sandbox block → `OutOfRange`. A `target_uid` switch without `CAP_SPAWN_AS_USER` → `PermissionDenied`; an unresolvable target (no identity table, or unknown uid) → `NotImplemented` / `PermissionDenied`. A `SPAWN_FLAG_FOREGROUND` hand-over without `CAP_CONSOLE_READ` → `PermissionDenied`; with no terminal behind the caller's standard input, or one another party holds — checked before the child exists and again as it is admitted — → `NotForeground`, the child never having run. A heap with no room to stage the path or startup strings, or for a copy the child keeps of them, its groups or its wires → `OutOfMemory`, before any child state exists. A heap with no room for the child's capability record or its table entries → `OutOfMemory`, the child never having run. No kernel memory for the child's records at admission → `OutOfMemory`, the child never having run. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion, or a reservation record the heap cannot hold (the reservation given back) → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, takes **every page** of the range out of what the caller holds anonymously before any is released (`AddressSpaceRegistry::begin_anon_release`: containment, not a match against one `mem_map` — a growable arena releases whatever came free at its top — and while the release runs no fault backs one of those pages and no second release takes one), then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4); on success their bytes are credited back and they are dropped from the registry snapshot, and on failure the caller holds them again | `len == 0` → `LengthOutOfRange`. Any page not held by the caller → `NotFound`, touching nothing. No room to record the cut through a held range → `OutOfMemory`, touching nothing. No producer wired → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mem_pin`       | checks the caller's pinned footprint (mapped address space + committed stack, the one shared accounting) against its effective `pinned-memory-bytes` soft bound under one registry write guard, then stores the pin mark against the kernel-trusted caller id — idempotent: an already-pinned caller is in the requested state | Footprint past the soft bound → `OutOfRange`. No room to record the mark → `OutOfMemory`. Otherwise `Ok(0)`. |
 | `mem_unpin`     | clears the caller's pin mark — idempotent: an already-unpinned caller is in the requested state | Always `Ok(0)`. |
 | `signal_intake` | acts only on the caller's own intake in `kernel/core::procsignal` (keyed by the kernel-trusted caller id): `Enable` inserts the opt-in (idempotent, pending slot preserved), `Disable` removes it unless an observation is pending undrained, `Take` drains the one pending observed signal and returns its wire discriminant | Unknown `op` → `OutOfRange` (before dispatch). `Disable` with a pending observation → `WouldBlock`. `Take` with nothing pending → `WouldBlock`; without the opt-in → `NotFound`. Otherwise `Ok(value)`. |
-| `wait`          | decodes `flags` through `WaitFlags::from_bits`, then hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship and reaps a reapable child; blocking (`flags` clear) parks until one is reapable, `NONBLOCK` polls via the same `ProcessTable::reap` and returns `WouldBlock` for a still-running child without parking; on a reap the exit code is copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. `NONBLOCK` with a still-running child → `WouldBlock` (`status` untouched). Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
+| `wait`          | decodes `flags` through `WaitFlags::from_bits`, then hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship and reports a reapable child; blocking (`flags` clear) parks until one is reapable, `NONBLOCK` polls the same report (`ProcessTable::peek_report`) and returns `WouldBlock` for a still-running child without parking; the report's status is copied out to `status` through `copy_to_user` *before* the child is taken (`ProcessTable::take_report`), so a copy-out the buffer or the machine's memory refuses leaves the child to report again rather than losing its exit, and the child's PID is returned (`plans/SPAWN.md` SP6) | Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. `NONBLOCK` with a still-running child → `WouldBlock` (`status` untouched, unless a sibling thread took the child being reported first). Faulting `status` / no registered address space → `BadAddress`, the child not taken. Otherwise `Ok(pid)`. |
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. No room to record the set → `OutOfMemory`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space the spawn attach block's console selector draws from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
@@ -2952,6 +3000,22 @@ message returns `BufferTooSmall`; a faulting buffer, or a caller with no
 registered address space, fails closed with the same `BadAddress`
 `ipc_send` uses, never an oracle (`AGENTS.md` §19.1). On success it
 returns the number of payload bytes copied.
+
+**A buffer the caller holds is backed, not refused.** Every copy through the
+user boundary backs a page of the caller's that is not resident — untouched
+anonymous memory, an unread file mapping, an ungrown stack, a page the
+compressed tier parked — as a hardware fault would
+([memory](./memory.md#3a-user-memory-copy-uaccess)), and answers for one it
+cannot back by what kept it unbacked, so a caller can tell its own mistake
+from the machine's state. Wherever a row of the table above answers
+`BadAddress` for a faulting buffer, that is a pointer no mapping of the
+caller's covers for the direction the copy needs (a write into a read-only
+file mapping included); a page of the caller's the machine had no memory to
+back, or that was reclaimed again before the copy could use it, answers
+`OutOfMemory`; a file page the storage could not supply answers
+`DeviceFault`; and a compressed page whose contents were lost answers
+`MediumError` and ends the process, as its own touch of the page would — the
+fault recorded, the death landing as the call returns.
 
 A rejected call to a syscall whose `SyscallSpec::audit == true` gets the
 dispatcher's standard `SYSCALL_HANDLER_REJECTED` record

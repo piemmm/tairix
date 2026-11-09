@@ -273,27 +273,36 @@ pub(crate) struct BitCodes<'a> {
 
 impl CodeSource for BitCodes<'_> {
     fn code(&mut self, width: u32) -> Result<Option<u16>, DecodeError> {
-        let total = self.data.len() as u64 * 8;
-        if self.at + u64::from(width) > total {
+        // A code starts within its first byte, so the word from there holds
+        // any code a `u16` can.
+        if width > u16::BITS {
+            return Err(DecodeError::TiffInvalidCode);
+        }
+        let total = (self.data.len() as u64).saturating_mul(8);
+        let Some(end) = self
+            .at
+            .checked_add(u64::from(width))
+            .filter(|&end| end <= total)
+        else {
             return Ok(None);
+        };
+        let first = usize::try_from(self.at / 8).map_err(|_| DecodeError::TiffInvalidCode)?;
+        let mut word = [0u8; 4];
+        for (byte, &held) in word
+            .iter_mut()
+            .zip(self.data.get(first..).unwrap_or_default())
+        {
+            *byte = held;
         }
-        let mut value = 0u32;
-        for offset in 0..u64::from(width) {
-            let at = self.at + offset;
-            let byte = self.data.get((at / 8) as usize).copied().unwrap_or(0);
-            let bit = if self.lsb_first {
-                u32::from(byte >> (at % 8)) & 1
-            } else {
-                u32::from(byte >> (7 - at % 8)) & 1
-            };
-            value = if self.lsb_first {
-                value | bit << offset
-            } else {
-                value << 1 | bit
-            };
-        }
-        self.at += u64::from(width);
-        u16::try_from(value)
+        let skip = self.at % 8;
+        let mask = (1u64 << width) - 1;
+        let code = if self.lsb_first {
+            (u64::from(u32::from_le_bytes(word)) >> skip) & mask
+        } else {
+            (u64::from(u32::from_be_bytes(word)) >> (32 - skip - u64::from(width))) & mask
+        };
+        self.at = end;
+        u16::try_from(code)
             .map(Some)
             .map_err(|_| DecodeError::TiffInvalidCode)
     }
@@ -478,7 +487,7 @@ impl Coder {
 mod tests {
     use alloc::vec::Vec;
 
-    use super::{CodeSink, CodeSource, Coder, Lzw, Widen};
+    use super::{expand_msb, BitCodes, CodeSink, CodeSource, Coder, Lzw, Widen};
     use crate::encode::EncodeError;
     use crate::DecodeError;
 
@@ -538,6 +547,123 @@ mod tests {
                 }
             }
             assert_eq!(out, data, "in pieces of {piece}");
+        }
+    }
+
+    /// `codes`, each `(code, width)`, packed a bit at a time from bit `lead`
+    /// on: the reference a word-at-a-time reader is held to.
+    fn packed(codes: &[(u16, u32)], lead: usize, lsb_first: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut at = lead;
+        for &(code, width) in codes {
+            for offset in 0..width {
+                let bit = if lsb_first {
+                    code >> offset & 1
+                } else {
+                    code >> (width - 1 - offset) & 1
+                };
+                bytes.resize(bytes.len().max(at / 8 + 1), 0);
+                if bit == 1 {
+                    bytes[at / 8] |= if lsb_first {
+                        1 << (at % 8)
+                    } else {
+                        0x80 >> (at % 8)
+                    };
+                }
+                at += 1;
+            }
+        }
+        bytes
+    }
+
+    /// Codes of every width a `u16` holds, read from every bit offset in
+    /// either packing, are exactly the bits packed, and none is read past the
+    /// end.
+    #[test]
+    fn codes_read_a_word_at_a_time_are_the_bits_packed() {
+        for lsb_first in [false, true] {
+            for width in 1..=16u32 {
+                for lead in 0..8usize {
+                    let codes: Vec<(u16, u32)> = (0..40u32)
+                        .map(|at| {
+                            let code = (at * 40_503 + width) % (1 << width);
+                            (u16::try_from(code).expect("within the width"), width)
+                        })
+                        .collect();
+                    let data = packed(&codes, lead, lsb_first);
+                    let mut source = BitCodes {
+                        data: &data,
+                        at: u64::try_from(lead).expect("a bit offset"),
+                        lsb_first,
+                    };
+                    for &(code, _) in &codes {
+                        assert_eq!(source.code(width), Ok(Some(code)), "{width} from {lead}");
+                    }
+                    let spare = data.len() * 8 - lead - codes.len() * width as usize;
+                    let past = (spare >= width as usize).then_some(0);
+                    assert_eq!(
+                        source.code(width),
+                        Ok(past),
+                        "{width} from {lead}, at the end"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A stream coded through every width to the widest, cleared and begun
+    /// again, expands back unchanged in each dialect: most significant bit
+    /// first, widening one code early (PDF's `/EarlyChange 1`) or when full,
+    /// and least significant first when full (classic TIFF).
+    #[test]
+    fn a_coded_stream_expands_back_in_every_dialect() {
+        let data: Vec<u8> = (0..30_000u32)
+            .map(|at| u8::try_from((at * at / 11 + at / 5) % 241).unwrap_or(0))
+            .collect();
+        for (lsb_first, widen) in [
+            (false, Widen::OneEarly),
+            (false, Widen::WhenFull),
+            (true, Widen::WhenFull),
+        ] {
+            let mut emitted = Codes::default();
+            let mut coder = Coder::new(8, widen, 4094).expect("tables");
+            coder.begin(&mut emitted).expect("begins");
+            for &byte in &data {
+                coder.push(byte, &mut emitted).expect("pushes");
+            }
+            coder.finish(&mut emitted).expect("ends");
+            assert!(
+                emitted.codes.iter().any(|&(_, width)| width == 12),
+                "the widest codes reached"
+            );
+            let stream = packed(&emitted.codes, 0, lsb_first);
+            let mut source = BitCodes {
+                data: &stream,
+                at: 0,
+                lsb_first,
+            };
+            let mut out = alloc::vec![0u8; data.len()];
+            let written = Lzw::new()
+                .expect("tables")
+                .expand(
+                    &mut source,
+                    8,
+                    widen,
+                    &DecodeError::TiffInvalidCode,
+                    &mut out,
+                )
+                .expect("expands");
+            assert_eq!(written, data.len(), "{widen:?}");
+            assert_eq!(out, data, "{widen:?}, least significant first: {lsb_first}");
+            if !lsb_first {
+                let mut expanded = Vec::new();
+                expand_msb(&stream, widen == Widen::OneEarly, &mut |run| {
+                    expanded.extend_from_slice(run);
+                    true
+                })
+                .expect("expands");
+                assert_eq!(expanded, data, "{widen:?} through expand_msb");
+            }
         }
     }
 }

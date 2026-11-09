@@ -857,25 +857,34 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Reconstruct one scanline in place from the reconstructed row above it,
-/// `prior` (none on a pass's first row): a sample is predicted only from
-/// bytes to its left and above, both already reconstructed when it is reached.
-fn defilter_row(
+/// Reconstruct one scanline filtered by `filter_type` in place from the
+/// reconstructed row above it, `prior` (none on a pass's first row), at `bpp`
+/// bytes to a pixel, rounded up to one as PNG's are: a sample is predicted
+/// only from bytes to its left and above, both already reconstructed when it
+/// is reached, and a byte `prior` lacks reads as zero, as above a first row.
+///
+/// # Errors
+///
+/// [`DecodeError::InvalidFilterType`] for a filter type PNG does not define.
+pub fn defilter_row(
     filter_type: u8,
     samples: &mut [u8],
     prior: Option<&[u8]>,
     bpp: usize,
 ) -> Result<(), DecodeError> {
-    for i in 0..samples.len() {
-        let a = if i >= bpp { samples[i - bpp] } else { 0 };
-        let b = prior.map_or(0, |prior| prior[i]);
-        let c = if i >= bpp {
-            prior.map_or(0, |prior| prior[i - bpp])
-        } else {
-            0
-        };
+    let bpp = bpp.max(1);
+    let above = |at: usize| prior.and_then(|prior| prior.get(at)).copied().unwrap_or(0);
+    for at in 0..samples.len() {
+        let left = at.checked_sub(bpp);
+        let a = left
+            .and_then(|left| samples.get(left))
+            .copied()
+            .unwrap_or(0);
+        let (b, c) = (above(at), left.map_or(0, above));
         let predicted = predict(filter_type, a, b, c).ok_or(DecodeError::InvalidFilterType)?;
-        samples[i] = samples[i].wrapping_add(predicted);
+        if let Some(sample) = samples.get_mut(at) {
+            *sample = sample.wrapping_add(predicted);
+        }
     }
     Ok(())
 }

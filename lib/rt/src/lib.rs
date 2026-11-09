@@ -2006,7 +2006,8 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
 /// Mark the calling process's entire anonymous memory — current and
 /// future — as pinned: ineligible for the compressed `ramzip` tier and any
 /// future lower swap tier (`SyscallNumber::MEM_PIN`,
-/// `plans/STRESSTEST.md` ST2).
+/// `plans/STRESSTEST.md` ST2). Once pinned, the process's heap also gives
+/// back no page it has mapped until [`mem_unpin`].
 ///
 /// Gated by `CAP_MEM_PIN` and bounded by the caller's effective
 /// `pinned-memory-bytes` limit; both refusals surface as `-errno`
@@ -2022,6 +2023,11 @@ pub fn mem_pin() -> i64 {
     // the capability and the pinned-memory bound on the far side of the
     // trap. No user pointer is passed.
     let ret = unsafe { raw_syscall(NUM_MEM_PIN, [0; 6]) };
+    // Gated exactly as the module is: a plain host build has no process heap.
+    #[cfg(any(rt_native, test))]
+    if ret == 0 {
+        heap::hold_mapped(true);
+    }
     ret as i64
 }
 
@@ -2180,6 +2186,11 @@ pub fn mem_unpin() -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel only
     // clears the caller's own pin mark. No user pointer is passed.
     let ret = unsafe { raw_syscall(NUM_MEM_UNPIN, [0; 6]) };
+    // Gated exactly as the module is: a plain host build has no process heap.
+    #[cfg(any(rt_native, test))]
+    if ret == 0 {
+        heap::hold_mapped(false);
+    }
     ret as i64
 }
 
@@ -5325,8 +5336,11 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 /// read-only file and for a pipe end, which has no extent, and for a writable
 /// file a stated bound or [`tairix_abi::GRANT_EXTENT_INHERIT`], this task's
 /// own reach, which a delegation it was itself handed can only narrow; zero
-/// is refused for a writable file. A pty end, resource or directory fails
-/// closed with `-errno` (`OutOfRange`), and a fresh delegation past the
+/// is refused for a writable file. `flags` is
+/// [`tairix_abi::GRANT_FILE_ONLY`] to delegate only a regular file, or zero.
+/// A pty end, resource or directory fails closed with `-errno`
+/// (`OutOfRange`), as does any but a regular file under `GRANT_FILE_ONLY`
+/// and a flag not defined, and a fresh delegation past the
 /// caller's pending bound to `recipient`, or a pipe end past those it may
 /// have in flight, with `LimitExceeded`.
 ///
@@ -5336,7 +5350,7 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 /// bystander. [`File::from_delegation`] is the owned redemption.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
-pub fn fd_grant(fd: u32, write_ceiling: u64, recipient: ProcId) -> i64 {
+pub fn fd_grant(fd: u32, write_ceiling: u64, recipient: ProcId, flags: u64) -> i64 {
     let instance = recipient.to_le_bytes();
     // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
     // this frame's `instance` array, live across the call and exactly the
@@ -5351,7 +5365,7 @@ pub fn fd_grant(fd: u32, write_ceiling: u64, recipient: ProcId) -> i64 {
                 write_ceiling,
                 instance.as_ptr() as u64,
                 instance.len() as u64,
-                0,
+                flags,
                 0,
             ],
         )
@@ -5890,33 +5904,24 @@ pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
 
 /// Park the calling task off the run queue for the life of the process.
 ///
-/// The park a **resident** program with no further work runs — a bus driver
-/// that must stay alive so its grants keep the hardware it brought up
-/// claimed, but which serves no requests and waits on no device event. It
-/// parks on an empty wait-set with no timeout: the kernel holds the task
-/// off the run queue and a spurious wake merely re-parks, so the task
-/// consumes no CPU for the life of the system. A `loop { yield_now() }`
-/// stand-in is the cooperative busy-poll the charter forbids: a
-/// perpetually-runnable task pegs a core and pollutes the run-queue load.
+/// The park a program with no further work runs: it waits, with no timeout,
+/// on a futex word nothing wakes, so the task consumes no CPU, and the wait
+/// needs no kernel object and no memory — it parks on a machine too short of
+/// memory to make a wait-set. A spurious return parks again. A
+/// `loop { yield_now() }` stand-in is the cooperative busy-poll the charter
+/// forbids.
 ///
-/// Returns only on failure, with the raw negative kernel result (`-errno`)
-/// from the wait-set call that failed — the caller exits fail-loud with its
-/// reason rather than falling back to a spin.
+/// Returns only on failure, with the raw negative kernel result (`-errno`) —
+/// the caller exits fail-loud with its reason rather than falling back to a
+/// spin.
 #[must_use = "park_forever returning means the park failed; the caller must exit fail-loud"]
 pub fn park_forever() -> i64 {
-    let ret = waitset_create();
-    let Ok(handle) = u64::try_from(ret) else {
-        return ret;
-    };
-    let set = WaitSet(handle);
-    let mut token = 0u64;
+    let word = core::sync::atomic::AtomicU32::new(0);
     loop {
-        // An empty membership with no timeout parks indefinitely; the kernel
-        // absorbs spurious wakes internally. A `0` return (a ready member on
-        // an empty set) is impossible by construction, so any return at all
-        // is surfaced to the caller as the park having failed.
-        let ret = waitset_wait(set.handle(), u64::MAX, &mut token);
-        if ret != 0 {
+        // SAFETY: `word` is a naturally aligned `u32` of this frame, live for
+        // the whole wait, and the kernel only reads it.
+        let ret = unsafe { futex_wait(word.as_ptr() as usize as u64, 0, u64::MAX) };
+        if ret < 0 {
             return ret;
         }
     }
@@ -10654,6 +10659,22 @@ mod tests {
         let (number, args) = capture(0, || drop(WaitSet(6)));
         assert_eq!(number, NUM_WAITSET_CLOSE);
         assert_eq!(args[0], 6);
+    }
+
+    /// The park a program with no further work runs is a futex wait with no
+    /// timeout, needing no wait-set, and a refusal is handed back.
+    ///
+    /// Regression: it made and waited on a wait-set, which a machine short of
+    /// memory refuses, leaving PID 1's boot halt to spin.
+    #[test]
+    fn the_resident_park_is_a_futex_wait_needing_no_wait_set() {
+        seam::arm(refusal(Errno::NotImplemented));
+        let ret = park_forever();
+        assert_eq!(Errno::from_syscall(ret), Errno::NotImplemented);
+        let (number, args) = seam::last_call().expect("the park trapped");
+        assert_eq!(number, NUM_FUTEX_WAIT);
+        assert_eq!(args[1], 0, "the word the wait expects");
+        assert_eq!(args[2], u64::MAX, "no timeout");
     }
 
     #[test]

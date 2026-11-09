@@ -199,7 +199,7 @@ fn a_draw_file_is_told_apart_by_its_signature() {
     let mut ids = Ids::new();
     assert!(
         crate::read(
-            &draw,
+            draw,
             &crate::pdf::Request {
                 page: 0,
                 password: None,
@@ -213,7 +213,7 @@ fn a_draw_file_is_told_apart_by_its_signature() {
     let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
     assert!(
         crate::read(
-            svg,
+            svg.to_vec(),
             &crate::pdf::Request {
                 page: 0,
                 password: None,

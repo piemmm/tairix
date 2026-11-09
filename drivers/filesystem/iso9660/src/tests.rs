@@ -1129,7 +1129,8 @@ fn the_served_driver_offers_every_disc_read_only() {
         gauge: &tairix_reclaim::Unpressured,
     };
     let image = || Image(master::master(&disc(Vec::new())).image);
-    let mut asked_to_write = crate::Served::open(image(), false, budget).expect("mounts");
+    let mut asked_to_write =
+        crate::Served::open(image(), false, budget, &tairix_log::DiscardSink).expect("mounts");
     assert_eq!(
         asked_to_write.format,
         tairix_abi::volume::FormatName::Iso9660
@@ -1138,7 +1139,8 @@ fn the_served_driver_offers_every_disc_read_only() {
         asked_to_write.offer().write_refusal,
         Some(tairix_abi::driver::filesystem::WriteRefusal::FormatReadOnly)
     );
-    let read_only = crate::Served::open(image(), true, budget).expect("mounts");
+    let read_only =
+        crate::Served::open(image(), true, budget, &tairix_log::DiscardSink).expect("mounts");
     assert_eq!(read_only.write_refusal, None);
 }
 
@@ -1297,10 +1299,12 @@ fn the_served_driver_writes_its_title_only_on_a_medium_taking_writes() {
         gauge: &tairix_reclaim::Unpressured,
     };
     let image = || Stick(master::master(&disc(Vec::new())).image);
-    let mut writable = crate::Served::open(image(), false, budget).expect("mounts");
+    let mut writable =
+        crate::Served::open(image(), false, budget, &tairix_log::DiscardSink).expect("mounts");
     assert!(writable.offer().title && writable.offer().title_apart);
     writable.fs.set_label(&title("New")).expect("retitled");
-    let mut pressed = crate::Served::open(image(), true, budget).expect("mounts");
+    let mut pressed =
+        crate::Served::open(image(), true, budget, &tairix_log::DiscardSink).expect("mounts");
     assert_eq!(
         pressed.fs.set_label(&title("New")),
         Err(DriverError::ReadOnly)

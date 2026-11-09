@@ -366,18 +366,22 @@ consumer still receives typed fail-closed answers and a later genuine return
 recovers it with no reboot (a health fault is not a surprise-removal, so the
 node is not retracted). Only the usb_msd-specific block-service endpoint-id
 derivation (`serve::blk_block_for`) lives in the driver crate. `virtio_blk` and
-`emmc2` are currently consumed in-kernel (root-unlock) and expose only their
-`Block` implementation; when either is brought up as a user-space serving
-process it reuses the same engine and the same idle-timer helper rather than
-copying them. Even in that in-kernel form each driver's `Block` already maps a
-raw device status to the *honest* per-request health class rather than a blanket
-`DeviceFault`: `virtio_blk` decodes a `virtio_blk_req` status byte through one
-shared `status_to_result` (`VIRTIO_BLK_S_IOERR` → a per-request
+`emmc2` are consumed in-kernel as the bootstrap floor, so no serving process
+stands between the kernel and them: `MeteredBlock`, the floor's innermost
+wrapper, runs the device's `BlkHealth` grace window and issues a failure the
+device says may clear again, under the same `IoBudget::reissue_wait_ns` policy
+a served device's consumer obeys — at once when the driver's `Block::reissue`
+vouches for its recovery, after the class's pacing otherwise, and never past
+the budget or the window. Each driver's `Block` maps a raw device status to the
+*honest* per-request health class rather than a blanket `DeviceFault`:
+`virtio_blk` decodes a `virtio_blk_req` status byte through one shared
+`status_to_result` (`VIRTIO_BLK_S_IOERR` → a per-request
 `DriverError::MediumError` the consumer recovers around and repairs, not a
 whole-device fault; `VIRTIO_BLK_S_UNSUPP` → `DriverError::Unsupported`; any
 undefined status → a fail-closed `DriverError::DeviceFault`, never the benign
-`Unsupported`), so the health axis is correct at the source and no consumer
-drops a whole device over a single bad sector. Device-level health
+`Unsupported`), and `emmc2` classes the controller's error bits (below), so the
+health axis is correct at the source and no consumer drops a whole device over
+a single bad sector. Device-level health
 observability through `lib/log`/`sysinfo` beyond the per-volume mount overlay is
 the staged remainder (`plans/FIX-IO.md` IO3–IO6).
 
@@ -685,7 +689,11 @@ already park the same body in the same place waiting for a slow device.
 `MeteredBlock` records an operation the device took 250 ms or more to answer
 (`4075` `DEVICE_OPERATION_SLOW`: the operation, its block and length, how long,
 and whether it succeeded) from the two clock readings its fold takes anyway,
-so the fast path pays nothing. A window kept waiting for the shared device is
+so the fast path pays nothing. A device failure that still reaches its caller,
+its reissues spent, is recorded too (`4314` `DEVICE_OPERATION_FAILED`: the
+operation, its block and length, the error, the reissues, and the running
+count); the first is always recorded and then one each time the count
+doubles, so a dying disk cannot flood the log. A window kept waiting for the shared device is
 the sleeping lock's own record (`4076` `LOCK_ACQUIRED_LATE`,
 `docs/src/architecture/sync.md`), naming `with_device` as the site. A slow
 operation is the device or its interrupt; a late lock is a holder, the wake, or
@@ -818,12 +826,24 @@ every 10 ms for up to one second — park on a timer
 clock-stable handshakes spin, bounded, and every wait fails closed with
 `DriverError::DeviceFault`.
 
+**Failure classes.** A transfer the controller ends on an error bit is classed
+by what it saw: a command or data timeout is `DriverError::TimedOut`, a CRC,
+end-bit, index or auto-command error `DriverError::TransferCorrupted` (the
+bus corrupted the exchange, not the medium), and anything else — an ADMA
+error, a register that never settles — `DriverError::DeviceFault`. A wait that
+hears no interrupt at all is `TimedOut`. A card status reporting data its ECC
+could not correct is `DriverError::MediumError`; any other card-status error
+is `DeviceFault`. The first two are reissuable, the others not.
+
 **Recovery.** A failed transfer resets the command and data lines, halting
 the ADMA2 engine, and a multi-block one is aborted with `CMD12`. A controller
 whose line reset never confirms may still master the staging, so it is handed
 none again and the staging is withheld for the kernel's DMA quarantine. A card
 whose state recovery could not prove is asked with `CMD13` before its next
 data command, and aborted or awaited back into `tran` within three rounds.
+Because that check precedes every data command, a transfer whose line reset
+confirmed vouches for an immediate reissue (`Block::reissue` answers `Now`);
+one whose reset did not, or that was refused before it started, does not.
 
 **Diagnostics.** QEMU models no EMMC2, so the UART log is the metal signal,
 and the driver records it on the log the kernel hands `floor::open`. A failed
@@ -831,10 +851,16 @@ bring-up logs `emmc2: bring-up failed` (`EventId(24941)`) with the
 `BringUpStage` it stalled at and the `DriverError` as its `stage` and `error`
 fields. A successful one logs `emmc2: link` (`EventId(24940)`) with `mode`,
 `clock_hz`, `base_clock_hz`, `signal_mv`, `cmd23`, `dma`, and the stage and
-error of any speed or DMA fallback, at `Warn` when either fell back. The
-engine also reports each step it takes as a
-`trace::Trace` record; no kernel host records them, and the bring-up tests
-read them to check the steps.
+error of any speed or DMA fallback, at `Warn` when either fell back. A transfer
+the block layer asked for that fails logs `emmc2: transfer failed`
+(`EventId(24942)`, `Warn`) with `op`, `lba`, `blocks`, the `command` the
+failing step ran, what reported it (`report`: `controller`, `silent`,
+`budget`, `card_status`, `card_state` or `staging_withheld`), the `register`
+and the `status` it read there, the `error`, the `reissue` the recovery
+vouches for, and `failed`, the running count: the first failure and then one
+each time the count doubles. The engine reports each step it takes as a
+`trace::Trace` record; the metal host records only the failed transfers, and
+the tests read every record to check the steps.
 
 The controller-reset clears SD Bus Power and the register block gates every
 command on it, so bring-up powers the bus before the first command. The CSD

@@ -51,6 +51,7 @@ use super::closing::{
     next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
 };
 use super::members::{members_of, route, Route};
+use super::offers::{FileOffer, FileOffers, OfferStep};
 use super::refit::Refit;
 use super::title::{opening, Title, Withheld};
 use super::{
@@ -1184,10 +1185,9 @@ pub struct Host<A: DocumentApp> {
     /// Quit was chosen: the process ends once every window has closed and no
     /// save is left to land.
     quitting: bool,
-    /// The media type of the file the last drag offered a window of the
-    /// application held, read once for every offer that drag, by its number,
-    /// makes over any of them.
-    offered: Option<(u32, Result<String, Errno>)>,
+    /// Files offered over the application's windows, and the read of their
+    /// drag's media type their answers wait on.
+    offers: FileOffers,
 }
 
 impl<A: DocumentApp> Host<A> {
@@ -1898,6 +1898,8 @@ impl<A: DocumentApp> Host<A> {
         }
         let mut window = self.windows.remove(index);
         let id = window.id();
+        let step = self.offers.closed(id);
+        self.take_offer_step(step);
         let withdrawn = self.withdraw(id);
         self.app.release_window();
         // On the queue already: the save in flight, and the window's own work
@@ -2487,7 +2489,8 @@ impl<A: DocumentApp> Host<A> {
                 handle,
                 writable,
             } => self.picked(index, *window_id, *handle, *writable),
-            WindowEvent::FileOffered { .. } => self.file_offer(index, event),
+            WindowEvent::FileOffered { .. } => self.file_offer(event),
+            WindowEvent::ItemsOfferEnded { window_id, .. } => self.offers.ended(*window_id),
             // A document app asks for no folder, so a folder answer ends its
             // pick as a cancellation does.
             WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
@@ -2565,7 +2568,6 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
-            | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -3180,11 +3182,11 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// A file another application's drag holds over window `index`, offered
-    /// at a point: answered with whether a drop there places it, as its view
-    /// says for the file's media type, read once for every offer the drag
-    /// makes over the application's windows.
-    fn file_offer(&mut self, index: usize, event: &WindowEvent) {
+    /// A file another application's drag holds over a window, offered at a
+    /// point: answered with whether a drop there places it, as the window's
+    /// view says for the file's media type, read once for every offer the
+    /// drag makes over the application's windows and never waited on.
+    fn file_offer(&mut self, event: &WindowEvent) {
         let &WindowEvent::FileOffered {
             window_id,
             drag,
@@ -3195,21 +3197,59 @@ impl<A: DocumentApp> Host<A> {
         else {
             return;
         };
-        if self.offered.as_ref().is_none_or(|(read, _)| *read != drag) {
-            let media = self
-                .client
-                .offered_file(window_id, serial)
-                .map(String::from);
-            // An offer that ended before it was read says nothing of the file.
-            if media != Err(Errno::NotFound) {
-                self.offered = Some((drag, media));
+        let step = self.offers.offered(FileOffer {
+            window_id,
+            drag,
+            serial,
+            at: pointer_point(x, y),
+        });
+        self.take_offer_step(step);
+    }
+
+    /// Take in every media type read for a file offered that has landed.
+    fn take_offered_media(&mut self) {
+        while let Some(read) = self.client.take_offered_media() {
+            let (step, failed) = self.offers.landed(read);
+            if let Some(err) = failed {
+                self.report(format!("cannot read a file offered ({err})"));
             }
+            self.take_offer_step(step);
         }
-        let window = &self.windows[index];
-        let at = pointer_point(x, y);
+    }
+
+    /// Carry out what a file offer, or its read landing, called for.
+    fn take_offer_step(&mut self, step: OfferStep) {
+        match step {
+            OfferStep::Rest => {}
+            OfferStep::Ask(offer) => {
+                if let Err(err) = self.client.ask_offered_file(offer.window_id, offer.serial) {
+                    self.offers.unasked(offer);
+                    self.report(format!("cannot read a file offered ({err})"));
+                }
+            }
+            OfferStep::Answer(offer) => self.answer_offer(offer),
+        }
+    }
+
+    /// Answer `offer` with whether a drop there places the file, as its
+    /// window's view says for the media type its drag holds.
+    fn answer_offer(&mut self, offer: FileOffer) {
+        let Some(window) = self
+            .windows
+            .iter()
+            .find(|window| window.id() == offer.window_id)
+        else {
+            return;
+        };
         let places = !window.loading()
-            && matches!(&self.offered, Some((read, Ok(media))) if *read == drag && window.view.places(at, media));
-        if let Err(err) = self.client.answer_file_offer(window_id, serial, places) {
+            && self
+                .offers
+                .media(offer.drag)
+                .is_some_and(|media| window.view.places(offer.at, media));
+        if let Err(err) = self
+            .client
+            .answer_file_offer(offer.window_id, offer.serial, places)
+        {
             self.report(format!("cannot answer a file offered ({err})"));
         }
     }
@@ -3645,6 +3685,7 @@ impl<A: DocumentApp> Host<A> {
                 polled => self.take_event(polled)?,
             }
         }
+        self.take_offered_media();
         let now = tairix_rt::clock_get();
         let answered = A::turn(self, now) | self.answered;
         self.advance_app_windows(now);
@@ -3828,7 +3869,7 @@ pub fn run<A: DocumentApp>() -> i32 {
         event_endpoint: endpoint,
         server,
         quitting: false,
-        offered: None,
+        offers: FileOffers::new(<ViewOf<A> as DocumentView>::PLACES),
     };
     match launched_document() {
         Some((handle, name, writable)) => host.open_document(handle, name, writable, None),

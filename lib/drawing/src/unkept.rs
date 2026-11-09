@@ -59,11 +59,14 @@ pub enum Lost {
     /// What a document holds beyond its pages: bookmarks, attachments,
     /// layers, structure and the like.
     DocumentParts,
+    /// The password and permissions a document is protected by, which a
+    /// drawing written from it would drop.
+    Protection,
 }
 
 impl Lost {
     /// Every part, in the order an editor lists them.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Filters,
         Self::Masks,
         Self::Patterns,
@@ -87,6 +90,7 @@ impl Lost {
         Self::Damage,
         Self::OtherPages,
         Self::DocumentParts,
+        Self::Protection,
     ];
 
     const fn bit(self) -> u32 {
@@ -120,6 +124,7 @@ impl Lost {
             Self::Damage => "damaged parts",
             Self::OtherPages => "the document's other pages",
             Self::DocumentParts => "the document's bookmarks, attachments and other parts",
+            Self::Protection => "the document's password protection",
         }
     }
 }

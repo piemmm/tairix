@@ -130,7 +130,7 @@ pub use spawn::{
 };
 pub use swap::{EncryptedSwap, SwapBackend, SwapError, SwapPage, SWAP_RECORD_LEN};
 pub use tags::TagSlots;
-pub use uaccess::{copy_in, copy_out, UaccessError};
+pub use uaccess::{copy_in, copy_out, next_unmapped_page, UaccessError};
 pub use vmm::{
     AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, UserAddressSpace,
     VirtAddr,

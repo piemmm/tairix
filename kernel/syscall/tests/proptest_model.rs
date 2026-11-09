@@ -1367,6 +1367,7 @@ impl SyscallHandlers for CountingHandlers {
         _write_ceiling: u64,
         _recipient: u64,
         _recipient_len: usize,
+        _flags: u64,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

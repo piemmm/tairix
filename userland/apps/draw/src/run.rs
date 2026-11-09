@@ -34,7 +34,7 @@ mod program {
     use tairix_draw::document::{blank, Document};
     use tairix_draw::glyphs::{Fetched, Lettering};
     use tairix_draw::layout::{Faces, WINDOW_SIZE};
-    use tairix_draw::pdfopen::{Answered, Asked, OpenPdf};
+    use tairix_draw::pdfopen::{Answered, Asked, Given, OpenPdf};
     use tairix_draw::preferences::Preferences;
     use tairix_draw::settings::{Category, DrawSettings};
     use tairix_draw::tiles::{RenderJob, TileKey, TILE};
@@ -52,7 +52,7 @@ mod program {
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_sandbox::drawedit::{
-        read_drawing, read_pages, read_placed, Access as ReadAccess, DrawEditService, DrawFailure,
+        self, open_drawing, page_size, read_page, read_placed, DrawEditService, DrawFailure,
         DrawRefusal, WORKER_MEMORY,
     };
     use tairix_sandbox::imagerender::{send_document, upload_document, UploadFailure};
@@ -60,7 +60,7 @@ mod program {
     use tairix_sandbox::ParserSandbox;
     use tairix_theme::Theme;
     use tairix_util::defer::JobQueue;
-    use tairix_util::secret::WipedBuf;
+    use tairix_util::fallible;
     use tairix_window::app;
     use tairix_window::docapp::settings::{Edit, SettingsRequest, Then};
     use tairix_window::docapp::{
@@ -110,14 +110,21 @@ mod program {
     }
 
     enum LoadWork {
-        /// Open a document: a PDF at `page` where one was chosen, and with
-        /// `password` where one was given.
+        /// Open a document afresh.
         Open {
             handle: Arc<Handle>,
             name: String,
-            page: Option<u32>,
-            password: Option<WipedBuf>,
         },
+        /// Answer what the PDF kept for the job's window asked, the document
+        /// named `name`.
+        Answer {
+            name: String,
+            given: Given,
+        },
+        /// Size a page, counting from 0, of the PDF kept for the job's window.
+        PageSize(u32),
+        /// Let the PDF kept for the job's window go.
+        Forget,
         Paste(Vec<u8>),
         Place {
             handle: Handle,
@@ -138,13 +145,22 @@ mod program {
             read: Result<(Read, Ids), ReadRefusal>,
             recorded: Option<Filetype>,
         },
-        /// A PDF that asks something before it opens: which page, or its
-        /// password, `password` being the one already given.
+        /// A PDF that asks something before it opens, kept until it is
+        /// answered or let go.
         Asks {
-            handle: Arc<Handle>,
             name: String,
             asked: Asked,
-            password: Option<WipedBuf>,
+        },
+        /// The size of a page, counting from 0, of the PDF kept for the
+        /// window, where it could be had.
+        PageSize {
+            page: u32,
+            size: Option<(f64, f64)>,
+        },
+        /// What the PDF kept for the window was answered with found none
+        /// kept.
+        Gone {
+            name: String,
         },
         Pasted(Result<Drawing, String>),
         Placed {
@@ -155,7 +171,7 @@ mod program {
     }
 
     type LoadDesk = JobQueue<Option<LoadJob>, Option<LoadReply>>;
-    type LoadWorker = Worker<Reader, Option<LoadJob>, Option<LoadReply>, LoadDesk>;
+    type LoadWorker = Worker<Loader, Option<LoadJob>, Option<LoadReply>, LoadDesk>;
 
     /// How long the regular file `file` measures, within `room`, what a
     /// worker may hold.
@@ -170,83 +186,157 @@ mod program {
         usize::try_from(length).map_err(|_| ReadRefusal::TooLong(room))
     }
 
-    /// What opening a document came to: its drawing, or a question a PDF
-    /// asks first.
-    enum Opened {
-        Read(Result<(Read, Ids), ReadRefusal>),
-        Asks(Asked),
+    /// The documents being read: the sandbox the next is read in, and the
+    /// workers each keeping a PDF whose window asks something of it.
+    struct Loader {
+        sandbox: Reader,
+        held: Vec<Held>,
     }
 
-    /// What a read that failed answers: a PDF's password asked for again
-    /// where it wanted one, and why the document is unreadable otherwise.
-    fn failed(failure: DrawFailure) -> Opened {
+    /// A worker keeping the PDF `stamp`'s window asks something of, and what
+    /// it was opened from: a document `handed` bytes long.
+    struct Held {
+        stamp: Stamp,
+        sandbox: Reader,
+        handed: u64,
+        handle: Arc<Handle>,
+        name: String,
+    }
+
+    /// A sandbox whose worker, started by its first request, reads one
+    /// document.
+    fn reader() -> Reader {
+        ParserSandbox::new(RtLauncher::own_binary(WORKER_MEMORY), tairix_rt::LogSink)
+    }
+
+    /// The answer of a document that is read, or could not be.
+    fn opened(
+        handle: Arc<Handle>,
+        name: String,
+        read: Result<(Read, Ids), ReadRefusal>,
+    ) -> LoadAnswer {
+        LoadAnswer::Opened {
+            read,
+            recorded: tairix_browse::recorded_filetype_of(&handle),
+            handle,
+            name,
+        }
+    }
+
+    /// What a PDF that failed to open asks: its password, where it wanted
+    /// one; anything else is why it is unreadable.
+    fn failed(failure: DrawFailure) -> Result<Asked, ReadRefusal> {
         match failure {
             DrawFailure::Refused(DrawRefusal::NeedsPassword) => {
-                Opened::Asks(Asked::Password { wrong: false })
+                Ok(Asked::Password { wrong: false })
             }
-            DrawFailure::Refused(DrawRefusal::WrongPassword) => {
-                Opened::Asks(Asked::Password { wrong: true })
-            }
-            failure => Opened::Read(Err(ReadRefusal::Unreadable(alloc::format!("{failure}")))),
+            DrawFailure::Refused(DrawRefusal::WrongPassword) => Ok(Asked::Password { wrong: true }),
+            failure => Err(ReadRefusal::Unreadable(alloc::format!("{failure}"))),
         }
     }
 
-    /// Read `handle`'s document: a PDF of several pages asks which first,
-    /// unless `page` already says, and one protected by a password asks for
-    /// it unless `password` opens it.
-    fn open(
-        sandbox: &mut Reader,
-        handle: &Handle,
-        page: Option<u32>,
-        password: Option<&[u8]>,
-    ) -> Opened {
-        let fd = handle.fd();
-        let length = match document_length(handle, sandbox.document_room()) {
-            Ok(length) => length,
-            Err(refusal) => return Opened::Read(Err(refusal)),
-        };
-        let uploaded = upload_document(sandbox, length, |offset, into| {
-            tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
-        })
-        .map_err(ReadRefusal::Upload);
-        let access = ReadAccess {
-            page: page.unwrap_or(0),
-            password,
-        };
-        let opened = uploaded.map_or_else(
-            |refusal| Opened::Read(Err(refusal)),
-            |()| read_uploaded(sandbox, length, page.is_none(), &access),
-        );
-        // The worker that read this document reads no other.
-        sandbox.release();
-        opened
-    }
+    impl Loader {
+        /// The worker kept for `stamp`'s window, taken.
+        fn take(&mut self, stamp: Stamp) -> Option<Held> {
+            let index = self.held.iter().position(|held| held.stamp == stamp)?;
+            Some(self.held.swap_remove(index))
+        }
 
-    /// The document uploaded to `sandbox`, `length` bytes long, read with
-    /// `access`; its pages counted first when `choosing`.
-    fn read_uploaded(
-        sandbox: &mut Reader,
-        length: usize,
-        choosing: bool,
-        access: &ReadAccess<'_>,
-    ) -> Opened {
-        let handed = length as u64;
-        if choosing {
-            match read_pages(sandbox, handed, access) {
-                Ok(pages) if pages.count > 1 => {
-                    return Opened::Asks(Asked::Page {
-                        count: pages.count,
-                        sizes: pages.sizes,
-                    });
+        /// Read `handle`'s document, called `name`, for `stamp`'s window: a
+        /// PDF of several pages asks which, and one protected by a password
+        /// asks for it, its worker kept until it is answered.
+        fn open(&mut self, stamp: Stamp, handle: Arc<Handle>, name: String) -> LoadAnswer {
+            // A window asks one thing at a time.
+            self.held
+                .retain(|held| held.stamp.window() != stamp.window());
+            let length = match document_length(&handle, self.sandbox.document_room()) {
+                Ok(length) => length,
+                Err(refusal) => return opened(handle, name, Err(refusal)),
+            };
+            let fd = handle.fd();
+            let uploaded = upload_document(&mut self.sandbox, length, |offset, into| {
+                tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
+            });
+            // The worker that reads this document reads no other.
+            let mut sandbox = core::mem::replace(&mut self.sandbox, reader());
+            if let Err(failure) = uploaded {
+                return opened(handle, name, Err(ReadRefusal::Upload(failure)));
+            }
+            let handed = length as u64;
+            let mut ids = Ids::new();
+            let opening = open_drawing(&mut sandbox, handed, None, true, &mut ids);
+            let held = Held {
+                stamp,
+                sandbox,
+                handed,
+                handle,
+                name,
+            };
+            self.settle(held, opening.map(|opening| (opening, ids)))
+        }
+
+        /// Answer what the PDF kept for `stamp`'s window asked with `given`,
+        /// where one is kept.
+        fn answer(&mut self, stamp: Stamp, given: Given) -> Option<LoadAnswer> {
+            let mut held = self.take(stamp)?;
+            let mut ids = Ids::new();
+            let opening = match given {
+                Given::Password(password) => open_drawing(
+                    &mut held.sandbox,
+                    held.handed,
+                    Some(&password),
+                    true,
+                    &mut ids,
+                ),
+                Given::Page(page) => read_page(&mut held.sandbox, held.handed, page, &mut ids)
+                    .map(drawedit::Opening::Read),
+            };
+            Some(self.settle(held, opening.map(|opening| (opening, ids))))
+        }
+
+        /// Page `page`'s size, of the PDF kept for `stamp`'s window, where one
+        /// is kept and its size could be had.
+        fn page_size(&mut self, stamp: Stamp, page: u32) -> Option<(f64, f64)> {
+            let held = self.held.iter_mut().find(|held| held.stamp == stamp)?;
+            page_size(&mut held.sandbox, page).ok()
+        }
+
+        /// What `held`'s document came to, `opening`: its worker kept where
+        /// it asks something, and let go otherwise.
+        fn settle(
+            &mut self,
+            mut held: Held,
+            opening: Result<(drawedit::Opening, Ids), DrawFailure>,
+        ) -> LoadAnswer {
+            let asked = match opening {
+                Ok((drawedit::Opening::Read(read), ids)) => {
+                    return opened(held.handle, held.name, Ok((read, ids)));
                 }
-                Ok(_) => {}
-                Err(failure) => return failed(failure),
-            }
+                Ok((drawedit::Opening::Pages { count }, _)) => {
+                    let first = page_size(&mut held.sandbox, 0).ok();
+                    return self.keep(held, Asked::Page { count, first });
+                }
+                Err(failure) => match failed(failure) {
+                    Ok(asked) => asked,
+                    Err(refusal) => return opened(held.handle, held.name, Err(refusal)),
+                },
+            };
+            self.keep(held, asked)
         }
-        let mut ids = Ids::new();
-        match read_drawing(sandbox, handed, access, &mut ids) {
-            Ok(read) => Opened::Read(Ok((read, ids))),
-            Err(failure) => failed(failure),
+
+        /// Keep `held`'s worker until what its document asks, `asked`, is
+        /// answered or let go.
+        fn keep(&mut self, held: Held, asked: Asked) -> LoadAnswer {
+            if self.held.try_reserve(1).is_err() {
+                return opened(
+                    held.handle,
+                    held.name,
+                    Err(ReadRefusal::Read(ReadFailure::NoMemory)),
+                );
+            }
+            let name = held.name.clone();
+            self.held.push(held);
+            LoadAnswer::Asks { name, asked }
         }
     }
 
@@ -256,16 +346,14 @@ mod program {
                 alloc::format!("The clipboard's drawing could not be handed over: {failure}")
             })
             .and_then(|()| {
-                read_drawing(
-                    sandbox,
-                    bytes.len() as u64,
-                    &ReadAccess::default(),
-                    &mut Ids::new(),
-                )
-                .map_err(|failure| alloc::format!("The clipboard holds no drawing: {failure}"))
+                open_drawing(sandbox, bytes.len() as u64, None, false, &mut Ids::new())
+                    .map_err(|failure| alloc::format!("The clipboard holds no drawing: {failure}"))
             });
         sandbox.release();
-        read.map(|read| read.drawing)
+        match read? {
+            drawedit::Opening::Read(read) => Ok(read.drawing),
+            drawedit::Opening::Pages { .. } => Err(String::from("The clipboard holds no drawing")),
+        }
     }
 
     /// The picture `handle` holds, decoded in the sandbox and made a picture
@@ -300,32 +388,24 @@ mod program {
         })
     }
 
-    fn serve_load(sandbox: &mut Reader, job: &mut Option<LoadJob>) -> Option<LoadReply> {
+    fn serve_load(loader: &mut Loader, job: &mut Option<LoadJob>) -> Option<LoadReply> {
         let LoadJob { stamp, work } = job.take()?;
         let answer = match work {
-            LoadWork::Open {
-                handle,
-                name,
+            LoadWork::Open { handle, name } => loader.open(stamp, handle, name),
+            LoadWork::Answer { name, given } => loader
+                .answer(stamp, given)
+                .unwrap_or(LoadAnswer::Gone { name }),
+            LoadWork::PageSize(page) => LoadAnswer::PageSize {
                 page,
-                password,
-            } => match open(sandbox, &handle, page, password.as_deref()) {
-                Opened::Read(read) => LoadAnswer::Opened {
-                    read,
-                    recorded: tairix_browse::recorded_filetype_of(&handle),
-                    handle,
-                    name,
-                },
-                Opened::Asks(asked) => LoadAnswer::Asks {
-                    handle,
-                    name,
-                    // A password asked again is not kept.
-                    password: password.filter(|_| matches!(asked, Asked::Page { .. })),
-                    asked,
-                },
+                size: loader.page_size(stamp, page),
             },
-            LoadWork::Paste(bytes) => LoadAnswer::Pasted(paste(sandbox, &bytes)),
+            LoadWork::Forget => {
+                drop(loader.take(stamp));
+                return None;
+            }
+            LoadWork::Paste(bytes) => LoadAnswer::Pasted(paste(&mut loader.sandbox, &bytes)),
             LoadWork::Place { handle, name, at } => LoadAnswer::Placed {
-                placed: place(sandbox, &handle),
+                placed: place(&mut loader.sandbox, &handle),
                 name,
                 at,
             },
@@ -517,7 +597,10 @@ mod program {
 
     struct Draw {
         loader: Arc<LoadWorker>,
-        _loader_guard: WorkerGuard<Reader, Option<LoadJob>, Option<LoadReply>, LoadDesk>,
+        _loader_guard: WorkerGuard<Loader, Option<LoadJob>, Option<LoadReply>, LoadDesk>,
+        /// The windows whose kept PDF is to be let go once the loader has
+        /// room for the asking.
+        owed: Vec<Stamp>,
         renderer: Arc<RenderWorker>,
         _renderer_guard: WorkerGuard<Pool, RenderAsk, RenderAnswer, RenderDesk>,
         /// The settings in force, the ones on screen, and what the store said.
@@ -583,36 +666,69 @@ mod program {
         }
     }
 
-    /// What a PDF's question is asked for: the window loading it, its file,
-    /// and the password already given.
+    /// What a PDF's question is asked for: the window loading it, and the
+    /// document's name.
     struct Ticket {
         stamp: Stamp,
-        handle: Arc<Handle>,
         name: String,
-        password: Option<WipedBuf>,
+    }
+
+    impl Draw {
+        /// Let the PDF the loader keeps for `stamp`'s window go, now or once
+        /// the loader has room for the asking, answering whether the asking
+        /// ran here.
+        fn forget(&mut self, stamp: Stamp) -> bool {
+            let job = LoadJob {
+                stamp,
+                work: LoadWork::Forget,
+            };
+            if let Ok(answered) = self.loader.submit(Some(job)) {
+                return answered;
+            }
+            if !fallible::push(&mut self.owed, stamp) {
+                app::report(APP_NAME, "a document's reader could not be let go");
+            }
+            false
+        }
+    }
+
+    /// Let the PDF the loader keeps for `stamp`'s window go.
+    fn forget(host: &mut Host<Draw>, stamp: Stamp) {
+        let answered = host.app.forget(stamp);
+        host.note_answered(answered);
+    }
+
+    /// Ask again to let go of what the loader had no room to be asked to.
+    fn forget_owed(host: &mut Host<Draw>) {
+        for stamp in core::mem::take(&mut host.app.owed) {
+            forget(host, stamp);
+        }
     }
 
     fn adopt_load(host: &mut Host<Draw>, reply: LoadReply) {
         let Some(index) = host.showing(reply.stamp) else {
+            // What the loader keeps for a window that has gone goes too.
+            if matches!(reply.answer, LoadAnswer::Asks { .. }) {
+                forget(host, reply.stamp);
+            }
             return;
         };
         match reply.answer {
-            LoadAnswer::Asks {
-                handle,
-                name,
-                asked,
-                password,
-            } => {
+            LoadAnswer::Asks { name, asked } => {
                 let ticket = Ticket {
                     stamp: reply.stamp,
-                    handle,
                     name: name.clone(),
-                    password,
                 };
                 let question = DrawWindow::OpenPdf(OpenPdf::new(&name, asked, ticket));
+                // A window refused is said by the host, in an alert of its own.
                 if host.open_app_window(question, Some(index)).is_none() {
-                    host.not_opened(index, &name, &"there is no room to ask how to open it");
+                    forget(host, reply.stamp);
+                    host.not_wanted(index);
                 }
+            }
+            LoadAnswer::PageSize { page, size } => sized(host, reply.stamp, page, size),
+            LoadAnswer::Gone { name } => {
+                host.not_opened(index, &name, &"the reader that opened it has stopped");
             }
             LoadAnswer::Opened {
                 handle,
@@ -678,7 +794,10 @@ mod program {
         fn start(desktop: &Desktop, set: u64) -> Result<Self, i32> {
             let loader = LoadWorker::queued(
                 serve_load,
-                ParserSandbox::new(RtLauncher::own_binary(WORKER_MEMORY), tairix_rt::LogSink),
+                Loader {
+                    sandbox: reader(),
+                    held: Vec::new(),
+                },
                 WorkerWake::create(),
                 0,
             );
@@ -722,6 +841,7 @@ mod program {
             Ok(Self {
                 loader,
                 _loader_guard: loader_guard,
+                owed: Vec::new(),
                 renderer,
                 _renderer_guard: renderer_guard,
                 preferences: Publication::new(preferences),
@@ -807,9 +927,25 @@ mod program {
             self.renderer.shrink(2);
         }
 
+        /// An answer to a PDF's question withdrawn still lets the PDF go,
+        /// and letting one go is never withdrawn.
         fn withdraw(&mut self, window: u64) {
-            self.loader
-                .retain_waiting(|job| job.as_ref().is_none_or(|job| job.stamp.window() != window));
+            let mut answered = Vec::new();
+            self.loader.retain_waiting(|job| {
+                let Some(job) = job.as_ref().filter(|job| job.stamp.window() == window) else {
+                    return true;
+                };
+                match job.work {
+                    LoadWork::Forget => true,
+                    // Run for nothing where it cannot be noted, but never
+                    // leaving its worker kept.
+                    LoadWork::Answer { .. } => !fallible::push(&mut answered, job.stamp),
+                    _ => false,
+                }
+            });
+            for stamp in answered {
+                self.forget(stamp);
+            }
             self.renderer.retain_waiting(|job| {
                 job.as_ref()
                     .is_none_or(|(stamp, _)| stamp.window() != window)
@@ -830,8 +966,6 @@ mod program {
                 work: LoadWork::Open {
                     handle,
                     name: name.clone(),
-                    page: None,
-                    password: None,
                 },
             };
             match host.app.loader.submit(Some(job)) {
@@ -847,6 +981,7 @@ mod program {
                     adopt_load(host, reply);
                 }
             });
+            forget_owed(host);
             let renderer = Arc::clone(&host.app.renderer);
             renderer.collect_landed(|answer| {
                 if let Some((stamp, drawn)) = answer {
@@ -898,16 +1033,14 @@ mod program {
         fn app_request(host: &mut Host<Self>, index: usize, request: DrawWindowAsk<Ticket>) {
             match request {
                 DrawWindowAsk::Settings(request) => settings_asked(host, request),
-                DrawWindowAsk::OpenPdf(answered) => {
+                DrawWindowAsk::OpenPdf(Answered::Size(page)) => size_asked(host, index, page),
+                DrawWindowAsk::OpenPdf(Answered::Open { ticket, given }) => {
                     host.close_app_window(index);
-                    match answered {
-                        Answered::Open {
-                            ticket,
-                            page,
-                            password,
-                        } => open_answered(host, ticket, page, password),
-                        Answered::Cancelled(ticket) => turned_down(host, &ticket),
-                    }
+                    open_answered(host, &ticket, given);
+                }
+                DrawWindowAsk::OpenPdf(Answered::Cancelled(ticket)) => {
+                    host.close_app_window(index);
+                    turned_down(host, &ticket);
                 }
             }
         }
@@ -1119,39 +1252,74 @@ mod program {
         }
     }
 
-    /// Open the PDF `ticket` is for as its question was answered: at `page`
-    /// where one was chosen, with `password` where one was given, else the
-    /// one given before.
-    fn open_answered(
-        host: &mut Host<Draw>,
-        ticket: Ticket,
-        page: Option<u32>,
-        password: Option<WipedBuf>,
-    ) {
+    /// Open the PDF `ticket` is for as its question was answered, with
+    /// `given`: the loader keeps it, so nothing is read or handed over again.
+    fn open_answered(host: &mut Host<Draw>, ticket: &Ticket, given: Given) {
         let Some(index) = host.showing(ticket.stamp) else {
+            forget(host, ticket.stamp);
             return;
         };
-        let name = ticket.name.clone();
         let job = LoadJob {
             stamp: ticket.stamp,
-            work: LoadWork::Open {
-                handle: ticket.handle,
-                name: ticket.name,
-                page,
-                password: password.or(ticket.password),
+            work: LoadWork::Answer {
+                name: ticket.name.clone(),
+                given,
             },
         };
-        match host.app.loader.submit(Some(job)) {
-            Ok(answered) => host.note_answered(answered),
-            Err(_) => host.not_opened(index, &name, &ReadFailure::NoMemory),
+        if let Ok(answered) = host.app.loader.submit(Some(job)) {
+            host.note_answered(answered);
+            return;
         }
+        forget(host, ticket.stamp);
+        host.not_opened(index, &ticket.name, &ReadFailure::NoMemory);
     }
 
-    /// The PDF `ticket` is for was turned down: its window is given up.
+    /// The PDF `ticket` is for was turned down: the loader lets it go, and
+    /// its window is given up.
     fn turned_down(host: &mut Host<Draw>, ticket: &Ticket) {
+        forget(host, ticket.stamp);
         if let Some(index) = host.showing(ticket.stamp) {
             host.not_wanted(index);
         }
+    }
+
+    /// The question in app window `index` wants the size of page `page`,
+    /// counting from 0.
+    fn size_asked(host: &mut Host<Draw>, index: usize, page: u32) {
+        let Some(stamp) = host.app_windows[index]
+            .view
+            .question()
+            .and_then(OpenPdf::ticket)
+            .map(|ticket| ticket.stamp)
+        else {
+            return;
+        };
+        let job = LoadJob {
+            stamp,
+            work: LoadWork::PageSize(page),
+        };
+        match host.app.loader.submit(Some(job)) {
+            Ok(answered) => host.note_answered(answered),
+            Err(_) => sized(host, stamp, page, None),
+        }
+    }
+
+    /// Page `page`'s size reached the question `stamp`'s window asks, or
+    /// could not be had.
+    fn sized(host: &mut Host<Draw>, stamp: Stamp, page: u32, size: Option<(f64, f64)>) {
+        let asking = host.app_windows.iter().position(|window| {
+            window
+                .view
+                .question()
+                .and_then(OpenPdf::ticket)
+                .is_some_and(|ticket| ticket.stamp == stamp)
+        });
+        let Some(index) = asking else {
+            return;
+        };
+        let window = &mut host.app_windows[index];
+        let outcome = window.view.sized(page, size, &mut window.damage);
+        host.apply_app(index, outcome);
     }
 
     /// Hand `job`, the settings write owed now, to the writer, and take in

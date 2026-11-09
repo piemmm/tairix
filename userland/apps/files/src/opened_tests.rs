@@ -59,7 +59,7 @@ fn a_volume_is_unmounted_once_no_window_shows_it() {
         "asked once, not again while its answer is on its way"
     );
     opened.landed(GAME, Ok(()), NOW);
-    opened.released();
+    opened.child_ended(true);
     assert_eq!(
         asked(&mut opened, showing(&[]), none_lost),
         None,
@@ -96,7 +96,7 @@ fn a_volume_in_use_is_asked_again_ever_more_rarely() {
     };
     assert_eq!(at(&mut opened, 0), Some(GAME));
     opened.landed(GAME, Err(Errno::Busy), 0);
-    assert_eq!(opened.retry_at(), Some(FIRST_RETRY_NS));
+    assert_eq!(opened.retry_at(true, none_lost), Some(FIRST_RETRY_NS));
     for now in [1, FIRST_RETRY_NS - 1] {
         assert_eq!(
             at(&mut opened, now),
@@ -107,11 +107,11 @@ fn a_volume_in_use_is_asked_again_ever_more_rarely() {
     assert_eq!(at(&mut opened, FIRST_RETRY_NS), Some(GAME));
     opened.landed(GAME, Err(Errno::Busy), FIRST_RETRY_NS);
     assert_eq!(
-        opened.retry_at(),
+        opened.retry_at(true, none_lost),
         Some(FIRST_RETRY_NS * 3),
         "the second wait is twice the first"
     );
-    opened.released();
+    opened.child_ended(true);
     assert_eq!(
         at(&mut opened, FIRST_RETRY_NS + 1),
         Some(GAME),
@@ -121,7 +121,7 @@ fn a_volume_in_use_is_asked_again_ever_more_rarely() {
     let mut longest = 0;
     for _ in 0..32 {
         opened.landed(GAME, Err(Errno::Busy), now);
-        let retry = opened.retry_at().expect("waiting");
+        let retry = opened.retry_at(true, none_lost).expect("waiting");
         longest = longest.max(retry - now);
         now = retry;
         assert_eq!(at(&mut opened, now), Some(GAME));
@@ -226,8 +226,81 @@ fn a_refusal_the_user_was_told_of_is_not_asked_about_again() {
         Some("game")
     );
     opened.landed(GAME, Err(Errno::DeviceFault), NOW);
-    opened.released();
+    opened.child_ended(true);
     assert_eq!(asked(&mut opened, showing(&[]), none_lost), None);
+}
+
+/// A volume the sweep would pass over gives the loop no time to wake at: one
+/// lost, one waiting behind an unmount on its way, and every one while
+/// unmounting is off.
+///
+/// Regression: a lost volume found in use kept its retry time, already past,
+/// as the loop's next deadline, so the loop turned without parking for as
+/// long as the volume stayed lost.
+#[test]
+fn a_volume_the_sweep_would_pass_over_names_no_retry() {
+    let mut opened = OpenedVolumes::new();
+    opened.opened(GAME, "game").expect("noted");
+    opened.opened(DISC, "disc").expect("noted");
+    let away = showing(&[]);
+    for _ in 0..2 {
+        let finished = opened
+            .sweep((0, true), &away, none_lost)
+            .map(|f| f.volume_id);
+        let id = finished.expect("one is asked");
+        opened.landed(id, Err(Errno::Busy), 0);
+    }
+    assert_eq!(opened.retry_at(true, none_lost), Some(FIRST_RETRY_NS));
+    assert_eq!(opened.retry_at(false, none_lost), None, "unmounting off");
+    let lost = |_: &[u8; 16]| true;
+    assert_eq!(opened.retry_at(true, lost), None, "every volume lost");
+    let disc_lost = |id: &[u8; 16]| *id == DISC;
+    assert_eq!(
+        opened.retry_at(true, disc_lost),
+        Some(FIRST_RETRY_NS),
+        "the other still waits"
+    );
+    let asked_now = opened
+        .sweep((FIRST_RETRY_NS, true), &away, none_lost)
+        .map(|f| f.volume_id);
+    assert!(asked_now.is_some());
+    assert_eq!(
+        opened.retry_at(true, none_lost),
+        None,
+        "an unmount on its way lands as a turn of its own"
+    );
+}
+
+/// The end of a child that was not an application the file manager launched
+/// — one of its own decoders — asks nothing about a volume found in use; an
+/// application's end does.
+///
+/// Regression: every reaped child counted as a release, so under pressure each
+/// decoder's end re-asked every in-use volume to unmount.
+#[test]
+fn only_a_launched_application_ending_asks_about_volumes_in_use() {
+    let mut opened = OpenedVolumes::new();
+    opened.opened(GAME, "game").expect("noted");
+    let away = showing(&[]);
+    let asked_at = |opened: &mut OpenedVolumes, now: u64| {
+        opened
+            .sweep((now, true), &away, none_lost)
+            .map(|f| f.volume_id)
+    };
+    assert_eq!(asked_at(&mut opened, 0), Some(GAME));
+    opened.landed(GAME, Err(Errno::Busy), 0);
+    opened.child_ended(false);
+    assert_eq!(
+        asked_at(&mut opened, 1),
+        None,
+        "a decoder's end asks nothing"
+    );
+    opened.child_ended(true);
+    assert_eq!(
+        asked_at(&mut opened, 1),
+        Some(GAME),
+        "an application's end asks"
+    );
 }
 
 #[test]

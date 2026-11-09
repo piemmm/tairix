@@ -43,7 +43,9 @@ use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, file_report, CodeWindow, DecodeService, Isa, Summarise,
 };
-use tairix_sandbox::drawedit::{read_drawing, read_pages, read_placed, Access, DrawEditService};
+use tairix_sandbox::drawedit::{
+    open_drawing, page_size, read_page, read_placed, DrawEditService, Opening,
+};
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imageedit::{
@@ -858,12 +860,9 @@ fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, Silent
     };
     let _ = read_kept(hostile, &kept, &mut Vec::new());
     let _ = close_edit(hostile);
-    let _ = read_drawing(
-        hostile,
-        handed,
-        &Access::default(),
-        &mut tairix_drawing::Ids::new(),
-    );
+    let _ = open_drawing(hostile, handed, None, true, &mut tairix_drawing::Ids::new());
+    let _ = page_size(hostile, 0);
+    let _ = read_page(hostile, handed, 0, &mut tairix_drawing::Ids::new());
     let _ = read_placed(hostile, handed);
 }
 
@@ -1144,18 +1143,20 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     for document in [mutated.as_slice(), &mutated[..cut], noise] {
         if send_document(honest, document).is_ok() {
             let handed = document.len() as u64;
-            if let Ok(pages) = read_pages(honest, handed, &Access::default()) {
-                assert!(
-                    pages.count >= 1 && pages.sizes.len() <= pages.count as usize,
-                    "a page list believed holds"
-                );
-            }
-            if let Ok(read) = read_drawing(
-                honest,
-                handed,
-                &Access::default(),
-                &mut tairix_drawing::Ids::new(),
-            ) {
+            let opening = open_drawing(honest, handed, None, true, &mut tairix_drawing::Ids::new());
+            let read = match opening {
+                Ok(Opening::Pages { count }) => {
+                    assert!(count > 1, "a document kept open believed holds");
+                    let page = u32::try_from(rng.below(count as usize + 1)).unwrap_or(0);
+                    if let Ok((width, height)) = page_size(honest, page) {
+                        assert!(width > 0.0 && height > 0.0, "a page size believed holds");
+                    }
+                    read_page(honest, handed, page, &mut tairix_drawing::Ids::new())
+                }
+                Ok(Opening::Read(read)) => Ok(read),
+                Err(failure) => Err(failure),
+            };
+            if let Ok(read) = read {
                 assert!(
                     tairix_drawing::svg::write(&read.drawing).is_ok(),
                     "a drawing believed writes"
@@ -1166,13 +1167,17 @@ fn fuzz_drawedit_iteration<L: Launcher, F: Launcher>(
     let honest_bytes = rng.pick(DRAWINGS).as_bytes();
     if send_document(flipping, honest_bytes).is_ok() {
         let handed = honest_bytes.len() as u64;
-        let _ = read_pages(flipping, handed, &Access::default());
-        let _ = read_drawing(
+        let opening = open_drawing(
             flipping,
             handed,
-            &Access::default(),
+            None,
+            true,
             &mut tairix_drawing::Ids::new(),
         );
+        if let Ok(Opening::Pages { count, .. }) = opening {
+            let _ = page_size(flipping, count - 1);
+            let _ = read_page(flipping, handed, count - 1, &mut tairix_drawing::Ids::new());
+        }
     }
     // A picture to place: mutated for the honest worker, honest for one
     // turning hostile.

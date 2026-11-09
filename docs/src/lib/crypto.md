@@ -108,11 +108,13 @@ and none offered as a general digest or cipher:
   `pdf_legacy_file_key` (revisions 2 to 4, Algorithms 2 and 4 to 7: a
   password tried as the user's, then as the owner's), `pdf_object_key`
   (Algorithm 1), `pdf_modern_file_key` (revisions 5 and 6, Algorithm 2.A over
-  Algorithm 2.B's hash, whose 64-fold input is streamed through AES-128-CBC a
-  block at a time rather than held, the password — prepared by SASLprep in
-  `lib/pdf` first — cut to the 127 bytes those revisions read),
-  `pdf_rc4_decrypt` and `pdf_aes_decrypt` (in place, after
-  the 16-byte IV, whole blocks only — a final part block is dropped, as other
+  Algorithm 2.B's hash, each round's 64-fold input built once in a buffer of
+  at most 15 296 bytes on the stack, encrypted with AES-128-CBC as whole
+  blocks, hashed in one update and wiped, the password — prepared by SASLprep
+  in `lib/pdf` first — cut to the 127 bytes those revisions read),
+  `pdf_rc4_decrypt` and `pdf_aes_decrypt` (in place; the latter takes the
+  16-byte IV apart from the ciphertext and answers the plaintext's length at
+  its front, whole blocks only — a final part block is dropped, as other
   readers drop it — padding left out where well formed). A key function
   answers `PdfUnusable` for entries no password could unlock — a revision it
   does not define, a key length out of range, an `/O` or `/U` too short — so a

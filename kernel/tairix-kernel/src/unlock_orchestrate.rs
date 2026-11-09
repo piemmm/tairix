@@ -37,7 +37,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::HwNode;
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
-use tairix_drv_fs_arxfs::{Keying, ARXFS};
+use tairix_drv_fs_arxfs::{IntegrityLog, Keying, ARXFS};
 use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
@@ -530,7 +530,9 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             );
             return None;
         };
-        let fs = fs.with_cluster_cache(cache);
+        let fs = fs
+            .with_cluster_cache(cache)
+            .with_integrity_log(IntegrityLog::new(self.audit));
         // The root backs the system's writable grafts, so it holds the whole
         // system reserve: the system keeps writing once users fill it.
         let Ok(fs) = fs.with_system_reserve(&SYSTEM_WRITE_SET) else {
@@ -1045,7 +1047,8 @@ fn serve_driver_store<B: Block + 'static>(
     // returns, so the window stays borrowed for the life of the system.
     let outcome = {
         let mut window = store.window();
-        with_system_volume(&mut window, audit, system_cache, |volume| {
+        let integrity = Some(IntegrityLog::new(audit));
+        with_system_volume(&mut window, audit, system_cache, integrity, |volume| {
             crate::driver_store_server::serve_system_store(volume, &serve_ctx, &binder, coop, audit)
         })
     };

@@ -5634,3 +5634,25 @@ fn the_band_is_drawn_where_it_lies() {
         "nothing outside the area"
     );
 }
+
+/// A document that would not open, and a folder or shortcut the desktop could
+/// not make, are refused naming them and saying why.
+#[test]
+fn an_unopened_document_and_an_unmade_item_are_refused_saying_why() {
+    let unopened = GestureRefusal::unopened("plan.txt", Errno::PermissionDenied);
+    assert_eq!(
+        unopened.headline(),
+        tairix_util::utf8::refusal_headline("plan.txt", "opened")
+    );
+    assert!(
+        unopened.detail().contains("permission denied"),
+        "{}",
+        unopened.detail()
+    );
+    let unmade = GestureRefusal::unmade("/Users/ann/Desktop/New folder", Errno::AlreadyExists);
+    assert_eq!(
+        unmade.headline(),
+        tairix_util::utf8::refusal_headline("New folder", "made")
+    );
+    assert!(unmade.line().starts_with("desktop: "));
+}

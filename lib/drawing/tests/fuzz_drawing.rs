@@ -532,7 +532,7 @@ fn reading_a_draw_file_never_panics_and_its_copy_reads_back() {
         let file = generated_draw(&mut rng);
         draw_read_never_panics(&file, &mut rng);
         let _ = tairix_drawing::read(
-            &file,
+            file,
             &tairix_drawing::pdf::Request {
                 page: 0,
                 password: None,

@@ -121,7 +121,10 @@ compresses, seals, then checksums; the read path verifies the checksum,
 opens the seal, decompresses, then verifies the hash. Each layer fails closed to a
 `DriverError` and is kept
 internally distinct (`integrity::DataFault` — `Physical`/`Seal`/`Logical`),
-never a panic (`AGENTS.md` §5.4 / §2.9). Identical plaintext shares one logical
+never a panic (`AGENTS.md` §5.4 / §2.9); a block the device could not read
+fails with the device's own error instead. A production read that finds a
+block corrupt is recorded on the mount's `IntegrityLog`
+(`ARXFS::with_integrity_log`, `DATA_FAULT`) with the block and the layer. Identical plaintext shares one logical
 hash — the seam Stage 7 dedupe keys on (`arxfs-spec.md` §9). The hash uses
 `lib/crypto`'s audited SHA-256 (`AGENTS.md` §2.12 — never hand-rolled; the
 spec names BLAKE3-256 but `lib/crypto` ships only the audited RustCrypto

@@ -131,20 +131,27 @@ pub fn serve<C: Channel, S: Service>(chan: &mut C, service: &mut S) -> ServeEnd 
 
 /// Serve one request read into `request`, answering how serving ends if it
 /// does. The request is wiped once handled: one may carry a secret, such as
-/// a document's password, which the next reuse of the buffer or its growth
-/// must not leave behind.
+/// a document's password. Its own bytes are all that need it — the buffer
+/// grows before a request is read into it and every earlier request was
+/// wiped the same way — so the cost follows the request, not the largest
+/// buffer an upload ever left.
 fn serve_one<C: Channel, S: Service>(
     chan: &mut C,
     service: &mut S,
     request: &mut Vec<u8>,
 ) -> Option<ServeEnd> {
-    match recv_frame_into(chan, request) {
-        Ok(true) => {}
-        Ok(false) => return Some(ServeEnd::Finished),
-        Err(err) => return Some(ServeEnd::Failed(err)),
+    let end = match recv_frame_into(chan, request) {
+        Ok(true) => None,
+        Ok(false) => Some(ServeEnd::Finished),
+        Err(err) => Some(ServeEnd::Failed(err)),
+    };
+    if end.is_some() {
+        // A request cut short may hold part of a secret too.
+        tairix_util::secret::wipe(request);
+        return end;
     }
     let reply = service.handle(request);
-    tairix_util::secret::wipe_block(request);
+    tairix_util::secret::wipe(request);
     send_frame(chan, &reply).err().map(ServeEnd::Failed)
 }
 
@@ -248,6 +255,51 @@ mod tests {
             serve_one(&mut chan, &mut Reverser, &mut request),
             Some(ServeEnd::Finished)
         );
+    }
+
+    /// A short request after a long one is read into the room the long one
+    /// left, wiped when it was handled, and is wiped in turn.
+    #[test]
+    fn a_short_request_after_a_long_one_is_wiped_too() {
+        let mut script = Loopback {
+            input: Vec::new(),
+            at: 0,
+            output: Vec::new(),
+        };
+        send_frame(&mut script, &[b'S'; 4096]).expect("frame");
+        send_frame(&mut script, b"pin").expect("frame");
+        let mut chan = Loopback {
+            input: script.output,
+            at: 0,
+            output: Vec::new(),
+        };
+        let mut request = Vec::new();
+        assert_eq!(serve_one(&mut chan, &mut Reverser, &mut request), None);
+        let room = request.capacity();
+        assert!(request.iter().all(|&byte| byte == 0));
+        assert_eq!(serve_one(&mut chan, &mut Reverser, &mut request), None);
+        assert_eq!(request.capacity(), room, "the short one grew nothing");
+        assert_eq!(request.len(), 3);
+        assert!(request.iter().all(|&byte| byte == 0));
+    }
+
+    /// Regression: a request cut short by the parent's end was dropped
+    /// unwiped, part of a password with it.
+    #[test]
+    fn a_request_cut_short_is_wiped_too() {
+        let mut input = 8u32.to_le_bytes().to_vec();
+        input.extend(b"pass");
+        let mut chan = Loopback {
+            input,
+            at: 0,
+            output: Vec::new(),
+        };
+        let mut request = Vec::new();
+        assert!(matches!(
+            serve_one(&mut chan, &mut Reverser, &mut request),
+            Some(ServeEnd::Failed(ProtoError::PeerClosed))
+        ));
+        assert!(request.iter().all(|&byte| byte == 0));
     }
 
     #[test]

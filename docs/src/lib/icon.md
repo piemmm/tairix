@@ -471,11 +471,14 @@ The decode cache is budgeted, though, so it can be asked to hold more than it
 will, and a decode it *refuses* must not be offered again: the repaint its
 landing drove would ask, the answer would be refused again, and every icon on
 screen would be read and decoded every frame, precisely when the machine is
-short of the memory that would have held them. The cache says so
-(`ArtworkResolver::declined`) and the key is held as declined until
-`ArtworkDesk::retry_declined` re-offers it on the pressure band's own wake,
-naming it in the next `Landed`: what an item draws without it is already on
-screen, so nothing else would make that item ask again.
+short of the memory that would have held them. The cache says so, with the
+bytes it could not keep (`ArtworkResolver::declined`), and the key is held as
+declined until `ArtworkDesk::retry_declined` re-offers it — on the pressure
+band's own wake or an output's change of size, and only where the cache now
+`holds` that many bytes (`ArtworkCache::holds`), since a band that did not
+widen the room would only refuse it again after a whole read and decode. A
+re-offered key is named in the next `Landed`: what an item draws without it is
+already on screen, so nothing else would make that item ask again.
 
 A pending tier **stops** the walk rather than falling through, because whether
 a later tier is reached at all depends on what this one turns out to be. A

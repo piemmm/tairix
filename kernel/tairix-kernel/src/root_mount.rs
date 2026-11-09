@@ -35,7 +35,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use tairix_abi::{DriverError, Errno};
 use tairix_drv_fs_arxfs::{
-    Keying, UnlockDescriptor, VolumeKey, VolumeProtection, ARXFS, ROOT_UNLOCK_NAME,
+    IntegrityLog, Keying, UnlockDescriptor, VolumeKey, VolumeProtection, ARXFS, ROOT_UNLOCK_NAME,
     UNLOCK_DESCRIPTOR_LEN,
 };
 use tairix_drv_fs_fat32::Fat32;
@@ -699,12 +699,15 @@ pub fn prefetch_root<Disk: Block>(mut disk: Disk) {
 /// * `audit` — the sink every decision is logged through. No secret is consumed or logged.
 /// * `cache` — the volume's transform cache, shared with its other mounts, for
 ///   a window that reads bundles; `None` for one that only lists.
+/// * `integrity` — where a window that reads bundles records the data blocks
+///   it finds corrupt; `None` for one that only lists.
 /// * `f` — the continuation run against the mounted read-only `/System`
 ///   volume.
 pub fn with_system_volume<Disk: Block, R>(
     disk: &mut Disk,
     audit: &dyn Sink,
     cache: Option<SharedClusterCache>,
+    integrity: Option<IntegrityLog>,
     f: impl FnOnce(&mut dyn RootVolume) -> R,
 ) -> Option<R> {
     let Ok(table) = parse_partition_table(&mut *disk) else {
@@ -726,6 +729,9 @@ pub fn with_system_volume<Disk: Block, R>(
     };
     if let Some(cache) = cache {
         system = system.with_cluster_cache(alloc::boxed::Box::new(cache));
+    }
+    if let Some(integrity) = integrity {
+        system = system.with_integrity_log(integrity);
     }
     // Confirm it is a real `/System` volume: its root carries the
     // `Drivers` store directory the continuation reads.
@@ -3671,7 +3677,7 @@ mod tests {
         let mut disk = success_disk();
         let sink = RecordingSink::new();
 
-        let found_store = with_system_volume(&mut disk, &sink, None, |volume| {
+        let found_store = with_system_volume(&mut disk, &sink, None, None, |volume| {
             let root = volume.root();
             volume.lookup(root, b"Drivers").is_ok()
         });
@@ -3694,7 +3700,7 @@ mod tests {
         let mut disk = FatVecBlock::new(64);
         let sink = RecordingSink::new();
 
-        let ran = with_system_volume(&mut disk, &sink, None, |_volume| {
+        let ran = with_system_volume(&mut disk, &sink, None, None, |_volume| {
             panic!("the continuation must not run when no /System volume mounts");
         });
 

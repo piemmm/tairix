@@ -301,14 +301,22 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
-        match producer.wait(ProcessId(cur), TaskId(cur), pid, flags) {
+        // The status is copied out to the parent's `status` pointer through
+        // the validated boundary before the child is taken, exactly as the
+        // production `wait` handler does, so a refused copy leaves it
+        // reportable.
+        let mut deliver = |reported: tairix_kernel_core::WaitedChild| {
+            if copy_status_to_parent(args[1], reported.status) {
+                Ok(())
+            } else {
+                Err(Errno::BadAddress)
+            }
+        };
+        match producer.wait(ProcessId(cur), TaskId(cur), pid, flags, &mut deliver) {
+            Err(Errno::BadAddress) => {
+                qemu_exit::exit_failure(FAIL_COPY_STATUS);
+            }
             Ok(reported) => {
-                // Copy the typed status record out to the parent's `status`
-                // pointer through the validated boundary, exactly as the
-                // production `wait` handler does.
-                if !copy_status_to_parent(args[1], reported.status) {
-                    qemu_exit::exit_failure(FAIL_COPY_STATUS);
-                }
                 match reported.status {
                     // The SP9 half: the stop was observed without a reap.
                     WaitStatus::Stopped(Signal::Stop) => {
@@ -568,7 +576,9 @@ fn drive_intake_saga(wait_producer: &KernelProcessWait<Aarch64Arch>) {
             let Ok(pid) = i64::try_from(intake_tid) else {
                 qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP);
             };
-            match wait_producer.poll(ProcessId(SUPERVISOR), pid, WaitFlags::NONBLOCK) {
+            match wait_producer.poll(ProcessId(SUPERVISOR), pid, WaitFlags::NONBLOCK, &mut |_| {
+                Ok(())
+            }) {
                 Ok(reported) => {
                     if reported.status
                         == WaitStatus::Exited(match Signal::Interrupt.termination_status() {

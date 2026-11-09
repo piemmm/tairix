@@ -1,6 +1,7 @@
 //! The lexer: every token kind, and its tolerance of what real files hold.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use super::{Lexer, Token};
 use crate::PdfError;
@@ -209,4 +210,20 @@ fn an_unterminated_string_is_refused() {
 #[test]
 fn the_end_of_the_data_is_no_token() {
     assert_eq!(Lexer::new(b"  % only a comment", 0).next(), Ok(None));
+}
+
+#[test]
+fn a_charged_lexer_spends_what_it_lexes_and_refuses_past_it() {
+    let allowance = Cell::new(10);
+    let mut lexer = Lexer::charged(b"12 (four) /Name", 0, &allowance);
+    assert_eq!(lexer.next(), Ok(Some(Token::Integer(12))));
+    assert_eq!(allowance.get(), 8);
+    assert_eq!(lexer.next(), Ok(Some(Token::String(b"four".to_vec()))));
+    assert_eq!(
+        allowance.get(),
+        1,
+        "the white space before a token is lexed with it"
+    );
+    assert_eq!(lexer.next(), Err(PdfError::TooComplex));
+    assert_eq!(allowance.get(), 1, "a refusal spends nothing");
 }

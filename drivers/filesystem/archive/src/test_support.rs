@@ -39,7 +39,7 @@ pub(crate) fn try_open(
         backing: 1 << 30,
         gauge: &Unpressured,
     };
-    Served::open(granted, read_only, budget).map(|opened| opened.fs)
+    Served::open(granted, read_only, budget, &tairix_log::DiscardSink).map(|opened| opened.fs)
 }
 
 /// The names `dir` lists, in order.

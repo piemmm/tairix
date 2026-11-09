@@ -2388,6 +2388,9 @@ pub trait SyscallHandlers {
     /// its reach is always asked for by name, and handing a delegation on
     /// can only narrow it.
     ///
+    /// `flags` holds [`GRANT_FILE_ONLY`](tairix_abi::GRANT_FILE_ONLY) to
+    /// delegate only a regular file; any other bit is refused.
+    ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
@@ -2398,6 +2401,7 @@ pub trait SyscallHandlers {
         _write_ceiling: u64,
         _recipient: u64,
         _recipient_len: usize,
+        _flags: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -5047,11 +5051,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // write-extent ceiling, which the handler checks against the
                 // descriptor's own access; args[2] is the non-null
                 // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
-                // recipient, and args[3] is its length in bytes.
+                // recipient, and args[3] is its length in bytes; args[4] is
+                // the flags, checked by the handler.
                 let fd = decode_u32(args.0[0]);
                 let recipient_len = decode_len(args.0[3])?;
                 self.handlers
-                    .fd_grant(caller, fd, args.0[1], args.0[2], recipient_len)
+                    .fd_grant(caller, fd, args.0[1], args.0[2], recipient_len, args.0[4])
             }
             SyscallNumber::FD_REDEEM => {
                 // args[0] is the grant handle minted to the calling task
@@ -7137,6 +7142,7 @@ mod tests {
             _write_ceiling: u64,
             _recipient: u64,
             _recipient_len: usize,
+            _flags: u64,
         ) -> SyscallResult {
             self.record("fd_grant");
             // Echo the descriptor so the reachability test can assert the

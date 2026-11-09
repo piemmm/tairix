@@ -54,10 +54,11 @@ use tairix_controls::{ControlState, SelectionState};
 use tairix_geometry::{Point, Rect};
 use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_theme::CursorKind;
-use tairix_util::utf8::shown;
+use tairix_util::utf8::{refusal_headline, shown};
 use tairix_window::{DragConclusion, Placement};
 use tairix_wm::{Compositor, InputEvent, Key, NamedKey, PointerButton, WindowId};
 
+use crate::desktop::GestureRefusal;
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
@@ -97,8 +98,8 @@ pub enum DesktopDrop {
     /// performs the drop.
     Window,
     /// The one file, on a window whose application answered it places it
-    /// there: the session opens it read-only and hands it over. Boxed: a name
-    /// is far wider than every other drop.
+    /// there: the session opens it read-only and hands it over, or says why it
+    /// could not. Boxed: a name is far wider than every other drop.
     Placed(Box<PlacedItem>),
 }
 
@@ -113,14 +114,49 @@ pub struct PlacedItem {
     pub name: DocumentName,
 }
 
+/// Why the one file a drag off the desktop placed in a window never reached
+/// that window's document.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PlaceRefused {
+    /// It could not be opened to be read, for this reason.
+    Unopened(Errno),
+    /// The window it was dropped on has since closed.
+    WindowClosed,
+    /// The window's application could not be handed it, for this reason.
+    Untaken(Errno),
+}
+
+impl PlacedItem {
+    /// The refusal the desktop states for the file not placed because of
+    /// `why`, under the headline any refused placement is stated under.
+    #[must_use]
+    pub fn refusal(&self, why: PlaceRefused) -> GestureRefusal {
+        let detail = match why {
+            PlaceRefused::Unopened(err) => crate::desktop::unopened_detail(err),
+            PlaceRefused::WindowClosed => {
+                String::from("The window it was dropped on has since closed.")
+            }
+            PlaceRefused::Untaken(Errno::NoSpace) => {
+                String::from("The window's application has too many files waiting for it.")
+            }
+            PlaceRefused::Untaken(err) => {
+                format!("The window's application could not be handed it ({err}).")
+            }
+        };
+        GestureRefusal::new(refusal_headline(self.name.as_str(), "placed"), detail)
+    }
+}
+
 /// What the window icons off the desktop are held over answered, since the
 /// pointer reached it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 struct OfferAnswers {
-    /// What a drop of the items there does, which the window performs.
-    items: Option<DropOperation>,
-    /// Whether a drop there places the one file.
-    places: bool,
+    /// The offer the window last answered for the items, and what a drop of
+    /// them at its point does, which the window performs.
+    items: Option<(u32, DropOperation)>,
+    /// The offer the window last answered, when it answered that a drop at
+    /// its point places the one file.
+    places: Option<u32>,
 }
 
 impl OfferAnswers {
@@ -128,8 +164,8 @@ impl OfferAnswers {
     /// is placed.
     const fn shown(self) -> Option<DropOperation> {
         match self.items {
-            Some(operation) => Some(operation),
-            None if self.places => Some(DropOperation::Copy),
+            Some((_, operation)) => Some(operation),
+            None if self.places.is_some() => Some(DropOperation::Copy),
             None => None,
         }
     }
@@ -813,6 +849,9 @@ enum Cargo {
         /// The other application's window offered the one file last and that
         /// offer's number, until it is told the offer ended.
         offered: Option<(u64, u32)>,
+        /// The offer that window last answered, when it answered that a drop
+        /// at its point places the file.
+        placing: Option<u32>,
         /// Whether a file offer, or its end, is owed another application's
         /// window.
         offer_owed: bool,
@@ -960,6 +999,7 @@ impl DesktopShell {
             items,
             drag: self.drag.drags,
             offered: None,
+            placing: None,
             offer_owed: false,
         };
         self.carry(compositor, wm, cargo)
@@ -1379,7 +1419,7 @@ impl DesktopShell {
         if !standing {
             return false;
         }
-        answers.items = verdict;
+        answers.items = verdict.map(|operation| (serial, operation));
         carried.shown = answers.shown();
         carried.answered = true;
         self.hold_drag_cursor(compositor);
@@ -1404,11 +1444,13 @@ impl DesktopShell {
         match &mut carried.cargo {
             Cargo::Items {
                 offered: Some((offered, _)),
+                placing,
                 ..
             } if standing
                 && *offered == window_id
                 && matches!(carried.over, DragSurface::AppWindow { window_id: over, .. } if over == window_id) =>
             {
+                *placing = places.then_some(serial);
                 carried.shown = places.then_some(DropOperation::Copy);
             }
             Cargo::Desktop {
@@ -1421,7 +1463,7 @@ impl DesktopShell {
                 && cargo.shown.openable()
                 && matches!(carried.over, DragSurface::Offer { window_id: over, .. } if over == window_id) =>
             {
-                answers.places = places;
+                answers.places = places.then_some(serial);
                 carried.shown = answers.shown();
             }
             _ => return false,
@@ -1667,8 +1709,9 @@ impl DesktopShell {
 
     /// Stop carrying, answering how it ended: where the pointer is if
     /// `dropped` and what is there takes the drag — a slot's application, or a
-    /// place whose last answer the pointer shows — and otherwise on nothing.
-    /// The slot it lit is latched dark for the caller's settle to paint.
+    /// place whose last answer the pointer shows, a file placed only where that
+    /// answer is for the point let go — and otherwise on nothing. The slot it
+    /// lit is latched dark for the caller's settle to paint.
     pub fn end_drag(&mut self, compositor: &mut Compositor, dropped: bool) -> Option<DragEnd> {
         let mut carried = self.drag.carried.take()?;
         self.drag.issued = carried.serial;
@@ -1677,10 +1720,14 @@ impl DesktopShell {
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
         self.cursor_mut().hold(None);
         self.refresh_cursor(compositor);
-        let (source, offered) = match carried.cargo {
+        let (source, offered, placing) = match carried.cargo {
             Cargo::Items {
-                source, offered, ..
-            } => (source, offered),
+                source,
+                offered,
+                placing,
+                offer_owed,
+                ..
+            } => (source, offered, placing.filter(|_| !offer_owed)),
             Cargo::Save { pick, offered, .. } => {
                 return Some(DragEnd::Save(save_end(
                     pick,
@@ -1699,6 +1746,11 @@ impl DesktopShell {
                 let DesktopCargo { shown, items } = *cargo;
                 let pointer = self.router().pointer();
                 let lead = (items.first().map(|item| item.path.as_str()), shown.first());
+                // Moved on since the last offer, nothing was offered where it is let go.
+                let answers = OfferAnswers {
+                    items: answers.items.filter(|_| !carried.owed),
+                    places: answers.places.filter(|_| !carried.owed),
+                };
                 let end = desktop_end(dropped, (&carried.over, answers), offered, (pointer, lead));
                 if end.dropped == DesktopDrop::Window {
                     if let Some(offer) = end.offer {
@@ -1718,16 +1770,18 @@ impl DesktopShell {
             }
             _ => None,
         };
-        // A window that answered it places the file has it placed; any other
-        // drop on it is its slot's.
-        let placed = match (dropped, &carried.over, carried.shown) {
+        // A window that answered the offer standing where the file is let go
+        // that it places it has it placed; any other drop on it is its slot's.
+        let placed = match (dropped, &carried.over, offered) {
             (
                 true,
                 &DragSurface::AppWindow {
                     window_id, x, y, ..
                 },
-                Some(DropOperation::Copy),
-            ) => Some(Placement { window_id, x, y }),
+                Some((offer, serial)),
+            ) if offer == window_id && placing == Some(serial) => {
+                Some(Placement { window_id, x, y })
+            }
             _ => None,
         };
         let offer = offered.map(|(window_id, serial)| ItemsOfferEnd {
@@ -1745,27 +1799,12 @@ impl DesktopShell {
             (true, Some(SlotAnswer::Refuses(refusal)), None) => Some(refusal.clone()),
             _ => None,
         };
-        let ended = match (placed, dropped, answer, &carried.over, carried.shown) {
-            (Some(placement), ..) => DragConclusion::Placed(placement),
-            (None, true, Some(SlotAnswer::Opens(target)), _, _) => {
-                DragConclusion::Application(target.clone())
-            }
-            (None, true, _, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
-                DragConclusion::Window {
-                    window_id,
-                    x,
-                    y,
-                    operation,
-                }
-            }
-            (None, true, _, DragSurface::Desktop { .. }, Some(operation)) => {
-                match carried.desktop_serial {
-                    Some(serial) => DragConclusion::Desktop { serial, operation },
-                    None => DragConclusion::Nothing,
-                }
-            }
-            _ => DragConclusion::Nothing,
-        };
+        let ended = items_conclusion(
+            (placed, dropped, answer),
+            &carried.over,
+            carried.shown,
+            carried.desktop_serial,
+        );
         Some(DragEnd::Items(ItemsEnd {
             source,
             ended,
@@ -1821,10 +1860,42 @@ fn save_end(
     }
 }
 
-/// How icons carried off the desktop ended over `over`, showing `shown`, the
+/// How carried items ended: `placed` where a window answered that a drop
+/// there places the file, opened by the slot application `answer` names where
+/// `dropped` on it, else dropped on the window or desktop under the pointer
+/// showing `shown`, and otherwise on nothing.
+fn items_conclusion(
+    (placed, dropped, answer): (Option<Placement>, bool, Option<&SlotAnswer>),
+    over: &DragSurface,
+    shown: Option<DropOperation>,
+    desktop_serial: Option<u32>,
+) -> DragConclusion {
+    match (placed, dropped, answer, over, shown) {
+        (Some(placement), ..) => DragConclusion::Placed(placement),
+        (None, true, Some(SlotAnswer::Opens(target)), _, _) => {
+            DragConclusion::Application(target.clone())
+        }
+        (None, true, _, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
+            DragConclusion::Window {
+                window_id,
+                x,
+                y,
+                operation,
+            }
+        }
+        (None, true, _, DragSurface::Desktop { .. }, Some(operation)) => match desktop_serial {
+            Some(serial) => DragConclusion::Desktop { serial, operation },
+            None => DragConclusion::Nothing,
+        },
+        _ => DragConclusion::Nothing,
+    }
+}
+
+/// How icons carried off the desktop ended over `over`, showing `answers`, the
 /// offer `offered` standing and the pointer at `pointer`: dropped on a window
 /// whose application took the offer standing there, that application performs
-/// the drop; back on the desktop, they are put down there; and anywhere else,
+/// the drop; on one that answered that offer places the one file, it is placed
+/// there; back on the desktop, they are put down there; and anywhere else,
 /// they stand where they stood.
 fn desktop_end(
     dropped: bool,
@@ -1836,15 +1907,22 @@ fn desktop_end(
     let (dropped, at) = match (dropped, over) {
         (true, DragSurface::Desktop { .. }) => (DesktopDrop::Desktop(pointer), None),
         (true, &DragSurface::Offer { window_id, x, y }) if standing(window_id) => {
+            let answered = |answered| offered.is_some_and(|(_, serial)| serial == answered);
             match (answers, path) {
                 (
                     OfferAnswers {
-                        items: Some(operation),
+                        items: Some((items, operation)),
                         ..
                     },
                     _,
-                ) => (DesktopDrop::Window, Some(OfferDrop { x, y, operation })),
-                (OfferAnswers { places: true, .. }, Some(path)) => (
+                ) if answered(items) => (DesktopDrop::Window, Some(OfferDrop { x, y, operation })),
+                (
+                    OfferAnswers {
+                        places: Some(places),
+                        ..
+                    },
+                    Some(path),
+                ) if answered(places) => (
                     DesktopDrop::Placed(Box::new(PlacedItem {
                         placement: Placement { window_id, x, y },
                         path: String::from(path),

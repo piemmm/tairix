@@ -4,5 +4,6 @@
 mod read;
 mod write;
 
-pub use read::{pages, read, recognised, Request};
+pub use read::{open, read, recognised, Opened, Request, MAX_PASSWORD_BYTES};
+pub use tairix_pdf::Refused;
 pub use write::{pdf, Pdf};

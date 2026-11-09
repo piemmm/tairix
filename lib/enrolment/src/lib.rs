@@ -8,7 +8,7 @@
 //! what to bring up. The administrator's layer, [`EnrolmentOverride`], is
 //! `/System/Settings/Services/overrides` and holds only what was changed from
 //! the image, so an update's new defaults reach everything the administrator
-//! has not spoken about. [`effective`] is the one fold of the two.
+//! has not spoken about. [`enabled`] is the one precedence of the two.
 //!
 //! An override document is untrusted input, refused whole on any defect; a
 //! refused or missing one leaves the image's layer standing. A service not
@@ -49,7 +49,7 @@ pub const MAX_SERVICE_NAME_LEN: usize = 64;
 /// produce a document no reader would accept.
 pub const MAX_DOCUMENT_LEN: usize = 64 * 1024;
 
-/// Why an enrolment store text, or an [`enrol`] / [`unenrol`] request, was
+/// Why an enrolment store text, or a change to an override layer, was
 /// refused.
 ///
 /// Every variant is a fail-closed refusal: the operation records nothing and
@@ -68,14 +68,13 @@ pub enum EnrolError {
     NameInvalid,
     /// The store text names the same service more than once.
     Duplicate,
-    /// [`unenrol`] named a service that is not currently enrolled; nothing
-    /// changed.
-    NotEnrolled,
     /// An override line's disposition word was neither `enabled` nor
     /// `disabled`, or the line carried more than a name and a disposition.
     ServiceEnrolmentInvalid,
     /// The document is longer than [`MAX_DOCUMENT_LEN`].
     TooLong,
+    /// There was no memory to hold the layer or its text.
+    OutOfMemory,
 }
 
 impl fmt::Display for EnrolError {
@@ -85,11 +84,11 @@ impl fmt::Display for EnrolError {
             Self::NameTooLong => f.write_str("a service name is too long"),
             Self::NameInvalid => f.write_str("a service name contains an invalid character"),
             Self::Duplicate => f.write_str("a service is enrolled more than once"),
-            Self::NotEnrolled => f.write_str("the service is not enrolled"),
             Self::ServiceEnrolmentInvalid => {
                 f.write_str("an override line is not `<service> enabled|disabled`")
             }
             Self::TooLong => f.write_str("the enrolment document is too long"),
+            Self::OutOfMemory => f.write_str("no memory to hold the enrolment record"),
         }
     }
 }
@@ -194,52 +193,6 @@ impl Enrolment {
     }
 }
 
-/// Produce the enrolment with `name` **enabled**.
-///
-/// Idempotent: enabling an already-enrolled service returns an equal set. The
-/// operation is pure — it returns the *new* enrolment for the caller to
-/// persist — and it decides eligibility only. It cannot widen authority
-/// because it never names one: the kernel derives a service's grant from its
-/// signed bundle and its account's ceiling at spawn, and the service
-/// manager's authority scope decides which accounts it may enrol at all.
-///
-/// # Errors
-///
-/// A name defect ([`EnrolError::NameEmpty`] / `NameTooLong` / `NameInvalid`).
-pub fn enrol(current: &Enrolment, name: &str) -> Result<Enrolment, EnrolError> {
-    validate_service_name(name)?;
-    let mut names = current.names.clone();
-    if let Err(at) = names.binary_search_by(|held| held.as_str().cmp(name)) {
-        names.insert(at, String::from(name));
-    }
-    Ok(Enrolment { names })
-}
-
-/// Produce the enrolment with `name` **disabled**.
-///
-/// The operation is pure — it returns the new enrolment for the caller to
-/// write back. Disabling requires no capability check (removing eligibility
-/// only ever narrows authority) but does fail closed if the service was not
-/// enrolled, so a control tool reports honestly that nothing changed.
-///
-/// # Errors
-///
-/// A name defect, or [`EnrolError::NotEnrolled`] if `name` is not currently
-/// enrolled.
-pub fn unenrol(current: &Enrolment, name: &str) -> Result<Enrolment, EnrolError> {
-    validate_service_name(name)?;
-    if !current.is_enabled(name) {
-        return Err(EnrolError::NotEnrolled);
-    }
-    let names = current
-        .names
-        .iter()
-        .filter(|n| n.as_str() != name)
-        .cloned()
-        .collect();
-    Ok(Enrolment { names })
-}
-
 /// The administrator's override layer: the services whose enrolment differs
 /// from the image's [`Enrolment`], and how.
 ///
@@ -280,13 +233,14 @@ impl EnrolmentOverride {
     ///
     /// The first refusal at its line: a name defect,
     /// [`EnrolError::ServiceEnrolmentInvalid`] for a malformed line, or
-    /// [`EnrolError::Duplicate`] at a service's second appearance.
+    /// [`EnrolError::Duplicate`] at a service's second appearance; or
+    /// [`EnrolError::OutOfMemory`], for the whole document, when there is no
+    /// memory to hold it.
     pub fn parse(text: &str) -> Result<Self, LocatedError> {
         if text.len() > MAX_DOCUMENT_LEN {
             return Err(LocatedError::whole(EnrolError::TooLong));
         }
-        let mut entries: Vec<(String, ServiceEnrolment)> = Vec::new();
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut layer = Self::empty();
         for (index, line) in text.lines().enumerate() {
             let Some(setting) = setting_line(line) else {
                 continue;
@@ -298,13 +252,94 @@ impl EnrolmentOverride {
                 .value
                 .and_then(ServiceEnrolment::from_name)
                 .ok_or(refused(EnrolError::ServiceEnrolmentInvalid))?;
-            if !seen.insert(name) {
+            // Kept sorted as it is read, so a duplicate is found at the line
+            // that repeats it and no second index is needed to find it.
+            let Err(at) = layer.place(name) else {
                 return Err(refused(EnrolError::Duplicate));
-            }
-            entries.push((String::from(name), disposition));
+            };
+            layer
+                .insert(at, name, disposition)
+                .map_err(LocatedError::whole)?;
         }
-        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-        Ok(Self { entries })
+        Ok(layer)
+    }
+
+    /// Where `name`'s entry is, or where it would go.
+    fn place(&self, name: &str) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|(held, _)| held.as_str().cmp(name))
+    }
+
+    /// Hold `disposition` for `name` at `at`, asking the heap for its room
+    /// first so a refusal changes nothing.
+    fn insert(
+        &mut self,
+        at: usize,
+        name: &str,
+        disposition: ServiceEnrolment,
+    ) -> Result<(), EnrolError> {
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(name.len())
+            .and_then(|()| self.entries.try_reserve(1))
+            .map_err(|_| EnrolError::OutOfMemory)?;
+        owned.push_str(name);
+        self.entries.insert(at, (owned, disposition));
+        Ok(())
+    }
+
+    /// Make `wanted` the enrolment of `name` over the image layer `vendor`,
+    /// holding an entry only where the two differ, and answer the change
+    /// [`undo`](Self::undo) takes back.
+    ///
+    /// Self-minimising: a service set to what the image already says has no
+    /// entry, so a later image shipping a different default reaches it. The
+    /// change is to this one entry; every other the administrator wrote
+    /// stands as written.
+    ///
+    /// # Errors
+    ///
+    /// A name defect, or [`EnrolError::OutOfMemory`] when a new entry has no
+    /// room; the layer is unchanged either way.
+    pub fn set(
+        &mut self,
+        vendor: &Enrolment,
+        name: &str,
+        wanted: ServiceEnrolment,
+    ) -> Result<Change, EnrolError> {
+        validate_service_name(name)?;
+        let default = vendor.is_enabled(name) == wanted.is_enabled();
+        match self.place(name) {
+            Ok(at) if default => {
+                let (name, disposition) = self.entries.remove(at);
+                Ok(Change::Removed(at, name, disposition))
+            }
+            Ok(at) if self.entries[at].1 == wanted => Ok(Change::None),
+            Ok(at) => {
+                let was = core::mem::replace(&mut self.entries[at].1, wanted);
+                Ok(Change::Replaced(at, was))
+            }
+            Err(_) if default => Ok(Change::None),
+            Err(at) => {
+                self.insert(at, name, wanted)?;
+                Ok(Change::Added(at))
+            }
+        }
+    }
+
+    /// Take back `change`, the most recent [`set`](Self::set) of this layer.
+    ///
+    /// Never asks the heap: an entry taken out is put back in the room its
+    /// removal left.
+    pub fn undo(&mut self, change: Change) {
+        match change {
+            Change::None => {}
+            Change::Added(at) => {
+                self.entries.remove(at);
+            }
+            Change::Replaced(at, was) => self.entries[at].1 = was,
+            Change::Removed(at, name, disposition) => self.entries.insert(at, (name, disposition)),
+        }
     }
 
     /// The administrator's disposition for `name`, or `None` if they have not
@@ -336,7 +371,8 @@ impl EnrolmentOverride {
     ///
     /// [`EnrolError::TooLong`] when the text would exceed [`MAX_DOCUMENT_LEN`]:
     /// a document every reader refuses would bring back, at the next boot,
-    /// every service the administrator disabled.
+    /// every service the administrator disabled. [`EnrolError::OutOfMemory`]
+    /// when there is no memory for the text.
     pub fn to_store_text(&self) -> Result<String, EnrolError> {
         const HEADER: &str =
             "# TAIRiX service enrolment overrides. One `<service> enabled|disabled` per line.\n";
@@ -349,7 +385,9 @@ impl EnrolmentOverride {
         if len > MAX_DOCUMENT_LEN {
             return Err(EnrolError::TooLong);
         }
-        let mut out = String::with_capacity(len);
+        let mut out = String::new();
+        out.try_reserve_exact(len)
+            .map_err(|_| EnrolError::OutOfMemory)?;
         out.push_str(HEADER);
         for (name, disposition) in &self.entries {
             out.push_str(name);
@@ -361,62 +399,63 @@ impl EnrolmentOverride {
     }
 }
 
-/// The enrolment a manager obeys: `vendor` with `overrides` applied.
-///
-/// The one definition of the precedence, so no consumer re-derives it.
+/// One change [`EnrolmentOverride::set`] made, for
+/// [`EnrolmentOverride::undo`] to take back.
+#[derive(Debug, Eq, PartialEq)]
 #[must_use]
-pub fn effective(vendor: &Enrolment, overrides: &EnrolmentOverride) -> Enrolment {
-    let mut names: BTreeSet<&str> = vendor
-        .names()
-        .iter()
-        .map(String::as_str)
-        .filter(|n| overrides.disposition(n) != Some(ServiceEnrolment::Disabled))
-        .collect();
-    for (name, disposition) in overrides.entries() {
-        if disposition.is_enabled() {
-            names.insert(name);
-        }
-    }
-    Enrolment {
-        names: names.into_iter().map(String::from).collect(),
-    }
+pub enum Change {
+    /// Nothing changed: the layer already said this.
+    None,
+    /// An entry was added at this place.
+    Added(usize),
+    /// The entry at this place said this before.
+    Replaced(usize, ServiceEnrolment),
+    /// This entry was taken from this place.
+    Removed(usize, String, ServiceEnrolment),
 }
 
-/// The override layer that makes `desired` the [`effective`] enrolment over
-/// `vendor`.
+/// Whether `name` is enrolled: the administrator's word where they have
+/// spoken about it, else the image's.
 ///
-/// Self-minimising by construction: a service whose desired state already
-/// matches the image's default gets no entry, so the document holds only what
-/// was changed and a system update shipping a different default reaches
-/// everything the administrator has not spoken about.
+/// The one definition of the precedence, so no consumer re-derives it, and a
+/// query rather than a set built per question.
 #[must_use]
-pub fn overrides_for(vendor: &Enrolment, desired: &Enrolment) -> EnrolmentOverride {
-    let mut entries: Vec<(String, ServiceEnrolment)> = Vec::new();
-    for name in desired.names() {
-        if !vendor.is_enabled(name) {
-            entries.push((name.clone(), ServiceEnrolment::Enabled));
-        }
-    }
-    for name in vendor.names() {
-        if !desired.is_enabled(name) {
-            entries.push((name.clone(), ServiceEnrolment::Disabled));
-        }
-    }
-    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-    EnrolmentOverride { entries }
+pub fn enabled(vendor: &Enrolment, overrides: &EnrolmentOverride, name: &str) -> bool {
+    overrides
+        .disposition(name)
+        .map_or_else(|| vendor.is_enabled(name), ServiceEnrolment::is_enabled)
 }
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        effective, enrol, overrides_for, unenrol, EnrolError, Enrolment, EnrolmentOverride,
-        LocatedError, ServiceEnrolment, MAX_SERVICE_NAME_LEN,
+        enabled, Change, EnrolError, Enrolment, EnrolmentOverride, LocatedError, ServiceEnrolment,
+        MAX_SERVICE_NAME_LEN,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
+    use tairix_fuzzseed::meter::{metered, refusing_after};
+    use ServiceEnrolment::{Disabled, Enabled};
 
     fn names(e: &Enrolment) -> Vec<&str> {
         e.names().iter().map(String::as_str).collect()
+    }
+
+    /// The names of `vendor` and `extra` that `overrides` enrols over it.
+    fn enrolled<'a>(
+        vendor: &Enrolment,
+        overrides: &EnrolmentOverride,
+        candidates: &[&'a str],
+    ) -> Vec<&'a str> {
+        candidates
+            .iter()
+            .copied()
+            .filter(|name| enabled(vendor, overrides, name))
+            .collect()
     }
 
     #[test]
@@ -431,11 +470,18 @@ mod tests {
     }
 
     #[test]
-    fn enrolling_keeps_the_set_sorted() {
-        let e = Enrolment::of(["b", "d"]).expect("valid");
-        let e = enrol(&e, "c").expect("enrols");
-        let e = enrol(&e, "a").expect("enrols");
-        assert_eq!(names(&e), ["a", "b", "c", "d"]);
+    fn setting_keeps_the_layer_sorted() {
+        let vendor = Enrolment::of(["b", "d"]).expect("valid");
+        let mut overrides = EnrolmentOverride::empty();
+        for name in ["c", "a", "e"] {
+            let _ = overrides.set(&vendor, name, Enabled).expect("set");
+        }
+        let held: Vec<&str> = overrides
+            .entries()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(held, ["a", "c", "e"]);
     }
 
     #[test]
@@ -472,37 +518,56 @@ mod tests {
     }
 
     #[test]
-    fn enrol_is_idempotent_and_adds_a_service() {
-        let e0 = Enrolment::empty();
-        let e1 = enrol(&e0, "netstack").expect("enrols");
-        assert!(e1.is_enabled("netstack"));
-        // Enabling again changes nothing.
-        assert_eq!(e1, enrol(&e1, "netstack").expect("idempotent"));
-    }
-
-    #[test]
-    fn enrol_rejects_an_invalid_name() {
+    fn setting_a_state_twice_changes_it_once() {
+        let vendor = Enrolment::empty();
+        let mut overrides = EnrolmentOverride::empty();
         assert_eq!(
-            enrol(&Enrolment::empty(), "Bad Name"),
-            Err(EnrolError::NameInvalid),
+            overrides.set(&vendor, "netstack", Enabled),
+            Ok(Change::Added(0))
+        );
+        assert!(enabled(&vendor, &overrides, "netstack"));
+        assert_eq!(
+            overrides.set(&vendor, "netstack", Enabled),
+            Ok(Change::None)
         );
     }
 
     #[test]
-    fn unenrol_removes_a_service_and_fails_closed_on_absent() {
-        let e = Enrolment::of(["a", "b", "c"]).expect("valid names");
-        let after = unenrol(&e, "b").expect("removes");
-        assert_eq!(names(&after), ["a", "c"]);
-        assert!(!after.is_enabled("b"));
-        // Disabling a service that is not enrolled fails closed.
-        assert_eq!(unenrol(&e, "z"), Err(EnrolError::NotEnrolled));
+    fn setting_refuses_an_invalid_name_and_changes_nothing() {
+        let mut overrides = EnrolmentOverride::empty();
+        assert_eq!(
+            overrides.set(&Enrolment::empty(), "Bad Name", Enabled),
+            Err(EnrolError::NameInvalid),
+        );
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn disabling_an_image_service_records_it_and_again_changes_nothing() {
+        let vendor = Enrolment::of(["a", "b", "c"]).expect("valid names");
+        let mut overrides = EnrolmentOverride::empty();
+        assert_eq!(overrides.set(&vendor, "b", Disabled), Ok(Change::Added(0)));
+        assert_eq!(enrolled(&vendor, &overrides, &["a", "b", "c"]), ["a", "c"]);
+        assert_eq!(overrides.set(&vendor, "b", Disabled), Ok(Change::None));
+        assert_eq!(
+            overrides.set(&vendor, "z", Disabled),
+            Ok(Change::None),
+            "a service nothing enrols is already disabled"
+        );
     }
 
     #[test]
     fn an_absent_or_corrupt_override_document_leaves_the_image_layer_standing() {
         let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
         // Missing document.
-        assert_eq!(effective(&vendor, &EnrolmentOverride::empty()), vendor);
+        assert_eq!(
+            enrolled(
+                &vendor,
+                &EnrolmentOverride::empty(),
+                &["fontd", "netstack", "timed"]
+            ),
+            names(&vendor)
+        );
         // Corrupt documents fail closed; the caller resolves each to `empty`,
         // which is "obey the signed image".
         for text in [
@@ -556,8 +621,10 @@ mod tests {
         );
         assert_eq!(overrides.disposition("netstack"), None);
 
-        let eff = effective(&vendor, &overrides);
-        assert_eq!(names(&eff), ["fontd", "netstack"]);
+        assert_eq!(
+            enrolled(&vendor, &overrides, &["fontd", "netstack", "timed"]),
+            ["fontd", "netstack"]
+        );
     }
 
     #[test]
@@ -576,38 +643,41 @@ mod tests {
     }
 
     #[test]
-    fn overrides_for_records_only_what_differs_from_the_image() {
+    fn setting_records_only_what_differs_from_the_image() {
         let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
+        let mut overrides = EnrolmentOverride::empty();
 
         // Disabling one of the image's services records exactly that.
-        let desired = unenrol(&vendor, "timed").expect("removes");
-        let overrides = overrides_for(&vendor, &desired);
+        let _ = overrides.set(&vendor, "timed", Disabled).expect("set");
         assert_eq!(
             overrides.entries(),
             [(String::from("timed"), ServiceEnrolment::Disabled)]
         );
-        assert_eq!(effective(&vendor, &overrides), desired);
 
         // Re-enabling it empties the document rather than pinning the
         // default: a later image that ships `timed` disabled must then be
         // obeyed, because the administrator is no longer speaking about it.
-        let back = enrol(&desired, "timed").expect("enrols");
-        assert!(overrides_for(&vendor, &back).is_empty());
+        assert_eq!(
+            overrides.set(&vendor, "timed", Enabled),
+            Ok(Change::Removed(0, String::from("timed"), Disabled))
+        );
+        assert!(overrides.is_empty());
 
         // Enabling something the image does not ship records an Enabled entry.
-        let extra = enrol(&vendor, "fontd").expect("enrols");
+        let _ = overrides.set(&vendor, "fontd", Enabled).expect("set");
         assert_eq!(
-            overrides_for(&vendor, &extra).entries(),
+            overrides.entries(),
             [(String::from("fontd"), ServiceEnrolment::Enabled)]
         );
     }
 
     #[test]
-    fn effective_and_overrides_for_are_inverse_over_every_pair() {
-        // Whatever the administrator wants, the derived document reproduces
-        // it exactly over the image layer — the property both PID 1's boot
-        // read and its control path rely on.
+    fn setting_each_name_reproduces_any_wanted_enrolment() {
+        // Whatever the administrator wants, the layer reproduces it exactly
+        // over the image layer — the property both PID 1's boot read and its
+        // control path rely on — and its document is canonical.
         let vendor = Enrolment::of(["a", "b", "c"]).expect("valid names");
+        let all = ["a", "b", "c", "d", "e"];
         let wanted: [&[&str]; 7] = [
             &[],
             &["a"],
@@ -618,14 +688,16 @@ mod tests {
             &["b", "d", "e"],
         ];
         for wanted in wanted {
-            let desired = Enrolment::of(wanted.iter().copied()).expect("valid names");
-            let overrides = overrides_for(&vendor, &desired);
-            assert_eq!(
-                effective(&vendor, &overrides),
-                desired,
-                "round trip failed for {wanted:?}"
-            );
-            // The derived document is itself canonical.
+            let mut overrides = EnrolmentOverride::empty();
+            for name in all {
+                let state = if wanted.contains(&name) {
+                    Enabled
+                } else {
+                    Disabled
+                };
+                let _ = overrides.set(&vendor, name, state).expect("set");
+            }
+            assert_eq!(enrolled(&vendor, &overrides, &all), wanted);
             assert_eq!(
                 EnrolmentOverride::parse(&overrides.to_store_text().expect("fits"))
                     .expect("reparses"),
@@ -634,14 +706,90 @@ mod tests {
         }
     }
 
+    /// A change taken back is taken back with no memory to spare, so a
+    /// record whose write was refused under pressure is restored rather than
+    /// left describing a change that never reached the disk.
+    ///
+    /// Regression: the control path built the next layer from scratch, so a
+    /// refused write had nothing to restore but needed memory to try.
+    #[test]
+    fn every_change_is_taken_back_without_the_heap() {
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
+        let base = EnrolmentOverride::parse(
+            "fontd enabled
+timed disabled
+",
+        )
+        .expect("parses");
+        for (name, state) in [
+            ("discoveryd", Enabled),
+            ("timed", Enabled),
+            ("fontd", Disabled),
+            ("netstack", Disabled),
+        ] {
+            let mut overrides = base.clone();
+            let change = overrides.set(&vendor, name, state).expect("set");
+            assert_ne!(change, Change::None, "{name}");
+            refusing_after(0, || overrides.undo(change));
+            assert_eq!(overrides, base, "{name}");
+        }
+    }
+
+    /// The precedence is a query: asking it allocates nothing.
+    ///
+    /// Regression: every activation and enrolment question rebuilt the
+    /// effective set, a string per enrolled name.
+    #[test]
+    fn asking_the_precedence_allocates_nothing() {
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
+        let overrides = EnrolmentOverride::parse(
+            "timed disabled
+",
+        )
+        .expect("parses");
+        let ((), used) = metered(|| {
+            for name in ["netstack", "timed", "fontd"] {
+                let _ = enabled(&vendor, &overrides, name);
+            }
+        });
+        assert_eq!(used.allocations, 0);
+    }
+
+    /// A layer the heap cannot hold is refused whole, as no memory rather
+    /// than as a malformed document.
+    #[test]
+    fn a_document_the_heap_cannot_hold_is_refused_for_memory() {
+        assert_eq!(
+            refusing_after(1, || EnrolmentOverride::parse(
+                "fontd enabled
+timed disabled
+"
+            )),
+            Err(LocatedError::whole(EnrolError::OutOfMemory))
+        );
+        let overrides = EnrolmentOverride::parse(
+            "fontd enabled
+",
+        )
+        .expect("parses");
+        assert_eq!(
+            refusing_after(0, || overrides.to_store_text()),
+            Err(EnrolError::OutOfMemory)
+        );
+    }
+
     #[test]
     fn the_writer_never_produces_a_document_the_reader_refuses() {
         let render = |count: usize| {
             let names: Vec<String> = (0..count)
                 .map(|i| alloc::format!("{i:0MAX_SERVICE_NAME_LEN$}"))
                 .collect();
-            let desired = Enrolment::of(names.iter().map(String::as_str)).expect("valid names");
-            let overrides = overrides_for(&Enrolment::empty(), &desired);
+            let mut overrides = EnrolmentOverride::empty();
+            for name in &names {
+                let _ = overrides
+                    .set(&Enrolment::empty(), name, Enabled)
+                    .expect("set");
+            }
             overrides.to_store_text().map(|text| (text, overrides))
         };
         let entry = MAX_SERVICE_NAME_LEN + " enabled\n".len();

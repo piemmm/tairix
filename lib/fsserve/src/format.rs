@@ -6,6 +6,7 @@ use tairix_abi::driver::filesystem::WriteRefusal;
 use tairix_abi::fsserve::ServeOffer;
 use tairix_abi::volume::{FormatName, VolumeFsType};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey};
+use tairix_log::Sink;
 use tairix_reclaim::PressureGauge;
 
 use crate::{GrantedVolume, ServedFilesystem, VolumeAccess};
@@ -78,7 +79,7 @@ pub trait ServedFormat {
     type Fs<B: Block>: ServedFilesystem;
 
     /// Open `volume`, only for reading when `read_only`, bounding what it
-    /// holds unpublished by `budget`.
+    /// holds unpublished by `budget` and recording its diagnostics on `log`.
     ///
     /// # Errors
     ///
@@ -88,6 +89,7 @@ pub trait ServedFormat {
         volume: B,
         read_only: bool,
         budget: WritebackBudget,
+        log: &'static (dyn Sink + Sync),
     ) -> Result<Opened<Self::Fs<B>>, DriverError>;
 }
 
@@ -99,7 +101,8 @@ pub trait ServedArchive {
     type Fs<A: VolumeAccess>: ServedFilesystem;
 
     /// Open the archive attachment `volume`, only for reading when
-    /// `read_only`, bounding what it holds unpublished by `budget`.
+    /// `read_only`, bounding what it holds unpublished by `budget` and
+    /// recording its diagnostics on `log`.
     ///
     /// # Errors
     ///
@@ -109,6 +112,7 @@ pub trait ServedArchive {
         volume: GrantedVolume<A>,
         read_only: bool,
         budget: WritebackBudget,
+        log: &'static (dyn Sink + Sync),
     ) -> Result<Opened<Self::Fs<A>>, DriverError>;
 }
 

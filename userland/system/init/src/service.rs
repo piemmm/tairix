@@ -16,10 +16,9 @@
 //! grant on the launch path, so there is no second capability-derivation
 //! path to drift from the kernel's authoritative one.
 
-use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::Cell;
 
 use tairix_abi::{
     ActivationMode, CapabilityId, Duration64, Errno, ProcId, ReadinessKind, ReadyCondition,
@@ -380,9 +379,8 @@ pub trait Spawner {
     /// # Errors
     ///
     /// Returns the implementation's [`Errno`] verbatim if the binary cannot
-    /// be loaded, verified, or executed. [`Init`](crate::Init) records it as
-    /// [`StartFailure::SpawnFailed`](crate::StartFailure::SpawnFailed) and
-    /// skips the dependents of the failed service.
+    /// be loaded, verified, or executed. [`Init`](crate::Init) audits the
+    /// refusal with it and skips the dependents of the failed service.
     fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno>;
 }
 
@@ -521,42 +519,45 @@ pub trait Reaper {
 /// its own login sessions, then calls `reap`, which drains exactly that child
 /// (a known service exit or an untracked child) and stops.
 ///
+/// One slot, because the loop deposits one child and reaps it before the
+/// next: a reap that needs no memory, however short the machine is.
+///
 /// It never itself blocks or waits — the kernel `wait` the loop already made
 /// is the only wait — so it is not a busy-poll: [`collect`](Reaper::collect)
-/// simply pops the queue and returns `None` when empty. The queue is a
-/// [`VecDeque`] (not a single slot) purely so a future loop that harvests a
-/// burst of exits in one turn cannot lose one; today the loop deposits one at
-/// a time.
+/// simply takes the slot.
 ///
-/// Interior mutability ([`RefCell`]) is required because [`Init`](crate::Init)
+/// Interior mutability ([`Cell`]) is required because [`Init`](crate::Init)
 /// borrows its reaper as `&dyn Reaper` (shared) for its whole lifetime while
-/// the loop must still push into it. Single-threaded PID 1 never re-enters a
-/// borrow, so the `RefCell` can never observe a conflicting borrow.
+/// the loop must still deposit into it.
 #[derive(Debug, Default)]
 pub struct LoopReaper {
-    pending: RefCell<VecDeque<ReapedChild>>,
+    pending: Cell<Option<ReapedChild>>,
 }
 
 impl LoopReaper {
     /// Create an empty mailbox.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            pending: RefCell::new(VecDeque::new()),
+            pending: Cell::new(None),
         }
     }
 
     /// Record one exited child for the next [`Init::reap`](crate::Init::reap)
     /// to drain. Called by PID 1's loop for a reaped pid that is not one of
-    /// its own login sessions.
+    /// its own login sessions, which reaps it before it deposits another.
     pub fn deposit(&self, child: ReapedChild) {
-        self.pending.borrow_mut().push_back(child);
+        let undrained = self.pending.replace(Some(child));
+        debug_assert!(
+            undrained.is_none(),
+            "a child was deposited before the last was reaped"
+        );
     }
 }
 
 impl Reaper for LoopReaper {
     fn collect(&self) -> Option<ReapedChild> {
-        self.pending.borrow_mut().pop_front()
+        self.pending.take()
     }
 }
 
@@ -614,34 +615,26 @@ mod tests {
         );
     }
 
+    /// A deposited child is collected once, and depositing it asks the heap
+    /// for nothing.
+    ///
+    /// Regression: the mailbox was a queue, so the first service to exit
+    /// after boot grew it, and on an exhausted heap that ended PID 1.
     #[test]
-    fn loop_reaper_yields_deposited_children_in_order_then_none() {
+    fn loop_reaper_yields_each_deposited_child_once_and_needs_no_memory() {
         let reaper = LoopReaper::new();
         assert_eq!(reaper.collect(), None);
-        reaper.deposit(ReapedChild {
-            pid: Pid::new(10),
-            exit_code: 0,
-        });
-        reaper.deposit(ReapedChild {
-            pid: Pid::new(20),
-            exit_code: 3,
-        });
-        assert_eq!(
-            reaper.collect(),
-            Some(ReapedChild {
-                pid: Pid::new(10),
-                exit_code: 0,
-            })
-        );
-        assert_eq!(
-            reaper.collect(),
-            Some(ReapedChild {
-                pid: Pid::new(20),
-                exit_code: 3,
-            })
-        );
-        // Drained: a `reap` that keeps pulling terminates.
-        assert_eq!(reaper.collect(), None);
+        for (pid, exit_code) in [(10, 0), (20, 3)] {
+            let child = ReapedChild {
+                pid: Pid::new(pid),
+                exit_code,
+            };
+            let ((), used) = tairix_fuzzseed::meter::metered(|| reaper.deposit(child));
+            assert_eq!(used.allocations, 0);
+            assert_eq!(reaper.collect(), Some(child));
+            // Drained: a `reap` that keeps pulling terminates.
+            assert_eq!(reaper.collect(), None);
+        }
     }
 
     #[test]

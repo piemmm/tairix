@@ -1014,6 +1014,11 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-11-08 — §25: a pinned process's heap holds what it has mapped.**
+  PID 1's heap gave its free pages back at critical pressure, so its next
+  allocation asked a machine with nothing to give and the refusal ended the
+  system; pinning already asks for resident memory.
+
 - **2026-11-05 — §25: the userland heap grows in the heap region the
   startup vector names.** Its fixed bases lay inside the file-mapping window,
   so its trims were refused, and the refusal of `FIXED` maps over windows

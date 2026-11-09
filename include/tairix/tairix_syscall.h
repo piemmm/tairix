@@ -616,6 +616,9 @@ typedef struct tairix_image_attach_reply {
 * A writable file refuses a zero ceiling, so its reach is always asked for:
 * a stated bound, or this. A pipe end has no extent and takes zero. */
 #define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t)0xffffffffffffffffull)
+/* fd_grant() flag that delegates only a regular file: a pipe end, a link
+* or anything else no document is fails with TAIRIX_E_OUT_OF_RANGE. */
+#define TAIRIX_GRANT_FILE_ONLY ((uint64_t)0x1ull)
 
 /* call_post() deadline_ns that never passes: the request is answered only
 * by its server or by the endpoint's end. */
@@ -887,7 +890,7 @@ uint64_t tairix_sys_fs_attr_list(uint32_t a0, uint64_t a1, void * a2, uintptr_t 
 int32_t tairix_sys_fs_attr_remove(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_port_bind(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t tairix_sys_boot_facts_get(void * a0, uintptr_t a1);
-uint64_t tairix_sys_fd_grant(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
+uint64_t tairix_sys_fd_grant(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3, uint64_t a4);
 uint64_t tairix_sys_fd_redeem(uint64_t a0);
 int32_t tairix_sys_mem_pin(void);
 int32_t tairix_sys_mem_unpin(void);

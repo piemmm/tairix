@@ -9573,7 +9573,7 @@ fn releasing_content_drops_the_retained_bytes_to_zero() {
     assert_eq!(held, 60 * 60 * size_of::<Pixel>());
 
     PRESSURE.report(PressureBand::Mild);
-    assert_eq!(c.release_content_under_pressure(None), held);
+    assert_eq!(c.release_content_under_pressure(), held);
     assert_eq!(c.content_bytes(), 0);
     assert!(!c.window(id).expect("window").has_content());
 }
@@ -9595,8 +9595,13 @@ fn a_released_window_shows_its_own_plate_and_leaves_the_desktop_identical() {
     let client = c.window_client_rect(dropped).expect("client rect");
     let before = c.frame().to_vec();
 
-    PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(Some(kept)) > 0);
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.set_visible(dropped, false));
+    assert!(
+        !content(&c, dropped),
+        "hidden at mild, its pixels went back"
+    );
+    assert!(c.set_visible(dropped, true));
     c.composite();
     PRESSURE.report(PressureBand::Normal);
 
@@ -9651,9 +9656,11 @@ fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
     let bounds = c.window(id).expect("window").bounds();
     let title_band = c.window(id).expect("window").furniture_bands()[0];
 
-    PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.set_visible(id, false));
+    assert!(c.set_visible(id, true));
     PRESSURE.report(PressureBand::Normal);
+    assert!(!content(&c, id));
     c.composite();
 
     // Still hit-tests over its whole outer rectangle.
@@ -9695,13 +9702,14 @@ fn a_full_window_present_after_release_restores_pixel_identical_content() {
     c.composite();
     let before = c.frame().to_vec();
 
-    PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.set_visible(id, false));
+    assert!(c.set_visible(id, true));
     PRESSURE.report(PressureBand::Normal);
     c.composite();
     assert_ne!(before, c.frame(), "the release must be visible");
 
-    // The redraw the release asked for arrives as a full-window present.
+    // The redraw the showing asked for arrives as a full-window present.
     present_full(&mut c, id, GREEN);
     c.composite();
     assert_eq!(
@@ -9715,43 +9723,63 @@ fn a_full_window_present_after_release_restores_pixel_identical_content() {
 fn the_release_ladder_follows_the_pressure_band() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
-    let focused = app_window(&mut c, 10, 10, 40, "focused");
-    let unfocused = app_window(&mut c, 100, 10, 40, "unfocused");
+    let front = app_window(&mut c, 10, 10, 40, "front");
+    let back = app_window(&mut c, 100, 10, 40, "back");
+    let hidden = app_window(&mut c, 200, 10, 40, "hidden");
+    assert!(c.set_visible(hidden, false));
+    c.composite();
+
+    // Normal: memory is plentiful and every release costs a repaint.
+    PRESSURE.report(PressureBand::Normal);
+    assert_eq!(c.release_content_under_pressure(), 0);
+    assert!(content(&c, front) && content(&c, back) && content(&c, hidden));
+
+    // Mild: only what nobody is looking at.
+    PRESSURE.report(PressureBand::Mild);
+    assert_eq!(
+        c.release_content_under_pressure(),
+        40 * 40 * size_of::<Pixel>()
+    );
+    assert!(content(&c, front) && content(&c, back));
+    assert!(!content(&c, hidden), "a hidden window goes first");
+    assert_eq!(c.release_content_under_pressure(), 0);
+}
+
+/// Critical pressure releases no visible window's pixels and asks no app to
+/// present.
+///
+/// Regression: a visible window was released at critical and asked to present
+/// at once, and the present established the same buffer again, so each
+/// crossing of the band repainted every background window and recovered
+/// nothing.
+#[test]
+fn critical_pressure_releases_no_visible_window() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
+    let front = app_window(&mut c, 10, 10, 40, "front");
+    let back = app_window(&mut c, 100, 10, 40, "back");
     let hidden = app_window(&mut c, 200, 10, 40, "hidden");
     assert!(c.set_visible(hidden, false));
     c.composite();
     let _ = c.pending_redraws();
+    let shown = c.frame().to_vec();
 
-    // Normal: memory is plentiful and every release costs a repaint.
-    PRESSURE.report(PressureBand::Normal);
-    assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
-    assert!(content(&c, focused) && content(&c, unfocused) && content(&c, hidden));
-
-    // Mild: only what nobody is looking at.
-    PRESSURE.report(PressureBand::Mild);
-    assert!(c.release_content_under_pressure(Some(focused)) > 0);
-    assert!(content(&c, focused), "the focused window is never released");
-    assert!(content(&c, unfocused), "a visible window survives mild");
-    assert!(!content(&c, hidden), "a hidden window goes first");
-    assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
-
-    // Critical: visible but unfocused goes too; the focused one never does.
     PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(Some(focused)) > 0);
-    assert!(
-        content(&c, focused),
-        "there would be nothing to show in the focused window's place"
+    assert_eq!(
+        c.release_content_under_pressure(),
+        40 * 40 * size_of::<Pixel>(),
+        "only the hidden window's pixels go"
     );
-    assert!(!content(&c, unfocused));
-
-    // With nothing focused, critical takes every window.
-    present_full(&mut c, focused, RED);
-    assert!(c.release_content_under_pressure(None) > 0);
-    assert!(!content(&c, focused));
+    assert!(content(&c, front) && content(&c, back));
+    assert!(c.pending_redraws().is_empty(), "no app is asked to present");
+    assert!(!c.has_damage(), "nothing on screen changed");
+    c.composite();
+    assert_eq!(shown, c.frame());
+    PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
-fn each_release_queues_exactly_one_redraw_request() {
+fn a_released_window_is_asked_to_present_once_when_it_is_shown() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let visible = app_window(&mut c, 10, 10, 40, "visible");
@@ -9762,15 +9790,11 @@ fn each_release_queues_exactly_one_redraw_request() {
     assert!(c.pending_redraws().is_empty());
 
     PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
-    // The visible one is asked, because it must not be left blank. The hidden
-    // one is not: it is queued as a released notice instead, and asked when it
-    // is next shown.
-    assert_eq!(c.pending_redraws(), alloc::vec![visible]);
-    assert!(
-        c.pending_redraws().is_empty(),
-        "draining must leave the queue empty"
-    );
+    assert!(c.release_content_under_pressure() > 0);
+    // Nobody is asked to present: the visible window kept its pixels, and the
+    // hidden one is told it may let go of its own copies instead.
+    assert!(content(&c, visible));
+    assert!(c.pending_redraws().is_empty());
     assert_eq!(c.take_released_notices(), alloc::vec![hidden]);
     assert!(
         c.take_released_notices().is_empty(),
@@ -9778,13 +9802,17 @@ fn each_release_queues_exactly_one_redraw_request() {
     );
 
     // A second release with nothing left to give back asks for nothing.
-    assert_eq!(c.release_content_under_pressure(None), 0);
+    assert_eq!(c.release_content_under_pressure(), 0);
     assert!(c.pending_redraws().is_empty());
     assert!(c.take_released_notices().is_empty());
 
-    // Showing a window whose pixels are gone asks again, once.
+    // Showing a window whose pixels are gone asks, once.
     assert!(c.set_visible(hidden, true));
     assert_eq!(c.pending_redraws(), alloc::vec![hidden]);
+    assert!(
+        c.pending_redraws().is_empty(),
+        "draining must leave the queue empty"
+    );
 }
 
 #[test]
@@ -9818,9 +9846,9 @@ fn hiding_a_window_releases_its_content_without_waiting_for_the_band_to_move() {
     assert!(c.set_visible(win, true));
     PRESSURE.report(PressureBand::Mild);
     assert_eq!(
-        c.release_content_under_pressure(None),
+        c.release_content_under_pressure(),
         0,
-        "a visible window is spared at mild, so the ladder's wake frees nothing"
+        "a visible window is spared, so the ladder's wake frees nothing"
     );
     assert!(content(&c, win));
     let _ = c.pending_redraws();
@@ -9904,8 +9932,11 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
     c.composite();
     let _ = c.pending_redraws();
 
-    PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
+    PRESSURE.report(PressureBand::Mild);
+    for id in [answering, silent] {
+        assert!(c.set_visible(id, false));
+        assert!(c.set_visible(id, true));
+    }
     PRESSURE.report(PressureBand::Normal);
     // Both apps were asked; only one of them answers.
     let mut asked = c.pending_redraws();
@@ -9961,8 +9992,9 @@ fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
     c.composite();
     assert!(c.content_bytes() > 0);
 
-    PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.set_visible(a, false));
+    assert!(c.set_visible(a, true));
     c.teardown_content();
     PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.content_bytes(), 0);
@@ -9988,24 +10020,19 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
         .expect("window")
         .is_app_presented());
     c.composite();
+    assert!(c.set_visible(session_painted, false));
+    assert!(c.set_visible(app, false));
 
+    // Even hidden, no client would present it again.
     PRESSURE.report(PressureBand::Critical);
-    assert!(c.release_content_under_pressure(None) > 0);
+    assert!(c.release_content_under_pressure() > 0);
     PRESSURE.report(PressureBand::Normal);
     assert!(
         c.window(session_painted).expect("window").has_content(),
         "a window nobody can redraw must keep its pixels"
     );
     assert!(!c.window(app).expect("window").has_content());
-    assert_eq!(c.pending_redraws(), alloc::vec![app]);
-
-    // Hiding it does not change that: even invisible, no client would
-    // present it again.
-    assert!(c.set_visible(session_painted, false));
-    PRESSURE.report(PressureBand::Mild);
-    assert_eq!(c.release_content_under_pressure(None), 0);
-    PRESSURE.report(PressureBand::Normal);
-    assert!(c.window(session_painted).expect("window").has_content());
+    assert_eq!(c.take_released_notices(), alloc::vec![app]);
     assert!(c.pending_redraws().is_empty());
 }
 

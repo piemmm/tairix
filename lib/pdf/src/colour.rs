@@ -5,12 +5,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_collections::try_arc;
-use tairix_colour::{linear_to_srgb, Cmyk, Fraction, Xyz};
+use tairix_colour::{linear_to_srgb, Adaptation, Cmyk, Fraction, Lab, Xyz};
 use tairix_util::mathf;
 
 use crate::document::Document;
+use crate::error::tolerated;
 use crate::function::{numbers, values, Function, Values, Work, MAX_COMPONENTS};
-use crate::object::{owned, Dict, Object};
+use crate::object::{Dict, Object};
 use crate::PdfError;
 
 /// How deeply colour spaces nest: an Indexed or Separation space's base is a
@@ -19,23 +20,6 @@ const MAX_SPACE_DEPTH: usize = 4;
 
 /// An encoded sRGB colour, each channel `0..=1`.
 pub(crate) type Srgb = [f64; 3];
-
-/// Bradford's cone response matrix, and its inverse, that adapt a colour seen
-/// under one white to how it looks under another.
-const BRADFORD: [f64; 9] = [
-    0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296,
-];
-const BRADFORD_INVERSE: [f64; 9] = [
-    0.986_992_9,
-    -0.147_054_3,
-    0.159_962_7,
-    0.432_305_3,
-    0.518_360_3,
-    0.049_291_2,
-    -0.008_528_7,
-    0.040_042_8,
-    0.968_486_7,
-];
 
 /// A colour space.
 #[derive(Debug)]
@@ -48,7 +32,7 @@ pub(crate) enum Space {
     Cie {
         kind: Cie,
         /// XYZ under its white into linear sRGB.
-        to_linear: [f64; 9],
+        adaptation: Adaptation,
     },
     Indexed {
         base: Arc<Space>,
@@ -68,9 +52,9 @@ pub(crate) enum Space {
 
 #[derive(Debug)]
 pub(crate) enum Cie {
-    Gray { white: [f64; 3], gamma: f64 },
+    Gray { white: Xyz, gamma: f64 },
     Rgb { gamma: [f64; 3], matrix: [f64; 9] },
-    Lab { white: [f64; 3], range: [f64; 4] },
+    Lab { white: Xyz, range: [f64; 4] },
 }
 
 impl Space {
@@ -78,7 +62,7 @@ impl Space {
     /// `spaces` — a resources dictionary's colour spaces — where it is not a
     /// device space's; with none, only a device space may be named.
     pub(crate) fn load(
-        document: &Document<'_>,
+        document: &Document,
         object: &Object,
         spaces: Option<&Dict>,
     ) -> Result<Arc<Self>, PdfError> {
@@ -86,7 +70,7 @@ impl Space {
     }
 
     fn load_at(
-        document: &Document<'_>,
+        document: &Document,
         object: &Object,
         spaces: Option<&Dict>,
         depth: usize,
@@ -120,7 +104,10 @@ impl Space {
                 let stream = document.resolve(parameter(0)?)?;
                 let dict = stream.as_dict().ok_or(PdfError::Malformed)?;
                 if let Some(alternate) = dict.get(b"Alternate") {
-                    if let Ok(space) = Self::load_at(document, alternate, spaces, depth + 1) {
+                    // Damage leaves the component count to read it by; a bound passed
+                    // refuses the space.
+                    let read = Self::load_at(document, alternate, spaces, depth + 1);
+                    if let Some(space) = tolerated(read)? {
                         return Ok(space);
                     }
                 }
@@ -138,11 +125,14 @@ impl Space {
                     .as_int()
                     .and_then(|high| u8::try_from(high).ok());
                 let high = high.ok_or(PdfError::Malformed)?;
-                let table = match owned(document.resolve(parameter(2)?)?)? {
+                let mut table = match document.resolve(parameter(2)?)?.into_owned()? {
                     Object::String(bytes) => bytes,
                     Object::Stream(stream) => document.decode(&stream)?.bytes,
                     _ => return Err(PdfError::Malformed),
                 };
+                // Only `high + 1` entries are ever looked up.
+                table.truncate((usize::from(high) + 1) * base.components());
+                tairix_util::fallible::trim(&mut table);
                 Self::Indexed { base, high, table }
             }
             b"Separation" | b"DeviceN" => {
@@ -158,7 +148,7 @@ impl Space {
                     return Err(PdfError::Malformed);
                 }
                 let alternate = Self::load_at(document, parameter(1)?, spaces, depth + 1)?;
-                let tint = try_arc(Function::load(document, parameter(2)?)?)?;
+                let tint = Function::load(document, parameter(2)?)?;
                 Self::Tinted {
                     components,
                     alternate,
@@ -186,19 +176,20 @@ impl Space {
         })
     }
 
-    fn cie(document: &Document<'_>, family: &[u8], dict: &Dict) -> Result<Self, PdfError> {
+    fn cie(document: &Document, family: &[u8], dict: &Dict) -> Result<Self, PdfError> {
         let triple = |key: &[u8], default: [f64; 3]| -> Result<[f64; 3], PdfError> {
-            Ok(match numbers(document, dict, key)? {
+            Ok(match numbers(document, dict, key, 3)? {
                 Some(values) => {
                     <[f64; 3]>::try_from(values.as_slice()).map_err(|_| PdfError::Malformed)?
                 }
                 None => default,
             })
         };
-        let white = triple(b"WhitePoint", [0.0; 3])?;
-        if white[0] <= 0.0 || white[2] <= 0.0 || (white[1] - 1.0).abs() > 1e-6 {
+        let [x, y, z] = triple(b"WhitePoint", [0.0; 3])?;
+        if x <= 0.0 || z <= 0.0 || (y - 1.0).abs() > 1e-6 {
             return Err(PdfError::Malformed);
         }
+        let white = Xyz { x, y, z };
         let kind = match family {
             b"CalGray" => Cie::Gray {
                 white,
@@ -210,7 +201,7 @@ impl Space {
             },
             b"CalRGB" => Cie::Rgb {
                 gamma: triple(b"Gamma", [1.0; 3])?,
-                matrix: match numbers(document, dict, b"Matrix")? {
+                matrix: match numbers(document, dict, b"Matrix", 9)? {
                     Some(values) => {
                         <[f64; 9]>::try_from(values.as_slice()).map_err(|_| PdfError::Malformed)?
                     }
@@ -219,7 +210,7 @@ impl Space {
             },
             _ => Cie::Lab {
                 white,
-                range: match numbers(document, dict, b"Range")? {
+                range: match numbers(document, dict, b"Range", 4)? {
                     Some(values) => match <[f64; 4]>::try_from(values.as_slice()) {
                         Ok(range) if range[0] <= range[1] && range[2] <= range[3] => range,
                         _ => return Err(PdfError::Malformed),
@@ -230,7 +221,7 @@ impl Space {
         };
         Ok(Self::Cie {
             kind,
-            to_linear: adapted_to_linear(white),
+            adaptation: Adaptation::from_white(white),
         })
     }
 
@@ -288,7 +279,7 @@ impl Space {
                 let rgb = Cmyk::new(ink(0), ink(1), ink(2), ink(3)).to_rgb();
                 [rgb.r, rgb.g, rgb.b].map(|channel| f64::from(channel) / 255.0)
             }
-            Self::Cie { kind, to_linear } => cie_srgb(kind, to_linear, components),
+            Self::Cie { kind, adaptation } => cie_srgb(kind, adaptation, components),
             Self::Indexed { base, high, table } => {
                 let index = mathf::round(components.first().copied().unwrap_or(0.0))
                     .clamp(0.0, f64::from(*high));
@@ -362,89 +353,38 @@ fn index_of(index: f64) -> usize {
 }
 
 /// A calibrated colour's components as sRGB.
-fn cie_srgb(kind: &Cie, to_linear: &[f64; 9], components: &[f64]) -> Srgb {
+fn cie_srgb(kind: &Cie, adaptation: &Adaptation, components: &[f64]) -> Srgb {
     let at = |index: usize| components.get(index).copied().unwrap_or(0.0);
     let xyz = match kind {
         Cie::Gray { white, gamma } => {
             let luminance = mathf::power(at(0).clamp(0.0, 1.0), *gamma);
-            white.map(|channel| channel * luminance)
+            Xyz {
+                x: white.x * luminance,
+                y: white.y * luminance,
+                z: white.z * luminance,
+            }
         }
         Cie::Rgb { gamma, matrix } => {
             let [a, b, c] =
                 [0, 1, 2].map(|index| mathf::power(at(index).clamp(0.0, 1.0), gamma[index]));
-            [0, 1, 2].map(|row| matrix[row] * a + matrix[3 + row] * b + matrix[6 + row] * c)
+            let mixed =
+                [0, 1, 2].map(|row| matrix[row] * a + matrix[3 + row] * b + matrix[6 + row] * c);
+            Xyz {
+                x: mixed[0],
+                y: mixed[1],
+                z: mixed[2],
+            }
         }
-        Cie::Lab { white, range } => {
-            let lightness = at(0).clamp(0.0, 100.0);
-            let a = at(1).clamp(range[0], range[1]);
-            let b = at(2).clamp(range[2], range[3]);
-            let m = (lightness + 16.0) / 116.0;
-            let curve = |x: f64| {
-                if x >= 6.0 / 29.0 {
-                    x * x * x
-                } else {
-                    108.0 / 841.0 * (x - 4.0 / 29.0)
-                }
-            };
-            [
-                white[0] * curve(m + a / 500.0),
-                white[1] * curve(m),
-                white[2] * curve(m - b / 200.0),
-            ]
+        Cie::Lab { white, range } => Lab {
+            l: at(0).clamp(0.0, 100.0),
+            a: at(1).clamp(range[0], range[1]),
+            b: at(2).clamp(range[2], range[3]),
         }
+        .to_xyz_under(*white),
     };
-    let linear = multiply(to_linear, xyz);
-    linear.map(|channel| linear_to_srgb(channel.clamp(0.0, 1.0)))
-}
-
-/// The matrix taking XYZ seen under `white` to linear sRGB: Bradford's
-/// adaptation to D65, then sRGB's own primaries.
-fn adapted_to_linear(white: [f64; 3]) -> [f64; 9] {
-    let source = multiply(&BRADFORD, white);
-    let target = multiply(&BRADFORD, [Xyz::D65.x, Xyz::D65.y, Xyz::D65.z]);
-    let gain = [0, 1, 2].map(|index| target[index] / source[index]);
-    let mut scaled = BRADFORD;
-    for (index, value) in scaled.iter_mut().enumerate() {
-        *value *= gain[index / 3];
-    }
-    let adapt = product(&BRADFORD_INVERSE, &scaled);
-    // Each column the linear sRGB of one XYZ axis, adapted.
-    let mut to_linear = [0.0; 9];
-    for axis in 0..3 {
-        let column = [adapt[axis], adapt[3 + axis], adapt[6 + axis]];
-        let linear = Xyz {
-            x: column[0],
-            y: column[1],
-            z: column[2],
-        }
-        .to_linear();
-        for row in 0..3 {
-            to_linear[row * 3 + axis] = linear[row];
-        }
-    }
-    to_linear
-}
-
-/// `matrix`, row major, times `vector`.
-fn multiply(matrix: &[f64; 9], vector: [f64; 3]) -> [f64; 3] {
-    [0, 1, 2].map(|row| {
-        matrix[row * 3] * vector[0]
-            + matrix[row * 3 + 1] * vector[1]
-            + matrix[row * 3 + 2] * vector[2]
-    })
-}
-
-/// `left` times `right`, both row major.
-fn product(left: &[f64; 9], right: &[f64; 9]) -> [f64; 9] {
-    let mut out = [0.0; 9];
-    for row in 0..3 {
-        for column in 0..3 {
-            out[row * 3 + column] = (0..3)
-                .map(|k| left[row * 3 + k] * right[k * 3 + column])
-                .sum();
-        }
-    }
-    out
+    adaptation
+        .to_linear(xyz)
+        .map(|channel| linear_to_srgb(channel.clamp(0.0, 1.0)))
 }
 
 #[cfg(test)]

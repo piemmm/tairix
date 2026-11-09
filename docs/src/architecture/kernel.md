@@ -312,6 +312,7 @@ compiled in only under the `watchdog-diagnostics` feature:
 | 4311 | Warn  | `VIEW_BIND_REFUSED`         | audit  |
 | 4312 | Info  | `VIEW_UNBOUND`              | audit  |
 | 4313 | Warn  | `VIEW_UNBIND_REFUSED`       | audit  |
+| 4314 | Warn  | `DEVICE_OPERATION_FAILED`   | audit  |
 
 `SECONDARY_CPU_START_FAILED` is at Warn for a CPU that did not come up — a
 start the port refused (`cpu`, `cause`, and `status`, the port's raw

@@ -116,8 +116,12 @@ the range.
 
 Cards are drawn, not loaded: every face, court and back is vector geometry
 rasterised at the active size into a tile, set in Noto Serif, and kept until the
-size or the colours change, along with the shaded baize. Under memory pressure
-the tiles and the baize are given back and drawn again when next shown.
+size or the colours change, along with the shaded baize. What stays cached
+follows the shared reclaim policy on every band change: a band that no longer
+allows the window-sized baize gives it back and the felt is shaded into each
+paint instead, over only what that paint covers, and the tiles go the same way
+when the band no longer allows them; a band that relaxes gives nothing back. A
+paint that covers none of the felt — the status line's clock — never shades it.
 
 ## Motion, and what it costs when nothing moves
 

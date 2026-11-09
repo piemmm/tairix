@@ -125,6 +125,13 @@ anonymous memory the kernel already accounts for, so it needs no cache-report
 ledger: it lowers the free-frame count directly, which deepens the band, which
 shrinks the retention.
 
+A **pinned** process (`mem_pin`) is the one exception: its heap gives no page
+back at any band, the trim included, until it is unpinned. Pinning asked that
+the process's memory stay resident, and a page given back would need a fresh
+commitment the next time it is wanted — exactly when the machine may have none.
+The pinned-memory budget bounds what it holds. PID 1 pins, so an allocation
+within what it has held never asks the machine for memory.
+
 The same figure is the least the arena **grows** by, so a run of small
 allocations does not pay a `mem_map` per page either. Mapping beyond what the
 caller asked for is speculation about the next allocation, which is exactly what

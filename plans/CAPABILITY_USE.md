@@ -861,7 +861,7 @@ what it wants first is recorded in `plans/VIEW.md`.**
   foreground, which a hand-off cannot carry.
 
   **The recipient is named by its attested `ProcId`, never by a task id.**
-  `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the
+  `fd_grant(fd, write_ceiling, recipient, len, flags)` takes a pointer to the
   16-byte instance the grantor read from an `Origin`; the kernel resolves it
   to the number its per-process tables are keyed by, records it with the
   delegation, and `fd_redeem` admits that instance alone. A pick concludes

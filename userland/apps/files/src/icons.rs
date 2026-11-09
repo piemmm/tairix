@@ -67,6 +67,13 @@ impl IconPipeline {
         self.cache.trim()
     }
 
+    /// Whether the cache would keep one picture of `bytes` at the band in
+    /// force now.
+    #[must_use]
+    pub fn holds(&self, bytes: usize) -> bool {
+        self.cache.holds(bytes)
+    }
+
     /// Hold the cache to what an output of `fb_bytes` allows, the output
     /// having changed size.
     pub fn rescale(&mut self, fb_bytes: usize) {

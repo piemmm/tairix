@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 use crate::drag::{
     DesktopCargo, DesktopDrop, DesktopEnd, DesktopItem, DesktopReport, DragEnd, DragStep,
     DragSurface, DropRefusal, FileOffer, FileReport, ItemsEnd, ItemsOffer, ItemsOfferEnd,
-    ItemsReport, OfferEnd, OwedReport, SaveDrop, SaveEnd, SaveOffer, SaveReport, SavedDocument,
-    SlotAnswer,
+    ItemsReport, OfferEnd, OwedReport, PlaceRefused, SaveDrop, SaveEnd, SaveOffer, SaveReport,
+    SavedDocument, SlotAnswer,
 };
 use crate::picker::PickId;
 use crate::shell::DesktopShell;
@@ -1176,6 +1176,60 @@ fn a_file_no_window_places_is_its_slots_and_a_window_left_is_told() {
     );
 }
 
+/// A file is placed only by its window's answer for where it is let go: let go
+/// after moving on unoffered, or with only an earlier offer answered, it is
+/// the slot's, whatever the pointer still showed.
+#[test]
+fn a_file_let_go_where_its_window_has_not_answered_is_its_slots() {
+    for offered_there in [false, true] {
+        let (mut shell, mut comp, window) = pressed();
+        shell
+            .begin_drag(&mut comp, 7, window, file("map.png"))
+            .expect("carried");
+        over(
+            &mut shell,
+            &mut comp,
+            Point::new(200, 200),
+            refusing_window(31, (40, 50)),
+        );
+        let first = file_report(&mut shell, "offered on arrival")
+            .over
+            .expect("an offer");
+        over(
+            &mut shell,
+            &mut comp,
+            Point::new(220, 220),
+            refusing_window(31, (60, 70)),
+        );
+        let standing = if offered_there {
+            file_report(&mut shell, "offered where it went")
+                .over
+                .expect("an offer")
+        } else {
+            first
+        };
+        assert!(shell.file_offer_answered(&mut comp, 31, first.serial, true));
+        assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+        let DragStep::Ended(DragEnd::Items(ended)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+            panic!("the drag ends");
+        };
+        assert_eq!(
+            ended.ended,
+            DragConclusion::Nothing,
+            "not placed, so the slot refuses it ({offered_there})"
+        );
+        assert!(ended.refused.is_some(), "and says why");
+        assert_eq!(
+            ended.offer,
+            Some(ItemsOfferEnd {
+                window_id: 31,
+                serial: standing.serial,
+                dropped: None,
+            })
+        );
+    }
+}
+
 /// The drag's source window going ends the drag and tells the window the file
 /// was offered to; the offered window going forgets the offer, owing nothing.
 #[test]
@@ -1819,6 +1873,140 @@ fn several_icons_off_the_desktop_are_offered_as_no_file() {
     let offer = offered_to_nine(&mut shell, &mut comp);
     assert_eq!(shell.offered_file(9, offer.serial), Err(Errno::NotFound));
     assert!(!shell.file_offer_answered(&mut comp, 9, offer.serial, true));
+}
+
+/// A lone file off the desktop is placed only by its window's answer for where
+/// it is let go: moved on since the offer the window answered, it is dropped
+/// on nothing.
+#[test]
+fn a_lone_file_off_the_desktop_let_go_where_unanswered_is_not_placed() {
+    let (mut shell, mut comp) = pressed_on_desktop();
+    shell
+        .begin_desktop_drag(&mut comp, desktop_picture())
+        .expect("carried");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(110, 110),
+        offer_at(9, 10, 20),
+    );
+    let offer = desktop_report(&mut shell)
+        .and_then(|report| report.over)
+        .expect("offered");
+    over(
+        &mut shell,
+        &mut comp,
+        Point::new(140, 150),
+        offer_at(9, 40, 60),
+    );
+    assert!(shell.file_offer_answered(&mut comp, 9, offer.serial, true));
+    assert_eq!(shell.cursor().kind(), CursorKind::DragCopy);
+    let DragStep::Ended(DragEnd::Desktop(end)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+        panic!("the drag ends");
+    };
+    assert_eq!(
+        end,
+        DesktopEnd {
+            dropped: DesktopDrop::Nothing,
+            offer: Some(ItemsOfferEnd {
+                window_id: 9,
+                serial: offer.serial,
+                dropped: None,
+            }),
+        }
+    );
+}
+
+/// Icons off the desktop let go at a point their window has not answered
+/// for stand, whatever it answered for another point.
+///
+/// Regression: the items' answer kept no offer, so a release moved since it
+/// concluded as a drop at the new point, which the window performed there.
+#[test]
+fn desktop_items_let_go_where_their_window_has_not_answered_stand() {
+    // Answered, then moved and let go before the new offer goes; moved first,
+    // the answer coming for the old offer; and the new offer sent, then left
+    // unanswered while the old one's answer stands.
+    for (answer_after_moving, new_offer_sent) in [(false, false), (true, false), (true, true)] {
+        let (mut shell, mut comp) = pressed_on_desktop();
+        shell
+            .begin_desktop_drag(&mut comp, desktop_picture())
+            .expect("carried");
+        over(
+            &mut shell,
+            &mut comp,
+            Point::new(110, 110),
+            offer_at(9, 10, 20),
+        );
+        let offer = desktop_report(&mut shell)
+            .and_then(|report| report.over)
+            .expect("offered");
+        let answer = |shell: &mut DesktopShell, comp: &mut Compositor| {
+            assert!(shell.items_offer_answered(comp, 9, offer.serial, Some(DropOperation::Move)));
+        };
+        if !answer_after_moving {
+            answer(&mut shell, &mut comp);
+        }
+        over(
+            &mut shell,
+            &mut comp,
+            Point::new(140, 150),
+            offer_at(9, 40, 60),
+        );
+        if new_offer_sent {
+            assert!(desktop_report(&mut shell).is_some(), "the new offer goes");
+        }
+        if answer_after_moving {
+            answer(&mut shell, &mut comp);
+        }
+        let DragStep::Ended(DragEnd::Desktop(end)) = shell.drag_pointer(&mut comp, &RELEASE) else {
+            panic!("the drag ends");
+        };
+        let case = (answer_after_moving, new_offer_sent);
+        assert_eq!(end.dropped, DesktopDrop::Nothing, "{case:?}");
+        assert_eq!(end.offer.and_then(|offer| offer.dropped), None, "{case:?}");
+    }
+}
+
+/// A file off the desktop that could not be placed is refused under the
+/// headline any refused placement has, saying why.
+#[test]
+fn a_file_off_the_desktop_not_placed_is_refused_saying_why() {
+    let placed = crate::drag::PlacedItem {
+        placement: tairix_window::Placement {
+            window_id: 9,
+            x: 10,
+            y: 20,
+        },
+        path: String::from("/Users/ann/Desktop/map.png"),
+        name: DocumentName::new("map.png").expect("a name"),
+    };
+    for (why, says) in [
+        (
+            PlaceRefused::Unopened(Errno::PermissionDenied),
+            "could not be opened to be read (permission denied)",
+        ),
+        (PlaceRefused::WindowClosed, "has since closed"),
+        (
+            PlaceRefused::Untaken(Errno::NoSpace),
+            "too many files waiting",
+        ),
+        (
+            PlaceRefused::Untaken(Errno::NotFound),
+            "could not be handed it (not found)",
+        ),
+    ] {
+        let refusal = placed.refusal(why);
+        assert_eq!(
+            refusal.headline(),
+            tairix_util::utf8::refusal_headline("map.png", "placed")
+        );
+        assert!(
+            refusal.detail().contains(says),
+            "{why:?}: {}",
+            refusal.detail()
+        );
+    }
 }
 
 /// The offers icons carried off the desktop owe.

@@ -100,7 +100,14 @@ fn setback(stage: BringUpStage, part: Part, at_1v8: bool, error: DriverError) ->
             fault,
             left_3v3: true,
         },
-        Part::Identify if error == DriverError::DeviceFault => Setback::Unanswered(fault),
+        Part::Identify
+            if matches!(
+                error,
+                DriverError::TimedOut | DriverError::TransferCorrupted | DriverError::DeviceFault
+            ) =>
+        {
+            Setback::Unanswered(fault)
+        }
         Part::Speed => Setback::Speed {
             fault,
             left_3v3: false,

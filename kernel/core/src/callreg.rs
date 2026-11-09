@@ -231,29 +231,51 @@ fn release_callers(destroyed: Destroyed) {
     destroyed.release_each(|caller| crate::waitq::budget_released_all(ProcessId(caller)));
 }
 
-/// Receive, as server task `server`, the next call posted to `endpoint` that
-/// fits `buf_cap` bytes. A non-`blocking` receive answers an empty queue at
-/// once; a blocking one parks through `park` on
+/// What one look at an endpoint's queue for a call found.
+pub enum Receive<T> {
+    /// A call, taken into service as `T`.
+    Taken(T),
+    /// The next call is larger than the server's buffer, left queued.
+    TooLarge,
+    /// No call is queued.
+    Empty,
+    /// The look waited for a page of the server's buffer, and looks again.
+    Again,
+}
+
+impl From<RecvCall> for Receive<ReceivedCall> {
+    fn from(received: RecvCall) -> Self {
+        match received {
+            RecvCall::Received(call) => Self::Taken(call),
+            RecvCall::TooLarge { .. } => Self::TooLarge,
+            RecvCall::Empty => Self::Empty,
+        }
+    }
+}
+
+/// Receive, as server task `server`, the next call posted to `endpoint`,
+/// each look at its queue made by `receive`. A non-`blocking` receive answers
+/// an empty queue at once; a blocking one parks through `park` on
 /// [`SERVE_WAITQ`](crate::waitq::SERVE_WAITQ), registered before its first
 /// look so a post in between still wakes it, until a call is posted. The
 /// server is recorded on the endpoint first, so a post wakes it alone.
 ///
 /// # Errors
 ///
-/// [`Errno::NotFound`] once the endpoint is closed; [`Errno::BufferTooSmall`]
-/// for a call larger than `buf_cap`, left queued; [`Errno::WouldBlock`] for an
-/// empty queue a non-blocking receive meets; [`Errno::OutOfMemory`] when a
-/// blocking one has no room to register its wait; [`Errno::NotImplemented`]
-/// when `park` cannot park the caller; [`Errno::Interrupted`] once `abandoned`
-/// reports the server ending.
-pub fn receive_call(
+/// What `receive` answers; [`Errno::NotFound`] once the endpoint is closed;
+/// [`Errno::BufferTooSmall`] for a call larger than the server's buffer, left
+/// queued; [`Errno::WouldBlock`] for an empty queue a non-blocking receive
+/// meets; [`Errno::OutOfMemory`] when a blocking one has no room to register
+/// its wait; [`Errno::NotImplemented`] when `park` cannot park the caller;
+/// [`Errno::Interrupted`] once `abandoned` reports the server ending.
+pub fn receive_call<T>(
     endpoint: &CallEndpoint,
     server: u64,
-    buf_cap: usize,
     blocking: bool,
     park: &mut dyn FnMut() -> bool,
     abandoned: &dyn Fn() -> bool,
-) -> Result<ReceivedCall, Errno> {
+    mut receive: impl FnMut() -> Result<Receive<T>, Errno>,
+) -> Result<T, Errno> {
     endpoint.record_server_task(server);
     if blocking {
         crate::waitq::SERVE_WAITQ.register(server, crate::waitq::NO_DEADLINE)?;
@@ -262,11 +284,13 @@ pub fn receive_call(
         if endpoint.is_closed() {
             break Err(Errno::NotFound);
         }
-        match endpoint.recv_call(buf_cap) {
-            RecvCall::Received(call) => break Ok(call),
-            RecvCall::TooLarge { .. } => break Err(Errno::BufferTooSmall),
-            RecvCall::Empty if !blocking => break Err(Errno::WouldBlock),
-            RecvCall::Empty => {
+        match receive() {
+            Err(refused) => break Err(refused),
+            Ok(Receive::Taken(call)) => break Ok(call),
+            Ok(Receive::TooLarge) => break Err(Errno::BufferTooSmall),
+            Ok(Receive::Again) => {}
+            Ok(Receive::Empty) if !blocking => break Err(Errno::WouldBlock),
+            Ok(Receive::Empty) => {
                 if !park() {
                     break Err(Errno::NotImplemented);
                 }
@@ -728,7 +752,7 @@ mod tests {
                 &NullSink,
             )
             .expect("posted");
-            crate::waitq::budget_watch(ProcessId(caller), waiter).expect("filed");
+            crate::waitq::budget_watch(ProcessId(caller), waiter, false).expect("filed");
             let _ = crate::test_boot::take_unparked();
             if owned_teardown {
                 let aspaces = RwLock::new(AddressSpaceRegistry::new());
@@ -830,11 +854,17 @@ mod tests {
         register(Arc::clone(&ep), &NullSink).expect("bound");
         let never = || false;
         assert_eq!(
-            receive_call(&ep, boot.task(), usize::MAX, false, &mut || true, &never).err(),
+            receive_call(&ep, boot.task(), false, &mut || true, &never, || Ok(ep
+                .recv_call(usize::MAX)
+                .into()))
+            .err(),
             Some(Errno::WouldBlock)
         );
         assert_eq!(
-            receive_call(&ep, boot.task(), usize::MAX, true, &mut || false, &never).err(),
+            receive_call(&ep, boot.task(), true, &mut || false, &never, || Ok(ep
+                .recv_call(usize::MAX)
+                .into()))
+            .err(),
             Some(Errno::NotImplemented)
         );
         let server = {
@@ -842,8 +872,10 @@ mod tests {
             boot.spawn(move || {
                 let task = crate::test_boot::HostBoot::current().task();
                 let park = &mut crate::waitq::park_calling_task;
-                receive_call(&ep, task, usize::MAX, true, park, &|| false)
-                    .map(|call| call.request.as_bytes().to_vec())
+                receive_call(&ep, task, true, park, &|| false, || {
+                    Ok(ep.recv_call(usize::MAX).into())
+                })
+                .map(|call: ReceivedCall| call.request.as_bytes().to_vec())
             })
         };
         boot.until_blocked(server.id());

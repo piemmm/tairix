@@ -1140,7 +1140,10 @@ Each stage is independently reviewable and must leave the whole-project
   `ipc_call`: every per-input request waited for the session's own loop.
 - **The posted half.** `WindowTransport` carries `post` and `reap`
   (`call_post`/`call_reap`), and `WindowClient` posts `Resize`, `SetCursor`,
-  `SetTooltip`, `DragVerdict`, `SetTitle` and `SetSizing`. The shared binding
+  `SetTooltip`, `DragVerdict`, the offer answers, `SetTitle`, `SetSizing`,
+  `Present`, a drop's end, and `OfferedFile`, the one read whose answer is data:
+  it lands for the application to take (`take_offered_media`), and a wait
+  returns once it has. The shared binding
   adds the window endpoint's `CallReply` source (`REPLY_TOKEN`, woken as
   `Wake::Event`), and `WindowEvents::try_wait` reaps before it drains —
   `WindowEvents::wait` runs it before every park, since the member stays
@@ -1160,7 +1163,8 @@ Each stage is independently reviewable and must leave the whole-project
   unanswered makes no region (`Fitted::Deferred`) and its size is delivered
   again once that one is answered.
 - **What stays a call.** `Create`, `Close`, menus,
-  alerts and the queries: their answers are needed before the app goes on.
+  alerts and the other queries: their answers are needed before the app goes
+  on.
 - **Proven by** the `lib/window` tests over a loopback that answers posts only
   when told: `a_posted_request_never_waits_on_the_session`,
   `a_posted_resize_is_served_before_the_present_that_follows_it`,

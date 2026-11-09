@@ -319,7 +319,7 @@ Done (code + host coverage). What now holds:
 
 - **Kernel one-shot delegation** (`fd_grant` 90 / `fd_redeem` 91,
   in-place `abi-v1` additions): `fd_grant(fd, write_ceiling, recipient,
-  len)` delegates the caller's **own** plain, non-directory filesystem
+  len, flags)` delegates the caller's **own** plain, non-directory filesystem
   descriptor — with that descriptor's own access, a writable one bounded by
   a mandatory extent ceiling — to the process *instance* `recipient` names — the
   attested `ProcId` the grantor read from an `Origin`, never a task id,

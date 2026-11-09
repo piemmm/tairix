@@ -32,6 +32,9 @@ colour conversion and spelling in the tree has one definition.
   drawn out, in 65535ths, exact for every 8-bit colour.
 - `Xyz`, `Lab`, `Lch` — CIE 1931 XYZ, L\*a\*b\* and its polar LCh(ab) under
   D65, in `f64`; a colour outside sRGB comes back clipped and marked.
+  `Lab::to_xyz_under` reads L\*a\*b\* measured against another white.
+- `Adaptation` — colour measured under another white as linear sRGB:
+  Bradford's adaptation to D65, then sRGB's primaries, held as one matrix.
 - `Illuminant`, `KELVIN_MIN`, `KELVIN_MAX` — a light's white by its correlated
   colour temperature and its Duv off the Planckian locus (Krystek's rational
   fit, 1000–15000 K), and the temperature and Duv a colour, or a point of the

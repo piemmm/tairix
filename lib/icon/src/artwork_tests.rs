@@ -1230,7 +1230,8 @@ impl ArtworkResolver for DecliningResolver<'_> {
         self.inner.resolve(key, side)
     }
 
-    fn declined(&mut self, key: &ArtworkKey, side: u32) {
+    fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+        assert!(bytes > 0, "a declined decode reports what it would cost");
         self.declined.push((key.clone(), side));
     }
 }

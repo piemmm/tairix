@@ -552,7 +552,12 @@ fn drive_until_the_parent_exits(
         // it the child's `exit` never unparks the parent blocked in `wait`.
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
 
-        match wait_producer.poll(ProcessId(0), parent_pid, WaitFlags::empty()) {
+        match wait_producer.poll(
+            ProcessId(0),
+            parent_pid,
+            WaitFlags::empty(),
+            &mut |_| Ok(()),
+        ) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(0) => {
                     note(

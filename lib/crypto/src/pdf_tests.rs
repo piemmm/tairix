@@ -14,6 +14,9 @@ use crate::test_hex::hex;
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 
+/// The IV the AES known answers were encrypted under.
+const IV: &str = "101112131415161718191a1b1c1d1e1f";
+
 fn legacy<'a>(
     revision: u8,
     key_len: usize,
@@ -199,33 +202,35 @@ fn revisions_5_and_6_unwrap_the_file_key_with_either_password() {
 
 #[test]
 fn aes_strings_decrypt_in_place_their_padding_left_out() {
-    let mut data = hex::<32>("101112131415161718191a1b1c1d1e1fc112bc37e390beec0926f303ffb4e0b8");
+    let iv = hex::<16>(IV);
+    let mut body = hex::<16>("c112bc37e390beec0926f303ffb4e0b8");
     let key = PdfKey::of(&core::array::from_fn::<u8, 16, _>(|at| {
         u8::try_from(at).expect("a small index")
     }));
-    let plain = pdf_aes_decrypt(&key, &mut data).expect("whole blocks");
-    assert_eq!(&data[plain], b"Hello, PDF");
-    let mut data = hex::<32>("101112131415161718191a1b1c1d1e1f94cb26536a58ebe6ad85137954bb7028");
+    let plain = pdf_aes_decrypt(&key, &iv, &mut body).expect("a key and IV AES takes");
+    assert_eq!(&body[..plain], b"Hello, PDF");
+    let mut body = hex::<16>("94cb26536a58ebe6ad85137954bb7028");
     let key = PdfKey::of(&core::array::from_fn::<u8, 32, _>(|at| {
         u8::try_from(at).expect("a small index")
     }));
-    let plain = pdf_aes_decrypt(&key, &mut data).expect("whole blocks");
-    assert_eq!(&data[plain], b"Hello, PDF");
+    let plain = pdf_aes_decrypt(&key, &iv, &mut body).expect("a key and IV AES takes");
+    assert_eq!(&body[..plain], b"Hello, PDF");
 }
 
 #[test]
-fn a_final_part_block_is_dropped_and_data_shorter_than_its_iv_is_nothing() {
+fn a_final_part_block_is_dropped_and_a_key_or_iv_aes_does_not_take_is_refused() {
     let key = PdfKey::of(&core::array::from_fn::<u8, 16, _>(|at| {
         u8::try_from(at).expect("a small index")
     }));
-    let whole = hex::<32>("101112131415161718191a1b1c1d1e1fc112bc37e390beec0926f303ffb4e0b8");
-    let mut damaged = [0u8; 39];
-    damaged[..32].copy_from_slice(&whole);
-    let plain = pdf_aes_decrypt(&key, &mut damaged).expect("a key AES takes");
-    assert_eq!(&damaged[plain], b"Hello, PDF");
-    assert_eq!(pdf_aes_decrypt(&key, &mut [0u8; 8]), Some(0..0));
-    assert_eq!(pdf_aes_decrypt(&key, &mut [0u8; 16]), Some(16..16));
-    assert!(pdf_aes_decrypt(&PdfKey::of(&[0u8; 5]), &mut [0u8; 32]).is_none());
+    let iv = hex::<16>(IV);
+    let mut damaged = [0u8; 23];
+    damaged[..16].copy_from_slice(&hex::<16>("c112bc37e390beec0926f303ffb4e0b8"));
+    let plain = pdf_aes_decrypt(&key, &iv, &mut damaged).expect("a key and IV AES takes");
+    assert_eq!(&damaged[..plain], b"Hello, PDF");
+    assert_eq!(pdf_aes_decrypt(&key, &iv, &mut [0u8; 8]), Some(0));
+    assert_eq!(pdf_aes_decrypt(&key, &iv, &mut []), Some(0));
+    assert!(pdf_aes_decrypt(&PdfKey::of(&[0u8; 5]), &iv, &mut [0u8; 16]).is_none());
+    assert!(pdf_aes_decrypt(&key, &iv[..8], &mut [0u8; 16]).is_none());
 }
 
 #[test]

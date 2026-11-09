@@ -38,8 +38,8 @@ use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep, DROP_LAND
 
 use crate::client::{
     pointer_point, present_damage, present_damage_list, presented_damage, retained_damage,
-    DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, PostedRequest, Refused,
-    Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    DeclaredTip, EventDrain, EventError, EventSource, OfferedMedia, Owed, Parked, PostedRequest,
+    Refused, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
 };
 use crate::damage_in;
 use crate::desktop::Desktop;
@@ -6456,7 +6456,7 @@ fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
 }
 
 /// A file offered over a window is delivered only inside it, and its type is
-/// read by that window's owner alone.
+/// read, never waited on, by that window's owner alone.
 #[test]
 fn a_file_offer_lies_within_its_window_and_its_type_is_its_owners_to_read() {
     let (loopback, mut client, [_, _, stranger]) = carried_drag();
@@ -6483,14 +6483,115 @@ fn a_file_offer_lies_within_its_window_and_its_type_is_its_owners_to_read() {
         .expect("inside the window");
     loopback.borrow_mut().host.offered_file = Some((stranger, 9));
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.offered_file(stranger, 9), Ok("image/png"));
+    client.ask_offered_file(stranger, 9).expect("posted");
+    client.reap_posted();
+    assert_eq!(
+        client.take_offered_media(),
+        Some(OfferedMedia {
+            window_id: stranger,
+            serial: 9,
+            media: Ok(String::from("image/png")),
+        })
+    );
     client.answer_file_offer(stranger, 9, true).expect("posted");
     assert_eq!(loopback.borrow().host.file_answers, [(stranger, 9, true)]);
     loopback.borrow_mut().ticket = TICKET_A;
+    client.ask_offered_file(stranger, 9).expect("posted");
+    client.reap_posted();
     assert_eq!(
-        client.offered_file(stranger, 9),
-        Err(Errno::NotFound),
+        client.take_offered_media().map(|read| read.media),
+        Some(Err(Errno::NotFound)),
         "only the offered window's owner reads its file's type"
+    );
+    assert_eq!(client.take_offered_media(), None);
+}
+
+/// An offered file's type is read without waiting on the session: the read
+/// lands with the other posted answers, the newest of several asked over one
+/// window is the one sent after the first, and a closed window's read is
+/// reaped but never handed over.
+#[test]
+fn an_offered_files_type_is_posted_folded_and_dropped_with_its_window() {
+    let (loopback, mut client, [_, _, stranger]) = carried_drag();
+    loopback.borrow_mut().host.offered_file = Some((stranger, 11));
+    loopback.borrow_mut().ticket = TICKET_B;
+    loopback.borrow_mut().holds_posts = true;
+    let sent = loopback.borrow().sent.len();
+    for serial in [9, 10, 11] {
+        client.ask_offered_file(stranger, serial).expect("posted");
+    }
+    assert_eq!(
+        loopback.borrow().sent.len(),
+        sent + 1,
+        "one read is in flight, the newest held behind it"
+    );
+    client.reap_posted();
+    assert_eq!(client.take_offered_media(), None, "nothing is served yet");
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(
+        client.take_offered_media(),
+        Some(OfferedMedia {
+            window_id: stranger,
+            serial: 9,
+            media: Err(Errno::NotFound),
+        })
+    );
+    assert_eq!(loopback.borrow().sent.len(), sent + 2);
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(
+        client.take_offered_media(),
+        Some(OfferedMedia {
+            window_id: stranger,
+            serial: 11,
+            media: Ok(String::from("image/png")),
+        }),
+        "the held read went under the newest number"
+    );
+
+    client.ask_offered_file(stranger, 11).expect("posted");
+    client.close(stranger).expect("closed");
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(client.take_offered_media(), None, "its window closed");
+    assert!(
+        loopback.borrow().answered.is_empty(),
+        "the closed window's read was still reaped"
+    );
+}
+
+/// A read that landed for a window is not handed over once it closes.
+///
+/// Regression: closing orphaned reads in flight but kept those already
+/// landed, so the application took a closed window's media type.
+#[test]
+fn a_closed_windows_landed_read_is_dropped_with_it() {
+    let (loopback, mut client, [_, _, stranger]) = carried_drag();
+    loopback.borrow_mut().host.offered_file = Some((stranger, 9));
+    loopback.borrow_mut().ticket = TICKET_B;
+    client.ask_offered_file(stranger, 9).expect("posted");
+    client.reap_posted();
+    client.close(stranger).expect("closed");
+    assert_eq!(client.take_offered_media(), None);
+}
+
+/// A wait returns once a read the application asked has landed, rather than
+/// parking with the answer untaken.
+#[test]
+fn a_wait_returns_once_an_asked_read_lands() {
+    let (loopback, mut client, [_, _, stranger]) = carried_drag();
+    loopback.borrow_mut().host.offered_file = Some((stranger, 9));
+    loopback.borrow_mut().ticket = TICKET_B;
+    client.ask_offered_file(stranger, 9).expect("posted");
+    let source = QueueSource::new([]);
+    let parked = Rc::clone(&source.parked);
+    let mut events = WindowEvents::new(source);
+    assert_eq!(events.wait(&mut client).expect("no park"), None);
+    assert_eq!(parked.get(), 0, "the landed read ended the wait unparked");
+    assert_eq!(
+        client.take_offered_media().map(|read| read.media),
+        Some(Ok(String::from("image/png")))
     );
 }
 

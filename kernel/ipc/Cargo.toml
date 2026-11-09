@@ -17,6 +17,9 @@ tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 # hash, so no lookup grows with the number of senders an endpoint has.
 tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
+# An answer's watchers are copied out in a fixed batch, so their group keeps
+# its room and the next watch needs no memory.
+tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }

@@ -3148,8 +3148,9 @@ pub enum WindowRequest {
     /// one-shot delegation minted to the session from a descriptor the caller
     /// opened read-only, and `name`, its own file name for display. One-shot:
     /// `NotFound` once the drop has been handed over or for a drag that placed
-    /// nothing. The session relays the file read-only, so a writable
-    /// descriptor is refused.
+    /// nothing. The session relays only a regular file, read-only, so a
+    /// writable descriptor, a pipe end or anything else but a file is
+    /// refused.
     PlaceDropped {
         /// The window the drag began in.
         window_id: u64,
@@ -7473,15 +7474,11 @@ pub fn decode_drag_spot_reply(bytes: &[u8]) -> Result<&str, Errno> {
     read_reply_path(bytes, DRAG_SPOT_REPLY_LEN_OFFSET)
 }
 
-/// Longest media type an [`WindowRequest::OfferedFile`] reply carries: a type
-/// and a subtype of at most 127 characters each, as RFC 6838 bounds them, and
-/// the slash between.
-pub const WINDOW_MEDIA_TYPE_MAX: usize = 255;
-
 /// Longest reply to a [`WindowRequest::OfferedFile`]: the status word, the
-/// media type's length, and the longest media type.
+/// media type's length, and the longest media type,
+/// [`MIME_TYPE_MAX`](crate::MIME_TYPE_MAX).
 pub const WINDOW_OFFERED_FILE_REPLY_MAX: usize =
-    OFFERED_FILE_REPLY_TEXT_OFFSET + WINDOW_MEDIA_TYPE_MAX;
+    OFFERED_FILE_REPLY_TEXT_OFFSET + crate::MIME_TYPE_MAX;
 /// Byte offset of an offered file reply's length.
 const OFFERED_FILE_REPLY_LEN_OFFSET: usize = 4;
 /// Byte offset of its media type.
@@ -7490,7 +7487,7 @@ const OFFERED_FILE_REPLY_TEXT_OFFSET: usize = OFFERED_FILE_REPLY_LEN_OFFSET + 1;
 /// Whether `text` is a media type a reply may carry: printable ASCII with no
 /// space, within the bound, never empty.
 fn media_type_text(text: &[u8]) -> bool {
-    !text.is_empty() && text.len() <= WINDOW_MEDIA_TYPE_MAX && text.iter().all(u8::is_ascii_graphic)
+    !text.is_empty() && text.len() <= crate::MIME_TYPE_MAX && text.iter().all(u8::is_ascii_graphic)
 }
 
 /// Encode a [`WindowRequest::OfferedFile`] outcome into `out`, answering the
@@ -10953,7 +10950,7 @@ mod tests {
     use super::{
         decode_offered_file_reply, encode_offered_file_reply, OFFERED_FILE_REPLY_TEXT_OFFSET,
         OPEN_TARGET_KIND_DOCUMENT, OPEN_TARGET_REPLY_KIND_OFFSET, PLACE_DROPPED_GRANT_OFFSET,
-        PLACE_DROPPED_NAME_LEN_OFFSET, WINDOW_MEDIA_TYPE_MAX, WINDOW_OFFERED_FILE_REPLY_MAX,
+        PLACE_DROPPED_NAME_LEN_OFFSET, WINDOW_OFFERED_FILE_REPLY_MAX,
     };
     use super::{
         decode_picked_file_reply, encode_picked_file_reply, PickedFile,
@@ -14758,9 +14755,24 @@ mod tests {
         let mut out = [0u8; WINDOW_OFFERED_FILE_REPLY_MAX];
         let n = encode_offered_file_reply(&mut out, Ok("image/png"));
         assert_eq!(decode_offered_file_reply(&out[..n]), Ok("image/png"));
-        let longest = "t".repeat(WINDOW_MEDIA_TYPE_MAX);
+        let longest = "t".repeat(crate::MIME_TYPE_MAX);
         let n = encode_offered_file_reply(&mut out, Ok(&longest));
         assert_eq!(decode_offered_file_reply(&out[..n]), Ok(longest.as_str()));
+        let longer = alloc::format!("{longest}t");
+        let n = encode_offered_file_reply(&mut out, Ok(&longer));
+        assert_eq!(
+            decode_offered_file_reply(&out[..n]),
+            Err(Errno::OutOfRange),
+            "a type no manifest could declare is never sent"
+        );
+        let mut past = [b't'; OFFERED_FILE_REPLY_TEXT_OFFSET + crate::MIME_TYPE_MAX + 1];
+        past[..OFFERED_FILE_REPLY_TEXT_OFFSET].fill(0);
+        past[OFFERED_FILE_REPLY_TEXT_OFFSET - 1] = u8::try_from(longer.len()).unwrap();
+        assert_eq!(
+            decode_offered_file_reply(&past),
+            Err(Errno::OutOfRange),
+            "nor read"
+        );
         for wrong in ["", "image/ png", "image/p\u{e9}ng", "a\tb"] {
             let n = encode_offered_file_reply(&mut out, Ok(wrong));
             assert_eq!(

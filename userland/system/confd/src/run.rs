@@ -215,7 +215,7 @@ mod program {
                 File::open(path.as_bytes(), OpenFlags::READ)
             }
             .map_err(Errno::from_syscall)?;
-            let handle = tairix_rt::fd_grant(file.fd(), ceiling, recipient);
+            let handle = tairix_rt::fd_grant(file.fd(), ceiling, recipient, 0);
             Errno::syscall_result(handle)
         }
     }

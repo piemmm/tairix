@@ -492,8 +492,7 @@ mod tests {
         for (id, task) in [(0x10, 0xA), (0x11, 0xB)] {
             reg.lookup(EndpointId(id))
                 .expect("registered")
-                .watch_room(task, sender)
-                .expect("recorded");
+                .watch_room(task, sender);
         }
         let taken = reg.take_owned_by(5).expect("owner 5 bound a port");
         let torn: Vec<EndpointId> = taken.iter().copied().collect();
@@ -553,8 +552,7 @@ mod tests {
         }
         reg.lookup(EndpointId(0x33))
             .expect("registered")
-            .watch_room(0xA, instance)
-            .expect("recorded");
+            .watch_room(0xA, instance);
         let used = |reg: &PortRegistry| {
             reg.senders
                 .as_ref()

@@ -25,7 +25,7 @@ use tairix_rng::RandU64;
 use tairix_theme::Theme;
 
 use crate::analysis::{DealFound, DealSearch, Finding, Question, HINT_BUDGET, MOVE_BUDGET};
-use crate::art::{CardArt, Palette};
+use crate::art::{surface_bytes, CardArt, Keeps, Palette};
 use crate::card::CardId;
 use crate::deal::DealNumber;
 use crate::layout::{Layout, Placement};
@@ -255,6 +255,7 @@ pub struct Game {
     pub(crate) placements: Vec<Placement>,
     pub(crate) motion: Motion,
     art: Option<CardArt>,
+    keeps: Keeps,
     pub(crate) pointer: Point,
     pub(crate) press: Option<Press>,
     pub(crate) drag: Option<Drag>,
@@ -295,6 +296,7 @@ impl Game {
             placements: Vec::new(),
             motion: Motion::new(variant.deck().count(), size, setup.reduced, setup.refresh),
             art: None,
+            keeps: Keeps::ALL,
             pointer: Point::ORIGIN,
             press: None,
             drag: None,
@@ -521,11 +523,17 @@ impl Game {
 
     // --- The window -----------------------------------------------------
 
-    /// Give back the card tiles and the baize, as memory pressure asks: each
-    /// is drawn again the next time it is shown.
-    pub fn trim(&mut self) {
+    /// Keep only the art `admits` lets this layout hold — it answers whether
+    /// that many bytes may stay cached — giving the rest back now; what goes
+    /// is drawn again when next shown.
+    pub fn fit_memory(&mut self, admits: impl Fn(usize) -> bool) {
+        let layout = &self.layout;
+        self.keeps = Keeps {
+            baize: admits(surface_bytes(layout.felt.width, layout.felt.height)),
+            tiles: admits(CardArt::tile_bytes(layout.card_width, layout.card_height)),
+        };
         if let Some(art) = &mut self.art {
-            art.trim();
+            art.fit(self.keeps);
         }
     }
 
@@ -569,14 +577,17 @@ impl Game {
         self.refresh_status(now_ns);
         let palette = Palette::resolve(theme, self.prefs());
         let layout = &self.layout;
+        let keeps = self.keeps;
         let art = self.art.get_or_insert_with(|| {
-            CardArt::new(
+            let mut art = CardArt::new(
                 layout.card_width,
                 layout.card_height,
                 layout.radius,
                 layout.hairline,
                 palette,
-            )
+            );
+            art.fit(keeps);
+            art
         });
         art.retune(
             layout.card_width,

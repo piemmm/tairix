@@ -9,7 +9,9 @@ The runtime every user-space filesystem driver serves its volume through
 
 A format's driver crate implements `ServedFormat`: open the volume it is
 given, only for reading when the kernel says so, with its write-back bounded
-by a `WritebackBudget` (the machine's memory and a pressure gauge), and name
+by a `WritebackBudget` (the machine's memory and a pressure gauge) and its
+diagnostics recorded on the log the runtime lends it (`Sink`, the process's
+own log under `CAP_LOG_EMIT`), and name
 what it opened — its `FormatName`, down to the generation, and why it will not
 write the volume if it will not. `Opened::offer` turns that into the
 `ServeOffer` the kernel is given, saying the volume keeps a title unless its

@@ -12,11 +12,14 @@ use tairix_util::fallible::try_push;
 
 use crate::colour::{Space, Srgb};
 use crate::display::{DisplayList, Gradient, GradientKind, Item, Losses, Lost, Paint, Pen, Stop};
-use crate::document::{tolerated, Document};
+use crate::document::Document;
+use crate::error::tolerated;
+use crate::filter::Decoded;
 use crate::function::{values, Values, MAX_COMPONENTS};
 use crate::image;
 use crate::lex::{Lexer, Token};
-use crate::object::{owned, Dict, Name, ObjRef, Object, Stream};
+use crate::limits::{MAX_CONTENT_BYTES, MAX_ITEMS};
+use crate::object::{Dict, Name, ObjRef, Object, Resolved, Stream};
 use crate::page::{Page, Rect};
 use crate::parse;
 use crate::shading::{self, level, Shading, MAX_STOPS};
@@ -25,7 +28,8 @@ use crate::PdfError;
 /// The most operators a page's content runs, its forms' included.
 const MAX_OPERATORS: usize = 4_000_000;
 
-/// The most path points and gradient stops a page's display list holds.
+/// The most path points and gradient stops a page's display list holds, the
+/// path being built counted with them.
 const MAX_POINTS: usize = 2_000_000;
 
 /// The deepest `q` saves graphics states: one past it is counted but saves
@@ -46,12 +50,22 @@ enum Read<T> {
     Damaged,
 }
 
-impl<T: Clone> Read<T> {
+impl<T> Read<T> {
     /// What `read` came to, its damage kept as damage.
     fn of(read: Option<T>) -> Self {
         read.map_or(Self::Damaged, Self::Held)
     }
 
+    /// What was read, to be added to, or the damage it was.
+    fn held_mut(&mut self) -> Result<&mut T, PdfError> {
+        match self {
+            Self::Held(held) => Ok(held),
+            Self::Damaged => Err(PdfError::Malformed),
+        }
+    }
+}
+
+impl<T: Clone> Read<T> {
     /// What was read, or the damage it was.
     fn held(&self) -> Result<T, PdfError> {
         match self {
@@ -76,7 +90,7 @@ struct Categories {
 impl Categories {
     /// `resources`' categories, a category that is a reference resolved and
     /// one that cannot be read held as empty.
-    fn of(document: &Document<'_>, resources: Dict) -> Result<Self, PdfError> {
+    fn of(document: &Document, resources: Dict) -> Result<Self, PdfError> {
         let mut categories = Self::default();
         for (key, entry) in resources.into_entries() {
             let held = match key.as_bytes() {
@@ -89,7 +103,9 @@ impl Categories {
                 _ => continue,
             };
             let entry = match entry {
-                Object::Ref(_) => tolerated(document.resolve(&entry).and_then(owned))?,
+                Object::Ref(_) => {
+                    tolerated(document.resolve(&entry).and_then(Resolved::into_owned))?
+                }
                 entry => Some(entry),
             };
             if let Some(Object::Dict(dict)) = entry {
@@ -134,6 +150,8 @@ struct Named {
     shadings: OrderedMap<Name, Read<Option<Arc<Shading>>>>,
     states: OrderedMap<Name, Read<Arc<Setting>>>,
     xobjects: OrderedMap<Name, Read<Arc<External>>>,
+    /// Whether the content each optional content name governs is shown.
+    properties: OrderedMap<Name, Read<bool>>,
 }
 
 /// What an external object's name came to.
@@ -220,6 +238,9 @@ struct State {
     ctm: Affine,
     /// Clips begun since this state was saved, ended when it is restored.
     clips: usize,
+    /// Whether a clip lets nothing through: one to no path, or one that
+    /// could not be placed.
+    clipped_out: bool,
     fill: Colour,
     stroke: Colour,
     pen: Pen,
@@ -237,6 +258,7 @@ impl State {
         Self {
             ctm: Affine::IDENTITY,
             clips: 0,
+            clipped_out: false,
             fill: black.clone(),
             stroke: black,
             pen: Pen {
@@ -274,9 +296,72 @@ struct Floor {
 }
 
 /// Where an inline image was read: its scope, its content stream — the page's
-/// or a form's — and its place there, and for a stencil the fill colour it
-/// was painted in.
-type Inline = (Scope, Option<u32>, usize, Option<[u8; 3]>);
+/// or a form's — and its place there.
+type Inline = (Scope, Option<u32>, usize);
+
+/// Where an image was read from: an image object, or an inline image.
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum Origin {
+    Object(u32),
+    Inline(Inline),
+}
+
+/// What an image was read to: a picture, or a stencil's samples and the
+/// picture they paint in each colour they were painted in.
+enum Painted {
+    Picture(Arc<image::Picture>),
+    Stencil {
+        stencil: image::Stencil,
+        coloured: OrderedMap<[u8; 3], Arc<image::Picture>>,
+    },
+}
+
+impl Painted {
+    /// What image dictionary `dict` over samples `decoded` paints as `kind`.
+    fn read(
+        document: &Document,
+        dict: &Dict,
+        decoded: Decoded,
+        kind: &image::Kind,
+    ) -> Result<Self, PdfError> {
+        Ok(match kind {
+            image::Kind::Stencil => Self::Stencil {
+                stencil: image::stencil(document, dict, &decoded)?,
+                coloured: OrderedMap::new(),
+            },
+            image::Kind::Colour(space) => {
+                Self::Picture(try_arc(image::picture(document, dict, decoded, space)?)?)
+            }
+        })
+    }
+
+    /// The picture it paints with the fill colour `fill`: a stencil's made
+    /// once in each colour, and in black where the fill is a paint no picture
+    /// holds, the loss recorded.
+    fn picture(
+        &mut self,
+        document: &Document,
+        fill: Option<Srgb>,
+        lost: &mut Losses,
+    ) -> Result<Arc<image::Picture>, PdfError> {
+        match self {
+            Self::Picture(picture) => Ok(Arc::clone(picture)),
+            Self::Stencil { stencil, coloured } => {
+                let colour = fill.unwrap_or_else(|| {
+                    lost.insert(Lost::Images);
+                    [0.0; 3]
+                });
+                let key = colour.map(level);
+                if let Some(picture) = coloured.get(&key) {
+                    return Ok(Arc::clone(picture));
+                }
+                let picture = try_arc(stencil.painted(document, colour)?)?;
+                coloured.try_insert(key, Arc::clone(&picture))?;
+                Ok(picture)
+            }
+        }
+    }
+}
 
 /// The display list of `page`.
 pub(crate) fn interpret(page: &Page<'_>) -> Result<DisplayList, PdfError> {
@@ -306,18 +391,14 @@ pub(crate) fn interpret(page: &Page<'_>) -> Result<DisplayList, PdfError> {
 
 /// A page's content: its one stream, or its streams joined by white space. A
 /// stream that cannot be read is left out, the loss recorded.
-fn page_content(
-    document: &Document<'_>,
-    page: &Dict,
-    lost: &mut Losses,
-) -> Result<Vec<u8>, PdfError> {
+fn page_content(document: &Document, page: &Dict, lost: &mut Losses) -> Result<Vec<u8>, PdfError> {
     let contents = document.get(page, b"Contents")?;
     let streams: &[Object] = match &*contents {
         Object::Array(streams) => streams,
         Object::Stream(_) => core::slice::from_ref(&*contents),
         _ => &[],
     };
-    let mut content = Vec::new();
+    let mut content: Vec<u8> = Vec::new();
     for stream in streams {
         let read = document
             .resolve(stream)
@@ -332,15 +413,21 @@ fn page_content(
         if decoded.damaged {
             lost.insert(Lost::Damaged);
         }
-        content.try_reserve(decoded.bytes.len() + 1)?;
-        content.extend_from_slice(&decoded.bytes);
+        // The first stream is taken as it was decoded rather than copied.
+        if content.is_empty() {
+            content = decoded.bytes;
+            content.try_reserve(1)?;
+        } else {
+            content.try_reserve(decoded.bytes.len() + 1)?;
+            content.extend_from_slice(&decoded.bytes);
+        }
         content.push(b'\n');
     }
     Ok(content)
 }
 
-struct Interpreter<'d, 'f> {
-    document: &'d Document<'f>,
+struct Interpreter<'d> {
+    document: &'d Document,
     /// The page's default space into its own.
     page: Affine,
     size: (f64, f64),
@@ -361,19 +448,23 @@ struct Interpreter<'d, 'f> {
     current: Option<Point>,
     clip: Option<FillRule>,
     operators: usize,
+    /// Content bytes lexed: the page's own, and a form's each time it is
+    /// painted.
+    lexed: usize,
     points: usize,
+    /// Points of the path being built.
+    built: usize,
     /// The forms being painted, innermost last.
     forms: Vec<ObjRef>,
     /// Marked-content sections open, each whether it hides what it holds.
     marked: Vec<bool>,
     hiding: usize,
-    /// What a form and an image object read to, by object, and a stencil in
-    /// each colour and an inline image where it was read; so none painted
-    /// again is read again.
+    /// What a form read to, by object, what an image read to, by where it
+    /// was read, and where each inline image ends: so none painted again is
+    /// read again.
     forms_read: OrderedMap<u32, Read<Arc<Form>>>,
-    pictures: OrderedMap<u32, Read<Arc<image::Picture>>>,
-    stencils: OrderedMap<(u32, [u8; 3]), Read<Arc<image::Picture>>>,
-    inline: OrderedMap<Inline, Read<Arc<image::Picture>>>,
+    images: OrderedMap<Origin, Read<Painted>>,
+    inline_ends: OrderedMap<Inline, usize>,
     /// What each resources dictionary's names were read to, by [`Scope`].
     named: Vec<Named>,
     /// The device spaces, shared by every colour set in one.
@@ -382,8 +473,8 @@ struct Interpreter<'d, 'f> {
     cmyk: Arc<Space>,
 }
 
-impl<'d, 'f> Interpreter<'d, 'f> {
-    fn new(document: &'d Document<'f>, page: &Page<'_>) -> Result<Self, PdfError> {
+impl<'d> Interpreter<'d> {
+    fn new(document: &'d Document, page: &Page<'_>) -> Result<Self, PdfError> {
         let gray = try_arc(Space::Gray)?;
         Ok(Self {
             document,
@@ -401,14 +492,15 @@ impl<'d, 'f> Interpreter<'d, 'f> {
             current: None,
             clip: None,
             operators: 0,
+            lexed: 0,
             points: 0,
+            built: 0,
             forms: Vec::new(),
             marked: Vec::new(),
             hiding: 0,
             forms_read: OrderedMap::new(),
-            pictures: OrderedMap::new(),
-            stencils: OrderedMap::new(),
-            inline: OrderedMap::new(),
+            images: OrderedMap::new(),
+            inline_ends: OrderedMap::new(),
             named: Vec::new(),
             gray,
             rgb: try_arc(Space::Rgb)?,
@@ -437,6 +529,10 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         resources: Resources<'_>,
         base: Affine,
     ) -> Result<(), PdfError> {
+        self.lexed = self.lexed.saturating_add(content.len());
+        if self.lexed > MAX_CONTENT_BYTES {
+            return Err(PdfError::TooComplex);
+        }
         let outer = self.floor;
         self.floor = Floor {
             saves: self.saved.len() + self.unsaved,
@@ -682,7 +778,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
             b"K" | b"k" => self.device(operator == b"K", Arc::clone(&self.cmyk), operands)?,
             b"sh" => self.shade(name(0)?, resources)?,
             b"Do" => self.xobject(name(0)?, resources)?,
-            b"Tj" | b"TJ" | b"'" | b"\"" if self.hiding == 0 => self.lost.insert(Lost::Text),
+            b"Tj" | b"TJ" | b"'" | b"\"" if self.shown() => self.lost.insert(Lost::Text),
             b"BMC" => try_push(&mut self.marked, false)?,
             b"BDC" => {
                 // Pushed whatever its operands, so its `EMC` ends this section
@@ -712,6 +808,12 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     fn end_marked(&mut self) {
         let hid = self.marked.pop() == Some(true);
         self.hiding -= usize::from(hid);
+    }
+
+    /// Whether what is painted now shows: neither optional content hides it
+    /// nor a clip lets nothing through.
+    fn shown(&self) -> bool {
+        self.hiding == 0 && !self.state.clipped_out
     }
 
     fn colour_mut(&mut self, stroking: bool) -> &mut Colour {
@@ -880,12 +982,17 @@ impl<'d, 'f> Interpreter<'d, 'f> {
                     let Some(user) = self.state.ctm.invert() else {
                         return Ok(None);
                     };
+                    let transform = matrix.then(base).then(user);
+                    if !transform.is_finite() {
+                        self.lost.insert(Lost::Damaged);
+                        return Ok(None);
+                    }
                     if shading.bbox.is_some() {
                         self.lost.insert(Lost::Shadings);
                     }
                     let gradient = Gradient {
                         stops: faded(&shading.gradient.stops, alpha)?,
-                        transform: matrix.then(base).then(user),
+                        transform,
                         ..shading.gradient.clone()
                     };
                     Some(Paint::Gradient(try_arc(gradient)?))
@@ -1083,7 +1190,11 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         else {
             return Ok(None);
         };
-        let own = match owned(self.document.get(&stream.dict, b"Resources")?)? {
+        let own = match self
+            .document
+            .get(&stream.dict, b"Resources")?
+            .into_owned()?
+        {
             Object::Dict(own) => Some(Categories::of(self.document, own)?),
             _ => None,
         };
@@ -1100,6 +1211,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     }
 
     fn move_to(&mut self, to: Point) -> Result<(), PdfError> {
+        self.grow(1)?;
         self.end_subpath()?;
         self.subpath = Some(Subpath::new(to));
         self.current = Some(to);
@@ -1117,6 +1229,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     /// Add `element`, a segment from the current point; a path begun without
     /// one starts there, as every reader starts it.
     fn segment(&mut self, element: PathEl) -> Result<(), PdfError> {
+        self.grow(element_points(&element) + usize::from(self.subpath.is_none()))?;
         if self.subpath.is_none() {
             let start = self.current.unwrap_or_else(|| element.end());
             self.subpath = Some(Subpath::new(start));
@@ -1144,7 +1257,18 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         Ok(())
     }
 
+    /// Count `points` more in the path being built: painting it copies them
+    /// into the list, so it is held to the list's bound as it grows.
+    fn grow(&mut self, points: usize) -> Result<(), PdfError> {
+        self.built += points;
+        if self.points + self.built > MAX_POINTS {
+            return Err(PdfError::TooComplex);
+        }
+        Ok(())
+    }
+
     fn rectangle(&mut self, at: Point, width: f64, height: f64) -> Result<(), PdfError> {
+        self.grow(4)?;
         self.end_subpath()?;
         let mut subpath = Subpath::new(at);
         subpath.elements.try_reserve_exact(3)?;
@@ -1173,72 +1297,96 @@ impl<'d, 'f> Interpreter<'d, 'f> {
             self.end_subpath()?;
         }
         let path = core::mem::take(&mut self.path);
+        self.built = 0;
         self.current = None;
         let clip = self.clip.take();
         let transform = self.state.ctm.then(self.page);
-        if path.is_empty() || !transform.is_finite() {
-            return Ok(());
-        }
-        // Each item takes a compact copy, and the path built goes back to the
-        // heap for the next to be built in: handing it on whole would keep its
-        // growth's slack in the list and build every path in fresh memory.
-        if self.hiding == 0 {
-            if self.state.mask.is_some() && (painting.fill.is_some() || painting.stroke) {
-                self.lost.insert(Lost::SoftMasks);
-            }
-            if let Some(rule) = painting.fill {
-                let colour = self.state.fill.clone();
-                if let Some(paint) = self.paint_of(&colour, self.state.fill_alpha, base)? {
-                    let path = path.try_clone()?;
-                    self.emit(Item::Fill {
-                        path,
-                        rule,
-                        paint,
-                        transform,
-                    })?;
-                }
-            }
-            if painting.stroke {
-                let colour = self.state.stroke.clone();
-                if let Some(paint) = self.paint_of(&colour, self.state.stroke_alpha, base)? {
-                    let pen = self.state.pen.clone();
-                    let path = path.try_clone()?;
-                    self.emit(Item::Stroke {
-                        path,
-                        pen,
-                        paint,
-                        transform,
-                    })?;
-                }
+        let paints = painting.fill.is_some() || painting.stroke;
+        if paints && !path.is_empty() && self.shown() {
+            if transform.is_finite() {
+                self.draw(painting, &path, transform, base)?;
+            } else {
+                self.lost.insert(Lost::Damaged);
             }
         }
         if let Some(rule) = clip {
-            self.emit(Item::Clip {
-                path,
-                rule,
-                transform,
-            })?;
-            self.state.clips += 1;
+            self.clip_to(path, rule, transform)?;
         }
         Ok(())
     }
 
-    /// Add `item` to the list, its points and stops counted against the
-    /// bound.
+    /// Fill and stroke `path` as `painting` says, each item taking a compact
+    /// copy of it, so the slack the path grew with stays out of the list.
+    fn draw(
+        &mut self,
+        painting: Painting,
+        path: &Path,
+        transform: Affine,
+        base: Affine,
+    ) -> Result<(), PdfError> {
+        if self.state.mask.is_some() {
+            self.lost.insert(Lost::SoftMasks);
+        }
+        if let Some(rule) = painting.fill {
+            let colour = self.state.fill.clone();
+            if let Some(paint) = self.paint_of(&colour, self.state.fill_alpha, base)? {
+                let path = path.try_clone()?;
+                self.emit(Item::Fill {
+                    path,
+                    rule,
+                    paint,
+                    transform,
+                })?;
+            }
+        }
+        if painting.stroke {
+            let colour = self.state.stroke.clone();
+            if let Some(paint) = self.paint_of(&colour, self.state.stroke_alpha, base)? {
+                let pen = self.state.pen.clone();
+                let path = path.try_clone()?;
+                self.emit(Item::Stroke {
+                    path,
+                    pen,
+                    paint,
+                    transform,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clip what follows, until the state is restored, to `path` placed by
+    /// `transform`. A clip to no path lets nothing through, and so does one
+    /// that cannot be placed, recorded as damage: nothing beneath a clip is
+    /// drawn unclipped.
+    fn clip_to(&mut self, path: Path, rule: FillRule, transform: Affine) -> Result<(), PdfError> {
+        let placed = transform.is_finite();
+        if !placed && !path.is_empty() {
+            self.lost.insert(Lost::Damaged);
+        }
+        if self.state.clipped_out || path.is_empty() || !placed {
+            self.state.clipped_out = true;
+            return Ok(());
+        }
+        self.emit(Item::Clip {
+            path,
+            rule,
+            transform,
+        })?;
+        self.state.clips += 1;
+        Ok(())
+    }
+
+    /// Add `item` to the list, counted against the bound on its items, and
+    /// its points and stops against the bound on those.
     fn emit(&mut self, item: Item) -> Result<(), PdfError> {
+        if self.items.len() >= MAX_ITEMS {
+            return Err(PdfError::TooComplex);
+        }
         let points = |path: &Path| -> usize {
             path.subpaths
                 .iter()
-                .map(|subpath| {
-                    1 + subpath
-                        .elements
-                        .iter()
-                        .map(|element| match element {
-                            PathEl::Line(_) => 1,
-                            PathEl::Cubic(..) => 3,
-                        })
-                        .sum::<usize>()
-                })
+                .map(|subpath| 1 + subpath.elements.iter().map(element_points).sum::<usize>())
                 .sum()
         };
         let stops = |paint: &Paint| match paint {
@@ -1261,7 +1409,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
 
     /// `sh`: shading `name` painted over everything the clip lets through.
     fn shade(&mut self, name: &[u8], resources: Resources<'_>) -> Result<(), PdfError> {
-        if self.hiding > 0 {
+        if !self.shown() {
             return Ok(());
         }
         let Some(shading) = self.shading(name, resources)? else {
@@ -1270,6 +1418,9 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         };
         let transform = self.state.ctm.then(self.page);
         let Some(user) = transform.invert() else {
+            if !transform.is_finite() {
+                self.lost.insert(Lost::Damaged);
+            }
             return Ok(());
         };
         let colours = &shading.gradient.stops;
@@ -1330,26 +1481,38 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     }
 
     /// Whether content marked as governed by the optional content `name`
-    /// names in `resources` is shown.
+    /// names in `resources` is shown: found once for each name, however much
+    /// content it governs.
     fn optional_shown(
-        &self,
+        &mut self,
         name: Option<&Object>,
         resources: Resources<'_>,
     ) -> Result<bool, PdfError> {
-        let governing = match name {
-            Some(Object::Name(name)) => resources.categories.properties.get(name.as_bytes()),
-            Some(inline @ Object::Dict(_)) => Some(inline),
-            _ => None,
+        let name = match name {
+            Some(Object::Name(name)) => name.as_bytes(),
+            Some(inline @ Object::Dict(_)) => {
+                return self.document.visibility().shows(self.document, inline);
+            }
+            _ => return Ok(true),
         };
-        match governing {
-            Some(governing) => self.document.visibility().shows(self.document, governing),
-            None => Ok(true),
+        if let Some(shown) = self.named(resources.scope)?.properties.get(name) {
+            return shown.held();
         }
+        let shown = match resources.categories.properties.get(name) {
+            Some(governing) => {
+                tolerated(self.document.visibility().shows(self.document, governing))?
+            }
+            None => Some(true),
+        };
+        self.named(resources.scope)?
+            .properties
+            .try_insert(Name::of(name)?, Read::of(shown))?;
+        shown.ok_or(PdfError::Malformed)
     }
 
     /// `Do`: external object `name` painted.
     fn xobject(&mut self, name: &[u8], resources: Resources<'_>) -> Result<(), PdfError> {
-        if self.hiding > 0 {
+        if !self.shown() {
             return Ok(());
         }
         let external = if let Some(external) = self.named(resources.scope)?.xobjects.get(name) {
@@ -1378,7 +1541,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     /// The external object `name` names, and whether it is shown.
     fn external(&self, name: &[u8], categories: &Categories) -> Result<Arc<External>, PdfError> {
         let entry = categories.xobjects.get(name).ok_or(PdfError::Malformed)?;
-        let Object::Stream(stream) = owned(self.document.resolve(entry)?)? else {
+        let Object::Stream(stream) = self.document.resolve(entry)?.into_owned()? else {
             return Err(PdfError::Malformed);
         };
         let shown = match stream.dict.get(b"OC") {
@@ -1398,69 +1561,62 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     }
 
     /// An image object painted: read once however often it is painted, a
-    /// stencil once in each colour it is painted in.
+    /// stencil's samples once in every colour it is painted in.
     fn image_xobject(&mut self, stream: &Stream) -> Result<(), PdfError> {
-        let num = stream.owner.num;
-        if self.document.get(&stream.dict, b"ImageMask")?.as_bool() == Some(true) {
-            let colour = self.stencil_colour();
-            let key = (num, colour.map(level));
-            if let Some(picture) = self.stencils.get(&key) {
-                let picture = picture.held()?;
-                return self.place(picture);
-            }
-            let read = tolerated(self.read_image(stream, &image::Kind::Stencil(colour)))?;
-            let read = Read::of(read);
-            self.stencils.try_insert(key, read.clone())?;
-            return self.place(read.held()?);
+        let origin = Origin::Object(stream.owner.num);
+        if !self.images.contains_key(&origin) {
+            let read = Read::of(tolerated(self.read_image(stream))?);
+            self.images.try_insert(origin, read)?;
         }
-        if let Some(picture) = self.pictures.get(&num) {
-            let picture = picture.held()?;
-            return self.place(picture);
-        }
-        // Only an inline image's colour space may be a resource's name.
-        let read = self
-            .document
-            .get(&stream.dict, b"ColorSpace")
-            .and_then(|space| Space::load(self.document, &space, None))
-            .and_then(|space| self.read_image(stream, &image::Kind::Colour(space)));
-        let read = Read::of(tolerated(read)?);
-        self.pictures.try_insert(num, read.clone())?;
-        self.place(read.held()?)
+        self.show(origin)
     }
 
-    /// Image object `stream` decoded as `kind`.
-    fn read_image(
-        &self,
-        stream: &Stream,
-        kind: &image::Kind,
-    ) -> Result<Arc<image::Picture>, PdfError> {
-        let decoded = self.document.decode(stream)?;
-        Ok(try_arc(image::picture(
-            self.document,
-            &stream.dict,
-            decoded,
-            kind,
-        )?)?)
+    /// Image object `stream` read: only an inline image's colour space may be
+    /// a resource's name.
+    fn read_image(&self, stream: &Stream) -> Result<Painted, PdfError> {
+        let dict = &stream.dict;
+        let kind = if self.document.get(dict, b"ImageMask")?.as_bool() == Some(true) {
+            image::Kind::Stencil
+        } else {
+            let space = self.document.get(dict, b"ColorSpace")?;
+            image::Kind::Colour(Space::load(self.document, &space, None)?)
+        };
+        Painted::read(self.document, dict, self.document.decode(stream)?, &kind)
     }
 
-    /// The colour a stencil is painted in: the fill's, or black where the fill
-    /// is a paint a picture cannot hold, the loss recorded.
-    fn stencil_colour(&mut self) -> Srgb {
+    /// The image read from `origin` painted, a stencil in the fill colour.
+    fn show(&mut self, origin: Origin) -> Result<(), PdfError> {
+        let document = self.document;
+        let fill = self.stencil_colour();
+        let inked = !matches!(self.state.fill.ink, Ink::Nothing);
+        let painted = self
+            .images
+            .get_mut(&origin)
+            .ok_or(PdfError::Malformed)?
+            .held_mut()?;
+        // A stencil inked with nothing paints nothing, as a fill in it does.
+        if !inked && matches!(painted, Painted::Stencil { .. }) {
+            return Ok(());
+        }
+        let picture = painted.picture(document, fill, &mut self.lost)?;
+        self.place(picture)
+    }
+
+    /// The colour a stencil is painted in: the fill's, or none where the fill
+    /// is a paint a picture cannot hold.
+    fn stencil_colour(&self) -> Option<Srgb> {
         match &self.state.fill.ink {
             Ink::Srgb(rgb)
             | Ink::Pattern {
                 tint: Some(rgb), ..
-            } => *rgb,
-            _ => {
-                self.lost.insert(Lost::Images);
-                [0.0; 3]
-            }
+            } => Some(*rgb),
+            _ => None,
         }
     }
 
     /// `picture` painted over the unit square, its top row at the top.
     fn place(&mut self, picture: Arc<image::Picture>) -> Result<(), PdfError> {
-        if self.hiding > 0 {
+        if !self.shown() {
             return Ok(());
         }
         if self.state.mask.is_some() {
@@ -1476,6 +1632,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         };
         let transform = flip.then(self.state.ctm).then(self.page);
         if !transform.is_finite() {
+            self.lost.insert(Lost::Damaged);
             return Ok(());
         }
         self.emit(Item::Image {
@@ -1486,14 +1643,24 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     }
 
     /// `BI`, read at `at`: an inline image, its dictionary, its data after
-    /// `ID` and its `EI`, the lexer left past it. One painted again where it
-    /// was read — a form painted again — is not decoded again.
+    /// `ID` and its `EI`, the lexer left past it. One met again where it lies
+    /// — a form painted again — is found and decoded only once.
     fn inline_image(
         &mut self,
         lexer: &mut Lexer<'_>,
         resources: Resources<'_>,
         at: usize,
     ) -> Result<(), PdfError> {
+        let inline = (resources.scope, self.content, at);
+        let origin = Origin::Inline(inline);
+        let shown = self.shown();
+        // One first met unseen is decoded only once it is painted.
+        if let Some(&end) = self.inline_ends.get(&inline) {
+            if !shown || self.images.contains_key(&origin) {
+                lexer.seek(end);
+                return if shown { self.show(origin) } else { Ok(()) };
+            }
+        }
         let mut entries = Vec::new();
         loop {
             match lexer.next()?.ok_or(PdfError::Malformed)? {
@@ -1520,31 +1687,26 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         let length = image::inline_end(self.document, &dict, space.as_deref(), data)?;
         let after = parse::find(&data[length..], b"EI").map_or(data.len(), |at| length + at + 2);
         lexer.seek(start + after);
-        if self.hiding > 0 {
+        self.inline_ends.try_insert(inline, lexer.at())?;
+        if !shown {
             return Ok(());
         }
-        let (kind, colour) = match space {
-            _ if stencil => {
-                let colour = self.stencil_colour();
-                (image::Kind::Stencil(colour), Some(colour.map(level)))
-            }
-            Some(space) => (image::Kind::Colour(space), None),
-            None => return Err(PdfError::Malformed),
+        let kind = match space {
+            _ if stencil => Ok(image::Kind::Stencil),
+            Some(space) => Ok(image::Kind::Colour(space)),
+            None => Err(PdfError::Malformed),
         };
-        let key = (resources.scope, self.content, at, colour);
-        if let Some(picture) = self.inline.get(&key) {
-            let picture = picture.held()?;
-            return self.place(picture);
-        }
-        let read = crate::filter::chain(dict.get(b"Filter"), dict.get(b"DecodeParms"))
-            .and_then(|chain| {
-                crate::filter::decode(&data[..length], &chain, self.document.budget())
-            })
-            .and_then(|decoded| image::picture(self.document, &dict, decoded, &kind))
-            .and_then(|picture| Ok(try_arc(picture)?));
-        let read = Read::of(tolerated(read)?);
-        self.inline.try_insert(key, read.clone())?;
-        self.place(read.held()?)
+        let read = kind.and_then(|kind| {
+            let chain = crate::filter::chain(dict.get(b"Filter"), dict.get(b"DecodeParms"))?;
+            let decoded = crate::filter::decode(
+                alloc::borrow::Cow::Borrowed(&data[..length]),
+                &chain,
+                self.document.budget(),
+            )?;
+            Painted::read(self.document, &dict, decoded, &kind)
+        });
+        self.images.try_insert(origin, Read::of(tolerated(read)?))?;
+        self.show(origin)
     }
 
     /// A form painted: its content in its own space and resources, clipped
@@ -1582,12 +1744,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         }
         if let Some(bbox) = form.bbox {
             let transform = self.state.ctm.then(self.page);
-            self.emit(Item::Clip {
-                path: rect_path(bbox)?,
-                rule: FillRule::NonZero,
-                transform,
-            })?;
-            self.state.clips += 1;
+            self.clip_to(rect_path(bbox)?, FillRule::NonZero, transform)?;
         }
         try_push(&mut self.forms, stream.owner)?;
         let content = self.content.replace(stream.owner.num);
@@ -1617,7 +1774,8 @@ impl<'d, 'f> Interpreter<'d, 'f> {
     fn read_form(&mut self, stream: &Stream) -> Result<Arc<Form>, PdfError> {
         let dict = &stream.dict;
         let matrix = matrix_entry(self.document, dict)?;
-        let bbox = match crate::function::numbers(self.document, dict, b"BBox")?.as_deref() {
+        let bbox = tolerated(crate::function::numbers(self.document, dict, b"BBox", 4))?;
+        let bbox = match bbox.flatten().as_deref() {
             Some(&[x0, y0, x1, y1]) => Some(Rect::spanning(x0, y0, x1, y1)),
             _ => None,
         };
@@ -1629,7 +1787,7 @@ impl<'d, 'f> Interpreter<'d, 'f> {
         if decoded.damaged {
             self.lost.insert(Lost::Damaged);
         }
-        let resources = match owned(self.document.get(dict, b"Resources")?)? {
+        let resources = match self.document.get(dict, b"Resources")?.into_owned()? {
             Object::Dict(resources) => {
                 Some((Categories::of(self.document, resources)?, self.scope()?))
             }
@@ -1687,7 +1845,7 @@ fn matrix(operands: &[Object]) -> Result<Affine, PdfError> {
 }
 
 /// The matrix an array object states.
-fn matrix_of(document: &Document<'_>, object: &Object) -> Result<Affine, PdfError> {
+fn matrix_of(document: &Document, object: &Object) -> Result<Affine, PdfError> {
     let object = document.resolve(object)?;
     let items = object.as_array().ok_or(PdfError::Malformed)?;
     affine(
@@ -1698,7 +1856,7 @@ fn matrix_of(document: &Document<'_>, object: &Object) -> Result<Affine, PdfErro
 }
 
 /// The matrix `dict`'s `/Matrix` states, the identity where it states none.
-fn matrix_entry(document: &Document<'_>, dict: &Dict) -> Result<Affine, PdfError> {
+fn matrix_entry(document: &Document, dict: &Dict) -> Result<Affine, PdfError> {
     match dict.get(b"Matrix") {
         Some(matrix) => matrix_of(document, matrix),
         None => Ok(Affine::IDENTITY),
@@ -1732,6 +1890,14 @@ fn finite(object: &Object) -> Result<f64, PdfError> {
         .as_number()
         .filter(|value| value.is_finite())
         .ok_or(PdfError::Malformed)
+}
+
+/// The points a path element adds: its end, and a curve's two controls.
+fn element_points(element: &PathEl) -> usize {
+    match element {
+        PathEl::Line(_) => 1,
+        PathEl::Cubic(..) => 3,
+    }
 }
 
 /// The closed path round `rect`.

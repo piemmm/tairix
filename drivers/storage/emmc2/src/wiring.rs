@@ -14,6 +14,7 @@ use tairix_abi::driver::mmio::MmioMapError;
 use tairix_abi::driver::timing::CompletionWait;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
+use crate::floor::FailureLog;
 use crate::{
     regs, Board, BringUpFault, BringUpStage, Emmc2, IrqSdhci, DMA_DATA_BYTES, DMA_TABLE_BYTES,
 };
@@ -22,8 +23,9 @@ use crate::{
 ///
 /// `regs_phys` is the CPU-physical base of the SDHCI register block the
 /// hardware-tree node carries. `waiter` is the completion and timed-wait
-/// seam the engine parks on, and `board` the platform's base clock and card
-/// supplies, borrowed for the bring-up alone.
+/// seam the engine parks on, `board` the platform's base clock and card
+/// supplies, borrowed for the bring-up alone, and `failures` the trail every
+/// transfer that fails afterwards is recorded on.
 ///
 /// With a host [`DmaHost`] the engine moves transfers by ADMA2 through a
 /// [`DMA_DATA_BYTES`] data slab and a [`DMA_TABLE_BYTES`] descriptor slab; a
@@ -49,6 +51,7 @@ pub fn open_discovered<W: CompletionWait>(
     regs_phys: u64,
     waiter: W,
     board: Board<'_>,
+    failures: FailureLog,
 ) -> Result<Emmc2<IrqSdhci<W>>, BringUpFault> {
     let map_fault = |error| BringUpFault {
         stage: BringUpStage::MapWindow,
@@ -65,8 +68,8 @@ pub fn open_discovered<W: CompletionWait>(
         .map_err(|e| map_fault(MmioMapError::as_driver_error(e)))?;
 
     let engine_host = match host.dma_host().and_then(carve_staging) {
-        Some((data, table)) => IrqSdhci::with_dma(window, waiter, data, table),
-        None => IrqSdhci::new(window, waiter),
+        Some((data, table)) => IrqSdhci::with_dma(window, waiter, failures, data, table),
+        None => IrqSdhci::new(window, waiter, failures),
     };
     let device = Emmc2::open(engine_host, board)?;
     // Bring-up reset the whole host controller, its ADMA engine included.

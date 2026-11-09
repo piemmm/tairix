@@ -3,21 +3,28 @@
 //! under its own key. The constructions are `lib/crypto`'s.
 
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use tairix_collections::try_box;
 use tairix_crypto::pdf::{
     pdf_aes_decrypt, pdf_legacy_file_key, pdf_modern_file_key, pdf_object_key, pdf_rc4_decrypt,
     PdfKey, PdfLegacyEntries, PdfModernEntries,
 };
-use tairix_unicode::{saslprep, Unassigned, MAX_DECOMPOSITION};
+use tairix_crypto::AES_BLOCK_LEN;
+use tairix_unicode::{saslprep, SaslprepError, Unassigned, MAX_DECOMPOSITION};
 use tairix_util::fallible;
 use tairix_util::secret::{Wiped, WipedBuf};
 
 use crate::document::Document;
-use crate::limits::MAX_NESTING;
+use crate::limits::{MAX_NESTING, MAX_PASSWORD_BYTES};
 use crate::object::{Dict, ObjRef, Object};
 use crate::pdfdoc;
 use crate::PdfError;
+
+/// The name of the identity crypt filter, the one the standard itself
+/// defines.
+pub(crate) const IDENTITY: &[u8] = b"Identity";
 
 /// How strings or streams are encrypted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -29,9 +36,21 @@ enum Method {
     Aes256,
 }
 
+impl Method {
+    /// The bytes leading what it encrypts: an AES method's IV.
+    const fn iv_len(self) -> usize {
+        match self {
+            Self::Aes128 | Self::Aes256 => AES_BLOCK_LEN,
+            Self::Identity | Self::Rc4 => 0,
+        }
+    }
+}
+
 /// An encrypted file's key, and how its strings and streams were encrypted.
 pub(crate) struct Security {
-    key: PdfKey,
+    /// Boxed where it is made, so moving the handler copies no key to leave
+    /// unwiped behind it.
+    key: Box<PdfKey>,
     strings: Method,
     streams: Method,
     /// Whether its metadata streams are encrypted.
@@ -45,9 +64,10 @@ pub(crate) struct Security {
 impl Security {
     /// The security of the file whose trailer is `trailer`, opened with
     /// `password` — and with the empty password first, which opens a file
-    /// protected only by its permissions: `None` for a file not encrypted.
+    /// protected only by its permissions: `None` for a file not encrypted. A
+    /// password longer than [`MAX_PASSWORD_BYTES`] opens nothing.
     pub(crate) fn open(
-        document: &Document<'_>,
+        document: &Document,
         trailer: &Dict,
         password: Option<&[u8]>,
     ) -> Result<Option<Self>, PdfError> {
@@ -89,33 +109,29 @@ impl Security {
                 document
                     .get(dict, key)?
                     .as_string()
-                    .and_then(|bytes| bytes.first_chunk().copied())
-                    .ok_or(PdfError::Malformed)
+                    .ok_or(PdfError::Malformed)?
+                    .first_chunk()
+                    .copied()
+                    .ok_or(PdfError::Unsupported)
             };
             Some((wrapped_key(b"OE")?, wrapped_key(b"UE")?))
         } else {
             None
         };
         let key_with = |given: &[u8]| -> Result<Option<PdfKey>, PdfError> {
+            // Past the bound none is tried, so none costs more to prepare.
+            if given.len() > MAX_PASSWORD_BYTES {
+                return Ok(None);
+            }
             if let Some((owner_key, user_key)) = &wrapped {
                 let entries = PdfModernEntries {
                     revision,
-                    owner: owner.first_chunk().ok_or(PdfError::Malformed)?,
-                    user: user.first_chunk().ok_or(PdfError::Malformed)?,
+                    owner: owner.first_chunk().ok_or(PdfError::Unsupported)?,
+                    user: user.first_chunk().ok_or(PdfError::Unsupported)?,
                     owner_key,
                     user_key,
                 };
-                // SASLprep's form first, as the handler asks, then the bytes as
-                // given, which a producer that prepares nothing hashed.
-                let prepared = modern_password(given)?;
-                for candidate in prepared.as_deref().into_iter().chain([given]) {
-                    let key = pdf_modern_file_key(&entries, candidate)
-                        .map_err(|_| PdfError::Unsupported)?;
-                    if key.is_some() {
-                        return Ok(key);
-                    }
-                }
-                return Ok(None);
+                return modern_key(&entries, given);
             }
             let bits = match version {
                 0 | 1 => 40,
@@ -124,7 +140,7 @@ impl Security {
             };
             let entries = PdfLegacyEntries {
                 revision,
-                key_len: usize::try_from(bits / 8).map_err(|_| PdfError::Malformed)?,
+                key_len: usize::try_from(bits / 8).map_err(|_| PdfError::Unsupported)?,
                 owner,
                 user,
                 permissions: permissions(int(b"P")?.ok_or(PdfError::Malformed)?),
@@ -143,7 +159,7 @@ impl Security {
             },
         };
         Ok(Some(Self {
-            key,
+            key: try_box(key)?,
             strings,
             streams,
             metadata,
@@ -187,7 +203,14 @@ impl Security {
 
     /// Stream `owner`'s bytes `data`, of dictionary `dict`, decrypted: not a
     /// cross-reference stream, nor metadata a file leaves in the clear, nor a
-    /// stream whose own crypt filter is the identity.
+    /// stream whose own crypt filter, `crypt`, is the identity. An AES stream
+    /// shorter than its IV holds nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`PdfError::Unsupported`] for a crypt filter the file does not define,
+    /// [`PdfError::Malformed`] for an AES key of a length AES does not take,
+    /// and [`PdfError::OutOfMemory`].
     pub(crate) fn decrypt_stream<'d>(
         &self,
         dict: &Dict,
@@ -196,28 +219,23 @@ impl Security {
         crypt: Option<&[u8]>,
     ) -> Result<Cow<'d, [u8]>, PdfError> {
         let method = match crypt {
-            Some(name) => self.named(name),
+            Some(name) => method_of(filter_named(&self.filters, name)?),
             None => self.streams,
         };
         let clear = dict.is_type(b"XRef") || (dict.is_type(b"Metadata") && !self.metadata);
         if method == Method::Identity || clear {
             return Ok(Cow::Borrowed(data));
         }
-        let mut bytes = fallible::copied(data).ok_or(PdfError::OutOfMemory)?;
-        let kept = self.with_object_key(owner, method, |key| decrypt(&mut bytes, key, method))?;
-        let end = kept.end;
-        bytes.truncate(end);
-        bytes.drain(..kept.start);
+        // Only what follows the IV is copied, so the plaintext is decrypted
+        // where it stays.
+        let Some((iv, ciphertext)) = data.split_at_checked(method.iv_len()) else {
+            return Ok(Cow::Borrowed(&[]));
+        };
+        let mut bytes = fallible::copied(ciphertext).ok_or(PdfError::OutOfMemory)?;
+        let len =
+            self.with_object_key(owner, method, |key| decrypt(iv, &mut bytes, key, method))?;
+        bytes.truncate(len);
         Ok(Cow::Owned(bytes))
-    }
-
-    /// The method crypt filter `name` names: the identity for `/Identity` or
-    /// one the file does not define.
-    fn named(&self, name: &[u8]) -> Method {
-        self.filters
-            .iter()
-            .find(|filter| filter.name == name)
-            .map_or(Method::Identity, |filter| filter.method)
     }
 
     /// `work` done with the key object `owner` is encrypted with under
@@ -279,17 +297,26 @@ fn modern_password(given: &[u8]) -> Result<Option<WipedBuf>, PdfError> {
     if text.is_ascii() {
         return Ok(None);
     }
-    let room = text
-        .chars()
-        .count()
+    let count = text.chars().count();
+    let worst = count
         .checked_mul(MAX_DECOMPOSITION)
         .ok_or(PdfError::OutOfMemory)?;
-    let mut chars = WipedBuf::<char>::with_capacity(room)?;
-    let work = chars.extend_zeroed(room).ok_or(PdfError::OutOfMemory)?;
-    let Ok(len) = saslprep(text, Unassigned::Allowed, work) else {
-        return Ok(None);
-    };
-    let prepared = work.get(..len).unwrap_or_default();
+    // A password seldom prepares to more characters than it holds, so the
+    // worst case's room is taken only where that is too little.
+    for room in [count, worst] {
+        let mut chars = WipedBuf::<char>::with_capacity(room)?;
+        let work = chars.extend_zeroed(room).ok_or(PdfError::OutOfMemory)?;
+        match saslprep(text, Unassigned::Allowed, work) {
+            Ok(len) => return encoded_unless_unchanged(work.get(..len).unwrap_or_default(), text),
+            Err(SaslprepError::Overflow) => {}
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// `prepared` as UTF-8, held zeroizing: `None` where it is `text` unchanged.
+fn encoded_unless_unchanged(prepared: &[char], text: &str) -> Result<Option<WipedBuf>, PdfError> {
     if prepared.iter().copied().eq(text.chars()) {
         return Ok(None);
     }
@@ -331,8 +358,22 @@ struct Methods {
     stream_key_bits: i64,
 }
 
+/// The file key revision 5 or 6 `entries` unwrap with `given`: SASLprep's
+/// form first, as the handler asks, then the bytes as given, which a producer
+/// that prepares nothing hashed.
+fn modern_key(entries: &PdfModernEntries<'_>, given: &[u8]) -> Result<Option<PdfKey>, PdfError> {
+    let prepared = modern_password(given)?;
+    for candidate in prepared.as_deref().into_iter().chain([given]) {
+        let key = pdf_modern_file_key(entries, candidate).map_err(|_| PdfError::Unsupported)?;
+        if key.is_some() {
+            return Ok(key);
+        }
+    }
+    Ok(None)
+}
+
 /// How an encryption dictionary of version `version` encrypts.
-fn methods(document: &Document<'_>, dict: &Dict, version: i64) -> Result<Methods, PdfError> {
+fn methods(document: &Document, dict: &Dict, version: i64) -> Result<Methods, PdfError> {
     let mut filters = Vec::new();
     if version < 4 {
         return Ok(Methods {
@@ -345,19 +386,25 @@ fn methods(document: &Document<'_>, dict: &Dict, version: i64) -> Result<Methods
     let defined = document.get(dict, b"CF")?;
     if let Some(defined) = defined.as_dict() {
         for (name, filter) in defined.iter() {
+            // A reader ignores an entry under the standard filter's own name
+            // (ISO 32000-2 Table 20).
+            if name.as_bytes() == IDENTITY {
+                continue;
+            }
             let filter = document.resolve(filter)?;
-            let filter = filter.as_dict();
-            let method = match filter.and_then(|filter| filter.name(b"CFM")) {
-                Some(b"V2") => Method::Rc4,
-                Some(b"AESV2") => Method::Aes128,
-                Some(b"AESV3") => Method::Aes256,
-                Some(b"None") | None => Method::Identity,
-                Some(_) => return Err(PdfError::Unsupported),
+            let filter = filter.as_dict().ok_or(PdfError::Malformed)?;
+            let method = match &*document.get(filter, b"CFM")? {
+                Object::Null => Method::Identity,
+                Object::Name(cfm) => match cfm.as_bytes() {
+                    b"None" => Method::Identity,
+                    b"V2" => Method::Rc4,
+                    b"AESV2" => Method::Aes128,
+                    b"AESV3" => Method::Aes256,
+                    _ => return Err(PdfError::Unsupported),
+                },
+                _ => return Err(PdfError::Malformed),
             };
-            let key_bits = match filter {
-                Some(filter) => document.get(filter, b"Length")?.as_int().map(in_bits),
-                None => None,
-            };
+            let key_bits = document.get(filter, b"Length")?.as_int().map(in_bits);
             let name = fallible::copied(name.as_bytes()).ok_or(PdfError::OutOfMemory)?;
             fallible::try_push(
                 &mut filters,
@@ -370,24 +417,47 @@ fn methods(document: &Document<'_>, dict: &Dict, version: i64) -> Result<Methods
         }
     }
     let chosen = |key: &[u8]| -> Result<Option<&Filter>, PdfError> {
-        Ok(document
-            .get(dict, key)?
-            .as_name()
-            .and_then(|name| filters.iter().find(|filter| filter.name == name)))
+        match &*document.get(dict, key)? {
+            Object::Null => Ok(None),
+            Object::Name(name) => filter_named(&filters, name.as_bytes()),
+            _ => Err(PdfError::Malformed),
+        }
     };
-    let method = |filter: Option<&Filter>| filter.map_or(Method::Identity, |filter| filter.method);
     let (strings, streams) = (chosen(b"StrF")?, chosen(b"StmF")?);
     let stream_key_bits = streams
         .or(strings)
         .and_then(|filter| filter.key_bits)
         .unwrap_or(128);
-    let (strings, streams) = (method(strings), method(streams));
+    let (strings, streams) = (method_of(strings), method_of(streams));
     Ok(Methods {
         strings,
         streams,
         filters,
         stream_key_bits,
     })
+}
+
+/// The crypt filter `name` names among `filters`: `None` for `/Identity`,
+/// the standard's own, which no entry of `/CF` redefines.
+///
+/// # Errors
+///
+/// [`PdfError::Unsupported`] for a name `filters` does not hold, which is
+/// never read as the identity.
+fn filter_named<'f>(filters: &'f [Filter], name: &[u8]) -> Result<Option<&'f Filter>, PdfError> {
+    if name == IDENTITY {
+        return Ok(None);
+    }
+    filters
+        .iter()
+        .find(|filter| filter.name == name)
+        .map(Some)
+        .ok_or(PdfError::Unsupported)
+}
+
+/// The method `filter` encrypts with: the identity for `None`.
+fn method_of(filter: Option<&Filter>) -> Method {
+    filter.map_or(Method::Identity, |filter| filter.method)
 }
 
 /// A crypt filter's `/Length` in bits: the standard handler states it in
@@ -401,25 +471,29 @@ const fn in_bits(length: i64) -> i64 {
     }
 }
 
-/// `bytes` decrypted in place under `key` by `method`, answering where the
-/// plaintext lies.
+/// `ciphertext`, which follows `iv` — an AES method's IV, empty otherwise —
+/// decrypted in place under `key` by `method`, answering how long the
+/// plaintext leading it is.
 ///
 /// # Errors
 ///
 /// [`PdfError::Malformed`] for an AES method over a key AES takes no such
 /// length of, which only a damaged encryption dictionary makes.
 fn decrypt(
-    bytes: &mut [u8],
+    iv: &[u8],
+    ciphertext: &mut [u8],
     key: &PdfKey,
     method: Method,
-) -> Result<core::ops::Range<usize>, PdfError> {
+) -> Result<usize, PdfError> {
     match method {
-        Method::Identity => Ok(0..bytes.len()),
+        Method::Identity => Ok(ciphertext.len()),
         Method::Rc4 => {
-            pdf_rc4_decrypt(key, bytes);
-            Ok(0..bytes.len())
+            pdf_rc4_decrypt(key, ciphertext);
+            Ok(ciphertext.len())
         }
-        Method::Aes128 | Method::Aes256 => pdf_aes_decrypt(key, bytes).ok_or(PdfError::Malformed),
+        Method::Aes128 | Method::Aes256 => {
+            pdf_aes_decrypt(key, iv, ciphertext).ok_or(PdfError::Malformed)
+        }
     }
 }
 
@@ -434,10 +508,14 @@ fn decrypt_strings(
     }
     match object {
         Object::String(bytes) => {
-            let kept = decrypt(bytes, key, method)?;
-            let end = kept.end;
-            bytes.truncate(end);
-            bytes.drain(..kept.start);
+            let lead = method.iv_len();
+            // A string shorter than its IV holds no plaintext.
+            let plain = match bytes.split_at_mut_checked(lead) {
+                Some((iv, ciphertext)) => lead..lead + decrypt(iv, ciphertext, key, method)?,
+                None => 0..0,
+            };
+            bytes.truncate(plain.end);
+            bytes.drain(..plain.start);
         }
         Object::Array(items) => {
             for item in items {

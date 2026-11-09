@@ -857,18 +857,23 @@ fn tampered_entry_fails_closed_with_audit_and_no_plaintext() {
         try_fault(&mut env, &mut ramzip, page),
         Err(FaultError::Authentication)
     );
-    // Fail closed: the entry is discarded, nothing was mapped, the
-    // books balance, and the loss is counted.
-    assert!(!ramzip.has_entry(SPACE, page));
+    // Fail closed: nothing was mapped, and the loss is counted.
     assert!(env.space.translate(page).is_none());
-    assert_eq!(ramzip.ledger().entries(), 0);
-    assert_eq!(ramzip.ledger().footprint(), 0);
     assert_eq!(ramzip.ledger().counters().auth_failures, 1);
-    // A second fault reports the entry gone.
+    // The entry stays, charged, as the record of the loss: every later
+    // fault reports the page lost, never absent, and is not counted again.
+    assert!(ramzip.has_entry(SPACE, page));
+    assert_eq!(ramzip.ledger().entries(), 1);
     assert_eq!(
         try_fault(&mut env, &mut ramzip, page),
-        Err(FaultError::NoEntry)
+        Err(FaultError::Lost)
     );
+    assert_eq!(ramzip.ledger().counters().auth_failures, 1);
+    assert!(env.space.translate(page).is_none());
+    // Releasing its range lets it go, and the books balance.
+    assert_eq!(ramzip.purge_range(SPACE, page.number(), 1), 1);
+    assert_eq!(ramzip.ledger().entries(), 0);
+    assert_eq!(ramzip.ledger().footprint(), 0);
 }
 
 #[test]
@@ -883,14 +888,59 @@ fn truncated_entry_metadata_fails_closed_as_corrupt() {
         try_fault(&mut env, &mut ramzip, page),
         Err(FaultError::Corrupt)
     );
-    assert!(!ramzip.has_entry(SPACE, page));
     assert_eq!(ramzip.ledger().counters().decode_failures, 1);
+    assert_eq!(
+        try_fault(&mut env, &mut ramzip, page),
+        Err(FaultError::Lost)
+    );
     // Regression (found by the fuzz harness): the release must use the
     // figures charged at compression time, not the truncated blob's,
     // so the books balance to exactly zero.
+    assert_eq!(ramzip.purge_range(SPACE, page.number(), 1), 1);
     assert_eq!(ramzip.ledger().entries(), 0);
     assert_eq!(ramzip.ledger().footprint(), 0);
     assert_eq!(ramzip.ledger().task_usage(TASK).stored_bytes, 0);
+}
+
+/// A neighbour a cluster restore finds corrupt stays lost: a later demand
+/// fault on it reports the loss, and no warm step tries it again.
+///
+/// Regression: the failed restore discarded the entry, so the page then read
+/// as never compressed and its next touch was handed a zeroed frame.
+#[test]
+fn a_neighbour_found_corrupt_by_a_cluster_stays_lost() {
+    let mut env = env!();
+    let mut ramzip = tier(&env);
+    let pages: Vec<Page> = (100..105).map(|n| env.map_page(n, 1)).collect();
+    env.press_to(PressureBand::Moderate);
+    for page in &pages {
+        compress(&mut env, &mut ramzip, *page);
+    }
+    let corrupt = pages[3];
+    let sealed_len = ramzip.entry_sealed_len(SPACE, corrupt).expect("entry");
+    assert!(ramzip.tamper_entry(SPACE, corrupt, sealed_len - 1));
+    env.relax();
+    try_fault(&mut env, &mut ramzip, pages[2]).expect("fault");
+    {
+        let pressure = &env.pressure;
+        let mut ctx = ctx!(env);
+        assert_eq!(ramzip.cluster_after_fault(pressure, &mut ctx, pages[2]), 3);
+    }
+    assert_eq!(ramzip.ledger().counters().auth_failures, 1);
+    assert!(env.space.translate(corrupt).is_none());
+    assert_eq!(
+        try_fault(&mut env, &mut ramzip, corrupt),
+        Err(FaultError::Lost)
+    );
+    {
+        let pressure = &env.pressure;
+        let mut ctx = ctx!(env);
+        assert_eq!(
+            ramzip.warm_step(pressure, &mut ctx),
+            WarmOutcome::NothingToDo
+        );
+    }
+    assert_eq!(ramzip.ledger().counters().auth_failures, 1);
 }
 
 #[test]

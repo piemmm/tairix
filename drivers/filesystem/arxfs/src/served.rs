@@ -10,7 +10,7 @@ use tairix_abi::DriverError;
 use tairix_fsserve::{Opened, ServedFormat, WritebackBudget};
 use tairix_reclaim::PinnedAccounting;
 
-use crate::{Keying, ARXFS};
+use crate::{IntegrityLog, Keying, ARXFS};
 
 /// The node this driver binds: a volume the kernel attached as ARXFS.
 pub const BIND_KEYS: &[DriverBindKey] = &[tairix_fsserve::bind_key(VolumeFsType::ARXFS)];
@@ -25,6 +25,7 @@ impl ServedFormat for Served {
         volume: B,
         read_only: bool,
         budget: WritebackBudget,
+        log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<ARXFS<B>>, DriverError> {
         // A removable volume is served plaintext: an encrypted one refuses
         // the open with a typed error, and the kernel never guesses a key.
@@ -37,6 +38,7 @@ impl ServedFormat for Served {
                 Arc::new(PinnedAccounting::new()),
             )?
         };
+        let fs = fs.with_integrity_log(IntegrityLog::new(log));
         Ok(Opened {
             fs,
             format: FormatName::Arxfs,

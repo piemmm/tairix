@@ -66,9 +66,35 @@ can be met. A single service that fails — the kernel's load gate refuses
 the spawn (a bad manifest, a capability beyond the account's ceiling, or
 another load failure) — is recorded, and the
 services that *transitively depend on it* are skipped; services
-independent of the failure still start. Each admission pass returns a
-`StartReport` (`started` + `failed`), so a caller can see what came up and
-which optional services are absent without the boot aborting.
+independent of the failure still start. Every start, refusal and skip is
+recorded on the engine's audit sink — the one record of an admission pass —
+and PID 1's sink also states each refusal and skip at the console, so an
+absent optional service is visible without the boot aborting.
+
+### Running short of memory
+
+PID 1's end is the system's, so running short of memory may refuse one of its
+requests but never end it:
+
+- **It pins its memory** at startup (`mem_pin`, under its manifest's
+  `CAP_MEM_PIN`), so no page of it is compressed out to need a frame back. A
+  refused pin is stated at the console and PID 1 runs unpinned.
+- **Its heap holds what it has mapped.** A pinned process's heap gives no page
+  back at any band, so an allocation within what PID 1 has held never asks the
+  machine for memory; the pinned-memory budget bounds it.
+- **Its handlers allocate nothing.** Audits and outcomes name a service by
+  borrowing its specification; the transport learns of a parked client's end
+  by `ServiceId`; the precedence of the enrolment layers is a query; a stop's
+  dependent closure is marked in the services themselves; the reaper is one
+  slot.
+- **What genuinely grows takes its room first.** A connect reserves its place
+  in the service's sink, its queue and the release report before anything
+  changes, and an enable reserves its registration before the record is
+  written; a refusal for want of memory is answered `OutOfMemory` with nothing
+  changed. An enrolment change is made in place, so one whose write is refused
+  is taken back, without the heap, before the refusal is answered. A document
+  the heap cannot hold at the mount is read again at the next change to the
+  mounts, never adopted as empty.
 
 ## Lifecycle and readiness (`NEW-SERVICEMANAGER.md` SVC-2)
 
@@ -163,8 +189,9 @@ lifecycle is therefore split into three distinct steps (the systemd
 3. **Activation** — actually starting an eligible service, through the
    bring-up engine above.
 
-The enrolment registry is **two layers**, folded by
-`tairix_enrolment::effective`:
+The enrolment registry is **two layers**, whose precedence is
+`tairix_enrolment::enabled` — the administrator's word where they have spoken
+about a service, else the image's:
 
 | Layer | Type | Where | Written by |
 |---|---|---|---|
@@ -182,9 +209,11 @@ whitelist, which PID 1 must not hold to read a configuration file. An on-disk
 vendor record waits for the `/System/Services` discovery scan, which needs that
 same read path. The administrator's layer holds only what *differs* from the
 image's, so a system update shipping a different default reaches every service
-the administrator has not spoken about. `tairix_enrolment::overrides_for` derives that document from the
-desired effective set, so re-enabling something empties its entry rather than
-pinning the old default. A **per-user** store lives under the user's own
+the administrator has not spoken about. `EnrolmentOverride::set` makes one
+service's change in place, holding an entry only where it differs from the
+image's, so re-enabling something empties its entry rather than pinning the old
+default; `EnrolmentOverride::undo` takes the change back if its write is
+refused. A **per-user** store lives under the user's own
 `/Users/<u>/Settings/Services/` and parses identically.
 
 PID 1 boots on the vendor layer alone and calls `Init::adopt_overrides` the
@@ -368,7 +397,7 @@ manager holds the call's *ticket* and replies to it when the engine reports
 the park resolved, so there is no poll and no retry anywhere on the path.
 
 Every park resolves exactly once, and both ways resolve through the same
-report (`Init::take_released_clients`). A service that reaches readiness
+report (`Init::drain_released_clients`). A service that reaches readiness
 connects its parked clients; a service whose process dies first, announces
 its own failure, or whose client withdraws, **abandons** them — and the
 transport refuses each abandoned caller rather than leaving it blocked on a
@@ -669,7 +698,17 @@ sessions directly and routes everything else to the engine:
    the engine (`Init::reap`), which moves a known service to a terminal
    state (scheduling any policy-driven restart) or logs the untracked one. A
    negative `wait` — the supervisor cannot reap its own child — is surfaced
-   as `EXIT_WAIT_FAILED` rather than continuing blindly.
+   as `EXIT_WAIT_FAILED` rather than continuing blindly, except a wait the
+   machine was too short of memory to complete: PID 1 states the first of a
+   run of those, sleeps on a futex park that needs no memory (10 ms, doubling
+   to 1 s) and waits again, since ending PID 1 or spinning would both be
+   worse than a late answer.
+
+A service whose start the kernel refuses for want of memory is started again
+after the restart backoff, as a crash would be, but with no cap on the
+attempts: the refusal says nothing about the service. Until then its
+dependents wait for it rather than being skipped as behind a failure, and a
+wakeup of the engine allocates nothing to find what is due.
 
 The per-console budget is a **crash-loop guard**, not a fixed restart count:
 a session that blocks on input runs for PID 1's whole life and never

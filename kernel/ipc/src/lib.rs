@@ -68,7 +68,7 @@ pub mod shmem;
 pub use audit::AuditEvent;
 pub use call::{
     CallEndpoint, CallEndpointLimits, CallPayload, CallTicket, Collector, Destroyed, ReceivedCall,
-    RecvCall, ReplyOutcome, Woken,
+    RecvCall, RecvDelivered, ReplyOutcome, Woken,
 };
 pub use lanes::RoomWake;
 pub use notify::{NotificationChannel, NotificationFlags};

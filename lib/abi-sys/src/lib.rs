@@ -4168,7 +4168,10 @@ pub extern "C" fn sys_resource_open(
 /// truncate to: zero for a read-only file and for a pipe end, which have no
 /// extent to bound, and for a writable file a stated bound or
 /// `TAIRIX_GRANT_EXTENT_INHERIT`, the caller's own reach, which a handed-on
-/// delegation can only narrow; zero is refused for a writable file.
+/// delegation can only narrow; zero is refused for a writable file. `flags`
+/// is `TAIRIX_GRANT_FILE_ONLY` to delegate only a regular file, or zero; any
+/// other bit, and any but a regular file under that flag, is
+/// `TAIRIX_E_OUT_OF_RANGE`.
 ///
 /// `(recipient, recipient_len)` is the attested `tairix_proc_id_t` the
 /// grantor read from an origin record — never a task id, which is redrawn
@@ -4192,6 +4195,7 @@ pub extern "C" fn sys_fd_grant(
     write_ceiling: u64,
     recipient: *mut c_void,
     recipient_len: usize,
+    flags: u64,
 ) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates `(recipient,
     // recipient_len)` against the caller's address space, along with the
@@ -4205,7 +4209,7 @@ pub extern "C" fn sys_fd_grant(
                 write_ceiling,
                 ptr_arg(recipient),
                 recipient_len as u64,
-                0,
+                flags,
                 0,
             ],
         )
@@ -4482,7 +4486,7 @@ mod tests {
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 4),
         (NUM_POINTER_READ, "pointer_read", 3),
-        (NUM_FD_GRANT, "fd_grant", 4),
+        (NUM_FD_GRANT, "fd_grant", 5),
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
         (NUM_FD_GRANT_LOCATION, "fd_grant_location", 3),
@@ -5544,18 +5548,19 @@ mod tests {
     }
 
     #[test]
-    fn fd_grant_marshals_descriptor_ceiling_and_recipient_instance() {
+    fn fd_grant_marshals_descriptor_ceiling_recipient_instance_and_flags() {
         let mut instance = [0x5Au8; tairix_abi::PROC_ID_LEN];
         let ptr = instance.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
-            assert_eq!(sys_fd_grant(4, 4096, ptr, instance.len()), 7);
+            let flags = tairix_abi::GRANT_FILE_ONLY;
+            assert_eq!(sys_fd_grant(4, 4096, ptr, instance.len(), flags), 7);
         });
         assert_eq!(number, NUM_FD_GRANT);
         assert_eq!(args[0], 4);
         assert_eq!(args[1], 4096);
         assert_eq!(args[2], ptr as usize as u64);
         assert_eq!(args[3], tairix_abi::PROC_ID_LEN as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(&args[4..], &[tairix_abi::GRANT_FILE_ONLY, 0]);
     }
 
     #[test]

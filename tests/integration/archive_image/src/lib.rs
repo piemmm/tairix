@@ -209,7 +209,7 @@ fn served(
         backing: 1 << 30,
         gauge: &Unpressured,
     };
-    let opened = Served::open(granted, !writable, budget)?;
+    let opened = Served::open(granted, !writable, budget, &tairix_log::DiscardSink)?;
     Ok((opened.fs, opened.write_refusal))
 }
 

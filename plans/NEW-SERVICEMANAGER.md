@@ -471,8 +471,9 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   administrator's `EnrolmentOverride` is `/System/Settings/Services/overrides`
   on the root volume (a user's own under `Settings/Services/`) and holds
   only what differs from the image, so an update's new defaults reach
-  everything the administrator never touched. `effective` is the one fold of
-  the two, and `overrides_for` the one derivation back.
+  everything the administrator never touched. `enabled` is the one precedence
+  of the two, a query, and `EnrolmentOverride::set` the one change back, made
+  in place and taken back by `undo` when its write is refused.
 - `validate_service_name` is the strict lowercase `[a-z0-9._-]` (alnum-first)
   identifier rule, a security control against traversal- and
   case-collision-shaped names. The override document is untrusted input,
@@ -634,7 +635,7 @@ same-account instance does not already have. `ClientId` is the attested
 `ProcId` rather than a pid for the reason recorded in its own docs: a client
 identity outlives the call that made it, where a notice does not.
 
-**Every park resolves, both ways.** `Init::take_released_clients` reports each
+**Every park resolves, both ways.** `Init::drain_released_clients` reports each
 park exactly once as `Connected` or `Abandoned`; the transport replies to the
 held ticket either way. Abandonment is what a service whose process dies
 before readiness, one that announces its own failure, or a client that
@@ -964,7 +965,7 @@ it does not.
     only sanctioned pre-unlock read is the store service's `CAP_DRV_LOAD`-gated
     whitelist, which PID 1 must not hold. An on-disk vendor record waits for the
     `/System/Services` discovery scan, which needs that same read path
-    and must answer the question properly. `effective` is one pure function over
+    and must answer the question properly. `enabled` is one pure query over
     the pair. This retires the `SystemConfigFile::SystemServices` whitelist
     entry, which named a path the mount table makes unreachable and never had a
     reader (§2.14).

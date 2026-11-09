@@ -282,6 +282,7 @@ impl Ramzip {
             charged_compressed: compressed,
             charged_stored: stored,
             blob,
+            lost: false,
         };
         if self.entries.try_insert(key, entry).is_err() {
             // The charge just made is given back exactly, so the books stand
@@ -380,10 +381,9 @@ impl Ramzip {
     ///
     /// # Errors
     ///
-    /// See [`FaultError`]. `Authentication` / `Corrupt` mean the page
-    /// is unrecoverable: the caller escalates through the VM policy
-    /// (the task cannot continue without the page), and no plaintext
-    /// was produced.
+    /// See [`FaultError`]. `Authentication`, `Corrupt` and `Lost` mean the
+    /// page is unrecoverable: the task cannot continue without it, and no
+    /// plaintext was produced.
     pub fn fault_in<P: PageTable>(
         &mut self,
         ctx: &mut VmContext<'_, P>,
@@ -524,7 +524,7 @@ impl Ramzip {
         WarmOutcome::Restored(restored)
     }
 
-    /// Compressed entries of `space` within `radius` pages of
+    /// Restorable entries of `space` within `radius` pages of
     /// `center`, nearest first and the lower of two as near, excluding
     /// `center` itself, bounded by `limit`. With `sealed_near`, only entries
     /// sealed within [`CLUSTER_EVENT_WINDOW`] events of that seal time
@@ -539,7 +539,9 @@ impl Ramzip {
         sealed_near: Option<u64>,
     ) -> ArrayVec<u64, NEARBY_MAX> {
         let qualifies = |entry: &Entry| {
-            sealed_near.is_none_or(|near| entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW)
+            !entry.lost
+                && sealed_near
+                    .is_none_or(|near| entry.sealed_at.abs_diff(near) <= CLUSTER_EVENT_WINDOW)
         };
         let side = |from: Bound<(u64, u64)>, to: Bound<(u64, u64)>| {
             self.entries
@@ -579,8 +581,8 @@ impl Ramzip {
     /// The one restore path all three initiators share: allocate a
     /// frame, authenticate + decrypt + decompress into it, map it, and
     /// delete the blob (move-only). Every failure is typed and
-    /// fail-closed; a lost entry (authentication or decode failure) is
-    /// audit-logged and never yields plaintext.
+    /// fail-closed; an entry that fails authentication or decoding is
+    /// audit-logged once, never yields plaintext, and stays as lost.
     fn restore_entry<P: PageTable>(
         &mut self,
         ctx: &mut VmContext<'_, P>,
@@ -591,6 +593,9 @@ impl Ramzip {
         let Some(entry) = self.entries.get(&key) else {
             return Err(FaultError::NoEntry);
         };
+        if entry.lost {
+            return Err(FaultError::Lost);
+        }
         let (task, flags, sealed_at) = (entry.task, entry.flags, entry.sealed_at);
         // Release exactly what was charged, never a figure recomputed
         // from the blob: a corrupted blob must not unbalance the books.
@@ -612,21 +617,14 @@ impl Ramzip {
 
         let aad = entry_aad(ctx.space_id, page.number(), flags);
         // Reborrow for the blob; the earlier copies keep the metadata.
-        let Some(entry) = self.entries.get(&key) else {
+        let Some(entry) = self.entries.get_mut(&key) else {
             let _ = ctx.frames.free(frame);
             return Err(FaultError::NoEntry);
         };
         if let Err(failure) = open_page(&self.key, &aad, &entry.blob, out) {
-            // The entry is unrecoverable: discard it, log the loss,
-            // return the (zeroed-by-open) frame, and fail closed.
-            self.entries.remove(&key);
-            if self
-                .ledger
-                .release(task, PAGE_SIZE, compressed, stored, ENTRY_METADATA_BYTES)
-                .is_err()
-            {
-                self.poisoned = true;
-            }
+            // Unrecoverable: kept as lost, and charged, until its range is
+            // released; the frame (zeroed by the open) goes back.
+            entry.lost = true;
             let _ = ctx.frames.free(frame);
             let (event, counter_is_auth) = match failure {
                 OpenFailure::Authentication => (RamzipAuditEvent::AuthenticationFailure, true),

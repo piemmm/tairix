@@ -236,7 +236,7 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
         desk.collect(&asset("/a.png"), 8).0,
         Resolved::Done(_)
     ));
-    desk.decline(&asset("/a.png"), 8);
+    desk.decline(&asset("/a.png"), 8, 64);
 
     // Every later paint asks for nothing: the draw takes its glyph.
     for _ in 0..3 {
@@ -245,8 +245,8 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
         assert!(desk.next_job().is_none());
     }
 
-    // The band moving is what makes the answer worth having again.
-    desk.retry_declined();
+    // The cache coming to hold it is what makes the answer worth having again.
+    desk.retry_declined(|_| true);
     assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));
     assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
 }
@@ -258,7 +258,7 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
 #[test]
 fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
     let mut desk = ArtworkDesk::new(TEST_KEYS);
-    desk.decline(&asset("/gone.png"), 8);
+    desk.decline(&asset("/gone.png"), 8, 64);
     assert!(!desk.has_work());
     assert!(is_pending(&desk.collect(&asset("/gone.png"), 8).0));
     assert!(
@@ -266,7 +266,7 @@ fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
         "a refused key was offered for decoding again"
     );
 
-    desk.retry_declined();
+    desk.retry_declined(|_| true);
     assert!(is_pending(&desk.collect(&asset("/gone.png"), 8).0));
     assert_eq!(desk.next_job(), Some(job("/gone.png", 8)));
 }
@@ -280,7 +280,7 @@ fn declining_a_key_in_flight_leaves_the_decode_to_land() {
     let _ = desk.collect(&asset("/a.png"), 8).0;
     let running = desk.next_job().expect("a job");
 
-    desk.decline(&asset("/a.png"), 8);
+    desk.decline(&asset("/a.png"), 8, 64);
     assert!(
         desk.deliver(&running, Some(picture(8))).kept(),
         "the decode in flight was stranded"
@@ -442,7 +442,7 @@ fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
         Resolved::Done(Some(_))
     ));
 
-    ArtworkResolver::declined(&mut desk, &key, 16);
+    ArtworkResolver::declined(&mut desk, &key, 16, 64);
     assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
     assert!(!desk.has_work(), "a declined key must not be re-offered");
 }
@@ -714,7 +714,7 @@ fn a_job_declined_while_queued_is_passed_and_holds_no_wake() {
     desk.want(&asset("/Users/a.png"), 16);
     desk.want(&asset("/Users/b.png"), 16);
     let first = desk.next_job().expect("the first job");
-    desk.decline(&asset("/Users/b.png"), 16);
+    desk.decline(&asset("/Users/b.png"), 16, 64);
     assert!(
         desk.deliver(&first, Some(picture(16))).wake(),
         "the batch's last icon to come has landed"
@@ -932,18 +932,46 @@ fn keeping_spares_a_thumbnail_from_the_sweep_and_records_nothing_new() {
     );
 }
 
+/// A band that moved without giving the cache room for a declined decode
+/// leaves it declined: offering it would cost a read and a decode only to be
+/// refused again. One that did give room offers it.
+///
+/// Regression: every band change offered every declined decode again, though
+/// between the deepest bands the room for them is the same, so each change
+/// re-read and re-decoded every icon refused before, to refuse it again.
+#[test]
+fn a_decline_is_retried_only_once_the_cache_would_hold_it() {
+    let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
+    desk.decline(&asset("/small.png"), 8, 64);
+    desk.decline(&asset("/large.png"), 8, 4096);
+    assert!(
+        desk.retry_declined(|bytes| bytes <= 1024),
+        "the small one fits"
+    );
+    let landed = desk.take_landed();
+    assert!(landed.resolves(request("/small.png"), 8));
+    assert!(!landed.resolves(request("/large.png"), 8));
+    assert!(is_pending(&desk.collect(&asset("/large.png"), 8).0));
+    assert!(!desk.has_work(), "the large one stayed declined");
+    assert!(
+        !desk.retry_declined(|bytes| bytes <= 1024),
+        "still too large"
+    );
+    assert!(desk.retry_declined(|_| true), "until the cache holds it");
+}
+
 /// A decode the band refused to keep is named as landed once the band moves,
 /// so the item drawn without it asks again: nothing else would, since what it
 /// shows is already on screen.
 #[test]
 fn retrying_the_declined_names_them_as_landed() {
     let mut desk: ArtworkDesk = ArtworkDesk::new(TEST_KEYS);
-    assert!(!desk.retry_declined(), "nothing was declined");
-    desk.decline(&asset("/a.png"), 8);
-    assert!(desk.retry_declined());
+    assert!(!desk.retry_declined(|_| true), "nothing was declined");
+    desk.decline(&asset("/a.png"), 8, 64);
+    assert!(desk.retry_declined(|_| true));
     assert!(desk.take_landed().resolves(request("/a.png"), 8));
     assert!(
-        !desk.retry_declined(),
+        !desk.retry_declined(|_| true),
         "a retried decline was retried again"
     );
     assert!(is_pending(&desk.collect(&asset("/a.png"), 8).0));

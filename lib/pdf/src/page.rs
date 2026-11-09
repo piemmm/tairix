@@ -8,9 +8,10 @@ use tairix_collections::try_arc;
 
 use crate::content;
 use crate::display::DisplayList;
-use crate::document::{tolerated, Document};
+use crate::document::Document;
+use crate::error::tolerated;
 use crate::limits::{MAX_BOX_COORDINATE, MAX_USER_UNIT};
-use crate::object::{owned, Dict, Object};
+use crate::object::{Dict, Object};
 use crate::PdfError;
 
 /// The attributes a page inherits from the nodes above it, as those nodes
@@ -94,7 +95,7 @@ impl Rect {
     }
 
     /// The rectangle `object` states: four numbers, any two opposite corners.
-    fn of(document: &Document<'_>, object: &Object) -> Result<Option<Self>, PdfError> {
+    fn of(document: &Document, object: &Object) -> Result<Option<Self>, PdfError> {
         let object = document.resolve(object)?;
         let Some([a, b, c, d]) = object
             .as_array()
@@ -139,7 +140,7 @@ impl Rect {
 
 /// A page of a [`Document`], read only through the document it is of.
 pub struct Page<'d> {
-    document: &'d Document<'d>,
+    document: &'d Document,
     pub(crate) dict: Dict,
     /// The resources it inherits, which its own replace.
     inherited_resources: Option<Arc<Object>>,
@@ -152,7 +153,7 @@ pub struct Page<'d> {
 impl<'d> Page<'d> {
     /// Page `dict` of `document`, inheriting `inherited`.
     pub(crate) fn new(
-        document: &'d Document<'d>,
+        document: &'d Document,
         dict: Dict,
         inherited: &Inherited,
     ) -> Result<Self, PdfError> {
@@ -212,7 +213,7 @@ impl<'d> Page<'d> {
     }
 
     /// The document it is of.
-    pub(crate) const fn document(&self) -> &'d Document<'d> {
+    pub(crate) const fn document(&self) -> &'d Document {
         self.document
     }
 
@@ -225,7 +226,7 @@ impl<'d> Page<'d> {
             self.inherited_resources.as_deref(),
         );
         Ok(match stated {
-            Some(resources) => match owned(self.document.resolve(resources)?)? {
+            Some(resources) => match self.document.resolve(resources)?.into_owned()? {
                 Object::Dict(resources) => resources,
                 _ => Dict::new(),
             },

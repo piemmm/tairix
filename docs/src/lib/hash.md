@@ -89,7 +89,7 @@ redacts the key like `HashSeed`'s does.
 
 | Site | Hash | Why |
 |---|---|---|
-| `kernel/core`'s futex bucket index | `SipHash13` | The address half of a wait key is the caller's to choose, and the bucket table is machine-wide: a predictable index lets one process crowd every unrelated futex onto one bucket lock. |
+| `kernel/core`'s futex bucket index | `SipHash13` | The address half of a wait key is the caller's to choose, and the bucket table is machine-wide: a predictable index lets one process crowd every unrelated futex onto one bucket's chain and lock. |
 | `lib/net`'s bond transmit flow hash | `SipHash13` | A remote peer chooses the 4-tuple; a predictable hash lands every flow of an attack on one member link. |
 | `lib/pagezero`'s self-verify fingerprint | `FastHash` | The buffer is the crate's own scratch. |
 | `lib/net`'s multicast revision counters | `FastHash` | Folded over this host's own configured addresses. |

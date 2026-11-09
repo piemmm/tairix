@@ -559,17 +559,16 @@ impl Port {
     /// and note `sender`'s use of the port so its end forgets the wait: a slot
     /// no sibling holds is handed to it, and otherwise it waits in its
     /// sender's line for the next [`Self::recv`] to free one, keeping its
-    /// place there if it waited before.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfMemory`] when the record cannot be kept: the task must
-    /// then not park, since nothing would wake it.
-    pub fn watch_room(&self, task: u64, sender: ProcId) -> Result<(), Errno> {
+    /// place there if it waited before. A wait the heap has no room to record
+    /// is woken by the broadcast the next slot freed carries.
+    pub fn watch_room(&self, task: u64, sender: ProcId) {
         let mut q = self.mailbox.lock();
-        q.noted.note(sender, self.id, self.is_closed())?;
+        if q.noted.note(sender, self.id, self.is_closed()).is_err() {
+            q.room.overflow();
+            return;
+        }
         let free = self.free_in(q.lanes.get(sender));
-        q.room.look(task, sender, free).map(drop)
+        let _ = q.room.look(task, sender, free);
     }
 
     /// Note each sender that uses the port in the registry's `index`.
@@ -1825,9 +1824,8 @@ mod tests {
         for _ in 0..DEPTH {
             send(&port, &from, b"x", &sink).expect("fits");
         }
-        assert_eq!(
+        assert!(
             port.mailbox.lock().room.look(11, from.proc_id(), 1),
-            Ok(true),
             "records that disagree with the lane"
         );
         assert!(port.holds_room(11));
@@ -1932,7 +1930,7 @@ mod tests {
             send(port, from, b"x", sink).expect("fits");
         }
         for &waiter in waiters {
-            port.watch_room(waiter, from.proc_id()).expect("recorded");
+            port.watch_room(waiter, from.proc_id());
         }
     }
 
@@ -1995,7 +1993,7 @@ mod tests {
         );
         drop(port.recv().expect("drains one"));
         assert!(port.own_room(22));
-        port.watch_room(33, from.proc_id()).expect("recorded");
+        port.watch_room(33, from.proc_id());
         assert_eq!(named(&port.leave_room(22)), [33], "or until it leaves");
         assert!(
             !port.own_room(44),
@@ -2041,7 +2039,7 @@ mod tests {
         for payload in [b"last".as_slice(), b"words"] {
             send(&port, &gone, payload, &sink).expect("sent");
         }
-        port.watch_room(5, instance(0x31)).expect("recorded");
+        port.watch_room(5, instance(0x31));
         port.sender_ended(instance(0x31), &sink);
         assert!(
             port.room_wake_everyone().is_empty(),

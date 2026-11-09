@@ -487,7 +487,17 @@ parked on the machine, and, once the cancelled calls' charges are back, every
 thread waiting for the budget of a caller whose calls it cancelled. A wait-set
 with a `CallReply` member resolves its endpoint once per wait and records its
 thread there before every scan, a record made and forgotten at one cost
-however many watch. An awaited answer wakes no watcher; of the others, one
+however many watch. A caller's group of watchers keeps its room while the
+caller lives, so a thread watching again needs memory only the first time,
+and a record the heap cannot hold does not fail the wait: the endpoint notes
+that a watcher went unrecorded, and its next answer is broadcast to every
+thread waiting for an answer, once — slower under exhaustion, never deaf. A
+thread waiting for room, at a call endpoint or a port, degrades the same way.
+An answer is retired only once it has landed in its claimant's buffer
+(`take_reply_with`), and a request taken into service only once the server's
+buffers hold it and its ticket (`recv_call_with`), so neither is lost to a
+copy the reader's memory refuses.
+An awaited answer wakes no watcher; of the others, one
 whose poster watches for it wakes that poster alone, and one it does not
 wakes every thread watching for its caller's answers, since a thread other
 than the one that posted may collect it. A destruction forgets the callers its

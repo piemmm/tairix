@@ -27,7 +27,7 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::driver::display::DisplayMode;
 use tairix_abi::{Errno, InputMode, TerminalSize};
@@ -38,6 +38,7 @@ use tairix_sync::SpinLock;
 use tairix_vt::control;
 use tairix_vt::line::EraseSeq;
 use tairix_vt::secret::{SecretIndicator, SecretInput};
+use zeroize::Zeroize;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -762,9 +763,154 @@ pub struct ConsoleDevice {
     ///
     /// [`current`]: crate::foreground::ForegroundOwnership::current
     fg: crate::foreground::ForegroundOwnership,
+    /// Input taken from [`Self::read`] that no reader has received yet: a
+    /// read whose copy to its reader fails leaves it here, first for the
+    /// next read, so the console never loses a keystroke it already took.
+    /// The lock also keeps one reader's take-and-deliver whole against
+    /// another's, and sleeps, since a read parks for input and for pages.
+    held: crate::sleeplock::SleepLock<HeldInput>,
+    /// Whether [`Self::held`] holds bytes, readable without its lock.
+    held_pending: AtomicBool,
+    /// How many sessions [`Self::purge_session`] has ended: input held from
+    /// one before the last is its alone, never delivered after it.
+    purges: AtomicU64,
+}
+
+/// The most one console read takes from its device: far more than a line,
+/// so the common read never iterates, and a bound on what a read holds.
+pub const CONSOLE_READ_MAX: usize = 4096;
+
+/// Console input taken from the device and not yet delivered.
+pub(crate) struct HeldInput {
+    bytes: [u8; CONSOLE_READ_MAX],
+    len: usize,
+    /// The session it was taken in, as [`ConsoleDevice::purges`] counted.
+    session: u64,
+}
+
+impl HeldInput {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; CONSOLE_READ_MAX],
+            len: 0,
+            session: 0,
+        }
+    }
+
+    /// Let go of every byte held, wiped, since a password passes through here.
+    fn discard(&mut self) {
+        self.bytes[..self.len].zeroize();
+        self.len = 0;
+    }
+
+    /// The bytes held, oldest first.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    /// Room for a take of up to `take` bytes from the device, when nothing is
+    /// held.
+    pub(crate) fn room(&mut self, take: usize) -> &mut [u8] {
+        &mut self.bytes[..take.min(CONSOLE_READ_MAX)]
+    }
+
+    /// Let go of the first `n` bytes, delivered: wiped, since a password
+    /// passes through here.
+    pub(crate) fn delivered(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.bytes.copy_within(n..self.len, 0);
+        self.bytes[self.len - n..self.len].zeroize();
+        self.len -= n;
+    }
+}
+
+/// One reader's hold on a console's [`HeldInput`].
+///
+/// Letting go publishes whether input is still held and then, once the hold
+/// is free to take, wakes the console's waiters if any input is left — held,
+/// or still queued in the device past what this read had room for. A reader
+/// waiting for its turn without queueing on the hold sleeps on the console's
+/// queue, so this wake is the one that tells it the input is there.
+pub(crate) struct HeldInputGuard<'d> {
+    held: crate::sleeplock::SleepGuard<'d, HeldInput>,
+    /// The session the hold was taken in.
+    session: u64,
+    /// Dropped after [`Self::held`], so its wake finds the hold released.
+    left: LeftInputWake<'d>,
+}
+
+impl HeldInputGuard<'_> {
+    /// Record `len` bytes taken into [`HeldInput::room`] under this hold, as
+    /// input of the session the hold was taken in.
+    pub(crate) fn took(&mut self, len: usize) {
+        self.held.len = len.min(CONSOLE_READ_MAX);
+        self.held.session = self.session;
+    }
+}
+
+/// The wake a [`HeldInputGuard`] owes once its hold is released.
+struct LeftInputWake<'d> {
+    device: &'d ConsoleDevice,
+}
+
+impl Drop for HeldInputGuard<'_> {
+    fn drop(&mut self) {
+        // Published under the hold, so a later holder's own release always
+        // overwrites it.
+        self.left
+            .device
+            .held_pending
+            .store(self.held.len > 0, Ordering::Release);
+    }
+}
+
+impl Drop for LeftInputWake<'_> {
+    fn drop(&mut self) {
+        if self.device.input_pending() {
+            if let Some(arch) = crate::waitq::wait_arch() {
+                crate::waitq::CONSOLE_WAITQ.wake_all(arch);
+            }
+        }
+    }
+}
+
+impl core::ops::Deref for HeldInputGuard<'_> {
+    type Target = HeldInput;
+
+    fn deref(&self) -> &HeldInput {
+        &self.held
+    }
+}
+
+impl core::ops::DerefMut for HeldInputGuard<'_> {
+    fn deref_mut(&mut self) -> &mut HeldInput {
+        &mut self.held
+    }
 }
 
 impl ConsoleDevice {
+    /// The input this console took and has not delivered, held for the
+    /// calling reader alone, unless another reader holds it.
+    pub(crate) fn try_held_input(&self) -> Option<HeldInputGuard<'_>> {
+        let mut held = self.held.try_lock()?;
+        let session = self.purges.load(Ordering::Acquire);
+        // Input taken in a session that has since ended is that session's.
+        if held.session != session {
+            held.discard();
+        }
+        Some(HeldInputGuard {
+            held,
+            session,
+            left: LeftInputWake { device: self },
+        })
+    }
+
+    /// Whether a read would return at once: input held, or the device's own.
+    #[must_use]
+    pub fn input_pending(&self) -> bool {
+        self.held_pending.load(Ordering::Acquire) || self.read.input_ready()
+    }
+
     /// Pair `write` and `read` as one installed console that accepts no
     /// injected input, with terminal echo on by default, as an interactive
     /// console echoes.
@@ -803,6 +949,9 @@ impl ConsoleDevice {
             secret: None,
             mode: AtomicU32::new(InputMode::Cooked.as_u32()),
             fg: crate::foreground::ForegroundOwnership::new(),
+            held: crate::sleeplock::SleepLock::new(HeldInput::new()),
+            held_pending: AtomicBool::new(false),
+            purges: AtomicU64::new(0),
         }
     }
 
@@ -883,7 +1032,11 @@ impl ConsoleDevice {
     /// releasing the slot here would let a task that never held the terminal
     /// take its control.
     pub fn purge_session(&self) {
+        self.purges.fetch_add(1, Ordering::AcqRel);
         self.read.purge();
+        self.held_pending.store(false, Ordering::Release);
+        // Wiped now where no reader holds it, else by the next hold.
+        drop(self.try_held_input());
         self.set_input_mode(InputMode::Cooked);
         self.write.purge();
     }
@@ -2814,6 +2967,43 @@ mod tests {
         // The emptied queue still works for whoever comes next.
         assert_eq!(device.push(b"next"), Ok(4));
         assert_eq!(drain(queue), b"next");
+    }
+
+    /// Input a read took and could not deliver ends with its session: the
+    /// purge wipes it, and the next session's reader never receives it.
+    ///
+    /// Regression: the purge discarded the device's queue but not the held
+    /// input, so a password one user's failed read left was the next login's.
+    #[test]
+    fn input_held_across_a_session_purge_is_wiped_and_never_delivered() {
+        let (device, _queue) = filter_device();
+        let mut held = device.try_held_input().expect("no reader holds it");
+        held.room(4).copy_from_slice(b"pass");
+        held.took(4);
+        drop(held);
+        assert!(device.input_pending(), "a copy that failed leaves it held");
+        device.purge_session();
+        assert!(!device.input_pending());
+        let raw = device.held.try_lock().expect("no reader holds it");
+        assert_eq!(raw.bytes[..4], [0; 4], "wiped by the purge itself");
+        drop(raw);
+        let held = device.try_held_input().expect("no reader holds it");
+        assert!(held.bytes().is_empty(), "the next session never reads it");
+    }
+
+    /// Input taken under a hold the purge could not take is the ended
+    /// session's too: the next hold wipes it before anyone receives it.
+    #[test]
+    fn input_a_holder_keeps_across_a_purge_is_wiped_by_the_next_hold() {
+        let (device, _queue) = filter_device();
+        let mut held = device.try_held_input().expect("no reader holds it");
+        device.purge_session();
+        held.room(4).copy_from_slice(b"pass");
+        held.took(4);
+        drop(held);
+        let held = device.try_held_input().expect("no reader holds it");
+        assert!(held.bytes().is_empty());
+        assert_eq!(held.held.bytes[..4], [0; 4]);
     }
 
     /// The session boundary a text login uses: one call discards the pending

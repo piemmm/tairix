@@ -78,14 +78,14 @@ A surface's obligation runs from one event to the next, so the kernel opens a
 span when the thread returns from an event wait and closes it at the next
 one. The surface pays no per-frame syscall and cannot misreport its own span.
 
-`waitset_wait` is userland's only park primitive, so the rule lives in one
-place:
+The rule lives in `waitset_wait`, the event park:
 
 | Wait | Closes the span? |
 | --- | --- |
 | An event set with members — the loop's own park | yes: the surface owes nothing until it returns |
-| Memberless with no timeout — `park_forever`, a backgrounded session | yes: nothing can resume it |
-| Memberless with a finite timeout — `park_ns` mid-frame | **no**: a sleep on the frame path is one of the stalls this exists to catch |
+| Memberless with no timeout — a backgrounded session | yes: nothing can resume it |
+| Memberless with a finite timeout | **no**: a sleep on the frame path is one of the stalls this exists to catch |
+| A futex park — a contended lock, `park_ns` mid-frame, `park_forever` | **no**, for the same reason |
 
 A blocking `ipc_call` parks internally through a *different* syscall, so it
 never closes the span. That is what makes the dominant stall class visible: a

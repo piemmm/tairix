@@ -5,7 +5,7 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
-use super::{normalize, normalize_in, Form, Overflow, Repertoire};
+use super::{normalize, normalize_in, Form, Overflow, Repertoire, Written, SPILL};
 use crate::MAX_DECOMPOSITION;
 
 /// `text` in `form`, into a buffer as long as any normalization of it needs.
@@ -14,6 +14,18 @@ fn normalized(text: &[char], form: Form) -> Vec<char> {
     let len = normalize(text.iter().copied(), form, &mut out).expect("room enough");
     out.truncate(len);
     out
+}
+
+/// Whether `text` in `form` fits a buffer exactly as long as `outcome`, as
+/// `outcome`, and is refused by one a character shorter.
+fn fits_exactly(text: &[char], form: Form, outcome: &[char]) -> bool {
+    let mut exact = vec!['\0'; outcome.len()];
+    let fits =
+        normalize(text.iter().copied(), form, &mut exact) == Ok(outcome.len()) && exact == outcome;
+    let refused = outcome.len().checked_sub(1).is_none_or(|shorter| {
+        normalize(text.iter().copied(), form, &mut vec!['\0'; shorter]) == Err(Overflow)
+    });
+    fits && refused
 }
 
 fn chars(field: &str) -> Vec<char> {
@@ -30,7 +42,8 @@ fn chars(field: &str) -> Vec<char> {
 
 /// Every case of `NormalizationTest.txt`, UAX #15's conformance file, each column through
 /// every form as the file's header states, and every code point its first
-/// part does not list unchanged by all four.
+/// part does not list unchanged by all four: each into a buffer exactly as
+/// long as its result, and refused by one a character shorter.
 #[test]
 fn every_case_of_the_conformance_file_normalizes_as_it_says() {
     let mut listed = vec![false; 0x11_0000];
@@ -61,6 +74,7 @@ fn every_case_of_the_conformance_file_normalizes_as_it_says() {
         for (form, outcomes) in expected {
             for (input, outcome) in [c1, c2, c3, c4, c5].into_iter().zip(outcomes) {
                 assert_eq!(&normalized(input, form), outcome, "{form:?} of {line}");
+                assert!(fits_exactly(input, form, outcome), "{form:?} of {line}");
             }
         }
         cases += 1;
@@ -71,7 +85,7 @@ fn every_case_of_the_conformance_file_normalizes_as_it_says() {
             continue;
         };
         for form in [Form::Nfc, Form::Nfd, Form::Nfkc, Form::Nfkd] {
-            assert_eq!(normalized(&[ch], form), [ch], "{form:?} of U+{code:04X}");
+            assert!(fits_exactly(&[ch], form, &[ch]), "{form:?} of U+{code:04X}");
         }
     }
 }
@@ -105,6 +119,29 @@ fn the_longest_decomposition_fills_its_bound_exactly() {
         Ok(1),
         "it has no canonical decomposition"
     );
+}
+
+/// Each part composes as it lands, so a buffer as long as the result holds
+/// it, even where a mark arrives out of canonical order and lets marks before
+/// it compose, the sequence running past the buffer meanwhile.
+#[test]
+fn a_buffer_as_long_as_the_result_suffices() {
+    for (text, form, result) in [
+        ("\u{e9}", Form::Nfc, "\u{e9}"),
+        ("e\u{301}", Form::Nfc, "\u{e9}"),
+        ("\u{ac00}", Form::Nfc, "\u{ac00}"),
+        ("\u{1100}\u{1161}\u{11a8}", Form::Nfc, "\u{ac01}"),
+        ("\u{1ec7}", Form::Nfkc, "\u{1ec7}"),
+        ("\u{fb01}", Form::Nfkc, "fi"),
+        ("a\u{301}\u{323}", Form::Nfc, "\u{1ea1}\u{301}"),
+        ("C\u{301}\u{327}", Form::Nfkc, "\u{1e08}"),
+        ("L\u{304}\u{323}", Form::Nfc, "\u{1e38}"),
+        ("\u{1f82}\u{301}", Form::Nfc, "\u{1f82}\u{301}"),
+    ] {
+        let text: Vec<char> = text.chars().collect();
+        let result: Vec<char> = result.chars().collect();
+        assert!(fits_exactly(&text, form, &result), "{form:?} of {text:?}");
+    }
 }
 
 #[test]
@@ -173,4 +210,21 @@ fn the_stringprep_repertoire_is_unicode_3_2() {
     assert_eq!(prepared("\u{2f9bf}", Form::Nfd), ['\u{4d57}']);
     // Corrigendum #3's fix was 3.2's own.
     assert_eq!(prepared("\u{f951}", Form::Nfkc), ['\u{964b}']);
+}
+
+/// What a normalization writes past its output is wiped as it ends, since the
+/// text may be a password and its caller can wipe only the output it lent.
+///
+/// Regression: `ﬁrst` into four places left its `t` in the spill, and a
+/// reordering that recomposes in place can leave a mark there too.
+#[test]
+fn what_a_normalization_writes_past_its_output_is_wiped() {
+    let mut out = ['\0'; 4];
+    let mut written = Written::new(&mut out, Form::Nfkc, Repertoire::Stringprep);
+    for ch in "\u{fb01}rst".chars() {
+        let _ = written.decompose(ch);
+    }
+    assert_ne!(written.spill, ['\0'; SPILL], "the text outran its output");
+    written.wipe_spill();
+    assert_eq!(written.spill, ['\0'; SPILL]);
 }

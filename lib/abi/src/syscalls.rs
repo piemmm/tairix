@@ -2313,7 +2313,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FD_GRANT,
         name: "fd_grant",
-        arg_count: 4,
+        arg_count: 5,
         args: [
             // The caller's own file or pipe-end descriptor, then the
             // write-extent ceiling, then the recipient's attested process
@@ -2333,7 +2333,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // reissued, so it names one process for all time.
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            // The flags: `GRANT_FILE_ONLY`, or none; any other bit is refused.
+            AbiType::U64,
             AbiType::Unit,
         ],
         // `U64` carries the minted grant handle (or a negated errno) back to

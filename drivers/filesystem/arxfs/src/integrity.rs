@@ -21,6 +21,15 @@
 //!   volume's seal is a checksum too.
 
 use tairix_abi::DriverError;
+use tairix_log::{log, Doubling, Event, EventId, Field, FieldValue, Level, Sink, Uuid};
+
+use crate::scrub::{ARXFS_RANGE_END, ARXFS_RANGE_START};
+
+/// Audit event: a read found a data block whose integrity failed, at the layer
+/// the record names.
+pub const DATA_FAULT: EventId = EventId(12_050);
+
+const _: () = assert!(DATA_FAULT.0 >= ARXFS_RANGE_START && DATA_FAULT.0 < ARXFS_RANGE_END);
 
 /// Length, in bytes, of a data block's logical content hash, keyed or not.
 pub const LOGICAL_HASH_LEN: usize = tairix_crypto::SHA256_OUTPUT_LEN;
@@ -137,6 +146,76 @@ impl DataFault {
         } else {
             Self::Physical
         }
+    }
+
+    /// The integrity layer that rejected the block, as a record names it, or
+    /// `None` for a refusal that judged nothing.
+    const fn layer(self) -> Option<&'static str> {
+        match self {
+            Self::Physical => Some("physical"),
+            Self::Seal => Some("seal"),
+            Self::Logical => Some("logical"),
+            Self::OutOfMemory => None,
+        }
+    }
+}
+
+/// The audit trail of the corrupt data a volume's reads found: every fault
+/// counted, the first recorded and then one each time the count doubles, so a
+/// volume full of rot costs the log a record per doubling rather than one per
+/// read.
+pub struct IntegrityLog {
+    audit: &'static (dyn Sink + Sync),
+    faults: Doubling,
+}
+
+impl IntegrityLog {
+    /// A trail recording on `audit`, nothing found yet.
+    #[must_use]
+    pub const fn new(audit: &'static (dyn Sink + Sync)) -> Self {
+        Self {
+            audit,
+            faults: Doubling::new(),
+        }
+    }
+
+    /// Count `fault`, found reading the block at `phys` of the volume `uuid`
+    /// names, recording it when the count is due. A refusal that judged no
+    /// block is no fault of the data's and is not counted.
+    pub(crate) fn note(&mut self, uuid: [u8; 16], phys: u64, fault: DataFault) {
+        let Some(layer) = fault.layer() else {
+            return;
+        };
+        self.faults.note();
+        let Some(faults) = self.faults.take_due() else {
+            return;
+        };
+        log(
+            self.audit,
+            &Event {
+                level: Level::Warn,
+                id: DATA_FAULT,
+                message: "arxfs: a read found a data block corrupt",
+                fields: &[
+                    Field {
+                        key: "volume",
+                        value: FieldValue::Uuid(Uuid(uuid)),
+                    },
+                    Field {
+                        key: "block",
+                        value: FieldValue::UnsignedInt(phys),
+                    },
+                    Field {
+                        key: "layer",
+                        value: FieldValue::Str(layer),
+                    },
+                    Field {
+                        key: "faults",
+                        value: FieldValue::UnsignedInt(faults),
+                    },
+                ],
+            },
+        );
     }
 }
 

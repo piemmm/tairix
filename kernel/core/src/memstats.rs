@@ -73,7 +73,7 @@ struct PressureBandWake;
 impl BandObserver for PressureBandWake {
     fn band_changed(&self, band: PressureBand) {
         let _ = band;
-        crate::waitq::notice_wake();
+        crate::waitq::notice_wake(tairix_abi::NoticeTopic::MemoryPressure);
     }
 }
 

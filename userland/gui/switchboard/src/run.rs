@@ -326,6 +326,11 @@ mod program {
             self.artwork.trim();
         }
 
+        /// Whether the retained artwork would keep one picture of `bytes`.
+        fn holds_artwork(&self, bytes: usize) -> bool {
+            self.artwork.holds(bytes)
+        }
+
         /// The desktop session's kernel-attested identity, learned from the
         /// reply to this instance's first accepted publish. `None` until
         /// then, and every command is dropped while it is `None`: an
@@ -1218,16 +1223,16 @@ mod program {
             }
         }
 
-        /// Note that the cache could not keep this decode, so nothing offers
-        /// it again until the band that refused it moves.
-        fn decline(&self, key: &ArtworkKey, side: u32) {
-            self.desk.lock().decline(key, side);
+        /// Note that the cache could not keep this decode's `bytes`, so
+        /// nothing offers it again until the cache would.
+        fn decline(&self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.desk.lock().decline(key, side, bytes);
         }
 
-        /// The band moved: offer the refused decodes again, waking the loop to
-        /// repaint what was drawn without them.
-        fn retry_declined(&self) {
-            if self.desk.lock().retry_declined() {
+        /// The band moved: offer again the refused decodes the cache now
+        /// `holds`, waking the loop to repaint what was drawn without them.
+        fn retry_declined(&self, holds: impl Fn(usize) -> bool) {
+            if self.desk.lock().retry_declined(holds) {
                 self.wake.nudge();
             }
         }
@@ -1264,8 +1269,8 @@ mod program {
             self.0.want(key, side);
         }
 
-        fn declined(&mut self, key: &ArtworkKey, side: u32) {
-            self.0.decline(key, side);
+        fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.0.decline(key, side, bytes);
         }
     }
 
@@ -1600,9 +1605,9 @@ mod program {
                 // at whatever later frame touches a cache.
                 host.trim_artwork();
                 tairix_font::trim_glyph_cache();
-                // The band that refused a decode has moved, so the keys held
-                // back for it are offered again.
-                reads.retry_declined();
+                // The keys held back for a refused decode are offered again
+                // where the cache would now keep them.
+                reads.retry_declined(|bytes| host.holds_artwork(bytes));
             }
             Some(WaitToken::Desktop) => {
                 if adopt_desktop(host) {

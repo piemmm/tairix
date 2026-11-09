@@ -33,6 +33,13 @@ pub const SYSCALL_TABLE_HASH_LEN: usize = 32;
 /// program may write the file as the user could, and no further.
 pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
 
+/// The [`SyscallNumber::FD_GRANT`] flag that delegates only a regular file,
+/// refusing a pipe end, a link or anything else no document is.
+///
+/// What a relay that promises its recipient a document mints with, so the
+/// kernel keeps the promise from the descriptor alone, touching no volume.
+pub const GRANT_FILE_ONLY: u64 = 1;
+
 /// The [`SyscallNumber::CALL_POST`] deadline that never passes: the posted
 /// request is answered only by its server or by the endpoint's end.
 ///

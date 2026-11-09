@@ -181,6 +181,8 @@ pub(crate) struct ThreadGate {
     credential: SpinLock<Option<Arc<TaskCapabilities>>>,
     /// What the thread's last wait left it owing.
     room: crate::waitset::RoomDebt,
+    /// The record every futex wait the thread makes links.
+    futex: Arc<crate::futex::FutexWaiter>,
 }
 
 /// Set between a kernel body's entry and its boundary, parked or running.
@@ -226,13 +228,14 @@ const fn status_of(word: u64) -> i32 {
 }
 
 impl ThreadGate {
-    const fn new(task: u64, process: ProcessId) -> Self {
+    const fn new(task: u64, process: ProcessId, futex: Arc<crate::futex::FutexWaiter>) -> Self {
         Self {
             task,
             process,
             word: AtomicU64::new(0),
             credential: SpinLock::new(None),
             room: crate::waitset::RoomDebt::new(),
+            futex,
         }
     }
 
@@ -307,6 +310,12 @@ impl ThreadGate {
     #[must_use]
     pub(crate) const fn room_debt(&self) -> &crate::waitset::RoomDebt {
         &self.room
+    }
+
+    /// The record the thread's futex waits link.
+    #[must_use]
+    pub(crate) const fn futex_waiter(&self) -> &Arc<crate::futex::FutexWaiter> {
+        &self.futex
     }
 
     /// Mark the thread as executing inside the kernel on its own stack,
@@ -498,7 +507,8 @@ static GATES: RwLock<Option<HashMap<u64, Arc<ThreadGate>, BuildSipHash13>>> = Rw
 /// owed anywhere.
 static OWED_KILLS: AtomicUsize = AtomicUsize::new(0);
 
-/// Give `task`, a thread of `process`, its kill gate.
+/// Give `task`, a thread of `process`, its kill gate, with the futex waiter
+/// and timer row its waits use, so none of them needs memory.
 ///
 /// Every admission of a user thread installs one before the thread can run —
 /// before its first syscall, and before it joins a group a kill could claim —
@@ -507,11 +517,14 @@ static OWED_KILLS: AtomicUsize = AtomicUsize::new(0);
 ///
 /// # Errors
 ///
-/// [`Errno::OutOfMemory`] when the gate or the registry cannot grow; the
-/// admission is then refused. [`Errno::AlreadyExists`] when `task` already has
-/// a gate.
+/// [`Errno::OutOfMemory`] when the gate, its timer row or the registry cannot
+/// grow; the admission is then refused with nothing installed.
+/// [`Errno::AlreadyExists`] when `task` already has a gate.
 pub fn install_gate(task: u64, process: ProcessId) -> Result<(), Errno> {
-    let gate = Arc::try_new(ThreadGate::new(task, process)).map_err(|_| Errno::OutOfMemory)?;
+    let futex =
+        Arc::try_new(crate::futex::FutexWaiter::new(task)).map_err(|_| Errno::OutOfMemory)?;
+    let gate =
+        Arc::try_new(ThreadGate::new(task, process, futex)).map_err(|_| Errno::OutOfMemory)?;
     let mut gates = GATES.write();
     let gates = gates.get_or_insert_with(|| {
         HashMap::with_hasher(BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED))
@@ -519,10 +532,14 @@ pub fn install_gate(task: u64, process: ProcessId) -> Result<(), Errno> {
     if gates.get(&task).is_some() {
         return Err(Errno::AlreadyExists);
     }
-    gates
-        .try_insert(task, gate)
-        .map(|_| ())
-        .map_err(|_| Errno::OutOfMemory)
+    let timer = &crate::waitq::FUTEX_TIMER_WAITQ;
+    timer
+        .register(task, crate::waitq::NO_DEADLINE)
+        .map_err(|_| Errno::OutOfMemory)?;
+    gates.try_insert(task, gate).map(|_| ()).map_err(|_| {
+        timer.deregister(task);
+        Errno::OutOfMemory
+    })
 }
 
 /// The gate of `task`, while it has one.
@@ -781,7 +798,8 @@ pub fn kill_pending(task: u64) -> bool {
 }
 
 /// Drop every trace of `task` from the gates on teardown — any death it owes,
-/// what its last wait left it owing, and its registration. Idempotent; driven
+/// what its last wait left it owing, its futex waiter's link and timer row,
+/// and its registration. Idempotent; driven
 /// by the one shared thread teardown once the thread has left its group, so a
 /// death claimed while it was still a member is cleared here and none can be
 /// claimed after.
@@ -792,6 +810,10 @@ pub fn clear_kill_gate(task: u64) {
         // Any room debt left here is a dying group's: its slot held back only
         // that group's threads.
         let _ = gate.room_debt().take();
+        // A thread that dies parked never unlinks itself, and a dead waiter
+        // left linked would hold its chain's place for nothing.
+        let _ = crate::futex::unfile(gate.futex_waiter());
+        crate::waitq::FUTEX_TIMER_WAITQ.deregister(task);
     }
 }
 
@@ -1345,6 +1367,19 @@ pub trait ProcessSignal: Sync {
         let _ = (process, keep, status);
     }
 
+    /// End `process` with `status` from inside a kernel body its thread
+    /// `caller` is running: the caller's death is owed where that body
+    /// returns, and every sibling is driven to its stopping point as
+    /// [`Self::terminate_siblings`] drives it.
+    ///
+    /// How a kernel copy that meets a page whose contents were lost ends the
+    /// process, as the caller's own touch of the page would have. A death
+    /// already owed to the caller stands. The default owes the caller's
+    /// alone: a producer with no thread-group table sees no sibling.
+    fn terminate_process(&self, process: ProcessId, caller: TaskId, status: i32) {
+        let _ = claim_gated(caller.0, DeferredTeardown::Exit { process, status });
+    }
+
     /// Whether this producer can drive a whole thread group to its stopping
     /// point.
     ///
@@ -1810,6 +1845,12 @@ where
         let _ = self.kill_group(DeferredTeardown::Exit { process, status }, Some(keep.0));
     }
 
+    fn terminate_process(&self, process: ProcessId, caller: TaskId, status: i32) {
+        let teardown = DeferredTeardown::Exit { process, status };
+        let _ = claim_gated(caller.0, teardown);
+        let _ = self.kill_group(teardown, Some(caller.0));
+    }
+
     fn can_stop_group(&self) -> bool {
         // Without the thread-group table a fan-out sees no siblings at all, so
         // a second thread of a process could never be driven to its stopping
@@ -1924,6 +1965,15 @@ mod tests {
     use crate::procwait::{ProcessWait, WaitedChild};
     use crate::sched::Scheduler;
     use crate::test_arch::TestArch;
+
+    /// A gate no registry holds, for a test of the gate's own word.
+    fn unregistered_gate(task: u64) -> ThreadGate {
+        ThreadGate::new(
+            task,
+            ProcessId(task),
+            Arc::new(crate::futex::FutexWaiter::new(task)),
+        )
+    }
 
     /// Build a leaked `'static` wait producer + live single-CPU scheduler for
     /// a producer-level test. The wait producer gets its own leaked
@@ -2132,7 +2182,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid,
@@ -2252,7 +2303,12 @@ mod tests {
         assert_eq!(scheduler.live_task_count(), 1);
         assert!(kill_pending(child));
         assert_eq!(
-            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(
+                ProcessId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::WouldBlock)
         );
         // The syscall boundary takes the deferred kill exactly once.
@@ -2763,6 +2819,75 @@ mod tests {
         clear_kill_gate(leader);
     }
 
+    /// A process ended from inside a kernel body owes its calling thread's
+    /// death where that body returns, never retiring the caller under itself,
+    /// and drives every sibling to its stopping point as a group death does.
+    #[test]
+    fn a_process_ended_from_a_kernel_body_owes_the_callers_death_at_its_boundary() {
+        let _g = running_kill_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (leader, _) = spawn_child(scheduler);
+        let (sibling, _) = spawn_child(scheduler);
+        let sink: &'static crate::test_sink::TestSink =
+            crate::forever(Box::new(crate::test_sink::TestSink::new()));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let record = tairix_kernel_sec::TaskCapabilities::derive(
+            ProcessId(leader),
+            tairix_kernel_sec::UserId(0),
+            tairix_caps::CapabilitySet::empty(),
+            tairix_caps::CapabilitySet::empty(),
+            sink,
+        )
+        .expect("derived");
+        caps.write().insert(record).expect("inserted");
+        caps.write()
+            .register_thread(TaskId(sibling), ProcessId(leader))
+            .expect("the sibling joins the group");
+        clear_kill_gate(sibling);
+        install_gate(sibling, ProcessId(leader)).expect("the sibling's gate names its group");
+        let caller = gate_of(leader).expect("gated");
+        assert!(enter_body(&caller), "the caller is inside a kernel body");
+        let signaller = KernelProcessSignal::new(wait, scheduler, caps);
+        let landed: &'static LandingRecorder = crate::forever(Box::new(LandingRecorder::new()));
+        signaller
+            .install_task_reclaim(landed)
+            .expect("first install on this producer");
+
+        signaller.terminate_process(ProcessId(leader), TaskId(leader), 139);
+
+        assert!(
+            !landed.landed(leader, Some(139)),
+            "the caller is not landed under itself"
+        );
+        assert!(
+            landed.landed(sibling, Some(139)),
+            "the sibling is driven down"
+        );
+        assert_eq!(
+            leave_body(&caller, true),
+            Some(exit_of(leader, 139)),
+            "the caller's death lands where its body returns"
+        );
+        clear_kill_gate(leader);
+        clear_kill_gate(sibling);
+    }
+
+    /// With no thread-group table to name siblings, ending a process from a
+    /// kernel body still owes the caller its death, and a death the caller
+    /// already owed stands.
+    #[test]
+    fn a_process_ended_without_a_group_table_owes_the_caller_alone() {
+        let _g = running_kill_test_lock();
+        let caller = 0x00c0_ffe9;
+        let held = gate(caller);
+        assert!(enter_body(&held));
+        NullProcessSignal.terminate_process(ProcessId(caller), TaskId(caller), 139);
+        NullProcessSignal.terminate_process(ProcessId(caller), TaskId(caller), 1);
+        assert_eq!(leave_body(&held, true), Some(exit_of(caller, 139)));
+        clear_kill_gate(caller);
+    }
+
     /// The real [`KernelProcessSignal`] lander drives the *same* landing seam
     /// the immediate terminate path does (one definition), passing an `Exit`
     /// teardown's status through and a `Plain` teardown's absence of one — so a
@@ -2831,7 +2956,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid,
@@ -2864,7 +2990,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid,
@@ -2909,7 +3036,8 @@ mod tests {
                 ProcessId(7),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
-                    .expect("defined bits")
+                    .expect("defined bits"),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid: child,
@@ -2951,7 +3079,8 @@ mod tests {
                 ProcessId(7),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
-                    .expect("defined bits")
+                    .expect("defined bits"),
+                &mut |_| Ok(())
             ),
             Err(Errno::WouldBlock)
         );
@@ -2985,7 +3114,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::STOPPED
+                WaitFlags::STOPPED,
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid: child,
@@ -3025,7 +3155,8 @@ mod tests {
                 ProcessId(7),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
-                    .expect("defined bits")
+                    .expect("defined bits"),
+                &mut |_| Ok(())
             ),
             Err(Errno::WouldBlock),
             "no stop to report"
@@ -3079,7 +3210,12 @@ mod tests {
         );
         assert_eq!(held.leave(true), Leave::Stop, "its edge owes the stop");
         assert_eq!(
-            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, stopped_flags()),
+            wait.poll(
+                ProcessId(7),
+                tairix_abi::WAIT_PID_ANY,
+                stopped_flags(),
+                &mut |_| Ok(())
+            ),
             Ok(WaitedChild {
                 pid: id,
                 status: WaitStatus::Stopped(Signal::Stop)
@@ -3227,7 +3363,7 @@ mod tests {
     #[test]
     fn a_body_whose_edge_stop_fails_still_skips_for_a_death() {
         let _gate = running_kill_test_lock();
-        let racing = ThreadGate::new(4, ProcessId(4));
+        let racing = unregistered_gate(4);
         let _ = racing.advance_job(true);
         let ran = enter_body_through(&racing, |gate| {
             let (recorded, site) = gate.claim(exit_of(4, 137));
@@ -3248,7 +3384,7 @@ mod tests {
     /// through every stop.
     #[test]
     fn a_joining_thread_adopts_its_groups_generation_however_far_it_has_come() {
-        let joining = ThreadGate::new(5, ProcessId(5));
+        let joining = unregistered_gate(5);
         let far = JobGeneration::from_bits((1 << (JobGeneration::BITS - 1)) | 1);
         joining.adopt_job(far);
         assert_eq!(joining.owed(), Owed::Stop, "it joins stopped");
@@ -3376,7 +3512,7 @@ mod tests {
     #[test]
     fn a_death_is_counted_before_anyone_can_take_it() {
         let _gate = running_kill_test_lock();
-        let racing = ThreadGate::new(2, ProcessId(2));
+        let racing = unregistered_gate(2);
         let (recorded, _) = racing.claim_then(
             DeferredTeardown::Plain {
                 process: ProcessId(2),
@@ -3420,7 +3556,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid: child,
@@ -3465,7 +3602,7 @@ mod tests {
         .expect("derived");
         caps.write().insert(record).expect("inserted");
         let empty = RwLock::new(CapTable::new());
-        let gate = ThreadGate::new(7, ProcessId(7));
+        let gate = unregistered_gate(7);
         assert!(gate.credential(&empty).is_none(), "nothing read yet");
 
         let first = gate.credential(&caps).expect("registered");
@@ -3760,7 +3897,12 @@ mod tests {
         );
         assert_eq!(scheduler.live_task_count(), 1);
         assert_eq!(
-            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            wait.poll(
+                ProcessId(7),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Err(Errno::WouldBlock)
         );
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
@@ -3776,7 +3918,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid: child,
@@ -3819,7 +3962,8 @@ mod tests {
                 ProcessId(7),
                 TaskId(7),
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Ok(WaitedChild {
                 pid: child,

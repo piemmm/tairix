@@ -3,9 +3,9 @@
 //! Text from anywhere reaches both — a name to compare, a password typed — so
 //! the harness holds them to what the standards guarantee of any input: they
 //! never panic, a buffer [`MAX_DECOMPOSITION`] times the input's length never
-//! overflows and a shorter one is said to, every form is idempotent, the
-//! forms agree with one another (UAX #15 §1.2), and a prepared string
-//! prepares to itself.
+//! overflows, a buffer as long as the result suffices and a shorter one is
+//! said to, every form is idempotent, the forms agree with one another
+//! (UAX #15 §1.2), and a prepared string prepares to itself.
 //!
 //! The text is drawn from the characters normalization works on — combining
 //! marks of every class, Hangul jamo and syllables, characters that
@@ -115,11 +115,19 @@ fn normalization_and_saslprep_hold_for_any_text() {
             "NFKD(NFC) is NFKD"
         );
 
-        // A buffer too short is said to be, never written past.
+        // A buffer as long as the result holds it; a shorter one is said to
+        // be too short, never written past.
         let form = *rng.pick(&FORMS);
-        let longest = normalized(&text, form).len();
-        if longest > 0 {
-            let mut short = vec!['\0'; rng.below(longest)];
+        let result = normalized(&text, form);
+        let mut exact = vec!['\0'; result.len()];
+        assert_eq!(
+            normalize(text.iter().copied(), form, &mut exact),
+            Ok(result.len()),
+            "{form:?} of {text:?} into a buffer as long as its result"
+        );
+        assert_eq!(exact, result);
+        if !result.is_empty() {
+            let mut short = vec!['\0'; rng.below(result.len())];
             assert_eq!(
                 normalize(text.iter().copied(), form, &mut short),
                 Err(Overflow)
@@ -128,7 +136,15 @@ fn normalization_and_saslprep_hold_for_any_text() {
 
         let typed: String = text.iter().collect();
         match prepared(&typed) {
-            Ok(once) => assert_eq!(prepared(&once), Ok(once.clone()), "SASLprep is idempotent"),
+            Ok(once) => {
+                let mut exact = vec!['\0'; once.chars().count()];
+                assert_eq!(
+                    saslprep(&typed, Unassigned::Allowed, &mut exact),
+                    Ok(exact.len()),
+                    "{typed:?} into a buffer as long as its preparation"
+                );
+                assert_eq!(prepared(&once), Ok(once.clone()), "SASLprep is idempotent");
+            }
             Err(error) => assert_ne!(error, SaslprepError::Overflow, "{typed:?} overflowed"),
         }
 

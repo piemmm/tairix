@@ -111,6 +111,7 @@ use integrity::{
     physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
+pub use integrity::{IntegrityLog, DATA_FAULT};
 pub use reserve::{release_share_blocks, system_reserve_blocks};
 pub use scrub::{PassVerdict, ScrubBudget, ScrubReport};
 pub use served::{Served, BIND_KEYS};
@@ -848,6 +849,10 @@ pub struct ARXFS<B: Block> {
     /// invalidated by [`ARXFS::free_run`] and purged by
     /// [`ARXFS::rollback`], so it can never serve a stale cluster.
     cluster_cache: Option<Box<dyn ClusterCache>>,
+    /// Where the data blocks reads find corrupt are recorded, or `None` for a
+    /// handle the host gave no log. Installed by
+    /// [`ARXFS::with_integrity_log`].
+    integrity: Option<IntegrityLog>,
     /// The mount's B-tree mutation scratch (`btree` module), lent to one
     /// insert or remove at a time. Held here so a steady-state mutation
     /// allocates nothing and no node buffer reaches the stack; `None` until
@@ -1235,6 +1240,25 @@ impl<B: Block> ARXFS<B> {
     pub fn with_cluster_cache(mut self, cache: Box<dyn ClusterCache>) -> Self {
         self.cluster_cache = Some(cache);
         self
+    }
+
+    /// Record every data block a read finds corrupt on `log`, with the layer
+    /// that rejected it. Install at mount time, before the volume serves
+    /// reads.
+    #[must_use]
+    pub fn with_integrity_log(mut self, log: IntegrityLog) -> Self {
+        self.integrity = Some(log);
+        self
+    }
+
+    /// The error a read whose block at `phys` failed with `fault` reports,
+    /// the fault first recorded where the host keeps a log.
+    fn integrity_fault(&mut self, phys: u64, fault: DataFault) -> DriverError {
+        let uuid = self.volume_uuid();
+        if let Some(log) = self.integrity.as_mut() {
+            log.note(uuid, phys, fault);
+        }
+        DriverError::from(fault)
     }
 
     /// Read the raw block at `phys` into the first `block_size` bytes of `buf`.
@@ -2573,6 +2597,7 @@ impl<B: Block> ARXFS<B> {
             schedule: CommitScheduler::new(cost),
             read_only: false,
             cluster_cache: None,
+            integrity: None,
             tree_edit: None,
             cluster_frame: Vec::new(),
             dirty: DirtySet::new(block_size),
@@ -3877,12 +3902,13 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::OutOfMemory`] when the device refused the read for
-    /// memory, [`DriverError::DeviceFault`] on any other read failure or on
-    /// any integrity layer failing (fail closed, never a panic).
+    /// The device's own error when it could not read the block, and
+    /// [`DriverError::DeviceFault`] when any integrity layer rejects what it
+    /// read (fail closed, never a panic), which is recorded.
     fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.read_data_block_classified(phys, buf)
-            .map_err(DriverError::from)
+        self.read_block(phys, buf)?;
+        let verified = self.verify_raw_block(phys, buf);
+        verified.map_err(|fault| self.integrity_fault(phys, fault))
     }
 
     /// As [`read_data_block`](Self::read_data_block), but reports *which*
@@ -4354,8 +4380,9 @@ impl<B: Block> ARXFS<B> {
                     self.read_block_run(ext.phys + first, run, stage.buf())?;
                     for slot in 0..run {
                         let block = &mut stage.buf()[slot * block_size..(slot + 1) * block_size];
-                        self.verify_raw_block(ext.phys + first + slot as u64, block)
-                            .map_err(DriverError::from)?;
+                        let phys = ext.phys + first + slot as u64;
+                        let verified = self.verify_raw_block(phys, block);
+                        verified.map_err(|fault| self.integrity_fault(phys, fault))?;
                         let at = if slot == 0 { within } else { 0 };
                         let chunk = (as_usize(cap) - at).min(as_usize(end - pos));
                         out[done..done + chunk].copy_from_slice(&block[at..at + chunk]);

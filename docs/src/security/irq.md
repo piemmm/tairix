@@ -343,12 +343,17 @@ scheduler or architecture dependency:
 Three implementations exist:
 
 * **`irq_wait` syscall handler** (`kernel/core::syscalls`): registers
-  the caller on `tairix_kernel_core::IRQ_WAITQ` *before* the first
-  poll, then **parks** off the run queue (`SyscallIrqWaiter` calls
-  `reschedule_current(Park)` — `AGENTS.md` §2.1, no busy yield). The
-  device-IRQ dispatch path's `irq_wake` (after `IrqTable::fire`) and the
-  architecture one-shot's `timed_wake_sweep` are **lock-free**: they only
-  flag a pending wake on `IRQ_WAITQ`, and the actual `unpark` runs at the
+  the caller on `tairix_kernel_core::IRQ_WAITQ`, under the key of the line
+  it is bound to, *before* the first poll, then **parks** off the run queue
+  (`SyscallIrqWaiter` calls `reschedule_current(Park)` — `AGENTS.md` §2.1,
+  no busy yield). `IrqTable::fire` notes the line as owed a wake and the
+  drain wakes only the waiters under the keys of the lines that fired, so a
+  fire on one line never wakes the waiters of another — nor every wait-set
+  on the machine, whose timer row the queue also holds. A revoked binding
+  wakes the whole queue (`irq_wake_all`). The device-IRQ dispatch path's
+  `irq_wake` and the architecture one-shot's `timed_wake_sweep` are
+  **lock-free**: they only flag a pending wake on `IRQ_WAITQ`, and the
+  actual `unpark` runs at the
   next `waitq::drain_pending_wakes` — the dispatch loop's, or the interrupted
   task's own return to user mode or in-kernel preemption boundary, where it
   holds no lock (the fully preemptive kernel runs in-kernel code with device

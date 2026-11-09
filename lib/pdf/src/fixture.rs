@@ -219,3 +219,8 @@ pub(crate) const OPTIONS: crate::Options<'static> = crate::Options {
 pub(crate) const fn reference(num: u32) -> crate::object::Object {
     crate::object::Object::Ref(crate::object::ObjRef { num, gen: 0 })
 }
+
+/// `file` as a document keeps it.
+pub(crate) fn kept(file: &[u8]) -> Vec<u8> {
+    file.to_vec()
+}

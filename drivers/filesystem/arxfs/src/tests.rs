@@ -5,6 +5,8 @@
 //! commit — plus the full read/write surface the VFS consumes, all over an
 //! in-memory [`MemBlock`] double.
 
+extern crate std;
+
 use alloc::collections::BTreeSet;
 
 use super::*;
@@ -2029,6 +2031,157 @@ fn integrity_faults_on_a_compressed_cluster_fail_closed() {
             DataFault::Logical
         );
     }
+}
+
+/// Every event a volume's integrity log recorded, as its id and its fields
+/// rendered `key=value`.
+#[derive(Default)]
+struct IntegrityRecorder(
+    std::sync::Mutex<alloc::vec::Vec<(u32, alloc::vec::Vec<alloc::string::String>)>>,
+);
+
+impl Sink for IntegrityRecorder {
+    fn write_event(&self, event: &Event<'_>) {
+        let fields = event
+            .fields
+            .iter()
+            .map(|field| alloc::format!("{}={}", field.key, field.value))
+            .collect();
+        self.0.lock().expect("recorder").push((event.id.0, fields));
+    }
+}
+
+impl IntegrityRecorder {
+    /// A recorder for the life of the test binary, as a mount keeps its log.
+    fn leaked() -> &'static Self {
+        alloc::boxed::Box::leak(alloc::boxed::Box::default())
+    }
+
+    fn events(&self) -> alloc::vec::Vec<(u32, alloc::vec::Vec<alloc::string::String>)> {
+        self.0.lock().expect("recorder").clone()
+    }
+}
+
+/// A volume holding the file `f` of one raw data block, the block's address
+/// and the volume's bytes.
+fn one_raw_block() -> (u64, [u8; 16], alloc::vec::Vec<u8>) {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let f = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    assert_eq!(fs.write_at(f, 0, &[0x77u8; 300]), Ok(300));
+    let phys = data_block_phys(&mut fs, b"f", 0);
+    let uuid = fs.volume_uuid();
+    (
+        phys,
+        uuid,
+        fs.into_block().expect("the volume closes").bytes(),
+    )
+}
+
+/// `bytes` remounted, recording its integrity faults on `audit`.
+fn logged(
+    bytes: alloc::vec::Vec<u8>,
+    audit: &'static IntegrityRecorder,
+) -> (ARXFS<MemBlock>, NodeId) {
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING)
+        .expect("remount")
+        .with_integrity_log(IntegrityLog::new(audit));
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    (fs, node)
+}
+
+#[test]
+fn a_read_that_finds_a_block_corrupt_records_where_and_at_which_layer() {
+    let (phys, uuid, mut bytes) = one_raw_block();
+    bytes[as_usize(phys) * 512] ^= 0x01;
+    let audit = IntegrityRecorder::leaked();
+    let (mut fs, node) = logged(bytes, audit);
+    let mut out = [0u8; 64];
+    assert_eq!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault));
+    let volume = alloc::format!("{}", tairix_log::FieldValue::Uuid(tairix_log::Uuid(uuid)));
+    assert_eq!(
+        audit.events(),
+        [(
+            DATA_FAULT.0,
+            alloc::vec![
+                alloc::format!("volume={volume}"),
+                alloc::format!("block={phys}"),
+                "layer=physical".into(),
+                "faults=1".into(),
+            ]
+        )]
+    );
+}
+
+#[test]
+fn a_corrupt_block_inside_a_cluster_is_recorded_at_its_own_address() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let c = fs
+        .create(root, b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    // Half noise, half padding: it compresses, but not into one block.
+    let logical = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
+    let mut payload = incompressible(logical / 2);
+    payload.resize(logical, b'.');
+    assert_eq!(fs.write_at(c, 0, &payload), Ok(payload.len()));
+    let (_, ext) = extent_of(&mut fs, b"f", 0);
+    assert!(
+        ext.compressed && ext.stored > 1,
+        "a cluster of several blocks"
+    );
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    let second = ext.phys + 1;
+    bytes[as_usize(second) * 512] ^= 0x01;
+    let audit = IntegrityRecorder::leaked();
+    let (mut fs, node) = logged(bytes, audit);
+    let mut out = [0u8; 64];
+    assert_eq!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault));
+    let events = audit.events();
+    let [(_, fields)] = &events[..] else {
+        panic!("one record, got {events:?}");
+    };
+    assert_eq!(fields[1], alloc::format!("block={second}"));
+}
+
+#[test]
+fn a_block_the_device_could_not_read_is_its_error_and_no_data_fault() {
+    let (phys, _, bytes) = one_raw_block();
+    let audit = IntegrityRecorder::leaked();
+    let mut fs = ARXFS::open(
+        MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(phys),
+        TEST_KEYING,
+    )
+    .expect("remount")
+    .with_integrity_log(IntegrityLog::new(audit));
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    let mut out = [0u8; 64];
+    let refused = fs.read_at(node, 0, &mut out);
+    assert!(refused.is_err());
+    assert!(
+        audit.events().is_empty(),
+        "the device said why, not the data"
+    );
+}
+
+#[test]
+fn a_block_read_corrupt_again_and_again_is_recorded_each_time_the_count_doubles() {
+    let (phys, _, mut bytes) = one_raw_block();
+    bytes[as_usize(phys) * 512] ^= 0x01;
+    let audit = IntegrityRecorder::leaked();
+    let (mut fs, node) = logged(bytes, audit);
+    let mut out = [0u8; 64];
+    for _ in 0..5 {
+        assert!(fs.read_at(node, 0, &mut out).is_err());
+    }
+    let counts: alloc::vec::Vec<alloc::string::String> = audit
+        .events()
+        .into_iter()
+        .filter_map(|(_, fields)| fields.into_iter().find(|f| f.starts_with("faults=")))
+        .collect();
+    assert_eq!(counts, ["faults=1", "faults=2", "faults=4"]);
 }
 
 #[test]

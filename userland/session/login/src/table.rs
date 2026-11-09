@@ -253,6 +253,61 @@ pub fn end_live_sessions(
     told
 }
 
+/// How the desktop session a round started ended.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SessionEnd {
+    /// It ran, and its user logged out or it exited.
+    LoggedOut,
+    /// The loader refused it, for this reason, so it never ran.
+    NeverRan(&'static str),
+}
+
+/// Forget `login_name`'s desktop session, which ended with exit `code` (none
+/// when its end could not be collected), recording on `sink` how it ended.
+///
+/// A session the loader refused is recorded as a launch failure with the
+/// loader's reason, never as an ordinary end: its user did not log out.
+pub fn end_session(
+    live: &mut LiveSessions,
+    login_name: &str,
+    code: Option<i32>,
+    sink: &dyn Sink,
+) -> SessionEnd {
+    let _ = live.remove(login_name);
+    let user = Field {
+        key: "user",
+        value: FieldValue::Str(login_name),
+    };
+    let Some(reason) = code.and_then(tairix_abi::load_failure_reason) else {
+        log(
+            sink,
+            &Event {
+                level: Level::Info,
+                id: events::SESSION_ENDED,
+                message: "desktop session ended",
+                fields: &[user],
+            },
+        );
+        return SessionEnd::LoggedOut;
+    };
+    log(
+        sink,
+        &Event {
+            level: Level::Warn,
+            id: events::SESSION_LAUNCH_FAILED,
+            message: "desktop session could not be started",
+            fields: &[
+                user,
+                Field {
+                    key: "reason",
+                    value: FieldValue::Str(reason),
+                },
+            ],
+        },
+    );
+    SessionEnd::NeverRan(reason)
+}
+
 /// Forget every session whose process `ended` reports gone — a desktop that
 /// died while switched away — so the login screen never offers to resume a
 /// session that no longer exists. Each is audited as ended.
@@ -284,8 +339,8 @@ pub fn forget_ended_sessions(
 #[cfg(test)]
 mod tests {
     use super::{
-        end_live_sessions, forget_ended_sessions, LiveSession, LiveSessions, SessionState,
-        SessionWaker,
+        end_live_sessions, end_session, forget_ended_sessions, LiveSession, LiveSessions,
+        SessionEnd, SessionState, SessionWaker,
     };
     use crate::events;
     use alloc::vec::Vec;
@@ -560,5 +615,32 @@ mod tests {
             1,
             "a running session is kept silently"
         );
+    }
+
+    #[test]
+    fn a_session_that_ran_ends_as_a_logout() {
+        for code in [Some(0), Some(1), None] {
+            let mut table = three_sessions();
+            let sink = CountingSink::default();
+            assert_eq!(
+                end_session(&mut table, "grace", code, &sink),
+                SessionEnd::LoggedOut,
+                "{code:?}"
+            );
+            assert!(!table.is_live("grace"));
+            assert_eq!(*sink.seen.borrow(), [events::SESSION_ENDED]);
+        }
+    }
+
+    #[test]
+    fn a_session_the_loader_refused_never_ran_and_is_recorded_with_why() {
+        let mut table = three_sessions();
+        let sink = CountingSink::default();
+        assert_eq!(
+            end_session(&mut table, "grace", Some(tairix_abi::LOAD_NOT_FOUND), &sink),
+            SessionEnd::NeverRan("program not found or not readable")
+        );
+        assert!(!table.is_live("grace"), "nor is it offered for resuming");
+        assert_eq!(*sink.seen.borrow(), [events::SESSION_LAUNCH_FAILED]);
     }
 }

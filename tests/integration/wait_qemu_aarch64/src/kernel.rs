@@ -226,14 +226,22 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
-        match producer.wait(ProcessId(cur), TaskId(cur), pid, flags) {
+        // The status is copied out to the parent's `status` pointer through
+        // the validated boundary before the child is taken, exactly as the
+        // production `wait` handler does, so a refused copy leaves it
+        // reportable.
+        let mut deliver = |reaped: tairix_kernel_core::WaitedChild| {
+            if copy_status_to_parent(args[1], reaped.status) {
+                Ok(())
+            } else {
+                Err(Errno::BadAddress)
+            }
+        };
+        match producer.wait(ProcessId(cur), TaskId(cur), pid, flags, &mut deliver) {
+            Err(Errno::BadAddress) => {
+                qemu_exit::exit_failure(FAIL_COPY_STATUS);
+            }
             Ok(reaped) => {
-                // Copy the typed status record out to the parent's `status`
-                // pointer through the validated boundary, exactly as the
-                // production `wait` handler does.
-                if !copy_status_to_parent(args[1], reaped.status) {
-                    qemu_exit::exit_failure(FAIL_COPY_STATUS);
-                }
                 if reaped.status == WaitStatus::Exited(CHILD_EXIT_CODE) {
                     REAP_OK.store(true, Ordering::SeqCst);
                 }

@@ -16,7 +16,8 @@ colour is or how it is spelled.
 | `srgb_to_linear`, `linear_to_srgb` | The IEC 61966-2-1 transfer. |
 | `linear_of`, `encode_linear`, `InGamut` | An 8-bit colour as linear light, and linear light back as the nearest 8-bit colour, each channel held to the gamut and the clip reported. |
 | `Cmyk` | Device CMYK: the complement of sRGB with the black drawn out, uncalibrated, since without an output profile there is nothing else for the numbers to mean. Exact for every 8-bit colour. |
-| `Xyz`, `Lab`, `Lch` | CIE 1931 XYZ (Y the luminance, 1 at white), L\*a\*b\* and its polar LCh(ab), all under D65. A colour outside sRGB comes back clipped and says so. |
+| `Xyz`, `Lab`, `Lch` | CIE 1931 XYZ (Y the luminance, 1 at white), L\*a\*b\* and its polar LCh(ab), all under D65. A colour outside sRGB comes back clipped and says so. `Lab::to_xyz_under` reads L\*a\*b\* measured against another white. |
+| `Adaptation` | Colour measured under another white as linear sRGB: Bradford's chromatic adaptation to D65, then sRGB's primaries, held as one matrix. |
 | `Illuminant`, `KELVIN_MIN`, `KELVIN_MAX` | A light's white by its correlated colour temperature and its Duv off the Planckian locus, and the temperature and Duv a colour, or a point of the CIE 1960 uv plane, lies at. |
 | `uv_of`, `chromaticity_of`, `white_of` | CIE 1931 chromaticity to the CIE 1960 uv plane and back, and a chromaticity's white as linear sRGB at luminance one. |
 | `legibility` | WCAG 2.1 contrast, for host tests only (feature `test-util`). |
@@ -39,6 +40,11 @@ rounds once. A Lab or LCh colour need not lie in sRGB at all; `to_rgb` answers
 the nearest 8-bit colour with each linear channel held to `0.0..=1.0`, and
 `InGamut::clipped` says when that moved it, so a picker can mark a value it
 cannot show.
+
+Colour measured under another white — each of a PDF's calibrated spaces names
+its own — reaches sRGB through `Adaptation`: Bradford's cone responses scaled
+from that white to D65's, then sRGB's primaries, the three matrices multiplied
+once into one. `Lab::to_xyz_under` reads L\*a\*b\* against such a white.
 
 `Illuminant` measures temperature on Krystek's rational fit of the Planckian
 locus in the CIE 1960 uv plane (1985), within 8e-5 of the true locus from

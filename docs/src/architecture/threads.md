@@ -157,43 +157,49 @@ instead of spinning.
   kernel-attested capability record, never from the caller. Cross-process
   (shared-memory-backed) futexes are a *different* abstraction and deliberately
   absent.
-* **Waiters live in the one shared `WaitQueue`** — its FIFO wake-one fairness,
-  its `O(log n)` deadline index, and its register-before-retest lost-wake
-  discipline. Queues are held in a bucket array sized from the discovered CPU
-  count (four buckets per CPU), created on demand per live key and dropped once
-  the last waiter leaves, so an idle process holds no futex state.
-* **The bucket table is fixed by its first use.** A key resolves to a bucket by
-  index into whichever table is live, so boot sizes the table before any thread
-  exists to wait and a sizing that arrives later is refused: a table swapped
-  between a registration and its wake would strand the waiter in a bucket no
-  waker looks in. The count is a contention choice only — a build that never
-  sized one still blocks and wakes exactly as specified, on a single bucket.
-* **No futex lock is ever held across a scheduler lock.** A waker clones the
-  queue handle out from under the bucket lock and releases it before any
-  `unpark`, so the bucket locks cannot participate in a lock cycle with the
-  scheduler's.
-* **Registration precedes the re-test.** `futex_wait` joins the key's queue,
-  *then* reads the word; a wake landing in that window finds the waiter already
-  registered. A word that no longer holds `expected` returns `WouldBlock` — the
+* **A wait needs no memory.** Every user thread is given a `FutexWaiter` with
+  its kill gate at admission, and a wait links that record rather than
+  allocating anything, so on an exhausted heap a contended lock still parks its
+  waiter instead of failing it into a retry loop. A thread blocks on at most one
+  futex at a time, so one record each is enough.
+* **Waiters are chained per bucket, in arrival order.** The bucket a key hashes
+  to holds a chain of the waiters linked there; a wake walks it, releasing the
+  oldest waiters on its key and passing over the others sharing the chain. The
+  buckets are sized from the discovered CPU count (64 per CPU, each a lock and
+  two words), so a chain stays short however many threads wait.
+* **The bucket table is fixed by its first use.** A waiter records the index of
+  the bucket it is linked in, so boot sizes the table before any thread exists
+  to wait and a sizing that arrives later is refused. The count is a contention
+  choice only — a build that never sized one still blocks and wakes exactly as
+  specified, on a single bucket.
+* **No futex lock is ever held across a scheduler lock.** A wake unlinks a
+  bounded batch of waiters under the bucket lock and unparks them once it is
+  released. A waiter whose thread can never run again is unlinked but not
+  counted, so it cannot swallow a wake the next waiter is owed.
+* **A wake is one walk of its chain.** It wakes only waiters linked before it
+  began — the chain is in arrival order, so it stops at the first later
+  arrival, and a thread that keeps waiting again cannot keep it walking — and
+  each batch resumes at the waiter the last one stopped before, unless that
+  waiter left or was linked again while the lock was down.
+* **Registration precedes the re-test.** `futex_wait` links its waiter, *then*
+  reads the word; a wake landing in that window finds the waiter already
+  linked. A word that no longer holds `expected` returns `WouldBlock` — the
   lost-wake-up race closing, not a failure — and the caller re-tests and retries.
-* **A wait the kernel cannot record is refused.** A key nobody waits on yet
-  needs a queue of its own; a heap that cannot give it one answers
-  `OutOfMemory` with nothing registered, so the caller never parks on a queue
-  no waker could find. The timed sweep and the nearest-deadline arming walk
-  the table without allocating, a bounded batch of queues per hold of a
-  bucket's lock.
+  A wait whose waiter a wake unlinked answers `Ok(0)` even when its deadline
+  passed as the wake landed, so the wake its waker counted is not lost.
 * **A wake is advisory.** One park returns `Ok(0)` and the caller re-tests its
   own condition, which is the contract `futex_wait` publishes; looping inside the
   kernel would hide a genuine wake from the userland lock that has to see it.
 * **Timed waits are tickless.** A relative `timeout_ns` becomes an absolute
   monotonic deadline, clamped one nanosecond short of the "no deadline" sentinel
-  so a saturating span still names a deadline the sweep fires. The module enrols
-  in the kernel's deadline sweep and its nearest-armed-wakeup, so a
-  `futex_wait(timeout)` fires even on an otherwise-idle CPU.
-
-Live keys are bounded without a cap of their own: a thread blocks on at most one
-futex at a time, so a process can hold no more keys than it has threads, which
-`LimitKind::Threads` already bounds.
+  so a saturating span still names a deadline the sweep fires. The deadline
+  arms the row each thread holds on `FUTEX_TIMER_WAITQ`, filed with its waiter
+  at admission, so the timed sweep and the nearest-armed-wakeup find it in
+  `O(log n)` like any other and a `futex_wait(timeout)` fires on an otherwise
+  idle CPU.
+* **A thread's teardown unlinks it.** Clearing a thread's gate unlinks its
+  waiter and drops its timer row, so a thread killed while parked leaves
+  nothing behind in any chain.
 
 ## Ending a thread, and ending a process
 

@@ -210,7 +210,20 @@ pub const fn op_cond_argument(signalling_1v8: bool, max_performance: bool) -> u3
 /// card's ECC, its controller, and the general error (SD Physical Layer
 /// Simplified Specification §4.10.1, card status).
 pub(crate) const R1_ERRORS: u32 =
-    (1 << 31) | (1 << 30) | (1 << 29) | (1 << 26) | (1 << 21) | (1 << 20) | (1 << 19);
+    (1 << 31) | (1 << 30) | (1 << 29) | (1 << 26) | R1_CARD_ECC_FAILED | (1 << 20) | (1 << 19);
+
+/// Card-status bit 21: the card's ECC could not correct the data it read.
+const R1_CARD_ECC_FAILED: u32 = 1 << 21;
+
+/// The class of a transfer the card's own status reported failed: data its
+/// ECC could not correct is a bad sector, and anything else a fault.
+pub(crate) const fn card_error_class(status: u32) -> DriverError {
+    if status & R1_CARD_ECC_FAILED != 0 {
+        DriverError::MediumError
+    } else {
+        DriverError::DeviceFault
+    }
+}
 
 /// Decode the published Card Capacity Status (`CSD` v2, block-addressed)
 /// into a [`BlockGeometry`].

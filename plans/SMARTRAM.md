@@ -841,7 +841,12 @@ complete one (`tairix_reclaim::pressure`; see
 - Reserve preservation: a reserve floor (1/64 of the backing) below which
   every reading is critical, and `growth_permitted`, which admits cache
   growth only at normal pressure and never into the reserve. A zero/unknown
-  backing reports critical and admits nothing (fail closed).
+  backing reports critical and admits nothing (fail closed). The reserve is
+  the kernel's: no kernel-path frame draw takes a frame a user commitment is
+  owed, and one drawn on a process's demand — a restored compressed page, a
+  file page, the compressed store — stops at the reserve's upper half
+  (`FrameAllocatorState::kernel_headroom`), so the kernel's heap and page
+  tables keep a share no process can drain.
 - The pure, deterministic reclaim-ordering policy `shrink_target` for every
   class (disposable/speculative drop at mild; clean file begins reclaim at
   mild and drains with transform cache at moderate; metadata and recovery
@@ -1164,17 +1169,18 @@ weaker policy:
   keyed cache: evicting a visible window's pixels is a visual defect
   rather than a slowdown, so eviction cannot follow recency. The ladder
   follows what the user can see — nothing at `Normal`, every hidden or
-  minimised window at `Mild` and deeper, additionally every visible but
-  unfocused window at `Critical`, and never the focused window, because
-  there would be nothing to show in its place. Only windows an app
-  presents are released; the session's own bar, lock screen, picker, and
-  prompts are not, because no client would answer their redraw. The
-  buffer is wiped before it is dropped, and because a present carries
-  only a damage rectangle the compositor queues a
-  `WindowEvent::RedrawRequested` the session delivers to the owning app,
-  which the `lib/window` client answers by re-presenting its last frame
-  with full-window damage. One memory model, two mechanisms suited to two
-  different kinds of memory.
+  minimised window at `Mild` and deeper, and never a visible window at any
+  band: the screen is composited from its pixels, so its app would have to
+  present at once and the present would establish the same buffer again,
+  recovering nothing for a repaint. Only windows an app presents are
+  released; the session's own bar, lock screen, picker, and prompts are
+  not, because no client would answer their redraw. The buffer is wiped
+  before it is dropped, the client is told it may let go of its own copies
+  (`WindowEvent::ContentReleased`), and because a present carries only a
+  damage rectangle the compositor queues a `WindowEvent::RedrawRequested`
+  when the window is next shown, which the `lib/window` client answers by
+  re-presenting its last frame with full-window damage. One memory model,
+  two mechanisms suited to two different kinds of memory.
 
   The ladder reads the band *and* each window's visibility, so it runs on
   either edge — the band's wake and `Compositor::set_visible` on the hide —

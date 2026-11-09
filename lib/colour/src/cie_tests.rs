@@ -1,4 +1,4 @@
-use crate::{encode_linear, Lab, Lch, Rgb, Xyz};
+use crate::{encode_linear, Adaptation, Lab, Lch, Rgb, Xyz};
 
 fn near(a: f64, b: f64, by: f64) -> bool {
     (a - b).abs() <= by
@@ -81,4 +81,50 @@ fn polar_form_keeps_a_grey_at_hue_zero_and_turns_with_the_opponents() {
         b: -40.0,
     });
     assert!(near(blue.h, 270.0, 1e-9));
+}
+
+/// The white the ICC and PDF worlds measure in.
+const D50: Xyz = Xyz {
+    x: 0.9642,
+    y: 1.0,
+    z: 0.8249,
+};
+
+#[test]
+fn a_lab_colour_reads_against_the_white_it_is_measured_under() {
+    let white = Lab {
+        l: 100.0,
+        a: 0.0,
+        b: 0.0,
+    }
+    .to_xyz_under(D50);
+    assert!(near(white.x, D50.x, 1e-12));
+    assert!(near(white.y, 1.0, 1e-12));
+    assert!(near(white.z, D50.z, 1e-12));
+    let colour = Lab {
+        l: 50.0,
+        a: 20.0,
+        b: -30.0,
+    };
+    assert_eq!(colour.to_xyz_under(Xyz::D65), colour.to_xyz());
+    let (under, d65) = (colour.to_xyz_under(D50), colour.to_xyz());
+    assert!(near(under.x / D50.x, d65.x / Xyz::D65.x, 1e-12));
+    assert!(near(under.y, d65.y, 1e-12));
+    assert!(near(under.z / D50.z, d65.z / Xyz::D65.z, 1e-12));
+}
+
+#[test]
+fn an_adaptation_takes_its_white_to_srgb_white_and_d65_to_itself() {
+    for channel in Adaptation::from_white(D50).to_linear(D50) {
+        assert!(near(channel, 1.0, 1e-3), "{channel}");
+    }
+    let colour = Xyz {
+        x: 0.3,
+        y: 0.4,
+        z: 0.5,
+    };
+    let adapted = Adaptation::from_white(Xyz::D65).to_linear(colour);
+    for (adapted, direct) in adapted.into_iter().zip(colour.to_linear()) {
+        assert!(near(adapted, direct, 1e-5), "{adapted} against {direct}");
+    }
 }

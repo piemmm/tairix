@@ -237,7 +237,15 @@ Each layer fails closed to a `DriverError` (never a panic, `AGENTS.md` §5.4 /
 §2.9) and is kept internally distinct (`integrity::DataFault` —
 `Physical`/`Seal`/`Logical`) so a media fault is not confused with a tamper or
 a plaintext mismatch, the seam Stage 8 scrub and Stage 11 health will record
-against.
+against. A block the device could not read at all is not judged: the read
+fails with the device's own error. A production read that finds a block
+corrupt is recorded on the mount's `IntegrityLog`
+(`ARXFS::with_integrity_log`) as `arxfs: a read found a data block corrupt`
+(`EventId(12050)`, `Warn`) with the `volume`, the `block` that failed (a
+compressed cluster's own stored block, not its extent's first), the `layer`,
+and `faults`, the running count — the first fault and then one each time the
+count doubles. The kernel's `/System` and root mounts and the served driver
+each install one.
 
 The logical hash is computed through `lib/crypto`'s audited SHA-256 — keyed
 as HMAC-SHA256 on an encrypted volume (`AGENTS.md` §2.12 — never

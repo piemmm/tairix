@@ -49,7 +49,7 @@ use alloc::sync::Arc;
 use core::ops::Bound;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, NoticeTopic};
 use tairix_collections::{OrderedMap, OrderedSet, TryReserveError};
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
@@ -232,6 +232,8 @@ struct Waiter {
     /// it has not passed the wake on: one that finds nothing for it does
     /// ([`WaitQueue::hand_on`]).
     chosen: bool,
+    /// Filed in room a pledge kept ([`WaitQueue::register_pledged`]).
+    pledged: bool,
 }
 
 /// A registered waiter's identity: the condition it waits on and the task
@@ -306,6 +308,11 @@ pub struct Chosen {
 /// files another, a choice takes the entry out and a hand-on puts it back — so
 /// those two indices keep room for every row to stand in them at once, and no
 /// such move needs the heap.
+///
+/// Room is also kept for every row pledged and not yet filed
+/// ([`WaitQueue::pledge`]): a row filed against a pledge takes room already
+/// made, and any other row takes room of its own on top, so the pledged room
+/// is never spent by a row that holds no pledge.
 struct WaitSet {
     /// Next FIFO arrival sequence to hand out. Monotonic; a fresh `register`
     /// takes and increments it, a re-`register` of a present waiter keeps its
@@ -317,6 +324,10 @@ struct WaitSet {
     deadlines: OrderedMap<(u64, u64), WaiterId>,
     by_task: OrderedSet<(TaskId, WakeKey)>,
     unchosen: OrderedMap<(WakeKey, u64), TaskId>,
+    /// Rows pledged ([`WaitQueue::pledge`]).
+    pledged: usize,
+    /// Rows filed in pledged room.
+    pledged_rows: usize,
 }
 
 impl WaitSet {
@@ -330,29 +341,57 @@ impl WaitSet {
             deadlines: OrderedMap::new(),
             by_task: OrderedSet::new(),
             unchosen: OrderedMap::new(),
+            pledged: 0,
+            pledged_rows: 0,
         }
     }
 
-    /// File a fresh row for `id`, taking every index's room first, so a
-    /// refusal files nothing.
+    /// Pledged rows not yet filed, whose room is kept for them.
+    const fn pledged_ahead(&self) -> usize {
+        self.pledged.saturating_sub(self.pledged_rows)
+    }
+
+    /// Make room for `more` rows beyond those already pledged ahead, so a
+    /// refusal changes nothing.
     ///
     /// `deadlines` and `unchosen` take room for as many entries again as the
-    /// set will hold rows: more than any arrangement of all of them needs.
-    fn file(&mut self, id: WaiterId, deadline_ns: u64, chooses: bool) -> Result<(), WaitRefused> {
-        let rows = self.by_waiter.len().saturating_add(1);
-        self.by_waiter.try_reserve(1)?;
-        self.order.try_reserve(1)?;
-        self.by_task.try_reserve(1)?;
-        self.deadlines.try_reserve(rows)?;
+    /// set could then hold rows: more than any arrangement of all of them
+    /// needs.
+    fn reserve_rows(&mut self, more: usize, chooses: bool) -> Result<(), WaitRefused> {
+        let ahead = self.pledged_ahead().saturating_add(more);
+        let standing = self.by_waiter.len().saturating_add(ahead);
+        self.by_waiter.try_reserve(ahead)?;
+        self.order.try_reserve(ahead)?;
+        self.by_task.try_reserve(ahead)?;
+        self.deadlines.try_reserve(standing)?;
         if chooses {
-            self.unchosen.try_reserve(rows)?;
+            self.unchosen.try_reserve(standing)?;
         }
+        Ok(())
+    }
+
+    /// File a fresh row for `id`: in room a pledge kept when `pledged` and
+    /// one is ahead, else in room taken for it first, so a refusal files
+    /// nothing.
+    fn file(
+        &mut self,
+        id: WaiterId,
+        deadline_ns: u64,
+        chooses: bool,
+        pledged: bool,
+    ) -> Result<(), WaitRefused> {
+        let pledged = pledged && self.pledged_ahead() > 0;
+        if !pledged {
+            self.reserve_rows(1, chooses)?;
+        }
+        self.pledged_rows += usize::from(pledged);
         let seq = self.next_seq;
         self.next_seq += 1;
         let waiter = Waiter {
             seq,
             deadline_ns,
             chosen: false,
+            pledged,
         };
         filed(self.by_waiter.try_insert(id, waiter));
         filed(self.order.try_insert(seq, id));
@@ -391,6 +430,9 @@ impl WaitSet {
     /// The one removal, so no caller can leave an index behind.
     fn remove(&mut self, id: WaiterId) -> Option<Waiter> {
         let waiter = self.by_waiter.remove(&id)?;
+        self.pledged_rows = self
+            .pledged_rows
+            .saturating_sub(usize::from(waiter.pledged));
         self.order.remove(&waiter.seq);
         self.by_task.remove(&(id.1, id.0));
         if waiter.deadline_ns != NO_DEADLINE {
@@ -445,14 +487,21 @@ pub struct WaitQueue {
     /// Its first wakes choose ([`Self::wake_key_first`]), so it files each
     /// waiter no wake has chosen by key and arrival.
     chooses: bool,
+    /// How a flagged wake is performed: the keys it owes, or, with none,
+    /// every waiter.
+    flagged_drain: Option<FlaggedDrain>,
 }
+
+/// A queue's own way of performing a flagged wake, waking only the keys the
+/// flag owes.
+type FlaggedDrain = fn(&WaitQueue, &dyn WaitQueueArch);
 
 impl WaitQueue {
     /// An empty wait-queue. `const` so a consumer can place one in a
     /// `static` (the [`HW_TREE_WAITQ`] global below).
     #[must_use]
     pub const fn new() -> Self {
-        Self::with_choice(false)
+        Self::with_choice(false, None)
     }
 
     /// An empty wait-queue whose first wakes choose among a key's waiters
@@ -460,16 +509,32 @@ impl WaitQueue {
     /// key and arrival as well, which every other queue is spared.
     #[must_use]
     pub const fn choosing() -> Self {
-        Self::with_choice(true)
+        Self::with_choice(true, None)
     }
 
-    const fn with_choice(chooses: bool) -> Self {
+    const fn with_choice(chooses: bool, flagged_drain: Option<FlaggedDrain>) -> Self {
         Self {
             waiters: SpinLock::new(WaitSet::new()),
             rows: AtomicUsize::new(0),
             wake_pending: AtomicBool::new(false),
             drained_at_ns: AtomicU64::new(0),
             chooses,
+            flagged_drain,
+        }
+    }
+
+    /// An empty wait-queue whose flagged wakes are performed by `drain`,
+    /// which wakes only the keys the flag owes.
+    const fn flagged_by(drain: FlaggedDrain) -> Self {
+        Self::with_choice(false, Some(drain))
+    }
+
+    /// Perform a flagged wake: the keys this queue's drain owes, or every
+    /// waiter.
+    fn drain_flagged(&self, arch: &dyn WaitQueueArch) {
+        match self.flagged_drain {
+            Some(drain) => drain(self, arch),
+            None => self.wake_all(arch),
         }
     }
 
@@ -545,13 +610,76 @@ impl WaitQueue {
         task: TaskId,
         deadline_ns: u64,
     ) -> Result<(), WaitRefused> {
+        self.file(key, task, deadline_ns, false)
+    }
+
+    /// [`Self::register_keyed`], a fresh row filed in room a pledge kept
+    /// ([`Self::pledge`]), so a waiter holding a pledge for it is not refused
+    /// for want of memory.
+    ///
+    /// # Errors
+    ///
+    /// [`WaitRefused`] only when no pledged room is left — every pledge spent
+    /// by rows already filed — and the heap cannot give the row room of its
+    /// own.
+    pub fn register_pledged(
+        &self,
+        key: WakeKey,
+        task: TaskId,
+        deadline_ns: u64,
+    ) -> Result<(), WaitRefused> {
+        self.file(key, task, deadline_ns, true)
+    }
+
+    /// File or refile `(key, task)` with `deadline_ns`, a fresh row in
+    /// pledged room when `pledged`.
+    fn file(
+        &self,
+        key: WakeKey,
+        task: TaskId,
+        deadline_ns: u64,
+        pledged: bool,
+    ) -> Result<(), WaitRefused> {
         let mut set = self.waiters.lock();
         let id = (key, task);
         if !set.refile(id, deadline_ns) {
-            set.file(id, deadline_ns, self.chooses)?;
+            set.file(id, deadline_ns, self.chooses, pledged)?;
             self.publish_rows(&set);
         }
         Ok(())
+    }
+
+    /// Pledge room for `rows` more rows, taken now so that filing them later
+    /// ([`Self::register_pledged`]) needs no memory: how a wait that must not
+    /// be refused under memory pressure has its rows' room made when its
+    /// sources are set up rather than when it parks. The room outlives the
+    /// pledge, as a filed row's does.
+    ///
+    /// # Errors
+    ///
+    /// [`WaitRefused`] when the heap cannot give the room; nothing is pledged.
+    pub fn pledge(&self, rows: usize) -> Result<(), WaitRefused> {
+        let mut set = self.waiters.lock();
+        set.reserve_rows(rows, self.chooses)?;
+        set.pledged = set.pledged.saturating_add(rows);
+        Ok(())
+    }
+
+    /// Release `rows` rows of pledge. A row filed under one stays filed.
+    pub fn unpledge(&self, rows: usize) {
+        let mut set = self.waiters.lock();
+        set.pledged = set.pledged.saturating_sub(rows);
+    }
+
+    /// Test-only: whether `task` holds a row on any key.
+    #[cfg(test)]
+    pub(crate) fn holds_task(&self, task: TaskId) -> bool {
+        self.waiters
+            .lock()
+            .by_task
+            .range((task, WakeKey::NONE)..=(task, WakeKey(u64::MAX)))
+            .next()
+            .is_some()
     }
 
     /// Remove `task`'s unkeyed registration ([`WakeKey::NONE`]) from the wait
@@ -720,9 +848,8 @@ impl WaitQueue {
     /// Wake the `count` oldest registered waiters, returning how many were
     /// woken (fewer than `count` when fewer are waiting).
     ///
-    /// The counted form of [`Self::wake_one`], and its one definition: a futex
-    /// wake releases a caller-chosen number of waiters, and repeating
-    /// `wake_one` would keep re-waking the same head (a waiter stays
+    /// The counted form of [`Self::wake_one`], and its one definition:
+    /// repeating `wake_one` would keep re-waking the same head (a waiter stays
     /// registered until it resumes and deregisters itself, which is what
     /// preserves the lost-wake discipline). The ids are collected in FIFO
     /// order under the lock and the lock released *before* any `unpark`, so
@@ -945,6 +1072,14 @@ impl WaitQueue {
             .map(|&(deadline, _seq)| deadline)
     }
 
+    /// Move `task`'s filed unkeyed row to `deadline_ns`, answering whether one
+    /// is filed. It never files a row, so it never needs the heap.
+    pub fn arm(&self, task: TaskId, deadline_ns: u64) -> bool {
+        self.waiters
+            .lock()
+            .refile((WakeKey::NONE, task), deadline_ns)
+    }
+
     /// Re-arm `task`'s filed row for the deadline `scan` reads from the state
     /// it waits on, disarmed while it reads: a [`Self::wake_by`] for a
     /// deadline published after the read then wakes the task, where the
@@ -1163,19 +1298,16 @@ pub fn procwait_wake(parent: ProcessId) {
 /// park here off the run queue (**no** busy yield) and are woken by
 /// [`stream_wake`] when *their* ring produces bytes, frees space, or closes
 /// terminally (EOF / broken pipe). Each woken task re-runs its non-blocking
-/// step ([`crate::pipe::PipeEnd::try_read`] /
+/// step ([`crate::pipe::PipeEnd::read_with`] /
 /// [`crate::pipe::PipeEnd::try_write`] and the pty equivalents) and either
 /// progresses or parks again; the check-then-park race is closed by the
 /// scheduler's wake-pending token (the same interlock `wait`/`irq_wait` use).
 ///
 /// Every waiter is registered under the [`WakeKey`] of the one ring side it
 /// blocked on ([`crate::pipe::RingWaits`]), so a chunk moved on one stream
-/// wakes only that stream's waiters. One queue for every stream is what keeps
-/// a timed `stream_read` on the single deadline index the timed sweep and
-/// [`nearest_timed_deadline`] already fold over, rather than the per-key
-/// queues [`crate::futex`] holds — whose table every sweep and every arming
-/// has to scan, a cost a futex key (a bare user address, with no kernel object
-/// to hang a queue on) has no way to avoid.
+/// wakes only that stream's waiters. One queue for every stream keeps a timed
+/// `stream_read` on the single deadline index the timed sweep and
+/// [`nearest_timed_deadline`] already fold over.
 pub static STREAM_WAITQ: WaitQueue = WaitQueue::new();
 
 /// Wake the tasks parked on the stream ring side `key` because *that* ring's
@@ -1244,35 +1376,81 @@ pub fn signal_intake_wake(task: TaskId) {
     }
 }
 
-/// The wait-queue holding `irq_wait` callers (Design D — the user-space
-/// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
-/// and called `irq_wait` parks here off the run queue (no busy yield) and is woken by [`irq_wake`] the instant the device-IRQ
-/// dispatch path runs [`tairix_kernel_irq::IrqTable::fire`] for *any* line,
-/// or, with a finite timeout, by the timed [`WaitQueue::sweep`] below. Each
-/// woken waiter re-checks its own bound line's ready flag through
-/// [`tairix_kernel_irq::IrqTable::try_wait_step`] and either returns or
-/// parks again, so a fire for a different line is a harmless spurious wake and the check-then-park race is closed by the
-/// scheduler's wake-pending token (the same interlock `hw_tree_wait` uses).
-pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
+/// The wait-queue holding the waiters of bound IRQ lines (`irq_wait`, a
+/// wait-set's `Irq` members, the in-kernel block-wait), each keyed by its
+/// line, plus the wait-sets' own timer rows, unkeyed. A
+/// fire wakes only its line's waiters ([`irq_wake`]); a timer row wakes only
+/// on its deadline, through the timed [`WaitQueue::sweep`].
+pub static IRQ_WAITQ: WaitQueue = WaitQueue::flagged_by(drain_irq_lines);
 
-/// Request a wake of every parked `irq_wait` caller because a bound IRQ
-/// line fired; each woken waiter re-checks its own line and either returns
-/// [`Ready`] or parks again, so a fire for a different line is a harmless
-/// spurious wake.
+/// The table whose fires mark the lines [`IRQ_WAITQ`]'s drain wakes; until it
+/// is installed every flagged wake reaches every waiter.
+static IRQ_LINES: OnceCell<&'static tairix_kernel_irq::IrqTable> = OnceCell::new();
+
+/// A wake owed to every [`IRQ_WAITQ`] waiter, a fire's or not.
+static IRQ_BROADCAST: AtomicBool = AtomicBool::new(false);
+
+/// Install the table whose fired lines [`irq_wake`] wakes. Set-once; a later
+/// call changes nothing.
+pub fn install_irq_lines(table: &'static tairix_kernel_irq::IrqTable) {
+    let _ = IRQ_LINES.set(table);
+}
+
+/// The key a waiter on IRQ `line` registers under on [`IRQ_WAITQ`].
+#[must_use]
+pub(crate) const fn irq_line_key(line: u32) -> WakeKey {
+    WakeKey::new(line as u64 + 1)
+}
+
+/// Request a wake of the waiters on every line a fire marked since the last
+/// drain ([`tairix_kernel_irq::IrqTable::fire`] marks it after masking the
+/// line, so mask-before-wake holds).
 ///
-/// Called from the production device-IRQ dispatch path immediately after
-/// [`tairix_kernel_irq::IrqTable::fire`] sets the per-line ready flag, so
-/// it is **lock-free**: it only flags the queue
-/// ([`WaitQueue::request_wake`]) and is safe to call from the device-IRQ
-/// dispatcher while a task it interrupted holds the wait-queue or
-/// scheduler locks. The real `unpark` runs at the next
-/// dispatcher-context [`drain_pending_wakes`]; mask-before-wake still holds
-/// because `fire` masked the line and set `ready` *before* this flag, and
-/// the drain's `unpark` re-readies the waiter that then consumes `ready`.
-///
-/// [`Ready`]: tairix_kernel_irq::WaitOutcome::Ready
+/// Lock-free, for the device-IRQ dispatch path: it only flags the queue and
+/// the real `unpark` runs at the next dispatcher-context
+/// [`drain_pending_wakes`].
 pub fn irq_wake() {
     IRQ_WAITQ.request_wake();
+}
+
+/// Request a wake of every [`IRQ_WAITQ`] waiter, whatever line it waits on:
+/// what a revocation every waiter must observe needs. Lock-free, as
+/// [`irq_wake`] is.
+pub fn irq_wake_all() {
+    IRQ_BROADCAST.store(true, Ordering::Release);
+    IRQ_WAITQ.request_wake();
+}
+
+/// [`IRQ_WAITQ`]'s flagged wake: the waiters of each line fired since the
+/// last, or every waiter when a broadcast is owed or no table is installed.
+fn drain_irq_lines(queue: &WaitQueue, arch: &dyn WaitQueueArch) {
+    let broadcast = IRQ_BROADCAST.swap(false, Ordering::AcqRel);
+    wake_fired_lines(
+        queue,
+        arch,
+        IRQ_LINES.get().ok().flatten().copied(),
+        broadcast,
+    );
+}
+
+/// Wake the waiters of each line `table` owes a wake, or every waiter when
+/// `broadcast` or with no table to name the lines.
+fn wake_fired_lines(
+    queue: &WaitQueue,
+    arch: &dyn WaitQueueArch,
+    table: Option<&tairix_kernel_irq::IrqTable>,
+    broadcast: bool,
+) {
+    match table {
+        Some(table) if !broadcast => table.take_owed(|line| {
+            let _ = queue.wake_key(arch, irq_line_key(line));
+        }),
+        Some(table) => {
+            table.take_owed(|_| {});
+            queue.wake_all(arch);
+        }
+        None => queue.wake_all(arch),
+    }
 }
 
 /// The wait-queue holding every task parked on a
@@ -1280,14 +1458,39 @@ pub fn irq_wake() {
 /// wait-set member, whatever topic it observes
 /// (`plans/NOTICE.md`).
 ///
-/// One queue for every topic rather than one per topic: each topic is a
-/// single machine-wide value, so a queue per topic would hold the same
-/// waiters over again, and a woken waiter re-checks its *own* topic's
-/// generation against the one its member last observed — a waiter already up
-/// to date simply parks again. One queue is also what lets the deferred wake
-/// stay a single lock-free flag, which the memory-pressure publisher requires
-/// (see [`notice_wake`]).
-pub static NOTICE_WAITQ: WaitQueue = WaitQueue::new();
+/// Each waiter is keyed by the topic it observes, so a topic moving wakes its
+/// own subscribers alone; the wake stays a lock-free flag
+/// per topic, which the memory-pressure publisher requires (see
+/// [`notice_wake`]).
+pub static NOTICE_WAITQ: WaitQueue = WaitQueue::flagged_by(drain_notice_topics);
+
+/// One bit per topic a move has owed its subscribers a wake since the last
+/// drain.
+static NOTICE_OWED: AtomicU64 = AtomicU64::new(0);
+
+const _: () = assert!(NoticeTopic::ALL.len() <= 64, "one owed bit per topic");
+
+/// The key a subscriber to `topic` registers under on [`NOTICE_WAITQ`].
+#[must_use]
+pub(crate) const fn notice_key(topic: NoticeTopic) -> WakeKey {
+    WakeKey::new(topic.as_u32() as u64 + 1)
+}
+
+/// [`NOTICE_WAITQ`]'s flagged wake: the subscribers of each topic that moved.
+fn drain_notice_topics(queue: &WaitQueue, arch: &dyn WaitQueueArch) {
+    wake_moved_topics(queue, arch, NOTICE_OWED.swap(0, Ordering::AcqRel));
+}
+
+/// Wake the subscribers of each topic `owed` names, one bit per topic.
+fn wake_moved_topics(queue: &WaitQueue, arch: &dyn WaitQueueArch, mut owed: u64) {
+    while owed != 0 {
+        let bit = owed.trailing_zeros();
+        owed &= owed - 1;
+        if let Ok(topic) = NoticeTopic::from_u32(bit) {
+            let _ = queue.wake_key(arch, notice_key(topic));
+        }
+    }
+}
 
 /// The wait-queue holding `waitset_wait` callers with a `ConsoleDamage` member:
 /// the driver hosting the kernel console, woken when the console comes to owe
@@ -1303,7 +1506,7 @@ pub fn console_damage_wake() {
     CONSOLE_DAMAGE_WAITQ.request_wake();
 }
 
-/// Request a wake of every system-notice watcher because some topic moved.
+/// Request a wake of `topic`'s subscribers because it moved.
 ///
 /// **Lock-free by requirement, not by preference.** The memory-pressure topic
 /// is published from the gauge's band-change hook, which fires inside whatever
@@ -1314,7 +1517,8 @@ pub fn console_damage_wake() {
 /// `unpark` runs later at the next dispatcher-context [`drain_pending_wakes`],
 /// exactly like a device IRQ's wake. Taking the wait-queue lock here instead
 /// could re-enter a lock the interrupted publisher already holds.
-pub fn notice_wake() {
+pub fn notice_wake(topic: NoticeTopic) {
+    NOTICE_OWED.fetch_or(1 << topic.as_u32(), Ordering::Release);
     NOTICE_WAITQ.request_wake();
 }
 
@@ -1479,6 +1683,11 @@ pub fn cpufreq_wake() {
 /// device interrupt or event elsewhere cuts a sleep short.
 pub static SLEEP_WAITQ: WaitQueue = WaitQueue::new();
 
+/// One row per user thread, filed when its gate is installed and armed only
+/// while a timed `futex_wait` runs ([`WaitQueue::arm`]), so a futex timeout
+/// needs no memory. Only the timed sweep releases it.
+pub static FUTEX_TIMER_WAITQ: WaitQueue = WaitQueue::new();
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree and by the timed sweep below.
@@ -1641,16 +1850,33 @@ pub fn call_wake_named(tasks: impl Iterator<Item = TaskId>) {
 /// room.
 pub static PORT_ROOM_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake exactly the sender `task` parked on [`PORT_ROOM_WAITQ`] because the
-/// mailbox *it* is waiting on freed a slot or went away (the port records its
+/// Wake exactly the senders `tasks` parked on [`PORT_ROOM_WAITQ`] because the
+/// mailbox each is waiting on freed a slot or went away (the port records its
 /// room waiters, so a drain or a teardown names them and no other). A sender
 /// that is not parked is running and will retry on its own, so the miss is
-/// benign. A fail-safe no-op before the arch hook is installed.
-pub fn port_room_wake_task(task: TaskId) {
-    if let Some(arch) = wait_arch() {
-        let _ = PORT_ROOM_WAITQ.wake_task(arch, task);
+/// benign. A `0` names a wait the port could not record, which only a wake of
+/// every sender waiting for room reaches. A no-op before the arch hook is
+/// installed.
+pub fn port_room_wake_named(tasks: impl Iterator<Item = TaskId>) {
+    let Some(arch) = wait_arch() else {
+        return;
+    };
+    let mut broadcast = false;
+    for task in tasks {
+        if task == 0 {
+            broadcast = true;
+        } else {
+            let _ = PORT_ROOM_WAITQ.wake_task(arch, task);
+        }
+    }
+    if broadcast {
+        PORT_ROOM_WAITQ.wake_all(arch);
     }
 }
+
+/// The wait-queue holding the threads a peer's exit wakes: those watching a
+/// process end through a wait-set's `PeerExit` member.
+pub static PEER_EXIT_WAITQ: WaitQueue = WaitQueue::new();
 
 /// The wait-queue holding the threads waiting for their own process's
 /// `ipc-queue-bytes` budget: a `PortRoom` wait-set member whose send the
@@ -1679,7 +1905,8 @@ pub const fn budget_key(process: ProcessId) -> WakeKey {
     WakeKey::new(process.0)
 }
 
-/// Register `task` as waiting for `process`'s budget, before the look that
+/// Register `task` as waiting for `process`'s budget, in room a pledge kept
+/// when `pledged` ([`WaitQueue::register_pledged`]), before the look that
 /// would park it: the fence orders the registration before that look as
 /// [`budget_released`]'s orders a release before its look at the queue, so
 /// either the look sees the release or the release sees the registration.
@@ -1687,8 +1914,13 @@ pub const fn budget_key(process: ProcessId) -> WakeKey {
 /// # Errors
 ///
 /// [`WaitRefused`] when its row cannot be filed; nothing is.
-pub fn budget_watch(process: ProcessId, task: TaskId) -> Result<(), WaitRefused> {
-    BUDGET_WAITQ.register_keyed(budget_key(process), task, NO_DEADLINE)?;
+pub fn budget_watch(process: ProcessId, task: TaskId, pledged: bool) -> Result<(), WaitRefused> {
+    let key = budget_key(process);
+    if pledged {
+        BUDGET_WAITQ.register_pledged(key, task, NO_DEADLINE)?;
+    } else {
+        BUDGET_WAITQ.register_keyed(key, task, NO_DEADLINE)?;
+    }
     fence(Ordering::SeqCst);
     Ok(())
 }
@@ -1777,15 +2009,14 @@ pub fn volume_attach_wake(task: TaskId) {
     }
 }
 
-/// Drop every registration `task` holds — on every global queue, and on
-/// every futex key.
+/// Drop every registration `task` holds on every global queue.
 ///
 /// Called from the one per-thread retirement path. A thread that dies inside
 /// the kernel never unwinds to its own `deregister`, so without this its rows
 /// outlive it: scheduler ids are drawn at random and never reused, so the
 /// rows accumulate for the life of the boot — and a row left at a FIFO head
-/// is worse than a leak, because a counted wake ([`WaitQueue::wake_n`], the
-/// futex's) spends itself on it and the live waiter behind stays parked.
+/// is worse than a leak, because a counted wake ([`WaitQueue::wake_n`])
+/// spends itself on it and the live waiter behind stays parked.
 ///
 /// A [`SleepLock`](crate::SleepLock)'s line is embedded in the mount or device
 /// that owns it and is reachable from no registry, so it is not walked here:
@@ -1795,7 +2026,6 @@ pub fn retire_task(task: TaskId) {
     for entry in ALL_QUEUES {
         entry.queue.deregister_task(task);
     }
-    crate::futex::deregister_task(task);
 }
 
 /// One global wait queue and the shared machinery it takes part in.
@@ -1828,9 +2058,6 @@ struct GlobalQueue {
 /// five. Holding the membership as separate per-path lists is what let a
 /// queue sit on the sweep and not the arming, and left the six queues on
 /// neither list unreachable from a path that has to name them all.
-///
-/// The per-key futex queues are created on demand, so every path folds them
-/// through [`crate::futex`] rather than from here.
 static ALL_QUEUES: &[GlobalQueue] = &[
     GlobalQueue {
         queue: &SERVE_WAITQ,
@@ -1904,6 +2131,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     },
     GlobalQueue {
         queue: &SLEEP_WAITQ,
+        timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &FUTEX_TIMER_WAITQ,
         timed: true,
         deferred: false,
     },
@@ -2008,10 +2240,6 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     for queue in timed_queues() {
         queue.sweep(arch, now);
     }
-    // Per-key and created on demand, so swept through their own module
-    // (`plans/THREADS.md` decision 5): a timed `futex_wait` is released
-    // exactly like any other timed wait.
-    crate::futex::sweep(arch, now);
     // Re-arm to the soonest deadline *any* queue still needs, so no finite
     // timeout is dropped because another queue armed a later one-shot.
     arch.set_wakeup(nearest_timed_deadline());
@@ -2040,7 +2268,7 @@ pub fn drain_pending_wakes() -> bool {
     for queue in deferred_queues() {
         if queue.take_wake_pending() {
             queue.drained_at_ns.store(arch.now_ns(), Ordering::Release);
-            queue.wake_all(arch);
+            queue.drain_flagged(arch);
             woke = true;
         }
     }
@@ -2128,15 +2356,14 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
     }
 }
 
-/// The soonest finite deadline pending across every timed queue
-/// and the per-key futex queues, or [`None`] if none has one. A park site
+/// The soonest finite deadline pending across every timed queue, or
+/// [`None`] if none has one. A park site
 /// arms the one-shot to this so registering a *later* deadline never delays
 /// an already-pending earlier wake.
 #[must_use]
 pub fn nearest_timed_deadline() -> Option<u64> {
     timed_queues()
         .filter_map(WaitQueue::earliest_deadline)
-        .chain(crate::futex::earliest_deadline())
         .min()
 }
 
@@ -2423,8 +2650,7 @@ mod tests {
         // A thread killed while parked leaves its row behind, and a counted
         // wake used to report the unparks it *issued* rather than the ones
         // that landed: `wake_n(_, 1)` over that row answered "one woken" and
-        // released nobody, so the live waiter behind it stayed parked. On the
-        // futex path that is a lost `FUTEX_WAKE`.
+        // released nobody, so the live waiter behind it stayed parked.
         let q = WaitQueue::new();
         let arch = MockArch::new();
         q.register(1, NO_DEADLINE).expect("filed");
@@ -2733,7 +2959,7 @@ mod tests {
     /// would be a race, not a test.
     #[test]
     fn a_notice_topic_change_flags_a_deferred_wake_without_unparking() {
-        notice_wake();
+        notice_wake(NoticeTopic::MemoryPressure);
 
         assert!(NOTICE_WAITQ.wake_is_pending(), "the change owes a wake");
         assert!(
@@ -2743,6 +2969,111 @@ mod tests {
         assert!(
             NOTICE_WAITQ.take_wake_pending(),
             "the drain consumes the owed wake"
+        );
+    }
+
+    /// A topic moving wakes its own subscribers and leaves the others parked:
+    /// a band change no longer wakes every task that watches the mounts.
+    #[test]
+    fn a_topic_moving_wakes_its_own_subscribers_alone() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register_keyed(notice_key(NoticeTopic::Mounts), 1, NO_DEADLINE)
+            .expect("filed");
+        q.register_keyed(notice_key(NoticeTopic::MemoryPressure), 2, NO_DEADLINE)
+            .expect("filed");
+        wake_moved_topics(&q, &arch, 1 << NoticeTopic::MemoryPressure.as_u32());
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![2]);
+    }
+
+    /// A drain that takes the wake a fire requested finds the line it was
+    /// raised for: the fire releases the line's owed bit before the queue's
+    /// flag, and the drain acquires the flag before taking the bits. Run on
+    /// real threads, since these are `core` atomics no model interleaves; a
+    /// notice topic's bit pairs with the flag the same way.
+    #[test]
+    fn a_drain_that_takes_a_fires_wake_finds_its_line() {
+        use core::sync::atomic::AtomicU64;
+        use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
+        use tairix_kernel_sec::ProcessId;
+
+        struct Masks;
+        impl IrqController for Masks {
+            fn mask(&self, _line: u32) -> Result<(), MaskError> {
+                Ok(())
+            }
+            fn rearm(&self, _line: u32) -> Result<(), MaskError> {
+                Ok(())
+            }
+        }
+
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: u64 = if cfg!(miri) { 1_000 } else { 400_000 };
+        let table = IrqTable::new(7);
+        table.bind(1, ProcessId(1)).expect("bound");
+        let queue = WaitQueue::new();
+        let round = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for r in 1..=ROUNDS {
+                    while round.load(Ordering::Acquire) != r {
+                        core::hint::spin_loop();
+                    }
+                    let _ = table.fire(1, &Masks);
+                    queue.request_wake();
+                }
+            });
+            for r in 1..=ROUNDS {
+                round.store(r, Ordering::Release);
+                while !queue.take_wake_pending() {
+                    core::hint::spin_loop();
+                }
+                let mut found = false;
+                table.take_owed(|line| found |= line == 1);
+                assert!(found, "round {r}: the drain took the wake but not its line");
+            }
+        });
+    }
+
+    /// A fire wakes its own line's waiters alone: neither another line's nor
+    /// a wait-set's timer row, which only its deadline releases. A broadcast,
+    /// or a queue no table names lines for, still reaches everyone.
+    #[test]
+    fn a_fire_wakes_its_own_lines_waiters_alone() {
+        use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
+
+        struct Masks;
+        impl IrqController for Masks {
+            fn mask(&self, _line: u32) -> Result<(), MaskError> {
+                Ok(())
+            }
+        }
+
+        let arch = MockArch::new();
+        let table = IrqTable::new(31);
+        let owner = ProcessId(7);
+        table.bind(7, owner).expect("binds");
+        table.bind(9, owner).expect("binds");
+        let q = WaitQueue::new();
+        q.register_keyed(irq_line_key(7), 1, NO_DEADLINE)
+            .expect("filed");
+        q.register_keyed(irq_line_key(9), 2, NO_DEADLINE)
+            .expect("filed");
+        q.register(3, 1_000).expect("filed");
+        let _ = table.fire(7, &Masks);
+        wake_fired_lines(&q, &arch, Some(&table), false);
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![1]);
+
+        arch.unparked.borrow_mut().clear();
+        wake_fired_lines(&q, &arch, Some(&table), true);
+        assert_eq!(arch.unparked.borrow().len(), 3, "a broadcast reaches all");
+        arch.unparked.borrow_mut().clear();
+        wake_fired_lines(&q, &arch, None, false);
+        assert_eq!(
+            arch.unparked.borrow().len(),
+            3,
+            "and so does a fire with no table"
         );
     }
 
@@ -2881,8 +3212,8 @@ mod tests {
     fn a_budget_release_wakes_only_its_own_processs_waiters() {
         let (_, mine) = crate::test_boot::claim_scheduler();
         let theirs = crate::test_boot::claim_peer_task();
-        budget_watch(ProcessId(mine), mine).expect("filed");
-        budget_watch(ProcessId(theirs), theirs).expect("filed");
+        budget_watch(ProcessId(mine), mine, false).expect("filed");
+        budget_watch(ProcessId(theirs), theirs, false).expect("filed");
         let _ = crate::test_boot::take_unparked();
         budget_released(ProcessId(mine));
         assert_eq!(crate::test_boot::take_unparked(), [mine]);
@@ -3000,9 +3331,9 @@ mod tests {
         let second = crate::test_boot::claim_peer_task();
         let theirs = crate::test_boot::claim_peer_task();
         let process = ProcessId(first);
-        budget_watch(process, first).expect("filed");
-        budget_watch(process, second).expect("filed");
-        budget_watch(ProcessId(theirs), theirs).expect("filed");
+        budget_watch(process, first, false).expect("filed");
+        budget_watch(process, second, false).expect("filed");
+        budget_watch(ProcessId(theirs), theirs, false).expect("filed");
         let _ = crate::test_boot::take_unparked();
         budget_released_all(process);
         let mut woken = crate::test_boot::take_unparked();
@@ -3028,7 +3359,7 @@ mod tests {
         let second = crate::test_boot::claim_peer_task();
         let process = ProcessId(first);
         for task in [first, second] {
-            budget_watch(process, task).expect("filed");
+            budget_watch(process, task, false).expect("filed");
         }
         let _ = crate::test_boot::take_unparked();
         budget_released(process);
@@ -3079,7 +3410,7 @@ mod tests {
                     if round.load(Ordering::Acquire) == STOP {
                         return;
                     }
-                    budget_watch(process, waiter).expect("filed");
+                    budget_watch(process, waiter, false).expect("filed");
                     let held = charges.held(tairix_abi::LimitKind::IpcQueueBytes);
                     saw_release.store(held == 0, Ordering::Relaxed);
                     looked.store(this, Ordering::Release);
@@ -3156,8 +3487,8 @@ mod tests {
                 }
             });
             for this in 1..=ROUNDS {
-                budget_watch(process, leaver).expect("filed");
-                budget_watch(process, behind).expect("filed");
+                budget_watch(process, leaver, false).expect("filed");
+                budget_watch(process, behind, false).expect("filed");
                 let _ = crate::test_boot::take_unparked();
                 round.store(this, Ordering::Release);
                 budget_released(process);
@@ -3244,5 +3575,75 @@ mod tests {
         q.register(9, NO_DEADLINE).expect("filed");
         q.rearm(9, || Some(5));
         assert_eq!(q.earliest_deadline(), Some(5));
+    }
+
+    /// Rows pledged ahead file with the heap refusing, deadlines and choices
+    /// included, and a pledge spent is room no further row is filed in.
+    #[test]
+    fn pledged_rows_file_without_the_heap() {
+        const ROWS: usize = 64;
+        let q = WaitQueue::choosing();
+        let arch = MockArch::new();
+        let key = WakeKey::new(6);
+        q.pledge(ROWS).expect("pledged");
+        arch.unparked.borrow_mut().reserve(2 * ROWS);
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let filed =
+            (1..=ROWS).all(|task| q.register_pledged(key, task as TaskId, task as u64).is_ok());
+        let beyond = q.register_pledged(key, ROWS as TaskId + 1, NO_DEADLINE);
+        q.sweep(&arch, ROWS as u64 / 2);
+        let chosen = q.wake_key_first(&arch, key);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(filed, "every pledged row filed");
+        assert_eq!(beyond, Err(WaitRefused), "no pledge is left for another");
+        assert!(chosen);
+        assert_eq!(q.earliest_deadline(), Some(ROWS as u64 / 2 + 1));
+    }
+
+    /// Room pledged is never spent by a row that holds no pledge: rows filed
+    /// without one take room of their own on top, so every pledged row still
+    /// files once the heap refuses.
+    #[test]
+    fn an_unpledged_row_never_spends_pledged_room() {
+        const PLEDGED: usize = 512;
+        let q = WaitQueue::new();
+        q.pledge(PLEDGED).expect("pledged");
+        for task in 1..=PLEDGED {
+            q.register(task as TaskId, NO_DEADLINE).expect("filed");
+        }
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let pledged = (PLEDGED + 1..=2 * PLEDGED).all(|task| {
+            q.register_pledged(WakeKey::NONE, task as TaskId, NO_DEADLINE)
+                .is_ok()
+        });
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(pledged, "the pledged room was all still there");
+    }
+
+    /// A pledged row's room comes back to its pledge when the row goes, so a
+    /// pledge serves wait after wait; a released pledge leaves its rows filed.
+    #[test]
+    fn a_pledge_serves_every_wait_until_released() {
+        let q = WaitQueue::new();
+        q.pledge(1).expect("pledged");
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let waits = (1..=8).all(|task| {
+            let filed = q.register_pledged(WakeKey::NONE, task, NO_DEADLINE).is_ok();
+            q.deregister(task);
+            filed
+        });
+        let held = q.register_pledged(WakeKey::NONE, 9, NO_DEADLINE);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert!(waits, "each wait filed in the one pledge's room");
+        assert_eq!(held, Ok(()));
+        q.unpledge(1);
+        assert!(!q.is_empty(), "the row stays filed");
+        q.deregister(9);
+        assert!(q.is_empty());
+        q.pledge(1).expect("pledged again");
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        let again = q.register_pledged(WakeKey::NONE, 10, NO_DEADLINE);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(again, Ok(()), "the released row's room was kept");
     }
 }

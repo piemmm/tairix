@@ -11,5 +11,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# Wipes the characters a normalization held past its output: SASLprep
+# prepares passwords, and a wipe the optimiser may drop is no wipe.
+zeroize = { version = "1.8.1", default-features = false }
+
 [dev-dependencies]
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -1,11 +1,14 @@
 //! The cross-reference: tables, streams, hybrids, updates and repair.
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
+use core::fmt::Write;
 
 use super::{chained, object_head, repair, Entry, ObjectStream, Source};
-use crate::fixture::Builder;
+use crate::fixture::{flate, Builder};
+use crate::limits::MAX_XREF_SECTIONS;
 use crate::object::{Name, Object};
 use crate::parse;
 use crate::parse::Endstreams;
@@ -224,11 +227,18 @@ fn an_object_stream_finds_an_object_by_number_where_its_index_is_wrong() {
         (Name(b"First".to_vec()), Object::Int(10)),
     ])
     .expect("room");
-    let objects = ObjectStream::new(&dict, data).expect("an object stream");
-    assert_eq!(objects.object(0, 10), Ok(Object::Int(1)));
-    assert_eq!(objects.object(0, 11), Ok(Object::String(b"b".to_vec())));
-    assert_eq!(objects.object(9, 11), Ok(Object::String(b"b".to_vec())));
-    assert_eq!(objects.object(0, 12), Err(PdfError::Malformed));
+    let room = budget();
+    let objects = ObjectStream::new(&dict, data, &room).expect("an object stream");
+    assert_eq!(objects.object(0, 10, &room), Ok(Object::Int(1)));
+    assert_eq!(
+        objects.object(0, 11, &room),
+        Ok(Object::String(b"b".to_vec()))
+    );
+    assert_eq!(
+        objects.object(9, 11, &room),
+        Ok(Object::String(b"b".to_vec()))
+    );
+    assert_eq!(objects.object(0, 12, &room), Err(PdfError::Malformed));
     let numbers: Vec<u32> = objects.numbers().collect();
     assert_eq!(numbers, [10, 11]);
 }
@@ -243,15 +253,15 @@ fn an_object_stream_past_its_bounds_is_refused() {
         .expect("room")
     };
     assert!(matches!(
-        ObjectStream::new(&dict(1, 99), b"1 0 2".to_vec()),
+        ObjectStream::new(&dict(1, 99), b"1 0 2".to_vec(), &budget()),
         Err(PdfError::Malformed)
     ));
     assert!(matches!(
-        ObjectStream::new(&dict(1, 4), b"1 50 2".to_vec()),
+        ObjectStream::new(&dict(1, 4), b"1 50 2".to_vec(), &budget()),
         Err(PdfError::Malformed)
     ));
     assert!(matches!(
-        ObjectStream::new(&dict(100_001, 0), Vec::new()),
+        ObjectStream::new(&dict(100_001, 0), Vec::new(), &budget()),
         Err(PdfError::TooComplex)
     ));
 }
@@ -269,4 +279,150 @@ fn heads_within_an_object_read_already_are_its_bytes() {
     assert_eq!(xref.entry(1), Entry::Offset(9));
     assert_eq!(xref.entry(2), Entry::Free);
     assert_eq!(xref.entry(3999), Entry::Free);
+}
+
+#[test]
+fn a_long_chain_of_updates_merges_its_trailers_once() {
+    // The newest trailer holds many keys and the oldest one it lacks: merged
+    // once, not rebuilt for every section.
+    let mut file = b"%PDF-1.7\n".to_vec();
+    let mut prev = None;
+    for _ in 1..MAX_XREF_SECTIONS {
+        let at = file.len();
+        let entries = prev.map_or_else(
+            || String::from("/Info 9 0 R"),
+            |prev| format!("/Prev {prev}"),
+        );
+        file.extend_from_slice(format!("xref\ntrailer\n<<{entries}>>\n").as_bytes());
+        prev = Some(at);
+    }
+    let prev = prev.expect("an older section");
+    let newest = file.len();
+    let keys = (0..50_000).fold(String::new(), |mut keys, key| {
+        write!(keys, "/K{key} {key} ").expect("a string takes any text");
+        keys
+    });
+    file.extend_from_slice(
+        format!("xref\ntrailer\n<<{keys}/Root 1 0 R /Prev {prev}>>\nstartxref\n{newest}\n%%EOF\n")
+            .as_bytes(),
+    );
+    let trailer = stated(&file)
+        .expect("a cross-reference")
+        .trailer
+        .expect("a trailer");
+    assert_eq!(trailer.get(b"K49999"), Some(&Object::Int(49_999)));
+    assert!(
+        trailer.get(b"Info").is_some(),
+        "the oldest trailer's key is kept"
+    );
+    assert_eq!(
+        trailer.get(b"Prev").and_then(Object::as_int),
+        i64::try_from(prev).ok(),
+        "the newest trailer's value wins"
+    );
+}
+
+#[test]
+fn what_a_cross_reference_streams_rows_decode_to_is_charged() {
+    // A hundred thousand one-byte rows compress to a few hundred bytes, and
+    // the entries they place take far more than they decode to.
+    let mut pdf = Builder::new();
+    let at = pdf.out.len();
+    pdf.stream(
+        1,
+        "/Type /XRef /Size 100000 /W [1 0 0] /Filter /FlateDecode",
+        &flate(&alloc::vec![0; 100_000]),
+    );
+    let file = pdf.finish(at);
+    assert!(matches!(stated(&file), Err(PdfError::TooComplex)));
+}
+
+#[test]
+fn an_object_streams_index_is_charged_to_the_budget() {
+    let dict = crate::object::Dict::from_written(alloc::vec![
+        (Name(b"N".to_vec()), Object::Int(2)),
+        (Name(b"First".to_vec()), Object::Int(10)),
+    ])
+    .expect("room");
+    let data = b"10 0 11 2 1 (b)";
+    assert!(matches!(
+        ObjectStream::new(&dict, data.to_vec(), &Cell::new(1)),
+        Err(PdfError::TooComplex)
+    ));
+    let room = budget();
+    assert!(ObjectStream::new(&dict, data.to_vec(), &room).is_ok());
+    assert!(room.get() < ROOM, "its index is charged");
+}
+
+#[test]
+fn a_repair_reading_past_trailer_keywords_is_held_to_its_allowance() {
+    // Each keyword is followed by the rest of one unbroken run, as a keyword
+    // or an unterminated string, so lexing what follows each for free would
+    // cost the square of the run.
+    for run in [b"trailer".as_slice(), b"trailer(".as_slice()] {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        file.extend(run.repeat(5000));
+        assert!(matches!(repair(&file), Err(PdfError::TooComplex)));
+    }
+}
+
+#[test]
+fn a_repair_refuses_an_object_nested_past_the_bound_rather_than_passing_it_over() {
+    // Passed over, the object would be missing from what the repair rebuilt:
+    // a different file, where reading it whole refuses it.
+    let mut file = b"%PDF-1.7\n1 0 obj\n".to_vec();
+    file.extend(b"<</A ".repeat(80));
+    file.extend(b">>".repeat(80));
+    file.extend(b"\nendobj\ntrailer\n<</Root 1 0 R>>\n");
+    assert!(matches!(repair(&file), Err(PdfError::TooComplex)));
+}
+
+#[test]
+fn repair_completes_the_last_trailer_from_earlier_ones() {
+    let mut pdf = Builder::new();
+    pdf.object(1, "<</Type /Catalog>>")
+        .object(9, "<</Filter /Standard>>");
+    pdf.table(1, "/Encrypt 9 0 R");
+    pdf.out
+        .extend_from_slice(b"trailer\n<</Root 1 0 R /Size 20>>\n");
+    let trailer = repair(&pdf.out)
+        .expect("a repair")
+        .trailer
+        .expect("a trailer");
+    assert_eq!(
+        trailer
+            .get(b"Encrypt")
+            .and_then(Object::as_reference)
+            .map(|encrypt| encrypt.num),
+        Some(9),
+        "the earlier trailer's key is kept"
+    );
+    assert_eq!(
+        trailer.get(b"Size"),
+        Some(&Object::Int(20)),
+        "the later trailer's value wins"
+    );
+}
+
+#[test]
+fn repair_with_no_trailer_left_names_the_encryption_dictionary_it_finds() {
+    let cut = b"%PDF-1.4\n1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n\
+        9 0 obj <</Filter /Standard /V 2 /R 3 /O <00> /U <00> /P -4>> endobj\n";
+    let trailer = repair(cut)
+        .expect("a repair")
+        .trailer
+        .expect("a trailer naming it");
+    assert_eq!(
+        trailer
+            .get(b"Encrypt")
+            .and_then(Object::as_reference)
+            .map(|encrypt| encrypt.num),
+        Some(9)
+    );
+    let signed = b"%PDF-1.4\n1 0 obj <</Type /Sig /Filter /Adobe.PPKLite \
+        /SubFilter /adbe.pkcs7.detached /Contents <00> /ByteRange [0 1 2 3]>> endobj\n";
+    assert!(
+        repair(signed).expect("a repair").trailer.is_none(),
+        "a signature is no encryption dictionary"
+    );
 }

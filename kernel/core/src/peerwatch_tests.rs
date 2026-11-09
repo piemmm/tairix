@@ -178,15 +178,20 @@ fn a_consume_of_anything_but_the_oldest_exit_changes_nothing() {
 #[test]
 fn a_retired_watcher_leaves_the_queue_as_well_as_the_registry() {
     let peers = PeerWatch::new();
-    peers.join(70_011).expect("filed");
-    assert!(!peers.parked.is_empty());
+    let queue = &crate::waitq::PEER_EXIT_WAITQ;
+    queue
+        .register(70_011, crate::waitq::NO_DEADLINE)
+        .expect("filed");
+    assert!(queue.holds_task(70_011));
     peers.leave(70_011);
-    assert!(peers.parked.is_empty());
+    assert!(!queue.holds_task(70_011));
     // A thread torn down while parked never unwinds to its own `leave`.
-    peers.join(70_012).expect("filed");
+    queue
+        .register(70_012, crate::waitq::NO_DEADLINE)
+        .expect("filed");
     peers.forget_watcher(70_012);
     assert!(
-        peers.parked.is_empty(),
+        !queue.holds_task(70_012),
         "retirement took its place in the queue"
     );
 }

@@ -454,7 +454,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         tairix_kernel_core::timed_wake_sweep();
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
 
-        match wait_producer.poll(ProcessId(0), fixture_pid, WaitFlags::empty()) {
+        match wait_producer.poll(ProcessId(0), fixture_pid, WaitFlags::empty(), &mut |_| {
+            Ok(())
+        }) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(0) => {
                     note(

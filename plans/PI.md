@@ -1698,7 +1698,14 @@ host. Its design and test surface are `drivers/storage/emmc2/README.md` and
 - The driver's `floor::open` records the negotiated link (`emmc2: link`,
   event 24940: mode, clock, base clock, signalling, `CMD23`, DMA,
   fallbacks), or the stage and error it failed at (`emmc2: bring-up failed`,
-  24941).
+  24941), and every transfer that fails afterwards (`emmc2: transfer failed`,
+  24942: the step, the controller's or card's status, the class, the reissue
+  its recovery vouches for), the first and then one per doubling of the count.
+- A failure is classed by the controller's error bits — timeouts `TimedOut`,
+  CRC, end-bit, index and auto-command errors `TransferCorrupted`, an
+  uncorrectable ECC status `MediumError`, the rest `DeviceFault` — so the
+  kernel's boot-disk wrapper rides out the first two under the shared reissue
+  policy (`plans/FIX-IO.md` IO3).
 
 **Metal acceptance.** A Pi 4B brings its card up at UHS-I DDR50, 50 MHz,
 1.8 V, with `CMD23` and ADMA2 and no fallback, and mounts `/System` over the

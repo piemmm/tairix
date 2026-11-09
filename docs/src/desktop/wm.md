@@ -1660,8 +1660,8 @@ A window's content surface is the compositor's single owned copy of the
 app's pixels, and on a full-screen window it is the largest single
 allocation the desktop holds. A minimised window that nobody can see
 would otherwise pin megabytes indefinitely, so content is **releasable**:
-under memory pressure the compositor gives the buffer back and asks the
-owning app to present again.
+under memory pressure the compositor gives a hidden window's buffer back and
+asks the owning app to present again when the window is next shown.
 
 This is deliberately **not** a keyed cache like the furniture, cursor,
 and icon caches. Evicting a visible window's pixels is a *visual defect*,
@@ -1686,8 +1686,7 @@ memory model, two mechanisms suited to two different kinds of memory.
   its client establish the buffer the release just freed, for pixels nobody can
   see: the release would free nothing and cost a repaint per hidden window,
   under pressure. The request is made by `set_visible` when the window is next
-  shown; a *visible* window released at critical pressure is still asked
-  straight away, because it must not be left blank.
+  shown.
 - **What survives a release.** Only the pixels go. The window keeps its
   client size (`Window::client_size`, retained independently of the
   buffer), origin, z-order, visibility, furniture, cursor, viewport, and
@@ -1701,12 +1700,11 @@ memory model, two mechanisms suited to two different kinds of memory.
 - **The redraw handshake.** A present carries only *damage rectangles*,
   so a re-established surface starts transparent — the plate showing
   through it on a decorated window — and is correct only once a
-  full-window present arrives. Every release therefore queues a
-  `WindowEvent::RedrawRequested` for that window, drained by the embedder
+  full-window present arrives. Showing a window with no content therefore
+  queues a `WindowEvent::RedrawRequested` for it, drained by the embedder
   through `Compositor::pending_redraws`. The compositor never reaches for
   the window protocol itself — the wm crate has no dependency on the
-  window-server side — and it queues the same request when a window with
-  no content is made visible again. `lib/window` answers the event on the
+  window-server side. `lib/window` answers the event on the
   app's behalf by re-presenting its last frame with full-window damage,
   so an app that does nothing still gets its pixels back; an app that
   ignores the event simply leaves an empty plate inside its frame while
@@ -1733,11 +1731,10 @@ memory model, two mechanisms suited to two different kinds of memory.
     goes, whether it was already hidden when the band moved or is hidden
     afterwards. Nobody is looking at it, so the release is invisible and the
     win is the whole surface.
-  - **Critical** — additionally every **visible but unfocused** window,
-    each with an immediate redraw request. A background window blank for
-    a frame is a far better outcome than exhausting memory.
-  - The **focused** window is never released at any band: there would be
-    nothing to show in its place.
+  - A **visible** window is never released at any band. The screen is
+    composited from its pixels, so its app would have to present at once,
+    and the present establishes the same buffer again: the memory comes
+    straight back and the repaint is spent for nothing.
 - **Only windows an app presents.** A window the session paints itself —
   the taskbar, the lock screen, the file picker, a confirmation prompt —
   has no client to answer a redraw request, so releasing it would blank
@@ -2560,17 +2557,26 @@ numbered with the seat's other offers, answered with `FileOfferAnswer {
 window_id, serial, places }` — whether a drop there places the file in the
 window's document, as a picture dropped on Draw's canvas is placed — and ended
 with `ItemsOfferEnded`, which carries the point when the file was placed
-there. `OfferedFile { window_id, serial }` reads the file's media type for the
+there. Only the answer to the offer standing where the file is let go places
+it: one let go before its window answered for that point is not placed.
+`OfferedFile { window_id, serial }` reads the file's media type for the
 offer standing, never its name (`decode_offered_file_reply`), the same for
-every offer of the drag numbered `drag`. One file carried off the desktop is
+every offer of the drag numbered `drag`. The client posts it
+(`WindowClient::ask_offered_file`): its answer lands with the other posted
+answers (`take_offered_media`), the newest of several asked over one window
+going once the first is answered, so an application never waits on the read. One file carried off the desktop is
 offered both ways under one number, as an item and as a file: an answer for it
 as an item outranks one for it as a file, and placed, the session opens it
-read-only under its own authority and hands it over itself. A drop the window
+read-only under its own authority and hands it over itself, saying why in a
+notice of its own where it cannot. A drop the window
 answered it places concludes `DropSite::Placed` for the dragging application,
 which opens the file read-only and hands it over with `PlaceDropped {
 window_id, name, grant }`:
-one-shot, honoured only for the drag's attested owner, and relayed read-only:
-the kernel refuses to relay a descriptor that can write, never narrowing it. The
+one-shot, honoured only for the drag's attested owner, and relayed only as a
+read-only regular file: the session mints the window's delegation with
+`GRANT_FILE_ONLY`, so the kernel refuses a grant holding anything but a file
+from the descriptor alone — a pipe end could be written through, or fed
+through and never closed — and one that can write, never narrowing it. The
 session queues it for the window's owner as `OpenTarget::Placed { window_id,
 x, y, name, grant }`, which a document application reads in as it would a
 picture it chose to place.

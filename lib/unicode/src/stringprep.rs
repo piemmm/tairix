@@ -45,10 +45,12 @@ pub enum SaslprepError {
 /// characters it takes there.
 ///
 /// The non-ASCII spaces become U+0020 and the characters stringprep maps to
-/// nothing are dropped; then the string is normalized to NFKC as Unicode 3.2
-/// defines it, and checked. `out` sized at
+/// nothing are dropped — U+200B ZERO WIDTH SPACE among them, which RFC 3454
+/// lists as both without ordering the two mappings, a choice implementations
+/// differ on — then the string is normalized to NFKC as Unicode 3.2 defines
+/// it, and checked. `out` need only be as long as the prepared string, and
 /// [`MAX_DECOMPOSITION`](crate::MAX_DECOMPOSITION) times the input's length
-/// always suffices.
+/// always is.
 ///
 /// # Errors
 ///
@@ -72,6 +74,7 @@ pub fn saslprep(
     let len = normalize_in(mapped, Form::Nfkc, Repertoire::Stringprep, out)
         .map_err(|_| SaslprepError::Overflow)?;
     let prepared = out.get(..len).ok_or(SaslprepError::Overflow)?;
+    let (mut right_to_left, mut left_to_right) = (false, false);
     for &ch in prepared {
         let code = u32::from(ch);
         if in_ranges(SASLPREP_PROHIBITED, code) {
@@ -80,27 +83,21 @@ pub fn saslprep(
         if unassigned == Unassigned::Refused && in_ranges(UNASSIGNED_3_2, code) {
             return Err(SaslprepError::Unassigned);
         }
+        right_to_left = right_to_left || in_ranges(RIGHT_TO_LEFT, code);
+        left_to_right = left_to_right || in_ranges(LEFT_TO_RIGHT, code);
     }
-    if bidirectionally_sound(prepared) {
-        Ok(len)
-    } else {
-        Err(SaslprepError::Bidi)
+    // RFC 3454 §6: right-to-left text holds no left-to-right character, and
+    // both begins and ends with a right-to-left one.
+    let right_to_left_at =
+        |end: Option<&char>| end.is_some_and(|&ch| in_ranges(RIGHT_TO_LEFT, u32::from(ch)));
+    if right_to_left
+        && (left_to_right
+            || !right_to_left_at(prepared.first())
+            || !right_to_left_at(prepared.last()))
+    {
+        return Err(SaslprepError::Bidi);
     }
-}
-
-/// Whether `text` keeps stringprep's bidirectional rules (RFC 3454 §6): text
-/// holding any right-to-left character holds no left-to-right one, and both
-/// begins and ends with a right-to-left one.
-fn bidirectionally_sound(text: &[char]) -> bool {
-    let right_to_left = |ch: &char| in_ranges(RIGHT_TO_LEFT, u32::from(*ch));
-    if !text.iter().any(right_to_left) {
-        return true;
-    }
-    !text
-        .iter()
-        .any(|&ch| in_ranges(LEFT_TO_RIGHT, u32::from(ch)))
-        && text.first().is_some_and(right_to_left)
-        && text.last().is_some_and(right_to_left)
+    Ok(len)
 }
 
 #[cfg(test)]

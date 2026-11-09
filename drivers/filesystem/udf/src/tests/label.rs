@@ -229,8 +229,13 @@ fn a_volume_served_read_only_refuses_a_title_at_once() {
         gauge: &tairix_reclaim::Unpressured,
     };
     let image = formatted(512, 0x0201).into_device();
-    let mut served = crate::Served::open(Disk::new(512, image.bytes.clone()), true, budget)
-        .expect("opens read-only");
+    let mut served = crate::Served::open(
+        Disk::new(512, image.bytes.clone()),
+        true,
+        budget,
+        &tairix_log::DiscardSink,
+    )
+    .expect("opens read-only");
     assert_eq!(served.write_refusal, None, "the format refuses nothing");
     assert_eq!(
         served.fs.write_refusal(),

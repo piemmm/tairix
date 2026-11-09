@@ -8,7 +8,6 @@
 //! silently.
 
 use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
@@ -22,20 +21,23 @@ use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_util::retry::RestartPacer;
 
-use crate::error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
+use crate::error::{ActivateError, ControlError, InitError, NotifyError};
 use crate::events;
 use crate::scope::AuthorityScope;
 use crate::service::{
     ClientId, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec, Spawner, Stopper,
 };
-use tairix_enrolment::{
-    effective, enrol, overrides_for, unenrol, validate_service_name, Enrolment, EnrolmentOverride,
-};
+use tairix_enrolment::{enabled, validate_service_name, EnrolError, Enrolment, EnrolmentOverride};
 
 /// Number of distinct named readiness conditions, sized from the closed
 /// [`ReadyCondition`] set so the satisfied-conditions bitmap tracks the
 /// vocabulary rather than a hand-picked constant.
 const CONDITION_COUNT: usize = ReadyCondition::ALL.len();
+
+// A stop's closure is the outermost; each closure computed inside it is
+// opened by withdrawing a condition, at most once each, so every one fits a
+// bit of `Service::closure`.
+const _: () = assert!(CONDITION_COUNT < u32::BITS as usize);
 
 /// Maximum number of clients that may be parked waiting for a single
 /// service to become ready.
@@ -127,29 +129,28 @@ pub struct InitConfig<'a> {
     pub scope: AuthorityScope,
 }
 
-/// A service that was successfully started during [`Init::start_all`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartedService {
-    /// Service name.
-    pub name: String,
-    /// Process identifier the [`Spawner`] returned.
-    pub pid: Pid,
-}
+/// A registered service, as the manager names it to its transport.
+///
+/// The registry only ever grows, so an id names one service for the
+/// manager's whole life; only this crate mints one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServiceId(pub(crate) usize);
 
 /// A client whose parked connection request has ended, and how.
 ///
 /// The manager accumulates these as parks resolve; the caller drains them
-/// with [`Init::take_released_clients`] and answers each one. A client that
+/// with [`Init::drain_released_clients`] and answers each one. A client that
 /// connected while its service was already ready is returned synchronously
 /// from [`Init::connect`] instead and never appears here.
 ///
 /// Every park resolves through this one list, whichever way it went: a park
 /// the manager stopped tracking without reporting would leave its client
-/// blocked on a reply nothing will ever send.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// blocked on a reply nothing will ever send. Its room is taken when the
+/// client is parked, so a release never asks the heap for any.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ReleasedClient {
     /// The service the client was waiting for.
-    pub service: String,
+    pub service: ServiceId,
     /// The client whose park ended.
     pub client: ClientId,
     /// How it ended.
@@ -175,48 +176,36 @@ pub enum ActivationOutcome {
     /// caller may hand it the endpoint immediately.
     Connected,
     /// The service is not yet ready (it was just activated, or is still
-    /// starting): the client is parked and will be reported through
-    /// [`Init::take_released_clients`] once the service becomes ready — or
+    /// starting): the client is parked on it and will be reported through
+    /// [`Init::drain_released_clients`] once the service becomes ready — or
     /// refused there if its process goes away first. The client is never
     /// busy-polled.
-    Queued,
+    Queued(ServiceId),
 }
 
-/// A service that was not started during [`Init::start_all`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FailedService {
-    /// Service name.
-    pub name: String,
-    /// Why the service was not started.
-    pub failure: StartFailure,
+/// Whether, and when, a down service is started again.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Relaunch {
+    /// It is not: it is up, or down for good.
+    No,
+    /// Its start was refused for want of memory. Nothing is wrong with the
+    /// service, so the next [`Init::expire_due`] arms its backoff from then.
+    Refused,
+    /// Its restart backoff ends at this instant.
+    At(Duration64),
 }
 
-/// Outcome of a single [`Init::start_all`] over a structurally valid graph.
-///
-/// Services init brought up are in `started`; services it refused or
-/// skipped are in `failed`. The whole bring-up is reported, so a caller can
-/// surface which optional services are absent without the boot aborting.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct StartReport {
-    /// Services that started, in dependency order.
-    pub started: Vec<StartedService>,
-    /// Services that were refused or skipped, with the reason.
-    pub failed: Vec<FailedService>,
-}
-
-impl StartReport {
-    /// `true` if every registered service started.
-    #[must_use]
-    pub fn all_started(&self) -> bool {
-        self.failed.is_empty()
+impl Relaunch {
+    /// The instant a backoff ends, if one is armed.
+    const fn at(self) -> Option<Duration64> {
+        match self {
+            Self::At(at) => Some(at),
+            Self::No | Self::Refused => None,
+        }
     }
 }
 
-/// Which of a service's four one-shot deadlines an entry refers to.
-///
-/// [`Init::expire_due`](Init::expire_due) snapshots the due deadlines before
-/// running any, because an expiry can re-enter the admission engine; this
-/// records what each snapshot entry was for.
+/// One of a service's four one-shot deadlines.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Deadline {
     /// An on-demand service's idle-stop timer.
@@ -230,18 +219,18 @@ enum Deadline {
 }
 
 impl Deadline {
-    /// The four kinds, in the same order as [`Service::armed_deadlines`].
-    const ALL: [Self; 4] = [Self::Linger, Self::Grace, Self::Restart, Self::Watchdog];
+    /// The four kinds in the order a wakeup serves them: the force-down kinds
+    /// before the bring-up kind, so a wakeup that finds both does not relaunch
+    /// a service it is about to kill.
+    const SERVED: [Self; 4] = [Self::Grace, Self::Watchdog, Self::Linger, Self::Restart];
 
-    /// Sort key placing the force-down kinds before the bring-up kind, so a
-    /// wakeup that finds both does not relaunch a service it is about to
-    /// kill.
-    const fn order(self) -> u8 {
+    /// The deadline of this kind `service` has armed.
+    const fn armed_in(self, service: &Service) -> Option<Duration64> {
         match self {
-            Self::Grace => 0,
-            Self::Watchdog => 1,
-            Self::Linger => 2,
-            Self::Restart => 3,
+            Self::Linger => service.linger_deadline,
+            Self::Grace => service.grace_deadline,
+            Self::Restart => service.restart.at(),
+            Self::Watchdog => service.watchdog_deadline,
         }
     }
 }
@@ -262,7 +251,7 @@ struct Service {
     sink: Vec<ClientId>,
     /// Clients parked waiting for this service to reach readiness, in
     /// arrival order. Drained into [`Service::sink`] (and reported through
-    /// [`Init::take_released_clients`]) when the service becomes ready or
+    /// [`Init::drain_released_clients`]) when the service becomes ready or
     /// its process goes away. Bounded by
     /// [`MAX_PENDING_PER_SERVICE`].
     waiters: VecDeque<ClientId>,
@@ -277,13 +266,14 @@ struct Service {
     grace_deadline: Option<Duration64>,
     /// When set, the absolute monotonic instant at (or after) which a
     /// crashed service whose [`RestartPolicy`](tairix_abi::RestartPolicy)
-    /// asks for it is relaunched.
+    /// asks for it is relaunched, or whose start was refused for want of
+    /// memory.
     /// Armed by [`reap`](Init::reap) after an unexpected exit and consumed
     /// by [`expire_restart_backoff`](Init::expire_restart_backoff) — a
-    /// single one-shot deadline, never a spawn-in-a-loop. `Some` here also
-    /// marks the service as *pending restart*, so a terminally-`Failed`
-    /// state with a live restart deadline does not block its dependents.
-    restart_deadline: Option<Duration64>,
+    /// single one-shot deadline, never a spawn-in-a-loop. Anything but
+    /// [`Relaunch::No`] marks the service as *pending restart*, so a
+    /// terminally-`Failed` state coming back does not block its dependents.
+    restart: Relaunch,
     /// The relaunches the restart policy has taken since this service last
     /// ran stably, and the backoff they have earned. Its count is what
     /// [`MAX_RESTART_ATTEMPTS`] caps, so a service that dies the instant it
@@ -312,49 +302,40 @@ struct Service {
     /// Whether the enrolment governs it: registered from the enrolled tier
     /// or enabled at runtime, never the boot floor.
     enrolled: bool,
+    /// Membership of the dependent closures being stopped, one bit per
+    /// nesting level ([`Init::open_closure`]).
+    closure: u32,
 }
 
 impl Service {
-    /// This service's four one-shot deadlines, in [`Deadline::ALL`] order so
-    /// a caller can zip the two together.
+    /// This service's four one-shot deadlines.
     const fn armed_deadlines(&self) -> [Option<Duration64>; 4] {
         [
             self.linger_deadline,
             self.grace_deadline,
-            self.restart_deadline,
+            self.restart.at(),
             self.watchdog_deadline,
         ]
     }
+
+    /// Whether it is down for now but coming back.
+    const fn relaunch_pending(&self) -> bool {
+        !matches!(self.restart, Relaunch::No)
+    }
 }
 
-/// The outcome of an accepted lifecycle notice.
+/// What a service reporting on itself is answered with.
 ///
-/// The transport needs the resolved service back because the notice named
-/// none: it answers the announcing service by state and reports whatever the
-/// resulting admission pass could not bring up.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NotifyReport {
-    /// The service the kernel-attested sender was resolved to.
-    pub service: String,
-    /// What the admission pass the notice drove started or failed.
-    pub started: StartReport,
-}
-
-/// The outcome of an accepted liveness renewal.
-///
-/// The transport answers the renewing service with its current state and
-/// the interval it is being held to, which is what the service programs its
-/// own renewal cadence from.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HeartbeatReport {
-    /// The service the kernel-attested sender was resolved to.
-    pub service: String,
+/// Its state as the manager now holds it, and the interval it is held to,
+/// which is what it programs its own renewal cadence from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NoticeAnswer {
+    /// The service's state as the manager holds it.
+    pub state: ServiceState,
     /// The watchdog interval the manager holds the service to, or
     /// [`Duration64::ZERO`] when it is not watched — which tells the
     /// service to stop renewing.
     pub watchdog: Duration64,
-    /// The service's state as the manager holds it.
-    pub state: ServiceState,
 }
 
 /// The outcome of an accepted enrolment request.
@@ -392,6 +373,9 @@ pub struct EnrolReport {
 pub struct Init<'a> {
     cfg: InitConfig<'a>,
     services: Vec<Service>,
+    /// The registry's indices sorted by service name, so a name is found in
+    /// `O(log n)` with no copy of it held.
+    by_name: Vec<usize>,
     /// Dependency-respecting start order, computed and validated by
     /// [`start_all`](Self::start_all) and reused by the readiness-driven
     /// admission passes.
@@ -403,12 +387,17 @@ pub struct Init<'a> {
     /// [`satisfy_condition`](Self::satisfy_condition) rather than by a
     /// provider, and so outlive every provider.
     asserted: [bool; CONDITION_COUNT],
-    /// Parked clients that became connected because their service reached
-    /// readiness, awaiting the caller's
-    /// [`take_released_clients`](Self::take_released_clients) drain. The
-    /// manager never wakes a client itself; it records whose park ended and
-    /// lets the transport layer answer it.
+    /// Parks that have ended, awaiting the caller's
+    /// [`drain_released_clients`](Self::drain_released_clients). The manager
+    /// never wakes a client itself; it records whose park ended and lets the
+    /// transport layer answer it. Room for every park still open is kept
+    /// here, so ending one never allocates.
     released_clients: Vec<ReleasedClient>,
+    /// Clients parked across every service: the room
+    /// [`released_clients`](Self::released_clients) keeps beyond its length.
+    parked_total: usize,
+    /// How many dependent closures are being stopped inside one another.
+    closure_depth: u32,
     /// The image's enrolment layer — which discovered bundles it enrols.
     vendor: Enrolment,
     /// The administrator's override layer, holding only what differs from
@@ -435,10 +424,13 @@ impl<'a> Init<'a> {
         Self {
             cfg,
             services: Vec::new(),
+            by_name: Vec::new(),
             order: Vec::new(),
             satisfied: [false; CONDITION_COUNT],
             asserted: [false; CONDITION_COUNT],
             released_clients: Vec::new(),
+            parked_total: 0,
+            closure_depth: 0,
             vendor: Enrolment::empty(),
             overrides: EnrolmentOverride::empty(),
             overrides_read: false,
@@ -517,9 +509,14 @@ impl<'a> Init<'a> {
             );
             return Err(InitError::ScopeViolation);
         }
-        if self.index_of(spec.name()).is_some() {
+        let Err(at) = self.name_place(spec.name()) else {
             return Err(InitError::DuplicateService);
-        }
+        };
+        self.services
+            .try_reserve(1)
+            .and_then(|()| self.by_name.try_reserve(1))
+            .map_err(|_| InitError::OutOfMemory)?;
+        self.by_name.insert(at, self.services.len());
         self.services.push(Service {
             spec,
             state: ServiceState::Inactive,
@@ -528,12 +525,13 @@ impl<'a> Init<'a> {
             waiters: VecDeque::new(),
             linger_deadline: None,
             grace_deadline: None,
-            restart_deadline: None,
+            restart: Relaunch::No,
             restart_pacer: restart_pacer(),
             watchdog_deadline: None,
             killed_by_watchdog: false,
             held: false,
             enrolled: false,
+            closure: 0,
         });
         Ok(())
     }
@@ -546,8 +544,8 @@ impl<'a> Init<'a> {
     /// `/System/Services` turned up (each already parsed into a
     /// [`ServiceSpec`] by the loader seam), and the two enrolment layers are
     /// the image's record and the administrator's overrides. A bundle is
-    /// registered for bring-up **only** if the [`effective`] enrolment enables
-    /// it; a discovered bundle that is not enrolled is never registered —
+    /// registered for bring-up **only** if the effective enrolment
+    /// ([`enabled`]) enables it; a discovered bundle that is not enrolled is never registered —
     /// presence on disk grants no eligibility (no ambient authority). Each
     /// skip emits [`events::SERVICE_NOT_ENROLLED`] and its spec is retained as
     /// *known but unenrolled*, so an administrator can enable it by name
@@ -581,10 +579,9 @@ impl<'a> Init<'a> {
     ) -> Result<(), InitError> {
         self.overrides_read = overrides.is_some();
         self.overrides = overrides.unwrap_or_else(EnrolmentOverride::empty);
-        let enrolment = effective(&vendor, &self.overrides);
         self.vendor = vendor;
         for spec in discovered {
-            if enrolment.is_enabled(spec.name()) {
+            if enabled(&self.vendor, &self.overrides, spec.name()) {
                 self.register(spec)?;
                 self.mark_enrolled();
             } else {
@@ -607,7 +604,8 @@ impl<'a> Init<'a> {
     /// and the kernel grants it `bundle-manifest ∩ account-ceiling` from the
     /// signed bundle; a service whose dependency failed is skipped, and a
     /// service whose spawn is refused is recorded failed — neither aborts the
-    /// independent services.
+    /// independent services. Each start, refusal and skip is recorded on the
+    /// audit sink, which is where the caller learns of them.
     ///
     /// # Errors
     ///
@@ -615,7 +613,7 @@ impl<'a> Init<'a> {
     /// graph is structurally invalid: a dependency names an unregistered
     /// service ([`InitError::DependencyMissing`]) or the graph contains a
     /// cycle ([`InitError::DependencyCycle`]).
-    pub fn start_all(&mut self) -> Result<StartReport, InitError> {
+    pub fn start_all(&mut self) -> Result<(), InitError> {
         self.order = match self.topological_order() {
             Ok(order) => order,
             Err(err) => {
@@ -623,7 +621,8 @@ impl<'a> Init<'a> {
                 return Err(err);
             }
         };
-        Ok(self.pump())
+        self.pump();
+        Ok(())
     }
 
     /// Record that a named readiness condition is satisfied and admit any
@@ -633,38 +632,37 @@ impl<'a> Init<'a> {
     /// nothing and audits nothing. This is the seam for a condition a
     /// providing service does not itself announce — for example the kernel
     /// signalling [`ReadyCondition::FilesystemsMounted`] — so a condition
-    /// asserted here is never withdrawn by a provider leaving readiness. The
-    /// returned [`StartReport`] lists the services this newly admitted.
-    pub fn satisfy_condition(&mut self, condition: ReadyCondition) -> StartReport {
+    /// asserted here is never withdrawn by a provider leaving readiness.
+    pub fn satisfy_condition(&mut self, condition: ReadyCondition) {
         self.asserted[condition.as_u16() as usize] = true;
         self.satisfy_condition_inner(condition);
-        self.pump()
+        self.pump();
     }
 
     /// Assert [`ReadyCondition::BootComplete`] once every service named in
-    /// `floor` has settled — ready, or down with no relaunch pending — and
-    /// report what that admitted.
+    /// `floor` has settled — ready, or down with no relaunch pending —
+    /// answering whether this call asserted it.
     ///
-    /// [`None`] while any is still coming up, and on every call after the
+    /// `false` while any is still coming up, and on every call after the
     /// one that asserted it: the machine boots once, and a floor service
     /// restarting later does not un-boot it. A failed service settles rather
     /// than holding the machine's start back for ever, so the condition marks
     /// the point the floor stopped changing, degraded or not.
-    pub fn complete_boot<'n>(
-        &mut self,
-        floor: impl IntoIterator<Item = &'n str>,
-    ) -> Option<StartReport> {
+    pub fn complete_boot<'n>(&mut self, floor: impl IntoIterator<Item = &'n str>) -> bool {
         if self.asserted[ReadyCondition::BootComplete.as_u16() as usize] {
-            return None;
+            return false;
         }
         let settled = floor.into_iter().all(|name| {
             self.index_of(name).is_none_or(|idx| {
                 let service = &self.services[idx];
                 service.state.is_ready()
-                    || (service.state.is_terminal() && service.restart_deadline.is_none())
+                    || (service.state.is_terminal() && !service.relaunch_pending())
             })
         });
-        settled.then(|| self.satisfy_condition(ReadyCondition::BootComplete))
+        if settled {
+            self.satisfy_condition(ReadyCondition::BootComplete);
+        }
+        settled
     }
 
     /// Apply a readiness notification a service sent about itself.
@@ -675,8 +673,7 @@ impl<'a> Init<'a> {
     /// itself. A [`LifecycleSignal::Ready`] releases the service's
     /// dependents and satisfies the conditions it provides; a
     /// [`LifecycleSignal::Failed`] marks it failed and skips the dependents
-    /// blocked on it. The returned [`StartReport`] lists whatever the
-    /// resulting admission pass started or failed.
+    /// blocked on it.
     ///
     /// # Errors
     ///
@@ -685,11 +682,7 @@ impl<'a> Init<'a> {
     ///   [`ServiceState::Starting`] — a notice cannot resolve a readiness
     ///   edge that does not exist. The notice is dropped and audited; it is
     ///   never trusted to move the service anyway (fail closed).
-    pub fn notify(
-        &mut self,
-        name: &str,
-        signal: LifecycleSignal,
-    ) -> Result<StartReport, NotifyError> {
+    pub fn notify(&mut self, name: &str, signal: LifecycleSignal) -> Result<(), NotifyError> {
         let Some(idx) = self.index_of(name) else {
             self.audit(
                 events::NOTIFY_REJECTED,
@@ -699,8 +692,17 @@ impl<'a> Init<'a> {
             );
             return Err(NotifyError::UnknownService);
         };
+        self.notify_at(idx, signal)
+    }
+
+    fn notify_at(&mut self, idx: usize, signal: LifecycleSignal) -> Result<(), NotifyError> {
         if self.services[idx].state != ServiceState::Starting {
-            self.audit(events::NOTIFY_REJECTED, Level::Warn, name, "not starting");
+            self.audit(
+                events::NOTIFY_REJECTED,
+                Level::Warn,
+                self.services[idx].spec.name(),
+                "not starting",
+            );
             return Err(NotifyError::NotStarting);
         }
         match signal {
@@ -711,16 +713,16 @@ impl<'a> Init<'a> {
                 // It announced that it will not serve, so nothing parked on
                 // it is going to be connected.
                 self.abandon_waiters(idx);
-                let owned = name.to_string();
                 self.audit(
                     events::SERVICE_START_FAILED,
                     Level::Warn,
-                    &owned,
+                    self.services[idx].spec.name(),
                     "reported failure",
                 );
             }
         }
-        Ok(self.pump())
+        self.pump();
+        Ok(())
     }
 
     /// Apply a readiness notification to the service the kernel-attested
@@ -737,12 +739,21 @@ impl<'a> Init<'a> {
     /// * [`NotifyError::UnknownSender`] if no starting service was spawned
     ///   as that process on that account.
     /// * Whatever [`notify`](Self::notify) reports for the resolved service.
+    ///
+    /// The answer is the service's state once the admission pass the notice
+    /// drove has run, and the interval it is held to: what an announcing
+    /// service needs to establish its renewal cadence without a second call.
     pub fn notify_sender(
         &mut self,
         sender: ServiceSender,
         signal: LifecycleSignal,
-    ) -> Result<NotifyReport, NotifyError> {
-        let Some(service) = self.starting_service_of(sender) else {
+    ) -> Result<NoticeAnswer, NotifyError> {
+        // Restricted to `Starting` because that is the only state a readiness
+        // edge exists in, which also bounds the match to the window between a
+        // spawn and its resolution: a process id the kernel has since redrawn
+        // for someone else has nothing to match.
+        let Some(idx) = self.service_index_of(sender, |state| state == ServiceState::Starting)
+        else {
             self.audit(
                 events::NOTIFY_REJECTED,
                 Level::Warn,
@@ -751,20 +762,16 @@ impl<'a> Init<'a> {
             );
             return Err(NotifyError::UnknownSender);
         };
-        let started = self.notify(&service, signal)?;
-        Ok(NotifyReport { service, started })
+        self.notify_at(idx, signal)?;
+        Ok(self.answer(idx))
     }
 
-    /// The name of the service the attested `sender` is the live process of,
-    /// while that service is still starting.
-    ///
-    /// Restricted to `Starting` because that is the only state a readiness
-    /// edge exists in, which also bounds the match to the window between a
-    /// spawn and its resolution — a process id the kernel has since redrawn
-    /// for someone else therefore has nothing to match.
-    fn starting_service_of(&self, sender: ServiceSender) -> Option<String> {
-        self.service_index_of(sender, |state| state == ServiceState::Starting)
-            .map(|idx| self.services[idx].spec.name().to_string())
+    /// What service `idx` is answered with when it reports on itself.
+    fn answer(&self, idx: usize) -> NoticeAnswer {
+        NoticeAnswer {
+            state: self.services[idx].state,
+            watchdog: self.services[idx].spec.watchdog(),
+        }
     }
 
     /// The index of the service the attested `sender` is the live process
@@ -822,23 +829,16 @@ impl<'a> Init<'a> {
         &mut self,
         sender: ServiceSender,
         now: Duration64,
-    ) -> Result<HeartbeatReport, NotifyError> {
+    ) -> Result<NoticeAnswer, NotifyError> {
         let idx = self
             .service_index_of(sender, |state| {
                 matches!(state, ServiceState::Ready | ServiceState::Running)
             })
             .ok_or(NotifyError::UnknownSender)?;
-        let service = self.services[idx].spec.name().to_string();
-        let interval = self.services[idx].spec.watchdog();
-        // `heartbeat` re-checks the watchdog opt-in and the live process, so
-        // a service that is running but not watched renews nothing and is
+        // A service that is running but not watched renews nothing and is
         // told so by the zero interval it gets back.
-        self.heartbeat(&service, now);
-        Ok(HeartbeatReport {
-            service,
-            watchdog: interval,
-            state: self.services[idx].state,
-        })
+        self.heartbeat_at(idx, now);
+        Ok(self.answer(idx))
     }
 
     /// Connect a client to a service's reserved endpoint, activating the
@@ -861,7 +861,7 @@ impl<'a> Init<'a> {
     ///
     /// A new connection always cancels a pending idle-linger stop: fresh
     /// interest keeps the service alive. Parked clients are woken through
-    /// [`take_released_clients`](Self::take_released_clients) when the
+    /// [`drain_released_clients`](Self::drain_released_clients) when the
     /// service becomes ready — never by polling.
     ///
     /// # Errors
@@ -879,6 +879,8 @@ impl<'a> Init<'a> {
     ///   queue is full.
     /// * [`ActivateError::NotActivatable`] — the service could not be
     ///   launched (the kernel's load gate refused the spawn).
+    /// * [`ActivateError::OutOfMemory`] — there was no memory to record the
+    ///   client; it is refused before the service is touched for it.
     ///
     /// Every refusal is audited with its reason and the client is granted
     /// nothing.
@@ -911,15 +913,23 @@ impl<'a> Init<'a> {
             }
         }
 
-        // Fresh interest: cancel any pending idle-stop.
-        self.services[idx].linger_deadline = None;
-
         match self.services[idx].state {
             ServiceState::Ready | ServiceState::Running => {
+                if !self.services[idx].sink.contains(&client) {
+                    self.room_for_client(idx)?;
+                }
+                // Fresh interest: cancel any pending idle-stop.
+                self.services[idx].linger_deadline = None;
                 self.attach_client(idx, client);
                 Ok(ActivationOutcome::Connected)
             }
-            ServiceState::Starting => self.park_client(idx, client),
+            ServiceState::Starting => {
+                if !self.services[idx].waiters.contains(&client) {
+                    self.room_for_client(idx)?;
+                }
+                self.services[idx].linger_deadline = None;
+                self.park_client(idx, client)
+            }
             ServiceState::Inactive | ServiceState::Stopped => {
                 // The client is not to blame for a service a connect may not
                 // start, so neither refusal is a denial of its authority.
@@ -936,6 +946,10 @@ impl<'a> Init<'a> {
                     self.audit(events::ACTIVATION_DENIED, Level::Warn, name, reason);
                     return Err(ActivateError::Unavailable);
                 }
+                // Before the start: a service started for a client it then
+                // cannot record would run with nobody and no linger armed.
+                self.room_for_client(idx)?;
+                self.services[idx].linger_deadline = None;
                 self.activate(idx, client)
             }
             ServiceState::Stopping | ServiceState::Failed => {
@@ -997,11 +1011,7 @@ impl<'a> Init<'a> {
                 // client that withdrew one thread's connect while another
                 // is blocked on it must not be left waiting for a reply
                 // nothing will send.
-                self.released_clients.push(ReleasedClient {
-                    service: self.services[idx].spec.name().to_string(),
-                    client,
-                    outcome: ParkOutcome::Abandoned,
-                });
+                self.release(idx, client, ParkOutcome::Abandoned);
                 true
             } else {
                 false
@@ -1021,8 +1031,7 @@ impl<'a> Init<'a> {
                 .linger()
                 .unwrap_or(Duration64::ZERO);
             self.services[idx].linger_deadline = Some(add_duration(now, linger));
-            let owned = name.to_string();
-            self.audit(events::SERVICE_LINGER_ARMED, Level::Info, &owned, "idle");
+            self.audit(events::SERVICE_LINGER_ARMED, Level::Info, name, "idle");
         }
         Ok(())
     }
@@ -1041,9 +1050,11 @@ impl<'a> Init<'a> {
     /// Returns `true` if a stop was initiated, `false` if the service is no
     /// longer eligible to be idle-stopped.
     pub fn expire_linger(&mut self, name: &str, now: Duration64) -> bool {
-        let Some(idx) = self.index_of(name) else {
-            return false;
-        };
+        self.index_of(name)
+            .is_some_and(|idx| self.expire_linger_at(idx, now))
+    }
+
+    fn expire_linger_at(&mut self, idx: usize, now: Duration64) -> bool {
         let Some(deadline) = self.services[idx].linger_deadline else {
             return false;
         };
@@ -1071,9 +1082,11 @@ impl<'a> Init<'a> {
     ///
     /// Returns `true` if the process was forced down.
     pub fn expire_grace(&mut self, name: &str, now: Duration64) -> bool {
-        let Some(idx) = self.index_of(name) else {
-            return false;
-        };
+        self.index_of(name)
+            .is_some_and(|idx| self.expire_grace_at(idx, now))
+    }
+
+    fn expire_grace_at(&mut self, idx: usize, now: Duration64) -> bool {
         if self.services[idx].state != ServiceState::Stopping {
             return false;
         }
@@ -1088,11 +1101,10 @@ impl<'a> Init<'a> {
         };
         let _ = self.cfg.stopper.force_terminate(pid);
         self.services[idx].grace_deadline = None;
-        let owned = name.to_string();
         self.audit(
             events::SERVICE_FORCE_TERMINATED,
             Level::Warn,
-            &owned,
+            self.services[idx].spec.name(),
             "grace elapsed",
         );
         true
@@ -1112,31 +1124,33 @@ impl<'a> Init<'a> {
     /// the crash-loop budget can later reset once it has run stably), clears
     /// the deadline, returns the service to [`ServiceState::Inactive`], and
     /// drives the admission engine — which brings it back up if its
-    /// dependencies are still ready, exactly as at boot. The returned
-    /// [`StartReport`] lists whatever that pass started or failed.
+    /// dependencies are still ready, exactly as at boot.
     ///
     /// The relaunch is woken by the timer event, never by polling, and the
     /// crash-loop budget already bounded whether a deadline was armed at
     /// all, so this can never become a spawn-in-a-loop.
-    pub fn expire_restart_backoff(&mut self, name: &str, now: Duration64) -> StartReport {
-        let Some(idx) = self.index_of(name) else {
-            return StartReport::default();
-        };
-        let Some(deadline) = self.services[idx].restart_deadline else {
-            return StartReport::default();
+    pub fn expire_restart_backoff(&mut self, name: &str, now: Duration64) {
+        if let Some(idx) = self.index_of(name) {
+            self.expire_restart_backoff_at(idx, now);
+        }
+    }
+
+    fn expire_restart_backoff_at(&mut self, idx: usize, now: Duration64) {
+        let Some(deadline) = self.services[idx].restart.at() else {
+            return;
         };
         if now < deadline
             || !self.services[idx].state.is_terminal()
             || self.services[idx].spec.activation().is_on_demand()
         {
-            return StartReport::default();
+            return;
         }
-        self.services[idx].restart_deadline = None;
+        self.services[idx].restart = Relaunch::No;
         self.services[idx]
             .restart_pacer
             .started(now.saturating_total_nanos());
         self.services[idx].state = ServiceState::Inactive;
-        self.pump()
+        self.pump();
     }
 
     /// Arm the liveness watchdog for every running service that has opted in
@@ -1177,11 +1191,10 @@ impl<'a> Init<'a> {
                 continue;
             }
             self.services[idx].watchdog_deadline = Some(add_duration(now, interval));
-            let name = self.services[idx].spec.name().to_string();
             self.audit(
                 events::SERVICE_WATCHDOG_ARMED,
                 Level::Info,
-                &name,
+                self.services[idx].spec.name(),
                 "watchdog armed",
             );
         }
@@ -1203,9 +1216,11 @@ impl<'a> Init<'a> {
     /// service is a harmless no-op returning `false` (fail safe) — never an
     /// error that could be used to probe which services exist.
     pub fn heartbeat(&mut self, name: &str, now: Duration64) -> bool {
-        let Some(idx) = self.index_of(name) else {
-            return false;
-        };
+        self.index_of(name)
+            .is_some_and(|idx| self.heartbeat_at(idx, now))
+    }
+
+    fn heartbeat_at(&mut self, idx: usize, now: Duration64) -> bool {
         let interval = self.services[idx].spec.watchdog();
         if interval == Duration64::ZERO {
             return false;
@@ -1268,9 +1283,11 @@ impl<'a> Init<'a> {
     ///
     /// Returns `true` if the process was force-terminated for wedging.
     pub fn expire_watchdog(&mut self, name: &str, now: Duration64) -> bool {
-        let Some(idx) = self.index_of(name) else {
-            return false;
-        };
+        self.index_of(name)
+            .is_some_and(|idx| self.expire_watchdog_at(idx, now))
+    }
+
+    fn expire_watchdog_at(&mut self, idx: usize, now: Duration64) -> bool {
         let Some(deadline) = self.services[idx].watchdog_deadline else {
             return false;
         };
@@ -1290,28 +1307,29 @@ impl<'a> Init<'a> {
         let _ = self.cfg.stopper.force_terminate(pid);
         self.services[idx].watchdog_deadline = None;
         self.services[idx].killed_by_watchdog = true;
-        let name = self.services[idx].spec.name().to_string();
         self.audit(
             events::SERVICE_WATCHDOG_TIMEOUT,
             Level::Warn,
-            &name,
+            self.services[idx].spec.name(),
             "liveness watchdog elapsed",
         );
         true
     }
 
-    /// Drain the clients whose parked connections have resolved since the
-    /// last call.
+    /// Hand `answer` each client whose parked connection has resolved since
+    /// the last call, with its service's state now.
     ///
     /// A client parked by [`connect`](Self::connect) is reported here once
     /// its service reaches readiness (through the boot admission engine, a
     /// readiness notice, or a satisfied condition), or once that service's
-    /// process goes away without reaching it. Draining clears the buffer, so
-    /// each park is reported exactly once and none is dropped silently —
-    /// the caller owes every parked client a reply.
-    #[must_use]
-    pub fn take_released_clients(&mut self) -> Vec<ReleasedClient> {
-        core::mem::take(&mut self.released_clients)
+    /// process goes away without reaching it. Each park is reported exactly
+    /// once and none is dropped silently — the caller owes every parked
+    /// client a reply. The buffer keeps its room, so the next release needs
+    /// no memory either.
+    pub fn drain_released_clients(&mut self, mut answer: impl FnMut(ReleasedClient, ServiceState)) {
+        for released in self.released_clients.drain(..) {
+            answer(released, self.services[released.service.0].state);
+        }
     }
 
     /// The armed idle-linger deadline of a service, or `None` if it has no
@@ -1337,7 +1355,7 @@ impl<'a> Init<'a> {
     #[must_use]
     pub fn restart_deadline(&self, name: &str) -> Option<Duration64> {
         self.index_of(name)
-            .and_then(|idx| self.services[idx].restart_deadline)
+            .and_then(|idx| self.services[idx].restart.at())
     }
 
     /// The soonest armed one-shot deadline across every registered service
@@ -1348,15 +1366,20 @@ impl<'a> Init<'a> {
     /// nothing pending waits indefinitely and takes no timer interrupt.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Duration64> {
+        let deferred = self
+            .services
+            .iter()
+            .any(|service| service.restart == Relaunch::Refused)
+            .then_some(Duration64::ZERO);
         self.services
             .iter()
             .flat_map(Service::armed_deadlines)
             .flatten()
+            .chain(deferred)
             .min()
     }
 
-    /// Run every one-shot deadline that has lapsed at `now`, returning
-    /// whatever a lapsed restart backoff relaunched.
+    /// Run every one-shot deadline that has lapsed at `now`.
     ///
     /// One wakeup can find several deadlines due — including several on one
     /// service — so this drives them all rather than the soonest alone;
@@ -1376,42 +1399,60 @@ impl<'a> Init<'a> {
     /// [`next_deadline`](Self::next_deadline): without it a lapsed deadline
     /// whose guard declined would leave the next wait zero-length for ever
     /// and peg a core.
-    pub fn expire_due(&mut self, now: Duration64) -> StartReport {
-        // Snapshot which deadlines are due before running any: an expiring
-        // restart backoff re-enters the admission engine, which may register
-        // state changes across the table, so indices taken now would not
-        // survive the first expiry.
-        let mut due: Vec<(String, Deadline)> = Vec::new();
-        for service in &self.services {
-            for (armed, kind) in service.armed_deadlines().into_iter().zip(Deadline::ALL) {
-                if armed.is_some_and(|at| now >= at) {
-                    due.push((service.spec.name().to_string(), kind));
+    pub fn expire_due(&mut self, now: Duration64) {
+        self.defer_refused_starts(now);
+        // An expiry re-entering admission only ever appends to the table, so
+        // an index names one service throughout and nothing is snapshotted.
+        for kind in Deadline::SERVED {
+            let mut idx = 0;
+            while idx < self.services.len() {
+                if kind
+                    .armed_in(&self.services[idx])
+                    .is_some_and(|at| now >= at)
+                {
+                    match kind {
+                        Deadline::Linger => {
+                            self.expire_linger_at(idx, now);
+                        }
+                        Deadline::Grace => {
+                            self.expire_grace_at(idx, now);
+                        }
+                        Deadline::Watchdog => {
+                            self.expire_watchdog_at(idx, now);
+                        }
+                        Deadline::Restart => {
+                            self.expire_restart_backoff_at(idx, now);
+                        }
+                    }
+                    self.disarm_if_stale_at(idx, kind, now);
                 }
+                idx += 1;
             }
         }
-        due.sort_by_key(|(_, kind)| kind.order());
+    }
 
-        let mut report = StartReport::default();
-        for (name, kind) in due {
-            match kind {
-                Deadline::Linger => {
-                    self.expire_linger(&name, now);
-                }
-                Deadline::Grace => {
-                    self.expire_grace(&name, now);
-                }
-                Deadline::Watchdog => {
-                    self.expire_watchdog(&name, now);
-                }
-                Deadline::Restart => {
-                    let relaunched = self.expire_restart_backoff(&name, now);
-                    report.started.extend(relaunched.started);
-                    report.failed.extend(relaunched.failed);
-                }
+    /// Arm the restart backoff of every service whose start was refused for
+    /// want of memory, from `now`.
+    ///
+    /// No cap on the attempts, unlike a crash loop's: the refusal says nothing
+    /// about the service, and giving up would leave it down after the
+    /// pressure that refused it has passed.
+    fn defer_refused_starts(&mut self, now: Duration64) {
+        for idx in 0..self.services.len() {
+            if self.services[idx].restart != Relaunch::Refused {
+                continue;
             }
-            self.disarm_if_stale(&name, kind, now);
+            let restart = self.services[idx]
+                .restart_pacer
+                .failed(now.saturating_total_nanos());
+            self.services[idx].restart = Relaunch::At(Duration64::from_nanos(restart.at));
+            self.audit(
+                events::SERVICE_RESTART_SCHEDULED,
+                Level::Info,
+                self.services[idx].spec.name(),
+                "start retried after a refusal for want of memory",
+            );
         }
-        report
     }
 
     /// Drop a one-shot that fired and found its condition already gone.
@@ -1425,16 +1466,18 @@ impl<'a> Init<'a> {
     /// ([`arm_watchdogs`](Self::arm_watchdogs) after a pass, a
     /// [`disconnect`](Self::disconnect) re-arming the idle linger), which is
     /// why dropping it loses nothing.
-    fn disarm_if_stale(&mut self, name: &str, kind: Deadline, now: Duration64) {
-        let Some(idx) = self.index_of(name) else {
-            return;
-        };
+    fn disarm_if_stale_at(&mut self, idx: usize, kind: Deadline, now: Duration64) {
         let service = &mut self.services[idx];
         let armed = match kind {
             Deadline::Linger => &mut service.linger_deadline,
             Deadline::Grace => &mut service.grace_deadline,
-            Deadline::Restart => &mut service.restart_deadline,
             Deadline::Watchdog => &mut service.watchdog_deadline,
+            Deadline::Restart => {
+                if service.restart.at().is_some_and(|at| now >= at) {
+                    service.restart = Relaunch::No;
+                }
+                return;
+            }
         };
         if armed.is_some_and(|at| now >= at) {
             *armed = None;
@@ -1457,38 +1500,84 @@ impl<'a> Init<'a> {
             .map_or(0, |idx| self.services[idx].waiters.len())
     }
 
+    /// Take the room one more client of service `idx` may need, whether it
+    /// is connected now or parked: a place in its sink beyond those its
+    /// parked clients are owed, a place in its queue, and a release report.
+    ///
+    /// Taken before anything changes, so a refusal leaves the service as it
+    /// was, and every later step of the connect — and the release of each
+    /// park — fits the room already held.
+    fn room_for_client(&mut self, idx: usize) -> Result<(), ActivateError> {
+        let service = &mut self.services[idx];
+        let waiting = service.waiters.len();
+        let room = service
+            .sink
+            .try_reserve(waiting + 1)
+            .and_then(|()| service.waiters.try_reserve(1))
+            .and_then(|()| self.released_clients.try_reserve(self.parked_total + 1));
+        if room.is_err() {
+            self.audit(
+                events::ACTIVATION_DENIED,
+                Level::Warn,
+                self.services[idx].spec.name(),
+                "no memory to record the client",
+            );
+            return Err(ActivateError::OutOfMemory);
+        }
+        Ok(())
+    }
+
     /// Add a client to a service's connected sink, without duplicating one
-    /// that is already connected.
+    /// that is already connected, into room [`room_for_client`] took.
+    ///
+    /// [`room_for_client`]: Self::room_for_client
     fn attach_client(&mut self, idx: usize, client: ClientId) {
         if !self.services[idx].sink.contains(&client) {
             self.services[idx].sink.push(client);
         }
     }
 
-    /// Park a client behind a not-yet-ready service, failing closed if the
+    /// Park a client behind a not-yet-ready service, into room
+    /// [`room_for_client`](Self::room_for_client) took, failing closed if the
     /// bounded pending-connection queue is full.
     fn park_client(
         &mut self,
         idx: usize,
         client: ClientId,
     ) -> Result<ActivationOutcome, ActivateError> {
+        let queued = ActivationOutcome::Queued(ServiceId(idx));
         if self.services[idx].waiters.contains(&client) {
-            return Ok(ActivationOutcome::Queued);
+            return Ok(queued);
         }
         if self.services[idx].waiters.len() >= MAX_PENDING_PER_SERVICE {
-            let name = self.services[idx].spec.name().to_string();
-            self.audit(events::ACTIVATION_DENIED, Level::Warn, &name, "queue full");
+            self.audit(
+                events::ACTIVATION_DENIED,
+                Level::Warn,
+                self.services[idx].spec.name(),
+                "queue full",
+            );
             return Err(ActivateError::QueueFull);
         }
         self.services[idx].waiters.push_back(client);
-        let name = self.services[idx].spec.name().to_string();
+        self.parked_total += 1;
         self.audit(
             events::ACTIVATION_QUEUED,
             Level::Info,
-            &name,
+            self.services[idx].spec.name(),
             "awaiting readiness",
         );
-        Ok(ActivationOutcome::Queued)
+        Ok(queued)
+    }
+
+    /// Report the end of a park of `client` on service `idx`, which has just
+    /// left its queue, into the report room its park was given.
+    fn release(&mut self, idx: usize, client: ClientId, outcome: ParkOutcome) {
+        self.parked_total = self.parked_total.saturating_sub(1);
+        self.released_clients.push(ReleasedClient {
+            service: ServiceId(idx),
+            client,
+            outcome,
+        });
     }
 
     /// Start a down service on demand and connect the requesting client:
@@ -1501,22 +1590,20 @@ impl<'a> Init<'a> {
         client: ClientId,
     ) -> Result<ActivationOutcome, ActivateError> {
         if !self.admissible(idx) {
-            let name = self.services[idx].spec.name().to_string();
             self.audit(
                 events::ACTIVATION_DENIED,
                 Level::Warn,
-                &name,
+                self.services[idx].spec.name(),
                 "conditions unmet",
             );
             return Err(ActivateError::Unavailable);
         }
         match self.try_start(idx) {
             Ok(_) => {
-                let name = self.services[idx].spec.name().to_string();
                 self.audit(
                     events::SERVICE_ACTIVATED,
                     Level::Info,
-                    &name,
+                    self.services[idx].spec.name(),
                     "on-demand connect",
                 );
                 if self.services[idx].spec.readiness() == ReadinessKind::Immediate {
@@ -1545,7 +1632,7 @@ impl<'a> Init<'a> {
     fn begin_stop(&mut self, idx: usize, now: Duration64, reason: &str) {
         let was_ready = self.services[idx].state.is_ready();
         self.services[idx].linger_deadline = None;
-        self.services[idx].restart_deadline = None;
+        self.services[idx].restart = Relaunch::No;
         // A stop the manager asked for must never be second-guessed by the
         // liveness watchdog: disarm it so a service that is deliberately
         // being torn down is not force-killed and relaunched as if wedged.
@@ -1559,8 +1646,12 @@ impl<'a> Init<'a> {
         self.services[idx].state = ServiceState::Stopping;
         let grace = self.services[idx].spec.stop_grace();
         self.services[idx].grace_deadline = Some(add_duration(now, grace));
-        let name = self.services[idx].spec.name().to_string();
-        self.audit(events::SERVICE_STOPPING, Level::Info, &name, reason);
+        self.audit(
+            events::SERVICE_STOPPING,
+            Level::Info,
+            self.services[idx].spec.name(),
+            reason,
+        );
         if was_ready {
             self.withdraw_provided(idx, now);
         }
@@ -1571,7 +1662,7 @@ impl<'a> Init<'a> {
     /// exit.
     fn stop_for_good(&mut self, idx: usize, now: Duration64, reason: &str) {
         let service = &mut self.services[idx];
-        service.restart_deadline = None;
+        service.restart = Relaunch::No;
         service.held = false;
         if service.state == ServiceState::Inactive && !service.spec.activation().is_on_demand() {
             service.state = ServiceState::Stopped;
@@ -1614,13 +1705,15 @@ impl<'a> Init<'a> {
     /// Stop `target` and every live service that names it, dependents first,
     /// each held for admission once what it was admitted on holds again.
     fn hold_closure(&mut self, target: usize, now: Duration64) {
-        let closure = self.dependent_closure(target);
-        for idx in self.reverse_stop_order() {
-            if closure[idx] && self.is_alive(idx) {
+        let member = self.open_closure(target);
+        for position in (0..self.services.len()).rev() {
+            let idx = self.ordered(position);
+            if self.services[idx].closure & member != 0 && self.is_alive(idx) {
                 self.services[idx].held = true;
                 self.begin_stop(idx, now, "required condition withdrawn");
             }
         }
+        self.close_closure(member);
     }
 
     /// Whether service `idx` has a live-or-starting process the manager
@@ -1633,20 +1726,20 @@ impl<'a> Init<'a> {
         )
     }
 
-    /// Indices in **reverse-dependency order**: every service appears before
-    /// the services it depends on, so tearing down in this order never stops
-    /// a dependency while a dependent still needs it.
+    /// The service at `position` of the admission order — dependencies
+    /// before their dependents, so walking it backwards tears a dependent
+    /// down before what it needs.
     ///
-    /// It is the reverse of the topological start order. The graph was
-    /// validated when it was registered ([`start_all`](Self::start_all)), so
-    /// the topological sort succeeds; the registration-order fallback keeps
-    /// the function total if it is ever called on an unvalidated graph.
-    fn reverse_stop_order(&self) -> Vec<usize> {
-        let mut order = self
-            .topological_order()
-            .unwrap_or_else(|_| (0..self.services.len()).collect());
-        order.reverse();
-        order
+    /// The order is computed when the graph is validated
+    /// ([`start_all`](Self::start_all)) and grows with each service enabled
+    /// after; before then registration order stands in, which keeps every
+    /// walk total.
+    fn ordered(&self, position: usize) -> usize {
+        if self.order.len() == self.services.len() {
+            self.order[position]
+        } else {
+            position
+        }
     }
 
     /// Stop `name` and every service that transitively depends on it, in
@@ -1680,13 +1773,19 @@ impl<'a> Init<'a> {
             );
             return Err(ActivateError::UnknownService);
         };
-        let closure = self.dependent_closure(target);
-        for idx in self.reverse_stop_order() {
-            if closure[idx] {
+        self.stop_at(target, now);
+        Ok(())
+    }
+
+    fn stop_at(&mut self, target: usize, now: Duration64) {
+        let member = self.open_closure(target);
+        for position in (0..self.services.len()).rev() {
+            let idx = self.ordered(position);
+            if self.services[idx].closure & member != 0 {
                 self.stop_for_good(idx, now, "stop");
             }
         }
-        Ok(())
+        self.close_closure(member);
     }
 
     /// Stop **every** service in reverse-dependency order — the
@@ -1707,7 +1806,8 @@ impl<'a> Init<'a> {
     /// exits and force-terminates any that overrun
     /// ([`expire_grace`](Self::expire_grace)).
     pub fn shutdown(&mut self, now: Duration64) {
-        for idx in self.reverse_stop_order() {
+        for position in (0..self.services.len()).rev() {
+            let idx = self.ordered(position);
             self.stop_for_good(idx, now, "shutdown");
         }
     }
@@ -1765,11 +1865,10 @@ impl<'a> Init<'a> {
                 self.stop(request.name, now)
                     .map_err(|_| ControlError::UnknownService)?;
                 let state = self.state_of(request.name).unwrap_or(ServiceState::Stopped);
-                let owned = request.name.to_string();
                 self.audit(
                     events::SERVICE_CONTROL_STOPPED,
                     Level::Info,
-                    &owned,
+                    request.name,
                     "control stop",
                 );
                 Ok(state)
@@ -1816,6 +1915,8 @@ impl<'a> Init<'a> {
     /// * [`ControlError::RecordFull`] when the override document would exceed
     ///   what any reader of it accepts.
     /// * [`ControlError::NotRecorded`] when `persist` refused the document.
+    /// * [`ControlError::OutOfMemory`] when there is no memory to record the
+    ///   change, or to register the service it enables.
     pub fn enrol_control(
         &mut self,
         request: ServiceEnrolRequest<'_>,
@@ -1869,35 +1970,49 @@ impl<'a> Init<'a> {
             return Err(err);
         }
 
-        let before = effective(&self.vendor, &self.overrides);
         let wanted = request.op.wanted();
-        let desired = if wanted.is_enabled() {
-            enrol(&before, name).map_err(|_| ControlError::UnknownService)?
-        } else {
-            // A disable of something already unenrolled leaves the record
-            // untouched; the requested end state already holds.
-            unenrol(&before, name).unwrap_or_else(|_| before.clone())
-        };
-        if desired == before {
+        if enabled(&self.vendor, &self.overrides, name) == wanted.is_enabled() {
             return Ok(EnrolReport {
                 enrolment: wanted,
                 outcome: EnrolOutcome::Unchanged,
             });
         }
-        let overrides = overrides_for(&self.vendor, &desired);
-        let recorded = overrides
-            .to_store_text()
-            .map_err(|_| ControlError::RecordFull)
-            .and_then(|document| persist(&document).map_err(ControlError::NotRecorded));
+        // Room to register what it enables, taken before anything is
+        // recorded, so the record never outlives a start that had no room.
+        let unregistered = wanted.is_enabled() && self.index_of(name).is_none();
+        let room = !unregistered
+            || (self.services.try_reserve(1).is_ok()
+                && self.by_name.try_reserve(1).is_ok()
+                && self.order.try_reserve(1).is_ok());
+        let change = if room {
+            self.overrides.set(&self.vendor, name, wanted).ok()
+        } else {
+            None
+        };
+        let Some(change) = change else {
+            self.audit(
+                events::SERVICE_ENROLMENT_DENIED,
+                Level::Warn,
+                name,
+                "no memory to make the change",
+            );
+            return Err(ControlError::OutOfMemory);
+        };
+        let recorded = match self.overrides.to_store_text() {
+            Ok(document) => persist(&document).map_err(ControlError::NotRecorded),
+            Err(EnrolError::TooLong) => Err(ControlError::RecordFull),
+            Err(_) => Err(ControlError::OutOfMemory),
+        };
         if let Err(err) = recorded {
+            self.overrides.undo(change);
             let reason = match err {
                 ControlError::RecordFull => "the enrolment record cannot hold another change",
+                ControlError::OutOfMemory => "no memory to make the change",
                 _ => "the enrolment record could not be written",
             };
             self.audit(events::SERVICE_ENROLMENT_DENIED, Level::Warn, name, reason);
             return Err(err);
         }
-        self.overrides = overrides;
         self.audit(
             events::SERVICE_ENROLMENT_CHANGED,
             Level::Info,
@@ -1935,18 +2050,23 @@ impl<'a> Init<'a> {
                 // `register` is where the scope check lives, so a service
                 // this manager may not manage is refused here rather than
                 // being brought to life by an enrolment request.
-                if self.register(spec).is_err() {
-                    self.audit(
-                        events::SERVICE_ENROLMENT_DENIED,
-                        Level::Warn,
-                        name,
-                        "outside this manager's authority",
-                    );
-                    return Err(ControlError::UnknownService);
+                if let Err(err) = self.register(spec) {
+                    let (refusal, reason) = match err {
+                        InitError::OutOfMemory => {
+                            (ControlError::OutOfMemory, "no memory to make the change")
+                        }
+                        _ => (
+                            ControlError::UnknownService,
+                            "outside this manager's authority",
+                        ),
+                    };
+                    self.audit(events::SERVICE_ENROLMENT_DENIED, Level::Warn, name, reason);
+                    return Err(refusal);
                 }
                 self.mark_enrolled();
                 // Its dependencies are registered and nothing registered can
-                // depend on it, so last is a valid place in the admission order.
+                // depend on it, so last is a valid place in the admission
+                // order. Its room was taken before the change was recorded.
                 self.order.push(self.services.len() - 1);
             }
             match self.start_service(name) {
@@ -1976,32 +2096,22 @@ impl<'a> Init<'a> {
     /// override that enables a service the image does not is honoured at the
     /// next boot's registration, so a late document can never bring an
     /// unregistered service up behind the dependency graph's back.
-    ///
-    /// Returns the names it stopped.
-    pub fn adopt_overrides(
-        &mut self,
-        overrides: EnrolmentOverride,
-        now: Duration64,
-    ) -> Vec<String> {
+    pub fn adopt_overrides(&mut self, overrides: EnrolmentOverride, now: Duration64) {
         self.overrides = overrides;
         self.overrides_read = true;
-        let enrolment = effective(&self.vendor, &self.overrides);
-        let revoked: Vec<String> = self
-            .services
-            .iter()
-            .filter(|s| s.enrolled && !enrolment.is_enabled(s.spec.name()))
-            .map(|s| String::from(s.spec.name()))
-            .collect();
-        for name in &revoked {
+        for idx in 0..self.services.len() {
+            let service = &self.services[idx];
+            if !service.enrolled || enabled(&self.vendor, &self.overrides, service.spec.name()) {
+                continue;
+            }
             self.audit(
                 events::SERVICE_ENROLMENT_REVOKED,
                 Level::Warn,
-                name,
+                service.spec.name(),
                 "disabled by the administrator's override",
             );
-            let _ = self.stop(name, now);
+            self.stop_at(idx, now);
         }
-        revoked
     }
 
     /// Mark the service registered last as one the enrolment governs.
@@ -2020,7 +2130,7 @@ impl<'a> Init<'a> {
     /// Whether the effective enrolment enables `name`.
     #[must_use]
     pub fn enrolment_of(&self, name: &str) -> ServiceEnrolment {
-        if effective(&self.vendor, &self.overrides).is_enabled(name) {
+        if enabled(&self.vendor, &self.overrides, name) {
             ServiceEnrolment::Enabled
         } else {
             ServiceEnrolment::Disabled
@@ -2085,7 +2195,7 @@ impl<'a> Init<'a> {
             ServiceState::Inactive | ServiceState::Stopped | ServiceState::Failed => {
                 // An explicit start supersedes any queued restart backoff and
                 // resets the service to a clean admission candidate.
-                self.services[idx].restart_deadline = None;
+                self.services[idx].restart = Relaunch::No;
                 self.services[idx].state = ServiceState::Inactive;
                 if !self.admissible(idx) {
                     self.audit(
@@ -2104,11 +2214,10 @@ impl<'a> Init<'a> {
                             // order-dependents this start satisfied.
                             self.pump();
                         }
-                        let owned = name.to_string();
                         self.audit(
                             events::SERVICE_CONTROL_STARTED,
                             Level::Info,
-                            &owned,
+                            name,
                             "control start",
                         );
                         Ok(self.services[idx].state)
@@ -2121,41 +2230,61 @@ impl<'a> Init<'a> {
         }
     }
 
-    /// The set of services made up of `target` and everything that
-    /// transitively depends on it, as a per-service boolean mask.
+    /// Open a closure of `target` and everything that transitively depends
+    /// on it, answering the [`Service::closure`] bit that marks its members
+    /// until [`close_closure`](Self::close_closure) ends it.
     ///
-    /// A breadth-first walk over the reverse-dependency edges (a service is
-    /// a dependent of `d` when it names `d` in its dependencies), so stopping
-    /// `target` can tear down exactly the services that would be left running
-    /// against a stopped prerequisite, and no others.
-    fn dependent_closure(&self, target: usize) -> Vec<bool> {
-        let n = self.services.len();
-        let mut in_set = vec![false; n];
-        in_set[target] = true;
-        let mut queue: VecDeque<usize> = VecDeque::new();
-        queue.push_back(target);
-        while let Some(d) = queue.pop_front() {
-            let dep_name = self.services[d].spec.name();
-            for (i, service) in self.services.iter().enumerate() {
-                if in_set[i] {
+    /// Stopping `target` tears down exactly the services that would be left
+    /// running against a stopped prerequisite, and no others. Each closure has
+    /// a bit of its own, because one is opened inside another: a stop that
+    /// withdraws a condition holds what requires it, and the outer stop's
+    /// members must stay marked through that. Nothing is allocated, so a stop
+    /// is as sure on an exhausted heap as on an idle one.
+    fn open_closure(&mut self, target: usize) -> u32 {
+        debug_assert!(
+            self.closure_depth < u32::BITS,
+            "closures nested past a condition each"
+        );
+        let member = 1u32.checked_shl(self.closure_depth).unwrap_or(0);
+        self.closure_depth += 1;
+        for service in &mut self.services {
+            service.closure &= !member;
+        }
+        self.services[target].closure |= member;
+        // In admission order one pass decides each service after everything
+        // it depends on; registration order may need more before it settles.
+        loop {
+            let mut changed = false;
+            for position in 0..self.services.len() {
+                let idx = self.ordered(position);
+                if self.services[idx].closure & member != 0 {
                     continue;
                 }
-                if service
-                    .spec
-                    .dependencies()
-                    .iter()
-                    .any(|dep| dep == dep_name)
-                {
-                    in_set[i] = true;
-                    queue.push_back(i);
+                let joins = self.services[idx].spec.dependencies().iter().any(|dep| {
+                    self.index_of(dep)
+                        .is_some_and(|d| self.services[d].closure & member != 0)
+                });
+                if joins {
+                    self.services[idx].closure |= member;
+                    changed = true;
                 }
             }
+            if !changed {
+                return member;
+            }
         }
-        in_set
     }
 
-    /// Reap every child that has exited, returning what re-admitting the held
-    /// services among them started.
+    /// End the closure [`open_closure`](Self::open_closure) marked `member`.
+    fn close_closure(&mut self, member: u32) {
+        for service in &mut self.services {
+            service.closure &= !member;
+        }
+        self.closure_depth = self.closure_depth.saturating_sub(1);
+    }
+
+    /// Reap every child that has exited, re-admitting the held services
+    /// among them.
     ///
     /// A reaped process that matches a started service is logged as a
     /// service exit and its lifecycle moved to a terminal state. A service
@@ -2187,11 +2316,10 @@ impl<'a> Init<'a> {
     /// linger or grace deadline is disarmed. Clients whose connections died
     /// with the process are the transport layer's to notice; the manager
     /// holds no stale references.
-    pub fn reap(&mut self, now: Duration64) -> StartReport {
+    pub fn reap(&mut self, now: Duration64) {
         let mut readmit = false;
         while let Some(child) = self.cfg.reaper.collect() {
             if let Some(pos) = self.services.iter().position(|s| s.pid == Some(child.pid)) {
-                let name = self.services[pos].spec.name().to_string();
                 let was_stopping = self.services[pos].state == ServiceState::Stopping;
                 let was_ready = self.services[pos].state.is_ready();
                 let watchdog_kill = self.services[pos].killed_by_watchdog;
@@ -2212,10 +2340,10 @@ impl<'a> Init<'a> {
                 self.abandon_waiters(pos);
                 self.services[pos].linger_deadline = None;
                 self.services[pos].grace_deadline = None;
-                self.services[pos].restart_deadline = None;
+                self.services[pos].restart = Relaunch::No;
                 self.services[pos].watchdog_deadline = None;
                 self.services[pos].killed_by_watchdog = false;
-                self.audit_exit(&name, child);
+                self.audit_exit(self.services[pos].spec.name(), child);
                 if was_ready {
                     self.withdraw_provided(pos, now);
                 }
@@ -2239,9 +2367,7 @@ impl<'a> Init<'a> {
             }
         }
         if readmit {
-            self.pump()
-        } else {
-            StartReport::default()
+            self.pump();
         }
     }
 
@@ -2251,7 +2377,7 @@ impl<'a> Init<'a> {
     /// The exit was not manager-initiated (the caller checked). If the
     /// service's [`RestartPolicy`](tairix_abi::RestartPolicy) wants a
     /// restart for this exit code and the crash-loop budget is not spent,
-    /// the manager arms [`restart_deadline`](Service::restart_deadline) and
+    /// the manager arms its [`restart`](Service::restart) backoff and
     /// audits it; if the budget is spent it audits the give-up and leaves
     /// the service down (fail closed — never an unbounded relaunch loop).
     fn schedule_restart(&mut self, idx: usize, exit_code: i32, now: Duration64) {
@@ -2261,21 +2387,20 @@ impl<'a> Init<'a> {
         let restart = self.services[idx]
             .restart_pacer
             .failed(now.saturating_total_nanos());
-        let name = self.services[idx].spec.name().to_string();
         if restart.taken >= MAX_RESTART_ATTEMPTS {
             self.audit(
                 events::SERVICE_RESTART_EXHAUSTED,
                 Level::Warn,
-                &name,
+                self.services[idx].spec.name(),
                 "crash-loop budget spent",
             );
             return;
         }
-        self.services[idx].restart_deadline = Some(Duration64::from_nanos(restart.at));
+        self.services[idx].restart = Relaunch::At(Duration64::from_nanos(restart.at));
         self.audit(
             events::SERVICE_RESTART_SCHEDULED,
             Level::Info,
-            &name,
+            self.services[idx].spec.name(),
             "restart scheduled",
         );
     }
@@ -2294,8 +2419,7 @@ impl<'a> Init<'a> {
     /// On-demand services (`plans/NEW-SERVICEMANAGER.md` §3.4) are **not**
     /// started here: they rest `Inactive` at boot and come up only when a
     /// client connects to their endpoint ([`connect`](Self::connect)).
-    fn pump(&mut self) -> StartReport {
-        let mut report = StartReport::default();
+    fn pump(&mut self) {
         loop {
             let mut changed = false;
             for i in 0..self.order.len() {
@@ -2310,32 +2434,23 @@ impl<'a> Init<'a> {
                     continue;
                 }
                 if self.dependency_failed(idx) {
-                    let name = self.services[idx].spec.name().to_string();
                     self.services[idx].state = ServiceState::Failed;
                     self.audit(
                         events::SERVICE_SKIPPED,
                         Level::Warn,
-                        &name,
+                        self.services[idx].spec.name(),
                         "dependency failed",
                     );
-                    report.failed.push(FailedService {
-                        name,
-                        failure: StartFailure::DependencyFailed,
-                    });
                     changed = true;
                     continue;
                 }
                 if !self.admissible(idx) {
                     continue;
                 }
-                match self.try_start(idx) {
-                    Ok(started) => {
-                        if self.services[idx].spec.readiness() == ReadinessKind::Immediate {
-                            self.mark_ready(idx);
-                        }
-                        report.started.push(started);
-                    }
-                    Err(failure) => report.failed.push(failure),
+                if self.try_start(idx).is_ok()
+                    && self.services[idx].spec.readiness() == ReadinessKind::Immediate
+                {
+                    self.mark_ready(idx);
                 }
                 changed = true;
             }
@@ -2348,7 +2463,6 @@ impl<'a> Init<'a> {
                 service.state = ServiceState::Running;
             }
         }
-        report
     }
 
     /// Whether service `idx` may start now: every dependency it names has
@@ -2378,7 +2492,7 @@ impl<'a> Init<'a> {
         self.services[idx].spec.dependencies().iter().any(|dep| {
             self.index_of(dep).is_some_and(|d| {
                 self.services[d].state == ServiceState::Failed
-                    && self.services[d].restart_deadline.is_none()
+                    && !self.services[d].relaunch_pending()
             })
         })
     }
@@ -2389,25 +2503,20 @@ impl<'a> Init<'a> {
     /// satisfy every named condition it provides.
     fn mark_ready(&mut self, idx: usize) {
         self.services[idx].state = ServiceState::Ready;
-        let name = self.services[idx].spec.name().to_string();
-        self.audit_ready(&name);
-        let provides: Vec<ReadyCondition> = self.services[idx].spec.provides().to_vec();
-        for condition in provides {
+        self.audit_ready(self.services[idx].spec.name());
+        for position in 0..self.services[idx].spec.provides().len() {
+            let condition = self.services[idx].spec.provides()[position];
             self.satisfy_condition_inner(condition);
         }
         // Release every client parked waiting for this service to come up:
         // move it into the connected sink and record it so the caller can
-        // wake it with the endpoint. The client is woken by this readiness
-        // event, never by polling.
+        // wake it with the endpoint, in the room its park took. The client
+        // is woken by this readiness event, never by polling.
         while let Some(client) = self.services[idx].waiters.pop_front() {
             if !self.services[idx].sink.contains(&client) {
                 self.services[idx].sink.push(client);
             }
-            self.released_clients.push(ReleasedClient {
-                service: name.clone(),
-                client,
-                outcome: ParkOutcome::Connected,
-            });
+            self.release(idx, client, ParkOutcome::Connected);
         }
     }
 
@@ -2419,16 +2528,8 @@ impl<'a> Init<'a> {
     /// is not going to connect anyone, and a park dropped without a report
     /// would leave its client blocked forever on a reply nothing sends.
     fn abandon_waiters(&mut self, idx: usize) {
-        if self.services[idx].waiters.is_empty() {
-            return;
-        }
-        let name = self.services[idx].spec.name().to_string();
         while let Some(client) = self.services[idx].waiters.pop_front() {
-            self.released_clients.push(ReleasedClient {
-                service: name.clone(),
-                client,
-                outcome: ParkOutcome::Abandoned,
-            });
+            self.release(idx, client, ParkOutcome::Abandoned);
         }
     }
 
@@ -2443,7 +2544,13 @@ impl<'a> Init<'a> {
     }
 
     fn index_of(&self, name: &str) -> Option<usize> {
-        self.services.iter().position(|s| s.spec.name() == name)
+        self.name_place(name).ok().map(|at| self.by_name[at])
+    }
+
+    /// Where `name` is in [`Self::by_name`], or where it would go.
+    fn name_place(&self, name: &str) -> Result<usize, usize> {
+        self.by_name
+            .binary_search_by(|&idx| self.services[idx].spec.name().cmp(name))
     }
 
     /// Compute a dependency-respecting start order, or report a structural
@@ -2493,30 +2600,32 @@ impl<'a> Init<'a> {
     /// computes one. On a spawn failure the service is transitioned to
     /// [`ServiceState::Failed`] and the reason recorded, so a failed service
     /// is never left resting in `Inactive` where `pump` would retry it.
-    fn try_start(&mut self, idx: usize) -> Result<StartedService, FailedService> {
-        let name = self.services[idx].spec.name().to_string();
-
+    fn try_start(&mut self, idx: usize) -> Result<Pid, Errno> {
         let pid = match self.cfg.spawner.spawn(&self.services[idx].spec) {
             Ok(pid) => pid,
             Err(err) => {
                 self.services[idx].state = ServiceState::Failed;
-                self.audit(
-                    events::SERVICE_START_FAILED,
-                    Level::Warn,
-                    &name,
-                    "spawn failed",
+                let deferred = err == Errno::OutOfMemory;
+                if deferred {
+                    self.services[idx].restart = Relaunch::Refused;
+                }
+                self.audit_start_failed(
+                    self.services[idx].spec.name(),
+                    err,
+                    if deferred {
+                        "spawn refused for want of memory; it is started again"
+                    } else {
+                        "spawn failed"
+                    },
                 );
-                return Err(FailedService {
-                    name,
-                    failure: StartFailure::SpawnFailed(err),
-                });
+                return Err(err);
             }
         };
 
         self.services[idx].state = ServiceState::Starting;
         self.services[idx].pid = Some(pid);
-        self.audit_started(&name, pid);
-        Ok(StartedService { name, pid })
+        self.audit_started(self.services[idx].spec.name(), pid);
+        Ok(pid)
     }
 
     fn emit(&self, level: Level, id: EventId, fields: &[Field<'_>]) {
@@ -2581,8 +2690,30 @@ impl<'a> Init<'a> {
         );
     }
 
+    fn audit_start_failed(&self, name: &str, err: Errno, reason: &str) {
+        let mut errno_buf = FieldBuf::new();
+        self.emit(
+            Level::Warn,
+            events::SERVICE_START_FAILED,
+            &[
+                Field {
+                    key: "service",
+                    value: tairix_log::FieldValue::Str(name),
+                },
+                Field {
+                    key: "reason",
+                    value: tairix_log::FieldValue::Str(reason),
+                },
+                Field {
+                    key: "errno",
+                    value: tairix_log::FieldValue::Str(errno_buf.format(err)),
+                },
+            ],
+        );
+    }
+
     fn audit_started(&self, name: &str, pid: Pid) {
-        let mut pid_buf = DecBuf::new();
+        let mut pid_buf = FieldBuf::new();
         self.emit(
             Level::Info,
             events::SERVICE_STARTED,
@@ -2593,15 +2724,15 @@ impl<'a> Init<'a> {
                 },
                 Field {
                     key: "pid",
-                    value: tairix_log::FieldValue::Str(pid_buf.format(i128::from(pid.as_u64()))),
+                    value: tairix_log::FieldValue::Str(pid_buf.format(pid.as_u64())),
                 },
             ],
         );
     }
 
     fn audit_exit(&self, name: &str, child: ReapedChild) {
-        let mut pid_buf = DecBuf::new();
-        let mut code_buf = DecBuf::new();
+        let mut pid_buf = FieldBuf::new();
+        let mut code_buf = FieldBuf::new();
         self.emit(
             Level::Info,
             events::SERVICE_EXITED,
@@ -2612,38 +2743,30 @@ impl<'a> Init<'a> {
                 },
                 Field {
                     key: "pid",
-                    value: tairix_log::FieldValue::Str(
-                        pid_buf.format(i128::from(child.pid.as_u64())),
-                    ),
+                    value: tairix_log::FieldValue::Str(pid_buf.format(child.pid.as_u64())),
                 },
                 Field {
                     key: "exit_code",
-                    value: tairix_log::FieldValue::Str(
-                        code_buf.format(i128::from(child.exit_code)),
-                    ),
+                    value: tairix_log::FieldValue::Str(code_buf.format(child.exit_code)),
                 },
             ],
         );
     }
 
     fn audit_untracked(&self, child: ReapedChild) {
-        let mut pid_buf = DecBuf::new();
-        let mut code_buf = DecBuf::new();
+        let mut pid_buf = FieldBuf::new();
+        let mut code_buf = FieldBuf::new();
         self.emit(
             Level::Info,
             events::UNTRACKED_CHILD_REAPED,
             &[
                 Field {
                     key: "pid",
-                    value: tairix_log::FieldValue::Str(
-                        pid_buf.format(i128::from(child.pid.as_u64())),
-                    ),
+                    value: tairix_log::FieldValue::Str(pid_buf.format(child.pid.as_u64())),
                 },
                 Field {
                     key: "exit_code",
-                    value: tairix_log::FieldValue::Str(
-                        code_buf.format(i128::from(child.exit_code)),
-                    ),
+                    value: tairix_log::FieldValue::Str(code_buf.format(child.exit_code)),
                 },
             ],
         );
@@ -2655,6 +2778,7 @@ impl<'a> Init<'a> {
             InitError::DependencyMissing => "dependency missing",
             InitError::DependencyCycle => "dependency cycle",
             InitError::ScopeViolation => "scope violation",
+            InitError::OutOfMemory => "out of memory",
         };
         self.emit(
             Level::Error,
@@ -2720,16 +2844,16 @@ fn add_duration(a: Duration64, b: Duration64) -> Duration64 {
     Duration64::new(secs, nanos).unwrap_or_else(|_| Duration64::from_secs(secs))
 }
 
-/// Fixed-capacity decimal formatter for an `i128`, used to render numeric
-/// audit fields without an allocator. 40 bytes hold the widest `i128`
-/// (39 digits plus a sign).
-struct DecBuf {
+/// Fixed-capacity text an audit field's value is formatted into, so a field
+/// needs no allocator: room for the widest integer and the longest errno
+/// message.
+struct FieldBuf {
     bytes: [u8; Self::CAP],
     len: usize,
 }
 
-impl DecBuf {
-    const CAP: usize = 40;
+impl FieldBuf {
+    const CAP: usize = 64;
 
     fn new() -> Self {
         Self {
@@ -2738,20 +2862,20 @@ impl DecBuf {
         }
     }
 
-    fn format(&mut self, value: i128) -> &str {
+    fn format(&mut self, value: impl fmt::Display) -> &str {
         self.len = 0;
-        let _ = write!(DecWriter(self), "{value}");
+        let _ = write!(FieldWriter(self), "{value}");
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("?")
     }
 }
 
-struct DecWriter<'a>(&'a mut DecBuf);
+struct FieldWriter<'a>(&'a mut FieldBuf);
 
-impl fmt::Write for DecWriter<'_> {
+impl fmt::Write for FieldWriter<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();
         let end = self.0.len.checked_add(bytes.len()).ok_or(fmt::Error)?;
-        if end > DecBuf::CAP {
+        if end > FieldBuf::CAP {
             return Err(fmt::Error);
         }
         self.0.bytes[self.0.len..end].copy_from_slice(bytes);
@@ -2764,8 +2888,9 @@ impl fmt::Write for DecWriter<'_> {
 mod tests {
     use super::{
         add_duration, event_message, ActivateError, ActivationOutcome, AuthorityScope,
-        ControlError, DecBuf, Init, InitConfig, InitError, NotifyError, ParkOutcome, ServiceSpec,
-        StartFailure, MAX_PENDING_PER_SERVICE,
+        ControlError, FieldBuf, Init, InitConfig, InitError, NoticeAnswer, NotifyError,
+        ParkOutcome, ReleasedClient, ServiceId, ServiceSpec, MAX_PENDING_PER_SERVICE,
+        MAX_RESTART_ATTEMPTS,
     };
     use crate::events;
     use crate::service::{ClientId, Pid, ReapedChild, Reaper, ServiceSender, Spawner, Stopper};
@@ -2779,7 +2904,7 @@ mod tests {
         ServiceEnrolOp, ServiceEnrolRequest, ServiceEnrolment, ServiceState,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_log::{Event, EventId, Level, Sink};
+    use tairix_log::{Event, EventId, FieldValue, Level, Sink};
 
     /// The service account uid every test service runs as. The concrete value
     /// is irrelevant to the engine (the kernel derives the grant from it and
@@ -2833,6 +2958,8 @@ mod tests {
     struct MockSpawner {
         next: Cell<u64>,
         fail: Option<&'static str>,
+        /// Spawns refused for want of memory before they are admitted again.
+        short: Cell<usize>,
         launched: RefCell<Vec<String>>,
     }
     impl MockSpawner {
@@ -2840,6 +2967,7 @@ mod tests {
             Self {
                 next: Cell::new(100),
                 fail: None,
+                short: Cell::new(0),
                 launched: RefCell::new(Vec::new()),
             }
         }
@@ -2849,11 +2977,21 @@ mod tests {
                 ..Self::new()
             }
         }
+        /// One refusing the next `refusals` spawns for want of memory.
+        fn short_of_memory(refusals: usize) -> Self {
+            let spawner = Self::new();
+            spawner.short.set(refusals);
+            spawner
+        }
     }
     impl Spawner for MockSpawner {
         fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno> {
             if self.fail == Some(spec.name()) {
                 return Err(Errno::NotFound);
+            }
+            if self.short.get() > 0 {
+                self.short.set(self.short.get() - 1);
+                return Err(Errno::OutOfMemory);
             }
             let raw = self.next.get();
             self.next.set(raw + 1);
@@ -2931,13 +3069,25 @@ mod tests {
         }
     }
 
+    /// One audited event about a service: its id, the service, and its
+    /// reason and errno fields where it has them.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Named {
+        id: EventId,
+        service: String,
+        reason: String,
+        errno: String,
+    }
+
     struct RecordingSink {
         events: RefCell<Vec<(Level, EventId)>>,
+        named: RefCell<Vec<Named>>,
     }
     impl RecordingSink {
         fn new() -> Self {
             Self {
                 events: RefCell::new(Vec::new()),
+                named: RefCell::new(Vec::new()),
             }
         }
         fn count(&self, id: EventId) -> usize {
@@ -2947,11 +3097,60 @@ mod tests {
                 .filter(|(_, e)| *e == id)
                 .count()
         }
+        /// Forget every service event so far, so what follows reads one
+        /// call's alone.
+        fn forget(&self) {
+            self.named.borrow_mut().clear();
+        }
+        /// The services `ids` named since they were last taken, in order,
+        /// taking them.
+        fn take(&self, ids: &[EventId]) -> Vec<Named> {
+            let mut named = self.named.borrow_mut();
+            let (taken, kept) = named.drain(..).partition(|n| ids.contains(&n.id));
+            *named = kept;
+            taken
+        }
+        /// The services started since this was last asked, in order.
+        fn started(&self) -> Vec<String> {
+            self.take(&[events::SERVICE_STARTED])
+                .into_iter()
+                .map(|n| n.service)
+                .collect()
+        }
+        /// The services refused or skipped since this was last asked, each
+        /// with the event that said so and its errno, in order.
+        fn refused(&self) -> Vec<(String, EventId, String)> {
+            self.take(&[events::SERVICE_START_FAILED, events::SERVICE_SKIPPED])
+                .into_iter()
+                .map(|n| (n.service, n.id, n.errno))
+                .collect()
+        }
     }
     impl Sink for RecordingSink {
         fn write_event(&self, event: &Event<'_>) {
             self.events.borrow_mut().push((event.level, event.id));
+            let field = |key| {
+                event.fields.iter().find_map(|field| match field.value {
+                    FieldValue::Str(text) if field.key == key => Some(text.to_string()),
+                    _ => None,
+                })
+            };
+            if let Some(service) = field("service") {
+                self.named.borrow_mut().push(Named {
+                    id: event.id,
+                    service,
+                    reason: field("reason").unwrap_or_default(),
+                    errno: field("errno").unwrap_or_default(),
+                });
+            }
         }
+    }
+
+    /// Every park the engine has resolved, with its service's state.
+    fn drained(init: &mut Init<'_>) -> Vec<(ReleasedClient, tairix_abi::ServiceState)> {
+        let mut out = Vec::new();
+        init.drain_released_clients(|released, state| out.push((released, state)));
+        out
     }
 
     fn cfg<'a>(
@@ -3003,10 +3202,6 @@ mod tests {
         }
     }
 
-    fn started_names(report: &super::StartReport) -> Vec<&str> {
-        report.started.iter().map(|s| s.name.as_str()).collect()
-    }
-
     #[test]
     fn starts_services_in_dependency_order() {
         let spawner = MockSpawner::new();
@@ -3018,9 +3213,9 @@ mod tests {
         init.register(spec("a", &[])).unwrap();
         init.register(spec("b", &["a"])).unwrap();
 
-        let report = init.start_all().unwrap();
-        assert!(report.all_started());
-        assert_eq!(started_names(&report), ["a", "b", "c"]);
+        init.start_all().unwrap();
+        assert!(sink.refused().is_empty());
+        assert_eq!(sink.started(), ["a", "b", "c"]);
         assert_eq!(init.running_count(), 3);
         assert_eq!(sink.count(events::SERVICE_STARTED), 3);
     }
@@ -3091,8 +3286,8 @@ mod tests {
         assert_eq!(init.registered_count(), 2);
         assert_eq!(sink.count(events::SERVICE_NOT_ENROLLED), 1);
 
-        let report = init.start_all().unwrap();
-        let mut started = started_names(&report);
+        init.start_all().unwrap();
+        let mut started = sink.started();
         started.sort_unstable();
         assert_eq!(started, ["netstack", "sysinfod"]);
         assert!(init.running_pid("rogue").is_none());
@@ -3232,20 +3427,20 @@ mod tests {
         init.register(spec("c", &["b"])).unwrap();
         init.register(spec("d", &["c"])).unwrap();
 
-        let report = init.start_all().unwrap();
-        assert_eq!(started_names(&report), ["a"]);
+        init.start_all().unwrap();
+        assert_eq!(sink.started(), ["a"]);
         // b failed to spawn; c and d are skipped because they depend on it.
-        let failed: Vec<(&str, StartFailure)> = report
-            .failed
-            .iter()
-            .map(|f| (f.name.as_str(), f.failure))
-            .collect();
+        let not_found = alloc::format!("{}", Errno::NotFound);
         assert_eq!(
-            failed,
+            sink.refused(),
             [
-                ("b", StartFailure::SpawnFailed(Errno::NotFound)),
-                ("c", StartFailure::DependencyFailed),
-                ("d", StartFailure::DependencyFailed),
+                (
+                    "b".to_string(),
+                    events::SERVICE_START_FAILED,
+                    not_found.clone()
+                ),
+                ("c".to_string(), events::SERVICE_SKIPPED, String::new()),
+                ("d".to_string(), events::SERVICE_SKIPPED, String::new()),
             ]
         );
         assert_eq!(init.running_count(), 1);
@@ -3274,7 +3469,9 @@ mod tests {
         assert_eq!(init.running_pid("svc"), Some(Pid::new(100)));
 
         // Nothing was held, so the reap admits nothing.
-        assert_eq!(init.reap(Duration64::ZERO), super::StartReport::default());
+        let _ = sink.started();
+        init.reap(Duration64::ZERO);
+        assert!(sink.started().is_empty());
         assert_eq!(init.running_count(), 0);
         assert_eq!(init.running_pid("svc"), None);
         assert_eq!(sink.count(events::SERVICE_EXITED), 1);
@@ -3282,11 +3479,18 @@ mod tests {
     }
 
     #[test]
-    fn dec_buf_formats_and_event_message_total() {
-        let mut buf = DecBuf::new();
+    fn field_buf_formats_and_event_message_total() {
+        let mut buf = FieldBuf::new();
         assert_eq!(buf.format(0), "0");
         assert_eq!(buf.format(-42), "-42");
-        assert_eq!(buf.format(i128::from(u64::MAX)), "18446744073709551615");
+        assert_eq!(
+            buf.format(i128::MIN),
+            "-170141183460469231731687303715884105728"
+        );
+        assert_eq!(
+            buf.format(Errno::LinkLoop),
+            "too many symbolic links in path resolution"
+        );
         // Every emitted id has a dedicated message, checked against the one
         // list of them: an id that fell through would otherwise reach an
         // operator's transcript as the generic fallback with nothing to catch
@@ -3315,8 +3519,9 @@ mod tests {
 
         // The initial pass spawns `a` (now `starting`) but must NOT start
         // `b`: a spawned-but-not-ready dependency does not release it.
-        let report = init.start_all().unwrap();
-        assert_eq!(started_names(&report), ["a"]);
+        sink.forget();
+        init.start_all().unwrap();
+        assert_eq!(sink.started(), ["a"]);
         assert_eq!(init.state_of("a"), Some(ServiceState::Starting));
         assert_eq!(init.state_of("b"), Some(ServiceState::Inactive));
         assert!(init.running_pid("a").is_some());
@@ -3324,13 +3529,61 @@ mod tests {
         assert_eq!(sink.count(events::SERVICE_READY), 0);
 
         // Once `a` announces readiness, `b` is admitted and both are running.
-        let report = init.notify("a", LifecycleSignal::Ready).unwrap();
-        assert_eq!(started_names(&report), ["b"]);
+        sink.forget();
+        init.notify("a", LifecycleSignal::Ready).unwrap();
+        assert_eq!(sink.started(), ["b"]);
         assert_eq!(init.state_of("a"), Some(ServiceState::Running));
         assert_eq!(init.state_of("b"), Some(ServiceState::Running));
         assert_eq!(init.running_count(), 2);
         // One readiness edge for `a`, one for the immediate `b`.
         assert_eq!(sink.count(events::SERVICE_READY), 2);
+    }
+
+    /// A start refused for want of memory is started again once the restart
+    /// backoff passes, however many times in a row it is refused, and its
+    /// dependents wait for it rather than being skipped as behind a failure.
+    ///
+    /// Regression: such a start left the service failed for good, so a boot
+    /// service refused during a pressure spike stayed down after it passed,
+    /// with every dependent skipped.
+    #[test]
+    fn a_start_refused_for_memory_is_started_again_after_the_backoff() {
+        let refusals = MAX_RESTART_ATTEMPTS as usize + 2;
+        let spawner = MockSpawner::short_of_memory(refusals);
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("fontd", &[])).unwrap();
+        init.register(spec("session", &["fontd"])).unwrap();
+
+        sink.forget();
+
+        init.start_all().unwrap();
+        assert!(sink.started().is_empty());
+        assert_eq!(init.state_of("fontd"), Some(ServiceState::Failed));
+        assert_eq!(
+            init.state_of("session"),
+            Some(ServiceState::Inactive),
+            "a dependent waits for a start to be retried"
+        );
+        let mut now = Duration64::from_secs(1);
+        for _ in 0..refusals {
+            assert_eq!(
+                init.next_deadline(),
+                Some(Duration64::ZERO),
+                "the refusal is due at once, for the backoff to be armed"
+            );
+            sink.forget();
+            init.expire_due(now);
+            assert!(sink.started().is_empty());
+            let at = init.restart_deadline("fontd").expect("a backoff is armed");
+            assert!(at > now, "and it lies ahead");
+            now = at;
+            init.expire_due(now);
+        }
+        assert_eq!(init.state_of("fontd"), Some(ServiceState::Running));
+        assert_eq!(init.state_of("session"), Some(ServiceState::Running));
+        assert_eq!(init.next_deadline(), None);
     }
 
     #[test]
@@ -3360,14 +3613,16 @@ mod tests {
             .unwrap();
 
         // The condition is unmet, so `client` stays inactive.
-        let report = init.start_all().unwrap();
-        assert!(report.started.is_empty());
+        sink.forget();
+        init.start_all().unwrap();
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
         assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
 
         // Satisfying it externally (e.g. a kernel signal) admits `client`.
-        let report = init.satisfy_condition(ReadyCondition::NetworkUp);
-        assert_eq!(started_names(&report), ["client"]);
+        sink.forget();
+        init.satisfy_condition(ReadyCondition::NetworkUp);
+        assert_eq!(sink.started(), ["client"]);
         assert_eq!(init.state_of("client"), Some(ServiceState::Running));
         assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
         assert_eq!(sink.count(events::CONDITION_SATISFIED), 1);
@@ -3389,7 +3644,7 @@ mod tests {
         let floor = ["plain", "announcer", "flaky"];
 
         // A service still starting holds the boot back.
-        assert_eq!(init.complete_boot(floor), None);
+        assert!(!init.complete_boot(floor));
         assert_eq!(init.state_of("waiter"), Some(ServiceState::Inactive));
         init.notify("announcer", LifecycleSignal::Ready).unwrap();
 
@@ -3398,13 +3653,14 @@ mod tests {
         reaper.push(ReapedChild { pid, exit_code: 1 });
         init.reap(Duration64::from_secs(1));
         assert!(init.restart_deadline("flaky").is_some());
-        assert_eq!(init.complete_boot(floor), None);
+        assert!(!init.complete_boot(floor));
 
         // ...until it is back.
         let deadline = init.restart_deadline("flaky").unwrap();
         init.expire_restart_backoff("flaky", deadline);
-        let report = init.complete_boot(floor).expect("the floor has settled");
-        assert_eq!(started_names(&report), ["waiter"]);
+        sink.forget();
+        assert!(init.complete_boot(floor), "the floor has settled");
+        assert_eq!(sink.started(), ["waiter"]);
         assert!(init.condition_satisfied(ReadyCondition::BootComplete));
 
         // Once: a later crash and recovery neither withdraws nor repeats it.
@@ -3414,7 +3670,7 @@ mod tests {
         assert!(init.condition_satisfied(ReadyCondition::BootComplete));
         let deadline = init.restart_deadline("flaky").unwrap();
         init.expire_restart_backoff("flaky", deadline);
-        assert_eq!(init.complete_boot(floor), None);
+        assert!(!init.complete_boot(floor));
     }
 
     #[test]
@@ -3430,7 +3686,7 @@ mod tests {
         init.register(spec("fine", &[])).unwrap();
         init.start_all().unwrap();
         assert_eq!(init.state_of("broken"), Some(ServiceState::Failed));
-        assert!(init.complete_boot(["broken", "fine"]).is_some());
+        assert!(init.complete_boot(["broken", "fine"]));
     }
 
     #[test]
@@ -3450,8 +3706,10 @@ mod tests {
         assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
         assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
 
-        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
-        assert_eq!(started_names(&report), ["client"]);
+        sink.forget();
+
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(sink.started(), ["client"]);
         assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
         assert_eq!(init.state_of("client"), Some(ServiceState::Running));
     }
@@ -3487,7 +3745,9 @@ mod tests {
             pid: stack,
             exit_code: 1,
         });
-        assert!(init.reap(Duration64::from_secs(10)).started.is_empty());
+        sink.forget();
+        init.reap(Duration64::from_secs(10));
+        assert!(sink.started().is_empty());
         assert!(!init.condition_satisfied(ReadyCondition::NetworkUp));
         assert_eq!(sink.count(events::CONDITION_WITHDRAWN), 1);
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
@@ -3499,20 +3759,21 @@ mod tests {
             pid: client,
             exit_code: 0,
         });
-        assert!(init.reap(Duration64::from_secs(10)).started.is_empty());
+        sink.forget();
+        init.reap(Duration64::from_secs(10));
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
         assert_eq!(init.restart_deadline("client"), None);
 
         let deadline = init
             .restart_deadline("netstack")
             .expect("the stack relaunches");
-        assert!(init
-            .expire_restart_backoff("netstack", deadline)
-            .started
-            .iter()
-            .all(|started| started.name != "client"));
-        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
-        assert_eq!(started_names(&report), ["client"]);
+        sink.forget();
+        init.expire_restart_backoff("netstack", deadline);
+        assert!(sink.started().iter().all(|started| started != "client"));
+        sink.forget();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(sink.started(), ["client"]);
         assert_ne!(init.running_pid("client"), Some(client));
         assert_eq!(sink.count(events::CONDITION_SATISFIED), 2);
     }
@@ -3534,16 +3795,18 @@ mod tests {
         // The stack is back before the client has finished going.
         let deadline = init.restart_deadline("netstack").unwrap();
         init.expire_restart_backoff("netstack", deadline);
-        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
-        assert!(report.started.is_empty());
+        sink.forget();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
 
         reaper.push(ReapedChild {
             pid: client,
             exit_code: 0,
         });
-        let report = init.reap(Duration64::from_secs(11));
-        assert_eq!(started_names(&report), ["client"]);
+        sink.forget();
+        init.reap(Duration64::from_secs(11));
+        assert_eq!(sink.started(), ["client"]);
         assert_eq!(init.state_of("client"), Some(ServiceState::Running));
     }
 
@@ -3615,8 +3878,9 @@ mod tests {
         assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
 
         init.start_service("netstack").unwrap();
-        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
-        assert_eq!(started_names(&report), ["client"]);
+        sink.forget();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert_eq!(sink.started(), ["client"]);
     }
 
     #[test]
@@ -3642,8 +3906,9 @@ mod tests {
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
         let deadline = init.restart_deadline("netstack").unwrap();
         init.expire_restart_backoff("netstack", deadline);
-        let report = init.notify("netstack", LifecycleSignal::Ready).unwrap();
-        assert!(report.started.is_empty());
+        sink.forget();
+        init.notify("netstack", LifecycleSignal::Ready).unwrap();
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
     }
 
@@ -3659,10 +3924,9 @@ mod tests {
         assert_eq!(init.state_of("client"), Some(ServiceState::Inactive));
 
         init.stop("client", Duration64::from_secs(1)).unwrap();
-        assert!(init
-            .satisfy_condition(ReadyCondition::NetworkUp)
-            .started
-            .is_empty());
+        sink.forget();
+        init.satisfy_condition(ReadyCondition::NetworkUp);
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
     }
 
@@ -3725,7 +3989,9 @@ mod tests {
         for pid in pids {
             reaper.push(ReapedChild { pid, exit_code: 0 });
         }
-        assert!(init.reap(Duration64::from_secs(2)).started.is_empty());
+        sink.forget();
+        init.reap(Duration64::from_secs(2));
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("client"), Some(ServiceState::Stopped));
         assert_eq!(init.state_of("netstack"), Some(ServiceState::Stopped));
     }
@@ -3741,20 +4007,24 @@ mod tests {
 
         init.start_all().unwrap();
         // `a` reports it could not come up; `b` must be skipped, not started.
-        let report = init.notify("a", LifecycleSignal::Failed).unwrap();
-        assert!(report.started.is_empty());
+        sink.forget();
+        init.notify("a", LifecycleSignal::Failed).unwrap();
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("a"), Some(ServiceState::Failed));
         assert_eq!(init.state_of("b"), Some(ServiceState::Failed));
         assert_eq!(init.running_pid("a"), None);
+        let refused: Vec<(String, EventId)> = sink
+            .refused()
+            .into_iter()
+            .map(|(name, id, _)| (name, id))
+            .collect();
         assert_eq!(
-            report
-                .failed
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect::<Vec<_>>(),
-            ["b"]
+            refused,
+            [
+                ("a".to_string(), events::SERVICE_START_FAILED),
+                ("b".to_string(), events::SERVICE_SKIPPED)
+            ]
         );
-        assert_eq!(report.failed[0].failure, StartFailure::DependencyFailed);
         assert_eq!(sink.count(events::SERVICE_SKIPPED), 1);
     }
 
@@ -3897,7 +4167,8 @@ mod tests {
         init.start_all().unwrap();
         let a = init.running_pid("a").expect("a was spawned");
 
-        let report = init
+        sink.forget();
+        let answer = init
             .notify_sender(
                 ServiceSender {
                     pid: a,
@@ -3907,15 +4178,22 @@ mod tests {
             )
             .expect("a announces its own failure");
         assert_eq!(init.state_of("a"), Some(ServiceState::Failed));
-        assert_eq!(report.service, "a");
         assert_eq!(
-            report
-                .started
-                .failed
-                .iter()
-                .map(|f| (f.name.as_str(), f.failure))
+            answer,
+            NoticeAnswer {
+                state: ServiceState::Failed,
+                watchdog: Duration64::ZERO
+            }
+        );
+        assert_eq!(
+            sink.refused()
+                .into_iter()
+                .map(|(name, id, _)| (name, id))
                 .collect::<Vec<_>>(),
-            [("b", StartFailure::DependencyFailed)]
+            [
+                ("a".to_string(), events::SERVICE_START_FAILED),
+                ("b".to_string(), events::SERVICE_SKIPPED)
+            ]
         );
     }
 
@@ -3942,8 +4220,10 @@ mod tests {
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register(on_demand_spec("fontd", 30)).unwrap();
 
-        let report = init.start_all().unwrap();
-        assert!(report.started.is_empty());
+        sink.forget();
+
+        init.start_all().unwrap();
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Inactive));
         assert!(spawner.launched.borrow().is_empty());
     }
@@ -3964,7 +4244,7 @@ mod tests {
         assert_eq!(init.connected_count("fontd"), 1);
         assert_eq!(sink.count(events::SERVICE_ACTIVATED), 1);
         // Immediate readiness connects synchronously, so nothing is queued.
-        assert!(init.take_released_clients().is_empty());
+        assert!(drained(&mut init).is_empty());
         assert_eq!(init.pending_count("fontd"), 0);
 
         // A second client shares the already-running service.
@@ -3985,25 +4265,32 @@ mod tests {
         init.start_all().unwrap();
 
         let out = init.connect("fontd", &caps, client(7)).unwrap();
-        assert_eq!(out, ActivationOutcome::Queued);
+        assert_eq!(out, ActivationOutcome::Queued(ServiceId(0)));
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Starting));
         assert_eq!(init.pending_count("fontd"), 1);
         // Not ready yet: the client is parked, not woken (no busy-poll).
-        assert!(init.take_released_clients().is_empty());
+        assert!(drained(&mut init).is_empty());
         assert_eq!(sink.count(events::ACTIVATION_QUEUED), 1);
 
         // The service announces readiness: the parked client is released.
         init.notify("fontd", LifecycleSignal::Ready).unwrap();
         assert_eq!(init.state_of("fontd"), Some(ServiceState::Running));
-        let released = init.take_released_clients();
-        assert_eq!(released.len(), 1);
-        assert_eq!(released[0].service, "fontd");
-        assert_eq!(released[0].client, client(7));
-        assert_eq!(released[0].outcome, ParkOutcome::Connected);
+        let released = drained(&mut init);
+        assert_eq!(
+            released,
+            [(
+                ReleasedClient {
+                    service: ServiceId(0),
+                    client: client(7),
+                    outcome: ParkOutcome::Connected,
+                },
+                ServiceState::Running
+            )]
+        );
         assert_eq!(init.connected_count("fontd"), 1);
         assert_eq!(init.pending_count("fontd"), 0);
         // Drained exactly once.
-        assert!(init.take_released_clients().is_empty());
+        assert!(drained(&mut init).is_empty());
     }
 
     /// A park the manager stops tracking is always reported, so its client
@@ -4026,10 +4313,10 @@ mod tests {
         let pid = init.running_pid("fontd").expect("activated");
         reaper.push(ReapedChild { pid, exit_code: 1 });
         init.reap(Duration64::ZERO);
-        let released = init.take_released_clients();
+        let released = drained(&mut init);
         assert_eq!(released.len(), 1);
-        assert_eq!(released[0].client, client(1));
-        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
+        assert_eq!(released[0].0.client, client(1));
+        assert_eq!(released[0].0.outcome, ParkOutcome::Abandoned);
         assert_eq!(init.pending_count("fontd"), 0);
 
         // (2) The service announces its own failure while a client waits.
@@ -4041,10 +4328,10 @@ mod tests {
         init.start_all().unwrap();
         init.connect("fontd", &caps, client(2)).unwrap();
         init.notify("fontd", LifecycleSignal::Failed).unwrap();
-        let released = init.take_released_clients();
+        let released = drained(&mut init);
         assert_eq!(released.len(), 1);
-        assert_eq!(released[0].client, client(2));
-        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
+        assert_eq!(released[0].0.client, client(2));
+        assert_eq!(released[0].0.outcome, ParkOutcome::Abandoned);
 
         // (3) The client withdraws the park it is still blocked on.
         let spawner = MockSpawner::new();
@@ -4056,10 +4343,10 @@ mod tests {
         init.connect("fontd", &caps, client(3)).unwrap();
         init.disconnect("fontd", client(3), Duration64::ZERO)
             .unwrap();
-        let released = init.take_released_clients();
+        let released = drained(&mut init);
         assert_eq!(released.len(), 1);
-        assert_eq!(released[0].client, client(3));
-        assert_eq!(released[0].outcome, ParkOutcome::Abandoned);
+        assert_eq!(released[0].0.client, client(3));
+        assert_eq!(released[0].0.outcome, ParkOutcome::Abandoned);
     }
 
     #[test]
@@ -4327,7 +4614,7 @@ mod tests {
             assert_eq!(
                 init.connect("fontd", &caps, client(u8::try_from(i).expect("bound fits")))
                     .unwrap(),
-                ActivationOutcome::Queued
+                ActivationOutcome::Queued(ServiceId(0))
             );
         }
         assert_eq!(init.pending_count("fontd"), MAX_PENDING_PER_SERVICE);
@@ -4419,13 +4706,15 @@ mod tests {
         assert_eq!(sink.count(events::SERVICE_RESTART_SCHEDULED), 1);
 
         // Before the deadline the relaunch is a no-op (no busy-poll).
-        let early = init.expire_restart_backoff("svc", Duration64::from_secs(10));
-        assert!(early.started.is_empty());
+        sink.forget();
+        init.expire_restart_backoff("svc", Duration64::from_secs(10));
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("svc"), Some(ServiceState::Failed));
 
         // At the deadline the service is relaunched with a fresh pid.
-        let report = init.expire_restart_backoff("svc", Duration64::new(10, 100_000_000).unwrap());
-        assert_eq!(started_names(&report), ["svc"]);
+        sink.forget();
+        init.expire_restart_backoff("svc", Duration64::new(10, 100_000_000).unwrap());
+        assert_eq!(sink.started(), ["svc"]);
         assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
         assert_ne!(init.running_pid("svc"), Some(pid));
         assert_eq!(init.restart_deadline("svc"), None);
@@ -4460,8 +4749,9 @@ mod tests {
             init.restart_deadline("svc"),
             Some(Duration64::new(5, 100_000_000).unwrap())
         );
-        let report = init.expire_restart_backoff("svc", Duration64::new(5, 100_000_000).unwrap());
-        assert_eq!(started_names(&report), ["svc"]);
+        sink.forget();
+        init.expire_restart_backoff("svc", Duration64::new(5, 100_000_000).unwrap());
+        assert_eq!(sink.started(), ["svc"]);
         assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
     }
 
@@ -4484,8 +4774,9 @@ mod tests {
             reaper.push(ReapedChild { pid, exit_code: 1 });
             init.reap(now);
             let deadline = init.restart_deadline("svc").expect("restart scheduled");
-            let report = init.expire_restart_backoff("svc", deadline);
-            assert_eq!(started_names(&report), ["svc"]);
+            sink.forget();
+            init.expire_restart_backoff("svc", deadline);
+            assert_eq!(sink.started(), ["svc"]);
             now = add_duration(deadline, Duration64::new(0, 500_000_000).unwrap());
         }
 
@@ -4671,7 +4962,6 @@ mod tests {
                 Duration64::from_secs(103),
             )
             .expect("svc renews its own liveness");
-        assert_eq!(report.service, "svc");
         assert_eq!(report.watchdog, Duration64::from_secs(5));
         assert_eq!(report.state, ServiceState::Running);
         assert_eq!(
@@ -4703,9 +4993,11 @@ mod tests {
                     account: TEST_ACCOUNT,
                 },
                 Duration64::from_secs(107),
-            )
-            .map(|r| r.service),
-            Ok(String::from("plain"))
+            ),
+            Ok(NoticeAnswer {
+                state: ServiceState::Running,
+                watchdog: Duration64::ZERO
+            })
         );
         assert_eq!(
             init.watchdog_deadline("svc"),
@@ -5080,11 +5372,196 @@ mod tests {
         )
     }
 
+    /// A spawner keeping no record, so a test can hold the engine's own
+    /// handlers to allocating nothing.
+    struct QuietSpawner(Cell<u64>);
+    impl Spawner for QuietSpawner {
+        fn spawn(&self, _spec: &ServiceSpec) -> Result<Pid, Errno> {
+            let raw = self.0.get();
+            self.0.set(raw + 1);
+            Ok(Pid::new(raw))
+        }
+    }
+
+    /// A sink keeping no record, for the same reason.
+    struct SilentSink;
+    impl Sink for SilentSink {
+        fn write_event(&self, _event: &Event<'_>) {}
+    }
+    static SILENT: SilentSink = SilentSink;
+
+    /// A system manager over `spawner` and `reaper` whose seams allocate
+    /// nothing of their own.
+    fn quiet_cfg<'a>(spawner: &'a dyn Spawner, reaper: &'a dyn Reaper) -> InitConfig<'a> {
+        InitConfig {
+            spawner,
+            stopper: &NOOP_STOPPER,
+            reaper,
+            sink: &SILENT,
+            scope: AuthorityScope::System,
+        }
+    }
+
+    /// Once booted, the handlers PID 1 serves ask the heap for nothing: a
+    /// readiness notice releasing parked clients and their drain, a repeated
+    /// connect, a renewal, exits with the withdrawal and hold they cause, the
+    /// deadline wakeup relaunching what crashed, a disconnect, and control
+    /// stops and starts.
+    ///
+    /// Regression: these copied service names into reports and audits,
+    /// rebuilt the dependency order and a stop's closure, and dropped the
+    /// release buffer on every drain, so an allocation refused on any of them
+    /// ended PID 1, and the system with it.
+    #[test]
+    fn a_booted_manager_serves_its_handlers_without_the_heap() {
+        let spawner = QuietSpawner(Cell::new(100));
+        let reaper = ScriptedReaper::new(&[]);
+        let caps = CapabilitySet::empty();
+        let mut init = Init::new(quiet_cfg(&spawner, &reaper));
+        init.register(
+            notify_spec("netstack", &[])
+                .providing([ReadyCondition::NetworkUp])
+                .with_restart(RestartPolicy::OnFailure)
+                .with_watchdog(Duration64::from_secs(5)),
+        )
+        .unwrap();
+        init.register(spec("client", &["netstack"]).requiring([ReadyCondition::NetworkUp]))
+            .unwrap();
+        init.register(spec("spare", &[])).unwrap();
+        init.register(on_demand_notify_spec("fontd", 30)).unwrap();
+        init.register(on_demand_notify_spec("printd", 30)).unwrap();
+        init.start_all().unwrap();
+        let sender = |pid| ServiceSender {
+            pid,
+            account: TEST_ACCOUNT,
+        };
+        let net = init.running_pid("netstack").expect("spawned");
+        init.notify_sender(sender(net), LifecycleSignal::Ready)
+            .unwrap();
+        init.arm_watchdogs(Duration64::from_secs(1));
+        init.connect("fontd", &caps, client(1)).unwrap();
+        init.connect("fontd", &caps, client(2)).unwrap();
+        init.connect("printd", &caps, client(3)).unwrap();
+        let fontd = init.running_pid("fontd").expect("activated");
+        let spare = init.running_pid("spare").expect("spawned");
+        init.stop("spare", Duration64::from_secs(1)).unwrap();
+        // The exits the reap collects, queued while the heap may be used.
+        reaper.push(ReapedChild {
+            pid: net,
+            exit_code: 1,
+        });
+        reaper.push(ReapedChild {
+            pid: spare,
+            exit_code: 0,
+        });
+
+        let now = Duration64::from_secs(2);
+        let ((), used) = tairix_fuzzseed::meter::metered(|| {
+            init.notify_sender(sender(fontd), LifecycleSignal::Ready)
+                .unwrap();
+            init.drain_released_clients(|_, _| {});
+            // A park left open across the drain is released into the room
+            // it was given, which the drain kept.
+            init.disconnect("printd", client(3), now).unwrap();
+            init.drain_released_clients(|_, _| {});
+            init.connect("fontd", &caps, client(1)).unwrap();
+            init.heartbeat_sender(sender(net), now).unwrap();
+            init.reap(now);
+            let relaunch = init.restart_deadline("netstack").expect("armed");
+            init.expire_due(relaunch);
+            init.arm_watchdogs(relaunch);
+            init.disconnect("fontd", client(2), now).unwrap();
+            init.control(stop_req("fontd"), now).unwrap();
+            init.control(start_req("spare"), now).unwrap();
+        });
+        assert_eq!(used.allocations, 0);
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Starting));
+        assert_eq!(init.state_of("client"), Some(ServiceState::Stopping));
+        assert_eq!(init.state_of("fontd"), Some(ServiceState::Stopping));
+        assert_eq!(init.state_of("spare"), Some(ServiceState::Running));
+    }
+
+    /// A connect the heap cannot record is refused before anything changes:
+    /// the service is not started for it and nothing is queued.
+    ///
+    /// Regression: the client's place was taken after its service had been
+    /// started for it, so a refused allocation there ended PID 1, and an
+    /// on-demand service ran on with nobody and no linger armed.
+    #[test]
+    fn a_connect_with_no_room_is_refused_before_anything_changes() {
+        let spawner = QuietSpawner(Cell::new(100));
+        let reaper = IdleReaper;
+        let caps = CapabilitySet::empty();
+        let mut init = Init::new(quiet_cfg(&spawner, &reaper));
+        init.register(on_demand_notify_spec("fontd", 30)).unwrap();
+        init.start_all().unwrap();
+        let refused =
+            tairix_fuzzseed::meter::refusing_after(0, || init.connect("fontd", &caps, client(1)));
+        assert_eq!(refused, Err(ActivateError::OutOfMemory));
+        assert_eq!(init.state_of("fontd"), Some(ServiceState::Inactive));
+        assert_eq!(init.pending_count("fontd"), 0);
+        assert_eq!(
+            init.connect("fontd", &caps, client(1)),
+            Ok(ActivationOutcome::Queued(ServiceId(0))),
+            "with room, the same connect goes through"
+        );
+    }
+
+    /// An enable the heap cannot record changes nothing: no record is
+    /// written, the layer and the registry are as they were.
+    ///
+    /// Regression: the registration it made after writing the record
+    /// allocated, so a refusal ended PID 1 with the record changed on disk.
+    #[test]
+    fn an_enable_with_no_room_records_and_registers_nothing() {
+        let spawner = QuietSpawner(Cell::new(100));
+        let reaper = IdleReaper;
+        let mut init = Init::new(quiet_cfg(&spawner, &reaper));
+        booted_enrolled(&mut init, &["timed", "discoveryd"], &["timed"]).unwrap();
+        init.start_all().unwrap();
+        let store = OverrideStore::default();
+        let now = Duration64::from_secs(1);
+        let refused = tairix_fuzzseed::meter::refusing_after(0, || {
+            init.enrol_control(enable_req("discoveryd"), now, store.persist())
+        });
+        assert_eq!(refused, Err(ControlError::OutOfMemory));
+        assert_eq!(store.writes(), 0);
+        assert_eq!(init.state_of("discoveryd"), None);
+        assert_eq!(init.enrolment_of("discoveryd"), ServiceEnrolment::Disabled);
+        let report = init
+            .enrol_control(enable_req("discoveryd"), now, store.persist())
+            .expect("with room, the same enable goes through");
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Running));
+    }
+
+    /// The override layer that disables `names` over `vendor`.
+    fn disabling(
+        vendor: &tairix_enrolment::Enrolment,
+        names: &[&str],
+    ) -> tairix_enrolment::EnrolmentOverride {
+        let mut record = tairix_enrolment::EnrolmentOverride::empty();
+        for name in names {
+            let _ = record
+                .set(vendor, name, ServiceEnrolment::Disabled)
+                .expect("set");
+        }
+        record
+    }
+
+    /// The services the administrator's record stopped since last asked.
+    fn revoked(sink: &RecordingSink) -> Vec<String> {
+        sink.take(&[events::SERVICE_ENROLMENT_REVOKED])
+            .into_iter()
+            .map(|n| n.service)
+            .collect()
+    }
+
     #[test]
     fn an_enrolment_change_waits_for_the_administrators_record() {
         // Regression: a change made before the override document was read was
         // written over the empty layer, erasing every decision it held.
-        use tairix_enrolment::{overrides_for, unenrol, Enrolment};
+        use tairix_enrolment::Enrolment;
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -5108,11 +5585,9 @@ mod tests {
         assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
 
-        let record = overrides_for(
-            &vendor,
-            &unenrol(&vendor, "netstack").expect("netstack is enrolled"),
-        );
-        assert_eq!(init.adopt_overrides(record, now), ["netstack"]);
+        let record = disabling(&vendor, &["netstack"]);
+        init.adopt_overrides(record, now);
+        assert_eq!(revoked(&sink), ["netstack"]);
         assert!(init.overrides_read());
         init.enrol_control(disable_req("timed"), now, store.persist())
             .unwrap();
@@ -5131,7 +5606,7 @@ mod tests {
         // Regression: adoption stopped every registered service the
         // enrolment did not enable, so the boot floor — which no enrolment
         // names — went down the moment any record was read.
-        use tairix_enrolment::{overrides_for, unenrol, Enrolment};
+        use tairix_enrolment::Enrolment;
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -5142,13 +5617,10 @@ mod tests {
             .unwrap();
         init.start_all().unwrap();
         let now = Duration64::from_secs(5);
-        assert_eq!(
-            init.adopt_overrides(tairix_enrolment::EnrolmentOverride::empty(), now),
-            Vec::<String>::new(),
-            "an empty record stops nothing"
-        );
-        let disabled = overrides_for(&vendor, &unenrol(&vendor, "timed").expect("enrolled"));
-        assert_eq!(init.adopt_overrides(disabled, now), ["timed"]);
+        init.adopt_overrides(tairix_enrolment::EnrolmentOverride::empty(), now);
+        assert!(revoked(&sink).is_empty(), "an empty record stops nothing");
+        init.adopt_overrides(disabling(&vendor, &["timed"]), now);
+        assert_eq!(revoked(&sink), ["timed"]);
         assert_eq!(init.state_of("sysinfod"), Some(ServiceState::Running));
         let store = OverrideStore::default();
         assert_eq!(
@@ -5339,7 +5811,7 @@ mod tests {
 
     #[test]
     fn a_change_no_reader_could_accept_is_refused_before_it_is_made() {
-        use tairix_enrolment::{overrides_for, Enrolment, EnrolmentOverride, MAX_DOCUMENT_LEN};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride, MAX_DOCUMENT_LEN};
         let entry = tairix_enrolment::MAX_SERVICE_NAME_LEN + " disabled\n".len();
         let header = EnrolmentOverride::empty()
             .to_store_text()
@@ -5349,7 +5821,7 @@ mod tests {
         let names: Vec<String> = (0..=fitting).map(|i| alloc::format!("{i:064}")).collect();
         let vendor = Enrolment::of(names.iter().map(String::as_str)).expect("valid names");
         // Every service but the last is already disabled: the document is full.
-        let desired = Enrolment::of(names[fitting..].iter().map(String::as_str)).expect("valid");
+        let full: Vec<&str> = names[..fitting].iter().map(String::as_str).collect();
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -5357,7 +5829,7 @@ mod tests {
         init.register_enrolled(
             names.iter().map(|n| spec(n, &[])).collect(),
             vendor.clone(),
-            Some(overrides_for(&vendor, &desired)),
+            Some(disabling(&vendor, &full)),
         )
         .unwrap();
 
@@ -5471,12 +5943,9 @@ mod tests {
             .unwrap();
         assert_eq!(report.outcome, EnrolOutcome::Applied);
         assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Inactive));
-        assert_eq!(
-            init.satisfy_condition(ReadyCondition::NetworkUp)
-                .started
-                .len(),
-            1
-        );
+        sink.forget();
+        init.satisfy_condition(ReadyCondition::NetworkUp);
+        assert_eq!(sink.started().len(), 1);
         assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Running));
     }
 
@@ -5495,8 +5964,8 @@ mod tests {
         assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
 
         let overrides = EnrolmentOverride::parse("timed disabled\n").expect("parses");
-        let revoked = init.adopt_overrides(overrides, Duration64::from_secs(30));
-        assert_eq!(revoked, [String::from("timed")]);
+        init.adopt_overrides(overrides, Duration64::from_secs(30));
+        assert_eq!(revoked(&sink), [String::from("timed")]);
         assert_eq!(init.state_of("timed"), Some(ServiceState::Stopping));
         assert_eq!(init.state_of("netstack"), Some(ServiceState::Running));
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_REVOKED), 1);
@@ -5520,10 +5989,9 @@ mod tests {
 
         let overrides = EnrolmentOverride::parse("discoveryd disabled\n").expect("parses");
         init.adopt_overrides(overrides, Duration64::from_secs(30));
-        assert!(init
-            .satisfy_condition(ReadyCondition::NetworkUp)
-            .started
-            .is_empty());
+        sink.forget();
+        init.satisfy_condition(ReadyCondition::NetworkUp);
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Stopped));
     }
 
@@ -5542,9 +6010,8 @@ mod tests {
         let launched_before = spawner.launched.borrow().len();
 
         let overrides = EnrolmentOverride::parse("timed enabled\n").expect("parses");
-        assert!(init
-            .adopt_overrides(overrides, Duration64::from_secs(30))
-            .is_empty());
+        init.adopt_overrides(overrides, Duration64::from_secs(30));
+        assert!(revoked(&sink).is_empty());
         assert_eq!(spawner.launched.borrow().len(), launched_before);
         assert_eq!(init.state_of("timed"), None);
         // The record does say it is enabled — the next boot registers it.
@@ -5795,10 +6262,11 @@ mod tests {
 
         // One wakeup, well past both: the wedged process is force-killed and
         // the crashed one relaunched, so a transport needs no second pass.
-        let report = init.expire_due(Duration64::from_secs(60));
+        sink.forget();
+        init.expire_due(Duration64::from_secs(60));
         assert_eq!(stopper.forced.borrow().as_slice(), &[watched]);
         assert_eq!(sink.count(events::SERVICE_WATCHDOG_TIMEOUT), 1);
-        assert_eq!(started_names(&report), ["crasher"]);
+        assert_eq!(sink.started(), ["crasher"]);
         assert_eq!(init.restart_deadline("crasher"), None);
     }
 
@@ -5818,9 +6286,10 @@ mod tests {
         // it fires. The stale wakeup must not kill a service that is plainly
         // alive.
         assert!(init.heartbeat("svc", Duration64::from_secs(14)));
-        let report = init.expire_due(Duration64::from_secs(15));
+        sink.forget();
+        init.expire_due(Duration64::from_secs(15));
         assert!(stopper.forced.borrow().is_empty());
-        assert!(report.started.is_empty());
+        assert!(sink.started().is_empty());
         assert_eq!(init.next_deadline(), Some(Duration64::from_secs(19)));
     }
 
@@ -5840,9 +6309,10 @@ mod tests {
         // The watchdog lapses and the service wedges. It is killed, and the
         // relaunch waits for the reap rather than racing the corpse: nothing
         // is started in this wakeup because the process is still live.
-        let report = init.expire_due(Duration64::from_secs(60));
+        sink.forget();
+        init.expire_due(Duration64::from_secs(60));
         assert_eq!(stopper.forced.borrow().as_slice(), &[pid]);
-        assert!(report.started.is_empty());
+        assert!(sink.started().is_empty());
         assert_eq!(init.state_of("svc"), Some(ServiceState::Running));
 
         // Only once the forced exit is reaped does the policy arm the backoff.
@@ -5852,8 +6322,10 @@ mod tests {
         let backoff = init.restart_deadline("svc").expect("backoff armed");
         assert_eq!(init.next_deadline(), Some(backoff));
 
-        let report = init.expire_due(backoff);
-        assert_eq!(started_names(&report), ["svc"]);
+        sink.forget();
+
+        init.expire_due(backoff);
+        assert_eq!(sink.started(), ["svc"]);
     }
     #[test]
     fn expire_due_never_leaves_a_lapsed_deadline_armed() {
@@ -5875,7 +6347,7 @@ mod tests {
         assert_eq!(init.state_of("svc"), Some(ServiceState::Stopping));
 
         let now = Duration64::from_secs(600);
-        let _ = init.expire_due(now);
+        init.expire_due(now);
 
         // Whatever the guards decided, nothing lapsed is still armed — so the
         // transport's next wait is either indefinite or genuinely in the
@@ -5910,9 +6382,10 @@ mod tests {
         assert!(init.restart_deadline("fontd").is_some());
 
         let now = Duration64::from_secs(600);
-        let report = init.expire_due(now);
+        sink.forget();
+        init.expire_due(now);
         assert!(
-            report.started.is_empty(),
+            sink.started().is_empty(),
             "on-demand services wait for a connect"
         );
         assert_eq!(init.restart_deadline("fontd"), None);

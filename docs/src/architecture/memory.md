@@ -486,7 +486,7 @@ Every page is checked, fail-closed, before a byte moves:
 | --- | --- |
 | Null base on a non-empty copy | `Null` |
 | `ptr + len` overflows the address space | `LengthOverflow` |
-| A page in range is unmapped | `NotMapped` |
+| A page in range is unmapped | `NotMapped` (with the page, the range's end and the direction) |
 | A page in range is not user-accessible (kernel-pointer confusion) | `NotUser` |
 | `copy_in` page lacks `READ` | `NotReadable` |
 | `copy_out` page lacks `WRITE` (read-only / executable — the §19.2 W^X guard) | `NotWritable` |
@@ -1115,6 +1115,12 @@ gracefully instead of being killed. A committed page's first touch is then
 one reserved page to residency); an *eager* user draw
 (`FrameAllocator::alloc_user`) may never dip below `reserve_frames +
 committed_frames`, so it can never steal a committed page's reserved frame.
+A kernel-path draw (`FrameAllocator::alloc_order`) may go below the reserve
+but never takes a frame a commitment is owed, and memory drawn on a process's
+demand — a restored compressed page, a file page, the compressed store itself
+— stops at the reserve's upper half, so a machine whose processes have used
+all they may still leaves the kernel half a reserve to grow its own heap and
+page tables in.
 This replaces the earlier overcommit-and-fault-time-kill behaviour, whose
 `stress --vm 4 --vm-bytes 76M` on a ~175 MiB machine surfaced out-of-memory
 only as a fault-time task kill mislabelled a "wild" fault. Stack growth takes
@@ -1138,8 +1144,8 @@ because a refusal changed nothing — asking again on every free (D114). The res
 `AddressSpaceBytes` ceiling and the pinned-memory budget are charged at map
 time, so those bounds are enforced up front and the fault path re-checks no
 limit. The copy path stays fault-aware: a kernel copy in either direction
-offers its miss to `resolve_anon_fault` (after the file, stack and compressed
-resolvers) exactly as the hardware fault path does.
+backs its miss through the same resolver chain the hardware fault path uses,
+`resolve_anon_fault` among them.
 
 This is staged (`plans/SPAWN.md` SP5):
 
@@ -1265,6 +1271,12 @@ is the consumer the `mem_map` ABI exists for (§7c).
   because the trim `pressure::report` drives ignores the granule and releases
   everything above the retention at once (`lib/rt/README.md`,
   `plans/OPEN-DEFECTS.md` D104).
+- **A pinned process's heap holds what it has mapped.** Pinning asked for
+  resident memory, so its heap gives no page back at any band, the trim
+  included, until it is unpinned; a page given back would need a fresh
+  commitment exactly when the machine may have none. The pinned-memory budget
+  bounds it, and PID 1 pins, so it serves any allocation within what it has
+  held however short the machine is.
 - **A refused release is asked once per arena extent.** The release the arena
   wants is decided by its top and its retention, so a kernel that refuses one
   will refuse the identical question every subsequent free asks — thousands of
@@ -2099,7 +2111,8 @@ nor metadata format with it.
   `CAP_MEM_PIN` may mark its entire anonymous memory — current and
   future — as pinned, and the per-task registry's `is_pinned` mark is
   the one pin decision a candidate's owner is judged by, so a pinned
-  process's pages carry the refusing `pinned` attribute above. The
+  process's pages carry the refusing `pinned` attribute above, and its
+  `lib/rt` heap gives back no page it has mapped. The
   exemption is bounded by the `pinned-memory-bytes` limit (see
   [resource limits](resource-limits.md)) — the derived per-boot default
   grants one eighth of discovered RAM per process — never inherited
@@ -2131,9 +2144,14 @@ nor metadata format with it.
 - **Move-only restore.** `fault_in` authenticates, decrypts,
   decompresses into a fresh frame, remaps with the original flags, and
   deletes the blob. Authentication or decode failure returns **no
-  plaintext**: the entry is discarded, the (zeroed) frame returned,
-  the loss audit-logged (events 2002/2003), and the typed error
-  escalates through the VM policy.
+  plaintext**: the (zeroed) frame is returned and the loss audit-logged
+  once (events 2002/2003). The entry stays, charged and marked lost,
+  until its range is released, and every later restore of the page —
+  demand, cluster or warm — reports `FaultError::Lost`: with the entry
+  gone the page would read as never written, and its next touch would be
+  handed a zeroed frame in place of the data. A lost entry is never a
+  cluster or warm candidate. The kernel ends the process the page
+  belongs to, as its own touch of the page would.
 - **Accounting is checked and tamper-independent** (`RamzipLedger`).
   Global and per-task books (logical/compressed/stored/metadata bytes,
   entries) with all-or-nothing checked arithmetic; releases use the
@@ -2232,17 +2250,24 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   user task's own bad instruction never parks the core.
 - **Fail closed, kill the task not the machine.** An address outside every
   region, a page wholly at/past end-of-file (the `SIGBUS` analogue), a
-  filesystem error, a page the heap has no room to stage, or frame
-  exhaustion terminates the *faulting task*: the hook records exit code 139
+  filesystem error, a page the heap has no room to stage, a compressed page
+  whose contents were lost, or frame exhaustion terminates the faulting
+  *process*: the hook records exit code 139
   (`128 + SIGSEGV`), reclaims exactly what
   `exit`/signal-kill reclaim, and the port suspends it with an `Exit`
   action. The kill is audited with the stable `TaskFaultKilled` event
   (kernel/core id 4034): task id plus a coarse `fault_class`
-  (`stack_limit` / `stack` / `file_region` / `anon` / `wild`) and a
+  (`stack_limit` / `stack` / `file_region` / `anon` / `wild`), the `cause`
+  the page could not be backed for (`invalid` for the program's own access,
+  `no_memory`, `unreadable`, `lost`), and a
   non-leaking `fault_offset` locality bucket (`null_page` /
   `below_stack_guard` / `region` / `in_region` / `wild`), never the raw
   address — so a crashing program
-  is visible on the system log, not only via its `wait` status. A miss
+  is visible on the system log, not only via its `wait` status, and a kill
+  for want of memory never reads as a bug in the program. A thread a death
+  was owed to while its fault was being resolved — a kill landing while it
+  waited on a release or a slow disk — dies of that death at the fault's
+  boundary, with that death's status, and is not recorded as a crash. A miss
   *inside* memory the task legitimately reserved (the deterministic
   out-of-memory case — with commit accounting this should not arise for
   anonymous memory, since `mem_map` fails first, but the kernel still
@@ -2262,16 +2287,32 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
 - **The kernel copy path resolves misses too.** A syscall buffer inside an
   untouched mapping works without pre-touching, in either direction
   (`write(fd, mapped, n)`, an answer into a fresh heap page): the copy walk
-  reports the missing page's base (`UaccessError::NotMapped { va }`), and
-  the one fault-aware copy (`KernelSyscallHandlers::copy_user`, under
-  `copy_in_user` and `copy_out_user`, which every handler that reaches user
-  memory uses) offers exactly that page to the same resolvers in the
-  hardware path's order — file, stack growth (§7c), the compressed tier,
-  then anonymous memory — releasing the registry guard around each
-  resolution and running the copy again under a budget of one resolution
-  per page it spans plus each buffer's two unaligned ends (an unresolvable
-  miss stays the stable `BadAddress`). A write into a file mapping still
-  fails closed: those mappings are read-only. aarch64, riscv64, and x86_64
+  stops at the first missing page (`UaccessError::NotMapped`, naming the
+  page, the range's end and the direction), and the one fault-aware copy
+  (`KernelSyscallHandlers::copy_user`, under `copy_in_user` and
+  `copy_out_user`, which every handler that reaches user memory uses)
+  backs it and every later page the copy needs (`uaccess::next_unmapped_page`
+  finds them, stopping where the copy would refuse a page anyway) before
+  running the copy again, so a buffer of any length costs two runs rather
+  than one per page. Every page goes through `back_user_page`, the one
+  resolver chain the hardware fault path also uses: stack growth (§7c), the
+  compressed tier before plain anonymous memory (which would zero-fill over
+  a parked page), then file backing for a read only, since file mappings
+  are read-only. The registry guard is released around each resolution, and
+  the copy may back every page it spans twice before it gives up, which
+  rides out one round of reclaim. Only the hardware path runs direct
+  reclaim first: a copy reaches the pages it has passed through the
+  kernel's own map, which marks none of them used, so reclaim there would
+  take back the buffer being filled.
+  A page that cannot be backed answers what kept it unbacked, so a caller
+  can tell its own mistake from the machine's state: `BadAddress` for a
+  page no mapping of the caller's covers (and for a write into a file
+  mapping), `OutOfMemory` for one the machine had no memory for or that
+  left again before the copy could use it, `DeviceFault` for a file page
+  the storage could not supply, and `MediumError` for a compressed page
+  whose contents were lost — which also ends the process as its own touch
+  of the page would: the fault is recorded and the death lands as the call
+  returns. aarch64, riscv64, and x86_64
   all resolve faults today and pass their `user_windows` file window at
   spawn; wasm32 has no user-fault source and reserves nothing.
 - **Tested.** `kernel/mem` `filemap` engine tests (fill/zero-tail/W^X/
@@ -2281,7 +2322,11 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   refusals, exact-match unmap, page read at the right file offset, EOF and
   foreign-task refusal, benign-race fold), the `copy_in_user` and
   `copy_out_user` resolve-retry tests (miss offered + bounded, outside-region and
-  resident-page behaviour), the fault-kill audit test, per-port fault
+  resident-page behaviour, every untouched page backed before one more run,
+  the errno each cause answers, a write into a file mapping reading
+  nothing, a lost page ending the process), the fault-kill audit test
+  (`cause` included, and no crash recorded for a death that overtook the
+  fault), per-port fault
   classification tests (aarch64 `is_write_data_abort`, riscv64
   `is_load_page_fault` / `is_store_page_fault`, x86_64
   `is_user_data_fault` / `is_resolvable_user_fault` + resolver-slot
@@ -2726,9 +2771,10 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
 - **A refusal is reported, not retried per frame.** For an entry larger than
   what the budget can hold — a whole screenful of artwork already retained, or
   an output whose budget is smaller than one decode — the cache genuinely
-  cannot keep it. `ArtworkResolver::declined` is how it says so, and the
-  session's icon desk holds that key back until the pressure band moves
-  (`ArtworkDesk::decline` / `retry_declined`). The draw falls to its built-in
+  cannot keep it. `ArtworkResolver::declined` is how it says so, with the bytes
+  it could not keep, and the session's icon desk holds that key back until the
+  cache would keep that many (`ArtworkDesk::decline` / `retry_declined`,
+  `ArtworkCache::holds`). The draw falls to its built-in
   glyph — the tier that exists for exactly this — rather than to a storm of
   reads that cannot be kept.
 - **Proved end to end on a real desktop.**
@@ -2766,13 +2812,14 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   `shrink_target` ordering. It is deliberately not keyed and not
   recency-driven: evicting a visible window's pixels is a visual defect
   rather than a slowdown, so the ladder follows what the user can see —
-  hidden and minimised windows at mild, visible-but-unfocused ones at
-  critical, never the focused window. The ladder's two inputs are the band and
-  each window's visibility, so it runs on either edge — the band's wake, and
-  the minimise itself, since a machine whose pressure has already settled
-  produces no further wake. The buffer is wiped before it is
-  dropped and the owning app is asked to present again through the window
-  protocol's redraw handshake, which its client library answers for it.
+  hidden and minimised windows at mild and deeper, never a visible window,
+  whose present would establish the same buffer again at once. The ladder's
+  two inputs are the band and each window's visibility, so it runs on either
+  edge — the band's wake, and the minimise itself, since a machine whose
+  pressure has already settled produces no further wake. The buffer is wiped
+  before it is dropped and, once the window is shown again, the owning app is
+  asked to present through the window protocol's redraw handshake, which its
+  client library answers for it.
   One memory model, two mechanisms for two different kinds of memory
   (see [Releasable window content](../desktop/wm.md#releasable-window-content)).
 - **Teardown wipes.** Logout or seat revocation tears the caches down and

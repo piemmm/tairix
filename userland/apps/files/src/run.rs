@@ -99,6 +99,7 @@ pub mod operations;
 pub mod paste;
 pub mod question;
 pub mod rename;
+pub mod reread;
 pub mod route;
 pub mod sidebar;
 pub mod turns;
@@ -443,24 +444,12 @@ mod program {
     /// The file manager's settings, as the desktop's document last said them.
     struct Kept {
         live: FilerPreferences,
-        /// The publication of the desktop's document they were read from.
-        generation: u32,
-        /// The publication a read is under way for.
-        asked: Option<u32>,
         /// A read has found them, so they are the user's rather than the
         /// defaults standing in for a document that could not be read.
         known: bool,
-        /// When a refused read is asked again, and the wait it was given.
-        retry: Option<u64>,
-        backoff_ns: u64,
+        /// When the document is read.
+        reread: crate::reread::Reread,
     }
-
-    /// The first wait before a refused read of the settings is asked again.
-    const SETTINGS_RETRY_FIRST_NS: u64 = 1_000_000_000;
-
-    /// The longest such wait: each refusal doubles it, up to this, so a
-    /// document that stays unreadable costs a read every few minutes.
-    const SETTINGS_RETRY_LONGEST_NS: u64 = 300_000_000_000;
 
     impl Kept {
         /// The settings the desktop publishes as `published`, read before any
@@ -468,11 +457,8 @@ mod program {
         fn starting(published: u32) -> Self {
             let mut kept = Self {
                 live: FilerPreferences::default(),
-                generation: published,
-                asked: None,
                 known: false,
-                retry: None,
-                backoff_ns: 0,
+                reread: crate::reread::Reread::new(published),
             };
             kept.landed(SettingsRead::of(published), tairix_rt::clock_get());
             kept
@@ -490,36 +476,25 @@ mod program {
             self.known && self.live.unmount_when_closed
         }
 
-        /// Whether the publication `published` is to be read at `now_ns`: these
-        /// were not read from it, or a refused read's wait is over, and no read
-        /// of it is under way. Answering yes notes the read as asked.
+        /// Whether the publication `published` is to be read at `now_ns`.
         fn wants(&mut self, published: u32, now_ns: u64) -> bool {
-            let due = self.retry.is_some_and(|at| at <= now_ns);
-            let wanted = (published != self.generation || due) && self.asked != Some(published);
-            if wanted {
-                self.asked = Some(published);
-                self.retry = None;
-            }
-            wanted
+            self.reread.wants(published, now_ns)
         }
 
-        /// When a refused read is next due to be asked again, if one was.
-        const fn retry_at(&self) -> Option<u64> {
-            self.retry
+        /// When a refused read is next to be asked again, if one is.
+        fn retry_at(&self) -> Option<u64> {
+            self.reread.retry_at()
         }
 
         /// Take what `read` found at `now_ns`, answering the settings to show
         /// where they moved. A refusal is stated, the settings in force stand,
         /// and the read is asked again after a wait that doubles each time.
         fn landed(&mut self, read: SettingsRead, now_ns: u64) -> Option<FilerPreferences> {
-            self.generation = read.generation;
-            if self.asked == Some(read.generation) {
-                self.asked = None;
-            }
+            self.reread
+                .landed(read.generation, read.found.is_err(), now_ns);
             match read.found {
                 Ok((settings, refused)) => {
                     self.known = true;
-                    self.backoff_ns = 0;
                     for key in refused {
                         app::report(
                             APP_NAME,
@@ -542,14 +517,6 @@ mod program {
                              force and reading them again shortly"
                         ),
                     );
-                    self.backoff_ns = if self.backoff_ns == 0 {
-                        SETTINGS_RETRY_FIRST_NS
-                    } else {
-                        self.backoff_ns
-                            .saturating_mul(2)
-                            .min(SETTINGS_RETRY_LONGEST_NS)
-                    };
-                    self.retry = Some(now_ns.saturating_add(self.backoff_ns));
                     None
                 }
             }
@@ -2213,17 +2180,21 @@ mod program {
     }
 
     /// Carry every window over to a desktop change: the artwork cache is held
-    /// to the screen as it now is, a browser window asks for its blur again and
+    /// to the screen as it now is, offering again what it refused and would
+    /// now keep, a browser window asks for its blur again and
     /// re-reads its floor and opening height at the new density, and each
     /// window — and any chooser over one — owes the whole of itself in the new
     /// theme.
     fn owe_desktop(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
-        (desktop, icons): (&Desktop, &RefCell<IconPipeline>),
+        (desktop, icons, reads): (&Desktop, &RefCell<IconPipeline>, &Reads),
         grounds: Grounds<'_>,
     ) {
         icons.borrow_mut().rescale(screen_bytes(desktop));
+        let held = icons.borrow();
+        let _ = reads.retry_declined_artwork(|bytes| held.holds(bytes));
+        drop(held);
         let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT).1;
         let floor_width = win_floor_width(desktop.scale(), grounds.window);
         for win in windows {
@@ -5075,7 +5046,7 @@ mod program {
                 }
                 #[allow(clippy::cast_sign_loss)] // guarded by `pid > 0`.
                 let label = self.in_flight.remove(&(pid as u64));
-                self.opened.released();
+                self.opened.child_ended(label.is_some());
                 if let WaitStatus::Exited(code) = status {
                     if let Some(reason) = load_failure_reason(code) {
                         let name = label.as_deref().unwrap_or("an application");
@@ -5317,6 +5288,7 @@ mod program {
             fd,
             document::grant_ceiling(false),
             session,
+            0,
         ))?;
         let grant = core::num::NonZeroU64::new(grant).ok_or(Errno::OutOfRange)?;
         client.place_dropped(source, name, grant)
@@ -5345,7 +5317,7 @@ mod program {
         let Ok(name) = DocumentName::new(display_name) else {
             return false;
         };
-        let grant = tairix_rt::fd_grant(fd, document::grant_ceiling(writable), session);
+        let grant = tairix_rt::fd_grant(fd, document::grant_ceiling(writable), session, 0);
         let Some(grant) = u64::try_from(grant)
             .ok()
             .and_then(core::num::NonZeroU64::new)
@@ -6633,16 +6605,17 @@ mod program {
             }
         }
 
-        /// Note that the cache could not keep this decode, so nothing offers
-        /// it again until the band that refused it moves.
-        fn decline_artwork(&self, key: &ArtworkKey, side: u32) {
-            self.work.lock().artwork.decline(key, side);
+        /// Note that the cache could not keep this decode's `bytes`, so
+        /// nothing offers it again until the cache would.
+        fn decline_artwork(&self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.work.lock().artwork.decline(key, side, bytes);
         }
 
-        /// The band moved: offer the refused decodes again, answering whether
-        /// there was one, for the windows drawn without it to ask again.
-        fn retry_declined_artwork(&self) -> bool {
-            self.work.lock().artwork.retry_declined()
+        /// The band moved: offer again the refused decodes the cache now
+        /// `holds`, answering whether there was one, for the windows drawn
+        /// without it to ask again.
+        fn retry_declined_artwork(&self, holds: impl Fn(usize) -> bool) -> bool {
+            self.work.lock().artwork.retry_declined(holds)
         }
 
         /// Note that a window still shows what `key` at `side` is for, so the
@@ -7434,8 +7407,8 @@ mod program {
             self.0.want_artwork(key, side);
         }
 
-        fn declined(&mut self, key: &ArtworkKey, side: u32) {
-            self.0.decline_artwork(key, side);
+        fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+            self.0.decline_artwork(key, side, bytes);
         }
 
         fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
@@ -7812,13 +7785,18 @@ mod program {
                 // The machine's band moved: give back whatever the new band
                 // says the decoded artwork may no longer keep, here at the
                 // wake rather than at the next user input. A decode the old
-                // band refused to keep is offered again, and the loop runs to
-                // repaint what was drawn without it. The glyph cache this
-                // window drew through gives back the same way.
+                // band refused is offered again only if the cache would now
+                // keep it, and the loop runs to repaint what was drawn without
+                // it. The glyph cache this window drew through gives back the
+                // same way.
                 Wake::PressureChanged => {
                     self.icons.borrow_mut().trim();
                     self.reads.adopt_band();
-                    let retried = self.reads.retry_declined_artwork();
+                    let icons = self.icons.borrow();
+                    let retried = self
+                        .reads
+                        .retry_declined_artwork(|bytes| icons.holds(bytes));
+                    drop(icons);
                     tairix_font::trim_glyph_cache();
                     if retried {
                         return Ok(Parked::Interrupted);
@@ -11866,6 +11844,14 @@ mod program {
     /// Whether a window shows a place within `roots`, describes a node there,
     /// or runs an operation reaching one, or is on its way to one — a window
     /// still opening, and an operation still being started, included.
+    /// Whether the volume published as `volume_id` is lost, which only the
+    /// user may let go.
+    fn volume_lost(places: &Places, volume_id: &[u8; tairix_abi::VOLUME_ID_LEN]) -> bool {
+        places
+            .volume_facts(*volume_id)
+            .is_some_and(|facts| facts.availability == MountAvailability::UnavailableLost)
+    }
+
     fn shows_within(windows: &[OpenWindow], opening: &Opening, roots: &[&[String]]) -> bool {
         let holds =
             |browser: &Browser<DeferredSource>| tairix_browse::mount::holds_within(browser, roots);
@@ -14330,7 +14316,12 @@ mod program {
                 // change is adopted once and every window owes it whole.
                 if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
                     let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                    owe_desktop(&mut windows, &mut client, (&desktop, &icons), grounds);
+                    owe_desktop(
+                        &mut windows,
+                        &mut client,
+                        (&desktop, &icons, &reads),
+                        grounds,
+                    );
                 }
                 route_event(
                     &mut windows,
@@ -14356,7 +14347,12 @@ mod program {
             let mut moved = false;
             if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
                 let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                owe_desktop(&mut windows, &mut client, (&desktop, &icons), grounds);
+                owe_desktop(
+                    &mut windows,
+                    &mut client,
+                    (&desktop, &icons, &reads),
+                    grounds,
+                );
                 moved = true;
             }
             moved |= serve_due(
@@ -14581,11 +14577,7 @@ mod program {
                         kept.borrow().unmounts() && may_unmount,
                     ),
                     |root| shows_within(&windows, &opening, &[root]),
-                    |volume_id| {
-                        places.volume_facts(*volume_id).is_some_and(|facts| {
-                            facts.availability == MountAvailability::UnavailableLost
-                        })
-                    },
+                    |volume_id| volume_lost(&places, volume_id),
                 )
                 .map(|finished| {
                     (
@@ -14807,12 +14799,12 @@ mod program {
                     })
                     .chain(browse.retry_at())
                     .chain(kept.borrow().retry_at())
-                    .chain(
-                        kept.borrow()
-                            .unmounts()
-                            .then(|| launcher.borrow().opened.retry_at())
-                            .flatten(),
-                    )
+                    .chain({
+                        let held = launcher.borrow();
+                        let enabled = kept.borrow().unmounts() && held.may_unmount();
+                        held.opened
+                            .retry_at(enabled, |volume_id| volume_lost(&places, volume_id))
+                    })
                     .min(),
             );
             // A park the reader interrupted has no event; the next turn

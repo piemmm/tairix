@@ -1,6 +1,7 @@
 //! Objects from tokens, indirect objects, and where a stream's bytes are.
 
 use alloc::vec;
+use core::cell::Cell;
 
 use super::{find, indirect, object, rfind, stream_span, stream_start, Endstreams, Indirect};
 use crate::lex::Lexer;
@@ -14,6 +15,17 @@ fn read(text: &[u8]) -> Result<Object, PdfError> {
 
 fn name(text: &str) -> Object {
     Object::Name(Name(text.as_bytes().to_vec()))
+}
+
+#[test]
+fn a_reference_cut_short_by_the_lexing_bound_is_refused_not_read_as_its_number() {
+    // Two bytes lex the number and two more the generation, which is past it:
+    // what follows the number is unknown, so the object is too.
+    let allowance = Cell::new(3);
+    assert_eq!(
+        object(&mut Lexer::charged(b"12 0 R", 0, &allowance), 0),
+        Err(PdfError::TooComplex)
+    );
 }
 
 #[test]
@@ -154,4 +166,34 @@ fn find_and_rfind_answer_the_first_and_last_match() {
     assert_eq!(rfind(b"abcabc", b"bc"), Some(4));
     assert_eq!(find(b"ab", b"abc"), None);
     assert_eq!(find(b"abc", b""), None);
+}
+
+#[test]
+fn what_follows_an_integer_is_lexed_once() {
+    let text = b"[1 2 (s) 3 4 <00>]";
+    let allowance = Cell::new(100);
+    let read = object(&mut Lexer::charged(text, 0, &allowance), 0);
+    assert_eq!(
+        read,
+        Ok(Object::Array(vec![
+            Object::Int(1),
+            Object::Int(2),
+            Object::String(b"s".to_vec()),
+            Object::Int(3),
+            Object::Int(4),
+            Object::String(vec![0]),
+        ]))
+    );
+    assert_eq!(allowance.get(), 100 - 18, "every byte is lexed once");
+}
+
+#[test]
+fn a_stream_past_the_allowance_is_never_read_as_a_dictionary() {
+    let text = b"3 0 obj <</Length 5>> stream\r\nhello\nendstream endobj";
+    let dictionary = find(text, b">>").expect("a dictionary") + 2;
+    let allowance = Cell::new(u64::try_from(dictionary).expect("a short text"));
+    assert!(matches!(
+        indirect(&mut Lexer::charged(text, 0, &allowance)),
+        Err(PdfError::TooComplex)
+    ));
 }

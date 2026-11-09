@@ -3557,6 +3557,14 @@ one writes a second.
   the arena **grows** by, so a run of small allocations pays no `mem_map` per
   page; mapping beyond what the caller asked for is speculation about the next
   allocation, so that pad shrinks with the band and is zero under real pressure.
+- **A pinned process's heap holds every page it has mapped.** Pinning
+  (`mem_pin`) asked that the process's memory stay resident, and a page given
+  back would need a fresh commitment the next time it is wanted — exactly when
+  the machine may have none. So a pinned heap gives no page back at any band,
+  through the trim included, until it is unpinned; the pinned-memory budget
+  bounds what it holds. This is the one departure from the retention above, and
+  it is what lets PID 1 serve any allocation within what it has held however
+  short the machine is.
 - **The arena is resized in granules, so a teardown cannot storm the machine
   (§2.16, §26.1).** A retention bounds what may be *kept*; it cannot bound a
   teardown's syscalls, because a level slides down with the free span it bounds

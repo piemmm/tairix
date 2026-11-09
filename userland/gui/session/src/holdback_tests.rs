@@ -1067,8 +1067,8 @@ fn an_items_offer_that_only_left_withdraws_what_it_ends() {
 }
 
 /// A drop is of the newest offer before it, which a window may answer as late
-/// as it reads it, so the offers before a drop stay and an end that only left
-/// takes neither them nor the drop.
+/// as it reads it, so that offer stays with the drop and an end that only left
+/// takes neither.
 #[test]
 fn an_items_drop_keeps_the_offer_it_drops() {
     let mut held = HoldBack::new();
@@ -1093,8 +1093,49 @@ fn an_items_drop_keeps_the_offer_it_drops() {
     hold(&mut held, items_ended(7, true));
     assert_eq!(
         drain_events(&mut held),
-        [items_offered(5), items_ended(7, true)],
-        "a drop takes the ends held before it, a second drop the first"
+        [items_ended(7, true)],
+        "a drop takes the ends held before it, a second drop the first and its offer"
+    );
+}
+
+/// A drop takes every offer held before it but the one it is of, numbered as
+/// it is: only the newest is worth an answer.
+#[test]
+fn an_items_drop_takes_every_offer_but_the_one_it_is_of() {
+    let mut held = HoldBack::new();
+    hold(&mut held, items_offered(1));
+    hold(&mut held, file_offered(1));
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, items_offered(2));
+    hold(&mut held, file_offered(2));
+    hold(&mut held, items_ended(2, true));
+    assert_eq!(
+        drain_events(&mut held),
+        [
+            typed(WINDOW),
+            items_offered(2),
+            file_offered(2),
+            items_ended(2, true)
+        ]
+    );
+}
+
+/// A window reads a drop by the offer it is of, so a window that stays behind
+/// never loses that offer to overflow: the input held after the drop goes
+/// instead.
+#[test]
+fn overflow_never_sheds_the_offer_a_held_drop_is_of() {
+    let mut held = HoldBack::new();
+    hold(&mut held, items_offered(1));
+    hold(&mut held, file_offered(1));
+    hold(&mut held, items_ended(1, true));
+    for _ in 0..HOLD_BACK_CAPACITY * 2 {
+        hold(&mut held, typed(WINDOW));
+    }
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
+    assert_eq!(
+        drain_events(&mut held)[..3],
+        [items_offered(1), file_offered(1), items_ended(1, true)]
     );
 }
 

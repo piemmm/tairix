@@ -106,6 +106,28 @@ fn column(variant: Variant, index: usize) -> PileId {
     variant.shape().tableau.nth(index).expect("a column")
 }
 
+/// A repaint covering only the status line — the clock's tick — neither makes
+/// nor shades the baize.
+///
+/// Regression: every paint asked for the baize first, so once memory pressure
+/// had taken it, the next tick made and shaded a new window-sized one that the
+/// clip then threw away.
+#[test]
+fn a_status_line_repaint_makes_no_baize() {
+    let mut scene = Scene::new(Variant::ALL[0], false);
+    let status = scene.layout.status;
+    let (x, y) = status
+        .surface_origin()
+        .expect("the status line is on the surface");
+    let mut surface = canvas();
+    surface.with_clip(x, y, status.width, status.height, |surface| {
+        scene.draw(surface, Extra::default(), 0);
+    });
+    assert!(!scene.art.holds_baize(), "a baize was made for a tick");
+    scene.draw(&mut canvas(), Extra::default(), 0);
+    assert!(scene.art.holds_baize(), "a whole frame keeps one");
+}
+
 #[test]
 fn every_game_draws_a_whole_table() {
     for variant in Variant::ALL {

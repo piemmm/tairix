@@ -23,6 +23,7 @@ impl ServedFormat for Served {
         volume: B,
         read_only: bool,
         _budget: WritebackBudget,
+        _log: &'static (dyn tairix_fsserve::Sink + Sync),
     ) -> Result<Opened<Udf<B>>, DriverError> {
         let mut fs = Udf::open(volume)?;
         let write_refusal = if read_only {

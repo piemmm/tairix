@@ -13,11 +13,12 @@ use tairix_drawing::svg::{read, write};
 use tairix_drawing::Ids;
 
 use super::{
-    put_header, put_point, read_drawing, read_pages, read_placed, receive_picture, take_header,
-    Access, Allowance, Builder, DrawEditService, DrawFailure, DrawRefusal, Pages,
-    MAX_PASSWORD_BYTES, OP_NEXT, RECORD_GROUP, RECORD_IMAGE, RECORD_RECT, RECORD_STYLE,
-    RECORD_TEXT, REPLY_BATCH, REPLY_OPENED, REPLY_PAGES, REPLY_PICTURE, REPLY_PIXELS, REPLY_PLACED,
-    RUN_FILL, RUN_SIZE, RUN_STROKE, SOURCE_NONE, SOURCE_PNG, SOURCE_SPRITE,
+    open_drawing, page_size, put_header, put_point, read_page, read_placed, receive_picture,
+    take_header, Allowance, Builder, DrawEditService, DrawFailure, DrawRefusal, Opening,
+    MAX_PASSWORD_BYTES, OP_NEXT, OP_PAGE, OP_PAGE_SIZE, RECORD_GROUP, RECORD_IMAGE, RECORD_RECT,
+    RECORD_STYLE, RECORD_TEXT, REPLY_BATCH, REPLY_OPENED, REPLY_PAGES, REPLY_PAGE_SIZE,
+    REPLY_PICTURE, REPLY_PIXELS, REPLY_PLACED, RUN_FILL, RUN_SIZE, RUN_STROKE, SOURCE_NONE,
+    SOURCE_PNG, SOURCE_SPRITE,
 };
 use crate::host::ParserSandbox;
 use crate::imagerender::send_document;
@@ -67,17 +68,25 @@ fn in_place(document: &str) -> String {
     write(&drawing).expect("writes")
 }
 
+/// The drawing the document handed over, `handed` bytes long, reads to,
+/// opened with no page to be chosen.
+fn read_drawing<L: crate::host::Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    handed: u64,
+    ids: &mut Ids,
+) -> Result<tairix_drawing::Read, DrawFailure> {
+    match open_drawing(sandbox, handed, None, false, ids)? {
+        Opening::Read(read) => Ok(read),
+        Opening::Pages { .. } => panic!("no page was to be chosen"),
+    }
+}
+
 fn through(
     sandbox: &mut TestSandbox,
     document: &[u8],
 ) -> Result<tairix_drawing::Read, DrawFailure> {
     send_document(sandbox, document).expect("handed over");
-    read_drawing(
-        sandbox,
-        document.len() as u64,
-        &Access::default(),
-        &mut Ids::new(),
-    )
+    read_drawing(sandbox, document.len() as u64, &mut Ids::new())
 }
 
 /// What a scripted worker answers as though it were handed: a document no
@@ -97,7 +106,7 @@ fn a_drawing_read_in_the_sandbox_is_the_drawing_read_in_place() {
     assert_eq!(read.unkept, kept, "what could not be kept is said");
     assert!(!read.unkept.is_empty());
     assert_eq!(
-        read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
+        read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
         Some(DrawFailure::Refused(DrawRefusal::NoDocument)),
         "the read consumed the document"
     );
@@ -124,6 +133,29 @@ fn a_draw_file_is_read_by_its_content_alone() {
         Some(DrawFailure::Refused(DrawRefusal::Malformed)),
         "a Draw file cut short is a broken one, never read as SVG"
     );
+}
+
+#[test]
+fn a_draw_file_whose_text_holds_a_pdf_header_is_read_as_a_draw_file() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="10" y="20" font-size="12">%PDF-1.7</text></svg>"#;
+    let drawing = read(svg.as_bytes(), &mut Ids::new())
+        .expect("reads")
+        .drawing;
+    let written = tairix_drawing::riscos::write(&drawing, &NoGlyphs).expect("a Draw file");
+    assert!(
+        tairix_drawing::pdf::recognised(&written.bytes),
+        "the header lies where a PDF's may"
+    );
+    let mut sandbox: TestSandbox = loopback();
+    send_document(&mut sandbox, &written.bytes).expect("handed over");
+    let opened = open_drawing(
+        &mut sandbox,
+        written.bytes.len() as u64,
+        None,
+        true,
+        &mut Ids::new(),
+    );
+    assert!(matches!(opened, Ok(Opening::Read(_))), "{opened:?}");
 }
 
 /// No glyph is known: text is laid out from its estimated advances.
@@ -180,7 +212,7 @@ fn what_is_no_drawing_is_refused_for_what_it_is() {
         );
     }
     assert_eq!(
-        read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
+        read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
         Some(DrawFailure::Refused(DrawRefusal::NoDocument))
     );
     let mut service = DrawEditService::default();
@@ -216,20 +248,6 @@ fn answering_within(
         LoopbackLauncher::new(move || Replies(replies.clone())).holding(room),
         NullSink,
     )
-}
-
-/// Answers a list of one page, keeping each request it is asked.
-struct Recording(Rc<RefCell<Vec<Vec<u8>>>>);
-
-impl Service for Recording {
-    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
-        self.0.borrow_mut().push(request.to_vec());
-        let mut w = Writer::new();
-        w.u8(REPLY_PAGES);
-        w.u32(1);
-        w.u32(0);
-        w.finish()
-    }
 }
 
 /// The open reply for a blank page of `layers` layers.
@@ -330,8 +348,7 @@ fn an_honest_script_is_believed() {
         opened(1),
         batch(true, &[style(), group(1), rect(0, 1.0)]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
-        .expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
     assert_eq!(read.drawing.objects(), 2);
 }
 
@@ -399,7 +416,7 @@ fn a_reply_that_breaks_its_bounds_is_not_believed() {
     ] {
         let mut sandbox = answering(script);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -469,8 +486,7 @@ fn a_text_s_baseline_and_runs_are_believed_only_within_their_bounds() {
         opened(1),
         batch(true, &[style(), group(1), text(along(2), runs(&[(1, 2)]))]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
-        .expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
     let layer = read.drawing.layers().get(0).cloned().expect("a layer");
     let node = layer
         .children()
@@ -507,7 +523,7 @@ fn a_text_s_baseline_and_runs_are_believed_only_within_their_bounds() {
     ] {
         let mut sandbox = answering(vec![opened(1), batch(true, &[style(), group(1), record])]);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -522,13 +538,7 @@ fn a_worker_that_turns_hostile_part_way_is_contained() {
     });
     send_document(&mut sandbox, RICH.as_bytes()).expect("handed over");
     assert_eq!(
-        read_drawing(
-            &mut sandbox,
-            RICH.len() as u64,
-            &Access::default(),
-            &mut Ids::new()
-        )
-        .err(),
+        read_drawing(&mut sandbox, RICH.len() as u64, &mut Ids::new()).err(),
         Some(DrawFailure::ReplyMalformed)
     );
     assert!(DrawFailure::ReplyMalformed
@@ -738,8 +748,7 @@ fn a_pictures_pixels_are_held_to_their_alpha_as_they_land() {
         pixels(&[200, 10, 10, 100, 1, 2, 3, 255]),
         batch(true, &[group(1), image(0)]),
     ]);
-    let read = read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new())
-        .expect("believed");
+    let read = read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).expect("believed");
     let layer = read.drawing.layers().get(0).cloned().expect("a layer");
     let picture = layer
         .children()
@@ -826,7 +835,7 @@ fn a_picture_that_breaks_its_bounds_is_not_believed() {
     ] {
         let mut sandbox = answering(script);
         assert_eq!(
-            read_drawing(&mut sandbox, SCRIPTED, &Access::default(), &mut Ids::new()).err(),
+            read_drawing(&mut sandbox, SCRIPTED, &mut Ids::new()).err(),
             Some(DrawFailure::ReplyMalformed),
             "{case}"
         );
@@ -892,7 +901,6 @@ fn a_source_longer_than_the_document_and_its_decoding_room_is_not_believed() {
         read_drawing(
             &mut answering_within(script(), room),
             handed,
-            &Access::default(),
             &mut Ids::new(),
         )
     };
@@ -958,24 +966,14 @@ fn a_drawing_this_side_has_no_memory_for_is_refused_as_that() {
     crate::testing::swept::<DrawEditService, _, _>(
         |sandbox| {
             handed_over(sandbox, document.as_bytes())?;
-            read_drawing(
-                sandbox,
-                document.len() as u64,
-                &Access::default(),
-                &mut Ids::new(),
-            )
+            read_drawing(sandbox, document.len() as u64, &mut Ids::new())
         },
         |failure| draw_refused(*failure),
     );
     crate::testing::swept::<DrawEditService, _, _>(
         |sandbox| {
             handed_over(sandbox, RICH.as_bytes())?;
-            read_drawing(
-                sandbox,
-                RICH.len() as u64,
-                &Access::default(),
-                &mut Ids::new(),
-            )
+            read_drawing(sandbox, RICH.len() as u64, &mut Ids::new())
         },
         |failure| draw_refused(*failure),
     );
@@ -1033,78 +1031,92 @@ fn pdf(pages: &[(u32, u32)], trailer: &str, extra: &[&str]) -> Vec<u8> {
     out
 }
 
+/// The pages of the PDF the worker keeps open, sized: what a chooser shows.
+fn sized(sandbox: &mut TestSandbox, pages: u32) -> Vec<Result<(f64, f64), DrawFailure>> {
+    (0..pages).map(|page| page_size(sandbox, page)).collect()
+}
+
 #[test]
-fn a_pdfs_pages_are_listed_and_the_one_chosen_is_read() {
+fn a_pdf_of_several_pages_is_kept_open_for_the_one_chosen_and_read_once() {
     let mut sandbox: TestSandbox = loopback();
-    let document = pdf(&[(200, 100), (300, 400)], "", &[]);
+    let document = pdf(&[(200, 100), (300, 400), (50, 60)], "", &[]);
+    let handed = document.len() as u64;
     send_document(&mut sandbox, &document).expect("handed over");
-    let pages =
-        read_pages(&mut sandbox, document.len() as u64, &Access::default()).expect("its pages");
-    assert_eq!(
-        pages,
-        Pages {
-            count: 2,
-            sizes: alloc::vec![(200.0, 100.0), (300.0, 400.0)]
-        }
+    let opening = open_drawing(&mut sandbox, handed, None, true, &mut Ids::new());
+    assert!(
+        matches!(opening, Ok(Opening::Pages { count: 3 })),
+        "{opening:?}"
     );
-    let second = Access {
-        page: 1,
-        password: None,
-    };
-    let read = read_drawing(
-        &mut sandbox,
-        document.len() as u64,
-        &second,
-        &mut Ids::new(),
-    )
-    .expect("page two");
+    assert_eq!(
+        sized(&mut sandbox, 4),
+        [
+            Ok((200.0, 100.0)),
+            Ok((300.0, 400.0)),
+            Ok((50.0, 60.0)),
+            Err(DrawFailure::Refused(DrawRefusal::NoSuchPage))
+        ],
+        "each page sized as it is asked, the document kept open"
+    );
+    let read = read_page(&mut sandbox, handed, 1, &mut Ids::new()).expect("page two");
     let size = read.drawing.page().size();
     assert!(
         (size.x - 400.0).abs() < 1e-6 && (size.y - 1600.0 / 3.0).abs() < 1e-6,
         "{size:?}"
     );
+    assert!(read
+        .unkept
+        .contains(tairix_drawing::unkept::Lost::OtherPages));
+    assert_eq!(
+        page_size(&mut sandbox, 0),
+        Err(DrawFailure::Refused(DrawRefusal::NotOpen)),
+        "a page read lets the document go"
+    );
 }
 
 #[test]
-fn a_page_a_pdf_lacks_is_refused() {
+fn a_page_a_kept_pdf_lacks_is_refused_and_the_pdf_let_go() {
     let mut sandbox: TestSandbox = loopback();
-    let document = pdf(&[(200, 100)], "", &[]);
+    let document = pdf(&[(200, 100), (10, 10)], "", &[]);
+    let handed = document.len() as u64;
     send_document(&mut sandbox, &document).expect("handed over");
-    let past = Access {
-        page: 3,
-        password: None,
-    };
+    assert!(open_drawing(&mut sandbox, handed, None, true, &mut Ids::new()).is_ok());
     assert_eq!(
-        read_drawing(&mut sandbox, document.len() as u64, &past, &mut Ids::new()).err(),
+        read_page(&mut sandbox, handed, 3, &mut Ids::new()).err(),
         Some(DrawFailure::Refused(DrawRefusal::NoSuchPage))
     );
-}
-
-#[test]
-fn any_other_document_lists_one_page_of_no_stated_size() {
-    let mut sandbox: TestSandbox = loopback();
-    send_document(&mut sandbox, RICH.as_bytes()).expect("handed over");
     assert_eq!(
-        read_pages(&mut sandbox, RICH.len() as u64, &Access::default()),
-        Ok(Pages {
-            count: 1,
-            sizes: Vec::new()
-        })
-    );
-    assert!(
-        read_drawing(
-            &mut sandbox,
-            RICH.len() as u64,
-            &Access::default(),
-            &mut Ids::new()
-        )
-        .is_ok(),
-        "the document was kept to read"
+        read_page(&mut sandbox, handed, 0, &mut Ids::new()).err(),
+        Some(DrawFailure::Refused(DrawRefusal::NotOpen))
     );
 }
 
 #[test]
-fn a_pdf_protected_by_a_password_asks_for_it_and_opens_with_it() {
+fn a_document_with_no_page_to_choose_is_read_at_once() {
+    let mut sandbox: TestSandbox = loopback();
+    for (document, choosing) in [
+        (pdf(&[(200, 100)], "", &[]), true),
+        (pdf(&[(200, 100), (300, 400)], "", &[]), false),
+        (RICH.as_bytes().to_vec(), true),
+    ] {
+        send_document(&mut sandbox, &document).expect("handed over");
+        let opened = open_drawing(
+            &mut sandbox,
+            document.len() as u64,
+            None,
+            choosing,
+            &mut Ids::new(),
+        );
+        assert!(matches!(opened, Ok(Opening::Read(_))), "{opened:?}");
+        assert_eq!(
+            page_size(&mut sandbox, 0),
+            Err(DrawFailure::Refused(DrawRefusal::NotOpen)),
+            "nothing is kept open"
+        );
+    }
+}
+
+#[test]
+fn a_pdf_protected_by_a_password_is_kept_to_be_opened_with_another() {
     let mut sandbox: TestSandbox = loopback();
     let encrypt = "<</Filter /Standard /V 2 /R 3 /Length 128 /P -3904 /O <0ba3835f88f90388e74e54584125ce142be0de24c6b0d37746e075b891756671> /U <ad944bba9714b0f0d9da179955e1945000000000000000000000000000000000>>>";
     let document = pdf(
@@ -1112,44 +1124,101 @@ fn a_pdf_protected_by_a_password_asks_for_it_and_opens_with_it() {
         "/Encrypt 5 0 R /ID [<0123456789abcdef0123456789abcdef> <0123456789abcdef0123456789abcdef>]",
         &[encrypt],
     );
-    send_document(&mut sandbox, &document).expect("handed over");
     let handed = document.len() as u64;
+    send_document(&mut sandbox, &document).expect("handed over");
+    let mut open = |password: Option<&[u8]>| {
+        open_drawing(&mut sandbox, handed, password, true, &mut Ids::new()).map(|opening| {
+            match opening {
+                Opening::Pages { count, .. } => count,
+                Opening::Read(_) => 0,
+            }
+        })
+    };
     assert_eq!(
-        read_pages(&mut sandbox, handed, &Access::default()),
+        open(None),
         Err(DrawFailure::Refused(DrawRefusal::NeedsPassword))
     );
-    let wrong = Access {
-        page: 0,
-        password: Some(b"guess"),
-    };
     assert_eq!(
-        read_pages(&mut sandbox, handed, &wrong),
-        Err(DrawFailure::Refused(DrawRefusal::WrongPassword))
+        open(Some(b"guess")),
+        Err(DrawFailure::Refused(DrawRefusal::WrongPassword)),
+        "tried again with no second upload"
     );
-    let right = Access {
-        page: 1,
-        password: Some(b"user"),
-    };
-    assert_eq!(
-        read_pages(&mut sandbox, handed, &right).map(|pages| pages.count),
-        Ok(2)
-    );
-    let read = read_drawing(&mut sandbox, handed, &right, &mut Ids::new()).expect("page two");
+    assert_eq!(open(Some(b"user")), Ok(2));
+    let read = read_page(&mut sandbox, handed, 1, &mut Ids::new()).expect("page two");
     assert!((read.drawing.page().size().x - 200.0 / 3.0).abs() < 1e-6);
+    assert!(read
+        .unkept
+        .contains(tairix_drawing::unkept::Lost::Protection));
+}
+
+#[test]
+fn a_document_handed_over_lets_go_of_what_was_kept() {
+    let mut sandbox: TestSandbox = loopback();
+    let document = pdf(&[(200, 100), (300, 400)], "", &[]);
+    send_document(&mut sandbox, &document).expect("handed over");
+    assert!(open_drawing(
+        &mut sandbox,
+        document.len() as u64,
+        None,
+        true,
+        &mut Ids::new()
+    )
+    .is_ok());
+    send_document(&mut sandbox, RICH.as_bytes()).expect("handed over");
+    assert_eq!(
+        page_size(&mut sandbox, 0),
+        Err(DrawFailure::Refused(DrawRefusal::NotOpen))
+    );
+    let read = read_drawing(&mut sandbox, RICH.len() as u64, &mut Ids::new());
+    assert!(read.is_ok(), "the new document is the one read");
+}
+
+#[test]
+fn a_kept_document_asked_after_with_nothing_kept_or_out_of_grammar_is_refused() {
+    let mut service = DrawEditService::default();
+    let refusal = |reply: Vec<u8>| reply.get(1).copied();
+    let not_open = Some(DrawRefusal::NotOpen.to_wire());
+    let malformed = Some(DrawRefusal::MalformedRequest.to_wire());
+    for op in [OP_PAGE_SIZE, OP_PAGE] {
+        assert_eq!(refusal(service.handle(&[op, 0, 0, 0, 0])), not_open);
+        assert_eq!(refusal(service.handle(&[op, 0, 0])), malformed);
+        assert_eq!(refusal(service.handle(&[op, 0, 0, 0, 0, 0])), malformed);
+    }
+    assert_eq!(
+        refusal(service.handle(&[super::OP_OPEN, 2])),
+        malformed,
+        "a choice is a flag"
+    );
 }
 
 #[test]
 fn a_password_past_the_bound_is_refused_unsent() {
     let mut sandbox = answering(Vec::new());
     let long = [b'x'; MAX_PASSWORD_BYTES + 1];
-    let access = Access {
-        page: 0,
-        password: Some(&long),
-    };
     assert_eq!(
-        read_pages(&mut sandbox, 0, &access),
-        Err(DrawFailure::Refused(DrawRefusal::MalformedRequest))
+        open_drawing(&mut sandbox, 0, Some(&long), true, &mut Ids::new()).err(),
+        Some(DrawFailure::Refused(DrawRefusal::MalformedRequest))
     );
+}
+
+/// Answers every open with a document of two pages, keeping each request it
+/// is asked.
+struct Recording(Rc<RefCell<Vec<Vec<u8>>>>);
+
+impl Service for Recording {
+    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+        self.0.borrow_mut().push(request.to_vec());
+        pages_reply(2, &[])
+    }
+}
+
+/// A reply of a PDF kept open: `count` pages, and then `extra`.
+fn pages_reply(count: u32, extra: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(REPLY_PAGES);
+    w.u32(count);
+    w.raw(extra);
+    w.finish()
 }
 
 #[test]
@@ -1161,49 +1230,57 @@ fn a_worker_decodes_into_what_its_share_holds_beside_the_document() {
         NullSink,
     );
     for handed in [30, 130] {
-        assert!(read_pages(&mut sandbox, handed, &Access::default()).is_ok());
+        assert!(open_drawing(&mut sandbox, handed, None, true, &mut Ids::new()).is_ok());
     }
     let rooms: Vec<Option<u64>> = asked
         .borrow()
         .iter()
-        .map(|request| Reader::new(request.get(1..).unwrap_or_default()).u64().ok())
+        .map(|request| Reader::new(request.get(2..).unwrap_or_default()).u64().ok())
         .collect();
     assert_eq!(rooms, [Some(70), Some(0)]);
 }
 
 #[test]
-fn a_page_list_out_of_its_grammar_is_not_believed() {
-    let reply = |count: u32, listed: u32, sizes: &[(f64, f64)]| {
-        let mut w = Writer::new();
-        w.u8(REPLY_PAGES);
-        w.u32(count);
-        w.u32(listed);
-        for &(width, height) in sizes {
-            w.raw(&width.to_le_bytes());
-            w.raw(&height.to_le_bytes());
-        }
-        w.finish()
-    };
+fn a_kept_pdfs_replies_out_of_their_grammar_are_not_believed() {
     for bad in [
-        reply(0, 0, &[]),
-        reply(1, 2, &[(1.0, 1.0), (1.0, 1.0)]),
-        reply(1, 1, &[(f64::NAN, 1.0)]),
-        reply(1, 1, &[(-1.0, 1.0)]),
-        reply(2, 1, &[]),
-        reply(u32::MAX, u32::MAX, &[]),
+        pages_reply(0, &[]),
+        pages_reply(1, &[]),
+        pages_reply(2, &[0]),
+        alloc::vec![REPLY_PAGES, 2, 0, 0],
     ] {
         let mut sandbox = answering(alloc::vec![bad]);
         assert_eq!(
-            read_pages(&mut sandbox, 0, &Access::default()),
-            Err(DrawFailure::ReplyMalformed)
+            open_drawing(&mut sandbox, 0, None, true, &mut Ids::new()).err(),
+            Some(DrawFailure::ReplyMalformed)
         );
     }
-    let mut sandbox = answering(alloc::vec![reply(3, 1, &[(10.0, 20.0)])]);
+    let mut sandbox = answering(alloc::vec![pages_reply(2, &[])]);
     assert_eq!(
-        read_pages(&mut sandbox, 0, &Access::default()),
-        Ok(Pages {
-            count: 3,
-            sizes: alloc::vec![(10.0, 20.0)]
-        })
+        open_drawing(&mut sandbox, 0, None, false, &mut Ids::new()).err(),
+        Some(DrawFailure::ReplyMalformed),
+        "a document kept open when no page was to be chosen"
     );
+    let mut sandbox = answering(alloc::vec![pages_reply(3, &[])]);
+    let opening = open_drawing(&mut sandbox, 0, None, true, &mut Ids::new());
+    assert!(
+        matches!(opening, Ok(Opening::Pages { count: 3 })),
+        "{opening:?}"
+    );
+    let size = |reply: Vec<u8>| page_size(&mut answering(alloc::vec![reply]), 0);
+    let sized = |width: f64, height: f64| {
+        let mut w = Writer::new();
+        w.u8(REPLY_PAGE_SIZE);
+        w.raw(&width.to_le_bytes());
+        w.raw(&height.to_le_bytes());
+        w.finish()
+    };
+    assert_eq!(size(sized(3.0, 4.0)), Ok((3.0, 4.0)));
+    for bad in [
+        sized(f64::INFINITY, 4.0),
+        sized(3.0, 0.0),
+        alloc::vec![REPLY_PAGE_SIZE, 0],
+        pages_reply(2, &[]),
+    ] {
+        assert_eq!(size(bad), Err(DrawFailure::ReplyMalformed));
+    }
 }

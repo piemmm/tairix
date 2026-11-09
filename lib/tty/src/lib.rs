@@ -105,22 +105,61 @@ pub const fn is_line_delimiter(byte: u8) -> bool {
 /// `next` yields the queue's next byte and removes it, so a byte it hands over
 /// is always placed in `out`: nothing is taken that is not delivered.
 #[must_use]
-pub fn read_bounded<F>(out: &mut [u8], mut next: F) -> usize
+pub fn read_bounded<F>(out: &mut [u8], next: F) -> usize
 where
     F: FnMut() -> Option<u8>,
 {
+    let room = out.len();
     let mut taken = 0usize;
-    for slot in out.iter_mut() {
-        let Some(byte) = next() else {
-            break;
-        };
+    for (slot, byte) in out
+        .iter_mut()
+        .zip(Line::new(core::iter::from_fn(next), room))
+    {
         *slot = byte;
         taken += 1;
-        if is_line_delimiter(byte) {
-            break;
-        }
     }
     taken
+}
+
+/// How many of the bytes `queued` yields a terminal read with room for `room`
+/// would take under the bound [`read_bounded`] applies, looking at no byte
+/// past the last it would take: what a reader peeking at a queue delivers
+/// before it removes anything.
+#[must_use]
+pub fn bounded_len<I: IntoIterator<Item = u8>>(queued: I, room: usize) -> usize {
+    Line::new(queued.into_iter(), room).count()
+}
+
+/// The bytes one terminal read takes from `queued`: at most `room`, through
+/// the first line delimiter, and never one more pulled from `queued`.
+struct Line<I> {
+    queued: I,
+    room: usize,
+    ended: bool,
+}
+
+impl<I> Line<I> {
+    const fn new(queued: I, room: usize) -> Self {
+        Self {
+            queued,
+            room,
+            ended: false,
+        }
+    }
+}
+
+impl<I: Iterator<Item = u8>> Iterator for Line<I> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        if self.ended || self.room == 0 {
+            return None;
+        }
+        let byte = self.queued.next()?;
+        self.room -= 1;
+        self.ended = is_line_delimiter(byte);
+        Some(byte)
+    }
 }
 
 /// Classify one input byte as a cooked-mode job-control signal, if it is one.

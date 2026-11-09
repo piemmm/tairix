@@ -559,6 +559,15 @@ pub enum DriverError {
     /// The caller was being terminated, so the operation was abandoned
     /// before it was answered. Maps to [`Errno::Interrupted`].
     Interrupted = 28,
+    /// The transfer was corrupted between the device and the host — a CRC,
+    /// end-bit or framing error on the bus — so the driver discarded it and
+    /// recovered the bus.
+    ///
+    /// It says nothing of the medium, unlike
+    /// [`MediumError`](Self::MediumError), and nothing of a dead device,
+    /// unlike [`DeviceFault`](Self::DeviceFault): the same request issued
+    /// again normally succeeds. Maps to the reissuable [`Errno::WouldBlock`].
+    TransferCorrupted = 29,
 }
 
 impl DriverError {
@@ -608,6 +617,7 @@ impl DriverError {
             26 => Ok(Self::TimedOut),
             27 => Ok(Self::NotReady),
             28 => Ok(Self::Interrupted),
+            29 => Ok(Self::TransferCorrupted),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -648,7 +658,7 @@ impl DriverError {
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
             Self::DeviceFault => Errno::DeviceFault,
-            Self::Busy | Self::NotReady => Errno::WouldBlock,
+            Self::Busy | Self::NotReady | Self::TransferCorrupted => Errno::WouldBlock,
             Self::Unsupported | Self::NotImplemented => Errno::NotImplemented,
         }
     }
@@ -1593,6 +1603,7 @@ mod tests {
         assert_eq!(DriverError::ReadOnly.as_errno(), Errno::ReadOnly);
         assert_eq!(DriverError::TimedOut.as_errno(), Errno::TimedOut);
         assert_eq!(DriverError::NotReady.as_errno(), Errno::WouldBlock);
+        assert_eq!(DriverError::TransferCorrupted.as_errno(), Errno::WouldBlock);
     }
 
     #[test]
@@ -1626,6 +1637,7 @@ mod tests {
             DriverError::TimedOut,
             DriverError::NotReady,
             DriverError::Interrupted,
+            DriverError::TransferCorrupted,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));

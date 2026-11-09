@@ -27,6 +27,7 @@ use core::hash::Hash;
 use tairix_abi::Errno;
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
+use tairix_inline::ArrayVec;
 use tairix_kernel_sec::Charge;
 
 /// What one sender holds at an endpoint.
@@ -433,9 +434,14 @@ impl<K: Copy + Eq + Hash, L: Lane> Lanes<K, L> {
 /// Who an endpoint's change leaves to be woken once its lock is released: the
 /// thread a freed slot was handed to, a sender's watchers, or, when an
 /// endpoint ends, every thread waiting at it.
+///
+/// A structure that could not record a waiter for want of memory leaves that
+/// waiter to a broadcast on its wait-queue instead, which the next wake it
+/// gives carries ([`Self::tasks`] names it as task `0`).
 #[derive(Debug)]
 pub struct RoomWake<K> {
     waiting: Waiting<K>,
+    broadcast: bool,
 }
 
 #[derive(Debug)]
@@ -443,8 +449,10 @@ enum Waiting<K> {
     Nobody,
     /// The thread a freed slot was handed to.
     One(u64),
-    /// A sender's watchers.
-    Sender(Vec<u64>),
+    /// A sender's watchers, copied out so its group keeps its room.
+    Sender(ArrayVec<u64, WATCH_BATCH>),
+    /// A sender's watchers, more than a batch holds, with their group's room.
+    Crowd(Vec<u64>),
     /// Every watcher at an endpoint that went.
     Everyone(Map<K, Vec<u64>>),
     /// Every thread waiting for room at an endpoint that went, or whose every
@@ -456,9 +464,20 @@ impl<K> RoomWake<K> {
     /// Nobody to wake.
     #[must_use]
     pub const fn none() -> Self {
+        Self::of(Waiting::Nobody)
+    }
+
+    const fn of(waiting: Waiting<K>) -> Self {
         Self {
-            waiting: Waiting::Nobody,
+            waiting,
+            broadcast: false,
         }
+    }
+
+    /// This wake, carrying a broadcast as well when `owed`.
+    fn broadcast_if(mut self, owed: bool) -> Self {
+        self.broadcast |= owed;
+        self
     }
 
     /// Whether nobody needs waking.
@@ -475,6 +494,7 @@ impl<K> RoomWake<K> {
         };
         let sender = match &self.waiting {
             Waiting::Sender(tasks) => tasks.as_slice(),
+            Waiting::Crowd(tasks) => tasks.as_slice(),
             _ => &[],
         };
         let everyone = match &self.waiting {
@@ -489,6 +509,7 @@ impl<K> RoomWake<K> {
             .chain(sender.iter().copied())
             .chain(everyone.into_iter().flatten().copied())
             .chain(all.into_iter().flatten().copied())
+            .chain(self.broadcast.then_some(0))
     }
 }
 
@@ -542,6 +563,9 @@ pub(crate) struct RoomWaiters<K> {
     /// Each waiting thread's record, by scheduler task.
     records: Map<u64, Record<K>>,
     lines: Map<K, Line>,
+    /// A waiter went unrecorded for want of memory, and the next room handed
+    /// out is broadcast.
+    overflowed: bool,
 }
 
 impl<K: Copy + Eq + Hash> RoomWaiters<K> {
@@ -550,6 +574,7 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
         Self {
             records: map(),
             lines: map(),
+            overflowed: false,
         }
     }
 
@@ -590,22 +615,29 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
     ///
     /// [`Errno::OutOfMemory`] when its record cannot be kept: it must then not
     /// park, since nothing would wake it.
-    pub(crate) fn look(&mut self, task: u64, sender: K, free: usize) -> Result<bool, Errno> {
-        if !self.records.contains_key(&task) {
-            self.wait(task, sender)?;
+    pub(crate) fn look(&mut self, task: u64, sender: K, free: usize) -> bool {
+        if !self.records.contains_key(&task) && self.wait(task, sender).is_err() {
+            self.overflow();
+            return false;
         }
         let Some(record) = self.records.get(&task) else {
-            return Ok(false);
+            return false;
         };
         let (waits_as, standing) = (record.sender, record.standing);
         if standing != Standing::Waiting {
-            return Ok(true);
+            return true;
         }
         if free > self.held(waits_as) {
             self.designate(task);
-            return Ok(true);
+            return true;
         }
-        Ok(false)
+        false
+    }
+
+    /// A waiter could not be recorded: it is woken by the broadcast the next
+    /// room handed out carries, rather than refused its wait.
+    pub(crate) fn overflow(&mut self) {
+        self.overflowed = true;
     }
 
     /// Put `task` at the back of `sender`'s line.
@@ -654,16 +686,15 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
     /// thread holds to the first thread in its line, answering whom to wake.
     /// With nobody waiting this is one look at an empty map.
     pub(crate) fn hand_out(&mut self, sender: K, free: usize) -> RoomWake<K> {
+        let broadcast = core::mem::take(&mut self.overflowed);
         if self.records.is_empty() || free <= self.held(sender) {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         }
         let Some(first) = self.first_waiting(sender) else {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         };
         self.designate(first);
-        RoomWake {
-            waiting: Waiting::One(first),
-        }
+        RoomWake::of(Waiting::One(first)).broadcast_if(broadcast)
     }
 
     /// `task` sent into the slot it holds, which ends its wait. Answers
@@ -722,12 +753,11 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
 
     /// Every record, for a change that touches every lane at once.
     pub(crate) fn take_everyone(&mut self) -> RoomWake<K> {
+        let broadcast = core::mem::take(&mut self.overflowed);
         if self.records.is_empty() {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         }
-        RoomWake {
-            waiting: Waiting::All(core::mem::replace(self, Self::new())),
-        }
+        RoomWake::of(Waiting::All(core::mem::replace(self, Self::new()))).broadcast_if(broadcast)
     }
 
     /// Drop `task`'s record from its line, answering its sender and standing.
@@ -751,14 +781,24 @@ impl<K: Copy + Eq + Hash> RoomWaiters<K> {
     }
 }
 
+/// Watchers one answer wakes while their group keeps its room, so the next
+/// watch needs no memory; a larger group hands its list over whole.
+const WATCH_BATCH: usize = 16;
+
 /// Tasks watching for the answers their sender is owed, grouped by that
 /// sender, so an answer wakes its own sender's watchers and no other's. A
 /// watch is found by its task, so recording and forgetting one cost the same
 /// however many watch.
+///
+/// A group outlives its watches until its sender ends or the endpoint goes,
+/// so a thread that watches again and again needs memory only the first time.
 pub(crate) struct Watchers<K> {
     /// Each watching task's sender, and its place in that sender's group.
     records: Map<u64, (K, usize)>,
     groups: Map<K, Vec<u64>>,
+    /// A watcher went unrecorded for want of memory, and the next answer is
+    /// broadcast.
+    overflowed: bool,
 }
 
 impl<K: Copy + Eq + Hash> Watchers<K> {
@@ -767,16 +807,25 @@ impl<K: Copy + Eq + Hash> Watchers<K> {
         Self {
             records: map(),
             groups: map(),
+            overflowed: false,
         }
     }
 
-    /// Record `task` as watching for `sender`'s answers. Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfMemory`] when the record cannot be kept; the task must
-    /// then not park on a wake that would never come.
-    pub(crate) fn watch(&mut self, task: u64, sender: K) -> Result<(), Errno> {
+    /// A watcher could not be recorded: it is woken by the broadcast the next
+    /// answer carries, rather than refused its wait.
+    pub(crate) fn overflow(&mut self) {
+        self.overflowed = true;
+    }
+
+    /// Record `task` as watching for `sender`'s answers, idempotently; one the
+    /// heap has no room to record is left to a broadcast ([`Self::overflow`]).
+    pub(crate) fn watch(&mut self, task: u64, sender: K) {
+        if self.record(task, sender).is_err() {
+            self.overflow();
+        }
+    }
+
+    fn record(&mut self, task: u64, sender: K) -> Result<(), Errno> {
         if self.records.contains_key(&task) {
             return Ok(());
         }
@@ -809,25 +858,23 @@ impl<K: Copy + Eq + Hash> Watchers<K> {
             .is_some_and(|&(watching, _)| watching == sender)
     }
 
-    /// Forget `task`'s watch as `sender`, returning an emptied group for the
-    /// caller to drop outside its lock.
-    pub(crate) fn unwatch(&mut self, task: u64, sender: K) -> Option<Vec<u64>> {
+    /// Forget `task`'s watch as `sender`.
+    pub(crate) fn unwatch(&mut self, task: u64, sender: K) {
         if !self.watches(task, sender) {
-            return None;
+            return;
         }
-        let (_, at) = self.records.remove(&task)?;
-        let group = self.groups.get_mut(&sender)?;
+        let Some((_, at)) = self.records.remove(&task) else {
+            return;
+        };
+        let Some(group) = self.groups.get_mut(&sender) else {
+            return;
+        };
         if at < group.len() {
             let _ = group.swap_remove(at);
         }
         let moved = group.get(at).copied();
         if let Some(record) = moved.and_then(|moved| self.records.get_mut(&moved)) {
             record.1 = at;
-        }
-        if group.is_empty() {
-            self.groups.remove(&sender)
-        } else {
-            None
         }
     }
 
@@ -841,40 +888,66 @@ impl<K: Copy + Eq + Hash> Watchers<K> {
         sender: K,
         mut named: impl Iterator<Item = u64>,
     ) -> RoomWake<K> {
+        let broadcast = core::mem::take(&mut self.overflowed);
         if self.groups.is_empty() || named.any(|task| self.watches(task, sender)) {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         }
-        self.take_watching_as(sender)
+        self.take_watching_as(sender).broadcast_if(broadcast)
     }
 
     /// The tasks watching for `sender`'s answers, taken, so each watch is
-    /// woken once: for an answer no thread its call names watches for, and
-    /// for a sender that has ended.
+    /// woken once, for an answer no thread its call names watches for. The
+    /// group stays, with its room, for the next watch.
     pub(crate) fn take_watching_as(&mut self, sender: K) -> RoomWake<K> {
-        if self.groups.is_empty() {
-            return RoomWake::none();
+        let broadcast = core::mem::take(&mut self.overflowed);
+        let Self {
+            records, groups, ..
+        } = self;
+        let Some(group) = groups.get_mut(&sender) else {
+            return RoomWake::none().broadcast_if(broadcast);
+        };
+        for task in group.iter() {
+            records.remove(task);
         }
+        let waiting = if group.len() <= WATCH_BATCH {
+            let mut batch = ArrayVec::new();
+            for task in group.drain(..) {
+                let copied = batch.try_push(task);
+                debug_assert!(copied.is_ok(), "a group past its batch was copied");
+            }
+            Waiting::Sender(batch)
+        } else {
+            Waiting::Crowd(core::mem::take(group))
+        };
+        RoomWake::of(waiting).broadcast_if(broadcast)
+    }
+
+    /// The tasks watching for the answers of `sender`, which has ended, taken
+    /// with its group.
+    pub(crate) fn take_ended(&mut self, sender: K) -> RoomWake<K> {
+        let broadcast = core::mem::take(&mut self.overflowed);
         let Some(group) = self.groups.remove(&sender) else {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         };
         for task in &group {
             self.records.remove(task);
         }
-        RoomWake {
-            waiting: Waiting::Sender(group),
-        }
+        RoomWake::of(Waiting::Crowd(group)).broadcast_if(broadcast)
     }
 
     /// Every watching task, for an endpoint that went.
     pub(crate) fn take_everyone(&mut self) -> RoomWake<K> {
+        let broadcast = core::mem::take(&mut self.overflowed);
         if self.groups.is_empty() {
-            return RoomWake::none();
+            return RoomWake::none().broadcast_if(broadcast);
         }
         // Keeps its table, so nothing is freed under the endpoint's lock.
         self.records.clear();
-        RoomWake {
-            waiting: Waiting::Everyone(core::mem::replace(&mut self.groups, map())),
-        }
+        RoomWake::of(Waiting::Everyone(core::mem::replace(
+            &mut self.groups,
+            map(),
+        )))
+        .broadcast_if(broadcast)
     }
 }
 
@@ -1181,12 +1254,10 @@ mod tests {
     #[test]
     fn watchers_wake_only_the_tasks_watching_as_a_sender_and_each_once() {
         let mut watchers = Watchers::new();
-        watchers.watch(1, 7).expect("recorded");
-        watchers.watch(2, 9).expect("recorded");
-        watchers.watch(3, 9).expect("recorded");
-        watchers
-            .watch(3, 9)
-            .expect("recording twice changes nothing");
+        watchers.watch(1, 7);
+        watchers.watch(2, 9);
+        watchers.watch(3, 9);
+        watchers.watch(3, 9);
         assert!(watchers.take_watching_as(5).is_empty());
         assert_eq!(tasks(&watchers.take_watching_as(9)), [2, 3]);
         assert!(watchers.take_watching_as(9).is_empty(), "woken once");
@@ -1197,24 +1268,73 @@ mod tests {
     fn however_many_watch_as_one_sender_each_is_named() {
         let mut watchers = Watchers::new();
         for task in 0..100 {
-            watchers.watch(task, 4).expect("recorded");
+            watchers.watch(task, 4);
         }
-        watchers.watch(500, 8).expect("recorded");
+        watchers.watch(500, 8);
         let woken = watchers.take_watching_as(4);
         assert_eq!(tasks(&woken), (0..100).collect::<Vec<u64>>());
         assert_eq!(tasks(&watchers.take_everyone()), [500]);
     }
 
     #[test]
-    fn a_forgotten_watch_is_not_woken_and_an_emptied_group_goes() {
+    fn a_forgotten_watch_is_not_woken_and_an_ended_sender_takes_its_group() {
         let mut watchers = Watchers::new();
-        watchers.watch(1, 7).expect("recorded");
-        watchers.watch(2, 7).expect("recorded");
-        assert!(watchers.unwatch(1, 7).is_none(), "the group still waits");
-        assert!(watchers.unwatch(9, 7).is_none());
-        assert!(watchers.unwatch(2, 7).is_some(), "the emptied group goes");
+        watchers.watch(1, 7);
+        watchers.watch(2, 7);
+        watchers.unwatch(1, 7);
+        watchers.unwatch(9, 7);
+        assert_eq!(tasks(&watchers.take_ended(7)), [2]);
+        assert!(watchers.groups.is_empty(), "the ended sender's group went");
         assert!(watchers.take_everyone().is_empty());
         assert!(RoomWake::<u64>::none().is_empty());
+    }
+
+    /// A thread watching, being woken and watching again keeps reusing its
+    /// group's room, so its watches after the first need no memory.
+    ///
+    /// Regression: an emptied or woken group was dropped and the next watch
+    /// allocated a fresh one, so every call-reply wait allocated and a wait
+    /// on an exhausted heap was refused at once.
+    #[test]
+    fn a_watch_after_the_first_needs_no_memory() {
+        let mut watchers = Watchers::new();
+        watchers.watch(1, 7);
+        let held = |watchers: &Watchers<u64>| {
+            let group = watchers.groups.get(&7).expect("the group stays");
+            (
+                group.as_ptr(),
+                group.capacity(),
+                watchers.records.allocated_bytes(),
+                watchers.groups.allocated_bytes(),
+            )
+        };
+        let first = held(&watchers);
+        for _ in 0..3 {
+            assert_eq!(tasks(&watchers.take_watching_as(7)), [1]);
+            assert_eq!(held(&watchers), first, "woken, the group kept its room");
+            watchers.watch(1, 7);
+            watchers.unwatch(1, 7);
+            assert_eq!(held(&watchers), first, "forgotten, the group kept its room");
+            watchers.watch(1, 7);
+            assert_eq!(held(&watchers), first, "watching again took no memory");
+        }
+    }
+
+    /// A group larger than one batch is woken whole, every watcher once.
+    #[test]
+    fn a_crowd_past_one_batch_is_woken_whole() {
+        let mut watchers = Watchers::new();
+        let crowd = u64::try_from(WATCH_BATCH).expect("a small batch") + 5;
+        for task in 0..crowd {
+            watchers.watch(task, 4);
+        }
+        assert_eq!(
+            tasks(&watchers.take_watching_as(4)),
+            (0..crowd).collect::<Vec<u64>>()
+        );
+        assert!(watchers.take_watching_as(4).is_empty(), "woken once");
+        watchers.watch(3, 4);
+        assert_eq!(tasks(&watchers.take_watching_as(4)), [3]);
     }
 
     /// Forgetting watches in any order leaves every other where a later look
@@ -1223,15 +1343,15 @@ mod tests {
     fn forgetting_watches_in_any_order_keeps_the_rest_found() {
         let mut watchers = Watchers::new();
         for task in 0..8 {
-            watchers.watch(task, 7).expect("recorded");
+            watchers.watch(task, 7);
         }
         for task in [0, 7, 3, 4] {
-            assert!(watchers.unwatch(task, 7).is_none(), "{task}");
+            watchers.unwatch(task, 7);
         }
         for task in [1, 2, 5, 6] {
             assert!(watchers.watches(task, 7), "{task}");
         }
-        assert!(watchers.unwatch(6, 7).is_none());
+        watchers.unwatch(6, 7);
         assert_eq!(tasks(&watchers.take_watching_as(7)), [1, 2, 5]);
     }
 
@@ -1242,9 +1362,9 @@ mod tests {
     fn an_answer_wakes_its_senders_watchers_only_when_its_call_names_none() {
         let mut watchers = Watchers::new();
         for task in [1, 2, 3] {
-            watchers.watch(task, 7).expect("recorded");
+            watchers.watch(task, 7);
         }
-        watchers.watch(4, 9).expect("recorded");
+        watchers.watch(4, 9);
         assert!(
             watchers.take_answered(7, [2, 8].into_iter()).is_empty(),
             "its poster watches"
@@ -1267,7 +1387,7 @@ mod tests {
     /// Each of `tasks` looks for room as `sender` with nothing free, in turn.
     fn waiting(waiters: &mut RoomWaiters<u64>, sender: u64, tasks: &[u64]) {
         for &task in tasks {
-            assert_eq!(waiters.look(task, sender, 0), Ok(false), "{task}");
+            assert!(!waiters.look(task, sender, 0), "{task}");
         }
     }
 
@@ -1309,8 +1429,8 @@ mod tests {
     #[test]
     fn a_used_slot_ends_the_wait_and_a_free_one_is_taken_by_a_look() {
         let mut waiters = RoomWaiters::new();
-        assert_eq!(waiters.look(1, 7, 1), Ok(true), "a slot nobody holds");
-        assert_eq!(waiters.look(2, 7, 1), Ok(false), "held, so the next waits");
+        assert!(waiters.look(1, 7, 1), "a slot nobody holds");
+        assert!(!waiters.look(2, 7, 1), "held, so the next waits");
         assert!(waiters.consume(1));
         assert!(!waiters.consume(2), "a waiting thread holds none to use");
         assert_eq!(tasks(&waiters.hand_out(7, 1)), [2]);
@@ -1365,7 +1485,7 @@ mod tests {
                 let task = draw % 4 + 1;
                 match (draw >> 8) % 5 {
                     0 => {
-                        let _ = waiters.look(task, 7, free).expect("recorded");
+                        let _ = waiters.look(task, 7, free);
                     }
                     1 if free > 0 && waiters.has_room(task, 7, free) => {
                         let _ = waiters.consume(task);

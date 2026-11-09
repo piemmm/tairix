@@ -555,6 +555,17 @@ mod program {
         }
     }
 
+    /// Whether `bytes` of art a paint can draw again may stay cached at the
+    /// band this process was last told.
+    fn keeps_cached(bytes: usize) -> bool {
+        use tairix_reclaim::{CacheBudget, PressureGauge, ReclaimClass};
+        tairix_rt::pressure::gauge().growth_permitted(
+            ReclaimClass::DisposableUi,
+            CacheBudget::from_ceiling(bytes),
+            bytes,
+        )
+    }
+
     // ---- the run ---------------------------------------------------------
 
     /// The event loop: park, drain, apply, paint once. A dead channel ends the
@@ -607,7 +618,7 @@ mod program {
                 concluded.whole |= shell.adopt_desktop(game, &mut damage);
             }
             if pressure_moved.replace(false) {
-                game.trim();
+                game.fit_memory(keeps_cached);
             }
             let _ = game.tick(now, &mut damage);
             shell.adopt_answers(game, now, &mut damage);
@@ -746,6 +757,7 @@ mod program {
             refresh: desktop.refresh(),
         };
         let mut game = Game::new(setup, now, &mut rng);
+        game.fit_memory(keeps_cached);
         let mut shell = Shell {
             window,
             endpoint: binding.endpoint(),

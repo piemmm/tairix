@@ -71,7 +71,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemWrite, MountFlags,
 };
 use tairix_abi::{DriverHandle, Errno};
-use tairix_drv_fs_arxfs::{Keying, ARXFS};
+use tairix_drv_fs_arxfs::{IntegrityLog, Keying, ARXFS};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::{
@@ -436,7 +436,9 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "transform_cache_unbuilt");
         return None;
     };
-    let fs = fs.with_cluster_cache(installed);
+    let fs = fs
+        .with_cluster_cache(installed)
+        .with_integrity_log(IntegrityLog::new(audit));
     let volume_uuid = fs.volume_uuid();
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");

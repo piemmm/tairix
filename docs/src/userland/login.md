@@ -335,8 +335,12 @@ The authority owns a session's start and end, so it is the one principal the
 cue authority lets make their sounds ([`soundd`](./soundd.md)). It cues
 `Login` once a session is started — text, or a fresh desktop, never one a
 switch resumes — and `Logout` once a session has ended, never when a desktop
-only stepped aside. Each cue is posted and its answer collected from the
-supervision wait-set, so a sound never delays a prompt or a session.
+only stepped aside and never for one the loader refused: that session never
+ran, so nobody logged out. A desktop the loader refused is recorded as
+`SESSION_LAUNCH_FAILED` with the loader's `reason`, and the reason is written
+to login's own stderr, rather than as an ordinary `SESSION_ENDED`. Each cue is
+posted and its answer collected from the supervision wait-set, so a sound
+never delays a prompt or a session.
 
 ## The terminal a session leaves behind
 
@@ -654,7 +658,7 @@ the font service's, are retired.
 | 10002 | `AUTH_FAILED`           | Warn  | an authentication attempt was rejected           |
 | 10003 | `LOCKED_OUT`            | Error | the attempt budget was exhausted; nothing started |
 | 10004 | `SESSION_ENDED`         | Info  | a launched session returned, or one switched away from was found to have ended |
-| 10005 | `SESSION_LAUNCH_FAILED` | Error | a user authenticated but their session would not start |
+| 10005 | `SESSION_LAUNCH_FAILED` | Error/Warn | a user authenticated but their session would not start (`Warn` from the graphical round) |
 | 10006 | `CONSOLE_ERROR`         | Error | the controlling terminal could not be read/written |
 | 10007 | `ELEVATE_GRANTED`       | Info  | an elevation re-authenticated and its command ran to completion |
 | 10008 | `ELEVATE_REFUSED`       | Warn  | an elevation was refused (cause audited, never disclosed) |

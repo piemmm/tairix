@@ -227,11 +227,13 @@ whole ([System Information API](../abi/sysinfo.md)).
   warning. One is asked at a time, never while an attach is on its way, and
   an attach asked for meanwhile waits for its answer. No window is moved off
   the volume for it, and one a window has come to show meanwhile is not asked
-  at all. One found in use is asked again at once when a program the app
-  started exits or a window shows it and leaves it again, and otherwise after
-  a wait that doubles from five seconds to five minutes, since nothing says
-  when a holder elsewhere lets go. A lost volume waits for its owner's own
-  *Eject*.
+  at all. One found in use is asked again at once when an application the
+  app launched exits or a window shows it and leaves it again — not when one
+  of its own decoders ends, which held nothing — and otherwise after a wait
+  that doubles from five seconds to five minutes, since nothing says when a
+  holder elsewhere lets go. A lost volume waits for its owner's own *Eject*,
+  and neither it nor one waiting behind an unmount on its way is a time the
+  app's loop wakes for.
 - **`mount IMAGE [TARGET]`** mounts one from a terminal, and
   **`unmount NAME`** detaches it ([utilities](../userland/utilities.md)).
 

@@ -8,10 +8,11 @@ use core::cell::Cell;
 use tairix_collections::{OrderedMap, OrderedSet};
 use tairix_util::fallible::{self, try_push};
 
+use crate::error::tolerated;
 use crate::filter::{self, Decoded};
 use crate::lex::{is_regular, is_white, Lexer, Token};
-use crate::limits::{MAX_OBJECTS, MAX_OBJECT_STREAM_OBJECTS, MAX_XREF_SECTIONS};
-use crate::object::{Dict, Object};
+use crate::limits::{MAX_LEX_PASSES, MAX_OBJECTS, MAX_OBJECT_STREAM_OBJECTS, MAX_XREF_SECTIONS};
+use crate::object::{Dict, Name, ObjRef, Object};
 use crate::parse::{self, Endstreams, Indirect};
 use crate::PdfError;
 
@@ -43,18 +44,34 @@ impl Xref {
         self.entries.get(&num).copied().unwrap_or(Entry::Free)
     }
 
-    /// Record `entry` for `num` unless a newer section already did.
-    fn define(&mut self, num: u32, entry: Entry) -> Result<(), PdfError> {
-        if !self.entries.contains_key(&num) {
-            self.entries.try_insert(num, entry)?;
+    /// Record `entry` for `num` unless a newer section already did, the room
+    /// it takes charged to `budget` where its row was decoded from a stream.
+    fn define(
+        &mut self,
+        num: u32,
+        entry: Entry,
+        budget: Option<&Cell<u64>>,
+    ) -> Result<(), PdfError> {
+        if self.entries.contains_key(&num) {
+            return Ok(());
         }
+        if let Some(budget) = budget {
+            return charged_insert(&mut self.entries, num, entry, budget);
+        }
+        self.entries.try_insert(num, entry)?;
         Ok(())
     }
 
     /// Place the objects of object stream `stream` a repair found, each
     /// where no object of its number lies later in the file: an update
-    /// appends, so the later definition is the newer.
-    pub(crate) fn index(&mut self, stream: u32, objects: &ObjectStream) -> Result<(), PdfError> {
+    /// appends, so the later definition is the newer. The room their places
+    /// take is charged to `budget`, as the stream's bytes were.
+    pub(crate) fn index(
+        &mut self,
+        stream: u32,
+        objects: &ObjectStream,
+        budget: &Cell<u64>,
+    ) -> Result<(), PdfError> {
         let Some(at) = self.offset_of(stream) else {
             return Ok(());
         };
@@ -67,8 +84,12 @@ impl Xref {
                 }
             };
             if older {
-                self.entries
-                    .try_insert(num, Entry::Compressed { stream, index })?;
+                charged_insert(
+                    &mut self.entries,
+                    num,
+                    Entry::Compressed { stream, index },
+                    budget,
+                )?;
             }
         }
         Ok(())
@@ -91,6 +112,24 @@ impl Xref {
     }
 }
 
+/// `value` put at `key` in `map`, the room the map grows by charged to
+/// `budget`, or nothing put where that is refused: what is built from what a
+/// file's streams decode to is held to the budget they decode within.
+pub(crate) fn charged_insert<K: Ord + Copy, V>(
+    map: &mut OrderedMap<K, V>,
+    key: K,
+    value: V,
+    budget: &Cell<u64>,
+) -> Result<(), PdfError> {
+    let before = map.allocated_bytes();
+    map.try_insert(key, value)?;
+    let charged = filter::charge(budget, map.allocated_bytes().saturating_sub(before));
+    if charged.is_err() {
+        map.remove(&key);
+    }
+    charged
+}
+
 /// A file being read: its bytes, what its streams may decode to, and where
 /// its `endstream` keywords lie.
 #[derive(Clone, Copy)]
@@ -101,11 +140,12 @@ pub(crate) struct Source<'a> {
 }
 
 /// The cross-reference `source`'s file states: its sections from `startxref`
-/// back through `/Prev`, the newest definition of each object winning.
+/// back through `/Prev`, the newest definition of each object and the newest
+/// value of each trailer key winning.
 pub(crate) fn chained(source: Source<'_>) -> Result<Xref, PdfError> {
     let file = source.file;
     let mut xref = Xref::default();
-    let mut trailer = Dict::new();
+    let mut trailers = Vec::new();
     let mut seen = OrderedSet::new();
     let mut next = Some(startxref(file)?);
     while let Some(offset) = next {
@@ -115,12 +155,24 @@ pub(crate) fn chained(source: Source<'_>) -> Result<Xref, PdfError> {
         if !seen.try_insert(offset)? {
             return Err(PdfError::Malformed);
         }
-        let section = section(source, offset, &mut xref)?;
-        next = offset_entry(&section, b"Prev");
-        trailer.complete_from(&section)?;
+        let trailer = section(source, offset, &mut xref)?;
+        next = offset_entry(&trailer, b"Prev");
+        try_push(&mut trailers, trailer)?;
     }
-    xref.trailer = Some(trailer);
+    xref.trailer = Some(merged(trailers.into_iter().rev())?);
     Ok(xref)
+}
+
+/// The trailer `trailers`, the oldest first, make together: the newest value
+/// of each key, merged once however many there are.
+fn merged(trailers: impl Iterator<Item = Dict>) -> Result<Dict, PdfError> {
+    let mut entries = Vec::new();
+    for trailer in trailers {
+        let trailer = trailer.into_entries();
+        entries.try_reserve(trailer.len())?;
+        entries.extend(trailer);
+    }
+    Dict::from_written(entries)
 }
 
 /// The offset the last `startxref` names.
@@ -170,7 +222,7 @@ fn section(source: Source<'_>, offset: usize, xref: &mut Xref) -> Result<Dict, P
         stream_section(source, stream, xref)?;
     }
     for num in freed {
-        xref.define(num, Entry::Free)?;
+        xref.define(num, Entry::Free, None)?;
     }
     Ok(trailer)
 }
@@ -201,7 +253,7 @@ fn table(lexer: &mut Lexer<'_>, xref: &mut Xref) -> Result<Vec<u32>, PdfError> {
             match kind {
                 b"n" => {
                     let offset = usize::try_from(offset).map_err(|_| PdfError::Malformed)?;
-                    xref.define(num, Entry::Offset(offset))?;
+                    xref.define(num, Entry::Offset(offset), None)?;
                 }
                 b"f" => try_push(&mut freed, num)?,
                 _ => return Err(PdfError::Malformed),
@@ -271,7 +323,7 @@ fn stream_section(source: Source<'_>, offset: usize, xref: &mut Xref) -> Result<
                 // object.
                 _ => Entry::Free,
             };
-            xref.define(num, entry)?;
+            xref.define(num, entry, Some(budget))?;
         }
     }
     Ok(dict)
@@ -333,7 +385,7 @@ fn big_endian(bytes: &[u8]) -> u64 {
 /// never indirect.
 fn decode_direct(data: &[u8], dict: &Dict, budget: &Cell<u64>) -> Result<Decoded, PdfError> {
     let chain = filter::chain(dict.get(b"Filter"), dict.get(b"DecodeParms"))?;
-    let decoded = filter::decode(data, &chain, budget)?;
+    let decoded = filter::decode(alloc::borrow::Cow::Borrowed(data), &chain, budget)?;
     if decoded.image.is_some() {
         return Err(PdfError::Malformed);
     }
@@ -350,8 +402,9 @@ pub(crate) struct ObjectStream {
 }
 
 impl ObjectStream {
-    /// The object stream of dictionary `dict` whose bytes decoded to `data`.
-    pub(crate) fn new(dict: &Dict, data: Vec<u8>) -> Result<Self, PdfError> {
+    /// The object stream of dictionary `dict` whose bytes decoded to `data`,
+    /// the index it keeps of them charged to `budget`, as its bytes were.
+    pub(crate) fn new(dict: &Dict, data: Vec<u8>, budget: &Cell<u64>) -> Result<Self, PdfError> {
         let count = dict
             .get(b"N")
             .and_then(Object::as_int)
@@ -363,6 +416,12 @@ impl ObjectStream {
         let first = offset_entry(dict, b"First")
             .filter(|&first| first <= data.len())
             .ok_or(PdfError::Malformed)?;
+        // Each object's place, by order and by number.
+        filter::charge(
+            budget,
+            count
+                .saturating_mul(core::mem::size_of::<(u32, usize)>() + core::mem::size_of::<u32>()),
+        )?;
         let mut objects = Vec::new();
         objects.try_reserve_exact(count)?;
         let mut lexer = Lexer::new(&data[..first], 0);
@@ -391,8 +450,13 @@ impl ObjectStream {
 
     /// Object `num`, which the cross-reference places `index`th; found by its
     /// number where a damaged cross-reference has the index wrong, the first
-    /// of that number then.
-    pub(crate) fn object(&self, index: u32, num: u32) -> Result<Object, PdfError> {
+    /// of that number then. What reading it lexes is charged to `lexing`.
+    pub(crate) fn object(
+        &self,
+        index: u32,
+        num: u32,
+        lexing: &Cell<u64>,
+    ) -> Result<Object, PdfError> {
         let listed = usize::try_from(index)
             .ok()
             .and_then(|index| self.objects.get(index))
@@ -407,7 +471,7 @@ impl ObjectStream {
                 .filter(|&&(held, _)| held == num)
         };
         let &(_, at) = listed.or_else(found).ok_or(PdfError::Malformed)?;
-        parse::object(&mut Lexer::new(&self.data, at), 0)
+        parse::object(&mut Lexer::charged(&self.data, at, lexing), 0)
     }
 
     /// The object numbers it holds, in order.
@@ -416,17 +480,12 @@ impl ObjectStream {
     }
 }
 
-/// How many times over its own length a repair may lex a file: each byte
-/// of a file is read about once, so past this the file was built to make
-/// every head it holds read the rest again.
-const REPAIR_PASSES: usize = 16;
-
 /// What a repair may still lex.
 struct Lexing(usize);
 
 impl Lexing {
     fn of(file: &[u8]) -> Self {
-        Self(file.len().saturating_mul(REPAIR_PASSES))
+        Self(file.len().saturating_mul(MAX_LEX_PASSES))
     }
 
     /// Spend `bytes`.
@@ -438,13 +497,15 @@ impl Lexing {
 
 /// The cross-reference rebuilt by scanning `file`: every `N G obj` it holds
 /// outside an object read before it, the last of a number winning, the
-/// object streams among them left to be indexed, and the last trailer or
-/// cross-reference stream naming a catalog.
+/// object streams among them left to be indexed, and for its trailer every
+/// trailer and cross-reference stream naming what a trailer does, merged as
+/// a chain of updates is.
 pub(crate) fn repair(file: &[u8]) -> Result<Xref, PdfError> {
     let mut lexing = Lexing::of(file);
     let ends = Endstreams::default();
     let mut direct = OrderedMap::new();
-    let mut streamed: Option<(usize, Dict)> = None;
+    let mut trailers = Vec::new();
+    let mut encryption = None;
     let (mut at, mut covered) = (0, 0);
     while let Some(found) = parse::find(&file[at..], b"obj") {
         let keyword = at + found;
@@ -462,34 +523,44 @@ pub(crate) fn repair(file: &[u8]) -> Result<Xref, PdfError> {
         let (read, stopped) = dict_at(file, start);
         lexing.spend(stopped - start)?;
         let mut object_stream = false;
-        match read {
+        match read? {
             Some((dict, true)) => {
                 covered = ends.at_or_after(file, stopped)?.unwrap_or(stopped);
                 object_stream = dict.is_type(b"ObjStm");
-                // A cross-reference stream naming a catalog is a trailer.
-                if dict.is_type(b"XRef") && dict.get(b"Root").is_some() {
-                    streamed = Some((start, dict));
+                // A cross-reference stream is its section's trailer.
+                if dict.is_type(b"XRef") && is_trailer(&dict) {
+                    try_push(&mut trailers, (start, dict))?;
                 }
             }
-            Some((_, false)) => covered = stopped,
+            Some((dict, false)) => {
+                covered = stopped;
+                if is_encryption(&dict) {
+                    encryption = Some((num, start));
+                }
+            }
             None => {}
         }
         direct.try_insert(num, (start, object_stream))?;
     }
+    trailers_in(file, &mut lexing, &mut trailers)?;
     let mut xref = Xref::default();
-    let mut trailer = last_trailer(file, &mut lexing)?;
     for (&num, &(offset, object_stream)) in &direct {
         xref.entries.try_insert(num, Entry::Offset(offset))?;
         if object_stream {
             try_push(&mut xref.unindexed, num)?;
         }
     }
-    if let Some((offset, dict)) = streamed {
-        if trailer.as_ref().is_none_or(|&(at, _)| at < offset) {
-            trailer = Some((offset, dict));
-        }
-    }
-    xref.trailer = trailer.map(|(_, dict)| dict);
+    trailers.sort_unstable_by_key(|&(offset, _)| offset);
+    xref.trailer = if trailers.is_empty() {
+        // With no trailer left, an encryption dictionary the scan found still
+        // says the file is encrypted, so it is never read as plaintext.
+        encryption
+            .filter(|(num, start)| direct.get(num).is_some_and(|&(at, _)| at == *start))
+            .map(|(num, _)| encrypted_by(num))
+            .transpose()?
+    } else {
+        Some(merged(trailers.into_iter().map(|(_, dict)| dict))?)
+    };
     Ok(xref)
 }
 
@@ -531,28 +602,37 @@ fn number_before(file: &[u8], end: usize) -> Option<(u64, usize)> {
 }
 
 /// The dictionary of the indirect object at `offset`, if it is one, and
-/// whether a stream follows it; and where reading it stopped.
-fn dict_at(file: &[u8], offset: usize) -> (Option<(Dict, bool)>, usize) {
+/// whether a stream follows it; and where reading it stopped. What does not
+/// parse is no dictionary; only a bound passed or the heap's refusal is an
+/// error, since passing over those would read a different file.
+fn dict_at(file: &[u8], offset: usize) -> (Result<Option<(Dict, bool)>, PdfError>, usize) {
     let mut lexer = Lexer::new(file, offset);
     let read = (|| {
         for _ in 0..3 {
-            lexer.next().ok()?;
+            if tolerated(lexer.next())?.is_none() {
+                return Ok(None);
+            }
         }
-        if lexer.next().ok()? != Some(Token::DictOpen) {
-            return None;
+        if tolerated(lexer.next())?.flatten() != Some(Token::DictOpen) {
+            return Ok(None);
         }
-        let dict = parse::dict_body(&mut lexer, 0).ok()?;
-        let is_stream = lexer.next().ok().flatten() == Some(Token::Keyword(b"stream"));
-        Some((dict, is_stream))
+        let Some(dict) = tolerated(parse::dict_body(&mut lexer, 0))? else {
+            return Ok(None);
+        };
+        let is_stream = tolerated(lexer.next())?.flatten() == Some(Token::Keyword(b"stream"));
+        Ok(Some((dict, is_stream)))
     })();
     (read, lexer.at())
 }
 
-/// The last `trailer` dictionary in `file` naming a catalog, and where it
-/// is: each read from its keyword on, those within one read already passed
-/// over, and what is lexed spent from `lexing`.
-fn last_trailer(file: &[u8], lexing: &mut Lexing) -> Result<Option<(usize, Dict)>, PdfError> {
-    let mut found = None;
+/// Every `trailer` dictionary in `file` naming what a trailer does, each with
+/// where it is, onto `found`: each read from its keyword on, those within
+/// one read already passed over, and what is lexed spent from `lexing`.
+fn trailers_in(
+    file: &[u8],
+    lexing: &mut Lexing,
+    found: &mut Vec<(usize, Dict)>,
+) -> Result<(), PdfError> {
     let (mut at, mut covered) = (0, 0);
     while let Some(offset) = parse::find(&file[at..], b"trailer") {
         let keyword = at + offset;
@@ -561,19 +641,48 @@ fn last_trailer(file: &[u8], lexing: &mut Lexing) -> Result<Option<(usize, Dict)
             continue;
         }
         let mut lexer = Lexer::new(file, at);
-        if lexer.next().ok().flatten() != Some(Token::DictOpen) {
-            continue;
-        }
-        let read = parse::dict_body(&mut lexer, 0);
+        let read = match tolerated(lexer.next()) {
+            Ok(Some(Some(Token::DictOpen))) => tolerated(parse::dict_body(&mut lexer, 0)),
+            Ok(_) => Ok(None),
+            Err(error) => Err(error),
+        };
+        // Charged whatever follows the keyword, so a token run that never
+        // opens a dictionary is not lexed again for free at every keyword in it.
         lexing.spend(lexer.at() - at)?;
-        if let Ok(dict) = read {
-            covered = lexer.at();
-            if dict.get(b"Root").and_then(Object::as_reference).is_some() {
-                found = Some((keyword, dict));
-            }
+        let Some(dict) = read? else {
+            continue;
+        };
+        covered = lexer.at();
+        if is_trailer(&dict) {
+            try_push(found, (keyword, dict))?;
         }
     }
-    Ok(found)
+    Ok(())
+}
+
+/// Whether `dict`, a trailer or a cross-reference stream's, names what a
+/// repair takes from one: the catalog, or the encryption dictionary.
+fn is_trailer(dict: &Dict) -> bool {
+    dict.get(b"Root").and_then(Object::as_reference).is_some() || dict.get(b"Encrypt").is_some()
+}
+
+/// Whether `dict` is an encryption dictionary (ISO 32000-2 §7.6.2): it names
+/// a security handler and holds what the standard handler's or a public-key
+/// handler's must.
+fn is_encryption(dict: &Dict) -> bool {
+    let holds = |key: &[u8]| dict.get(key).is_some();
+    dict.name(b"Filter").is_some()
+        && ((holds(b"O") && holds(b"U")) || holds(b"Recipients") || holds(b"CF"))
+}
+
+/// A trailer naming object `num` the file's encryption dictionary.
+fn encrypted_by(num: u32) -> Result<Dict, PdfError> {
+    let mut entries = Vec::new();
+    try_push(
+        &mut entries,
+        (Name::of(b"Encrypt")?, Object::Ref(ObjRef { num, gen: 0 })),
+    )?;
+    Dict::from_written(entries)
 }
 
 #[cfg(test)]

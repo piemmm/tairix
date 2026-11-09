@@ -186,7 +186,17 @@ pub trait Sessions {
     /// (fd 2, the inherited diagnostic stream); a silent skip would hide a
     /// dead service behind a working-looking boot.
     fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64);
+    /// Sleep for `ns` without needing memory, after a park the machine was
+    /// too short of it to take, and state the first of a run of such refusals.
+    fn rest(&mut self, ns: u64, first: bool);
 }
+
+/// The first rest after a park refused for want of memory.
+pub const FIRST_REST_NS: u64 = 10_000_000;
+
+/// The longest: each refusal in a row doubles the rest up to this, so a
+/// machine that stays short costs PID 1 one attempt a second.
+pub const LONGEST_REST_NS: u64 = 1_000_000_000;
 
 /// What one [`Sessions::wait_next`] park observed.
 ///
@@ -213,6 +223,9 @@ pub enum Woke {
     Mounts,
     /// The park lapsed at the deadline the caller passed.
     Deadline,
+    /// The machine was too short of memory to complete the park. Nothing is
+    /// wrong with the wait itself, so PID 1 rests and parks again.
+    Short,
     /// The park itself failed (`-errno`) — a kernel-state inconsistency PID 1
     /// surfaces rather than continuing blindly.
     Failed,
@@ -359,6 +372,7 @@ pub fn supervise<E: Services, S: Sessions>(
         slot.pid = pid;
     }
 
+    let mut rest_ns = 0u64;
     loop {
         let any_session = slots[..consoles].iter().any(Slot::alive);
         if !any_session && !services.any_running() {
@@ -369,7 +383,22 @@ pub fn supervise<E: Services, S: Sessions>(
         }
 
         let mut status = 0i32;
-        let reaped = match sys.wait_next(services.next_timeout_ns(), &mut status) {
+        let woke = sys.wait_next(services.next_timeout_ns(), &mut status);
+        let resting = rest_ns;
+        rest_ns = 0;
+        let reaped = match woke {
+            // No event says memory came back that a park could hear without
+            // the memory it lacked, so PID 1 sleeps on what needs none, ever
+            // longer, rather than ending the system or spinning.
+            Woke::Short => {
+                rest_ns = if resting == 0 {
+                    FIRST_REST_NS
+                } else {
+                    resting.saturating_mul(2).min(LONGEST_REST_NS)
+                };
+                sys.rest(rest_ns, resting == 0);
+                continue;
+            }
             Woke::Failed => return Outcome::WaitFailed,
             Woke::Control => {
                 services.serve_control();
@@ -560,6 +589,9 @@ mod tests {
         reports: Vec<(Vec<u8>, u32, i64)>,
         /// Park lengths the loop passed, most recent last.
         parks: Vec<u64>,
+        /// Rests taken after a park refused for memory, and whether each was
+        /// the first of its run.
+        rests: Vec<(u64, bool)>,
         next_spawn: usize,
         next_wait: usize,
     }
@@ -576,6 +608,7 @@ mod tests {
                 statuses: Vec::new(),
                 reports: Vec::new(),
                 parks: Vec::new(),
+                rests: Vec::new(),
                 next_spawn: 0,
                 next_wait: 0,
             }
@@ -619,6 +652,38 @@ mod tests {
         fn report_launch_failure(&mut self, path: &[u8], console: u32, err: i64) {
             self.reports.push((path.to_vec(), console, err));
         }
+        fn rest(&mut self, ns: u64, first: bool) {
+            self.rests.push((ns, first));
+        }
+    }
+
+    /// A park the machine is too short of memory to take is rested out and
+    /// taken again, each rest in a run longer than the last up to the longest,
+    /// and the run's first stated; PID 1 neither ends nor spins.
+    ///
+    /// Regression: such a park answered `WaitFailed` and PID 1 exited.
+    #[test]
+    fn a_park_refused_for_memory_is_rested_out_not_fatal() {
+        let mut waits = vec![Woke::Short; 9];
+        waits.push(Woke::Control);
+        waits.push(Woke::Short);
+        let mut sys = ScriptedSessions::new(1, vec![10], waits);
+        let mut services = MockServices::perpetual();
+        assert_eq!(
+            supervise(&mut services, &mut sys, session(b"login")),
+            Outcome::WaitFailed,
+            "only the spent script ends it"
+        );
+        assert_eq!(services.served, 1, "the request after the run was answered");
+        let mut expected = Vec::new();
+        let mut rest = FIRST_REST_NS;
+        for at in 0..9 {
+            expected.push((rest, at == 0));
+            rest = (rest * 2).min(LONGEST_REST_NS);
+        }
+        expected.push((FIRST_REST_NS, true));
+        assert_eq!(sys.rests, expected);
+        assert_eq!(sys.rests[8].0, LONGEST_REST_NS, "the rest stops growing");
     }
 
     #[test]

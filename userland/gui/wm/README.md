@@ -322,19 +322,20 @@ router**:
   pressure gauge and the same `tairix_reclaim::shrink_target` ordering the
   caches use. It is deliberately a **policy**, not a fourth cache: evicting
   a visible window's pixels is a visual defect rather than a slowdown, so
-  what goes is decided by what the user can see — nothing at `Normal`,
-  every hidden or minimised window at `Mild` and deeper, and additionally
-  every visible but unfocused window at `Critical`; the focused window is
-  never released, because there would be nothing to show in its place, and
-  neither is a window the embedder has not declared app-presented (nobody
-  would answer its redraw). Only the pixels go: the window keeps its client
-  size, origin, furniture, cursor, viewport, and size state, still
-  hit-tests, focuses, and resizes, and composites transparent until its app
-  presents again. The buffer is user data, so it is overwritten before it is
-  dropped. Because a present carries only a damage rectangle, every release
-  queues a redraw request the embedder drains through `pending_redraws` —
-  the crate asks for the repaint but never speaks the window protocol
-  itself.
+  what goes is decided by what the user can see — nothing at `Normal` and
+  every hidden or minimised window at `Mild` and deeper. A visible window is
+  never released, because its present would establish the same buffer again
+  at once, and neither is a window the embedder has not declared
+  app-presented (nobody would answer its redraw). Only the pixels go: the
+  window keeps its client size, origin, furniture, cursor, viewport, and
+  size state, still hit-tests, focuses, and resizes, and composites
+  transparent until its app presents again. The buffer is user data, so it is
+  overwritten before it is dropped. A release queues a notice the embedder
+  drains through `take_released_notices`, so the client can let go of its own
+  copies; because a present carries only a damage rectangle, showing a
+  released window queues a redraw request the embedder drains through
+  `pending_redraws` — the crate asks for the repaint but never speaks the
+  window protocol itself.
 
 - The desktop layer (`compositor`): an optional `Surface` the session
   installs with `set_desktop`, composited between the opaque background
@@ -503,8 +504,8 @@ bytes falling to zero; a released window compositing transparent while the
 rest of the desktop stays pixel-identical; a released window still
 hit-testing, still drawing its furniture, still focusing and still resizing;
 a full-window present after a release restoring pixel-identical content;
-the whole band ladder (nothing at normal, hidden at mild, visible-unfocused
-only at critical, the focused window never released at any band, and a
-session-painted window never released at all); exactly one redraw request
-queued per release; and an app that ignores the request leaving its window
-blank while the desktop composites on unharmed.
+the whole band ladder (nothing at normal, hidden at mild and deeper, no
+visible window released at any band, and a session-painted window never
+released at all); exactly one redraw request queued when a released window is
+shown; and an app that ignores the request leaving its window blank while the
+desktop composites on unharmed.

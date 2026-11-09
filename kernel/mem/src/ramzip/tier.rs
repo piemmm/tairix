@@ -103,6 +103,10 @@ pub struct VmContext<'a, P: PageTable> {
 /// blob. `charged_compressed` / `charged_stored` are recorded at
 /// compression time and released verbatim: the books never depend on
 /// the blob's own (corruptible) length.
+///
+/// An entry that failed its check is kept, `lost`, until its range is
+/// released: with it gone the page would read as never written, and the
+/// next touch would be handed a zeroed frame in place of the data.
 struct Entry {
     task: u64,
     flags: MapFlags,
@@ -110,6 +114,7 @@ struct Entry {
     charged_compressed: usize,
     charged_stored: usize,
     blob: SealedBlob,
+    lost: bool,
 }
 
 /// A remembered demand fault, used as a locality hint.
@@ -164,9 +169,9 @@ pub enum CompressRefusal {
 }
 
 /// Why a restore failed. `NoEntry` and `AlreadyMapped` leave the tier
-/// unchanged; `Authentication` and `Corrupt` discard the entry (its
-/// bytes are unrecoverable), audit-log the loss, and return no
-/// plaintext.
+/// unchanged; `Authentication` and `Corrupt` audit-log the loss, return no
+/// plaintext, and keep the entry as lost, which every later restore of the
+/// page reports as `Lost`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FaultError {
@@ -183,12 +188,15 @@ pub enum FaultError {
     /// the data is not lost.
     PageTable(PageTableError),
     /// The entry failed authentication: tampered, replayed, or
-    /// damaged. Fail closed — the entry is gone and no plaintext was
-    /// produced.
+    /// damaged. Fail closed — the page's contents are gone and no
+    /// plaintext was produced.
     Authentication,
     /// The entry failed metadata validation or decompression after
     /// authenticating. Fail closed as above.
     Corrupt,
+    /// The entry failed its check at an earlier restore: the page's
+    /// contents are gone, and stay so until its range is released.
+    Lost,
 }
 
 /// The outcome of one [`Ramzip::warm_step`].

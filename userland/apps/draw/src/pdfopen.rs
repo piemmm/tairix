@@ -1,11 +1,12 @@
 //! The window a PDF is opened through when it asks something first: which of
 //! its pages, or its password. Each is a form in a dialog window of its own,
-//! answered or turned down; what it is for travels through it untouched.
+//! answered or turned down; what it is for travels through it untouched. A
+//! page's size is shown beside its number once it is known, each asked for as
+//! the number comes to it.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
-use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::CursorShape;
 use tairix_controls::{
@@ -19,7 +20,8 @@ use tairix_raster::Surface;
 use tairix_sandbox::drawedit::MAX_PASSWORD_BYTES;
 use tairix_theme::Theme;
 use tairix_util::secret::WipedBuf;
-use tairix_window::docapp::{AppRequest, AppView, Outcome};
+use tairix_util::utf8::shown;
+use tairix_window::docapp::{AppRequest, AppView, Outcome, Relayout};
 
 use crate::layout::Faces;
 
@@ -31,15 +33,15 @@ const WIDTH: u32 = 440;
 const HEIGHT: u32 = 210;
 
 /// What the window asks.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Asked {
-    /// Which page: the document's count, and the sizes of as many as were
-    /// listed, in points.
+    /// Which page: the document's count, and its first page's width and
+    /// height, in points, where it could be had.
     Page {
         /// How many pages it has.
         count: u32,
-        /// Their widths and heights, first first.
-        sizes: Vec<(f64, f64)>,
+        /// The first page's width and height.
+        first: Option<(f64, f64)>,
     },
     /// Its password, `wrong` where one given did not open it.
     Password {
@@ -48,21 +50,41 @@ pub enum Asked {
     },
 }
 
+/// What the window was answered with.
+#[derive(Debug)]
+pub enum Given {
+    /// The page chosen, counting from 0.
+    Page(u32),
+    /// The password typed, erased when dropped.
+    Password(WipedBuf),
+}
+
 /// How the window was answered, and what it was asked for.
 #[derive(Debug)]
 pub enum Answered<T> {
-    /// Open the document: page `page` where a page was asked, with
-    /// `password` where one was.
+    /// Open the document with what was given.
     Open {
         /// What the window was asked for.
         ticket: T,
-        /// The page chosen, counting from 0.
-        page: Option<u32>,
-        /// The password given, erased when dropped.
-        password: Option<WipedBuf>,
+        /// The page or the password.
+        given: Given,
     },
+    /// The size of a page, counting from 0, is wanted beside its number; the
+    /// window stays.
+    Size(u32),
     /// Turned down: the document is not opened.
     Cancelled(T),
+}
+
+/// The page sizes a page question learns as its number moves.
+struct Sizes {
+    /// The page whose size is known, counting from 0, and that size.
+    known: Option<(u32, (f64, f64))>,
+    /// The page whose size is being fetched.
+    asking: Option<u32>,
+    /// The page whose size was last refused, not asked for again until
+    /// another is chosen.
+    refused: Option<u32>,
 }
 
 /// The window, asking for `T`.
@@ -70,7 +92,10 @@ pub struct OpenPdf<T> {
     title: String,
     /// The whole window, where its dialog is laid out.
     bounds: Rect,
-    asked: Asked,
+    /// Its form's rows as last laid out.
+    rows: Option<FieldLayout>,
+    /// A page question's sizes; a password question has none.
+    sizes: Option<Sizes>,
     dialog: Dialog,
     group: FieldGroup,
     ticket: Option<T>,
@@ -80,19 +105,26 @@ impl<T> OpenPdf<T> {
     /// The window asking `asked` of the document named `name`, for `ticket`.
     #[must_use]
     pub fn new(name: &str, asked: Asked, ticket: T) -> Self {
-        let (message, row) = match &asked {
-            Asked::Page { count, sizes } => {
-                let most = i32::try_from(*count).unwrap_or(i32::MAX);
+        let name = shown(name);
+        let (message, row, sizes) = match asked {
+            Asked::Page { count, first } => {
+                let most = i32::try_from(count).unwrap_or(i32::MAX);
                 let mut row =
                     FieldRow::new("Page", FieldControl::Number(NumberField::new(1, 1, most)));
-                row.set_description(page_size(sizes, 1));
+                row.set_description(first.map(page_size));
+                let sizes = Sizes {
+                    known: first.map(|size| (0, size)),
+                    asking: None,
+                    refused: first.is_none().then_some(0),
+                };
                 (
                     format!("\u{201c}{name}\u{201d} has {count} pages. Which one opens?"),
                     row,
+                    Some(sizes),
                 )
             }
             Asked::Password { wrong } => (
-                if *wrong {
+                if wrong {
                     format!("That password does not open \u{201c}{name}\u{201d}. Try another.")
                 } else {
                     format!("\u{201c}{name}\u{201d} is protected by a password.")
@@ -101,6 +133,7 @@ impl<T> OpenPdf<T> {
                     "Password",
                     FieldControl::Secret(SecretField::new(MAX_PASSWORD_BYTES)),
                 ),
+                None,
             ),
         };
         let title = format!("Open \u{201c}{name}\u{201d}");
@@ -119,11 +152,17 @@ impl<T> OpenPdf<T> {
         Self {
             title,
             bounds: Rect::default(),
-            asked,
+            rows: None,
+            sizes,
             dialog,
             group,
             ticket: Some(ticket),
         }
+    }
+
+    /// What it was asked for, while it is unanswered.
+    pub const fn ticket(&self) -> Option<&T> {
+        self.ticket.as_ref()
     }
 
     /// What it was asked for, taken: a window closed unanswered hands it
@@ -132,17 +171,45 @@ impl<T> OpenPdf<T> {
         self.ticket.take()
     }
 
-    /// Its form's rows as laid out in the window.
-    fn rows_layout(&self, scale: Scale, theme: &Theme) -> Option<FieldLayout> {
-        let content = self.dialog.content_rect(self.bounds, scale, theme)?;
-        Some(self.group.layout(content, self.bounds, scale, theme))
-    }
-
     /// The window's content drawn into `surface`.
     pub fn render(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
         self.dialog.render(surface, self.bounds, scale, theme);
-        if let Some(layout) = self.rows_layout(scale, theme) {
+        if let Some(layout) = self.rows {
             self.group.render(surface, layout, scale, theme);
+        }
+    }
+
+    /// Page `page`'s size, counting from 0, has come back as `size`, or could
+    /// not be had: shown where that page is still the one chosen, and the
+    /// chosen one's asked for where it is not.
+    pub fn sized(
+        &mut self,
+        page: u32,
+        size: Option<(f64, f64)>,
+        damage: &mut Region,
+    ) -> Outcome<AppRequest<Answered<T>>> {
+        let Some(sizes) = &mut self.sizes else {
+            return Outcome::none();
+        };
+        if sizes.asking != Some(page) {
+            return Outcome::none();
+        }
+        sizes.asking = None;
+        match size {
+            Some(size) => sizes.known = Some((page, size)),
+            None => sizes.refused = Some(page),
+        }
+        match self.chosen() {
+            Some(chosen) => self.describe(chosen, damage),
+            None => Outcome::none(),
+        }
+    }
+
+    /// The page number the form holds, counting from 1.
+    fn chosen(&self) -> Option<i32> {
+        match self.group.rows().first().map(FieldRow::control) {
+            Some(FieldControl::Number(field)) => Some(field.value()),
+            _ => None,
         }
     }
 
@@ -167,18 +234,18 @@ impl<T> OpenPdf<T> {
                     let page = field.value();
                     return self.describe(page, damage);
                 }
-                let page = u32::try_from(field.value() - 1).ok();
+                let Some(page) = page_index(field.value()) else {
+                    return Outcome::none();
+                };
                 self.answered(|ticket| Answered::Open {
                     ticket,
-                    page,
-                    password: None,
+                    given: Given::Page(page),
                 })
             }
             Some(FieldControl::Secret(field)) => match typed_password(field) {
                 Ok(password) => self.answered(|ticket| Answered::Open {
                     ticket,
-                    page: None,
-                    password: Some(password),
+                    given: Given::Password(password),
                 }),
                 Err(unoffered) => {
                     // Nothing typed is ever shown, so too much is typed again
@@ -214,19 +281,33 @@ impl<T> OpenPdf<T> {
         }
     }
 
-    /// Restate page `page`'s size beside its number, the window laid out
-    /// again where that changed the row.
+    /// Restate page `page`'s size beside its number, counting from 1, the
+    /// window laid out again where that changed the row: the size where it is
+    /// known, and otherwise asked for, one page at a time.
     fn describe(&mut self, page: i32, damage: &mut Region) -> Outcome<AppRequest<Answered<T>>> {
-        let (Asked::Page { sizes, .. }, Some(row)) =
-            (&self.asked, self.group.rows_mut().first_mut())
-        else {
+        let (Some(sizes), Some(row)) = (&mut self.sizes, self.group.rows_mut().first_mut()) else {
             return Outcome::none();
         };
-        if !row.set_description(page_size(sizes, page)) {
+        let Some(index) = page_index(page) else {
             return Outcome::none();
+        };
+        let shown = sizes
+            .known
+            .filter(|&(known, _)| known == index)
+            .map(|(_, size)| page_size(size));
+        let ask = shown.is_none() && sizes.asking.is_none() && sizes.refused != Some(index);
+        if ask {
+            sizes.asking = Some(index);
         }
-        damage.add(self.bounds);
-        Outcome::reshaped()
+        let mut outcome = Outcome {
+            request: ask.then(|| AppRequest::Own(Answered::Size(index))),
+            relayout: Relayout::None,
+        };
+        if row.set_description(shown) {
+            damage.add(self.bounds);
+            outcome.relayout = Relayout::Reported;
+        }
+        outcome
     }
 
     /// Follow what the form's row reported: a page's size restated as its
@@ -280,12 +361,14 @@ fn typed_password(field: &SecretField) -> Result<WipedBuf, Unoffered> {
     Ok(held)
 }
 
-/// Page `page`'s size as its row describes it, where it was listed.
-fn page_size(sizes: &[(f64, f64)], page: i32) -> Option<String> {
-    let listed = usize::try_from(page - 1)
-        .ok()
-        .and_then(|index| sizes.get(index));
-    listed.map(|&(width, height)| format!("{} \u{d7} {} points", whole(width), whole(height)))
+/// The page a page number names, counting from 0.
+fn page_index(number: i32) -> Option<u32> {
+    u32::try_from(number.checked_sub(1)?).ok()
+}
+
+/// A page's width and height as its row describes them.
+fn page_size((width, height): (f64, f64)) -> String {
+    format!("{} \u{d7} {} points", whole(width), whole(height))
 }
 
 /// A page side, to the nearest point.
@@ -309,12 +392,16 @@ impl<T> AppView for OpenPdf<T> {
         &mut self,
         width: u32,
         height: u32,
-        _: &Theme,
-        _: Scale,
+        theme: &Theme,
+        scale: Scale,
         _: Faces,
         damage: &mut Region,
     ) {
         self.bounds = Rect::new(0, 0, width, height);
+        self.rows = self
+            .dialog
+            .content_rect(self.bounds, scale, theme)
+            .map(|content| self.group.layout(content, self.bounds, scale, theme));
         damage.add(self.bounds);
     }
 
@@ -345,7 +432,7 @@ impl<T> AppView for OpenPdf<T> {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome<AppRequest<Answered<T>>> {
-        let Some(rows) = self.rows_layout(scale, theme) else {
+        let Some(rows) = self.rows else {
             return Outcome::none();
         };
         match *input {
@@ -387,7 +474,7 @@ impl<T> AppView for OpenPdf<T> {
     fn advance(&mut self, now_ns: u64, scale: Scale, theme: &Theme, damage: &mut Region) {
         // Laid out nowhere, the rows' clocks still move: a deadline left
         // passed would wake the window without end.
-        let rows = self.rows_layout(scale, theme).unwrap_or_else(|| {
+        let rows = self.rows.unwrap_or_else(|| {
             self.group
                 .layout(Rect::default(), self.bounds, scale, theme)
         });

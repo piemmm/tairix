@@ -170,8 +170,8 @@ impl ArtworkResolver for Deferring {
         self.0.borrow_mut().want(key, side);
     }
 
-    fn declined(&mut self, key: &ArtworkKey, side: u32) {
-        self.0.borrow_mut().decline(key, side);
+    fn declined(&mut self, key: &ArtworkKey, side: u32, bytes: usize) {
+        self.0.borrow_mut().decline(key, side, bytes);
     }
 
     fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
@@ -251,7 +251,10 @@ impl Arrangement {
     /// longer allows, and the desk re-offers what the old one refused.
     fn band_moved(&mut self) -> usize {
         let released = self.pipeline.trim();
-        self.desk.borrow_mut().retry_declined();
+        let pipeline = &self.pipeline;
+        self.desk
+            .borrow_mut()
+            .retry_declined(|bytes| pipeline.holds(bytes));
         released
     }
 }
@@ -468,12 +471,15 @@ fn a_declined_decode_is_never_offered_again_until_the_band_moves() {
     assert_eq!(grid.work(), (1, 1));
 }
 
-/// A pressure-band change remakes the decision: what a band refused to keep
-/// may now be retainable, so the declined key is offered once more. This is
-/// what the pressure wake's trim-and-re-offer pair is for beyond releasing
-/// bytes.
+/// A band change offers a declined decode again only once the cache would
+/// keep it: a band that leaves the cache unable to hold it asks for nothing,
+/// and room the cache has come to have is what makes it worth asking again.
+///
+/// Regression: every band change offered every declined decode again, though
+/// between the deepest bands the room for them is the same, so each change
+/// re-read and re-decoded every refused icon only to refuse it again.
 #[test]
-fn a_band_change_offers_a_declined_decode_again() {
+fn a_band_change_offers_again_only_what_the_cache_would_keep() {
     let mut grid = Arrangement::over(cacheless(), vec![(String::from(ASSET), vec![0u8; 8])]);
     assert!(!grid.paint());
     assert!(grid.serve());
@@ -482,9 +488,15 @@ fn a_band_change_offers_a_declined_decode_again() {
     let _ = grid.band_moved();
     assert!(!grid.paint());
     assert!(
-        grid.serve(),
-        "a band change must remake the decision it refused"
+        !grid.serve(),
+        "a cache that still cannot hold it was asked again"
     );
+    assert_eq!(grid.work(), (1, 1));
+
+    grid.pipeline.rescale(TEST_FRAME_BYTES);
+    let _ = grid.band_moved();
+    assert!(!grid.paint());
+    assert!(grid.serve(), "a cache with room for it asks again");
     assert_eq!(grid.work(), (2, 2));
 }
 

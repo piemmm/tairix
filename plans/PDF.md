@@ -42,9 +42,10 @@ parses and interprets; it renders nothing and knows nothing of Draw. The
 reference is `docs/src/lib/pdf.md`.
 
 - **`Document`** holds the file's bytes and its cross-reference index, and
-  resolves an object lazily the first time it is asked for, so a page is read
-  without parsing the objects of every other. Resolution is depth-bounded, so
-  a reference cycle is malformed rather than a loop.
+  resolves an object lazily the first time it is asked for, keeping it, so a
+  page is read without parsing the objects of every other and no object is
+  parsed twice. Resolution is depth-bounded: a reference cycle is malformed
+  rather than a loop, and a chain past the bound too complex.
 - **`Page`** is a page's geometry and resources: its media and crop boxes, its
   rotation and user unit, each inherited through the page tree as the
   specification says, the crop box held within the media box.
@@ -69,8 +70,15 @@ is refused as too complex, never truncated into a different document.
 - The decoded bytes a document may produce, filters and pictures included,
   are the caller's budget — Draw's the sandbox worker's document room — so no
   filter chain can expand past the memory the worker was given.
-- A page's content runs at most 4 000 000 operators and its display list at
-  most 2 000 000 path points; graphics states are saved at most 64 deep (a
+- What is built from those bytes — a cross-reference stream's entries, an
+  object stream's index — is charged to the same budget, and the objects a
+  document keeps of what it reads take at most a quarter of it. Reading its
+  objects lexes at most 16 times over what the file and its object streams
+  hold.
+- A page's content runs at most 4 000 000 operators and reads at most 256 MiB,
+  a form's content again each time it is painted; its display list holds at
+  most 1 048 576 items and, with the path being built, 2 000 000 path points;
+  graphics states are saved at most 64 deep (a
   deeper `q` counted, saving nothing), forms nest at most 16 deep, and an
   image is at most 65 536 pixels a side. A drawing's own limits then bound
   what a page becomes.
@@ -87,19 +95,25 @@ is refused as too complex, never truncated into a different document.
   wrong length is recovered by finding `endstream`.
 - **Cross-reference**: tables (§7.5.4) and streams (§7.5.8), object streams
   (§7.5.7), hybrid files, and the `/Prev` chain of incremental updates with
-  the newest definition winning; a `/Prev` loop is malformed.
+  the newest definition and the newest trailer entry winning, the trailers
+  merged once; a `/Prev` loop is malformed.
 - **Repair**: a missing or damaged cross-reference is rebuilt by scanning the
   file for `N G obj` and for trailers and cross-reference streams, the last
-  definition of an object winning, as every reader of real-world files does.
+  definition of an object and of a trailer entry winning, as every reader of
+  real-world files does. Where no trailer is left, an encryption dictionary
+  the scan finds is the file's, so an encrypted file is never read as
+  plaintext.
 - **The page tree**: `/Pages` walked with inherited `/Resources`,
-  `/MediaBox`, `/CropBox` and `/Rotate`; a node reached twice — shared or in a
-  loop — read once, and at most 200 000 kids listed.
+  `/MediaBox`, `/CropBox` and `/Rotate`; a node or an array of kids reached
+  twice — shared, through another reference, or in a loop — read once, and
+  at most 200 000 kids listed.
 
 ### PDF2 — filters
 
 Flate (`lib/compress`) and LZW with `/EarlyChange`, each with the PNG and TIFF
-predictors of `/DecodeParms`; ASCIIHex, ASCII85 and RunLength; Crypt naming a
-crypt filter. A chain applies in order, each stage's output bounded. DCT, JPX,
+predictors of `/DecodeParms`, undone in place by `lib/image`'s row routines;
+ASCIIHex, ASCII85 and RunLength; Crypt, first in its chain, naming a crypt
+filter the file defines or `/Identity`. A chain applies in order, each stage's output bounded. DCT, JPX,
 CCITTFax and JBIG2 end a chain undecoded, handed with their parameters to the
 image stage.
 
@@ -111,15 +125,20 @@ The empty user password is tried first, so the many files encrypted only to
 state permissions open as any other; a file needing a password says so, and
 the caller asks the user. Strings and streams are decrypted per object, a
 stream's own `/Crypt` filter, the `/Identity` crypt filter and
-`/EncryptMetadata` honoured. Revisions 2 to 4 hash a password in
+`/EncryptMetadata` honoured; a crypt filter named but not defined is
+unsupported, never read as the identity, and `/CF` cannot redefine
+`/Identity`. Revisions 2 to 4 hash a password in
 `PDFDocEncoding` where it is text that encoding holds, and as its bytes
 otherwise; revisions 5 and 6 its text prepared by SASLprep (PDF15) as a
 query, then cut to 127 bytes of UTF-8 — and the bytes as given once that
 fails, since several producers prepare nothing. SASLprep is `lib/unicode`'s,
-over Unicode 3.2 exactly: what 3.2 does not assign passes inert, and the five
-decompositions Corrigendum #4 corrected are 3.2's own. Entries no password
-could unlock are unsupported, never a password asked for again. The password is a secret: held zeroizing, never
-logged, gone once the file key is made.
+over today's tables restricted to Unicode 3.2's repertoire: what 3.2 does not
+assign passes inert, and the five decompositions Corrigendum #4 corrected are
+3.2's own. Entries no password
+could unlock are unsupported, never a password asked for again. A password
+longer than 1024 bytes is not tried, so none costs more to prepare. The
+password is a secret: held zeroizing, never logged, gone once the file key is
+made.
 
 The handler's constructions enter `lib/crypto` as its `pdf` module, beside
 NTLM's, over the MD5 and SHA-2 it already carried and RC4 and AES-CBC from
@@ -132,12 +151,15 @@ The operators of §8: the graphics state stack, `cm`, path construction and
 painting with both fill rules, clipping, the line width, cap, join, miter
 limit and dash, every colour space (Device, CIE-based through XYZ adapted to
 D65, ICC through their alternates, Indexed, Separation and DeviceN through
-their tint transforms, Pattern), the four function types, `gs` with its
-opacities, `Do` of a Form XObject (its matrix, its bounding box clipped, a
+their tint transforms, Pattern), the four function types (each function
+object read once however much shares it), `gs` with its opacities, `Do` of a
+Form XObject (its matrix, its bounding box clipped, a
 transparency group kept as a group, decoded once) and of an image, `sh`,
 shading patterns, and optional content the default configuration hides. A
-named colour space, pattern, shading or graphics state is read once per
-resources dictionary, the scope a name has meaning in.
+clip to no path lets nothing through, and so does one placed past what a
+number holds, recorded as damage, so nothing beneath a clip is drawn
+unclipped. A named colour space, pattern, shading or graphics state is read
+once per resources dictionary, the scope a name has meaning in.
 Axial and radial shadings become gradients, their functions sampled into
 stops within half an sRGB level, a sharp step kept; a luminosity soft mask
 that is one shading over the same geometry becomes its gradient's alpha,
@@ -172,32 +194,47 @@ recovered is still drawn as itself.
 Image XObjects and inline images in every colour space at 1, 2, 4, 8 and 16
 bits, `/Decode` arrays, `/ImageMask` stencils in the fill colour, `/SMask`
 soft masks (with `/Matte`) and `/Mask` stencils and colour keys as alpha, and
-grey and RGB `DCTDecode` through `lib/image`, kept with their bytes and any
-EXIF orientation undone. An image used again is decoded once. Only an inline
-image's colour space may name a resource, as every reader reads them, and an
+grey and RGB `DCTDecode` through `lib/image`, their decode arrays and colour
+keys read from the samples they decode to, kept with their bytes and any EXIF
+orientation undone. A stencil short of its samples paints nowhere past them.
+An image used again is decoded once, a stencil's samples once in every colour
+it is painted in, and an inline image is found and decoded once where it lies;
+samples too wide for a table of every colour they spell are converted a colour
+at a time through a fixed memo of the colours met, so a tint transform is
+charged for a colour once rather than for every pixel. Only an inline image's
+colour space may name a resource, as every reader reads them, and an
 unfiltered inline image is as long as its samples in it. CMYK and YCCK
 JPEGs and `CCITTFaxDecode` are PDF14's, recorded as lost until then.
 
 ### PDF8 — Draw opens a PDF
 
-- **The format**: Draw's manifest claims `application/pdf`; the sandbox reads
-  a PDF by its header (`tairix_drawing::read`, `pdf::read`), as it reads SVG
-  and Draw files by their content.
-- **The questions**: the load worker asks the sandbox worker for the pages
-  first (`drawedit::read_pages`, `OP_PAGES`, the document kept for the read).
-  One of several pages, unless one was chosen, and one needing a password come
-  back as a question (`LoadAnswer::Asks`), asked in a dialog window of Draw's
-  own (`pdfopen::OpenPdf`, beside the settings window in
+- **The format**: Draw's manifest claims `application/pdf`; the sandbox tells
+  a PDF by its header as it tells SVG and Draw files by their content, one
+  decision both its open and `tairix_drawing::read` take
+  (`tairix_drawing::format_of`).
+- **The questions**: a document is opened once (`drawedit::open_drawing`,
+  `OP_OPEN` carrying whether a page is to be chosen, the budget — the worker's
+  room beside the document — and the password). One of several pages, and one
+  needing a password, come back as a question (`LoadAnswer::Asks`), and the
+  worker that opened it keeps it until the question is answered or let go —
+  its bytes while the password is asked (`lib/pdf`'s refusal hands them back,
+  `Refused`), the opened document while a page is chosen — so no answer costs
+  a second read of the file, upload or open. The question is a dialog window
+  of Draw's own (`pdfopen::OpenPdf`, beside the settings window in
   `appwindow::DrawWindow`), asked on the loading window's behalf so it closes
-  with it: a page number, its size in points described, or a secret password
-  field of `drawedit::MAX_PASSWORD_BYTES`. A page typed past the document's is
-  held to them and shown before anything opens; Open with no password, or
-  more than a password can be, opens nothing and says why. Open reads again
-  with the answer (`OP_OPEN` carrying the page, the budget — the worker's room
-  beside the document — and the password); Cancel or closing it gives the
-  load up without an alert (`Host::not_wanted`). A wrong password asks again,
-  saying so. The password is erased when dropped, in the request once sent and
-  once read, and never kept or logged.
+  with it: a page number, its size in points described once the worker has
+  said it (`OP_PAGE_SIZE`, one page at a time, the latest wanted winning), or a
+  secret password field of `MAX_PASSWORD_BYTES`. A page typed past the
+  document's is held to them and shown before anything opens; Open with no
+  password, or more than a password can be, opens nothing and says why. Open
+  hands the answer to the worker keeping the document (`OP_PAGE` reads the
+  page chosen); Cancel, closing it, or a question window that cannot open lets
+  the worker go and gives the load up without an alert of Draw's
+  (`Host::not_wanted`). A wrong password asks again, saying so. The password
+  is erased when dropped, in the request once sent and once read, and Draw
+  holds it only until that request is made: the worker keeps the document it
+  opened, never the password. A name in a question is shown as
+  `tairix_util::utf8::shown` shows it.
 - **The drawing**: the page's crop box is the drawing's page, in points.
   Fills and strokes are shapes in their style — a fill and the stroke of the
   same path that follows it one shape, a stroke as thin as a device draws a
@@ -211,10 +248,13 @@ JPEGs and `CCITTFaxDecode` are PDF14's, recorded as lost until then.
   annotations and form fields, and damaged parts): soft masks, blend modes,
   tiling patterns, other shadings, annotations, text and images in codecs not
   yet read — until PDF5, PDF9 to PDF11 and PDF14 keep each — and so are the
-  document's other pages, its bookmarks, attachments and other parts, and
-  metadata besides its title and subject, which become the drawing's. A PDF
-  that lost anything opens read-only, so it is never written over; one Draw
-  wrote loses nothing and opens writable. A drawing saved as PDF says it
+  document's other pages, its bookmarks, attachments and other parts,
+  metadata besides its title and subject, which become the drawing's, and its
+  password protection, which a drawing written from it would be written
+  without. A picture larger than a surface, or past what a drawing's pictures
+  hold together, is lost, never the page. A PDF that lost anything opens
+  read-only, so it is never written over; one Draw wrote loses nothing and
+  opens writable. A drawing saved as PDF says it
   opens again as one layer whose text is outlines.
 
 ### PDF9 — rendered fallbacks

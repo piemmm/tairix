@@ -57,6 +57,11 @@ pub struct WaitedChild {
     pub status: WaitStatus,
 }
 
+/// Where a report is delivered before its child is taken: the `wait`
+/// caller's status copy-out. A refusal leaves the report standing, so a
+/// copy the machine had no memory for loses no exit.
+pub type Deliver<'a> = dyn FnMut(WaitedChild) -> Result<(), Errno> + 'a;
+
 /// The kernel-side producer of the `wait` syscall.
 ///
 /// Implemented by the scheduler-side producer that tracks each spawned
@@ -72,7 +77,8 @@ pub struct WaitedChild {
 /// the spawn producer, and the anonymous-memory producer.
 pub trait ProcessWait: Sync {
     /// Block `waiter` — one thread of `parent` — until the child selected by
-    /// `pid` exits, reap it, and return the reaped child's PID and exit code.
+    /// `pid` exits, hand its report to `deliver`, and once that is accepted
+    /// reap it, returning the reaped child's PID and exit code.
     ///
     /// The table is keyed by the *process*, because a child belongs to the
     /// thread group and any of its threads may reap it; the park names the
@@ -103,10 +109,12 @@ pub trait ProcessWait: Sync {
         waiter: TaskId,
         pid: i64,
         flags: WaitFlags,
+        deliver: &mut Deliver<'_>,
     ) -> Result<WaitedChild, Errno>;
 
     /// Non-blocking counterpart to [`Self::wait`]: try to report a child of
-    /// `parent` selected by `pid` **without ever parking the caller**.
+    /// `parent` selected by `pid` **without ever parking the caller**,
+    /// delivering the report before the child is taken.
     ///
     /// This backs `WaitFlags::NONBLOCK`, the poll the shell's job
     /// control uses to report finished background jobs before the next
@@ -119,11 +127,18 @@ pub trait ProcessWait: Sync {
     ///   to report yet — the `abi-v1` "nothing yet, retry" signal, so a
     ///   polling caller neither blocks nor floods the audit log.
     /// * [`Errno::NotFound`] when `pid` names no child of `parent`.
+    /// * Whatever `deliver` refused with, the report left standing.
     ///
     /// The default fails closed with [`Errno::NotImplemented`] so a producer
     /// that predates the poll path — and the inert [`NullProcessWait`] —
     /// never fabricates a reaped child; [`KernelProcessWait`] overrides it.
-    fn poll(&self, _parent: ProcessId, _pid: i64, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn poll(
+        &self,
+        _parent: ProcessId,
+        _pid: i64,
+        _flags: WaitFlags,
+        _deliver: &mut Deliver<'_>,
+    ) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -251,6 +266,7 @@ impl ProcessWait for NullProcessWait {
         _waiter: TaskId,
         _pid: i64,
         _flags: WaitFlags,
+        _deliver: &mut Deliver<'_>,
     ) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
@@ -395,7 +411,7 @@ pub enum ChildPeek {
     NoChild,
 }
 
-/// Outcome of a single [`ProcessTable::reap`] attempt.
+/// What a report of a child would say ([`ProcessTable::peek_report`]).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Reap {
     /// A matching child has something to report: an exited child (removed
@@ -417,8 +433,8 @@ pub enum Reap {
 /// reaches the waiter's children alone and never another parent's. A child
 /// is registered when it is spawned ([`Self::register`]), becomes a reapable
 /// zombie when it exits ([`Self::record_exit`]), and leaves when its parent
-/// reaps it ([`Self::reap`]). A `WAIT_PID_ANY` reap takes the child that
-/// exited first.
+/// takes its report ([`Self::take_report`]). A `WAIT_PID_ANY` report names the
+/// child that exited first.
 ///
 /// Every operation is expected constant time, except a parent's exit, linear
 /// in its own children, and a reap or a resume naming one child, linear in
@@ -510,31 +526,45 @@ impl Tables {
         }
     }
 
-    /// Report `child` to its `parent`: its exit, removing it, or else its
-    /// pending stop, consuming it.
-    fn report(&mut self, parent: u64, child: u64) -> Reap {
-        let Some(row) = self.rows.get_mut(&child) else {
+    /// What reporting `child` would say, taking nothing: its exit, or else its
+    /// pending stop.
+    fn describe(&self, child: u64) -> Reap {
+        let Some(row) = self.rows.get(&child) else {
             return Reap::NoChild;
         };
-        if let Some(code) = row.exit {
-            self.forget(child);
-            return Reap::Ready(WaitedChild {
-                pid: child,
-                status: WaitStatus::Exited(code),
-            });
-        }
-        let Some(signal) = row.stop.take() else {
-            return Reap::Blocked;
+        let status = match (row.exit, row.stop) {
+            (Some(code), _) => WaitStatus::Exited(code),
+            (None, Some(signal)) => WaitStatus::Stopped(signal),
+            (None, None) => return Reap::Blocked,
         };
-        if row.listing == ChildListing::Listed {
-            if let Some(family) = self.families.get_mut(&parent) {
-                remove_queued(&mut family.stopped, child);
-            }
+        Reap::Ready(WaitedChild { pid: child, status })
+    }
+
+    /// Take `report` from `parent` if it still stands as described — an exit
+    /// removing the child, a stop consumed — answering whether it did.
+    fn take(&mut self, parent: u64, report: &WaitedChild) -> bool {
+        let Some(row) = self.rows.get_mut(&report.pid) else {
+            return false;
+        };
+        if row.parent != parent {
+            return false;
         }
-        Reap::Ready(WaitedChild {
-            pid: child,
-            status: WaitStatus::Stopped(signal),
-        })
+        match report.status {
+            WaitStatus::Exited(code) if row.exit == Some(code) => {
+                self.forget(report.pid);
+                true
+            }
+            WaitStatus::Stopped(signal) if row.exit.is_none() && row.stop == Some(signal) => {
+                row.stop = None;
+                if row.listing == ChildListing::Listed {
+                    if let Some(family) = self.families.get_mut(&parent) {
+                        remove_queued(&mut family.stopped, report.pid);
+                    }
+                }
+                true
+            }
+            WaitStatus::Exited(_) | WaitStatus::Stopped(_) => false,
+        }
     }
 }
 
@@ -644,21 +674,19 @@ impl ProcessTable {
         }
     }
 
-    /// Try to report a child of `parent` selected by `pid`.
+    /// What a report of a child of `parent` selected by `pid` would say,
+    /// taking nothing ([`Self::take_report`] takes it).
     ///
     /// `pid` is [`tairix_abi::WAIT_PID_ANY`] for any child or a specific child's
-    /// id. An exited child wins: it is removed and returned as
-    /// [`Reap::Ready`], the first to exit first for [`WAIT_PID_ANY`];
-    /// otherwise, with `report_stopped` set, a child carrying an unreported
-    /// stop is returned with a stopped status — **kept in the table**, its
-    /// pending stop consumed so it is reported exactly once. A matching child
-    /// with nothing to report is [`Reap::Blocked`], and no match at all is
-    /// [`Reap::NoChild`]. A negative `pid` other than
-    /// [`tairix_abi::WAIT_PID_ANY`] names no child and fails closed with
-    /// [`Reap::NoChild`].
+    /// id. An exited child wins, the first to exit first for
+    /// [`WAIT_PID_ANY`]; otherwise, with `report_stopped` set, a child carrying
+    /// an unreported stop. A matching child with nothing to report is
+    /// [`Reap::Blocked`], and no match at all is [`Reap::NoChild`]. A negative
+    /// `pid` other than [`tairix_abi::WAIT_PID_ANY`] names no child and fails
+    /// closed with [`Reap::NoChild`].
     #[must_use]
-    pub fn reap(&mut self, parent: ProcessId, pid: i64, report_stopped: bool) -> Reap {
-        let Some(tables) = self.tables.as_mut() else {
+    pub fn peek_report(&self, parent: ProcessId, pid: i64, report_stopped: bool) -> Reap {
+        let Some(tables) = self.tables.as_ref() else {
             return Reap::NoChild;
         };
         let child = match Selector::of(pid) {
@@ -686,7 +714,30 @@ impl ProcessTable {
                 _ => return Reap::NoChild,
             },
         };
-        tables.report(parent.0, child)
+        tables.describe(child)
+    }
+
+    /// Take `report`, a [`Self::peek_report`] answer, if it still stands as it
+    /// was given: an exited child is removed, a stopped one kept with its stop
+    /// consumed, so each is reported exactly once. `false` when another
+    /// reporter took it, or it changed, since.
+    pub fn take_report(&mut self, parent: ProcessId, report: &WaitedChild) -> bool {
+        self.tables
+            .as_mut()
+            .is_some_and(|tables| tables.take(parent.0, report))
+    }
+
+    /// Report and take at once, as a caller with nowhere it could fail to
+    /// deliver does.
+    #[cfg(test)]
+    #[must_use]
+    pub fn reap(&mut self, parent: ProcessId, pid: i64, report_stopped: bool) -> Reap {
+        let report = self.peek_report(parent, pid, report_stopped);
+        if let Reap::Ready(child) = report {
+            let taken = self.take_report(parent, &child);
+            debug_assert!(taken, "a report taken under the same hold");
+        }
+        report
     }
 
     /// Non-consuming readiness peek: classify the child selected by `pid`
@@ -694,8 +745,8 @@ impl ProcessTable {
     ///
     /// The wait-set `Child` source scans through this, so observing "a child
     /// is reapable" never steals the reap from the `wait` syscall that
-    /// follows. It selects exactly as [`Self::reap`] does, so the two can
-    /// never disagree on which children match.
+    /// follows. It selects exactly as [`Self::peek_report`] does, so the two
+    /// can never disagree on which children match.
     #[must_use]
     pub fn peek(&self, parent: ProcessId, pid: i64) -> ChildPeek {
         let Some(tables) = self.tables.as_ref() else {
@@ -816,17 +867,29 @@ where
         parent: ProcessId,
         pid: i64,
         flags: WaitFlags,
+        deliver: &mut Deliver<'_>,
     ) -> Result<WaitedChild, Errno> {
-        match self.table.lock().reap(parent, pid, flags.is_stopped()) {
-            Reap::Ready(child) => {
+        loop {
+            let report = match self
+                .table
+                .lock()
+                .peek_report(parent, pid, flags.is_stopped())
+            {
+                Reap::Ready(child) => child,
+                Reap::Blocked => return Err(Errno::WouldBlock),
+                Reap::NoChild => return Err(Errno::NotFound),
+            };
+            // Delivered with no lock held — the copy may page — and taken only
+            // as delivered: a sibling thread that took it first sends this one
+            // round for whatever stands now.
+            deliver(report)?;
+            if self.table.lock().take_report(parent, &report) {
                 // A reaped exit removed the row that was holding the number.
-                if matches!(child.status, WaitStatus::Exited(_)) {
-                    release_number(ProcessId(child.pid));
+                if matches!(report.status, WaitStatus::Exited(_)) {
+                    release_number(ProcessId(report.pid));
                 }
-                Ok(child)
+                return Ok(report);
             }
-            Reap::Blocked => Err(Errno::WouldBlock),
-            Reap::NoChild => Err(Errno::NotFound),
         }
     }
 }
@@ -887,13 +950,19 @@ where
             .ok_or(Errno::NotFound)
     }
 
-    fn poll(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn poll(
+        &self,
+        parent: ProcessId,
+        pid: i64,
+        flags: WaitFlags,
+        deliver: &mut Deliver<'_>,
+    ) -> Result<WaitedChild, Errno> {
         // A single non-blocking report attempt — the same primitive the
         // blocking `wait` loop uses, so the two can never diverge. A matching
         // child with nothing to report yet is `WouldBlock` (the
         // caller decides whether to retry) rather than parking; no child at
         // all fails closed with `NotFound`.
-        self.try_report(parent, pid, flags)
+        self.try_report(parent, pid, flags, deliver)
     }
 
     fn child_state(&self, parent: ProcessId, pid: i64) -> ChildPeek {
@@ -906,12 +975,13 @@ where
         waiter: TaskId,
         pid: i64,
         flags: WaitFlags,
+        deliver: &mut Deliver<'_>,
     ) -> Result<WaitedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
             // child whose exit we are waiting for can take the same lock from
             // its own `exit` (`record_exit`) while we are suspended.
-            match self.try_report(parent, pid, flags) {
+            match self.try_report(parent, pid, flags, deliver) {
                 Ok(child) => return Ok(child),
                 Err(Errno::NotFound) => return Err(Errno::NotFound),
                 Err(Errno::WouldBlock) => {
@@ -944,8 +1014,7 @@ where
                         return Err(Errno::Interrupted);
                     }
                 }
-                // `try_report` yields only the three arms above; keep the
-                // residual fail-closed rather than unreachable-panicking.
+                // The delivery's own refusal, the report left standing.
                 Err(err) => return Err(err),
             }
         }
@@ -1001,7 +1070,7 @@ mod tests {
     #[test]
     fn null_process_wait_fails_closed() {
         assert_eq!(
-            NULL_PROCESS_WAIT.wait(ProcessId(7), REAPER, 9, WaitFlags::empty()),
+            NULL_PROCESS_WAIT.wait(ProcessId(7), REAPER, 9, WaitFlags::empty(), &mut |_| Ok(())),
             Err(Errno::NotImplemented)
         );
         // A WAIT_PID_ANY request announces the inert interface too, rather than
@@ -1011,7 +1080,8 @@ mod tests {
                 ProcessId(1),
                 REAPER,
                 tairix_abi::WAIT_PID_ANY,
-                WaitFlags::empty()
+                WaitFlags::empty(),
+                &mut |_| Ok(())
             ),
             Err(Errno::NotImplemented)
         );
@@ -1565,7 +1635,13 @@ mod tests {
         // termination status, indistinguishable from a self-exit to `reap`.
         p.record_exit(ProcessId(2), 130);
         assert_eq!(
-            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(
+                ProcessId(1),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Exited(130)
@@ -1654,7 +1730,8 @@ mod tests {
             .poll(
                 parent,
                 i64::try_from(reaped).expect("small"),
-                WaitFlags::NONBLOCK
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
             )
             .is_ok());
         assert!(
@@ -1683,7 +1760,13 @@ mod tests {
         // vertical).
         p.record_exit(ProcessId(2), 9);
         assert_eq!(
-            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(
+                ProcessId(1),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Exited(9)
@@ -1691,7 +1774,13 @@ mod tests {
         );
         // The zombie was consumed; a second wait finds no child.
         assert_eq!(
-            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(
+                ProcessId(1),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
     }
@@ -1704,11 +1793,17 @@ mod tests {
         p.record_exit(ProcessId(2), 0);
         // Task 9 never spawned child 2: it may not reap it.
         assert_eq!(
-            p.wait(ProcessId(9), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(
+                ProcessId(9),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            p.wait(ProcessId(9), REAPER, 2, WaitFlags::empty()),
+            p.wait(ProcessId(9), REAPER, 2, WaitFlags::empty(), &mut |_| Ok(())),
             Err(Errno::NotFound)
         );
     }
@@ -1723,7 +1818,13 @@ mod tests {
         p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(
-            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
+            p.wait(
+                ProcessId(1),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::empty(),
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -1735,7 +1836,12 @@ mod tests {
             .expect("registered");
         p.record_exit(ProcessId(2), 9);
         assert_eq!(
-            p.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            p.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Exited(9)
@@ -1743,9 +1849,117 @@ mod tests {
         );
         // The zombie was consumed; a second poll finds no child.
         assert_eq!(
-            p.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            p.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
+    }
+
+    /// A report whose delivery is refused — a status copy-out the machine had
+    /// no memory for — leaves the child to report again, exit or stop alike,
+    /// and the delivery that is accepted takes it once.
+    ///
+    /// Regression: the child was reaped before its status was copied out, so
+    /// a refused copy lost the exit, and PID 1 never restarted a service whose
+    /// death it could not read.
+    #[test]
+    fn a_report_whose_delivery_is_refused_is_left_to_report_again() {
+        let p = producer();
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
+            .expect("registered");
+        p.record_stop(ProcessId(2), Signal::Stop, JobGeneration::from_bits(1));
+        let stops = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
+            .expect("defined flags");
+        let mut offered = std::vec::Vec::new();
+        let refused = p.poll(ProcessId(1), WAIT_PID_ANY, stops, &mut |child| {
+            offered.push(child);
+            Err(Errno::OutOfMemory)
+        });
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        let stop = WaitedChild {
+            pid: 2,
+            status: WaitStatus::Stopped(Signal::Stop),
+        };
+        assert_eq!(offered, [stop], "the stop was offered");
+        assert_eq!(
+            p.poll(ProcessId(1), WAIT_PID_ANY, stops, &mut |_| Ok(())),
+            Ok(stop),
+            "and is still there to report"
+        );
+        p.record_exit(ProcessId(2), 9);
+        let exit = WaitedChild {
+            pid: 2,
+            status: WaitStatus::Exited(9),
+        };
+        assert_eq!(
+            p.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK, &mut |_| {
+                Err(Errno::BadAddress)
+            }),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(
+            p.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
+            Ok(exit),
+            "the exit survived the refused copy"
+        );
+        assert_eq!(
+            p.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
+            Err(Errno::NotFound),
+            "and was taken once"
+        );
+    }
+
+    /// A report is taken only as it was given: one another reporter took
+    /// first, or that changed since, is not taken again.
+    #[test]
+    fn a_report_is_taken_only_as_it_was_given() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
+            .expect("registered");
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
+        let Reap::Ready(stop) = table.peek_report(ProcessId(1), WAIT_PID_ANY, true) else {
+            panic!("the stop is reported");
+        };
+        assert_eq!(
+            table.peek_report(ProcessId(1), WAIT_PID_ANY, true),
+            Reap::Ready(stop),
+            "a peek takes nothing"
+        );
+        assert!(
+            !table.take_report(ProcessId(3), &stop),
+            "not another parent's"
+        );
+        assert!(table.take_report(ProcessId(1), &stop));
+        assert!(!table.take_report(ProcessId(1), &stop), "taken once");
+        let _ = table.record_exit(ProcessId(2), 4);
+        let stale = WaitedChild {
+            pid: 2,
+            status: WaitStatus::Exited(5),
+        };
+        assert!(
+            !table.take_report(ProcessId(1), &stale),
+            "an exit it did not make"
+        );
+        let Reap::Ready(exit) = table.peek_report(ProcessId(1), 2, false) else {
+            panic!("the exit is reported");
+        };
+        assert!(table.take_report(ProcessId(1), &exit));
+        assert_eq!(table.peek_report(ProcessId(1), 2, false), Reap::NoChild);
     }
 
     #[test]
@@ -1757,11 +1971,16 @@ mod tests {
         p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(
-            p.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            p.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Err(Errno::WouldBlock)
         );
         assert_eq!(
-            p.poll(ProcessId(1), 2, WaitFlags::NONBLOCK),
+            p.poll(ProcessId(1), 2, WaitFlags::NONBLOCK, &mut |_| Ok(())),
             Err(Errno::WouldBlock)
         );
     }
@@ -1775,11 +1994,16 @@ mod tests {
         // Task 9 never spawned child 2, and a caller with no children at all
         // sees `NotFound` — a poll grants no authority over another principal.
         assert_eq!(
-            p.poll(ProcessId(9), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            p.poll(
+                ProcessId(9),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            p.poll(ProcessId(9), 2, WaitFlags::NONBLOCK),
+            p.poll(ProcessId(9), 2, WaitFlags::NONBLOCK, &mut |_| Ok(())),
             Err(Errno::NotFound)
         );
     }
@@ -1789,7 +2013,12 @@ mod tests {
         // The inert default announces an unwired interface rather than
         // fabricating a reaped child.
         assert_eq!(
-            NULL_PROCESS_WAIT.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            NULL_PROCESS_WAIT.poll(
+                ProcessId(1),
+                WAIT_PID_ANY,
+                WaitFlags::NONBLOCK,
+                &mut |_| Ok(())
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -1933,7 +2162,7 @@ mod tests {
         let flags = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
             .expect("defined bits");
         assert_eq!(
-            p.poll(ProcessId(1), WAIT_PID_ANY, flags),
+            p.poll(ProcessId(1), WAIT_PID_ANY, flags, &mut |_| Ok(())),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Stopped(Signal::Stop)
@@ -1941,7 +2170,7 @@ mod tests {
         );
         // Reported once; the second poll would block again.
         assert_eq!(
-            p.poll(ProcessId(1), WAIT_PID_ANY, flags),
+            p.poll(ProcessId(1), WAIT_PID_ANY, flags, &mut |_| Ok(())),
             Err(Errno::WouldBlock)
         );
         // The stopped child was not reaped: it is still a live,
@@ -1958,7 +2187,13 @@ mod tests {
         // The stop is already pending when the parent waits, so the report
         // is immediate — the blocking park path is never reached.
         assert_eq!(
-            p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::STOPPED),
+            p.wait(
+                ProcessId(1),
+                REAPER,
+                WAIT_PID_ANY,
+                WaitFlags::STOPPED,
+                &mut |_| Ok(())
+            ),
             Ok(WaitedChild {
                 pid: 2,
                 status: WaitStatus::Stopped(Signal::Stop)

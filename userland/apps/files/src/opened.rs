@@ -230,9 +230,14 @@ impl OpenedVolumes {
         }
     }
 
-    /// Note that something this file manager started ended: whatever it held
-    /// is let go, so each volume found in use is worth asking about again.
-    pub fn released(&mut self) {
+    /// Note that a child of this file manager ended, `launched` when it was
+    /// an application it started: whatever that held is let go, so each
+    /// volume found in use is worth asking about again. Any other child — one
+    /// of its own decoders — held none of them, so its end asks nothing.
+    pub fn child_ended(&mut self, launched: bool) {
+        if !launched {
+            return;
+        }
         for volume in &mut self.volumes {
             if matches!(volume.unmount, Unmount::InUse { .. }) {
                 volume.unmount = Unmount::Due;
@@ -240,11 +245,25 @@ impl OpenedVolumes {
         }
     }
 
-    /// When a volume found in use is next due to be asked about, if any is.
+    /// When a volume found in use is next due to be asked about, if the
+    /// [`sweep`](Self::sweep) given `enabled` and `lost` would then ask: none
+    /// while unmounting is not `enabled` or one is on its way, whose landing
+    /// is a turn of its own, and none for a volume `lost` names.
+    ///
+    /// A time the sweep would pass over stays in the past, and a loop parking
+    /// until it would turn without waiting.
     #[must_use]
-    pub fn retry_at(&self) -> Option<u64> {
+    pub fn retry_at(
+        &self,
+        enabled: bool,
+        lost: impl Fn(&[u8; VOLUME_ID_LEN]) -> bool,
+    ) -> Option<u64> {
+        if !enabled || self.unmounting() {
+            return None;
+        }
         self.volumes
             .iter()
+            .filter(|volume| !lost(&volume.volume_id))
             .filter_map(|volume| match volume.unmount {
                 Unmount::InUse { retry_ns } => Some(retry_ns),
                 Unmount::Due | Unmount::Asked => None,

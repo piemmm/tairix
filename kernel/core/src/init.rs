@@ -2381,6 +2381,8 @@ fn run_phases<A: KernelArch>(
         .arch
         .install_irq_dispatch(&state.irq)
         .map_err(InitError::InterruptController)?;
+    // Before any line can fire: its fires name the waiters a wake reaches.
+    crate::waitq::install_irq_lines(&state.irq);
     let routing = state.arch.route_interrupts(
         state.dma_translation,
         scheduler_config.cpus,
@@ -4620,7 +4622,8 @@ mod tests {
             process_wait.poll(
                 SecProcessId(1),
                 tairix_abi::WAIT_PID_ANY,
-                tairix_abi::WaitFlags::empty()
+                tairix_abi::WaitFlags::empty(),
+                &mut |_| Ok(()),
             ),
             Ok(crate::procwait::WaitedChild {
                 pid: task,
@@ -4738,7 +4741,8 @@ mod tests {
             process_wait.poll(
                 SecProcessId(1),
                 tairix_abi::WAIT_PID_ANY,
-                tairix_abi::WaitFlags::empty()
+                tairix_abi::WaitFlags::empty(),
+                &mut |_| Ok(()),
             ),
             Ok(crate::procwait::WaitedChild {
                 pid: task,

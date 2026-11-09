@@ -83,12 +83,13 @@ pub const fn pool_pages(carves: &[usize]) -> Option<usize> {
 
 /// How the kernel opens a host-attached floor device: the driver's own
 /// `open`, handed the host the kernel lends it, the device's node, its
-/// completion wait and the audit log the driver records its outcome on.
+/// completion wait and the audit log the driver records its outcome on, and
+/// keeps for the device's life.
 pub type FloorOpen = fn(
     &dyn DriverHost,
     &HwNode,
     &'static dyn CompletionWait,
-    &dyn Sink,
+    &'static (dyn Sink + Sync),
 ) -> Result<Box<dyn Block>, DriverError>;
 
 /// A floor driver the kernel lends a host to.

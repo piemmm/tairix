@@ -37,7 +37,7 @@ mod model;
 mod rgb;
 mod srgb;
 
-pub use cie::{encode_linear, linear_of, InGamut, Lab, Lch, Xyz};
+pub use cie::{encode_linear, linear_of, Adaptation, InGamut, Lab, Lch, Xyz};
 pub use cmyk::Cmyk;
 pub use hex::{parse_hex, Hex, HexForm};
 pub use kelvin::{chromaticity_of, uv_of, white_of, Illuminant, KELVIN_MAX, KELVIN_MIN};

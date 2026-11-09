@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockClass;
 
+use tairix_abi::blkio::BlkReissue;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_log::Event;
@@ -33,12 +34,20 @@ const BLOCK: usize = BLOCK_SIZE as usize;
 /// A device identity in the reserved kernel-driven space.
 const DEV: u64 = tairix_abi::blkio::kernel_block_device(0);
 
-/// A tiny in-memory device whose next operation can be made to fail with a
-/// chosen error, and whose promise to a consumer can be set independently of
-/// its transfers succeeding.
+/// A tiny in-memory device whose operations can be made to fail with a chosen
+/// error, for good or a set number of times, and whose promise to a consumer
+/// can be set independently of its transfers succeeding.
 struct FixtureBlock {
     data: Vec<u8>,
     fail: Option<DriverError>,
+    /// How many more operations `fail` fails; `None` for every one.
+    fails_left: Option<u32>,
+    /// Its word, after a failure, on when it may be issued again.
+    vouch: BlkReissue,
+    /// How often it was asked for that word.
+    asked: u32,
+    /// How many operations reached it.
+    attempts: u32,
     promise: MountAvailability,
     name: BlkDeviceName,
     medium: Option<BlkMedium>,
@@ -53,6 +62,10 @@ impl FixtureBlock {
         Self {
             data: vec![0u8; blocks * BLOCK],
             fail: None,
+            fails_left: None,
+            vouch: BlkReissue::Paced,
+            asked: 0,
+            attempts: 0,
             promise: MountAvailability::Available,
             name: BlkDeviceName::new("fixture-blk"),
             medium: Some(FIXTURE_MEDIUM),
@@ -64,9 +77,17 @@ impl FixtureBlock {
 
     fn check(&mut self) -> Result<(), DriverError> {
         crate::test_boot::advance_clock(self.takes_ns);
-        match self.fail {
-            Some(err) => Err(err),
-            None => Ok(()),
+        self.attempts += 1;
+        let Some(err) = self.fail else {
+            return Ok(());
+        };
+        match &mut self.fails_left {
+            Some(0) => Ok(()),
+            Some(left) => {
+                *left -= 1;
+                Err(err)
+            }
+            None => Err(err),
         }
     }
 }
@@ -129,6 +150,11 @@ impl Block for FixtureBlock {
 
     fn backing_availability(&self) -> MountAvailability {
         self.promise
+    }
+
+    fn reissue(&mut self) -> BlkReissue {
+        self.asked += 1;
+        self.vouch
     }
 }
 
@@ -440,7 +466,7 @@ fn a_device_operation_taking_a_quarter_second_is_recorded_and_a_quicker_one_is_n
         assert_eq!(device.flush(), Err(DriverError::DeviceFault));
     });
     let events = sink.snapshot();
-    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events.len(), 3, "{events:?}");
     let fields = |at: usize| -> Vec<(&str, &str)> {
         events[at]
             .fields
@@ -475,6 +501,21 @@ fn a_device_operation_taking_a_quarter_second_is_recorded_and_a_quicker_one_is_n
             ("ok", "false"),
         ],
         "a slow failure is named as one"
+    );
+    assert_eq!(events[2].id, AuditEvent::DeviceOperationFailed.id());
+    assert_eq!(
+        fields(2),
+        [
+            ("dev", dev.as_str()),
+            ("device", "fixture-blk"),
+            ("op", "flush"),
+            ("lba", "null"),
+            ("bytes", "0"),
+            ("error", "device fault"),
+            ("reissues", "0"),
+            ("failed", "1"),
+        ],
+        "and, failing back to its caller, recorded as a failure"
     );
 }
 
@@ -580,4 +621,184 @@ fn the_kernel_device_identity_space_is_disjoint_from_endpoint_ids() {
     assert!(!tairix_abi::blkio::is_kernel_block_device(
         tairix_abi::sysinfo::SYSINFO_ENDPOINT
     ));
+}
+
+/// A metered device over `inner`, recording its audit trail.
+fn audited(
+    inner: FixtureBlock,
+) -> (
+    MeteredBlock<FixtureBlock>,
+    &'static crate::test_sink::TestSink,
+) {
+    let sink: &'static crate::test_sink::TestSink =
+        crate::forever(alloc::boxed::Box::new(crate::test_sink::TestSink::new()));
+    (MeteredBlock::new(inner, DEV, sink), sink)
+}
+
+/// The failure records `sink` holds, as their `reissues` and `failed` fields.
+fn failure_records(
+    sink: &crate::test_sink::TestSink,
+) -> Vec<(alloc::string::String, alloc::string::String)> {
+    sink.snapshot()
+        .into_iter()
+        .filter(|event| event.id == AuditEvent::DeviceOperationFailed.id())
+        .map(|event| {
+            let field = |key: &str| {
+                event
+                    .fields
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            };
+            (field("reissues"), field("failed"))
+        })
+        .collect()
+}
+
+#[test]
+fn a_failure_the_device_vouches_for_is_issued_again_at_once_and_succeeds() {
+    let mut inner = FixtureBlock::new(4);
+    inner.data[BLOCK..2 * BLOCK].fill(0x5A);
+    inner.fail = Some(DriverError::TransferCorrupted);
+    inner.fails_left = Some(2);
+    inner.vouch = BlkReissue::Now;
+    let (mut device, sink) = audited(inner);
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        device.read_blocks(1, &mut buf).expect("ridden out");
+    });
+    assert!(buf.iter().all(|&byte| byte == 0x5A));
+    assert_eq!((device.device.attempts, device.device.asked), (3, 2));
+    let counters = device.io_source().counters.snapshot();
+    assert_eq!(
+        (
+            counters.completions,
+            counters.transient,
+            counters.ok,
+            counters.reissues
+        ),
+        (3, 2, 1, 2),
+        "each attempt folds as the device answered it"
+    );
+    assert_eq!(
+        device.io_source().live_availability(),
+        Some(MountAvailability::Available),
+        "and the blip is over"
+    );
+    assert!(failure_records(sink).is_empty(), "no caller saw a failure");
+}
+
+#[test]
+fn a_failure_that_keeps_coming_back_reaches_its_caller_once_the_budget_is_spent() {
+    let mut inner = FixtureBlock::new(4);
+    inner.fail = Some(DriverError::TimedOut);
+    inner.vouch = BlkReissue::Now;
+    let (mut device, sink) = audited(inner);
+    let retries = device.meter.budget().max_retries;
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        assert_eq!(device.read_blocks(0, &mut buf), Err(DriverError::TimedOut));
+    });
+    assert_eq!(device.device.attempts, retries + 1);
+    assert_eq!(
+        device.io_source().counters.snapshot().reissues,
+        u64::from(retries)
+    );
+    assert_eq!(
+        failure_records(sink),
+        [(alloc::format!("{retries}"), "1".into())]
+    );
+}
+
+#[test]
+fn a_fault_is_never_issued_again() {
+    let mut inner = FixtureBlock::new(4);
+    inner.fail = Some(DriverError::DeviceFault);
+    inner.vouch = BlkReissue::Now;
+    let (mut device, sink) = audited(inner);
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        assert_eq!(
+            device.read_blocks(0, &mut buf),
+            Err(DriverError::DeviceFault)
+        );
+    });
+    assert_eq!((device.device.attempts, device.device.asked), (1, 1));
+    assert_eq!(failure_records(sink), [("0".into(), "1".into())]);
+}
+
+#[test]
+fn a_reissue_the_device_cannot_vouch_for_waits_and_is_never_spun() {
+    // The pacing is a park, and a caller no scheduler can park is answered
+    // with the failure instead.
+    let _ = crate::test_boot::claim_scheduler();
+    let mut inner = FixtureBlock::new(4);
+    inner.fail = Some(DriverError::TransferCorrupted);
+    inner.fails_left = Some(1);
+    let (mut device, sink) = audited(inner);
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        assert_eq!(
+            device.read_blocks(0, &mut buf),
+            Err(DriverError::TransferCorrupted)
+        );
+    });
+    assert_eq!(
+        device.device.attempts, 1,
+        "no second attempt without the wait"
+    );
+    assert_eq!(failure_records(sink), [("0".into(), "1".into())]);
+}
+
+#[test]
+fn a_request_the_device_refused_is_neither_issued_again_nor_recorded() {
+    let mut inner = FixtureBlock::new(4);
+    inner.vouch = BlkReissue::Now;
+    let (mut device, sink) = audited(inner);
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        assert_eq!(
+            device.read_blocks(9, &mut buf),
+            Err(DriverError::LengthOutOfRange)
+        );
+    });
+    assert_eq!((device.device.attempts, device.device.asked), (1, 0));
+    assert!(failure_records(sink).is_empty());
+}
+
+#[test]
+fn a_transient_failure_past_the_grace_window_is_not_issued_again() {
+    let _ = crate::test_boot::claim_scheduler();
+    let mut inner = FixtureBlock::new(4);
+    inner.fail = Some(DriverError::TimedOut);
+    inner.vouch = BlkReissue::Now;
+    let mut device = MeteredBlock::new(inner, DEV, &SINK);
+    // Every attempt outlasts the whole window, so the first reissue already
+    // finds it elapsed.
+    device.device.takes_ns = device.health.budget().grace_ns;
+    let mut buf = [0u8; BLOCK];
+    assert_eq!(device.read_blocks(0, &mut buf), Err(DriverError::TimedOut));
+    assert_eq!(
+        device.device.attempts, 2,
+        "the window let one reissue through"
+    );
+}
+
+#[test]
+fn failures_reaching_their_callers_are_recorded_each_time_their_count_doubles() {
+    let mut inner = FixtureBlock::new(4);
+    inner.fail = Some(DriverError::DeviceFault);
+    let (mut device, sink) = audited(inner);
+    let mut buf = [0u8; BLOCK];
+    crate::test_sink::with_log_level(Level::Trace, || {
+        for _ in 0..9 {
+            assert!(device.read_blocks(0, &mut buf).is_err());
+        }
+    });
+    let failed: Vec<alloc::string::String> = failure_records(sink)
+        .into_iter()
+        .map(|(_, failed)| failed)
+        .collect();
+    assert_eq!(failed, ["1", "2", "4", "8"]);
 }

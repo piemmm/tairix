@@ -3,11 +3,9 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use alloc::borrow::Cow;
-
 use tairix_collections::OrderedMap;
 
-use super::{owned, Dict, Name, ObjRef, Object, Stream};
+use super::{Dict, Name, ObjRef, Object, Resolved, Stream};
 
 fn name(text: &str) -> Name {
     Name(text.as_bytes().to_vec())
@@ -68,27 +66,6 @@ fn a_large_dictionary_finds_every_key_and_keeps_the_last_repeat() {
 }
 
 #[test]
-fn completing_from_an_older_dictionary_adds_only_the_keys_it_lacks() {
-    let mut dict = written(&[("B", 1), ("D", 2)]);
-    dict.complete_from(&written(&[("A", 5), ("B", 9), ("C", 3), ("E", 7)]))
-        .expect("room");
-    let entries: Vec<(&[u8], &Object)> = dict
-        .iter()
-        .map(|(key, value)| (key.as_bytes(), value))
-        .collect();
-    assert_eq!(
-        entries,
-        [
-            (&b"A"[..], &Object::Int(5)),
-            (b"B", &Object::Int(1)),
-            (b"C", &Object::Int(3)),
-            (b"D", &Object::Int(2)),
-            (b"E", &Object::Int(7)),
-        ]
-    );
-}
-
-#[test]
 fn a_type_and_a_name_are_read_through_the_dictionary() {
     let dict =
         Dict::from_written(alloc::vec![(name("Type"), Object::Name(name("Page")))]).expect("room");
@@ -118,8 +95,23 @@ fn a_copy_is_the_object_however_deeply_it_nests() {
         }),
     ]);
     assert_eq!(object.try_clone(), Ok(object.clone()));
-    assert_eq!(owned(Cow::Borrowed(&object)), Ok(object.clone()));
-    assert_eq!(owned(Cow::Owned(Object::Int(1))), Ok(Object::Int(1)));
+    assert_eq!(Resolved::Borrowed(&object).into_owned(), Ok(object.clone()));
+    assert_eq!(
+        Resolved::Owned(Object::Int(1)).into_owned(),
+        Ok(Object::Int(1))
+    );
+    let shared = alloc::sync::Arc::new(object.clone());
+    let held = alloc::sync::Arc::clone(&shared);
+    assert_eq!(
+        Resolved::Shared(shared).into_owned(),
+        Ok(object.clone()),
+        "copied"
+    );
+    assert_eq!(
+        Resolved::Shared(held).into_owned(),
+        Ok(object),
+        "the last holder's taken"
+    );
 }
 
 #[test]

@@ -12,7 +12,8 @@ serve its volume to the kernel (`plans/FSSERVE.md` FSS2).
   its format is opened over, through `VolumeAccess` — the kernel's
   `volume_read`, `volume_write` and `volume_ctl`.
 - `ServedFormat` is all a format's driver crate supplies: how it opens a
-  volume, read-only or with its write-back bounded by a `WritebackBudget`.
+  volume, read-only or with its write-back bounded by a `WritebackBudget`,
+  recording its diagnostics on the log the runtime lends it.
   `bind_key` and `REQUIRED_CAPABILITIES` are every served driver's bind key
   and capability set.
 - The `program` feature's `program::run` is the whole driver process: read

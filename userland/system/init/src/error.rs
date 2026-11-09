@@ -1,19 +1,13 @@
-//! Error and failure types surfaced by the [`Init`](crate::Init) manager.
+//! Error types surfaced by the [`Init`](crate::Init) manager.
 //!
-//! Two distinct vocabularies are deliberately kept apart:
-//!
-//! * [`InitError`] is a **graph-level, fail-closed** error returned by
-//!   [`Init::register`](crate::Init::register) and
-//!   [`Init::start_all`](crate::Init::start_all). It signals a structural
-//!   defect in the registered service set — a duplicate name, a dependency
-//!   on an unregistered service, or a cycle — that prevents *any* service
-//!   from coming up. The system does not boot a
-//!   partial, surprising configuration.
-//! * [`StartFailure`] is a **per-service** outcome recorded in the
-//!   [`StartReport`](crate::StartReport). When the graph is sound, init
-//!   brings up every service it can; a single service that fails (and the
-//!   dependents it blocks) is reported here without aborting the services
-//!   that are independent of it.
+//! [`InitError`] is a **fail-closed** error returned by
+//! [`Init::register`](crate::Init::register) and
+//! [`Init::start_all`](crate::Init::start_all): a structural defect in the
+//! registered service set — a duplicate name, a dependency on an unregistered
+//! service, or a cycle — that prevents *any* service from coming up, so the
+//! system does not boot a partial, surprising configuration. A single service
+//! that fails to start within a sound graph is not an error here: init brings
+//! up every service it can and records each refusal on its audit sink.
 
 use core::fmt;
 
@@ -39,6 +33,8 @@ pub enum InitError {
     /// another user's service — to life (fail closed, no privilege
     /// escalation).
     ScopeViolation,
+    /// The registry could not grow to hold another service.
+    OutOfMemory,
 }
 
 impl fmt::Display for InitError {
@@ -48,38 +44,9 @@ impl fmt::Display for InitError {
             Self::DependencyMissing => "a service depends on an unregistered service",
             Self::DependencyCycle => "the service dependency graph contains a cycle",
             Self::ScopeViolation => "a service's account is outside this manager's authority scope",
+            Self::OutOfMemory => "the service registry cannot grow",
         };
         f.write_str(message)
-    }
-}
-
-/// Why a single service was not started during an otherwise-valid bring-up.
-///
-/// Recorded in [`StartReport::failed`](crate::StartReport); never aborts the
-/// services that do not depend on the failed one.
-///
-/// The manager does not decode manifests or check capabilities itself: the
-/// kernel is the single capability authority and derives each service's grant
-/// from the signed bundle at load time. A launch therefore fails here only
-/// because the spawn was refused (the kernel's load gate, which includes that
-/// capability derivation, said no) or because a dependency failed first.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum StartFailure {
-    /// The [`Spawner`](crate::Spawner) refused to launch the service; the
-    /// wrapped [`Errno`] is the spawner's error verbatim. This subsumes a
-    /// bad manifest or a capability the account's ceiling does not hold: the
-    /// kernel rejects such a load and the refusal surfaces here.
-    SpawnFailed(Errno),
-    /// A dependency of this service failed to start, so it was skipped.
-    DependencyFailed,
-}
-
-impl fmt::Display for StartFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SpawnFailed(e) => write!(f, "spawn failed: {e}"),
-            Self::DependencyFailed => f.write_str("a dependency failed to start"),
-        }
     }
 }
 
@@ -162,9 +129,11 @@ pub enum ActivateError {
     QueueFull,
     /// The service could not be launched: the kernel's load gate refused the
     /// spawn (a bad manifest, a capability beyond the account's ceiling, or
-    /// another load failure). The underlying [`StartFailure`] is recorded in
-    /// the audit log.
+    /// another load failure). The refusal is recorded in the audit log.
     NotActivatable,
+    /// There was no memory to record the client: nothing was queued, and the
+    /// service was not started for it.
+    OutOfMemory,
 }
 
 impl ActivateError {
@@ -181,6 +150,7 @@ impl ActivateError {
             // The client was entitled to ask; the target's bundle is what the
             // load gate refused.
             Self::NotActivatable => Errno::NotSupported,
+            Self::OutOfMemory => Errno::OutOfMemory,
         }
     }
 }
@@ -193,6 +163,7 @@ impl fmt::Display for ActivateError {
             Self::Unavailable => "the service cannot be activated in its current state",
             Self::QueueFull => "the service's pending-connection queue is full",
             Self::NotActivatable => "the service could not be launched",
+            Self::OutOfMemory => "no memory to record the connection",
         };
         f.write_str(message)
     }
@@ -219,8 +190,7 @@ pub enum ControlError {
     Unavailable,
     /// The service could not be launched: the kernel's load gate refused the
     /// spawn (a bad manifest, a capability beyond the account's ceiling, or
-    /// another load failure). The underlying [`StartFailure`] is recorded in
-    /// the audit log.
+    /// another load failure). The refusal is recorded in the audit log.
     NotStartable,
     /// An enrolment change would make the administrator override document
     /// longer than any reader of it accepts.
@@ -234,6 +204,9 @@ pub enum ControlError {
     RecordUnread,
     /// The service is part of the boot floor, which no enrolment governs.
     BootFloor,
+    /// There was no memory to make the change: nothing was recorded or
+    /// started.
+    OutOfMemory,
 }
 
 impl ControlError {
@@ -258,6 +231,7 @@ impl ControlError {
             // the caller.
             Self::NotRecorded(err) => err,
             Self::RecordUnread => Errno::NoData,
+            Self::OutOfMemory => Errno::OutOfMemory,
         }
     }
 }
@@ -274,6 +248,7 @@ impl fmt::Display for ControlError {
             }
             Self::RecordUnread => "the enrolment record has not been read yet",
             Self::BootFloor => "a boot-floor service, which no enrolment governs",
+            Self::OutOfMemory => "no memory to make the change",
         };
         f.write_str(message)
     }
@@ -281,7 +256,7 @@ impl fmt::Display for ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
+    use super::{ActivateError, ControlError, InitError, NotifyError};
     use tairix_abi::Errno;
 
     extern crate alloc;
@@ -312,17 +287,7 @@ mod tests {
         assert_eq!(ActivateError::NotActivatable.errno(), Errno::NotSupported);
         assert_eq!(NotifyError::UnknownSender.errno(), Errno::NotFound);
         assert_eq!(NotifyError::NotStarting.errno(), Errno::NotSupported);
-    }
-
-    #[test]
-    fn start_failure_display_wraps_errno() {
-        assert_eq!(
-            format!("{}", StartFailure::SpawnFailed(Errno::NotFound)),
-            "spawn failed: not found",
-        );
-        assert_eq!(
-            format!("{}", StartFailure::DependencyFailed),
-            "a dependency failed to start",
-        );
+        assert_eq!(ActivateError::OutOfMemory.errno(), Errno::OutOfMemory);
+        assert_eq!(ControlError::OutOfMemory.errno(), Errno::OutOfMemory);
     }
 }

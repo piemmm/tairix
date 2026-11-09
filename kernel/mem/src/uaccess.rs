@@ -53,7 +53,7 @@
 //! through the very same [`PhysMap`] the copy uses, and asserts the
 //! cross-page, offset, and every fail-closed path.
 
-use crate::frame::{PhysAddr, PAGE_SIZE};
+use crate::frame::{Frame, PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
 use crate::vmm::{MapFlags, Page, UserAddressSpace, VirtAddr};
 
@@ -73,13 +73,16 @@ pub enum UaccessError {
     /// `ptr + len` does not fit in the address space, or the length
     /// exceeds what a single span can describe (CWE-190).
     LengthOverflow,
-    /// A page in the range has no mapping in the address space. `va` is
-    /// the page-aligned base of the first unmapped page, so a caller
-    /// backing demand-paged file mappings can offer exactly that page to
-    /// its fault resolver and retry.
+    /// A page in the range has no mapping in the address space, so a caller
+    /// backing demand-paged memory can back it and every later page the copy
+    /// needs ([`next_unmapped_page`]) before running the copy again.
     NotMapped {
         /// Page-aligned base of the first unmapped page.
         va: u64,
+        /// One past the last byte of the range the copy was moving.
+        end: u64,
+        /// The copy writes it: a [`copy_out`].
+        write: bool,
     },
     /// A page in the range is mapped but is not user-accessible — the
     /// classic kernel-pointer-confusion vector.
@@ -128,8 +131,7 @@ pub fn copy_in(
         physmap,
         uaddr,
         dst.len(),
-        MapFlags::READ,
-        UaccessError::NotReadable,
+        false,
         |user_ptr, buf_off, span| {
             // SAFETY: `walk` proves `user_ptr` is valid for `span`
             // readable bytes (the page is mapped USER|READ and the
@@ -171,8 +173,7 @@ pub fn copy_out(
         physmap,
         uaddr,
         src.len(),
-        MapFlags::WRITE,
-        UaccessError::NotWritable,
+        true,
         |user_ptr, buf_off, span| {
             // SAFETY: `walk` proves `user_ptr` is valid for `span`
             // writable bytes (the page is mapped USER|WRITE and the
@@ -191,24 +192,83 @@ pub fn copy_out(
     )
 }
 
+/// The base of the first page of `[from, end)` a copy that `write`s or reads
+/// it would find unmapped, or `None` when the copy can run to `end` or would
+/// stop first at a page it refuses for another reason.
+///
+/// Lets a caller back every page a copy still needs at once and run the copy
+/// one more time, instead of once per missing page: a copy that runs again
+/// from the start after each miss makes a buffer of `n` untouched pages cost
+/// `n²` page copies.
+#[must_use]
+pub fn next_unmapped_page(
+    space: &dyn UserAddressSpace,
+    from: u64,
+    end: u64,
+    write: bool,
+) -> Option<u64> {
+    let mut page_start = from & !(PAGE_SIZE as u64 - 1);
+    while page_start < end {
+        match user_page(space, page_start, end, write) {
+            Ok(_) => page_start = page_start.checked_add(PAGE_SIZE as u64)?,
+            Err(UaccessError::NotMapped { va, .. }) => return Some(va),
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// The frame and flags of the page at `page_start`, provided a copy that
+/// `write`s or reads it may use them: mapped, a user page, carrying the
+/// direction's permission, and ordinary cacheable RAM. `end` is the copy's.
+fn user_page(
+    space: &dyn UserAddressSpace,
+    page_start: u64,
+    end: u64,
+    write: bool,
+) -> Result<(Frame, MapFlags), UaccessError> {
+    let unmapped = UaccessError::NotMapped {
+        va: page_start,
+        end,
+        write,
+    };
+    // `page_start` is page-aligned by construction, so `Page::from_addr`
+    // cannot report `Misaligned`; any error reads as "no mapping", which is
+    // total and fails closed.
+    let page = Page::from_addr(VirtAddr::new(page_start)).map_err(|_| unmapped)?;
+    let (frame, flags) = space.translate(page).ok_or(unmapped)?;
+    if !flags.contains(MapFlags::USER) {
+        return Err(UaccessError::NotUser);
+    }
+    let (required, missing) = if write {
+        (MapFlags::WRITE, UaccessError::NotWritable)
+    } else {
+        (MapFlags::READ, UaccessError::NotReadable)
+    };
+    if !flags.contains(required) {
+        return Err(missing);
+    }
+    if flags & MapFlags::NOT_CACHEABLE != MapFlags::empty() {
+        return Err(UaccessError::NotCacheable);
+    }
+    Ok((frame, flags))
+}
+
 /// Walk `[uaddr, uaddr + len)` one page at a time, validating each page
 /// and invoking `per_span` with `(user_ptr, buf_offset, span_len)` for
 /// the byte run that falls inside that page.
 ///
-/// `required` is the data permission the direction needs on top of
-/// [`MapFlags::USER`]; `missing_perm` is the error returned when a page
-/// is user-accessible but lacks it. The closure performs the actual
-/// byte move and reports a fault the hardware window absorbed; `walk`
-/// owns every bounds and permission check so the two public entry
-/// points share exactly one validated traversal, and it stops at the
-/// first span whose move fails.
+/// A copy that `write`s needs [`MapFlags::WRITE`] on every page, one that
+/// reads [`MapFlags::READ`]. The closure performs the actual byte move and
+/// reports a fault the hardware window absorbed; `walk` owns every bounds and
+/// permission check so the two public entry points share exactly one
+/// validated traversal, and it stops at the first span whose move fails.
 fn walk<F>(
     space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
     uaddr: VirtAddr,
     len: usize,
-    required: MapFlags,
-    missing_perm: UaccessError,
+    write: bool,
     mut per_span: F,
 ) -> Result<(), UaccessError>
 where
@@ -232,23 +292,7 @@ where
     let mut buf_off: usize = 0;
     while addr < end {
         let page_start = addr & !page_mask;
-        // `page_start` is page-aligned by construction, so `Page::from_addr`
-        // cannot report `Misaligned`; treat any error as "no mapping" to
-        // stay total and fail-closed.
-        let page = Page::from_addr(VirtAddr::new(page_start))
-            .map_err(|_| UaccessError::NotMapped { va: page_start })?;
-        let (frame, flags) = space
-            .translate(page)
-            .ok_or(UaccessError::NotMapped { va: page_start })?;
-        if !flags.contains(MapFlags::USER) {
-            return Err(UaccessError::NotUser);
-        }
-        if !flags.contains(required) {
-            return Err(missing_perm);
-        }
-        if flags & MapFlags::NOT_CACHEABLE != MapFlags::empty() {
-            return Err(UaccessError::NotCacheable);
-        }
+        let (frame, _) = user_page(space, page_start, end, write)?;
 
         let offset_in_page = addr - page_start;
         let page_remaining = page_size - offset_in_page;
@@ -275,7 +319,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::Frame;
     use crate::phys::SimPhysMap;
     use crate::vmm::{AddressSpace, HostPageTable};
 
@@ -452,7 +495,21 @@ mod tests {
         let mut dst = [0u8; 4];
         assert_eq!(
             copy_in(&space, &sim, VirtAddr::new(0x4000), &mut dst),
-            Err(UaccessError::NotMapped { va: 0x4000 })
+            Err(UaccessError::NotMapped {
+                va: 0x4000,
+                end: 0x4004,
+                write: false
+            })
+        );
+        let src = [0u8; 4];
+        assert_eq!(
+            copy_out(&space, &sim, VirtAddr::new(0x4000), &src),
+            Err(UaccessError::NotMapped {
+                va: 0x4000,
+                end: 0x4004,
+                write: true
+            }),
+            "naming the access the copy needed"
         );
     }
 
@@ -543,7 +600,9 @@ mod tests {
             // base — exactly the page a demand-paging caller must
             // resolve before retrying.
             Err(UaccessError::NotMapped {
-                va: 0x4000 + PAGE_SIZE as u64
+                va: 0x4000 + PAGE_SIZE as u64,
+                end: 0x4000 + PAGE_SIZE as u64 + 4,
+                write: false
             })
         );
     }
@@ -610,8 +669,7 @@ mod tests {
             &sim,
             VirtAddr::new(0x4000),
             3 * PAGE_SIZE,
-            MapFlags::READ,
-            UaccessError::NotReadable,
+            false,
             |_ptr, _buf_off, _span| {
                 spans_seen += 1;
                 if spans_seen == 2 {
@@ -637,5 +695,75 @@ mod tests {
             copy_in(&space, &sim, VirtAddr::new(0x4000), &mut dst),
             Err(UaccessError::PhysUnmapped)
         );
+    }
+
+    /// The probe names every unmapped page of a range in turn, from any page
+    /// onward, and nothing past its end.
+    #[test]
+    fn the_probe_finds_each_unmapped_page_of_a_range_in_turn() {
+        let page = PAGE_SIZE as u64;
+        let rw = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
+        let space = space_with(&[
+            (0x4000, Frame(SIM_BASE_FRAME), rw),
+            (0x4000 + 2 * page, Frame(SIM_BASE_FRAME + 1), rw),
+        ]);
+        let end = 0x4000 + 4 * page - 1;
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000 + 3, end, false),
+            Some(0x4000 + page)
+        );
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000 + 2 * page, end, true),
+            Some(0x4000 + 3 * page)
+        );
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000 + 3 * page, 0x4000 + 3 * page, false),
+            None,
+            "an empty range needs nothing"
+        );
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000, 0x4000 + page, false),
+            None
+        );
+    }
+
+    /// The probe stops where the copy would: a page the copy refuses for any
+    /// reason but a missing mapping ends the search, so nothing past it is
+    /// backed for a copy that cannot reach it.
+    #[test]
+    fn the_probe_stops_at_a_page_the_copy_refuses() {
+        let page = PAGE_SIZE as u64;
+        let space = space_with(&[
+            (
+                0x4000,
+                Frame(SIM_BASE_FRAME),
+                MapFlags::READ | MapFlags::USER,
+            ),
+            (0x4000 + page, Frame(SIM_BASE_FRAME + 1), MapFlags::READ),
+        ]);
+        let end = 0x4000 + 3 * page;
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000, end, true),
+            None,
+            "a page the copy may not write"
+        );
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000, end, false),
+            None,
+            "a kernel page before the unmapped one"
+        );
+        assert_eq!(
+            next_unmapped_page(&space, 0x4000 + 2 * page, end, false),
+            Some(0x4000 + 2 * page)
+        );
+    }
+
+    /// The probe at the top of the address space ends rather than wrapping.
+    #[test]
+    fn the_probe_ends_at_the_top_of_the_address_space() {
+        let page = PAGE_SIZE as u64;
+        let top = !(page - 1);
+        let space = space_with(&[(top, Frame(SIM_BASE_FRAME), MapFlags::READ | MapFlags::USER)]);
+        assert_eq!(next_unmapped_page(&space, top, u64::MAX, false), None);
     }
 }

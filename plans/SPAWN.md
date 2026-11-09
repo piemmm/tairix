@@ -1299,8 +1299,8 @@ this plan.
   `InitSpawnCtx::admit_init` (in-place signature evolution, every port +
   double updated together) from the one shared derivation
   `spawn_layout::stack_span`. `resolve_stack_fault` sits beside
-  `resolve_file_fault` and is offered first in
-  `KernelDispatchHook::resolve_user_fault` — for reads *and* writes, so
+  `resolve_file_fault` and is offered first in `back_user_page`, the
+  resolver chain the fault and copy paths share — for reads *and* writes, so
   the write-fatal file rule can never kill a growth fault — backing
   **every page from the committed base down to the faulting page** with
   zeroed `RW` pages through the installed `MemMap` producer

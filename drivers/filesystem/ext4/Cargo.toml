@@ -52,6 +52,8 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
 
 [dev-dependencies]
+# The log a test opens a served volume with, which keeps nothing.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The shared driver listing fixtures (`listing::listed`, `first_listed`).
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
 tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0", features = ["test-util"] }

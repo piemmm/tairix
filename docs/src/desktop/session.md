@@ -1606,9 +1606,9 @@ conclusion is *accepted*.
   as a pair, so a run of offers folds each kind to its newest; an items
   offer's end takes the ends held before it as a save offer's does, and one
   that only left every offer held since the last drop, so items carried back
-  and forth over a window that has stopped reading cost it one end. The
-  offers before a drop stay: the drop is of the newest of them, which the
-  window may answer as late as it reads it.
+  and forth over a window that has stopped reading cost it one end. A drop
+  takes every offer before it but the one it is of, numbered as it is, which
+  the window may answer as late as it reads it and reads the drop by.
   Everything else — keys, buttons, the pick conclusion — is owed in full.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
@@ -1621,10 +1621,11 @@ conclusion is *accepted*.
   window has one pick at a time), one authorisation's, one tool-window move's
   end, one end of a press already delivered (a window holds one press at a
   time), and of a save offer's ends and an items offer's each one that only
-  left, a later one superseding it, and one drop's, which only a later drop
-  takes, since a window has every event held before a drag's offer by the
-  time it can answer it — so an evictable input event — a drag's report and
-  an offer among them — always exists.
+  left, a later one superseding it, and one drop's with the one offer it is
+  of, never shed ahead of it, which only a later drop takes, since a window
+  has every event held before a drag's offer by the time it can answer it —
+  so an evictable input event — a drag's report and an offer among them —
+  always exists.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same. Any other refusal no wait
@@ -2865,10 +2866,12 @@ pointer from that window, which therefore never sees the release it lent.
   each point, a numbered `FileOffered` per input batch, apart from the reports
   the dragging application is owed (`OwedReport::File`, so a batch may owe
   both); the window that is left is told with `ItemsOfferEnded`. The window
-  reads the file's media type for the offer standing (`offered_file`) and
-  answers whether a drop places it (`FileOfferAnswer`), which the pointer
-  shows as a copy; a drop there concludes `DragConclusion::Placed`, and the
-  source hands the file over read-only with `PlaceDropped`, which the session
+  reads the file's media type for the offer standing (`OfferedFile`, posted)
+  and answers whether a drop places it (`FileOfferAnswer`), which the pointer
+  shows as a copy; only a drop at the point of the offer the window answered
+  places it — one let go before it answered there is its slot's — concluding
+  `DragConclusion::Placed`, and the source hands the file over read-only with
+  `PlaceDropped`, which the session
   relays to the window's owner as an `OpenEntry::Placed`, consuming the grant
   whatever it answers. A drop the window does not place is its slot's.
 - **The application decides every folder drop.** Over its own windows or the
@@ -2930,10 +2933,13 @@ pointer from that window, which therefore never sees the release it lent.
   Dropped on a window whose answer stands, its application performs the drop
   under its own authority. One file is offered as a file too, under the same
   number (`DesktopReport::file`, the icon a regular file alone): a window that
-  answers it places it, and gave no answer for it as an item, has it placed
-  (`DesktopDrop::Placed`) — the session opens it read-only on its file worker
-  (`DesktopCall::Place`) and queues it for the window's owner as an
-  `OpenEntry::Placed`, its icon staying where it stood. Brought back over the
+  answers it places it at the point it is let go, and gave no answer for it
+  as an item, has it placed (`DesktopDrop::Placed`) — the session opens it
+  read-only on its file worker (`DesktopCall::Place`) and queues it for the
+  window's owner as an `OpenEntry::Placed`, its icon staying where it stood;
+  a file that cannot be opened or handed over is said in the desktop's own
+  notice. Let go before the window answered for that point, the icons stand
+  where they stood. Brought back over the
   desktop the pointer shows a
   move, and let go there the press is put down where it was released
   (`Desktop::put_down_lent`); ended any other way, a lock among them, they
@@ -3417,19 +3423,20 @@ which is the single place the desktop's whole answer lives:
 - the cursor, notification-glyph, icon-artwork, and window-furniture
   `ReclaimCache`s each shrink to their pressure-derived target, wiping what
   they release, and
-- `Compositor::release_content_under_pressure` runs the content ladder for the
-  window the session's own router currently focuses (see [Releasable window
+- `Compositor::release_content_under_pressure` runs the content ladder, which
+  takes only what nobody can see (see [Releasable window
   content](./wm.md#releasable-window-content)).
 
 Releasing content is only half of the handshake: the session then drains
-`Compositor::pending_redraws` and delivers a `WindowEvent::RedrawRequested` to
-each released window's owning app over the window channel, mapping the
+`Compositor::take_released_notices`, unmaps its side of each released window's
+frames and tells the owning app over the window channel, mapping the
 compositor's `WindowId` back to the client's window through the same served-
-window table every other app-ward event uses — there is no second mapping. The
-same drain runs after a window becomes visible again, so a restored window that
-lost its pixels while minimised is asked for them immediately. Only windows the
-embedder declared app-presented are ever released, so the bar, the lock screen,
-the picker, and a confirmation prompt — which the session paints itself and no
+window table every other app-ward event uses — there is no second mapping.
+When a window that lost its pixels is shown again, the session drains
+`Compositor::pending_redraws` and delivers a `WindowEvent::RedrawRequested`, so
+a restored window is asked for them immediately. Only windows the embedder
+declared app-presented are ever released, so the bar, the lock screen, the
+picker, and a confirmation prompt — which the session paints itself and no
 client would redraw — keep their pixels at every band.
 
 Logout or seat loss runs `teardown`, which tears every cache down and wipes

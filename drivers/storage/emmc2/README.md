@@ -120,10 +120,15 @@ The engine reports what it does through `SdhciHost::trace` (`trace::Trace`):
 - the card's OCR, SCR and switch status;
 - the DMA staging, and the first byte a failed DMA self-check differed at;
 - every wait that ended without what it wanted, with the register value it
-  last saw and how many completion parks it took.
+  last saw and how many completion parks it took;
+- every transfer the block layer asked for that failed, with the step it
+  failed at, what the controller or card reported there, its class, and when
+  it may be issued again.
 
-A host that records nothing keeps the default no-op, as the metal host does;
-the bring-up tests record it to check each step.
+A host that records nothing keeps the default no-op; the metal host records
+the failed transfers on the kernel's log (`floor::FailureLog`, the first and
+then one each time their count doubles), and the tests record everything to
+check each step.
 
 ## Layered seam
 
@@ -186,7 +191,13 @@ Command and transfer completions park on the controller's interrupt
 (`SdhciHost::await_irq`); the spec-mandated intervals park on a timer
 (`SdhciHost::delay_us`). Only the controller's own reset and clock-stable
 handshakes spin, each bounded by `DEFAULT_POLL_BUDGET`. Every wait fails
-closed with `DriverError::DeviceFault` rather than waiting forever.
+closed rather than waiting forever: a timeout bit or a silent controller as
+`DriverError::TimedOut`, a CRC, end-bit, index or auto-command error as
+`DriverError::TransferCorrupted`, and anything else as
+`DriverError::DeviceFault`; a card status reporting data its ECC could not
+correct is `DriverError::MediumError`. A transfer whose line reset confirmed
+answers `Block::reissue` with `Now`: the next request proves the card in
+`tran` before it moves data.
 
 ## Test surface
 

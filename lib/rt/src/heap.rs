@@ -48,6 +48,12 @@
 //!   a TLB shootdown for each cycle; releasing them in granules is what stops a
 //!   *teardown* from paying that per page, thousands of times over, with the
 //!   global address-space registry's write lock held each time.
+//! * **Hold.** A pinned process's heap ([`crate::mem_pin`]) gives back no page
+//!   it has mapped, at any band, until it is unpinned. Pinning asked that the
+//!   process's memory stay resident, and a page given back would need a fresh
+//!   commitment the next time it is wanted — exactly when the machine may have
+//!   none — so an allocation within what the heap has held never asks the
+//!   kernel for memory. The pinned-memory budget bounds what is held.
 //! * **Reallocate.** `realloc` resizes in place whenever it can, avoiding the
 //!   copy entirely. A **shrink** always succeeds in place:
 //!   the surrendered tail is returned to the free list (and top pages above the
@@ -292,6 +298,9 @@ struct ArenaPolicy {
     /// The least one unmap releases ([`ARENA_RESIZE_BYTES`]). Zero releases
     /// exactly what the call freed, on the spot.
     granule: usize,
+    /// Whether every mapped page is kept whatever the retention, for a pinned
+    /// process.
+    holds: bool,
 }
 
 impl ArenaPolicy {
@@ -300,6 +309,7 @@ impl ArenaPolicy {
         Self {
             retain: retain_bytes(arena_bytes, band),
             granule: ARENA_RESIZE_BYTES,
+            holds: false,
         }
     }
 
@@ -309,7 +319,16 @@ impl ArenaPolicy {
     /// process told that memory is critical surrenders everything above its
     /// (then zero) retention in one call, with no granule left behind.
     const fn exact(retain: usize) -> Self {
-        Self { retain, granule: 0 }
+        Self {
+            retain,
+            granule: 0,
+            holds: false,
+        }
+    }
+
+    /// This policy, keeping every mapped page if `holds`.
+    const fn holding(self, holds: bool) -> Self {
+        Self { holds, ..self }
     }
 }
 
@@ -358,6 +377,9 @@ struct HeapState<S: SpanStore> {
     /// No arena byte at or above this has been handed out since its page was
     /// mapped, so each still reads as the zero the kernel mapped it as.
     untouched: usize,
+    /// Whether the process is pinned, so its heap gives back no page it has
+    /// mapped.
+    holds: bool,
 }
 
 impl<S: SpanStore> HeapState<S> {
@@ -372,6 +394,7 @@ impl<S: SpanStore> HeapState<S> {
             release_refused_at: None,
             refusal: None,
             untouched: 0,
+            holds: false,
         }
     }
 
@@ -725,7 +748,7 @@ impl<S: SpanStore> HeapState<S> {
     /// paid a page at a time ([`ARENA_RESIZE_BYTES`]); the band-change trim
     /// passes zero to release on the spot.
     fn try_shrink_top(&mut self, pager: &dyn Pager, policy: ArenaPolicy) {
-        if self.count == 0 || self.release_refused_at == Some(self.mapped_end) {
+        if policy.holds || self.count == 0 || self.release_refused_at == Some(self.mapped_end) {
             return;
         }
         let top = self.count - 1;
@@ -820,7 +843,7 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     /// call, so the band has to be something the caller already holds rather
     /// than something it asks for.
     fn policy(state: &HeapState<S>) -> ArenaPolicy {
-        ArenaPolicy::new(state.mapped_bytes(), crate::pressure::gauge().band())
+        ArenaPolicy::new(state.mapped_bytes(), crate::pressure::gauge().band()).holding(state.holds)
     }
 
     /// Whether the last failed allocation was refused by the process's own
@@ -844,7 +867,17 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     fn trim(&self) {
         let mut state = self.state.lock();
         let retain = retain_bytes(state.mapped_bytes(), crate::pressure::gauge().band());
-        state.try_shrink_top(&self.pager, ArenaPolicy::exact(retain));
+        let holds = state.holds;
+        state.try_shrink_top(&self.pager, ArenaPolicy::exact(retain).holding(holds));
+    }
+
+    /// Keep every mapped page from now on, or stop keeping them and give back
+    /// what the band no longer permits.
+    fn hold(&self, holds: bool) {
+        self.state.lock().holds = holds;
+        if !holds {
+            self.trim();
+        }
     }
 }
 
@@ -1096,6 +1129,15 @@ pub(crate) fn refused_by_own_bound() -> bool {
 pub(crate) fn trim_retained() {
     #[cfg(rt_native)]
     GLOBAL.trim();
+}
+
+/// Keep every page the heap has mapped, at any band, while the process is
+/// pinned ([`crate::mem_pin`]), or stop once it is unpinned.
+pub(crate) fn hold_mapped(holds: bool) {
+    #[cfg(rt_native)]
+    GLOBAL.hold(holds);
+    #[cfg(not(rt_native))]
+    let _ = holds;
 }
 
 #[cfg(test)]
@@ -1631,6 +1673,7 @@ mod tests {
         let policy = ArenaPolicy {
             retain: 64 * PAGE_SIZE,
             granule: ARENA_RESIZE_BYTES,
+            holds: false,
         };
         let addr = heap
             .alloc(layout(PAGE_SIZE, 8), &pager, policy)
@@ -1773,6 +1816,36 @@ mod tests {
                 len: 2 * PAGE_SIZE
             }]
         );
+    }
+
+    /// A pinned process's heap gives back no page it has mapped, at any band
+    /// and through the trim, so an allocation within what it has held needs
+    /// no `mem_map` however short the machine is; unpinned, the band governs
+    /// again at once.
+    ///
+    /// Regression: PID 1's heap gave its free pages back at critical
+    /// pressure, so its next allocation asked a machine with nothing to give
+    /// and the refusal ended it.
+    #[test]
+    fn a_pinned_heap_keeps_what_it_has_mapped_at_any_band() {
+        let heap = wrapper(FakePager::new(), VecSpanStore::unbounded());
+        heap.hold(true);
+        let l = layout(3 * PAGE_SIZE, 8);
+        // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
+        let p = unsafe { heap.alloc(l) };
+        let maps = heap.pager.maps();
+        // SAFETY: `p` was just returned by this allocator for `l`.
+        unsafe { heap.dealloc(p, l) };
+        heap.trim();
+        assert_eq!(heap.pager.unmaps(), 0, "the unreported band reads critical");
+        // SAFETY: as above; the same layout fits the pages still held.
+        let again = unsafe { heap.alloc(l) };
+        assert_eq!(heap.pager.maps(), maps, "the held pages served it");
+        // SAFETY: `again` was just returned by this allocator for `l`.
+        unsafe { heap.dealloc(again, l) };
+        heap.hold(false);
+        assert_eq!(heap.pager.unmaps(), 1, "unpinned, the band takes them");
+        assert_eq!(heap.state.lock().mapped_bytes(), 0);
     }
 
     /// A band that deepens while the heap is idle must give the retained

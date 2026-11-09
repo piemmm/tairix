@@ -32,7 +32,7 @@ fn page(content: &[u8], resources: &str, objects: &[(u32, &str, &[u8])]) -> Disp
         pdf.stream(num, entries, data);
     }
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     document
         .page(0)
         .expect("a page")
@@ -53,7 +53,7 @@ fn painted(content: &str, entries: &str, data: &[u8], extra: &[(u32, &str, &[u8]
         pdf.stream(num, entries, data);
     }
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     document
         .page(0)
         .expect("a page")
@@ -150,6 +150,17 @@ fn a_stencil_paints_the_fill_colour_where_its_samples_are_zero() {
         &[],
     );
     assert_eq!(pixels(&inverted), [[0, 0, 0, 0], [0, 0, 0, 255]]);
+}
+
+#[test]
+fn a_stencil_inked_with_nothing_paints_nothing() {
+    let list = page(
+        b"/CS0 cs 1 scn /Im0 Do",
+        "<</ColorSpace <</CS0 [/Separation /None /DeviceGray <</FunctionType 2 /Domain [0 1] /N 1>>]>> /XObject <</Im0 5 0 R>>>>",
+        &[(5, "/Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true", &[0b0100_0000])],
+    );
+    assert!(list.items.is_empty());
+    assert!(!list.lost.contains(Lost::Images));
 }
 
 #[test]
@@ -294,7 +305,7 @@ fn an_inline_image_is_read_and_the_content_after_it_goes_on() {
         .object(3, "<</Type /Page /MediaBox [0 0 200 100] /Contents 4 0 R>>")
         .stream(4, "", content);
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let list = document
         .page(0)
         .expect("a page")
@@ -315,7 +326,7 @@ fn a_filtered_inline_image_ends_at_an_ei_followed_by_content() {
         .object(3, "<</Type /Page /MediaBox [0 0 200 100] /Contents 4 0 R>>")
         .stream(4, "", content);
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let list = document
         .page(0)
         .expect("a page")
@@ -336,7 +347,7 @@ fn an_image_too_large_for_the_budget_is_too_complex() {
         .stream(4, "", b"/Im0 Do")
         .stream(5, "/Type /XObject /Subtype /Image /Width 60000 /Height 60000 /ImageMask true", b"");
     let file = pdf.tabled(1, "");
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let page = document.page(0).expect("a page");
     assert_eq!(page.display_list(), Err(crate::PdfError::TooComplex));
 }
@@ -389,7 +400,7 @@ fn within(file: &[u8], budget: u64) -> Result<DisplayList, crate::PdfError> {
         password: None,
         budget,
     };
-    let document = Document::open(file, &options)?;
+    let document = Document::open(crate::fixture::kept(file), &options)?;
     document.page(0)?.display_list()
 }
 
@@ -567,4 +578,147 @@ fn a_jpegs_decoded_pixels_are_charged_with_the_pictures() {
         within(&file, needed - 1).err(),
         Some(crate::PdfError::TooComplex)
     );
+}
+
+#[test]
+fn a_jpegs_decode_array_reads_the_samples_it_decodes_to() {
+    let grey = jpeg(8, 8, [200, 200, 200]);
+    let list = painted(
+        "/Im0 Do",
+        "/Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Decode [1 0]",
+        &grey,
+        &[],
+    );
+    let [Item::Image { picture, .. }] = list.items.as_slice() else {
+        panic!("one picture: {:?}", list.lost);
+    };
+    assert!(
+        picture.jpeg.is_none(),
+        "its pixels are no longer the JPEG's own"
+    );
+    assert!(
+        picture.pixels[0].abs_diff(55) < 6,
+        "{:?}",
+        &picture.pixels[..4]
+    );
+    let masked = painted(
+        "/Im0 Do",
+        "/Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 6 0 R",
+        &[0; 64],
+        &[(
+            6,
+            "/Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Decode [1 0]",
+            grey.as_slice(),
+        )],
+    );
+    let alpha = pixels(&masked)[0][3];
+    assert!(alpha.abs_diff(55) < 6, "{alpha}");
+}
+
+#[test]
+fn a_jpegs_colour_key_clears_the_samples_it_decodes_to() {
+    let bytes = jpeg(16, 8, [200, 30, 40]);
+    let list = painted(
+        "/Im0 Do",
+        "/Width 16 /Height 8 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Mask [190 210 20 40 30 50]",
+        &bytes,
+        &[],
+    );
+    let alphas: Vec<u8> = pixels(&list).iter().map(|pixel| pixel[3]).collect();
+    assert!(alphas.iter().all(|&alpha| alpha == 0), "{alphas:?}");
+}
+
+#[test]
+fn a_jpeg_that_cannot_fill_its_picture_is_refused_not_a_panic() {
+    let file = crate::fixture::one_page(b"", "<<>>");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let bytes = jpeg(16, 8, [10, 20, 30]);
+    let mut short = alloc::vec![0u8; 16 * 8 * 4 - 4];
+    assert_eq!(
+        super::dct(
+            &document,
+            &bytes,
+            (16, 8),
+            &crate::colour::Space::Rgb,
+            &mut short
+        ),
+        Err(crate::PdfError::Unsupported)
+    );
+}
+
+#[test]
+fn a_tiny_image_runs_its_tint_transform_no_more_often_than_it_has_pixels() {
+    // A table of every colour eight bits spell would run it 256 times.
+    let file = image_file(
+        "/Im0 Do",
+        "/Width 2 /Height 1 /ColorSpace [/Separation /A /DeviceGray 6 0 R] /BitsPerComponent 8",
+        &[0, 255],
+        &[(
+            6,
+            "/FunctionType 4 /Domain [0 1] /Range [0 1]",
+            b"{ 1 exch sub }",
+        )],
+    );
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let list = document
+        .page(0)
+        .expect("a page")
+        .display_list()
+        .expect("a display list");
+    assert_eq!(pixels(&list), [[255, 255, 255, 255], [0, 0, 0, 255]]);
+    let steps = crate::limits::MAX_EVALUATION_STEPS - document.work().left();
+    assert!(steps < 64, "{steps} steps for two pixels");
+}
+
+#[test]
+fn a_tint_transform_runs_once_for_each_colour_an_image_holds() {
+    // Each run is charged its program's whole length, which it all but skips:
+    // run a pixel at a time, two colours alternating would spend the
+    // document's steps.
+    let program = format!("{{ pop pop false {{ {} }} if }}", "dup pop ".repeat(32_500));
+    let data: Vec<u8> = (0..130 * 130)
+        .flat_map(|at| if at % 2 == 0 { [0; 3] } else { [255; 3] })
+        .collect();
+    let list = painted(
+        "/Im0 Do",
+        "/Width 130 /Height 130 /ColorSpace [/DeviceN [/A /B /C] /DeviceGray 6 0 R] /BitsPerComponent 8",
+        &data,
+        &[(
+            6,
+            "/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1]",
+            program.as_bytes(),
+        )],
+    );
+    assert_eq!(&pixels(&list)[..2], &[[0, 0, 0, 255], [255, 255, 255, 255]]);
+}
+
+#[test]
+fn a_stencils_samples_are_read_once_in_every_colour_it_is_painted_in() {
+    let content = "1 0 0 rg /Im0 Do 0 0 1 rg /Im0 Do";
+    let file = image_file(
+        content,
+        "/Width 8 /Height 8 /ImageMask true",
+        &[0x0f; 8],
+        &[],
+    );
+    // The page's content and the stencil's bytes, its samples once, and a
+    // picture in each of its two colours.
+    let needed = u64::try_from(content.len() + 8 + 8 * 8 + 2 * 8 * 8 * 4).expect("small");
+    assert!(within(&file, needed).is_ok());
+    assert_eq!(
+        within(&file, needed - 1).err(),
+        Some(crate::PdfError::TooComplex)
+    );
+}
+
+#[test]
+fn an_inverted_stencil_short_of_its_samples_paints_nowhere_past_them() {
+    let list = painted(
+        "/Im0 Do",
+        "/Width 2 /Height 2 /ImageMask true /Decode [1 0]",
+        &[0b1000_0000],
+        &[],
+    );
+    let alphas: Vec<u8> = pixels(&list).iter().map(|pixel| pixel[3]).collect();
+    assert_eq!(alphas, [255, 0, 0, 0]);
 }

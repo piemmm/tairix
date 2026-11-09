@@ -4,8 +4,7 @@
 //! A userland lock is a word in the process's own memory. While it is
 //! uncontended, acquiring and releasing it is a pair of atomic operations and
 //! the kernel never hears about it at all; only when a thread must actually
-//! *wait* does it enter the kernel, name the word, and park. That is what keeps
-//! a lock cheap and still lets a waiter give the CPU up rather than spin.
+//! *wait* does it enter the kernel, name the word, and park.
 //!
 //! # The key
 //!
@@ -18,40 +17,26 @@
 //!
 //! # Structure
 //!
-//! Waiters live in the one tested [`WaitQueue`] definition — its FIFO
-//! wake-one fairness, its `O(log n)` deadline index, and its
-//! register-before-retest lost-wake discipline — one queue per live key, held
-//! in a bucket array sized from the discovered CPU count rather than a
-//! hand-picked constant. Each queue is refcounted so a waker (or a waiter
-//! about to park) drops the bucket lock *before* touching the scheduler: no
-//! path holds a futex lock across an `unpark`, so the bucket locks can never
-//! participate in a lock cycle with the scheduler's.
+//! Every user thread is given its [`FutexWaiter`] when it is admitted, and
+//! each wait it makes links that record rather than anything new, so a futex
+//! wait needs no memory: on an exhausted heap a contended lock still parks its
+//! waiter instead of failing it into a retry loop. A waiter is linked, in
+//! arrival order, into the chain of the bucket its key hashes to, and a wake
+//! walks that chain releasing the oldest waiters on its key. The buckets are
+//! sized from the discovered CPU count, so a chain holds few waiters.
 //!
-//! A key's queue is created on demand and dropped once its last waiter
-//! leaves, so an idle process holds no futex state. Both the registration and
-//! the removal happen under the bucket lock, which is what makes the removal
-//! safe: a queue that is in the map is never one a waiter is about to join,
-//! and a queue a waiter *has* joined is never empty, so no wake can be lost
-//! to a concurrent cleanup.
+//! A timed wait arms the row its thread was given on
+//! [`crate::waitq::FUTEX_TIMER_WAITQ`] at admission, so the timed sweep and
+//! the one-shot arming find a futex deadline exactly as any other.
 //!
-//! A key's first waiter needs a queue for it, and a heap that cannot hold one,
-//! or the waiter's row in it, refuses the registration with nothing filed, so
-//! the caller fails rather than parks on a queue no waker could find. Nothing else this module
-//! allocates: the deadline walks lift a bounded batch of handles per hold of a
-//! bucket's lock into a stack buffer, and resume past the last.
-//!
-//! Live keys are bounded without a cap of their own: a thread blocks on at
-//! most one futex at a time, so a process can hold no more keys than it has
-//! threads, which `LimitKind::Threads` already bounds.
+//! No path holds a bucket lock across an `unpark`: a wake unlinks a batch of
+//! waiters under the lock and releases them once it is dropped.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::convert::Infallible;
 use core::hash::Hasher;
-use core::ops::Bound;
 
-use tairix_abi::Errno;
-use tairix_collections::OrderedMap;
 use tairix_hash::{HashSeed, SipHash13};
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::TaskId;
@@ -59,7 +44,7 @@ use tairix_kernel_sec::ProcessId;
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
 
-use crate::waitq::{WaitQueue, WaitQueueArch};
+use crate::waitq::WaitQueueArch;
 
 /// A futex wait key: the process that owns the address space and the user
 /// virtual address of the 32-bit word inside it.
@@ -72,25 +57,139 @@ pub struct FutexKey {
     pub uaddr: u64,
 }
 
-/// One bucket of the key→queue table, ordered within: the address half of a
-/// key is the caller's choice, and an ordered map's cost does not depend on
-/// how keys fall.
-type Bucket = SpinLock<OrderedMap<FutexKey, Arc<WaitQueue>>>;
+/// One thread's futex wait: made when the thread is admitted, and linked by
+/// every wait it makes.
+pub struct FutexWaiter {
+    task: TaskId,
+    /// Changed only under the lock of the bucket it is filed in; the lock
+    /// makes it mutable, the bucket's makes it consistent.
+    link: SpinLock<Link>,
+}
+
+struct Link {
+    filed: Option<Filed>,
+    next: Option<Arc<FutexWaiter>>,
+    prev: Weak<FutexWaiter>,
+}
+
+/// The key a waiter waits on, the bucket of its table it is linked in, and
+/// the arrival it was linked as there.
+#[derive(Copy, Clone)]
+struct Filed {
+    key: FutexKey,
+    bucket: usize,
+    /// Unique within the bucket, so a wake that let go of the lock can tell
+    /// whether the waiter it stopped at is still where it left it.
+    arrival: u64,
+}
+
+impl FutexWaiter {
+    /// `task`'s waiter, linked nowhere.
+    #[must_use]
+    pub const fn new(task: TaskId) -> Self {
+        Self {
+            task,
+            link: SpinLock::new(Link {
+                filed: None,
+                next: None,
+                prev: Weak::new(),
+            }),
+        }
+    }
+
+    fn filed(&self) -> Option<Filed> {
+        self.link.lock().filed
+    }
+}
+
+/// One bucket's linked waiters, oldest first.
+struct Chain {
+    head: Option<Arc<FutexWaiter>>,
+    tail: Weak<FutexWaiter>,
+    arrivals: u64,
+    /// Waiters the wakes have examined, so a test can hold a wake to one walk.
+    #[cfg(test)]
+    walked: usize,
+}
+
+impl Chain {
+    const fn new() -> Self {
+        Self {
+            head: None,
+            tail: Weak::new(),
+            arrivals: 0,
+            #[cfg(test)]
+            walked: 0,
+        }
+    }
+
+    /// Link `waiter` last, on `key`, in the bucket at `bucket`. Each link lock
+    /// is taken alone: the bucket's lock, held by the caller, is what keeps
+    /// the chain consistent.
+    fn push(&mut self, waiter: &Arc<FutexWaiter>, key: FutexKey, bucket: usize) {
+        let arrival = self.arrivals;
+        self.arrivals = arrival.wrapping_add(1);
+        {
+            let mut link = waiter.link.lock();
+            link.filed = Some(Filed {
+                key,
+                bucket,
+                arrival,
+            });
+            link.next = None;
+            link.prev = self.tail.clone();
+        }
+        match self.tail.upgrade() {
+            Some(tail) => tail.link.lock().next = Some(Arc::clone(waiter)),
+            None => self.head = Some(Arc::clone(waiter)),
+        }
+        self.tail = Arc::downgrade(waiter);
+    }
+
+    /// Unlink `waiter`, which is linked here. The caller holds a share of it,
+    /// so dropping the chain's cannot free it under this call.
+    fn unlink(&mut self, waiter: &FutexWaiter) {
+        let (next, prev) = {
+            let mut link = waiter.link.lock();
+            link.filed = None;
+            (link.next.take(), core::mem::take(&mut link.prev))
+        };
+        match prev.upgrade() {
+            Some(before) => before.link.lock().next.clone_from(&next),
+            None => self.head.clone_from(&next),
+        }
+        match next {
+            Some(after) => after.link.lock().prev = prev,
+            None => self.tail = prev,
+        }
+    }
+}
+
+impl Drop for Chain {
+    /// Iteratively, so a long chain cannot recurse through its links.
+    fn drop(&mut self) {
+        let mut next = self.head.take();
+        while let Some(waiter) = next {
+            let mut link = waiter.link.lock();
+            link.filed = None;
+            next = link.next.take();
+        }
+    }
+}
+
+type Bucket = SpinLock<Chain>;
 
 /// Buckets per discovered CPU.
 ///
-/// Four gives a machine's cores room to contend on *distinct* keys without
-/// serialising on one bucket lock, while costing a handful of empty maps per
-/// core — the bucket array is the only fixed-size structure
-/// here, and it is sized from the hardware rather than hand-picked, so a
-/// 128-core server and a single-core board each get a workable table from the
-/// same policy.
-const BUCKETS_PER_CPU: usize = 4;
+/// A bucket is a lock and two words, so many are cheap, and a chain walked by
+/// a wake stays short however many threads wait; sized from the hardware, so a
+/// large machine is not crowded onto a small machine's table.
+const BUCKETS_PER_CPU: usize = 64;
 
-/// Queues a deadline walk lifts from one bucket per hold of its lock: the
-/// granule that keeps the walk allocation-free and each hold short, not a
-/// bound on the queues it reaches.
-const WALK_BATCH: usize = 32;
+/// Waiters a wake unlinks per hold of a bucket's lock: the granule that keeps
+/// the wake allocation-free and each hold short, not a bound on how many it
+/// wakes.
+const WAKE_BATCH: usize = 32;
 
 /// The resolved bucket table, published **exactly once** — by
 /// [`init_buckets`] at boot, or by the first resolution that finds none.
@@ -100,48 +199,38 @@ const WALK_BATCH: usize = 32;
 /// [`FALLBACK_BUCKET`].
 static BUCKETS: OnceCell<Vec<Bucket>> = OnceCell::new();
 
-/// The single bucket a build that never sized the table uses.
-///
-/// The bucket *count* is a contention choice, not a correctness one, so
-/// falling back to one bucket is honest rather than fail-closed: a futex still
-/// blocks and wakes exactly as specified, it just serialises unrelated keys.
-static FALLBACK_BUCKET: Bucket = SpinLock::new(OrderedMap::new());
+/// The single bucket a build that never sized the table uses: a contention
+/// choice, not a correctness one, so a futex still blocks and wakes exactly
+/// as specified.
+static FALLBACK_BUCKET: Bucket = SpinLock::new(Chain::new());
 
 /// Size the bucket table from the discovered CPU count.
 ///
-/// Called once per boot, beside the other scheduler-derived publications, and
-/// necessarily **before the first key resolves** — a table installed after
-/// that is refused, because a key resolves to a bucket by index into whichever
-/// table was live, so swapping tables mid-flight would strand a registered
-/// waiter in a bucket no waker looks in.
+/// Called once per boot, necessarily **before the first key resolves** — a
+/// table installed after that is refused, because a waiter records the index
+/// of the bucket it is linked in, and swapping tables would strand it where no
+/// waker looks.
 pub fn init_buckets(cpu_count: usize) {
     if BUCKETS.is_initialised() {
         return;
     }
-    let count = cpu_count.max(1) * BUCKETS_PER_CPU;
+    let count = cpu_count.max(1).saturating_mul(BUCKETS_PER_CPU);
     let mut buckets = Vec::new();
     if buckets.try_reserve_exact(count).is_err() {
         // Deterministic OOM, never a panic: the single-bucket table stands.
         return;
     }
     for _ in 0..count {
-        buckets.push(SpinLock::new(OrderedMap::new()));
+        buckets.push(SpinLock::new(Chain::new()));
     }
     let _ = BUCKETS.set(buckets);
 }
 
 /// The live bucket table, fixed for the rest of this boot by the first
-/// resolution.
-///
-/// One atomic decision point, so a key can never resolve against two different
-/// tables: whoever reaches here first publishes the answer — boot's sized
-/// table, or the empty "never sized" one — and every later resolution reads
-/// that same publication.
+/// resolution: boot's sized table, or the empty "never sized" one.
 fn buckets() -> &'static [Bucket] {
     match BUCKETS.get_or_try_init(|| Ok::<Vec<Bucket>, Infallible>(Vec::new())) {
         Ok(table) if !table.is_empty() => table.as_slice(),
-        // The published empty table (nothing sized one), or a poisoned cell an
-        // infallible initialiser cannot actually produce: one bucket.
         _ => core::slice::from_ref(&FALLBACK_BUCKET),
     }
 }
@@ -149,19 +238,14 @@ fn buckets() -> &'static [Bucket] {
 /// The index `key` hashes to in a table of `len` buckets.
 ///
 /// Keyed, because the address half of a key is chosen by the caller: with a
-/// predictable hash a process can pick wait addresses that all land in one
-/// bucket and serialise every unrelated futex on that bucket's lock — and the
-/// table is machine-wide, so the process it starves need not be its own. The
+/// predictable hash a process could pick wait addresses that all land in one
+/// bucket, lengthening one chain that other processes' keys share. The
 /// per-boot key ([`tairix_hash`]) is what it cannot compute. Shifting the
 /// address by two drops the always-zero alignment bits, so adjacent words in
-/// one lock array still spread rather than crowding one bucket.
+/// one lock array still spread.
 ///
-/// A boot whose CSPRNG never seeded has no key and hashes unkeyed; that is a
-/// contention property rather than an authority one, and the boot path audits
-/// the absence rather than refusing to block a thread over it.
-///
-/// A `len` of zero folds to one so the index is always computable; [`buckets`]
-/// never yields an empty table.
+/// A boot whose CSPRNG never seeded hashes unkeyed; that is a contention
+/// property rather than an authority one. A `len` of zero folds to one.
 fn bucket_index(seed: HashSeed, key: FutexKey, len: usize) -> usize {
     let mut hasher = SipHash13::new(seed);
     hasher.write_u64(key.process.0);
@@ -169,11 +253,7 @@ fn bucket_index(seed: HashSeed, key: FutexKey, len: usize) -> usize {
     usize::try_from(hasher.finish() % len.max(1) as u64).unwrap_or(0)
 }
 
-/// A key→queue table: the boot's live one, or a host test's own.
-///
-/// Every operation runs against a table rather than the process-global one,
-/// so a test drives a table no other test's retirement walk or deadline sweep
-/// can reach.
+/// A bucket table: the boot's live one, or a host test's own.
 #[derive(Clone, Copy)]
 struct Table<'a> {
     /// Never empty: the live table falls back to one bucket.
@@ -181,152 +261,134 @@ struct Table<'a> {
 }
 
 impl Table<'static> {
-    /// The live table ([`buckets`]).
     fn live() -> Self {
         Self { buckets: buckets() }
     }
 }
 
 impl<'a> Table<'a> {
-    /// The bucket `key` belongs to.
-    fn bucket_of(self, key: FutexKey) -> &'a Bucket {
+    fn index_of(self, key: FutexKey) -> usize {
         let seed = tairix_hash::published().unwrap_or(HashSeed::UNKEYED);
-        // The table is never empty, so the index is in range.
-        &self.buckets[bucket_index(seed, key, self.buckets.len())]
+        bucket_index(seed, key, self.buckets.len())
     }
 
-    fn register(
-        self,
-        key: FutexKey,
-        thread: TaskId,
-        deadline_ns: u64,
-    ) -> Result<Arc<WaitQueue>, Errno> {
-        let mut bucket = self.bucket_of(key).lock();
-        let queue = if let Some(queue) = bucket.get(&key) {
-            Arc::clone(queue)
-        } else {
-            let queue = Arc::try_new(WaitQueue::new()).map_err(|_| Errno::OutOfMemory)?;
-            bucket
-                .try_insert(key, Arc::clone(&queue))
-                .map_err(|_| Errno::OutOfMemory)?;
-            queue
+    /// The bucket at `index`, which [`Self::index_of`] keeps in range.
+    fn bucket(self, index: usize) -> &'a Bucket {
+        &self.buckets[index]
+    }
+
+    fn file(self, waiter: &Arc<FutexWaiter>, key: FutexKey) {
+        self.unfile(waiter);
+        let bucket = self.index_of(key);
+        self.bucket(bucket).lock().push(waiter, key, bucket);
+    }
+
+    fn unfile(self, waiter: &Arc<FutexWaiter>) -> bool {
+        let Some(filed) = waiter.filed() else {
+            return false;
         };
-        // Registered under the bucket lock, so the cleanup below can use
-        // "the queue is empty" as a safe removal condition, and a refusal drops
-        // a queue this call just filed.
-        if let Err(refused) = queue.register(thread, deadline_ns) {
-            if queue.is_empty() {
-                bucket.remove(&key);
-            }
-            return Err(refused.into());
+        let mut chain = self.bucket(filed.bucket).lock();
+        // Only its own thread links a waiter, so once read it is either still
+        // linked in that bucket or a wake has unlinked it since.
+        if waiter.filed().is_none() {
+            return false;
         }
-        Ok(queue)
+        chain.unlink(waiter);
+        true
     }
 
-    fn deregister(self, key: FutexKey, thread: TaskId) {
-        let mut bucket = self.bucket_of(key).lock();
-        let Some(queue) = bucket.get(&key) else {
-            return;
-        };
-        queue.deregister(thread);
-        if queue.is_empty() {
-            bucket.remove(&key);
-        }
-    }
-
-    fn deregister_task(self, thread: TaskId) {
-        for bucket in self.buckets {
-            bucket.lock().retain(|_, queue| {
-                queue.deregister_task(thread);
-                !queue.is_empty()
-            });
-        }
-    }
-
+    /// Wake up to `count` of the waiters on `key` linked when the wake began.
+    ///
+    /// The chain is in arrival order, so the first round pins the arrival it
+    /// reached and the walk stops there: a waiter linked while the wake runs
+    /// waits for the next one, which also bounds a wake against a thread that
+    /// keeps waiting again. Each later round resumes at the waiter the last
+    /// stopped before, so nothing is walked twice however many rounds a wake
+    /// takes.
     fn wake(self, arch: &dyn WaitQueueArch, key: FutexKey, count: usize) -> usize {
-        // Lift the queue handle out from under the bucket lock and release it
-        // before the wake, so the scheduler's locks are never taken while a
-        // futex lock is held.
-        let queue = {
-            let bucket = self.bucket_of(key).lock();
-            bucket.get(&key).map(Arc::clone)
-        };
-        match queue {
-            Some(queue) => queue.wake_n(arch, count),
-            None => 0,
-        }
-    }
-
-    fn release_process(self, process: ProcessId) {
-        for bucket in self.buckets {
-            bucket.lock().retain(|key, _| key.process != process);
-        }
-    }
-
-    fn earliest_deadline(self) -> Option<u64> {
-        let mut soonest: Option<u64> = None;
-        self.for_each_queue(|queue| {
-            if let Some(deadline) = queue.earliest_deadline() {
-                soonest = Some(soonest.map_or(deadline, |current| current.min(deadline)));
+        let index = self.index_of(key);
+        let bucket = self.bucket(index);
+        let mut woken = 0usize;
+        let mut end: Option<u64> = None;
+        let mut resume: Option<(Arc<FutexWaiter>, u64)> = None;
+        while woken < count {
+            let mut batch: ArrayVec<Arc<FutexWaiter>, WAKE_BATCH> = ArrayVec::new();
+            {
+                let mut chain = bucket.lock();
+                let end = *end.get_or_insert(chain.arrivals);
+                // Still linked as the arrival it was, a waiter has nothing
+                // unexamined ahead of it. One that left, or was linked again,
+                // while the lock was down proves nothing, so the walk restarts.
+                let mut cursor = match resume.take() {
+                    Some((waiter, arrival))
+                        if waiter.filed().is_some_and(|filed| {
+                            filed.bucket == index && filed.arrival == arrival
+                        }) =>
+                    {
+                        Some(waiter)
+                    }
+                    _ => chain.head.clone(),
+                };
+                while let Some(waiter) = cursor {
+                    let (next, filed) = {
+                        let link = waiter.link.lock();
+                        (link.next.clone(), link.filed)
+                    };
+                    let Some(filed) = filed.filter(|filed| filed.arrival < end) else {
+                        break;
+                    };
+                    if woken + batch.len() == count || batch.is_full() {
+                        resume = Some((waiter, filed.arrival));
+                        break;
+                    }
+                    #[cfg(test)]
+                    {
+                        chain.walked += 1;
+                    }
+                    if filed.key == key {
+                        chain.unlink(&waiter);
+                        let unlinked = batch.try_push(waiter);
+                        debug_assert!(unlinked.is_ok(), "a batch took past its room");
+                    }
+                    cursor = next;
+                }
             }
-        });
-        soonest
-    }
-
-    fn sweep(self, arch: &dyn WaitQueueArch, now_ns: u64) {
-        self.for_each_queue(|queue| queue.sweep(arch, now_ns));
-    }
-
-    /// Visit every live queue with no bucket lock held across `visit`, so a
-    /// visit may take the queue's own lock or the scheduler's.
-    fn for_each_queue(self, mut visit: impl FnMut(&WaitQueue)) {
-        for bucket in self.buckets {
-            walk_bucket(bucket, &mut visit);
+            // A waiter whose thread can never run again is unlinked but not
+            // counted, so it cannot swallow a wake the next waiter is owed.
+            for waiter in &batch {
+                if arch.unpark(waiter.task) {
+                    woken += 1;
+                }
+            }
+            if resume.is_none() {
+                break;
+            }
         }
+        woken
     }
 }
 
-/// Register `thread` as a waiter on `key` with an absolute monotonic
-/// `deadline_ns` ([`crate::waitq::NO_DEADLINE`] for none), returning the queue
-/// it joined.
+/// Link `waiter` as waiting on `key`, last among its bucket's waiters.
 ///
 /// The caller re-tests the word *after* this returns and parks only if it
 /// still holds the expected value, which is the lost-wake discipline: a wake
-/// that lands in the window between the test and the park finds the waiter
-/// already registered.
-///
-/// # Errors
-///
-/// [`Errno::OutOfMemory`] when the heap cannot hold the key's queue or the
-/// waiter's row in it: nothing is registered, so the caller fails rather than
-/// parks.
-pub fn register(key: FutexKey, thread: TaskId, deadline_ns: u64) -> Result<Arc<WaitQueue>, Errno> {
-    Table::live().register(key, thread, deadline_ns)
+/// that lands between the test and the park finds the waiter linked. Needs no
+/// memory, so it cannot fail.
+pub fn file(waiter: &Arc<FutexWaiter>, key: FutexKey) {
+    Table::live().file(waiter, key);
 }
 
-/// Remove `thread` from `key`'s wait set, dropping the queue when it was the
-/// last waiter.
-pub fn deregister(key: FutexKey, thread: TaskId) {
-    Table::live().deregister(key, thread);
+/// Unlink `waiter`, answering whether it was still linked: `false` means a
+/// wake took it first.
+pub fn unfile(waiter: &Arc<FutexWaiter>) -> bool {
+    Table::live().unfile(waiter)
 }
 
-/// Remove every registration `thread` holds, dropping each key whose last
-/// waiter it was.
+/// Wake the `count` oldest threads waiting on `key`, returning how many wakes
+/// landed.
 ///
-/// The retirement half: a thread that dies inside the kernel never reaches
-/// its own [`deregister`], and a row it leaves behind sits at its key's FIFO
-/// head where the next `futex_wake` spends itself on it — reporting a wake it
-/// never delivered and leaving the live waiter parked. Bucket lock then queue
-/// lock, the same order [`deregister`] takes.
-pub fn deregister_task(thread: TaskId) {
-    Table::live().deregister_task(thread);
-}
-
-/// Wake the `count` oldest threads waiting on `key`, returning how many were
-/// woken.
-///
-/// Waking nobody is success: by the register-before-retest discipline a thread
-/// that has not parked yet re-tests the word itself.
+/// Waking nobody is success: by the lost-wake discipline a thread that has not
+/// parked yet re-tests the word itself.
 pub fn wake(arch: &dyn WaitQueueArch, key: FutexKey, count: usize) -> usize {
     Table::live().wake(arch, key, count)
 }
@@ -335,76 +397,14 @@ pub fn wake(arch: &dyn WaitQueueArch, key: FutexKey, count: usize) -> usize {
 /// boot-installed wait-queue hook.
 ///
 /// The form every in-kernel caller uses: the `futex_wake` syscall handler and
-/// the thread-exit clear-on-exit notification both reach the futex through this,
-/// so neither has to resolve the scheduler hook itself. A build with no hook
-/// installed can have nothing parked, so waking nobody is the honest answer.
+/// the thread-exit clear-on-exit notification. A build with no hook installed
+/// can have nothing parked, so waking nobody is the honest answer.
 #[must_use]
 pub fn wake_installed(process: ProcessId, uaddr: u64, count: usize) -> usize {
     let Some(arch) = crate::waitq::wait_arch() else {
         return 0;
     };
     wake(arch, FutexKey { process, uaddr }, count)
-}
-
-/// Drop every futex key belonging to `process`.
-///
-/// Driven by the one shared task-reclaim path, so a process that exits, faults,
-/// or is killed leaves no queue behind. Any thread still registered is already
-/// dead, so nothing is woken.
-pub fn release_process(process: ProcessId) {
-    Table::live().release_process(process);
-}
-
-/// The soonest finite deadline any futex waiter is holding, or [`None`].
-///
-/// Folded into the kernel's nearest-armed-wakeup so a timed `futex_wait`
-/// cannot be dropped because another queue armed a later one-shot.
-#[must_use]
-pub fn earliest_deadline() -> Option<u64> {
-    Table::live().earliest_deadline()
-}
-
-/// Release every futex waiter whose finite deadline is at or before `now_ns`.
-///
-/// Part of the kernel's dispatcher-context deadline sweep, so a
-/// `futex_wait(timeout)` fires even on an otherwise-idle CPU.
-pub fn sweep(arch: &dyn WaitQueueArch, now_ns: u64) {
-    Table::live().sweep(arch, now_ns);
-}
-
-/// Visit `bucket`'s queues in key order, lifting a batch of their handles per
-/// hold of its lock and visiting the batch once the lock is released.
-///
-/// Allocation-free, and resuming past the last key a batch lifted, so a key
-/// filed or dropped meanwhile is visited at most once.
-fn walk_bucket(bucket: &Bucket, visit: &mut impl FnMut(&WaitQueue)) {
-    let mut after: Option<FutexKey> = None;
-    loop {
-        let mut batch: ArrayVec<(FutexKey, Arc<WaitQueue>), WALK_BATCH> = ArrayVec::new();
-        let mut more = false;
-        {
-            let map = bucket.lock();
-            let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-            for (&key, queue) in map.range((from, Bound::Unbounded)) {
-                if batch.is_full() {
-                    more = true;
-                    break;
-                }
-                let lifted = batch.try_push((key, Arc::clone(queue)));
-                debug_assert!(lifted.is_ok(), "a batch lifted past its room");
-            }
-        }
-        let Some(&(last, _)) = batch.last() else {
-            return;
-        };
-        after = Some(last);
-        for (_, queue) in &batch {
-            visit(queue);
-        }
-        if !more {
-            return;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -417,17 +417,34 @@ mod tests {
 
     use core::cell::RefCell;
 
-    /// A [`WaitQueueArch`] double recording every `unpark`, so the wake
-    /// fan-out is observable without a scheduler.
-    struct MockArch {
+    /// A [`WaitQueueArch`] double recording every `unpark`, refusing the
+    /// tasks it is told can never run again.
+    struct MockArch<'a> {
         unparked: RefCell<Vec<TaskId>>,
+        retired: Vec<TaskId>,
+        /// Run at the first `unpark`, while the waking bucket's lock is down:
+        /// what another thread can do between a wake's rounds.
+        between_rounds: RefCell<Option<std::boxed::Box<dyn FnOnce() + 'a>>>,
     }
 
-    impl MockArch {
+    impl<'a> MockArch<'a> {
         fn new() -> Self {
+            Self::retiring(&[])
+        }
+
+        fn retiring(retired: &[TaskId]) -> Self {
+            // Room up front, so recording a wake allocates nothing in a test
+            // that refuses the heap.
             Self {
-                unparked: RefCell::new(Vec::new()),
+                unparked: RefCell::new(Vec::with_capacity(4 * WAKE_BATCH)),
+                retired: retired.to_vec(),
+                between_rounds: RefCell::new(None),
             }
+        }
+
+        fn between_rounds(self, act: impl FnOnce() + 'a) -> Self {
+            *self.between_rounds.borrow_mut() = Some(std::boxed::Box::new(act));
+            self
         }
 
         fn taken(&self) -> Vec<TaskId> {
@@ -437,12 +454,16 @@ mod tests {
 
     // SAFETY-INVARIANT: the double is only ever driven from one test thread
     // at a time; the `Sync` claim exists solely to satisfy the trait bound.
-    unsafe impl Sync for MockArch {}
+    unsafe impl Sync for MockArch<'_> {}
 
-    impl WaitQueueArch for MockArch {
+    impl WaitQueueArch for MockArch<'_> {
         fn unpark(&self, task: TaskId) -> bool {
+            let act = self.between_rounds.borrow_mut().take();
+            if let Some(act) = act {
+                act();
+            }
             self.unparked.borrow_mut().push(task);
-            true
+            !self.retired.contains(&task)
         }
 
         fn now_ns(&self) -> u64 {
@@ -459,12 +480,13 @@ mod tests {
         }
     }
 
-    /// Buckets for a test's own table: every sibling test's retirement walk
-    /// and deadline sweep run over the live table, and none can reach these.
-    fn own_buckets() -> Vec<Bucket> {
-        (0..BUCKETS_PER_CPU)
-            .map(|_| SpinLock::new(OrderedMap::new()))
-            .collect()
+    fn waiter(task: TaskId) -> Arc<FutexWaiter> {
+        Arc::new(FutexWaiter::new(task))
+    }
+
+    /// Buckets for a test's own table, out of every sibling test's reach.
+    fn own_buckets(len: usize) -> Vec<Bucket> {
+        (0..len).map(|_| SpinLock::new(Chain::new())).collect()
     }
 
     fn table(buckets: &[Bucket]) -> Table<'_> {
@@ -472,78 +494,76 @@ mod tests {
         Table { buckets }
     }
 
+    /// A futex wait links only the record its thread was admitted with, so it
+    /// files, wakes and leaves on a heap that refuses every allocation.
+    ///
+    /// Regression: a key's first waiter allocated its key a queue, its place
+    /// in the bucket and its own row, so a contended lock under memory
+    /// pressure answered `OutOfMemory` at once and its caller spun.
     #[test]
-    fn a_key_holds_no_queue_until_a_thread_waits_and_none_after_it_leaves() {
-        let buckets = own_buckets();
+    fn a_wait_files_wakes_and_leaves_with_no_memory_to_spare() {
+        let buckets = own_buckets(BUCKETS_PER_CPU);
         let table = table(&buckets);
         let k = key(0x9001, 0x4000);
-        assert_eq!(
-            table.wake(&MockArch::new(), k, 1),
-            0,
-            "no waiter, nothing woken"
-        );
-        let _queue = table
-            .register(k, 1, NO_DEADLINE)
-            .expect("room for a waiter");
-        assert!(table.bucket_of(k).lock().contains_key(&k));
-        table.deregister(k, 1);
-        assert!(
-            !table.bucket_of(k).lock().contains_key(&k),
-            "the last waiter's exit drops the queue"
-        );
+        let (first, second) = (waiter(1), waiter(2));
+        let arch = MockArch::new();
+        crate::test_alloc::refuse_allocations_on_current_thread(true);
+        table.file(&first, k);
+        table.file(&second, k);
+        let woken = table.wake(&arch, k, 1);
+        let first_left = table.unfile(&first);
+        let second_left = table.unfile(&second);
+        crate::test_alloc::refuse_allocations_on_current_thread(false);
+        assert_eq!(woken, 1);
+        assert_eq!(arch.taken(), std::vec![1]);
+        assert!(!first_left, "the wake unlinked the first waiter");
+        assert!(second_left, "the second was still linked");
+        assert_eq!(table.wake(&arch, k, usize::MAX), 0, "nobody is left");
     }
 
     #[test]
     fn wake_releases_the_oldest_waiters_first_and_bounds_the_count() {
-        let buckets = own_buckets();
+        let buckets = own_buckets(BUCKETS_PER_CPU);
         let table = table(&buckets);
         let k = key(0x9002, 0x4000);
         let arch = MockArch::new();
-        for id in 1..=3 {
-            let _ = table
-                .register(k, id, NO_DEADLINE)
-                .expect("room for a waiter");
+        let waiters: Vec<_> = (1..=3).map(waiter).collect();
+        for w in &waiters {
+            table.file(w, k);
         }
         assert_eq!(table.wake(&arch, k, 2), 2);
         assert_eq!(arch.taken(), std::vec![1, 2]);
-        // A count past the waiter count wakes exactly the waiters present.
-        assert_eq!(table.wake(&arch, k, usize::MAX), 3);
+        assert_eq!(table.wake(&arch, k, usize::MAX), 1, "exactly those present");
+        assert_eq!(arch.taken(), std::vec![3]);
     }
 
-    /// A sibling test's thread death walks the live table by task id; this
-    /// module's tests drive tables of their own, out of its reach, so their
-    /// waiters keep their places whatever ids other tests retire.
+    /// Keys sharing a chain stay apart: a wake releases only its own key's
+    /// waiters, in their order, and leaves the others linked in theirs.
     #[test]
-    fn a_retirement_walk_of_the_live_table_reaches_no_tests_own() {
-        let buckets = own_buckets();
+    fn a_wake_passes_over_other_keys_sharing_its_chain() {
+        let buckets = own_buckets(1);
         let table = table(&buckets);
-        let k = key(0x900e, 0x4000);
+        let (mine, theirs) = (key(0x9003, 0x4000), key(0x9003, 0x4004));
         let arch = MockArch::new();
-        let waiters = [
-            crate::test_boot::claim_task(),
-            crate::test_boot::claim_peer_task(),
-            crate::test_boot::claim_peer_task(),
-        ];
-        for &id in &waiters {
-            let _ = table
-                .register(k, id, NO_DEADLINE)
-                .expect("room for a waiter");
+        let waiters: Vec<_> = (1..=4).map(waiter).collect();
+        for (w, k) in waiters.iter().zip([theirs, mine, theirs, mine]) {
+            table.file(w, k);
         }
-        deregister_task(waiters[1]);
-        assert_eq!(table.wake(&arch, k, 2), 2);
-        assert_eq!(arch.taken(), waiters[..2].to_vec());
+        assert_eq!(table.wake(&arch, mine, usize::MAX), 2);
+        assert_eq!(arch.taken(), std::vec![2, 4]);
+        assert_eq!(table.wake(&arch, theirs, 1), 1);
+        assert_eq!(arch.taken(), std::vec![1]);
+        assert!(table.unfile(&waiters[2]), "the last waiter kept its link");
     }
 
     #[test]
     fn two_processes_at_one_address_are_distinct_keys() {
-        let buckets = own_buckets();
+        let buckets = own_buckets(1);
         let table = table(&buckets);
-        let mine = key(0x9003, 0x4000);
-        let theirs = key(0x9004, 0x4000);
+        let (mine, theirs) = (key(0x9004, 0x4000), key(0x9005, 0x4000));
         let arch = MockArch::new();
-        let _ = table
-            .register(mine, 7, NO_DEADLINE)
-            .expect("room for a waiter");
+        let w = waiter(7);
+        table.file(&w, mine);
         assert_eq!(
             table.wake(&arch, theirs, usize::MAX),
             0,
@@ -552,22 +572,156 @@ mod tests {
         assert_eq!(table.wake(&arch, mine, usize::MAX), 1);
     }
 
+    /// A waiter whose thread can never run again is unlinked by the wake that
+    /// reaches it, and the counted wake passes on to the live waiter behind.
     #[test]
-    fn a_finite_deadline_is_visible_to_the_sweep_and_the_nearest_arming() {
-        let buckets = own_buckets();
+    fn a_dead_waiter_cannot_swallow_a_counted_wake() {
+        let buckets = own_buckets(BUCKETS_PER_CPU);
         let table = table(&buckets);
-        let k = key(0x9005, 0x4000);
+        let k = key(0x9006, 0x4000);
+        let arch = MockArch::retiring(&[11]);
+        let (dead, live) = (waiter(11), waiter(12));
+        table.file(&dead, k);
+        table.file(&live, k);
+        assert_eq!(table.wake(&arch, k, 1), 1, "the live waiter was woken");
+        assert_eq!(arch.taken(), std::vec![11, 12]);
+        assert!(!table.unfile(&dead), "and the dead one unlinked");
+    }
+
+    /// A wake reaching more waiters than one batch unlinks releases every one
+    /// of them, in arrival order, across the seams between batches.
+    #[test]
+    fn a_wake_past_one_batch_releases_every_waiter_in_order() {
+        let buckets = own_buckets(1);
+        let table = table(&buckets);
+        let k = key(0x9007, 0x4000);
+        let other = key(0x9007, 0x4004);
         let arch = MockArch::new();
-        let _ = table.register(k, 11, 500).expect("room for a waiter");
-        assert_eq!(
-            table.earliest_deadline(),
-            Some(500),
-            "the futex deadline joins the kernel's nearest armed wakeup"
+        let filed = 2 * WAKE_BATCH + 3;
+        let ids: Vec<TaskId> = (1u64..).take(filed).collect();
+        let waiters: Vec<_> = ids.iter().map(|&id| waiter(id)).collect();
+        let bystander = waiter(10_000);
+        table.file(&bystander, other);
+        for w in &waiters {
+            table.file(w, k);
+        }
+        assert_eq!(table.wake(&arch, k, usize::MAX), filed);
+        assert_eq!(arch.taken(), ids);
+        assert!(
+            table.unfile(&bystander),
+            "another key's waiter stayed linked"
         );
-        table.sweep(&arch, 499);
-        assert!(arch.taken().is_empty(), "not yet due");
-        table.sweep(&arch, 500);
-        assert_eq!(arch.taken(), std::vec![11]);
+    }
+
+    /// A wake walks its chain once, however many batches it takes.
+    ///
+    /// Regression: every round restarted at the head, so a broadcast behind
+    /// other keys' waiters walked those once per batch.
+    #[test]
+    fn a_wake_walks_its_chain_once_across_batches() {
+        let buckets = own_buckets(1);
+        let table = table(&buckets);
+        let (k, other) = (key(0x900b, 0x4000), key(0x900b, 0x4004));
+        let arch = MockArch::new();
+        let ahead: Vec<_> = (1..=8).map(waiter).collect();
+        let behind: Vec<_> = (100u64..).take(3 * WAKE_BATCH).map(waiter).collect();
+        for w in &ahead {
+            table.file(w, other);
+        }
+        for w in &behind {
+            table.file(w, k);
+        }
+        assert_eq!(table.wake(&arch, k, usize::MAX), behind.len());
+        assert_eq!(buckets[0].lock().walked, ahead.len() + behind.len());
+    }
+
+    /// A waiter linked while a wake runs waits for the next wake, so a thread
+    /// that keeps waiting again cannot keep a broadcast walking.
+    ///
+    /// Regression: each round walked to the chain's tail, reaching whatever
+    /// had been linked since, so a thread re-filing on the key could hold a
+    /// wake of every waiter on another CPU for as long as it kept going.
+    #[test]
+    fn a_waiter_linked_during_a_wake_waits_for_the_next() {
+        let buckets = own_buckets(1);
+        let table = table(&buckets);
+        let k = key(0x900c, 0x4000);
+        let waiters: Vec<_> = (1u64..).take(WAKE_BATCH + 1).map(waiter).collect();
+        for w in &waiters {
+            table.file(w, k);
+        }
+        let late = waiter(999);
+        let arch = MockArch::new().between_rounds(|| table.file(&late, k));
+        assert_eq!(table.wake(&arch, k, usize::MAX), waiters.len());
+        assert!(table.unfile(&late), "the late waiter is still linked");
+    }
+
+    /// The waiter a round stopped before is no place to resume once it has
+    /// left, or been linked again behind the rest, while the lock was down:
+    /// the next round walks from the head and wakes every earlier waiter.
+    #[test]
+    fn a_round_resumes_only_where_its_seam_waiter_still_stands() {
+        let k = key(0x900d, 0x4000);
+        for linked_again in [false, true] {
+            let buckets = own_buckets(1);
+            let table = table(&buckets);
+            let waiters: Vec<_> = (1u64..).take(WAKE_BATCH + 4).map(waiter).collect();
+            for w in &waiters {
+                table.file(w, k);
+            }
+            let seam = &waiters[WAKE_BATCH];
+            let arch = MockArch::new().between_rounds(|| {
+                if linked_again {
+                    table.file(seam, k);
+                } else {
+                    assert!(table.unfile(seam));
+                }
+            });
+            let mut expected: Vec<TaskId> = (1u64..).take(WAKE_BATCH + 4).collect();
+            expected.remove(WAKE_BATCH);
+            assert_eq!(table.wake(&arch, k, usize::MAX), expected.len());
+            assert_eq!(arch.taken(), expected, "linked again: {linked_again}");
+            assert_eq!(
+                table.unfile(seam),
+                linked_again,
+                "linked again after the wake began, it waits for the next"
+            );
+        }
+    }
+
+    /// Re-filing a waiter that is still linked moves it rather than linking it
+    /// twice, so one thread is never woken as two.
+    #[test]
+    fn a_waiter_filed_again_is_linked_once_under_its_new_key() {
+        let buckets = own_buckets(1);
+        let table = table(&buckets);
+        let (old, new) = (key(0x9008, 0x4000), key(0x9008, 0x4004));
+        let arch = MockArch::new();
+        let w = waiter(21);
+        table.file(&w, old);
+        table.file(&w, new);
+        assert_eq!(table.wake(&arch, old, usize::MAX), 0);
+        assert_eq!(table.wake(&arch, new, usize::MAX), 1);
+        assert_eq!(arch.taken(), std::vec![21]);
+    }
+
+    /// The waiter unlinked from the middle, the head and the tail of a chain
+    /// leaves the rest linked in order.
+    #[test]
+    fn unfiling_from_any_place_keeps_the_rest_in_order() {
+        let buckets = own_buckets(1);
+        let table = table(&buckets);
+        let k = key(0x9009, 0x4000);
+        let arch = MockArch::new();
+        let waiters: Vec<_> = (1..=5).map(waiter).collect();
+        for w in &waiters {
+            table.file(w, k);
+        }
+        for index in [2, 0, 4] {
+            assert!(table.unfile(&waiters[index]));
+        }
+        assert_eq!(table.wake(&arch, k, usize::MAX), 2);
+        assert_eq!(arch.taken(), std::vec![2, 4]);
     }
 
     #[test]
@@ -590,34 +744,13 @@ mod tests {
         assert_ne!(saturated, NO_DEADLINE);
     }
 
-    #[test]
-    fn a_dead_process_leaves_no_key_behind() {
-        let buckets = own_buckets();
-        let table = table(&buckets);
-        let k = key(0x9006, 0x4000);
-        let other = key(0x9007, 0x4000);
-        let _ = table
-            .register(k, 21, NO_DEADLINE)
-            .expect("room for a waiter");
-        let _ = table
-            .register(other, 22, NO_DEADLINE)
-            .expect("room for a waiter");
-        table.release_process(ProcessId(0x9006));
-        assert!(!table.bucket_of(k).lock().contains_key(&k));
-        assert!(
-            table.bucket_of(other).lock().contains_key(&other),
-            "another process's keys are untouched"
-        );
-    }
-
     /// A fixed key for the pure index assertions, so they do not depend on
     /// whether the host test binary ever published one.
     const TEST_SEED: HashSeed = HashSeed::from_words(0x0f1e_2d3c_4b5a_6978, 0x8796_a5b4_c3d2_e1f0);
 
     /// The key is what stops a caller choosing wait addresses that all crowd
-    /// one bucket lock: the same addresses must land differently under a
-    /// different key, or the hash is predictable and the machine-wide table
-    /// can be jammed by any process that can compute it.
+    /// one chain: the same addresses must land differently under a different
+    /// key, or the hash is predictable.
     #[test]
     fn the_key_decides_where_a_chosen_address_lands() {
         let len = 8 * BUCKETS_PER_CPU;
@@ -628,23 +761,16 @@ mod tests {
                 bucket_index(TEST_SEED, k, len) != bucket_index(other, k, len)
             })
             .count();
-        // A different key re-shuffles the table, so all-but-a-few of any
-        // chosen run of addresses must move. Landing in the same bucket by
-        // chance is a 1-in-`len` event per address.
+        // Landing in the same bucket by chance is a 1-in-`len` event per
+        // address, so all but a few of any chosen run must move.
         assert!(
             moved >= 48,
             "only {moved} of 64 chosen addresses moved when the key changed"
         );
     }
 
-    /// A per-CPU-sized table is only worth having if neighbouring lock words
-    /// do not all crowd one bucket.
-    ///
     /// Asserted against the pure index function rather than by installing a
-    /// table: the live table is fixed for the boot by its first use, so a test
-    /// that sized it would decide which table every *other* test's keys resolve
-    /// against — and one that registered a key before the swap would then wake
-    /// against a bucket its waiter is not in.
+    /// table: the live table is fixed for the boot by its first use.
     #[test]
     fn adjacent_words_of_one_lock_array_spread_across_buckets() {
         let len = 8 * BUCKETS_PER_CPU;
@@ -658,8 +784,7 @@ mod tests {
         );
     }
 
-    /// One process's whole lock array must not collapse onto one bucket
-    /// either — the process id is mixed, not just the address.
+    /// The process id is mixed, not just the address.
     #[test]
     fn distinct_processes_at_one_address_spread_across_buckets() {
         let len = 8 * BUCKETS_PER_CPU;
@@ -673,8 +798,6 @@ mod tests {
         );
     }
 
-    /// Every index the hash produces is a valid subscript, including for the
-    /// degenerate one-bucket table the never-sized build resolves against.
     #[test]
     fn a_bucket_index_is_always_in_range() {
         for len in [1usize, 2, 3, 4 * BUCKETS_PER_CPU, 128 * BUCKETS_PER_CPU] {
@@ -686,118 +809,21 @@ mod tests {
     }
 
     /// The table is fixed for the boot by its first use: a sizing that arrives
-    /// after a key has resolved is refused rather than stranding that key's
-    /// waiters in a bucket no waker looks in.
+    /// after a key has resolved is refused rather than stranding a linked
+    /// waiter in a bucket no waker looks in.
     ///
-    /// The whole test binary shares one table and every sibling test resolves a
-    /// key, so by the time this runs the table is already latched — precisely
-    /// the state being asserted. A swap here made the sibling wake and sweep
-    /// tests fail intermittently, with a waiter the waker could not find
+    /// Every sibling test binary resolves a key first, so by the time this runs
+    /// the table is already latched — precisely the state being asserted
     /// (`plans/OPEN-DEFECTS.md` D45).
     #[test]
     fn a_resolved_table_is_never_swapped_out_from_under_a_live_key() {
-        // The live table is the subject here, so the waiter is an identity no
-        // other test can retire, and waits with no deadline no sweep can take.
-        let waiter = crate::test_boot::claim_task();
-        let k = key(0x9009, 0x4000);
-        let _queue = register(k, waiter, NO_DEADLINE).expect("room for a waiter");
-        let before = core::ptr::from_ref(Table::live().bucket_of(k)) as usize;
+        let w = waiter(crate::test_boot::claim_task());
+        let k = key(0x900a, 0x4000);
+        file(&w, k);
         let len_before = buckets().len();
-
-        // A late sizing must change nothing: neither the table nor where this
-        // live key resolves.
         init_buckets(8);
         assert_eq!(buckets().len(), len_before, "the live table was replaced");
-        assert_eq!(
-            core::ptr::from_ref(Table::live().bucket_of(k)) as usize,
-            before,
-            "a live key moved bucket"
-        );
         assert_eq!(wake(&MockArch::new(), k, 1), 1, "the waiter is still found");
-        deregister(k, waiter);
-    }
-
-    /// A key nobody waits on yet needs a queue, and a heap that cannot hold
-    /// one refuses the registration with nothing filed; the retry succeeds.
-    #[test]
-    fn a_registration_the_heap_cannot_hold_is_refused_and_files_nothing() {
-        let buckets = own_buckets();
-        let table = table(&buckets);
-        let k = key(0x900a, 0x4000);
-        crate::test_alloc::refuse_allocations_on_current_thread(true);
-        let refused = table.register(k, 41, NO_DEADLINE).map(drop);
-        crate::test_alloc::refuse_allocations_on_current_thread(false);
-        assert_eq!(refused, Err(Errno::OutOfMemory));
-        assert!(
-            !table.bucket_of(k).lock().contains_key(&k),
-            "a refused registration filed a queue"
-        );
-        assert_eq!(
-            table.wake(&MockArch::new(), k, 1),
-            0,
-            "and registered no waiter"
-        );
-        let _queue = table
-            .register(k, 41, NO_DEADLINE)
-            .expect("registered once the heap has room");
-        assert_eq!(table.wake(&MockArch::new(), k, 1), 1);
-    }
-
-    /// A first waiter refused at any of its allocations — its queue, the
-    /// queue's place in the bucket, or the row the queue files it in — leaves
-    /// no queue behind and is answered `OutOfMemory`, never an abort.
-    #[test]
-    fn a_first_waiter_refused_at_any_allocation_leaves_no_queue() {
-        let buckets = own_buckets();
-        let table = table(&buckets);
-        let k = key(0x900d, 0x4000);
-        let answer = crate::test_alloc::past_each_refusal(&Err(Errno::OutOfMemory), || {
-            let answer = table.register(k, 61, 700).map(drop);
-            if answer.is_err() {
-                assert!(
-                    !table.bucket_of(k).lock().contains_key(&k),
-                    "a refused wait left its queue"
-                );
-            }
-            answer
-        });
-        assert_eq!(answer, Ok(()));
-        assert_eq!(table.wake(&MockArch::new(), k, 1), 1);
-    }
-
-    /// The walk the timed sweep and the nearest arming share allocates
-    /// nothing, so a timed wait still fires on an exhausted heap.
-    #[test]
-    fn the_deadline_walk_allocates_nothing() {
-        let buckets = own_buckets();
-        let table = table(&buckets);
-        let k = key(0x900b, 0x4000);
-        let _queue = table.register(k, 51, 900).expect("registered");
-        crate::test_alloc::refuse_allocations_on_current_thread(true);
-        let soonest = table.earliest_deadline();
-        crate::test_alloc::refuse_allocations_on_current_thread(false);
-        assert_eq!(soonest, Some(900));
-    }
-
-    /// A walk over a bucket holding more queues than one batch lifts visits
-    /// every queue once, across the seams between batches.
-    #[test]
-    fn a_walk_past_one_batch_visits_every_queue_once() {
-        let bucket: Bucket = SpinLock::new(OrderedMap::new());
-        let filed = 2 * WALK_BATCH + 3;
-        for word in 0..filed {
-            let uaddr = 0x4000 + 4 * u64::try_from(word).expect("a small index");
-            bucket
-                .lock()
-                .try_insert(key(0x900c, uaddr), Arc::new(WaitQueue::new()))
-                .expect("filed");
-        }
-        let mut seen = alloc::collections::BTreeSet::new();
-        let mut visits = 0;
-        walk_bucket(&bucket, &mut |queue: &WaitQueue| {
-            visits += 1;
-            seen.insert(core::ptr::from_ref(queue) as usize);
-        });
-        assert_eq!((visits, seen.len()), (filed, filed));
+        assert!(!unfile(&w));
     }
 }

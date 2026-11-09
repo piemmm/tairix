@@ -7,13 +7,16 @@
 //!
 //! * [`EnrolmentOverride::parse`] never panics, whatever it is given;
 //! * a document that parses renders to text that parses back equal;
-//! * over any image layer, [`effective`] and [`overrides_for`] are inverses,
-//!   so a derived document reproduces exactly the enrolment it was made for.
+//! * over any image layer, a layer rebuilt by [`EnrolmentOverride::set`]ting
+//!   each service to the enrolment a parsed one gives it reproduces that
+//!   enrolment exactly, holding an entry only where it differs from the
+//!   image.
 //!
 //! A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;
 //! `cargo xtask fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend it.
 
-use tairix_enrolment::{effective, overrides_for, Enrolment, EnrolmentOverride};
+use tairix_abi::ServiceEnrolment;
+use tairix_enrolment::{enabled, Enrolment, EnrolmentOverride};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -32,12 +35,20 @@ const VENDORS: &[&[&str]] = &[&[], &["netstack"], &["netstack", "timed", "fontd"
 /// Well-formed documents, rendered through the engine itself so the harness
 /// holds no second copy of the format.
 fn templates() -> Vec<String> {
-    let desired = Enrolment::of(["discoveryd", "netstack"]).expect("valid names");
     VENDORS
         .iter()
         .map(|vendor| {
             let vendor = Enrolment::of(vendor.iter().copied()).expect("valid names");
-            overrides_for(&vendor, &desired)
+            let mut overrides = EnrolmentOverride::empty();
+            for name in ["discoveryd", "netstack", "timed", "fontd"] {
+                let wanted = if matches!(name, "discoveryd" | "netstack") {
+                    ServiceEnrolment::Enabled
+                } else {
+                    ServiceEnrolment::Disabled
+                };
+                let _ = overrides.set(&vendor, name, wanted).expect("set");
+            }
+            overrides
                 .to_store_text()
                 .expect("a two-entry document fits")
         })
@@ -62,12 +73,35 @@ fn exercise(text: &str) {
         "round trip changed the document"
     );
     for vendor in VENDORS {
-        let vendor = Enrolment::of(vendor.iter().copied()).expect("valid names");
-        let desired = effective(&vendor, &overrides);
-        assert_eq!(
-            effective(&vendor, &overrides_for(&vendor, &desired)),
-            desired,
-            "the derived document does not reproduce what it was made for"
+        let image = Enrolment::of(vendor.iter().copied()).expect("valid names");
+        let named = || {
+            vendor
+                .iter()
+                .copied()
+                .chain(overrides.entries().iter().map(|(name, _)| name.as_str()))
+        };
+        let mut rebuilt = EnrolmentOverride::empty();
+        for name in named() {
+            let wanted = if enabled(&image, &overrides, name) {
+                ServiceEnrolment::Enabled
+            } else {
+                ServiceEnrolment::Disabled
+            };
+            let _ = rebuilt.set(&image, name, wanted).expect("set");
+        }
+        for name in named() {
+            assert_eq!(
+                enabled(&image, &rebuilt, name),
+                enabled(&image, &overrides, name),
+                "the rebuilt layer does not reproduce what it was made for"
+            );
+        }
+        assert!(
+            rebuilt
+                .entries()
+                .iter()
+                .all(|(name, disposition)| image.is_enabled(name) != disposition.is_enabled()),
+            "the rebuilt layer holds an entry the image already says"
         );
     }
 }

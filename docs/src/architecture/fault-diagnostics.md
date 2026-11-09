@@ -29,6 +29,7 @@ through the audit sink. Its fields:
 | `proc_id`       | The CSPRNG-minted process-instance identity, so the crash stays correlatable across the log after the scheduler recycles the `task` id. |
 | `access`        | `read`, `write`, or `instruction` — a wild read, a wild write, and an instruction the CPU refused outright are sharply different bug classes. |
 | `fault_class`   | A coarse class of *why* the access was refused (below).        |
+| `cause`         | Why the page could not be backed: `invalid` (the program's own access — and every instruction-side kill), `no_memory` (the machine had no memory to back it), `unreadable` (the storage behind a file page failed), or `lost` (a compressed page whose contents failed their check). A kill for want of memory never reads as a bug in the program. |
 | `fault_offset`  | A coarse, non-leaking locality bucket (below).                 |
 | `region_offset` | Present only when `fault_offset` carries a distance: the *distance* from a fixed anchor, never an absolute address. |
 
@@ -41,7 +42,8 @@ through the audit sink. Its fields:
 - `file_region` — a miss inside a live file mapping the resolver refused
   (e.g. a page at or past end-of-file, the `SIGBUS` analogue).
 - `anon` — a miss inside a reserved anonymous region the resolver could
-  not back (deterministic OOM fatal to the task alone).
+  not back (deterministic OOM, `cause=no_memory`, or a lost compressed
+  page, `cause=lost`).
 - `wild` — an address outside every mapping the task owns.
 - `instruction` — the CPU refused the instruction itself (an illegal or
   privileged encoding, a misaligned program counter, a fetch from a

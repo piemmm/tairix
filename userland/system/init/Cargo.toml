@@ -56,5 +56,10 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # its one wait-set so a slow or absent sound authority never stalls it.
 tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", default-features = false, features = ["rt"] }
 
+[dev-dependencies]
+# The per-thread metering allocator the tests hold PID 1's handler paths to
+# allocating nothing.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -202,7 +202,7 @@ fn a_card_that_cannot_move_data_at_default_speed_is_unusable() {
         Emmc2::open(ModelHost::new(mock), Board::default()).err(),
         Some(BringUpFault {
             stage: BringUpStage::VerifyBus,
-            error: DriverError::DeviceFault
+            error: DriverError::TransferCorrupted
         })
     );
 }

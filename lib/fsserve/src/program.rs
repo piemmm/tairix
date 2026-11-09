@@ -89,7 +89,12 @@ pub fn run_archive<F: ServedArchive>() -> i32 {
 
 /// Serve the volume this driver's grant names as `open` opens it.
 fn serve_volume<S: ServedFilesystem>(
-    open: impl FnOnce(GrantedVolume<RtVolume>, bool, WritebackBudget) -> Result<Opened<S>, DriverError>,
+    open: impl FnOnce(
+        GrantedVolume<RtVolume>,
+        bool,
+        WritebackBudget,
+        &'static (dyn crate::Sink + Sync),
+    ) -> Result<Opened<S>, DriverError>,
 ) -> i32 {
     let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
@@ -138,7 +143,7 @@ fn serve_volume<S: ServedFilesystem>(
         gauge: tairix_rt::pressure::gauge(),
     };
     let read_only = granted.info().read_only;
-    let mut opened = match open(granted, read_only, budget) {
+    let mut opened = match open(granted, read_only, budget, &tairix_rt::LogSink) {
         Ok(opened) => opened,
         Err(why) => {
             // The kernel retracts the volume with this reason on record.

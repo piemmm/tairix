@@ -12,6 +12,7 @@ use tairix_util::fallible::try_push;
 use crate::colour::{Space, Srgb};
 use crate::display::{Gradient, GradientKind, Stop};
 use crate::document::Document;
+use crate::error::tolerated;
 use crate::function::{numbers, Function, Values, Work, MAX_COMPONENTS};
 use crate::object::{Dict, Object};
 use crate::page::Rect;
@@ -36,11 +37,11 @@ pub(crate) struct Shading {
 /// The one-input function, or functions one a component, a shading's colour
 /// comes from.
 struct Colours {
-    functions: Vec<Function>,
+    functions: Vec<Arc<Function>>,
 }
 
 impl Colours {
-    fn load(document: &Document<'_>, object: &Object) -> Result<Self, PdfError> {
+    fn load(document: &Document, object: &Object) -> Result<Self, PdfError> {
         let object = document.resolve(object)?;
         let listed: &[Object] = match object.as_array() {
             Some(listed) => listed,
@@ -62,7 +63,7 @@ impl Colours {
     }
 
     fn at(&self, t: f64, left: bool, work: &Work) -> Result<Values, PdfError> {
-        let evaluate = |function: &Function, outputs: &mut Values| {
+        let evaluate = |function: &Arc<Function>, outputs: &mut Values| {
             if left {
                 function.evaluate_left(&[t], work, outputs)
             } else {
@@ -101,7 +102,7 @@ impl Colours {
 /// colour space named in `spaces`; `None` for the other types, which no
 /// gradient holds.
 pub(crate) fn shading(
-    document: &Document<'_>,
+    document: &Document,
     object: &Object,
     spaces: Option<&Dict>,
 ) -> Result<Option<Shading>, PdfError> {
@@ -117,7 +118,7 @@ pub(crate) fn shading(
     if matches!(*space, Space::Pattern(_)) {
         return Err(PdfError::Malformed);
     }
-    let coords = numbers(document, dict, b"Coords")?.ok_or(PdfError::Malformed)?;
+    let coords = numbers(document, dict, b"Coords", 6)?.ok_or(PdfError::Malformed)?;
     let kind = match (radial, coords.as_slice()) {
         (false, &[x0, y0, x1, y1]) => GradientKind::Axial {
             start: Point::new(x0, y0),
@@ -131,7 +132,7 @@ pub(crate) fn shading(
         },
         _ => return Err(PdfError::Malformed),
     };
-    let domain = match numbers(document, dict, b"Domain")?.as_deref() {
+    let domain = match numbers(document, dict, b"Domain", 2)?.as_deref() {
         Some(&[t0, t1]) => (t0, t1),
         None => (0.0, 1.0),
         Some(_) => return Err(PdfError::Malformed),
@@ -147,7 +148,8 @@ pub(crate) fn shading(
     let Some(stops) = stops(&colours, &space, domain, document.work())? else {
         return Ok(None);
     };
-    let bbox = match numbers(document, dict, b"BBox")?.as_deref() {
+    let bbox = tolerated(numbers(document, dict, b"BBox", 4))?;
+    let bbox = match bbox.flatten().as_deref() {
         Some(&[x0, y0, x1, y1]) => Some(Rect::spanning(x0, y0, x1, y1)),
         _ => None,
     };
@@ -204,7 +206,8 @@ fn stops(
             ((t - t0) / span).clamp(0.0, 1.0)
         }
     };
-    for pair in breaks.windows(2) {
+    let pieces = breaks.len() - 1;
+    for (index, pair) in breaks.windows(2).enumerate() {
         let (a, b) = (pair[0], pair[1]);
         let (from, to) = (colour(a, descending)?, colour(b, !descending)?);
         let repeated = out.last().is_some_and(|last: &Stop| {
@@ -219,12 +222,14 @@ fn stops(
                 },
             )?;
         }
+        let middle = f64::midpoint(a, b);
+        // Room is kept for this piece's end and two stops for each piece after.
+        let ceiling = MAX_STOPS.saturating_sub(1 + 2 * (pieces - 1 - index));
         refine(
             &mut out,
             &colour,
-            (a, from),
-            (b, to),
-            MAX_REFINEMENT,
+            [(a, from), (middle, colour(middle, false)?), (b, to)],
+            (MAX_REFINEMENT, ceiling),
             &offset,
         )?;
         try_push(
@@ -238,40 +243,50 @@ fn stops(
     Ok(Some(out))
 }
 
-/// Stops strictly between `a` and `b` wherever the straight run between them
-/// strays from the colours, halving the run at most `depth` more times.
+/// Stops strictly between the ends of `run` — its start, middle and end, each
+/// with its colour — wherever the straight run between them strays from the
+/// colours, halving it at most `depth` more times and leaving `out` holding
+/// no more than `ceiling`. A half's middle is a quarter probed here, so no
+/// place is evaluated twice.
 fn refine(
     out: &mut Vec<Stop>,
     colour: &impl Fn(f64, bool) -> Result<Srgb, PdfError>,
-    (a, from): (f64, Srgb),
-    (b, to): (f64, Srgb),
-    depth: u32,
+    [(a, from), (middle, at_middle), (b, to)]: [(f64, Srgb); 3],
+    (depth, ceiling): (u32, usize),
     offset: &impl Fn(f64) -> f64,
 ) -> Result<(), PdfError> {
-    if depth == 0 || out.len() + 2 >= MAX_STOPS {
+    if depth == 0 || out.len() >= ceiling {
         return Ok(());
     }
-    let mut straight = true;
-    for share in [0.25, 0.5, 0.75] {
-        let actual = colour(a + (b - a) * share, false)?;
-        straight &= (0..3).all(|channel| {
+    let quarter = f64::midpoint(a, middle);
+    let three_quarters = f64::midpoint(middle, b);
+    let at_quarter = colour(quarter, false)?;
+    let at_three_quarters = colour(three_quarters, false)?;
+    let straight = [
+        (0.25, at_quarter),
+        (0.5, at_middle),
+        (0.75, at_three_quarters),
+    ]
+    .iter()
+    .all(|&(share, actual)| {
+        (0..3).all(|channel| {
             (actual[channel] - (from[channel] + (to[channel] - from[channel]) * share)).abs()
                 <= TOLERANCE
-        });
-    }
+        })
+    });
     if straight {
         return Ok(());
     }
-    let middle = f64::midpoint(a, b);
-    let at_middle = colour(middle, false)?;
     refine(
         out,
         colour,
-        (a, from),
-        (middle, at_middle),
-        depth - 1,
+        [(a, from), (quarter, at_quarter), (middle, at_middle)],
+        (depth - 1, ceiling),
         offset,
     )?;
+    if out.len() >= ceiling {
+        return Ok(());
+    }
     try_push(
         out,
         Stop {
@@ -279,7 +294,17 @@ fn refine(
             colour: rgba(at_middle),
         },
     )?;
-    refine(out, colour, (middle, at_middle), (b, to), depth - 1, offset)
+    refine(
+        out,
+        colour,
+        [
+            (middle, at_middle),
+            (three_quarters, at_three_quarters),
+            (b, to),
+        ],
+        (depth - 1, ceiling),
+        offset,
+    )
 }
 
 /// `colour` as an opaque 8-bit colour.

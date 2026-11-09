@@ -109,14 +109,15 @@ mod program {
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
         audit_launch_ended_abnormally, audit_wired_ended, configured_session_kind, drain_bounded,
-        effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
-        handle_elevate_request, handle_session_request, home_refusal, session_attach,
-        session_environment, session_program, supervise, AttemptBudget, AuthenticatedUser,
-        Authenticator, Authority, Caller, Captured, ConfigStore, ConsoleMode, Credentials,
-        CursesView, DbAccounts, DbLoad, ElevateDirectory, GuessMeter, InputWait, InputWake,
-        LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView, ProgramRequests,
-        SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        Wired, ZoneStoreGrant, SESSION_FALLBACK_DIRECTORY,
+        effective_session_kind, elevated_attach, end_live_sessions, end_session, events,
+        forget_ended_sessions, handle_elevate_request, handle_session_request, home_refusal,
+        session_attach, session_environment, session_program, supervise, AttemptBudget,
+        AuthenticatedUser, Authenticator, Authority, Caller, Captured, ConfigStore, ConsoleMode,
+        Credentials, CursesView, DbAccounts, DbLoad, ElevateDirectory, GuessMeter, InputWait,
+        InputWake, LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView,
+        ProgramRequests, SessionDirectory, SessionEnd, SessionKind, SessionLauncher,
+        SessionOutcome, SessionWaker, StatusSource, Wired, ZoneStoreGrant,
+        SESSION_FALLBACK_DIRECTORY,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -866,7 +867,7 @@ mod program {
                 tairix_abi::fs::OpenFlags::READ,
             )
             .map_err(Errno::from_syscall)?;
-            let handle = Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, self.to))?;
+            let handle = Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, self.to, 0))?;
             // The kernel mints handles from one: zero is no delegation.
             core::num::NonZeroU64::new(handle).ok_or(Errno::OutOfRange)
         }
@@ -1161,7 +1162,7 @@ mod program {
     ) -> Result<WiredLaunch, Errno> {
         let instance = tairix_rt::child_origin(pid)?.proc_id();
         let grant = |fd| {
-            let handle = Errno::syscall_result(tairix_rt::fd_grant(fd, 0, requester))?;
+            let handle = Errno::syscall_result(tairix_rt::fd_grant(fd, 0, requester, 0))?;
             // The kernel mints handles from one: zero is no delegation.
             core::num::NonZeroU64::new(handle).ok_or(Errno::OutOfRange)
         };
@@ -1329,7 +1330,9 @@ mod program {
                 // an exit, which this reap collects.
                 Watched::Released => plain_wait(pid)?,
             };
-            if let Some(server) = self.server {
+            // A session the loader refused never ran, so nobody logged out.
+            if let (Some(server), None) = (self.server, tairix_abi::load_failure_reason(exit_code))
+            {
                 server.cue(SoundEvent::Logout);
             }
             Ok(SessionOutcome { kind, exit_code })
@@ -1592,20 +1595,20 @@ mod program {
                     Watch::Keep
                 })
             };
-            if matches!(watched, Ok(Watched::Released)) {
-                return;
+            let code = match watched {
+                Ok(Watched::Released) => return,
+                Ok(Watched::Exited(code)) => Some(code),
+                Err(_) => None,
+            };
+            match end_session(live, &user.username, code, &self.broker.sink) {
+                SessionEnd::LoggedOut => self.server.cue(SoundEvent::Logout),
+                SessionEnd::NeverRan(reason) => write_stderr_line(format_args!(
+                    "login: the desktop session of {} could not be started: {reason}",
+                    user.username
+                )),
             }
-            let _ = live.remove(&user.username);
-            self.audit(
-                Level::Info,
-                events::SESSION_ENDED,
-                "desktop session ended",
-                &user.username,
-            );
-            self.server.cue(SoundEvent::Logout);
         }
 
-        /// Record one round decision, naming the account it concerns.
         /// Say why the login screen could not be started, on the console and
         /// in the log; the round then tries again, as for one that ended.
         fn greeter_refused(&self, errno: Errno) {

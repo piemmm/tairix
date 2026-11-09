@@ -25,9 +25,11 @@ algorithms.
   `Script_Extensions` UTS #39 §5.1 augments, with UAX #31's Recommended
   Scripts.
 - `normalize`, `Form` and `Overflow` — UAX #15's four normalization forms,
-  written into a buffer the caller holds; `MAX_DECOMPOSITION` sizes one.
+  written into a buffer the caller holds that need only be as long as the
+  result; `MAX_DECOMPOSITION` times the input's length always is.
 - `saslprep`, `Unassigned` and `SaslprepError` — RFC 4013's stringprep
-  profile for user names and passwords, over Unicode 3.2 as RFC 3454 fixes it.
+  profile for user names and passwords, over Unicode 3.2 as RFC 3454 fixes it,
+  into a buffer sized alike.
 - `VERSION` — the Unicode version the tables describe.
 
 ## Provenance
@@ -36,14 +38,19 @@ algorithms.
 `PropertyValueAliases.txt`, `DerivedGeneralCategory.txt`,
 `DerivedCoreProperties.txt`, `UnicodeData.txt`, `CompositionExclusions.txt`,
 `NormalizationCorrections.txt` and `NormalizationTest.txt` byte-identical to
-`https://www.unicode.org/Public/18.0.0/ucd/`, under the Unicode License V3
-(`assets/LICENSE`), and `rfc3454.txt` byte-identical to
-`https://www.rfc-editor.org/rfc/rfc3454.txt`, under the copyright notice that
-closes it. `cargo xtask unicode` pins each by SHA-256, checks that
-`UnicodeData.txt` and `DerivedGeneralCategory.txt` agree on the marks and that
-each correction is the mapping `UnicodeData.txt` holds, and fails closed when
-`src/tables.rs` differs from a fresh generation. `NormalizationTest.txt` is
-read only by the conformance test.
+`https://www.unicode.org/Public/18.0.0/ucd/`, under the Unicode License V3,
+and `rfc3454.txt` byte-identical to
+`https://www.rfc-editor.org/rfc/rfc3454.txt`, under the Internet Society's
+copyright notice that closes it, which every work derived from the RFC must
+carry. `assets/LICENSE` holds both, and the generated `src/tables.rs` carries
+the RFC's notice; the crate's `license` field is the workspace's, for its own
+code. `cargo xtask unicode` pins each asset by SHA-256, checks that
+`UnicodeData.txt` and `DerivedGeneralCategory.txt` agree on the marks, that
+each correction is the mapping `UnicodeData.txt` holds and that
+`assets/LICENSE` carries the RFC's notice, refuses tables in which a
+character Unicode 3.2 assigns decomposes or composes to one it does not, and
+fails closed when `src/tables.rs` differs from a fresh generation.
+`NormalizationTest.txt` is read only by the conformance test.
 
 Taking a new release: replace the UCD assets, their pins in
 `tools/xtask/src/commands/unicode.rs`, its `VERSION` and its `RECOMMENDED`

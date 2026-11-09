@@ -90,7 +90,10 @@ fn a_tile_is_kept_until_the_size_or_colours_change() {
     assert!(art.faces.iter().all(Option::is_none));
     let larger = art.face(face(Suit::Hearts, 12)).expect("a tile");
     assert_eq!((larger.width(), larger.height()), (WIDTH + 10, HEIGHT + 14));
-    art.trim();
+    art.fit(Keeps {
+        baize: true,
+        tiles: false,
+    });
     assert!(art.faces.iter().all(Option::is_none) && art.back.is_none());
 }
 
@@ -200,6 +203,44 @@ fn the_baize_is_shaded_once_per_size() {
         .map(|baize| (baize.width(), baize.height()));
     assert_eq!(wider, Some((320, 200)));
     assert_eq!(shaded.get(), 2, "a new size shades it again");
-    art.trim();
+    art.fit(Keeps {
+        baize: false,
+        tiles: true,
+    });
     assert!(art.baize.is_none());
+}
+
+/// Under pressure that forbids keeping the baize none is made, so the felt is
+/// shaded into the paint instead; tiles stay as long as they are allowed.
+///
+/// Regression: every band change dropped the baize and every paint after,
+/// even a status-line tick, made and shaded a new window-sized one, so a
+/// machine near a band's edge flipped back and forth at the paint rate.
+#[test]
+fn a_baize_pressure_forbids_is_neither_kept_nor_made() {
+    let mut art = art(Preferences::default());
+    let tile = pixels(art.face(face(Suit::Spades, 1)));
+    art.fit(Keeps {
+        baize: false,
+        tiles: true,
+    });
+    assert!(art.baize(300, 200, |_| {}).is_none(), "none is made");
+    assert_eq!(pixels(art.face(face(Suit::Spades, 1))), tile, "tiles stay");
+    art.fit(Keeps::ALL);
+    assert!(
+        art.baize(300, 200, |_| {}).is_some(),
+        "made again once allowed"
+    );
+}
+
+/// A new card size keeps the pressure verdict it was given.
+#[test]
+fn a_retune_keeps_what_pressure_allows() {
+    let mut art = art(Preferences::default());
+    art.fit(Keeps {
+        baize: false,
+        tiles: true,
+    });
+    art.retune(WIDTH + 2, HEIGHT + 2, 7, 1, palette(Preferences::default()));
+    assert!(art.baize(300, 200, |_| {}).is_none());
 }

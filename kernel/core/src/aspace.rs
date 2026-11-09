@@ -4221,22 +4221,23 @@ impl AddressSpaceRegistry {
         )
     }
 
-    /// Take the location `handle` tells, minted to `task` by `from`
-    /// (`fd_redeem_location`), for a reader that is user `uid` with `cap`
-    /// bytes to write the path into.
+    /// A copy of the path the location `handle` tells, minted to `task` by
+    /// `from` (`fd_redeem_location`), for a reader that is user `uid` with
+    /// `cap` bytes to write it into. The location stays pending: the reader
+    /// takes it ([`Self::take_fd_location`]) only once the path is delivered,
+    /// so a delivery its buffer refuses loses nothing.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — as [`Self::redeem_fd_delegation`]; the
-    ///   location stays pending.
+    /// * [`Errno::NotFound`] — as [`Self::redeem_fd_delegation`].
     /// * [`Errno::OutOfRange`] — a delegated descriptor rather than a
-    ///   location; it stays pending.
-    /// * [`Errno::BufferTooSmall`] — `cap` is shorter than the path; it stays
-    ///   pending.
+    ///   location.
+    /// * [`Errno::BufferTooSmall`] — `cap` is shorter than the path.
+    /// * [`Errno::OutOfMemory`] — no room for the copy.
     /// * [`Errno::PermissionDenied`] — the descriptor reaches its file as
     ///   another user than `uid`. Such a location can never be told, so it
     ///   is consumed rather than left charged to its grantor.
-    pub fn redeem_fd_location(
+    pub fn fd_location(
         &mut self,
         task: ProcessId,
         instance: ProcId,
@@ -4262,13 +4263,29 @@ impl AddressSpaceRegistry {
         if location.path.len() > cap {
             return Err(Errno::BufferTooSmall);
         }
-        match Self::consume_pending(&mut self.fd_delegations, &mut self.sent, task, handle) {
-            Some(PendingFdDelegation {
-                conveys: Conveyed::Location(location),
-                ..
-            }) => Ok(location.path),
-            _ => Err(Errno::NotFound),
-        }
+        let mut path = String::new();
+        path.try_reserve_exact(location.path.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        path.push_str(&location.path);
+        Ok(path)
+    }
+
+    /// Take the location `handle` tells, minted to `task`'s `instance` by
+    /// `from`, once its path is delivered, answering whether it was still
+    /// pending: a sibling thread may have taken it meanwhile.
+    pub fn take_fd_location(
+        &mut self,
+        task: ProcessId,
+        instance: ProcId,
+        handle: u64,
+        from: ProcId,
+    ) -> bool {
+        let location = self
+            .pending_for(task, instance, handle, Some(from))
+            .is_ok_and(|pending| matches!(pending.conveys, Conveyed::Location(_)));
+        location
+            && Self::consume_pending(&mut self.fd_delegations, &mut self.sent, task, handle)
+                .is_some()
     }
 
     /// The delegation `handle` minted to `task`'s `instance`, by `from` where
@@ -5318,7 +5335,10 @@ mod tests {
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = alloc::vec![0u8; 32];
-        assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Read(32));
+        assert_eq!(
+            crate::pipe::read_into(&read_end, &mut out),
+            crate::pipe::ReadStep::Read(32)
+        );
         assert!(reg.stream_writable(ProcessId(2), write_fd));
         // Every read end closed leaves the member ready so the woken writer
         // fails `BrokenPipe` instead of waiting on a stream nothing drains.
@@ -6793,7 +6813,7 @@ mod tests {
 
         let (read, handle) = send(&mut reg);
         assert_eq!(
-            read.try_read(&mut out),
+            crate::pipe::read_into(&read, &mut out),
             ReadStep::Empty,
             "the end in flight writes"
         );
@@ -6801,25 +6821,25 @@ mod tests {
             .redeem_fd_delegation(recipient, who, handle, None)
             .expect("redeems");
         assert_eq!(
-            read.try_read(&mut out),
+            crate::pipe::read_into(&read, &mut out),
             ReadStep::Empty,
             "as the descriptor it became does"
         );
         let closed = reg.close_file(recipient, fd);
-        assert_eq!(read.try_read(&mut out), ReadStep::Empty);
+        assert_eq!(crate::pipe::read_into(&read, &mut out), ReadStep::Empty);
         drop(closed);
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&read, &mut out), ReadStep::Eof);
 
         let (read, _) = send(&mut reg);
         let withdrawn = reg.withdraw(grantor);
         assert_eq!(reg.stale_task_entry(grantor), None);
         assert_eq!(
-            read.try_read(&mut out),
+            crate::pipe::read_into(&read, &mut out),
             ReadStep::Empty,
             "the caller's to let go"
         );
         drop(withdrawn);
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&read, &mut out), ReadStep::Eof);
     }
 
     /// Regression: a grantor withdrawn while the heap refuses every allocation
@@ -6857,13 +6877,13 @@ mod tests {
             "the files are the caller's to let go"
         );
         assert_eq!(
-            read.try_read(&mut out),
+            crate::pipe::read_into(&read, &mut out),
             ReadStep::Empty,
             "and so are the pipe ends"
         );
         drop(withdrawn);
         assert_eq!(volume.outstanding(), 0);
-        assert_eq!(read.try_read(&mut out), ReadStep::Eof);
+        assert_eq!(crate::pipe::read_into(&read, &mut out), ReadStep::Eof);
     }
 
     /// A pipe end still pending is one right, as a file is: granting it again
@@ -6896,7 +6916,7 @@ mod tests {
         drop(reg.close_file(recipient, fd));
         let mut out = [0u8; 1];
         assert_eq!(
-            read.try_read(&mut out),
+            crate::pipe::read_into(&read, &mut out),
             ReadStep::Eof,
             "the one pending reference was the last writer"
         );
@@ -7022,7 +7042,7 @@ mod tests {
                 let live = own.is_some() || !pending.is_empty() || !open.is_empty();
                 let expected = if live { ReadStep::Empty } else { ReadStep::Eof };
                 assert_eq!(
-                    read.try_read(&mut [0u8; 1]),
+                    crate::pipe::read_into(&read, &mut [0u8; 1]),
                     expected,
                     "seed {seed}, step {step}"
                 );
@@ -7347,7 +7367,10 @@ mod tests {
         reg.register(ProcessId(2), user_space(1, 7), sim())
             .expect("register");
         assert!(reg.withdraw(ProcessId(2)).was_present());
-        assert_eq!(read_end.try_read(&mut [0u8; 4]), ReadStep::Eof);
+        assert_eq!(
+            crate::pipe::read_into(&read_end, &mut [0u8; 4]),
+            ReadStep::Eof
+        );
     }
 
     #[test]

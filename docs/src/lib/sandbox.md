@@ -24,9 +24,11 @@ Stability tier: **experimental**.
   frame, hand the payload to a total `Service`, write the reply frame,
   finish when the parent closes the request stream. A `Service` encodes
   "that request is malformed" as a typed error reply; the loop itself
-  cannot be derailed by request content. Each request is wiped, its block's
-  spare room too, once it is handled, since one may carry a secret such as a
-  document's password.
+  cannot be derailed by request content. Each request's bytes are wiped once
+  it is handled, since one may carry a secret such as a document's password;
+  the buffer grows before a request is read into it and every earlier request
+  was wiped the same way, so nothing past a request's own bytes needs it, and
+  the cost follows the request rather than the largest upload the buffer held.
 - **`host`** — the calling program's side. `ParserSandbox::request` sends
   one payload and blocks for the reply, for no longer than the production
   launcher's reply deadline (`rt::REPLY_DEADLINE_NS`, two minutes: far past
@@ -188,14 +190,18 @@ Stability tier: **experimental**.
   Data display is the consumer.
 - **`drawedit`** — a drawing editor's documents read into the editable
   drawing (`tairix-drawing`, [`docs`](./drawing.md)) over the same upload.
-  `read_drawing` asks the worker to read the document, which it reads as a
-  RISC OS Draw file, a PDF or SVG by its content (`tairix_drawing::read`),
-  never by a name the editor could be wrong about, a PDF at the page and with
-  the password `Access` asks; `read_pages` asks first for a document's pages,
-  a PDF's count and as many of their sizes as a reply holds. Either request
+  `open_drawing` asks the worker to open the document, which it reads as a
+  RISC OS Draw file, a PDF or SVG by its content
+  (`tairix_drawing::format_of`), never by a name the editor could be wrong
+  about, a PDF with the password given. A PDF of several pages, where a page
+  is to be chosen, is kept open by the worker and answered with its count
+  (`Opening::Pages`); `page_size` sizes a page as a chooser shows it, and
+  `read_page` reads the one chosen, the worker keeping the PDF no longer. A PDF refused for its password is kept too, its bytes
+  opened again with the next password given, so no answer costs a second
+  upload or open; a document handed over lets go of what was kept. An open
   carries the room the worker may decode into — what its share holds beside
   the document — and the password, at most `MAX_PASSWORD_BYTES`, the request
-  wiped once sent. The worker answers the page,
+  wiped once sent. For a drawing the worker answers the page,
   grid, guides, title, what it could not keep and how many pictures the
   drawing shows. The pictures come next, each once however many objects show
   it: its size and what the bytes it was read from state, then its
@@ -204,7 +210,7 @@ Stability tier: **experimental**.
   exchanges as its size allows — each channel held to its pixel's alpha as
   it lands. Together the pictures
   of one read hold no more pixels than a drawing's may and no more bytes
-  than the document handed over (`read_drawing`'s `handed`) or the room its
+  than the document handed over (the open's `handed`) or the room its
   streams decoded into, whichever is more, since every picture's bytes are
   part of the one or of the other. Then the drawing as records a batch at a time —
   every gradient and style once, referred to by number, then the tree depth

@@ -30,7 +30,7 @@ fn near(actual: Option<Srgb>, expected: Srgb, within: f64) {
 }
 
 fn space(file: &[u8], num: u32) -> Result<Arc<Space>, PdfError> {
-    let document = Document::open(file, &OPTIONS)?;
+    let document = Document::open(crate::fixture::kept(file), &OPTIONS)?;
     Space::load(&document, &reference(num), None)
 }
 
@@ -129,6 +129,20 @@ fn an_indexed_space_looks_its_colours_up() {
 }
 
 #[test]
+fn an_indexed_space_keeps_only_the_entries_it_can_look_up() {
+    let lookup = alloc::vec![7u8; 4096];
+    let file = with_objects(
+        &[(10, "[/Indexed /DeviceRGB 1 12 0 R]")],
+        &[(12, "", &lookup)],
+    );
+    let indexed = space(&file, 10).expect("an Indexed space");
+    let Space::Indexed { table, .. } = &*indexed else {
+        panic!("an Indexed space");
+    };
+    assert_eq!((table.len(), table.capacity()), (6, 6));
+}
+
+#[test]
 fn a_separation_tints_through_its_function_and_none_paints_nothing() {
     let file = with_objects(
         &[
@@ -178,7 +192,7 @@ fn an_icc_space_reads_through_its_alternate_or_its_component_count() {
 #[test]
 fn a_name_is_looked_up_in_the_resources() {
     let file = with_objects(&[], &[]);
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let spaces = Dict::from_written(alloc::vec![(
         Name(b"CS0".to_vec()),
         Object::Name(Name(b"DeviceCMYK".to_vec()))
@@ -209,7 +223,7 @@ fn a_space_that_names_itself_is_damage() {
 #[test]
 fn with_no_resources_only_a_device_space_may_be_named() {
     let file = with_objects(&[], &[]);
-    let document = Document::open(&file, &OPTIONS).expect("a document");
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
     let device = Space::load(&document, &Object::Name(Name(b"DeviceRGB".to_vec())), None);
     assert!(matches!(device.as_deref(), Ok(Space::Rgb)));
     let named = Space::load(&document, &Object::Name(Name(b"CS0".to_vec())), None);
@@ -226,4 +240,43 @@ fn a_lab_range_that_runs_backwards_is_damage() {
         &[],
     );
     assert_eq!(space(&file, 10).err(), Some(PdfError::Malformed));
+}
+
+/// A Separation read again — as a `cs` reads a space spelled as an array
+/// each time it is set, its named base with it — tints through the one
+/// function read the first time.
+#[test]
+fn a_space_read_again_reuses_its_tint_transform() {
+    let file = with_objects(
+        &[
+            (9, "<</FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1>>"),
+            (12, "[/Indexed /CS1 0 <00>]"),
+            (13, "<</CS1 [/Separation /Spot /DeviceGray 9 0 R]>>"),
+        ],
+        &[],
+    );
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let named = reference(13);
+    let spaces = document.resolve(&named).expect("the spaces");
+    let spaces = spaces.as_dict().expect("a dictionary");
+    let tint = || match &*Space::load(&document, &reference(12), Some(spaces)).expect("a space") {
+        Space::Indexed { base, .. } => match &**base {
+            Space::Tinted { tint, .. } => Arc::clone(tint),
+            other => panic!("a Separation base: {other:?}"),
+        },
+        other => panic!("an Indexed space: {other:?}"),
+    };
+    assert!(Arc::ptr_eq(&tint(), &tint()), "one tint transform");
+}
+
+/// An ICC space whose alternate is past a containment bound is refused, not
+/// read by its component count instead.
+#[test]
+fn an_icc_alternate_past_a_bound_refuses_the_space() {
+    let pieces = "<</FunctionType 2 /Domain [0 1] /N 1>> ".repeat(257);
+    let entries = alloc::format!(
+        "/N 1 /Alternate [/Separation /Spot /DeviceGray <</FunctionType 3 /Domain [0 1] /Functions [{pieces}] /Bounds [] /Encode []>>]"
+    );
+    let file = with_objects(&[(10, "[/ICCBased 11 0 R]")], &[(11, &entries, b"icc")]);
+    assert_eq!(space(&file, 10).err(), Some(PdfError::TooComplex));
 }

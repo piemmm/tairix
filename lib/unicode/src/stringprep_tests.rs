@@ -4,9 +4,11 @@ extern crate std;
 
 use std::string::String;
 use std::vec;
+use std::vec::Vec;
 
 use super::{saslprep, SaslprepError, Unassigned};
-use crate::MAX_DECOMPOSITION;
+use crate::tables::{MAPPED_TO_NOTHING, NON_ASCII_SPACES};
+use crate::{in_ranges, MAX_DECOMPOSITION};
 
 fn prepared(text: &str, unassigned: Unassigned) -> Result<String, SaslprepError> {
     let mut out = vec!['\0'; text.chars().count() * MAX_DECOMPOSITION];
@@ -108,11 +110,58 @@ fn a_code_point_unicode_3_2_does_not_assign_passes_a_query_alone() {
 }
 
 #[test]
-fn a_buffer_too_short_for_the_prepared_string_is_said() {
-    let mut out = ['\0'; 1];
+fn a_buffer_as_long_as_the_prepared_string_suffices() {
+    for (text, result) in [
+        ("I", "I"),
+        ("\u{ac00}", "\u{ac00}"),
+        ("e\u{301}", "\u{e9}"),
+        ("I\u{ad}X", "IX"),
+        ("\u{2168}", "IX"),
+        ("a\u{a0}b", "a b"),
+    ] {
+        let result: Vec<char> = result.chars().collect();
+        let mut exact = vec!['\0'; result.len()];
+        assert_eq!(
+            saslprep(text, Unassigned::Allowed, &mut exact),
+            Ok(result.len()),
+            "{text:?}"
+        );
+        assert_eq!(exact, result);
+        let mut short = vec!['\0'; result.len() - 1];
+        assert_eq!(
+            saslprep(text, Unassigned::Allowed, &mut short),
+            Err(SaslprepError::Overflow),
+            "{text:?}"
+        );
+    }
+}
+
+/// One pass judges every character, and a prohibited or unassigned one
+/// refuses the string before its bidirectional text can.
+#[test]
+fn a_refused_character_says_why_before_the_bidirectional_rules_do() {
+    assert_eq!(query("\u{627}a\u{7}"), Err(SaslprepError::Prohibited));
+    assert_eq!(query("\u{7}\u{627}a"), Err(SaslprepError::Prohibited));
     assert_eq!(
-        saslprep("\u{2168}", Unassigned::Allowed, &mut out),
-        Err(SaslprepError::Overflow)
+        prepared("\u{627}a\u{1f100}", Unassigned::Refused),
+        Err(SaslprepError::Unassigned)
     );
-    assert_eq!(saslprep("I", Unassigned::Allowed, &mut out), Ok(1));
+    assert_eq!(
+        prepared("\u{1f100}\u{7}", Unassigned::Refused),
+        Err(SaslprepError::Unassigned),
+        "the first refused character says why"
+    );
+}
+
+/// RFC 3454 lists U+200B both among the characters it maps to nothing and
+/// among the spaces, the only character it lists in both, which SASLprep maps
+/// to nothing.
+#[test]
+fn the_zero_width_space_alone_is_both_mapped_to_nothing_and_a_space() {
+    let both: Vec<u32> = MAPPED_TO_NOTHING
+        .iter()
+        .flat_map(|&(first, last)| first..=last)
+        .filter(|&code| in_ranges(NON_ASCII_SPACES, code))
+        .collect();
+    assert_eq!(both, [0x200b]);
 }

@@ -179,6 +179,41 @@ pub enum RecvCall {
     Received(ReceivedCall),
 }
 
+/// What [`CallEndpoint::recv_call_with`] did with the next request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecvDelivered {
+    /// No request is pending.
+    Empty,
+    /// The next request is larger than the server's buffer, left queued.
+    TooLarge {
+        /// Byte length of the request the buffer could not hold.
+        request_len: usize,
+    },
+    /// The request, of `len` bytes, and its ticket were delivered and the
+    /// call taken into service, its room kept for the answer.
+    Call {
+        /// The ticket delivered.
+        ticket: CallTicket,
+        /// The request's length.
+        len: usize,
+    },
+}
+
+/// What [`CallEndpoint::take_call`] took, `T` being what became of the
+/// request's payload.
+enum Taken<T> {
+    Empty,
+    TooLarge {
+        request_len: usize,
+    },
+    Call {
+        ticket: CallTicket,
+        sender: u64,
+        len: usize,
+        kept: T,
+    },
+}
+
 /// A request handed to the server by [`CallEndpoint::recv_call`].
 #[derive(Debug)]
 pub struct ReceivedCall {
@@ -1368,7 +1403,7 @@ impl CallEndpoint {
             // Its threads have ended, so nothing it waited or watched with is
             // woken, whether or not it still held a lane.
             room.take_sender(sender);
-            let watched = watchers.take_watching_as(sender);
+            let watched = watchers.take_ended(sender);
             let lane = lanes.remove(sender);
             if let Some(lane) = &lane {
                 *pending -= lane.pending.len();
@@ -1783,6 +1818,61 @@ impl CallEndpoint {
     /// Never allocates.
     #[must_use]
     pub fn recv_call(&self, max_copy: usize) -> RecvCall {
+        let Ok(received) = self.take_call(
+            max_copy,
+            |_, _| Ok::<(), core::convert::Infallible>(()),
+            |_, request| request,
+        );
+        match received {
+            Taken::Empty => RecvCall::Empty,
+            Taken::TooLarge { request_len } => RecvCall::TooLarge { request_len },
+            Taken::Call {
+                ticket,
+                sender,
+                kept: request,
+                ..
+            } => RecvCall::Received(ReceivedCall {
+                ticket,
+                sender,
+                request,
+            }),
+        }
+    }
+
+    /// [`Self::recv_call`], the request and its ticket handed to `deliver`
+    /// under the lock first and the call taken into service only once
+    /// `deliver` has them, its room kept for the answer at once: a request a
+    /// server's buffer refuses stays queued with its turn, rather than taken
+    /// into service and answered empty for want of a server that saw it.
+    ///
+    /// # Errors
+    ///
+    /// What `deliver` refused with; the request stays queued.
+    pub fn recv_call_with<E>(
+        &self,
+        max_copy: usize,
+        deliver: impl FnOnce(CallTicket, &[u8]) -> Result<(), E>,
+    ) -> Result<RecvDelivered, E> {
+        let received = self.take_call(max_copy, deliver, |call, mut request| {
+            request.wipe();
+            call.room = Some(request);
+        })?;
+        Ok(match received {
+            Taken::Empty => RecvDelivered::Empty,
+            Taken::TooLarge { request_len } => RecvDelivered::TooLarge { request_len },
+            Taken::Call { ticket, len, .. } => RecvDelivered::Call { ticket, len },
+        })
+    }
+
+    /// The next request in turn that fits `max_copy` bytes, handed to
+    /// `deliver` under the lock and then taken into service, `keep` deciding
+    /// what becomes of its payload: handed out, or kept as the answer's room.
+    fn take_call<E, T>(
+        &self,
+        max_copy: usize,
+        deliver: impl FnOnce(CallTicket, &[u8]) -> Result<(), E>,
+        keep: impl FnOnce(&mut InServiceCall, CallPayload) -> T,
+    ) -> Result<Taken<T>, E> {
         let mut g = self.inner.lock();
         let Inner {
             lanes,
@@ -1791,29 +1881,32 @@ impl CallEndpoint {
             ..
         } = &mut *g;
         let Some(sender) = lanes.next_turn() else {
-            return RecvCall::Empty;
+            return Ok(Taken::Empty);
         };
         let Some(lane) = lanes.get_mut(sender) else {
-            return RecvCall::Empty;
+            return Ok(Taken::Empty);
         };
         let Some(request_len) = lane.pending.front().map(|c| c.request.len()) else {
-            return RecvCall::Empty;
+            return Ok(Taken::Empty);
         };
         // Refuse to dequeue a request the server's buffer cannot hold: leave
         // it queued and report its size so the server can resize (the kernel
         // maps this to `BufferTooSmall`).
         if request_len > max_copy {
-            return RecvCall::TooLarge { request_len };
+            return Ok(Taken::TooLarge { request_len });
         }
         // The room was reserved when the call was posted, so neither record
         // below allocates; without it the call is left queued.
         if lane.in_service.len() == lane.in_service.capacity()
             || serving.len() == serving.capacity()
         {
-            return RecvCall::Empty;
+            return Ok(Taken::Empty);
+        }
+        if let Some(front) = lane.pending.front() {
+            deliver(CallTicket(front.ticket), front.request.as_bytes())?;
         }
         let Some(call) = lane.pending.pop_front() else {
-            return RecvCall::Empty;
+            return Ok(Taken::Empty);
         };
         let still_waiting = !lane.pending.is_empty();
         let PendingCall {
@@ -1825,7 +1918,7 @@ impl CallEndpoint {
             request,
             charge,
         } = call;
-        lane.in_service.push(InServiceCall {
+        let mut call = InServiceCall {
             ticket,
             origin,
             wakes,
@@ -1833,14 +1926,17 @@ impl CallEndpoint {
             answer_cap,
             room: None,
             charge,
-        });
+        };
+        let kept = keep(&mut call, request);
+        lane.in_service.push(call);
         let _ = serving.try_insert(ticket, sender);
         *pending -= 1;
         lanes.end_turn(still_waiting);
-        RecvCall::Received(ReceivedCall {
+        Ok(Taken::Call {
             ticket: CallTicket(ticket),
             sender,
-            request,
+            len: request_len,
+            kept,
         })
     }
 
@@ -2222,6 +2318,29 @@ impl CallEndpoint {
         now: u64,
         audit: &S,
     ) -> ReplyOutcome {
+        let Ok(outcome) = self.take_reply_with(claimant, ticket, now, audit, |_| {
+            Ok::<(), core::convert::Infallible>(())
+        });
+        outcome
+    }
+
+    /// [`Self::take_reply`], a ready answer handed to `deliver` under the
+    /// endpoint's lock first and the ticket retired only once `deliver` has
+    /// it: an answer its reader cannot take now — a buffer too small for it,
+    /// or one refusing the copy — stays for the reader to claim again rather
+    /// than going with its ticket.
+    ///
+    /// # Errors
+    ///
+    /// What `deliver` refused with; the answer and its ticket stay.
+    pub fn take_reply_with<S: Sink + ?Sized, E>(
+        &self,
+        claimant: u64,
+        ticket: CallTicket,
+        now: u64,
+        audit: &S,
+        deliver: impl FnOnce(&CallPayload) -> Result<(), E>,
+    ) -> Result<ReplyOutcome, E> {
         let mut g = self.inner.lock();
         let closed = self.is_closed();
         let Inner {
@@ -2232,20 +2351,23 @@ impl CallEndpoint {
             ..
         } = &mut *g;
         let Some(lane) = lanes.get_mut(claimant) else {
-            return if closed {
+            return Ok(if closed {
                 ReplyOutcome::Cancelled
             } else {
                 ReplyOutcome::Unknown
-            };
+            });
         };
         if let Some(pos) = lane.completed.iter().position(|c| c.ticket == ticket.0) {
+            if let Some(done) = lane.completed.get(pos) {
+                deliver(&done.reply)?;
+            }
             let done = lane.completed.swap_remove(pos);
             let idle = lanes.retire_if_idle(claimant);
             let shed = g.shed_idle_room();
             drop(g);
             drop(idle);
             drop(shed);
-            return ReplyOutcome::Ready(done.reply);
+            return Ok(ReplyOutcome::Ready(done.reply));
         }
         // A ticket still waiting, wherever it sits; its deadline decides
         // between a timeout and a live wait.
@@ -2259,7 +2381,7 @@ impl CallEndpoint {
             (None, Some(pos)) => lane.in_service.get(pos).map(|c| c.deadline),
             (None, None) => None,
         };
-        match deadline {
+        Ok(match deadline {
             None => ReplyOutcome::Unknown,
             Some(deadline) if deadline > now => ReplyOutcome::Pending,
             Some(deadline) => {
@@ -2316,7 +2438,7 @@ impl CallEndpoint {
                 );
                 ReplyOutcome::TimedOut(freed)
             }
-        }
+        })
     }
 
     /// Whether a reaper's [`take_reply`](Self::take_reply) for `claimant` as
@@ -2488,16 +2610,12 @@ impl CallEndpoint {
     /// thread of `sender` holds, which it then holds. Otherwise it waits in
     /// `sender`'s line for the next slot to free, keeping its place there if it
     /// waited before. A closed endpoint has room, so a woken caller posts and
-    /// finds it gone.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfMemory`] when its wait cannot be recorded: the thread
-    /// must then not park, since nothing would wake it.
-    pub fn room_or_wait(&self, task: u64, sender: u64) -> Result<bool, Errno> {
+    /// finds it gone. A wait the heap has no room to record is woken by the
+    /// broadcast the next slot freed carries.
+    pub fn room_or_wait(&self, task: u64, sender: u64) -> bool {
         let mut g = self.inner.lock();
         if self.is_closed() {
-            return Ok(true);
+            return true;
         }
         let free = self.free_in(g.lanes.get(sender));
         g.room.look(task, sender, free)
@@ -2520,25 +2638,24 @@ impl CallEndpoint {
     /// wait-set for the answers `claimant` awaits here, so an answer to one of
     /// its calls that no thread the call names watches for wakes it, and note
     /// `claimant` so its end forgets the watch. Idempotent; a closed endpoint
-    /// records nothing, since the watching member reports it gone.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfMemory`] when the record cannot be kept: the thread must
-    /// then not park, since nothing would wake it.
-    pub fn watch_replies(&self, task: u64, claimant: u64) -> Result<(), Errno> {
+    /// records nothing, since the watching member reports it gone. A watch the
+    /// heap has no room to record is left to the broadcast the next answer
+    /// here carries, so a wait never fails for want of the record.
+    pub fn watch_replies(&self, task: u64, claimant: u64) {
         let mut g = self.inner.lock();
         if self.is_closed() {
-            return Ok(());
+            return;
         }
-        g.noted.note(claimant, self.id, self.is_closed())?;
-        g.watchers.watch(task, claimant)
+        if g.noted.note(claimant, self.id, self.is_closed()).is_err() {
+            g.watchers.overflow();
+            return;
+        }
+        g.watchers.watch(task, claimant);
     }
 
     /// Forget `task`'s watch for `claimant`'s answers.
     pub fn unwatch_replies(&self, task: u64, claimant: u64) {
-        let emptied = self.inner.lock().watchers.unwatch(task, claimant);
-        drop(emptied);
+        self.inner.lock().watchers.unwatch(task, claimant);
     }
 }
 
@@ -3992,7 +4109,7 @@ mod tests {
         for _ in 0..2 {
             post().expect("posted");
         }
-        assert_eq!(ep.room_or_wait(0x10, 9), Ok(false), "recorded");
+        assert!(!ep.room_or_wait(0x10, 9), "recorded");
         assert_eq!(post(), Err(Errno::WouldBlock));
         let call = recv_one(&ep).expect("received");
         let woken = ep.reply(call.ticket, b"r", &sink).expect("replied");
@@ -4270,7 +4387,7 @@ mod tests {
             Err(Errno::LimitExceeded),
             "past it, never WouldBlock"
         );
-        assert_eq!(ep.room_or_wait(0x10, 9), Ok(true), "no room is waited for");
+        assert!(ep.room_or_wait(0x10, 9), "no room is waited for");
         drop(ep.leave_room_wait(0x10));
         let _ = ready_bytes(ep.take_reply(9, answered[0], 0, &sink));
         assert_eq!(
@@ -4296,15 +4413,13 @@ mod tests {
         for _ in 0..2 {
             post().expect("posted");
         }
-        assert_eq!(
-            ep.room_or_wait(0x10, 9),
-            Ok(false),
+        assert!(
+            !ep.room_or_wait(0x10, 9),
             "its depth is waiting on the server"
         );
         assert_eq!(post(), Err(Errno::WouldBlock));
-        assert_eq!(
+        assert!(
             ep.room_or_wait(0x20, 7),
-            Ok(true),
             "another caller's room is untouched"
         );
         let call = recv_one(&ep).expect("received");
@@ -4313,12 +4428,11 @@ mod tests {
             woken.tasks().any(|task| task == 0x10),
             "an answer makes room, collected or not"
         );
-        assert_eq!(ep.room_or_wait(0x10, 9), Ok(true), "for the thread woken");
+        assert!(ep.room_or_wait(0x10, 9), "for the thread woken");
         drop(ep.leave_room_wait(0x10));
         drop(ep.destroy(&sink));
-        assert_eq!(
+        assert!(
             ep.room_or_wait(0x10, 9),
-            Ok(true),
             "a closed endpoint has room to find it gone"
         );
     }
@@ -4335,7 +4449,7 @@ mod tests {
         ep.post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, sink)
             .expect("fills the depth");
         for &waiter in waiters {
-            assert_eq!(ep.room_or_wait(waiter, 7), Ok(false), "{waiter}");
+            assert!(!ep.room_or_wait(waiter, 7), "{waiter}");
         }
     }
 
@@ -4347,11 +4461,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = endpoint_of_depth(1, &sink);
         waiting_at_depth_one(&ep, &[0x10, 0x11], &sink);
-        assert_eq!(
-            ep.room_or_wait(0x20, 8),
-            Ok(true),
-            "another caller has room"
-        );
+        assert!(ep.room_or_wait(0x20, 8), "another caller has room");
         let call = recv_one(&ep).expect("received");
         assert_eq!(
             replied(&ep, call.ticket, &sink),
@@ -4429,9 +4539,8 @@ mod tests {
         let caller = task_with(7, &[]);
         ep.post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
             .expect("fills the depth");
-        assert_eq!(
+        assert!(
             ep.inner.lock().room.look(0x10, 7, 1),
-            Ok(true),
             "records that disagree with the lane"
         );
         assert_eq!(
@@ -4866,14 +4975,14 @@ mod tests {
         let _ = ep.reply(done, b"r", &sink).expect("replied");
         ep.post(&queued, 0x17, b"q", u64::MAX, NO_LIMIT, &sink)
             .expect("posted");
-        assert_eq!(ep.room_or_wait(0x27, 7), Ok(false), "recorded");
+        assert!(!ep.room_or_wait(0x27, 7), "recorded");
         let elsewhere = open_endpoint(&sink);
         elsewhere
             .post(&queued, 0x37, b"q", u64::MAX, NO_LIMIT, &sink)
             .expect("posted");
-        assert_eq!(elsewhere.room_or_wait(0x47, 7), Ok(true), "recorded");
-        ep.watch_replies(0x57, 9).expect("recorded");
-        elsewhere.watch_replies(0x67, 7).expect("recorded");
+        assert!(elsewhere.room_or_wait(0x47, 7), "recorded");
+        ep.watch_replies(0x57, 9);
+        elsewhere.watch_replies(0x67, 7);
         let mut named: alloc::vec::Vec<u64> = ep.destroy(&sink).tasks().collect();
         named.sort_unstable();
         assert_eq!(named, [0x17, 0x18, 0x27, 0x28, 0x57]);
@@ -4886,8 +4995,8 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        ep.watch_replies(0x77, 7).expect("recorded");
-        ep.watch_replies(0x88, 8).expect("recorded");
+        ep.watch_replies(0x77, 7);
+        ep.watch_replies(0x88, 8);
         let ticket = ep
             .post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
             .expect("posted");
@@ -4925,7 +5034,7 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
         for watcher in [POSTER_SCHED, 0x52, 0x53] {
-            ep.watch_replies(watcher, 7).expect("recorded");
+            ep.watch_replies(watcher, 7);
         }
         let ticket = ep
             .post(&caller, POSTER_SCHED, b"q", u64::MAX, NO_LIMIT, &sink)
@@ -4955,8 +5064,8 @@ mod tests {
     fn an_ended_callers_watchers_are_forgotten() {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
-        ep.watch_replies(0x77, 7).expect("recorded");
-        ep.watch_replies(0x78, 7).expect("recorded");
+        ep.watch_replies(0x77, 7);
+        ep.watch_replies(0x78, 7);
         assert_eq!(ep.cancel_posted_by(7, &sink), 0, "it held no lane");
         let named: alloc::vec::Vec<u64> = ep.destroy(&sink).tasks().collect();
         assert!(named.is_empty(), "its watchers went with it");
@@ -4970,7 +5079,7 @@ mod tests {
         let ep = open_endpoint(&sink);
         let index = Arc::new(SenderIndex::new());
         ep.note_senders_in(Arc::clone(&index));
-        ep.watch_replies(0x77, 7).expect("recorded");
+        ep.watch_replies(0x77, 7);
         assert_eq!(index.uses(7), [ep.id()]);
     }
 
@@ -4986,7 +5095,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        ep.watch_replies(0x77, 7).expect("recorded");
+        ep.watch_replies(0x77, 7);
 
         let blocking = ep
             .post_within(
@@ -5035,7 +5144,7 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        ep.watch_replies(0x77, 7).expect("recorded");
+        ep.watch_replies(0x77, 7);
         let answered = ep
             .post(&caller, POSTER_SCHED, b"a", u64::MAX, NO_LIMIT, &sink)
             .expect("posted");
@@ -5049,7 +5158,7 @@ mod tests {
         assert!(ep.has_ready_reply_for(7, 0), "a reaper's again");
         let _ = ready_bytes(ep.take_reply(7, answered, 0, &sink));
 
-        ep.watch_replies(0x77, 7).expect("recorded");
+        ep.watch_replies(0x77, 7);
         let unanswered = ep
             .post(&caller, POSTER_SCHED, b"b", u64::MAX, NO_LIMIT, &sink)
             .expect("posted");

@@ -6,15 +6,20 @@
     reason = "a radius read from the file is compared exactly: it is the number written"
 )]
 
-use super::{shading, Shading, MAX_STOPS};
+use alloc::sync::Arc;
+
+use super::{shading, stops, Colours, Shading, MAX_STOPS};
+use crate::colour::Space;
 use crate::display::GradientKind;
 use crate::document::Document;
 use crate::fixture::{reference, with_objects, OPTIONS};
+use crate::function::Work;
+use crate::limits::MAX_EVALUATION_STEPS;
 use crate::PdfError;
 
 fn read(objects: &[(u32, &str)]) -> Result<Option<Shading>, PdfError> {
     let file = with_objects(objects, &[]);
-    let document = Document::open(&file, &OPTIONS)?;
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS)?;
     shading(&document, &reference(10), None)
 }
 
@@ -58,6 +63,51 @@ fn stitched_straight_runs_keep_their_sharp_steps() {
             (0.5, [204, 204, 204, 255]),
             (1.0, [255, 255, 255, 255])
         ]
+    );
+}
+
+#[test]
+fn a_curve_before_many_sharp_steps_leaves_room_for_them() {
+    // The curve alone would take every stop; each of the 126 steps after it
+    // needs two.
+    let functions: alloc::vec::Vec<&str> = core::iter::once("12 0 R")
+        .chain((1..127u32).map(|step| if step % 2 == 0 { "13 0 R" } else { "14 0 R" }))
+        .collect();
+    let bounds: alloc::vec::Vec<alloc::string::String> = core::iter::once(0.5)
+        .chain((1..126u32).map(|step| 0.5 + f64::from(step) / 252.0))
+        .map(|bound| alloc::format!("{bound}"))
+        .collect();
+    let (functions, bounds) = (functions.join(" "), bounds.join(" "));
+    let stitched = alloc::format!(
+        "<</FunctionType 3 /Domain [0 1] /Functions [{functions}] /Bounds [{bounds}] /Encode [{}]>>",
+        "0 1 ".repeat(127)
+    );
+    let file = with_objects(
+        &[
+            (
+                10,
+                "<</ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function 11 0 R>>",
+            ),
+            (11, stitched.as_str()),
+            (13, "<</FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0] /N 1>>"),
+            (14, "<</FunctionType 2 /Domain [0 1] /C0 [1] /C1 [1] /N 1>>"),
+        ],
+        &[(
+            12,
+            "/FunctionType 4 /Domain [0 1] /Range [0 1]",
+            b"{ 10007 mul sin 1 add 2 div }",
+        )],
+    );
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let read = shading(&document, &reference(10), None)
+        .expect("a shading")
+        .expect("an axial shading");
+    let stops = &read.gradient.stops;
+    assert!(stops.len() <= MAX_STOPS, "{} stops", stops.len());
+    assert!(
+        stops.len() > 2 * 126,
+        "every step kept: {} stops",
+        stops.len()
     );
 }
 
@@ -149,4 +199,27 @@ fn a_shading_whose_pieces_meet_past_the_stops_a_gradient_holds_is_none() {
     let read = read(&[(10, &shading)]).expect("a shading read");
     assert!(read.is_none());
     assert!(2 * (pieces + 1) > MAX_STOPS);
+}
+
+/// A curve is refined evaluating each place once: t² is halved down to runs
+/// of a sixteenth, 31 runs probed at their quarters, each run's middle a
+/// quarter of the run it halves — so its 2 ends, 1 middle and 62 quarters.
+#[test]
+fn a_curve_is_refined_evaluating_each_place_once() {
+    let file = with_objects(
+        &[(10, "<</FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2>>")],
+        &[],
+    );
+    let document = Document::open(crate::fixture::kept(&file), &OPTIONS).expect("a document");
+    let colours = Colours::load(&document, &reference(10)).expect("a function");
+    let work = Work::new();
+    let placed = stops(&colours, &Arc::new(Space::Gray), (0.0, 1.0), &work)
+        .expect("work to spare")
+        .expect("stops");
+    assert_eq!(
+        placed.len(),
+        17,
+        "an end each side and a stop each run halved"
+    );
+    assert_eq!(MAX_EVALUATION_STEPS - work.left(), 2 + 1 + 2 * 31);
 }

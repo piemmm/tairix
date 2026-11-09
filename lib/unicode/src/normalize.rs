@@ -2,10 +2,12 @@
 //! decompositions, canonical ordering and canonical composition, written into
 //! a buffer the caller holds, so nothing is allocated.
 
+use zeroize::Zeroize;
+
 use crate::in_ranges;
 use crate::tables::{
-    COMBINING_CLASSES, COMPOSITIONS, DECOMPOSED_IN_3_2, DECOMPOSITIONS, DECOMPOSITION_POOL,
-    LEAST_COMBINING, LEAST_COMPOSING, SYLLABLES, UNASSIGNED_3_2,
+    CANONICAL, COMBINING_CLASSES, COMPATIBILITY, COMPOSING_SECONDS, COMPOSITIONS,
+    DECOMPOSED_IN_3_2, LEAST_COMBINING, MAX_CANONICAL_DECOMPOSITION, SYLLABLES, UNASSIGNED_3_2,
 };
 
 /// A normalization form (UAX #15).
@@ -37,9 +39,53 @@ pub(crate) enum Repertoire {
 }
 
 impl Repertoire {
-    /// Whether it knows nothing of `ch`.
+    /// Whether it knows nothing of `ch`. The generator refuses tables that
+    /// take a character it knows to one it does not, so this is asked only of
+    /// the characters read, never of their parts or composites.
     fn ignores(self, ch: char) -> bool {
         self == Self::Stringprep && in_ranges(UNASSIGNED_3_2, u32::from(ch))
+    }
+
+    /// `ch`'s decomposition in this repertoire, where a later release
+    /// corrected it.
+    fn original(self, ch: char) -> Option<char> {
+        if self != Self::Stringprep {
+            return None;
+        }
+        let code = u32::from(ch);
+        let index = DECOMPOSED_IN_3_2
+            .binary_search_by_key(&code, |&(listed, _)| listed)
+            .ok()?;
+        DECOMPOSED_IN_3_2
+            .get(index)
+            .map(|&(_, original)| char::from_u32(original).unwrap_or(ch))
+    }
+}
+
+/// The full decompositions of one kind, as generated: that of `keys[i]` is
+/// `parts[starts[i]..starts[i + 1]]`.
+pub(crate) struct Decompositions {
+    /// The characters decomposed, sorted.
+    pub(crate) keys: &'static [u32],
+    /// Where each one's decomposition begins in `parts`, then where the last
+    /// ends.
+    pub(crate) starts: &'static [u16],
+    /// The decompositions, laid end to end.
+    pub(crate) parts: &'static [char],
+}
+
+impl Decompositions {
+    /// `ch`'s full decomposition, where it has one of this kind.
+    pub(crate) fn of(&self, ch: char) -> Option<&'static [char]> {
+        let code = u32::from(ch);
+        // Below every key, as ASCII is, without a search.
+        if self.keys.first().is_none_or(|&least| code < least) {
+            return None;
+        }
+        let index = self.keys.binary_search(&code).ok()?;
+        let start = usize::from(*self.starts.get(index)?);
+        let end = usize::from(*self.starts.get(index + 1)?);
+        self.parts.get(start..end)
     }
 }
 
@@ -56,19 +102,27 @@ const S_COUNT: u32 = L_COUNT * N_COUNT;
 
 const _: () = assert!(SYLLABLES.1 - SYLLABLES.0 + 1 == S_COUNT);
 
+/// How far past `out` the text may run while it can still fit once composed:
+/// a starter absorbs at most this many characters into its composite.
+const SPILL: usize = MAX_CANONICAL_DECOMPOSITION - 1;
+
 /// `input` in normalization form `form`, written to the start of `out`: how
 /// many characters it takes there.
 ///
-/// No character fully decomposes to more than
-/// [`MAX_DECOMPOSITION`](crate::MAX_DECOMPOSITION), so a buffer that many
-/// times the input's length always suffices. The work is linear in the input
-/// but for canonical ordering, which moves each combining mark past the marks
-/// of a higher class before it in its run.
+/// `out` need only be as long as the normalized text, and as no character
+/// normalizes to more than [`MAX_DECOMPOSITION`](crate::MAX_DECOMPOSITION)
+/// characters, a buffer that many times the input's length always is. Each
+/// part of a character's decomposition lands in canonical order and, in NFC
+/// and NFKC, composes as it lands, so the work is linear in the input but
+/// where a combining mark follows one of a higher class in its sequence: it
+/// is moved before them, and NFC and NFKC compose the sequence again from its
+/// starter's decomposition, so a long run of marks out of order costs time
+/// quadratic in its length.
 ///
 /// # Errors
 ///
-/// [`Overflow`] where the text is longer than `out`, whose contents are then
-/// unspecified.
+/// [`Overflow`] where the normalized text is longer than `out`, whose
+/// contents are then unspecified.
 pub fn normalize(
     input: impl IntoIterator<Item = char>,
     form: Form,
@@ -84,55 +138,17 @@ pub(crate) fn normalize_in(
     repertoire: Repertoire,
     out: &mut [char],
 ) -> Result<usize, Overflow> {
-    let compatibility = matches!(form, Form::Nfkd | Form::Nfkc);
-    let mut written = Written {
-        out,
-        len: 0,
-        run: 0,
-        repertoire,
-    };
+    let mut written = Written::new(out, form, repertoire);
     for ch in input {
-        written.decompose(ch, compatibility)?;
+        written.decompose(ch)?;
     }
-    if matches!(form, Form::Nfc | Form::Nfkc) {
-        written.compose();
-    }
-    Ok(written.len)
+    written.finish()
 }
 
-/// `ch`'s full canonical decomposition, where it has one by mapping: a
-/// Hangul syllable decomposes by arithmetic and is not listed.
-pub(crate) fn canonical_decomposition(ch: char) -> Option<&'static [char]> {
-    mapped(ch, false)
-}
-
-/// `ch`'s full decomposition by mapping, a compatibility one where
-/// `compatibility`, if it has one.
-fn mapped(ch: char, compatibility: bool) -> Option<&'static [char]> {
-    if ch.is_ascii() {
-        return None;
-    }
+/// `ch`'s canonical combining class.
+fn class_of(ch: char) -> u8 {
     let code = u32::from(ch);
-    let index = DECOMPOSITIONS
-        .binary_search_by_key(&code, |&(listed, ..)| listed)
-        .ok()?;
-    let &(_, canonical_at, canonical_len, compatibility_at, compatibility_len) =
-        DECOMPOSITIONS.get(index)?;
-    let (at, len) = if compatibility {
-        (compatibility_at, compatibility_len)
-    } else {
-        (canonical_at, canonical_len)
-    };
-    let at = usize::from(at);
-    DECOMPOSITION_POOL
-        .get(at..at + usize::from(len))
-        .filter(|parts| !parts.is_empty())
-}
-
-/// `ch`'s canonical combining class in `repertoire`.
-fn class_of(ch: char, repertoire: Repertoire) -> u8 {
-    let code = u32::from(ch);
-    if code < LEAST_COMBINING || repertoire.ignores(ch) {
+    if code < LEAST_COMBINING {
         return 0;
     }
     let after = COMBINING_CLASSES.partition_point(|&(first, _, _)| first <= code);
@@ -143,13 +159,10 @@ fn class_of(ch: char, repertoire: Repertoire) -> u8 {
         .map_or(0, |&(_, _, class)| class)
 }
 
-/// The primary composite `first` and `second` are canonically equivalent to
-/// in `repertoire`, where there is one.
-fn composite(first: char, second: char, repertoire: Repertoire) -> Option<char> {
+/// The primary composite `first` and `second` are canonically equivalent to,
+/// where there is one.
+fn composite(first: char, second: char) -> Option<char> {
     let (a, b) = (u32::from(first), u32::from(second));
-    if b < LEAST_COMPOSING.min(V_BASE) {
-        return None;
-    }
     let lead = a.checked_sub(L_BASE).filter(|&lead| lead < L_COUNT);
     let vowel = b.checked_sub(V_BASE).filter(|&vowel| vowel < V_COUNT);
     if let (Some(lead), Some(vowel)) = (lead, vowel) {
@@ -164,14 +177,13 @@ fn composite(first: char, second: char, repertoire: Repertoire) -> Option<char> 
     if let (Some(_), Some(trail)) = (syllable, trail) {
         return char::from_u32(a + trail);
     }
-    if repertoire.ignores(first) || repertoire.ignores(second) {
+    if !in_ranges(COMPOSING_SECONDS, b) {
         return None;
     }
     let index = COMPOSITIONS
         .binary_search_by_key(&(a, b), |&(x, y, _)| (x, y))
         .ok()?;
-    let composite = char::from_u32(COMPOSITIONS.get(index)?.2)?;
-    (!repertoire.ignores(composite)).then_some(composite)
+    char::from_u32(COMPOSITIONS.get(index)?.2)
 }
 
 /// The jamo Hangul syllable `index` (counted from the first) is written
@@ -190,105 +202,270 @@ fn jamo(index: u32) -> impl Iterator<Item = char> {
 }
 
 /// A normalization's output as it is written: the first `len` characters of
-/// `out`, the run of non-starters ending them beginning at `run`.
+/// `out` and, past its end, of `spill`, the run of non-starters ending them
+/// beginning at `run`.
 struct Written<'a> {
     out: &'a mut [char],
+    spill: [char; SPILL],
     len: usize,
     run: usize,
+    /// The highest class in the run, counting the marks its starter absorbed.
+    highest: u8,
+    /// The class of the run's last mark, 0 while it holds none.
+    last: u8,
+    /// Whether the run follows a starter that may still compose.
+    joins: bool,
+    composes: bool,
+    compatibility: bool,
     repertoire: Repertoire,
 }
 
+impl Drop for Written<'_> {
+    fn drop(&mut self) {
+        self.wipe_spill();
+    }
+}
+
+impl<'a> Written<'a> {
+    /// A normalization to `form` over `repertoire` about to be written to
+    /// `out`.
+    fn new(out: &'a mut [char], form: Form, repertoire: Repertoire) -> Self {
+        Self {
+            out,
+            spill: ['\0'; SPILL],
+            len: 0,
+            run: 0,
+            highest: 0,
+            last: 0,
+            joins: false,
+            composes: matches!(form, Form::Nfc | Form::Nfkc),
+            compatibility: matches!(form, Form::Nfkd | Form::Nfkc),
+            repertoire,
+        }
+    }
+
+    /// Wipe what was written past `out`: what is normalized may be a
+    /// password, and the caller can wipe only what it lent.
+    fn wipe_spill(&mut self) {
+        self.spill.zeroize();
+    }
+}
+
 impl Written<'_> {
-    /// Append `ch`'s full decomposition, a compatibility one where
-    /// `compatibility`.
-    fn decompose(&mut self, ch: char, compatibility: bool) -> Result<(), Overflow> {
-        if ch.is_ascii() || self.repertoire.ignores(ch) {
-            return self.push(ch);
+    /// Append `ch`'s full decomposition — a compatibility one where the form
+    /// asks — in canonical order (UAX #15 D108), each part composed as it
+    /// lands where the form composes (D117).
+    fn decompose(&mut self, ch: char) -> Result<(), Overflow> {
+        if ch.is_ascii() {
+            return self.extend(ch, 0);
+        }
+        if self.repertoire.ignores(ch) {
+            // What the repertoire does not know composes with nothing.
+            return self.start(ch, false);
         }
         let code = u32::from(ch);
         if let Some(index) = code
             .checked_sub(SYLLABLES.0)
             .filter(|&index| index < S_COUNT)
         {
-            return jamo(index).try_for_each(|part| self.push(part));
+            return jamo(index).try_for_each(|part| self.extend(part, 0));
         }
-        if self.repertoire == Repertoire::Stringprep {
-            if let Ok(index) = DECOMPOSED_IN_3_2.binary_search_by_key(&code, |&(listed, _)| listed)
-            {
-                let original = DECOMPOSED_IN_3_2
-                    .get(index)
-                    .and_then(|&(_, original)| char::from_u32(original))
-                    .unwrap_or(ch);
-                return self.push(original);
-            }
+        if let Some(original) = self.repertoire.original(ch) {
+            return self.push(original, class_of(original));
         }
-        match mapped(ch, compatibility) {
-            Some(parts) => parts.iter().try_for_each(|&part| self.push(part)),
-            None => self.push(ch),
+        match CANONICAL.of(ch) {
+            Some(parts) => parts.iter().try_for_each(|&part| self.push_part(part)),
+            None => self.push_part(ch),
         }
     }
 
-    /// Append `ch` in canonical order (UAX #15 D108): after every
-    /// non-starter of its run whose class is no higher than its own.
-    fn push(&mut self, ch: char) -> Result<(), Overflow> {
-        *self.out.get_mut(self.len).ok_or(Overflow)? = ch;
-        self.len += 1;
-        let class = class_of(ch, self.repertoire);
-        if class == 0 {
-            self.run = self.len;
-            return Ok(());
+    /// Append `ch`, which has no canonical decomposition, decomposed by
+    /// compatibility where the form asks.
+    fn push_part(&mut self, ch: char) -> Result<(), Overflow> {
+        let class = class_of(ch);
+        // The generator refuses a compatibility mapping on a combining mark.
+        let parts = if self.compatibility && class == 0 {
+            COMPATIBILITY.of(ch)
+        } else {
+            None
+        };
+        match parts {
+            Some(parts) => parts
+                .iter()
+                .try_for_each(|&part| self.push(part, class_of(part))),
+            None => self.push(ch, class),
         }
-        let repertoire = self.repertoire;
-        if let Some((_, before)) = self
-            .out
-            .get_mut(self.run..self.len)
-            .and_then(<[char]>::split_last_mut)
-        {
-            let at = before.partition_point(|&held| class_of(held, repertoire) <= class);
-            if let Some(moved) = self.out.get_mut(self.run + at..self.len) {
-                moved.rotate_right(1);
+    }
+
+    /// Append `ch`, of combining class `class`, in canonical order.
+    fn push(&mut self, ch: char, class: u8) -> Result<(), Overflow> {
+        if class == 0 || class >= self.highest {
+            self.extend(ch, class)
+        } else if self.joins {
+            self.recompose(ch, class)
+        } else {
+            self.place(ch, class)
+        }
+    }
+
+    /// Append `ch` of class `class`, which no mark of the run outranks,
+    /// joining it to the run's starter where the two have a primary composite
+    /// and nothing blocks them: a starter must follow that one directly, and a
+    /// mark must have no mark of its class between them.
+    fn extend(&mut self, ch: char, class: u8) -> Result<(), Overflow> {
+        let unblocked = if class == 0 {
+            self.len == self.run
+        } else {
+            self.last < class
+        };
+        if self.joins && unblocked {
+            let starter = self.run.saturating_sub(1);
+            if let Some(joined) = self.get(starter).and_then(|held| composite(held, ch)) {
+                self.highest = class;
+                return self.set(starter, joined);
+            }
+        }
+        if class == 0 {
+            self.start(ch, self.composes)
+        } else {
+            self.place(ch, class)
+        }
+    }
+
+    /// Append the starter `ch`, which begins a run that may compose with it
+    /// where `joins`.
+    fn start(&mut self, ch: char, joins: bool) -> Result<(), Overflow> {
+        self.append(ch)?;
+        self.run = self.len;
+        self.highest = 0;
+        self.last = 0;
+        self.joins = joins;
+        Ok(())
+    }
+
+    /// Append the mark `ch` of class `class` after every mark of the run whose
+    /// class is no higher, composing nothing.
+    fn place(&mut self, ch: char, class: u8) -> Result<(), Overflow> {
+        if self.last <= class {
+            self.last = class;
+            self.highest = self.highest.max(class);
+            return self.append(ch);
+        }
+        let at = self.first_above(class);
+        self.shift(at, 1)?;
+        self.set(at, ch)
+    }
+
+    /// Where the first mark of the run whose class is above `class` stands.
+    fn first_above(&self, class: u8) -> usize {
+        let (mut low, mut high) = (self.run, self.len);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.get(mid).map_or(0, class_of) <= class {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low
+    }
+
+    /// Put the mark `ch` of class `class`, which a mark the run's starter
+    /// absorbed outranks, in canonical order: the starter's decomposition, the
+    /// run's marks and `ch` are ordered anew, then composed as they land.
+    fn recompose(&mut self, ch: char, class: u8) -> Result<(), Overflow> {
+        let starter = self.run.saturating_sub(1);
+        let held = self.get(starter).ok_or(Overflow)?;
+        let alone = [held];
+        let parts = CANONICAL.of(held).unwrap_or(&alone);
+        let grow = parts.len().saturating_sub(1);
+        let marks = self.run + grow..self.len + grow;
+        self.shift(self.run, grow)?;
+        self.restart(starter);
+        for &part in parts {
+            self.order(part, class_of(part))?;
+        }
+        for at in marks {
+            if let Some(mark) = self.get(at) {
+                self.order(mark, class_of(mark))?;
+            }
+        }
+        self.order(ch, class)?;
+        let ordered = starter..self.len;
+        self.restart(starter);
+        for at in ordered {
+            if let Some(part) = self.get(at) {
+                self.extend(part, class_of(part))?;
             }
         }
         Ok(())
     }
 
-    /// Compose what was written in place (UAX #15 D117): each character
-    /// joined to the last starter before it where nothing between blocks it
-    /// and the two have a primary composite.
-    fn compose(&mut self) {
-        let repertoire = self.repertoire;
-        let mut starter: Option<usize> = None;
-        let mut last_class = 0;
-        let mut kept = 0;
-        for read in 0..self.len {
-            let Some(&ch) = self.out.get(read) else {
-                break;
-            };
-            let class = class_of(ch, repertoire);
-            if let Some(at) = starter {
-                // What stands between them is a run of non-starters in
-                // canonical order, so the last of them is its highest.
-                let blocked = kept > at + 1 && last_class >= class;
-                let joined = self
-                    .out
-                    .get(at)
-                    .filter(|_| !blocked)
-                    .and_then(|&held| composite(held, ch, repertoire));
-                if let (Some(joined), Some(slot)) = (joined, self.out.get_mut(at)) {
-                    *slot = joined;
-                    continue;
-                }
-            }
-            if class == 0 {
-                starter = Some(kept);
-            }
-            last_class = class;
-            if let Some(slot) = self.out.get_mut(kept) {
-                *slot = ch;
-            }
-            kept += 1;
+    /// Write again from `at`, where a starter stands.
+    fn restart(&mut self, at: usize) {
+        self.len = at;
+        self.run = at;
+        self.highest = 0;
+        self.last = 0;
+        self.joins = false;
+    }
+
+    /// Append `ch` of class `class` in canonical order, composing nothing.
+    fn order(&mut self, ch: char, class: u8) -> Result<(), Overflow> {
+        if class == 0 {
+            self.start(ch, false)
+        } else {
+            self.place(ch, class)
         }
-        self.len = kept;
+    }
+
+    /// Move what stands from `from` on `by` places along.
+    fn shift(&mut self, from: usize, by: usize) -> Result<(), Overflow> {
+        let end = self.len;
+        for _ in 0..by {
+            self.append('\0')?;
+        }
+        for at in (from..end).rev() {
+            if let Some(moved) = self.get(at) {
+                self.set(at + by, moved)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The `at`th character written: in `out` while it lasts, then in the
+    /// spill.
+    fn get(&self, at: usize) -> Option<char> {
+        let held = match at.checked_sub(self.out.len()) {
+            None => self.out.get(at),
+            Some(past) => self.spill.get(past),
+        };
+        held.copied()
+    }
+
+    /// Write `ch` as the `at`th character.
+    fn set(&mut self, at: usize, ch: char) -> Result<(), Overflow> {
+        let slot = match at.checked_sub(self.out.len()) {
+            None => self.out.get_mut(at),
+            Some(past) => self.spill.get_mut(past),
+        };
+        *slot.ok_or(Overflow)? = ch;
+        Ok(())
+    }
+
+    fn append(&mut self, ch: char) -> Result<(), Overflow> {
+        self.set(self.len, ch)?;
+        self.len += 1;
+        Ok(())
+    }
+
+    /// How many characters were written, where `out` holds them all.
+    fn finish(self) -> Result<usize, Overflow> {
+        if self.len > self.out.len() {
+            Err(Overflow)
+        } else {
+            Ok(self.len)
+        }
     }
 }
 

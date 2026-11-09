@@ -43,6 +43,33 @@ fn wrapped<R, S>(
     }
 }
 
+impl<T> DrawWindow<T> {
+    /// The PDF's question this window asks, where it asks one.
+    #[must_use]
+    pub const fn question(&self) -> Option<&OpenPdf<T>> {
+        match self {
+            Self::OpenPdf(question) => Some(question),
+            Self::Settings(_) => None,
+        }
+    }
+
+    /// Page `page`'s size reached the window, or could not be had: what that
+    /// asks, where the window is a PDF's question.
+    pub fn sized(
+        &mut self,
+        page: u32,
+        size: Option<(f64, f64)>,
+        damage: &mut Region,
+    ) -> Outcome<AppRequest<DrawWindowAsk<T>>> {
+        match self {
+            Self::OpenPdf(question) => {
+                wrapped(question.sized(page, size, damage), DrawWindowAsk::OpenPdf)
+            }
+            Self::Settings(_) => Outcome::none(),
+        }
+    }
+}
+
 impl<T> AppView for DrawWindow<T> {
     type Faces = Faces;
     type Own = DrawWindowAsk<T>;

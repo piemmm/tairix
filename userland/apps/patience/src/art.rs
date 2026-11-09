@@ -7,8 +7,8 @@
 //! as at the reference density and re-colours with the table and the theme.
 //!
 //! A tile is drawn the first time it is needed and kept until the card's
-//! size or colours change, or until the machine asks for memory back
-//! ([`CardArt::trim`]): a game shows most of the deck soon after the deal,
+//! size or colours change, or until memory pressure no longer allows it
+//! ([`CardArt::fit`]): a game shows most of the deck soon after the deal,
 //! and drawing a face is far dearer than laying one down.
 
 use alloc::vec;
@@ -199,6 +199,13 @@ fn deepen(colour: Color, share: u8) -> Color {
     Color::rgb(keep(colour.r), keep(colour.g), keep(colour.b))
 }
 
+/// The bytes a surface `width`×`height` holds.
+#[must_use]
+pub fn surface_bytes(width: u32, height: u32) -> usize {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    usize::try_from(pixels.saturating_mul(4)).unwrap_or(usize::MAX)
+}
+
 /// `colour` lightened (positive) or darkened (negative) by `by` levels.
 #[must_use]
 pub fn shade(colour: Color, by: i16) -> Color {
@@ -223,6 +230,24 @@ pub struct Shadow {
     pub offset: (i32, i32),
 }
 
+/// What memory pressure lets the art keep between paints.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Keeps {
+    /// The window-sized baize; without it the felt is shaded into each
+    /// paint, over only what that paint covers.
+    pub baize: bool,
+    /// The card tiles and their shadows.
+    pub tiles: bool,
+}
+
+impl Keeps {
+    /// Everything: what the art keeps until pressure is known to say less.
+    pub const ALL: Self = Self {
+        baize: true,
+        tiles: true,
+    };
+}
+
 /// The tiles one card size is drawn from.
 #[derive(Debug)]
 pub struct CardArt {
@@ -236,6 +261,7 @@ pub struct CardArt {
     rest: Option<Shadow>,
     lift: Option<Shadow>,
     baize: Option<Surface>,
+    keeps: Keeps,
 }
 
 impl CardArt {
@@ -253,7 +279,15 @@ impl CardArt {
             rest: None,
             lift: None,
             baize: None,
+            keeps: Keeps::ALL,
         }
+    }
+
+    /// The bytes every tile and shadow of cards `width`×`height` hold once
+    /// drawn: 52 faces, the back and two shadows, each a card at most.
+    #[must_use]
+    pub fn tile_bytes(width: u32, height: u32) -> usize {
+        surface_bytes(width, height).saturating_mul(55)
     }
 
     /// Adopt a card size or palette, forgetting every tile and the baize drawn
@@ -274,20 +308,30 @@ impl CardArt {
             self.palette,
         ) == (width, height, radius, hairline, palette);
         if !same {
+            let keeps = self.keeps;
             *self = Self::new(width, height, radius, hairline, palette);
+            self.keeps = keeps;
         }
     }
 
-    /// Give every tile and the baize back, as memory pressure asks.
-    pub fn trim(&mut self) {
-        let (width, height, radius, hairline, palette) = (
-            self.width,
-            self.height,
-            self.radius,
-            self.hairline,
-            self.palette,
-        );
-        *self = Self::new(width, height, radius, hairline, palette);
+    /// Keep only what `keeps` allows, giving the rest back now.
+    pub fn fit(&mut self, keeps: Keeps) {
+        self.keeps = keeps;
+        if !keeps.baize {
+            self.baize = None;
+        }
+        if !keeps.tiles {
+            self.faces.iter_mut().for_each(|face| *face = None);
+            self.back = None;
+            self.rest = None;
+            self.lift = None;
+        }
+    }
+
+    /// Whether a baize is held.
+    #[cfg(test)]
+    pub(crate) const fn holds_baize(&self) -> bool {
+        self.baize.is_some()
     }
 
     /// The colours the tiles are drawn in.
@@ -318,13 +362,17 @@ impl CardArt {
     }
 
     /// The baize `width`×`height`, shaded by `shade` when it is not yet: a
-    /// repaint copies it rather than shading every pixel again.
+    /// repaint copies it rather than shading every pixel again. [`None`]
+    /// while memory pressure forbids keeping one, or none can be made.
     pub fn baize(
         &mut self,
         width: u32,
         height: u32,
         shade: impl FnOnce(&mut Surface),
     ) -> Option<&Surface> {
+        if !self.keeps.baize {
+            return None;
+        }
         let fits = self
             .baize
             .as_ref()

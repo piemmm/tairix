@@ -373,6 +373,10 @@ pub struct IrqTable {
     /// Per-line "it has a binding" flags, written under the `Inner` write
     /// lock and read lock-free by [`IrqTable::fire`].
     bound: Vec<AtomicBool>,
+    /// One bit per line a fire has owed its waiters a wake since the last
+    /// [`IrqTable::take_owed`], so the wake reaches that line's waiters
+    /// alone rather than every task waiting on any line.
+    owed: Vec<AtomicU64>,
 }
 
 impl core::fmt::Debug for IrqTable {
@@ -476,6 +480,26 @@ impl IrqTable {
             fires: (0..slots).map(|_| AtomicU64::new(0)).collect(),
             last_fire_ns: (0..slots).map(|_| AtomicU64::new(0)).collect(),
             bound: (0..slots).map(|_| AtomicBool::new(false)).collect(),
+            owed: (0..slots.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// Report, once each, every line a fire has owed a wake since the last
+    /// call, clearing what it reports. Wait-free, so the deferred wake that
+    /// consumes it never contends with [`Self::fire`].
+    pub fn take_owed(&self, mut owed: impl FnMut(u32)) {
+        for (index, word) in self.owed.iter().enumerate() {
+            if word.load(Ordering::Relaxed) == 0 {
+                continue;
+            }
+            let mut bits = word.swap(0, Ordering::AcqRel);
+            while bits != 0 {
+                let bit = bits.trailing_zeros();
+                bits &= bits - 1;
+                if let Ok(line) = u32::try_from(index * 64 + bit as usize) {
+                    owed(line);
+                }
+            }
         }
     }
 
@@ -830,6 +854,9 @@ impl IrqTable {
         if self.note_fire_and_quarantined(slot, now) {
             return Ok(FireOutcome::Quarantined);
         }
+        if let Some(word) = self.owed.get(slot / 64) {
+            word.fetch_or(1 << (slot % 64), Ordering::Release);
+        }
         Ok(FireOutcome::Marked)
     }
 
@@ -1053,6 +1080,25 @@ mod tests {
         assert!(t.is_empty());
         assert_eq!(t.owner_of_line(9), None);
         assert!(t.bind(9, ProcessId(1)).is_ok(), "and binds once it can");
+    }
+
+    /// A fire owes a wake to its own line's waiters alone, and once: a stray
+    /// owes none, and a second take finds nothing.
+    #[test]
+    fn a_fire_owes_its_own_line_a_wake_once() {
+        let t = IrqTable::new(130);
+        let ctl = MockController::ok();
+        t.bind(7, ProcessId(1)).expect("binds");
+        t.bind(129, ProcessId(1)).expect("binds");
+        let _ = t.fire(7, &ctl);
+        let _ = t.fire(129, &ctl);
+        let _ = t.fire(64, &ctl);
+        let mut owed = Vec::new();
+        t.take_owed(|line| owed.push(line));
+        assert_eq!(owed, [7, 129]);
+        let mut again = Vec::new();
+        t.take_owed(|line| again.push(line));
+        assert!(again.is_empty(), "taken once");
     }
 
     #[test]

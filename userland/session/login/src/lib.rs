@@ -124,6 +124,7 @@ pub use session::{
 };
 pub use supervise::{supervise, DbLoad};
 pub use table::{
-    end_live_sessions, forget_ended_sessions, LiveSession, LiveSessions, SessionWaker,
+    end_live_sessions, end_session, forget_ended_sessions, LiveSession, LiveSessions, SessionEnd,
+    SessionWaker,
 };
 pub use view::{ConsoleMode, CursesView, InputWait, InputWake, LoginStatus, StatusSource};

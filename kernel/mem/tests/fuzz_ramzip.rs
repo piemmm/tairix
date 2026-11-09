@@ -129,6 +129,30 @@ fn maybe_corrupt_entry(rng: &mut Prng, ramzip: &mut Ramzip, page: Page) -> bool 
     }
 }
 
+/// A page whose entry failed its check reports lost on every later restore,
+/// until its range is released.
+fn stays_lost_until_purged(
+    ramzip: &mut Ramzip,
+    space: &mut AddressSpace<HostPageTable>,
+    physmap: &SimPhysMap,
+    frames: &'static FrameAllocator,
+    page: Page,
+) {
+    let mut ctx = VmContext {
+        space_id: SPACE,
+        space,
+        physmap,
+        frames,
+        sink: &NULL_SINK,
+    };
+    assert_eq!(
+        ramzip.fault_in(&mut ctx, page),
+        Err(FaultError::Lost),
+        "a lost page stays lost"
+    );
+    assert_eq!(ramzip.purge_range(SPACE, page.number(), 1), 1);
+}
+
 #[test]
 fn fuzz_ramzip_restore_is_fail_closed() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -218,6 +242,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
                     space.translate(page).is_none(),
                     "no plaintext may be mapped from a corrupt entry"
                 );
+                stays_lost_until_purged(&mut ramzip, &mut space, &physmap, frames, page);
                 tamper_rejected += 1;
             } else {
                 verdict.expect("untampered restore");

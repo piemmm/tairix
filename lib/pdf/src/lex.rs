@@ -2,9 +2,11 @@
 //! are spelled in.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use tairix_util::fallible::try_push;
 
+use crate::filter;
 use crate::PdfError;
 
 /// One token.
@@ -51,12 +53,28 @@ pub(crate) const fn is_regular(byte: u8) -> bool {
 pub(crate) struct Lexer<'a> {
     data: &'a [u8],
     at: usize,
+    /// Where every byte it lexes is charged, lexed again or not.
+    allowance: Option<&'a Cell<u64>>,
 }
 
 impl<'a> Lexer<'a> {
     /// A lexer over `data` from offset `at`.
     pub(crate) const fn new(data: &'a [u8], at: usize) -> Self {
-        Self { data, at }
+        Self {
+            data,
+            at,
+            allowance: None,
+        }
+    }
+
+    /// A lexer over `data` from offset `at`, every byte it lexes charged to
+    /// `allowance`.
+    pub(crate) const fn charged(data: &'a [u8], at: usize, allowance: &'a Cell<u64>) -> Self {
+        Self {
+            data,
+            at,
+            allowance: Some(allowance),
+        }
     }
 
     /// Where the next byte is read from.
@@ -96,9 +114,20 @@ impl<'a> Lexer<'a> {
     ///
     /// # Errors
     ///
-    /// [`PdfError::Malformed`] for a token out of the grammar, and
+    /// [`PdfError::Malformed`] for a token out of the grammar,
+    /// [`PdfError::TooComplex`] past its allowance, and
     /// [`PdfError::OutOfMemory`].
     pub(crate) fn next(&mut self) -> Result<Option<Token<'a>>, PdfError> {
+        let start = self.at;
+        let token = self.token();
+        if let Some(allowance) = self.allowance {
+            filter::charge(allowance, self.at.saturating_sub(start))?;
+        }
+        token
+    }
+
+    /// The token at the cursor, as [`next`](Self::next) answers it.
+    fn token(&mut self) -> Result<Option<Token<'a>>, PdfError> {
         self.skip_white();
         let Some(&byte) = self.data.get(self.at) else {
             return Ok(None);

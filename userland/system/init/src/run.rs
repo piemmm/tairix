@@ -82,12 +82,13 @@ mod program {
         ServiceNotice, ServiceState, Signal, WaitSetOp, WaitSourceKind,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_enrolment::{Enrolment, EnrolmentOverride};
+    use tairix_enrolment::{EnrolError, Enrolment, EnrolmentOverride};
     use tairix_init::{
-        service_attach, ActivateError, ActivationOutcome, AuthorityScope, ClientId, ControlError,
-        FailedService, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome, Pid, ReapedChild,
+        events, service_attach, ActivateError, ActivationOutcome, AuthorityScope, ClientId,
+        ControlError, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome, Pid, ReapedChild,
         ServiceSender, ServiceSpec, Spawner, Stopper,
     };
+    use tairix_log::{Event, FieldValue, Sink};
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
     use tairix_soundtheme::cue::RtCuePost;
@@ -211,16 +212,36 @@ mod program {
             .providing(entry.provides.iter().collect::<Vec<_>>())
     }
 
-    /// State on the diagnostic stream each service an admission pass could
-    /// not bring up, and carry on: one refused service (a stale or mis-signed
-    /// bundle) must not take the rest of the system down with it. The audit
-    /// log already carries each refusal; this makes it visible at the console.
-    fn state_refused(failed: &[FailedService], what: &str) {
-        for service in failed {
-            let _ = Stderr.write_fmt(format_args!(
-                "init: service {} not {what} ({:?}); continuing without it\n",
-                service.name, service.failure
-            ));
+    /// The engine's audit sink, which also states at the console each
+    /// service it could not bring up and each the administrator's record
+    /// stopped: one refused service (a stale or mis-signed bundle) must not
+    /// take the rest of the system down with it, and must not go unseen.
+    struct ConsoleSink;
+
+    impl Sink for ConsoleSink {
+        fn write_event(&self, event: &Event<'_>) {
+            LogSink.write_event(event);
+            let field = |key| {
+                event.fields.iter().find_map(|field| match field.value {
+                    FieldValue::Str(text) if field.key == key => Some(text),
+                    _ => None,
+                })
+            };
+            let service = field("service").unwrap_or("?");
+            let reason = field("reason").unwrap_or("?");
+            let (colon, errno) = field("errno").map_or(("", ""), |errno| (": ", errno));
+            let _ = match event.id {
+                events::SERVICE_START_FAILED | events::SERVICE_SKIPPED => {
+                    Stderr.write_fmt(format_args!(
+                        "init: service {service} not started ({reason}{colon}{errno}); \
+                         continuing without it\n"
+                    ))
+                }
+                events::SERVICE_ENROLMENT_REVOKED => Stderr.write_fmt(format_args!(
+                    "init: service {service} stopped: disabled by the administrator\n"
+                )),
+                _ => Ok(()),
+            };
         }
     }
 
@@ -242,8 +263,7 @@ mod program {
     /// bundle, resolves the account's ceiling, and grants
     /// `manifest ∩ ceiling` — so this seam passes only the path and the
     /// account uid, never a capability set. A refused load surfaces as the
-    /// kernel's `-errno`, which the engine records as
-    /// [`StartFailure::SpawnFailed`](tairix_init::StartFailure::SpawnFailed).
+    /// kernel's `-errno`, which the engine audits with the refusal.
     struct RtSpawner;
 
     impl Spawner for RtSpawner {
@@ -316,7 +336,15 @@ mod program {
         let Ok(text) = core::str::from_utf8(&bytes) else {
             return malformed();
         };
-        EnrolmentOverride::parse(text).or_else(|_| malformed())
+        match EnrolmentOverride::parse(text) {
+            Ok(overrides) => Ok(overrides),
+            // Not a document the administrator wrote wrong, so it is read
+            // again later rather than adopted as empty: an empty layer would
+            // let the next change replace their record with one built over
+            // nothing.
+            Err(refusal) if refusal.kind == EnrolError::OutOfMemory => Err(Errno::OutOfMemory),
+            Err(_) => malformed(),
+        }
     }
 
     /// Whether the writable root is mounted: before the unlock every path it
@@ -361,14 +389,7 @@ mod program {
         start_sounded: bool,
         /// Call tickets of clients the engine parked, awaiting their
         /// service's readiness.
-        ///
-        /// The reply is owed to a *ticket*, which only the transport holds,
-        /// while readiness is the engine's to report — so the two are joined
-        /// here. Every entry is one outstanding call on the activation
-        /// endpoint, so the kernel's own bound on those is what bounds this;
-        /// it cannot grow past it however the calls are spread across
-        /// clients.
-        parked: Vec<ParkedClient>,
+        parked: tairix_init::parked::ParkedClients,
         /// The boot floor's service names: the machine has started once all
         /// of them have settled.
         floor: Vec<String>,
@@ -376,14 +397,6 @@ mod program {
         /// stalls the loop that owes every other endpoint an answer.
         cues: PostedCues,
         cue_post: RtCuePost,
-    }
-
-    /// A client parked on its service's readiness, and the call ticket its
-    /// reply is owed to.
-    struct ParkedClient {
-        service: String,
-        client: ClientId,
-        ticket: u64,
     }
 
     impl Services for EngineServices<'_, '_> {
@@ -395,7 +408,7 @@ mod program {
             // The monotonic clock feeds the engine's restart-backoff and
             // grace deadlines.
             let now = Duration64::from_nanos(tairix_rt::clock_get());
-            state_refused(&self.engine.reap(now).failed, "started");
+            self.engine.reap(now);
             // An exit resolves every park on the service that died — as an
             // abandonment, or as a connection if a restart carried it back
             // to ready.
@@ -542,7 +555,7 @@ mod program {
 
         fn expire_deadlines(&mut self) {
             let now = Duration64::from_nanos(tairix_rt::clock_get());
-            state_refused(&self.engine.expire_due(now).failed, "restarted");
+            self.engine.expire_due(now);
             // A lapsed deadline can restart a service into readiness, which
             // releases whoever was parked waiting for it.
             self.release_parked_clients();
@@ -572,13 +585,7 @@ mod program {
             // and is read again on the next change to the mounts.
             if !self.engine.overrides_read() {
                 match read_overrides() {
-                    Ok(overrides) => {
-                        for name in self.engine.adopt_overrides(overrides, now) {
-                            let _ = Stderr.write_fmt(format_args!(
-                                "init: service {name} stopped: disabled by the administrator\n"
-                            ));
-                        }
-                    }
+                    Ok(overrides) => self.engine.adopt_overrides(overrides, now),
                     Err(err) => {
                         let _ = Stderr.write_fmt(format_args!(
                             "init: the administrator's service overrides could not be read ({err:?}); the image's enrolment stands\n"
@@ -590,10 +597,8 @@ mod program {
                 return;
             }
             self.mounted = true;
-            let report = self
-                .engine
+            self.engine
                 .satisfy_condition(ReadyCondition::FilesystemsMounted);
-            state_refused(&report.failed, "started");
             self.release_parked_clients();
             self.settled(now);
         }
@@ -609,11 +614,10 @@ mod program {
         /// up, so a user may log in and the machine's own sound policy, which
         /// lives on that volume, can be read. The sound is asked for once.
         fn settled(&mut self, now: Duration64) {
-            if let Some(report) = self
+            if self
                 .engine
                 .complete_boot(self.floor.iter().map(String::as_str))
             {
-                state_refused(&report.failed, "started");
                 self.release_parked_clients();
             }
             if !self.start_sounded
@@ -659,6 +663,7 @@ mod program {
             let held = CapabilitySet::from_le_bytes(origin.capabilities().as_bytes())?;
             match request.op {
                 ServiceActivationOp::Connect => {
+                    let room = self.parked.make_room()?;
                     match self
                         .engine
                         .connect(request.name, &held, client)
@@ -667,12 +672,8 @@ mod program {
                         ActivationOutcome::Connected => {
                             Ok(Some(self.state_for_reply(request.name)?))
                         }
-                        ActivationOutcome::Queued => {
-                            self.parked.push(ParkedClient {
-                                service: request.name.to_string(),
-                                client,
-                                ticket,
-                            });
+                        ActivationOutcome::Queued(service) => {
+                            self.parked.park(room, service, client, ticket);
                             Ok(None)
                         }
                     }
@@ -708,29 +709,16 @@ mod program {
                 pid: Pid::new(origin.pid()),
                 account: origin.uid(),
             };
-            let signal = match notice {
-                ServiceNotice::Alive => {
-                    let report = self
-                        .engine
-                        .heartbeat_sender(sender, now)
-                        .map_err(NotifyError::errno)?;
-                    return Ok((report.state, report.watchdog));
-                }
-                ServiceNotice::Lifecycle(signal) => signal,
-            };
-            let report = self
-                .engine
-                .notify_sender(sender, signal)
-                .map_err(NotifyError::errno)?;
-            state_refused(&report.started.failed, "started");
             // The announcement is also what establishes the service's
             // renewal cadence, so it is answered with the same pair a
             // renewal is: one reply shape for the endpoint, and a
             // `notify`-ready service needs no second call to learn it.
-            Ok((
-                self.state_for_reply(&report.service)?,
-                self.engine.watchdog_of(&report.service),
-            ))
+            let answer = match notice {
+                ServiceNotice::Alive => self.engine.heartbeat_sender(sender, now),
+                ServiceNotice::Lifecycle(signal) => self.engine.notify_sender(sender, signal),
+            }
+            .map_err(NotifyError::errno)?;
+            Ok((answer.state, answer.watchdog))
         }
 
         /// The state to report for a service the engine has just accepted a
@@ -753,9 +741,10 @@ mod program {
         /// answer, because it is equally true of all of them. Answering only
         /// the first would leave the rest blocked for ever.
         fn release_parked_clients(&mut self) {
-            for released in self.engine.take_released_clients() {
+            let parked = &mut self.parked;
+            self.engine.drain_released_clients(|released, state| {
                 let answer = match released.outcome {
-                    ParkOutcome::Connected => self.state_for_reply(&released.service),
+                    ParkOutcome::Connected => Ok(state),
                     // The service died, failed, or the client withdrew: there
                     // is no connection to hand back, so the caller is refused
                     // rather than left blocked on one that is not coming. The
@@ -764,21 +753,10 @@ mod program {
                     // may well make the next attempt succeed.
                     ParkOutcome::Abandoned => Err(Errno::Busy),
                 };
-                // Swap-remove in place: the entry moved into `at` is the
-                // one examined next, so the scan stays one pass and answers
-                // every ticket without rebuilding the list.
-                let mut at = 0;
-                while at < self.parked.len() {
-                    if self.parked[at].client == released.client
-                        && self.parked[at].service == released.service
-                    {
-                        let parked = self.parked.swap_remove(at);
-                        Self::reply_state(ACTIVATION_ENDPOINT, parked.ticket, answer);
-                    } else {
-                        at += 1;
-                    }
-                }
-            }
+                parked.take(released.client, released.service, |ticket| {
+                    Self::reply_state(ACTIVATION_ENDPOINT, ticket, answer);
+                });
+            });
         }
 
         /// Encode and send one notice reply: the sender's resulting state
@@ -986,10 +964,10 @@ mod program {
             let mut token = 0u64;
             let woke = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
             if woke < 0 {
-                return if Errno::from_syscall(woke) == Errno::TimedOut {
-                    Woke::Deadline
-                } else {
-                    Woke::Failed
+                return match Errno::from_syscall(woke) {
+                    Errno::TimedOut => Woke::Deadline,
+                    refused if short_of_memory(refused) => Woke::Short,
+                    _ => Woke::Failed,
                 };
             }
             match token {
@@ -1006,10 +984,12 @@ mod program {
                     // reported-ready child that is then not reapable is a
                     // kernel-state inconsistency, not a quiet retry.
                     let reaped = tairix_rt::try_wait_exit(tairix_abi::WAIT_PID_ANY, status);
-                    if reaped < 0 {
-                        Woke::Failed
-                    } else {
+                    if reaped >= 0 {
                         Woke::Child(reaped.unsigned_abs())
+                    } else if short_of_memory(Errno::from_syscall(reaped)) {
+                        Woke::Short
+                    } else {
+                        Woke::Failed
                     }
                 }
                 _ => Woke::Failed,
@@ -1026,6 +1006,23 @@ mod program {
                 "init: launch of {shown} on console {console} refused (err {err}); continuing without it\n"
             ));
         }
+        fn rest(&mut self, ns: u64, first: bool) {
+            if first {
+                let _ = Stderr.write_fmt(format_args!(
+                    "init: the machine is too short of memory to wait on its events; \
+                     resting and waiting again\n"
+                ));
+            }
+            tairix_rt::park_ns(ns);
+        }
+    }
+
+    /// Whether a wait refused with `refused` was refused for want of memory.
+    ///
+    /// Every buffer PID 1 hands its waits is its own and valid, so a bad
+    /// address can only be a page of it the machine had no frame to back.
+    fn short_of_memory(refused: Errno) -> bool {
+        matches!(refused, Errno::OutOfMemory | Errno::BadAddress)
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -1046,10 +1043,19 @@ mod program {
     /// without the console it was spawned to drive, so it parks fail-closed
     /// off the run queue (`tairix_rt::park_forever`) rather than supervising
     /// sessions on a console it never reached — a terminal park consuming no
-    /// CPU, not a retry loop. Only when even that park is refused does it
-    /// fall to the last-resort halt spin: with no console and no wait-set
-    /// there is nothing left to park on or report to.
+    /// CPU, not a retry loop. A park the kernel refuses ends PID 1 with the
+    /// wait-failed status, since with no console that is the only report left.
     fn main() -> i32 {
+        // Pinned, no page of PID 1's is compressed out to need a frame back,
+        // and its heap keeps what it has held: memory running short then
+        // refuses one request rather than ending the system.
+        let pinned = tairix_rt::mem_pin();
+        if pinned < 0 {
+            let _ = Stderr.write_fmt(format_args!(
+                "init: memory not pinned ({}); running unpinned\n",
+                Errno::from_syscall(pinned)
+            ));
+        }
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
         };
@@ -1074,13 +1080,10 @@ mod program {
         // copy (the charter forbids that duplication).
         if Stdout.write_all(banner.as_bytes()).is_err() {
             // Terminal park off the run queue — a spinning halt would peg a
-            // core for the life of the system. The spin below runs only when
-            // even the park is refused (a doubly-failed boot: no console, no
-            // wait-set), where nothing better remains.
+            // core for the life of the system. A park the kernel refuses ends
+            // PID 1 with that status, the one report left without a console.
             let _ = tairix_rt::park_forever();
-            loop {
-                core::hint::spin_loop();
-            }
+            return EXIT_WAIT_FAILED;
         }
 
         // Bring the boot-floor services up through the service-manager engine
@@ -1095,7 +1098,7 @@ mod program {
         let spawner = RtSpawner;
         let stopper = RtStopper;
         let reaper = LoopReaper::new();
-        let sink = LogSink;
+        let sink = ConsoleSink;
         let mut engine = Init::new(InitConfig {
             spawner: &spawner,
             stopper: &stopper,
@@ -1129,19 +1132,15 @@ mod program {
         if !register_startup_services(&mut engine, &config) {
             return EXIT_CONFIG_INVALID;
         }
-        let report = match engine.start_all() {
-            Ok(report) => report,
-            Err(err) => {
-                // A structurally invalid floor graph (missing dependency or a
-                // cycle). The floor is acyclic, so this is a build defect; the
-                // engine has already audited `GRAPH_REJECTED`.
-                let _ = Stderr.write_fmt(format_args!(
-                    "init: boot-floor service graph rejected ({err:?}); refusing to boot\n"
-                ));
-                return EXIT_CONFIG_INVALID;
-            }
-        };
-        state_refused(&report.failed, "started");
+        if let Err(err) = engine.start_all() {
+            // A structurally invalid floor graph (missing dependency or a
+            // cycle). The floor is acyclic, so this is a build defect; the
+            // engine has already audited `GRAPH_REJECTED`.
+            let _ = Stderr.write_fmt(format_args!(
+                "init: boot-floor service graph rejected ({err:?}); refusing to boot\n"
+            ));
+            return EXIT_CONFIG_INVALID;
+        }
 
         // Supervise one login session per console and route every other
         // reaped child — a service the engine started, or an untracked one —
@@ -1152,7 +1151,7 @@ mod program {
             reaper: &reaper,
             mounted: false,
             start_sounded: false,
-            parked: Vec::new(),
+            parked: tairix_init::parked::ParkedClients::default(),
             floor: config
                 .services()
                 .iter()
@@ -1222,6 +1221,7 @@ impl supervisor::Sessions for StubSessions {
         woke
     }
     fn report_launch_failure(&mut self, _path: &[u8], _console: u32, _err: i64) {}
+    fn rest(&mut self, _ns: u64, _first: bool) {}
 }
 
 /// A host-stub service seam that records which reactor callbacks the
@@ -1302,8 +1302,9 @@ fn main() {
     // Drive the reactor's dispatch over a scripted seam so an ordinary host
     // build covers every arm: a control request, an enrolment request, a
     // client activation, a service's own readiness notice, a cue's answer, a
-    // mount-table move, a lapsed deadline, a non-session child exit, then a
-    // failed park that ends the loop.
+    // mount-table move, a lapsed deadline, a non-session child exit, a park
+    // the machine was too short of memory for, then a failed park that ends
+    // the loop.
     let mut services = StubServices::default();
     let mut sessions = StubSessions {
         script: &[
@@ -1315,6 +1316,7 @@ fn main() {
             supervisor::Woke::Mounts,
             supervisor::Woke::Deadline,
             supervisor::Woke::Child(4242),
+            supervisor::Woke::Short,
             supervisor::Woke::Failed,
         ],
         next: 0,

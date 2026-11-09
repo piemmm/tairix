@@ -75,6 +75,7 @@ extern crate std;
 pub mod appspawn;
 pub mod aspace;
 pub mod audit;
+pub mod backing;
 pub mod blockwait;
 pub mod boot_audit_ring;
 pub mod boot_id;

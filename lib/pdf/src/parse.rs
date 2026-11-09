@@ -4,8 +4,10 @@
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
+use tairix_inline::RingBuf;
 use tairix_util::fallible::try_push;
 
+use crate::error::tolerated;
 use crate::lex::{is_white, Lexer, Token};
 use crate::limits::MAX_NESTING;
 use crate::object::{Dict, Name, ObjRef, Object, Stream};
@@ -16,25 +18,17 @@ use crate::PdfError;
 /// # Errors
 ///
 /// [`PdfError::Malformed`] for tokens that spell no object, and
-/// [`PdfError::TooComplex`] past [`MAX_NESTING`].
+/// [`PdfError::TooComplex`] past [`MAX_NESTING`] or the lexer's allowance.
 pub(crate) fn object(lexer: &mut Lexer<'_>, depth: usize) -> Result<Object, PdfError> {
-    let token = lexer.next()?.ok_or(PdfError::Malformed)?;
-    from_token(lexer, token, depth)
-}
-
-/// The object `token`, the first of its tokens, begins.
-pub(crate) fn from_token(
-    lexer: &mut Lexer<'_>,
-    token: Token<'_>,
-    depth: usize,
-) -> Result<Object, PdfError> {
-    value(lexer, token, depth, Syntax::File)
+    let mut tokens = Tokens::new(lexer);
+    let token = tokens.next()?.ok_or(PdfError::Malformed)?;
+    value(&mut tokens, token, depth, Syntax::File)
 }
 
 /// The operand `token`, the first of its tokens, begins in a content stream,
 /// which holds no references: an integer is never looked past.
 pub(crate) fn operand(lexer: &mut Lexer<'_>, token: Token<'_>) -> Result<Object, PdfError> {
-    value(lexer, token, 0, Syntax::Content)
+    value(&mut Tokens::new(lexer), token, 0, Syntax::Content)
 }
 
 /// Where an object is written: a content stream holds no references.
@@ -44,8 +38,86 @@ enum Syntax {
     Content,
 }
 
+/// The tokens at a lexer: those read ahead looking for a reference are kept
+/// for what follows rather than lexed again, and where nothing takes them
+/// the lexer is left where the first of them began.
+struct Tokens<'l, 'a> {
+    lexer: &'l mut Lexer<'a>,
+    /// Each with where it began, the next first.
+    ahead: RingBuf<(usize, Token<'a>), 2>,
+}
+
+impl<'l, 'a> Tokens<'l, 'a> {
+    fn new(lexer: &'l mut Lexer<'a>) -> Self {
+        Self {
+            lexer,
+            ahead: RingBuf::new(),
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<Token<'a>>, PdfError> {
+        match self.ahead.pop_front() {
+            Some((_, token)) => Ok(Some(token)),
+            None => self.lexer.next(),
+        }
+    }
+
+    /// The token `offset` past the next, read ahead and kept: none at the
+    /// end of the data, or where it cannot be lexed, which reading it says.
+    ///
+    /// # Errors
+    ///
+    /// A containment bound passed or the heap's refusal: what lies ahead is
+    /// then unknown, not absent.
+    fn peek(&mut self, offset: usize) -> Result<Option<&Token<'a>>, PdfError> {
+        while self.ahead.len() <= offset {
+            let at = self.lexer.at();
+            let kept = match tolerated(self.lexer.next())? {
+                Some(Some(token)) => self.ahead.try_push_back((at, token)).is_ok(),
+                _ => false,
+            };
+            if !kept {
+                self.lexer.seek(at);
+                return Ok(None);
+            }
+        }
+        Ok(self.ahead.get(offset).map(|(_, token)| token))
+    }
+
+    /// The reference `num` begins where the next tokens are a generation and
+    /// `R`, which it takes.
+    ///
+    /// # Errors
+    ///
+    /// As [`peek`](Self::peek).
+    fn reference(&mut self, num: i64) -> Result<Option<ObjRef>, PdfError> {
+        let Ok(num) = u32::try_from(num) else {
+            return Ok(None);
+        };
+        let Some(&Token::Integer(gen)) = self.peek(0)? else {
+            return Ok(None);
+        };
+        let Ok(gen) = u16::try_from(gen) else {
+            return Ok(None);
+        };
+        if !matches!(self.peek(1)?, Some(Token::Keyword(b"R"))) {
+            return Ok(None);
+        }
+        self.ahead.clear();
+        Ok(Some(ObjRef { num, gen }))
+    }
+}
+
+impl Drop for Tokens<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(&(at, _)) = self.ahead.front() {
+            self.lexer.seek(at);
+        }
+    }
+}
+
 fn value(
-    lexer: &mut Lexer<'_>,
+    tokens: &mut Tokens<'_, '_>,
     token: Token<'_>,
     depth: usize,
     syntax: Syntax,
@@ -54,28 +126,26 @@ fn value(
         return Err(PdfError::TooComplex);
     }
     Ok(match token {
-        Token::Integer(value) => match (syntax == Syntax::File)
-            .then(|| reference_after(lexer, value))
-            .flatten()
-        {
+        Token::Integer(value) if syntax == Syntax::File => match tokens.reference(value)? {
             Some(reference) => Object::Ref(reference),
             None => Object::Int(value),
         },
+        Token::Integer(value) => Object::Int(value),
         Token::Real(value) => Object::Real(value),
         Token::String(bytes) => Object::String(bytes),
         Token::Name(bytes) => Object::Name(Name(bytes)),
         Token::ArrayOpen => {
             let mut items = Vec::new();
             loop {
-                let token = lexer.next()?.ok_or(PdfError::Malformed)?;
+                let token = tokens.next()?.ok_or(PdfError::Malformed)?;
                 if token == Token::ArrayClose {
                     break;
                 }
-                try_push(&mut items, value(lexer, token, depth + 1, syntax)?)?;
+                try_push(&mut items, value(tokens, token, depth + 1, syntax)?)?;
             }
             Object::Array(items)
         }
-        Token::DictOpen => Object::Dict(entries(lexer, depth, syntax)?),
+        Token::DictOpen => Object::Dict(entries(tokens, depth, syntax)?),
         Token::Keyword(b"true") => Object::Bool(true),
         Token::Keyword(b"false") => Object::Bool(false),
         Token::Keyword(b"null") => Object::Null,
@@ -85,40 +155,22 @@ fn value(
 
 /// A dictionary's entries after its `<<`, through its `>>`.
 pub(crate) fn dict_body(lexer: &mut Lexer<'_>, depth: usize) -> Result<Dict, PdfError> {
-    entries(lexer, depth, Syntax::File)
+    entries(&mut Tokens::new(lexer), depth, Syntax::File)
 }
 
-fn entries(lexer: &mut Lexer<'_>, depth: usize, syntax: Syntax) -> Result<Dict, PdfError> {
+fn entries(tokens: &mut Tokens<'_, '_>, depth: usize, syntax: Syntax) -> Result<Dict, PdfError> {
     let mut entries = Vec::new();
     loop {
-        match lexer.next()?.ok_or(PdfError::Malformed)? {
+        match tokens.next()?.ok_or(PdfError::Malformed)? {
             Token::DictClose => return Dict::from_written(entries),
             Token::Name(key) => {
-                let token = lexer.next()?.ok_or(PdfError::Malformed)?;
-                let value = value(lexer, token, depth + 1, syntax)?;
+                let token = tokens.next()?.ok_or(PdfError::Malformed)?;
+                let value = value(tokens, token, depth + 1, syntax)?;
                 try_push(&mut entries, (Name(key), value))?;
             }
             _ => return Err(PdfError::Malformed),
         }
     }
-}
-
-/// The reference `num` begins where the next tokens are a generation and
-/// `R`; the lexer is left where it was otherwise.
-fn reference_after(lexer: &mut Lexer<'_>, num: i64) -> Option<ObjRef> {
-    let start = *lexer;
-    let reference = (|| {
-        let num = u32::try_from(num).ok()?;
-        let Ok(Some(Token::Integer(gen))) = lexer.next() else {
-            return None;
-        };
-        let gen = u16::try_from(gen).ok()?;
-        matches!(lexer.next(), Ok(Some(Token::Keyword(b"R")))).then_some(ObjRef { num, gen })
-    })();
-    if reference.is_none() {
-        *lexer = start;
-    }
-    reference
 }
 
 /// An indirect object's head and body at `lexer`: `num gen obj`, the object,
@@ -146,18 +198,23 @@ pub(crate) fn head(lexer: &mut Lexer<'_>) -> Result<ObjRef, PdfError> {
 
 /// An indirect object's body at `lexer`, after its head.
 pub(crate) fn body(lexer: &mut Lexer<'_>) -> Result<Indirect, PdfError> {
-    let token = lexer.next()?.ok_or(PdfError::Malformed)?;
-    let object = from_token(lexer, token, 0)?;
-    let after = *lexer;
-    if let Object::Dict(dict) = object {
-        if let Ok(Some(Token::Keyword(b"stream"))) = lexer.next() {
+    let dict = match object(lexer, 0)? {
+        Object::Dict(dict) => dict,
+        other => return Ok(Indirect::Object(other)),
+    };
+    let after = lexer.at();
+    match lexer.next() {
+        Ok(Some(Token::Keyword(b"stream"))) => {
             let data = stream_start(lexer.data(), lexer.at());
-            return Ok(Indirect::Stream { dict, data });
+            Ok(Indirect::Stream { dict, data })
         }
-        *lexer = after;
-        return Ok(Indirect::Object(Object::Dict(dict)));
+        // Past its allowance, what follows may be a stream it never read.
+        Err(PdfError::TooComplex) => Err(PdfError::TooComplex),
+        _ => {
+            lexer.seek(after);
+            Ok(Indirect::Object(Object::Dict(dict)))
+        }
     }
-    Ok(Indirect::Object(object))
 }
 
 /// What an indirect object turned out to be.

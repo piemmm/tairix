@@ -1,5 +1,6 @@
 //! The CIE spaces a colour is measured in — 1931 XYZ, L\*a\*b\* and its polar
-//! form LCh(ab) — all under D65, the white sRGB is defined on.
+//! form LCh(ab) — all under D65, the white sRGB is defined on, and the
+//! adaptation that brings colour measured under another white to it.
 
 use tairix_util::mathf;
 
@@ -18,6 +19,19 @@ const XYZ_TO_RGB: [[f64; 3]; 3] = [
     [3.240_454_2, -1.537_138_5, -0.498_531_4],
     [-0.969_266_0, 1.876_010_8, 0.041_556_0],
     [0.055_643_4, -0.204_025_9, 1.057_225_2],
+];
+
+/// Bradford's cone response matrix, and its inverse: where a colour seen
+/// under one white is adapted to how it looks under another.
+const BRADFORD: [[f64; 3]; 3] = [
+    [0.8951, 0.2664, -0.1614],
+    [-0.7502, 1.7135, 0.0367],
+    [0.0389, -0.0685, 1.0296],
+];
+const BRADFORD_INVERSE: [[f64; 3]; 3] = [
+    [0.986_992_9, -0.147_054_3, 0.159_962_7],
+    [0.432_305_3, 0.518_360_3, 0.049_291_2],
+    [-0.008_528_7, 0.040_042_8, 0.968_486_7],
 ];
 
 /// The 6/29 the L\*a\*b\* transfer turns linear at.
@@ -146,7 +160,13 @@ impl Lab {
     /// This colour in XYZ.
     #[must_use]
     pub fn to_xyz(self) -> Xyz {
-        let white = Xyz::D65;
+        self.to_xyz_under(Xyz::D65)
+    }
+
+    /// This colour in XYZ, its coordinates measured against `white` rather
+    /// than D65.
+    #[must_use]
+    pub fn to_xyz_under(self, white: Xyz) -> Xyz {
         let fy = (self.l + 16.0) / 116.0;
         Xyz {
             x: white.x * lab_f_inverse(fy + self.a / 500.0),
@@ -217,6 +237,38 @@ impl Lch {
     #[must_use]
     pub fn to_rgb(self) -> InGamut {
         self.to_lab().to_rgb()
+    }
+}
+
+/// Colour measured under another white, as linear sRGB: Bradford's chromatic
+/// adaptation to D65, sRGB's own white, then sRGB's primaries, held as the
+/// one matrix they make.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Adaptation([[f64; 3]; 3]);
+
+impl Adaptation {
+    /// The adaptation of colour measured under `white`.
+    #[must_use]
+    pub fn from_white(white: Xyz) -> Self {
+        let cone = |xyz: Xyz| multiply(&BRADFORD, [xyz.x, xyz.y, xyz.z]);
+        let (target, source) = (cone(Xyz::D65), cone(white));
+        // The matrix's columns: each XYZ axis adapted, as linear sRGB.
+        let [[xr, xg, xb], [yr, yg, yb], [zr, zg, zb]] =
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|axis| {
+                let mut response = multiply(&BRADFORD, axis);
+                for ((value, to), from) in response.iter_mut().zip(target).zip(source) {
+                    *value *= to / from;
+                }
+                multiply(&XYZ_TO_RGB, multiply(&BRADFORD_INVERSE, response))
+            });
+        Self([[xr, yr, zr], [xg, yg, zg], [xb, yb, zb]])
+    }
+
+    /// `xyz`, measured under the white this adapts from, as linear sRGB
+    /// light, outside `0.0..=1.0` where it lies outside the gamut.
+    #[must_use]
+    pub fn to_linear(&self, xyz: Xyz) -> [f64; 3] {
+        multiply(&self.0, [xyz.x, xyz.y, xyz.z])
     }
 }
 

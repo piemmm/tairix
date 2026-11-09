@@ -251,7 +251,10 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
-            let Some(wait_ns) = self.budget.reissue_wait_ns(&outcome, attempts) else {
+            let Some(wait_ns) =
+                self.budget
+                    .reissue_wait_ns(outcome.status, outcome.reissue, attempts)
+            else {
                 return outcome.data();
             };
             attempts += 1;
