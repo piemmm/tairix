@@ -12,9 +12,10 @@
 //!   click and screendump on the desktop session's own announcements: the
 //!   game's window first on screen, and each size state on screen at the
 //!   extent it gave.
-//! - The **guest** kernel's audit sink sees kernel audit records only, so it
-//!   gates on those: the bundles the shell loads and the window channel's
-//!   create reply.
+//! - The **guest** gates on the kernel's audit records of the bundles the
+//!   shell loads, and on the desktop's record of the game's window first
+//!   shown, off its diagnostic sink, where the kernel delivers what userland
+//!   emits.
 //!
 //! Neither side infers the other's facts.
 

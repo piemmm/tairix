@@ -27,28 +27,23 @@ path = "src/main.rs"
 # test. It runs the entire production boot pipeline through `tairix-kernel`'s
 # library half (`boot_aarch64::boot`) — bootstrap-floor virtio-MMIO
 # discovery, the unlock kthread, driver autoload, the display service, and
-# the desktop session — and only swaps the audit sink for the PASS witnesses.
+# the desktop session — and only swaps the sinks for the PASS witnesses.
 # Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
 # production crate) prevents feature unification from leaking it into any
 # production build.
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
-# The kernel/ipc audit vocabulary: the `CallReplied` event id whose
-# `endpoint` field attributes a served reply to the window channel.
-tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
 # The load gate's audit vocabulary: the `APP_LOADED` event id whose `bundle`
 # field names the loaded bundle — the launch witness.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
-# The reserved `WINDOW_ENDPOINT` id, the create reply's wire length, and the
-# system application store / bundle suffix spellings the witnesses are
+# The system application store / bundle suffix spellings the launch witness is
 # composed from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The bundle-name reading every guest sink shares.
 tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
-# `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
-# the endpoint witness compares the exact on-wire spelling.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The desktop's record of a window on screen.
+tairix-itest-desktop-witness = { path = "../desktop_witness", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 

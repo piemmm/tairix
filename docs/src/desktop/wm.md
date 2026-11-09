@@ -2047,9 +2047,9 @@ Three requests ride the existing channel, because a layer surface *is* a window
 in the one registry — it has a region, frames, damage, an owner, a budget, and a
 teardown, and `Present` and `Close` act on it unchanged:
 
-- `WindowRequest::OpenLayer { shm_handle, event_endpoint, frame_count,
-  width_px, height_px, stride_bytes, format, x, y, depth }`, answering the
-  ordinary create reply.
+- `WindowRequest::OpenLayer { window_id, shm_handle, event_endpoint,
+  frame_count, width_px, height_px, stride_bytes, format, x, y, depth }`,
+  named and answered as a create is.
 - `WindowRequest::PlaceLayer { window_id, x, y, depth }` — move and re-stack
   together, because a companion changes both in one step and splitting them
   would let a frame land at the old depth.
@@ -2156,8 +2156,9 @@ the app draws its next present into the other, brought up to date from its
 own picture first (`plans/FIX-DESKTOP.md` DESK-19). A
 `Create` also carries the frame geometry, a bounded, validated
 `WindowTitle` (UTF-8, no control characters — it crosses into the taskbar
-renderer), and the app's own **event endpoint**; the reply is the
-session-minted, never-reused window id. Input travels the other way as
+renderer), the app's own **event endpoint**, and the window's id, which the
+app names from the range its `Connect` was given (`ObjectIds`,
+`plans/FIX-DESKTOP.md` DESK-28); the reply is only the acceptance. Input travels the other way as
 fixed-width `WindowEvent`s — focus changes (every move of the keyboard,
 whatever moved it — a press, a raise from the icon bar, a popup opening, a
 window closing — reported lost before gained and before the next input, so
@@ -2222,9 +2223,8 @@ bounded and content-checked by the very validator a row label goes through.
 An open carrying no rows is refused at both ends — there would be nothing to
 open — where a declaration legitimately offers no menu at all.
 
-The reply is only the **acceptance**, and it carries the session-minted,
-never-reused **open id** (the shared status-plus-minted-id reply frame a
-`Create` also begins with). The whole answer arrives later as exactly one
+The app names the open with an **open id** from its own range, and the reply
+is only the **acceptance**. The whole answer arrives later as exactly one
 `WindowEvent::MenuClosed` naming that id: `Chosen(item)`, `Dismissed`, or
 `Refused(reason)` over a closed reason vocabulary (`NoDisplay`, `SeatBusy`,
 `NoResources`) whose unknown discriminant fails closed. It fits the existing
@@ -2309,7 +2309,11 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   (`call_peer_origin` behind the `CallerIdentity` seam), and every window
   is keyed to its creator: a `Present` or `Close` naming another client's
   window answers `NotFound`, indistinguishable from a window that never
-  existed. The granted region is mapped **once** at create (the shared
+  existed. Each `Connect` is given a fresh id range, and an object's id is
+  admitted only in a range its caller holds and above the last admitted
+  there, so ids never collide across processes and are never reused; a
+  process holds at most `OBJECT_RANGES_MAX` ranges, all gone with
+  `client_exited`. The granted region is mapped **once** at create (the shared
   `tairix_display::ShmMapper` seam) and validated to hold every frame;
   each present hands the session's compositor bridge (`WindowHost`) a
   bounds-checked frame slice and a damage list, every rectangle validated
@@ -2321,14 +2325,19 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   (`CallerIdentity::caller_mailbox`) — so no application's events are
   aimed at another's mailbox; any other is refused `PermissionDenied`.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
-  (`ipc_call`, and `call_post`/`call_reap` for the requests an app makes as
-  input moves — a resize, a pointer shape, a tooltip, a drop answer, a title,
-  a resize range — which are posted, one of a kind per window in flight with
-  the newest held behind it, and answered through the event drain:
-  a refusal as `EventError::Refused`, and a refused resize followed by the
-  size the session kept) and the mailbox seam (the app's own event endpoint).
-  The endpoint serves a client's requests in the order posted or called, so a
-  posted resize reaches the session before the present at its size. The
+  (`ipc_call` for the connect and what only a context owing no frame asks,
+  and `call_post`/`call_reap` for every request an interactive loop makes:
+  posted, at most one of a kind per object in flight where a newer one
+  supersedes it, the newest held behind it, and answered through the event
+  drain — a refusal as `EventError::Refused`, a refused resize followed by
+  the size the session kept, and a reply that is data landing as one
+  `Answer` the loop takes, `plans/FIX-DESKTOP.md` DESK-29) and the mailbox
+  seam (the app's own event endpoint). The endpoint serves a client's
+  requests in the order asked, so a create reaches the session before the
+  present of what it created and a resize before the present at its size. A
+  window has one present in flight; a paint asked meanwhile is deferred and
+  owed back as `Answer::FrameReturned`, so a window paints at most once per
+  present the desktop serves. The
   client remembers each window's last presented frame index and extent, so
   `WindowEvents::wait` answers a `RedrawRequested` by re-presenting that
   frame with full-window damage before returning the event to the app —
@@ -2357,8 +2366,9 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   by least growth to what one present carries — and paints and presents each
   rectangle once a turn, so a burst of pointer samples costs one frame.
   `EventMailbox` is the production drain: it accepts only frames of the
-  right length from the kernel-attested session identity the create reply
-  named, so that authentication has one definition rather than one per app.
+  right length from the kernel-attested session identity the connect
+  answered, so that authentication has one definition rather than one per
+  app.
   Both paths decode and answer the redraw through one definition, and a
   failed read names which half failed (`EventError`): a frame that will not
   decode is consumed and the app reads on, a dead mailbox ends the channel.
@@ -2562,9 +2572,9 @@ it: one let go before its window answered for that point is not placed.
 `OfferedFile { window_id, serial }` reads the file's media type for the
 offer standing, never its name (`decode_offered_file_reply`), the same for
 every offer of the drag numbered `drag`. The client posts it
-(`WindowClient::ask_offered_file`): its answer lands with the other posted
-answers (`take_offered_media`), the newest of several asked over one window
-going once the first is answered, so an application never waits on the read. One file carried off the desktop is
+(`WindowClient::ask_offered_file`): its answer lands as
+`Answer::OfferedFile`, the newest of several asked over one window going once
+the first is answered, so an application never waits on the read. One file carried off the desktop is
 offered both ways under one number, as an item and as a file: an answer for it
 as an item outranks one for it as a file, and placed, the session opens it
 read-only under its own authority and hands it over itself, saying why in a

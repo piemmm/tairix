@@ -47,6 +47,12 @@ pub enum WaitToken {
     /// The sound authority's answer to the machine's end sound (armed only
     /// while one is outstanding).
     Cue,
+    /// The session answering a request the window client posted.
+    ///
+    /// Permanent: the icon-bar declaration is answered with no window open,
+    /// and a window's paint deferred behind its present in flight waits on
+    /// this answer to go.
+    WindowReply,
 }
 
 impl WaitToken {
@@ -63,6 +69,7 @@ impl WaitToken {
             Self::Desktop => 6,
             Self::Network => 7,
             Self::Cue => 8,
+            Self::WindowReply => 9,
         }
     }
 
@@ -83,6 +90,7 @@ impl WaitToken {
             6 => Some(Self::Desktop),
             7 => Some(Self::Network),
             8 => Some(Self::Cue),
+            9 => Some(Self::WindowReply),
             _ => None,
         }
     }
@@ -91,8 +99,9 @@ impl WaitToken {
 /// The wait-set members the run loop must have armed for the given window
 /// state: [`WaitToken::Signal`], [`WaitToken::Command`],
 /// [`WaitToken::MemoryPressure`], [`WaitToken::Artwork`],
-/// [`WaitToken::Desktop`] and [`WaitToken::Network`] are permanent;
-/// [`WaitToken::WindowEvent`] is present only while `window_open`.
+/// [`WaitToken::Desktop`], [`WaitToken::Network`] and
+/// [`WaitToken::WindowReply`] are permanent; [`WaitToken::WindowEvent`] is
+/// present only while `window_open`.
 #[must_use]
 pub fn required_members(window_open: bool) -> Vec<WaitToken> {
     let mut members = alloc::vec![
@@ -101,7 +110,8 @@ pub fn required_members(window_open: bool) -> Vec<WaitToken> {
         WaitToken::MemoryPressure,
         WaitToken::Artwork,
         WaitToken::Desktop,
-        WaitToken::Network
+        WaitToken::Network,
+        WaitToken::WindowReply
     ];
     if window_open {
         members.push(WaitToken::WindowEvent);
@@ -124,6 +134,7 @@ mod tests {
             WaitToken::Desktop,
             WaitToken::Network,
             WaitToken::Cue,
+            WaitToken::WindowReply,
         ] {
             assert_eq!(WaitToken::from_u64(token.as_u64()), Some(token));
         }
@@ -132,8 +143,17 @@ mod tests {
     #[test]
     fn an_unknown_token_value_decodes_to_none() {
         assert_eq!(WaitToken::from_u64(0), None);
-        assert_eq!(WaitToken::from_u64(9), None);
+        assert_eq!(WaitToken::from_u64(10), None);
         assert_eq!(WaitToken::from_u64(u64::MAX), None);
+    }
+
+    /// Regression: the window client's replies woke nothing, so a frame held
+    /// behind an unanswered present waited for an unrelated wake to go.
+    #[test]
+    fn the_session_s_replies_are_watched_with_or_without_a_window() {
+        for open in [false, true] {
+            assert!(required_members(open).contains(&WaitToken::WindowReply));
+        }
     }
 
     #[test]
@@ -150,7 +170,8 @@ mod tests {
                 WaitToken::MemoryPressure,
                 WaitToken::Artwork,
                 WaitToken::Desktop,
-                WaitToken::Network
+                WaitToken::Network,
+                WaitToken::WindowReply
             ]
         );
     }
@@ -166,6 +187,7 @@ mod tests {
                 WaitToken::Artwork,
                 WaitToken::Desktop,
                 WaitToken::Network,
+                WaitToken::WindowReply,
                 WaitToken::WindowEvent
             ]
         );

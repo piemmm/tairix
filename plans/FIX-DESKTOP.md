@@ -31,6 +31,10 @@
 | DESK-25 | A present that replaces an unshown frame is answered once that frame is shown | done |
 | DESK-26 | The document host's applications (Draw, Paint, TextEdit) draw text without waiting on the font service | done |
 | DESK-27 | Every other windowed application's loop draws text without waiting on the font service | planned |
+| DESK-28 | The client names what it creates: an id range at connect, and windows, transients, layers, menu opens and alerts created without a round trip | done |
+| DESK-29 | No window-channel request is awaited on an interactive loop: every request posted, data answers landed for the loop to take, a present never waits | done |
+| DESK-30 | Every windowed application, component and the document host on DESK-28 and DESK-29 | done |
+| DESK-31 | Draw repaints what an input changes: a drag's marks, what follows an edit, where a tile lands | done |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -113,6 +117,7 @@ event loop** inherits the freeze:
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
 | Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache did not hold was a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 41 of them in a 13 s hover run, clustered where new text appears: 32 inside 41 ms on window-open. The cache absorbs the steady state, so this was a cold-cache stall rather than a periodic one. Fixed in DESK-18. |
 | Settings picture requests | `userland/apps/settings/src/run.rs` (`Pictures::request` → `WindowClient::render_preview`) | A window-channel round trip to the session's serve loop **per picture asked for**, on the pane's own loop: a busy desktop stalled the Settings window once per thumbnail. Fixed in DESK-20. |
+| Draw's canvas | `userland/apps/draw/src/{input,view,paint}.rs` | Every move of a drag repainted the whole canvas and status band, every inspector change and key the whole window — a slider drag or a held arrow key at the event rate — and every tile landing the whole canvas. Fixed in DESK-31. |
 | Window endpoint capacity | `kernel/ipc/src/call.rs` (one outstanding-call total every caller shared, counting replies not yet collected) | An application that posted a handful of window requests and never reaped them **refused every other application's `Create`, `Present` and `Close` `WouldBlock`** for as long as it lived; so did a busy desktop serving many posting clients. Fixed in DESK-22. |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
@@ -1091,14 +1096,14 @@ Each stage is independently reviewable and must leave the whole-project
   presented with (`tairix_geometry::StaleFrames`, hoisted from `lib/display`,
   which keeps its own frames through it; `tairix_display::stale_frames` builds
   both rings). The newest frame may replace one pending because every frame is
-  whole when it is presented. The pane draws through `FrameRing`, whose present
-  awaits the window's previous one before drawing the other frame.
+  whole when it is presented. The pane draws through `FrameRing`, which draws
+  the other frame only once the window's previous present is answered.
 - **Posted, one in flight.** `WindowClient::present` posts once the window's
-  previous present is answered (`await_present`, on the `call_await` syscall,
-  which that call's answer alone ends, reaping nothing else), so a client waits
-  only for that answer — the desktop's next frame once it outruns the desktop
-  (DESK-25) — never on a conversion or a composite. A present refused for room
-  goes as a call. A refused present
+  previous present is answered; a paint asked meanwhile is deferred and owed
+  back as `Answer::FrameReturned` (DESK-29), so a client never waits on that
+  answer — the desktop's next frame once it outruns the desktop (DESK-25) —
+  nor on a conversion or a composite. A present the endpoint has no room for
+  waits for room. A refused present
   reaches the app as `EventError::Refused` and the next present declares the
   whole window; a `NotAttached` refusal marks the window released instead. The
   library's redraw answer is held behind a present in flight, never awaited,
@@ -1141,9 +1146,8 @@ Each stage is independently reviewable and must leave the whole-project
 - **The posted half.** `WindowTransport` carries `post` and `reap`
   (`call_post`/`call_reap`), and `WindowClient` posts `Resize`, `SetCursor`,
   `SetTooltip`, `DragVerdict`, the offer answers, `SetTitle`, `SetSizing`,
-  `Present`, a drop's end, and `OfferedFile`, the one read whose answer is data:
-  it lands for the application to take (`take_offered_media`), and a wait
-  returns once it has. The shared binding
+  `Present` and a drop's end; reads whose answer is data land for the
+  application to take (DESK-29). The shared binding
   adds the window endpoint's `CallReply` source (`REPLY_TOKEN`, woken as
   `Wake::Event`), and `WindowEvents::try_wait` reaps before it drains —
   `WindowEvents::wait` runs it before every park, since the member stays
@@ -1162,9 +1166,8 @@ Each stage is independently reviewable and must leave the whole-project
   frame) and posted when that one is answered. A resize asked while one is
   unanswered makes no region (`Fitted::Deferred`) and its size is delivered
   again once that one is answered.
-- **What stays a call.** `Create`, `Close`, menus,
-  alerts and the other queries: their answers are needed before the app goes
-  on.
+- **What stays a call** is DESK-29's: only what a context owing no frame
+  asks.
 - **Proven by** the `lib/window` tests over a loopback that answers posts only
   when told: `a_posted_request_never_waits_on_the_session`,
   `a_posted_resize_is_served_before_the_present_that_follows_it`,
@@ -1284,12 +1287,12 @@ Each stage is independently reviewable and must leave the whole-project
   return; its one shot is armed only while something is held and is folded past
   the background override, so clients are paced alike with the screen on or
   off.
-- **Clients.** `WindowClient::present_in_flight` says whether a window's last
-  present is unanswered. The terminal never waits: a pty wake is parsed, a
-  window whose last frame is unanswered — its Settings window too — is owed its
-  paint, and owed windows are painted before the park once answered, so the pty
-  drains at parse speed. Every other application presents once a burst
-  (DESK-23).
+- **Clients.** `WindowClient::present_state` says whether a window's last
+  present is unanswered. No application waits: the terminal parses a pty wake,
+  a window whose last frame is unanswered — its Settings window too — is owed
+  its paint until `Answer::FrameReturned`, and owed windows are painted before
+  the park, so the pty drains at parse speed. Every other application presents
+  once a burst (DESK-23).
 - **The loopback** mints a ticket per call, so a held answer is told from the
   next; waiting on a held ticket runs one latch, or fails the test as a stall.
 - **Proven by** `a_present_replacing_an_unshown_frame_is_answered_once_it_is_shown`,
@@ -1327,6 +1330,104 @@ Each stage is independently reviewable and must leave the whole-project
   font worker on its wait-set, `defer_fetches` once it runs, a fetch handed
   over after a paint that missed, and its own text laid out and drawn again
   when `text_generation` moves.
+
+### DESK-28 — The client names what it creates
+- **Why.** A create, a menu open and an alert answered with an id the session
+  minted, so the application waited for the session's loop — a frame or more
+  on a busy desktop — before it could name what it had asked for. Display
+  protocols that care about round trips let the client name its objects
+  (X11's resource-id base, Wayland's `new_id`); this channel now does too.
+- **The range.** `WindowRequest::Connect`, a call made once at start-up
+  before any window exists, answers the serving session's identity and a
+  fresh range of the caller's own (`ObjectIds`): its objects — windows of
+  every kind, layer surfaces, menu opens and alerts — are numbered
+  `prefix << 32 | n`, `n` counting up from 1, and no prefix is reused while
+  the session runs. Each connect is a range of its own, so two clients in one
+  process never share one; a process holds at most `OBJECT_RANGES_MAX` (8),
+  and a further connect is refused `LimitExceeded`. Prefix 0 is the
+  session's own.
+- **Validation.** The session accepts an id only in a range the caller holds
+  and above the last it accepted there: ids never collide across processes
+  and are never reused, so a stale reference cannot reach a newer object.
+  Anything else is refused and creates nothing. A process's ranges go with
+  `client_exited`.
+- **What it buys.** A create, its title and its first present go in one
+  burst, served in order; a refusal arrives later as the create's answer, and
+  what was posted for the object meanwhile is refused with it.
+
+### DESK-29 — No window-channel request is awaited on an interactive loop
+- **Posted, always.** Every request an interactive loop makes is posted, at
+  most one of a kind per object in flight where a newer one supersedes it,
+  and reaped by the event drain.
+- **What stays a call.** Only what a context owing no frame asks: the connect
+  at start-up, and what start-up or a worker fetches — the wallpaper and
+  cursor catalogues, the screensaver and its preview, the notification
+  sources, the zone store, a rendered preview, an authorised task's output,
+  the screen lock — and `WindowClient::await_answers`, with which a worker
+  waits for what it posted.
+- **Answers that are data land.** An open target, a menu's committed text,
+  the icon bar's, a drag's spot, a drop target, a picked file and its name,
+  the items a drag offers, the clipboard's contents, the terrain, a
+  hand-over's outcome: each is asked for and lands as one `Answer` the loop
+  takes (`WindowClient::take_answer`), and a wait returns once one has.
+- **Refusals are answers.** A refused status request reaches the loop as
+  `EventError::Refused` naming the object it was for; a refused create or
+  open also ends what was posted for that object.
+- **In the order asked.** A request asked while an earlier one waits for
+  room waits behind it, so the session serves a client's requests as they
+  were asked — a create before the present of what it created, and ids in
+  the order they were minted. A request of a kind a newer one supersedes (a
+  resize, a cursor, a tooltip, a title, a backdrop blur, a layer's place, a
+  drag's spot) has at most one in flight per object, the newest held behind
+  it; any other is posted as its own, waiting for room as its frame.
+- **A present never waits.** A window has one present in flight. Both of
+  its frames are the session's until that one is answered, so the window's
+  next paint is deferred, its damage kept by the frame ring, and owed back
+  as `Answer::FrameReturned` once that present is answered; a present the
+  endpoint has no room for waits for room rather than being sent as a call.
+  So a window paints at most once per present the desktop serves.
+- **Closing a window closes its transients** client-side too: the session
+  closes them with it, so the client forgets their records and orphans what
+  they posted.
+- **Proven by** a loopback that answers only when told:
+  `no_request_a_loop_makes_waits_on_a_busy_session` — a request issued while
+  the session is busy compositing returns at once, and its answer is
+  delivered when the session gets to it — with
+  `a_present_asked_while_one_is_in_flight_is_owed_its_frame_back` and
+  `closing_a_window_forgets_the_transients_the_session_closes_with_it`.
+
+### DESK-30 — Every application on DESK-28 and DESK-29
+- The document host and every application and component with a window loop
+  of its own: the file manager, the terminal, the viewer, Music, Settings,
+  Netmap, Patience, Date & Time, Cinder, the Switchboard, WinterSun, Widgets,
+  Sapper, Draw, Paint and TextEdit. Each treats a refusal of what it created
+  as the end of that object, and acts on each landed answer where it used to
+  act on a reply; what an answer is acted on with is held by the object it
+  belongs to (a window's drag drops, a menu's rename), so closing the object
+  drops it.
+- The QEMU verticals that witnessed a window by its create reply's length
+  witness the desktop's own record of the window first shown
+  (`tests/integration/desktop_witness`).
+
+### DESK-31 — Draw repaints what an input changes
+- The canvas beneath the overlay changes only with the viewport, the page and
+  a landing, so everything else repaints the overlay where it was and where it
+  now is. `View::gesture_extent` measures the marks a drag under way draws and
+  `View::overlay_extent` the whole overlay, each from the geometry the overlay
+  is drawn by (`paint.rs`), with the reach of its lines and marks.
+  - A move repaints its gesture's extent before and after it; a freehand line
+    its new stretch; a pan the window. A press repaints the marks it begins,
+    and Shift or Alt changing marks a drag they constrain again.
+  - An inspector change, a key and a typed character repaint the overlay's
+    extent before and after with the inspector, the status band and the bars
+    (`drawing_followed`); a page change, the window. A gradient laid live
+    repaints the inspector, which shows it.
+  - A landing repaints the tiles kept; glyphs that may have moved a frame or
+    the caret, and memory pressure letting go of the stand-in, the canvas.
+- Tests: a pixel oracle that renders the window before and after each event
+  and requires every changed pixel inside the damage reported, over every
+  gesture, Shift and Alt, typing, nudges, tool keys, inspector changes, a
+  landing and pressure, each also bounding what of the canvas it repaints.
 
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the
@@ -1605,6 +1706,9 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-26.** A document application's loop never waits on the font service:
   what it has not fetched is drawn provisionally and laid out again once a
   worker of the host's has fetched it.
+- **DESK-31.** Draw repaints what an input changes: a hover the controls it
+  crosses and the pointer's reading, a drag's move its marks, an edit the
+  overlay and the parts that follow it, a landing where it lands.
 
 ---
 

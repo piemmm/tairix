@@ -506,14 +506,6 @@ pub fn serve_system_store(
     );
     tairix_kernel_core::callreg::register(endpoint.clone(), audit)
         .map_err(|_| "driver-store: driver-store endpoint id already bound")?;
-    // Record this kthread's scheduler id on the endpoint so a posted
-    // request wakes exactly this server instead of broadcasting to every
-    // parked one (wake-one). The id is published by the admission seam
-    // before the body first runs; a degenerate build without it leaves the
-    // endpoint unrecorded and posts fall back to the broadcast wake.
-    if let Some(task) = crate::unlock_service::store_service_task() {
-        endpoint.record_server_task(task);
-    }
     // The driver store is now reachable. Wake any reactive observer parked
     // on `hw_tree_wait` (the user-space `devmgr`) so it re-attempts its
     // catalogue fetch: the endpoint binds *after* the boot tree settles, so
@@ -528,12 +520,18 @@ pub fn serve_system_store(
     // again (the per-request full re-scan this replaces
     // turned each driver load into an O(bundles) re-read).
     let store = scan_store_view(&service, audit);
-    // Filed once for the server's life, so a request posted between an empty
-    // drain and the park still finds it and no park asks the heap again.
-    // Refused, or with no published id, it parks bare: the dispatch loop's
-    // wait-for-interrupt re-step still re-runs the body.
+    // Filed once for the server's life, under the endpoint's key, so a
+    // request posted between an empty drain and the park still finds it and
+    // no park asks the heap again. Refused, or with no published id, it parks
+    // bare: the dispatch loop's wait-for-interrupt re-step still re-runs the
+    // body.
     if let Some(task) = crate::unlock_service::store_service_task() {
-        let _ = tairix_kernel_core::SERVE_WAITQ.register(task, tairix_kernel_core::NO_DEADLINE);
+        let key = tairix_kernel_core::endpoint_key(endpoint.id().0);
+        let _ = tairix_kernel_core::SERVE_WAITQ.register_keyed(
+            key,
+            task,
+            tairix_kernel_core::NO_DEADLINE,
+        );
     }
     loop {
         if serve_pending(&service, ctx, &store, &endpoint, audit) {

@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveFormats};
 use tairix_bezier::Point;
 use tairix_browse::media::{save_format, MediaType};
+use tairix_browse::vfs::write_document_title;
 use tairix_collections::try_arc;
 use tairix_drawing::unkept::Unkept;
 use tairix_geometry::{Rect, Region, Scale};
@@ -20,7 +21,7 @@ use crate::input::ViewOutcome;
 use crate::layout::{Faces, Layout};
 use crate::menu::chosen;
 use crate::tools::Tool;
-use crate::view::{MenuKind, Own, Snapshot, View};
+use crate::view::{MenuKind, Own, Snapshot, View, APP_TITLE};
 
 /// Whether Draw places a file of `media` type as a picture: one the shared
 /// raster decoders read whole, or a sprite file, whose first sprite it takes.
@@ -96,10 +97,8 @@ impl DocumentView for View {
     }
 
     fn write_title(&self, title: &mut String) {
-        title.push_str(&self.name);
-        if self.access == Access::ReadOnly {
-            title.push_str(" (read-only)");
-        }
+        let read_only = self.access == Access::ReadOnly;
+        write_document_title(title, &self.name, self.is_modified(), read_only, APP_TITLE);
     }
 
     fn lay_out(

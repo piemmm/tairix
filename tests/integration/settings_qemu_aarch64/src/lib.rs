@@ -14,11 +14,12 @@
 //!   frame on screen (the window wears the pane's title, and the session
 //!   announces the frame that carries a new title), the desktop redrawn in
 //!   the appearance chosen, and drawn whole at the resolution chosen.
-//! - The **guest** kernel's audit sink sees kernel audit records only, so it
-//!   gates on those: the bundle a load names, the window channel's create
-//!   reply, and each commit of the desktop's published settings document,
+//! - The **guest** gates on the kernel's audit records — the bundle a load
+//!   names, and each commit of the desktop's published settings document,
 //!   attributed by the path it replaced rather than by how many writes have
-//!   gone by (`plans/OPEN-DEFECTS.md` D19/D20).
+//!   gone by (`plans/OPEN-DEFECTS.md` D19/D20) — and on the desktop's record of
+//!   the Settings window first shown, off its diagnostic sink, where the
+//!   kernel delivers what userland emits.
 //!
 //! Neither side infers the other's facts.
 //!

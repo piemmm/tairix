@@ -38,7 +38,7 @@ mod program {
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
         AppMenuShortcut, AppMenuSymbol, WindowEvent,
     };
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::Errno;
     use tairix_appdata::{Refusal, RtHost, Settings};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
@@ -244,7 +244,8 @@ mod program {
 
     impl GameWindow {
         /// Open a window shaped to `game`'s board and present its first frame,
-        /// answering the session's [`ProcId`] or the reserved exit code.
+        /// answering the window's id or the reserved exit code for one that
+        /// could not be asked for; the desktop's refusal arrives later.
         ///
         /// The board is laid out in the window that actually opened before a
         /// pixel of it is drawn: what a *previous* window was — a size the user
@@ -256,11 +257,10 @@ mod program {
             game: &mut Game,
             desktop: &Desktop,
             theme: &Theme,
-        ) -> Result<ProcId, i32> {
+        ) -> Result<u64, i32> {
             let asked = game.window_geometry(desktop.scale(), desktop.screen());
             let mode = app::mode_for(asked.width, asked.height);
-            let server = self
-                .window
+            self.window
                 .open(event_endpoint, &mode, "Sapper", asked.sizing)
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             // The first frame is the whole window, so the rectangles the
@@ -273,7 +273,9 @@ mod program {
                 self.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
-            Ok(server)
+            self.window
+                .window_id()
+                .ok_or_else(|| app::fail(APP_NAME, EXIT_CHANNEL_LOST, "no window was opened"))
         }
 
         fn close(&mut self) {
@@ -600,7 +602,7 @@ mod program {
     fn run_event_loop(
         surface: &mut GameWindow,
         round: &mut Round<'_>,
-        event_endpoint: u64,
+        (event_endpoint, first_window): (u64, u64),
         deadline: &Cell<Option<u64>>,
         desktop_moved: &Cell<bool>,
         mut events: WindowEvents<RtEventSource<'_>>,
@@ -649,7 +651,18 @@ mod program {
                     // A malformed frame from the authenticated session is
                     // refused rather than guessed at.
                     Err(EventError::Undecodable(_)) => {}
-                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Refused(refused)) => {
+                        app::report(APP_NAME, refused);
+                        // The game was started to be played, so a first window
+                        // the desktop refused leaves it nothing to be.
+                        if surface.window.refused(&refused) && refused.window_id == first_window {
+                            return app::fail(
+                                APP_NAME,
+                                EXIT_CHANNEL_LOST,
+                                "no window could be opened",
+                            );
+                        }
+                    }
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }
@@ -659,6 +672,9 @@ mod program {
                 }
                 waited = events.try_wait(surface.window.client());
             }
+            // A frame given back is presented by the shell itself, and the
+            // game asks for nothing else.
+            while surface.window.take_answer().is_some() {}
 
             match acted {
                 Acted::Quit => {
@@ -834,9 +850,17 @@ mod program {
         // The game was started to be played, so a first window that will not
         // open leaves it nothing to be and it ends fail-loud; every later one
         // is a click on its slot, which reports and carries on.
-        let server = match surface.open(event_endpoint, &mut game, &desktop, themes.active()) {
-            Ok(server) => server,
+        let first_window = match surface.open(event_endpoint, &mut game, &desktop, themes.active())
+        {
+            Ok(window) => window,
             Err(code) => return code,
+        };
+        let Some(server) = surface.window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
 
         let deadline = Cell::new(None);
@@ -859,7 +883,7 @@ mod program {
         let code = run_event_loop(
             &mut surface,
             &mut round,
-            event_endpoint,
+            (event_endpoint, first_window),
             &deadline,
             &desktop_moved,
             events,

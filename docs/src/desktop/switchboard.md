@@ -821,14 +821,15 @@ leaves them denied: fail closed, never optimistic.
 The loop is tickless and event-driven: **one** `waitset_wait` per iteration
 covers the termination signal, the command mailbox, the machine's
 memory-pressure band, the `Network` notice, the cue authority's answer while
-the end sound is awaited, and — only while a window is open — that window's
-event mailbox, with a timeout equal to the time until the next real sample is
+the end sound is awaited, the session's replies to what the window client
+posted, and — only while a window is open — that window's event mailbox, with
+a timeout equal to the time until the next real sample is
 due. Sampling is strict: a cycle triggered by an input or command wake before
 the deadline is a no-op that never re-queries the system. There is no poll
 loop and no sleep. The window's event source joins the set when the window opens and
 leaves it when the window closes, so a closed window's channel is never left
 armed. Its folding event stream (`tairix_window::WindowEvents` over an
-`EventMailbox` keyed to the identity the create reply attested) is created
+`EventMailbox` keyed to the identity the connect attested) is created
 and dropped with the window for the same reason; the mailbox itself is the
 process's and outlives any one window, so an event still queued from a
 window that has gone is dropped on the id it names rather than applied to

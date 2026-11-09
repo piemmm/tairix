@@ -21,7 +21,7 @@
 //! the other half the way the user just stopped asking for.
 //!
 //! The record travels in two places, from one definition: an application
-//! *asks* for it with `QueryDesktop` — before it opens a window, so its
+//! is answered it by `Connect` — before it opens a window, so its
 //! very first frame is the right size, at the right density, in the right
 //! colours — and the session *publishes* it on the
 //! [`NoticeTopic::Desktop`](crate::notice::NoticeTopic::Desktop) system

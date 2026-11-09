@@ -6,9 +6,9 @@
 //! latches can never drift apart.
 //!
 //! Every stage is sequenced on a **uniquely attributable** witness — the
-//! exact bundle a load names, a reply only one request shape produces —
-//! never on a cumulative event count that an unrelated subsystem's cadence
-//! can shift under it.
+//! exact bundle a load names, an announcement only the desktop makes — never
+//! on a cumulative event count that an unrelated subsystem's cadence can
+//! shift under it.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -22,10 +22,10 @@ pub const DATETIME_APP_NAME: &str = "datetime";
 /// Number of windows the elevated application opens once the vertical's
 /// whole script has been delivered: the one it opens on launch.
 ///
-/// Each is a create reply on the reserved window endpoint. In this world the
-/// elevated Date & Time application is the only client that creates a window
-/// after the script starts (the desktop's own surfaces are session-painted
-/// compositor windows that never call the window channel; the autostarted
-/// file manager is already up before the script runs and is not counted by
-/// the guest's latch). Reaching this count is the guest's PASS.
-pub const WINDOWS_OPENED: u32 = 1;
+/// Each is a window the desktop records first shown. In this world the
+/// elevated Date & Time application is the only client that opens one after
+/// the script starts (the desktop's own surfaces are session-painted and never
+/// call the window channel; the autostarted file manager's are shown before
+/// the script runs and are not counted by the guest's latch). Reaching this
+/// count is the guest's PASS.
+pub const WINDOWS_OPENED: usize = 1;

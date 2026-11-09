@@ -68,7 +68,7 @@ mod program {
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
         AppMenuShortcut, AppMenuSymbol, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, STDIN};
+    use tairix_abi::{Errno, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
@@ -100,9 +100,9 @@ mod program {
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         key_input_event, pinch_input_events, pointer_input_events, pointer_point,
-        scroll_input_events, DeclaredTip, Desktop, EventDrain, EventError, EventMailbox,
-        EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
-        EVENT_MAILBOX_CAPACITY,
+        scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain, EventError,
+        EventMailbox, EventSource, Owed, Parked, PostedRequest, Refused, Repaint, Target,
+        WindowClient, WindowEvents, WindowSizing, EVENT_MAILBOX_CAPACITY,
     };
 
     /// The name this program states its own refusals under.
@@ -855,6 +855,9 @@ mod program {
         owed: Owed,
         /// The movie's playback, while the window shows one.
         playback: Option<Playback>,
+        /// The file the picker chose, while its name is asked for: the
+        /// `fd_redeem` handle.
+        chosen: Option<u64>,
     }
 
     impl Window {
@@ -964,15 +967,15 @@ mod program {
     }
 
     /// Open a window for `source`, or for the user to pick into when there is
-    /// none, answering it and the session identity it is served by.
+    /// none.
     ///
-    /// A refusal is put up as an alert and answers `None`: the viewer carries
-    /// on with the windows it has, which for a resident application is the
-    /// honest outcome — it is still on the icon bar and still clickable.
+    /// A refusal is put up as an alert and answers `None` — the desktop's own,
+    /// which arrives later, as [`refused`] does: the viewer carries on with the
+    /// windows it has, which for a resident application is the honest outcome
+    /// — it is still on the icon bar and still clickable.
     fn open_window(
         client: &mut WindowClient<app::RtWindowTransport>,
         event_endpoint: u64,
-        server: ProcId,
         desktop: &Desktop,
         theme: &Theme,
         scale: Scale,
@@ -1000,22 +1003,13 @@ mod program {
             max_width_px: 0,
             max_height_px: 0,
         };
-        let (pane, replied) =
-            match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {
-                Ok(opened) => opened,
-                Err(err) => {
-                    refused(client, &format!("the desktop would not open it ({err})"));
-                    return None;
-                }
-            };
-        // A reply from any other sender is something else answering for the
-        // window endpoint: the window it named is closed rather than drawn
-        // into, exactly as a popup's reply is checked.
-        if replied != server {
-            let _ = pane.close(client);
-            refused(client, "a window reply came from another sender");
-            return None;
-        }
+        let pane = match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {
+            Ok(opened) => opened,
+            Err(err) => {
+                refused(client, &format!("the desktop would not open it ({err})"));
+                return None;
+            }
+        };
         Some(Window {
             pane,
             surface,
@@ -1030,6 +1024,7 @@ mod program {
             presented: false,
             owed: Owed::new(),
             playback: None,
+            chosen: None,
         })
     }
 
@@ -1334,9 +1329,9 @@ mod program {
 
     /// What a delivery carrying no event calls for: the channel dying ends the
     /// viewer with the status this answers, while a malformed frame — refused
-    /// rather than guessed at — and a request the session refused are stated
-    /// and carried on from.
-    fn refused_delivery(err: EventError) -> Option<i32> {
+    /// rather than guessed at — and a request the session refused are acted
+    /// on and carried on from.
+    fn refused_delivery(app: &mut App<'_>, err: EventError) -> Option<i32> {
         match err {
             EventError::Mailbox(_) => {
                 let code = app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "the event channel died");
@@ -1346,8 +1341,8 @@ mod program {
                 app::report(APP_NAME, "a malformed window event was refused");
                 None
             }
-            EventError::Refused(refused) => {
-                app::report(APP_NAME, refused);
+            EventError::Refused(asked) => {
+                refused(app, &asked);
                 None
             }
         }
@@ -1460,7 +1455,6 @@ mod program {
             if let Some(opened) = open_window(
                 &mut client,
                 event_endpoint,
-                server,
                 &desktop,
                 theme,
                 scale,
@@ -1520,7 +1514,6 @@ mod program {
                     client: &mut client,
                     desk: &mut desk,
                     event_endpoint,
-                    server,
                     desktop: &desktop,
                 };
                 match reply {
@@ -1546,7 +1539,6 @@ mod program {
                     client: &mut client,
                     desk: &mut desk,
                     event_endpoint,
-                    server,
                     desktop: &desktop,
                 },
                 (theme, scale),
@@ -1568,7 +1560,14 @@ mod program {
                         break;
                     }
                     Err(err) => {
-                        if let Some(code) = refused_delivery(err) {
+                        let mut app = App {
+                            windows: &mut windows,
+                            client: &mut client,
+                            desk: &mut desk,
+                            event_endpoint,
+                            desktop: &desktop,
+                        };
+                        if let Some(code) = refused_delivery(&mut app, err) {
                             return code;
                         }
                         continue;
@@ -1580,7 +1579,6 @@ mod program {
                         client: &mut client,
                         desk: &mut desk,
                         event_endpoint,
-                        server,
                         desktop: &desktop,
                     },
                     &event,
@@ -1592,6 +1590,17 @@ mod program {
                 }
             }
 
+            take_answers(
+                &mut App {
+                    windows: &mut windows,
+                    client: &mut client,
+                    desk: &mut desk,
+                    event_endpoint,
+                    desktop: &desktop,
+                },
+                theme,
+                scale,
+            );
             // Each window tells its playback what the turn asked of it, and
             // presents what the turn owes it, once.
             for window in &mut windows {
@@ -1639,7 +1648,14 @@ mod program {
                 // collect at the top of the next turn adopts what it woke for.
                 Ok(None) => {}
                 Err(err) => {
-                    if let Some(code) = refused_delivery(err) {
+                    let mut app = App {
+                        windows: &mut windows,
+                        client: &mut client,
+                        desk: &mut desk,
+                        event_endpoint,
+                        desktop: &desktop,
+                    };
+                    if let Some(code) = refused_delivery(&mut app, err) {
                         return code;
                     }
                 }
@@ -1656,7 +1672,6 @@ mod program {
         client: &'a mut WindowClient<app::RtWindowTransport>,
         desk: &'a mut Desk,
         event_endpoint: u64,
-        server: ProcId,
         desktop: &'a Desktop,
     }
 
@@ -1772,6 +1787,7 @@ mod program {
     }
 
     /// What routing one event decided for the window it named.
+    #[derive(Copy, Clone)]
     enum Acted {
         /// Something drawn changed, at this scope.
         Changed(Repaint),
@@ -1805,7 +1821,12 @@ mod program {
             // At least one document has been handed to this instance: drain
             // them, opening a window at each.
             WindowEvent::OpenRequested => {
-                drain_open_targets(app, theme, scale);
+                if let Err(err) = app.client.ask_open_targets() {
+                    app::report(
+                        APP_NAME,
+                        format_args!("cannot ask for what to open ({err})"),
+                    );
+                }
                 return Routed::Served;
             }
             _ => {}
@@ -1820,18 +1841,8 @@ mod program {
         // The event's own sink: one window's rectangles are no description of
         // another's surface.
         let mut reported = damage::sink();
-        match act(app, index, event, theme, scale, &mut reported) {
-            Acted::Changed(repaint) => app.windows[index].owe(repaint, &reported),
-            Acted::Close => {
-                // The viewer is not its windows: it keeps its icon-bar slot
-                // with none open, and a click there opens the next. Only
-                // *Quit* ends it.
-                let window = app.windows.remove(index);
-                app.desk.closed.push(window.pane.id());
-                window.close(app.client);
-            }
-            Acted::Idle => {}
-        }
+        let acted = act(app, index, event, theme, scale, &mut reported);
+        settle(app, index, acted, &reported);
         Routed::Served
     }
 
@@ -1879,33 +1890,15 @@ mod program {
             WindowEvent::FilePicked {
                 window_id, handle, ..
             } => {
-                // A name the session no longer holds leaves the document
-                // unnamed rather than refusing it.
-                let name = app.client.take_picked_name(*window_id).unwrap_or_default();
-                let showing = app.windows[index].view.document().is_some();
-                let source = match delegated(*handle, name) {
-                    Ok(source) => source,
-                    Err(name) => {
-                        let _ = app::refuse(
-                            app.client,
-                            (APP_NAME, app.event_endpoint),
-                            showing.then_some(*window_id),
-                            &not_opened_headline(&name),
-                            "it could not be taken over",
-                        );
-                        return if showing { Acted::Idle } else { Acted::Close };
-                    }
-                };
-                if showing {
-                    // The document shown stays: the one chosen opens in a
-                    // window of its own, as every other document does.
-                    open_document(app, source, theme, scale);
-                    return Acted::Idle;
+                // A file chosen again before the first's name landed replaces
+                // it; the first is let go rather than held.
+                if let Some(earlier) = app.windows[index].chosen.replace(*handle) {
+                    drop(tairix_rt::File::from_delegation(earlier));
                 }
-                app.windows[index].pending = Some(source);
-                app.windows[index].view.expect_document();
-                reported.add(layout.window());
-                Acted::Changed(Repaint::Reported)
+                if app.client.ask_picked_name(*window_id).is_err() {
+                    return name_chosen(app, index, String::new(), (theme, scale), reported);
+                }
+                Acted::Idle
             }
             // The user chose nothing, so there is nothing to display: the
             // window they were choosing into closes rather than appearing to
@@ -2123,7 +2116,6 @@ mod program {
         let Some(opened) = open_window(
             app.client,
             app.event_endpoint,
-            app.server,
             app.desktop,
             theme,
             scale,
@@ -2138,77 +2130,192 @@ mod program {
         app.windows.push(opened);
     }
 
-    /// Drain every document the desktop has handed to this instance, opening
-    /// a window at each.
+    /// Open a window at `target`, a document the desktop handed to this
+    /// instance.
     ///
     /// How a launch that names a document reaches an instance already
     /// running: the desktop relays the authority to this process and wakes
     /// it, rather than starting a second viewer.
-    fn drain_open_targets(app: &mut App<'_>, theme: &Theme, scale: Scale) {
-        loop {
-            let target = match app.client.take_open_target() {
-                Ok(Some(target)) => target,
-                Ok(None) => return,
-                Err(err) => {
-                    app::report(APP_NAME, format_args!("cannot take an open target ({err})"));
+    fn open_target(app: &mut App<'_>, target: Target, theme: &Theme, scale: Scale) {
+        let source = match target {
+            Target::Document { name, grant, .. } => match delegated(grant, name) {
+                Ok(source) => source,
+                Err(name) => {
+                    let _ = app::refuse(
+                        app.client,
+                        (APP_NAME, app.event_endpoint),
+                        None,
+                        &not_opened_headline(&name),
+                        "it could not be taken over",
+                    );
                     return;
                 }
-            };
-            let source = match target {
-                Target::Document { name, grant, .. } => match delegated(grant, name) {
-                    Ok(source) => source,
-                    Err(name) => {
-                        let _ = app::refuse(
-                            app.client,
-                            (APP_NAME, app.event_endpoint),
-                            None,
-                            &not_opened_headline(&name),
-                            "it could not be taken over",
-                        );
-                        continue;
-                    }
-                },
-                // Honest, and unreachable from the desktop, which hands this
-                // viewer a descriptor precisely because it holds no
-                // filesystem authority to open a name with.
-                Target::Path(path) | Target::Image(path) => {
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{path} was handed over as a path; this viewer holds no filesystem \
-                         authority and can only be given an open document"
-                        ),
-                    );
-                    continue;
-                }
-                // This viewer places nothing in a document, so it answers no
-                // file offer and no drop is placed in it; one that reached it
-                // is let go rather than left pending.
-                Target::Placed { name, grant, .. } => {
-                    drop(tairix_rt::File::from_delegation(grant));
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{name} was dropped to be placed, but this viewer places nothing"
-                        ),
-                    );
-                    continue;
-                }
-                // This viewer is one place: it shows a document, and has no
-                // pane a launch could name.
-                Target::Pane(pane) => {
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{pane} was handed over, but this viewer shows a document and has no \
-                         places to go to"
-                        ),
-                    );
-                    continue;
-                }
-            };
+            },
+            // Honest, and unreachable from the desktop, which hands this
+            // viewer a descriptor precisely because it holds no filesystem
+            // authority to open a name with.
+            Target::Path(path) | Target::Image(path) => {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{path} was handed over as a path; this viewer holds no filesystem \
+                     authority and can only be given an open document"
+                    ),
+                );
+                return;
+            }
+            // This viewer places nothing in a document, so it answers no file
+            // offer and no drop is placed in it; one that reached it is let go
+            // rather than left pending.
+            Target::Placed { name, grant, .. } => {
+                drop(tairix_rt::File::from_delegation(grant));
+                app::report(
+                    APP_NAME,
+                    format_args!("{name} was dropped to be placed, but this viewer places nothing"),
+                );
+                return;
+            }
+            // This viewer is one place: it shows a document, and has no pane a
+            // launch could name.
+            Target::Pane(pane) => {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{pane} was handed over, but this viewer shows a document and has no \
+                     places to go to"
+                    ),
+                );
+                return;
+            }
+        };
+        open_document(app, source, theme, scale);
+    }
+
+    /// The name of the file the picker chose for the window at `index` has
+    /// landed: `name`, empty where the session holds none, leaving the
+    /// document unnamed rather than refusing it.
+    fn name_chosen(
+        app: &mut App<'_>,
+        index: usize,
+        name: String,
+        (theme, scale): (&Theme, Scale),
+        reported: &mut Region,
+    ) -> Acted {
+        let Some(handle) = app.windows[index].chosen.take() else {
+            return Acted::Idle;
+        };
+        let window_id = app.windows[index].pane.id();
+        let showing = app.windows[index].view.document().is_some();
+        let source = match delegated(handle, name) {
+            Ok(source) => source,
+            Err(name) => {
+                let _ = app::refuse(
+                    app.client,
+                    (APP_NAME, app.event_endpoint),
+                    showing.then_some(window_id),
+                    &not_opened_headline(&name),
+                    "it could not be taken over",
+                );
+                return if showing { Acted::Idle } else { Acted::Close };
+            }
+        };
+        if showing {
+            // The document shown stays: the one chosen opens in a window of
+            // its own, as every other document does.
             open_document(app, source, theme, scale);
+            return Acted::Idle;
         }
+        let layout = app.windows[index].layout(theme, scale);
+        app.windows[index].pending = Some(source);
+        app.windows[index].view.expect_document();
+        reported.add(layout.window());
+        Acted::Changed(Repaint::Reported)
+    }
+
+    /// Carry out `acted`, what window `index` came to, its rectangles in
+    /// `reported`.
+    fn settle(app: &mut App<'_>, index: usize, acted: Acted, reported: &Region) {
+        match acted {
+            Acted::Changed(repaint) => app.windows[index].owe(repaint, reported),
+            Acted::Close => {
+                // The viewer is not its windows: it keeps its icon-bar slot
+                // with none open, and a click there opens the next. Only
+                // *Quit* ends it.
+                let window = app.windows.remove(index);
+                app.desk.closed.push(window.pane.id());
+                window.close(app.client);
+            }
+            Acted::Idle => {}
+        }
+    }
+
+    /// Take every answer that has landed: a document handed over, the name
+    /// of a file chosen, and a frame given back to a window, which presents
+    /// what was drawn behind it.
+    fn take_answers(app: &mut App<'_>, theme: &Theme, scale: Scale) {
+        while let Some(answer) = app.client.take_answer() {
+            match answer {
+                Landed::OpenTarget(Ok(Some(target))) => open_target(app, target, theme, scale),
+                Landed::OpenTarget(Err(err)) => {
+                    app::report(APP_NAME, format_args!("cannot take an open target ({err})"));
+                }
+                Landed::PickedName { window_id, name } => {
+                    let Some(index) = index_of(app.windows, window_id) else {
+                        continue;
+                    };
+                    let mut reported = damage::sink();
+                    let name = name.unwrap_or_default();
+                    let acted = name_chosen(app, index, name, (theme, scale), &mut reported);
+                    settle(app, index, acted, &reported);
+                }
+                Landed::FrameReturned { window_id } => {
+                    if let Some(index) = index_of(app.windows, window_id) {
+                        let window = &mut app.windows[index];
+                        if window
+                            .pane
+                            .present_deferred(app.client, &window.surface)
+                            .is_err()
+                        {
+                            window.owed.owe_whole();
+                        }
+                    }
+                }
+                // The end of the open targets, and nothing else is asked for.
+                _ => {}
+            }
+        }
+    }
+
+    /// A request the session refused: a window it would not open never
+    /// existed, and is said in an alert; a menu it would not open is
+    /// forgotten; anything else is stated.
+    fn refused(app: &mut App<'_>, refused: &Refused) {
+        let Some(index) = index_of(app.windows, refused.window_id) else {
+            app::report(APP_NAME, refused);
+            return;
+        };
+        if app::refused_create(refused, refused.window_id) {
+            let window = app.windows.remove(index);
+            app.desk.closed.push(window.pane.id());
+            if let Some(handle) = window.chosen {
+                drop(tairix_rt::File::from_delegation(handle));
+            }
+            let _ = app::refuse(
+                app.client,
+                (APP_NAME, app.event_endpoint),
+                None,
+                NO_WINDOW,
+                &format!("the desktop would not open it ({})", refused.errno),
+            );
+            return;
+        }
+        if let PostedRequest::OpenMenu(open) = refused.request {
+            let window = &mut app.windows[index];
+            if window.menu == Some(open) {
+                window.menu = None;
+            }
+        }
+        app::report(APP_NAME, refused);
     }
 
     /// Open a window at `source`, withheld from the screen until its document
@@ -2217,7 +2324,6 @@ mod program {
         let Some(opened) = open_window(
             app.client,
             app.event_endpoint,
-            app.server,
             app.desktop,
             theme,
             scale,

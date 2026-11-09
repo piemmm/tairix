@@ -49,7 +49,7 @@ mod program {
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::KeyInput;
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::Errno;
     use tairix_appdata::RtHost;
     use tairix_appdata::{Opening, Publication, PublishWorker, Settings};
     use tairix_controls::damage::{self, Repaint};
@@ -65,8 +65,8 @@ mod program {
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::desktop::Desktop;
     use tairix_window::{
-        damage_in, key_input_event, pointer_input_events, pointer_point, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, WindowClient, WindowEvents,
+        damage_in, key_input_event, pointer_input_events, pointer_point, Answer, EventDrain,
+        EventError, EventMailbox, EventSource, Parked, WindowClient, WindowEvents,
     };
     use tairix_wintersun_app::appbar::{self, BarCommand};
     use tairix_wintersun_app::budget::{FrameTimes, Governor};
@@ -457,12 +457,10 @@ mod program {
     }
 
     impl SettingsPane {
-        /// Open the window on `client`, refusing a create answered by any
-        /// session but `server`, the one serving the game's window.
+        /// Open the window on `client`.
         fn open(
             client: &mut WindowClient<app::RtWindowTransport>,
             endpoint: u64,
-            server: ProcId,
             shown: Shown,
             look: &Look,
         ) -> Result<Self, String> {
@@ -471,7 +469,7 @@ mod program {
             let surface = Surface::new(width, height)
                 .ok_or_else(|| String::from("no memory for the settings window"))?;
             let mode = app::mode_for(width, height);
-            let (pane, replied) = WindowPane::open(
+            let pane = WindowPane::open(
                 client,
                 endpoint,
                 &mode,
@@ -479,12 +477,6 @@ mod program {
                 WindowSizing::Fixed,
             )
             .map_err(|err| alloc::format!("{err}"))?;
-            if replied != server {
-                let _ = pane.close(client);
-                return Err(String::from(
-                    "the settings window was answered by another session",
-                ));
-            }
             Ok(Self {
                 pane,
                 surface,
@@ -602,8 +594,6 @@ mod program {
         look: Look,
         /// The mailbox every window's events are addressed to.
         endpoint: u64,
-        /// The session that answered the game window's create.
-        server: ProcId,
         /// Whether the last settings present was refused, so a run of them
         /// is reported once.
         settings_refusing: bool,
@@ -613,13 +603,11 @@ mod program {
     }
 
     /// The window's side of a session: the window, the desktop it is drawn
-    /// for, the mailbox its events reach, and the session that answered its
-    /// create.
+    /// for, and the mailbox its events reach.
     struct Opened {
         window: AppWindow,
         look: Look,
         endpoint: u64,
-        server: ProcId,
     }
 
     impl<'a> Session<'a> {
@@ -638,7 +626,6 @@ mod program {
                 window,
                 look,
                 endpoint,
-                server,
             } = opened;
             Self {
                 window,
@@ -661,7 +648,6 @@ mod program {
                 settings: None,
                 look,
                 endpoint,
-                server,
                 settings_refusing: false,
                 redraw_asked: false,
             }
@@ -883,11 +869,45 @@ mod program {
             Err(EventError::Undecodable(_)) => Served::Applied,
             Err(EventError::Refused(refused)) => {
                 app::report(APP_NAME, refused);
+                // A game window the desktop would not open leaves the client
+                // nothing to be.
+                if session.window.refused(&refused) {
+                    return Served::Stop(app::fail(
+                        APP_NAME,
+                        EXIT_CHANNEL_LOST,
+                        "the desktop would not open the window",
+                    ));
+                }
+                let settings = session.settings.as_ref().map(SettingsPane::id);
+                if settings.is_some_and(|pane| app::refused_create(&refused, pane)) {
+                    session.settings = None;
+                    declare_app_bar(session.window.client(), session.endpoint, false);
+                }
                 Served::Applied
             }
-            Ok(None) => Served::Empty,
+            Ok(None) => {
+                take_answers(session);
+                Served::Empty
+            }
             Err(EventError::Mailbox(_)) => {
                 Served::Stop(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost"))
+            }
+        }
+    }
+
+    /// Take every answer that has landed: a frame given back to the settings
+    /// window presents what was drawn behind it, the game window's the shell
+    /// presents itself, and nothing else is asked for.
+    fn take_answers(session: &mut Session<'_>) {
+        while let Some(answer) = session.window.take_answer() {
+            let Answer::FrameReturned { window_id } = answer else {
+                continue;
+            };
+            let Session {
+                window, settings, ..
+            } = session;
+            if let Some(pane) = settings.as_mut().filter(|pane| pane.id() == window_id) {
+                let _ = pane.pane.present_deferred(window.client(), &pane.surface);
             }
         }
     }
@@ -1079,7 +1099,6 @@ mod program {
         match SettingsPane::open(
             session.window.client(),
             session.endpoint,
-            session.server,
             shown,
             &session.look,
         ) {
@@ -1225,13 +1244,9 @@ mod program {
 
     /// Open the game's window at the size the budget is stated for, as the
     /// desktop's scale lays it out and no larger than its screen, answering
-    /// the serving session's id or the exit code a refusal ends the client
-    /// with.
-    fn open_window(
-        window: &mut AppWindow,
-        desktop: &Desktop,
-        endpoint: u64,
-    ) -> Result<ProcId, i32> {
+    /// the exit code a window that could not be asked for ends the client
+    /// with; the desktop's refusal arrives later, and ends it too.
+    fn open_window(window: &mut AppWindow, desktop: &Desktop, endpoint: u64) -> Result<(), i32> {
         let (width, height) = desktop.window_size(shell::OPEN_WIDTH, shell::OPEN_HEIGHT);
         let mode = app::mode_for(width, height);
         window
@@ -1356,9 +1371,15 @@ mod program {
         // A declared presence belongs to the process, so it goes out before
         // the window: the slot carries its menu from the moment it appears.
         declare_app_bar(window.client(), binding.endpoint(), false);
-        let server = match open_window(&mut window, &look.desktop, binding.endpoint()) {
-            Ok(server) => server,
-            Err(code) => return code,
+        if let Err(code) = open_window(&mut window, &look.desktop, binding.endpoint()) {
+            return code;
+        }
+        let Some(server) = window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
 
         let mut session = Session::new(
@@ -1366,7 +1387,6 @@ mod program {
                 window,
                 look,
                 endpoint: binding.endpoint(),
-                server,
             },
             (start, realm_bounds(params)),
             cast,
@@ -1727,9 +1747,15 @@ mod program {
                 "the motion set's clips could not be built",
             );
         }
-        let server = match open_window(&mut window, &look.desktop, endpoint) {
-            Ok(server) => server,
-            Err(code) => return code,
+        if let Err(code) = open_window(&mut window, &look.desktop, endpoint) {
+            return code;
+        }
+        let Some(server) = window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
         let bounds = realm_bounds(world.params());
         let scene = Arc::new(SceneWorker::new(
@@ -1754,7 +1780,6 @@ mod program {
                 window,
                 look,
                 endpoint,
-                server,
             },
             (WorldPoint { x: 0, y: 0 }, bounds),
             Cast::new(),

@@ -208,7 +208,7 @@ seat manager both build on it, never re-deriving the state machine.
 - **The seat's desktop record is deliberately ungated.**
   `tairix_abi::desktop::DesktopInfo` — the screen extent, the UI scale, and
   the active appearance — reaches an application over the window channel it
-  already holds: `WindowRequest::QueryDesktop` answers it, and the `Desktop`
+  already holds: `WindowRequest::Connect` answers it, and the `Desktop`
   system notice (`plans/NOTICE.md`) carries each change the session makes to
   it. **Do not add a capability to it.** It describes
   the caller's own seat, names no other principal's data, and authorises

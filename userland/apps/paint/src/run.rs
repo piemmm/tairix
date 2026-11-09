@@ -87,7 +87,7 @@ mod program {
         Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
-    use tairix_window::{clipboard, Desktop};
+    use tairix_window::Desktop;
 
     /// The name this program's bundle, help and refusals go by.
     const APP_NAME: &str = "Paint";
@@ -500,11 +500,16 @@ mod program {
         cores: Arc<Cores>,
     }
 
+    /// What a window keeps beside its view: the kind its document was when
+    /// it asked to paste, while the clipboard is read.
+    #[derive(Default)]
+    struct Pasting(Option<Kind>);
+
     impl DocumentApp for Paint {
         type View = Engine;
         type AppView = PaintSettings;
         type Snapshot = Snapshot;
-        type Extra = ();
+        type Extra = Pasting;
         type Work = Work;
         type Answer = Answer;
         type Failure = SaveFailure;
@@ -854,6 +859,31 @@ mod program {
             }
         }
 
+        fn pasted(
+            host: &mut Host<Self>,
+            index: usize,
+            contents: Result<Option<(ClipboardKind, Vec<u8>)>, Errno>,
+        ) {
+            let window = &mut host.windows[index];
+            let Some(kind) = window.extra.0.take() else {
+                return;
+            };
+            match contents {
+                Ok(Some((ClipboardKind::Png | ClipboardKind::Octets, bytes))) => {
+                    match host.app.decoder.submit(Some(DecodeJob {
+                        stamp: window.stamp(),
+                        work: DecodeWork::Paste { bytes, kind },
+                    })) {
+                        Ok(answered) => host.note_answered(answered),
+                        Err(_) => host.windows[index].state("There is no room to paste"),
+                    }
+                }
+                Ok(Some(_)) => window.state("The clipboard holds no picture"),
+                Ok(None) => window.state("The clipboard is empty"),
+                Err(err) => window.state(alloc::format!("Could not paste: {err}")),
+            }
+        }
+
         fn answered(host: &mut Host<Self>, index: usize, answer: Answer) {
             match answer {
                 Answer::Copied(copied) => put_copy(host, index, copied),
@@ -1045,7 +1075,9 @@ mod program {
     fn put_copy(host: &mut Host<Paint>, index: usize, copied: Result<Vec<u8>, String>) {
         let window = &mut host.windows[index];
         let refused = match copied {
-            Ok(bytes) => clipboard::put(&mut host.client, window.id(), ClipboardKind::Png, &bytes)
+            Ok(bytes) => host
+                .client
+                .set_clipboard(window.id(), ClipboardKind::Png, &bytes)
                 .err()
                 .map(|err| alloc::format!("Could not copy: {err}")),
             Err(err) => Some(alloc::format!("Could not copy: {err}")),
@@ -1288,7 +1320,6 @@ mod program {
     /// Carry out a request of window `index`'s that only the painter makes.
     fn carry_out(host: &mut Host<Paint>, index: usize, request: Own) {
         let window = &mut host.windows[index];
-        let id = window.id();
         match request {
             Own::OpenSprites(ids) => open_sprites(host, index, &ids),
             Own::ShowSpriteFile => {
@@ -1327,20 +1358,10 @@ mod program {
                     host.windows[index].state("There is no room to cut");
                 }
             }
-            Own::Paste(kind) => match clipboard::take(&mut host.client, id) {
-                Ok(Some((ClipboardKind::Png | ClipboardKind::Octets, bytes))) => {
-                    match host.app.decoder.submit(Some(DecodeJob {
-                        stamp: host.windows[index].stamp(),
-                        work: DecodeWork::Paste { bytes, kind },
-                    })) {
-                        Ok(answered) => host.note_answered(answered),
-                        Err(_) => host.windows[index].state("There is no room to paste"),
-                    }
-                }
-                Ok(Some(_)) => window.state("The clipboard holds no picture"),
-                Ok(None) => window.state("The clipboard is empty"),
-                Err(err) => window.state(alloc::format!("Could not paste: {err}")),
-            },
+            Own::Paste(kind) => {
+                window.extra = Pasting(Some(kind));
+                host.paste(index);
+            }
             Own::Compute { job, work } => {
                 let cores = Arc::clone(&host.app.cores);
                 if !host.queue(index, Work::Compute { job, work, cores }) {

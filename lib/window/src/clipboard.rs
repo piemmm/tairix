@@ -1,176 +1,139 @@
-//! The desktop clipboard, from an application's side: a payload goes out
-//! through a region this program creates and grants the session, and comes
-//! back the same way. The session honours either only for the window that
-//! holds the keyboard.
+//! The desktop clipboard's paste policy: what a region offered for a paste
+//! brings back. The session honours a copy or a paste only for the window
+//! that holds the keyboard; [`WindowClient::set_clipboard`] and
+//! [`WindowClient::ask_clipboard`] carry them.
+//!
+//! [`WindowClient::set_clipboard`]: crate::WindowClient::set_clipboard
+//! [`WindowClient::ask_clipboard`]: crate::WindowClient::ask_clipboard
 
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{ClipboardHeld, ClipboardKind, CLIPBOARD_MAX_BYTES};
 use tairix_abi::Errno;
 
-use crate::client::{WindowClient, WindowTransport};
-use crate::frames::granted_region;
-
 /// The region first offered for a paste: most payloads fit it, and a longer
 /// one is asked for again at the length the session stated.
-const FIRST_OFFER: usize = 64 * 1024;
+pub(crate) const FIRST_OFFER: usize = 64 * 1024;
 
-/// Put `bytes` on the clipboard as `kind`, from this program's focused
-/// window `window_id`.
+/// What a paste's answer comes to.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Landing {
+    /// The clipboard's contents, `None` when it is empty.
+    Taken(Option<(ClipboardKind, Vec<u8>)>),
+    /// The payload did not fit: ask again through a region this long.
+    Again(usize),
+}
+
+/// What `held`, the session's answer to a paste offered `region`, comes to:
+/// the payload copied out, or the length to offer again unless `second`
+/// already was the second offer.
 ///
 /// # Errors
 ///
-/// [`Errno::LengthOutOfRange`] past [`CLIPBOARD_MAX_BYTES`];
-/// [`Errno::OutOfMemory`] when the region cannot be made; otherwise the
-/// session's refusal.
-pub fn put<T: WindowTransport>(
-    client: &mut WindowClient<T>,
-    window_id: u64,
-    kind: ClipboardKind,
-    bytes: &[u8],
-) -> Result<(), Errno> {
-    if bytes.len() > CLIPBOARD_MAX_BYTES {
-        return Err(Errno::LengthOutOfRange);
+/// [`Errno::LengthOutOfRange`] for a payload past [`CLIPBOARD_MAX_BYTES`],
+/// which no copy can have put there; [`Errno::Busy`] when the payload
+/// changed size between the two offers a long one takes;
+/// [`Errno::OutOfMemory`] when the copy cannot be made.
+pub(crate) fn landed(held: ClipboardHeld, region: &[u8], second: bool) -> Result<Landing, Errno> {
+    let Some(kind) = held.kind else {
+        return Ok(Landing::Taken(None));
+    };
+    let len = usize::try_from(held.len)
+        .ok()
+        .filter(|&len| len <= CLIPBOARD_MAX_BYTES)
+        .ok_or(Errno::LengthOutOfRange)?;
+    // A payload that grew between offers into the mapping's page slack was
+    // copied past what this region shows, so it is asked for again.
+    if let Some(payload) = region.get(..len).filter(|_| held.copied) {
+        let mut out = Vec::new();
+        out.try_reserve_exact(len).map_err(|_| Errno::OutOfMemory)?;
+        out.extend_from_slice(payload);
+        return Ok(Landing::Taken(Some((kind, out))));
     }
-    let (mut region, grant) = granted_region(bytes.len().max(1)).ok_or(Errno::OutOfMemory)?;
-    region.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
-    let len = u64::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?;
-    client.set_clipboard(window_id, grant, len, kind)
-}
-
-/// What the clipboard holds, for this program's focused window
-/// `window_id`: `None` when it is empty.
-///
-/// # Errors
-///
-/// [`Errno::OutOfMemory`] when a region or the copy cannot be made;
-/// [`Errno::Busy`] when the payload changed size between the two asks a long
-/// one takes; otherwise the session's refusal.
-pub fn take<T: WindowTransport>(
-    client: &mut WindowClient<T>,
-    window_id: u64,
-) -> Result<Option<(ClipboardKind, Vec<u8>)>, Errno> {
-    take_through(
-        |offer| {
-            let (region, grant) = granted_region(offer).ok_or(Errno::OutOfMemory)?;
-            Ok((region, client.get_clipboard(window_id, grant)?))
-        },
-        |region| region.bytes_mut(),
-    )
-}
-
-/// [`take`]'s policy over `ask`, which offers the session a region of the
-/// length given and answers the region and the reply; `bytes` is what the
-/// region shows.
-fn take_through<R>(
-    mut ask: impl FnMut(usize) -> Result<(R, ClipboardHeld), Errno>,
-    bytes: impl Fn(&mut R) -> &[u8],
-) -> Result<Option<(ClipboardKind, Vec<u8>)>, Errno> {
-    let mut offer = FIRST_OFFER;
-    for _ in 0..2 {
-        let (mut region, held) = ask(offer)?;
-        let Some(kind) = held.kind else {
-            return Ok(None);
-        };
-        let len = usize::try_from(held.len).map_err(|_| Errno::LengthOutOfRange)?;
-        // A payload that grew between asks into the mapping's page slack was
-        // copied past what this region shows, so it is asked for again.
-        if let Some(payload) = bytes(&mut region).get(..len).filter(|_| held.copied) {
-            let mut out = Vec::new();
-            out.try_reserve_exact(len).map_err(|_| Errno::OutOfMemory)?;
-            out.extend_from_slice(payload);
-            return Ok(Some((kind, out)));
-        }
-        offer = len.max(1);
+    if second {
+        return Err(Errno::Busy);
     }
-    Err(Errno::Busy)
+    Ok(Landing::Again(len.max(1)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{take_through, FIRST_OFFER};
+    use super::{landed, Landing, FIRST_OFFER};
     use alloc::vec;
-    use alloc::vec::Vec;
-    use tairix_abi::window_ipc::{ClipboardHeld, ClipboardKind};
+    use tairix_abi::window_ipc::{ClipboardHeld, ClipboardKind, CLIPBOARD_MAX_BYTES};
     use tairix_abi::Errno;
 
-    /// A session answering each ask in turn with the payload length it holds
-    /// and whether it filled the region offered, recording every offer.
-    struct Session {
-        answers: Vec<(u64, bool)>,
-        offers: Vec<usize>,
-    }
-
-    impl Session {
-        fn answering(answers: &[(u64, bool)]) -> Self {
-            Self {
-                answers: answers.to_vec(),
-                offers: Vec::new(),
-            }
-        }
-
-        fn ask(&mut self, offer: usize) -> (Vec<u8>, ClipboardHeld) {
-            let (len, copied) = self.answers[self.offers.len()];
-            self.offers.push(offer);
-            let held = ClipboardHeld {
-                kind: Some(ClipboardKind::Text),
-                len,
-                copied,
-            };
-            (vec![7u8; offer], held)
-        }
-
-        fn take(&mut self) -> Result<Option<(ClipboardKind, Vec<u8>)>, Errno> {
-            take_through(
-                |offer| Ok(self.ask(offer)),
-                |region: &mut Vec<u8>| region.as_slice(),
-            )
+    /// The session's answer: a text payload of `len` bytes, copied or not.
+    const fn text(len: u64, copied: bool) -> ClipboardHeld {
+        ClipboardHeld {
+            kind: Some(ClipboardKind::Text),
+            len,
+            copied,
         }
     }
 
     #[test]
     fn a_payload_that_fits_the_first_offer_is_taken_at_once() {
-        let mut session = Session::answering(&[(5, true)]);
-        assert_eq!(session.take(), Ok(Some((ClipboardKind::Text, vec![7; 5]))));
-        assert_eq!(session.offers, [FIRST_OFFER]);
+        let region = vec![7u8; FIRST_OFFER];
+        assert_eq!(
+            landed(text(5, true), &region, false),
+            Ok(Landing::Taken(Some((ClipboardKind::Text, vec![7; 5]))))
+        );
     }
 
     #[test]
     fn a_longer_payload_is_asked_for_again_at_the_length_the_session_stated() {
-        let long = FIRST_OFFER as u64 * 3;
-        let mut session = Session::answering(&[(long, false), (long, true)]);
+        let region = vec![7u8; FIRST_OFFER];
+        let long = FIRST_OFFER * 3;
         assert_eq!(
-            session
-                .take()
-                .map(|held| held.map(|(_, bytes)| bytes.len())),
-            Ok(Some(FIRST_OFFER * 3))
+            landed(text(long as u64, false), &region, false),
+            Ok(Landing::Again(long))
         );
-        assert_eq!(session.offers, [FIRST_OFFER, FIRST_OFFER * 3]);
+        let region = vec![7u8; long];
+        assert_eq!(
+            landed(text(long as u64, true), &region, true)
+                .map(|landing| matches!(landing, Landing::Taken(Some((_, ref bytes))) if bytes.len() == long)),
+            Ok(true)
+        );
     }
 
     #[test]
-    fn a_payload_that_keeps_growing_is_refused_as_busy_after_the_second_ask() {
-        let long = FIRST_OFFER as u64 * 2;
-        let mut session = Session::answering(&[(long, false), (long * 2, false)]);
-        assert_eq!(session.take(), Err(Errno::Busy));
-        assert_eq!(session.offers.len(), 2);
+    fn a_payload_that_keeps_growing_is_refused_as_busy_after_the_second_offer() {
+        let region = vec![7u8; FIRST_OFFER * 2];
+        assert_eq!(
+            landed(text(FIRST_OFFER as u64 * 4, false), &region, true),
+            Err(Errno::Busy)
+        );
+    }
+
+    #[test]
+    fn a_payload_copied_past_what_the_region_shows_is_asked_for_again() {
+        let region = vec![7u8; 16];
+        assert_eq!(
+            landed(text(32, true), &region, false),
+            Ok(Landing::Again(32))
+        );
+    }
+
+    /// A session stating a length no copy can have put on the clipboard is
+    /// not offered a region of it.
+    #[test]
+    fn a_length_past_the_clipboard_bound_is_refused_rather_than_offered() {
+        let region = vec![0u8; FIRST_OFFER];
+        let past = CLIPBOARD_MAX_BYTES as u64 + 1;
+        assert_eq!(
+            landed(text(past, false), &region, false),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 
     #[test]
     fn an_empty_clipboard_answers_nothing() {
-        let taken = take_through(
-            |_| {
-                Ok((
-                    Vec::new(),
-                    ClipboardHeld {
-                        kind: None,
-                        len: 0,
-                        copied: false,
-                    },
-                ))
-            },
-            |region: &mut Vec<u8>| region.as_slice(),
-        );
-        assert_eq!(taken, Ok(None));
+        let empty = ClipboardHeld {
+            kind: None,
+            len: 0,
+            copied: false,
+        };
+        assert_eq!(landed(empty, &[], false), Ok(Landing::Taken(None)));
     }
 }

@@ -5,7 +5,7 @@
 //! The production aarch64 boot pipeline runs unchanged — bootstrap-floor
 //! virtio-MMIO discovery, the unlock kthread, the encrypted `ARXFS` root,
 //! driver autoload, the display service and the desktop session — and only
-//! the audit sink is swapped for the PASS witnesses. The host logs in as the
+//! the sinks are swapped, for one gate latching the PASS witnesses. The host logs in as the
 //! seeded fixture account, starts the desktop, launches the terminal from the
 //! program library, and then clicks its icon-bar slot once per further
 //! window, each click gated on the session's own witness that the previous
@@ -22,11 +22,10 @@
 //!    diagnostics registry, so the test observes the production gauge rather
 //!    than steering it: there is no test hook in the pressure path, and a run
 //!    that never left normal cannot pass.
-//! 3. **The desktop kept serving windows there** — a create reply served on
-//!    the reserved window endpoint *after* the band moved. A create is
-//!    recognised by its reply's wire length, which is unique among that
-//!    endpoint's replies; nothing about a reply's ordinal is read, because the
-//!    rendezvous is shared.
+//! 3. **The desktop kept serving windows there** — its own record of windows
+//!    first shown *after* the band moved. Those records are log records,
+//!    which the kernel delivers to the diagnostic sink, so one gate is both
+//!    sinks.
 //!
 //! # What the host attests
 //!
@@ -54,10 +53,11 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::names_bundle;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_desktop_witness::{window_shown, ShownWindows};
+    use tairix_itest_witness::{field_str, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel_core::memstats::MEM_STATS;
@@ -67,7 +67,6 @@ mod kernel {
         BAR_APP_NAME, PRESSURE_DEEPENED_EVENT, PRESSURE_DEEPENED_MARKER,
         PRESSURE_LEFT_NORMAL_EVENT, PRESSURE_LEFT_NORMAL_MARKER, WINDOWS_AFTER_PRESSURE,
     };
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -85,81 +84,42 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// three PASS witnesses described in the module docs.
-    struct DesktopPressureSink {
+    /// The gate both sinks are handed: it latches the three PASS witnesses
+    /// described in the module docs and replays the whole trail to serial.
+    struct DesktopPressureGate {
         /// The terminal's bundle was loaded.
         app_launched: AtomicBool,
-        /// Window creates served on the reserved window endpoint.
-        windows_opened: AtomicU32,
+        /// The windows first shown since the band left normal.
+        windows: ShownWindows<WINDOWS_AFTER_PRESSURE>,
         /// The system pressure gauge has published a band above normal.
         left_normal_band: AtomicBool,
-        /// [`Self::windows_opened`] as it stood when the band left normal, so
-        /// the third witness is a window served *after* that moment.
-        /// `u32::MAX` until it does, which no create count can exceed.
-        windows_at_left_normal: AtomicU32,
         /// The published band has reached severe or critical, where the
         /// desktop legitimately gives its decoded artwork up.
         deepened_past_moderate: AtomicBool,
     }
 
-    impl DesktopPressureSink {
-        /// A sink with no witness latched.
+    impl DesktopPressureGate {
+        /// A gate with no witness latched.
         const fn new() -> Self {
             Self {
                 app_launched: AtomicBool::new(false),
-                windows_opened: AtomicU32::new(0),
+                windows: ShownWindows::new(),
                 left_normal_band: AtomicBool::new(false),
-                windows_at_left_normal: AtomicU32::new(u32::MAX),
                 deepened_past_moderate: AtomicBool::new(false),
             }
         }
 
-        /// Count a window create served on the reserved window endpoint.
-        ///
-        /// The endpoint is matched against the exact hex spelling the
-        /// kernel/ipc audit fields render, so the match can neither
-        /// false-positive on another endpoint nor drift from the emitter.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            let mut on_window_endpoint = false;
-            let mut reply_len = 0usize;
-            for field in event.fields {
-                let tairix_log::FieldValue::Str(value) = field.value else {
-                    continue;
-                };
-                match field.key {
-                    "endpoint" => on_window_endpoint = value == expected,
-                    // An unparsable length stays zero, matching no reply
-                    // length and counting nothing (fail closed).
-                    "len" => {
-                        reply_len = usize::try_from(
-                            tairix_util::count::parse_decimal(value).unwrap_or_default(),
-                        )
-                        .unwrap_or_default();
-                    }
-                    _ => {}
+        /// Latch what `event` itself attests.
+        fn note(&self, event: &Event<'_>) {
+            if event.id.0 == tairix_appload::events::APP_LOADED.0 {
+                let launched = field_str(event, "bundle").is_some_and(|bundle| {
+                    names_bundle(bundle, tairix_abi::SYSTEM_APPLICATION_STORE, BAR_APP_NAME)
+                });
+                if launched {
+                    self.app_launched.store(true, Ordering::Release);
                 }
-            }
-            if on_window_endpoint && reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN {
-                self.windows_opened.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-
-        /// Latch the launch witness from an `APP_LOADED` record naming the
-        /// terminal's bundle.
-        fn note_bundle_loaded(&self, event: &Event<'_>) {
-            for field in event.fields {
-                if field.key != "bundle" {
-                    continue;
-                }
-                if let tairix_log::FieldValue::Str(value) = field.value {
-                    if names_bundle(value, tairix_abi::SYSTEM_APPLICATION_STORE, BAR_APP_NAME) {
-                        self.app_launched.store(true, Ordering::Release);
-                    }
-                }
+            } else if let Some(window) = window_shown(event) {
+                self.windows.note(window);
             }
         }
 
@@ -170,18 +130,15 @@ mod kernel {
         /// spend the frame-allocator lock inside an audit callback, and the
         /// band is refreshed by whoever actually spends the memory.
         ///
-        /// The create count is snapshotted as the band moves, and the caller
-        /// counts a create *before* peeking here, so a window served by the
-        /// very event that moved the band is inside the snapshot rather than
-        /// satisfying the "after" witness itself. That is what keeps the guest
-        /// alive until the host has read the frame back.
+        /// The window tally is armed as the band moves, and the caller notes
+        /// a window *before* peeking here, so one shown by the very event that
+        /// moved the band is below the tally's floor rather than satisfying the
+        /// "after" witness itself. That is what keeps the guest alive until the
+        /// host has read the frame back.
         fn note_pressure(&self) {
             let band = MEM_STATS.published_band();
             if band != PressureBand::Normal && !self.left_normal_band.swap(true, Ordering::AcqRel) {
-                self.windows_at_left_normal.store(
-                    self.windows_opened.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
+                self.windows.arm();
                 SerialSink::new().write_event(&Event {
                     level: Level::Info,
                     id: EventId(PRESSURE_LEFT_NORMAL_EVENT),
@@ -213,7 +170,7 @@ mod kernel {
         /// the click that opens the next window is gated on the *previous*
         /// one reaching the screen, so if the band moves just after that
         /// record is written the click is already away and its window is
-        /// served regardless. The click after *that* one waits on a record
+        /// shown regardless. The click after *that* one waits on a record
         /// written long after the marker, and the host latches every marker
         /// from one shared transcript — so it cannot release that click
         /// without having already seen the marker and held it for the frame.
@@ -223,37 +180,29 @@ mod kernel {
         fn passed(&self) -> bool {
             self.app_launched.load(Ordering::Acquire)
                 && self.left_normal_band.load(Ordering::Acquire)
-                && self.windows_opened.load(Ordering::Acquire)
-                    >= self
-                        .windows_at_left_normal
-                        .load(Ordering::Acquire)
-                        .saturating_add(WINDOWS_AFTER_PRESSURE)
+                && self.windows.count() >= WINDOWS_AFTER_PRESSURE
         }
     }
 
-    impl Sink for DesktopPressureSink {
+    impl Sink for DesktopPressureGate {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink first, so the QEMU transcript
-            // records the full boot → unlock → desktop → windows timeline and
-            // the host can gate its injection on it.
-            SerialSink::new().write_event(event);
-            // The event's own subject is counted before the incidental
-            // pressure peek, so a create and the band moving on the same
-            // event leave that create inside the snapshot.
-            if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
-            } else if event.id.0 == tairix_appload::events::APP_LOADED.0 {
-                self.note_bundle_loaded(event);
-            }
+            // The event's own subject is noted before the incidental pressure
+            // peek, so a window shown on the event that moved the band stays
+            // below the tally's floor; both are latched before the record
+            // reaches serial, so the line the host acts on cannot precede what
+            // it attests. Replayed so the QEMU transcript records the full
+            // boot → unlock → desktop → windows timeline.
+            self.note(event);
             self.note_pressure();
+            SerialSink::new().write_event(event);
             if self.passed() {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: DesktopPressureSink = DesktopPressureSink::new();
+    /// The gate the boot pipeline is handed as both its sinks.
+    static GATE: DesktopPressureGate = DesktopPressureGate::new();
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -267,16 +216,16 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the audit
-    /// observer in place.
+    /// address is forwarded to the production boot pipeline with the gate in
+    /// place of both sinks.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
-            &AUDIT_SINK,
+            &GATE,
+            &GATE,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; the host waits for that record's
             // `sc=irq_bind` marker before typing the unlock passphrase, so

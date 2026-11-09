@@ -41,7 +41,6 @@ mod program {
     use tairix_abi::driver::display::DisplayMode;
     use tairix_abi::driver_store::SystemConfigFile;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::origin::ProcId;
     use tairix_abi::rtc_ipc::{self, RtcOp, RTC_ENDPOINT};
     use tairix_abi::settings_ipc::{
         decode_reply, encode_set, set_request_len, SETTINGS_ENDPOINT, SETTINGS_REPLY_MAX,
@@ -362,7 +361,6 @@ mod program {
     struct Dialog {
         window: Window,
         main: Drawn,
-        server: ProcId,
         endpoint: u64,
         machine: MachineTime,
         zones: Option<&'static ZoneInfo<'static>>,
@@ -772,7 +770,7 @@ mod program {
             };
             let opened = WindowPane::open_dialog(
                 client,
-                (self.main.id(), self.server),
+                self.main.id(),
                 self.endpoint,
                 &mode,
                 DialogModality::OwnerModal,
@@ -997,6 +995,50 @@ mod program {
             Ok(())
         }
 
+        /// Take every answer that has landed: a frame given back to either
+        /// window presents what was drawn behind it, and nothing else is
+        /// asked for.
+        fn take_window_answers(&mut self, client: &mut Client) {
+            while let Some(answer) = client.take_answer() {
+                let tairix_window::Answer::FrameReturned { window_id } = answer else {
+                    continue;
+                };
+                let drawn = if window_id == self.main.id() {
+                    Some(&mut self.main)
+                } else {
+                    self.chooser
+                        .as_mut()
+                        .map(|chooser| &mut chooser.pane)
+                        .filter(|pane| pane.id() == window_id)
+                };
+                if let Some(drawn) = drawn {
+                    if drawn.pane.present_deferred(client, &drawn.surface).is_err() {
+                        drawn.owed.owe_whole();
+                    }
+                }
+            }
+        }
+
+        /// The desktop refused what `refused` names: a zone chooser it would
+        /// not open never existed, which the user is told.
+        fn chooser_refused(&mut self, refused: &tairix_window::Refused, client: &mut Client) {
+            let refused_chooser = self
+                .chooser
+                .as_ref()
+                .is_some_and(|chooser| app::refused_create(refused, chooser.pane.id()));
+            if !refused_chooser {
+                return;
+            }
+            self.chooser = None;
+            let _ = app::refuse(
+                client,
+                (APP_NAME, self.endpoint),
+                Some(self.main.id()),
+                "The time zone chooser could not be opened",
+                &alloc::format!("The desktop would not open it ({}).", refused.errno),
+            );
+        }
+
         /// When the next tick is due: just past the clock's next whole
         /// second, from the reading the last tick took.
         fn next_tick(&self) -> u64 {
@@ -1140,7 +1182,7 @@ mod program {
         let Some(surface) = Surface::new(extent.0, extent.1) else {
             return app::fail(APP_NAME, app::EXIT_NO_WINDOW, "no memory for the window");
         };
-        let (pane, server) = match WindowPane::open(
+        let pane = match WindowPane::open(
             &mut client,
             binding.endpoint(),
             &mode,
@@ -1150,6 +1192,13 @@ mod program {
             Ok(opened) => opened,
             Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
+        let Some(server) = client.session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
+        };
         let mut dialog = Dialog {
             window,
             main: Drawn {
@@ -1157,7 +1206,6 @@ mod program {
                 surface,
                 owed: Owed::new(),
             },
-            server,
             endpoint: binding.endpoint(),
             machine: MachineTime::default(),
             zones: None,
@@ -1202,6 +1250,14 @@ mod program {
                     Err(EventError::Undecodable(_)) => continue,
                     Err(EventError::Refused(refused)) => {
                         app::report(APP_NAME, refused);
+                        if app::refused_create(&refused, dialog.main.id()) {
+                            break 'serve app::fail(
+                                APP_NAME,
+                                EXIT_CHANNEL_LOST,
+                                "the desktop would not open the window",
+                            );
+                        }
+                        dialog.chooser_refused(&refused, &mut client);
                         continue;
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -1224,6 +1280,7 @@ mod program {
                 }
             }
 
+            dialog.take_window_answers(&mut client);
             let due = woke.replace(Woke::default());
             if due.desktop {
                 match app::adopt_desktop(&mut desktop, &mut themes) {

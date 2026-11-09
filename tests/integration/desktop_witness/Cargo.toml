@@ -1,0 +1,24 @@
+[package]
+name = "tairix-itest-desktop-witness"
+description = "The desktop session's on-screen announcements the freestanding QEMU integration kernels' PASS witnesses gate on, by the ids the session's own definitions carry, and the tally of the windows first shown once a witness is armed. Test scaffolding: nothing in TAIRiX itself links it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+
+[build-dependencies]
+# The session's own record ids, read here and generated into the crate: a
+# guest kernel linking the desktop would build its whole tree beside it.
+tairix-desktop-session = { path = "../../../userland/gui/session", version = "=0.0.0" }

@@ -4463,9 +4463,23 @@ mod tests {
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
             };
+            let mut ranges = alloc::collections::BTreeMap::new();
             for (process, shm_handle) in [(1, 7), (1, 8), (2, 9)] {
                 let mut caller = Process(process);
+                let ids = ranges.entry(process).or_insert_with(|| {
+                    let connected = served(
+                        &mut server,
+                        &mut host,
+                        &mut caller,
+                        &tairix_abi::window_ipc::WindowRequest::Connect,
+                    );
+                    tairix_abi::window_ipc::decode_connect_reply(&connected)
+                        .expect("connected")
+                        .ids
+                });
+                let window_id = ids.mint().expect("a fresh range names a window");
                 let create = tairix_abi::window_ipc::WindowRequest::Create {
+                    window_id,
                     shm_handle,
                     event_endpoint: tairix_abi::window_ipc::event_endpoint_for(u64::from(process)),
                     frame_count: 2,
@@ -4477,8 +4491,7 @@ mod tests {
                     sizing: WindowSizing::default(),
                 };
                 let opened = served(&mut server, &mut host, &mut caller, &create);
-                let (window_id, _) =
-                    tairix_abi::window_ipc::decode_create_reply(&opened).expect("opened");
+                assert_eq!(tairix_abi::reply::decode_status_reply(&opened), Ok(()));
                 let pick = tairix_abi::window_ipc::WindowRequest::PickFile {
                     window_id,
                     purpose: PickPurpose::Open,
@@ -4534,7 +4547,19 @@ mod tests {
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
             };
+            let connected = served(
+                &mut server,
+                &mut host,
+                &mut Caller(None),
+                &tairix_abi::window_ipc::WindowRequest::Connect,
+            );
+            let id = tairix_abi::window_ipc::decode_connect_reply(&connected)
+                .expect("connected")
+                .ids
+                .mint()
+                .expect("a fresh range names a window");
             let create = tairix_abi::window_ipc::WindowRequest::Create {
+                window_id: id,
                 shm_handle: 7,
                 event_endpoint: tairix_abi::window_ipc::event_endpoint_for(1),
                 frame_count: 2,
@@ -4546,7 +4571,7 @@ mod tests {
                 sizing: WindowSizing::default(),
             };
             let opened = served(&mut server, &mut host, &mut Caller(None), &create);
-            let (id, _) = tairix_abi::window_ipc::decode_create_reply(&opened).expect("opened");
+            assert_eq!(tairix_abi::reply::decode_status_reply(&opened), Ok(()));
             let present = tairix_abi::window_ipc::WindowRequest::Present {
                 window_id: id,
                 frame_index: 1,

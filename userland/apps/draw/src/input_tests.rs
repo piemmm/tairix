@@ -8,7 +8,7 @@ use tairix_bezier::Point;
 use tairix_colour::Rgba;
 use tairix_drawing::unkept::{Lost, Unkept};
 use tairix_drawing::{Ids, Kind, Paint};
-use tairix_geometry::{Region, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::Theme;
 use tairix_window::docapp::{DocumentView, Request, SaveTarget};
@@ -1785,4 +1785,626 @@ fn a_drawing_saves_as_svg_a_draw_file_or_pdf_and_refuses_any_other_name() {
         formats.of("a,aff"),
         "a Draw file is saved as one again"
     );
+}
+
+/// A window's title names its drawing once, marked as any document window's
+/// is — its unsaved changes, and a file it may not save over — then Draw.
+#[test]
+fn a_window_s_title_names_its_drawing_marked_as_any_document_s() {
+    let mut window = Window::new();
+    let title = |view: &View| {
+        let mut title = String::new();
+        DocumentView::write_title(view, &mut title);
+        title
+    };
+    assert_eq!(title(&window.view), "Untitled \u{2014} Draw");
+    window.view.choose_tool(Tool::Rectangle);
+    window.drag((100.0, 100.0), (300.0, 200.0));
+    assert_eq!(title(&window.view), "*Untitled \u{2014} Draw");
+    window.view.set_access(Access::ReadOnly);
+    assert_eq!(title(&window.view), "*Untitled (read-only) \u{2014} Draw");
+}
+
+/// Every window point a sweep of the pointer visits, the last row and column
+/// — the window's edges — among them.
+fn sweep(layout: &crate::layout::Layout) -> impl Iterator<Item = tairix_geometry::Point> {
+    let edge = |length: u32| i32::try_from(length).expect("a window's size") - 1;
+    let (right, bottom) = (edge(layout.window.width), edge(layout.window.height));
+    let rows = (0..bottom).step_by(3).chain(core::iter::once(bottom));
+    rows.flat_map(move |y| {
+        let columns = (0..right).step_by(3).chain(core::iter::once(right));
+        columns.map(move |x| tairix_geometry::Point::new(x, y))
+    })
+}
+
+/// A move with nothing held repaints the status's reading of the pointer when
+/// that changes, and a control the pointer comes to or leaves: never the
+/// canvas, its rulers or the window around them.
+#[test]
+fn a_hover_repaints_the_pointer_s_reading_and_the_controls_it_crosses_only() {
+    let mut window = Window::new();
+    let layout = window.view.layout;
+    let inside = |rect: Rect, of: Rect| of.intersection(&rect) == rect;
+    let controls = [
+        layout.tools,
+        layout.horizontal_bar,
+        layout.vertical_bar,
+        layout.bar_corner,
+        layout.tabs,
+        layout.panel,
+    ];
+    let mut readings = 0_usize;
+    for to in sweep(&layout) {
+        let reading = window.view.pointer_reading();
+        let mut damage = Region::new();
+        let event = InputEvent::PointerMoved { to };
+        let _ = window
+            .view
+            .on_input(&event, Scale::ONE, &window.theme, &mut damage);
+        for &rect in damage.rects() {
+            let on_control = controls.iter().any(|&control| inside(rect, control));
+            assert!(
+                on_control || inside(rect, layout.pointer),
+                "a move to {to:?} repainted {rect:?}"
+            );
+        }
+        let read_again = window.view.pointer_reading() != reading;
+        let shown = damage
+            .rects()
+            .iter()
+            .any(|&rect| inside(rect, layout.pointer));
+        assert_eq!(
+            shown, read_again,
+            "the pointer's reading after a move to {to:?}"
+        );
+        readings += usize::from(read_again);
+    }
+    assert!(readings > 0, "the reading follows the pointer");
+}
+
+/// The pointer leaving the window across an edge, with nothing held, puts out
+/// the light of the control it was over and repaints nothing else.
+#[test]
+fn the_pointer_leaving_repaints_only_the_control_it_left() {
+    let mut window = Window::new();
+    let layout = window.view.layout;
+    let leave = |window: &mut Window, to: tairix_geometry::Point| {
+        let mut damage = Region::new();
+        let event = InputEvent::PointerMoved { to };
+        let _ = window
+            .view
+            .on_input(&event, Scale::ONE, &window.theme, &mut damage);
+        let lit = !damage
+            .rects()
+            .iter()
+            .all(|&rect| layout.pointer.intersection(&rect) == rect);
+        let mut damage = Region::new();
+        let _ = window.view.on_input(
+            &InputEvent::PointerCancelled,
+            Scale::ONE,
+            &window.theme,
+            &mut damage,
+        );
+        (lit, damage)
+    };
+    let canvas = layout.canvas;
+    let middle = tairix_geometry::Point::new(
+        canvas.left() + i32::try_from(canvas.width / 2).expect("a canvas"),
+        canvas.top() + i32::try_from(canvas.height / 2).expect("a canvas"),
+    );
+    let (_, left) = leave(&mut window, middle);
+    assert!(left.is_empty(), "leaving the canvas repaints nothing");
+    let button = (layout.tools.top()..layout.tools.bottom())
+        .map(|y| tairix_geometry::Point::new(layout.tools.left() + 12, y))
+        .find(|&at| {
+            let (lit, _) = leave(&mut window, at);
+            lit
+        })
+        .expect("a tool button");
+    let (lit, left) = leave(&mut window, button);
+    assert!(lit);
+    assert!(!left.is_empty(), "the button's light goes out");
+    for &rect in left.rects() {
+        assert_eq!(
+            layout.tools.intersection(&rect),
+            rect,
+            "only the button repaints"
+        );
+    }
+}
+
+/// How many pixels `damage` repaints.
+fn area(damage: &Region) -> u64 {
+    damage
+        .rects()
+        .iter()
+        .map(|rect| u64::from(rect.width) * u64::from(rect.height))
+        .sum()
+}
+
+/// Every pixel `after` shows differently from `before` lies in `damage`.
+fn assert_repainted(
+    before: &tairix_raster::Surface,
+    after: &tairix_raster::Surface,
+    damage: &Region,
+    what: &dyn core::fmt::Debug,
+) {
+    let width = usize::try_from(before.width()).expect("a width");
+    let changed = before.pixels().iter().zip(after.pixels()).enumerate();
+    for (at, _) in changed.filter(|(_, (was, now))| was != now) {
+        let x = i32::try_from(at % width).expect("on the window");
+        let y = i32::try_from(at / width).expect("on the window");
+        let point = tairix_geometry::Point::new(x, y);
+        assert!(
+            damage.contains(point),
+            "{what:?} changed {point:?} beyond what it repainted: {:?}",
+            damage.rects()
+        );
+    }
+}
+
+impl Window {
+    /// Feed `event` as the host does, holding it to repaint every pixel it
+    /// changes, and answer what it repainted.
+    fn feed_repainted(&mut self, event: InputEvent) -> Region {
+        let before = self.rendered();
+        let mut damage = Region::new();
+        let _ = self
+            .view
+            .on_input(&event, Scale::ONE, &self.theme, &mut damage);
+        let what = (&event, &self.view.gesture, self.view.tool);
+        assert_repainted(&before, &self.rendered(), &damage, &what);
+        damage
+    }
+
+    /// How many pixels of the canvas `damage` repaints.
+    fn on_canvas(&self, mut damage: Region) -> u64 {
+        damage.clip(self.view.layout.canvas);
+        area(&damage)
+    }
+
+    /// Hold the modifiers `modifiers` down, as the host says they are.
+    fn hold(&mut self, modifiers: Modifiers) {
+        self.feed_repainted(InputEvent::ModifiersChanged { modifiers });
+    }
+
+    /// Press at window point `at`, move through `path` — drawing points —
+    /// with the modifiers `held` changing between moves where a step names
+    /// them, and let go, each step holding the window to repaint every pixel
+    /// it changes. Answers the most of the canvas any one move repainted.
+    fn drag_repainted(
+        &mut self,
+        at: tairix_geometry::Point,
+        path: &[((f64, f64), Option<Modifiers>)],
+    ) -> u64 {
+        self.feed_repainted(InputEvent::PointerMoved { to: at });
+        self.feed_repainted(InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        });
+        assert!(self.view.gesture.is_some(), "the press began a drag");
+        let mut most = 0;
+        for &((x, y), held) in path {
+            if let Some(held) = held {
+                self.hold(held);
+            }
+            let to = self.at(x, y);
+            let damage = self.feed_repainted(InputEvent::PointerMoved { to });
+            most = most.max(self.on_canvas(damage));
+        }
+        self.hold(Modifiers::default());
+        self.feed_repainted(InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        });
+        most
+    }
+
+    /// A rectangle drawn from drawing point `from` to `to`, selected.
+    fn rectangle(&mut self, from: (f64, f64), to: (f64, f64)) {
+        self.view.choose_tool(Tool::Rectangle);
+        self.drag(from, to);
+    }
+}
+
+const SHIFT: Modifiers = Modifiers {
+    shift: true,
+    ctrl: false,
+    alt: false,
+    meta: false,
+};
+
+const ALT: Modifiers = Modifiers {
+    shift: false,
+    ctrl: false,
+    alt: true,
+    meta: false,
+};
+
+/// Requires that the most `what` repainted of the canvas in one move is a
+/// small share of it.
+fn assert_small(most: u64, what: &str) {
+    let canvas = Window::new().view.layout.canvas;
+    let canvas = u64::from(canvas.width) * u64::from(canvas.height);
+    assert!(
+        most * 4 < canvas,
+        "{what} repainted {most} pixels of a canvas of {canvas}"
+    );
+}
+
+/// A drag through `points`, Shift held from its third move, Alt alone from
+/// its fourth and neither from its fifth.
+fn modified(points: &[(f64, f64)]) -> alloc::vec::Vec<((f64, f64), Option<Modifiers>)> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(at, point)| {
+            let held = match at {
+                2 => Some(SHIFT),
+                3 => Some(ALT),
+                4 => Some(Modifiers::default()),
+                _ => None,
+            };
+            (*point, held)
+        })
+        .collect()
+}
+
+/// The drag the tests below move through.
+const PATH: [(f64, f64); 5] = [
+    (220.0, 230.0),
+    (260.0, 250.0),
+    (300.0, 330.0),
+    (330.0, 300.0),
+    (360.0, 380.0),
+];
+
+/// A move during a drag repaints its preview where it was and where it now
+/// is: every pixel it changes, and much less than the canvas. Shift and Alt
+/// changing as it goes mark it again where it now stands.
+#[test]
+fn a_drag_s_preview_repaints_what_it_changes_and_not_the_canvas() {
+    let path = modified(&PATH);
+    for tool in [
+        Tool::Select,
+        Tool::Rectangle,
+        Tool::Ellipse,
+        Tool::Star,
+        Tool::Line,
+        Tool::Pencil,
+        Tool::Zoom,
+    ] {
+        let mut window = Window::new();
+        window.view.choose_tool(tool);
+        let at = window.at(200.0, 200.0);
+        assert_small(
+            window.drag_repainted(at, &path),
+            &alloc::format!("{tool:?}"),
+        );
+    }
+    // A guide out of a ruler: a line across the canvas, repainted as one.
+    let mut window = Window::new();
+    let ruler = window.view.layout.top_ruler;
+    let at = tairix_geometry::Point::new(ruler.left() + 40, ruler.top() + 4);
+    assert_small(window.drag_repainted(at, &path), "a guide");
+}
+
+/// Moving, scaling and turning the selection repaint its marks where they
+/// were and where they now are — a group's framed by everything it paints,
+/// which reaches past its outlines — every pixel they change and much less
+/// than the canvas.
+#[test]
+fn a_drag_of_the_selection_repaints_what_it_changes_and_not_the_canvas() {
+    let path = modified(&PATH);
+    let selected = || {
+        let mut window = Window::new();
+        window.rectangle((100.0, 100.0), (180.0, 160.0));
+        window.view.choose_tool(Tool::Select);
+        window
+    };
+    let mut window = selected();
+    let inside = window.at(140.0, 130.0);
+    assert_small(window.drag_repainted(inside, &path), "a move");
+    let mut window = selected();
+    let corner = window.at(180.0, 160.0);
+    assert_small(window.drag_repainted(corner, &path), "a scale");
+    let mut window = selected();
+    let beyond = window.at(180.0, 160.0);
+    let beyond = tairix_geometry::Point::new(beyond.x + 12, beyond.y + 12);
+    let turns = modified(&[
+        (200.0, 120.0),
+        (190.0, 90.0),
+        (150.0, 70.0),
+        (120.0, 80.0),
+        (90.0, 100.0),
+    ]);
+    assert_small(window.drag_repainted(beyond, &turns), "a turn");
+    let mut window = Window::new();
+    window.rectangle((100.0, 100.0), (140.0, 130.0));
+    window.rectangle((150.0, 100.0), (180.0, 160.0));
+    window.view.choose_tool(Tool::Select);
+    window.chord('a');
+    window.change(Change::Width {
+        width: 40.0,
+        settled: true,
+    });
+    window.command(Command::Group);
+    let inside = window.at(120.0, 115.0);
+    assert_small(window.drag_repainted(inside, &path), "a group moved");
+}
+
+/// Laying a gradient, dragging a path's node and the handle of the pen's
+/// newest node repaint every pixel they change: their marks, and the
+/// inspector a gradient laid live is shown in, not the canvas beneath.
+#[test]
+fn a_drag_laying_a_gradient_or_reshaping_a_path_repaints_what_it_changes() {
+    let path = modified(&PATH);
+    let mut window = Window::new();
+    window.rectangle((100.0, 100.0), (180.0, 160.0));
+    window.view.choose_tool(Tool::Gradient);
+    let start = window.at(110.0, 130.0);
+    let across = modified(&[
+        (120.0, 130.0),
+        (140.0, 140.0),
+        (160.0, 120.0),
+        (170.0, 135.0),
+        (175.0, 150.0),
+    ]);
+    assert_small(window.drag_repainted(start, &across), "a gradient");
+
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Line);
+    window.drag((100.0, 300.0), (200.0, 340.0));
+    window.view.choose_tool(Tool::Nodes);
+    let end = window.at(200.0, 340.0);
+    assert_small(window.drag_repainted(end, &path), "a node");
+
+    let mut window = Window::new();
+    window.view.choose_tool(Tool::Pen);
+    for x in [100.0, 160.0] {
+        let at = window.at(x, 300.0);
+        window.feed(InputEvent::PointerMoved { to: at });
+        window.feed(InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        });
+        window.feed(InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        });
+    }
+    let newest = window.at(220.0, 300.0);
+    assert_small(window.drag_repainted(newest, &path), "a pen handle");
+}
+
+/// Typing, and selecting characters by a drag, repaint every pixel they
+/// change: the marks, and the inspector showing the paint of the characters
+/// selected as the selection moves into a run coloured otherwise and out.
+#[test]
+fn typing_and_a_drag_across_text_repaint_the_marks_and_the_inspector() {
+    let mut window = Window::new();
+    window.text_at(100.0, 100.0);
+    for character in "Hello".chars() {
+        window.feed_repainted(InputEvent::KeyPressed {
+            key: Key::Char(character),
+            modifiers: Modifiers::default(),
+        });
+    }
+    window.shifted(Key::Named(NamedKey::Left));
+    window.shifted(Key::Named(NamedKey::Left));
+    window.change(Change::Paint {
+        target: Target::Fill,
+        paint: Paint::Colour(Rgba::new(200, 0, 0, 255)),
+        settled: true,
+    });
+    window.key(Key::Named(NamedKey::Escape));
+    // No glyph has arrived, so each character stands its unknown advance
+    // wide: 0.6 of the 24-pixel size.
+    let wide = 0.6 * 24.0;
+    window.view.choose_tool(Tool::Text);
+    let start = window.at(100.0 + 3.0 * wide + 1.0, 95.0);
+    let across = [4.0, 4.5, 2.0, 1.0, 1.0].map(|at| ((100.0 + at * wide, 95.0), None));
+    window.drag_repainted(start, &across);
+}
+
+/// A key that nudges the selection, chooses a tool or ends the pen's path
+/// repaints every pixel it changes, and the canvas beneath only where the
+/// overlay changes.
+#[test]
+fn keys_repaint_what_they_change() {
+    let canvas = Window::new().view.layout.canvas;
+    let canvas = u64::from(canvas.width) * u64::from(canvas.height);
+    let mut window = Window::new();
+    window.rectangle((100.0, 100.0), (180.0, 160.0));
+    window.view.choose_tool(Tool::Select);
+    for key in [NamedKey::Right, NamedKey::Down, NamedKey::Left] {
+        let damage = window.feed_repainted(InputEvent::KeyPressed {
+            key: Key::Named(key),
+            modifiers: Modifiers::default(),
+        });
+        let repainted = window.on_canvas(damage);
+        assert!(
+            repainted * 4 < canvas,
+            "a nudge repainted {repainted} pixels of the canvas"
+        );
+    }
+    for character in ['n', 'v', 'p', 't'] {
+        window.feed_repainted(InputEvent::KeyPressed {
+            key: Key::Char(character),
+            modifiers: Modifiers::default(),
+        });
+    }
+    window.view.choose_tool(Tool::Pen);
+    for x in [100.0, 160.0, 220.0] {
+        let at = window.at(x, 300.0);
+        window.feed_repainted(InputEvent::PointerMoved { to: at });
+        window.feed_repainted(InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        });
+        window.feed_repainted(InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        });
+    }
+    window.feed_repainted(InputEvent::KeyPressed {
+        key: Key::Named(NamedKey::Backspace),
+        modifiers: Modifiers::default(),
+    });
+    window.feed_repainted(InputEvent::KeyPressed {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+    });
+    window.feed_repainted(InputEvent::KeyPressed {
+        key: Key::Named(NamedKey::Escape),
+        modifiers: Modifiers::default(),
+    });
+    let damage = window.feed_repainted(InputEvent::KeyPressed {
+        key: Key::Char(' '),
+        modifiers: Modifiers::default(),
+    });
+    assert!(damage.is_empty(), "space only readies the hand");
+}
+
+/// What the inspector changes repaints every pixel it changes: the selection
+/// where it was and where it now is, and the inspector, status and bars that
+/// follow it, not the canvas beneath them.
+#[test]
+fn an_inspector_change_repaints_what_follows_it() {
+    let canvas = Window::new().view.layout.canvas;
+    let canvas = u64::from(canvas.width) * u64::from(canvas.height);
+    let mut window = Window::new();
+    window.rectangle((100.0, 100.0), (180.0, 160.0));
+    window.view.choose_tool(Tool::Select);
+    for change in [
+        Change::Width {
+            width: 12.0,
+            settled: false,
+        },
+        Change::Width {
+            width: 30.0,
+            settled: true,
+        },
+        Change::Rotation(30.0),
+        Change::Corners(10.0),
+        Change::Place {
+            index: 0,
+            value: 240.0,
+        },
+        // Far past the page: the bars scroll over more.
+        Change::Place {
+            index: 0,
+            value: 4000.0,
+        },
+    ] {
+        let before = window.rendered();
+        let mut damage = Region::new();
+        window.view.apply_change(change.clone(), &mut damage);
+        assert_repainted(&before, &window.rendered(), &damage, &change);
+        let repainted = window.on_canvas(damage);
+        assert!(
+            repainted * 2 < canvas,
+            "{change:?} repainted {repainted} pixels of the canvas"
+        );
+    }
+}
+
+/// A tile landing repaints where it lands and nothing else of the canvas.
+#[test]
+fn a_tile_landing_repaints_where_it_lands() {
+    let mut window = Window::new();
+    let colours = [
+        tairix_raster::Color::rgb(220, 20, 30),
+        tairix_raster::Color::rgb(20, 160, 30),
+    ];
+    for colour in colours {
+        window.view.scene += 1;
+        window.view.tiles.invalidate(window.view.scene);
+        while let Some(job) = window.view.wanted_render() {
+            let mut keys = job.keys.iter();
+            let first = keys.next().copied().expect("a tile wanted");
+            let mut tile = tairix_raster::Surface::new(crate::tiles::TILE, crate::tiles::TILE)
+                .expect("a tile");
+            tile.fill(colour);
+            let before = window.rendered();
+            let mut damage = Region::new();
+            window
+                .view
+                .rendered(job.scene, (&job.keys, [(first, tile)]), &mut damage);
+            assert_repainted(&before, &window.rendered(), &damage, &first);
+            let place = {
+                let (x, y) = window.view.tile_origin(&first);
+                tairix_geometry::Rect::new(x, y, crate::tiles::TILE, crate::tiles::TILE)
+                    .intersection(&window.view.layout.canvas)
+            };
+            assert!(
+                damage
+                    .rects()
+                    .iter()
+                    .all(|rect| place.intersection(rect) == *rect),
+                "only where the tile lands: {:?} for {place:?}",
+                damage.rects()
+            );
+            // The rest of the job could not be drawn: asked for again.
+            let _ = keys;
+        }
+    }
+}
+
+/// Memory pressure that lets go of what stands in for tiles not yet drawn
+/// repaints every pixel that changes with it.
+#[test]
+fn pressure_letting_the_stand_in_go_repaints_the_canvas() {
+    let mut window = Window::new();
+    let red = tairix_raster::Color::rgb(220, 20, 30);
+    while let Some(job) = window.view.wanted_render() {
+        let tiles = job.keys.iter().map(|key| {
+            let mut tile = tairix_raster::Surface::new(crate::tiles::TILE, crate::tiles::TILE)
+                .expect("a tile");
+            tile.fill(red);
+            (*key, tile)
+        });
+        window
+            .view
+            .rendered(job.scene, (&job.keys, tiles), &mut Region::new());
+    }
+    let canvas = window.view.layout.canvas;
+    window.view.viewport.zoom_at(
+        2.0,
+        Point::new(
+            f64::from(canvas.width) / 2.0,
+            f64::from(canvas.height) / 2.0,
+        ),
+    );
+    let asked = window.view.wanted_render().expect("the new zoom's tiles");
+    window.view.render_refused(&asked.keys);
+    let before = window.rendered();
+    let mut damage = Region::new();
+    window
+        .view
+        .adopt_pressure(tairix_reclaim::PressureBand::Severe, &mut damage);
+    let after = window.rendered();
+    assert_ne!(before.pixels(), after.pixels(), "the stand-in went");
+    assert_repainted(&before, &after, &damage, &"severe pressure");
+}
+
+/// A gradient drag the desktop takes, or Escape ends, takes back the gradient
+/// it was laying live rather than leaving it to land with whatever comes next.
+#[test]
+fn a_gradient_drag_cancelled_lays_nothing() {
+    let escape = InputEvent::KeyPressed {
+        key: Key::Named(NamedKey::Escape),
+        modifiers: Modifiers::default(),
+    };
+    for end in [InputEvent::PointerCancelled, escape] {
+        let mut window = Window::new();
+        window.rectangle((100.0, 100.0), (180.0, 160.0));
+        let depth = window.view.document().depth();
+        window.view.choose_tool(Tool::Gradient);
+        window.hold_drag((110.0, 130.0), (170.0, 130.0));
+        assert!(window.view.live.is_some(), "laid live while held");
+        window.feed(end);
+        assert!(window.view.live.is_none(), "{end:?} took it back");
+        window.view.choose_tool(Tool::Select);
+        window.drag((400.0, 400.0), (420.0, 420.0));
+        assert_eq!(
+            window.view.document().depth(),
+            depth,
+            "{end:?} left no step"
+        );
+    }
 }

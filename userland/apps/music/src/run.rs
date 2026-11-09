@@ -87,8 +87,8 @@ mod program {
     use tairix_window::notices::{Notices, Raised};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
-        EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient,
-        WindowEvents, WindowSizing,
+        Answer, EventDrain, EventError, EventMailbox, EventSource, Parked, PostedRequest, Refused,
+        Repaint, Target, WindowClient, WindowEvents, WindowSizing,
     };
 
     /// The name this program states its refusals under.
@@ -682,6 +682,21 @@ mod program {
         /// The player has every alert up it may, so nothing more is put up
         /// until one is answered.
         alerts_full: bool,
+        /// The file the picker chose, while its name is asked for: the
+        /// `fd_redeem` handle.
+        chosen: Option<u64>,
+        /// The files a folder pick delegated, read in as each lands.
+        folder: Option<FolderRead>,
+        /// The documents handed over since the queue was last read to its end.
+        handed: Vec<(String, File)>,
+    }
+
+    /// A folder pick's files as they land: those opened, how many could not
+    /// be, and how many the pick left out.
+    struct FolderRead {
+        opened: Vec<(String, File)>,
+        refused: u32,
+        left_out: u32,
     }
 
     impl App {
@@ -915,16 +930,54 @@ mod program {
             }
         }
 
-        /// Take every file a folder pick delegated.
+        /// Ask for every file a folder pick delegated, each taken in as it
+        /// lands ([`Self::picked_file`]).
         fn take_folder(&mut self, left_out: u32, reported: &mut Region) {
-            let mut opened = Vec::new();
-            let mut refused = 0u32;
-            while let Ok(picked) = self.client.take_picked_file(self.pane.id()) {
-                match File::from_delegation(picked.handle) {
-                    Ok(file) => opened.push((String::from(picked.name.as_str()), file)),
-                    Err(_) => refused = refused.saturating_add(1),
-                }
+            self.folder = Some(FolderRead {
+                opened: Vec::new(),
+                refused: 0,
+                left_out,
+            });
+            if let Err(err) = self.client.ask_picked_files(self.pane.id()) {
+                app::report(
+                    APP_NAME,
+                    format_args!("the folder's files could not be asked for ({err})"),
+                );
+                self.folder_read(reported);
             }
+        }
+
+        /// A file the folder pick delegated landed, or the end of them.
+        fn picked_file(
+            &mut self,
+            file: Result<tairix_window::Picked, Errno>,
+            reported: &mut Region,
+        ) {
+            let Some(folder) = self.folder.as_mut() else {
+                if let Ok(picked) = file {
+                    drop(File::from_delegation(picked.handle));
+                }
+                return;
+            };
+            match file {
+                Ok(picked) => match File::from_delegation(picked.handle) {
+                    Ok(opened) => folder.opened.push((picked.name, opened)),
+                    Err(_) => folder.refused = folder.refused.saturating_add(1),
+                },
+                Err(_) => self.folder_read(reported),
+            }
+        }
+
+        /// Add what the folder pick brought, saying what it could not.
+        fn folder_read(&mut self, reported: &mut Region) {
+            let Some(FolderRead {
+                opened,
+                refused,
+                left_out,
+            }) = self.folder.take()
+            else {
+                return;
+            };
             if opened.is_empty() && left_out == 0 && refused == 0 {
                 self.notices.refuse(
                     Spoke::Folder,
@@ -947,23 +1000,94 @@ mod program {
             }
         }
 
-        /// Take every document handed over since the last wake.
-        fn take_targets(&mut self, reported: &mut Region) {
-            let mut opened = Vec::new();
-            while let Ok(Some(target)) = self.client.take_open_target() {
-                let Target::Document { name, grant, .. } = target else {
-                    continue;
-                };
-                match File::from_delegation(grant) {
-                    Ok(file) => opened.push((name, file)),
-                    Err(raw) => self.notices.refuse(
-                        Spoke::Chosen,
-                        &not_opened(&name),
-                        &format!("it could not be taken over ({})", Errno::from_syscall(raw)),
-                    ),
+        /// A document handed over landed, or the end of them: the documents
+        /// are added together once the queue is read to its end.
+        fn handed_over(&mut self, target: Result<Option<Target>, Errno>, reported: &mut Region) {
+            match target {
+                Ok(Some(Target::Document { name, grant, .. })) => {
+                    match File::from_delegation(grant) {
+                        Ok(file) => self.handed.push((name, file)),
+                        Err(raw) => self.notices.refuse(
+                            Spoke::Chosen,
+                            &not_opened(&name),
+                            &format!("it could not be taken over ({})", Errno::from_syscall(raw)),
+                        ),
+                    }
+                }
+                Ok(Some(_)) => {}
+                ended => {
+                    if let Err(err) = ended {
+                        app::report(APP_NAME, format_args!("cannot take an open target ({err})"));
+                    }
+                    let handed = core::mem::take(&mut self.handed);
+                    self.add(handed, reported);
                 }
             }
-            self.add(opened, reported);
+        }
+
+        /// The name of the file the picker chose landed: empty where the
+        /// session holds none.
+        fn name_chosen(&mut self, name: String, reported: &mut Region) {
+            let Some(handle) = self.chosen.take() else {
+                return;
+            };
+            match File::from_delegation(handle) {
+                Ok(file) => self.add(alloc::vec![(name, file)], reported),
+                Err(ret) => self.notices.refuse(
+                    Spoke::Chosen,
+                    &not_opened(&name),
+                    &format!("it could not be taken over ({})", Errno::from_syscall(ret)),
+                ),
+            }
+        }
+
+        /// Take every answer that has landed.
+        fn take_answers(&mut self, reported: &mut Region) {
+            while let Some(answer) = self.client.take_answer() {
+                match answer {
+                    Answer::PickedFile { file, .. } => self.picked_file(file, reported),
+                    Answer::OpenTarget(target) => self.handed_over(target, reported),
+                    Answer::PickedName { name, .. } => {
+                        self.name_chosen(name.unwrap_or_default(), reported);
+                    }
+                    Answer::FrameReturned { window_id } if window_id == self.pane.id() => {
+                        let presented = self.pane.present_deferred(&mut self.client, &self.surface);
+                        if presented.is_err() {
+                            reported.add(self.layout.window());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        /// Act on a request the session refused: the window it would not open
+        /// leaves the player nothing to be, which ends it, answering why; an
+        /// alert it would not show waits for room or is stated, and a menu it
+        /// would not open is forgotten.
+        fn refused(&mut self, refused: &Refused) -> Option<&'static str> {
+            app::report(APP_NAME, refused);
+            if app::refused_create(refused, self.pane.id()) {
+                return Some("the desktop would not open the window");
+            }
+            match refused.request {
+                PostedRequest::OpenAlert(alert) => match self.notices.refused(alert, refused.errno)
+                {
+                    Raised::Full => self.alerts_full = true,
+                    Raised::Refused(err, notice) => app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{}: {} (the desktop would not show this: {err})",
+                            notice.headline(),
+                            notice.detail()
+                        ),
+                    ),
+                    Raised::Nothing | Raised::Up => {}
+                },
+                PostedRequest::OpenMenu(open) if self.menu == Some(open) => self.menu = None,
+                _ => {}
+            }
+            None
         }
 
         /// Put the next waiting refusal up, unless one is up or the player
@@ -1057,7 +1181,14 @@ mod program {
                     self.declare_bar(endpoint);
                     return self.act(outcome);
                 }
-                WindowEvent::OpenRequested => self.take_targets(reported),
+                WindowEvent::OpenRequested => {
+                    if let Err(err) = self.client.ask_open_targets() {
+                        app::report(
+                            APP_NAME,
+                            format_args!("cannot ask for what to open ({err})"),
+                        );
+                    }
+                }
                 WindowEvent::CloseRequested { .. }
                 | WindowEvent::AlternateCloseRequested { .. } => {
                     return true;
@@ -1080,17 +1211,13 @@ mod program {
                 }
                 WindowEvent::ContentReleased { .. } => self.pane.release_frames(),
                 WindowEvent::FilePicked { handle, .. } => {
-                    let name = self
-                        .client
-                        .take_picked_name(self.pane.id())
-                        .unwrap_or_default();
-                    match File::from_delegation(*handle) {
-                        Ok(file) => self.add(alloc::vec![(name, file)], reported),
-                        Err(ret) => self.notices.refuse(
-                            Spoke::Chosen,
-                            &not_opened(&name),
-                            &format!("it could not be taken over ({})", Errno::from_syscall(ret)),
-                        ),
+                    // One chosen again before the first's name landed replaces
+                    // it; the first is let go rather than held.
+                    if let Some(earlier) = self.chosen.replace(*handle) {
+                        drop(File::from_delegation(earlier));
+                    }
+                    if self.client.ask_picked_name(self.pane.id()).is_err() {
+                        self.name_chosen(String::new(), reported);
                     }
                 }
                 WindowEvent::AlertClosed { alert_id, .. } => {
@@ -1304,19 +1431,10 @@ mod program {
             max_width_px: 0,
             max_height_px: 0,
         };
-        let (pane, replied) =
-            match WindowPane::open(&mut client, endpoint, &mode, APP_TITLE, sizing) {
-                Ok(opened) => opened,
-                Err(err) => return app::fail(APP_NAME, err.code(), err),
-            };
-        if replied != server {
-            let _ = pane.close(&mut client);
-            return app::fail(
-                APP_NAME,
-                app::EXIT_NO_WINDOW,
-                "a window reply came from another sender",
-            );
-        }
+        let pane = match WindowPane::open(&mut client, endpoint, &mode, APP_TITLE, sizing) {
+            Ok(opened) => opened,
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
+        };
         let frame_bytes = usize::try_from(u64::from(mode.width_px) * u64::from(mode.height_px) * 4)
             .unwrap_or(usize::MAX);
         let covers = working_set_ui_cache(
@@ -1352,6 +1470,9 @@ mod program {
             presented: false,
             notices: Notices::default(),
             alerts_full: false,
+            chosen: None,
+            folder: None,
+            handed: Vec::new(),
         };
         app_state.player.relayout(&app_state.layout);
         app_state.player.devices_listed(devices);
@@ -1455,9 +1576,15 @@ mod program {
                     Err(EventError::Undecodable(_)) => {
                         app::report(APP_NAME, "a malformed window event was refused");
                     }
-                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Refused(refused)) => {
+                        if let Some(why) = app_state.refused(&refused) {
+                            app_state.link.leave();
+                            return app::fail(APP_NAME, app::EXIT_NO_WINDOW, why);
+                        }
+                    }
                 }
             }
+            app_state.take_answers(&mut reported);
             // A held scrollbar press may be due whether the last wait ended on
             // its deadline or on input.
             let now = tairix_rt::clock_get();
@@ -1480,7 +1607,12 @@ mod program {
                 Err(EventError::Undecodable(_)) => {
                     app::report(APP_NAME, "a malformed window event was refused");
                 }
-                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                Err(EventError::Refused(refused)) => {
+                    if let Some(why) = app_state.refused(&refused) {
+                        app_state.link.leave();
+                        return app::fail(APP_NAME, app::EXIT_NO_WINDOW, why);
+                    }
+                }
             }
         }
     }

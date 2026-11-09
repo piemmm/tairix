@@ -40,7 +40,7 @@ mod program {
         AlertOutcome, AppBar, AppBarClick, AppMenu, AppMenuItemId, MenuOutcome, WindowEvent,
         WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::Errno;
     use tairix_appdata::{Refusal, RtHost, Settings};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region};
@@ -60,8 +60,9 @@ mod program {
     use tairix_theme::{TextRole, ThemeRegistry};
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowEvents,
+        key_input_event, pointer_input_events, pointer_point, present_damage, Answer as Landed,
+        Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, PostedRequest, Refused,
+        Repaint, WindowEvents,
     };
 
     /// The wait-set tokens the workers' answer wakes arrive under.
@@ -199,13 +200,12 @@ mod program {
 
     impl Shell<'_> {
         /// Open a window at the size the game asks for and present its first
-        /// frame, answering the session's [`ProcId`] or the reserved exit
-        /// code.
-        fn open(&mut self, game: &mut Game, now_ns: u64) -> Result<ProcId, i32> {
+        /// frame, answering the window's id or the reserved exit code for one
+        /// that could not be asked for; the desktop's refusal arrives later.
+        fn open(&mut self, game: &mut Game, now_ns: u64) -> Result<u64, i32> {
             let geometry = WindowGeometry::resolve(self.desktop.scale(), self.desktop.screen());
             let mode = app::mode_for(geometry.width, geometry.height);
-            let server = self
-                .window
+            self.window
                 .open(self.endpoint, &mode, TITLE, geometry.sizing)
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             self.adopt(game, &mut tairix_controls::damage::sink());
@@ -214,7 +214,9 @@ mod program {
                 self.close(game, now_ns);
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
-            Ok(server)
+            self.window
+                .window_id()
+                .ok_or_else(|| app::fail(APP_NAME, EXIT_CHANNEL_LOST, "no window was opened"))
         }
 
         fn close(&mut self, game: &mut Game, now_ns: u64) {
@@ -445,26 +447,10 @@ mod program {
         ) {
             match outcome {
                 MenuOutcome::Chosen(item) => self.chosen(game, item, now_ns, damage),
-                // The number is wider than the event, so it is pulled.
+                // The number is wider than the event, so it is asked for.
                 MenuOutcome::Entered(item) if item.get() == DEAL_ENTRY => {
-                    match self.window.client().take_menu_text(window_id, open_id) {
-                        Ok(Some(text)) => {
-                            if !game.deal_entered(&text, now_ns, &mut self.rng, damage) {
-                                let owner = self.window.window_id();
-                                let _ = app::refuse(
-                                    self.window.client(),
-                                    (APP_NAME, self.endpoint),
-                                    owner,
-                                    "That is not a deal of this game",
-                                    "A deal is numbered from 1, up to 1,000,000 in FreeCell \
-                                     and 999,999,999 in the others.",
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            app::report(APP_NAME, format_args!("typed deal refused ({err})"));
-                        }
+                    if let Err(err) = self.window.client().ask_menu_text(window_id, open_id) {
+                        app::report(APP_NAME, format_args!("typed deal refused ({err})"));
                     }
                 }
                 MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
@@ -477,8 +463,59 @@ mod program {
             }
         }
 
+        /// The deal typed into the table's menu landed.
+        fn deal_typed(
+            &mut self,
+            game: &mut Game,
+            text: Result<Option<alloc::string::String>, Errno>,
+            now_ns: u64,
+            damage: &mut Region,
+        ) {
+            match text {
+                Ok(Some(text)) => {
+                    if !game.deal_entered(&text, now_ns, &mut self.rng, damage) {
+                        let owner = self.window.window_id();
+                        let _ = app::refuse(
+                            self.window.client(),
+                            (APP_NAME, self.endpoint),
+                            owner,
+                            "That is not a deal of this game",
+                            "A deal is numbered from 1, up to 1,000,000 in FreeCell and \
+                             999,999,999 in the others.",
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => app::report(APP_NAME, format_args!("typed deal refused ({err})")),
+            }
+        }
+
+        /// Act on a request the session refused: the first window it would not
+        /// open leaves the game nothing to be, answering why; an alert it
+        /// would not show is let go, and a menu forgotten.
+        fn refused(&mut self, refused: &Refused, first_window: u64) -> Option<&'static str> {
+            app::report(APP_NAME, refused);
+            if self.window.refused(refused) {
+                self.context = None;
+                return (refused.window_id == first_window)
+                    .then_some("the desktop would not open the window");
+            }
+            match refused.request {
+                PostedRequest::OpenAlert(alert) => self.alerts.retain(|&(id, _)| id != alert),
+                PostedRequest::OpenMenu(open) if self.context == Some(open) => self.context = None,
+                _ => {}
+            }
+            None
+        }
+
         /// Take every answer that has landed.
         fn adopt_answers(&mut self, game: &mut Game, now_ns: u64, damage: &mut Region) {
+            // A frame given back is presented by the shell itself.
+            while let Some(answer) = self.window.take_answer() {
+                if let Landed::MenuText { text, .. } = answer {
+                    self.deal_typed(game, text, now_ns, damage);
+                }
+            }
             while let Some(answer) = self.workers.writer.collect() {
                 let mut refusals = Vec::new();
                 let next = game.store_landed(answer, &mut refusals);
@@ -571,7 +608,7 @@ mod program {
     /// The event loop: park, drain, apply, paint once. A dead channel ends the
     /// program fail-loud; a quit ends it at zero.
     fn run(
-        shell: &mut Shell<'_>,
+        (shell, first_window): (&mut Shell<'_>, u64),
         game: &mut Game,
         deadline: &Cell<Option<u64>>,
         moved: (&Cell<bool>, &Cell<bool>),
@@ -588,7 +625,9 @@ mod program {
                     Ok(event) => event,
                     Err(EventError::Undecodable(_)) => None,
                     Err(EventError::Refused(refused)) => {
-                        app::report(APP_NAME, refused);
+                        if let Some(why) = shell.refused(&refused, first_window) {
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, why);
+                        }
                         None
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -602,7 +641,11 @@ mod program {
                 match events.try_wait(shell.window.client()) {
                     Ok(Some(event)) => burst.push(event),
                     Ok(None) | Err(EventError::Undecodable(_)) => break,
-                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Refused(refused)) => {
+                        if let Some(why) = shell.refused(&refused, first_window) {
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, why);
+                        }
+                    }
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }
@@ -776,9 +819,16 @@ mod program {
         shell.declare(&game);
         // A first window that will not open leaves the game nothing to be, so
         // it ends fail-loud; every later one is a click on its slot.
-        let server = match shell.open(&mut game, now) {
-            Ok(server) => server,
+        let first_window = match shell.open(&mut game, now) {
+            Ok(window) => window,
             Err(code) => return code,
+        };
+        let Some(server) = shell.window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
         shell.serve_outbox(&mut game);
 
@@ -794,7 +844,7 @@ mod program {
             pressure_moved: &pressure_moved,
         });
         let code = run(
-            &mut shell,
+            (&mut shell, first_window),
             &mut game,
             &deadline,
             (&desktop_moved, &pressure_moved),

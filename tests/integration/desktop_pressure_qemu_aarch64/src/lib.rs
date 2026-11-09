@@ -81,7 +81,7 @@ pub const WINDOW_CLICK_BOUND: u32 = 64;
 /// without having seen the marker too, so it is held for the frame. One
 /// window can slip past the marker and a second cannot, which is what keeps
 /// the guest alive across the host's readback.
-pub const WINDOWS_AFTER_PRESSURE: u32 = 2;
+pub const WINDOWS_AFTER_PRESSURE: usize = 2;
 
 /// Serial marker the guest emits, once, when the published pressure band first
 /// leaves normal — the moment the machine enters the state this vertical

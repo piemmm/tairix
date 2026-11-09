@@ -6413,3 +6413,82 @@ fn undoing_another_layers_eye_keeps_painting_and_the_open_operation_put() {
         Some([10, 20, 30, 255])
     );
 }
+
+/// How many pixels of `rect` `damage` repaints.
+fn repainted_within(damage: &Region, rect: Rect) -> u64 {
+    let mut within = damage.clone();
+    within.clip(rect);
+    within
+        .rects()
+        .iter()
+        .map(|part| u64::from(part.width) * u64::from(part.height))
+        .sum()
+}
+
+/// A hover repaints the controls it crosses and the pointer's reading, never
+/// the canvas, whatever tool is in hand.
+#[test]
+fn a_hover_never_repaints_the_canvas() {
+    for tool in Tool::ALL {
+        let mut window = Window::white(64, 48);
+        window.act(Action::Tool(tool));
+        let canvas = window.view.layout().canvas();
+        let (right, bottom) = (to_i32(WINDOW.0) - 1, to_i32(WINDOW.1) - 1);
+        for y in (0..bottom).step_by(12).chain([bottom]) {
+            for x in (0..right).step_by(12).chain([right]) {
+                let theme = window.registry.active();
+                let mut damage = Region::new();
+                window.now += 10_000_000;
+                let event = InputEvent::PointerMoved {
+                    to: Point::new(x, y),
+                };
+                let _ = window
+                    .view
+                    .on_pointer(&event, window.now, Scale::ONE, theme, &mut damage);
+                assert_eq!(
+                    repainted_within(&damage, canvas),
+                    0,
+                    "{tool:?} over ({x}, {y}) repainted the canvas: {:?}",
+                    damage.rects()
+                );
+            }
+        }
+    }
+}
+
+/// A stroke repaints what each move reaches, not the canvas it lies on.
+#[test]
+fn a_stroke_repaints_what_each_move_reaches() {
+    for tool in [
+        Tool::Pencil,
+        Tool::Brush,
+        Tool::Line,
+        Tool::Rectangle,
+        Tool::Select,
+    ] {
+        let mut window = Window::white(400, 300);
+        window.act(Action::Tool(tool));
+        let canvas = window.view.layout().canvas();
+        let whole = u64::from(canvas.width) * u64::from(canvas.height);
+        let start = Point::new(canvas.left() + 100, canvas.top() + 100);
+        window.move_to(start);
+        window.press(PointerButton::Primary);
+        for step in 1..8 {
+            let theme = window.registry.active();
+            let mut damage = Region::new();
+            window.now += 10_000_000;
+            let event = InputEvent::PointerMoved {
+                to: Point::new(start.x + step * 9, start.y + step * 5),
+            };
+            let _ = window
+                .view
+                .on_pointer(&event, window.now, Scale::ONE, theme, &mut damage);
+            let repainted = repainted_within(&damage, canvas);
+            assert!(
+                repainted * 8 < whole,
+                "{tool:?} repainted {repainted} pixels of a canvas of {whole}"
+            );
+        }
+        window.release(PointerButton::Primary);
+    }
+}

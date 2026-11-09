@@ -25,8 +25,8 @@
 //! the appearance the desktop did not boot in, photograph the desktop redrawn
 //! in it, shrink the window, choose a smaller desktop on Displays and keep it,
 //! photograph the desktop drawn at that size, and finally choose Compact
-//! density on Appearance. Only the audit sink is swapped, for the PASS
-//! witnesses below.
+//! density on Appearance. Only the sinks are swapped, for one gate latching
+//! the PASS witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -34,11 +34,13 @@
 //!
 //! 1. **Settings launched.** An `APP_LOADED` record naming the bundle
 //!    [`SETTINGS_APP_NAME`] spells — the menu row's own launch.
-//! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the
-//!    reserved window endpoint after that load. Settings opens one window,
-//!    and the desktop's own surfaces never call the window channel.
+//! 2. **Its window opened.** The desktop's record of a window first shown
+//!    after that load. Settings opens one window, and the desktop's own
+//!    surfaces never call the window channel. The desktop's records are log
+//!    records, which the kernel delivers to the diagnostic sink, so one gate
+//!    is both sinks.
 //! 3. **The appearance choice became durable.** A rename replacing the
-//!    desktop's published settings document after that create: the app-data
+//!    desktop's published settings document after that window: the app-data
 //!    service commits a document by writing it whole and renaming it over the
 //!    live one, and only the changes Settings asks for rewrite it in this run.
 //! 4. **The kept resolution did too.** A second such rename: the trial's
@@ -70,16 +72,15 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
-    use tairix_itest_witness::names_bundle;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_desktop_witness::{window_shown, ShownWindows};
+    use tairix_itest_witness::{field_str, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_settings_qemu_aarch64::{
         is_desktop_document, DESKTOP_CHANGES, RENAME_OP, SETTINGS_APP_NAME,
     };
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -98,23 +99,23 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// four PASS witnesses described in the module docs.
-    struct SettingsSink {
+    /// The gate both sinks are handed: it latches the PASS witnesses described
+    /// in the module docs and replays the whole trail to serial.
+    struct SettingsGate {
         /// The settings bundle was loaded.
         launched: AtomicBool,
-        /// Its window was created after that.
-        window_opened: AtomicBool,
+        /// The windows first shown after that: the settings window.
+        windows: ShownWindows<1>,
         /// Commits of the desktop's published document after that.
         committed: AtomicU32,
     }
 
-    impl SettingsSink {
-        /// A sink with no witness latched.
+    impl SettingsGate {
+        /// A gate with no witness latched.
         const fn new() -> Self {
             Self {
                 launched: AtomicBool::new(false),
-                window_opened: AtomicBool::new(false),
+                windows: ShownWindows::new(),
                 committed: AtomicU32::new(0),
             }
         }
@@ -130,34 +131,7 @@ mod kernel {
                 )
             }) {
                 self.launched.store(true, Ordering::Release);
-            }
-        }
-
-        /// Latch the window witness from a create reply on the reserved
-        /// window endpoint, once the bundle has loaded.
-        ///
-        /// The endpoint is matched against the exact hex spelling the
-        /// kernel/ipc audit fields render (`format_hex_u64`), and the
-        /// operation by its reply's wire length; nothing else about a reply
-        /// is read, because the rendezvous is shared.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            if !self.launched.load(Ordering::Acquire) {
-                return;
-            }
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            if field_str(event, "endpoint") != Some(expected) {
-                return;
-            }
-            // An unparsable length stays zero, matching no reply length and
-            // latching nothing (fail closed).
-            let reply_len = field_str(event, "len")
-                .and_then(tairix_util::count::parse_decimal)
-                .and_then(|len| usize::try_from(len).ok())
-                .unwrap_or_default();
-            if reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN {
-                self.window_opened.store(true, Ordering::Release);
+                self.windows.arm();
             }
         }
 
@@ -168,7 +142,7 @@ mod kernel {
         /// own fields, so a mutation of anything else matches nothing (fail
         /// closed).
         fn note_mutation(&self, event: &Event<'_>) {
-            if !self.window_opened.load(Ordering::Acquire) {
+            if self.windows.count() == 0 {
                 return;
             }
             if field_str(event, "op") == Some(RENAME_OP)
@@ -185,29 +159,28 @@ mod kernel {
         }
     }
 
-    impl Sink for SettingsSink {
+    impl Sink for SettingsGate {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink first, so the QEMU transcript
-            // records the full boot → unlock → desktop → Settings timeline and
-            // the host can gate its injection on it.
-            SerialSink::new().write_event(event);
+            // Latched before the record reaches serial, so the line the host
+            // acts on cannot precede what it attests; replayed so the QEMU
+            // transcript records the full boot → unlock → desktop → Settings
+            // timeline the host gates its injection on.
             if event.id.0 == tairix_appload::events::APP_LOADED.0 {
                 self.note_bundle_loaded(event);
-            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
+            } else if let Some(window) = window_shown(event) {
+                self.windows.note(window);
             } else if event.id.0 == tairix_kernel_core::audit::AuditEvent::FsNodeMutated.id().0 {
                 self.note_mutation(event);
-            } else {
-                return;
             }
+            SerialSink::new().write_event(event);
             if self.passed() {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: SettingsSink = SettingsSink::new();
+    /// The gate the boot pipeline is handed as both its sinks.
+    static GATE: SettingsGate = SettingsGate::new();
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -221,16 +194,16 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the audit
-    /// observer in place.
+    /// address is forwarded to the production boot pipeline with the gate in
+    /// place of both sinks.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
-            &AUDIT_SINK,
+            &GATE,
+            &GATE,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; the host waits for that record's
             // `sc=irq_bind` marker before typing the unlock passphrase, so

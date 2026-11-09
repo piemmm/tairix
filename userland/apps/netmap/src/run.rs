@@ -39,7 +39,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion, WindowSizing,
     };
-    use tairix_abi::{Errno, FieldValue, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, FieldValue, ORIGIN_WIRE_LEN};
     use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings};
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
@@ -67,9 +67,9 @@ mod program {
     use tairix_window::app::WindowPane;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        clipboard, damage_in, key_input_event, pinch_input_events, pointer_input_events,
-        pointer_point, scroll_input_events, DeclaredTip, Desktop, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, WindowClient, WindowEvents,
+        damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
+        scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain, EventError,
+        EventMailbox, EventSource, Parked, PostedRequest, Refused, WindowClient, WindowEvents,
     };
 
     /// The name this program states its refusals under.
@@ -614,9 +614,8 @@ mod program {
         settings: Option<SettingsPane>,
         /// The event endpoint the settings window opens on.
         event_endpoint: u64,
-        /// The session serving the map's window, which must answer the settings
-        /// window too; `None` until the map's window first opens.
-        server: Option<ProcId>,
+        /// The map's first window, whose refusal leaves the map nothing to be.
+        first_window: Option<u64>,
     }
 
     impl NetMap {
@@ -624,7 +623,10 @@ mod program {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
         }
 
-        fn open(&mut self, event_endpoint: u64) -> Result<ProcId, i32> {
+        /// Open the map's window and present its first frame, answering the
+        /// reserved exit code for a window that could not be asked for; the
+        /// desktop's refusal arrives later.
+        fn open(&mut self, event_endpoint: u64) -> Result<(), i32> {
             let scale = self.desktop.scale();
             let sizing = win_sizing(
                 scale.scale_length(MIN_WIDTH),
@@ -635,8 +637,7 @@ mod program {
             } else {
                 LOADING_TITLE
             };
-            let server = self
-                .window
+            self.window
                 .open(event_endpoint, &self.mode, title, sizing)
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             self.tip = DeclaredTip::new();
@@ -646,8 +647,60 @@ mod program {
                 let _ = self.window.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
-            self.server = Some(server);
-            Ok(server)
+            if self.first_window.is_none() {
+                self.first_window = self.window.window_id();
+            }
+            Ok(())
+        }
+
+        /// Act on a request the session refused: the map's first window it
+        /// would not open leaves the map nothing to be, answering why; a later
+        /// one or the settings window it would not open never existed, and the
+        /// map carries on without it.
+        fn refused(&mut self, refused: &Refused) -> Option<&'static str> {
+            app::report(APP_NAME, refused);
+            let window = self.window.window_id();
+            if self.window.refused(refused) {
+                self.close_settings();
+                self.menu = None;
+                if window == self.first_window {
+                    return Some("the desktop would not open the window");
+                }
+                return None;
+            }
+            let settings = self.settings.as_ref().map(SettingsPane::id);
+            if settings.is_some_and(|pane| app::refused_create(refused, pane)) {
+                self.settings = None;
+            }
+            if let PostedRequest::OpenMenu(open) = refused.request {
+                if self.menu.as_ref().is_some_and(|(asked, _)| *asked == open) {
+                    self.menu = None;
+                }
+            }
+            None
+        }
+
+        /// Take every answer that has landed: a frame given back to the
+        /// settings window presents what was drawn behind it, the map's the
+        /// shell presents itself, and nothing else is asked for.
+        fn take_answers(&mut self) {
+            while let Some(answer) = self.window.take_answer() {
+                let Landed::FrameReturned { window_id } = answer else {
+                    continue;
+                };
+                let Self {
+                    window, settings, ..
+                } = self;
+                if let Some(pane) = settings.as_mut().filter(|pane| pane.id() == window_id) {
+                    if pane
+                        .pane
+                        .present_deferred(window.client(), &pane.surface)
+                        .is_err()
+                    {
+                        pane.owed = Repaint::Whole;
+                    }
+                }
+            }
         }
 
         /// Open the probe-settings window, on the posture now in force. A
@@ -657,14 +710,10 @@ mod program {
             if self.settings.is_some() {
                 return;
             }
-            let Some(server) = self.server else {
-                return;
-            };
             let posture = self.choice.live().posture;
             match SettingsPane::open(
                 self.window.client(),
                 self.event_endpoint,
-                server,
                 posture,
                 &self.desktop,
                 &self.themes,
@@ -863,12 +912,10 @@ mod program {
             let Some(window_id) = self.window.window_id() else {
                 return;
             };
-            let put = clipboard::put(
-                self.window.client(),
-                window_id,
-                ClipboardKind::Text,
-                text.as_bytes(),
-            );
+            let put =
+                self.window
+                    .client()
+                    .set_clipboard(window_id, ClipboardKind::Text, text.as_bytes());
             if let Err(err) = put {
                 app::report(APP_NAME, format_args!("nothing was copied ({err})"));
             }
@@ -1210,7 +1257,9 @@ mod program {
                     Ok(event) => event,
                     Err(EventError::Undecodable(_)) => None,
                     Err(EventError::Refused(refused)) => {
-                        app::report(APP_NAME, refused);
+                        if let Some(why) = app_state.refused(&refused) {
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, why);
+                        }
                         None
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -1224,12 +1273,17 @@ mod program {
                 match events.try_wait(app_state.window.client()) {
                     Ok(Some(event)) => burst.push(event),
                     Ok(None) | Err(EventError::Undecodable(_)) => break,
-                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Refused(refused)) => {
+                        if let Some(why) = app_state.refused(&refused) {
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, why);
+                        }
+                    }
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }
                 }
             }
+            app_state.take_answers();
 
             let now = tairix_rt::clock_get();
             let mut repaint = false;
@@ -1609,12 +1663,10 @@ mod program {
     }
 
     impl SettingsPane {
-        /// Open the window on `client`, refusing a create answered by any
-        /// session but `server`, the one serving the map's window.
+        /// Open the window on `client`.
         fn open(
             client: &mut WindowClient<app::RtWindowTransport>,
             endpoint: u64,
-            server: ProcId,
             posture: Posture,
             desktop: &Desktop,
             themes: &ThemeRegistry,
@@ -1624,7 +1676,7 @@ mod program {
             let surface = Surface::new(width, height)
                 .ok_or_else(|| String::from("no memory for the window"))?;
             let mode = app::mode_for(width, height);
-            let (pane, replied) = WindowPane::open(
+            let pane = WindowPane::open(
                 client,
                 endpoint,
                 &mode,
@@ -1632,12 +1684,6 @@ mod program {
                 WindowSizing::Fixed,
             )
             .map_err(|err| alloc::format!("{err}"))?;
-            if replied != server {
-                let _ = pane.close(client);
-                return Err(String::from(
-                    "the settings window was answered by another session",
-                ));
-            }
             Ok(Self {
                 pane,
                 surface,
@@ -1768,13 +1814,19 @@ mod program {
             choice: Publication::new(loaded_settings),
             settings: None,
             event_endpoint,
-            server: None,
+            first_window: None,
         };
         // The map was started to be looked at, so a first window that will
         // not open leaves it nothing to be; later ones are a click on its slot.
-        let server = match state.open(event_endpoint) {
-            Ok(server) => server,
-            Err(code) => return code,
+        if let Err(code) = state.open(event_endpoint) {
+            return code;
+        }
+        let Some(server) = state.window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
 
         let deadlines = Deadlines::default();

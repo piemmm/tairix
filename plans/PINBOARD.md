@@ -594,7 +594,7 @@ is **served** rather than hosted:
   what stops the request being used to make the session read a file the
   caller chose.
 
-Both are of the same posture as `QueryDesktop`: seat-scoped,
+Both are of the same posture as `Connect`: seat-scoped,
 capability-free, describing the caller's own desktop and granting nothing.
 Both are *reads*: the only write is still the §6 apply.
 

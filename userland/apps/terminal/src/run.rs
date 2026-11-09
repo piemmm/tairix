@@ -81,7 +81,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppMenuItemId, DialogModality, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind};
+    use tairix_abi::{Errno, Signal, WaitSetOp, WaitSourceKind};
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
@@ -107,8 +107,8 @@ mod program {
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         damage_in, key_input_event, pointer_input_events, pointer_point, present_damage_list,
-        scroll_input_events, Desktop, EventError, EventMailbox, Repaint, WindowClient,
-        WindowEvents, WindowTransport,
+        scroll_input_events, Desktop, EventError, EventMailbox, PostedRequest, PresentState,
+        Repaint, WindowClient, WindowEvents, WindowTransport,
     };
 
     /// The wait-set token of the settings worker's wake pipe: readable exactly
@@ -359,7 +359,7 @@ mod program {
     /// terminal carries on.
     fn open_settings(
         client: &mut WindowClient<app::RtWindowTransport>,
-        (owner, server): (u64, ProcId),
+        owner: u64,
         event_endpoint: u64,
         sheet: Box<Settings>,
         theme: &Theme,
@@ -382,7 +382,7 @@ mod program {
         };
         let pane = match WindowPane::open_dialog(
             client,
-            (owner, server),
+            owner,
             event_endpoint,
             &app::mode_for(width, height),
             DialogModality::Modeless,
@@ -421,7 +421,7 @@ mod program {
         scale: Scale,
         client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Result<(), Errno> {
-        window.owed = client.present_in_flight(window.pane.id());
+        window.owed = client.present_state(window.pane.id()) == PresentState::InFlight;
         if window.owed {
             return Ok(());
         }
@@ -568,7 +568,7 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
         ) -> Result<(), Errno> {
-            if client.present_in_flight(self.pane.id()) {
+            if client.present_state(self.pane.id()) == PresentState::InFlight {
                 self.unpainted = true;
                 return Ok(());
             }
@@ -742,9 +742,6 @@ mod program {
         client: &'a mut WindowClient<app::RtWindowTransport>,
         /// The one event mailbox every window reports through.
         event_endpoint: u64,
-        /// The session the desktop query named, the one sender a window
-        /// create's reply may come from.
-        server: ProcId,
         /// The wait-set the process parks on.
         set: u64,
         /// The slot this window takes, naming its two tokens.
@@ -871,13 +868,7 @@ mod program {
             "Terminal",
             win_sizing(min_width_px, min_height_px),
         ) {
-            Ok((pane, replied)) if replied == ctx.server => pane,
-            // Something else answering for the window endpoint: the window it
-            // named is closed rather than drawn into.
-            Ok((pane, _)) => {
-                let _ = pane.close(ctx.client);
-                return Err("a window reply came from another sender");
-            }
+            Ok(pane) => pane,
             Err(err) => {
                 app::report(
                     OWN_WORD,
@@ -1125,7 +1116,6 @@ mod program {
         match open_window(WindowContext {
             client: &mut client,
             event_endpoint,
-            server,
             set,
             slot: next_slot,
             profile: publication.live(),
@@ -1266,7 +1256,6 @@ mod program {
                         AppContext {
                             set,
                             event_endpoint,
-                            server,
                             next_slot: &mut next_slot,
                             publication: &mut publication,
                             themes: &mut themes,
@@ -1298,7 +1287,6 @@ mod program {
                         AppContext {
                             set,
                             event_endpoint,
-                            server,
                             next_slot: &mut next_slot,
                             publication: &mut publication,
                             themes: &mut themes,
@@ -1336,7 +1324,6 @@ mod program {
                             AppContext {
                                 set,
                                 event_endpoint,
-                                server,
                                 next_slot: &mut next_slot,
                                 publication: &mut publication,
                                 themes: &mut themes,
@@ -1433,7 +1420,6 @@ mod program {
                             AppContext {
                                 set,
                                 event_endpoint,
-                                server,
                                 next_slot: &mut next_slot,
                                 publication: &mut publication,
                                 themes: &mut themes,
@@ -1632,9 +1618,6 @@ mod program {
         set: u64,
         /// The one event mailbox.
         event_endpoint: u64,
-        /// The session the desktop query named: every event and every window
-        /// reply must come from it.
-        server: ProcId,
         /// The next window slot to mint.
         next_slot: &'a mut u64,
         /// The user's profile — what the windows render, and what the store
@@ -1727,7 +1710,6 @@ mod program {
                 match open_window(WindowContext {
                     client,
                     event_endpoint: ctx.event_endpoint,
-                    server: ctx.server,
                     set: ctx.set,
                     slot,
                     profile: ctx.publication.live(),
@@ -1809,7 +1791,7 @@ mod program {
                 }
                 *ctx.settings = open_settings(
                     client,
-                    (window, ctx.server),
+                    window,
                     ctx.event_endpoint,
                     Box::new(Settings::new(ctx.publication.live())),
                     ctx.themes.active(),
@@ -2184,13 +2166,45 @@ mod program {
         loop {
             let event = match events.try_wait(client) {
                 Ok(Some(event)) => event,
-                Ok(None) => return finish(EventOutcome::Continue, redrawn, edited),
+                Ok(None) => {
+                    // The terminal asks for nothing else, and a frame given
+                    // back is painted by the window it was owed to.
+                    while let Some(answer) = client.take_answer() {
+                        if let tairix_window::Answer::FrameReturned { window_id } = answer {
+                            for open in windows
+                                .iter_mut()
+                                .filter(|open| open.pane.id() == window_id)
+                            {
+                                open.unpainted = true;
+                            }
+                        }
+                    }
+                    return finish(EventOutcome::Continue, redrawn, edited);
+                }
                 // A frame the session sent that this build cannot decode is
                 // dropped and the drain reads on past it; only the mailbox
                 // itself failing ends the channel.
                 Err(EventError::Undecodable(_)) => continue,
                 Err(EventError::Refused(refused)) => {
                     app::report(OWN_WORD, refused);
+                    // A window the desktop would not open never existed.
+                    if windows
+                        .iter()
+                        .any(|open| app::refused_create(&refused, open.pane.id()))
+                    {
+                        return EventOutcome::CloseWindow {
+                            window: refused.window_id,
+                        };
+                    }
+                    let held = settings.as_ref().map(|held| held.pane.id());
+                    if held.is_some_and(|held| app::refused_create(&refused, held)) {
+                        *settings = None;
+                    }
+                    if let PostedRequest::OpenMenu(asked) = refused.request {
+                        for open in windows.iter_mut().filter(|open| open.menu == Some(asked)) {
+                            open.menu = None;
+                        }
+                    }
                     continue;
                 }
                 Err(EventError::Mailbox(_)) => return EventOutcome::ChannelLost,

@@ -19,8 +19,8 @@
 //! desktop, open a terminal from the program library, type
 //! [`COMMAND_LINE`], photograph the window, press `F11`, `Escape` and the
 //! title bar's size toggle, photograph each state, and finally press the
-//! title bar's close control. Only the audit sink is swapped, for the PASS
-//! witnesses below.
+//! title bar's close control. Only the sinks are swapped, for one gate
+//! latching the PASS witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -28,11 +28,12 @@
 //!
 //! 1. **The game launched.** An `APP_LOADED` record naming the game's bundle
 //!    in the system application store — the shell resolving the typed word.
-//! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the
-//!    reserved window endpoint after that load. The game opens one window,
-//!    and the terminal's was created before the game was loaded.
+//! 2. **Its window opened.** The desktop's record of a window first shown
+//!    after that load. The game opens one window, and the terminal's was shown
+//!    before the game was loaded. The desktop's records are log records, which
+//!    the kernel delivers to the diagnostic sink, so one gate is both sinks.
 //! 3. **It left cleanly.** An `APP_LOADED` record naming [`THEN_COMMAND`]'s
-//!    bundle after that create: the typed line joins the two with `&&`, so
+//!    bundle after that window: the typed line joins the two with `&&`, so
 //!    the shell loads it only once the game exited with status zero.
 //!
 //! # Why the guest cannot exit early
@@ -55,13 +56,13 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_desktop_witness::{window_shown, ShownWindows};
     use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_wintersun_client_qemu_aarch64::{is_bundle, GAME_APP_NAME, THEN_COMMAND};
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -80,23 +81,23 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// three PASS witnesses described in the module docs.
-    struct ClientSink {
+    /// The gate both sinks are handed: it latches the three PASS witnesses
+    /// described in the module docs and replays the whole trail to serial.
+    struct ClientGate {
         /// The game's bundle was loaded.
         launched: AtomicBool,
-        /// Its window was created after that.
-        window_opened: AtomicBool,
+        /// The windows first shown after that: the game's.
+        windows: ShownWindows<1>,
         /// The witness command was loaded after that.
         left_cleanly: AtomicBool,
     }
 
-    impl ClientSink {
-        /// A sink with no witness latched.
+    impl ClientGate {
+        /// A gate with no witness latched.
         const fn new() -> Self {
             Self {
                 launched: AtomicBool::new(false),
-                window_opened: AtomicBool::new(false),
+                windows: ShownWindows::new(),
                 left_cleanly: AtomicBool::new(false),
             }
         }
@@ -118,7 +119,8 @@ mod kernel {
                 suffix,
             ) {
                 self.launched.store(true, Ordering::Release);
-            } else if self.window_opened.load(Ordering::Acquire)
+                self.windows.arm();
+            } else if self.windows.count() >= 1
                 && is_bundle(
                     bundle,
                     tairix_abi::SYSTEM_COMMAND_STORE,
@@ -129,57 +131,28 @@ mod kernel {
                 self.left_cleanly.store(true, Ordering::Release);
             }
         }
-
-        /// Latch the window witness from a create reply on the reserved
-        /// window endpoint, once the game has loaded.
-        ///
-        /// The endpoint is matched against the exact hex spelling the
-        /// kernel/ipc audit fields render (`format_hex_u64`), and the
-        /// operation by its reply's wire length; nothing else about a reply
-        /// is read, because the rendezvous is shared.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            if !self.launched.load(Ordering::Acquire) {
-                return;
-            }
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            if field_str(event, "endpoint") != Some(expected) {
-                return;
-            }
-            // An unparsable length stays zero, matching no reply length and
-            // latching nothing (fail closed).
-            let reply_len = field_str(event, "len")
-                .and_then(tairix_util::count::parse_decimal)
-                .and_then(|len| usize::try_from(len).ok())
-                .unwrap_or_default();
-            if reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN {
-                self.window_opened.store(true, Ordering::Release);
-            }
-        }
     }
 
-    impl Sink for ClientSink {
+    impl Sink for ClientGate {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink first, so the QEMU transcript
-            // records the full boot → unlock → desktop → game timeline and the
-            // host can gate its injection on it.
-            SerialSink::new().write_event(event);
+            // Latched before the record reaches serial, so the line the host
+            // acts on cannot precede what it attests; replayed so the QEMU
+            // transcript records the full boot → unlock → desktop → game
+            // timeline the host gates its injection on.
             if event.id.0 == tairix_appload::events::APP_LOADED.0 {
                 self.note_bundle_loaded(event);
-            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
-            } else {
-                return;
+            } else if let Some(window) = window_shown(event) {
+                self.windows.note(window);
             }
+            SerialSink::new().write_event(event);
             if self.left_cleanly.load(Ordering::Acquire) {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: ClientSink = ClientSink::new();
+    /// The gate the boot pipeline is handed as both its sinks.
+    static GATE: ClientGate = ClientGate::new();
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -193,16 +166,16 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the audit
-    /// observer in place.
+    /// address is forwarded to the production boot pipeline with the gate in
+    /// place of both sinks.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
-            &AUDIT_SINK,
+            &GATE,
+            &GATE,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; the host waits for that record's
             // `sc=irq_bind` marker before typing the unlock passphrase, so

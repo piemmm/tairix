@@ -38,8 +38,7 @@ use tairix_log::Sink;
 
 use crate::sharedreg::KernelHold;
 use crate::waitq::{
-    nearest_timed_deadline, park_calling_task, serve_wake_server, wait_arch, WaitQueueArch,
-    CALL_WAITQ,
+    nearest_timed_deadline, park_calling_task, serve_wake, wait_arch, WaitQueueArch, CALL_WAITQ,
 };
 
 use super::blkmeter::{Attempt, DeviceIoMeter, VolumeIoSource};
@@ -385,10 +384,9 @@ impl BlkClient {
         // or as busy time.
         self.meter.issued(issued_ns);
 
-        // Wake the serving driver parked between requests — exactly the
-        // endpoint's recorded server where known, the broadcast fallback
-        // otherwise (a thundering herd is worse than one spurious wake).
-        serve_wake_server(self.endpoint.server_task());
+        // Wake the serving driver parked between requests: the threads
+        // waiting on this endpoint, and no other server.
+        serve_wake(self.endpoint.id().0);
 
         // Register before the first poll so a reply landing in the
         // check/park window is never lost, then poll-and-park until the

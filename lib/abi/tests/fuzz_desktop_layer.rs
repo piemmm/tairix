@@ -39,6 +39,7 @@ const SMOKE_ITERATIONS: u64 = 20_000;
 /// A well-formed `OpenLayer` as a mutation seed.
 fn seed_open() -> Vec<u8> {
     encode(&WindowRequest::OpenLayer {
+        window_id: tairix_abi::window_ipc::object_id(4, 1),
         shm_handle: 0x4242,
         event_endpoint: 0x99,
         frame_count: 2,

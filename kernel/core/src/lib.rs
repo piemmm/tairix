@@ -335,8 +335,8 @@ pub use users::{
 };
 pub use waitq::{
     call_wake, call_wake_task, call_woken, console_damage_wake, console_deregister, console_wake,
-    drain_pending_wakes, hw_tree_wake, install_wait_arch, irq_wake, nearest_timed_deadline,
-    procwait_wake, rearm_timed_wakeup, seat_input_wake, serve_wake, serve_wake_task,
+    drain_pending_wakes, endpoint_key, hw_tree_wake, install_wait_arch, irq_wake,
+    nearest_timed_deadline, procwait_wake, rearm_timed_wakeup, seat_input_wake, serve_wake,
     timed_wake_sweep, wait_now_ns, WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch, CALL_WAITQ,
     CONSOLE_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ, NO_DEADLINE, PROCWAIT_WAITQ, SEAT_INPUT_WAITQ,
     SERVE_WAITQ,

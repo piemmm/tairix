@@ -10449,11 +10449,10 @@ static TESTS: &[QemuTest] = &[
     // terminal's own model, so the click lands where the desktop draws.
     //
     // PASS needs all three of the guest's witnesses, in order: an `APP_LOADED`
-    // naming the terminal's bundle, a 12-byte minted-id reply on the reserved
-    // window endpoint (the reply of exactly one operation, `OpenMenu`), and a
-    // create reply *after* it — the settings sheet the chosen row opens, which
-    // the terminal opens on nothing but the one `MenuClosed` answer naming
-    // that row. Two dumps read the screen: the terminal's window alone, and
+    // naming the terminal's bundle, the desktop's record of a menu's plates on
+    // screen, and its record of a window first shown *after* it — the settings
+    // sheet the chosen row opens, which the terminal opens on nothing but the
+    // one `MenuClosed` answer naming that row. Two dumps read the screen: the terminal's window alone, and
     // the same screen with the plate over it, each gated on the session's own
     // witness that the frame is on screen and verified before the gesture that
     // follows it.
@@ -10571,7 +10570,7 @@ static TESTS: &[QemuTest] = &[
     // waits on anything slower than the prompt itself.
     //
     // PASS needs the guest's witnesses in order: an `APP_LOADED` naming the
-    // settings bundle, the create reply of its window, and three commits of
+    // settings bundle, the desktop's record of its window shown, and three commits of
     // the desktop's published settings document — the appearance choice, the
     // kept resolution, then Compact density, the last gesture, which the
     // runner sends only once the resized dump is read back.
@@ -10713,7 +10712,7 @@ static TESTS: &[QemuTest] = &[
     // raise the marker three times, and the keyboard's arming is among them.
     //
     // PASS needs the guest's witnesses in order: an `APP_LOADED` naming the map
-    // bundle, the create reply of its window, a finished probe that reached a
+    // bundle, the desktop's record of its window shown, a finished probe that reached a
     // host — read off the diagnostic sink, where the map's own records arrive —
     // and the map's own clean exit, the *Quit* the runner sends once the dump is
     // read back and the probe's line is out. An exit with no host reached fails
@@ -10766,7 +10765,7 @@ static TESTS: &[QemuTest] = &[
     // compared with the scene this host draws at that extent.
     //
     // PASS needs the guest's three witnesses in order: an `APP_LOADED` naming
-    // the game's bundle, its window's create reply, and then the load of the
+    // the game's bundle, the desktop's record of its window shown, and then the load of the
     // command the typed line runs only once the game has left cleanly — which
     // it does only once the script presses its title bar's close control,
     // after the last dump.

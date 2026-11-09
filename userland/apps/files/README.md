@@ -90,8 +90,8 @@ that text lives.
 One `shm_create`d frame region granted to the reserved window endpoint
 (the zero-copy window surface), one `port_bind`-bound event mailbox the
 app **parks** on through its wait-set (every accepted event
-authenticated against the kernel-attested session identity the create
-reply named), and the `WindowClient` calls over `ipc_call`.
+authenticated against the kernel-attested session identity the connect
+answered), and the `WindowClient` requests it posts.
 
 Each window also holds one drawing `Surface` for its whole life, so a round
 that can say what it moved is redrawn and copied only inside that rectangle —
@@ -106,8 +106,8 @@ and is never taller than its listing: it opens at the height the listing
 fills and states that as its height ceiling whenever the listing's height
 moves (`fit_to_listing`), so the window manager holds it there.
 
-The desktop is asked for first, before anything is sized or painted
-(`WindowClient::desktop`), so the window opens at a size the screen can
+The desktop is learned first, before anything is sized or painted
+(`WindowClient::connect`), so the window opens at a size the screen can
 hold, the listing is set at the desktop's own UI density, and a session in
 dark mode gets a dark window rather than a light one corrected after the
 user has seen it. A `DesktopChanged` afterwards is adopted and repainted —

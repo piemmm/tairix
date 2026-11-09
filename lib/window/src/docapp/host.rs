@@ -35,8 +35,8 @@ use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuSymbol, CursorShape, DialogModality, DocumentName, MenuOutcome, PickPurpose, ToolOver,
-    WindowEvent, WindowRegion, WindowSizing,
+    AppMenuSymbol, ClipboardKind, CursorShape, DialogModality, DocumentName, MenuOutcome,
+    PickPurpose, ToolOver, WindowEvent, WindowRegion, WindowSizing,
 };
 use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, DOCUMENT_WRITABLE_ROLE_ARG, STDIN};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -62,8 +62,8 @@ use crate::app::{self, fail, report, RtWindowTransport, Wake, WindowPane};
 use crate::appbar::{declaration, declare_app_bar, is_quit, QUIT_ROW};
 use crate::client::{
     pinch_input_events, pointer_input_events, pointer_point, present_damage_list,
-    scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Parked, Repaint, Target,
-    WindowClient, WindowEvents,
+    scroll_input_events, Answer, DeclaredTip, EventDrain, EventError, EventSource, Parked,
+    PostedRequest, Refused, Repaint, Target, WindowClient, WindowEvents,
 };
 use crate::desktop::Desktop;
 use crate::document::{Access, DocumentFile, PickFor, SaveJob, SaveStep, SavedDocument, UNTITLED};
@@ -383,6 +383,16 @@ pub trait DocumentApp: Sized {
     ) {
     }
 
+    /// What the clipboard held when the window at `index` asked to paste
+    /// ([`Host::paste`]): `None` when it was empty. An application that
+    /// pastes nothing never sees this.
+    fn pasted(
+        _host: &mut Host<Self>,
+        _index: usize,
+        _contents: Result<Option<(ClipboardKind, Vec<u8>)>, Errno>,
+    ) {
+    }
+
     /// Window `index`'s engine was driven, and what it asked is about to be
     /// carried out: what it changed is handed to the other windows of its
     /// document here, so a save asked now freezes it.
@@ -469,6 +479,18 @@ pub struct DocWindow<A: DocumentApp> {
     /// The window whose document it shows, for a member window
     /// ([`Host::open_member`]): its file is that window's.
     primary: Option<u64>,
+    /// A file the picker chose for it, kept while its name is asked for.
+    chosen: Option<Chosen>,
+    /// The quick-entry row of the menu open named that was committed, while
+    /// its text is asked for.
+    entering: Option<(u64, AppMenuItemId)>,
+}
+
+/// A file the picker handed a window, and what the pick was for.
+struct Chosen {
+    pick: PickFor,
+    file: Handle,
+    writable: bool,
 }
 
 /// Whether a window's document is still being read in; input waits until it
@@ -574,7 +596,7 @@ impl OwnedPane {
                 ),
             }
         }
-        if self.chrome.title.draft != title {
+        if self.chrome.title.draft() != title {
             self.chrome.title.read(title);
             self.chrome.owe(Repaint::Whole);
         }
@@ -1083,11 +1105,11 @@ impl<A: DocumentApp> DocWindow<A> {
                 self.chrome.owed = Repaint::Nothing;
             }
         }
+        let view = &self.view;
         if self.chrome.owed != Repaint::Nothing {
-            self.view.write_title(&mut self.chrome.title.draft);
+            self.chrome.title.write(|title| view.write_title(title));
         }
         let focused = self.focus_told;
-        let view = &self.view;
         let painted = self.chrome.present(client, &mut self.damage, |surface, _| {
             render(surface, view, focused);
         });
@@ -1181,10 +1203,12 @@ pub struct Host<A: DocumentApp> {
     /// to keep having been refused: each lands with none to give back.
     unroomed: usize,
     event_endpoint: u64,
-    server: ProcId,
     /// Quit was chosen: the process ends once every window has closed and no
     /// save is left to land.
     quitting: bool,
+    /// The documents asked to be shown in their folders and not yet answered,
+    /// by the reveal's token, named for the alert a refusal raises.
+    reveals: Vec<(u64, String)>,
     /// Files offered over the application's windows, and the read of their
     /// drag's media type their answers wait on.
     offers: FileOffers,
@@ -1207,6 +1231,15 @@ impl<A: DocumentApp> Host<A> {
     /// State `reason` on `stderr` under the application's name.
     pub fn report(&self, reason: impl Display) {
         report(A::NAME, reason);
+    }
+
+    /// Ask what the clipboard holds for window `index`, handed to
+    /// [`DocumentApp::pasted`] once it lands.
+    pub fn paste(&mut self, index: usize) {
+        let id = self.windows[index].id();
+        if let Err(err) = self.client.ask_clipboard(id) {
+            self.windows[index].state(format!("Could not paste: {err}"));
+        }
     }
 
     /// A job was handed to one of the application's own workers; `answered`
@@ -1539,13 +1572,7 @@ impl<A: DocumentApp> Host<A> {
         let least = view.min_size(theme, scale, self.faces);
         let mut title = String::new();
         view.write_title(&mut title);
-        let opened = open_pane(
-            &mut self.client,
-            (self.event_endpoint, self.server),
-            &mode,
-            &title,
-            least,
-        );
+        let opened = open_pane(&mut self.client, self.event_endpoint, &mode, &title, least);
         let pane = match opened {
             Ok(pane) => pane,
             Err(why) => {
@@ -1575,6 +1602,8 @@ impl<A: DocumentApp> Host<A> {
             quit_asked: false,
             reveal_on_close: false,
             primary: None,
+            chosen: None,
+            entering: None,
         };
         window.view.lay_out(
             mode.width_px,
@@ -1686,13 +1715,7 @@ impl<A: DocumentApp> Host<A> {
         };
         let least = view.min_size(theme, scale, self.faces);
         let title = String::from(view.title());
-        let opened = open_pane(
-            &mut self.client,
-            (self.event_endpoint, self.server),
-            &mode,
-            &title,
-            least,
-        );
+        let opened = open_pane(&mut self.client, self.event_endpoint, &mode, &title, least);
         let pane = match opened {
             Ok(pane) => pane,
             Err(why) => {
@@ -1957,16 +1980,36 @@ impl<A: DocumentApp> Host<A> {
             .ok_or(Errno::NotSupported)
             .and_then(|session| tairix_rt::fd_grant_location(fd, session))
             .and_then(|location| self.client.reveal_document(id, location));
-        let Err(err) = shown else {
+        match shown {
+            Ok(token) if self.reveals.try_reserve(1).is_ok() => self.reveals.push((token, name)),
+            // With no room to name it the answer is not said: the reveal is
+            // incidental to the close under way.
+            Ok(_) => {}
+            Err(err) => self.not_revealed(&name, err),
+        }
+    }
+
+    /// The desktop answered the reveal `token` named: a refusal is said in an
+    /// alert, since the window it would have shown has gone.
+    fn revealed(&mut self, token: u64, shown: Result<(), Errno>) {
+        let Some(at) = self.reveals.iter().position(|(asked, _)| *asked == token) else {
             return;
         };
+        let (_, name) = self.reveals.swap_remove(at);
+        if let Err(err) = shown {
+            self.not_revealed(&name, err);
+        }
+    }
+
+    /// Say that the document `name` was not shown in its folder, for `err`.
+    fn not_revealed(&mut self, name: &str, err: Errno) {
         self.report(format_args!(
             "{} was not shown in its folder: {err}",
-            tairix_util::utf8::shown(&name)
+            tairix_util::utf8::shown(name)
         ));
         self.alert(
             None,
-            &refusal_headline(&name, "shown in its folder"),
+            &refusal_headline(name, "shown in its folder"),
             reveal_refusal(err),
         );
     }
@@ -2241,13 +2284,33 @@ impl<A: DocumentApp> Host<A> {
                 return;
             }
         };
-        // A name the session no longer holds leaves the document named as it
-        // was, or untitled.
-        let name = self
-            .client
-            .take_picked_name(window_id)
-            .ok()
-            .filter(|name| !name.is_empty());
+        let window = &mut self.windows[index];
+        // A file chosen again before the first's name landed replaces it.
+        window.chosen = Some(Chosen {
+            pick,
+            file,
+            writable,
+        });
+        if let Err(err) = self.client.ask_picked_name(window_id) {
+            self.report(format!(
+                "the chosen file's name could not be asked for ({err})"
+            ));
+            self.name_chosen(index, None);
+        }
+    }
+
+    /// The name of the file window `index`'s picker chose has landed: `None`,
+    /// one the session no longer holds, leaves the document named as it was,
+    /// or untitled.
+    fn name_chosen(&mut self, index: usize, name: Option<String>) {
+        let Some(Chosen {
+            pick,
+            file,
+            writable,
+        }) = self.windows[index].chosen.take()
+        else {
+            return;
+        };
         match pick {
             PickFor::Open => {
                 let into = self.windows[index].pristine().then_some(index);
@@ -2305,14 +2368,14 @@ impl<A: DocumentApp> Host<A> {
         }
         let outcome = match outcome {
             MenuOutcome::Chosen(item) => window.view.chosen(item, &mut window.damage),
-            MenuOutcome::Entered(item) => match self.client.take_menu_text(over, open_id) {
-                Ok(Some(text)) => window.view.entered(item, &text, &mut window.damage),
-                Ok(None) => return,
-                Err(err) => {
+            MenuOutcome::Entered(item) => {
+                if let Err(err) = self.client.ask_menu_text(over, open_id) {
                     window.state(format!("The entry could not be read ({err})"));
-                    return;
+                } else {
+                    window.entering = Some((open_id, item));
                 }
-            },
+                return;
+            }
             MenuOutcome::Refused(reason) => {
                 window.state(format!("No menu was shown: {}", reason.describe()));
                 return;
@@ -2414,7 +2477,9 @@ impl<A: DocumentApp> Host<A> {
                 return;
             }
             WindowEvent::OpenRequested => {
-                self.drain_open_targets();
+                if let Err(err) = self.client.ask_open_targets() {
+                    self.report(format!("cannot ask for what to open ({err})"));
+                }
                 return;
             }
             WindowEvent::AlertClosed { alert_id, outcome } => {
@@ -2899,10 +2964,9 @@ impl<A: DocumentApp> Host<A> {
             }
             let title = String::from(wanted.title);
             let opening = window.view.tool_opening(id);
-            let parent = (window_id, self.server);
             let opened = open_tool(
                 &mut self.client,
-                parent,
+                window_id,
                 self.event_endpoint,
                 (rect, sizing),
                 opening,
@@ -2977,11 +3041,10 @@ impl<A: DocumentApp> Host<A> {
         let Some(wanted) = wanted else {
             return;
         };
-        let owner = (window.id(), self.server);
         let (rect, modality) = (wanted.rect, wanted.modality);
         let opened = open_dialog(
             &mut self.client,
-            owner,
+            window.id(),
             self.event_endpoint,
             (rect, modality),
             String::from(wanted.title),
@@ -3133,52 +3196,43 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Open a window at every document the desktop has handed this instance.
-    fn drain_open_targets(&mut self) {
-        loop {
-            let target = match self.client.take_open_target() {
-                Ok(Some(target)) => target,
-                Ok(None) => return,
-                Err(err) => {
-                    self.report(format!("cannot take an open target ({err})"));
-                    return;
-                }
-            };
-            match target {
-                Target::Document {
-                    name,
-                    grant,
-                    writable,
-                } => match Handle::from_delegation(grant) {
-                    Ok(file) => self.open_document(file, name, writable, None),
-                    Err(raw) => self.alert(
-                        None,
-                        &refusal_headline(name.as_str(), "opened"),
-                        &format!(
-                            "The document could not be taken over ({}).",
-                            Errno::from_syscall(raw)
-                        ),
+    /// Open a window at `target`, one of the documents the desktop has handed
+    /// this instance.
+    fn open_target(&mut self, target: Target) {
+        match target {
+            Target::Document {
+                name,
+                grant,
+                writable,
+            } => match Handle::from_delegation(grant) {
+                Ok(file) => self.open_document(file, name, writable, None),
+                Err(raw) => self.alert(
+                    None,
+                    &refusal_headline(name.as_str(), "opened"),
+                    &format!(
+                        "The document could not be taken over ({}).",
+                        Errno::from_syscall(raw)
                     ),
-                },
-                // Unreachable from the desktop, which hands a document
-                // application an open document because it holds no authority
-                // to open a name.
-                Target::Path(path) | Target::Image(path) => self.report(format!(
-                    "{path} was handed over as a path; {} holds no filesystem authority and \
-                     can only be given an open document",
-                    A::NAME
-                )),
-                Target::Pane(pane) => self.report(format!(
-                    "{pane} was handed over, but {} has no places to go to",
-                    A::NAME
-                )),
-                Target::Placed {
-                    window_id,
-                    at,
-                    name,
-                    grant,
-                } => self.placed(window_id, pointer_point(at.0, at.1), name, grant),
-            }
+                ),
+            },
+            // Unreachable from the desktop, which hands a document
+            // application an open document because it holds no authority
+            // to open a name.
+            Target::Path(path) | Target::Image(path) => self.report(format!(
+                "{path} was handed over as a path; {} holds no filesystem authority and \
+                 can only be given an open document",
+                A::NAME
+            )),
+            Target::Pane(pane) => self.report(format!(
+                "{pane} was handed over, but {} has no places to go to",
+                A::NAME
+            )),
+            Target::Placed {
+                window_id,
+                at,
+                name,
+                grant,
+            } => self.placed(window_id, pointer_point(at.0, at.1), name, grant),
         }
     }
 
@@ -3206,15 +3260,154 @@ impl<A: DocumentApp> Host<A> {
         self.take_offer_step(step);
     }
 
-    /// Take in every media type read for a file offered that has landed.
-    fn take_offered_media(&mut self) {
-        while let Some(read) = self.client.take_offered_media() {
-            let (step, failed) = self.offers.landed(read);
-            if let Some(err) = failed {
-                self.report(format!("cannot read a file offered ({err})"));
-            }
-            self.take_offer_step(step);
+    /// Take in every answer that has landed.
+    fn take_answers(&mut self) {
+        while let Some(answer) = self.client.take_answer() {
+            self.take_answer(answer);
         }
+    }
+
+    /// Act on one landed answer.
+    fn take_answer(&mut self, answer: Answer) {
+        match answer {
+            Answer::OfferedFile(read) => {
+                let (step, failed) = self.offers.landed(read);
+                if let Some(err) = failed {
+                    self.report(format!("cannot read a file offered ({err})"));
+                }
+                self.take_offer_step(step);
+            }
+            Answer::OpenTarget(Ok(Some(target))) => self.open_target(target),
+            Answer::OpenTarget(Err(err)) => {
+                self.report(format!("cannot take an open target ({err})"));
+            }
+            Answer::PickedName { window_id, name } => {
+                if let Some(index) = self.index_of(window_id) {
+                    self.name_chosen(index, name.ok().filter(|name| !name.is_empty()));
+                }
+            }
+            Answer::MenuText {
+                window_id: _,
+                open_id,
+                text,
+            } => self.entered(open_id, text),
+            Answer::Revealed { token, shown } => self.revealed(token, shown),
+            Answer::Clipboard {
+                window_id,
+                contents,
+            } => {
+                if let Some(index) = self.index_of(window_id) {
+                    A::pasted(self, index, contents);
+                }
+            }
+            Answer::FrameReturned { window_id } => self.frame_returned(window_id),
+            // The end of the open targets, and nothing else is asked for here.
+            _ => {}
+        }
+    }
+
+    /// The text committed into the quick-entry row of menu open `open_id` has
+    /// landed.
+    fn entered(&mut self, open_id: u64, text: Result<Option<String>, Errno>) {
+        let Some(index) = self
+            .windows
+            .iter()
+            .position(|window| window.entering.is_some_and(|(open, _)| open == open_id))
+        else {
+            return;
+        };
+        let window = &mut self.windows[index];
+        let Some((_, item)) = window.entering.take() else {
+            return;
+        };
+        if window.loading() {
+            return;
+        }
+        let outcome = match text {
+            Ok(Some(text)) => window.view.entered(item, &text, &mut window.damage),
+            Ok(None) => return,
+            Err(err) => {
+                window.state(format!("The entry could not be read ({err})"));
+                return;
+            }
+        };
+        self.apply(index, outcome);
+    }
+
+    /// Window `window_id`'s last present was answered, so what was drawn
+    /// behind it is presented now.
+    fn frame_returned(&mut self, window_id: u64) {
+        let chrome = if let Some(index) = self.index_of(window_id) {
+            &mut self.windows[index].chrome
+        } else if let Some(index) = self.app_index_of(window_id) {
+            &mut self.app_windows[index].chrome
+        } else if let Some((index, at)) = self.owned_of(window_id) {
+            &mut self.windows[index].owned[at].chrome
+        } else {
+            return;
+        };
+        let presented = chrome
+            .pane
+            .present_deferred(&mut self.client, &chrome.surface);
+        if presented.is_err() {
+            chrome.owe(Repaint::Whole);
+        }
+    }
+
+    /// Act on a request the session refused: what it created never existed,
+    /// and a pick or a menu it would not offer is said.
+    fn refused(&mut self, refused: Refused) {
+        let window_id = refused.window_id;
+        match refused.request {
+            PostedRequest::Create => {
+                let why = format!("{}", refused.errno);
+                if let Some(index) = self.index_of(window_id) {
+                    self.close_window(index);
+                    self.alert(None, NO_NEW_WINDOW, &why);
+                } else if let Some(index) = self.app_index_of(window_id) {
+                    self.close_app_window(index);
+                    self.alert(None, NO_NEW_WINDOW, &why);
+                } else if let Some((index, at)) = self.owned_of(window_id) {
+                    let pane = self.windows[index].owned.remove(at);
+                    match pane.kind {
+                        Owned::Tool(id) => self.tool_refused(index, id, &why),
+                        Owned::Dialog(_) => self.dialog_refused(index, &why),
+                    }
+                }
+                return;
+            }
+            PostedRequest::PickFile => {
+                if let Some(index) = self.index_of(window_id) {
+                    let _ = self.windows[index].file.end_pick();
+                    self.quitting = false;
+                    self.alert(
+                        Some(index),
+                        "No file chooser could be opened",
+                        &format!("The desktop would not offer one ({}).", refused.errno),
+                    );
+                    return;
+                }
+            }
+            PostedRequest::SetClipboard => {
+                if let Some(index) = self.index_of(window_id) {
+                    self.windows[index].state(format!("Could not copy: {}", refused.errno));
+                    return;
+                }
+            }
+            PostedRequest::OpenMenu(open_id) => {
+                let window = self
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.menu.is_some_and(|(open, _)| open == open_id));
+                if let Some(window) = window {
+                    window.menu = None;
+                    window.state(format!("The desktop composes no menu ({})", refused.errno));
+                    return;
+                }
+            }
+            _ => {}
+        }
+        self.report(refused);
     }
 
     /// Carry out what a file offer, or its read landing, called for.
@@ -3458,34 +3651,24 @@ const fn resizable(least: (u32, u32)) -> WindowSizing {
 }
 
 /// Open a resizable pane of `mode` titled `title`, held to at least `least`,
-/// its events sent to `endpoint` and its reply taken from `server` alone,
-/// answering why where it could not be.
+/// its events sent to `endpoint`, answering why where it could not be.
 fn open_pane(
     client: &mut Client,
-    (endpoint, server): (u64, ProcId),
+    endpoint: u64,
     mode: &DisplayMode,
     title: &str,
     least: (u32, u32),
 ) -> Result<WindowPane, String> {
-    match WindowPane::open(client, endpoint, mode, title, resizable(least)) {
-        // A reply from any other sender is something else answering for the
-        // window endpoint.
-        Ok((pane, replied)) if replied == server => Ok(pane),
-        Ok((pane, _)) => {
-            let _ = pane.close(client);
-            Err(String::from("a window reply came from another sender"))
-        }
-        Err(err) => Err(format!("{err}")),
-    }
+    WindowPane::open(client, endpoint, mode, title, resizable(least))
+        .map_err(|err| format!("{err}"))
 }
 
 /// Open a tool window over `rect` of window `parent`'s drawing, sized as
 /// `sizing` allows, titled `title` and opening as `opening` says, its events
-/// sent to `endpoint` and its reply taken from the session alone; it opens
-/// without the keyboard.
+/// sent to `endpoint`; it opens without the keyboard.
 fn open_tool(
     client: &mut Client,
-    parent: (u64, ProcId),
+    parent: u64,
     endpoint: u64,
     (rect, sizing): (Rect, WindowSizing),
     opening: super::ToolOpening,
@@ -3514,11 +3697,10 @@ fn open_tool(
 }
 
 /// Open the dialog of window `owner` showing a `rect` of its drawing and holding
-/// it as `modality` says, titled `title`, its events sent to `endpoint` and its
-/// reply taken from the session alone.
+/// it as `modality` says, titled `title`, its events sent to `endpoint`.
 fn open_dialog(
     client: &mut Client,
-    owner: (u64, ProcId),
+    owner: u64,
     endpoint: u64,
     (rect, modality): (Rect, DialogModality),
     title: String,
@@ -3685,7 +3867,7 @@ impl<A: DocumentApp> Host<A> {
                 polled => self.take_event(polled)?,
             }
         }
-        self.take_offered_media();
+        self.take_answers();
         let now = tairix_rt::clock_get();
         let answered = A::turn(self, now) | self.answered;
         self.advance_app_windows(now);
@@ -3761,7 +3943,7 @@ impl<A: DocumentApp> Host<A> {
             Err(EventError::Undecodable(_)) => {
                 self.report("a malformed window event was refused");
             }
-            Err(EventError::Refused(refused)) => self.report(refused),
+            Err(EventError::Refused(refused)) => self.refused(refused),
         }
         ControlFlow::Continue(())
     }
@@ -3867,8 +4049,8 @@ pub fn run<A: DocumentApp>() -> i32 {
         saves: 0,
         unroomed: 0,
         event_endpoint: endpoint,
-        server,
         quitting: false,
+        reveals: Vec::new(),
         offers: FileOffers::new(<ViewOf<A> as DocumentView>::PLACES),
     };
     match launched_document() {

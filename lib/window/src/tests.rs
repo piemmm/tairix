@@ -37,9 +37,10 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep, DROP_LANDINGS_MAX};
 
 use crate::client::{
-    pointer_point, present_damage, present_damage_list, presented_damage, retained_damage,
-    DeclaredTip, EventDrain, EventError, EventSource, OfferedMedia, Owed, Parked, PostedRequest,
-    Refused, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    pointer_point, present_damage, present_damage_list, presented_damage, retained_damage, Answer,
+    DeclaredTip, EventDrain, EventError, EventSource, OfferedMedia, Owed, Parked, PayloadRegion,
+    PostedRequest, PresentState, Refused, Repaint, Target, WindowClient, WindowEvents,
+    WindowTransport,
 };
 use crate::damage_in;
 use crate::desktop::Desktop;
@@ -69,6 +70,216 @@ const FRAME_LEN: usize = 48;
 /// The refusal the client reaped for a posted request, if it reaped one.
 fn refusal<T: WindowTransport>(client: &mut WindowClient<T>) -> Option<Refused> {
     client.take_owed()?.err()
+}
+
+/// A client over the loopback.
+type Client = WindowClient<Rc<RefCell<Loopback>>>;
+
+/// A client of `loopback`, connected as every application is before it
+/// opens anything.
+fn connected(loopback: &Rc<RefCell<Loopback>>) -> Client {
+    let mut client = WindowClient::new(Rc::clone(loopback));
+    client
+        .connect()
+        .expect("the loopback's session connects a client");
+    client
+}
+
+/// A client of `loopback` for the process `ticket` attests, connected as it:
+/// another application, acting as itself while the loopback's ticket names
+/// it.
+fn connected_as(loopback: &Rc<RefCell<Loopback>>, ticket: u64) -> Client {
+    let saved = core::mem::replace(&mut loopback.borrow_mut().ticket, ticket);
+    let client = connected(loopback);
+    loopback.borrow_mut().ticket = saved;
+    client
+}
+
+/// What `ask` came to once the session has answered it: its own error, or
+/// the refusal its answer brought, as an application's event drain hands it
+/// on.
+fn settled<R>(
+    client: &mut Client,
+    ask: impl FnOnce(&mut Client) -> Result<R, Errno>,
+) -> Result<R, Errno> {
+    let asked = ask(client)?;
+    match refusal(client) {
+        Some(refused) => Err(refused.errno),
+        None => Ok(asked),
+    }
+}
+
+/// The oldest answer landed for what `client` asked, taken in as an event
+/// drain takes it.
+fn landed(client: &mut Client) -> Option<Answer> {
+    client.reap_posted();
+    client.take_answer()
+}
+
+/// The first answer that lands for `client` that `wanted` takes, reaping as
+/// an event drain reaps.
+fn land<R>(client: &mut Client, mut wanted: impl FnMut(Answer) -> Result<R, Answer>) -> R {
+    for _ in 0..=SPIN_BOUND {
+        client.reap_posted();
+        if let Some(answer) = client.take_answer() {
+            return match wanted(answer) {
+                Ok(taken) => taken,
+                Err(other) => panic!("an answer that was not asked for landed: {other:?}"),
+            };
+        }
+    }
+    panic!("the answer never landed");
+}
+
+/// The name of the file `window`'s last pick chose, asked for and landed.
+fn picked_name(client: &mut Client, window: u64) -> Result<String, Errno> {
+    client.ask_picked_name(window)?;
+    land(client, |answer| match answer {
+        Answer::PickedName { name, .. } => Ok(name),
+        other => Err(other),
+    })
+}
+
+/// The next file `window`'s folder pick delegated, asked for and landed.
+fn picked_file(client: &mut Client, window: u64) -> Result<crate::client::Picked, Errno> {
+    client.ask_picked_files(window)?;
+    land(client, |answer| match answer {
+        Answer::PickedFile { file, .. } => Ok(file),
+        other => Err(other),
+    })
+}
+
+/// The application `window`'s drag was dropped on, asked for and landed.
+fn drop_target(client: &mut Client, window: u64) -> Result<crate::client::Dropped, Errno> {
+    client.ask_drop_target(window)?;
+    land(client, |answer| match answer {
+        Answer::DropTarget { target, .. } => Ok(target),
+        other => Err(other),
+    })
+}
+
+/// The desktop folder `window`'s drag report `serial` named, asked for and
+/// landed.
+fn drag_spot(client: &mut Client, window: u64, serial: u32) -> Result<String, Errno> {
+    client.ask_drag_spot(window, serial)?;
+    land(client, |answer| match answer {
+        Answer::DragSpot { folder, .. } => Ok(folder),
+        other => Err(other),
+    })
+}
+
+/// The text committed into `window`'s menu open `open`, asked for and
+/// landed.
+fn menu_text(client: &mut Client, window: u64, open: u64) -> Result<Option<String>, Errno> {
+    client.ask_menu_text(window, open)?;
+    land(client, |answer| match answer {
+        Answer::MenuText { text, .. } => Ok(text),
+        other => Err(other),
+    })
+}
+
+/// The text committed into icon-bar row `item` under `revision`, asked for
+/// and landed.
+fn app_bar_text(
+    client: &mut Client,
+    item: AppMenuItemId,
+    revision: u32,
+) -> Result<Option<String>, Errno> {
+    client.ask_app_bar_text(item, revision)?;
+    land(client, |answer| match answer {
+        Answer::AppBarText { text, .. } => Ok(text),
+        other => Err(other),
+    })
+}
+
+/// The terrain layer surface `window` sits on, asked for and landed.
+fn terrain(client: &mut Client, window: u64) -> Result<Vec<TerrainPlate>, Errno> {
+    client.ask_terrain(window)?;
+    land(client, |answer| match answer {
+        Answer::Terrain { plates, .. } => Ok(plates),
+        other => Err(other),
+    })
+}
+
+/// Every item of drag `drag` over `window`, asked for and landed.
+fn offered_items(
+    client: &mut Client,
+    window: u64,
+    drag: u32,
+) -> Result<Vec<crate::client::OfferedPath>, Errno> {
+    client.ask_offered_items(window, drag)?;
+    land(client, |answer| match answer {
+        Answer::OfferedItems { items, .. } => Ok(items),
+        other => Err(other),
+    })
+}
+
+/// The media type read landed for `client`, if one has.
+fn offered_media(client: &mut Client) -> Option<OfferedMedia> {
+    client.reap_posted();
+    match client.take_answer()? {
+        Answer::OfferedFile(read) => Some(read),
+        other => panic!("only a file offer's media type was asked for, not {other:?}"),
+    }
+}
+
+/// What the clipboard holds for `window`, asked for and landed.
+fn clipboard(client: &mut Client, window: u64) -> Result<Option<(ClipboardKind, Vec<u8>)>, Errno> {
+    client.ask_clipboard(window)?;
+    land(client, |answer| match answer {
+        Answer::Clipboard { contents, .. } => Ok(contents),
+        other => Err(other),
+    })
+}
+
+/// How handing `target` to `run_path`'s instance went, asked and landed.
+fn hand_over(
+    client: &mut Client,
+    run_path: &str,
+    target: &HandOverTarget,
+) -> Result<HandOverOutcome, Errno> {
+    let asked = client.hand_over_launch(run_path, *target)?;
+    land(client, |answer| match answer {
+        Answer::HandOver { token, outcome } if token == asked => Ok(outcome),
+        other => Err(other),
+    })
+}
+
+/// Whether the desktop showed `window`'s document, asked and landed.
+fn revealed(client: &mut Client, window: u64, location: u64) -> Result<(), Errno> {
+    let asked = client.reveal_document(window, location)?;
+    land(client, |answer| match answer {
+        Answer::Revealed { token, shown } if token == asked => Ok(shown),
+        other => Err(other),
+    })
+}
+
+/// Whether a present of `window` is unanswered, in flight or waiting for
+/// room, once every answer that has landed is taken in.
+fn presenting(client: &mut Client, window: u64) -> bool {
+    client.present_state(window) != PresentState::Idle
+}
+
+/// The next open target queued for `client`: the one the queue's last read
+/// brought on, or one asked for and landed.
+fn next_open_target(client: &mut Client) -> Result<Option<Target>, Errno> {
+    let pick = |answer| match answer {
+        Answer::OpenTarget(target) => Ok(target),
+        other => Err(other),
+    };
+    // The queue read on from the last target is answered already.
+    client.reap_posted();
+    if let Some(answer) = client.take_answer() {
+        return pick(answer).unwrap_or_else(|other| panic!("not asked for: {other:?}"));
+    }
+    client.ask_open_targets()?;
+    land(client, pick)
+}
+
+impl PayloadRegion for Vec<u8> {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self
+    }
 }
 
 /// The refusal of `request` for `window_id` with `errno`.
@@ -366,6 +577,9 @@ struct RecordingHost {
     refuse_render: Option<Errno>,
     /// Every clipboard set and get the engine passed on, by window.
     clipboard: Vec<(u64, ClientRegion)>,
+    /// What each clipboard get is answered, oldest first: an empty clipboard
+    /// once none is left.
+    clipboard_held: VecDeque<ClipboardHeld>,
     /// The cursor sets this host offers.
     cursor_sets: Vec<CursorSetName>,
     /// The sources this host answers, and the application every
@@ -408,6 +622,7 @@ impl Default for RecordingHost {
             render_callers: Vec::new(),
             refuse_render: None,
             clipboard: Vec::new(),
+            clipboard_held: VecDeque::new(),
             cursor_sets: Vec::new(),
             notify_sources: Vec::new(),
             asked_by: Vec::new(),
@@ -989,11 +1204,11 @@ impl WindowHost for RecordingHost {
         region: ClientRegion,
     ) -> Result<ClipboardHeld, Errno> {
         self.clipboard.push((window_id, region));
-        Ok(ClipboardHeld {
+        Ok(self.clipboard_held.pop_front().unwrap_or(ClipboardHeld {
             kind: None,
             len: 0,
             copied: false,
-        })
+        }))
     }
 }
 
@@ -1134,6 +1349,8 @@ struct Loopback {
     /// The session's endpoint has gone: nothing is answered, and every reap
     /// says so.
     gone: bool,
+    /// The handle the next region granted to the session is given.
+    next_region: u64,
 }
 
 impl Loopback {
@@ -1163,6 +1380,7 @@ impl Loopback {
             latches: 0,
             refuses_awaits: None,
             gone: false,
+            next_region: 0x44,
         }))
     }
 
@@ -1309,6 +1527,28 @@ fn conclude(
 /// A window's picker, asked to choose a file to open.
 const OPEN: PickPurpose = PickPurpose::Open;
 
+/// Connect as `TICKET_A`'s process on `server`, the raw frame a client
+/// sends, answering the range it was given.
+fn connect_raw(
+    server: &mut WindowServer<MockMapper>,
+    host: &mut dyn WindowHost,
+    identity: &mut MockIdentity,
+) -> tairix_abi::window_ipc::ObjectIds {
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let outcome = server.serve(
+        host,
+        &mut QueueSink::default(),
+        identity,
+        TICKET_A,
+        &request_frame(&WindowRequest::Connect),
+        &mut reply,
+    );
+    let len = replied(outcome);
+    tairix_abi::window_ipc::decode_connect_reply(&reply[..len])
+        .expect("connected")
+        .ids
+}
+
 /// One request encoded exactly as a client sends it: a frame of its own
 /// operation's length, which is what the server is given on the wire.
 fn request_frame(request: &WindowRequest) -> alloc::vec::Vec<u8> {
@@ -1416,6 +1656,15 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
         }
         self.reap(ticket, reply)?.ok_or(Errno::NotFound)
     }
+
+    type Region = Vec<u8>;
+
+    fn grant_region(&mut self, len: usize) -> Result<(Vec<u8>, u64), Errno> {
+        let inner = &mut *self.borrow_mut();
+        let handle = inner.next_region;
+        inner.next_region += 1;
+        Ok((alloc::vec![0; len], handle))
+    }
 }
 
 /// The client-side event source popping the recorded deliveries for one
@@ -1488,7 +1737,7 @@ impl EventSource for InterruptingSource {
 #[test]
 fn an_interrupted_park_ends_the_wait_without_an_event() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let source = InterruptingSource::default();
     let parked = Rc::clone(&source.parked);
     let mut waiter = WindowEvents::new(source);
@@ -1542,7 +1791,7 @@ impl EventSource for ReplyWakeSource {
 #[test]
 fn an_answer_landing_during_the_park_is_taken_in_before_the_next() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
     hold_a_present(&mut client, window);
@@ -1554,7 +1803,7 @@ fn an_answer_landing_during_the_park_is_taken_in_before_the_next() {
     });
     assert_eq!(waiter.wait(&mut client), Ok(None), "the deadline ends it");
     assert_eq!(parked.get(), 2, "woken by the answer, then by the deadline");
-    assert!(!client.present_in_flight(window), "the answer was taken in");
+    assert!(!presenting(&mut client, window), "the answer was taken in");
     assert!(loopback.borrow().answered.is_empty());
 }
 
@@ -1593,7 +1842,7 @@ impl EventSource for StuckReplySource {
 #[test]
 fn a_wait_whose_session_has_gone_ends_the_channel_rather_than_spinning() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().gone = true;
     let parked = Rc::default();
     let mut waiter = WindowEvents::new(StuckReplySource {
@@ -1617,7 +1866,7 @@ fn a_wait_whose_session_has_gone_ends_the_channel_rather_than_spinning() {
 #[test]
 fn a_live_session_asked_after_an_empty_wake_keeps_the_channel() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parked = Rc::default();
     let mut waiter = WindowEvents::new(StuckReplySource {
         parked: Rc::clone(&parked),
@@ -1634,7 +1883,7 @@ fn a_live_session_asked_after_an_empty_wake_keeps_the_channel() {
 #[test]
 fn a_reap_that_finds_the_session_gone_ends_the_channel() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
     hold_a_present(&mut client, window);
@@ -1660,17 +1909,17 @@ fn one(rect: DamageRect) -> DamageList {
     DamageList::new(&[rect]).expect("a non-empty rectangle")
 }
 
-/// Create through `client`, returning just the minted window id (the
-/// server stamp is asserted once in the loopback round trip).
+/// Create through `client` and answer the window's id once the session has
+/// answered the create, or its refusal.
 fn create_id(
-    client: &mut WindowClient<Rc<RefCell<Loopback>>>,
+    client: &mut Client,
     shm: u64,
     events: u64,
     frames: u32,
     title: &str,
 ) -> Result<u64, Errno> {
-    client
-        .create(
+    settled(client, |client| {
+        client.create(
             shm,
             events,
             frames,
@@ -1678,7 +1927,12 @@ fn create_id(
             title,
             WindowSizing::default(),
         )
-        .map(|(id, _)| id)
+    })
+}
+
+/// The id the `serial`th object a client connected `prefix`th names.
+const fn named(prefix: u32, serial: u32) -> u64 {
+    tairix_abi::window_ipc::object_id(prefix, serial)
 }
 
 /// A one-frame SURFACE-shaped popup of `parent`, granted as `shm`, its
@@ -1725,11 +1979,21 @@ fn an_app_learns_its_desktop_before_it_owns_a_window() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    // Nothing has been created: the query names no window precisely so an
+    // Nothing has been created: the connect names no window precisely so an
     // app can size its first one to a screen it knows.
+    let info = client.connect().expect("the session describes its desktop");
     assert_eq!(loopback.borrow().server.window_count(), 0);
-    let info = client.desktop().expect("the session describes its desktop");
     assert_eq!(info, sample_desktop());
+    assert_eq!(
+        client.session(),
+        Some(SERVER),
+        "the identity apps authenticate events against"
+    );
+    assert_eq!(
+        client.connect(),
+        Err(Errno::AlreadyExists),
+        "one range a client"
+    );
 
     let desktop = Desktop::new(info).expect("the reported scale is one Scale admits");
     assert_eq!(desktop.screen(), Rect::new(0, 0, 1024, 768));
@@ -1759,11 +2023,21 @@ fn a_window_is_sized_at_the_desktops_density_and_capped_to_the_screen() {
 
 #[test]
 fn a_session_with_no_desktop_refuses_rather_than_inventing_one() {
-    let loopback = Loopback::with_regions(&[]);
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     loopback.borrow_mut().host.desktop = Err(Errno::NotFound);
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
-    assert_eq!(client.desktop(), Err(Errno::NotFound));
+    assert_eq!(client.connect(), Err(Errno::NotFound));
+    assert_eq!(client.session(), None);
+    // Unconnected, it has no range to name a window by.
+    assert_eq!(
+        client.create(7, EVENTS_A, 1, &SURFACE, "a", WindowSizing::default()),
+        Err(Errno::NotConnected)
+    );
+    assert!(
+        loopback.borrow().sent.len() == 1,
+        "nothing but the connect was sent"
+    );
 }
 
 /// The desktop belongs to the seat, not to one window, so an application
@@ -1852,15 +2126,15 @@ fn a_desktop_the_client_cannot_draw_at_is_refused_and_the_last_good_one_stands()
 #[test]
 fn create_present_close_round_trips_through_the_loopback() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
-    let (window, server) = client
+    let window = client
         .create(7, EVENTS_A, 2, &SURFACE, "Files", WindowSizing::default())
         .expect("a valid create succeeds");
-    assert_eq!(window, 1);
     assert_eq!(
-        server, SERVER,
-        "the reply is stamped with the session identity apps authenticate events against"
+        window,
+        named(1, 1),
+        "the client named it from its own range"
     );
     {
         let inner = loopback.borrow();
@@ -1869,7 +2143,7 @@ fn create_present_close_round_trips_through_the_loopback() {
             inner.host.opened,
             alloc::vec![(
                 proc_id(0xA1),
-                1,
+                window,
                 SURFACE,
                 String::from("Files"),
                 WindowSizing::default()
@@ -1905,14 +2179,16 @@ fn create_present_close_round_trips_through_the_loopback() {
         assert_eq!(inner.server.window_count(), 0);
         assert_eq!(inner.host.closed, alloc::vec![window]);
     }
-    // The window is gone: a second close finds nothing.
-    assert_eq!(client.close(window), Err(Errno::NotFound));
+    // The window is gone: a second close is answered that it is, silently.
+    client.close(window).expect("the close is posted");
+    assert_eq!(refusal(&mut client), None);
+    assert_eq!(loopback.borrow().host.closed, alloc::vec![window]);
 }
 
 #[test]
 fn create_forwards_the_sizing_contract_to_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
@@ -1947,14 +2223,14 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
     // resizing itself back up would fight the drag, frame by frame, which
     // is the flicker this negotiation removes.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
         max_width_px: 0,
         max_height_px: 0,
     };
-    let (window, _) = client
+    let window = client
         .create(7, EVENTS_A, 1, &SURFACE, "Files", floor)
         .expect("create");
 
@@ -1987,7 +2263,7 @@ fn resize_remaps_the_window_and_presents_at_the_new_size() {
     const BIG_FRAME_LEN: usize = 96;
 
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (20, 2 * BIG_FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 2, "Files").expect("create succeeds");
 
@@ -2026,7 +2302,7 @@ fn resize_is_refused_fail_closed() {
     };
 
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (20, 2 * 96)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 2, "Files").expect("create succeeds");
 
@@ -2075,43 +2351,52 @@ fn resize_is_refused_fail_closed() {
 #[test]
 fn window_ids_are_minted_monotonically_and_never_reused() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("first");
     let second = create_id(&mut client, 7, EVENTS_A, 1, "b").expect("second");
     client.close(first).expect("close");
     let third = create_id(&mut client, 7, EVENTS_A, 1, "c").expect("third");
-    assert_eq!((first, second, third), (1, 2, 3));
+    assert_eq!(
+        (first, second, third),
+        (named(1, 1), named(1, 2), named(1, 3)),
+        "named by the client in order from its own range, never twice"
+    );
+    // A second connect is a second range, so its windows never meet these.
+    let mut other = connected(&loopback);
+    assert_eq!(create_id(&mut other, 7, EVENTS_A, 1, "d"), Ok(named(2, 1)));
 }
 
 #[test]
 fn a_caller_cannot_touch_another_clients_window() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 1, "A's").expect("A creates");
 
     // B presents and closes A's window: refused exactly like a window
     // that does not exist, and A's window survives untouched.
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    client.present(window, 0, full_damage()).expect("posted");
+    other.present(window, 0, full_damage()).expect("posted");
     assert_eq!(
-        refusal(&mut client),
+        refusal(&mut other),
         Some(refused(window, PostedRequest::Present, Errno::NotFound))
     );
-    client.set_title(window, "B's").expect("posted");
-    client
+    other.set_title(window, "B's").expect("posted");
+    other
         .set_sizing(window, WindowSizing::Fixed)
         .expect("posted");
     assert_eq!(
-        refusal(&mut client),
+        refusal(&mut other),
         Some(refused(window, PostedRequest::Title, Errno::NotFound))
     );
     assert_eq!(
-        refusal(&mut client),
+        refusal(&mut other),
         Some(refused(window, PostedRequest::Sizing, Errno::NotFound))
     );
-    assert_eq!(client.close(window), Err(Errno::NotFound));
+    other.close(window).expect("posted");
+    assert_eq!(refusal(&mut other), None, "a close is never reported");
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
@@ -2130,7 +2415,7 @@ fn a_caller_cannot_touch_another_clients_window() {
 #[test]
 fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 1, "Sapper").expect("A creates");
     let range = WindowSizing::Resizable {
@@ -2146,7 +2431,7 @@ fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
 
     // A range naming no reachable size never reaches the session.
     assert_eq!(
-        client.set_sizing(
+        settled(&mut client, |client| client.set_sizing(
             window,
             WindowSizing::Resizable {
                 min_width_px: 300,
@@ -2154,7 +2439,7 @@ fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
                 max_width_px: 100,
                 max_height_px: 700,
             },
-        ),
+        )),
         Err(Errno::OutOfRange)
     );
     // An unknown window is refused, and a host refusal leaves the
@@ -2176,7 +2461,7 @@ fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
 #[test]
 fn an_owner_asks_for_a_size_state_and_a_refusal_changes_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 1, "WinterSun").expect("A creates");
     client
@@ -2190,7 +2475,8 @@ fn an_owner_asks_for_a_size_state_and_a_refusal_changes_nothing() {
     // A window the caller does not own never reaches the session: the id
     // is a name, not a credential.
     assert_eq!(
-        client.set_size_state(window + 1, WindowSizeState::Fullscreen),
+        settled(&mut client, |client| client
+            .set_size_state(window + 1, WindowSizeState::Fullscreen)),
         Err(Errno::NotFound)
     );
     assert_eq!(loopback.borrow().host.size_states.len(), 1);
@@ -2198,7 +2484,8 @@ fn an_owner_asks_for_a_size_state_and_a_refusal_changes_nothing() {
     // A host refusal is relayed and leaves the window where it is.
     loopback.borrow_mut().host.refuse_size_state = Some(Errno::NotSupported);
     assert_eq!(
-        client.set_size_state(window, WindowSizeState::Fullscreen),
+        settled(&mut client, |client| client
+            .set_size_state(window, WindowSizeState::Fullscreen)),
         Err(Errno::NotSupported)
     );
     assert_eq!(loopback.borrow().host.size_states.len(), 1);
@@ -2207,7 +2494,7 @@ fn an_owner_asks_for_a_size_state_and_a_refusal_changes_nothing() {
 #[test]
 fn an_owner_retitles_its_window_and_a_refusal_changes_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let window = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("A creates");
     client
@@ -2221,11 +2508,11 @@ fn an_owner_retitles_its_window_and_a_refusal_changes_nothing() {
     // A title the protocol refuses never reaches the session.
     let over_long = "t".repeat(WINDOW_TITLE_MAX + 1);
     assert_eq!(
-        client.set_title(window, &over_long),
+        settled(&mut client, |client| client.set_title(window, &over_long)),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        client.set_title(window, "two\nlines"),
+        settled(&mut client, |client| client.set_title(window, "two\nlines")),
         Err(Errno::OutOfRange)
     );
     // An unknown window is refused, and a host refusal leaves the
@@ -2247,7 +2534,7 @@ fn an_owner_retitles_its_window_and_a_refusal_changes_nothing() {
 #[test]
 fn create_is_refused_fail_closed() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, FRAME_LEN - 1)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     // An unknown grant handle.
     assert_eq!(
@@ -2266,14 +2553,25 @@ fn create_is_refused_fail_closed() {
     // A kernel-domain caller is not a window client.
     loopback.borrow_mut().ticket = TICKET_KERNEL;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
+        create_id(&mut client, 7, EVENTS_A, 1, "x"),
         Err(Errno::PermissionDenied)
     );
     // A caller the kernel cannot attest.
     loopback.borrow_mut().ticket = TICKET_UNATTESTED;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
+        create_id(&mut client, 7, EVENTS_A, 1, "x"),
         Err(Errno::NotFound)
+    );
+    // Nor may one process name its window from another's range.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        create_id(&mut client, 7, EVENTS_B, 1, "x"),
+        Err(Errno::NotConnected)
+    );
+    connected_as(&loopback, TICKET_B);
+    assert_eq!(
+        create_id(&mut client, 7, EVENTS_B, 1, "x"),
+        Err(Errno::OutOfRange)
     );
     // Nothing leaked out of any refusal.
     let inner = loopback.borrow();
@@ -2304,7 +2602,7 @@ fn the_client_budget_scales_with_the_machine() {
 #[test]
 fn a_client_is_bounded_by_the_bytes_it_holds_mapped() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     for _ in 0..FRAMES_PER_CLIENT {
         create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
@@ -2314,8 +2612,9 @@ fn a_client_is_bounded_by_the_bytes_it_holds_mapped() {
         Err(Errno::NoSpace)
     );
     // Another client still has its own budget.
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    create_id(&mut client, 7, EVENTS_B, 1, "w").expect("B's own budget");
+    create_id(&mut other, 7, EVENTS_B, 1, "w").expect("B's own budget");
 }
 
 /// The bound is on bytes, so a client asking for *bigger* windows gets
@@ -2331,14 +2630,21 @@ fn a_bigger_window_spends_more_of_the_same_budget() {
     };
     // Four frames of this surface, so two windows fill the whole budget.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN * 4)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     for _ in 0..2 {
         client
             .create(7, EVENTS_A, 4, &WIDE, "w", WindowSizing::default())
             .expect("within the budget");
     }
     assert_eq!(
-        client.create(7, EVENTS_A, 4, &WIDE, "w", WindowSizing::default()),
+        settled(&mut client, |client| client.create(
+            7,
+            EVENTS_A,
+            4,
+            &WIDE,
+            "w",
+            WindowSizing::default()
+        )),
         Err(Errno::NoSpace),
         "two four-frame windows spend what eight one-frame windows would"
     );
@@ -2351,7 +2657,7 @@ fn a_bigger_window_spends_more_of_the_same_budget() {
 #[test]
 fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
     client
         .present(window, 0, one(DamageRect::full(&SURFACE)))
@@ -2393,7 +2699,7 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
 #[test]
 fn released_frames_stop_counting_against_the_client_budget() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut opened = Vec::new();
     for _ in 0..FRAMES_PER_CLIENT {
         opened.push(create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget"));
@@ -2413,7 +2719,7 @@ fn released_frames_stop_counting_against_the_client_budget() {
 #[test]
 fn releasing_frames_is_idempotent_and_total() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
     assert_eq!(
         loopback.borrow_mut().server.release_frames(window),
@@ -2444,7 +2750,7 @@ fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN * 8 * 2)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
 
     client.resize(window, 8, 2, &TALL).expect("posted");
@@ -2465,22 +2771,26 @@ fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
 fn a_refused_host_open_commits_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     loopback.borrow_mut().host.refuse_open = true;
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
+        create_id(&mut client, 7, EVENTS_A, 1, "x"),
         Err(Errno::WouldBlock)
     );
+    assert_eq!(loopback.borrow().server.window_count(), 0);
     loopback.borrow_mut().host.refuse_open = false;
-    // The refused create consumed no id.
     let window = create_id(&mut client, 7, EVENTS_A, 1, "x").expect("retry");
-    assert_eq!(window, 1);
+    assert_eq!(
+        window,
+        named(1, 2),
+        "the refused window's id is never named again"
+    );
 }
 
 #[test]
 fn present_bounds_are_enforced() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "x").expect("create");
 
     // A frame index past the created count.
@@ -2526,12 +2836,13 @@ fn present_bounds_are_enforced() {
 #[test]
 fn a_dead_clients_windows_are_torn_down_and_others_survive() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let a1 = create_id(&mut client, 7, EVENTS_A, 1, "a1").expect("a1");
     let a2 = create_id(&mut client, 7, EVENTS_A, 1, "a2").expect("a2");
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let b1 = create_id(&mut client, 7, EVENTS_B, 1, "b1").expect("b1");
+    let b1 = create_id(&mut other, 7, EVENTS_B, 1, "b1").expect("b1");
 
     {
         let inner = &mut *loopback.borrow_mut();
@@ -2540,23 +2851,26 @@ fn a_dead_clients_windows_are_torn_down_and_others_survive() {
         assert_eq!(inner.host.closed, alloc::vec![a1, a2]);
     }
     // B's window still presents.
-    client.present(b1, 0, full_damage()).expect("b1 lives");
+    other.present(b1, 0, full_damage()).expect("posted");
+    assert_eq!(refusal(&mut other), None, "b1 lives");
+    // A's range went with it: a process that comes back connects afresh.
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        create_id(&mut client, 7, EVENTS_A, 1, "a3"),
+        Err(Errno::NotConnected)
+    );
 }
 
 #[test]
 fn create_popup_round_trips_and_present_and_close_act_on_its_own_id() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("parent opens");
-    let (popup, server) = client
+    let popup = client
         .create_popup(&popup_spec(parent, 8, EVENTS_A, 5, -7))
         .expect("popup opens");
-    assert_eq!(popup, parent + 1);
-    assert_eq!(
-        server, SERVER,
-        "a popup is stamped with the same session identity as a top-level create"
-    );
+    assert_eq!(popup, parent + 1, "named next from the same range");
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 2);
@@ -2601,21 +2915,24 @@ fn create_popup_round_trips_and_present_and_close_act_on_its_own_id() {
 #[test]
 fn a_popup_over_a_foreign_or_unknown_parent_is_refused() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let a_window = create_id(&mut client, 7, EVENTS_A, 1, "A").expect("A's window");
 
     // A parent the caller does not own answers exactly like one that never
     // existed, leaking nothing about another client's windows.
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.create_popup(&popup_spec(a_window, 8, EVENTS_B, 0, 0)),
+        settled(&mut other, |client| client
+            .create_popup(&popup_spec(a_window, 8, EVENTS_B, 0, 0))),
         Err(Errno::NotFound)
     );
     // An unknown parent id is refused the same way.
     loopback.borrow_mut().ticket = TICKET_A;
     assert_eq!(
-        client.create_popup(&popup_spec(9999, 8, EVENTS_A, 0, 0)),
+        settled(&mut client, |client| client
+            .create_popup(&popup_spec(9999, 8, EVENTS_A, 0, 0))),
         Err(Errno::NotFound)
     );
     let inner = loopback.borrow();
@@ -2626,7 +2943,7 @@ fn a_popup_over_a_foreign_or_unknown_parent_is_refused() {
 #[test]
 fn a_popup_counts_against_the_same_per_client_budget() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
     for _ in 1..FRAMES_PER_CLIENT {
@@ -2635,7 +2952,8 @@ fn a_popup_counts_against_the_same_per_client_budget() {
     // The client now holds its whole budget; a popup cannot be used to
     // exceed it.
     assert_eq!(
-        client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+        settled(&mut client, |client| client
+            .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))),
         Err(Errno::NoSpace)
     );
     assert!(loopback.borrow().host.popups.is_empty());
@@ -2644,12 +2962,13 @@ fn a_popup_counts_against_the_same_per_client_budget() {
 #[test]
 fn a_kernel_caller_cannot_open_a_popup() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("parent");
 
     loopback.borrow_mut().ticket = TICKET_KERNEL;
     assert_eq!(
-        client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+        settled(&mut client, |client| client
+            .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))),
         Err(Errno::PermissionDenied)
     );
 }
@@ -2658,34 +2977,37 @@ fn a_kernel_caller_cannot_open_a_popup() {
 fn a_refused_host_popup_commits_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
     let parent = {
-        let mut client = WindowClient::new(Rc::clone(&loopback));
+        let mut client = connected(&loopback);
         let parent = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("parent");
         loopback.borrow_mut().host.refuse_popup = true;
         assert_eq!(
-            client.create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0)),
+            settled(&mut client, |client| client
+                .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))),
             Err(Errno::WouldBlock)
         );
         parent
     };
-    // The refused popup consumed no id: the next window is the id the
-    // popup would have taken.
+    // The refused popup left nothing behind, and its id is spent: the next
+    // window is the id after it.
     loopback.borrow_mut().host.refuse_popup = false;
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let next = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("retry");
-    assert_eq!(next, parent + 1);
+    assert_eq!(next, named(2, 1), "a fresh connect, a fresh range");
     assert_eq!(loopback.borrow().server.window_count(), 2);
+    assert!(loopback.borrow().host.popups.is_empty());
+    let _ = parent;
 }
 
 #[test]
 fn closing_a_parent_tears_down_its_popups() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "parent").expect("parent");
-    let (menu, _) = client
+    let menu = client
         .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
         .expect("menu popup");
-    let (sheet, _) = client
+    let sheet = client
         .create_popup(&popup_spec(parent, 9, EVENTS_A, 0, 0))
         .expect("sheet popup");
     assert_eq!(loopback.borrow().server.window_count(), 3);
@@ -2699,13 +3021,42 @@ fn closing_a_parent_tears_down_its_popups() {
     assert!(inner.host.closed.contains(&sheet));
 }
 
+/// Closing a window forgets the transients the session closes with it, so a
+/// popup's paint owed behind its present lands nothing once its owner closes.
+///
+/// Regression: the client kept a transient's record after its owner closed,
+/// so the popup's frame came back to a window that no longer existed.
+#[test]
+fn closing_a_window_forgets_the_transients_the_session_closes_with_it() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "parent").expect("parent");
+    let popup = client
+        .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
+        .expect("popup");
+    client.reap_posted();
+    loopback.borrow_mut().holds_posts = true;
+    client.present(popup, 0, full_damage()).expect("posted");
+    assert_eq!(
+        client.present(popup, 0, full_damage()),
+        Err(Errno::WouldBlock),
+        "owed its frame back"
+    );
+    client.close(parent).expect("closed");
+    loopback.borrow_mut().serve_posted();
+    assert!(
+        landed(&mut client).is_none(),
+        "nothing lands for a window the session closed"
+    );
+}
+
 #[test]
 fn a_dead_clients_parent_and_popups_are_all_torn_down() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "parent").expect("parent");
-    let (popup, _) = client
+    let popup = client
         .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
         .expect("popup");
 
@@ -2739,12 +3090,11 @@ const TOOL_RANGE: WindowSizing = WindowSizing::Resizable {
 #[test]
 fn a_tool_window_opens_through_its_own_path_and_closes_alone() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
-    let (tool, server) = client
+    let tool = client
         .create_tool(&tool_spec(parent, 8, Some(2)))
         .expect("tool window opens");
-    assert_eq!(server, SERVER);
     {
         let inner = loopback.borrow();
         assert_eq!(
@@ -2773,30 +3123,33 @@ fn a_tool_window_opens_through_its_own_path_and_closes_alone() {
 #[test]
 fn a_transient_hangs_only_from_a_top_level_window_of_the_callers_own() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
-    let (tool, _) = client
+    let tool = client
         .create_tool(&tool_spec(parent, 8, None))
         .expect("tool window");
-    let (popup, _) = client
+    let popup = client
         .create_popup(&popup_spec(parent, 9, EVENTS_A, 0, 0))
         .expect("popup");
     // One level only: neither a tool window nor a popup hangs a transient.
     for transient in [tool, popup] {
         assert_eq!(
-            client.create_tool(&tool_spec(transient, 9, None)),
+            settled(&mut client, |client| client
+                .create_tool(&tool_spec(transient, 9, None))),
             Err(Errno::NotSupported)
         );
         assert_eq!(
-            client.create_popup(&popup_spec(transient, 9, EVENTS_A, 0, 0)),
+            settled(&mut client, |client| client
+                .create_popup(&popup_spec(transient, 9, EVENTS_A, 0, 0))),
             Err(Errno::NotSupported)
         );
     }
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
     let mut foreign = tool_spec(parent, 9, None);
     foreign.transient.event_endpoint = EVENTS_B;
     assert_eq!(
-        client.create_tool(&foreign),
+        settled(&mut other, |client| client.create_tool(&foreign)),
         Err(Errno::NotFound),
         "a foreign parent reads as none"
     );
@@ -2806,15 +3159,14 @@ fn a_transient_hangs_only_from_a_top_level_window_of_the_callers_own() {
 #[test]
 fn a_dialog_opens_through_its_own_path_with_the_front_it_earned() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let owner = create_id(&mut client, 7, EVENTS_A, 1, "TextEdit").expect("owner");
     loopback.borrow_mut().host.focused = Some(owner);
-    let (held, server) = client
+    let held = client
         .create_dialog(&dialog_spec(owner, 8, DialogModality::OwnerModal))
         .expect("the dialog opens");
-    assert_eq!(server, SERVER);
     loopback.borrow_mut().host.focused = None;
-    let (free, _) = client
+    let free = client
         .create_dialog(&dialog_spec(owner, 9, DialogModality::Modeless))
         .expect("so does a second");
     let inner = loopback.borrow();
@@ -2845,31 +3197,37 @@ fn a_dialog_opens_through_its_own_path_with_the_front_it_earned() {
 #[test]
 fn a_dialog_hangs_only_from_a_top_level_window_of_the_callers_own() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let owner = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("owner");
-    let (dialog, _) = client
+    let dialog = client
         .create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless))
         .expect("a dialog");
-    let (tool, _) = client
+    let tool = client
         .create_tool(&tool_spec(owner, 9, None))
         .expect("a tool window");
     for transient in [dialog, tool] {
         assert_eq!(
-            client.create_dialog(&dialog_spec(transient, 9, DialogModality::OwnerModal)),
+            settled(&mut client, |client| client.create_dialog(&dialog_spec(
+                transient,
+                9,
+                DialogModality::OwnerModal
+            ))),
             Err(Errno::NotSupported),
             "one level only"
         );
     }
     assert_eq!(
-        client.create_tool(&tool_spec(dialog, 9, None)),
+        settled(&mut client, |client| client
+            .create_tool(&tool_spec(dialog, 9, None))),
         Err(Errno::NotSupported),
         "nor hangs anything else"
     );
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
     let mut foreign = dialog_spec(owner, 9, DialogModality::Modeless);
     foreign.transient.event_endpoint = EVENTS_B;
     assert_eq!(
-        client.create_dialog(&foreign),
+        settled(&mut other, |client| client.create_dialog(&foreign)),
         Err(Errno::NotFound),
         "a foreign owner reads as none"
     );
@@ -2880,16 +3238,20 @@ fn a_dialog_hangs_only_from_a_top_level_window_of_the_callers_own() {
 #[test]
 fn a_dialog_shares_the_budget_and_closes_with_its_owner_and_what_holds_it() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let owner = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("owner");
-    let (dialog, _) = client
+    let dialog = client
         .create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless))
         .expect("a dialog");
     for _ in 2..FRAMES_PER_CLIENT {
         create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
     }
     assert_eq!(
-        client.create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless)),
+        settled(&mut client, |client| client.create_dialog(&dialog_spec(
+            owner,
+            8,
+            DialogModality::Modeless
+        ))),
         Err(Errno::NoSpace)
     );
     let question = client
@@ -2912,18 +3274,26 @@ fn a_dialog_shares_the_budget_and_closes_with_its_owner_and_what_holds_it() {
 #[test]
 fn a_refused_dialog_commits_nothing_and_spends_no_activation() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let owner = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("owner");
     loopback.borrow_mut().host.focused = Some(owner);
     loopback.borrow_mut().host.refuse_popup = true;
     assert_eq!(
-        client.create_dialog(&dialog_spec(owner, 8, DialogModality::OwnerModal)),
+        settled(&mut client, |client| client.create_dialog(&dialog_spec(
+            owner,
+            8,
+            DialogModality::OwnerModal
+        ))),
         Err(Errno::WouldBlock)
     );
     loopback.borrow_mut().host.refuse_popup = false;
     assert_eq!(loopback.borrow().server.window_count(), 1);
     let next = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("retry");
-    assert_eq!(next, owner + 1, "the refused dialog consumed no id");
+    assert_eq!(
+        next,
+        owner + 2,
+        "the refused dialog's id is never named again"
+    );
 }
 
 #[test]
@@ -2931,13 +3301,17 @@ fn a_request_naming_another_applications_mailbox_is_refused() {
     // Every answer goes to the mailbox the caller binds for itself: a client
     // naming another's would have its events delivered into that one.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     assert_eq!(
         create_id(&mut client, 7, EVENTS_B, 1, "Files"),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
-        client.open_alert(EVENTS_B, None, &sample_alert()),
+        settled(&mut client, |client| client.open_alert(
+            EVENTS_B,
+            None,
+            &sample_alert()
+        )),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(loopback.borrow().server.window_count(), 0);
@@ -2947,10 +3321,14 @@ fn a_request_naming_another_applications_mailbox_is_refused() {
 #[test]
 fn the_kernel_sentinel_raises_no_alert() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().ticket = TICKET_KERNEL;
     assert_eq!(
-        client.open_alert(EVENTS_A, None, &sample_alert()),
+        settled(&mut client, |client| client.open_alert(
+            EVENTS_A,
+            None,
+            &sample_alert()
+        )),
         Err(Errno::PermissionDenied)
     );
     assert!(loopback.borrow().host.alerts.is_empty());
@@ -2959,16 +3337,17 @@ fn the_kernel_sentinel_raises_no_alert() {
 #[test]
 fn a_tool_window_shares_the_budget_and_goes_with_its_parent() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
-    let (tool, _) = client
+    let tool = client
         .create_tool(&tool_spec(parent, 8, None))
         .expect("tool window");
     for _ in 2..FRAMES_PER_CLIENT {
         create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
     }
     assert_eq!(
-        client.create_tool(&tool_spec(parent, 8, None)),
+        settled(&mut client, |client| client
+            .create_tool(&tool_spec(parent, 8, None))),
         Err(Errno::NoSpace)
     );
     client.close(parent).expect("close the parent");
@@ -2981,15 +3360,15 @@ fn a_tool_window_shares_the_budget_and_goes_with_its_parent() {
 #[test]
 fn a_resizable_tool_window_states_its_range_and_is_told_each_size_on_its_own_id() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
-    let (palette, _) = client
+    let palette = client
         .create_tool(&ToolSpec {
             sizing: TOOL_RANGE,
             ..tool_spec(parent, 8, None)
         })
         .expect("a resizable palette");
-    let (tools, _) = client
+    let tools = client
         .create_tool(&tool_spec(parent, 9, None))
         .expect("a fixed tool box");
     let resized = WindowEvent::Resized {
@@ -3034,15 +3413,15 @@ fn a_resizable_tool_window_states_its_range_and_is_told_each_size_on_its_own_id(
 #[test]
 fn a_tool_window_s_range_is_restated_and_a_refused_kind_changes_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
-    let (palette, _) = client
+    let palette = client
         .create_tool(&ToolSpec {
             sizing: TOOL_RANGE,
             ..tool_spec(parent, 8, None)
         })
         .expect("a resizable palette");
-    let (tools, _) = client
+    let tools = client
         .create_tool(&tool_spec(parent, 9, None))
         .expect("a fixed tool box");
     let narrower = WindowSizing::Resizable {
@@ -3095,10 +3474,11 @@ fn a_malformed_request_answers_a_typed_status_refusal() {
 #[test]
 fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let a = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut b_client = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let b = create_id(&mut client, 7, EVENTS_B, 1, "b").expect("b");
+    let b = create_id(&mut b_client, 7, EVENTS_B, 1, "b").expect("b");
 
     let key = KeyInput::Pressed {
         key: KeyValue::Char('x'),
@@ -3178,7 +3558,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
 #[test]
 fn the_parked_wait_drains_before_it_parks() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let queued = WindowEvent::CloseRequested { window_id: 11 };
     let source = QueueSource::new([queued.to_le_bytes()]);
     let parked = Rc::clone(&source.parked);
@@ -3201,7 +3581,7 @@ fn the_parked_wait_drains_before_it_parks() {
 #[test]
 fn the_drained_wait_answers_without_parking() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let queued = WindowEvent::Focus {
@@ -3238,7 +3618,7 @@ impl EventDrain for FailingDrain {
 #[test]
 fn a_failed_drain_is_never_mistaken_for_an_undecodable_frame() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut events = WindowEvents::new(FailingDrain);
 
     assert_eq!(
@@ -3252,7 +3632,7 @@ fn a_failed_drain_is_never_mistaken_for_an_undecodable_frame() {
 #[test]
 fn a_frame_that_will_not_decode_is_answered_apart_from_a_dead_mailbox() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut events = WindowEvents::new(DrainOnlySource {
         queue: [[0u8; WindowEvent::WIRE_LEN]].into_iter().collect(),
     });
@@ -3298,7 +3678,7 @@ impl EventDrain for DrainOnlySource {
 #[test]
 fn a_loop_that_owns_its_park_still_folds_a_resize_run() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let resized = |width_px, height_px| WindowEvent::Resized {
@@ -3340,7 +3720,7 @@ fn a_loop_that_owns_its_park_still_folds_a_resize_run() {
 #[test]
 fn a_run_of_resizes_folds_to_the_newest_extent() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let resized = |width_px, height_px| WindowEvent::Resized {
@@ -3362,51 +3742,12 @@ fn a_run_of_resizes_folds_to_the_newest_extent() {
     assert_eq!(waiter.try_wait(&mut client), Ok(None));
 }
 
-/// A present is posted, and the next waits only for its answer — the frame
-/// the first named is the session's until then — which comes at once when
-/// nothing waited to be shown.
-#[test]
-fn a_present_is_posted_and_the_next_waits_only_for_its_answer() {
-    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
-    loopback.borrow_mut().holds_posts = true;
-
-    client.present(window, 0, full_damage()).expect("posted");
-    assert!(
-        loopback.borrow().awaited.is_empty(),
-        "the first waits on nothing"
-    );
-    assert!(
-        loopback.borrow().host.presented.is_empty(),
-        "nor is it served"
-    );
-
-    client.present(window, 1, full_damage()).expect("posted");
-    let inner = loopback.borrow();
-    assert_eq!(
-        inner.awaited.len(),
-        1,
-        "the second waited for the first alone"
-    );
-    assert_eq!(
-        inner.host.presented.len(),
-        1,
-        "the first was answered before the second went"
-    );
-    assert_eq!(
-        inner.unserved.len(),
-        1,
-        "the second waits on nothing in turn"
-    );
-}
-
 /// However often a window presents between the desktop's frames, the session
 /// converts one frame — the newest — carrying every change since the last.
 #[test]
 fn presents_between_frames_are_shown_once_with_every_change() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
     let first = DamageRect {
@@ -3455,7 +3796,7 @@ fn presents_between_frames_are_shown_once_with_every_change() {
 #[test]
 fn a_resize_or_a_release_drops_the_pending_frame() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
 
@@ -3476,7 +3817,7 @@ fn a_resize_or_a_release_drops_the_pending_frame() {
 #[test]
 fn a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     {
         let inner = &mut *loopback.borrow_mut();
@@ -3526,7 +3867,7 @@ fn a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next() {
 #[test]
 fn a_redraw_asked_with_a_present_in_flight_follows_it_without_waiting() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     let corner = DamageRect {
@@ -3564,7 +3905,7 @@ fn a_redraw_asked_with_a_present_in_flight_follows_it_without_waiting() {
 #[test]
 fn a_released_window_is_left_for_its_application_to_paint() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     client.present(window, 0, full_damage()).expect("posted");
     loopback.borrow_mut().server.release_frames(window);
@@ -3585,7 +3926,7 @@ fn a_released_window_is_left_for_its_application_to_paint() {
 #[test]
 fn a_released_window_is_hidden_until_the_session_asks_for_it_again() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     client.present(window, 0, full_damage()).expect("posted");
     assert!(!client.is_hidden(window));
@@ -3610,26 +3951,57 @@ fn a_released_window_is_hidden_until_the_session_asks_for_it_again() {
     assert!(!client.content_released(window) && !client.is_hidden(window));
 }
 
-/// A present this process's own calls leave no room for goes as a call, which
-/// waits for the room, rather than waiting on nothing.
+/// A present this process's own calls leave no room for waits for room behind
+/// what was asked before it, never as a call that would wait on the session's
+/// loop; drawn again before it goes, it is sent once, declaring both.
 #[test]
-fn a_present_with_no_room_goes_as_a_call() {
+fn a_present_with_no_room_waits_in_turn_and_a_redraw_goes_with_it() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     {
         let inner = &mut *loopback.borrow_mut();
         inner.holds_posts = true;
         inner.lane = Some(1);
     }
+    let (left, right) = (
+        DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        },
+        DamageRect {
+            x: 3,
+            y: 2,
+            width_px: 1,
+            height_px: 1,
+        },
+    );
     client
         .set_cursor(window, CursorShape::Text)
         .expect("posted");
-    client.present(window, 0, full_damage()).expect("called");
+    client
+        .present(window, 0, one(left))
+        .expect("waits for room");
+    assert_eq!(client.present_state(window), PresentState::Waiting(0));
+    client.present(window, 0, one(right)).expect("drawn again");
+    {
+        let inner = loopback.borrow();
+        assert!(inner.awaited.is_empty(), "nothing waited on the session");
+        assert!(inner.host.presented.is_empty() && inner.host.cursors.is_empty());
+    }
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    loopback.borrow_mut().serve_posted();
     let inner = loopback.borrow();
-    assert!(inner.awaited.is_empty());
-    assert_eq!(inner.host.presented.len(), 1, "answered before it returned");
-    assert_eq!(inner.host.cursors, [(window, CursorShape::Text)]);
+    assert_eq!(
+        inner.host.cursors,
+        [(window, CursorShape::Text)],
+        "first, as asked"
+    );
+    assert_eq!(inner.host.presented.len(), 1, "the two went as one");
+    assert_eq!(inner.host.presented[0].2.rects(), [left, right]);
 }
 
 /// A refused frame is tried again with the next frame the desktop composes,
@@ -3639,7 +4011,7 @@ fn a_present_with_no_room_goes_as_a_call() {
 #[test]
 fn a_refused_frame_is_tried_again_with_the_next_desktop_frame() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     {
         let inner = &mut *loopback.borrow_mut();
@@ -3680,7 +4052,7 @@ fn a_refused_frame_is_tried_again_with_the_next_desktop_frame() {
 #[test]
 fn a_closed_windows_frame_asks_for_no_desktop_frame() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
     client.present(window, 0, full_damage()).expect("posted");
@@ -3691,13 +4063,11 @@ fn a_closed_windows_frame_asks_for_no_desktop_frame() {
 
 /// Present twice to `window`, the second held behind the frame the first
 /// named, which the desktop has yet to show.
-fn hold_a_present(client: &mut WindowClient<Rc<RefCell<Loopback>>>, window: u64) {
+fn hold_a_present(client: &mut Client, window: u64) {
     client.present(window, 0, full_damage()).expect("posted");
+    client.reap_posted();
     client.present(window, 1, full_damage()).expect("posted");
-    assert!(
-        client.present_in_flight(window),
-        "held behind an unshown frame"
-    );
+    assert!(presenting(client, window), "held behind an unshown frame");
 }
 
 /// The tickets the engine answered through `send_answers` that no post was
@@ -3722,25 +4092,25 @@ fn called_tickets(loopback: &Loopback) -> Vec<u64> {
 #[test]
 fn a_present_replacing_an_unshown_frame_is_answered_once_it_is_shown() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
 
     client.present(window, 0, full_damage()).expect("posted");
     assert!(
-        !client.present_in_flight(window),
+        !presenting(&mut client, window),
         "nothing waited to be shown"
     );
     client.present(window, 1, full_damage()).expect("posted");
     assert!(
-        client.present_in_flight(window),
+        presenting(&mut client, window),
         "its answer waits for the frame it replaced"
     );
     loopback.borrow_mut().latch();
-    assert!(!client.present_in_flight(window), "shown, it is answered");
+    assert!(!presenting(&mut client, window), "shown, it is answered");
     client.present(window, 0, full_damage()).expect("posted");
     assert!(
-        !client.present_in_flight(window),
+        !presenting(&mut client, window),
         "after a shown frame it is answered at once"
     );
 }
@@ -3752,17 +4122,28 @@ fn a_present_replacing_an_unshown_frame_is_answered_once_it_is_shown() {
 #[test]
 fn a_streaming_client_is_held_to_the_desktops_frames() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let latched = {
         let inner = &mut *loopback.borrow_mut();
         inner.holds_frames = true;
         inner.latches
     };
-    for frame_index in 0..64u32 {
-        client
-            .present(window, frame_index % 2, full_damage())
-            .expect("presented");
+    let mut presented = 0u32;
+    while presented < 64 {
+        match client.present(window, presented % 2, full_damage()) {
+            Ok(()) => presented += 1,
+            // Both frames are the session's: the desktop's next frame answers
+            // the present in flight and hands one back.
+            Err(Errno::WouldBlock) => {
+                loopback.borrow_mut().latch();
+                assert!(matches!(
+                    landed(&mut client),
+                    Some(Answer::FrameReturned { .. })
+                ));
+            }
+            Err(err) => panic!("presented: {err}"),
+        }
     }
     let inner = loopback.borrow();
     let frames = inner.latches - latched;
@@ -3779,14 +4160,14 @@ fn a_streaming_client_is_held_to_the_desktops_frames() {
 fn a_resize_a_release_or_a_close_answers_the_present_it_supersedes() {
     let regions = [(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN), (9, 2 * FRAME_LEN)];
     let loopback = Loopback::with_regions(&regions);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let other = create_id(&mut client, 9, EVENTS_A, 2, "b").expect("b");
     loopback.borrow_mut().holds_frames = true;
 
     hold_a_present(&mut client, window);
     client.resize(window, 8, 2, &SURFACE).expect("posted");
-    assert!(!client.present_in_flight(window), "the re-map answered it");
+    assert!(!presenting(&mut client, window), "the re-map answered it");
 
     hold_a_present(&mut client, window);
     {
@@ -3794,7 +4175,7 @@ fn a_resize_a_release_or_a_close_answers_the_present_it_supersedes() {
         inner.server.release_frames(window);
         inner.collect_answers();
     }
-    assert!(!client.present_in_flight(window), "the release answered it");
+    assert!(!presenting(&mut client, window), "the release answered it");
 
     hold_a_present(&mut client, other);
     client.close(other).expect("closed");
@@ -3809,7 +4190,7 @@ fn a_resize_a_release_or_a_close_answers_the_present_it_supersedes() {
 #[test]
 fn a_refused_frame_still_answers_the_present_held_behind_it() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     {
         let inner = &mut *loopback.borrow_mut();
@@ -3818,7 +4199,7 @@ fn a_refused_frame_still_answers_the_present_held_behind_it() {
     }
     hold_a_present(&mut client, window);
     loopback.borrow_mut().latch();
-    assert!(!client.present_in_flight(window), "refused yet answered");
+    assert!(!presenting(&mut client, window), "refused yet answered");
     assert_eq!(
         loopback.borrow().host.frames_refused,
         [(window, Errno::OutOfMemory)]
@@ -3830,7 +4211,7 @@ fn a_refused_frame_still_answers_the_present_held_behind_it() {
 #[test]
 fn a_present_superseding_a_held_one_answers_the_older_at_once() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let inner = &mut *loopback.borrow_mut();
     inner.holds_frames = true;
@@ -3855,7 +4236,7 @@ fn a_present_superseding_a_held_one_answers_the_older_at_once() {
 #[test]
 fn an_exited_clients_answers_are_dropped() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let inner = &mut *loopback.borrow_mut();
     inner.holds_frames = true;
@@ -3877,7 +4258,7 @@ fn an_exited_clients_answers_are_dropped() {
 #[test]
 fn every_call_is_answered_exactly_once() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let inner = &mut *loopback.borrow_mut();
     inner.holds_frames = true;
@@ -3929,7 +4310,7 @@ fn every_call_is_answered_exactly_once() {
 #[test]
 fn held_answers_are_released_with_their_frames_left_to_show() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_frames = true;
     hold_a_present(&mut client, window);
@@ -3945,12 +4326,12 @@ fn held_answers_are_released_with_their_frames_left_to_show() {
         );
     }
     assert!(
-        !client.present_in_flight(window),
+        !presenting(&mut client, window),
         "answered with nothing shown"
     );
     client.present(window, 0, full_damage()).expect("posted");
     assert!(
-        client.present_in_flight(window),
+        presenting(&mut client, window),
         "the next is held to the desktop's pace"
     );
     loopback.borrow_mut().latch();
@@ -3974,7 +4355,7 @@ fn a_resize_drops_a_redraw_held_for_the_region_it_replaced() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * 24)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     client.present(window, 0, full_damage()).expect("posted");
@@ -3998,7 +4379,7 @@ fn a_resize_drops_a_redraw_held_for_the_region_it_replaced() {
 #[test]
 fn a_resize_while_hidden_keeps_the_window_hidden() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     client.present(window, 0, full_damage()).expect("posted");
     loopback.borrow_mut().server.release_frames(window);
@@ -4016,7 +4397,7 @@ fn a_resize_while_hidden_keeps_the_window_hidden() {
 #[test]
 fn a_reattach_refused_for_room_asks_for_the_paint_again() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     client.present(window, 0, full_damage()).expect("posted");
     loopback.borrow_mut().server.release_frames(window);
@@ -4062,82 +4443,105 @@ fn a_reattach_refused_for_room_asks_for_the_paint_again() {
 #[test]
 fn a_frame_is_drawn_only_once_the_previous_present_is_answered() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     let mut ring = crate::frames::FrameRing::new(&SURFACE);
     let mut drawn = Vec::new();
-    for remapped in [false, true, false] {
-        if remapped {
-            ring.reset(&SURFACE);
-        }
-        ring.present(&mut client, window, full_damage(), |index, _| {
-            drawn.push((index, loopback.borrow().unserved.len()));
+    let mut present = |client: &mut Client, ring: &mut crate::frames::FrameRing| {
+        ring.present(client, window, full_damage(), |index, _| {
+            drawn.push(index);
             Ok(())
         })
-        .expect("presented");
-    }
+        .expect("presented")
+    };
+    assert!(
+        present(&mut client, &mut ring),
+        "drawn with nothing in flight"
+    );
+    assert!(
+        !present(&mut client, &mut ring),
+        "nothing is drawn while both frames are the session's"
+    );
+    loopback.borrow_mut().serve_posted();
+    assert!(
+        matches!(landed(&mut client), Some(Answer::FrameReturned { window_id }) if window_id == window),
+        "the deferred paint is owed its frame back"
+    );
+    assert!(present(&mut client, &mut ring), "and goes then");
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    ring.reset(&SURFACE);
+    assert!(present(&mut client, &mut ring));
     assert_eq!(
         drawn,
-        [(0, 0), (0, 0), (1, 0)],
+        [0, 1, 0],
         "each frame drawn with nothing in flight, a re-mapped ring from its first"
     );
 }
 
-/// Waiting for a window's present reaps nothing else: each present is awaited
-/// by its own answer, so a window with none in flight costs no call.
+/// While a window's present is in flight both its frames are the session's,
+/// so another is refused at once, sending nothing, and the window is owed its
+/// frame back once the first is answered: a loop is never held to the
+/// desktop's pace, and never draws into a frame the session reads.
 #[test]
-fn awaiting_a_present_reaps_nothing_else() {
+fn a_present_asked_while_one_is_in_flight_is_owed_its_frame_back() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
-    loopback.borrow_mut().holds_posts = true;
-    client
-        .set_cursor(window, CursorShape::Text)
-        .expect("posted");
-    let reaps = loopback.borrow().reaps;
-    client.await_present(window).expect("none in flight");
-    client.present(window, 0, full_damage()).expect("posted");
-    assert_eq!(loopback.borrow().reaps, reaps, "nothing was reaped");
-}
-
-/// A present whose wait ends unanswered while the call is still live stays
-/// posted for the reap: forgotten, its answer would leave the window's reply
-/// member ready for ever and every park would return at once. No second
-/// present goes out while it is in flight.
-#[test]
-fn a_present_whose_wait_is_interrupted_stays_posted_for_the_reap() {
-    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     client.present(window, 0, full_damage()).expect("posted");
-    loopback.borrow_mut().refuses_awaits = Some(Errno::Interrupted);
-    assert_eq!(client.await_present(window), Err(Errno::Interrupted));
+    assert_eq!(client.present_state(window), PresentState::InFlight);
     let sent = loopback.borrow().sent.len();
     assert_eq!(
         client.present(window, 1, full_damage()),
-        Err(Errno::Interrupted)
+        Err(Errno::WouldBlock)
     );
-    assert_eq!(loopback.borrow().sent.len(), sent, "no second present");
-    assert!(client.present_in_flight(window), "still posted");
-    {
-        let mut inner = loopback.borrow_mut();
-        inner.refuses_awaits = None;
-        inner.serve_posted();
-    }
-    assert!(!client.present_in_flight(window), "its answer was taken in");
+    assert_eq!(loopback.borrow().sent.len(), sent, "nothing more was sent");
+    assert!(
+        landed(&mut client).is_none(),
+        "owed once the first is answered"
+    );
+    loopback.borrow_mut().serve_posted();
+    assert!(
+        matches!(landed(&mut client), Some(Answer::FrameReturned { window_id }) if window_id == window)
+    );
+    assert_eq!(client.present_state(window), PresentState::Idle);
     client
         .present(window, 1, full_damage())
         .expect("the next present");
 }
 
-/// A present whose wait ends after the call itself has ended is retired, so
-/// the window is free for its next present.
+/// A worker's wait that ends unanswered while the call is still live leaves it
+/// posted for the reap: forgotten, its answer would leave the window's reply
+/// member ready for ever and every park would return at once.
 #[test]
-fn a_present_whose_call_ended_unanswered_is_retired() {
+fn a_wait_for_answers_that_is_interrupted_leaves_them_posted_for_the_reap() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    client.present(window, 0, full_damage()).expect("posted");
+    loopback.borrow_mut().refuses_awaits = Some(Errno::Interrupted);
+    assert_eq!(client.await_answers(), Err(Errno::Interrupted));
+    assert!(presenting(&mut client, window), "still posted");
+    {
+        let mut inner = loopback.borrow_mut();
+        inner.refuses_awaits = None;
+        inner.serve_posted();
+    }
+    assert!(!presenting(&mut client, window), "its answer was taken in");
+    client
+        .present(window, 1, full_damage())
+        .expect("the next present");
+}
+
+/// A request whose call ended unanswered is retired by the wait, as refused,
+/// so the window is free for its next present.
+#[test]
+fn a_request_whose_call_ended_unanswered_is_retired_by_the_wait() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     client.present(window, 0, full_damage()).expect("posted");
@@ -4146,8 +4550,8 @@ fn a_present_whose_call_ended_unanswered_is_retired() {
         inner.unserved.clear();
         inner.refuses_awaits = Some(Errno::TimedOut);
     }
-    assert_eq!(client.await_present(window), Ok(()));
-    assert!(!client.present_in_flight(window));
+    assert_eq!(client.await_answers(), Err(Errno::NotFound));
+    assert!(!presenting(&mut client, window));
 }
 
 /// No per-input request waits on the session: each is posted and answered
@@ -4161,7 +4565,7 @@ fn a_posted_request_never_waits_on_the_session() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
 
@@ -4198,7 +4602,7 @@ fn a_posted_request_never_waits_on_the_session() {
 #[test]
 fn a_post_refused_for_room_waits_for_an_answer_then_goes_in_order() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     {
         let mut inner = loopback.borrow_mut();
@@ -4248,7 +4652,7 @@ fn a_resize_refused_for_room_is_deferred_and_delivered_again() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let resized = WindowEvent::Resized {
         window_id: window,
@@ -4298,7 +4702,7 @@ fn a_posted_resize_is_served_before_the_present_that_follows_it() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
 
@@ -4314,7 +4718,7 @@ fn a_posted_resize_is_served_before_the_present_that_follows_it() {
 #[test]
 fn a_burst_of_one_kind_keeps_one_in_flight_and_ends_on_the_newest() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     let sent_before = loopback.borrow().sent.len();
@@ -4359,7 +4763,7 @@ fn a_resize_asked_while_another_is_unanswered_is_delivered_again() {
         format: DisplayFormat::Bgra8888,
     };
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
     let resized = |width_px| WindowEvent::Resized {
@@ -4395,7 +4799,7 @@ fn a_resize_asked_while_another_is_unanswered_is_delivered_again() {
 #[test]
 fn folding_a_resize_run_keeps_every_other_event_in_order() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let resized = |window_id, width_px| WindowEvent::Resized {
@@ -4435,7 +4839,7 @@ fn folding_a_resize_run_keeps_every_other_event_in_order() {
 #[test]
 fn the_drained_wait_answers_a_redraw_request_like_the_parked_one() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     client
         .present(window, 1, full_damage())
@@ -4463,7 +4867,7 @@ fn redraw_source(window: u64) -> QueueSource {
 #[test]
 fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
     let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
 
     // A client that has never presented has no frame to re-send: the
@@ -4510,7 +4914,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
 #[test]
 fn event_routing_fails_closed() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     let mut sink = QueueSink::default();
@@ -4581,7 +4985,7 @@ fn the_wallpaper_catalog_is_answered_as_pages_of_the_hosts_own_listing() {
             file: String::from("b.png"),
         },
     ];
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut page = [0u8; tairix_abi::window_ipc::WINDOW_WALLPAPERS_REPLY_MAX];
 
     let answered = client.wallpapers(0, &mut page).expect("a catalog page");
@@ -4622,7 +5026,7 @@ fn the_cursor_sets_are_answered_whole_from_the_hosts_own_listing() {
         CursorSetName(String::from("Standard")),
         CursorSetName(String::from("High Visibility")),
     ];
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_CURSOR_SETS_REPLY_MAX];
 
     let answered = client.cursor_sets(&mut frame).expect("the choice space");
@@ -4642,7 +5046,7 @@ fn the_cursor_sets_are_answered_whole_from_the_hosts_own_listing() {
 #[test]
 fn a_host_with_no_cursor_store_answers_an_empty_choice_space() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_CURSOR_SETS_REPLY_MAX];
     let answered = client.cursor_sets(&mut frame).expect("the choice space");
     assert!(answered.is_empty());
@@ -4659,7 +5063,7 @@ fn a_notify_source_query_reaches_the_host_with_the_attested_application() {
     loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
     loopback.borrow_mut().host.notify_sources =
         alloc::vec![BundleId::new("os.tairix.netstack").expect("a bounded identity")];
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
 
     let answered = client.notify_sources(&mut frame).expect("the host answers");
@@ -4681,7 +5085,7 @@ fn a_zone_store_request_is_delegated_to_the_attested_caller() {
     let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
         .expect("a well-formed identity");
     loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     assert_eq!(client.zone_store(), Ok(ZONE_GRANT));
     assert_eq!(
@@ -4691,8 +5095,8 @@ fn a_zone_store_request_is_delegated_to_the_attested_caller() {
     assert_eq!(loopback.borrow().host.asked_by, alloc::vec![Some(settings)]);
 }
 
-/// A host holding no store refuses with the minted-id frame's own shape, so
-/// the client reads the refusal rather than a malformed reply.
+/// A host holding no store refuses with the handle frame's own shape, so the
+/// client reads the refusal rather than a malformed reply.
 #[test]
 fn a_host_with_no_zone_store_refuses_it_whole() {
     let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
@@ -4711,7 +5115,7 @@ fn a_host_with_no_zone_store_refuses_it_whole() {
     );
     let len = replied(outcome);
     assert_eq!(
-        tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
+        tairix_abi::window_ipc::decode_handle_reply(&reply[..len]),
         Err(Errno::NotSupported)
     );
 }
@@ -4721,7 +5125,7 @@ fn a_host_with_no_zone_store_refuses_it_whole() {
 #[test]
 fn a_caller_with_no_application_is_refused_by_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
     assert_eq!(
         client.notify_sources(&mut frame).map(|list| list.len()),
@@ -4776,7 +5180,7 @@ fn authorised(sink: &QueueSink) -> Vec<AuthorisedOutcome> {
 #[test]
 fn an_authorisation_reaches_the_host_and_concludes_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = settings_window(&loopback, &mut client);
     let mut sink = QueueSink::default();
 
@@ -4790,7 +5194,8 @@ fn an_authorisation_reaches_the_host_and_concludes_once() {
         )]
     );
     assert_eq!(
-        client.authorise(Some(window), &SystemTask::ShowAccounts),
+        settled(&mut client, |client| client
+            .authorise(Some(window), &SystemTask::ShowAccounts)),
         Err(Errno::AlreadyExists),
         "one pends per window"
     );
@@ -4829,13 +5234,13 @@ fn an_authorisation_reaches_the_host_and_concludes_once() {
 #[test]
 fn a_slot_authorisation_is_answered_on_the_bar_route() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings_app())];
     let mut sink = QueueSink::default();
     let task = SystemTask::ShowAccounts;
 
     assert_eq!(
-        client.authorise(None, &task),
+        settled(&mut client, |client| client.authorise(None, &task)),
         Err(Errno::NotFound),
         "no slot was declared"
     );
@@ -4850,7 +5255,7 @@ fn a_slot_authorisation_is_answered_on_the_bar_route() {
         alloc::vec![(Some(settings_app()), slot, task)]
     );
     assert_eq!(
-        client.authorise(None, &task),
+        settled(&mut client, |client| client.authorise(None, &task)),
         Err(Errno::AlreadyExists),
         "one pends per slot"
     );
@@ -4924,14 +5329,15 @@ fn a_slot_authorisation_is_answered_on_the_bar_route() {
 #[test]
 fn window_zero_is_refused_rather_than_taken_for_the_slot() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings_app())];
     client
         .set_app_bar(&sample_app_bar(EVENTS_B))
         .expect("declared");
 
     assert_eq!(
-        client.authorise(Some(0), &SystemTask::ShowAccounts),
+        settled(&mut client, |client| client
+            .authorise(Some(0), &SystemTask::ShowAccounts)),
         Err(Errno::OutOfRange)
     );
     assert_eq!(
@@ -4949,13 +5355,14 @@ fn window_zero_is_refused_rather_than_taken_for_the_slot() {
 #[test]
 fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = settings_window(&loopback, &mut client);
     let mut sink = QueueSink::default();
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.authorise(Some(window), &configure_task()),
+        settled(&mut client, |client| client
+            .authorise(Some(window), &configure_task())),
         Err(Errno::NotFound)
     );
     loopback.borrow_mut().ticket = TICKET_A;
@@ -4963,7 +5370,8 @@ fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() 
 
     loopback.borrow_mut().host.refuse_authorise = Some(Errno::SeatBusy);
     assert_eq!(
-        client.authorise(Some(window), &configure_task()),
+        settled(&mut client, |client| client
+            .authorise(Some(window), &configure_task())),
         Err(Errno::SeatBusy)
     );
     assert_eq!(
@@ -4984,7 +5392,7 @@ fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() 
 #[test]
 fn a_captured_output_is_the_owners_to_take_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = settings_window(&loopback, &mut client);
     let mut sink = QueueSink::default();
     let listing = b"alice 1000\n".to_vec();
@@ -5039,7 +5447,7 @@ fn a_captured_output_is_the_owners_to_take_once() {
 #[test]
 fn an_authorised_event_is_not_delivered_as_any_other() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = settings_window(&loopback, &mut client);
     client
         .authorise(Some(window), &SystemTask::SetClock)
@@ -5062,10 +5470,11 @@ fn an_authorised_event_is_not_delivered_as_any_other() {
 #[test]
 fn an_authorisation_from_no_application_is_refused_by_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a window");
     assert_eq!(
-        client.authorise(Some(window), &configure_task()),
+        settled(&mut client, |client| client
+            .authorise(Some(window), &configure_task())),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(
@@ -5079,7 +5488,7 @@ fn an_authorisation_from_no_application_is_refused_by_the_host() {
 fn a_failed_attestation_refuses_a_reserved_request_before_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     loopback.borrow_mut().identity.attest_error = Some(Errno::NotFound);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     assert_eq!(client.lock_screen(), Err(Errno::NotFound));
     assert!(loopback.borrow().host.asked_by.is_empty());
 }
@@ -5089,7 +5498,7 @@ fn a_failed_attestation_refuses_a_reserved_request_before_the_host() {
 #[test]
 fn a_host_with_no_catalog_answers_an_empty_page() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut page = [0u8; tairix_abi::window_ipc::WINDOW_WALLPAPERS_REPLY_MAX];
     let answered = client.wallpapers(0, &mut page).expect("a catalog page");
     assert_eq!(answered.total, 0);
@@ -5104,7 +5513,7 @@ fn a_window_maps_only_a_frame_region_its_own_client_granted() {
         (7, FRAME_LEN, proc_id(0xA1)),
         (8, FRAME_LEN, proc_id(0xB2)),
     ]));
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     assert_eq!(
         create_id(&mut client, 8, EVENTS_A, 1, "stolen"),
         Err(Errno::NotFound)
@@ -5117,26 +5526,32 @@ fn a_window_maps_only_a_frame_region_its_own_client_granted() {
 #[test]
 fn the_clipboard_is_asked_only_for_the_callers_own_window_and_region() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.set_clipboard(window, 0x44, 3, ClipboardKind::Text),
+        settled(&mut client, |client| client.set_clipboard(
+            window,
+            ClipboardKind::Text,
+            b"abc"
+        )),
         Err(Errno::NotFound)
     );
-    assert_eq!(client.get_clipboard(window, 0x44), Err(Errno::NotFound));
+    assert_eq!(clipboard(&mut client, window), Err(Errno::NotFound));
     assert!(loopback.borrow().host.clipboard.is_empty());
 
     loopback.borrow_mut().ticket = TICKET_A;
-    client
-        .set_clipboard(window, 0x44, 3, ClipboardKind::Text)
-        .expect("set passed on");
-    client.get_clipboard(window, 0x45).expect("get passed on");
+    settled(&mut client, |client| {
+        client.set_clipboard(window, ClipboardKind::Text, b"abc")
+    })
+    .expect("set passed on");
+    assert_eq!(clipboard(&mut client, window), Ok(None), "it holds nothing");
     let own = |handle| (window, ClientRegion::of(proc_id(0xA1), handle));
     assert_eq!(
         loopback.borrow().host.clipboard,
-        alloc::vec![own(0x44), own(0x45)]
+        alloc::vec![own(0x46), own(0x47)],
+        "each through a region of its own, granted as it was asked"
     );
 }
 
@@ -5146,7 +5561,7 @@ fn the_clipboard_is_asked_only_for_the_callers_own_window_and_region() {
 #[test]
 fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let wallpaper = PreviewSubject::Wallpaper(0);
     let starfield = PreviewSubject::Screensaver(2);
@@ -5230,7 +5645,7 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
 #[test]
 fn no_render_is_accepted_while_a_conclusion_waits_undelivered() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let subject = PreviewSubject::Wallpaper(0);
     loopback.borrow_mut().sink.held_render = Some((EVENTS_A, window));
@@ -5253,7 +5668,7 @@ fn no_render_is_accepted_while_a_conclusion_waits_undelivered() {
 fn a_refused_render_leaves_no_pending_conclusion() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     loopback.borrow_mut().host.refuse_render = Some(Errno::LengthOutOfRange);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let subject = PreviewSubject::Wallpaper(0);
     assert_eq!(
@@ -5271,7 +5686,7 @@ fn a_refused_render_leaves_no_pending_conclusion() {
 #[test]
 fn a_screensaver_preview_reaches_the_host_with_the_caller_it_was_attested_as() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     assert_eq!(
         client.preview_screensaver("screensaver.saver = os.tairix.saver.clock\n"),
         Err(Errno::PermissionDenied),
@@ -5296,7 +5711,7 @@ fn a_screensaver_preview_reaches_the_host_with_the_caller_it_was_attested_as() {
 #[test]
 fn a_screensaver_picture_names_its_caller_and_a_wallpaper_none() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
         .expect("a well-formed identity");
@@ -5316,13 +5731,16 @@ fn a_screensaver_picture_names_its_caller_and_a_wallpaper_none() {
 #[test]
 fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // A window the caller does not own answers exactly like one that
     // never existed.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.pick_file(window, OPEN), Err(Errno::NotFound));
+    assert_eq!(
+        settled(&mut client, |client| client.pick_file(window, OPEN)),
+        Err(Errno::NotFound)
+    );
     loopback.borrow_mut().ticket = TICKET_A;
 
     // The owner's request reaches the host with its purpose and pends; a
@@ -5330,7 +5748,10 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
     // again.
     client.pick_file(window, OPEN).expect("pick accepted");
     assert_eq!(loopback.borrow().host.picks, alloc::vec![(window, OPEN)]);
-    assert_eq!(client.pick_file(window, OPEN), Err(Errno::AlreadyExists));
+    assert_eq!(
+        settled(&mut client, |client| client.pick_file(window, OPEN)),
+        Err(Errno::AlreadyExists)
+    );
     assert_eq!(loopback.borrow().host.picks.len(), 1);
 
     // The conclusion delivers to the owner's endpoint and clears the
@@ -5377,18 +5798,18 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
 #[test]
 fn the_chosen_name_is_the_owners_to_take_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut sink = QueueSink::default();
 
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Err(Errno::NotFound),
         "nothing was picked"
     );
     client.pick_file(window, OPEN).expect("pick accepted");
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Err(Errno::NotFound),
         "nor has it concluded"
     );
@@ -5396,17 +5817,17 @@ fn the_chosen_name_is_the_owners_to_take_once() {
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Err(Errno::NotFound),
         "another client cannot learn what this window chose"
     );
     loopback.borrow_mut().ticket = TICKET_A;
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Ok(String::from("report.txt"))
     );
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Err(Errno::NotFound),
         "one-shot"
     );
@@ -5427,7 +5848,7 @@ fn the_chosen_name_is_the_owners_to_take_once() {
     );
     client.pick_file(window, OPEN).expect("pick accepted");
     conclude(&loopback, &mut sink, window, None).expect("cancelled");
-    assert_eq!(client.take_picked_name(window), Err(Errno::NotFound));
+    assert_eq!(picked_name(&mut client, window), Err(Errno::NotFound));
 }
 
 /// The files a folder pick delegated, each named and handled.
@@ -5444,7 +5865,7 @@ fn folder(files: &[(u64, &str)]) -> VecDeque<tairix_abi::window_ipc::PickedFile>
 #[test]
 fn a_folder_pick_concludes_with_its_files_for_the_owner_to_take_in_order() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut sink = QueueSink::default();
 
@@ -5479,22 +5900,22 @@ fn a_folder_pick_concludes_with_its_files_for_the_owner_to_take_in_order() {
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_picked_file(window).map(|file| file.handle),
+        picked_file(&mut client, window).map(|file| file.handle),
         Err(Errno::NotFound),
         "another client cannot take what this window was handed"
     );
     loopback.borrow_mut().ticket = TICKET_A;
     assert_eq!(
-        client.pick_file(window, OPEN),
+        settled(&mut client, |client| client.pick_file(window, OPEN)),
         Err(Errno::AlreadyExists),
         "a further pick waits until the delegated files are taken"
     );
-    let first = client.take_picked_file(window).expect("the first file");
+    let first = picked_file(&mut client, window).expect("the first file");
     assert_eq!((first.handle, first.name.as_str()), (3, "01.flac"));
-    let second = client.take_picked_file(window).expect("the second file");
+    let second = picked_file(&mut client, window).expect("the second file");
     assert_eq!((second.handle, second.name.as_str()), (4, "02.flac"));
     assert_eq!(
-        client.take_picked_file(window).map(|file| file.handle),
+        picked_file(&mut client, window).map(|file| file.handle),
         Err(Errno::NotFound)
     );
     client
@@ -5506,7 +5927,7 @@ fn a_folder_pick_concludes_with_its_files_for_the_owner_to_take_in_order() {
 #[test]
 fn a_folder_conclusion_is_refused_unless_a_folder_was_asked_for_and_is_honest() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut sink = QueueSink::default();
     let server = |sink: &mut QueueSink, files, left_out| {
@@ -5559,7 +5980,7 @@ fn an_application_has_at_most_its_bound_of_picks_open() {
     let handles: Vec<u64> = (7..).take(bound + 1).collect();
     let regions: Vec<(u64, usize)> = handles.iter().map(|&handle| (handle, FRAME_LEN)).collect();
     let loopback = Loopback::with_regions(&regions);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let windows: Vec<u64> = handles
         .iter()
         .map(|&handle| create_id(&mut client, handle, EVENTS_A, 1, "a").expect("a window"))
@@ -5568,7 +5989,10 @@ fn an_application_has_at_most_its_bound_of_picks_open() {
         client.pick_file(window, OPEN).expect("within the bound");
     }
     let past = windows[bound];
-    assert_eq!(client.pick_file(past, OPEN), Err(Errno::LimitExceeded));
+    assert_eq!(
+        settled(&mut client, |client| client.pick_file(past, OPEN)),
+        Err(Errno::LimitExceeded)
+    );
     assert_eq!(
         loopback.borrow().host.picks.len(),
         bound,
@@ -5579,7 +6003,7 @@ fn an_application_has_at_most_its_bound_of_picks_open() {
         [(proc_id(0xA1), past)]
     );
     assert_eq!(
-        client.pick_file(windows[0], OPEN),
+        settled(&mut client, |client| client.pick_file(windows[0], OPEN)),
         Err(Errno::AlreadyExists),
         "one pick per window"
     );
@@ -5595,14 +6019,15 @@ fn an_application_has_at_most_its_bound_of_picks_open() {
 #[test]
 fn an_application_has_one_folder_pick_open_until_its_files_are_taken() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
     client
         .pick_file(first, PickPurpose::Folder)
         .expect("accepted");
     assert_eq!(
-        client.pick_file(second, PickPurpose::Folder),
+        settled(&mut client, |client| client
+            .pick_file(second, PickPurpose::Folder)),
         Err(Errno::LimitExceeded)
     );
     client
@@ -5616,11 +6041,12 @@ fn an_application_has_one_folder_pick_open_until_its_files_are_taken() {
         .expect("concluded");
     conclude(&loopback, &mut sink, second, None).expect("cancelled");
     assert_eq!(
-        client.pick_file(second, PickPurpose::Folder),
+        settled(&mut client, |client| client
+            .pick_file(second, PickPurpose::Folder)),
         Err(Errno::LimitExceeded),
         "the files it delegated are not taken yet"
     );
-    client.take_picked_file(first).expect("taken");
+    picked_file(&mut client, first).expect("taken");
     client
         .pick_file(second, PickPurpose::Folder)
         .expect("taken, another folder may be chosen");
@@ -5636,11 +6062,12 @@ fn an_application_has_one_folder_pick_open_until_its_files_are_taken() {
 #[test]
 fn a_pick_takes_the_keyboard_only_when_its_application_holds_the_front() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let other = create_id(&mut client, 9, EVENTS_A, 1, "c").expect("c");
+    let mut b_client = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    let theirs = create_id(&mut b_client, 8, EVENTS_B, 1, "b").expect("b");
     loopback.borrow_mut().ticket = TICKET_A;
 
     loopback.borrow_mut().host.focused = Some(mine);
@@ -5696,7 +6123,7 @@ fn one_file() -> DragItems {
 #[test]
 fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut sink = QueueSink::default();
     let target = DropTarget {
@@ -5706,11 +6133,14 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     };
 
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.begin_drag(window, one_file()), Err(Errno::NotFound));
+    assert_eq!(
+        settled(&mut client, |client| client.begin_drag(window, one_file())),
+        Err(Errno::NotFound)
+    );
     loopback.borrow_mut().ticket = TICKET_A;
     loopback.borrow_mut().host.refuse_drag = Some(Errno::PermissionDenied);
     assert_eq!(
-        client.begin_drag(window, one_file()),
+        settled(&mut client, |client| client.begin_drag(window, one_file())),
         Err(Errno::PermissionDenied),
         "a gesture the host cannot carry records nothing"
     );
@@ -5721,11 +6151,11 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
         [(window, String::from("notes.txt"))]
     );
     assert_eq!(
-        client.begin_drag(window, one_file()),
+        settled(&mut client, |client| client.begin_drag(window, one_file())),
         Err(Errno::AlreadyExists)
     );
     assert_eq!(
-        client.take_drop_target(window),
+        drop_target(&mut client, window),
         Err(Errno::NotFound),
         "not dropped yet"
     );
@@ -5774,9 +6204,15 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
             .conclude_drag(&mut sink, window, DragConclusion::Nothing),
         Err(Errno::OutOfRange)
     );
-    assert_eq!(client.take_drop_target(window), Ok(target));
     assert_eq!(
-        client.take_drop_target(window),
+        drop_target(&mut client, window),
+        Ok(crate::client::Dropped {
+            run_path: String::from(target.run_path.as_str()),
+            writes_documents: target.writes_documents,
+        })
+    );
+    assert_eq!(
+        drop_target(&mut client, window),
         Err(Errno::NotFound),
         "one-shot"
     );
@@ -5788,7 +6224,7 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
         .server
         .conclude_drag(&mut sink, window, DragConclusion::Nothing)
         .expect("concluded");
-    assert_eq!(client.take_drop_target(window), Err(Errno::NotFound));
+    assert_eq!(drop_target(&mut client, window), Err(Errno::NotFound));
 }
 
 /// A loopback client over the test engine.
@@ -5798,11 +6234,12 @@ type LoopClient = WindowClient<Rc<RefCell<Loopback>>>;
 /// carried from the first.
 fn carried_drag() -> (Rc<RefCell<Loopback>>, LoopClient, [u64; 3]) {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let source = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let sibling = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let stranger = create_id(&mut client, 9, EVENTS_B, 1, "c").expect("c");
+    let stranger = create_id(&mut other, 9, EVENTS_B, 1, "c").expect("c");
     loopback.borrow_mut().ticket = TICKET_A;
     client.begin_drag(source, one_file()).expect("accepted");
     (loopback, client, [source, sibling, stranger])
@@ -5888,17 +6325,17 @@ fn a_drag_is_reported_to_its_owner_about_its_own_windows_alone() {
     )
     .expect("the desktop");
     assert_eq!(
-        client.drag_spot(source, 3).as_deref(),
+        drag_spot(&mut client, source, 3).as_deref(),
         Ok("/Users/ann/Desktop")
     );
     assert_eq!(
-        client.drag_spot(source, 2),
+        drag_spot(&mut client, source, 2),
         Err(Errno::NotFound),
         "another report"
     );
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.drag_spot(source, 3),
+        drag_spot(&mut client, source, 3),
         Err(Errno::NotFound),
         "only the owner reads it"
     );
@@ -5922,11 +6359,11 @@ fn a_desktop_folder_is_held_for_every_report_of_its_place() {
     report(3, desktop);
     report(4, desktop);
     assert_eq!(
-        client.drag_spot(source, 3).as_deref(),
+        drag_spot(&mut client, source, 3).as_deref(),
         Ok("/D"),
         "a report superseded where the pointer rests"
     );
-    assert_eq!(client.drag_spot(source, 4).as_deref(), Ok("/D"));
+    assert_eq!(drag_spot(&mut client, source, 4).as_deref(), Ok("/D"));
     report(
         5,
         DragReport::Window {
@@ -5937,18 +6374,18 @@ fn a_desktop_folder_is_held_for_every_report_of_its_place() {
     );
     report(6, desktop);
     assert_eq!(
-        client.drag_spot(source, 4),
+        drag_spot(&mut client, source, 4),
         Err(Errno::NotFound),
         "the pointer left that place"
     );
-    assert_eq!(client.drag_spot(source, 6).as_deref(), Ok("/D"));
+    assert_eq!(drag_spot(&mut client, source, 6).as_deref(), Ok("/D"));
     report(7, DragReport::Desktop { folder: "/D/Inbox" });
     assert_eq!(
-        client.drag_spot(source, 6),
+        drag_spot(&mut client, source, 6),
         Err(Errno::NotFound),
         "another folder is another place"
     );
-    assert_eq!(client.drag_spot(source, 7).as_deref(), Ok("/D/Inbox"));
+    assert_eq!(drag_spot(&mut client, source, 7).as_deref(), Ok("/D/Inbox"));
 }
 
 /// A drag of three items led by `notes.txt`.
@@ -6007,7 +6444,7 @@ fn drop_on_desktop(loopback: &Rc<RefCell<Loopback>>, window: u64, serial: u32) -
 #[test]
 fn a_landing_is_stepped_by_its_owner_in_turn_until_it_ends() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client.begin_drag(window, three_items()).expect("accepted");
     assert_eq!(drop_on_desktop(&loopback, window, 3), None);
@@ -6083,7 +6520,7 @@ fn a_landing_is_stepped_by_its_owner_in_turn_until_it_ends() {
 #[test]
 fn a_landing_ends_at_the_bound_and_with_its_window_or_owner() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut displaced = Vec::new();
     for serial in 1..=5 {
@@ -6126,7 +6563,7 @@ fn a_landing_ends_at_the_bound_and_with_its_window_or_owner() {
 #[test]
 fn each_drops_end_is_posted_on_its_own() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for serial in [1, 2] {
         client.begin_drag(window, one_file()).expect("accepted");
@@ -6155,25 +6592,18 @@ fn each_drops_end_is_posted_on_its_own() {
 /// Every item the desktop's drag numbered `drag` offers window `window_id`,
 /// read as `client`.
 fn read_offered(
-    client: &mut WindowClient<Rc<RefCell<Loopback>>>,
+    client: &mut Client,
     window_id: u64,
     drag: u32,
 ) -> Result<Vec<(String, tairix_abi::fs::FileId)>, Errno> {
-    let mut read = Vec::new();
-    let total = client.read_offered_items(window_id, drag, |item| {
-        read.push((String::from(item.path), item.id));
-        Ok(())
-    })?;
-    assert_eq!(
-        usize::try_from(total),
-        Ok(read.len()),
-        "every item it carries"
-    );
-    Ok(read)
+    Ok(offered_items(client, window_id, drag)?
+        .into_iter()
+        .map(|item| (item.path, item.id))
+        .collect())
 }
 
 /// More items than one reply holds are read a page at a time, in order, each
-/// with its node, and a refusal from the reader stops the read.
+/// with its node, and land as one answer once the last page is in.
 #[test]
 fn offered_items_past_one_page_are_read_in_order() {
     let (loopback, mut client, [_, _, stranger]) = carried_drag();
@@ -6200,19 +6630,7 @@ fn offered_items_past_one_page_are_read_in_order() {
         (2..400).contains(&pages),
         "a page a round trip, never an item: {pages}"
     );
-    let mut seen = 0;
-    assert_eq!(
-        client.read_offered_items(stranger, 2, |_| {
-            seen += 1;
-            if seen == 3 {
-                Err(Errno::OutOfMemory)
-            } else {
-                Ok(())
-            }
-        }),
-        Err(Errno::OutOfMemory)
-    );
-    assert_eq!(seen, 3, "nothing after the refusal");
+    assert!(landed(&mut client).is_none(), "one answer for every page");
 }
 
 /// The desktop's items offer is answered by the offered window's owner alone,
@@ -6407,7 +6825,7 @@ fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
         })
     );
     assert_eq!(
-        client.take_drop_target(source),
+        drop_target(&mut client, source),
         Err(Errno::NotFound),
         "a placed drop opens nothing"
     );
@@ -6415,7 +6833,8 @@ fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
     let grant = core::num::NonZeroU64::new(77).expect("a grant");
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.place_dropped(source, name, grant),
+        settled(&mut client, |client| client
+            .place_dropped(source, name, grant)),
         Err(Errno::NotFound),
         "only the drag's owner hands it over"
     );
@@ -6424,7 +6843,8 @@ fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
         .place_dropped(source, name, grant)
         .expect("handed over");
     assert_eq!(
-        client.place_dropped(source, name, grant),
+        settled(&mut client, |client| client
+            .place_dropped(source, name, grant)),
         Err(Errno::NotFound),
         "once"
     );
@@ -6445,7 +6865,7 @@ fn a_placed_drop_is_handed_over_once_by_its_owner_to_the_window_dropped_on() {
     );
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Placed {
             window_id: stranger,
             at: (5, 6),
@@ -6486,7 +6906,7 @@ fn a_file_offer_lies_within_its_window_and_its_type_is_its_owners_to_read() {
     client.ask_offered_file(stranger, 9).expect("posted");
     client.reap_posted();
     assert_eq!(
-        client.take_offered_media(),
+        offered_media(&mut client),
         Some(OfferedMedia {
             window_id: stranger,
             serial: 9,
@@ -6499,11 +6919,11 @@ fn a_file_offer_lies_within_its_window_and_its_type_is_its_owners_to_read() {
     client.ask_offered_file(stranger, 9).expect("posted");
     client.reap_posted();
     assert_eq!(
-        client.take_offered_media().map(|read| read.media),
+        offered_media(&mut client).map(|read| read.media),
         Some(Err(Errno::NotFound)),
         "only the offered window's owner reads its file's type"
     );
-    assert_eq!(client.take_offered_media(), None);
+    assert_eq!(offered_media(&mut client), None);
 }
 
 /// An offered file's type is read without waiting on the session: the read
@@ -6526,11 +6946,11 @@ fn an_offered_files_type_is_posted_folded_and_dropped_with_its_window() {
         "one read is in flight, the newest held behind it"
     );
     client.reap_posted();
-    assert_eq!(client.take_offered_media(), None, "nothing is served yet");
+    assert_eq!(offered_media(&mut client), None, "nothing is served yet");
     loopback.borrow_mut().serve_posted();
     client.reap_posted();
     assert_eq!(
-        client.take_offered_media(),
+        offered_media(&mut client),
         Some(OfferedMedia {
             window_id: stranger,
             serial: 9,
@@ -6541,7 +6961,7 @@ fn an_offered_files_type_is_posted_folded_and_dropped_with_its_window() {
     loopback.borrow_mut().serve_posted();
     client.reap_posted();
     assert_eq!(
-        client.take_offered_media(),
+        offered_media(&mut client),
         Some(OfferedMedia {
             window_id: stranger,
             serial: 11,
@@ -6554,7 +6974,7 @@ fn an_offered_files_type_is_posted_folded_and_dropped_with_its_window() {
     client.close(stranger).expect("closed");
     loopback.borrow_mut().serve_posted();
     client.reap_posted();
-    assert_eq!(client.take_offered_media(), None, "its window closed");
+    assert_eq!(offered_media(&mut client), None, "its window closed");
     assert!(
         loopback.borrow().answered.is_empty(),
         "the closed window's read was still reaped"
@@ -6573,7 +6993,7 @@ fn a_closed_windows_landed_read_is_dropped_with_it() {
     client.ask_offered_file(stranger, 9).expect("posted");
     client.reap_posted();
     client.close(stranger).expect("closed");
-    assert_eq!(client.take_offered_media(), None);
+    assert_eq!(offered_media(&mut client), None);
 }
 
 /// A wait returns once a read the application asked has landed, rather than
@@ -6590,7 +7010,7 @@ fn a_wait_returns_once_an_asked_read_lands() {
     assert_eq!(events.wait(&mut client).expect("no park"), None);
     assert_eq!(parked.get(), 0, "the landed read ended the wait unparked");
     assert_eq!(
-        client.take_offered_media().map(|read| read.media),
+        offered_media(&mut client).map(|read| read.media),
         Some(Ok(String::from("image/png")))
     );
 }
@@ -6680,7 +7100,7 @@ fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
         })
     );
     assert_eq!(
-        client.drag_spot(source, 3).as_deref(),
+        drag_spot(&mut client, source, 3).as_deref(),
         Ok("/D"),
         "read after the drop"
     );
@@ -6692,7 +7112,7 @@ fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
     );
     client.begin_drag(source, one_file()).expect("a new drag");
     assert_eq!(
-        client.drag_spot(source, 3),
+        drag_spot(&mut client, source, 3),
         Err(Errno::NotFound),
         "a new drag forgets it"
     );
@@ -6710,7 +7130,7 @@ fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
 #[test]
 fn a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client.pick_file(window, OPEN).expect("pick accepted");
 
@@ -6725,12 +7145,12 @@ fn a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted() {
         "a full mailbox is relayed, not swallowed"
     );
     assert_eq!(
-        client.pick_file(window, OPEN),
+        settled(&mut client, |client| client.pick_file(window, OPEN)),
         Err(Errno::AlreadyExists),
         "the pick is still pending, so no second one starts"
     );
     assert_eq!(
-        client.take_picked_name(window),
+        picked_name(&mut client, window),
         Err(Errno::NotFound),
         "nor is a name held for a conclusion that never arrived"
     );
@@ -6747,7 +7167,7 @@ fn a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted() {
 #[test]
 fn a_refused_picker_leaves_no_pending_pick() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // The host cannot run a picker (its one slot is taken, or it holds
@@ -6755,7 +7175,10 @@ fn a_refused_picker_leaves_no_pending_pick() {
     // pick pends — a conclusion is still refused, and a later request
     // (once the host recovers) is accepted.
     loopback.borrow_mut().host.refuse_pick = Some(Errno::AlreadyExists);
-    assert_eq!(client.pick_file(window, OPEN), Err(Errno::AlreadyExists));
+    assert_eq!(
+        settled(&mut client, |client| client.pick_file(window, OPEN)),
+        Err(Errno::AlreadyExists)
+    );
     let mut sink = QueueSink::default();
     assert_eq!(
         conclude(&loopback, &mut sink, window, None),
@@ -6770,13 +7193,16 @@ fn a_refused_picker_leaves_no_pending_pick() {
 #[test]
 fn set_backdrop_blur_is_owner_bound_and_reaches_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // A window the caller does not own is refused, and the host is
     // never told.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.set_backdrop_blur(window, 8), Err(Errno::NotFound));
+    assert_eq!(
+        settled(&mut client, |client| client.set_backdrop_blur(window, 8)),
+        Err(Errno::NotFound)
+    );
     assert!(loopback.borrow().host.blur_sets.is_empty());
     loopback.borrow_mut().ticket = TICKET_A;
 
@@ -6784,6 +7210,7 @@ fn set_backdrop_blur_is_owner_bound_and_reaches_the_host() {
     // replaces it rather than accumulating.
     client.set_backdrop_blur(window, 12).expect("set");
     assert_eq!(loopback.borrow().host.blur_sets, alloc::vec![(window, 12)]);
+    client.reap_posted();
     client.set_backdrop_blur(window, 0).expect("disabled");
     assert_eq!(
         loopback.borrow().host.blur_sets,
@@ -6801,8 +7228,11 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
     let mut host = MinimalHost;
     let mut identity = MockIdentity::holding_layer(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let mut ids = connect_raw(&mut server, &mut host, &mut identity);
+    let window = ids.mint().expect("a fresh range names a window");
 
     let create = request_frame(&WindowRequest::Create {
+        window_id: window,
         shm_handle: 7,
         event_endpoint: EVENTS_A,
         frame_count: 1,
@@ -6822,7 +7252,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         &mut reply,
     );
     let len = replied(outcome);
-    let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()), "created");
 
     // Setting the backdrop blur is infallible for an owned window: the
     // default handler has no compositor to tell.
@@ -6877,16 +7307,17 @@ fn sample_menu_anchor() -> WindowRegion {
 #[test]
 fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let menu = sample_open_menu();
     let anchor = sample_menu_anchor();
 
     // A window the caller does not own answers exactly like one that never
     // existed, and the host is never told.
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.open_menu(window, anchor, &menu),
+        settled(&mut other, |client| client.open_menu(window, anchor, &menu)),
         Err(Errno::NotFound)
     );
     assert!(loopback.borrow().host.menu_opens.is_empty());
@@ -6917,7 +7348,8 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
     // host: the chain holds the seat's grab, so a well-behaved application
     // never reaches here.
     assert_eq!(
-        client.open_menu(window, anchor, &menu),
+        settled(&mut client, |client| client
+            .open_menu(window, anchor, &menu)),
         Err(Errno::AlreadyExists)
     );
     assert_eq!(loopback.borrow().host.menu_opens.len(), 1);
@@ -6989,7 +7421,7 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
 #[test]
 fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let other = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
     let menu = sample_open_menu();
@@ -7000,7 +7432,7 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
 
     // With nothing recorded the pull answers the honest empty rather than a
     // fabricated name.
-    assert_eq!(client.take_menu_text(window, open), Ok(None));
+    assert_eq!(menu_text(&mut client, window, open), Ok(None));
 
     // A text may only be recorded against the open that window is still
     // waiting on: any other names a gesture whose answer has gone.
@@ -7038,7 +7470,7 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
     // existed, and reads nothing.
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_menu_text(window, open),
+        menu_text(&mut client, window, open),
         Err(Errno::NotFound),
         "a foreign pull is refused"
     );
@@ -7046,13 +7478,13 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
 
     // A pull naming another open answers nothing and leaves the held text
     // for the pull that names it.
-    assert_eq!(client.take_menu_text(window, open + 1), Ok(None));
+    assert_eq!(menu_text(&mut client, window, open + 1), Ok(None));
     assert_eq!(
-        client.take_menu_text(window, open),
+        menu_text(&mut client, window, open),
         Ok(Some(String::from("report.txt")))
     );
     // Taken once: two readers cannot both act on one commit.
-    assert_eq!(client.take_menu_text(window, open), Ok(None));
+    assert_eq!(menu_text(&mut client, window, open), Ok(None));
 
     // A commit the application never pulled belongs to the gesture that is
     // over, so the next open on that window clears it.
@@ -7089,11 +7521,11 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
         .open_menu(window, anchor, &menu)
         .expect("a third open is accepted");
     assert_eq!(
-        client.take_menu_text(window, again),
+        menu_text(&mut client, window, again),
         Ok(None),
         "the next open cleared the commit nobody pulled"
     );
-    assert_eq!(client.take_menu_text(window, third), Ok(None));
+    assert_eq!(menu_text(&mut client, window, third), Ok(None));
 }
 
 /// Two windows each hold their own open, and each answer reaches only its
@@ -7102,7 +7534,7 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
 #[test]
 fn each_windows_open_is_answered_on_its_own() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
     let menu = sample_open_menu();
@@ -7156,11 +7588,11 @@ fn each_windows_open_is_answered_on_its_own() {
     assert_eq!(sink.delivered.len(), 2);
 }
 
-/// A refused open records nothing, spends no id, and leaves no outcome owed.
+/// A refused open records nothing and leaves no outcome owed.
 #[test]
-fn a_refused_menu_open_records_nothing_and_spends_no_id() {
+fn a_refused_menu_open_records_nothing_and_owes_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let menu = sample_open_menu();
     let anchor = sample_menu_anchor();
@@ -7168,9 +7600,14 @@ fn a_refused_menu_open_records_nothing_and_spends_no_id() {
     // The host cannot bring a chain up (its seat is held by a lock screen,
     // it is tearing down): the refusal is relayed verbatim.
     loopback.borrow_mut().host.refuse_menu_open = Some(Errno::NotSupported);
+    let refused_open = client.open_menu(window, anchor, &menu).expect("asked");
     assert_eq!(
-        client.open_menu(window, anchor, &menu),
-        Err(Errno::NotSupported)
+        refusal(&mut client),
+        Some(refused(
+            window,
+            PostedRequest::OpenMenu(refused_open),
+            Errno::NotSupported
+        ))
     );
 
     // No open pends, so no outcome can be delivered for one.
@@ -7181,20 +7618,19 @@ fn a_refused_menu_open_records_nothing_and_spends_no_id() {
             &mut sink,
             &WindowEvent::MenuClosed {
                 window_id: window,
-                open_id: 1,
+                open_id: refused_open,
                 outcome: MenuOutcome::Dismissed,
             }
         ),
         Err(Errno::OutOfRange)
     );
 
-    // And the refusal spent no id: the first accepted open is still the
-    // first one minted.
+    // And the window may open another at once.
     loopback.borrow_mut().host.refuse_menu_open = None;
     assert_eq!(
-        client.open_menu(window, anchor, &menu),
-        Ok(1),
-        "a refused open consumes nothing"
+        settled(&mut client, |client| client
+            .open_menu(window, anchor, &menu)),
+        Ok(refused_open + 1),
     );
 }
 
@@ -7203,7 +7639,7 @@ fn a_refused_menu_open_records_nothing_and_spends_no_id() {
 #[test]
 fn an_outcome_the_sink_refuses_stays_owed_until_one_is_accepted() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let menu = sample_open_menu();
     let anchor = sample_menu_anchor();
@@ -7222,7 +7658,8 @@ fn an_outcome_the_sink_refuses_stays_owed_until_one_is_accepted() {
         "a full mailbox is relayed, not swallowed"
     );
     assert_eq!(
-        client.open_menu(window, anchor, &menu),
+        settled(&mut client, |client| client
+            .open_menu(window, anchor, &menu)),
         Err(Errno::AlreadyExists),
         "the open is still owed, so no second chain starts"
     );
@@ -7248,8 +7685,11 @@ fn a_host_with_no_menu_service_refuses_an_open() {
     let mut host = MinimalHost;
     let mut identity = MockIdentity::holding_layer(&[]);
     let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let mut ids = connect_raw(&mut server, &mut host, &mut identity);
+    let window = ids.mint().expect("a fresh range names a window");
 
     let create = request_frame(&WindowRequest::Create {
+        window_id: window,
         shm_handle: 7,
         event_endpoint: EVENTS_A,
         frame_count: 1,
@@ -7269,10 +7709,11 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         &mut reply,
     );
     let len = replied(outcome);
-    let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()), "created");
 
     let open = request_frame(&WindowRequest::OpenMenu {
         window_id: window,
+        open_id: ids.mint().expect("and the open"),
         anchor: sample_menu_anchor(),
         menu: sample_open_menu(),
     });
@@ -7285,10 +7726,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
         &mut reply,
     );
     let len = replied(outcome);
-    assert_eq!(
-        tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
-        Err(Errno::NotSupported)
-    );
+    assert_eq!(decode_status_reply(&reply[..len]), Err(Errno::NotSupported));
 }
 
 /// An icon-bar row's committed text is held for that application and that
@@ -7297,7 +7735,7 @@ fn a_host_with_no_menu_service_refuses_an_open() {
 #[test]
 fn committed_app_bar_text_is_held_per_row_and_taken_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let row = |raw| AppMenuItemId::new(raw).expect("a valid id");
     let record = |item, text: &str| {
         loopback
@@ -7318,21 +7756,21 @@ fn committed_app_bar_text_is_held_per_row_and_taken_once() {
     record(row(4), "First").expect("held");
     record(row(4), "Archive").expect("the row's next commit replaces it");
     record(row(5), "Photos").expect("another row holds its own");
-    assert_eq!(client.take_app_bar_text(row(9), 0), Ok(None));
+    assert_eq!(app_bar_text(&mut client, row(9), 0), Ok(None));
     assert_eq!(
-        client.take_app_bar_text(row(5), 0),
+        app_bar_text(&mut client, row(5), 0),
         Ok(Some(String::from("Photos")))
     );
     assert_eq!(
-        client.take_app_bar_text(row(4), 0),
+        app_bar_text(&mut client, row(4), 0),
         Ok(Some(String::from("Archive")))
     );
-    assert_eq!(client.take_app_bar_text(row(4), 0), Ok(None), "taken once");
+    assert_eq!(app_bar_text(&mut client, row(4), 0), Ok(None), "taken once");
 
     record(row(6), "Kept").expect("held");
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.take_app_bar_text(row(6), 0),
+        app_bar_text(&mut client, row(6), 0),
         Ok(None),
         "another application reads none of it"
     );
@@ -7355,7 +7793,7 @@ fn committed_app_bar_text_is_held_per_row_and_taken_once() {
 #[test]
 fn committed_app_bar_text_answers_only_its_own_revision() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let row = AppMenuItemId::new(4).expect("a valid id");
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
@@ -7366,12 +7804,12 @@ fn committed_app_bar_text_answers_only_its_own_revision() {
         .record_app_bar_text(proc_id(0xA1), row, 2, "Archive")
         .expect("held");
     assert_eq!(
-        client.take_app_bar_text(row, 1),
+        app_bar_text(&mut client, row, 1),
         Ok(None),
         "a take naming another revision collects nothing"
     );
     assert_eq!(
-        client.take_app_bar_text(row, 2),
+        app_bar_text(&mut client, row, 2),
         Ok(Some(String::from("Archive")))
     );
 }
@@ -7407,8 +7845,8 @@ fn sample_app_bar(endpoint: u64) -> AppBar {
 #[test]
 fn reusing_the_encode_buffer_leaks_nothing_into_a_later_frame() {
     let fresh = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut first = WindowClient::new(Rc::clone(&fresh));
-    let (window, _) = first
+    let mut first = connected(&fresh);
+    let window = first
         .create(7, EVENTS_A, 1, &SURFACE, "Files", WindowSizing::Fixed)
         .expect("a window");
     first
@@ -7424,8 +7862,8 @@ fn reusing_the_encode_buffer_leaks_nothing_into_a_later_frame() {
     // The same present, on a client that has since sent the widest operation
     // the channel has.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (window, _) = client
+    let mut client = connected(&loopback);
+    let window = client
         .create(7, EVENTS_A, 1, &SURFACE, "Files", WindowSizing::Fixed)
         .expect("a window");
     client
@@ -7452,7 +7890,7 @@ fn reusing_the_encode_buffer_leaks_nothing_into_a_later_frame() {
 #[test]
 fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let bar = sample_app_bar(EVENTS_A);
 
     // The declaration needs no window: an application claims a slot under
@@ -7498,6 +7936,7 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
     // one, so an application that moves its mailbox is not delivered to
     // both.
     let moved = sample_app_bar(EVENTS_B);
+    client.reap_posted();
     client.set_app_bar(&moved).expect("re-declared");
     let mut sink = QueueSink::default();
     loopback
@@ -7519,7 +7958,7 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
 #[test]
 fn declaring_an_icon_bar_presence_says_why_there_is_none() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let bar = sample_app_bar(EVENTS_A);
     assert_eq!(crate::declare_app_bar(&mut client, Ok(bar)), Ok(()));
     assert_eq!(
@@ -7528,13 +7967,15 @@ fn declaring_an_icon_bar_presence_says_why_there_is_none() {
     );
 
     loopback.borrow_mut().host.refuse_app_bar = Some(Errno::NotSupported);
-    let refused = crate::declare_app_bar(&mut client, Ok(bar));
+    client.reap_posted();
+    assert_eq!(crate::declare_app_bar(&mut client, Ok(bar)), Ok(()));
     assert_eq!(
-        refused,
-        Err(crate::AppBarRefused::Refused(Errno::NotSupported))
+        refusal(&mut client),
+        Some(refused(0, PostedRequest::AppBar, Errno::NotSupported)),
+        "the session's refusal lands as any posted request's does"
     );
-    let said = alloc::format!("{}", refused.expect_err("refused"));
-    assert!(said.contains("refused") && said.ends_with("carrying on without one"));
+    let said = alloc::format!("{}", crate::AppBarRefused::Unsent(Errno::BrokenPipe));
+    assert!(said.contains("could not be asked for") && said.ends_with("carrying on without one"));
 
     let invalid = crate::declare_app_bar(&mut client, Err(Errno::LengthOutOfRange));
     assert_eq!(
@@ -7553,7 +7994,7 @@ fn declaring_an_icon_bar_presence_says_why_there_is_none() {
 #[test]
 fn icon_bar_delivery_fails_closed_without_a_declaration() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut sink = QueueSink::default();
 
     // An application that never declared a presence has nowhere for a bar
@@ -7572,7 +8013,8 @@ fn icon_bar_delivery_fails_closed_without_a_declaration() {
     // one only once the host accepted it.
     loopback.borrow_mut().host.refuse_app_bar = Some(Errno::NotSupported);
     assert_eq!(
-        client.set_app_bar(&sample_app_bar(EVENTS_A)),
+        settled(&mut client, |client| client
+            .set_app_bar(&sample_app_bar(EVENTS_A))),
         Err(Errno::NotSupported)
     );
     assert_eq!(
@@ -7612,7 +8054,7 @@ fn icon_bar_delivery_fails_closed_without_a_declaration() {
 #[test]
 fn a_dead_clients_icon_bar_presence_is_withdrawn() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
         .expect("declared");
@@ -8141,11 +8583,11 @@ fn path_entry(path: &str) -> OpenEntry {
 fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // Nothing queued is the honest empty answer, not an error.
-    assert_eq!(client.take_open_target(), Ok(None));
+    assert_eq!(next_open_target(&mut client), Ok(None));
 
     loopback
         .borrow_mut()
@@ -8155,11 +8597,11 @@ fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
         })
         .expect("the application takes it");
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Path(String::from("Users:/ada/Documents"))))
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(None),
         "popping is what makes a target one-shot"
     );
@@ -8171,7 +8613,7 @@ fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
 fn an_image_hand_over_is_pulled_as_an_image_to_attach() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback
         .borrow_mut()
@@ -8181,7 +8623,7 @@ fn an_image_hand_over_is_pulled_as_an_image_to_attach() {
         })
         .expect("the application takes it");
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Image(String::from("/Users/ada/Home/wb.adf"))))
     );
     let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
@@ -8200,7 +8642,7 @@ fn an_image_hand_over_is_pulled_as_an_image_to_attach() {
 fn a_document_hand_over_carries_its_delegation_and_its_name() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     loopback
@@ -8215,7 +8657,7 @@ fn a_document_hand_over_carries_its_delegation_and_its_name() {
         })
         .expect("the application takes it");
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 42,
@@ -8236,7 +8678,7 @@ fn a_document_hand_over_carries_its_delegation_and_its_name() {
             }),),
         Err(Errno::OutOfRange)
     );
-    assert_eq!(client.take_open_target(), Ok(None));
+    assert_eq!(next_open_target(&mut client), Ok(None));
 }
 
 #[test]
@@ -8247,7 +8689,7 @@ fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
     // the repeat is the answer rather than a second entry.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let document = OpenEntry::Document {
         name: DocumentName::new("holiday.png").expect("a name"),
@@ -8262,21 +8704,25 @@ fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
             .expect("a repeat is taken");
     }
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 42,
             writable: false,
         }))
     );
-    assert_eq!(client.take_open_target(), Ok(None), "one handle, one entry");
+    assert_eq!(
+        next_open_target(&mut client),
+        Ok(None),
+        "one handle, one entry"
+    );
 }
 
 #[test]
 fn handing_over_a_target_wakes_its_owner() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     loopback
@@ -8303,7 +8749,7 @@ fn a_windowless_application_is_reached_through_its_icon_bar_route() {
     // A window-scoped queue would leave it unreachable.
     let loopback = Loopback::with_regions(&[]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
         .expect("the bar declaration is accepted");
@@ -8322,7 +8768,7 @@ fn a_windowless_application_is_reached_through_its_icon_bar_route() {
         Ok(WindowEvent::OpenRequested)
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Path(String::from("Users:/ada/report"))))
     );
 }
@@ -8353,7 +8799,7 @@ fn an_application_with_no_route_at_all_takes_nothing() {
 #[test]
 fn a_refused_wake_produces_and_queues_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
     // A target the owner was never woken for would sit unreachable, and a
@@ -8368,7 +8814,7 @@ fn a_refused_wake_produces_and_queues_nothing() {
         Err(Errno::WouldBlock)
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(None),
         "a refused hand-over strands no target"
     );
@@ -8385,7 +8831,7 @@ fn a_document_name_the_channel_cannot_carry_cannot_be_queued() {
     );
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let widest = DocumentName::new(&"n".repeat(tairix_abi::FS_NAME_MAX)).expect("fits");
     loopback
@@ -8400,7 +8846,7 @@ fn a_document_name_the_channel_cannot_carry_cannot_be_queued() {
         })
         .expect("the widest name is carried");
     assert!(matches!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Document { grant: 5, ref name, .. })) if name.len() == tairix_abi::FS_NAME_MAX
     ));
 }
@@ -8409,7 +8855,7 @@ fn a_document_name_the_channel_cannot_carry_cannot_be_queued() {
 fn queued_targets_are_pulled_oldest_first() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
         loopback
@@ -8420,19 +8866,19 @@ fn queued_targets_are_pulled_oldest_first() {
     }
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
         assert_eq!(
-            client.take_open_target(),
+            next_open_target(&mut client),
             Ok(Some(Target::Path(String::from(path)))),
             "the ordering is the protocol"
         );
     }
-    assert_eq!(client.take_open_target(), Ok(None));
+    assert_eq!(next_open_target(&mut client), Ok(None));
 }
 
 #[test]
 fn a_pull_reaches_only_the_callers_own_queue() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback
         .borrow_mut()
@@ -8446,12 +8892,12 @@ fn a_pull_reaches_only_the_callers_own_queue() {
     // kernel attests is the scope, so the reply says nothing about who else
     // has something waiting.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.take_open_target(), Ok(None));
+    assert_eq!(next_open_target(&mut client), Ok(None));
     loopback.borrow_mut().ticket = TICKET_A;
 
     // And that pull took nothing: the owner still finds its target.
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Path(String::from("Users:/ada/secret"))))
     );
 }
@@ -8460,7 +8906,7 @@ fn a_pull_reaches_only_the_callers_own_queue() {
 fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for index in 0..WINDOW_MAX_OPEN_TARGETS {
         loopback
@@ -8481,7 +8927,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
     );
     // The oldest is still first: a refusal at the far end disturbs nothing.
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Path(String::from("Users:/0"))))
     );
 
@@ -8507,7 +8953,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
 fn an_applications_queued_targets_die_with_the_client() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut sink = QueueSink::default();
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
@@ -8525,7 +8971,7 @@ fn an_applications_queued_targets_die_with_the_client() {
     // to take.
     client.close(window).expect("the owner closes it");
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Path(String::from("Users:/ada/report")))),
         "a target outlives the window that happened to be open"
     );
@@ -8555,7 +9001,7 @@ fn an_applications_queued_targets_die_with_the_client() {
         "a client with no windows and no bar has no route left"
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(None),
         "and the queue went with it"
     );
@@ -8564,11 +9010,11 @@ fn an_applications_queued_targets_die_with_the_client() {
 #[test]
 fn a_reveal_reaches_the_host_with_the_callers_attested_identity_and_its_answer_returns() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    assert_eq!(client.reveal_document(5, 12), Ok(()));
+    let mut client = connected(&loopback);
+    assert_eq!(revealed(&mut client, 5, 12), Ok(()));
     loopback.borrow_mut().host.reveal = Err(Errno::PermissionDenied);
     assert_eq!(
-        client.reveal_document(5, 13),
+        revealed(&mut client, 5, 13),
         Err(Errno::PermissionDenied),
         "a refusal is relayed as itself"
     );
@@ -8614,12 +9060,16 @@ fn an_instance_the_desk_cannot_reach_is_answered_not_running() {
 #[test]
 fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     // The host answers "nothing to reach" by default, which is the caller's
     // cue to launch the bundle itself rather than a refusal.
     assert_eq!(
-        client.hand_over_launch("/System/Applications/view.app/Run", HandOverTarget::Bare),
+        hand_over(
+            &mut client,
+            "/System/Applications/view.app/Run",
+            &HandOverTarget::Bare
+        ),
         Ok(HandOverOutcome::NotRunning)
     );
     let document = HandOverDocument {
@@ -8634,14 +9084,15 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
         .expect("the bar declaration is accepted");
     loopback.borrow_mut().host.hand_over = Ok(HandOverOutcome::Reached);
     assert_eq!(
-        client.hand_over_launch(
+        hand_over(
+            &mut client,
             "/System/Applications/view.app/Run",
-            HandOverTarget::Document(document)
+            &HandOverTarget::Document(document)
         ),
         Ok(HandOverOutcome::Reached)
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 31,
@@ -8649,15 +9100,29 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
         })),
         "the engine's half of the hand-over really queued it"
     );
+    assert_eq!(
+        next_open_target(&mut client),
+        Ok(None),
+        "and the queue's end"
+    );
     let pane = PaneName::new("files").expect("a pane");
     assert_eq!(
-        client.hand_over_launch(tairix_abi::SETTINGS_RUN_PATH, HandOverTarget::Pane(pane)),
+        hand_over(
+            &mut client,
+            tairix_abi::SETTINGS_RUN_PATH,
+            &HandOverTarget::Pane(pane)
+        ),
         Ok(HandOverOutcome::Reached)
     );
     assert_eq!(
-        client.take_open_target(),
+        next_open_target(&mut client),
         Ok(Some(Target::Pane(String::from("files")))),
         "a pane reaches the instance as the place to show"
+    );
+    assert_eq!(
+        next_open_target(&mut client),
+        Ok(None),
+        "and the queue's end"
     );
 
     assert_eq!(
@@ -8686,12 +9151,16 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     // name never reaches the channel at all.
     loopback.borrow_mut().host.hand_over = Err(Errno::NoSpace);
     assert_eq!(
-        client.hand_over_launch("/System/Applications/view.app/Run", HandOverTarget::Bare),
+        hand_over(
+            &mut client,
+            "/System/Applications/view.app/Run",
+            &HandOverTarget::Bare
+        ),
         Err(Errno::NoSpace)
     );
     let long = "p".repeat(HAND_OVER_RUN_PATH_MAX + 1);
     assert_eq!(
-        client.hand_over_launch(&long, HandOverTarget::Bare),
+        hand_over(&mut client, &long, &HandOverTarget::Bare),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
@@ -8704,7 +9173,7 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
 #[test]
 fn a_tooltip_declaration_reaches_the_host_and_replaces_rather_than_appends() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let region = sample_menu_anchor();
     let other = WindowRegion::new(4, 8, 20, 12).expect("a second region");
@@ -8722,12 +9191,16 @@ fn a_tooltip_declaration_reaches_the_host_and_replaces_rather_than_appends() {
     assert!(loopback.borrow().host.tooltips.is_empty());
     loopback.borrow_mut().ticket = TICKET_A;
 
+    // Each asked once the last is answered, as the event drain between two
+    // pointer samples takes it in.
     client
         .set_tooltip(window, region, tip("Copy"))
         .expect("the owner may declare one");
+    client.reap_posted();
     client
         .set_tooltip(window, other, tip("Paste"))
         .expect("and re-declare it");
+    client.reap_posted();
     client
         .set_tooltip(window, other, tip(""))
         .expect("and withdraw it");
@@ -8751,7 +9224,7 @@ fn a_tooltip_declaration_reaches_the_host_and_replaces_rather_than_appends() {
 #[test]
 fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().host.refuse_tooltip = Some(Errno::NotSupported);
     client
@@ -8768,16 +9241,20 @@ fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
 #[test]
 fn a_declared_tip_asks_once_per_tool_and_once_more_to_withdraw() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let (copy, paste) = (Rect::new(0, 0, 20, 20), Rect::new(20, 0, 20, 20));
     let mut tip = DeclaredTip::new();
+    let mut declare = |client: &mut Client, wanted| {
+        tip.declare(client, window, wanted);
+        client.reap_posted();
+    };
     for _ in 0..3 {
-        tip.declare(&mut client, window, Some((copy, "Copy")));
+        declare(&mut client, Some((copy, "Copy")));
     }
-    tip.declare(&mut client, window, Some((paste, "Paste")));
-    tip.declare(&mut client, window, None);
-    tip.declare(&mut client, window, None);
+    declare(&mut client, Some((paste, "Paste")));
+    declare(&mut client, None);
+    declare(&mut client, None);
     let host = &loopback.borrow().host;
     assert_eq!(host.tooltips.len(), 3, "{:?}", host.tooltips);
     assert_eq!(host.tooltips[2].2, String::new(), "the withdrawal");
@@ -8786,7 +9263,7 @@ fn a_declared_tip_asks_once_per_tool_and_once_more_to_withdraw() {
 #[test]
 fn a_declared_tip_asks_again_when_its_line_changes_over_the_same_region() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let host_plate = Rect::new(40, 40, 44, 44);
     let mut tip = DeclaredTip::new();
@@ -8795,6 +9272,7 @@ fn a_declared_tip_asks_again_when_its_line_changes_over_the_same_region() {
         window,
         Some((host_plate, "printer — 1 service: ipp")),
     );
+    client.reap_posted();
     tip.declare(
         &mut client,
         window,
@@ -8808,10 +9286,11 @@ fn a_declared_tip_asks_again_when_its_line_changes_over_the_same_region() {
 #[test]
 fn a_tip_the_wire_cannot_carry_withdraws_the_last_one() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut tip = DeclaredTip::new();
     tip.declare(&mut client, window, Some((Rect::new(0, 0, 20, 20), "Copy")));
+    client.reap_posted();
     let unsendable = "x".repeat(TOOLTIP_TEXT_MAX + 1);
     tip.declare(
         &mut client,
@@ -8838,7 +9317,7 @@ fn a_tip_the_wire_cannot_carry_withdraws_the_last_one() {
 #[test]
 fn a_refused_tip_is_not_asked_again_on_every_pointer_sample() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().host.refuse_tooltip = Some(Errno::NotSupported);
     let asked = loopback.borrow().sent.len();
@@ -8856,7 +9335,7 @@ fn a_refused_tip_is_not_asked_again_on_every_pointer_sample() {
 #[test]
 fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
@@ -8870,14 +9349,14 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
     };
 
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "nothing the user did asked for it"
     );
     deliver_app(&WindowEvent::AppBarDefault);
     assert_eq!(client.activate_window(window), Ok(()));
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "an activation is spent by its first use"
     );
@@ -8898,7 +9377,7 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
         )
         .expect("delivered");
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "the keyboard moved, so the gesture is past"
     );
@@ -8910,7 +9389,10 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
 
     deliver_app(&WindowEvent::AppBarDefault);
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.activate_window(window), Err(Errno::NotFound));
+    assert_eq!(
+        settled(&mut client, |client| client.activate_window(window)),
+        Err(Errno::NotFound)
+    );
     loopback.borrow_mut().ticket = TICKET_A;
     assert_eq!(
         loopback.borrow().host.raised,
@@ -8922,9 +9404,10 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
         .borrow_mut()
         .server
         .client_exited(&mut RecordingHost::default(), proc_id(0xA1));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "b").expect("b");
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "an activation dies with the client it was handed to"
     );
@@ -8937,7 +9420,7 @@ fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
 #[test]
 fn an_activation_raises_nothing_once_the_keyboard_has_moved_or_when_withheld() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
@@ -8962,18 +9445,21 @@ fn an_activation_raises_nothing_once_the_keyboard_has_moved_or_when_withheld() {
     });
     loopback.borrow_mut().host.focused = None;
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "the keyboard left the window it was at"
     );
 
     deliver_app(Activation::Withheld);
-    assert_eq!(client.activate_window(window), Err(Errno::PermissionDenied));
+    assert_eq!(
+        settled(&mut client, |client| client.activate_window(window)),
+        Err(Errno::PermissionDenied)
+    );
 
     deliver_app(GRANTED);
     deliver_app(Activation::Withheld);
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "a later withheld event takes back an unspent grant"
     );
@@ -8989,7 +9475,7 @@ fn an_activation_raises_nothing_once_the_keyboard_has_moved_or_when_withheld() {
 #[test]
 fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     client
         .set_app_bar(&sample_app_bar(EVENTS_A))
@@ -9009,13 +9495,13 @@ fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
     let settings = tairix_abi::SETTINGS_RUN_PATH;
 
     assert_eq!(
-        client.hand_over_launch(settings, HandOverTarget::Bare),
+        hand_over(&mut client, settings, &HandOverTarget::Bare),
         Ok(HandOverOutcome::NotRunning)
     );
     deliver_app(GRANTED);
     for _ in 0..2 {
         assert_eq!(
-            client.hand_over_launch(settings, HandOverTarget::Bare),
+            hand_over(&mut client, settings, &HandOverTarget::Bare),
             Ok(HandOverOutcome::NotRunning)
         );
     }
@@ -9023,7 +9509,7 @@ fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
         focus: Some(window),
     });
     assert_eq!(
-        client.hand_over_launch(settings, HandOverTarget::Bare),
+        hand_over(&mut client, settings, &HandOverTarget::Bare),
         Ok(HandOverOutcome::NotRunning)
     );
     assert_eq!(
@@ -9032,7 +9518,7 @@ fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
         "nothing to spend, the gesture's one raise, nothing left, one the keyboard has left"
     );
     assert_eq!(
-        client.activate_window(window),
+        settled(&mut client, |client| client.activate_window(window)),
         Err(Errno::PermissionDenied),
         "a spent activation raises nothing"
     );
@@ -9041,7 +9527,7 @@ fn a_hand_over_spends_the_activation_a_gesture_at_its_caller_minted() {
 #[test]
 fn only_a_window_s_owner_sets_its_pointer_shape() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().ticket = TICKET_B;
     client
@@ -9059,6 +9545,7 @@ fn only_a_window_s_owner_sets_its_pointer_shape() {
     client
         .set_cursor(window, CursorShape::Text)
         .expect("the owner sets it");
+    client.reap_posted();
     client
         .set_cursor(window, CursorShape::Arrow)
         .expect("and restates it");
@@ -9090,16 +9577,20 @@ fn layer_spec(shm: u64, events: u64, x: i32, y: i32, depth: LayerDepth) -> Layer
 #[test]
 fn opening_a_layer_surface_needs_the_capability_and_reaches_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
 
     // The gate is the kernel's attestation of the caller, not anything the
     // caller said: with the capability withheld the open is refused before
     // the host is told anything at all.
     loopback.borrow_mut().identity = MockIdentity::holding_layer(&[]);
     assert_eq!(
-        client
-            .open_layer(&layer_spec(7, EVENTS_A, 10, 20, LayerDepth::Above))
-            .map(|(id, _)| id),
+        settled(&mut client, |client| client.open_layer(&layer_spec(
+            7,
+            EVENTS_A,
+            10,
+            20,
+            LayerDepth::Above
+        ))),
         Err(Errno::PermissionDenied)
     );
     assert!(
@@ -9110,7 +9601,7 @@ fn opening_a_layer_surface_needs_the_capability_and_reaches_the_host() {
     // Granted, the open carries the attested owner, the geometry, the
     // screen point, and the depth through to the host.
     loopback.borrow_mut().identity = MockIdentity::holding_layer(&[TICKET_A]);
-    let (id, _) = client
+    let id = client
         .open_layer(&layer_spec(7, EVENTS_A, 10, 20, LayerDepth::Above))
         .expect("a held capability opens the surface");
     let host = &loopback.borrow().host;
@@ -9123,12 +9614,16 @@ fn opening_a_layer_surface_needs_the_capability_and_reaches_the_host() {
 #[test]
 fn a_failed_capability_attestation_refuses_rather_than_grants() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().identity.attest_error = Some(Errno::NotFound);
     assert_eq!(
-        client
-            .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
-            .map(|(id, _)| id),
+        settled(&mut client, |client| client.open_layer(&layer_spec(
+            7,
+            EVENTS_A,
+            0,
+            0,
+            LayerDepth::Below
+        ))),
         Err(Errno::NotFound),
         "an attestation the kernel could not answer fails closed"
     );
@@ -9138,8 +9633,8 @@ fn a_failed_capability_attestation_refuses_rather_than_grants() {
 #[test]
 fn every_layer_operation_is_gated_not_only_the_open() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (id, _) = client
+    let mut client = connected(&loopback);
+    let id = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("opened while held");
 
@@ -9147,17 +9642,16 @@ fn every_layer_operation_is_gated_not_only_the_open() {
     // letting it run as long as the process does.
     loopback.borrow_mut().identity = MockIdentity::holding_layer(&[]);
     assert_eq!(
-        client.place_layer(id, 5, 5, LayerDepth::Above),
+        settled(&mut client, |client| client.place_layer(
+            id,
+            5,
+            5,
+            LayerDepth::Above
+        )),
         Err(Errno::PermissionDenied)
     );
-    let mut plates = [TerrainPlate {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    }; 4];
     assert_eq!(
-        client.take_terrain(id, &mut plates).map(<[_]>::len),
+        terrain(&mut client, id).map(|plates| plates.len()),
         Err(Errno::PermissionDenied)
     );
     assert!(loopback.borrow().host.layer_places.is_empty());
@@ -9166,15 +9660,19 @@ fn every_layer_operation_is_gated_not_only_the_open() {
 #[test]
 fn a_layer_surface_is_one_per_client() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("the first is allowed");
     assert_eq!(DESKTOP_LAYER_MAX_PER_CLIENT, 1);
     assert_eq!(
-        client
-            .open_layer(&layer_spec(8, EVENTS_A, 0, 0, LayerDepth::Below))
-            .map(|(id, _)| id),
+        settled(&mut client, |client| client.open_layer(&layer_spec(
+            8,
+            EVENTS_A,
+            0,
+            0,
+            LayerDepth::Below
+        ))),
         Err(Errno::LimitExceeded),
         "a second would multiply the screen area one holder occupies"
     );
@@ -9183,8 +9681,8 @@ fn a_layer_surface_is_one_per_client() {
 #[test]
 fn closing_a_layer_surface_frees_its_slot() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (id, _) = client
+    let mut client = connected(&loopback);
+    let id = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("the first is allowed");
 
@@ -9200,8 +9698,8 @@ fn closing_a_layer_surface_frees_its_slot() {
 #[test]
 fn place_layer_is_owner_bound_and_refuses_an_ordinary_window() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (layer, _) = client
+    let mut client = connected(&loopback);
+    let layer = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("opened");
     let window = create_id(&mut client, 8, EVENTS_A, 1, "a").expect("a window");
@@ -9209,12 +9707,22 @@ fn place_layer_is_owner_bound_and_refuses_an_ordinary_window() {
     // An ordinary window is placed by the window manager; letting this move
     // one would hand every holder authority over its own windows' positions.
     assert_eq!(
-        client.place_layer(window, 1, 2, LayerDepth::Above),
+        settled(&mut client, |client| client.place_layer(
+            window,
+            1,
+            2,
+            LayerDepth::Above
+        )),
         Err(Errno::NotSupported)
     );
     // A window nobody owns here leaks nothing beyond "not found".
     assert_eq!(
-        client.place_layer(9_999, 1, 2, LayerDepth::Above),
+        settled(&mut client, |client| client.place_layer(
+            9_999,
+            1,
+            2,
+            LayerDepth::Above
+        )),
         Err(Errno::NotFound)
     );
     client
@@ -9229,8 +9737,8 @@ fn place_layer_is_owner_bound_and_refuses_an_ordinary_window() {
 #[test]
 fn a_refused_place_leaves_the_recorded_depth_alone() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (layer, _) = client
+    let mut client = connected(&loopback);
+    let layer = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("opened");
 
@@ -9238,7 +9746,12 @@ fn a_refused_place_leaves_the_recorded_depth_alone() {
     // two can never disagree about what is actually stacked.
     loopback.borrow_mut().host.refuse_layer = Some(Errno::WouldBlock);
     assert_eq!(
-        client.place_layer(layer, 1, 1, LayerDepth::Above),
+        settled(&mut client, |client| client.place_layer(
+            layer,
+            1,
+            1,
+            LayerDepth::Above
+        )),
         Err(Errno::WouldBlock)
     );
     loopback.borrow_mut().host.refuse_layer = None;
@@ -9250,8 +9763,8 @@ fn a_refused_place_leaves_the_recorded_depth_alone() {
 #[test]
 fn terrain_is_answered_for_a_layer_surface_and_refused_for_anything_else() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (layer, _) = client
+    let mut client = connected(&loopback);
+    let layer = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("opened");
     let window = create_id(&mut client, 8, EVENTS_A, 1, "a").expect("a window");
@@ -9272,18 +9785,12 @@ fn terrain_is_answered_for_a_layer_surface_and_refused_for_anything_else() {
     ];
     loopback.borrow_mut().host.terrain = reported.to_vec();
 
-    let mut plates = [TerrainPlate {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    }; 8];
-    assert_eq!(client.take_terrain(layer, &mut plates), Ok(&reported[..]));
+    assert_eq!(terrain(&mut client, layer), Ok(reported.to_vec()));
 
     // An ordinary window has no terrain to ask about: the desktop's shape
     // is what the layer authority buys, not something every window may read.
     assert_eq!(
-        client.take_terrain(window, &mut plates).map(<[_]>::len),
+        terrain(&mut client, window).map(|plates| plates.len()),
         Err(Errno::NotSupported)
     );
 }
@@ -9291,19 +9798,13 @@ fn terrain_is_answered_for_a_layer_surface_and_refused_for_anything_else() {
 #[test]
 fn a_refused_terrain_query_reaches_the_caller_as_a_refusal() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let (layer, _) = client
+    let mut client = connected(&loopback);
+    let layer = client
         .open_layer(&layer_spec(7, EVENTS_A, 0, 0, LayerDepth::Below))
         .expect("opened");
     loopback.borrow_mut().host.refuse_terrain = Some(Errno::SeatRevoked);
-    let mut plates = [TerrainPlate {
-        x: 0,
-        y: 0,
-        width_px: 1,
-        height_px: 1,
-    }; 4];
     assert_eq!(
-        client.take_terrain(layer, &mut plates).map(<[_]>::len),
+        terrain(&mut client, layer).map(|plates| plates.len()),
         Err(Errno::SeatRevoked),
         "a refusal must not read as an empty desktop"
     );
@@ -9373,7 +9874,12 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
         CLIENT_FRAME_MAX,
     );
     let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let mut host = BareHost;
+    let mut identity = MockIdentity::holding_layer(&[TICKET_A]);
     let request = WindowRequest::OpenLayer {
+        window_id: connect_raw(&mut server, &mut host, &mut identity)
+            .mint()
+            .expect("a fresh range names a surface"),
         shm_handle: 7,
         event_endpoint: EVENTS_A,
         frame_count: 1,
@@ -9388,9 +9894,9 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
     let mut frame = [0u8; 128];
     let len = request.encode(&mut frame).expect("encodes");
     let outcome = server.serve(
-        &mut BareHost,
+        &mut host,
         &mut QueueSink::default(),
-        &mut MockIdentity::holding_layer(&[TICKET_A]),
+        &mut identity,
         TICKET_A,
         &frame[..len],
         &mut reply,
@@ -9426,7 +9932,7 @@ fn alert_answers(sink: &QueueSink, endpoint: u64) -> Vec<WindowEvent> {
 #[test]
 fn an_alert_is_put_up_for_its_owner_and_answered_exactly_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let alert = client
         .open_alert(EVENTS_A, Some(window), &sample_alert())
@@ -9470,29 +9976,38 @@ fn an_alert_is_put_up_for_its_owner_and_answered_exactly_once() {
 #[test]
 fn an_alert_may_hold_only_the_callers_own_top_level_window_or_dialog() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut other = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.open_alert(EVENTS_B, Some(window), &sample_alert()),
+        settled(&mut other, |client| client.open_alert(
+            EVENTS_B,
+            Some(window),
+            &sample_alert()
+        )),
         Err(Errno::NotFound)
     );
     loopback.borrow_mut().ticket = TICKET_A;
-    let (popup, _) = client
+    let popup = client
         .create_popup(&popup_spec(window, 8, EVENTS_A, 0, 0))
         .expect("a popup");
-    let (tool, _) = client
+    let tool = client
         .create_tool(&tool_spec(window, 8, None))
         .expect("a tool window");
     for fleeting in [popup, tool] {
         assert_eq!(
-            client.open_alert(EVENTS_A, Some(fleeting), &sample_alert()),
+            settled(&mut client, |client| client.open_alert(
+                EVENTS_A,
+                Some(fleeting),
+                &sample_alert()
+            )),
             Err(Errno::OutOfRange)
         );
     }
     assert!(loopback.borrow().host.alerts.is_empty());
     // A copy's question holds the copy's own window, not the folder's.
-    let (dialog, _) = client
+    let dialog = client
         .create_dialog(&dialog_spec(window, 9, DialogModality::Modeless))
         .expect("a dialog");
     client
@@ -9504,7 +10019,7 @@ fn an_alert_may_hold_only_the_callers_own_top_level_window_or_dialog() {
 #[test]
 fn an_application_with_no_window_may_still_raise_an_alert() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let alert = client
         .open_alert(EVENTS_A, None, &sample_alert())
         .expect("an ownerless alert is accepted");
@@ -9515,14 +10030,18 @@ fn an_application_with_no_window_may_still_raise_an_alert() {
 #[test]
 fn an_application_has_at_most_its_bound_of_alerts_up() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     for _ in 0..tairix_abi::window_ipc::ALERT_MAX_OPEN {
         client
             .open_alert(EVENTS_A, None, &sample_alert())
             .expect("within the bound");
     }
     assert_eq!(
-        client.open_alert(EVENTS_A, None, &sample_alert()),
+        settled(&mut client, |client| client.open_alert(
+            EVENTS_A,
+            None,
+            &sample_alert()
+        )),
         Err(Errno::LimitExceeded)
     );
     loopback.borrow_mut().ticket = TICKET_B;
@@ -9533,30 +10052,60 @@ fn an_application_has_at_most_its_bound_of_alerts_up() {
 }
 
 #[test]
-fn a_refused_alert_spends_no_id_and_leaves_nothing_owed() {
+fn a_refused_alert_leaves_nothing_owed_and_its_id_is_never_named_again() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     loopback.borrow_mut().host.refuse_alert = Some(Errno::NotSupported);
+    let refused_alert = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("asked");
     assert_eq!(
-        client.open_alert(EVENTS_A, None, &sample_alert()),
-        Err(Errno::NotSupported)
+        refusal(&mut client),
+        Some(refused(
+            0,
+            PostedRequest::OpenAlert(refused_alert),
+            Errno::NotSupported
+        ))
     );
+    assert!(loopback.borrow().host.alerts.is_empty());
     loopback.borrow_mut().host.refuse_alert = None;
     let first = client
         .open_alert(EVENTS_A, None, &sample_alert())
         .expect("accepted once the host can draw it");
-    assert_eq!(first, 1, "the refusal minted nothing");
+    assert_eq!(first, refused_alert + 1, "the next id the client names");
+    assert_eq!(refusal(&mut client), None);
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.answer_alert(
+            &mut sink,
+            refused_alert,
+            0,
+            Activation::Withheld
+        ),
+        Err(Errno::NotFound),
+        "the refused alert owes no answer"
+    );
 }
 
 #[test]
 fn a_withdrawn_alert_comes_down_answered_dismissed() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let alert = client
         .open_alert(EVENTS_A, None, &sample_alert())
         .expect("accepted");
+    let mut b_client = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.close_alert(alert), Err(Errno::NotFound));
+    b_client.close_alert(alert).expect("posted");
+    assert_eq!(
+        refusal(&mut b_client),
+        None,
+        "a withdrawal is never reported"
+    );
+    assert!(
+        loopback.borrow().host.alerts_withdrawn.is_empty(),
+        "nor another's done"
+    );
     loopback.borrow_mut().ticket = TICKET_A;
     client.close_alert(alert).expect("its owner withdraws it");
     let looped = loopback.borrow();
@@ -9573,7 +10122,7 @@ fn a_withdrawn_alert_comes_down_answered_dismissed() {
 #[test]
 fn closing_the_window_an_alert_holds_takes_the_alert_down_with_it() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let held = client
         .open_alert(EVENTS_A, Some(window), &sample_alert())
@@ -9597,7 +10146,7 @@ fn closing_the_window_an_alert_holds_takes_the_alert_down_with_it() {
 #[test]
 fn an_exiting_application_takes_its_alerts_down_unanswered() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let alert = client
         .open_alert(EVENTS_A, None, &sample_alert())
         .expect("accepted");
@@ -9617,7 +10166,7 @@ fn an_exiting_application_takes_its_alerts_down_unanswered() {
 #[test]
 fn an_answer_naming_a_button_the_alert_lacks_is_never_delivered_as_a_choice() {
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let alert = client
         .open_alert(EVENTS_A, None, &sample_alert())
         .expect("accepted");
@@ -9646,10 +10195,11 @@ fn an_answer_naming_a_button_the_alert_lacks_is_never_delivered_as_a_choice() {
 #[test]
 fn answering_an_alert_lets_its_application_bring_the_next_one_forward() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut b_client = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    let theirs = create_id(&mut b_client, 8, EVENTS_B, 1, "b").expect("b");
     loopback.borrow_mut().ticket = TICKET_A;
     loopback.borrow_mut().host.focused = Some(theirs);
     let first = client
@@ -9684,10 +10234,11 @@ fn answering_an_alert_lets_its_application_bring_the_next_one_forward() {
 #[test]
 fn an_alert_takes_the_keyboard_only_when_its_application_has_earned_it() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut b_client = connected_as(&loopback, TICKET_B);
     loopback.borrow_mut().ticket = TICKET_B;
-    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    let theirs = create_id(&mut b_client, 8, EVENTS_B, 1, "b").expect("b");
     loopback.borrow_mut().ticket = TICKET_A;
 
     // The user is working in this application's window.
@@ -9764,7 +10315,7 @@ fn a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence() {
 fn a_window_that_could_not_be_opened_is_stated_in_an_alert_holding_none() {
     use crate::client::notice_alert;
     let loopback = Loopback::with_regions(&[]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let refusal = notice_alert(
         AlertSeverity::Error,
         "No window opened",
@@ -9804,7 +10355,7 @@ fn noticed(loopback: &Rc<RefCell<Loopback>>, alert_id: u64) -> (String, String) 
 fn a_refusal_while_another_is_up_waits_its_turn() {
     use crate::notices::{Notices, Raised};
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not listed", "the volume went away");
@@ -9820,18 +10371,21 @@ fn a_refusal_while_another_is_up_waits_its_turn() {
         "nothing goes up over the first"
     );
     assert_eq!(
-        noticed(&loopback, 1),
+        noticed(&loopback, named(1, 2)),
         ("Not listed".into(), "The volume went away.".into()),
         "a reason reads as a sentence"
     );
-    assert!(!notices.answered(2), "only its own alert answers it");
-    assert!(notices.answered(1));
+    assert!(
+        !notices.answered(named(1, 3)),
+        "only its own alert answers it"
+    );
+    assert!(notices.answered(named(1, 2)));
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Up
     );
-    assert_eq!(noticed(&loopback, 2).0, "Copy stopped");
-    assert!(notices.answered(2));
+    assert_eq!(noticed(&loopback, named(1, 3)).0, "Copy stopped");
+    assert!(notices.answered(named(1, 3)));
     assert!(!notices.is_showing());
 }
 
@@ -9839,7 +10393,7 @@ fn a_refusal_while_another_is_up_waits_its_turn() {
 fn a_warning_is_a_warning_alert_waiting_its_turn_like_a_refusal() {
     use crate::notices::{Notices, Raised};
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut notices = Notices::default();
     notices.refuse(From::Operation, "Copy stopped", "the destination is full");
@@ -9848,7 +10402,7 @@ fn a_warning_is_a_warning_alert_waiting_its_turn_like_a_refusal() {
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Up
     );
-    assert!(notices.answered(1));
+    assert!(notices.answered(named(1, 2)));
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Up
@@ -9866,7 +10420,7 @@ fn a_warning_is_a_warning_alert_waiting_its_turn_like_a_refusal() {
 fn a_source_keeps_only_its_latest_refusal_waiting() {
     use crate::notices::{Notices, Raised};
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut notices = Notices::default();
     notices.refuse(From::Paste, "Not moved", "shown");
@@ -9878,23 +10432,23 @@ fn a_source_keeps_only_its_latest_refusal_waiting() {
         notices.refuse(From::Listing, "Not listed", reason);
     }
     notices.refuse(From::Paste, "Not moved", "after");
-    assert!(notices.answered(1));
+    assert!(notices.answered(named(1, 2)));
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Up
     );
     assert_eq!(
-        noticed(&loopback, 2).1,
+        noticed(&loopback, named(1, 3)).1,
         "Newest.",
         "it keeps its place in line with what it says now"
     );
-    assert!(notices.answered(2));
+    assert!(notices.answered(named(1, 3)));
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Up
     );
-    assert_eq!(noticed(&loopback, 3).1, "After.");
-    assert!(notices.answered(3));
+    assert_eq!(noticed(&loopback, named(1, 4)).1, "After.");
+    assert!(notices.answered(named(1, 4)));
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Nothing
@@ -9906,7 +10460,7 @@ fn a_notice_waits_while_its_application_has_every_alert_it_may() {
     use crate::notices::{Notices, Raised};
     use tairix_abi::window_ipc::ALERT_MAX_OPEN;
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     for _ in 0..ALERT_MAX_OPEN {
         client
@@ -9917,14 +10471,19 @@ fn a_notice_waits_while_its_application_has_every_alert_it_may() {
     notices.refuse(From::Listing, "Not listed", "the volume went away");
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
-        Raised::Full
+        Raised::Up
     );
+    let refused = refusal(&mut client).expect("the desktop holds every alert it may");
+    let PostedRequest::OpenAlert(alert) = refused.request else {
+        panic!("the alert was refused, not {refused:?}");
+    };
+    assert_eq!(notices.refused(alert, refused.errno), Raised::Full);
     assert!(notices.is_showing(), "it is kept, not lost");
     let mut sink = QueueSink::default();
     loopback
         .borrow_mut()
         .server
-        .answer_alert(&mut sink, 1, 0, Activation::Withheld)
+        .answer_alert(&mut sink, named(1, 2), 0, Activation::Withheld)
         .expect("answered");
     assert_eq!(
         notices.raise(&mut client, EVENTS_A, Some(window)),
@@ -9936,14 +10495,25 @@ fn a_notice_waits_while_its_application_has_every_alert_it_may() {
 fn a_notice_the_desktop_will_not_show_is_handed_back_to_be_stated() {
     use crate::notices::{Notices, Raised};
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not listed", "the volume went away");
     loopback.borrow_mut().host.refuse_alert = Some(Errno::NotSupported);
-    let Raised::Refused(Errno::NotSupported, notice) =
-        notices.raise(&mut client, EVENTS_A, Some(window))
-    else {
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
+    let refused = refusal(&mut client).expect("the desktop shows no alerts");
+    let PostedRequest::OpenAlert(alert) = refused.request else {
+        panic!("the alert was refused, not {refused:?}");
+    };
+    assert_eq!(
+        notices.refused(alert + 1, refused.errno),
+        Raised::Nothing,
+        "only its own alert's refusal is one of these"
+    );
+    let Raised::Refused(Errno::NotSupported, notice) = notices.refused(alert, refused.errno) else {
         panic!("refused");
     };
     assert_eq!(notice.headline(), "Not listed");
@@ -9956,11 +10526,319 @@ fn a_notice_the_desktop_will_not_show_is_handed_back_to_be_stated() {
 fn a_notice_no_window_asked_for_goes_up_holding_none() {
     use crate::notices::{Notices, Raised};
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut client = connected(&loopback);
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not opened", "the volume went away");
     assert_eq!(notices.raise(&mut client, EVENTS_A, None), Raised::Up);
     let looped = loopback.borrow();
     let (_, _, owner, _) = looped.host.alerts.last().expect("it went up");
     assert_eq!(*owner, None, "it holds no window");
+}
+
+/// Serve and reap until nothing is left unserved, taking every answer that
+/// lands, in order: what an application's loop is handed once a busy session
+/// gets to its requests.
+fn drained(loopback: &Rc<RefCell<Loopback>>, client: &mut Client) -> Vec<Answer> {
+    let mut taken = Vec::new();
+    for _ in 0..=SPIN_BOUND {
+        loopback.borrow_mut().serve_posted();
+        client.reap_posted();
+        while let Some(answer) = client.take_answer() {
+            taken.push(answer);
+        }
+        if loopback.borrow().unserved.is_empty() && loopback.borrow().answered.is_empty() {
+            return taken;
+        }
+    }
+    panic!("the session never caught up: {taken:?}");
+}
+
+/// Every request an interactive loop makes returns at once while the session
+/// is busy compositing — a create and what is asked of it, a transient, a
+/// menu, an alert, the data a loop reads, a paste, a hand-over — and what
+/// each came to lands once the session gets to it, the create served before
+/// anything asked of what it created. A loop that waited on any of them was
+/// frozen for as long as the desktop's own loop was busy (D653).
+#[test]
+fn no_request_a_loop_makes_waits_on_a_busy_session() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let parent = create_id(&mut client, 7, EVENTS_A, 2, "parent").expect("parent");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    client.reap_posted();
+    loopback.borrow_mut().holds_posts = true;
+    let calls = loopback.borrow().awaited.len();
+
+    let window = client
+        .create(7, EVENTS_A, 2, &SURFACE, "window", WindowSizing::default())
+        .expect("named and posted");
+    client.set_title(window, "renamed").expect("posted");
+    client.present(window, 0, full_damage()).expect("posted");
+    let popup = client
+        .create_popup(&popup_spec(parent, 8, EVENTS_A, 0, 0))
+        .expect("named and posted");
+    let open = client
+        .open_menu(parent, sample_menu_anchor(), &sample_open_menu())
+        .expect("named and posted");
+    let alert = client
+        .open_alert(EVENTS_A, Some(parent), &sample_alert())
+        .expect("named and posted");
+    client.ask_open_targets().expect("posted");
+    client.ask_clipboard(parent).expect("posted");
+    let handed = client
+        .hand_over_launch("/System/Applications/view.app/Run", HandOverTarget::Bare)
+        .expect("posted");
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.awaited.len(), calls, "nothing waited on the session");
+        assert_eq!(inner.server.window_count(), 1, "nor was anything served");
+        assert!(inner.host.menu_opens.is_empty() && inner.host.alerts.is_empty());
+    }
+    assert!(landed(&mut client).is_none(), "nothing has been answered");
+
+    let answers = drained(&loopback, &mut client);
+    assert!(
+        matches!(
+            answers.as_slice(),
+            [
+                Answer::OpenTarget(Ok(None)),
+                Answer::Clipboard { contents: Ok(None), .. },
+                Answer::HandOver { token, outcome: Ok(HandOverOutcome::NotRunning) },
+            ] if *token == handed
+        ),
+        "each landed in the order it was asked: {answers:?}"
+    );
+    assert_eq!(refusal(&mut client), None, "and nothing was refused");
+    let inner = loopback.borrow();
+    assert_eq!(inner.server.window_count(), 3);
+    assert_eq!(inner.host.retitled.first().map(|(id, _)| *id), Some(window));
+    assert_eq!(
+        inner.host.presented.first().map(|(id, ..)| *id),
+        Some(window)
+    );
+    assert_eq!(inner.host.popups.first().map(|popup| popup.0), Some(popup));
+    assert_eq!(
+        inner
+            .host
+            .menu_opens
+            .first()
+            .map(|opened| (opened.0, opened.1)),
+        Some((parent, open))
+    );
+    assert_eq!(inner.host.alerts.first().map(|up| up.0), Some(alert));
+}
+
+/// A create that waits for room goes before what is asked of the window it
+/// creates, and that waits behind it: served out of order, the window's title
+/// and first frame would be refused as a window that does not exist.
+#[test]
+fn a_create_waiting_for_room_goes_before_what_is_asked_of_its_window() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let first = create_id(&mut client, 7, EVENTS_A, 2, "first").expect("first");
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.holds_posts = true;
+        inner.lane = Some(1);
+    }
+    client.set_cursor(first, CursorShape::Text).expect("posted");
+    let window = client
+        .create(8, EVENTS_A, 2, &SURFACE, "second", WindowSizing::default())
+        .expect("waits for room");
+    client.set_title(window, "titled").expect("waits behind it");
+    client
+        .present(window, 0, full_damage())
+        .expect("waits behind it");
+    assert_eq!(client.present_state(window), PresentState::Waiting(0));
+    assert!(drained(&loopback, &mut client).is_empty());
+    assert_eq!(
+        refusal(&mut client),
+        None,
+        "none was served ahead of the create"
+    );
+    let inner = loopback.borrow();
+    assert_eq!(inner.host.retitled, [(window, String::from("titled"))]);
+    assert_eq!(inner.host.presented.len(), 1);
+}
+
+/// A refused create ends the window: what was asked of it meanwhile is
+/// refused with it and is not reported, and the client forgets it.
+#[test]
+fn a_refused_create_takes_what_was_asked_of_its_window_with_it() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    loopback.borrow_mut().holds_posts = true;
+    loopback.borrow_mut().host.refuse_open = true;
+    let window = client
+        .create(7, EVENTS_A, 2, &SURFACE, "refused", WindowSizing::default())
+        .expect("posted");
+    client.set_title(window, "never").expect("posted");
+    client.present(window, 0, full_damage()).expect("posted");
+    assert!(drained(&loopback, &mut client).is_empty());
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Create, Errno::WouldBlock))
+    );
+    assert_eq!(
+        refusal(&mut client),
+        None,
+        "its title and frame went with it"
+    );
+    assert_eq!(client.present_state(window), PresentState::Idle);
+    assert!(!client.is_hidden(window) && !client.content_released(window));
+}
+
+/// Each connect is given a range of its own, a process holding a bounded
+/// number at once, and a process's ranges go when it does.
+#[test]
+fn a_process_holds_a_bounded_number_of_id_ranges() {
+    use tairix_abi::window_ipc::OBJECT_RANGES_MAX;
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let clients: Vec<Client> = (0..OBJECT_RANGES_MAX)
+        .map(|_| connected(&loopback))
+        .collect();
+    let mut over = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(over.connect(), Err(Errno::LimitExceeded));
+    drop(clients);
+    {
+        let inner = &mut *loopback.borrow_mut();
+        inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+    }
+    let mut again = WindowClient::new(Rc::clone(&loopback));
+    again
+        .connect()
+        .expect("a process that has gone frees its ranges");
+    let prefix = u32::try_from(OBJECT_RANGES_MAX).expect("a small bound") + 1;
+    assert_eq!(
+        create_id(&mut again, 7, EVENTS_A, 1, "w"),
+        Ok(named(prefix, 1)),
+        "a prefix is never given twice"
+    );
+}
+
+/// A payload longer than the region first offered is asked for again through
+/// a region of the length the session stated, and lands as one answer.
+#[test]
+fn a_paste_past_the_first_offer_is_asked_again_at_its_length() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let len = crate::clipboard::FIRST_OFFER * 2;
+    let long = u64::try_from(len).expect("a length");
+    loopback.borrow_mut().host.clipboard_held.extend([
+        ClipboardHeld {
+            kind: Some(ClipboardKind::Text),
+            len: long,
+            copied: false,
+        },
+        ClipboardHeld {
+            kind: Some(ClipboardKind::Text),
+            len: long,
+            copied: true,
+        },
+    ]);
+    assert_eq!(
+        clipboard(&mut client, window),
+        Ok(Some((ClipboardKind::Text, alloc::vec![0; len])))
+    );
+    let own = |handle| (window, ClientRegion::of(proc_id(0xA1), handle));
+    assert_eq!(
+        loopback.borrow().host.clipboard,
+        [own(0x44), own(0x45)],
+        "a second region, of the length stated"
+    );
+}
+
+/// One ask reads the whole queue, each target landing in turn and the end of
+/// the queue after; an ask made while it is read — another wake — reads it
+/// once more after, so a target queued meanwhile is never left behind.
+#[test]
+fn the_open_targets_are_read_until_none_is_left_and_one_queued_meanwhile_is_kept() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = connected(&loopback);
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    client.reap_posted();
+    let queue = |loopback: &Rc<RefCell<Loopback>>, path: &str| {
+        let mut sink = QueueSink::default();
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(path_entry(path)))
+            .expect("queued");
+    };
+    queue(&loopback, "/a");
+    queue(&loopback, "/b");
+    loopback.borrow_mut().holds_posts = true;
+    client.ask_open_targets().expect("posted");
+    loopback.borrow_mut().serve_posted();
+    queue(&loopback, "/c");
+    client
+        .ask_open_targets()
+        .expect("held behind the read under way");
+    let _ = &mut sink;
+    let paths: Vec<Option<String>> = drained(&loopback, &mut client)
+        .into_iter()
+        .map(|answer| match answer {
+            Answer::OpenTarget(Ok(Some(Target::Path(path)))) => Some(path),
+            Answer::OpenTarget(Ok(None)) => None,
+            other => panic!("only targets were asked for: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            Some(String::from("/a")),
+            Some(String::from("/b")),
+            Some(String::from("/c")),
+            None
+        ],
+    );
+}
+
+/// A wait returns once for each answer that lands, then parks again: a loop
+/// that leaves one untaken is not spun on it.
+#[test]
+fn a_wait_returns_once_for_each_landing_and_parks_while_one_is_left_untaken() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    client.ask_open_targets().expect("posted");
+    let mut events = WindowEvents::new(QueueSource::new([]));
+    assert_eq!(events.wait(&mut client), Ok(None), "an answer landed");
+    assert_eq!(
+        events.wait(&mut client),
+        Err(EventError::Mailbox(Errno::WouldBlock)),
+        "the next wait parks rather than returning for it again"
+    );
+    assert!(matches!(
+        client.take_answer(),
+        Some(Answer::OpenTarget(Ok(None)))
+    ));
+}
+
+/// A document is shown in its folder as its window closes, so the answer
+/// lands whether or not the window is still open, matched to its asking.
+#[test]
+fn a_reveal_is_answered_after_its_window_has_closed() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    loopback.borrow_mut().host.reveal = Err(Errno::NotFound);
+    let asked = client.reveal_document(window, 12).expect("posted");
+    client.close(window).expect("posted");
+    assert!(
+        matches!(
+            drained(&loopback, &mut client).as_slice(),
+            [Answer::Revealed { token, shown: Err(Errno::NotFound) }] if *token == asked
+        ),
+        "the refusal is still the user's to read"
+    );
 }

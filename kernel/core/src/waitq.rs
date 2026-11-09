@@ -1192,50 +1192,32 @@ pub fn park_calling_task() -> bool {
         })
 }
 
-/// The wait-queue holding the in-kernel driver-store **server** kthread
-/// while it has no pending call to serve (Design D D2b-2c). Unlike
-/// [`CALL_WAITQ`] (which holds the *callers* awaiting a reply), this holds
-/// the bound *server* so it parks off the run queue between requests
-/// instead of busy-yielding. It is woken by
-/// [`serve_wake`] the instant the `ipc_call` handler posts a request to a
-/// registered endpoint, so the server re-runs and drains it. The server
-/// registers with [`NO_DEADLINE`] (it waits only for work, never a
-/// timeout) and re-checks its endpoint after every wake, so the
-/// check-then-park race is closed by the scheduler's wake-pending token.
+/// The wait-queue holding the threads waiting for calls on an endpoint — a
+/// server blocked in a receive, the in-kernel driver-store server between
+/// requests, a wait-set watching the endpoint — each under that endpoint's
+/// [`endpoint_key`]. Unlike [`CALL_WAITQ`], which holds the *callers*
+/// awaiting a reply, this holds the *servers*. An endpoint belongs to a
+/// process and any of its threads may wait on it, so a post wakes whichever
+/// threads wait on that endpoint and no other server. Every waiter registers
+/// with [`NO_DEADLINE`] and re-checks its endpoint after each wake; the
+/// scheduler's wake-pending token closes the check-then-park race.
 pub static SERVE_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every parked IPC-server kthread because a request was posted to a
-/// registered call endpoint; each re-drains its endpoint and parks again
-/// when empty. A fail-safe no-op before the arch hook is installed.
-///
-/// This broadcast is the **fallback** for an endpoint whose server has not
-/// yet recorded its scheduler id (never received); a post to an endpoint
-/// with a recorded server uses the targeted [`serve_wake_task`] instead, so
-/// unrelated parked servers stay parked (wake-one, not a thundering herd).
-pub fn serve_wake() {
-    if let Some(arch) = wait_arch() {
-        SERVE_WAITQ.wake_all(arch);
-    }
+/// The key a thread waiting for calls on endpoint `endpoint` registers under
+/// on [`SERVE_WAITQ`]. The queue holds no other rows, so every endpoint id,
+/// zero among them, is a key of its own.
+#[must_use]
+pub const fn endpoint_key(endpoint: u64) -> WakeKey {
+    WakeKey::new(endpoint)
 }
 
-/// Wake the server of an endpoint a request was posted to or that was taken
-/// down: exactly its recorded `server`, or every parked server while the
-/// endpoint has recorded none.
-pub fn serve_wake_server(server: Option<TaskId>) {
-    match server {
-        Some(server) => serve_wake_task(server),
-        None => serve_wake(),
-    }
-}
-
-/// Wake exactly the IPC server `task` parked on [`SERVE_WAITQ`] because a
-/// request was posted to *its* endpoint (the endpoint recorded its server's
-/// scheduler id at first receive). A server that is not parked is running
-/// and will drain the request on its own next poll, so the miss is benign.
-/// A fail-safe no-op before the arch hook is installed.
-pub fn serve_wake_task(task: TaskId) {
+/// Wake the threads waiting for calls on endpoint `endpoint`, which a request
+/// was just posted to or which was taken down; each re-checks the endpoint
+/// and serves it or parks again. A fail-safe no-op before the arch hook is
+/// installed.
+pub fn serve_wake(endpoint: u64) {
     if let Some(arch) = wait_arch() {
-        let _ = SERVE_WAITQ.wake_task(arch, task);
+        let _ = SERVE_WAITQ.wake_key(arch, endpoint_key(endpoint));
     }
 }
 
@@ -1838,6 +1820,30 @@ pub fn call_wake_named(tasks: impl Iterator<Item = TaskId>) {
     }
 }
 
+/// The wait-queue holding the threads parked on a wait-set observing a message
+/// port, each under that port's [`port_key`]. A port belongs to a process and
+/// any of its threads may wait on it, so a delivery wakes whichever threads
+/// wait on that port and no other waiter. Delivery is an explicit event, so
+/// every waiter registers with [`NO_DEADLINE`].
+pub static PORT_WAITQ: WaitQueue = WaitQueue::new();
+
+/// The key a thread waiting on message port `port` registers under on
+/// [`PORT_WAITQ`]. The queue holds no other rows, so every port id, zero
+/// among them, is a key of its own.
+#[must_use]
+pub const fn port_key(port: u64) -> WakeKey {
+    WakeKey::new(port)
+}
+
+/// Wake the threads waiting on message port `port`, which a message was just
+/// delivered to; each re-scans its members and either reports or parks again.
+/// A fail-safe no-op before the arch hook is installed.
+pub fn port_wake(port: u64) {
+    if let Some(arch) = wait_arch() {
+        let _ = PORT_WAITQ.wake_key(arch, port_key(port));
+    }
+}
+
 /// The wait-queue holding senders parked on a `PortRoom` wait-set member —
 /// a task that has a message a full mailbox refused and waits for the
 /// receiver to free a slot rather than dropping the message or polling for
@@ -2162,6 +2168,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     GlobalQueue {
         queue: &CALL_WAITQ,
         timed: true,
+        deferred: false,
+    },
+    GlobalQueue {
+        queue: &PORT_WAITQ,
+        timed: false,
         deferred: false,
     },
     GlobalQueue {

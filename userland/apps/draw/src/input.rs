@@ -122,21 +122,96 @@ impl View {
     ) -> ViewOutcome {
         match *event {
             InputEvent::KeyPressed { key, modifiers } => {
-                self.modifiers = modifiers;
+                self.hold_modifiers(modifiers, damage);
                 self.key(key, modifiers, scale, theme, damage)
             }
             InputEvent::KeyReleased { key, modifiers } => {
-                self.modifiers = modifiers;
+                self.hold_modifiers(modifiers, damage);
                 if key == Key::Char(' ') {
                     self.spaced = false;
                 }
                 Outcome::none()
             }
             InputEvent::ModifiersChanged { modifiers } => {
-                self.modifiers = modifiers;
+                self.hold_modifiers(modifiers, damage);
                 Outcome::none()
             }
             _ => self.pointer_event(event, scale, theme, damage),
+        }
+    }
+
+    /// The modifiers held are `modifiers` from now on: a drag whose marks they
+    /// constrain is marked again where it now stands, and a gradient being
+    /// laid is laid again.
+    fn hold_modifiers(&mut self, modifiers: Modifiers, damage: &mut Region) {
+        if modifiers == self.modifiers {
+            return;
+        }
+        let constrained = matches!(
+            self.gesture,
+            Some(
+                Gesture::Move { .. }
+                    | Gesture::Scale { .. }
+                    | Gesture::Rotate { .. }
+                    | Gesture::Create { .. }
+                    | Gesture::Gradient { .. }
+            )
+        );
+        let marked = if constrained {
+            self.gesture_extent()
+        } else {
+            None
+        };
+        self.modifiers = modifiers;
+        if !constrained {
+            return;
+        }
+        if let Some(Gesture::Gradient { from, to }) = self.gesture {
+            self.relay_gradient((from, to), damage);
+        }
+        damage.extend([marked, self.gesture_extent()].into_iter().flatten());
+    }
+
+    /// The gradient a drag is laying laid again along `line`, live: the
+    /// inspector shows the paint it lays, and the status why it could not.
+    fn relay_gradient(&mut self, line: (Point, Point), damage: &mut Region) {
+        if self.lay_gradient(line, false) {
+            damage.add(self.layout.message);
+        }
+        damage.add(self.layout.panel);
+    }
+
+    /// How the modifiers held constrain a drag: Shift evens it, Alt centres it
+    /// on where it began.
+    pub(crate) const fn constraint(&self) -> Constraint {
+        Constraint {
+            even: self.modifiers.shift,
+            centred: self.modifiers.alt,
+        }
+    }
+
+    /// The shape the tool in hand makes of a drag from `from` to `to`, as the
+    /// modifiers held constrain it: `None` for a tool that makes none.
+    pub(crate) fn created(&self, from: Point, to: Point) -> Option<Result<Shape, DrawingError>> {
+        let constraint = self.constraint();
+        match self.tool {
+            Tool::Rectangle => Some(Ok(tools::rectangle(
+                from,
+                to,
+                constraint,
+                self.corner_radius,
+            ))),
+            Tool::Ellipse => Some(Ok(tools::ellipse(from, to, constraint))),
+            Tool::Star => Some(Ok(tools::star(
+                from,
+                to,
+                self.star.points,
+                self.star.inner,
+                self.star.polygon,
+                constraint,
+            ))),
+            Tool::Line => Some(tools::line(from, tools::line_end(from, to, constraint))),
+            _ => None,
         }
     }
 
@@ -148,7 +223,11 @@ impl View {
         damage: &mut Region,
     ) -> ViewOutcome {
         if let InputEvent::PointerMoved { to } = *event {
+            let reading = self.pointer_reading();
             self.pointer = device(to);
+            if self.pointer_reading() != reading {
+                damage.add(self.layout.pointer);
+            }
         }
         let over =
             tairix_geometry::Point::new(round_i32(self.pointer.x), round_i32(self.pointer.y));
@@ -254,7 +333,10 @@ impl View {
             return Outcome::none();
         }
         if self.layout.canvas.contains(over) {
-            return self.press(damage);
+            let outcome = self.press(damage);
+            // A drag begun shows its marks at once.
+            damage.extend(self.gesture_extent());
+            return outcome;
         }
         if self.layout.zoom.contains(over) {
             return Outcome::asking(Request::Menu {
@@ -684,18 +766,40 @@ impl View {
             InputEvent::PointerMoved { .. }
                 if matches!(self.gesture, Some(Gesture::TextSelect)) =>
             {
+                let typed_at = |view: &Self| view.typing.as_ref().map(|t| (t.caret, t.anchor));
+                let (typed, marked) = (typed_at(self), self.gesture_extent());
                 self.place_caret(point, true);
-                self.refresh_inspector();
-                damage.add(self.layout.window);
+                if typed_at(self) != typed {
+                    self.refresh_inspector();
+                    damage.extend([marked, self.gesture_extent()].into_iter().flatten());
+                    // The inspector shows the characters selected.
+                    damage.add(self.layout.panel);
+                }
                 Outcome::none()
             }
             InputEvent::PointerMoved { .. } => {
+                let marked = match self.gesture {
+                    Some(Gesture::Pan { .. } | Gesture::Freehand { .. }) => None,
+                    _ => self.gesture_extent(),
+                };
                 match &mut self.gesture {
                     Some(Gesture::Pan { last }) => {
                         let by = *last - self.pointer;
                         *last = self.pointer;
                         self.viewport.scroll(by);
                         damage.add(self.layout.window);
+                        return Outcome::none();
+                    }
+                    Some(Gesture::Freehand { points }) => {
+                        // A line memory will not grow ends where it reached.
+                        let last = points.last().copied();
+                        let apart = last.is_none_or(|last| last.distance(point) >= pixel);
+                        if apart && points.try_reserve(1).is_ok() {
+                            points.push(point);
+                            // Only the stretch just drawn is new.
+                            let stretch = Bounds::new(last.unwrap_or(point), point);
+                            damage.extend(self.marks_rect(stretch.transformed(self.overlay_map())));
+                        }
                         return Outcome::none();
                     }
                     Some(
@@ -714,16 +818,7 @@ impl View {
                     Some(Gesture::Gradient { from, to }) => {
                         *to = snapped;
                         let line = (*from, *to);
-                        self.lay_gradient(line, false);
-                    }
-                    Some(Gesture::Freehand { points }) => {
-                        // A line memory will not grow ends where it reached.
-                        let apart = points
-                            .last()
-                            .is_none_or(|last| last.distance(point) >= pixel);
-                        if apart && points.try_reserve(1).is_ok() {
-                            points.push(point);
-                        }
+                        self.relay_gradient(line, damage);
                     }
                     Some(Gesture::Zoom { to, .. }) => {
                         *to = self.pointer - canvas_origin(&self.layout);
@@ -733,16 +828,16 @@ impl View {
                     }
                     Some(Gesture::TextSelect) | None => {}
                 }
-                damage.add(self.layout.canvas);
-                damage.add(self.layout.status);
+                damage.extend([marked, self.gesture_extent()].into_iter().flatten());
                 Outcome::none()
             }
             InputEvent::PointerReleased { .. } | InputEvent::PointerCancelled => {
                 let cancelled = matches!(event, InputEvent::PointerCancelled);
-                if let Some(gesture) = self.gesture.take() {
-                    if !cancelled {
-                        self.land(gesture);
-                    }
+                match self.gesture.take() {
+                    Some(gesture) if !cancelled => self.land(gesture),
+                    // What it laid live goes with it.
+                    Some(Gesture::Gradient { .. }) => self.drop_live(),
+                    Some(_) | None => {}
                 }
                 self.refresh_inspector();
                 damage.add(self.layout.window);
@@ -825,13 +920,11 @@ impl View {
 
     /// A gesture ended: land what it made.
     fn land(&mut self, gesture: Gesture) {
-        let constraint = Constraint {
-            even: self.modifiers.shift,
-            centred: self.modifiers.alt,
-        };
         match gesture {
             Gesture::Pan { .. } | Gesture::TextSelect => {}
-            Gesture::Gradient { from, to } => self.lay_gradient((from, to), true),
+            Gesture::Gradient { from, to } => {
+                self.lay_gradient((from, to), true);
+            }
             Gesture::Marquee { from, to, adding } => {
                 if let Err(error) = self.select_within(Bounds::new(from, to), adding) {
                     self.say_error("Select", error);
@@ -856,7 +949,7 @@ impl View {
                     }
                 }
             }
-            Gesture::Create { from, to } => self.create(from, to, constraint),
+            Gesture::Create { from, to } => self.create(from, to),
             Gesture::Freehand { points } => {
                 let tolerance = 1.5 * self.pixel();
                 match tools::freehand(&points, tolerance) {
@@ -958,32 +1051,19 @@ impl View {
         }
     }
 
-    fn create(&mut self, from: Point, to: Point, constraint: Constraint) {
+    fn create(&mut self, from: Point, to: Point) {
         if from.distance(to) < 2.0 * self.pixel() {
             return;
         }
-        let (shape, label) = match self.tool {
-            Tool::Rectangle => (
-                Ok(tools::rectangle(from, to, constraint, self.corner_radius)),
-                "Draw rectangle",
-            ),
-            Tool::Ellipse => (Ok(tools::ellipse(from, to, constraint)), "Draw ellipse"),
-            Tool::Star => (
-                Ok(tools::star(
-                    from,
-                    to,
-                    self.star.points,
-                    self.star.inner,
-                    self.star.polygon,
-                    constraint,
-                )),
-                "Draw star",
-            ),
-            Tool::Line => (
-                tools::line(from, tools::line_end(from, to, constraint)),
-                "Draw line",
-            ),
+        let label = match self.tool {
+            Tool::Rectangle => "Draw rectangle",
+            Tool::Ellipse => "Draw ellipse",
+            Tool::Star => "Draw star",
+            Tool::Line => "Draw line",
             _ => return,
+        };
+        let Some(shape) = self.created(from, to) else {
+            return;
         };
         let mut style = self.style.clone();
         if self.tool == Tool::Line {
@@ -1063,10 +1143,13 @@ impl View {
                     _ => None,
                 });
             if let Some(length) = length {
-                typing.anchor = 0;
-                typing.caret = length;
+                let marked = self.overlay_extent();
+                if let Some(typing) = &mut self.typing {
+                    typing.anchor = 0;
+                    typing.caret = length;
+                }
                 self.refresh_inspector();
-                damage.add(self.layout.window);
+                self.drawing_followed(marked, damage);
                 return Outcome::none();
             }
         }
@@ -1091,19 +1174,26 @@ impl View {
             && self.tool == Tool::Pen
             && !self.pen.is_empty();
         if backing_up {
+            let marked = self.overlay_extent();
             self.pen.pop();
-            damage.add(self.layout.canvas);
+            damage.extend([marked, self.overlay_extent()].into_iter().flatten());
             return Outcome::none();
         }
         if let Some(command) = self.chord(key, modifiers) {
             return self.carry_out(command, damage);
         }
-        damage.add(self.layout.window);
+        let marked = self.overlay_extent();
         match key {
-            Key::Char(' ') => self.spaced = true,
+            // Space changes only what a press does, and the pointer's shape.
+            Key::Char(' ') => {
+                self.spaced = true;
+                return Outcome::none();
+            }
             Key::Named(NamedKey::Escape) => {
+                if matches!(self.gesture.take(), Some(Gesture::Gradient { .. })) {
+                    self.drop_live();
+                }
                 self.pen.clear();
-                self.gesture = None;
                 self.selection.clear();
             }
             Key::Named(NamedKey::Enter) => self.finish_pen(),
@@ -1112,13 +1202,34 @@ impl View {
             Key::Named(NamedKey::Up) => self.nudge(0.0, -1.0),
             Key::Named(NamedKey::Down) => self.nudge(0.0, 1.0),
             Key::Char(character) if !modifiers.ctrl && !modifiers.alt && !modifiers.meta => {
-                if let Some(tool) = Tool::for_key(character) {
-                    self.choose_tool(tool);
-                }
+                let Some(tool) = Tool::for_key(character) else {
+                    return Outcome::none();
+                };
+                self.choose_tool(tool);
+                damage.add(self.layout.tools);
             }
-            _ => {}
+            _ => return Outcome::none(),
         }
+        self.drawing_followed(marked, damage);
         Outcome::none()
+    }
+
+    /// Repaint what a change to the drawing, its selection or the tool in
+    /// hand changes at once: the overlay where it was, `marked`, and where it
+    /// now is, and the inspector, status and bars that follow them. The canvas
+    /// beneath shows the tiles it holds until their redrawing lands, which
+    /// repaints them.
+    fn drawing_followed(&self, marked: Option<Rect>, damage: &mut Region) {
+        damage.extend([marked, self.overlay_extent()].into_iter().flatten());
+        let layout = &self.layout;
+        for part in [
+            layout.panel,
+            layout.status,
+            layout.horizontal_bar,
+            layout.vertical_bar,
+        ] {
+            damage.add(part);
+        }
     }
 
     fn nudge(&mut self, across: f64, down: f64) {
@@ -1228,7 +1339,7 @@ impl View {
             }
             _ => return,
         };
-        damage.add(self.layout.window);
+        let marked = self.overlay_extent();
         let Some((range, with)) =
             edit.filter(|(range, with)| !range.is_empty() || !with.is_empty())
         else {
@@ -1239,6 +1350,7 @@ impl View {
                 ..typing
             });
             self.refresh_inspector();
+            self.drawing_followed(marked, damage);
             return;
         };
         let caret = range.start + with.len();
@@ -1254,11 +1366,20 @@ impl View {
             Err(error) => self.say_error("Type", error),
         }
         self.refresh_inspector();
+        self.drawing_followed(marked, damage);
     }
 
     /// Carry out what the inspector changed.
     pub(crate) fn apply_change(&mut self, change: Change, damage: &mut Region) {
-        damage.add(self.layout.window);
+        // The page is what the canvas, its rulers and the pointer's reading
+        // are laid out by.
+        let paged = matches!(change, Change::Page(_));
+        let marked = if paged {
+            damage.add(self.layout.window);
+            None
+        } else {
+            self.overlay_extent()
+        };
         match change {
             Change::Paint {
                 target,
@@ -1339,6 +1460,9 @@ impl View {
             Change::Refused { what, error } => self.say_error(what, error.into()),
         }
         self.refresh_inspector();
+        if !paged {
+            self.drawing_followed(marked, damage);
+        }
     }
 
     /// The `target` paint made `paint`: of the characters typing has
@@ -1656,8 +1780,8 @@ impl View {
     /// the line's start to its end on the page — its end in 15° steps with
     /// Shift, radial about its start with Alt — in each object's own space:
     /// shown live until `settled`, then one step. A line no longer than a
-    /// pixel lays nothing.
-    fn lay_gradient(&mut self, (from, to): (Point, Point), settled: bool) {
+    /// pixel lays nothing. Answers whether it said why it could not be laid.
+    fn lay_gradient(&mut self, (from, to): (Point, Point), settled: bool) -> bool {
         let even = Constraint {
             even: self.modifiers.shift,
             centred: false,
@@ -1667,7 +1791,7 @@ impl View {
             if settled {
                 self.drop_live();
             }
-            return;
+            return false;
         }
         let (target, radial) = (self.inspector.target(), self.modifiers.alt);
         let lay = |style: &Style, placed: &edit::Placed<'_>| {
@@ -1682,7 +1806,9 @@ impl View {
         };
         let glyphs = Lettering::new(Arrived);
         let result = edit::restyle(self.edit_base(), &self.selection, &lay, &glyphs);
+        let refused = result.is_err();
         self.take_change(result, "Gradient", settled);
+        refused
     }
 
     /// The selection turned about its centre so it stands `degrees`

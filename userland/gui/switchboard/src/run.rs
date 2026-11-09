@@ -358,10 +358,13 @@ mod program {
         /// one's events against the wrong identity.
         fn next_window_event(&mut self) -> Result<Option<WindowEvent>, EventError> {
             let Self { events, window, .. } = self;
-            match events.as_mut() {
-                Some(events) => events.try_wait(window.client()),
-                None => Ok(None),
+            if let Some(events) = events.as_mut() {
+                return events.try_wait(window.client());
             }
+            // What was posted with no window open is still taken in, or its
+            // reply member would stay ready and wake the loop for ever.
+            window.client().reap_posted();
+            Ok(None)
         }
 
         /// Ask the compositor for the blur the window's ground is drawn over.
@@ -404,8 +407,7 @@ mod program {
             // The window manager decorates and resizes the window server-side;
             // the app draws no chrome and only re-maps its region when a
             // `WindowEvent::Resized` arrives.
-            let server = self
-                .window
+            self.window
                 .open(
                     self.event_endpoint,
                     &mode,
@@ -413,6 +415,10 @@ mod program {
                     win_sizing(self.desktop.scale()),
                 )
                 .map_err(|err| err.errno())?;
+            let Some(server) = self.window.client().session() else {
+                let _ = self.window.close();
+                return Err(Errno::NotConnected);
+            };
             // The window's own event member is armed only while a window is
             // open, so a closed window's channel is never left idly armed.
             if tairix_rt::waitset_ctl(
@@ -889,13 +895,25 @@ mod program {
         loop {
             let event = match host.next_window_event() {
                 Ok(Some(event)) => event,
-                Ok(None) => return,
+                Ok(None) => {
+                    // A frame given back is presented by the shell itself, and
+                    // the monitor asks for nothing else.
+                    while host.window.take_answer().is_some() {}
+                    return;
+                }
                 Err(EventError::Undecodable(_)) => {
                     app::report(APP_NAME, "dropped a malformed window event");
                     continue;
                 }
                 Err(EventError::Refused(refused)) => {
                     app::report(APP_NAME, refused);
+                    // A window the desktop would not open never existed.
+                    if host
+                        .window_id()
+                        .is_some_and(|window| app::refused_create(&refused, window))
+                    {
+                        service.panel_mut().close(host);
+                    }
                     continue;
                 }
                 // The mailbox will refuse the same way again, so reading on
@@ -1080,6 +1098,20 @@ mod program {
                 APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the network-change wait-set member",
+            ));
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::CallReply,
+            WINDOW_ENDPOINT,
+            WaitToken::WindowReply.as_u64(),
+        ) != 0
+        {
+            return Err(app::fail(
+                APP_NAME,
+                EXIT_NO_WAIT_SOURCE,
+                "cannot arm the window-reply wait-set member",
             ));
         }
         Ok(set)
@@ -1590,7 +1622,9 @@ mod program {
                 )));
             }
             Some(WaitToken::Command) => drain_commands(service, host, authority),
-            Some(WaitToken::WindowEvent) => drain_window_events(service, host, authority),
+            Some(WaitToken::WindowEvent | WaitToken::WindowReply) => {
+                drain_window_events(service, host, authority);
+            }
             Some(WaitToken::Artwork) => {
                 // The readiness is a level peek, so leaving it undrained would
                 // report ready for ever and turn the park into a spin.

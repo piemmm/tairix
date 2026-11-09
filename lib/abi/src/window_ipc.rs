@@ -22,15 +22,16 @@
 //! [`WindowEvent::FilePicked`] delegation handle — is owner-bound
 //! kernel-side (it redeems only when presented by the task it was minted
 //! to, `fd_redeem`), so the number is useless to any observer or forger;
-//! an app still accepts events only from the session identity the create
-//! reply named.
+//! an app still accepts events only from the session identity its connect
+//! named.
 //!
-//! Requests are the fixed-width [`WindowRequest`]. `Create` answers with
-//! the [`WINDOW_CREATE_REPLY_LEN`]-byte window-id reply
-//! ([`encode_create_reply`] / [`decode_create_reply`]); `Present` and
-//! `Close` answer with the shared status frame
-//! ([`crate::reply::encode_status_reply`] /
-//! [`crate::reply::decode_status_reply`]). Every decode fails closed: an
+//! Requests are the fixed-width [`WindowRequest`]. `Connect` answers the
+//! desktop, the session's identity and the caller's [`ObjectIds`]
+//! ([`encode_connect_reply`] / [`decode_connect_reply`]); everything the
+//! caller creates is named from that range, so a create or an open answers
+//! with the shared status frame ([`crate::reply::encode_status_reply`] /
+//! [`crate::reply::decode_status_reply`]), as `Present` and `Close` do.
+//! Every decode fails closed: an
 //! unknown magic, version, operation, format, an out-of-bounds frame
 //! count, an empty damage rectangle, a malformed title, a minimum client
 //! size declared by a window that cannot be resized, a request frame that
@@ -2619,8 +2620,11 @@ impl WindowSizing {
 pub enum WindowRequest {
     /// Open a window over the caller's granted frame region: map the
     /// region once, validate the frame layout, and list the window under
-    /// `title`. The session assigns and replies the window id.
+    /// `title`, named `window_id`. The reply is the status alone, so the
+    /// caller may go on to title and present the window before it lands.
     Create {
+        /// The id the caller names the window by ([`ObjectIds`]).
+        window_id: u64,
         /// The `shm_grant` handle minted to the session's serving task,
         /// naming the region that holds the window's frames back-to-back.
         shm_handle: u64,
@@ -2661,15 +2665,15 @@ pub enum WindowRequest {
     /// modal surfaces.
     ///
     /// It counts against the same per-client window budget as
-    /// [`Self::Create`], so "popup" cannot be used to exceed the cap. It
-    /// answers with the same [`WINDOW_CREATE_REPLY_LEN`]-byte reply as
-    /// `Create` (the assigned window id and the serving session identity),
-    /// and thereafter [`Self::Present`] and [`Self::Close`] act on the
-    /// popup's own id unchanged. Closing the parent window closes its
-    /// popups with it.
+    /// [`Self::Create`], so "popup" cannot be used to exceed the cap, and is
+    /// named and answered as `Create` is; [`Self::Present`] and
+    /// [`Self::Close`] act on its id unchanged. Closing the parent window
+    /// closes its popups with it.
     CreatePopup {
+        /// The id the caller names the popup by ([`ObjectIds`]).
+        window_id: u64,
         /// The caller's own window the popup is anchored above and owned
-        /// by (from that window's `Create` reply); never zero.
+        /// by; never zero.
         parent_window_id: u64,
         /// The `shm_grant` handle minted to the session's serving task,
         /// naming the region that holds the popup's frames back-to-back.
@@ -2710,9 +2714,11 @@ pub enum WindowRequest {
     /// area's: the band and rim are the window manager's. One whose `sizing`
     /// is resizable is given resize edges — never a maximize — and told each
     /// size the user gives it as [`WindowEvent::Resized`], as a window is. It
-    /// counts against the same budget and answers with the same reply as
-    /// [`Self::Create`].
+    /// counts against the same budget and is named and answered as
+    /// [`Self::Create`] is.
     CreateTool {
+        /// The id the caller names the tool window by ([`ObjectIds`]).
+        window_id: u64,
         /// The caller's own top-level window the tool window belongs to;
         /// never zero, and never a transient itself.
         parent_window_id: u64,
@@ -2762,8 +2768,10 @@ pub enum WindowRequest {
     /// dialog: a title band reading `title` beside the application's
     /// attested name, and no resize edge. The geometry is the client area's,
     /// sized by the caller to its content. It counts against the same budget
-    /// and answers with the same reply as [`Self::Create`].
+    /// and is named and answered as [`Self::Create`] is.
     CreateDialog {
+        /// The id the caller names the dialog by ([`ObjectIds`]).
+        window_id: u64,
         /// The caller's own top-level window the dialog belongs to; never
         /// zero, and never a transient itself.
         owner_window_id: u64,
@@ -3202,34 +3210,31 @@ pub enum WindowRequest {
         /// The blur radius in logical pixels; `0` disables the effect.
         radius_px: u16,
     },
-    /// Describe the desktop the caller's windows are displayed on: the
-    /// screen extent, the UI scale, and the active appearance
-    /// ([`DesktopInfo`]). The reply is the
-    /// [`WINDOW_DESKTOP_REPLY_LEN`]-byte desktop frame
-    /// ([`encode_desktop_reply`] / [`decode_desktop_reply`]).
-    ///
-    /// Read-only, and the one request that names no window: an app asks
-    /// *before* it opens anything, so its first frame is already the right
-    /// size, at the right density, in the right colours rather than a
-    /// guess it must correct. Thereafter it converges on the
+    /// Connect: the call every windowed application makes once, before it
+    /// opens anything. The reply ([`encode_connect_reply`] /
+    /// [`decode_connect_reply`]) describes the desktop the caller's windows
+    /// are displayed on — the screen extent, the UI scale and the active
+    /// appearance ([`DesktopInfo`]) — so its first frame is already the right
+    /// size, at the right density, in the right colours; it converges on the
     /// [`NoticeTopic::Desktop`](crate::notice::NoticeTopic::Desktop) system
-    /// notice, which the session publishes whenever any of it changes — so an
-    /// application with no window open is told too.
+    /// notice thereafter.
     ///
-    /// The reply also carries the serving session's own [`ProcId`], so an
-    /// app that declares an icon-bar presence before it owns a window —
-    /// or that never opens one — can still authenticate the bar events it
-    /// receives (see [`encode_desktop_reply`]).
+    /// It also answers the serving session's own [`ProcId`], which the
+    /// caller requires of every event's kernel-attested sender, and a fresh
+    /// [`ObjectIds`] range the connecting client names everything it creates
+    /// by, so no create or open ever waits on the session for a name. Each
+    /// connect is given a range of its own, so two clients in one process
+    /// never name the same object; a process holds at most
+    /// [`OBJECT_RANGES_MAX`] and is refused [`Errno::LimitExceeded`] past it.
     ///
     /// It carries no capability: the reply describes the seat's own screen
-    /// and theme — no other principal's data, and no authority to act — so
-    /// gating it would only force every application to guess at facts the
-    /// user can see by looking at their monitor.
-    QueryDesktop,
+    /// and theme and grants no authority to act, and the id range is the
+    /// caller's own.
+    Connect,
     /// Ask the session for a page of the shipped wallpaper catalog, from
     /// entry `from` onward.
     ///
-    /// The same posture as [`Self::QueryDesktop`]: it describes the seat's
+    /// The same posture as [`Self::Connect`]: it describes the seat's
     /// own read-only shipped store, carries no capability, and grants
     /// nothing. The session lists that store once — `/System` is read-only,
     /// so its catalog is fixed for the life of the boot — and answers from
@@ -3246,7 +3251,7 @@ pub enum WindowRequest {
     },
     /// Ask the session which cursor sets this desktop offers.
     ///
-    /// The same posture as [`Self::QueryDesktop`]: it describes the seat's
+    /// The same posture as [`Self::Connect`]: it describes the seat's
     /// own read-only shipped store, carries no capability, and grants
     /// nothing. The session lists that store once, at bring-up, and
     /// answers from what it holds, so the reply costs no I/O.
@@ -3291,7 +3296,7 @@ pub enum WindowRequest {
     ///
     /// Answered only for the desktop's own Settings application, which lists
     /// the store's regions and places for the user to choose from. The reply
-    /// is a minted-id frame ([`decode_minted_id_reply`]) carrying the
+    /// is a handle frame ([`decode_handle_reply`]) carrying the
     /// `fd_grant` handle the session minted to the caller from the descriptor
     /// it opened at bring-up, so answering costs no filesystem operation;
     /// `NotFound` when this desktop holds no store.
@@ -3370,10 +3375,10 @@ pub enum WindowRequest {
     /// **Per gesture, not a standing declaration.** Unlike
     /// [`Self::SetAppBar`] — which the caller re-issues to replace an
     /// application's whole icon-bar presence — this one asks for a chain to
-    /// come up *now*, once, for a window the caller owns. The reply is only
-    /// the acceptance: it carries the session-minted, never-reused **open
-    /// id**, and the chain's whole answer arrives later as exactly one
-    /// [`WindowEvent::MenuClosed`] naming that id.
+    /// come up *now*, once, for a window the caller owns. The caller names
+    /// the open with an id from its own range ([`ObjectIds`]), the reply is
+    /// only the acceptance, and the chain's whole answer arrives later as
+    /// exactly one [`WindowEvent::MenuClosed`] naming that id.
     ///
     /// The application describes and the desktop decides: it sends the row
     /// model, the plate's title (carried by the menu itself,
@@ -3391,8 +3396,11 @@ pub enum WindowRequest {
     /// have opened another.
     OpenMenu {
         /// The caller's own window the chain belongs to and its outcome is
-        /// delivered to (from the `Create` reply).
+        /// delivered to.
         window_id: u64,
+        /// The id the caller names this open by ([`ObjectIds`]), which its
+        /// one [`WindowEvent::MenuClosed`] names.
+        open_id: u64,
         /// Where the root plate is anchored, in that window's client
         /// pixels.
         anchor: WindowRegion,
@@ -3569,12 +3577,13 @@ pub enum WindowRequest {
     /// [`DESKTOP_LAYER_MAX_SIDE_LOGICAL`] logical pixels, and it is hidden
     /// with its feeds stopped whenever a trusted surface is up.
     ///
-    /// It answers with the same [`WINDOW_CREATE_REPLY_LEN`]-byte reply as
-    /// `Create`, and thereafter [`Self::Present`] and [`Self::Close`] act
-    /// on its id unchanged — a layer surface is a window in the one
-    /// registry, so its ownership, budget, and teardown are the same code
-    /// every other window's are.
+    /// It is named and answered as `Create` is, and [`Self::Present`] and
+    /// [`Self::Close`] act on its id unchanged — a layer surface is a window
+    /// in the one registry, so its ownership, budget, and teardown are the
+    /// same code every other window's are.
     OpenLayer {
+        /// The id the caller names the surface by ([`ObjectIds`]).
+        window_id: u64,
         /// The `shm_grant` handle minted to the session's serving task,
         /// naming the region that holds the surface's frames back-to-back.
         shm_handle: u64,
@@ -3610,7 +3619,7 @@ pub enum WindowRequest {
     /// in the same step — and splitting them would let a frame land at the
     /// old depth.
     PlaceLayer {
-        /// The layer surface being moved (from its `OpenLayer` reply).
+        /// The layer surface being moved.
         window_id: u64,
         /// New left edge in physical screen pixels.
         x: i32,
@@ -3627,12 +3636,12 @@ pub enum WindowRequest {
     /// nobody reads. [`WindowEvent::TerrainChanged`] says an answer would
     /// differ from the last one.
     TakeTerrain {
-        /// The layer surface asking (from its `OpenLayer` reply).
+        /// The layer surface asking.
         window_id: u64,
     },
     /// Put an alert to the user: a refusal, warning, notice or question the
     /// desktop draws in a window of its own and answers exactly once with
-    /// [`WindowEvent::AlertClosed`] naming the id the reply mints.
+    /// [`WindowEvent::AlertClosed`] naming `alert_id`.
     ///
     /// Application-scoped, so an application with no window open may still
     /// say why it refused what it was given. `owner_window_id`, when not
@@ -3646,6 +3655,8 @@ pub enum WindowRequest {
     /// the scope, and at most [`ALERT_MAX_OPEN`] of its alerts are up at
     /// once.
     OpenAlert {
+        /// The id the caller names the alert by ([`ObjectIds`]).
+        alert_id: u64,
         /// The caller's own endpoint the answer is delivered to. Never a
         /// reserved endpoint.
         event_endpoint: u64,
@@ -3658,7 +3669,7 @@ pub enum WindowRequest {
     /// Withdraw the caller's own alert `alert_id`, which is answered
     /// [`AlertOutcome::Dismissed`] as it comes down.
     CloseAlert {
-        /// The alert, from its open's reply.
+        /// The alert, as its open named it.
         alert_id: u64,
     },
     /// Ask the desktop to authorise and perform `task` for the caller's own
@@ -3713,8 +3724,8 @@ const OP_TAKE_PICKED_FILE: u16 = 37;
 const OP_BEGIN_DRAG: u16 = 7;
 /// Wire operation discriminant of [`WindowRequest::TakeDropTarget`].
 const OP_TAKE_DROP_TARGET: u16 = 8;
-/// Wire operation discriminant of [`WindowRequest::QueryDesktop`].
-const OP_QUERY_DESKTOP: u16 = 9;
+/// Wire operation discriminant of [`WindowRequest::Connect`].
+const OP_CONNECT: u16 = 9;
 /// Wire operation discriminant of [`WindowRequest::SetBackdropBlur`].
 const OP_SET_BACKDROP_BLUR: u16 = 10;
 /// Wire operation discriminant of [`WindowRequest::CreatePopup`].
@@ -3978,6 +3989,11 @@ const FRAME_LAYOUT_AT: usize = 24;
 /// one fact, and moving a field in the block would silently desynchronise
 /// two of them.
 const FRAME_LAYOUT_END: usize = FRAME_LAYOUT_AT + 17;
+/// Byte offset of the id a surface-opening request names its surface by,
+/// just past the frame layout; the request's own operands follow it.
+const SURFACE_ID_OFFSET: usize = FRAME_LAYOUT_END;
+/// One past the surface prologue every surface-opening request carries.
+const SURFACE_PROLOGUE_END: usize = SURFACE_ID_OFFSET + 8;
 
 /// Encoded size of a [`WindowRequest::Resize`]: the header, the window id,
 /// the shared-memory handle, and the shared frame-layout block.
@@ -3985,9 +4001,8 @@ const RESIZE_WIRE_LEN: usize = FRAME_LAYOUT_END;
 /// Encoded size of a [`WindowRequest::SetBackdropBlur`]: the header, the
 /// window id, and the radius.
 const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
-/// Encoded size of a [`WindowRequest::QueryDesktop`]: the header alone —
-/// the one request that names no window and carries no operand.
-const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+/// Encoded size of a [`WindowRequest::Connect`]: the header alone.
+const CONNECT_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Encoded size of a [`WindowRequest::TakeMenuText`]: the header, the window
 /// the chain belonged to, and the open whose commit is being pulled.
@@ -4097,9 +4112,9 @@ const HAND_OVER_MAX_WIRE_LEN: usize =
     hand_over_wire_len(HAND_OVER_RUN_PATH_MAX, crate::FS_NAME_MAX);
 
 /// Byte offset of the tail every transient — a popup or a tool window —
-/// carries after the shared frame-layout block: the parent window id (8),
-/// then the two signed placement offsets (4 each).
-const TRANSIENT_PARENT_OFFSET: usize = FRAME_LAYOUT_END;
+/// carries after the surface prologue: the parent window id (8), then the
+/// two signed placement offsets (4 each).
+const TRANSIENT_PARENT_OFFSET: usize = SURFACE_PROLOGUE_END;
 /// Byte offset of a transient's horizontal placement offset.
 const TRANSIENT_OFFSET_X: usize = TRANSIENT_PARENT_OFFSET + 8;
 /// Byte offset of a transient's vertical placement offset.
@@ -4124,8 +4139,8 @@ const TOOL_SIZING_OFFSET: usize = TOOL_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
 const CREATE_TOOL_WIRE_LEN: usize = TOOL_SIZING_OFFSET + SIZING_WIRE_LEN;
 
 /// Byte offset of a [`WindowRequest::CreateDialog`]'s owner window id, after
-/// the shared frame-layout block.
-const DIALOG_OWNER_OFFSET: usize = FRAME_LAYOUT_END;
+/// the surface prologue.
+const DIALOG_OWNER_OFFSET: usize = SURFACE_PROLOGUE_END;
 /// Byte offset of its modality.
 const DIALOG_MODALITY_OFFSET: usize = DIALOG_OWNER_OFFSET + 8;
 /// Byte offset of its title length.
@@ -4134,8 +4149,8 @@ const DIALOG_TITLE_LEN_OFFSET: usize = DIALOG_MODALITY_OFFSET + 1;
 const CREATE_DIALOG_WIRE_LEN: usize = DIALOG_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
 
 /// Byte offset of [`WindowRequest::OpenLayer::x`], the first operand after
-/// the shared frame-layout block.
-const LAYER_OPEN_X: usize = FRAME_LAYOUT_END;
+/// the surface prologue.
+const LAYER_OPEN_X: usize = SURFACE_PROLOGUE_END;
 /// Byte offset of [`WindowRequest::OpenLayer::y`].
 const LAYER_OPEN_Y: usize = LAYER_OPEN_X + 4;
 /// Byte offset of [`WindowRequest::OpenLayer::depth`].
@@ -4153,9 +4168,9 @@ const LAYER_PLACE_DEPTH: usize = LAYER_PLACE_Y + 4;
 const PLACE_LAYER_WIRE_LEN: usize = LAYER_PLACE_DEPTH + 1;
 
 /// Byte offset of a [`WindowRequest::Create`] title length, immediately
-/// after the shared frame-layout block. The create tail runs on from here:
-/// the title text, the resizable flag, and the declared client-size range.
-const CREATE_TITLE_LEN_OFFSET: usize = FRAME_LAYOUT_END;
+/// after the surface prologue. The create tail runs on from here: the title
+/// text, the resizable flag, and the declared client-size range.
+const CREATE_TITLE_LEN_OFFSET: usize = SURFACE_PROLOGUE_END;
 /// Byte offset of a [`WindowRequest::Create`] title's text.
 const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
 /// Byte offset of the [`WindowSizing`] block a [`WindowRequest::Create`]
@@ -4304,9 +4319,11 @@ const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, AP
 /// [`WindowRegion::write_to`] lays them out.
 const WINDOW_REGION_WIRE_LEN: usize = 16;
 
-/// Byte offset of a [`WindowRequest::OpenMenu`]'s anchor, immediately after
-/// the window the chain belongs to.
-const OPEN_MENU_ANCHOR_OFFSET: usize = 16;
+/// Byte offset of a [`WindowRequest::OpenMenu`]'s open id, after the window
+/// the chain belongs to.
+const OPEN_MENU_ID_OFFSET: usize = 16;
+/// Byte offset of an open's anchor.
+const OPEN_MENU_ANCHOR_OFFSET: usize = OPEN_MENU_ID_OFFSET + 8;
 /// Byte offset of the length of an open's root-plate title.
 const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + WINDOW_REGION_WIRE_LEN;
 /// Byte offset of an open's declared row count.
@@ -4338,8 +4355,10 @@ const OPEN_MENU_MAX_WIRE_LEN: usize = open_menu_wire_len(
 /// Byte offset of a [`WindowRequest::OpenAlert`]'s owner window, after its
 /// event endpoint.
 const OPEN_ALERT_OWNER_OFFSET: usize = 16;
+/// Byte offset of the id the alert is named by.
+const OPEN_ALERT_ID_OFFSET: usize = OPEN_ALERT_OWNER_OFFSET + 8;
 /// Byte offset of an alert's own operand block.
-const OPEN_ALERT_SPEC_OFFSET: usize = 24;
+const OPEN_ALERT_SPEC_OFFSET: usize = OPEN_ALERT_ID_OFFSET + 8;
 /// Encoded size of the longest possible [`WindowRequest::OpenAlert`].
 const OPEN_ALERT_MAX_WIRE_LEN: usize = OPEN_ALERT_SPEC_OFFSET + alert::MAX_WIRE_LEN;
 
@@ -4478,7 +4497,7 @@ impl WindowRequest {
             Self::SetClipboard { .. } => SET_CLIPBOARD_WIRE_LEN,
             Self::GetClipboard { .. } => GET_CLIPBOARD_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
-            Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
+            Self::Connect => CONNECT_WIRE_LEN,
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
             Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
             Self::QueryNotifySources => QUERY_NOTIFY_SOURCES_WIRE_LEN,
@@ -4593,7 +4612,7 @@ impl WindowRequest {
             Self::GetClipboard { .. } => OP_GET_CLIPBOARD,
             Self::ActivateWindow { .. } => OP_ACTIVATE_WINDOW,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
-            Self::QueryDesktop => OP_QUERY_DESKTOP,
+            Self::Connect => OP_CONNECT,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
             Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
             Self::QueryNotifySources => OP_QUERY_NOTIFY_SOURCES,
@@ -4623,6 +4642,7 @@ impl WindowRequest {
     /// Write the operands of a [`WindowRequest::CreateDialog`].
     fn write_dialog_operands(&self, out: &mut [u8]) {
         if let Self::CreateDialog {
+            window_id,
             owner_window_id,
             shm_handle,
             event_endpoint,
@@ -4635,14 +4655,19 @@ impl WindowRequest {
             title,
         } = *self
         {
-            let layout = FrameLayout {
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-            };
-            write_surface_operands(out, shm_handle, event_endpoint, &layout);
+            SurfaceOperands {
+                window_id,
+                shm_handle,
+                event_endpoint,
+                layout: FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                },
+            }
+            .write_to(out);
             put_u64(out, DIALOG_OWNER_OFFSET, owner_window_id);
             out[DIALOG_MODALITY_OFFSET] = modality.wire();
             encode_title(out, DIALOG_TITLE_LEN_OFFSET, &title);
@@ -4740,12 +4765,14 @@ impl WindowRequest {
                 self.write_authorise_operands(out);
             }
             Self::OpenAlert {
+                alert_id,
                 event_endpoint,
                 owner_window_id,
                 ref alert,
             } => {
                 put_u64(out, 8, event_endpoint);
                 put_u64(out, OPEN_ALERT_OWNER_OFFSET, owner_window_id);
+                put_u64(out, OPEN_ALERT_ID_OFFSET, alert_id);
                 alert::write(&mut out[OPEN_ALERT_SPEC_OFFSET..], alert);
             }
             Self::PickFile { .. }
@@ -4792,7 +4819,7 @@ impl WindowRequest {
             // identity the kernel attests, or the seat's own read-only
             // store, so none carries an operand.
             Self::TakeOpenTarget
-            | Self::QueryDesktop
+            | Self::Connect
             | Self::QueryCursorSets
             | Self::QueryNotifySources
             | Self::LockScreen
@@ -4804,9 +4831,10 @@ impl WindowRequest {
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
                 window_id,
+                open_id,
                 anchor,
                 ref menu,
-            } => write_open_menu(out, window_id, anchor, menu),
+            } => write_open_menu(out, (window_id, open_id), anchor, menu),
         }
     }
 
@@ -4913,6 +4941,7 @@ impl WindowRequest {
     const fn transient(&self) -> Option<Transient> {
         match *self {
             Self::CreatePopup {
+                window_id,
                 parent_window_id,
                 shm_handle,
                 event_endpoint,
@@ -4925,6 +4954,7 @@ impl WindowRequest {
                 offset_y,
             }
             | Self::CreateTool {
+                window_id,
                 parent_window_id,
                 shm_handle,
                 event_endpoint,
@@ -4938,14 +4968,17 @@ impl WindowRequest {
                 ..
             } => Some(Transient {
                 parent_window_id,
-                shm_handle,
-                event_endpoint,
-                layout: FrameLayout {
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
+                surface: SurfaceOperands {
+                    window_id,
+                    shm_handle,
+                    event_endpoint,
+                    layout: FrameLayout {
+                        frame_count,
+                        width_px,
+                        height_px,
+                        stride_bytes,
+                        format,
+                    },
                 },
                 offset: (offset_x, offset_y),
             }),
@@ -4993,6 +5026,7 @@ impl WindowRequest {
             return;
         }
         let Self::OpenLayer {
+            window_id,
             shm_handle,
             event_endpoint,
             frame_count,
@@ -5007,18 +5041,19 @@ impl WindowRequest {
         else {
             return;
         };
-        write_surface_operands(
-            out,
+        SurfaceOperands {
+            window_id,
             shm_handle,
             event_endpoint,
-            &FrameLayout {
+            layout: FrameLayout {
                 frame_count,
                 width_px,
                 height_px,
                 stride_bytes,
                 format,
             },
-        );
+        }
+        .write_to(out);
         put_i32(out, LAYER_OPEN_X, x);
         put_i32(out, LAYER_OPEN_Y, y);
         out[LAYER_OPEN_DEPTH] = depth.as_u8();
@@ -5029,6 +5064,7 @@ impl WindowRequest {
     /// A no-op for any other request.
     fn write_create_operands(&self, out: &mut [u8]) {
         let Self::Create {
+            window_id,
             shm_handle,
             event_endpoint,
             frame_count,
@@ -5042,18 +5078,19 @@ impl WindowRequest {
         else {
             return;
         };
-        write_surface_operands(
-            out,
+        SurfaceOperands {
+            window_id,
             shm_handle,
             event_endpoint,
-            &FrameLayout {
+            layout: FrameLayout {
                 frame_count,
                 width_px,
                 height_px,
                 stride_bytes,
                 format,
             },
-        );
+        }
+        .write_to(out);
         encode_title(out, CREATE_TITLE_LEN_OFFSET, &title);
         write_sizing(out, CREATE_SIZING_OFFSET, sizing);
     }
@@ -5152,9 +5189,7 @@ impl WindowRequest {
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_OPEN_MENU => read_open_menu(bytes),
             OP_SET_BACKDROP_BLUR => read_set_backdrop_blur(bytes),
-            OP_QUERY_DESKTOP => {
-                exact_len(bytes, QUERY_DESKTOP_WIRE_LEN).map(|()| Self::QueryDesktop)
-            }
+            OP_CONNECT => exact_len(bytes, CONNECT_WIRE_LEN).map(|()| Self::Connect),
             OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
             OP_RENDER_PREVIEW => read_render_preview(bytes),
             OP_PREVIEW_SCREENSAVER => read_preview_screensaver(bytes),
@@ -5241,6 +5276,7 @@ fn read_open_alert(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::OutOfRange);
     }
     Ok(WindowRequest::OpenAlert {
+        alert_id: nonzero_id(read_u64(bytes, OPEN_ALERT_ID_OFFSET))?,
         event_endpoint,
         owner_window_id: read_u64(bytes, OPEN_ALERT_OWNER_OFFSET),
         alert: alert::read(&bytes[OPEN_ALERT_SPEC_OFFSET..])?,
@@ -6143,8 +6179,14 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// The title trails the rows' text so the shared block keeps one layout;
 /// where a declaration's block simply ends, an open's carries the title
 /// after it.
-fn write_open_menu(out: &mut [u8], window_id: u64, anchor: WindowRegion, menu: &AppMenu) {
+fn write_open_menu(
+    out: &mut [u8],
+    (window_id, open_id): (u64, u64),
+    anchor: WindowRegion,
+    menu: &AppMenu,
+) {
     put_u64(out, 8, window_id);
+    put_u64(out, OPEN_MENU_ID_OFFSET, open_id);
     anchor.write_to(out, OPEN_MENU_ANCHOR_OFFSET);
     out[OPEN_MENU_TITLE_LEN_OFFSET] = menu.title.len_byte();
     out[OPEN_MENU_ROW_COUNT_OFFSET] = menu.len;
@@ -6180,6 +6222,7 @@ fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }
     exact_len(bytes, open_menu_wire_len(count, text_len, title_len))?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let open_id = nonzero_id(read_u64(bytes, OPEN_MENU_ID_OFFSET))?;
     let anchor = WindowRegion::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?;
     // The title trails the whole menu block, whose length the counts above
     // already state, so it is read before the rows the menu is then filled
@@ -6195,6 +6238,7 @@ fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     read_menu_block(&mut menu, bytes, OPEN_MENU_ROWS_OFFSET, count, text_len)?;
     Ok(WindowRequest::OpenMenu {
         window_id,
+        open_id,
         anchor,
         menu,
     })
@@ -6378,14 +6422,15 @@ fn encode_set_title(out: &mut [u8], window_id: u64, title: &WindowTitle) {
 /// itself and is refused.
 fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, CREATE_WIRE_LEN)?;
-    let shm_handle = read_u64(bytes, 8);
-    let event_endpoint = read_u64(bytes, 16);
-    if crate::ipc::is_reserved_endpoint(event_endpoint) {
-        return Err(Errno::OutOfRange);
-    }
-    let layout = read_frame_layout(bytes)?;
+    let SurfaceOperands {
+        window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+    } = read_surface_operands(bytes)?;
     let title = decode_title(bytes, CREATE_TITLE_LEN_OFFSET)?;
     Ok(WindowRequest::Create {
+        window_id,
         shm_handle,
         event_endpoint,
         frame_count: layout.frame_count,
@@ -6456,16 +6501,14 @@ const fn crossed_sizing(sizing: WindowSizing) -> bool {
 /// its offset from that parent's client origin.
 struct Transient {
     parent_window_id: u64,
-    shm_handle: u64,
-    event_endpoint: u64,
-    layout: FrameLayout,
+    surface: SurfaceOperands,
     offset: (i32, i32),
 }
 
 impl Transient {
     /// Write the block at the offsets [`read_transient`] reads it from.
     fn write_to(&self, out: &mut [u8]) {
-        write_surface_operands(out, self.shm_handle, self.event_endpoint, &self.layout);
+        self.surface.write_to(out);
         put_u64(out, TRANSIENT_PARENT_OFFSET, self.parent_window_id);
         put_i32(out, TRANSIENT_OFFSET_X, self.offset.0);
         put_i32(out, TRANSIENT_OFFSET_Y, self.offset.1);
@@ -6477,18 +6520,11 @@ impl Transient {
 /// parent window id. The offsets are unconstrained: the session clamps a
 /// transient onto the screen, so any offset is a legitimate request.
 fn read_transient(bytes: &[u8]) -> Result<Transient, Errno> {
-    let shm_handle = read_u64(bytes, 8);
-    let event_endpoint = read_u64(bytes, 16);
-    if crate::ipc::is_reserved_endpoint(event_endpoint) {
-        return Err(Errno::OutOfRange);
-    }
-    let layout = read_frame_layout(bytes)?;
+    let surface = read_surface_operands(bytes)?;
     let parent_window_id = nonzero_id(read_u64(bytes, TRANSIENT_PARENT_OFFSET))?;
     Ok(Transient {
         parent_window_id,
-        shm_handle,
-        event_endpoint,
-        layout,
+        surface,
         offset: (
             read_i32(bytes, TRANSIENT_OFFSET_X),
             read_i32(bytes, TRANSIENT_OFFSET_Y),
@@ -6527,12 +6563,17 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, CREATE_POPUP_WIRE_LEN)?;
     let Transient {
         parent_window_id,
-        shm_handle,
-        event_endpoint,
-        layout,
+        surface:
+            SurfaceOperands {
+                window_id,
+                shm_handle,
+                event_endpoint,
+                layout,
+            },
         offset: (offset_x, offset_y),
     } = read_transient(bytes)?;
     Ok(WindowRequest::CreatePopup {
+        window_id,
         parent_window_id,
         shm_handle,
         event_endpoint,
@@ -6557,9 +6598,13 @@ fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, CREATE_TOOL_WIRE_LEN)?;
     let Transient {
         parent_window_id,
-        shm_handle,
-        event_endpoint,
-        layout,
+        surface:
+            SurfaceOperands {
+                window_id,
+                shm_handle,
+                event_endpoint,
+                layout,
+            },
         offset: (offset_x, offset_y),
     } = read_transient(bytes)?;
     let place = read_u32(bytes, TOOL_CARRY_OFFSET);
@@ -6570,6 +6615,7 @@ fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         _ => return Err(Errno::OutOfRange),
     };
     Ok(WindowRequest::CreateTool {
+        window_id,
         parent_window_id,
         shm_handle,
         event_endpoint,
@@ -6591,13 +6637,14 @@ fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// non-zero owner, a modality in the closed set, and the title.
 fn read_create_dialog(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, CREATE_DIALOG_WIRE_LEN)?;
-    let shm_handle = read_u64(bytes, 8);
-    let event_endpoint = read_u64(bytes, 16);
-    if crate::ipc::is_reserved_endpoint(event_endpoint) {
-        return Err(Errno::OutOfRange);
-    }
-    let layout = read_frame_layout(bytes)?;
+    let SurfaceOperands {
+        window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+    } = read_surface_operands(bytes)?;
     Ok(WindowRequest::CreateDialog {
+        window_id,
         owner_window_id: nonzero_id(read_u64(bytes, DIALOG_OWNER_OFFSET))?,
         shm_handle,
         event_endpoint,
@@ -6625,18 +6672,19 @@ fn read_create_dialog(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// live one.
 fn read_open_layer(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, OPEN_LAYER_WIRE_LEN)?;
-    let shm_handle = read_u64(bytes, 8);
-    let event_endpoint = read_u64(bytes, 16);
-    if crate::ipc::is_reserved_endpoint(event_endpoint) {
-        return Err(Errno::OutOfRange);
-    }
-    let layout = read_frame_layout(bytes)?;
+    let SurfaceOperands {
+        window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+    } = read_surface_operands(bytes)?;
     if layout.width_px > DESKTOP_LAYER_MAX_SIDE_PHYSICAL
         || layout.height_px > DESKTOP_LAYER_MAX_SIDE_PHYSICAL
     {
         return Err(Errno::LengthOutOfRange);
     }
     Ok(WindowRequest::OpenLayer {
+        window_id,
         shm_handle,
         event_endpoint,
         frame_count: layout.frame_count,
@@ -6673,18 +6721,41 @@ impl FrameLayout {
     }
 }
 
-/// Write the operand block every surface-opening request begins with: the
-/// granted region, the event route, and the shared frame layout, at the
-/// offsets [`read_frame_layout`] and its callers read them back from.
-fn write_surface_operands(
-    out: &mut [u8],
+/// The prologue every surface-opening request begins with: the granted
+/// region, the event route, the shared frame layout and the id the surface
+/// is named by.
+struct SurfaceOperands {
+    window_id: u64,
     shm_handle: u64,
     event_endpoint: u64,
-    layout: &FrameLayout,
-) {
-    put_u64(out, 8, shm_handle);
-    put_u64(out, 16, event_endpoint);
-    layout.write_to(out);
+    layout: FrameLayout,
+}
+
+impl SurfaceOperands {
+    /// Write the prologue at the offsets [`read_surface_operands`] reads it
+    /// from.
+    fn write_to(&self, out: &mut [u8]) {
+        put_u64(out, 8, self.shm_handle);
+        put_u64(out, 16, self.event_endpoint);
+        self.layout.write_to(out);
+        put_u64(out, SURFACE_ID_OFFSET, self.window_id);
+    }
+}
+
+/// Decode the surface prologue, failing closed on a reserved event route, a
+/// bad frame layout or the zero id: the one reading every surface-opening
+/// request shares.
+fn read_surface_operands(bytes: &[u8]) -> Result<SurfaceOperands, Errno> {
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(SurfaceOperands {
+        window_id: nonzero_id(read_u64(bytes, SURFACE_ID_OFFSET))?,
+        shm_handle: read_u64(bytes, 8),
+        event_endpoint,
+        layout: read_frame_layout(bytes)?,
+    })
 }
 
 /// Decode and validate the frame layout those requests carry at
@@ -6731,8 +6802,8 @@ fn exact_len(bytes: &[u8], len: usize) -> Result<(), Errno> {
     }
 }
 
-/// A session-minted id — a window's, or one menu open's — starts at 1 and is
-/// never reused; zero names nothing and is refused rather than looked up.
+/// An object id is never zero: zero names nothing and is refused rather
+/// than looked up.
 fn nonzero_id(id: u64) -> Result<u64, Errno> {
     if id == 0 {
         return Err(Errno::OutOfRange);
@@ -6740,39 +6811,117 @@ fn nonzero_id(id: u64) -> Result<u64, Errno> {
     Ok(id)
 }
 
-/// Reply length, in bytes, of a request that mints an id: the shared status
-/// word then, on success, the id the session assigned.
+/// The ids a connected client names what it creates by — windows of every
+/// kind, layer surfaces, menu opens and alerts — each `prefix << 32 | n` with
+/// `n` counting up from `next` ([`WindowRequest::Connect`]).
 ///
-/// [`WindowRequest::OpenMenu`] answers with exactly this; a `Create` answers
-/// with it plus the serving session's identity
-/// ([`WINDOW_CREATE_REPLY_LEN`]).
-pub const WINDOW_MINTED_ID_REPLY_LEN: usize = 12;
+/// The session keeps one per connect and admits an id only from the process
+/// holding its prefix and at or past its `next`, so no two clients' ids meet
+/// and none is named twice; the client keeps the same range and mints from
+/// it, so it never waits on the session for a name. Prefix 0 is the
+/// session's own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ObjectIds {
+    prefix: core::num::NonZeroU32,
+    /// The next serial; zero once the range is spent, since serial zero
+    /// names nothing.
+    next: u32,
+}
 
-/// Encode a minted-id outcome: on success the non-zero id after a zero
+impl ObjectIds {
+    /// The range under `prefix` whose next serial is `next`, or `None` for
+    /// serial zero, which names nothing.
+    #[must_use]
+    pub const fn new(prefix: core::num::NonZeroU32, next: u32) -> Option<Self> {
+        if next == 0 {
+            return None;
+        }
+        Some(Self { prefix, next })
+    }
+
+    /// The process's prefix.
+    #[must_use]
+    pub const fn prefix(self) -> core::num::NonZeroU32 {
+        self.prefix
+    }
+
+    /// The next serial, or `None` once the range is spent.
+    #[must_use]
+    pub const fn next(self) -> Option<u32> {
+        if self.next == 0 {
+            return None;
+        }
+        Some(self.next)
+    }
+
+    /// The next id, the range moved past it: `None` once the range is spent.
+    pub fn mint(&mut self) -> Option<u64> {
+        let serial = self.next()?;
+        self.next = serial.checked_add(1).unwrap_or(0);
+        Some(object_id(self.prefix.get(), serial))
+    }
+
+    /// Admit `id` as named by this range's process: under its prefix and at
+    /// or past its next serial, which moves past it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an id under another prefix, below the next
+    /// serial — one named before, or skipped — serial zero, or any id once
+    /// the range is spent.
+    pub fn admit(&mut self, id: u64) -> Result<(), Errno> {
+        let [p0, p1, p2, p3, s0, s1, s2, s3] = id.to_be_bytes();
+        let prefix = u32::from_be_bytes([p0, p1, p2, p3]);
+        let serial = u32::from_be_bytes([s0, s1, s2, s3]);
+        if prefix != self.prefix.get() || self.next == 0 || serial < self.next {
+            return Err(Errno::OutOfRange);
+        }
+        self.next = serial.checked_add(1).unwrap_or(0);
+        Ok(())
+    }
+}
+
+/// The id serial `serial` names under `prefix`.
+#[must_use]
+pub const fn object_id(prefix: u32, serial: u32) -> u64 {
+    ((prefix as u64) << 32) | serial as u64
+}
+
+/// The most id ranges one process holds at once ([`WindowRequest::Connect`]):
+/// a containment bound on what a process that connects in a loop can make the
+/// session keep, far above the one client an application connects.
+pub const OBJECT_RANGES_MAX: usize = 8;
+
+/// Reply length, in bytes, of a request answered with a handle: the shared
+/// status word then, on success, the non-zero handle
+/// ([`WindowRequest::TakeZoneStore`]'s delegation).
+pub const WINDOW_HANDLE_REPLY_LEN: usize = 12;
+
+/// Encode a handle outcome: on success the non-zero handle after a zero
 /// status word; on refusal the shared status frame (a negative [`Errno`]
 /// discriminant) zero-padded to the same length, so a client always issues
 /// one fixed-size receive.
 #[must_use]
-pub fn encode_minted_id_reply(result: Result<u64, Errno>) -> [u8; WINDOW_MINTED_ID_REPLY_LEN] {
-    let mut out = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
+pub fn encode_handle_reply(result: Result<u64, Errno>) -> [u8; WINDOW_HANDLE_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_HANDLE_REPLY_LEN];
     match result {
-        Ok(id) => put_u64(&mut out, 4, id),
+        Ok(handle) => put_u64(&mut out, 4, handle),
         Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
     }
     out
 }
 
-/// Decode a minted-id reply frame.
+/// Decode a handle reply frame.
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
 /// * [`Errno::OutOfRange`] — a corrupt status word, or a successful reply
-///   carrying the never-minted zero id.
+///   carrying the zero handle.
 /// * The decoded [`Errno`] itself, when the session refused the request.
-pub fn decode_minted_id_reply(bytes: &[u8]) -> Result<u64, Errno> {
+pub fn decode_handle_reply(bytes: &[u8]) -> Result<u64, Errno> {
     let frame = bytes
-        .get(..WINDOW_MINTED_ID_REPLY_LEN)
+        .get(..WINDOW_HANDLE_REPLY_LEN)
         .ok_or(Errno::BufferTooSmall)?;
     crate::reply::decode_status_reply(&frame[..4])?;
     nonzero_id(read_u64(frame, 4))
@@ -6828,35 +6977,10 @@ pub fn decode_clipboard_reply(bytes: &[u8]) -> Result<ClipboardHeld, Errno> {
     Ok(ClipboardHeld { kind, len, copied })
 }
 
-/// Reply length, in bytes, of a `Create`: the minted-id reply, then the
-/// serving session's [`ProcId`].
-pub const WINDOW_CREATE_REPLY_LEN: usize = WINDOW_MINTED_ID_REPLY_LEN + crate::PROC_ID_LEN;
-
-/// Encode a `Create` outcome: on success the assigned (non-zero) window
-/// id followed by the serving session's own [`ProcId`] — the identity an
-/// app then requires of every event's kernel-attested sender, closing
-/// the event channel against forged input from any other process (the
-/// reply itself is trustworthy because the window rendezvous is
-/// squat-protected). On refusal, the shared status frame (a negative
-/// [`Errno`] discriminant), zero-padded to the same length, so a client
-/// always issues one fixed-size receive.
-#[must_use]
-pub fn encode_create_reply(
-    result: Result<u64, Errno>,
-    server: ProcId,
-) -> [u8; WINDOW_CREATE_REPLY_LEN] {
-    let mut out = [0u8; WINDOW_CREATE_REPLY_LEN];
-    out[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
-    if result.is_ok() {
-        out[WINDOW_MINTED_ID_REPLY_LEN..].copy_from_slice(server.as_bytes());
-    }
-    out
-}
-
-/// Reply length, in bytes, of a [`WindowRequest::QueryDesktop`]: the
-/// shared status word, the [`DesktopInfo`] record, and the serving
-/// session's [`ProcId`].
-pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN;
+/// Reply length, in bytes, of a [`WindowRequest::Connect`]: the shared
+/// status word, the [`DesktopInfo`] record, the serving session's
+/// [`ProcId`], and the caller's [`ObjectIds`] — its prefix and next serial.
+pub const WINDOW_CONNECT_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN + 8;
 
 /// Reply length, in bytes, of a [`WindowRequest::TakeTerrain`] carrying a
 /// full page: the shared paged-reply header and
@@ -9058,83 +9182,85 @@ pub fn decode_hand_over_reply(bytes: &[u8]) -> Result<HandOverOutcome, Errno> {
     }
 }
 
-/// Byte offset of the serving session's [`ProcId`] in a desktop reply.
-const DESKTOP_REPLY_SERVER_OFFSET: usize = 4 + DesktopInfo::WIRE_LEN;
+/// Byte offset of the serving session's [`ProcId`] in a connect reply.
+const CONNECT_REPLY_SERVER_OFFSET: usize = 4 + DesktopInfo::WIRE_LEN;
+/// Byte offset of the caller's id prefix in a connect reply.
+const CONNECT_REPLY_PREFIX_OFFSET: usize = CONNECT_REPLY_SERVER_OFFSET + crate::PROC_ID_LEN;
+/// Byte offset of the caller's next serial in a connect reply.
+const CONNECT_REPLY_NEXT_OFFSET: usize = CONNECT_REPLY_PREFIX_OFFSET + 4;
 
-/// Encode a `QueryDesktop` outcome: on success the desktop record after a
-/// zero status word, followed by the serving session's own [`ProcId`]; on
-/// refusal the shared status frame (a negative [`Errno`] discriminant)
-/// zero-padded to the same length, so a client always issues one fixed-size
-/// receive.
-///
-/// The identity is the same one [`encode_create_reply`] stamps, and it is
-/// here for the same reason — an app requires it of every event's
-/// kernel-attested sender, closing its event channel against forged input.
-/// It is carried on *this* reply as well because an application may declare
-/// an icon-bar presence, and so start receiving bar events, before it owns
-/// any window ([`WindowRequest::SetAppBar`]); the desktop query is the one
-/// call every windowed app makes first, so it is where an app that has no
-/// window yet learns whom to trust.
+/// What a [`WindowRequest::Connect`] answers.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Connected {
+    /// The desktop the caller's windows are displayed on.
+    pub desktop: DesktopInfo,
+    /// The serving session's identity, which the caller requires of every
+    /// event's kernel-attested sender, closing its event channel against
+    /// forged input (the reply itself is trustworthy because the window
+    /// rendezvous is squat-protected).
+    pub server: ProcId,
+    /// The ids the caller names what it creates by.
+    pub ids: ObjectIds,
+}
+
+/// Encode a [`WindowRequest::Connect`] outcome: on success the desktop
+/// record, the serving session's identity and the caller's id range after a
+/// zero status word; on refusal the shared status frame (a negative
+/// [`Errno`] discriminant) zero-padded to the same length, so a client
+/// always issues one fixed-size receive. A spent range is refused
+/// [`Errno::NoSpace`].
 #[must_use]
-pub fn encode_desktop_reply(
-    result: Result<DesktopInfo, Errno>,
+pub fn encode_connect_reply(
+    result: Result<(DesktopInfo, ObjectIds), Errno>,
     server: ProcId,
-) -> [u8; WINDOW_DESKTOP_REPLY_LEN] {
-    let mut out = [0u8; WINDOW_DESKTOP_REPLY_LEN];
-    match result {
-        Ok(desktop) => {
+) -> [u8; WINDOW_CONNECT_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_CONNECT_REPLY_LEN];
+    let answered =
+        result.and_then(|(desktop, ids)| Ok((desktop, ids, ids.next().ok_or(Errno::NoSpace)?)));
+    match answered {
+        Ok((desktop, ids, next)) => {
             desktop.write_to_at(&mut out, 4);
-            out[DESKTOP_REPLY_SERVER_OFFSET..].copy_from_slice(server.as_bytes());
+            out[CONNECT_REPLY_SERVER_OFFSET..CONNECT_REPLY_PREFIX_OFFSET]
+                .copy_from_slice(server.as_bytes());
+            put_u32(&mut out, CONNECT_REPLY_PREFIX_OFFSET, ids.prefix().get());
+            put_u32(&mut out, CONNECT_REPLY_NEXT_OFFSET, next);
         }
         Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
     }
     out
 }
 
-/// Decode a `QueryDesktop` reply frame into the desktop record and the
-/// serving session's [`ProcId`].
+/// Decode a [`WindowRequest::Connect`] reply frame.
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
-/// * [`Errno::OutOfRange`] — a corrupt status word, a successful reply
-///   carrying a desktop no screen or scale could describe, or a malformed
-///   server identity.
+/// * [`Errno::OutOfRange`] — a corrupt status word, a desktop no screen or
+///   scale could describe, the kernel-reserved all-zero server identity
+///   (fail closed: an app must never accept an event stream it cannot
+///   authenticate), the session's own prefix 0, or serial zero.
 /// * [`Errno::BadMagic`] — a dirty reserved byte in the record.
-/// * The decoded [`Errno`] itself, when the session refused the query.
-pub fn decode_desktop_reply(bytes: &[u8]) -> Result<(DesktopInfo, ProcId), Errno> {
-    if bytes.len() < WINDOW_DESKTOP_REPLY_LEN {
+/// * The decoded [`Errno`] itself, when the session refused the connect.
+pub fn decode_connect_reply(bytes: &[u8]) -> Result<Connected, Errno> {
+    if bytes.len() < WINDOW_CONNECT_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     crate::reply::decode_status_reply(&bytes[..4])?;
     let desktop = DesktopInfo::from_bytes_at(bytes, 4)?;
-    let server = ProcId::from_bytes(
-        &bytes[DESKTOP_REPLY_SERVER_OFFSET..DESKTOP_REPLY_SERVER_OFFSET + crate::PROC_ID_LEN],
-    )?;
-    Ok((desktop, server))
-}
-
-/// Decode a `Create` reply frame into the assigned window id and the
-/// serving session's [`ProcId`].
-///
-/// # Errors
-///
-/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
-/// * [`Errno::OutOfRange`] — a corrupt status word, a successful reply
-///   carrying the never-minted zero window id, or the kernel-reserved
-///   all-zero server identity (fail closed: an app must never accept an
-///   event stream it cannot authenticate).
-/// * The decoded [`Errno`] itself, when the session refused the request.
-pub fn decode_create_reply(bytes: &[u8]) -> Result<(u64, ProcId), Errno> {
-    if bytes.len() < WINDOW_CREATE_REPLY_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    let window_id = decode_minted_id_reply(bytes)?;
-    let server = ProcId::from_bytes(&bytes[WINDOW_MINTED_ID_REPLY_LEN..WINDOW_CREATE_REPLY_LEN])?;
+    let server =
+        ProcId::from_bytes(&bytes[CONNECT_REPLY_SERVER_OFFSET..CONNECT_REPLY_PREFIX_OFFSET])?;
     if server.is_kernel() {
         return Err(Errno::OutOfRange);
     }
-    Ok((window_id, server))
+    let prefix = core::num::NonZeroU32::new(read_u32(bytes, CONNECT_REPLY_PREFIX_OFFSET))
+        .ok_or(Errno::OutOfRange)?;
+    let ids = ObjectIds::new(prefix, read_u32(bytes, CONNECT_REPLY_NEXT_OFFSET))
+        .ok_or(Errno::OutOfRange)?;
+    Ok(Connected {
+        desktop,
+        server,
+        ids,
+    })
 }
 
 /// Wire event discriminant of [`WindowEvent::Focus`].
@@ -10882,24 +11008,23 @@ mod tests {
     extern crate alloc;
 
     use super::{
-        app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
-        decode_desktop_reply, decode_drag_spot_reply, decode_drop_target_reply,
-        decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
-        decode_notify_sources_reply, decode_offered_items_reply, decode_open_target_reply,
-        decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply,
-        encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply,
-        encode_desktop_reply, encode_drag_spot_reply, encode_drop_target_reply,
-        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
-        encode_notify_sources_reply, encode_offered_items_reply, encode_open_target_reply,
-        encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
-        hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
-        read_u32, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuIconView,
-        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-        AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardHeld,
-        ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite,
-        DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset, LayerDepth,
-        MenuOutcome, MenuRefusal, OfferDrop, OfferedItem, OpenTarget, PaneName, PickPurpose,
-        PinchPhase, PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText,
+        app_bar_wire_len, decode_clipboard_reply, decode_connect_reply, decode_cursor_sets_reply,
+        decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
+        decode_handle_reply, decode_menu_text_reply, decode_notify_sources_reply,
+        decode_offered_items_reply, decode_open_target_reply, decode_picked_name_reply,
+        decode_terrain_reply, decode_wallpapers_reply, encode_clipboard_reply,
+        encode_connect_reply, encode_cursor_sets_reply, encode_drag_spot_reply,
+        encode_drop_target_reply, encode_hand_over_reply, encode_handle_reply,
+        encode_menu_text_reply, encode_notify_sources_reply, encode_offered_items_reply,
+        encode_open_target_reply, encode_picked_name_reply, encode_terrain_reply,
+        encode_wallpapers_reply, hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64,
+        read_i32, read_u16, read_u32, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText,
+        AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
+        AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
+        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+        DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset,
+        LayerDepth, MenuOutcome, MenuRefusal, OfferDrop, OfferedItem, OpenTarget, PaneName,
+        PickPurpose, PinchPhase, PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText,
         WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
         WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
         APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
@@ -10910,12 +11035,13 @@ mod tests {
         APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
         APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
         APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
-        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL,
-        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
-        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET,
-        DRAG_NAME_OFFSET, DRAG_TYPED, DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET,
-        HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
+        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_TITLE_LEN_OFFSET,
+        CREATE_TITLE_TEXT_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL, DRAG_EVENT_KIND_OFFSET,
+        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
+        DRAG_EVENT_X_OFFSET, DRAG_FILETYPE_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DRAG_TYPED,
+        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
         HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, ICON_ASSET_MAX,
         ITEMS_EVENT_DRAG_OFFSET, ITEMS_EVENT_SHIFT_OFFSET, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
         MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
@@ -10939,10 +11065,10 @@ mod tests {
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_APP_BAR_TEXT_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
         TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT,
-        WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+        WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX,
+        WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HANDLE_REPLY_LEN,
+        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
         WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX,
         WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
         WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
@@ -11046,6 +11172,7 @@ mod tests {
     /// The same window, opened with `sizing`.
     fn sample_create_sized(sizing: WindowSizing) -> WindowRequest {
         WindowRequest::Create {
+            window_id: super::object_id(4, 1),
             shm_handle: 7,
             event_endpoint: 0x900d,
             frame_count: 2,
@@ -11120,6 +11247,7 @@ mod tests {
 
     fn sample_create_popup() -> WindowRequest {
         WindowRequest::CreatePopup {
+            window_id: super::object_id(4, 2),
             parent_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -11136,6 +11264,7 @@ mod tests {
     /// A tool window carried at `carry`, sized as `sizing` says.
     fn sample_create_tool(carry: Option<u32>, sizing: WindowSizing) -> WindowRequest {
         WindowRequest::CreateTool {
+            window_id: super::object_id(4, 3),
             parent_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -11401,6 +11530,7 @@ mod tests {
     fn opening(menu: &AppMenu) -> WindowRequest {
         WindowRequest::OpenMenu {
             window_id: 3,
+            open_id: super::object_id(4, 5),
             anchor: sample_anchor(),
             menu: *menu,
         }
@@ -11604,6 +11734,7 @@ mod tests {
 
     fn sample_create_dialog(modality: super::DialogModality) -> WindowRequest {
         WindowRequest::CreateDialog {
+            window_id: super::object_id(4, 4),
             owner_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -11747,7 +11878,7 @@ mod tests {
             region: sample_anchor(),
             text: TooltipText::new(&"t".repeat(TOOLTIP_TEXT_MAX)).expect("the widest tip"),
         });
-        visit(WindowRequest::QueryDesktop);
+        visit(WindowRequest::Connect);
         each_seat_request(&mut visit);
         each_settings_request(&mut visit);
     }
@@ -12264,33 +12395,22 @@ mod tests {
         assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
-    /// The reply that carries a session-minted id — a window's or one menu
-    /// open's — refuses a corrupt frame and the never-minted zero.
+    /// A handle reply refuses a corrupt frame and the zero handle.
     #[test]
-    fn a_minted_id_reply_round_trips_and_fails_closed() {
+    fn a_handle_reply_round_trips_and_fails_closed() {
+        assert_eq!(decode_handle_reply(&encode_handle_reply(Ok(9))), Ok(9));
         assert_eq!(
-            decode_minted_id_reply(&encode_minted_id_reply(Ok(9))),
-            Ok(9)
-        );
-        assert_eq!(
-            decode_minted_id_reply(&encode_minted_id_reply(Ok(0))),
+            decode_handle_reply(&encode_handle_reply(Ok(0))),
             Err(Errno::OutOfRange),
-            "zero names no open"
+            "zero names no handle"
         );
         assert_eq!(
-            decode_minted_id_reply(&encode_minted_id_reply(Err(Errno::NotSupported))),
-            Err(Errno::NotSupported)
+            decode_handle_reply(&encode_handle_reply(Err(Errno::NotFound))),
+            Err(Errno::NotFound)
         );
         assert_eq!(
-            decode_minted_id_reply(&[0u8; WINDOW_MINTED_ID_REPLY_LEN - 1]),
+            decode_handle_reply(&[0u8; WINDOW_HANDLE_REPLY_LEN - 1]),
             Err(Errno::BufferTooSmall)
-        );
-        // The create reply is this frame plus the serving session's identity,
-        // so the two cannot disagree about where the id sits.
-        let create = encode_create_reply(Ok(9), server());
-        assert_eq!(
-            decode_minted_id_reply(&create[..WINDOW_MINTED_ID_REPLY_LEN]),
-            Ok(9)
         );
     }
 
@@ -15646,61 +15766,169 @@ mod tests {
 
     #[test]
     fn the_desktop_query_round_trips_and_names_no_window() {
-        let request = WindowRequest::QueryDesktop;
+        let request = WindowRequest::Connect;
         assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
         // The one request with no operands at all: its frame is the header,
         // so a smuggled window id or payload cannot ride along unread.
         assert_eq!(request.wire_len(), REQUEST_HEADER_LEN);
     }
 
+    fn sample_ids() -> super::ObjectIds {
+        super::ObjectIds::new(core::num::NonZeroU32::new(4).expect("non-zero"), 7).expect("a range")
+    }
+
     #[test]
-    fn the_desktop_reply_round_trips_and_fails_closed() {
+    fn the_connect_reply_round_trips_and_fails_closed() {
         let desktop = sample_desktop();
-        let session = ProcId::KERNEL;
+        let connected = super::Connected {
+            desktop,
+            server: server(),
+            ids: sample_ids(),
+        };
         assert_eq!(
-            decode_desktop_reply(&encode_desktop_reply(Ok(desktop), session)),
-            Ok((desktop, session))
+            decode_connect_reply(&encode_connect_reply(Ok((desktop, sample_ids())), server())),
+            Ok(connected)
         );
         assert_eq!(
-            decode_desktop_reply(&encode_desktop_reply(Err(Errno::PermissionDenied), session)),
+            decode_connect_reply(&encode_connect_reply(
+                Err(Errno::PermissionDenied),
+                server()
+            )),
             Err(Errno::PermissionDenied)
         );
-
-        let good = encode_desktop_reply(Ok(desktop), session);
+        let good = encode_connect_reply(Ok((desktop, sample_ids())), server());
         assert_eq!(
-            decode_desktop_reply(&good[..WINDOW_DESKTOP_REPLY_LEN - 1]),
+            decode_connect_reply(&good[..WINDOW_CONNECT_REPLY_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
         // A refusal reply carries no record, and a success reply whose
         // record is blank is not a desktop: neither can be read as one.
-        assert!(decode_desktop_reply(&[0u8; WINDOW_DESKTOP_REPLY_LEN]).is_err());
+        assert!(decode_connect_reply(&[0u8; WINDOW_CONNECT_REPLY_LEN]).is_err());
         // The record's own reserved bytes still fail closed: its second
         // reserved byte sits at offset 15 of the record, after the status.
         let mut dirty = good;
         dirty[4 + 15] = 1;
-        assert_eq!(decode_desktop_reply(&dirty), Err(Errno::BadMagic));
+        assert_eq!(decode_connect_reply(&dirty), Err(Errno::BadMagic));
+        assert_eq!(
+            decode_connect_reply(&encode_connect_reply(
+                Ok((desktop, sample_ids())),
+                ProcId::KERNEL
+            )),
+            Err(Errno::OutOfRange),
+            "an event stream it cannot authenticate is never accepted"
+        );
+        let prefix_at = WINDOW_CONNECT_REPLY_LEN - 8;
+        let mut session_prefix = good;
+        session_prefix[prefix_at..prefix_at + 4].fill(0);
+        assert_eq!(
+            decode_connect_reply(&session_prefix),
+            Err(Errno::OutOfRange),
+            "prefix zero is the session's own"
+        );
+        let mut zero_serial = good;
+        zero_serial[prefix_at + 4..].fill(0);
+        assert_eq!(decode_connect_reply(&zero_serial), Err(Errno::OutOfRange));
+        let mut spent = sample_ids();
+        spent
+            .admit(super::object_id(4, u32::MAX))
+            .expect("the last serial");
+        assert_eq!(
+            decode_connect_reply(&encode_connect_reply(Ok((desktop, spent)), server())),
+            Err(Errno::NoSpace),
+            "a spent range is answered as one"
+        );
+    }
+
+    /// A range mints its ids in order, and admits only what it could have
+    /// minted and has not: its own prefix, at or past its next serial.
+    #[test]
+    fn an_id_range_mints_in_order_and_admits_each_id_once() {
+        let mut minted = sample_ids();
+        assert_eq!(minted.mint(), Some(super::object_id(4, 7)));
+        assert_eq!(minted.mint(), Some(super::object_id(4, 8)));
+        let mut session = sample_ids();
+        assert_eq!(session.admit(super::object_id(4, 7)), Ok(()));
+        assert_eq!(
+            session.admit(super::object_id(4, 7)),
+            Err(Errno::OutOfRange),
+            "never named twice"
+        );
+        assert_eq!(
+            session.admit(super::object_id(4, 9)),
+            Ok(()),
+            "a gap is no harm"
+        );
+        assert_eq!(
+            session.admit(super::object_id(4, 8)),
+            Err(Errno::OutOfRange),
+            "nor named once passed"
+        );
+        assert_eq!(
+            session.admit(super::object_id(5, 10)),
+            Err(Errno::OutOfRange),
+            "another process's prefix"
+        );
+        assert_eq!(
+            session.admit(super::object_id(4, 0)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(session.admit(super::object_id(4, u32::MAX)), Ok(()));
+        assert_eq!(session.next(), None, "the range is spent");
+        assert_eq!(session.mint(), None);
+        assert_eq!(
+            super::ObjectIds::new(core::num::NonZeroU32::new(4).expect("non-zero"), 0),
+            None
+        );
+    }
+
+    /// Every create and open names what it creates, and the zero id names
+    /// nothing, so a frame carrying it is refused before the session sees it.
+    #[test]
+    fn a_create_or_open_naming_the_zero_id_is_refused() {
+        let surfaces: [fn() -> WindowRequest; 5] = [
+            sample_create,
+            sample_create_popup,
+            || sample_create_tool(None, WindowSizing::Fixed),
+            || sample_create_dialog(super::DialogModality::OwnerModal),
+            || layer_open(64, 64),
+        ];
+        for make in surfaces {
+            let request = make();
+            let mut frame = request.frame();
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+            frame[super::SURFACE_ID_OFFSET..super::SURFACE_ID_OFFSET + 8].fill(0);
+            assert_eq!(
+                WindowRequest::from_bytes(&frame),
+                Err(Errno::OutOfRange),
+                "{request:?}"
+            );
+        }
+        let mut menu = opening(&sample_menu()).frame();
+        menu[super::OPEN_MENU_ID_OFFSET..super::OPEN_MENU_ID_OFFSET + 8].fill(0);
+        assert_eq!(WindowRequest::from_bytes(&menu), Err(Errno::OutOfRange));
     }
 
     #[test]
     fn create_refuses_a_malformed_title() {
         // An over-long claimed length.
         let mut long = sample_create().frame();
-        long[41] = u8::try_from(WINDOW_TITLE_MAX + 1).expect("a small test constant");
+        long[CREATE_TITLE_LEN_OFFSET] =
+            u8::try_from(WINDOW_TITLE_MAX + 1).expect("a small test constant");
         assert_eq!(
             WindowRequest::from_bytes(&long),
             Err(Errno::LengthOutOfRange)
         );
         // Bytes past the claimed length must be zero.
         let mut dirty = sample_create().frame();
-        dirty[42 + 10] = b'x';
+        dirty[CREATE_TITLE_TEXT_OFFSET + 10] = b'x';
         assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
         // Invalid UTF-8 inside the claimed length.
         let mut bad_utf8 = sample_create().frame();
-        bad_utf8[42] = 0xFF;
+        bad_utf8[CREATE_TITLE_TEXT_OFFSET] = 0xFF;
         assert_eq!(WindowRequest::from_bytes(&bad_utf8), Err(Errno::OutOfRange));
         // A control character inside the claimed length.
         let mut control = sample_create().frame();
-        control[42] = 0x1B;
+        control[CREATE_TITLE_TEXT_OFFSET] = 0x1B;
         assert_eq!(WindowRequest::from_bytes(&control), Err(Errno::OutOfRange));
     }
 
@@ -15753,47 +15981,6 @@ mod tests {
     /// The serving session identity the reply tests stamp.
     fn server() -> ProcId {
         ProcId::from_raw([0x5A; 16])
-    }
-
-    #[test]
-    fn create_replies_round_trip_ok_and_error() {
-        assert_eq!(
-            decode_create_reply(&encode_create_reply(Ok(42), server())),
-            Ok((42, server()))
-        );
-        assert_eq!(
-            decode_create_reply(&encode_create_reply(Err(Errno::NoSpace), server())),
-            Err(Errno::NoSpace)
-        );
-        assert_eq!(
-            decode_create_reply(&encode_create_reply(Err(Errno::PermissionDenied), server())),
-            Err(Errno::PermissionDenied)
-        );
-    }
-
-    #[test]
-    fn create_reply_decode_fails_closed() {
-        let good = encode_create_reply(Ok(42), server());
-        assert_eq!(
-            decode_create_reply(&good[..WINDOW_CREATE_REPLY_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        // A corrupt (positive) status word.
-        let mut bad_status = good;
-        bad_status[0] = 1;
-        assert_eq!(decode_create_reply(&bad_status), Err(Errno::OutOfRange));
-        // A "successful" reply carrying the never-minted zero id.
-        assert_eq!(
-            decode_create_reply(&encode_create_reply(Ok(0), server())),
-            Err(Errno::OutOfRange)
-        );
-        // A "successful" reply carrying the kernel-reserved all-zero
-        // server identity: an app must never accept an event stream it
-        // cannot authenticate.
-        assert_eq!(
-            decode_create_reply(&encode_create_reply(Ok(42), ProcId::KERNEL)),
-            Err(Errno::OutOfRange)
-        );
     }
 
     fn sample_key() -> KeyInput {
@@ -17271,6 +17458,7 @@ mod tests {
 
     fn layer_open(width_px: u32, height_px: u32) -> WindowRequest {
         WindowRequest::OpenLayer {
+            window_id: super::object_id(4, 6),
             shm_handle: 0x2222,
             event_endpoint: 0x77,
             frame_count: 2,
@@ -17321,6 +17509,7 @@ mod tests {
     #[test]
     fn open_layer_refuses_a_reserved_event_endpoint() {
         let WindowRequest::OpenLayer {
+            window_id,
             shm_handle,
             frame_count,
             width_px,
@@ -17336,6 +17525,7 @@ mod tests {
             unreachable!("constructed as OpenLayer")
         };
         let hijack = WindowRequest::OpenLayer {
+            window_id,
             shm_handle,
             event_endpoint: SEATMGR_ENDPOINT,
             frame_count,

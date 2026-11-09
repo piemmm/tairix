@@ -14,7 +14,9 @@ above its panel, and the desktop's one status band along the bottom
 nothing, how the tool in hand is used (`Tool::hint`) — cut short of the
 readings beside it, then the pointer's place and the selection's size in the
 page's units and the zoom, each in a slot measured for the most it reads; the
-zoom opens a menu of zooms when pressed. There is no bar across the top, as
+zoom opens a menu of zooms when pressed. The window's title names its drawing
+as any document window's does, marked while it holds unsaved changes and when
+it may only be read, then Draw. There is no bar across the top, as
 there is no menu bar. Rulers in the page's units run
 along the canvas's top and left and scrollbars along its right and foot; a
 bar's span is derived from the viewport each time it is wanted — the page and
@@ -48,7 +50,7 @@ gradient, eyedropper, zoom and hand, chosen by `V`, `A`, `R`, `E`, `S`, `L`,
 paint as a gradient along a drag, mapped into each selected object's own
 space through its transform — radial about the drag's start with Alt or
 where it is radial already, in 15° steps with Shift — shown live and landing
-as one step; while it is in hand, the one object selected shows its
+as one step, or taken back when the drag is cancelled; while it is in hand, the one object selected shows its
 gradient's course. The eyedropper gives a gradient it takes to each object
 fitted to that object. A drag is previewed over the tiles and lands as one
 step when it ends: moving (Shift to one axis, Alt a copy), scaling from the
@@ -321,6 +323,24 @@ reads nothing and waits on nothing:
 
 Held controls — the tool box's and the inspector's and canvas's bars — arm
 the window's deadline, so a held press steps on a timer rather than a poll.
+
+A repaint covers what the input changed. The canvas beneath the overlay
+changes only with the viewport, the page and a landing, so:
+
+- a hover repaints the controls it crosses, and the pointer's reading when it
+  reads otherwise;
+- a move during a drag repaints its marks where they were and where they now
+  are (`View::gesture_extent`), measured from the geometry they are drawn by
+  with the reach of their lines and marks — a freehand line its new stretch, a
+  pan the window. A press repaints the marks it begins, and Shift or Alt
+  changing marks the drag again;
+- a key, a typed character and a change in the inspector repaint the overlay
+  where it was and where it now is (`View::overlay_extent`) with the inspector,
+  status band and bars that follow it, a gradient laid live the inspector that
+  shows it, and a change of page the window;
+- a landing repaints the tiles kept. Glyphs that may have moved a frame or the
+  caret, and memory pressure letting go of what stood in for tiles not yet
+  drawn, repaint the canvas.
 
 ## Limits
 

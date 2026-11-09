@@ -214,9 +214,9 @@ mod program {
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::notices::Raised;
     use tairix_window::{
-        pointer_input_events, pointer_point, Desktop, EventDrain, EventError, EventMailbox,
-        EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
-        EVENT_MAILBOX_CAPACITY,
+        pointer_input_events, pointer_point, Answer as WindowAnswer, Desktop, Dropped, EventDrain,
+        EventError, EventMailbox, EventSource, OfferedPath, Owed, Parked, PostedRequest, Refused,
+        Repaint, Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     use crate::appbar;
@@ -248,7 +248,9 @@ mod program {
         Sliced, Step, Turn,
     };
     use crate::paste::{Landing, Paste};
-    use crate::question::{Answer, Question, ANSWERING_ANOTHER, UNASKABLE};
+    use crate::question::{
+        Answer, Question, Refusal as QuestionRefusal, ANSWERING_ANOTHER, UNASKABLE,
+    };
     use crate::rename::RenameEdit;
     use crate::sidebar::{self, press_point};
     use crate::turns::{name_into, named, Turns};
@@ -1035,6 +1037,7 @@ mod program {
         /// to end rather than moving the listing under it.
         fn listing_is_held(&self) -> bool {
             self.menu.is_some()
+                || self.overlays.rename_typed.is_some()
                 || self.overlays.rename.is_open()
                 || self.overlays.drag.is_some()
                 || self.overlays.carrying.is_some()
@@ -1948,6 +1951,191 @@ mod program {
         present_owed(win, client, grounds, icons, scale)
     }
 
+    /// Act on every answer the desktop has landed: each read the loop asked
+    /// for, carried out now it is known, and each frame handed back to a
+    /// window or chooser whose paint waited on one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever a window's present of what it painted meanwhile refuses.
+    #[allow(clippy::too_many_arguments)] // The windows, the desktop's state and the reads.
+    fn take_answers(
+        windows: &mut [OpenWindow],
+        (opening, launcher): (&Opening, &RefCell<Launcher>),
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (places, declarations): (&Places, &appbar::Declarations),
+        reads: &alloc::sync::Arc<Reads>,
+        settings: &FilerPreferences,
+        look: (&Theme, Scale),
+    ) -> Result<(), Errno> {
+        while let Some(answer) = client.take_answer() {
+            let window_of = |windows: &mut [OpenWindow], id| {
+                windows
+                    .iter_mut()
+                    .position(|win: &mut OpenWindow| win.pane.id() == id)
+            };
+            match answer {
+                WindowAnswer::FrameReturned { window_id } => {
+                    frame_returned(windows, client, window_id)?;
+                }
+                WindowAnswer::HandOver { token, outcome } => {
+                    launcher.borrow_mut().handed_over(token, outcome);
+                }
+                WindowAnswer::OpenTarget(target) => open_target_landed(
+                    windows,
+                    (opening, launcher),
+                    client,
+                    reads,
+                    (settings, target),
+                ),
+                WindowAnswer::AppBarText {
+                    item,
+                    revision,
+                    text,
+                } => retitled_from_bar(
+                    (item, revision, text),
+                    (places, declarations),
+                    &mut launcher.borrow_mut(),
+                ),
+                WindowAnswer::DragSpot {
+                    window_id,
+                    serial,
+                    folder,
+                } => {
+                    if let Some(at) = window_of(windows, window_id) {
+                        spot_landed(&mut windows[at], client, (serial, folder));
+                    }
+                }
+                WindowAnswer::DropTarget { window_id, target } => {
+                    if let Some(at) = window_of(windows, window_id) {
+                        drop_target_landed(&mut windows[at], client, launcher, target);
+                    }
+                }
+                WindowAnswer::OfferedItems {
+                    window_id,
+                    drag,
+                    items,
+                } => offered_items_landed(
+                    windows,
+                    client,
+                    look,
+                    &mut launcher.borrow_mut(),
+                    (window_id, drag, items),
+                ),
+                WindowAnswer::MenuText {
+                    window_id,
+                    open_id,
+                    text,
+                } => {
+                    if let Some(at) = window_of(windows, window_id) {
+                        menu_rename_landed(&mut windows[at], reads, look, (open_id, text));
+                    }
+                }
+                // Asked by no file manager.
+                WindowAnswer::OfferedFile(_)
+                | WindowAnswer::PickedName { .. }
+                | WindowAnswer::PickedFile { .. }
+                | WindowAnswer::Clipboard { .. }
+                | WindowAnswer::Terrain { .. }
+                | WindowAnswer::Revealed { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Window or chooser `window_id` has its frame back: what it painted
+    /// while it had none is presented now.
+    ///
+    /// # Errors
+    ///
+    /// Whatever a window's present refuses; a chooser's refusal is said and
+    /// costs nothing more.
+    fn frame_returned(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        window_id: u64,
+    ) -> Result<(), Errno> {
+        for win in windows {
+            if win.pane.id() == window_id {
+                return win.pane.present_deferred(client, &win.surface);
+            }
+            let Some(chooser) = win
+                .browser()
+                .and_then(|state| state.overlays.open_with.as_mut())
+                .filter(|chooser| chooser.pane.id() == window_id)
+            else {
+                continue;
+            };
+            if chooser
+                .pane
+                .present_deferred(client, &chooser.surface)
+                .is_err()
+            {
+                report_error("the chooser present was refused");
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Take in `refused`, a request the desktop refused: a window it would not
+    /// create is put away as one never opened, a menu it would not show lets
+    /// go of the listing it held, and an alert it had no room for waits to go
+    /// up again once one of this app's is answered, setting `full`. Every
+    /// other refusal is stated.
+    fn take_refusal(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        (reads, launcher): (&Reads, &RefCell<Launcher>),
+        full: &mut bool,
+        refused: &Refused,
+    ) {
+        let window_id = refused.window_id;
+        match refused.request {
+            PostedRequest::Create => {
+                report_error(&alloc::format!("{refused}"));
+                create_refused(windows, reads, window_id);
+            }
+            PostedRequest::OpenMenu(open_id) => {
+                report_error(&alloc::format!("no menu was shown ({})", refused.errno));
+                let state = windows
+                    .iter_mut()
+                    .find(|win| win.pane.id() == window_id)
+                    .and_then(OpenWindow::browser);
+                if let Some(state) = state {
+                    state.menu = state.menu.take().filter(|menu| menu.open_id != open_id);
+                }
+            }
+            PostedRequest::OpenAlert(alert_id) => {
+                let notices = &mut launcher.borrow_mut().notices;
+                *full |= alert_refused(windows, notices, alert_id, refused.errno);
+            }
+            _ => report_error(&alloc::format!("{refused}")),
+        }
+    }
+
+    /// The desktop would not create window or chooser `window_id`, which the
+    /// client has already forgotten: a window is put away as one never opened,
+    /// and a chooser let go of.
+    fn create_refused(windows: &mut alloc::vec::Vec<OpenWindow>, reads: &Reads, window_id: u64) {
+        if let Some(index) = windows.iter().position(|win| win.pane.id() == window_id) {
+            drop(take_window(windows, index, reads));
+            return;
+        }
+        for win in windows.iter_mut() {
+            let refused = win.browser().is_some_and(|state| {
+                state
+                    .overlays
+                    .open_with
+                    .take_if(|chooser| chooser.pane.id() == window_id)
+                    .is_some()
+            });
+            if refused {
+                win.owed.owe_whole();
+                return;
+            }
+        }
+    }
+
     /// Paint every window that owes the screen, and every chooser popup over
     /// one, once: how a turn ends after its input is drained and what landed
     /// meanwhile is adopted.
@@ -2036,7 +2224,7 @@ mod program {
         // the first frame would have to replace.
         let title = location_title(&browser);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
-            Ok((pane, _)) => pane,
+            Ok(pane) => pane,
             Err(err) => {
                 report_error(&alloc::format!("{err}; no window opened"));
                 return None;
@@ -2228,8 +2416,21 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
     ) {
+        if let Some(closed) = take_window(windows, index, reads) {
+            let _ = closed.pane.close(client);
+        }
+    }
+
+    /// Take the window at `index` out of `windows`, with everything that is
+    /// its own: its outstanding reads, and its progress dialogs, which the
+    /// desktop closes with it.
+    fn take_window(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        reads: &Reads,
+    ) -> Option<OpenWindow> {
         if index >= windows.len() {
-            return;
+            return None;
         }
         let mut closed = windows.remove(index);
         // A window's outstanding reads are dropped with it: an answer for a
@@ -2257,7 +2458,7 @@ mod program {
             }
             WindowKind::Progress(progress) => stop_operation(id, &mut progress.operation, reads),
         }
-        let _ = closed.pane.close(client);
+        Some(closed)
     }
 
     /// Operation `id` stops with the window showing it: it never runs if it
@@ -2949,12 +3150,9 @@ mod program {
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             return Err((stopped, String::from("no memory to draw it")));
         };
-        let Some(server) = client.session() else {
-            return Err((stopped, String::from("the desktop session is unknown")));
-        };
         let pane = WindowPane::open_dialog(
             client,
-            (owner, server),
+            owner,
             event_endpoint,
             &mode,
             DialogModality::Modeless,
@@ -3133,10 +3331,15 @@ mod program {
             }
             WindowEvent::OpenRequested => {
                 // A wake, not a path: the desktop queued at least one folder
-                // for this instance, so drain until the queue answers empty.
-                // One event may cover several, and another may arrive while
-                // this drain is still running.
-                drain_open_targets(windows, (opening, launcher), client, reads, &settings);
+                // for this instance, each landing as its own answer until the
+                // queue answers empty. One event may cover several, and
+                // another may arrive while they are still landing.
+                if let Err(err) = client.ask_open_targets() {
+                    app::report(
+                        APP_NAME,
+                        format_args!("cannot ask for an open target: {err}"),
+                    );
+                }
                 BarRouted::Handled
             }
             // A row answers for what it stood for in the declaration its menu
@@ -3161,10 +3364,15 @@ mod program {
                 }
                 BarRouted::Handled
             }
+            // The text is wider than an event, so it is asked for and the
+            // retitle made once it lands.
             WindowEvent::AppBarEntered { item, revision } => {
-                if let Some(appbar::BarRow::Retitled(index)) = appbar::BarRow::of(item) {
-                    let field = (item, revision, index);
-                    retitle_from_bar(client, field, (places, declarations), launcher);
+                if matches!(appbar::BarRow::of(item), Some(appbar::BarRow::Retitled(_))) {
+                    if let Err(err) = client.ask_app_bar_text(item, revision) {
+                        report_error(&alloc::format!(
+                            "typed title could not be asked for ({err})"
+                        ));
+                    }
                 }
                 BarRouted::Handled
             }
@@ -3180,17 +3388,19 @@ mod program {
     }
 
     /// Title the disk image the icon-bar field `item` was committed for — of
-    /// the place at `index` in the declaration made under `revision` — with
-    /// the text the desktop holds for it, taken once: what that asks is
+    /// the place its row stands for in the declaration made under `revision`
+    /// — with `text`, what the desktop held for it: what that asks is
     /// [`appbar::Declarations::retitled`]'s, and a refusal, a take that
     /// failed included, is stated.
-    fn retitle_from_bar(
-        client: &mut WindowClient<app::RtWindowTransport>,
-        (item, revision, index): (AppMenuItemId, u32, usize),
+    fn retitled_from_bar(
+        (item, revision, text): (AppMenuItemId, u32, Result<Option<String>, Errno>),
         (places, declarations): (&Places, &appbar::Declarations),
-        launcher: &RefCell<Launcher>,
+        launcher: &mut Launcher,
     ) {
-        let text = match client.take_app_bar_text(item, revision) {
+        let Some(appbar::BarRow::Retitled(index)) = appbar::BarRow::of(item) else {
+            return;
+        };
+        let text = match text {
             Ok(Some(text)) => text,
             Ok(None) => return,
             Err(err) => {
@@ -3198,7 +3408,6 @@ mod program {
                 return;
             }
         };
-        let mut launcher = launcher.borrow_mut();
         let viewer = launcher.viewer;
         match declarations.retitled((index, revision), places, viewer, &text) {
             Ok(Some(retitle)) => launcher.mount(retitle),
@@ -3503,13 +3712,23 @@ mod program {
                         .map_or((None, None), |(folder, tile)| {
                             (Some(folder), tile.map(|tile| (window_id, tile)))
                         }),
-                    // A report whose folder the desktop no longer holds is one
-                    // the pointer has left: an answer would refuse where it
-                    // is now.
-                    DragAt::Desktop => match desktop_drop_folder(client, source_id, serial) {
-                        Some(folder) => (Some(folder), None),
-                        None => return,
-                    },
+                    // The folder is the desktop's to name, so the report is
+                    // answered once it lands, nothing in a window lit
+                    // meanwhile.
+                    DragAt::Desktop => {
+                        light_drop_tile(windows, theme, scale, None);
+                        match client.ask_drag_spot(source_id, serial) {
+                            Ok(()) => {
+                                if let Some(state) = windows[source].browser() {
+                                    state.overlays.spot = Some((serial, shift));
+                                }
+                            }
+                            Err(err) => report_error(&alloc::format!(
+                                "the drag's place could not be asked for ({err})"
+                            )),
+                        }
+                        return;
+                    }
                     DragAt::Nowhere => (None, None),
                 };
                 let verdict = windows[source]
@@ -3532,61 +3751,75 @@ mod program {
                     .browser()
                     .and_then(|state| state.overlays.carrying.take());
                 light_drop_tile(windows, theme, scale, None);
-                let Some(carrying) = carrying else {
-                    return;
-                };
-                match site {
-                    DropSite::Nothing => {}
-                    DropSite::Application | DropSite::Placed => {
-                        hand_dropped_file(client, launcher, (source_id, site), carrying.file);
-                    }
-                    DropSite::Window {
-                        window_id,
-                        x,
-                        y,
-                        operation,
-                    } => {
-                        let Some(target) =
-                            windows.iter().position(|win| win.pane.id() == window_id)
-                        else {
-                            let reason = "the window it was dropped on has closed";
-                            refuse_drop(&mut windows[source], operation, reason);
-                            return;
-                        };
-                        let Some((folder, _)) =
-                            window_drop_folder(&mut windows[target], x, y, scale, theme)
-                        else {
-                            let reason = "nothing there takes a drop";
-                            refuse_drop(&mut windows[target], operation, reason);
-                            return;
-                        };
-                        let steps = DropLanding::none();
-                        begin_drop(&mut windows[target], carrying, &folder, operation, steps);
-                    }
-                    DropSite::Desktop { serial, operation } => {
-                        // Stepped for the desktop around each item, and ended
-                        // however the drop goes: with no room to owe its end
-                        // in, it ends now and its items land as any arrival.
-                        let reads = alloc::sync::Arc::clone(&launcher.borrow().reads);
-                        let begun = DesktopSteps::begin(source_id, serial, reads);
-                        let steps = if let Some(steps) = begun {
-                            DropLanding::to(steps)
-                        } else {
-                            if let Err(err) = client.end_landing(source_id, serial) {
-                                report_error(&alloc::format!("{END_UNSENT} ({err})"));
-                            }
-                            DropLanding::none()
-                        };
-                        let Some(folder) = desktop_drop_folder(client, source_id, serial) else {
-                            let reason = "the desktop folder it was dropped on is gone";
-                            refuse_drop(&mut windows[source], operation, reason);
-                            return;
-                        };
-                        begin_drop(&mut windows[source], carrying, &folder, operation, steps);
-                    }
+                if let Some(carrying) = carrying {
+                    let look = (theme, scale);
+                    conclude_drag(windows, client, look, launcher, (source, carrying, site));
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Carry out where `source`'s drag of `carrying` ended, as `site` says.
+    fn conclude_drag(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (theme, scale): (&Theme, Scale),
+        launcher: &RefCell<Launcher>,
+        (source, carrying, site): (usize, Carrying, DropSite),
+    ) {
+        let source_id = windows[source].pane.id();
+        match site {
+            DropSite::Nothing => {}
+            DropSite::Application | DropSite::Placed => {
+                let source = &mut windows[source];
+                hand_dropped_file(client, launcher, (source, site), carrying.file);
+            }
+            DropSite::Window {
+                window_id,
+                x,
+                y,
+                operation,
+            } => {
+                let Some(target) = windows.iter().position(|win| win.pane.id() == window_id) else {
+                    let reason = "the window it was dropped on has closed";
+                    refuse_drop(&mut windows[source], operation, reason);
+                    return;
+                };
+                let Some((folder, _)) =
+                    window_drop_folder(&mut windows[target], x, y, scale, theme)
+                else {
+                    let reason = "nothing there takes a drop";
+                    refuse_drop(&mut windows[target], operation, reason);
+                    return;
+                };
+                let steps = DropLanding::none();
+                begin_drop(&mut windows[target], carrying, &folder, operation, steps);
+            }
+            DropSite::Desktop { serial, operation } => {
+                // Stepped for the desktop around each item, and ended
+                // however the drop goes: with no room to owe its end
+                // in, it ends now and its items land as any arrival.
+                let reads = alloc::sync::Arc::clone(&launcher.borrow().reads);
+                let begun = DesktopSteps::begin(source_id, serial, reads);
+                let steps = if let Some(steps) = begun {
+                    DropLanding::to(steps)
+                } else {
+                    if let Err(err) = client.end_landing(source_id, serial) {
+                        report_error(&alloc::format!("{END_UNSENT} ({err})"));
+                    }
+                    DropLanding::none()
+                };
+                let drop = DesktopDrop {
+                    serial,
+                    carrying,
+                    operation,
+                    steps,
+                };
+                if let Err(reason) = ask_desktop_drop(client, &mut windows[source], drop) {
+                    refuse_drop(&mut windows[source], operation, reason);
+                }
+            }
         }
     }
 
@@ -3672,22 +3905,14 @@ mod program {
                 y,
                 shift,
             } => {
-                let target = windows
-                    .iter_mut()
-                    .find(|win| win.pane.id() == window_id)
-                    .and_then(|win| window_drop_folder(win, x, y, scale, theme));
-                let verdict = {
-                    let mut launcher = launcher.borrow_mut();
-                    offered_drag(client, &mut launcher, window_id, drag).and_then(|offered| {
-                        offered.answered = serial;
-                        let (folder, _) = target.as_ref()?;
-                        offered.carrying.verdict(folder, shift)
-                    })
-                };
-                let tile = target.and_then(|(_, tile)| tile.map(|tile| (window_id, tile)));
-                light_drop_tile(windows, theme, scale, verdict.and(tile));
-                if let Err(err) = client.answer_items_offer(window_id, serial, verdict) {
-                    report_error(&alloc::format!("a drop's answer was refused ({err})"));
+                let offer = (serial, (x, y), shift);
+                let mut held = launcher.borrow_mut();
+                let offered = offered_drag(client, &mut held.offered, window_id, drag);
+                if matches!(offered.read, OfferRead::Asked) {
+                    // Answered once the icons land: the newest offer alone.
+                    offered.waiting = Some(offer);
+                } else {
+                    answer_items_offer(windows, client, (theme, scale), offered, offer);
                 }
             }
             WindowEvent::ItemsOfferEnded {
@@ -3706,7 +3931,13 @@ mod program {
                 ) else {
                     return;
                 };
-                let Some(offered) = offered.filter(|offered| offered.answered == serial) else {
+                let carrying = offered
+                    .filter(|offered| offered.answered == Some(serial))
+                    .and_then(|offered| match offered.read {
+                        OfferRead::Landed(carrying) => Some(carrying),
+                        OfferRead::Asked | OfferRead::Failed => None,
+                    });
+                let Some(carrying) = carrying else {
                     let reason = "the items dropped could not be read";
                     refuse_drop(&mut windows[target], drop.operation, reason);
                     return;
@@ -3721,7 +3952,7 @@ mod program {
                 let steps = DropLanding::none();
                 begin_drop(
                     &mut windows[target],
-                    offered.carrying,
+                    carrying,
                     &folder,
                     drop.operation,
                     steps,
@@ -3731,57 +3962,117 @@ mod program {
         }
     }
 
-    /// The icons the desktop's drag numbered `drag` offers window
-    /// `window_id`, read from the session the first time it offers them
-    /// there; `None` once the session no longer offers them, or where they
-    /// cannot be read, which is stated.
+    /// The read of the icons the desktop's drag numbered `drag` offers window
+    /// `window_id`, asked for the first time it offers them there: a read
+    /// that could not be asked for is stated, and declines every offer of the
+    /// drag.
     fn offered_drag<'a>(
         client: &mut WindowClient<app::RtWindowTransport>,
-        launcher: &'a mut Launcher,
+        offered: &'a mut Option<OfferedDrag>,
         window_id: u64,
         drag: u32,
-    ) -> Option<&'a mut OfferedDrag> {
-        let current = launcher
-            .offered
+    ) -> &'a mut OfferedDrag {
+        if offered
             .as_ref()
-            .is_some_and(|offered| (offered.window_id, offered.drag) == (window_id, drag));
-        if !current {
-            let read = read_offered_drag(client, window_id, drag, &launcher.volumes);
-            launcher.offered = match read {
-                Ok(carrying) => Some(OfferedDrag {
-                    window_id,
-                    drag,
-                    answered: 0,
-                    carrying,
-                }),
-                Err(Errno::NotFound) => None,
+            .is_some_and(|stood| (stood.window_id, stood.drag) != (window_id, drag))
+        {
+            *offered = None;
+        }
+        offered.get_or_insert_with(|| {
+            let read = match client.ask_offered_items(window_id, drag) {
+                Ok(()) => OfferRead::Asked,
                 Err(err) => {
                     report_error(&alloc::format!(
-                        "the items offered could not be read ({err})"
+                        "the items offered could not be asked for ({err})"
                     ));
-                    None
+                    OfferRead::Failed
                 }
             };
-        }
-        launcher.offered.as_mut()
+            OfferedDrag {
+                window_id,
+                drag,
+                answered: None,
+                read,
+                waiting: None,
+            }
+        })
     }
 
-    /// The icons the desktop's drag numbered `drag` offers window `window_id`,
-    /// as a drop of them acts on them.
-    fn read_offered_drag(
+    /// Answer `offer` of the icons `offered` holds with what the one drop
+    /// policy says a drop of them into the folder at its point would do,
+    /// lighting that folder's tile while the answer takes them.
+    fn answer_items_offer(
+        windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
-        window_id: u64,
-        drag: u32,
-        volumes: &[Volume],
-    ) -> Result<Carrying, Errno> {
+        (theme, scale): (&Theme, Scale),
+        offered: &mut OfferedDrag,
+        (serial, (x, y), shift): ItemsOffer,
+    ) {
+        let window_id = offered.window_id;
+        let target = windows
+            .iter_mut()
+            .find(|win| win.pane.id() == window_id)
+            .and_then(|win| window_drop_folder(win, x, y, scale, theme));
+        let verdict = match &offered.read {
+            OfferRead::Landed(carrying) => target
+                .as_ref()
+                .and_then(|(folder, _)| carrying.verdict(folder, shift)),
+            OfferRead::Asked | OfferRead::Failed => None,
+        };
+        let tile = target.and_then(|(_, tile)| tile.map(|tile| (window_id, tile)));
+        light_drop_tile(windows, theme, scale, verdict.and(tile));
+        offered.answered = Some(serial);
+        if let Err(err) = client.answer_items_offer(window_id, serial, verdict) {
+            report_error(&alloc::format!("a drop's answer was refused ({err})"));
+        }
+    }
+
+    /// The icons the desktop's drag numbered `drag` offers window `window_id`
+    /// landed: they are taken as a drop of them acts on them, and the newest
+    /// offer made while they were read is answered.
+    fn offered_items_landed(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        look: (&Theme, Scale),
+        launcher: &mut Launcher,
+        (window_id, drag, items): (u64, u32, Result<Vec<OfferedPath>, Errno>),
+    ) {
+        let Launcher {
+            offered, volumes, ..
+        } = launcher;
+        let Some(offered) = offered.as_mut().filter(|offered| {
+            (offered.window_id, offered.drag) == (window_id, drag)
+                && matches!(offered.read, OfferRead::Asked)
+        }) else {
+            return;
+        };
+        offered.read = match items.and_then(|items| offered_carrying(&items, volumes)) {
+            Ok(carrying) => OfferRead::Landed(carrying),
+            // The offer no longer stands: its end is on its way.
+            Err(Errno::NotFound) => OfferRead::Failed,
+            Err(err) => {
+                report_error(&alloc::format!(
+                    "the items offered could not be read ({err})"
+                ));
+                OfferRead::Failed
+            }
+        };
+        if let Some(offer) = offered.waiting.take() {
+            answer_items_offer(windows, client, look, offered, offer);
+        }
+    }
+
+    /// The icons `items` names, as a drop of them acts on them.
+    fn offered_carrying(items: &[OfferedPath], volumes: &[Volume]) -> Result<Carrying, Errno> {
         let mut sources: Vec<Listed> = Vec::new();
-        client.read_offered_items(window_id, drag, |item| {
-            let path = tairix_browse::vfs::components_from_absolute_path(item.path)
+        sources
+            .try_reserve_exact(items.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        for item in items {
+            let path = tairix_browse::vfs::components_from_absolute_path(&item.path)
                 .map_err(|_| Errno::OutOfRange)?;
-            sources.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
             sources.push(Listed { path, id: item.id });
-            Ok(())
-        })?;
+        }
         let links = tairix_browse::volume::catalog_shortcuts(&sources, volumes);
         Ok(Carrying {
             sources,
@@ -3851,15 +4142,82 @@ mod program {
         )
     }
 
-    /// The desktop folder the drag report numbered `serial` named, read from
-    /// the session; `None` once the session has named another.
-    fn desktop_drop_folder(
+    /// Ask which desktop folder the report of `drop`, a drop of `win`'s drag,
+    /// named, carrying the drop out into it once that lands
+    /// ([`spot_landed`]).
+    ///
+    /// # Errors
+    ///
+    /// Why the drop cannot be carried out: no room to hold it, or an ask
+    /// that could not be made, stated.
+    fn ask_desktop_drop(
         client: &mut WindowClient<app::RtWindowTransport>,
-        source_id: u64,
-        serial: u32,
-    ) -> Option<Vec<String>> {
-        let path = client.drag_spot(source_id, serial).ok()?;
-        tairix_browse::vfs::components_from_absolute_path(&path).ok()
+        win: &mut OpenWindow,
+        drop: DesktopDrop,
+    ) -> Result<(), &'static str> {
+        let window_id = win.pane.id();
+        let state = win.browser().ok_or("the window it began in has closed")?;
+        let drops = &mut state.overlays.desktop_drops;
+        drops
+            .try_reserve(1)
+            .map_err(|_| "there was no room to hold the drop")?;
+        if let Err(err) = client.ask_drag_spot(window_id, drop.serial) {
+            report_error(&alloc::format!(
+                "the desktop folder it was dropped on could not be asked for ({err})"
+            ));
+            return Err("the desktop folder it was dropped on could not be asked for");
+        }
+        drops.push(drop);
+        Ok(())
+    }
+
+    /// The desktop named the folder report `serial` of `win`'s drag named: a
+    /// drop on it is carried out into it, and the report standing is
+    /// answered with what a drop there would do.
+    fn spot_landed(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (serial, folder): (u32, Result<String, Errno>),
+    ) {
+        let window_id = win.pane.id();
+        let folder = folder
+            .ok()
+            .and_then(|path| tairix_browse::vfs::components_from_absolute_path(&path).ok());
+        let Some(state) = win.browser() else {
+            return;
+        };
+        let overlays = &mut state.overlays;
+        let dropped = overlays
+            .desktop_drops
+            .iter()
+            .position(|drop| drop.serial == serial)
+            .map(|at| overlays.desktop_drops.swap_remove(at));
+        if let Some(drop) = dropped {
+            if let Some(folder) = folder {
+                begin_drop(win, drop.carrying, &folder, drop.operation, drop.steps);
+            } else {
+                let reason = "the desktop folder it was dropped on is gone";
+                refuse_drop(win, drop.operation, reason);
+            }
+            return;
+        }
+        // A report whose folder the desktop no longer holds is one the pointer
+        // has left: an answer would refuse where it is now.
+        let asked = overlays.spot.take_if(|(asked, _)| *asked == serial);
+        let (Some((_, shift)), Some(folder), Some(carrying)) =
+            (asked, folder, overlays.carrying.as_ref())
+        else {
+            return;
+        };
+        let verdict = carrying.verdict(&folder, shift);
+        // A drag that ended after this report was sent answers nothing; its
+        // end is already on its way.
+        match client.drag_verdict(window_id, serial, verdict) {
+            Ok(()) | Err(Errno::NotFound) => {}
+            Err(err) => {
+                report_error(&alloc::format!("the drag's answer was refused ({err})"));
+            }
+        }
     }
 
     /// Light `tile` — a window and a listed entry — as where the drag would
@@ -3929,24 +4287,55 @@ mod program {
         }
     }
 
-    /// Hand the one file a drag carried to where `site` says it was dropped:
-    /// the application it opens in, exactly as its "Open With" row would, or
-    /// the other application's window it is placed in, read-only.
+    /// Hand the one file `win`'s drag carried to where `site` says it was
+    /// dropped: the application it opens in, exactly as its "Open With" row
+    /// would, once the desktop says which ([`drop_target_landed`]), or the
+    /// other application's window it is placed in, read-only.
     fn hand_dropped_file(
         client: &mut WindowClient<app::RtWindowTransport>,
         launcher: &RefCell<Launcher>,
-        (source_id, site): (u64, DropSite),
+        (win, site): (&mut OpenWindow, DropSite),
         file: Option<PendingChooser>,
     ) {
         let Some(file) = file else {
             return;
         };
+        let source_id = win.pane.id();
         if site == DropSite::Placed {
             let mut launcher = launcher.borrow_mut();
             launcher.open_placed(client, source_id, (&file.path, &file.name));
             return;
         }
-        let target = match client.take_drop_target(source_id) {
+        let Some(state) = win.browser() else {
+            return;
+        };
+        let drops = &mut state.overlays.app_drops;
+        if drops.try_reserve(1).is_err() {
+            report_error("the drop was lost: there was no room to hold it");
+            return;
+        }
+        match client.ask_drop_target(source_id) {
+            Ok(()) => drops.push_back(file),
+            Err(err) => report_error(&alloc::format!("the drop was lost ({err})")),
+        }
+    }
+
+    /// The desktop named the application `win`'s drag was dropped on: the one
+    /// file the oldest such drop carried opens there, exactly as its "Open
+    /// With" row would.
+    fn drop_target_landed(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        launcher: &RefCell<Launcher>,
+        target: Result<Dropped, Errno>,
+    ) {
+        let Some(file) = win
+            .browser()
+            .and_then(|state| state.overlays.app_drops.pop_front())
+        else {
+            return;
+        };
+        let target = match target {
             Ok(target) => target,
             Err(err) => {
                 report_error(&alloc::format!("the drop was lost ({err})"));
@@ -4189,7 +4578,7 @@ mod program {
         // are far apart, and a sink that degraded to their bounding box would
         // repaint the whole band where the window's account merges them least.
         let mut damage = Region::new();
-        let popup = PopupLink::of(client, desktop, event_endpoint);
+        let popup = PopupLink::of(desktop, event_endpoint);
         let mut properties = None;
         let Some(state) = win.browser() else {
             return;
@@ -4555,8 +4944,8 @@ mod program {
     /// asked states the move in.
     const OPENED_ELSEWHERE: &str = "Opened elsewhere";
 
-    /// Drain every folder the desktop has queued for this instance, opening a
-    /// window at each.
+    /// Open `target`, one the desktop queued for this instance: a window at a
+    /// folder.
     ///
     /// How a *relaunch* that names a folder reaches this already-running
     /// instance: the desktop asks the running process to open it rather than
@@ -4571,71 +4960,66 @@ mod program {
     /// `CAP_FS_ACCESS` and opens what it is given by name, so a delegated
     /// descriptor is authority it has no use for. It is stated and skipped
     /// rather than silently dropped.
-    fn drain_open_targets(
+    fn open_target_landed(
         windows: &mut [OpenWindow],
         (opening, launcher): (&Opening, &RefCell<Launcher>),
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &alloc::sync::Arc<Reads>,
-        settings: &FilerPreferences,
+        (settings, target): (&FilerPreferences, Result<Option<Target>, Errno>),
     ) {
-        loop {
-            let path = match client.take_open_target() {
-                Ok(Some(Target::Path(path))) => path,
-                // Attached as one opened in a window is, so it is this file
-                // manager's to let go once no window shows it.
-                Ok(Some(Target::Image(path))) => {
-                    match crate::command::image_path(&path) {
-                        Ok(path) => launcher.borrow_mut().mount(MountAct::Attach {
-                            path,
-                            read_only: false,
-                            handoff: None,
-                        }),
-                        Err(reason) => app::report(APP_NAME, reason),
-                    }
-                    continue;
+        let path = match target {
+            Ok(Some(Target::Path(path))) => path,
+            // Attached as one opened in a window is, so it is this file
+            // manager's to let go once no window shows it.
+            Ok(Some(Target::Image(path))) => {
+                match crate::command::image_path(&path) {
+                    Ok(path) => launcher.borrow_mut().mount(MountAct::Attach {
+                        path,
+                        read_only: false,
+                        handoff: None,
+                    }),
+                    Err(reason) => app::report(APP_NAME, reason),
                 }
-                // Taken and let go, so no delegation is left pending for this
-                // process's life.
-                Ok(Some(
-                    Target::Document { name, grant, .. } | Target::Placed { name, grant, .. },
-                )) => {
-                    drop(tairix_rt::File::from_delegation(grant));
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{name} was handed over as a document; this is a file manager, \
-                         which opens what it is given by name"
-                        ),
-                    );
-                    continue;
-                }
-                // A window on a folder is what this opens; it has no panes
-                // for a launch to name.
-                Ok(Some(Target::Pane(pane))) => {
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{pane} was handed over, but this is a file manager and has no \
-                         places of that name"
-                        ),
-                    );
-                    continue;
-                }
-                Ok(None) => return,
-                Err(err) => {
-                    app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
-                    return;
-                }
-            };
-            match crate::command::location_components(&path) {
-                Ok(location) => {
-                    open_more(windows, opening, client, reads, (Some(location), settings));
-                }
-                // Stated and skipped: the *next* target may well be fine, so
-                // one bad spelling must not abandon the drain.
-                Err(reason) => {
-                    app::report(APP_NAME, reason);
-                }
+                return;
+            }
+            // Taken and let go, so no delegation is left pending for this
+            // process's life.
+            Ok(Some(Target::Document { name, grant, .. } | Target::Placed { name, grant, .. })) => {
+                drop(tairix_rt::File::from_delegation(grant));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{name} was handed over as a document; this is a file manager, \
+                     which opens what it is given by name"
+                    ),
+                );
+                return;
+            }
+            // A window on a folder is what this opens; it has no panes
+            // for a launch to name.
+            Ok(Some(Target::Pane(pane))) => {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{pane} was handed over, but this is a file manager and has no \
+                     places of that name"
+                    ),
+                );
+                return;
+            }
+            Ok(None) => return,
+            Err(err) => {
+                app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
+                return;
+            }
+        };
+        match crate::command::location_components(&path) {
+            Ok(location) => {
+                open_more(windows, opening, client, reads, (Some(location), settings));
+            }
+            // Stated and skipped: the next target may well be fine.
+            Err(reason) => {
+                app::report(APP_NAME, reason);
             }
         }
     }
@@ -4707,6 +5091,40 @@ mod program {
         /// The desktop's icons offered to one of this app's windows, while
         /// that offer stands.
         offered: Option<OfferedDrag>,
+        /// The launches handed to the desktop's single-instance funnel, by
+        /// the token each is answered by.
+        hand_overs: Vec<(u64, HandedLaunch)>,
+    }
+
+    /// A drop of a window's drag on the desktop, carried out once the folder
+    /// its report named is known.
+    struct DesktopDrop {
+        serial: u32,
+        carrying: Carrying,
+        operation: DropOperation,
+        steps: DropLanding<DesktopSteps>,
+    }
+
+    /// A launch handed to the desktop's single-instance funnel, and what it
+    /// falls back to where no live instance took it.
+    enum HandedLaunch {
+        /// A bundle activated, started itself.
+        Bare {
+            label: String,
+            run_path: String,
+            handoff: Option<Handoff>,
+        },
+        /// The Settings application at this manager's pane, started on it.
+        Settings { label: String },
+        /// A document the reader opened, the viewer started on it.
+        Document {
+            label: String,
+            run_path: String,
+            file: tairix_rt::File,
+            writable: bool,
+            name: String,
+            handoff: Option<Handoff>,
+        },
     }
 
     /// The folder a save dropped on a window goes into, for the reader to
@@ -4815,6 +5233,7 @@ mod program {
                 ensuring_trash: None,
                 volumes: Vec::new(),
                 offered: None,
+                hand_overs: Vec::new(),
             }
         }
 
@@ -4973,15 +5392,98 @@ mod program {
             // running. Anything but "reached" — no instance, an instance that
             // could not be reached, a session with no funnel — spawns, so a
             // launch never silently does nothing.
-            if matches!(
-                client.hand_over_launch(&run_path, HandOverTarget::Bare),
-                Ok(HandOverOutcome::Reached)
-            ) {
-                self.handoffs.handed(handoff);
+            let launch = HandedLaunch::Bare {
+                label,
+                run_path,
+                handoff,
+            };
+            self.hand_over(client, launch);
+        }
+
+        /// Ask the desktop to reach a live instance for `launch`, falling
+        /// back at once where the ask cannot be made.
+        fn hand_over(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            launch: HandedLaunch,
+        ) {
+            let asked = match &launch {
+                HandedLaunch::Bare { run_path, .. } => {
+                    client.hand_over_launch(run_path, HandOverTarget::Bare)
+                }
+                HandedLaunch::Settings { .. } => PaneName::new(tairix_browse::SETTINGS_PANE)
+                    .and_then(|pane| {
+                        client.hand_over_launch(SETTINGS_RUN_PATH, HandOverTarget::Pane(pane))
+                    }),
+                HandedLaunch::Document {
+                    run_path,
+                    file,
+                    writable,
+                    name,
+                    ..
+                } => document_hand_over(client, run_path, file.fd(), *writable, name),
+            };
+            match asked {
+                Ok(token) if self.hand_overs.try_reserve(1).is_ok() => {
+                    self.hand_overs.push((token, launch));
+                }
+                _ => self.start_unreached(launch),
+            }
+        }
+
+        /// The desktop answered hand-over `token`: one a live instance took
+        /// is done, and one it did not is started here.
+        fn handed_over(&mut self, token: u64, outcome: Result<HandOverOutcome, Errno>) {
+            let Some(at) = self
+                .hand_overs
+                .iter()
+                .position(|(asked, _)| *asked == token)
+            else {
+                return;
+            };
+            let (_, launch) = self.hand_overs.swap_remove(at);
+            if !matches!(outcome, Ok(HandOverOutcome::Reached)) {
+                self.start_unreached(launch);
                 return;
             }
-            if self.started(label, tairix_rt::spawn(run_path.as_bytes())) {
-                self.handoffs.handed(handoff);
+            match launch {
+                HandedLaunch::Bare { handoff, .. } | HandedLaunch::Document { handoff, .. } => {
+                    self.handoffs.handed(handoff);
+                }
+                HandedLaunch::Settings { .. } => {}
+            }
+        }
+
+        /// Start what `launch` names here, no live instance having taken it.
+        fn start_unreached(&mut self, launch: HandedLaunch) {
+            match launch {
+                HandedLaunch::Bare {
+                    label,
+                    run_path,
+                    handoff,
+                } => {
+                    if self.started(label, tairix_rt::spawn(run_path.as_bytes())) {
+                        self.handoffs.handed(handoff);
+                    }
+                }
+                HandedLaunch::Settings { label } => {
+                    let ret = tairix_rt::spawn_with(
+                        SETTINGS_RUN_PATH.as_bytes(),
+                        CONSOLE_INHERIT,
+                        SPAWN_UID_INHERIT,
+                        &[tairix_browse::SETTINGS_PANE.as_bytes()],
+                        &[],
+                    );
+                    self.started(label, ret);
+                }
+                HandedLaunch::Document {
+                    label,
+                    run_path,
+                    file,
+                    writable,
+                    name,
+                    handoff,
+                } => self.start_viewer((label, &run_path), &file, (writable, &name), handoff),
             }
         }
 
@@ -4992,24 +5494,11 @@ mod program {
             let label = bundle_leaf(
                 tairix_appstore::bundle_of_entry(SETTINGS_RUN_PATH).unwrap_or(SETTINGS_RUN_PATH),
             );
-            let Ok(pane) = PaneName::new(tairix_browse::SETTINGS_PANE) else {
+            if PaneName::new(tairix_browse::SETTINGS_PANE).is_err() {
                 self.not_opened(&label, "its settings pane cannot be named");
                 return;
-            };
-            if matches!(
-                client.hand_over_launch(SETTINGS_RUN_PATH, HandOverTarget::Pane(pane)),
-                Ok(HandOverOutcome::Reached)
-            ) {
-                return;
             }
-            let ret = tairix_rt::spawn_with(
-                SETTINGS_RUN_PATH.as_bytes(),
-                CONSOLE_INHERIT,
-                SPAWN_UID_INHERIT,
-                &[tairix_browse::SETTINGS_PANE.as_bytes()],
-                &[],
-            );
-            self.started(label, ret);
+            self.hand_over(client, HandedLaunch::Settings { label });
         }
 
         /// Note the child a spawn of `label` answered `ret` with, answering
@@ -5233,33 +5722,48 @@ mod program {
             // instance the document itself: the grant is minted from *this*
             // descriptor to the session, which relays it on, so the viewer
             // reads it under this manager's authority and never the session's.
-            // Anything but "reached" spawns below, which still shows it.
-            if hand_over(client, &run_path, file.fd(), writable, display_name) {
-                self.handoffs.handed(handoff);
-                return;
-            }
+            // Anything but "reached" starts the viewer, which still shows it.
+            let launch = HandedLaunch::Document {
+                label,
+                run_path,
+                file,
+                writable,
+                name: String::from(display_name),
+                handoff,
+            };
+            self.hand_over(client, launch);
+        }
+
+        /// Start the viewer `run_path`, labelled `label`, on the document open
+        /// on `file`, read-write when `writable`, called `name`.
+        fn start_viewer(
+            &mut self,
+            (label, run_path): (String, &str),
+            file: &tairix_rt::File,
+            (writable, name): (bool, &str),
+            handoff: Option<Handoff>,
+        ) {
             let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
             wires[STDIN as usize] = FdWire::Handle(file.fd());
             let attach = SpawnAttach {
                 wires,
                 ..SpawnAttach::INHERIT
             };
+            // The child holds its own counted clone of the open description,
+            // so the manager's copy goes once this returns, either way.
             let pid = tairix_rt::spawn_attached(
                 run_path.as_bytes(),
                 &attach,
                 &[
                     run_path.as_bytes(),
                     document::role_arg(writable),
-                    display_name.as_bytes(),
+                    name.as_bytes(),
                 ],
                 &[],
             );
-            // The child holds its own counted clone of the open description,
-            // so the manager's copy goes either way.
-            drop(file);
             if pid < 0 {
                 let reason = not_started(&label, Errno::from_syscall(pid));
-                self.not_opened(display_name, &reason);
+                self.not_opened(name, &reason);
                 return;
             }
             #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
@@ -5295,45 +5799,42 @@ mod program {
     }
 
     /// Offer the document open on `fd`, read-write when `writable`, to a live
-    /// instance of the bundle whose entry binary is `run_path`, answering
-    /// whether one took it.
+    /// instance of the bundle whose entry binary is `run_path`, answering the
+    /// token the desktop's answer names.
     ///
     /// The delegation is minted from this manager's own descriptor to the
     /// *session*, which redeems it and hands the same authority on to the
     /// instance — so the viewer reads the document under this manager's
     /// captured identity and the session lends none of its own, larger reach.
-    /// Every refusal answers `false` and leaves the caller to spawn, which
-    /// still shows the document.
-    fn hand_over(
+    ///
+    /// # Errors
+    ///
+    /// No session to mint to, a name the channel cannot carry, or a refused
+    /// mint; the caller starts the viewer itself, which still shows the
+    /// document.
+    fn document_hand_over(
         client: &mut WindowClient<app::RtWindowTransport>,
         run_path: &str,
         fd: u32,
         writable: bool,
         display_name: &str,
-    ) -> bool {
-        let Some(session) = client.session() else {
-            return false;
-        };
-        let Ok(name) = DocumentName::new(display_name) else {
-            return false;
-        };
-        let grant = tairix_rt::fd_grant(fd, document::grant_ceiling(writable), session, 0);
-        let Some(grant) = u64::try_from(grant)
-            .ok()
-            .and_then(core::num::NonZeroU64::new)
-        else {
-            return false;
-        };
-        matches!(
-            client.hand_over_launch(
-                run_path,
-                HandOverTarget::Document(HandOverDocument {
-                    name,
-                    grant,
-                    writable
-                })
-            ),
-            Ok(HandOverOutcome::Reached)
+    ) -> Result<u64, Errno> {
+        let session = client.session().ok_or(Errno::NotFound)?;
+        let name = DocumentName::new(display_name)?;
+        let grant = Errno::syscall_result(tairix_rt::fd_grant(
+            fd,
+            document::grant_ceiling(writable),
+            session,
+            0,
+        ))?;
+        let grant = core::num::NonZeroU64::new(grant).ok_or(Errno::OutOfRange)?;
+        client.hand_over_launch(
+            run_path,
+            HandOverTarget::Document(HandOverDocument {
+                name,
+                grant,
+                writable,
+            }),
         )
     }
 
@@ -8268,28 +8769,15 @@ mod program {
     struct PopupLink {
         /// The seat's screen rectangle, at its own origin.
         screen: Rect,
-        /// The serving session's attested identity, which every popup's
-        /// create reply must match. Absent until the desktop has answered a
-        /// query, so a popup asked for before then is refused rather than
-        /// opened against an unattested server.
-        server: Option<ProcId>,
         /// The app's own event mailbox endpoint.
         event_endpoint: u64,
     }
 
     impl PopupLink {
         /// The context a popup opened during this round is opened against.
-        ///
-        /// Read before the round borrows the client, because a popup's create
-        /// reply is checked against the session that served its parent.
-        fn of(
-            client: &WindowClient<app::RtWindowTransport>,
-            desktop: &Desktop,
-            event_endpoint: u64,
-        ) -> Self {
+        const fn of(desktop: &Desktop, event_endpoint: u64) -> Self {
             Self {
                 screen: desktop.screen(),
-                server: client.session(),
                 event_endpoint,
             }
         }
@@ -8319,6 +8807,9 @@ mod program {
         /// The entry New ▸ made and the directory it made it in, whose rename
         /// opens once a listing there shows it.
         rename_on_arrival: Option<(Vec<String>, String)>,
+        /// The menu open whose Rename field was committed, and the endings
+        /// its name was shown without, until the text typed there lands.
+        rename_typed: Option<(u64, HiddenEndings)>,
         /// The window's one question, when it asks one: a removal, or the
         /// eject of a lost volume.
         question: Question<Confirms>,
@@ -8356,6 +8847,15 @@ mod program {
         drag: Option<(DragArm, usize)>,
         /// What this window handed the desktop to carry, until its drag ends.
         carrying: Option<Carrying>,
+        /// The newest report of this window's drag over the desktop asked
+        /// about: its serial, and whether shift was held there.
+        spot: Option<(u32, bool)>,
+        /// The drops of this window's drags on the desktop, each waiting on
+        /// the folder its report named.
+        desktop_drops: Vec<DesktopDrop>,
+        /// The one file each of this window's drags carried to an
+        /// application, oldest first, waiting on which application that was.
+        app_drops: alloc::collections::VecDeque<PendingChooser>,
         /// The entry a press inside a multi-selection landed on, selected alone
         /// if the press is released without becoming a drag.
         collapse_on_release: Option<usize>,
@@ -8440,9 +8940,27 @@ mod program {
         /// The desktop's drag they were read by.
         drag: u32,
         /// The offer this app last answered there.
-        answered: u32,
-        /// What a drop of them acts on.
-        carrying: Carrying,
+        answered: Option<u32>,
+        /// Where their read stands.
+        read: OfferRead,
+        /// The newest offer made while they were read — its serial, the
+        /// window-local point and whether shift was held — answered once they
+        /// land.
+        waiting: Option<ItemsOffer>,
+    }
+
+    /// One offer of a desktop drag's icons: its serial, the window-local
+    /// point it was made at, and whether shift was held.
+    type ItemsOffer = (u32, (u32, u32), bool);
+
+    /// Where the read of a desktop drag's icons stands.
+    enum OfferRead {
+        /// Asked for.
+        Asked,
+        /// Read, as a drop of them acts on them.
+        Landed(Carrying),
+        /// Refused or unreadable: every offer of the drag is declined.
+        Failed,
     }
 
     /// What a window handed the desktop to carry.
@@ -10306,21 +10824,9 @@ mod program {
                             };
                             match client.open_alert(endpoint, Some(window_id), asked) {
                                 Ok(alert) => overlays.question.raised(alert),
-                                Err(Errno::LimitExceeded) => {
-                                    *full = true;
-                                    return;
-                                }
                                 Err(err) => {
-                                    let (kind, undone) = match overlays.question.withdraw() {
-                                        Some(Confirms::EjectLost(_)) => ("eject", "ejected"),
-                                        Some(Confirms::Delete { .. }) | None => {
-                                            ("delete", "removed")
-                                        }
-                                    };
-                                    report_error(&alloc::format!(
-                                        "the {kind} question could not be asked ({err}); \
-                                         nothing was {undone}"
-                                    ));
+                                    let withdrawn = overlays.question.withdraw();
+                                    question_unasked(withdrawn.as_ref(), err);
                                 }
                             }
                         }
@@ -10360,6 +10866,70 @@ mod program {
                     notice.headline(),
                     notice.detail()
                 )),
+            }
+        }
+    }
+
+    /// State that a question confirming `confirms` could not be asked, for
+    /// `err`, and so nothing it would have done was.
+    fn question_unasked(confirms: Option<&Confirms>, err: Errno) {
+        let (kind, undone) = match confirms {
+            Some(Confirms::EjectLost(_)) => ("eject", "ejected"),
+            Some(Confirms::Delete { .. }) | None => ("delete", "removed"),
+        };
+        report_error(&alloc::format!(
+            "the {kind} question could not be asked ({err}); nothing was {undone}"
+        ));
+    }
+
+    /// The desktop refused alert `alert_id` for `errno`: whichever window's
+    /// question or notice it was waits to go up again where the application
+    /// holds every alert it may — answered `true`, so nothing more is raised
+    /// until one is answered — and is otherwise stated.
+    fn alert_refused(
+        windows: &mut [OpenWindow],
+        launcher_notices: &mut Notices,
+        alert_id: u64,
+        errno: Errno,
+    ) -> bool {
+        for win in windows {
+            let (question, notices) = match &mut win.kind {
+                WindowKind::Browser(state) => (
+                    Some(&mut state.overlays.question),
+                    &mut state.overlays.notices,
+                ),
+                WindowKind::Properties(props) => (None, &mut props.notices),
+                WindowKind::Progress(_) => continue,
+            };
+            match question.map(|question| question.refused(alert_id, errno)) {
+                Some(QuestionRefusal::Waiting) => return true,
+                Some(QuestionRefusal::Withdrawn(confirms)) => {
+                    question_unasked(Some(&confirms), errno);
+                    return false;
+                }
+                Some(QuestionRefusal::Other) | None => {}
+            }
+            if let Some(full) = notice_refused(notices, alert_id, errno) {
+                return full;
+            }
+        }
+        notice_refused(launcher_notices, alert_id, errno).unwrap_or(false)
+    }
+
+    /// Whether the desktop's refusal of alert `alert_id` was of one of
+    /// `notices`: `Some(true)` where it waits for room, `Some(false)` where it
+    /// is stated instead, `None` where it was another's.
+    fn notice_refused(notices: &mut Notices, alert_id: u64, errno: Errno) -> Option<bool> {
+        match notices.refused(alert_id, errno) {
+            Raised::Nothing | Raised::Up => None,
+            Raised::Full => Some(true),
+            Raised::Refused(err, notice) => {
+                report_error(&alloc::format!(
+                    "{}: {} (the desktop would not show this: {err})",
+                    notice.headline(),
+                    notice.detail()
+                ));
+                Some(false)
             }
         }
     }
@@ -11498,26 +12068,18 @@ mod program {
                 Some(ContextChoice::RenameCommit) | None => (false, false),
             },
             // The field's text is wider than the event frame, so the answer
-            // names the field and the text is pulled. It renames through the
-            // very path `F2` drives, so a name typed in the menu and one typed
-            // in place cannot come to mean different things.
+            // names the field and the text is asked for. It renames through
+            // the very path `F2` drives, so a name typed in the menu and one
+            // typed in place cannot come to mean different things.
             MenuOutcome::Entered(item) => match context_choice_from_item(item) {
                 Some(ContextChoice::RenameCommit) => {
-                    let frame = Frame {
-                        scale,
-                        theme,
-                        viewport,
-                        toolbar,
-                    };
-                    let repaint = commit_menu_rename(
-                        browser,
-                        &mut overlays.rename,
-                        acts.reads,
-                        (acts.menu.client, window, gesture),
-                        frame,
-                        damage,
-                    );
-                    return (repaint, false);
+                    match acts.menu.client.ask_menu_text(window, gesture.open_id) {
+                        Ok(()) => overlays.rename_typed = Some((gesture.open_id, gesture.endings)),
+                        Err(err) => report_error(&alloc::format!(
+                            "typed name could not be asked for ({err})"
+                        )),
+                    }
+                    (false, false)
                 }
                 _ => (false, false),
             },
@@ -11541,50 +12103,57 @@ mod program {
         (true, false)
     }
 
-    /// Pull the name the user typed into the context menu's Rename field and
-    /// rename the selection to it.
+    /// Rename `win`'s selection to `text`, the name typed into its context
+    /// menu's Rename field, once the text menu open `open_id` committed lands.
     ///
-    /// The text is pulled rather than delivered because an event is one fixed
-    /// frame and a name is wider than that; the session holds exactly one per
-    /// window and hands it over once. Nothing held is an honest answer that
-    /// renames nothing — a stale pull, or a commit the session could not keep
-    /// — and the rename is prepared and handed on exactly as `F2`'s
-    /// ([`commit_rename`]): the same permission-checked `fs_rename` under the
-    /// user's own identity, off the loop, so a refusal is stated and the
-    /// listing is untouched.
-    fn commit_menu_rename<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        edit: &mut RenameEdit,
+    /// Nothing held is an honest answer that renames nothing — a stale ask,
+    /// or a commit the session could not keep — and the rename is prepared
+    /// and handed on exactly as `F2`'s ([`commit_rename`]): the same
+    /// permission-checked `fs_rename` under the user's own identity, off the
+    /// loop, so a refusal is stated and the listing is untouched.
+    fn menu_rename_landed(
+        win: &mut OpenWindow,
         reads: &Reads,
-        (client, window, gesture): (
-            &mut WindowClient<app::RtWindowTransport>,
-            u64,
-            &OpenMenuState,
-        ),
-        frame: Frame<'_>,
-        damage: &mut Region,
-    ) -> Repaint {
-        let name = match client.take_menu_text(window, gesture.open_id) {
+        (theme, scale): (&Theme, Scale),
+        (open_id, text): (u64, Result<Option<String>, Errno>),
+    ) {
+        let mode = *win.pane.mode();
+        let Some(state) = win.browser() else {
+            return;
+        };
+        let Some((_, endings)) = state
+            .overlays
+            .rename_typed
+            .take_if(|(asked, _)| *asked == open_id)
+        else {
+            return;
+        };
+        let name = match text {
             Ok(Some(name)) => name,
-            Ok(None) => return Repaint::Nothing,
+            Ok(None) => return,
             Err(err) => {
                 report_error(&alloc::format!("typed name refused ({err})"));
-                return Repaint::Nothing;
+                return;
             }
         };
-        if edit.in_flight() {
+        let frame = frame_of(state, &mode, theme, scale);
+        let edit = &mut state.overlays.rename;
+        let browser = &mut state.browser;
+        let mut damage = Region::new();
+        let repaint = if edit.in_flight() {
             edit.refuse(String::from("a rename is already being carried out"));
-            return Repaint::Nothing;
-        }
-        let pending = match browser.prepare_rename(&name, gesture.endings) {
-            Ok(pending) => pending,
-            Err(RenameError::Unchanged) => return close_editor(browser, edit, frame, damage),
-            Err(err) => {
-                edit.refuse(rename_refusal(err));
-                return Repaint::Nothing;
+            Repaint::Nothing
+        } else {
+            match browser.prepare_rename(&name, endings) {
+                Ok(pending) => submit_rename(browser, edit, reads, pending, frame, &mut damage),
+                Err(RenameError::Unchanged) => close_editor(browser, edit, frame, &mut damage),
+                Err(err) => {
+                    edit.refuse(rename_refusal(err));
+                    Repaint::Nothing
+                }
             }
         };
-        submit_rename(browser, edit, reads, pending, frame, damage)
+        owe(win, repaint, &damage);
     }
 
     /// Hand the file the menu was opened on to the candidate application the
@@ -11968,14 +12537,9 @@ mod program {
             report_error("the chooser surface was refused; not shown");
             return None;
         };
-        let Some(server) = acts.popup.server else {
-            report_error("the serving session is unknown; the chooser was not shown");
-            return None;
-        };
         let pane = match WindowPane::open_popup(
             acts.menu.client,
             acts.menu.window,
-            server,
             acts.popup.event_endpoint,
             &mode,
             offset,
@@ -12548,7 +13112,7 @@ mod program {
         };
         let sizing = tairix_browse::properties_sizing(desktop.scale(), grounds.popups);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
-            Ok((pane, _)) => pane,
+            Ok(pane) => pane,
             Err(err) => {
                 report_error(&alloc::format!("{err}; no Info window opened"));
                 return;
@@ -13791,6 +14355,7 @@ mod program {
         Overlays {
             rename: RenameEdit::default(),
             rename_on_arrival: None,
+            rename_typed: None,
             question: Question::default(),
             open_with: None,
             starting: None,
@@ -13800,6 +14365,9 @@ mod program {
             double_click: DoubleClickTracker::new(),
             drag: None,
             carrying: None,
+            spot: None,
+            desktop_drops: Vec::new(),
+            app_drops: alloc::collections::VecDeque::new(),
             collapse_on_release: None,
             rename_arm: None,
             sweep: None,
@@ -14300,7 +14868,8 @@ mod program {
                     // refused and the drain carries on (never guessed at).
                     Err(EventError::Undecodable(_)) => continue,
                     Err(EventError::Refused(refused)) => {
-                        report_error(&alloc::format!("{refused}"));
+                        let held = (&*reads, &launcher);
+                        take_refusal(&mut windows, held, &mut alerts_full, &refused);
                         continue;
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -14341,6 +14910,23 @@ mod program {
                 );
             }
 
+            let settings = *kept.borrow().live();
+            let look = (
+                themes.grounds(MANAGER_WINDOW_GROUND).popups,
+                desktop.scale(),
+            );
+            let answered = take_answers(
+                &mut windows,
+                (&opening, &launcher),
+                &mut client,
+                (&places, &declarations),
+                &reads,
+                &settings,
+                look,
+            );
+            if answered.is_err() {
+                return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+            }
             // What landed while the input was served, folded into the windows
             // it moves. `moved` keeps the loop turning while a step produced
             // work a later step adopts, as a listing a watch re-read does.
@@ -14814,7 +15400,10 @@ mod program {
                 // A malformed frame from the authenticated session is refused
                 // and the app keeps waiting (never guessed at).
                 Err(EventError::Undecodable(_)) => {}
-                Err(EventError::Refused(refused)) => report_error(&alloc::format!("{refused}")),
+                Err(EventError::Refused(refused)) => {
+                    let held = (&*reads, &launcher);
+                    take_refusal(&mut windows, held, &mut alerts_full, &refused);
+                }
                 Err(EventError::Mailbox(_)) => {
                     return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                 }

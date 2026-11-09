@@ -111,7 +111,7 @@ mod program {
             return fail(sink, reason);
         }
         let mut client = WindowClient::new(app::RtWindowTransport);
-        if client.desktop().is_err() {
+        if client.connect().is_err() {
             return fail(sink, "framestats: the desktop did not answer");
         }
         let Some(server) = client.session() else {
@@ -121,7 +121,10 @@ mod program {
             return fail(sink, "framestats: its event mailbox could not be bound");
         };
         let declared = tairix_window::info_and_quit(binding.endpoint(), AppBarClick::Open);
-        if tairix_window::declare_app_bar(&mut client, declared).is_err() {
+        // It owes no frame yet, so it may wait for the desktop's word.
+        if tairix_window::declare_app_bar(&mut client, declared).is_err()
+            || client.await_answers().is_err()
+        {
             return fail(sink, "framestats: the desktop refused it a slot");
         }
         let mut mailbox = EventMailbox::new(binding.endpoint(), server);
@@ -143,6 +146,9 @@ mod program {
                     if app::park(binding.set()).is_err() {
                         return fail(sink, "framestats: its wait-set failed");
                     }
+                    // An answer to a posted request wakes the park too, and
+                    // stays ready until it is taken in.
+                    client.reap_posted();
                 }
                 Err(_) => return fail(sink, "framestats: its event mailbox failed"),
             }

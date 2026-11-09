@@ -14,12 +14,13 @@ use tairix_abi::Errno;
 
 use crate::client::{notice_alert, WindowClient, WindowTransport};
 
-/// What [`Notices::raise`] did.
+/// What [`Notices::raise`] or [`Notices::refused`] did.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Raised {
-    /// One is up already, or none is waiting.
+    /// One is up already, none is waiting, or the refusal was not of one of
+    /// these notices.
     Nothing,
-    /// The oldest waiting is up.
+    /// The oldest waiting is asked to go up.
     Up,
     /// The application has as many alerts up as it may: the notice waits, to
     /// be raised again once one of its alerts is answered.
@@ -33,7 +34,9 @@ pub enum Raised {
 /// each keyed by the source `S` that raised it.
 #[derive(Debug)]
 pub struct Notices<S> {
-    showing: Option<u64>,
+    /// The notice up, by its alert's id: kept until it is answered, so a
+    /// refusal can put it back in line or hand it back to be stated.
+    showing: Option<(u64, S, AlertSpec)>,
     waiting: VecDeque<(S, AlertSpec)>,
 }
 
@@ -85,9 +88,10 @@ impl<S: Copy + Eq> Notices<S> {
         }
     }
 
-    /// Put the oldest waiting notice up as an alert holding `owner`, or none
-    /// for a refusal no window asked for, its answer sent to
-    /// `event_endpoint`, unless one is up already.
+    /// Ask for the oldest waiting notice to go up as an alert holding
+    /// `owner`, or none for a refusal no window asked for, its answer sent to
+    /// `event_endpoint`, unless one is up already. The desktop's refusal of
+    /// it arrives later, for [`Self::refused`].
     pub fn raise<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
@@ -102,21 +106,37 @@ impl<S: Copy + Eq> Notices<S> {
         };
         match client.open_alert(event_endpoint, owner, &notice) {
             Ok(alert) => {
-                self.showing = Some(alert);
+                self.showing = Some((alert, source, notice));
                 Raised::Up
-            }
-            Err(Errno::LimitExceeded) => {
-                self.waiting.push_front((source, notice));
-                Raised::Full
             }
             Err(err) => Raised::Refused(err, Box::new(notice)),
         }
     }
 
+    /// The desktop refused alert `alert_id` for `errno`: one of these notices
+    /// waits at the head of the line for an application holding every alert
+    /// it may, and is otherwise handed back to be stated.
+    pub fn refused(&mut self, alert_id: u64, errno: Errno) -> Raised {
+        if self.showing.as_ref().is_none_or(|(up, ..)| *up != alert_id) {
+            return Raised::Nothing;
+        }
+        let Some((_, source, notice)) = self.showing.take() else {
+            return Raised::Nothing;
+        };
+        if errno == Errno::LimitExceeded {
+            self.waiting.push_front((source, notice));
+            return Raised::Full;
+        }
+        Raised::Refused(errno, Box::new(notice))
+    }
+
     /// Alert `alert_id` was answered: whether it was this window's notice,
     /// which lets the next waiting one go up.
     pub fn answered(&mut self, alert_id: u64) -> bool {
-        let shown = self.showing == Some(alert_id);
+        let shown = self
+            .showing
+            .as_ref()
+            .is_some_and(|(up, ..)| *up == alert_id);
         if shown {
             self.showing = None;
         }

@@ -93,8 +93,8 @@ the first about id allocation, ownership, budget, and teardown-on-exit. Two
 registries that must agree is how an orphaned surface gets in. Three operations
 were added instead:
 
-* `OpenLayer` — the surface, a screen point, and a depth. Answers the ordinary
-  create reply.
+* `OpenLayer` — the surface, a screen point, and a depth, named and answered as
+  a create is.
 * `PlaceLayer` — move and re-stack together, because a companion changes both
   in one step and splitting them would let a frame land at the old depth.
 * `TakeTerrain` — pull the visible windows' rectangles, back-to-front.

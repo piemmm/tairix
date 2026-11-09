@@ -53,8 +53,8 @@ use tairix_log::{Field, FieldValue, Level, Sink};
 use crate::audit::{emit, AuditEvent};
 use crate::sharedreg::KernelHold;
 use crate::waitq::{
-    nearest_timed_deadline, park_calling_task, serve_wake_server, wait_arch, WaitQueueArch,
-    CALL_WAITQ, NO_DEADLINE,
+    nearest_timed_deadline, park_calling_task, serve_wake, wait_arch, WaitQueueArch, CALL_WAITQ,
+    NO_DEADLINE,
 };
 
 /// The most entries one listing call hands its caller before the driver is
@@ -583,7 +583,7 @@ impl ServedFs {
                 Errno::NotFound => DriverError::DeviceOffline,
                 _ => DriverError::DeviceFault,
             })?;
-        serve_wake_server(self.endpoint.server_task());
+        serve_wake(self.endpoint.id().0);
         Ok(ticket)
     }
 

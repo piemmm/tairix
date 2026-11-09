@@ -22,7 +22,7 @@ use tairix_drawing::unkept::{Lost, Unkept};
 use tairix_drawing::{
     Drawing, DrawingError, NodePath, ObjectId, Paint, PathNode, SharedSlice, Style,
 };
-use tairix_geometry::{Region, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::menu_symbol_icon;
 use tairix_input::Modifiers;
 use tairix_theme::Theme;
@@ -35,7 +35,7 @@ use crate::glyphs::{Arrived, Lettering};
 use crate::inspector::{Inspector, Shown};
 use crate::layout::Layout;
 use crate::preferences::{Handling, Preferences};
-use crate::tiles::{covering, RenderJob, TileKey, Tiles};
+use crate::tiles::{covering, RenderJob, TileKey, Tiles, TILE};
 use crate::tools::Tool;
 use crate::viewport::Viewport;
 
@@ -236,6 +236,9 @@ pub(crate) struct Live {
     pub(crate) label: &'static str,
 }
 
+/// The application's name, as window titles end.
+pub const APP_TITLE: &str = "Draw";
+
 /// What typing lands as.
 pub(crate) const TYPE_TEXT: &str = "Type text";
 
@@ -360,8 +363,17 @@ pub struct View {
     pub(crate) text: TextDefaults,
     /// Where everything it draws goes, for its window's size.
     pub(crate) layout: Layout,
-    /// The selection's bounds, the scene and selection they are of.
-    framed: core::cell::RefCell<Option<(u64, Vec<NodePath>, edit::Framed)>>,
+    /// The selection measured, and the scene and selection it is of.
+    measured: core::cell::RefCell<Option<Measured>>,
+}
+
+/// What a selection is framed by and what it paints reaches, in the
+/// drawing's space, for one scene.
+struct Measured {
+    scene: u64,
+    selection: Vec<NodePath>,
+    framed: edit::Framed,
+    reach: Bounds,
 }
 
 impl View {
@@ -436,7 +448,7 @@ impl View {
             },
             text: TextDefaults::default(),
             layout: Layout::default(),
-            framed: core::cell::RefCell::new(None),
+            measured: core::cell::RefCell::new(None),
         };
         view.layer = view.document.drawing().layers().len().saturating_sub(1);
         if !view.unkept.is_empty() {
@@ -682,15 +694,40 @@ impl View {
     /// The selection's bounds in the drawing's space, worked out once a scene.
     #[must_use]
     pub fn selection_bounds(&self) -> Bounds {
-        let mut memo = self.framed.borrow_mut();
-        if let Some((scene, selection, framed)) = &*memo {
-            if *scene == self.scene && *selection == self.selection {
-                return framed.bounds;
+        self.measured().0
+    }
+
+    /// The bounds of everything the selection paints, in the drawing's space:
+    /// what its marks reach wherever a drag puts it.
+    pub(crate) fn selection_reach(&self) -> Bounds {
+        self.measured().1
+    }
+
+    /// The selection's bounds and its reach, worked out once a scene.
+    fn measured(&self) -> (Bounds, Bounds) {
+        let mut memo = self.measured.borrow_mut();
+        if let Some(measured) = &*memo {
+            if measured.scene == self.scene && measured.selection == self.selection {
+                return (measured.framed.bounds, measured.reach);
             }
         }
-        let framed = edit::framed(self.shown(), &self.selection, &Lettering::new(Arrived));
-        *memo = copied_paths(&self.selection).map(|selection| (self.scene, selection, framed));
-        framed.bounds
+        let drawing = self.shown();
+        let framed = edit::framed(drawing, &self.selection, &Lettering::new(Arrived));
+        let reach = self
+            .selection
+            .iter()
+            .filter_map(|path| {
+                let node = drawing.node_at(path)?;
+                Some(node.bounds().transformed(edit::parent_space(drawing, path)))
+            })
+            .fold(Bounds::EMPTY, Bounds::union);
+        *memo = copied_paths(&self.selection).map(|selection| Measured {
+            scene: self.scene,
+            selection,
+            framed,
+            reach,
+        });
+        (framed.bounds, reach)
     }
 
     /// How the tiles in view are drawn.
@@ -748,23 +785,32 @@ impl View {
     ) {
         let visible = self.visible_tiles();
         for (key, surface) in tiles {
-            self.tiles.landed(scene, key, surface, &visible);
+            if self.tiles.landed(scene, key, surface, &visible) {
+                let (x, y) = self.tile_origin(&key);
+                damage.add(Rect::new(x, y, TILE, TILE).intersection(&self.layout.canvas));
+            }
         }
         self.tiles.refused(keys);
-        damage.add(self.layout.canvas);
         // Glyphs that arrived with the tiles may frame text afresh; bounds
         // that waited on none stand.
         let waiting = self
-            .framed
+            .measured
             .get_mut()
             .as_ref()
-            .is_none_or(|(_, _, framed)| !framed.complete);
+            .is_none_or(|measured| !measured.framed.complete);
+        let reframed = waiting && !self.selection.is_empty();
         if waiting {
-            *self.framed.get_mut() = None;
-            if !self.selection.is_empty() {
-                self.refresh_inspector();
-                damage.add(self.layout.panel);
-            }
+            *self.measured.get_mut() = None;
+        }
+        if reframed {
+            self.refresh_inspector();
+            damage.add(self.layout.panel);
+            damage.add(self.layout.selected);
+        }
+        // The frame and the caret are drawn by the glyphs that have arrived,
+        // which may since have moved them from where they were last drawn.
+        if reframed || self.typing.is_some() {
+            damage.add(self.layout.canvas);
         }
     }
 
@@ -1133,10 +1179,13 @@ impl View {
 
     /// Hold the history, and the tiles beyond those in view, to what memory
     /// pressure `band` allows.
-    pub fn adopt_pressure(&mut self, band: tairix_reclaim::PressureBand) {
+    pub fn adopt_pressure(&mut self, band: tairix_reclaim::PressureBand, damage: &mut Region) {
         self.document.adopt_pressure(band);
         let visible = self.visible_tiles();
         self.tiles.adopt_pressure(band, &visible);
+        // What stood in for tiles not yet drawn may have been let go, and the
+        // glyphs the caret and the frame are drawn by trimmed with it.
+        damage.add(self.layout.canvas);
     }
 
     /// Arm the deadlines the held controls call for, now it is `now_ns`.

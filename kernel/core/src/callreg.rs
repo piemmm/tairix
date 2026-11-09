@@ -220,7 +220,7 @@ pub fn take_down(id: EndpointId, audit: &dyn Sink) -> bool {
     };
     let destroyed = endpoint.destroy(audit);
     crate::waitq::call_wake_named(destroyed.tasks());
-    crate::waitq::serve_wake_server(endpoint.server_task());
+    crate::waitq::serve_wake(id.0);
     release_callers(destroyed);
     true
 }
@@ -256,9 +256,9 @@ impl From<RecvCall> for Receive<ReceivedCall> {
 /// Receive, as server task `server`, the next call posted to `endpoint`,
 /// each look at its queue made by `receive`. A non-`blocking` receive answers
 /// an empty queue at once; a blocking one parks through `park` on
-/// [`SERVE_WAITQ`](crate::waitq::SERVE_WAITQ), registered before its first
-/// look so a post in between still wakes it, until a call is posted. The
-/// server is recorded on the endpoint first, so a post wakes it alone.
+/// [`SERVE_WAITQ`](crate::waitq::SERVE_WAITQ) under the endpoint's key,
+/// registered before its first look so a post in between still wakes it,
+/// until a call is posted.
 ///
 /// # Errors
 ///
@@ -276,9 +276,9 @@ pub fn receive_call<T>(
     abandoned: &dyn Fn() -> bool,
     mut receive: impl FnMut() -> Result<Receive<T>, Errno>,
 ) -> Result<T, Errno> {
-    endpoint.record_server_task(server);
+    let key = crate::waitq::endpoint_key(endpoint.id().0);
     if blocking {
-        crate::waitq::SERVE_WAITQ.register(server, crate::waitq::NO_DEADLINE)?;
+        crate::waitq::SERVE_WAITQ.register_keyed(key, server, crate::waitq::NO_DEADLINE)?;
     }
     let received = loop {
         if endpoint.is_closed() {
@@ -301,7 +301,7 @@ pub fn receive_call<T>(
         }
     };
     if blocking {
-        crate::waitq::SERVE_WAITQ.deregister(server);
+        crate::waitq::SERVE_WAITQ.deregister_keyed(key, server);
     }
     received
 }
@@ -809,7 +809,6 @@ mod tests {
         let server = crate::test_boot::claim_peer_task();
         let ep = endpoint(0xCA11_8300, owner);
         register(Arc::clone(&ep), &NullSink).expect("bound");
-        ep.record_server_task(server);
         let caps = TaskCapabilities::derive(
             ProcessId(caller),
             UserId(1),
@@ -830,14 +829,15 @@ mod tests {
         crate::waitq::CALL_WAITQ
             .register(poster, crate::waitq::NO_DEADLINE)
             .expect("filed");
+        let key = crate::waitq::endpoint_key(ep.id().0);
         crate::waitq::SERVE_WAITQ
-            .register(server, crate::waitq::NO_DEADLINE)
+            .register_keyed(key, server, crate::waitq::NO_DEADLINE)
             .expect("filed");
         let _ = crate::test_boot::take_unparked();
         assert!(take_down(ep.id(), &NullSink));
         let woken = crate::test_boot::take_unparked();
         crate::waitq::CALL_WAITQ.deregister(poster);
-        crate::waitq::SERVE_WAITQ.deregister(server);
+        crate::waitq::SERVE_WAITQ.deregister_keyed(key, server);
         assert!(woken.contains(&poster), "its caller wakes");
         assert!(woken.contains(&server), "its server wakes");
         assert!(!contains(ep.id()));
@@ -896,7 +896,7 @@ mod tests {
             &NullSink,
         )
         .expect("posted");
-        crate::waitq::serve_wake_server(ep.server_task());
+        crate::waitq::serve_wake(ep.id().0);
         let id = server.id();
         assert_eq!(server.join(), Ok(std::vec![b'q']));
         assert_eq!(boot.waits(id), 1, "the receive parked once, until the post");

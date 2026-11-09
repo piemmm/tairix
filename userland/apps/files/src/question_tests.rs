@@ -2,7 +2,9 @@ use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
 };
 
-use super::{Answer, Question};
+use tairix_abi::Errno;
+
+use super::{Answer, Question, Refusal};
 
 const YES: usize = 1;
 
@@ -115,4 +117,35 @@ fn a_withdrawn_question_hands_back_what_it_would_have_confirmed() {
     question
         .ask(spec("Delete “a”?"), YES, "delete a")
         .expect("a new question may be asked");
+}
+
+/// An alert the desktop refused for want of room puts the question back to
+/// wait, saying what it said, to be asked again once an alert is answered.
+#[test]
+fn a_question_refused_for_room_waits_to_go_up_again_as_it_was() {
+    let mut question = up("eject game", 7);
+    assert_eq!(question.refused(8, Errno::LimitExceeded), Refusal::Other);
+    assert_eq!(question.refused(7, Errno::LimitExceeded), Refusal::Waiting);
+    assert_eq!(question.is_up(), Some(false), "waiting to go up again");
+    assert_eq!(
+        question.waiting().map(AlertSpec::headline),
+        Some("Eject “game”?")
+    );
+    question.raised(9);
+    assert_eq!(
+        question.answer(9, chosen(1)),
+        Answer::Confirmed("eject game")
+    );
+}
+
+/// An alert the desktop will not show withdraws the question, handing back
+/// what it would have confirmed, which is then not carried out.
+#[test]
+fn a_question_the_desktop_will_not_ask_is_withdrawn() {
+    let mut question = up("eject game", 7);
+    assert_eq!(
+        question.refused(7, Errno::NotSupported),
+        Refusal::Withdrawn("eject game")
+    );
+    assert!(!question.is_pending());
 }

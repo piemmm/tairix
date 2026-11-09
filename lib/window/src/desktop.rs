@@ -1,7 +1,7 @@
 //! The app-side view of the desktop a window is displayed on.
 //!
-//! [`Desktop`] is what an application holds after asking the session
-//! ([`WindowClient::desktop`](crate::WindowClient::desktop)): the screen
+//! [`Desktop`] is what an application holds once it has connected to the
+//! session ([`WindowClient::connect`](crate::WindowClient::connect)): the screen
 //! extent as geometry, the UI scale as a [`Scale`] rather than a bare
 //! percentage, the active [`Appearance`], and the [`RefreshRate`] it
 //! composes frames at. Handing it each state the desktop notice publishes

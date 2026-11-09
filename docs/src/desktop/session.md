@@ -1092,8 +1092,8 @@ definition serves both directions, so an answer and an announcement can never
 disagree:
 
 - `ShellWindowHost`'s `WindowHost::desktop` answers an application's
-  `QueryDesktop`, which it issues before creating its first window. The query
-  is read-only and carries no capability: the reply describes the caller's own
+  `Connect`, which it makes before creating its first window. The record is
+  read-only and carries no capability: the reply describes the caller's own
   seat, names no other principal's data, and grants no authority (`AGENTS.md`
   §5.2). A compositor whose output the record cannot describe — a zero-sized
   screen, a density outside the percentage the wire carries — refuses rather

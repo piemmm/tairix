@@ -37,10 +37,7 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::window_ipc::{
-        LayerDepth, PointerAction, TerrainPlate, WindowEvent, WindowSizing,
-        DESKTOP_LAYER_MAX_PLATES,
-    };
+    use tairix_abi::window_ipc::{LayerDepth, PointerAction, WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId};
     use tairix_appconf::Keys;
     use tairix_appdata::{Opening, PublishAnswer, PublishJob, PublishWorker, RtHost, Settings};
@@ -64,8 +61,8 @@ mod program {
     use tairix_util::mathf;
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        pointer_input_events, pointer_point, Desktop, EventError, EventMailbox, WindowClient,
-        WindowEvents,
+        pointer_input_events, pointer_point, Answer, Desktop, EventError, EventMailbox,
+        WindowClient, WindowEvents,
     };
 
     /// The wait-set token the saved-mood worker's answer wake arrives under.
@@ -130,18 +127,20 @@ mod program {
         /// Where he is and where he is going: the whole of the movement, and
         /// host-tested, because this binary is reachable by no test at all.
         roam: Roam,
-        /// The terrain generation last pulled, so a pull is made only when
-        /// the answer would differ.
+        /// The terrain generation last read, so it is asked for only when the
+        /// answer would differ.
         terrain_seen: Option<u64>,
+        /// The generation the terrain was last asked for under.
+        terrain_asked: Option<u64>,
         /// Whether a frame of him has reached the desktop yet.
         shown: bool,
     }
 
     impl Loose {
-        /// Open the layer surface and put Cinder on the desktop at `at`.
+        /// Open the layer surface and put Cinder on the desktop at `at`; the
+        /// desktop's refusal arrives later ([`refusal_of`]).
         fn open(
             client: &mut WindowClient<tairix_window::app::RtWindowTransport>,
-            server: ProcId,
             event_endpoint: u64,
             scale: Scale,
             at: Ground,
@@ -154,25 +153,30 @@ mod program {
             let origin = companion_origin(at, side);
             let pane = WindowPane::open_layer(
                 client,
-                server,
                 event_endpoint,
                 &mode,
                 (origin.x, origin.y),
                 LayerDepth::Below,
             )
-            .map_err(|err| match err.errno() {
-                Errno::PermissionDenied => Refusal::NotPermitted,
-                Errno::LimitExceeded => Refusal::SeatFull,
-                Errno::OutOfMemory => Refusal::NoMemory,
-                _ => Refusal::NoDesktop,
-            })?;
+            .map_err(|err| refusal_of(err.errno()))?;
             Ok(Self {
                 pane,
                 surface,
                 roam: Roam::new(at),
                 terrain_seen: None,
+                terrain_asked: None,
                 shown: false,
             })
+        }
+    }
+
+    /// Why the desktop will not have Cinder, as `errno` says.
+    const fn refusal_of(errno: Errno) -> Refusal {
+        match errno {
+            Errno::PermissionDenied => Refusal::NotPermitted,
+            Errno::LimitExceeded => Refusal::SeatFull,
+            Errno::OutOfMemory => Refusal::NoMemory,
+            _ => Refusal::NoDesktop,
         }
     }
 
@@ -390,10 +394,16 @@ mod program {
 
         let (pen_w, pen_h) = pen_client(desktop.scale());
         let mode = app::mode_for(pen_w, pen_h);
-        let server = match window.open(event_endpoint, &mode, "Cinder", pen_sizing(desktop.scale()))
+        if let Err(err) = window.open(event_endpoint, &mode, "Cinder", pen_sizing(desktop.scale()))
         {
-            Ok(server) => server,
-            Err(err) => return app::fail(APP_NAME, err.code(), err),
+            return app::fail(APP_NAME, err.code(), err);
+        }
+        let Some(server) = window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
         let mut pen_layout = layout::pen(
             Rect::new(0, 0, pen_w, pen_h),
@@ -406,13 +416,7 @@ mod program {
         // is what "where you left him" means. A refusal here is stated and
         // the pen carries on.
         if saved.was_loose {
-            let_out(
-                &mut companion,
-                &mut window,
-                server,
-                event_endpoint,
-                &desktop,
-            );
+            let_out(&mut companion, &mut window, event_endpoint, &desktop);
         }
 
         let code = run_loop(
@@ -439,18 +443,11 @@ mod program {
     fn let_out(
         companion: &mut Companion,
         window: &mut AppWindow,
-        server: ProcId,
         event_endpoint: u64,
         desktop: &Desktop,
     ) {
         let start = start_point(desktop);
-        match Loose::open(
-            window.client(),
-            server,
-            event_endpoint,
-            desktop.scale(),
-            start,
-        ) {
+        match Loose::open(window.client(), event_endpoint, desktop.scale(), start) {
             Ok(loose) => {
                 companion.loose = Some(loose);
                 companion.pen.let_out(None);
@@ -497,12 +494,11 @@ mod program {
         desktop: &Desktop,
         pen_layout: &PenLayout,
         event_endpoint: u64,
-        server: ProcId,
     ) {
         if companion.loose.is_some() {
             put_away(companion, window, pen_layout);
         } else {
-            let_out(companion, window, server, event_endpoint, desktop);
+            let_out(companion, window, event_endpoint, desktop);
         }
         declare_app_bar(window.client(), event_endpoint, companion.loose.is_some());
         companion.dirty = true;
@@ -534,12 +530,6 @@ mod program {
         let mut events = WindowEvents::new(EventMailbox::new(event_endpoint, server));
         let mut pen_open = true;
         let mut advanced_at = tairix_rt::clock_get();
-        let mut plates = [TerrainPlate {
-            x: 0,
-            y: 0,
-            width_px: 1,
-            height_px: 1,
-        }; DESKTOP_LAYER_MAX_PLATES as usize];
 
         loop {
             let frame_ns = desktop.refresh().frame_ns();
@@ -596,6 +586,18 @@ mod program {
                     Err(EventError::Undecodable(_)) => continue,
                     Err(EventError::Refused(refused)) => {
                         app::report(APP_NAME, refused);
+                        if window.refused(&refused) {
+                            pen_open = false;
+                        }
+                        let layer = companion.loose.as_ref().map(|loose| loose.pane.id());
+                        if layer.is_some_and(|layer| app::refused_create(&refused, layer)) {
+                            // He was never let out: back in the pen, saying why.
+                            companion.loose = None;
+                            companion.pen.put_away(pen_layout);
+                            companion.pen.let_out(Some(refusal_of(refused.errno)));
+                            declare_app_bar(window.client(), event_endpoint, false);
+                            companion.dirty = true;
+                        }
                         continue;
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -640,7 +642,6 @@ mod program {
                                 desktop,
                                 pen_layout,
                                 event_endpoint,
-                                server,
                             );
                         }
                     }
@@ -668,7 +669,7 @@ mod program {
                         // one already held.
                         if companion.loose.as_ref().and_then(|l| l.terrain_seen) != Some(generation)
                         {
-                            pull_terrain(companion, window.client(), &mut plates, generation);
+                            ask_terrain(companion, window.client(), generation);
                         }
                     }
                     WindowEvent::LayerPointer { x, y, .. } => {
@@ -694,7 +695,6 @@ mod program {
                                 desktop,
                                 pen_layout,
                                 event_endpoint,
-                                server,
                             );
                         }
                     }
@@ -702,6 +702,7 @@ mod program {
                 }
             }
 
+            take_answers(companion, window);
             if companion.dirty && pen_open {
                 present_pen(
                     companion,
@@ -714,25 +715,45 @@ mod program {
         }
     }
 
-    /// Pull the terrain and adopt it.
-    fn pull_terrain(
+    /// Ask for the terrain of `generation`, adopted once it lands.
+    fn ask_terrain(
         companion: &mut Companion,
         client: &mut WindowClient<tairix_window::app::RtWindowTransport>,
-        plates: &mut [TerrainPlate],
         generation: u64,
     ) {
         let Some(loose) = companion.loose.as_mut() else {
             return;
         };
-        match client.take_terrain(loose.pane.id(), plates) {
-            Ok(answer) => {
-                companion.world.adopt_terrain(answer);
-                loose.terrain_seen = Some(generation);
-            }
-            Err(_) => {
-                // A refused pull leaves the terrain he already knows, which is
-                // stale rather than wrong: he walks the desktop he last saw.
-                loose.terrain_seen = None;
+        if client.ask_terrain(loose.pane.id()).is_ok() {
+            loose.terrain_asked = Some(generation);
+        }
+    }
+
+    /// Take every answer that has landed: the terrain asked for, and a frame
+    /// given back to his surface, which presents what was drawn behind it;
+    /// the pen's the shell presents itself.
+    fn take_answers(companion: &mut Companion, window: &mut AppWindow) {
+        while let Some(answer) = window.take_answer() {
+            let Some(loose) = companion.loose.as_mut() else {
+                continue;
+            };
+            match answer {
+                Answer::Terrain { window_id, plates } if window_id == loose.pane.id() => {
+                    match plates {
+                        Ok(plates) => {
+                            companion.world.adopt_terrain(&plates);
+                            loose.terrain_seen = loose.terrain_asked;
+                        }
+                        // A refused read leaves the terrain he already knows,
+                        // which is stale rather than wrong: he walks the
+                        // desktop he last saw.
+                        Err(_) => loose.terrain_seen = None,
+                    }
+                }
+                Answer::FrameReturned { window_id } if window_id == loose.pane.id() => {
+                    let _ = loose.pane.present_deferred(window.client(), &loose.surface);
+                }
+                _ => {}
             }
         }
     }
@@ -820,7 +841,7 @@ mod program {
         let (w, h) = pen_client(desktop.scale());
         let mode = app::mode_for(w, h);
         match window.open(event_endpoint, &mode, "Cinder", pen_sizing(desktop.scale())) {
-            Ok(_) => {
+            Ok(()) => {
                 *pen_layout = layout::pen(Rect::new(0, 0, w, h), desktop.scale(), theme);
                 true
             }

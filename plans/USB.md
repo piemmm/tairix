@@ -371,9 +371,10 @@ nothing of the VL805's own behaviour.
     serves or an `IrqHandle` it bound. `WAITSET_CTL(Add)` resolves and
     **owner-checks that resource against the kernel-trusted caller before
     recording it** (no ambient authority): an unowned endpoint / unbound IRQ
-    fails closed `NotFound`. `WAITSET_WAIT` parks the caller on the shared
-    `SERVE_WAITQ` + `IRQ_WAITQ` with the timeout as the deadline (woken by an
-    endpoint post, a member line firing, or the timed sweep — never a spin),
+    fails closed `NotFound`. `WAITSET_WAIT` parks the caller on `SERVE_WAITQ`
+    under each member endpoint's key and on `IRQ_WAITQ` with the timeout as
+    the deadline (woken by an endpoint post, a member line firing, or the
+    timed sweep — never a spin),
     re-arms each IRQ member's line before parking, re-checks each member
     against the caller as it scans, writes the ready member's token through the
     validated user boundary **before** consuming the IRQ edge (a faulting

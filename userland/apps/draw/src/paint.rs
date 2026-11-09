@@ -12,21 +12,21 @@ use tairix_bezier::flatten::flatten_cubic;
 use tairix_bezier::{Affine, Bounds, Path, Point, Segment};
 use tairix_colour::Rgba;
 use tairix_controls::{blend_area, fill_area, withheld, Ruler, RulerAxis, StatusBand, StatusTone};
-use tairix_drawing::{GradientKind, GuideAxis, Kind, Node, Paint, Shape, PAPER_WHITE};
+use tairix_drawing::{GradientKind, GuideAxis, Kind, Node, Paint, PathNode, Shape, PAPER_WHITE};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Palette, Theme};
-use tairix_util::mathf::{fabs, floor, fmin, real, round, round_i32};
+use tairix_util::mathf::{ceil, clamp, fabs, floor, fmin, real, round, round_i32};
 
 use crate::edit;
 use crate::glyphs::{Arrived, Lettering};
 use crate::input::{handle_point, handles};
 use crate::inspector::{Face, Shown};
 use crate::layout::{px, Faces, Layout};
-use crate::tiles::TILE;
-use crate::tools::{self, Constraint, Tool};
-use crate::view::{Gesture, Grip, View};
+use crate::tiles::{TileKey, TILE};
+use crate::tools::{self, Tool};
+use crate::view::{Gesture, Grip, Typing, View};
 use crate::viewport::readout;
 
 /// The most points a frame's previews flatten, past which what is left is
@@ -134,15 +134,13 @@ impl View {
                 Color::from(paper(drawing.page())),
             );
         }
-        let origin = self.viewport.origin();
         let stand_in = self.tiles.stand_in(self.show.outline);
         let onto = stand_in
             .as_ref()
             .map(|stand_in| stand_in.onto(self.viewport.pixels()));
         for key in self.visible_tiles() {
             let at = key.origin();
-            let x = self.layout.canvas.left() + round_i32(origin.x + at.x);
-            let y = self.layout.canvas.top() + round_i32(origin.y + at.y);
+            let (x, y) = self.tile_origin(&key);
             let place = Rect::new(x, y, TILE, TILE).intersection(&self.layout.canvas);
             if place.is_empty() {
                 continue;
@@ -191,6 +189,17 @@ impl View {
             }
         }
         self.overlay(surface, palette);
+    }
+
+    /// Where the tile `key`'s top-left corner stands in the window.
+    pub(crate) fn tile_origin(&self, key: &TileKey) -> (i32, i32) {
+        let origin = self.viewport.origin();
+        let at = key.origin();
+        let canvas = self.layout.canvas;
+        (
+            canvas.left().saturating_add(round_i32(origin.x + at.x)),
+            canvas.top().saturating_add(round_i32(origin.y + at.y)),
+        )
     }
 
     /// The window's device rectangle over `bounds` of the drawing.
@@ -251,11 +260,13 @@ impl View {
     }
 
     /// What the hand is doing, over the tiles.
+    /// The map from the drawing onto the window the overlay is drawn through.
+    pub(crate) fn overlay_map(&self) -> Affine {
+        self.viewport.to_canvas().then(canvas_map(&self.layout))
+    }
+
     fn overlay(&self, surface: &mut Surface, palette: &Palette) {
-        let to_window = self.viewport.to_canvas().then(Affine::translate(
-            f64::from(self.layout.canvas.left()),
-            f64::from(self.layout.canvas.top()),
-        ));
+        let to_window = self.overlay_map();
         let pen = Pen::hairline(&self.layout, Color::from(palette.accent));
         self.selection_marks(surface, to_window, pen);
         if self.tool == Tool::Nodes {
@@ -326,17 +337,23 @@ impl View {
     /// a linear one from its start to its end, a radial one from its centre
     /// out to its circle.
     fn gradient_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
+        if let Some((course, placed)) = self.gradient_course(to_window) {
+            gradient_line(surface, &self.layout, course, placed, pen);
+        }
+    }
+
+    /// The course of the gradient the Style tab edits, from its start to its
+    /// end, and the map placing it in the window.
+    fn gradient_course(&self, to_window: Affine) -> Option<((Point, Point), Affine)> {
         let [path] = self.selection.as_slice() else {
-            return;
+            return None;
         };
         let drawing = self.shown();
-        let Some(node) = drawing.node_at(path) else {
-            return;
-        };
+        let node = drawing.node_at(path)?;
         let Some(Paint::Gradient(gradient)) =
             node.style().map(|style| self.inspector.target().of(style))
         else {
-            return;
+            return None;
         };
         let course = match gradient.kind {
             GradientKind::Linear { start, end } => (start, end),
@@ -349,46 +366,24 @@ impl View {
             .then(node.transform())
             .then(edit::parent_space(drawing, path))
             .then(to_window);
-        gradient_line(surface, &self.layout, course, placed, pen);
+        Some((course, placed))
     }
 
     /// What the gesture under way would make: a marquee, a zoom area, a new
     /// shape, a freehand line or a guide.
     fn gesture_preview(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
-        let constraint = Constraint {
-            even: self.modifiers.shift,
-            centred: self.modifiers.alt,
-        };
         let mut budget = PREVIEW_POINTS;
         match &self.gesture {
             Some(Gesture::Marquee { from, to, .. }) => {
                 stroke_bounds(surface, Bounds::new(*from, *to), to_window, pen);
             }
             Some(Gesture::Zoom { from, to }) => {
-                let canvas = Affine::translate(
-                    f64::from(self.layout.canvas.left()),
-                    f64::from(self.layout.canvas.top()),
-                );
+                let canvas = canvas_map(&self.layout);
                 stroke_bounds(surface, Bounds::new(*from, *to), canvas, pen);
             }
             Some(Gesture::Create { from, to }) => {
-                let shape = match self.tool {
-                    Tool::Rectangle => {
-                        Some(tools::rectangle(*from, *to, constraint, self.corner_radius))
-                    }
-                    Tool::Ellipse => Some(tools::ellipse(*from, *to, constraint)),
-                    Tool::Star => Some(tools::star(
-                        *from,
-                        *to,
-                        self.star.points,
-                        self.star.inner,
-                        self.star.polygon,
-                        constraint,
-                    )),
-                    Tool::Line => tools::line(*from, tools::line_end(*from, *to, constraint)).ok(),
-                    _ => None,
-                };
-                if let Some(path) = shape.and_then(|shape: Shape| shape.to_path().ok()) {
+                let shape = self.created(*from, *to).and_then(Result::ok);
+                if let Some(path) = shape.and_then(|shape| shape.to_path().ok()) {
                     stroke_path(surface, &path, to_window, pen, &mut budget);
                 }
             }
@@ -414,7 +409,7 @@ impl View {
                 line.finish();
             }
             Some(Gesture::Gradient { from, to }) => {
-                let end = tools::line_end(*from, *to, constraint);
+                let end = tools::line_end(*from, *to, self.constraint());
                 gradient_line(surface, &self.layout, (*from, end), to_window, pen);
             }
             Some(Gesture::Guide { horizontal, at, .. }) => {
@@ -442,10 +437,8 @@ impl View {
     fn pen_marks(&self, surface: &mut Surface, to_window: Affine, pen: Pen) {
         if !self.pen.is_empty() {
             let mut nodes = self.pen.clone();
-            if let Some(Gesture::PenHandle { to }) = &self.gesture {
-                if let Some(last) = nodes.last_mut() {
-                    *last = tools::pen_node(last.point, Some(*to));
-                }
+            if let (Some(last), Some(newest)) = (nodes.last_mut(), self.pen_newest()) {
+                *last = newest;
             }
             if let Some(path) = tools::pen_path(&nodes, false)
                 .ok()
@@ -460,6 +453,16 @@ impl View {
                 fill_area(surface, square(&self.layout, at, 6), pen.colour);
             }
         }
+    }
+
+    /// The newest node of the path the pen is setting, as a drag of its
+    /// handle under way shapes it.
+    fn pen_newest(&self) -> Option<PathNode> {
+        let newest = *self.pen.last()?;
+        Some(match &self.gesture {
+            Some(Gesture::PenHandle { to }) => tools::pen_node(newest.point, Some(*to)),
+            _ => newest,
+        })
     }
 
     /// The path a node drag under way would make of the selected one, and
@@ -533,16 +536,25 @@ impl View {
         }
     }
 
-    /// Where typing goes: the selection's characters marked, then a caret
-    /// standing across the line where the text sets its next character —
-    /// turned with a path it is set along — by the glyphs that have arrived.
+    /// Where typing goes, its marks painted.
     fn caret(
         &self,
         surface: &mut Surface,
-        typing: &crate::view::Typing,
+        typing: &Typing,
         to_window: Affine,
         (pen, marked): (Pen, Color),
     ) {
+        self.typing_marks(typing, to_window, |mark| match mark {
+            TypingMark::Band(band) => surface.fill_polygon_subpixel(&band.map(sub_pixel), marked),
+            TypingMark::Caret([top, bottom]) => pen.heavier(2).line(surface, top, bottom),
+        });
+    }
+
+    /// The marks typing shows, in the order they are drawn: a band across
+    /// each character selected, then a caret standing across the line where
+    /// the text sets its next character — turned with a path it is set along
+    /// — by the glyphs that have arrived.
+    fn typing_marks(&self, typing: &Typing, to_window: Affine, mut mark: impl FnMut(TypingMark)) {
         let drawing = self.shown();
         let Some(node) = drawing.node_at(&typing.path) else {
             return;
@@ -569,7 +581,7 @@ impl View {
                     if pair[0].offset < span.start || pair[0].offset >= span.end {
                         continue;
                     }
-                    let quad = [
+                    let band = [
                         (pair[0], -CARET_ABOVE),
                         (pair[1], -CARET_ABOVE),
                         (pair[1], CARET_BELOW),
@@ -578,9 +590,9 @@ impl View {
                     .map(|(pen, across)| {
                         let up = Point::new(-pen.direction.y, pen.direction.x)
                             * (across * pen.face.size);
-                        sub_pixel(placed.map(pen.point + up))
+                        placed.map(pen.point + up)
                     });
-                    surface.fill_polygon_subpixel(&quad, marked);
+                    mark(TypingMark::Band(band));
                 }
             }
         }
@@ -588,18 +600,259 @@ impl View {
             return;
         };
         let across = Point::new(-caret.direction.y, caret.direction.x) * caret.size;
-        let top = placed.map(caret.pen - across * CARET_ABOVE);
-        let bottom = placed.map(caret.pen + across * CARET_BELOW);
-        pen.heavier(2).line(surface, top, bottom);
+        mark(TypingMark::Caret([
+            placed.map(caret.pen - across * CARET_ABOVE),
+            placed.map(caret.pen + across * CARET_BELOW),
+        ]));
+    }
+
+    /// What the marks of the gesture under way cover in the window, their
+    /// lines' and marks' reach included: where a move during it repaints,
+    /// both where they were and where they now are. `None` with no gesture,
+    /// or one that marks nothing on the canvas.
+    pub(crate) fn gesture_extent(&self) -> Option<Rect> {
+        let to_window = self.overlay_map();
+        let marked = match self.gesture.as_ref()? {
+            Gesture::Pan { .. } => return None,
+            gesture @ (Gesture::Move { .. } | Gesture::Scale { .. } | Gesture::Rotate { .. }) => {
+                self.selection_marked(self.gesture_map(gesture), to_window)
+            }
+            Gesture::Node { grip, to } => self
+                .node_marked(Some((*grip, *to)), to_window)
+                .union(self.preview_marked(to_window)),
+            Gesture::PenHandle { .. } => self.pen_end_marked(to_window),
+            Gesture::TextSelect => self.typing_marked(to_window),
+            Gesture::Marquee { .. }
+            | Gesture::Zoom { .. }
+            | Gesture::Create { .. }
+            | Gesture::Freehand { .. }
+            | Gesture::Gradient { .. }
+            | Gesture::Guide { .. } => self.preview_marked(to_window),
+        };
+        self.marks_rect(marked)
+    }
+
+    /// What the whole overlay covers in the window, as
+    /// [`gesture_extent`](Self::gesture_extent) measures a gesture's marks:
+    /// where a change to the selection, the tool in hand or what it is doing
+    /// repaints, both where the marks were and where they now are.
+    pub(crate) fn overlay_extent(&self) -> Option<Rect> {
+        let to_window = self.overlay_map();
+        let map = self
+            .gesture
+            .as_ref()
+            .and_then(|gesture| self.gesture_map(gesture));
+        let mut marked = self
+            .selection_marked(map, to_window)
+            .union(self.preview_marked(to_window))
+            .union(self.pen_marked(to_window))
+            .union(self.typing_marked(to_window));
+        if self.tool == Tool::Nodes {
+            let held = match &self.gesture {
+                Some(Gesture::Node { grip, to }) => Some((*grip, *to)),
+                _ => None,
+            };
+            marked = marked.union(self.node_marked(held, to_window));
+        }
+        if self.tool == Tool::Gradient && self.gesture.is_none() {
+            if let Some(((start, end), placed)) = self.gradient_course(to_window) {
+                marked = marked.union(Bounds::new(placed.map(start), placed.map(end)));
+            }
+        }
+        self.marks_rect(marked)
+    }
+
+    /// The canvas rectangle `marked`, in window positions, covers once the
+    /// lines and marks drawn through it reach past it, or `None` where it
+    /// covers none of the canvas.
+    pub(crate) fn marks_rect(&self, marked: Bounds) -> Option<Rect> {
+        if !marked.is_finite() {
+            return None;
+        }
+        let reach = f64::from(self.layout.length(OVERLAY_REACH));
+        let canvas = self.layout.canvas;
+        let across = |at: f64| {
+            round_i32(clamp(
+                at,
+                f64::from(canvas.left()),
+                f64::from(canvas.right()),
+            ))
+        };
+        let down = |at: f64| {
+            round_i32(clamp(
+                at,
+                f64::from(canvas.top()),
+                f64::from(canvas.bottom()),
+            ))
+        };
+        let (left, right) = (
+            across(floor(marked.min.x - reach)),
+            across(ceil(marked.max.x + reach)),
+        );
+        let (top, bottom) = (
+            down(floor(marked.min.y - reach)),
+            down(ceil(marked.max.y + reach)),
+        );
+        let width = u32::try_from(right.saturating_sub(left)).ok()?;
+        let height = u32::try_from(bottom.saturating_sub(top)).ok()?;
+        let rect = Rect::new(left, top, width, height);
+        (!rect.is_empty()).then_some(rect)
+    }
+
+    /// What the selection's marks cover in the window: each object where
+    /// `map` — the move, scale or turn a drag under way makes — puts it,
+    /// outlined or framed by what it paints, and the frame and handles where
+    /// no map does.
+    fn selection_marked(&self, map: Option<Affine>, to_window: Affine) -> Bounds {
+        if self.selection.is_empty() {
+            return Bounds::EMPTY;
+        }
+        let placed = map.unwrap_or(Affine::IDENTITY).then(to_window);
+        let framed = self.selection_bounds().transformed(placed);
+        match map {
+            None => framed,
+            Some(_) => framed.union(self.selection_reach().transformed(placed)),
+        }
+    }
+
+    /// What the selected path's node marks cover in the window: every node
+    /// and handle, the one `held` — a grip dragged to a point — where the
+    /// drag has it.
+    fn node_marked(&self, held: Option<(Grip, Point)>, to_window: Affine) -> Bounds {
+        let drawing = self.shown();
+        let Some((path, node)) = self
+            .selection
+            .first()
+            .and_then(|path| Some((path, drawing.node_at(path)?)))
+        else {
+            return Bounds::EMPTY;
+        };
+        let Some(shape) = crate::input::node_path(node) else {
+            return Bounds::EMPTY;
+        };
+        let placed = node
+            .transform()
+            .then(edit::parent_space(drawing, path))
+            .then(to_window);
+        let moved =
+            held.and_then(|(grip, to)| crate::input::gripped(node, drawing, path, grip, to));
+        let nodes = shape
+            .contours
+            .iter()
+            .flat_map(|contour| contour.nodes.iter().copied())
+            .chain(moved);
+        Bounds::from_points(nodes.flat_map(|node| node_points(node).map(|point| placed.map(point))))
+    }
+
+    /// What the preview of the gesture under way covers in the window, as
+    /// [`gesture_preview`](Self::gesture_preview) draws it.
+    fn preview_marked(&self, to_window: Affine) -> Bounds {
+        match &self.gesture {
+            Some(Gesture::Marquee { from, to, .. }) => {
+                Bounds::new(*from, *to).transformed(to_window)
+            }
+            Some(Gesture::Zoom { from, to }) => {
+                Bounds::new(*from, *to).transformed(canvas_map(&self.layout))
+            }
+            Some(Gesture::Create { from, to }) => self
+                .created(*from, *to)
+                .and_then(Result::ok)
+                .and_then(|shape| shape.to_path().ok())
+                .map_or(Bounds::EMPTY, |path| path.bounds().transformed(to_window)),
+            Some(Gesture::Node { grip, to }) => self
+                .node_moving(*grip, *to, to_window)
+                .map_or(Bounds::EMPTY, |(moved, placed)| {
+                    moved.local_bounds().transformed(placed)
+                }),
+            Some(Gesture::Freehand { points }) => {
+                Bounds::from_points(points.iter().map(|point| to_window.map(*point)))
+            }
+            Some(Gesture::Gradient { from, to }) => {
+                let end = tools::line_end(*from, *to, self.constraint());
+                Bounds::new(to_window.map(*from), to_window.map(end))
+            }
+            Some(Gesture::Guide { horizontal, at, .. }) => {
+                let canvas = self.layout.canvas;
+                let (left, right) = (f64::from(canvas.left()), f64::from(canvas.right()));
+                let (top, bottom) = (f64::from(canvas.top()), f64::from(canvas.bottom()));
+                if *horizontal {
+                    let y = to_window.map(Point::new(0.0, *at)).y;
+                    Bounds::new(Point::new(left, y), Point::new(right, y))
+                } else {
+                    let x = to_window.map(Point::new(*at, 0.0)).x;
+                    Bounds::new(Point::new(x, top), Point::new(x, bottom))
+                }
+            }
+            _ => Bounds::EMPTY,
+        }
+    }
+
+    /// What the path the pen is setting covers in the window: its nodes and
+    /// their handles, the newest's as a drag of its handle shapes them.
+    fn pen_marked(&self, to_window: Affine) -> Bounds {
+        let older = self.pen.len().saturating_sub(1);
+        let nodes = self
+            .pen
+            .iter()
+            .take(older)
+            .copied()
+            .chain(self.pen_newest());
+        Bounds::from_points(
+            nodes.flat_map(|node| node_points(node).map(|point| to_window.map(point))),
+        )
+    }
+
+    /// What a drag of the pen's newest handle reshapes in the window: the one
+    /// stretch of the path ending at that node.
+    fn pen_end_marked(&self, to_window: Affine) -> Bounds {
+        let (Some(newest), [.., before, _]) = (self.pen_newest(), self.pen.as_slice()) else {
+            return Bounds::EMPTY;
+        };
+        let reshaped = [
+            Some(before.point),
+            before.after,
+            newest.before,
+            Some(newest.point),
+        ];
+        Bounds::from_points(
+            reshaped
+                .into_iter()
+                .flatten()
+                .map(|point| to_window.map(point)),
+        )
+    }
+
+    /// What typing's marks cover in the window.
+    fn typing_marked(&self, to_window: Affine) -> Bounds {
+        let mut marked = Bounds::EMPTY;
+        if let Some(typing) = &self.typing {
+            self.typing_marks(typing, to_window, |mark| {
+                let corners: &[Point] = match &mark {
+                    TypingMark::Band(band) => band,
+                    TypingMark::Caret(ends) => ends,
+                };
+                marked = corners.iter().copied().fold(marked, Bounds::union_point);
+            });
+        }
+        marked
+    }
+
+    /// Where the status reads the pointer as being, in hundredths of the
+    /// page's unit across and down: a move that leaves it reading the same
+    /// repaints nothing.
+    pub(crate) fn pointer_reading(&self) -> (f64, f64) {
+        let unit = self.document.drawing().page().unit;
+        let pointer = self.drawing_at(self.pointer) / unit.pixels();
+        (hundredths(pointer.x), hundredths(pointer.y))
     }
 
     fn status(&self, surface: &mut Surface, theme: &Theme, band: StatusBand) {
         let unit = self.document.drawing().page().unit;
-        let pointer = self.drawing_at(self.pointer) / unit.pixels();
+        let (across, down) = self.pointer_reading();
         let at = alloc::format!(
             "{}, {} {}",
-            round2(pointer.x),
-            round2(pointer.y),
+            two_places(across),
+            two_places(down),
             unit.symbol()
         );
         let mut selected = String::new();
@@ -693,10 +946,19 @@ pub(crate) fn shown_of<'a>(
     }
 }
 
+/// `value` in whole hundredths, the precision the status reads to.
+fn hundredths(value: f64) -> f64 {
+    round(value * 100.0)
+}
+
 /// `value` to two places, trailing zeros dropped.
 fn round2(value: f64) -> String {
-    let rounded = round(value * 100.0) / 100.0;
-    let mut text = alloc::format!("{rounded:.2}");
+    two_places(hundredths(value))
+}
+
+/// A whole number of `hundredths` to two places, trailing zeros dropped.
+fn two_places(hundredths: f64) -> String {
+    let mut text = alloc::format!("{:.2}", hundredths / 100.0);
     while text.ends_with('0') {
         text.pop();
     }
@@ -716,6 +978,35 @@ const CARET_BELOW: f64 = 0.2;
 
 /// `point`, a window position, in the sub-pixel units an anti-aliased
 /// polygon is placed by.
+/// How far past the points it is drawn through a line or mark of the overlay
+/// can reach, in logical pixels: half the largest mark, a heavy line's
+/// weight, and their smoothing and rounding.
+const OVERLAY_REACH: u32 = 8;
+
+/// One mark typing shows, in window positions.
+enum TypingMark {
+    /// A selected character's band, corner by corner.
+    Band([Point; 4]),
+    /// The caret, from its top to its foot.
+    Caret([Point; 2]),
+}
+
+/// The map from the canvas's own pixels onto the window.
+fn canvas_map(layout: &Layout) -> Affine {
+    Affine::translate(
+        f64::from(layout.canvas.left()),
+        f64::from(layout.canvas.top()),
+    )
+}
+
+/// The node `node` of a path and the ends of its handles: what its marks are
+/// drawn through, and what holds the curves either side of it.
+fn node_points(node: PathNode) -> impl Iterator<Item = Point> {
+    [Some(node.point), node.before, node.after]
+        .into_iter()
+        .flatten()
+}
+
 fn sub_pixel(point: Point) -> (i32, i32) {
     let unit = f64::from(tairix_raster::SUBPIXEL);
     (round_i32(point.x * unit), round_i32(point.y * unit))

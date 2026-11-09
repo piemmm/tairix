@@ -247,8 +247,8 @@ pub fn spawn_unlock<P: UnlockPort>(
         give_up();
         return false;
     };
-    // The serve loop registers on `SERVE_WAITQ` under this id, so a posted
-    // request unparks it: a real wake, never a busy-yield.
+    // The serve loop files this id on `SERVE_WAITQ` under its endpoint's key,
+    // so a posted request unparks it: a real wake, never a busy-yield.
     set_store_service_task(task_id);
     note_field(
         audit,

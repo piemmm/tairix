@@ -750,7 +750,7 @@ re-derives:
   set an update removed still parses (the rest of the document survives),
   is still *offered* under its own name (opening the pane changes nothing),
   and falls back to the built-in artwork at activation.
-- **A third served request, of `QueryDesktop`'s posture.** `QueryCursorSets`
+- **A third served request, of `Connect`'s posture.** `QueryCursorSets`
   is seat-scoped, capability-free, and a read: Settings holds no
   `CAP_FS_ACCESS`, so the session lists and Settings asks, exactly as for the
   wallpaper catalog. Unlike `QueryWallpapers` it carries **no operand and no
@@ -811,7 +811,7 @@ rather than hosted: the desktop session already owns a sandboxed image
 renderer, and Settings asks it.
 
 - **Two descriptive window-channel requests** (the render generalised by
-  DS19), of the same posture as `QueryDesktop`: seat-scoped, capability-free,
+  DS19), of the same posture as `Connect`: seat-scoped, capability-free,
   describing the caller's own desktop and granting nothing. Both are *reads*,
   so §0's four write paths and no fifth still hold — the only write is the
   existing session apply.
@@ -822,7 +822,7 @@ renderer, and Settings asks it.
     `catalog_categories`, `catalog_entries` and `lib/wallpaper`'s
     `desktop_catalog`, and answers from memory. That is what keeps a
     directory walk off the compositing loop while leaving the query as
-    ordinary and synchronous as `QueryDesktop`. Paging exists because the
+    ordinary and synchronous as `Connect`. Paging exists because the
     channel's reply frame is bounded; the bound on the catalog itself is
     `MAX_WALLPAPER_CATALOG_ENTRIES`, applied to the whole flat list because
     that bound is a gallery's rather than one directory's.
@@ -1769,7 +1769,8 @@ What the vertical needed, and now guarantees:
   `WINDOW_SIZED` like any other new size, which gates the presses on the
   shrunk window.
 - **PASS is the guest's own five witnesses, in order:** an `APP_LOADED` naming
-  the settings bundle, its window's create reply, and three commits of the
+  the settings bundle, the desktop's record of its window shown, and three
+  commits of the
   desktop's published document — the appearance choice, the kept resolution,
   then Compact density, a key neither before it changed — attributed by the
   path each rename replaced.

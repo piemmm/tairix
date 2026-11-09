@@ -129,13 +129,15 @@ pub fn info_and_quit(endpoint: u64, click: AppBarClick) -> Result<AppBar, Errno>
 /// Why an application has no icon-bar presence of its own.
 ///
 /// An answer, not a death: the application carries on in the slot the session
-/// derives from its windows, so it states this and goes on.
+/// derives from its windows, so it states this and goes on. The session's own
+/// refusal of a declaration it was sent arrives later, as any posted request's
+/// does.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AppBarRefused {
     /// The declaration could not be built.
     Invalid(Errno),
-    /// The session refused it.
-    Refused(Errno),
+    /// It could not be sent to the session.
+    Unsent(Errno),
 }
 
 impl fmt::Display for AppBarRefused {
@@ -145,9 +147,9 @@ impl fmt::Display for AppBarRefused {
                 f,
                 "this application's icon-bar menu is invalid ({err}); carrying on without one"
             ),
-            Self::Refused(err) => write!(
+            Self::Unsent(err) => write!(
                 f,
-                "the desktop refused this application's icon-bar presence ({err}); \
+                "this application's icon-bar presence could not be asked for ({err}); \
                  carrying on without one"
             ),
         }
@@ -165,7 +167,7 @@ pub fn declare_app_bar<T: WindowTransport>(
     declared: Result<AppBar, Errno>,
 ) -> Result<(), AppBarRefused> {
     let bar = declared.map_err(AppBarRefused::Invalid)?;
-    client.set_app_bar(&bar).map_err(AppBarRefused::Refused)
+    client.set_app_bar(&bar).map_err(AppBarRefused::Unsent)
 }
 
 /// Whether `item` is the convention's *Quit* row.

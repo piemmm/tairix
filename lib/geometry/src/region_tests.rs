@@ -660,3 +660,24 @@ fn clone_from_copies_the_source_over_what_was_kept() {
         "the source is untouched"
     );
 }
+
+/// Extending a region adds each rectangle as `add` does, and an absent one
+/// adds nothing.
+#[test]
+fn extending_adds_each_rectangle_and_nothing_for_none() {
+    let rects = [
+        Rect::new(0, 0, 4, 4),
+        Rect::new(10, 2, 3, 6),
+        Rect::new(2, 2, 4, 4),
+    ];
+    let mut added = Region::new();
+    for rect in rects {
+        added.add(rect);
+    }
+    let mut extended = Region::new();
+    extended.extend(rects);
+    extended.extend(None);
+    assert_eq!(extended, added);
+    extended.extend(Some(Rect::new(30, 30, 1, 1)));
+    assert!(extended.contains(Point::new(30, 30)));
+}

@@ -21,6 +21,7 @@ fn spec(detail: &str, buttons: &[AlertButton]) -> AlertSpec {
 
 fn open(alert: &AlertSpec) -> WindowRequest {
     WindowRequest::OpenAlert {
+        alert_id: crate::window_ipc::object_id(4, 1),
         event_endpoint: event_endpoint_for(42),
         owner_window_id: 7,
         alert: *alert,
@@ -53,7 +54,7 @@ impl Frame {
 }
 
 /// The byte offset of the spec's own block within an encoded open.
-const SPEC: usize = 24;
+const SPEC: usize = crate::window_ipc::OPEN_ALERT_SPEC_OFFSET;
 
 #[test]
 fn an_alert_round_trips_with_every_field_it_carries() {

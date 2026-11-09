@@ -62,7 +62,6 @@ extern crate alloc;
 pub mod app;
 pub mod appbar;
 pub mod client;
-#[cfg(feature = "rt")]
 pub mod clipboard;
 pub mod desktop;
 pub mod docapp;
@@ -82,8 +81,9 @@ pub use appbar::{
 };
 pub use client::{
     pinch_input_events, pointer_input_events, pointer_point, present_damage, present_damage_list,
-    scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Owed, Parked, Repaint,
-    Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
+    scroll_input_events, Answer, DeclaredTip, Dropped, EventDrain, EventError, EventSource,
+    OfferedMedia, OfferedPath, Owed, Parked, PayloadRegion, Picked, PostedRequest, PresentState,
+    Refused, Repaint, Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]

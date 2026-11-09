@@ -7,42 +7,21 @@
 //! latches can never drift apart.
 //!
 //! Every stage is sequenced on a **uniquely attributable** witness — the exact
-//! bundle a load names, a reply length only one request shape produces, an
-//! announcement only the desktop makes — never on a cumulative event count an
-//! unrelated subsystem's cadence can shift under it
+//! bundle a load names, an announcement only the desktop makes — never on a
+//! cumulative event count an unrelated subsystem's cadence can shift under it
 //! (`plans/OPEN-DEFECTS.md` D19/D20).
 //!
 //! # Who states what
 //!
-//! The two sides observe different streams, and each gates on the one that can
-//! answer its question honestly:
-//!
-//! - The **host** reads the serial transcript, so it gates on the *desktop
-//!   session's* own announcements. Only the session knows when a served
-//!   window's pixels reached the display, and only the session knows when a
-//!   menu chain's plates did — an application learns that its open was
-//!   *accepted* and never that a plate was drawn. So
-//!   `tairix_desktop_session::WINDOW_SHOWN_MESSAGE` is what says "the window
-//!   is there to right-click" and `MENU_SHOWN_MESSAGE` is what says "the plate
-//!   is there to photograph and click".
-//! - The **guest** kernel's audit sink sees kernel audit records only (a
-//!   userland `lib/log` record reaches the kernel's *diagnostic* sink and the
-//!   serial line, never the audit sink), so it gates on those: the bundle a
-//!   load names, and the window channel's reply lengths.
-//!
-//! Neither side infers the other's facts.
-//!
-//! # Why the reply lengths are enough
-//!
-//! On the reserved window endpoint exactly one operation answers with the
-//! 12-byte minted-id frame (`WINDOW_MINTED_ID_REPLY_LEN`): `OpenMenu`. Every
-//! other request answers with a four-byte status, the desktop-query record, or
-//! the longer create reply (`WINDOW_CREATE_REPLY_LEN`, the minted id plus the
-//! serving session's identity). So a 12-byte reply *is* an `OpenMenu` served,
-//! and a create reply observed **after** one — with the application the only
-//! client in this world that creates a window — can only be the surface that
-//! application opened because a row of the chain was chosen and answered back
-//! to it.
+//! Only the session knows when a served window's pixels reached the display,
+//! and only the session knows when a menu chain's plates did — an application
+//! learns that its open was *accepted* and never that a plate was drawn. So
+//! `tairix_desktop_session::WINDOW_SHOWN_MESSAGE` is what says "the window is
+//! there to right-click" and `MENU_SHOWN_MESSAGE` is what says "the plate is
+//! there to photograph and click": the host reads them off the serial
+//! transcript, and the guest's gate off its diagnostic sink, where the kernel
+//! delivers what userland emits. The load a bundle names is the kernel's own
+//! audit record.
 
 #![no_std]
 #![forbid(unsafe_code)]

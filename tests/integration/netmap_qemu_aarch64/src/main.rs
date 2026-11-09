@@ -25,20 +25,21 @@
 //!
 //! # The PASS gate
 //!
-//! Four latches which must land **in order**, each attributed by the kernel:
+//! Four latches which must land **in order**. The desktop's and netmap's
+//! records are emitted through `log_emit`, which delivers to the kernel's
+//! diagnostic sink and never its audit sink, so the diagnostic observer
+//! latches those two and the audit observer the kernel's own:
 //!
 //! 1. **The map launched.** An `APP_LOADED` record naming the bundle
 //!    [`NETMAP_APP_NAME`] spells — the library row's own launch.
-//! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the reserved
-//!    window endpoint after that load. `netmap` opens one window, and the
-//!    desktop's own surfaces never call the window channel.
+//! 2. **Its window opened.** The desktop's record of a window first shown
+//!    after that load. `netmap` opens one window, and the desktop's own
+//!    surfaces never call the window channel.
 //! 3. **Its active probe reached a host.** A netmap record (its id in netmap's
 //!    own event range) carrying a reachable count of at least one, after the
-//!    window opened — the gateway answering the live ICMP-echo sweep. The
-//!    record is emitted through `log_emit`, which delivers to the kernel's
-//!    diagnostic sink and never its audit sink, so this is the one witness the
-//!    diagnostic observer latches. This is what no host test can show: the
-//!    probe actually reaching the real network the guest booted onto.
+//!    window opened — the gateway answering the live ICMP-echo sweep. This is
+//!    what no host test can show: the probe actually reaching the real network
+//!    the guest booted onto.
 //! 4. **The map exited cleanly.** A `SyscallInvoked` record naming the exit
 //!    syscall from [`NETMAP_COMM`], after the window opened — the *Quit* the
 //!    host injects as its final gesture, which it gates on the finished probe's
@@ -67,13 +68,13 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_desktop_witness::{window_shown, ShownWindows};
     use tairix_itest_finisher::fail_point;
     use tairix_itest_witness::{field_str, field_u64, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_netmap_qemu_aarch64::{EXIT_SYSCALL, NETMAP_APP_NAME, NETMAP_COMM};
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build time
     // (`build.rs`). The boot pipeline discovers the board from it because QEMU
@@ -99,8 +100,8 @@ mod kernel {
     struct Witnesses {
         /// The map bundle was loaded.
         launched: AtomicBool,
-        /// Its window was created after that.
-        window_opened: AtomicBool,
+        /// The windows first shown after that: the map's.
+        windows: ShownWindows<1>,
         /// Its active probe reached at least one host after that.
         probe_reached: AtomicBool,
         /// It exited cleanly after that.
@@ -112,7 +113,7 @@ mod kernel {
         const fn new() -> Self {
             Self {
                 launched: AtomicBool::new(false),
-                window_opened: AtomicBool::new(false),
+                windows: ShownWindows::new(),
                 probe_reached: AtomicBool::new(false),
                 exited: AtomicBool::new(false),
             }
@@ -129,30 +130,13 @@ mod kernel {
                 )
             }) {
                 self.launched.store(true, Ordering::Release);
+                self.windows.arm();
             }
         }
 
-        /// Latch the window witness from a create reply on the reserved window
-        /// endpoint, once the bundle has loaded. The endpoint is matched
-        /// against the exact hex spelling the kernel/ipc audit field renders,
-        /// and the operation by its reply's wire length.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            if !self.launched.load(Ordering::Acquire) {
-                return;
-            }
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            if field_str(event, "endpoint") != Some(expected) {
-                return;
-            }
-            let reply_len = field_str(event, "len")
-                .and_then(tairix_util::count::parse_decimal)
-                .and_then(|len| usize::try_from(len).ok())
-                .unwrap_or_default();
-            if reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN {
-                self.window_opened.store(true, Ordering::Release);
-            }
+        /// Whether the map's window has been shown since it loaded.
+        fn window_opened(&self) -> bool {
+            self.windows.count() >= 1
         }
 
         /// Latch the probe witness from a netmap record carrying a
@@ -163,7 +147,7 @@ mod kernel {
         /// merely that a campaign ran — is what witnesses that active probing
         /// reached the live map (the gateway answers the sweep).
         fn note_probe(&self, event: &Event<'_>) {
-            if !self.window_opened.load(Ordering::Acquire) {
+            if !self.window_opened() {
                 return;
             }
             if field_u64(event, "live").is_some_and(|live| live >= 1) {
@@ -176,7 +160,7 @@ mod kernel {
         /// from the record's kernel-attested fields, so no other principal's
         /// exit matches (fail closed).
         fn note_syscall(&self, event: &Event<'_>) {
-            if !self.window_opened.load(Ordering::Acquire) {
+            if !self.window_opened() {
                 return;
             }
             if field_str(event, "sc") == Some(EXIT_SYSCALL)
@@ -204,7 +188,7 @@ mod kernel {
     static WITNESSES: Witnesses = Witnesses::new();
 
     /// Audit observer: replays the trail to serial and latches the witnesses
-    /// the kernel attests — the load, the window's create reply, the exit.
+    /// the kernel attests — the load and the exit.
     struct AuditObserver;
 
     impl Sink for AuditObserver {
@@ -215,8 +199,6 @@ mod kernel {
             SerialSink::new().write_event(event);
             if event.id.0 == tairix_appload::events::APP_LOADED.0 {
                 WITNESSES.note_bundle_loaded(event);
-            } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                WITNESSES.note_call_replied(event);
             } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
                 WITNESSES.note_syscall(event);
                 WITNESSES.finish();
@@ -226,15 +208,18 @@ mod kernel {
 
     static AUDIT_SINK: AuditObserver = AuditObserver;
 
-    /// Diagnostic observer: latches the probe witness, then replays the record
-    /// to serial as the production log sink does. The kernel delivers what
-    /// userland emits here and never to the audit sink, and the latch comes
-    /// first so the line the host quits the map on cannot precede it.
+    /// Diagnostic observer: latches the window and probe witnesses, then
+    /// replays the record to serial as the production log sink does. The
+    /// kernel delivers what userland emits here and never to the audit sink,
+    /// and the latch comes first so the line the host acts on cannot precede
+    /// it.
     struct DiagnosticObserver;
 
     impl Sink for DiagnosticObserver {
         fn write_event(&self, event: &Event<'_>) {
-            if tairix_log::registry::NETMAP.contains(event.id) {
+            if let Some(window) = window_shown(event) {
+                WITNESSES.windows.note(window);
+            } else if tairix_log::registry::NETMAP.contains(event.id) {
                 WITNESSES.note_probe(event);
             }
             SerialSink::new().write_event(event);

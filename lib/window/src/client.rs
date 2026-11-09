@@ -21,38 +21,36 @@ use tairix_display::winframe::damage_in;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
+use tairix_abi::fs::FileId;
 use tairix_abi::input::PointerButtonCode;
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::window_ipc::{
-    decode_authorised_output_reply, decode_screensaver_reply, ScreensaverEntry, SystemTask,
-    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX,
-};
-use tairix_abi::window_ipc::{
-    decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
-    decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
-    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_offered_file_reply, decode_offered_items_reply, decode_open_target_reply,
-    decode_picked_file_reply, decode_picked_name_reply, decode_terrain_reply,
-    decode_wallpapers_reply, AlertSeverity, AlertSpec, AppBar, AppMenu, BundleRunPath,
-    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragItems, DropOperation, DropTarget,
-    HandOverOutcome, HandOverTarget, LayerDepth, NameList, OfferedItem, OpenTarget, PickPurpose,
-    PickedFile, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage,
-    WindowEvent, WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-    WINDOW_OFFERED_FILE_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
-    WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
+    decode_authorised_output_reply, decode_clipboard_reply, decode_connect_reply,
+    decode_cursor_sets_reply, decode_drag_spot_reply, decode_drop_target_reply,
+    decode_hand_over_reply, decode_handle_reply, decode_menu_text_reply,
+    decode_notify_sources_reply, decode_offered_file_reply, decode_offered_items_reply,
+    decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
+    decode_screensaver_reply, decode_terrain_reply, decode_wallpapers_reply, AlertSeverity,
+    AlertSpec, AppBar, AppMenu, AppMenuItemId, BundleRunPath, ClipboardKind, CursorShape,
+    DocumentName, DragItems, DropOperation, HandOverOutcome, HandOverTarget, LandingStep,
+    LayerDepth, NameList, ObjectIds, OpenTarget, PickPurpose, PointerAction, PreviewSubject,
+    ScreensaverEntry, SystemTask, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, CLIPBOARD_MAX_BYTES, DESKTOP_LAYER_MAX_PLATES,
+    DROP_LANDING_MAX_WIRE_LEN, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_CLIPBOARD_REPLY_LEN,
+    WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX,
+    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HANDLE_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_FILE_REPLY_MAX,
+    WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX,
+    WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
-use tairix_abi::window_ipc::{LandingStep, DROP_LANDING_MAX_WIRE_LEN};
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, PinchPhase, PointerButton};
 
-use crate::server::{
-    DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec, WindowSizeState, WindowSizing,
-};
+use crate::clipboard::{self, Landing};
+use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, WindowSizeState, WindowSizing};
 
 /// An open target an application pulled, owned rather than borrowed from the
 /// reply buffer so the pull can be drained in a loop.
@@ -96,43 +94,41 @@ pub enum Target {
     },
 }
 
-const fn wider(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
+const fn widest(lens: &[usize]) -> usize {
+    let mut widest = 0;
+    let mut at = 0;
+    while at < lens.len() {
+        if lens[at] > widest {
+            widest = lens[at];
+        }
+        at += 1;
     }
+    widest
 }
 
-/// Widest reply any *pull* answers with, and so the one buffer every pull is
-/// answered into ([`WindowClient::pull_reply`]).
+/// Widest reply the client reads into its own buffer: every posted
+/// request's, and every call's but those answered into the caller's own page
+/// buffer.
 ///
-/// Derived from the pulls the channel has rather than from whichever is
-/// widest today, so a pull whose reply outgrew the buffer could not slip
-/// past.
-const PULL_REPLY_MAX: usize = wider(
-    wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_MENU_TEXT_REPLY_MAX),
-    wider(
-        WINDOW_WALLPAPERS_REPLY_MAX,
-        wider(
-            WINDOW_CLIPBOARD_REPLY_LEN,
-            wider(
-                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
-                wider(
-                    wider(
-                        WINDOW_DROP_TARGET_REPLY_MAX,
-                        wider(WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX),
-                    ),
-                    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
-                ),
-            ),
-        ),
-    ),
-);
-
-/// Widest reply a posted request is answered with: a status, or the media
-/// type a posted read carries back.
-const POSTED_REPLY_MAX: usize = wider(WINDOW_CREATE_REPLY_LEN, WINDOW_OFFERED_FILE_REPLY_MAX);
+/// Derived from the requests the channel has rather than from whichever is
+/// widest today, so a reply that outgrew the buffer could not slip past.
+const REPLY_MAX: usize = widest(&[
+    STATUS_REPLY_LEN,
+    WINDOW_CONNECT_REPLY_LEN,
+    WINDOW_HANDLE_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_CLIPBOARD_REPLY_LEN,
+    WINDOW_PICKED_NAME_REPLY_MAX,
+    WINDOW_PICKED_FILE_REPLY_MAX,
+    WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_DRAG_SPOT_REPLY_MAX,
+    WINDOW_OFFERED_ITEMS_REPLY_MAX,
+    WINDOW_OFFERED_FILE_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+]);
 
 /// Why a round of input repaints, which is what decides the rectangle it
 /// presents (see [`present_damage`]).
@@ -609,6 +605,24 @@ pub trait WindowTransport {
     ///
     /// As [`call`](Self::call).
     fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno>;
+
+    /// A region a payload crosses to or from the session, unmapped when
+    /// dropped.
+    type Region: PayloadRegion;
+
+    /// A fresh `len`-byte region granted to the session, and the grant's
+    /// handle.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the kernel refuses the region or its grant.
+    fn grant_region(&mut self, len: usize) -> Result<(Self::Region, u64), Errno>;
+}
+
+/// The bytes of a region a payload crosses ([`WindowTransport::Region`]).
+pub trait PayloadRegion {
+    /// The region's bytes.
+    fn bytes_mut(&mut self) -> &mut [u8];
 }
 
 /// Step the drop numbered `serial` onto the desktop that window `window_id`'s
@@ -634,14 +648,13 @@ pub fn step_landing<T: WindowTransport>(
         step,
     }
     .encode(&mut frame)?;
-    let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+    let mut reply = [0u8; STATUS_REPLY_LEN];
     let got = transport.call(&frame[..len], &mut reply)?;
     decode_status_reply(reply.get(..got).ok_or(Errno::BufferTooSmall)?)
 }
 
-/// A request the client posts rather than waits on. Each is made as input
-/// moves, so awaiting each would hand the application the desktop's frame
-/// time per pointer sample.
+/// A request the client posts rather than waits on: every request a loop
+/// makes, so no loop waits on the session's for an answer.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PostedRequest {
     /// [`WindowClient::resize`].
@@ -670,13 +683,106 @@ pub enum PostedRequest {
     /// [`WindowClient::ask_offered_file`], for the offer it asks about: a
     /// newer ask over the same window replaces one not yet sent.
     OfferedFile(u32),
+    /// A window of any kind or a layer surface created: refused, it never
+    /// existed.
+    Create,
+    /// [`WindowClient::open_menu`], for the open it names.
+    OpenMenu(u64),
+    /// [`WindowClient::open_alert`], for the alert it names.
+    OpenAlert(u64),
+    /// [`WindowClient::close`].
+    Close,
+    /// [`WindowClient::set_size_state`].
+    SizeState,
+    /// [`WindowClient::pick_file`].
+    PickFile,
+    /// [`WindowClient::begin_drag`].
+    BeginDrag,
+    /// [`WindowClient::place_dropped`].
+    PlaceDropped,
+    /// [`WindowClient::save_into`], for the offer it answers.
+    SaveInto(u32),
+    /// [`WindowClient::authorise`].
+    Authorise,
+    /// [`WindowClient::close_alert`], for the alert it withdraws.
+    CloseAlert(u64),
+    /// [`WindowClient::reveal_document`], answered by the token it
+    /// returned.
+    RevealDocument(u64),
+    /// [`WindowClient::activate_window`].
+    Activate,
+    /// [`WindowClient::set_clipboard`].
+    SetClipboard,
+    /// [`WindowClient::set_app_bar`].
+    AppBar,
+    /// [`WindowClient::set_backdrop_blur`].
+    BackdropBlur,
+    /// [`WindowClient::place_layer`].
+    PlaceLayer,
+    /// [`WindowClient::hand_over_launch`], answered by the token it
+    /// returned.
+    HandOver(u64),
+    /// [`WindowClient::ask_open_targets`].
+    OpenTarget,
+    /// [`WindowClient::ask_menu_text`], for the open it asks about.
+    MenuText(u64),
+    /// [`WindowClient::ask_app_bar_text`], for the row and revision it asks
+    /// about.
+    AppBarText(AppMenuItemId, u32),
+    /// [`WindowClient::ask_drag_spot`], for the report it asks about: a newer
+    /// ask over the same window replaces one not yet sent.
+    DragSpot(u32),
+    /// [`WindowClient::ask_drop_target`].
+    DropTarget,
+    /// [`WindowClient::ask_picked_name`].
+    PickedName,
+    /// [`WindowClient::ask_picked_files`].
+    PickedFile,
+    /// [`WindowClient::ask_offered_items`], a page of the drag it reads.
+    OfferedItems(u32),
+    /// [`WindowClient::ask_clipboard`].
+    Clipboard,
+    /// [`WindowClient::ask_terrain`].
+    Terrain,
 }
 
 impl PostedRequest {
+    /// Whether a newer request of this kind supersedes an older one about
+    /// the same object, so at most one is in flight and the newest is held.
+    const fn supersedes(self) -> bool {
+        matches!(
+            self,
+            Self::Resize
+                | Self::Cursor
+                | Self::Tooltip
+                | Self::DragVerdict
+                | Self::SaveOfferAnswer
+                | Self::ItemsOfferAnswer
+                | Self::FileOfferAnswer
+                | Self::Title
+                | Self::Sizing
+                | Self::Present
+                | Self::OfferedFile(_)
+                | Self::SizeState
+                | Self::BackdropBlur
+                | Self::PlaceLayer
+                | Self::DragSpot(_)
+                | Self::Terrain
+                | Self::OpenTarget
+                | Self::PickedFile
+                | Self::AppBar
+        )
+    }
+
     /// Whether an ask of kind `asked` is held behind an unanswered one of
-    /// this kind over the same window, as the newest wanted.
+    /// this kind over the same object, as the newest wanted.
     fn folds(self, asked: Self) -> bool {
-        matches!((self, asked), (Self::OfferedFile(_), Self::OfferedFile(_))) || self == asked
+        self.supersedes()
+            && match (self, asked) {
+                (Self::OfferedFile(_), Self::OfferedFile(_))
+                | (Self::DragSpot(_), Self::DragSpot(_)) => true,
+                _ => self == asked,
+            }
     }
 
     const fn what(self) -> &'static str {
@@ -693,8 +799,174 @@ impl PostedRequest {
             Self::Present => "a frame",
             Self::LandingEnded(_) => "a drop's end",
             Self::OfferedFile(_) => "a file offer's media type",
+            Self::Create => "a window",
+            Self::OpenMenu(_) => "a menu",
+            Self::OpenAlert(_) => "an alert",
+            Self::Close => "a window's closing",
+            Self::SizeState => "a window's size",
+            Self::PickFile => "a file pick",
+            Self::BeginDrag => "a drag",
+            Self::PlaceDropped => "a dropped file",
+            Self::SaveInto(_) => "a save",
+            Self::Authorise => "an authorisation",
+            Self::CloseAlert(_) => "an alert's withdrawal",
+            Self::RevealDocument(_) => "showing a document",
+            Self::Activate => "bringing a window forward",
+            Self::SetClipboard => "a copy",
+            Self::AppBar => "the icon bar's entry",
+            Self::BackdropBlur => "a backdrop blur",
+            Self::PlaceLayer => "a layer's place",
+            Self::HandOver(_) => "a hand-over",
+            Self::OpenTarget => "a target to open",
+            Self::MenuText(_) | Self::AppBarText(..) => "a menu's text",
+            Self::DragSpot(_) => "a drag's place",
+            Self::DropTarget => "a drop's target",
+            Self::PickedName => "a picked name",
+            Self::PickedFile => "a picked file",
+            Self::OfferedItems(_) => "a drag's items",
+            Self::Clipboard => "a paste",
+            Self::Terrain => "the desktop's terrain",
         }
     }
+}
+
+/// A file a folder pick delegated, as [`Answer::PickedFile`] lands it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Picked {
+    /// The `fd_redeem` handle minted to this application; never zero.
+    pub handle: u64,
+    /// The file's own name, for the application to show it by.
+    pub name: String,
+}
+
+/// The application a drag was dropped on, as [`Answer::DropTarget`] lands
+/// it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dropped {
+    /// The target bundle's entry binary.
+    pub run_path: String,
+    /// Whether its signed manifest claims to edit the documents it opens.
+    pub writes_documents: bool,
+}
+
+/// An item a drag offers, as [`Answer::OfferedItems`] lands it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferedPath {
+    /// Its absolute path.
+    pub path: String,
+    /// The node the desktop's listing showed there, or [`FileId::NONE`].
+    pub id: FileId,
+}
+
+/// What a request the application asked for lands as, for its loop to take
+/// ([`WindowClient::take_answer`]).
+#[derive(Debug)]
+pub enum Answer {
+    /// A file offer's media type ([`WindowClient::ask_offered_file`]).
+    OfferedFile(OfferedMedia),
+    /// The next target queued for the application to open, or `None` once
+    /// none is left ([`WindowClient::ask_open_targets`]).
+    OpenTarget(Result<Option<Target>, Errno>),
+    /// The text committed into a menu open's quick-entry field
+    /// ([`WindowClient::ask_menu_text`]).
+    MenuText {
+        /// The window the chain belonged to.
+        window_id: u64,
+        /// The open asked about.
+        open_id: u64,
+        /// The text, or `None` for none committed.
+        text: Result<Option<String>, Errno>,
+    },
+    /// The text committed into an icon-bar row's field
+    /// ([`WindowClient::ask_app_bar_text`]).
+    AppBarText {
+        /// The row.
+        item: AppMenuItemId,
+        /// The revision the row answered under.
+        revision: u32,
+        /// The text, or `None` for none committed.
+        text: Result<Option<String>, Errno>,
+    },
+    /// The desktop folder a drag's report names
+    /// ([`WindowClient::ask_drag_spot`]).
+    DragSpot {
+        /// The window whose drag it is.
+        window_id: u64,
+        /// The report asked about.
+        serial: u32,
+        /// The folder.
+        folder: Result<String, Errno>,
+    },
+    /// The application a drag was dropped on
+    /// ([`WindowClient::ask_drop_target`]).
+    DropTarget {
+        /// The window whose drag it was.
+        window_id: u64,
+        /// The target.
+        target: Result<Dropped, Errno>,
+    },
+    /// The name of the file a pick chose ([`WindowClient::ask_picked_name`]).
+    PickedName {
+        /// The window that picked.
+        window_id: u64,
+        /// The name.
+        name: Result<String, Errno>,
+    },
+    /// The next file a folder pick delegated
+    /// ([`WindowClient::ask_picked_files`]).
+    PickedFile {
+        /// The window that picked.
+        window_id: u64,
+        /// The file, or [`Errno::NotFound`] once none is left.
+        file: Result<Picked, Errno>,
+    },
+    /// Every item a drag offers, in order
+    /// ([`WindowClient::ask_offered_items`]).
+    OfferedItems {
+        /// The window the drag is offered to.
+        window_id: u64,
+        /// The drag.
+        drag: u32,
+        /// Its items.
+        items: Result<Vec<OfferedPath>, Errno>,
+    },
+    /// What the clipboard holds, `None` when it is empty
+    /// ([`WindowClient::ask_clipboard`]).
+    Clipboard {
+        /// The window that asked.
+        window_id: u64,
+        /// What it holds.
+        contents: Result<Option<(ClipboardKind, Vec<u8>)>, Errno>,
+    },
+    /// The visible windows' rectangles, back to front
+    /// ([`WindowClient::ask_terrain`]).
+    Terrain {
+        /// The layer surface that asked.
+        window_id: u64,
+        /// The plates.
+        plates: Result<Vec<TerrainPlate>, Errno>,
+    },
+    /// Whether a document was shown in its folder
+    /// ([`WindowClient::reveal_document`]).
+    Revealed {
+        /// The token the reveal was answered by.
+        token: u64,
+        /// Whether the desktop showed it.
+        shown: Result<(), Errno>,
+    },
+    /// How a hand-over went ([`WindowClient::hand_over_launch`]).
+    HandOver {
+        /// The token the hand-over was answered by.
+        token: u64,
+        /// Whether a live instance took it.
+        outcome: Result<HandOverOutcome, Errno>,
+    },
+    /// The window's last present was answered, so a paint deferred behind it
+    /// may go now ([`WindowClient::owe_frame`]).
+    FrameReturned {
+        /// The window.
+        window_id: u64,
+    },
 }
 
 /// The media type [`WindowClient::ask_offered_file`] asked for, as the
@@ -733,9 +1005,9 @@ impl fmt::Display for Refused {
     }
 }
 
-/// What one coalesced request asks, its window apart: no more than each
+/// What one coalesced request asks, its object apart: no more than each
 /// kind carries, so holding the newest costs a few bytes rather than a whole
-/// request frame.
+/// request frame. A request that reads on from an answer is spelled here too.
 #[derive(Copy, Clone, Debug)]
 enum Asked {
     Cursor(CursorShape),
@@ -746,9 +1018,19 @@ enum Asked {
     FileOfferAnswer(u32, bool),
     Title(WindowTitle),
     Sizing(WindowSizing),
+    SizeState(WindowSizeState),
+    BackdropBlur(u16),
+    PlaceLayer(i32, i32, LayerDepth),
     Present(u32, DamageList),
-    LandingEnded(u32),
     OfferedFile(u32),
+    DragSpot(u32),
+    Terrain,
+    OpenTarget,
+    PickedFile,
+    /// A drag's items, read on from the item numbered second.
+    OfferedItems(u32, u32),
+    /// A paste offered the region granted as this handle.
+    Clipboard(u64),
 }
 
 impl Asked {
@@ -762,9 +1044,17 @@ impl Asked {
             Self::FileOfferAnswer(..) => PostedRequest::FileOfferAnswer,
             Self::Title(_) => PostedRequest::Title,
             Self::Sizing(_) => PostedRequest::Sizing,
+            Self::SizeState(_) => PostedRequest::SizeState,
+            Self::BackdropBlur(_) => PostedRequest::BackdropBlur,
+            Self::PlaceLayer(..) => PostedRequest::PlaceLayer,
             Self::Present(..) => PostedRequest::Present,
-            Self::LandingEnded(serial) => PostedRequest::LandingEnded(*serial),
             Self::OfferedFile(serial) => PostedRequest::OfferedFile(*serial),
+            Self::DragSpot(serial) => PostedRequest::DragSpot(*serial),
+            Self::Terrain => PostedRequest::Terrain,
+            Self::OpenTarget => PostedRequest::OpenTarget,
+            Self::PickedFile => PostedRequest::PickedFile,
+            Self::OfferedItems(drag, _) => PostedRequest::OfferedItems(*drag),
+            Self::Clipboard(_) => PostedRequest::Clipboard,
         }
     }
 
@@ -798,35 +1088,121 @@ impl Asked {
             },
             Self::Title(title) => WindowRequest::SetTitle { window_id, title },
             Self::Sizing(sizing) => WindowRequest::SetSizing { window_id, sizing },
+            Self::SizeState(state) => WindowRequest::SetSizeState { window_id, state },
+            Self::BackdropBlur(radius_px) => WindowRequest::SetBackdropBlur {
+                window_id,
+                radius_px,
+            },
+            Self::PlaceLayer(x, y, depth) => WindowRequest::PlaceLayer {
+                window_id,
+                x,
+                y,
+                depth,
+            },
             Self::Present(frame_index, damage) => WindowRequest::Present {
                 window_id,
                 frame_index,
                 damage,
             },
-            Self::LandingEnded(serial) => WindowRequest::DropLanding {
-                window_id,
-                serial,
-                step: LandingStep::Ended,
-            },
             Self::OfferedFile(serial) => WindowRequest::OfferedFile { window_id, serial },
+            Self::DragSpot(serial) => WindowRequest::QueryDragSpot { window_id, serial },
+            Self::Terrain => WindowRequest::TakeTerrain { window_id },
+            Self::OpenTarget => WindowRequest::TakeOpenTarget,
+            Self::PickedFile => WindowRequest::TakePickedFile { window_id },
+            Self::OfferedItems(drag, from) => WindowRequest::OfferedItems {
+                window_id,
+                drag,
+                from,
+            },
+            Self::Clipboard(shm_handle) => WindowRequest::GetClipboard {
+                window_id,
+                shm_handle,
+            },
         }
     }
 }
 
-/// A posted request awaiting its answer, and the newest of its kind asked for
-/// since, posted once that answer is in.
-#[derive(Copy, Clone, Debug)]
-struct Posting {
+/// A request waiting to be posted.
+enum Held {
+    /// A coalesced request, or one reading on from an answer.
+    Asked(Asked),
+    /// Any other request, as encoded: its kind is its posting's.
+    Frame(Vec<u8>),
+}
+
+impl Held {
+    /// The kind the request is, posted for a posting of `kind`.
+    const fn kind(&self, kind: PostedRequest) -> PostedRequest {
+        match self {
+            Self::Asked(asked) => asked.kind(),
+            Self::Frame(_) => kind,
+        }
+    }
+}
+
+/// What a posting keeps until its answer lands.
+enum Carried<R> {
+    Nothing,
+    /// The region a copy or a paste crosses, kept mapped until the session
+    /// has answered, and whether a paste's region is its second offer.
+    Region(R, bool),
+    /// The items of a drag read so far.
+    Items(Vec<OfferedPath>),
+}
+
+/// A posted request awaiting its answer, or one waiting for room.
+struct Posting<R> {
+    /// The window it is for, or zero for this process's own.
     window_id: u64,
     kind: PostedRequest,
     /// `None` while the request waits for room: this process's own calls
     /// fill its place at the endpoint, and one of them being answered is what
     /// makes room, so it is posted then, in the order it was asked.
     ticket: Option<u64>,
-    held: Option<Asked>,
+    /// What goes in its place: the request itself while it waits for room,
+    /// or the newest of its kind asked for since it was posted.
+    held: Option<Held>,
+    carried: Carried<R>,
     /// Its window was closed since: the answer is still reaped, but nobody
     /// is told of it.
     orphaned: bool,
+}
+
+/// A request reading on from an answer, in its posting's place.
+#[derive(Copy, Clone, Debug)]
+enum ReadOn {
+    OpenTarget,
+    PickedFile,
+    /// A drag's items, from the item numbered second.
+    OfferedItems(u32, u32),
+    /// A paste offered the region granted as this handle.
+    Clipboard(u64),
+}
+
+impl ReadOn {
+    const fn asked(self) -> Asked {
+        match self {
+            Self::OpenTarget => Asked::OpenTarget,
+            Self::PickedFile => Asked::PickedFile,
+            Self::OfferedItems(drag, from) => Asked::OfferedItems(drag, from),
+            Self::Clipboard(shm_handle) => Asked::Clipboard(shm_handle),
+        }
+    }
+}
+
+/// What an answer came to.
+enum Outcome {
+    /// A request answered with a status.
+    Status(Result<(), Errno>),
+    /// What lands for the application, if anything, and the request reading
+    /// on in its posting's place.
+    Read(Option<Answer>, Option<ReadOn>),
+}
+
+impl Outcome {
+    const fn landed(answer: Answer) -> Self {
+        Self::Read(Some(answer), None)
+    }
 }
 
 /// What a window last presented, so the client can re-present it when
@@ -839,6 +1215,8 @@ struct Posting {
 struct LastPresent {
     /// The window the record belongs to.
     window_id: u64,
+    /// The window it is a transient of, which the session closes it with.
+    owner: Option<u64>,
     /// Client width in pixels, as last created or resized.
     width_px: u32,
     /// Client height in pixels, as last created or resized.
@@ -859,6 +1237,9 @@ struct LastPresent {
     /// A present the session refused never reached the screen, so the next
     /// one declares the whole window.
     owed_whole: bool,
+    /// A paint was deferred behind the present in flight, so the window is
+    /// owed [`Answer::FrameReturned`] once that one is answered.
+    frame_owed: bool,
 }
 
 /// Where a window's frames stand with the session.
@@ -894,12 +1275,31 @@ impl LastPresent {
     }
 }
 
+/// Where a window's presents stand ([`WindowClient::present_state`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PresentState {
+    /// None is unanswered: the frame the session is not reading is the
+    /// application's to draw.
+    Idle,
+    /// One is unanswered, so both frames are the session's: the next paint
+    /// waits for [`Answer::FrameReturned`] ([`WindowClient::owe_frame`]).
+    InFlight,
+    /// One waits for room, naming this frame, which the session has not yet
+    /// been sent: the frame may be drawn again and presented again, and the
+    /// two presents go as one.
+    Waiting(u32),
+}
+
 /// A typed handle on the desktop session's window service.
 ///
-/// The client remembers each of its windows' extent and last presented
-/// frame index so it can answer a
-/// [`WindowEvent::RedrawRequested`]
-/// on the app's behalf — see [`WindowEvents::wait`].
+/// Every request is posted: an interactive loop never waits on the session,
+/// whose own loop may be a frame or more from serving it. The client keeps
+/// each request until its answer lands, taken in by the event drain, and
+/// hands the application what it asked for as an [`Answer`] and what the
+/// session refused as an [`EventError::Refused`]. It remembers each of its
+/// windows' extent and last presented frame so it can answer a
+/// [`WindowEvent::RedrawRequested`] on the app's behalf — see
+/// [`WindowEvents::wait`].
 pub struct WindowClient<T: WindowTransport> {
     transport: T,
     presented: Vec<LastPresent>,
@@ -909,47 +1309,105 @@ pub struct WindowClient<T: WindowTransport> {
     /// — the hottest operation and one of the shortest — the whole of the
     /// widest one's clearing.
     frame: [u8; WindowRequest::MAX_WIRE_LEN],
-    /// The scratch every *pull* is answered into — an open target, a menu
-    /// chain's committed text — held once for the same reason [`Self::frame`]
-    /// is: the widest of them carries a path, so a per-call array would put
-    /// four kibibytes of clearing on a path that only runs when the user
-    /// opens something. One buffer rather than one per pull, since no two are
-    /// in flight at once.
-    pull_reply: [u8; PULL_REPLY_MAX],
-    /// The serving session's attested identity, as the last reply that
-    /// carried it stated. `None` until one has.
+    /// The scratch every reply is read into, a call's or a posted request's,
+    /// held once for the same reason [`Self::frame`] is.
+    reply: [u8; REPLY_MAX],
+    /// The serving session's attested identity, as the connect stated it.
     session: Option<ProcId>,
-    /// The requests posted and not yet answered, and those waiting for room
-    /// to be posted: at most one a kind per window, so a burst of pointer
-    /// samples has one in flight.
-    posted: Vec<Posting>,
+    /// The range this client names what it creates by.
+    ids: Option<ObjectIds>,
+    /// The requests posted and not yet answered, and those waiting for room,
+    /// in the order asked.
+    posted: Vec<Posting<T::Region>>,
     /// Refusals reaped and not yet handed to the application.
     refused: VecDeque<Refused>,
     /// Geometry the application is owed again: a resize it asked while
     /// another was unanswered, now free to go, or the size the session kept
     /// on refusing one.
     owed: VecDeque<WindowEvent>,
+    /// Answers landed and not yet taken by the application.
+    answers: VecDeque<Answer>,
+    /// An answer landed since a wait last returned for one.
+    unannounced: bool,
+    /// The token the next hand-over or reveal is answered by.
+    next_token: u64,
     /// The session's endpoint has gone: nothing posted will be answered.
     lost: bool,
-    /// Media types read and not yet taken by the application.
-    media: VecDeque<OfferedMedia>,
+    /// The client could not keep what it was owed: the application ends the
+    /// channel rather than wait on an answer that will never land.
+    broken: Option<Errno>,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
-    /// A client over `transport`.
+    /// A client over `transport`, not yet connected.
     pub const fn new(transport: T) -> Self {
         Self {
             transport,
             presented: Vec::new(),
             frame: [0; WindowRequest::MAX_WIRE_LEN],
-            pull_reply: [0; PULL_REPLY_MAX],
+            reply: [0; REPLY_MAX],
             session: None,
+            ids: None,
             posted: Vec::new(),
             refused: VecDeque::new(),
             owed: VecDeque::new(),
+            answers: VecDeque::new(),
+            unannounced: false,
+            next_token: 1,
             lost: false,
-            media: VecDeque::new(),
+            broken: None,
         }
+    }
+
+    /// Connect to the session: learn the desktop this client's windows are
+    /// displayed on — the screen extent, the UI scale and the active
+    /// appearance — the serving session's identity, and the range this client
+    /// names what it creates by.
+    ///
+    /// An app connects **before** it creates anything, so its first window is
+    /// sized to a screen it knows and its first frame is painted at the right
+    /// density in the right colours. Thereafter the session publishes each new
+    /// state on the desktop system notice; [`Desktop`](crate::Desktop) holds
+    /// the answer and [`adopt`](crate::Desktop::adopt) keeps it current. It is
+    /// the one call an application makes of the session, made before it owes
+    /// anyone a frame.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::AlreadyExists`] for a client already connected, whose range
+    /// stands; the session's refusal ([`Errno::LimitExceeded`] for a process
+    /// holding as many ranges as it may, or a session tearing down that no
+    /// longer has a screen to describe), a transport failure, or a corrupt
+    /// reply — never a guessed extent.
+    pub fn connect(&mut self) -> Result<DesktopInfo, Errno> {
+        if self.ids.is_some() {
+            return Err(Errno::AlreadyExists);
+        }
+        let len = self.call_reply(&WindowRequest::Connect)?;
+        let connected = decode_connect_reply(self.reply.get(..len).ok_or(Errno::BufferTooSmall)?)?;
+        self.session = Some(connected.server);
+        self.ids = Some(connected.ids);
+        Ok(connected.desktop)
+    }
+
+    /// The serving session's kernel-attested [`ProcId`], once
+    /// [`connect`](Self::connect) has learned it — the identity an app
+    /// requires of every event's sender.
+    ///
+    /// `None` before then: until the session has said who it is, an app has
+    /// nothing to authenticate against and must accept nothing (fail closed).
+    #[must_use]
+    pub const fn session(&self) -> Option<ProcId> {
+        self.session
+    }
+
+    /// The next id this client names an object by.
+    fn mint(&mut self) -> Result<u64, Errno> {
+        self.ids
+            .as_mut()
+            .ok_or(Errno::NotConnected)?
+            .mint()
+            .ok_or(Errno::NoSpace)
     }
 
     /// Open a window: `frame_count` frames shaped as `surface`, laid out
@@ -970,22 +1428,22 @@ impl<T: WindowTransport> WindowClient<T> {
     /// out at exactly the size it is told; an app that resized itself back
     /// up instead would fight the drag, frame by frame.
     ///
-    /// The size is the app's own choice; [`Self::desktop`] is how it
-    /// learns the screen it must fit on before making that choice.
+    /// The size is the app's own choice; [`Self::connect`] is how it learns
+    /// the screen it must fit on before making that choice.
     ///
-    /// Returns the session-minted window id and the serving session's
-    /// [`ProcId`]: the identity the app then requires of every event's
-    /// kernel-attested sender, so no other process can feed it forged
-    /// input (the reply is trustworthy because the window rendezvous is
-    /// squat-protected).
+    /// Returns the window's id, named by this client from its own range, so
+    /// the window's title, first present and anything else asked of it go
+    /// straight after the create, served in that order. A refusal arrives
+    /// later as an [`EventError::Refused`] naming the window, which then never
+    /// existed: what was asked of it meanwhile is refused with it, unreported.
     ///
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a title
-    ///   or geometry the protocol refuses, caught before any call.
-    /// * The session's typed refusal, a transport failure, or a corrupt
-    ///   reply (fail closed, never a guessed id or an unauthenticatable
-    ///   event stream).
+    ///   or geometry the protocol refuses, caught before any request.
+    /// * [`Errno::NotConnected`] before [`Self::connect`], and
+    ///   [`Errno::NoSpace`] once the client's range is spent.
+    /// * A transport failure.
     ///
     /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
     pub fn create(
@@ -996,9 +1454,11 @@ impl<T: WindowTransport> WindowClient<T> {
         surface: &DisplayMode,
         title: &str,
         sizing: WindowSizing,
-    ) -> Result<(u64, ProcId), Errno> {
+    ) -> Result<u64, Errno> {
         let title = WindowTitle::new(title)?;
+        let window_id = self.mint()?;
         let request = WindowRequest::Create {
+            window_id,
             shm_handle,
             event_endpoint,
             frame_count,
@@ -1009,12 +1469,7 @@ impl<T: WindowTransport> WindowClient<T> {
             title,
             sizing,
         };
-        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        let (window_id, server) = decode_create_reply(&reply[..len])?;
-        self.session = Some(server);
-        self.note_extent(window_id, surface.width_px, surface.height_px);
-        Ok((window_id, server))
+        self.open(window_id, None, &request, surface)
     }
 
     /// Open an undecorated popup surface stacked directly above this app's
@@ -1030,22 +1485,19 @@ impl<T: WindowTransport> WindowClient<T> {
     /// window budget as [`Self::create`], so a popup cannot be used to
     /// exceed the cap.
     ///
-    /// The reply is the same shape as [`Self::create`] — the session-minted
-    /// window id and the serving session's [`ProcId`] — and thereafter
-    /// [`Self::present`] and [`Self::close`] act on the popup's id exactly
-    /// as they do for a top-level window.
+    /// Answered as [`Self::create`] is, and thereafter [`Self::present`] and
+    /// [`Self::close`] act on the popup's id exactly as they do for a
+    /// top-level window. The session's refusal — a foreign or unknown parent,
+    /// the per-client window budget reached — arrives as the create's does.
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry
-    ///   or a reserved event endpoint the protocol refuses, caught before
-    ///   any call.
-    /// * The session's typed refusal (a foreign or unknown parent, the
-    ///   per-client window budget reached), a transport failure, or a
-    ///   corrupt reply (fail closed, never a guessed id).
-    pub fn create_popup(&mut self, spec: &PopupSpec) -> Result<(u64, ProcId), Errno> {
+    /// [`Self::create`]'s.
+    pub fn create_popup(&mut self, spec: &PopupSpec) -> Result<u64, Errno> {
         let transient = &spec.transient;
+        let window_id = self.mint()?;
         let request = WindowRequest::CreatePopup {
+            window_id,
             parent_window_id: transient.parent_window_id,
             shm_handle: transient.shm_handle,
             event_endpoint: transient.event_endpoint,
@@ -1057,7 +1509,12 @@ impl<T: WindowTransport> WindowClient<T> {
             offset_x: spec.offset_x,
             offset_y: spec.offset_y,
         };
-        self.create_transient(&request, transient)
+        self.open(
+            window_id,
+            Some(transient.parent_window_id),
+            &request,
+            &transient.surface,
+        )
     }
 
     /// Open a tool window: a floating palette hung from this app's own
@@ -1073,19 +1530,18 @@ impl<T: WindowTransport> WindowClient<T> {
     /// keyboard only when the user presses it. A `spec.sizing` the user may
     /// resize it within gives it resize edges — never a maximize — and each
     /// new client size arrives as [`WindowEvent::Resized`], as a window's
-    /// does. The reply is the same shape as [`Self::create`]'s.
+    /// does. Answered as [`Self::create`] is; the session refuses a parent
+    /// that is itself a transient [`Errno::NotSupported`].
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry, a
-    ///   carry off the band, a range naming no reachable size, or a reserved
-    ///   event endpoint the protocol refuses, caught before any call.
-    /// * The session's typed refusal (a foreign or unknown parent,
-    ///   [`Errno::NotSupported`] for a parent that is itself a transient, the
-    ///   window budget reached), a transport failure, or a corrupt reply.
-    pub fn create_tool(&mut self, spec: &ToolSpec) -> Result<(u64, ProcId), Errno> {
+    /// [`Self::create`]'s, and [`Errno::OutOfRange`] for a carry off the band
+    /// or a range naming no reachable size, caught before any request.
+    pub fn create_tool(&mut self, spec: &ToolSpec) -> Result<u64, Errno> {
         let transient = &spec.transient;
+        let window_id = self.mint()?;
         let request = WindowRequest::CreateTool {
+            window_id,
             parent_window_id: transient.parent_window_id,
             shm_handle: transient.shm_handle,
             event_endpoint: transient.event_endpoint,
@@ -1100,7 +1556,12 @@ impl<T: WindowTransport> WindowClient<T> {
             title: spec.title,
             sizing: spec.sizing,
         };
-        self.create_transient(&request, transient)
+        self.open(
+            window_id,
+            Some(transient.parent_window_id),
+            &request,
+            &transient.surface,
+        )
     }
 
     /// Open a dialog window: a form, a question or an operation's progress,
@@ -1113,21 +1574,20 @@ impl<T: WindowTransport> WindowClient<T> {
     /// off the taskbar. It takes the keyboard only where this app has earned
     /// the front, and ignores presses until it has been seen a moment. An
     /// [`OwnerModal`](tairix_abi::window_ipc::DialogModality::OwnerModal)
-    /// dialog holds its owner as an alert does; a modeless one holds nothing. The extent is this app's to size
-    /// to its content: one past the screen is fitted to it and told so with a
-    /// [`WindowEvent::Resized`]. The reply is the same shape as
-    /// [`Self::create`]'s.
+    /// dialog holds its owner as an alert does; a modeless one holds nothing.
+    /// The extent is this app's to size to its content: one past the screen is
+    /// fitted to it and told so with a [`WindowEvent::Resized`]. Answered as
+    /// [`Self::create`] is; the session refuses an owner that is itself a
+    /// transient [`Errno::NotSupported`].
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry or a
-    ///   reserved event endpoint the protocol refuses, caught before any call.
-    /// * The session's typed refusal (a foreign or unknown owner,
-    ///   [`Errno::NotSupported`] for an owner that is itself a transient, the
-    ///   window budget reached), a transport failure, or a corrupt reply.
-    pub fn create_dialog(&mut self, spec: &DialogSpec) -> Result<(u64, ProcId), Errno> {
+    /// [`Self::create`]'s.
+    pub fn create_dialog(&mut self, spec: &DialogSpec) -> Result<u64, Errno> {
         let transient = &spec.transient;
+        let window_id = self.mint()?;
         let request = WindowRequest::CreateDialog {
+            window_id,
             owner_window_id: transient.parent_window_id,
             shm_handle: transient.shm_handle,
             event_endpoint: transient.event_endpoint,
@@ -1139,29 +1599,19 @@ impl<T: WindowTransport> WindowClient<T> {
             modality: spec.modality,
             title: spec.title,
         };
-        self.create_transient(&request, transient)
-    }
-
-    /// Send the transient create `request` describes as `transient`, and note
-    /// the extent the window it answers with opened at.
-    fn create_transient(
-        &mut self,
-        request: &WindowRequest,
-        transient: &TransientSpec,
-    ) -> Result<(u64, ProcId), Errno> {
-        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(request, &mut reply)?;
-        let (window_id, server) = decode_create_reply(&reply[..len])?;
-        let surface = &transient.surface;
-        self.note_extent(window_id, surface.width_px, surface.height_px);
-        Ok((window_id, server))
+        self.open(
+            window_id,
+            Some(transient.parent_window_id),
+            &request,
+            &transient.surface,
+        )
     }
 
     /// Open a desktop layer surface: an undecorated surface placed in
     /// **screen** coordinates, in the desktop's own stacking layers rather
     /// than inside a window of this app's.
     ///
-    /// The one call on this channel that requires `CAP_DESKTOP_LAYER`, and
+    /// The one request on this channel that requires `CAP_DESKTOP_LAYER`, and
     /// the difference between it and [`Self::create_popup`]: a popup is
     /// also undecorated, but it hangs off a window this app already owns
     /// and is offset from that window's client origin, so it tells the app
@@ -1174,24 +1624,22 @@ impl<T: WindowTransport> WindowClient<T> {
     /// is hidden whenever a trusted surface is up. Each side is at most
     /// `DESKTOP_LAYER_MAX_SIDE_LOGICAL` logical pixels.
     ///
-    /// The reply is the same shape as [`Self::create`], and thereafter
-    /// [`Self::present`] and [`Self::close`] act on the surface's id
-    /// exactly as they do for a window.
+    /// Answered as [`Self::create`] is, and thereafter [`Self::present`] and
+    /// [`Self::close`] act on the surface's id exactly as they do for a
+    /// window. The refusal of a caller without `CAP_DESKTOP_LAYER`
+    /// ([`Errno::PermissionDenied`]) or of one already holding a layer
+    /// surface ([`Errno::LimitExceeded`]) arrives as the create's does, and an
+    /// app degrades over it rather than dying: the refusal is the answer, not
+    /// a fault.
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry
-    ///   beyond the bound, or a reserved event endpoint, caught before any
-    ///   call.
-    /// * [`Errno::PermissionDenied`] — the caller does not hold
-    ///   `CAP_DESKTOP_LAYER`, which an app degrades over rather than dying:
-    ///   the refusal is the answer, not a fault.
-    /// * [`Errno::LimitExceeded`] — this client already holds a layer
-    ///   surface, or the seat's total is reached.
-    /// * A transport failure or a corrupt reply (fail closed, never a
-    ///   guessed id).
-    pub fn open_layer(&mut self, spec: &LayerSpec) -> Result<(u64, ProcId), Errno> {
+    /// [`Self::create`]'s, with a geometry beyond the bound refused before any
+    /// request.
+    pub fn open_layer(&mut self, spec: &LayerSpec) -> Result<u64, Errno> {
+        let window_id = self.mint()?;
         let request = WindowRequest::OpenLayer {
+            window_id,
             shm_handle: spec.shm_handle,
             event_endpoint: spec.event_endpoint,
             frame_count: spec.frame_count,
@@ -1203,20 +1651,46 @@ impl<T: WindowTransport> WindowClient<T> {
             y: spec.y,
             depth: spec.depth,
         };
-        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        let (window_id, server) = decode_create_reply(&reply[..len])?;
-        self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
-        Ok((window_id, server))
+        self.open(window_id, None, &request, &spec.surface)
+    }
+
+    /// Post the create `request`, which names `window_id`, a transient of
+    /// `owner` or a window of its own, and record the extent it opens at.
+    fn open(
+        &mut self,
+        window_id: u64,
+        owner: Option<u64>,
+        request: &WindowRequest,
+        surface: &DisplayMode,
+    ) -> Result<u64, Errno> {
+        self.presented
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.post_own(window_id, PostedRequest::Create, request, Carried::Nothing)?;
+        self.presented.push(LastPresent {
+            window_id,
+            owner,
+            width_px: surface.width_px,
+            height_px: surface.height_px,
+            frame_index: None,
+            accepted: (surface.width_px, surface.height_px),
+            reported: None,
+            deferred: false,
+            frames: Frames::Mapped,
+            owed_whole: false,
+            frame_owed: false,
+        });
+        Ok(window_id)
     }
 
     /// Move this app's layer surface to a new screen point and stacking
-    /// layer. The session clamps the point onto the work area.
+    /// layer. The session clamps the point onto the work area. Its refusal —
+    /// a window this app does not own, or one that is not a layer surface —
+    /// arrives later as an [`EventError::Refused`].
     ///
     /// # Errors
     ///
-    /// The session's typed refusal (a window this app does not own, or one
-    /// that is not a layer surface) or a transport failure.
+    /// A transport failure.
     pub fn place_layer(
         &mut self,
         window_id: u64,
@@ -1224,140 +1698,66 @@ impl<T: WindowTransport> WindowClient<T> {
         y: i32,
         depth: LayerDepth,
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::PlaceLayer {
-            window_id,
-            x,
-            y,
-            depth,
-        })
+        self.post_or_hold(window_id, Asked::PlaceLayer(x, y, depth), Carried::Nothing)
     }
 
-    /// Pull the desktop terrain this app's layer surface sits on: the
-    /// visible windows' screen rectangles, back-to-front, written into
-    /// `out` and returned as the filled prefix.
+    /// Ask for the desktop terrain this app's layer surface sits on: the
+    /// visible windows' screen rectangles, back-to-front, landing as
+    /// [`Answer::Terrain`].
     ///
-    /// Pulled rather than pushed, so a surface that does not care is told
+    /// Asked for rather than pushed, so a surface that does not care is told
     /// nothing. [`WindowEvent::TerrainChanged`] says an answer would now
-    /// differ.
+    /// differ; asked again while one is unanswered, only the newest is sent.
     ///
     /// # Errors
     ///
-    /// The session's typed refusal, a transport failure, or a corrupt
-    /// reply. [`Errno::BufferTooSmall`] if `out` is shorter than the answer
-    /// the session sent.
+    /// A transport failure.
     ///
     /// [`WindowEvent::TerrainChanged`]: tairix_abi::window_ipc::WindowEvent::TerrainChanged
-    pub fn take_terrain<'a>(
-        &mut self,
-        window_id: u64,
-        out: &'a mut [TerrainPlate],
-    ) -> Result<&'a [TerrainPlate], Errno> {
-        let request = WindowRequest::TakeTerrain { window_id };
-        let mut reply = [0u8; WINDOW_TERRAIN_REPLY_MAX];
-        let len = self.call(&request, &mut reply)?;
-        decode_terrain_reply(&reply[..len], out)
-    }
-
-    /// Ask the session to describe the desktop this app's windows are
-    /// displayed on: the screen extent, the UI scale, and the active
-    /// appearance.
-    ///
-    /// An app calls this **before** [`Self::create`], so its first window
-    /// is sized to a screen it knows and its first frame is painted at the
-    /// right density in the right colours, rather than at a guess it has
-    /// to correct once the user has already seen it. Thereafter the session
-    /// publishes each new state on the desktop system notice;
-    /// [`Desktop`](crate::Desktop) holds the answer and
-    /// [`adopt`](crate::Desktop::adopt) keeps it current from those. The
-    /// query answers the value an app needs before it can size anything and
-    /// the notice carries the changes, so an app started while a session is
-    /// coming up is correct without waiting for a publish.
-    ///
-    /// # Errors
-    ///
-    /// The session's typed refusal (a session that is tearing down and no
-    /// longer has a screen to describe), a transport failure, or a corrupt
-    /// reply — never a guessed extent.
-    ///
-    /// The reply also carries the serving session's [`ProcId`], which this
-    /// records so [`session`](Self::session) can hand it back: an app that
-    /// declares an icon-bar presence before it owns a window — or that never
-    /// opens one — needs it to authenticate the bar events it receives, and
-    /// this is the only call it makes before then.
-    pub fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
-        let request = WindowRequest::QueryDesktop;
-        let mut reply = [0u8; WINDOW_DESKTOP_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        let (desktop, server) = decode_desktop_reply(&reply[..len])?;
-        self.session = Some(server);
-        Ok(desktop)
-    }
-
-    /// The serving session's kernel-attested [`ProcId`], once a call has
-    /// learned it — the identity an app requires of every event's sender.
-    ///
-    /// `None` before the first [`desktop`](Self::desktop) or
-    /// [`create`](Self::create) succeeds: until the session has said who it
-    /// is, an app has nothing to authenticate against and must accept
-    /// nothing (fail closed).
-    #[must_use]
-    pub const fn session(&self) -> Option<ProcId> {
-        self.session
+    pub fn ask_terrain(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::Terrain, Carried::Nothing)
     }
 
     /// Present frame `frame_index` of window `window_id`, of which
     /// `damage` changed.
     ///
-    /// Posted once the window's previous present is answered
-    /// ([`Self::await_present`]), so the client never has two in flight. The
-    /// session shows the frame with its next one, answering at once when the
-    /// window held no frame it had yet to show and otherwise once it shows
-    /// that one. A frame this process's own calls leave no room for is sent as
-    /// a call instead, which waits for the room. A refusal of a posted present
-    /// arrives later as [`EventError::Refused`], and the window's next present
-    /// declares the whole window, since the refused one never reached it.
+    /// Posted, so it never waits. The session shows the frame with its next
+    /// one, answering at once when the window held no frame it had yet to
+    /// show and otherwise once it shows that one; until then it reads both
+    /// of the window's frames, so a window has one present in flight and
+    /// [`Self::present_state`] says when the next may be drawn. A present the
+    /// endpoint has no room for waits for room, and one made while it waits
+    /// is sent with it as one. A refusal arrives later as
+    /// [`EventError::Refused`], and the window's next present declares the
+    /// whole window, since the refused one never reached it.
     ///
     /// # Errors
     ///
-    /// A transport failure, or the session's refusal of a present sent as a
-    /// call.
+    /// [`Errno::WouldBlock`] while a present of the window is in flight — the
+    /// window is then owed [`Answer::FrameReturned`] — or a transport failure.
     pub fn present(
         &mut self,
         window_id: u64,
         frame_index: u32,
         damage: DamageList,
     ) -> Result<(), Errno> {
-        self.await_present(window_id)?;
+        if self.present_state(window_id) == PresentState::InFlight {
+            self.owe_frame(window_id);
+            return Err(Errno::WouldBlock);
+        }
         let owed = self
             .record_mut(window_id)
             .filter(|record| record.owed_whole)
             .map(|record| (record.width_px, record.height_px));
         let damage = match owed {
-            Some((width_px, height_px)) => DamageList::new(&[DamageRect {
-                x: 0,
-                y: 0,
-                width_px,
-                height_px,
-            }])?,
+            Some((width_px, height_px)) => whole(width_px, height_px)?,
             None => damage,
         };
-        let request = Asked::Present(frame_index, damage).request(window_id);
-        match self.post(&request) {
-            Ok(ticket) => self.posted.push(Posting {
-                window_id,
-                kind: PostedRequest::Present,
-                ticket: Some(ticket),
-                held: None,
-                orphaned: false,
-            }),
-            Err(Errno::WouldBlock) => {
-                if let Err(errno) = self.status_call(&request) {
-                    let _ = self.present_refused(window_id, errno);
-                    return Err(errno);
-                }
-            }
-            Err(errno) => return Err(errno),
-        }
+        self.post_or_hold(
+            window_id,
+            Asked::Present(frame_index, damage),
+            Carried::Nothing,
+        )?;
         if let Some(record) = self.record_mut(window_id) {
             record.frame_index = Some(frame_index);
             record.owed_whole = false;
@@ -1365,68 +1765,37 @@ impl<T: WindowTransport> WindowClient<T> {
         Ok(())
     }
 
-    /// Wait until window `window_id` has no present unanswered.
-    ///
-    /// The session reads the frame a present names until a later present
-    /// replaces it, so a client draws its other frame only once the present
-    /// naming that one is answered. A present replacing a frame the desktop
-    /// had yet to show is answered with the desktop's next frame, so this
-    /// holds a client drawing faster than the desktop shows frames to its
-    /// pace; a loop that must never wait asks [`Self::present_in_flight`]
-    /// first. How an awaited present ended reaches the application as any
-    /// posted request's answer does.
-    ///
-    /// # Errors
-    ///
-    /// Why the wait ended with the present still unanswered — the task
-    /// interrupted, or no room to wait in. The present stays posted and is
-    /// taken in like any other answer, so the window still has one in flight.
-    pub fn await_present(&mut self, window_id: u64) -> Result<(), Errno> {
-        // Each present is awaited by its own answer and nothing else is
-        // reaped, so a window with none in flight costs no call.
-        while let Some(index) = self.posted.iter().position(|posting| {
+    /// Where window `window_id`'s presents stand, once every answer that has
+    /// landed is taken in: whether the frame the session is not reading may
+    /// be drawn, or a paint must wait for [`Answer::FrameReturned`].
+    pub fn present_state(&mut self, window_id: u64) -> PresentState {
+        self.reap_posted();
+        let present = self.posted.iter().find(|posting| {
             posting.window_id == window_id && posting.kind == PostedRequest::Present
-        }) {
-            let posting = self.posted[index];
-            let Some(ticket) = posting.ticket else {
-                // A present that waited for room is sent as a call, which
-                // waits for the room itself.
-                self.posted.remove(index);
-                if let Some(held) = posting.held {
-                    let answer = self.status_call(&held.request(window_id));
-                    self.settle_status(&posting, answer);
-                }
-                continue;
-            };
-            let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-            let len = match self.transport.await_reply(ticket, &mut reply) {
-                Ok(len) => Ok(len),
-                // A call still live when its await ends is a reaper's again;
-                // forgotten, its answer would keep the reply member ready for
-                // ever.
-                Err(errno) => match self.transport.reap(ticket, &mut reply) {
-                    Ok(None) => return Err(errno),
-                    Ok(Some(len)) => Ok(len),
-                    Err(over) => Err(over),
-                },
-            };
-            let answer = len.and_then(|len| reply.get(..len).ok_or(Errno::BufferTooSmall));
-            let _ = self.answered(index, answer);
+        });
+        match present {
+            None => PresentState::Idle,
+            Some(Posting {
+                ticket: None,
+                held: Some(Held::Asked(Asked::Present(frame_index, _))),
+                ..
+            }) => PresentState::Waiting(*frame_index),
+            Some(_) => PresentState::InFlight,
         }
-        Ok(())
     }
 
-    /// Whether a present of window `window_id` is still unanswered once every
-    /// answer that has landed is taken in. A loop that must never wait — one
-    /// draining a stream into its window — presents only while this is false
-    /// and otherwise owes the window its paint: the answer, when it lands,
-    /// wakes the loop.
-    pub fn present_in_flight(&mut self, window_id: u64) -> bool {
-        self.reap_posted();
-        let presents = |posting: &Posting| {
+    /// Owe window `window_id` an [`Answer::FrameReturned`] once its present in
+    /// flight is answered: what a paint deferred behind it waits for. With
+    /// none in flight it is owed at once.
+    pub fn owe_frame(&mut self, window_id: u64) {
+        let presenting = self.posted.iter().any(|posting| {
             posting.window_id == window_id && posting.kind == PostedRequest::Present
-        };
-        self.posted.iter().any(presents)
+        });
+        match self.record_mut(window_id) {
+            Some(record) if presenting => record.frame_owed = true,
+            Some(_) => self.land(Answer::FrameReturned { window_id }),
+            None => {}
+        }
     }
 
     /// Whether the session released window `window_id`'s pixels because
@@ -1449,27 +1818,33 @@ impl<T: WindowTransport> WindowClient<T> {
             .any(|record| record.window_id == window_id && record.frames != Frames::Mapped)
     }
 
-    /// Close window `window_id`.
+    /// Close window `window_id`, and with it every transient hung from it.
+    ///
+    /// The client forgets them at once — they are certainly not ones to
+    /// keep re-presenting, nor to post to — and what they have in flight is
+    /// still reaped, unreported, as is the close's own answer: a window the
+    /// session no longer knows is closed already.
     ///
     /// # Errors
     ///
-    /// The session's typed refusal, a transport failure, or a corrupt
-    /// status frame.
+    /// A transport failure.
     pub fn close(&mut self, window_id: u64) -> Result<(), Errno> {
-        let closed = self.status_call(&WindowRequest::Close { window_id });
-        // Forget it either way: a window the session does not know is
-        // certainly not one to keep re-presenting, nor to post to. What it
-        // has in flight is still reaped, unreported.
-        self.presented
-            .retain(|record| record.window_id != window_id);
-        self.forget_unsent(window_id, |_| true);
-        for posting in &mut self.posted {
-            if posting.window_id == window_id {
-                posting.orphaned = true;
-            }
+        // The session closes a window's transients with it.
+        while let Some(transient) = self
+            .presented
+            .iter()
+            .find(|record| record.owner == Some(window_id))
+            .map(|record| record.window_id)
+        {
+            self.forget(transient);
         }
-        self.media.retain(|read| read.window_id != window_id);
-        closed
+        self.forget(window_id);
+        self.post_own(
+            window_id,
+            PostedRequest::Close,
+            &WindowRequest::Close { window_id },
+            Carried::Nothing,
+        )
     }
 
     /// Re-map window `window_id` onto a fresh frame region: `frame_count`
@@ -1480,13 +1855,15 @@ impl<T: WindowTransport> WindowClient<T> {
     /// A resizable app calls this after the window manager tells it a new
     /// client size ([`WindowEvent::Resized`]): it renders into the new
     /// region and re-maps the existing window onto it, so the resize keeps
-    /// the window identity rather than opening a new window.
+    /// the window identity rather than opening a new window. A refusal
+    /// arrives later as an [`EventError::Refused`], followed by the size the
+    /// session kept.
     ///
     /// # Errors
     ///
-    /// The session's typed refusal (e.g. [`Errno::NotFound`] for a window
-    /// the caller does not own), a transport failure, or a corrupt status
-    /// frame.
+    /// [`Errno::WouldBlock`] while a resize of the window is unanswered or a
+    /// request waits for room ahead of it — the window's newest size is
+    /// delivered again once one is answered — or a transport failure.
     ///
     /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
     pub fn resize(
@@ -1499,6 +1876,7 @@ impl<T: WindowTransport> WindowClient<T> {
         if self.resize_in_flight(window_id) {
             return Err(Errno::WouldBlock);
         }
+        self.posted.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
         let request = WindowRequest::Resize {
             window_id,
             shm_handle,
@@ -1508,11 +1886,15 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
         };
-        let ticket = match self.post(&request) {
+        let posted = if self.waits_for_room() {
+            Err(Errno::WouldBlock)
+        } else {
+            self.post(&request)
+        };
+        let ticket = match posted {
             Ok(ticket) => ticket,
             Err(Errno::WouldBlock) => {
-                // This process's own calls fill its place at the endpoint:
-                // the size is delivered again once one of them is answered.
+                // The size is delivered again once room is made.
                 if let Some(record) = self.record_mut(window_id) {
                     record.deferred = true;
                 }
@@ -1525,6 +1907,7 @@ impl<T: WindowTransport> WindowClient<T> {
             kind: PostedRequest::Resize,
             ticket: Some(ticket),
             held: None,
+            carried: Carried::Nothing,
             orphaned: false,
         });
         // The old frames describe the old extent, so the remembered
@@ -1558,19 +1941,16 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The session applies the new title to the window's chrome and to
     /// its taskbar entry together, so an app whose window shows a
     /// changing subject (the folder it is browsing, the document it
-    /// holds) names that subject in both places from this one call.
+    /// holds) names that subject in both places from this one request.
     ///
     /// # Errors
     ///
-    /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a title the
-    ///   protocol refuses (over-long, or holding a control character),
-    ///   caught before any call (never truncated).
-    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
-    ///   windows.
-    /// * A transport failure, or a corrupt status frame.
+    /// [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a title the
+    /// protocol refuses (over-long, or holding a control character), caught
+    /// before any request (never truncated) — or a transport failure.
     pub fn set_title(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
         let title = WindowTitle::new(title)?;
-        self.post_or_hold(window_id, Asked::Title(title))
+        self.post_or_hold(window_id, Asked::Title(title), Carried::Nothing)
     }
 
     /// Restate the range the window manager may resize window `window_id`
@@ -1581,30 +1961,28 @@ impl<T: WindowTransport> WindowClient<T> {
     /// range here. Without it the window manager holds a drag to the range
     /// of content the app is no longer showing. A window the new range no
     /// longer holds is brought inside it and answered with a
-    /// [`WindowEvent::Resized`].
+    /// [`WindowEvent::Resized`]. The session refuses a sizing that
+    /// contradicts how the window was decorated [`Errno::NotSupported`]: what
+    /// may be restated is the range, not whether the window is resizable.
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] — a range naming no reachable size (a
-    ///   maximum below its own minimum), caught before any call.
-    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
-    ///   windows.
-    /// * [`Errno::NotSupported`] — the sizing contradicts how the window was
-    ///   decorated; what may be restated is the range, not whether the
-    ///   window is resizable at all.
-    /// * A transport failure, or a corrupt status frame.
+    /// [`Errno::OutOfRange`] — a range naming no reachable size (a maximum
+    /// below its own minimum), caught before any request — or a transport
+    /// failure.
     pub fn set_sizing(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::Sizing(sizing))
+        self.post_or_hold(window_id, Asked::Sizing(sizing), Carried::Nothing)
     }
 
     /// Ask for window `window_id` to be put into `state` — the app's half
     /// of exclusive fullscreen.
     ///
-    /// A success is only the acceptance. The state the window manager
-    /// actually applied arrives as a [`WindowEvent::Resized`] carrying it
-    /// alongside the new client extent, so an app lays out from the event
-    /// rather than from having asked. Leaving fullscreen means naming the
-    /// state to return to.
+    /// The state the window manager actually applied arrives as a
+    /// [`WindowEvent::Resized`] carrying it alongside the new client extent,
+    /// so an app lays out from the event rather than from having asked.
+    /// Leaving fullscreen means naming the state to return to. A window that
+    /// cannot take the state — a fixed-size window has only the size it was
+    /// created at — is refused [`Errno::NotSupported`].
     ///
     /// The window manager keeps the display path: it sizes the surface to
     /// the scan-out and withdraws the decoration, and the app presents
@@ -1612,53 +1990,56 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
-    ///   windows.
-    /// * [`Errno::NotSupported`] — the window cannot take the state; a
-    ///   fixed-size window has only the size it was created at.
-    /// * A transport failure, or a corrupt status frame.
+    /// A transport failure.
     ///
     /// [`WindowEvent::Resized`]: tairix_abi::window_ipc::WindowEvent::Resized
     pub fn set_size_state(&mut self, window_id: u64, state: WindowSizeState) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetSizeState { window_id, state })
+        self.post_or_hold(window_id, Asked::SizeState(state), Carried::Nothing)
     }
 
     /// Ask the session to run its trusted file picker for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
     ///
-    /// A success is only the acceptance: the pick concludes
-    /// asynchronously with a [`WindowEvent::FilePicked`] (carrying the
-    /// one-shot `fd_redeem` handle) or a [`WindowEvent::PickCancelled`]
-    /// on the app's event endpoint, so the app keeps parking on its
-    /// ordinary event wait.
+    /// The pick concludes asynchronously with a [`WindowEvent::FilePicked`]
+    /// (carrying the one-shot `fd_redeem` handle) or a
+    /// [`WindowEvent::PickCancelled`] on the app's event endpoint. The
+    /// session refuses [`Errno::AlreadyExists`] while a pick is already
+    /// pending on the window.
     ///
     /// # Errors
     ///
-    /// The session's typed refusal ([`Errno::AlreadyExists`] while a pick
-    /// is already pending on the window; [`Errno::NotFound`] for a window
-    /// the caller does not own), a transport failure, or a corrupt status
-    /// frame.
+    /// A transport failure.
     ///
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
     /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
     pub fn pick_file(&mut self, window_id: u64, purpose: PickPurpose) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::PickFile { window_id, purpose })
+        self.post_own(
+            window_id,
+            PostedRequest::PickFile,
+            &WindowRequest::PickFile { window_id, purpose },
+            Carried::Nothing,
+        )
     }
 
     /// Hand the session the drag the user began on `items` in window
     /// `window_id`, while the press that began it is still held. It is
     /// reported as it moves ([`WindowEvent::DragOver`]) and ends with one
-    /// [`WindowEvent::DragEnded`].
+    /// [`WindowEvent::DragEnded`]; a refusal to take the gesture arrives as
+    /// an [`EventError::Refused`] instead.
     ///
     /// # Errors
     ///
-    /// The session's refusal to take the gesture, a transport failure, or a
-    /// corrupt status frame.
+    /// A transport failure.
     ///
     /// [`WindowEvent::DragOver`]: tairix_abi::window_ipc::WindowEvent::DragOver
     /// [`WindowEvent::DragEnded`]: tairix_abi::window_ipc::WindowEvent::DragEnded
     pub fn begin_drag(&mut self, window_id: u64, items: DragItems) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::BeginDrag { window_id, items })
+        self.post_own(
+            window_id,
+            PostedRequest::BeginDrag,
+            &WindowRequest::BeginDrag { window_id, items },
+            Carried::Nothing,
+        )
     }
 
     /// Answer the drag report numbered `serial` for the drag window
@@ -1666,15 +2047,18 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when no drag is carried from the window, the
-    /// session's refusal, a transport failure, or a corrupt status frame.
+    /// A transport failure.
     pub fn drag_verdict(
         &mut self,
         window_id: u64,
         serial: u32,
         verdict: Option<DropOperation>,
     ) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::DragVerdict(serial, verdict))
+        self.post_or_hold(
+            window_id,
+            Asked::DragVerdict(serial, verdict),
+            Carried::Nothing,
+        )
     }
 
     /// Answer the save offer numbered `serial` over window `window_id`:
@@ -1683,15 +2067,18 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// A request the wire cannot carry; the session's own answer arrives
-    /// with [`WindowClient::reap_posted`].
+    /// A transport failure.
     pub fn answer_save_offer(
         &mut self,
         window_id: u64,
         serial: u32,
         accepts: bool,
     ) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::SaveOfferAnswer(serial, accepts))
+        self.post_or_hold(
+            window_id,
+            Asked::SaveOfferAnswer(serial, accepts),
+            Carried::Nothing,
+        )
     }
 
     /// Answer the desktop's items offer numbered `serial` over window
@@ -1699,15 +2086,18 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// A request the wire cannot carry; the session's own answer arrives
-    /// with [`WindowClient::reap_posted`].
+    /// A transport failure.
     pub fn answer_items_offer(
         &mut self,
         window_id: u64,
         serial: u32,
         verdict: Option<DropOperation>,
     ) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::ItemsOfferAnswer(serial, verdict))
+        self.post_or_hold(
+            window_id,
+            Asked::ItemsOfferAnswer(serial, verdict),
+            Carried::Nothing,
+        )
     }
 
     /// Answer the file offer numbered `serial` over window `window_id`:
@@ -1715,96 +2105,75 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// A request the wire cannot carry; the session's own answer arrives
-    /// with [`WindowClient::reap_posted`].
+    /// A transport failure.
     pub fn answer_file_offer(
         &mut self,
         window_id: u64,
         serial: u32,
         places: bool,
     ) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::FileOfferAnswer(serial, places))
+        self.post_or_hold(
+            window_id,
+            Asked::FileOfferAnswer(serial, places),
+            Carried::Nothing,
+        )
     }
 
     /// Ask for the media type of the one file the [`WindowEvent::FileOffered`]
-    /// numbered `serial` holds over window `window_id`, never waiting: the
-    /// answer is taken with [`WindowClient::take_offered_media`] once it lands,
-    /// and [`WindowEvents::wait`] returns, unparked, while one is untaken.
+    /// numbered `serial` holds over window `window_id`, landing as
+    /// [`Answer::OfferedFile`]. Asked again over the same window while one is
+    /// unanswered, only the newest is sent.
     ///
     /// # Errors
     ///
-    /// A request the wire cannot carry, or a transport failure.
+    /// A transport failure.
     ///
     /// [`WindowEvent::FileOffered`]: tairix_abi::window_ipc::WindowEvent::FileOffered
     pub fn ask_offered_file(&mut self, window_id: u64, serial: u32) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::OfferedFile(serial))
-    }
-
-    /// The oldest media type asked with [`WindowClient::ask_offered_file`]
-    /// that has landed, of a window still open. Answers land as every other
-    /// posted request's do, with [`WindowClient::reap_posted`], which each
-    /// event drain runs.
-    pub fn take_offered_media(&mut self) -> Option<OfferedMedia> {
-        self.media.pop_front()
+        self.post_or_hold(window_id, Asked::OfferedFile(serial), Carried::Nothing)
     }
 
     /// Hand the file window `window_id`'s drag placed to the window it was
     /// dropped on, through `grant`, a delegation minted to the session from a
-    /// descriptor opened read-only, called `name`. One-shot.
+    /// descriptor opened read-only, called `name`. One-shot. The session
+    /// refuses [`Errno::NotFound`] when the drag placed nothing or its drop
+    /// was handed over already.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when the drag placed nothing or its drop was handed
-    /// over already, a refused relay — a descriptor that is not a read-only
-    /// regular file among them — a transport failure, or a corrupt reply.
+    /// A transport failure.
     pub fn place_dropped(
         &mut self,
         window_id: u64,
         name: DocumentName,
         grant: core::num::NonZeroU64,
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::PlaceDropped {
+        self.post_own(
             window_id,
-            name,
-            grant,
-        })
+            PostedRequest::PlaceDropped,
+            &WindowRequest::PlaceDropped {
+                window_id,
+                name,
+                grant,
+            },
+            Carried::Nothing,
+        )
     }
 
-    /// Hand `each` every item of the desktop's drag numbered `drag`, offered
-    /// to or dropped on window `window_id`, in order — a page of them a round
-    /// trip — answering how many there were.
+    /// Ask for every item of the desktop's drag numbered `drag`, offered to
+    /// or dropped on window `window_id`, landing in order as one
+    /// [`Answer::OfferedItems`]: read a page a round trip, none of them
+    /// waited on.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] once the drag stands neither over nor on the
-    /// window, a transport failure, a corrupt reply or one that brings no
-    /// item it owes, or the first refusal `each` answers.
-    pub fn read_offered_items(
-        &mut self,
-        window_id: u64,
-        drag: u32,
-        mut each: impl FnMut(OfferedItem<'_>) -> Result<(), Errno>,
-    ) -> Result<u32, Errno> {
-        let mut from = 0u32;
-        loop {
-            let page = decode_offered_items_reply(self.pull(&WindowRequest::OfferedItems {
-                window_id,
-                drag,
-                from,
-            })?)?;
-            for item in page.iter() {
-                each(item)?;
-            }
-            from = from
-                .checked_add(u32::from(page.len()))
-                .ok_or(Errno::OutOfRange)?;
-            if from >= page.total() {
-                return Ok(page.total());
-            }
-            if page.is_empty() {
-                return Err(Errno::OutOfRange);
-            }
-        }
+    /// A transport failure.
+    pub fn ask_offered_items(&mut self, window_id: u64, drag: u32) -> Result<(), Errno> {
+        self.post_or_hold(
+            window_id,
+            Asked::OfferedItems(drag, 0),
+            Carried::Items(Vec::new()),
+        )
     }
 
     /// Answer the save dropped on window `window_id`, numbered `serial`, with
@@ -1814,83 +2183,101 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when no such drop awaits its folder, the session's
-    /// refusal, a transport failure, or a corrupt status frame.
+    /// A transport failure.
     pub fn save_into(&mut self, window_id: u64, serial: u32, location: u64) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SaveInto {
+        self.post_own(
             window_id,
-            serial,
-            location,
-        })
+            PostedRequest::SaveInto(serial),
+            &WindowRequest::SaveInto {
+                window_id,
+                serial,
+                location,
+            },
+            Carried::Nothing,
+        )
     }
 
-    /// Tell the desktop, without waiting, that the drop numbered `serial`
-    /// window `window_id`'s drag concluded there has ended: what a drop that
-    /// ends before its own thread steps it owes. A refusal is not reported,
-    /// since a drop the desktop already ended has nothing left to end.
+    /// Tell the desktop that the drop numbered `serial` window `window_id`'s
+    /// drag concluded there has ended: what a drop that ends before its own
+    /// thread steps it owes. A refusal is not reported, since a drop the
+    /// desktop already ended has nothing left to end.
     ///
     /// # Errors
     ///
-    /// A request the wire cannot carry, or a transport failure.
+    /// A transport failure.
     pub fn end_landing(&mut self, window_id: u64, serial: u32) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::LandingEnded(serial))
+        self.post_own(
+            window_id,
+            PostedRequest::LandingEnded(serial),
+            &WindowRequest::DropLanding {
+                window_id,
+                serial,
+                step: LandingStep::Ended,
+            },
+            Carried::Nothing,
+        )
     }
 
-    /// The desktop folder the drag report numbered `serial` named, for the
-    /// drag window `window_id` began.
+    /// Ask for the desktop folder the drag report numbered `serial` named, for
+    /// the drag window `window_id` began, landing as [`Answer::DragSpot`].
+    /// Asked again over the same window while one is unanswered, only the
+    /// newest is sent.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] once the pointer has gone from that folder, a
-    /// transport failure, or a corrupt reply.
-    pub fn drag_spot(&mut self, window_id: u64, serial: u32) -> Result<String, Errno> {
-        let folder = decode_drag_spot_reply(
-            self.pull(&WindowRequest::QueryDragSpot { window_id, serial })?,
-        )?;
-        Ok(String::from(folder))
+    /// A transport failure.
+    pub fn ask_drag_spot(&mut self, window_id: u64, serial: u32) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::DragSpot(serial), Carried::Nothing)
     }
 
-    /// The application window `window_id`'s drag was dropped on, once its
-    /// [`WindowEvent::DragEnded`] said it was. One-shot.
+    /// Ask for the application window `window_id`'s drag was dropped on, once
+    /// its [`WindowEvent::DragEnded`] said it was, landing as
+    /// [`Answer::DropTarget`]. One-shot.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when there is none to take, a transport failure,
-    /// or a corrupt reply.
+    /// A transport failure.
     ///
     /// [`WindowEvent::DragEnded`]: tairix_abi::window_ipc::WindowEvent::DragEnded
-    pub fn take_drop_target(&mut self, window_id: u64) -> Result<DropTarget, Errno> {
-        decode_drop_target_reply(self.pull(&WindowRequest::TakeDropTarget { window_id })?)
+    pub fn ask_drop_target(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.post_own(
+            window_id,
+            PostedRequest::DropTarget,
+            &WindowRequest::TakeDropTarget { window_id },
+            Carried::Nothing,
+        )
     }
 
-    /// The name of the file window `window_id`'s last pick chose, once its
-    /// [`WindowEvent::FilePicked`] has arrived. One-shot.
+    /// Ask for the name of the file window `window_id`'s last pick chose,
+    /// once its [`WindowEvent::FilePicked`] has arrived, landing as
+    /// [`Answer::PickedName`]. One-shot.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when there is none to take — taken already, the
-    /// pick was cancelled, or the window is not the caller's — a transport
-    /// failure, or a corrupt reply.
+    /// A transport failure.
     ///
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
-    pub fn take_picked_name(&mut self, window_id: u64) -> Result<String, Errno> {
-        let name =
-            decode_picked_name_reply(self.pull(&WindowRequest::TakePickedName { window_id })?)?;
-        Ok(String::from(name.as_str()))
+    pub fn ask_picked_name(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.post_own(
+            window_id,
+            PostedRequest::PickedName,
+            &WindowRequest::TakePickedName { window_id },
+            Carried::Nothing,
+        )
     }
 
-    /// The next file window `window_id`'s last folder pick delegated, once its
-    /// [`WindowEvent::FolderPicked`] has arrived: the `fd_redeem` handle and
-    /// the file's name.
+    /// Ask for the files window `window_id`'s last folder pick delegated, once
+    /// its [`WindowEvent::FolderPicked`] has arrived: each lands as an
+    /// [`Answer::PickedFile`], in order, and the last as
+    /// [`Errno::NotFound`], once none is left.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] once every file is taken, or when the window is
-    /// not the caller's; a transport failure; or a corrupt reply.
+    /// A transport failure.
     ///
     /// [`WindowEvent::FolderPicked`]: tairix_abi::window_ipc::WindowEvent::FolderPicked
-    pub fn take_picked_file(&mut self, window_id: u64) -> Result<PickedFile, Errno> {
-        decode_picked_file_reply(self.pull(&WindowRequest::TakePickedFile { window_id })?)
+    pub fn ask_picked_files(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::PickedFile, Carried::Nothing)
     }
 
     /// One page of the shipped wallpaper catalog, from entry `from`.
@@ -1901,6 +2288,9 @@ impl<T: WindowTransport> WindowClient<T> {
     /// the answer borrows from it: the catalog's total length and the
     /// entries this page carried. A caller with more entries than one page
     /// holds asks again from where the page ended.
+    ///
+    /// A call, which waits on the session's loop: made where no frame is owed
+    /// — at start-up, or on a worker — never on an interactive loop.
     ///
     /// # Errors
     ///
@@ -1921,7 +2311,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// for the desktop's own Settings application: the desktop's own two, then
     /// every saver bundle installed for the system and for the user, each with
     /// whether it can be chosen. `into` is the caller's own reply buffer, and
-    /// the answer borrows from it.
+    /// the answer borrows from it. A call, made only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -1944,7 +2334,8 @@ impl<T: WindowTransport> WindowClient<T> {
     /// answers from what it holds, so this costs no I/O either side. `into`
     /// is the caller's own reply buffer, held once rather than taken per
     /// call, and the answer borrows from it. There is no paging: the whole
-    /// choice space fits one reply by construction.
+    /// choice space fits one reply by construction. A call, made only where
+    /// no frame is owed.
     ///
     /// # Errors
     ///
@@ -1964,7 +2355,8 @@ impl<T: WindowTransport> WindowClient<T> {
     /// since the desktop started, in the order they first did.
     ///
     /// The session answers only its own Settings application. `into` is the
-    /// caller's own reply buffer and the answer borrows from it.
+    /// caller's own reply buffer and the answer borrows from it. A call, made
+    /// only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -1979,7 +2371,8 @@ impl<T: WindowTransport> WindowClient<T> {
         decode_notify_sources_reply(frame)
     }
 
-    /// Ask the session to lock the screen now.
+    /// Ask the session to lock the screen now. A call, made only where no
+    /// frame is owed.
     ///
     /// # Errors
     ///
@@ -1995,25 +2388,34 @@ impl<T: WindowTransport> WindowClient<T> {
     /// output is then taken with
     /// [`take_authorised_output`](Self::take_authorised_output).
     ///
+    /// The session's refusal arrives as an [`EventError::Refused`]:
+    /// [`Errno::PermissionDenied`] for any caller but the component the task
+    /// belongs to, [`Errno::OutOfRange`] for a task it will not perform as
+    /// asked, [`Errno::AlreadyExists`] while one is pending on the window or
+    /// slot, [`Errno::NotFound`] for a slot never declared, and
+    /// [`Errno::SeatBusy`] while anything else holds the seat.
+    ///
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] for window `0`, which names none, or a task the
-    /// wire cannot carry, the session's refusal ([`Errno::PermissionDenied`]
-    /// for any caller but the component the task belongs to,
-    /// [`Errno::OutOfRange`] for a task it will not perform as asked,
-    /// [`Errno::AlreadyExists`] while one is pending on the window or slot,
-    /// [`Errno::NotFound`] for a slot never declared, [`Errno::SeatBusy`]
-    /// while anything else holds the seat), or a transport failure.
+    /// wire cannot carry, or a transport failure.
     pub fn authorise(&mut self, window_id: Option<u64>, task: &SystemTask) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::Authorise {
+        let request = WindowRequest::Authorise {
             window_id: asked_window(window_id)?,
             task: *task,
-        })
+        };
+        self.post_own(
+            window_id.unwrap_or(0),
+            PostedRequest::Authorise,
+            &request,
+            Carried::Nothing,
+        )
     }
 
     /// What the last task asked for window `window_id`, or for this
     /// application's icon-bar slot when `None`, printed, once its
-    /// [`WindowEvent::Authorised`] said it was captured. One-shot.
+    /// [`WindowEvent::Authorised`] said it was captured. One-shot. A call,
+    /// made only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -2025,12 +2427,17 @@ impl<T: WindowTransport> WindowClient<T> {
         let output = decode_authorised_output_reply(
             self.pull(&WindowRequest::TakeAuthorisedOutput { window_id })?,
         )?;
-        Ok(output.to_vec())
+        let mut taken = Vec::new();
+        taken
+            .try_reserve_exact(output.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        taken.extend_from_slice(output);
+        Ok(taken)
     }
 
     /// A read-only delegation of the desktop's civil-time store: the
     /// `fd_grant` handle the session minted to this process, redeemed from
-    /// [`session`](Self::session).
+    /// [`session`](Self::session). A call, made only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -2038,13 +2445,11 @@ impl<T: WindowTransport> WindowClient<T> {
     /// its own Settings application, [`Errno::NotFound`] when the desktop
     /// holds no store), a transport failure, or a malformed reply.
     pub fn zone_store(&mut self) -> Result<u64, Errno> {
-        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
-        let len = self.call(&WindowRequest::TakeZoneStore, &mut reply)?;
-        decode_minted_id_reply(&reply[..len])
+        decode_handle_reply(self.pull(&WindowRequest::TakeZoneStore)?)
     }
 
     /// Ask the session to show the screensaver `document` describes, now, as
-    /// a preview.
+    /// a preview. A call, made only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -2066,7 +2471,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// A success is only the acceptance: the session decodes the untrusted
     /// picture in its own parser sandbox, off its compositing loop, and
     /// concludes with a [`WindowEvent::PreviewRendered`] on the app's event
-    /// endpoint, so the app keeps parking on its ordinary event wait.
+    /// endpoint. A call, made only where no frame is owed.
     ///
     /// # Errors
     ///
@@ -2105,28 +2510,22 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The app describes and the desktop decides: it supplies the rows, the
     /// root plate's title ([`AppMenu::titled`]) and the anchor, and the
     /// session titles, places, draws, grabs, routes, dismisses — and
-    /// answers. Returns the session-minted **open id**: a success is only
-    /// the acceptance, and the whole answer arrives asynchronously as
-    /// exactly one [`WindowEvent::MenuClosed`] naming that id, so the app
-    /// keeps parking on its ordinary event wait.
+    /// answers. Returns the **open id**, named by this client: the whole
+    /// answer arrives as exactly one [`WindowEvent::MenuClosed`] naming it,
+    /// or as an [`EventError::Refused`] naming it when the session will not
+    /// open the menu — [`Errno::NotSupported`] from a desktop that composes no
+    /// menu service, over which the caller carries on and never draws a menu
+    /// of its own, and [`Errno::AlreadyExists`] while an open on the window is
+    /// unanswered.
     ///
     /// Match the open id rather than assuming the next outcome is this
     /// open's: an answer to a previous gesture may still be in the app's
-    /// mailbox when this one is accepted.
+    /// mailbox when this one is asked.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotSupported`] — the desktop composes no menu service.
-    ///   A menu is incidental to the app's purpose, so the caller reports
-    ///   the refusal and carries on rather than ending, and never draws a
-    ///   menu of its own instead.
-    /// * [`Errno::AlreadyExists`] — an open on this window is still
-    ///   unanswered.
-    /// * [`Errno::NotFound`] — `window_id` is not one of the caller's own
-    ///   windows.
-    /// * [`Errno::OutOfRange`] — an empty menu, which would open nothing;
-    ///   caught by the protocol before any call.
-    /// * A transport failure, or a corrupt reply frame.
+    /// [`Errno::OutOfRange`] for an empty menu, which would open nothing;
+    /// [`Self::create`]'s naming errors; or a transport failure.
     ///
     /// [`WindowEvent::MenuClosed`]: tairix_abi::window_ipc::WindowEvent::MenuClosed
     pub fn open_menu(
@@ -2135,30 +2534,40 @@ impl<T: WindowTransport> WindowClient<T> {
         anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<u64, Errno> {
+        let open_id = self.mint()?;
         let request = WindowRequest::OpenMenu {
             window_id,
+            open_id,
             anchor,
             menu: *menu,
         };
-        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        decode_minted_id_reply(&reply[..len])
+        self.post_own(
+            window_id,
+            PostedRequest::OpenMenu(open_id),
+            &request,
+            Carried::Nothing,
+        )?;
+        Ok(open_id)
     }
 
     /// Put `alert` to the user in a window of its own, holding `owner` — one
     /// of this app's own top-level windows — until it is answered, or no
-    /// window when `None`. Returns the id its one
-    /// [`WindowEvent::AlertClosed`] names, delivered to `event_endpoint`.
+    /// window when `None`. Returns the alert's id, named by this client, which
+    /// its one [`WindowEvent::AlertClosed`] names, delivered to
+    /// `event_endpoint`.
+    ///
+    /// The session's refusal arrives as an [`EventError::Refused`] naming the
+    /// alert: [`Errno::NotSupported`] from a desktop that draws no alerts,
+    /// over which the caller states its message on `stderr` instead and
+    /// carries on; [`Errno::LimitExceeded`] for an app that already has
+    /// [`ALERT_MAX_OPEN`](tairix_abi::window_ipc::ALERT_MAX_OPEN) up;
+    /// [`Errno::NotFound`] for an `owner` that is not one of this app's
+    /// windows; [`Errno::OutOfRange`] for one that is a popup, tool or layer
+    /// surface.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotSupported`] — the desktop draws no alerts. The caller
-    ///   states its message on `stderr` instead and carries on.
-    /// * [`Errno::LimitExceeded`] — this app already has
-    ///   [`ALERT_MAX_OPEN`](tairix_abi::window_ipc::ALERT_MAX_OPEN) alerts up.
-    /// * [`Errno::NotFound`] — `owner` is not one of this app's windows.
-    /// * [`Errno::OutOfRange`] — `owner` is a popup, tool or layer surface.
-    /// * A transport failure, or a corrupt reply frame.
+    /// [`Self::create`]'s naming errors, or a transport failure.
     ///
     /// [`WindowEvent::AlertClosed`]: tairix_abi::window_ipc::WindowEvent::AlertClosed
     pub fn open_alert(
@@ -2167,33 +2576,46 @@ impl<T: WindowTransport> WindowClient<T> {
         owner: Option<u64>,
         alert: &AlertSpec,
     ) -> Result<u64, Errno> {
+        let alert_id = self.mint()?;
         let request = WindowRequest::OpenAlert {
+            alert_id,
             event_endpoint,
             owner_window_id: owner.unwrap_or(0),
             alert: *alert,
         };
-        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        decode_minted_id_reply(&reply[..len])
+        self.post_own(
+            owner.unwrap_or(0),
+            PostedRequest::OpenAlert(alert_id),
+            &request,
+            Carried::Nothing,
+        )?;
+        Ok(alert_id)
     }
 
-    /// Withdraw this app's alert `alert_id`; it is answered `Dismissed`.
+    /// Withdraw this app's alert `alert_id`; it is answered `Dismissed`. A
+    /// refusal is not reported: an alert already answered has nothing left
+    /// to withdraw.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] for an alert already answered or not this app's,
-    /// a transport failure, or a corrupt status frame.
+    /// A transport failure.
     pub fn close_alert(&mut self, alert_id: u64) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::CloseAlert { alert_id })
+        self.post_own(
+            0,
+            PostedRequest::CloseAlert(alert_id),
+            &WindowRequest::CloseAlert { alert_id },
+            Carried::Nothing,
+        )
     }
 
-    /// Take the next target queued for this application to open, or `None`
-    /// once the queue is drained.
+    /// Ask for every target queued for this application to open: each lands
+    /// as an [`Answer::OpenTarget`], in order, and the last as `None`, once
+    /// the queue is drained.
     ///
     /// The answer to a [`WindowEvent::OpenRequested`] wake, which says only
-    /// that *at least one* target is waiting: drain in a loop until this
-    /// answers `None`, since one event may cover several targets and another
-    /// may arrive while this one is still being drained.
+    /// that *at least one* target is waiting. Asked again while the queue is
+    /// being read, it is read once more after, so a target queued meanwhile
+    /// is never left behind.
     ///
     /// A [`Target::Path`] is the file or folder the user asked this
     /// application to open, and confers no access — the application opens it
@@ -2201,100 +2623,63 @@ impl<T: WindowTransport> WindowClient<T> {
     /// argument list. A [`Target::Document`] is a file *already* opened by
     /// whoever handed it over, reachable through a one-shot delegation the
     /// kernel minted to this application, which is the only form an
-    /// application holding no filesystem capability can act on.
+    /// application holding no filesystem capability can act on. The session
+    /// answers [`Errno::NotFound`] for an application with no target queue
+    /// and [`Errno::NotSupported`] for a session serving none.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — this application has no target queue (it has
-    ///   declared no icon-bar presence and owns no window, so the session has
-    ///   nothing to deliver a wake to).
-    /// * [`Errno::NotSupported`] — the session serves no open targets.
-    /// * Any transport refusal, or a malformed reply (fail closed, never a
-    ///   guessed path).
-    pub fn take_open_target(&mut self) -> Result<Option<Target>, Errno> {
-        let reply = self.pull(&WindowRequest::TakeOpenTarget)?;
-        let text = |bytes: &[u8]| -> Result<String, Errno> {
-            Ok(String::from(
-                core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?,
-            ))
-        };
-        match decode_open_target_reply(reply)? {
-            None => Ok(None),
-            Some(OpenTarget::Path(path)) => Ok(Some(Target::Path(text(path)?))),
-            Some(OpenTarget::Image(path)) => Ok(Some(Target::Image(text(path)?))),
-            Some(OpenTarget::Document {
-                name,
-                grant,
-                writable,
-            }) => Ok(Some(Target::Document {
-                name: text(name)?,
-                grant,
-                writable,
-            })),
-            Some(OpenTarget::Pane(pane)) => Ok(Some(Target::Pane(text(pane)?))),
-            Some(OpenTarget::Placed {
-                window_id,
-                x,
-                y,
-                name,
-                grant,
-            }) => Ok(Some(Target::Placed {
-                window_id,
-                at: (x, y),
-                name: text(name)?,
-                grant,
-            })),
-        }
+    /// A transport failure.
+    pub fn ask_open_targets(&mut self) -> Result<(), Errno> {
+        self.post_or_hold(0, Asked::OpenTarget, Carried::Nothing)
     }
 
-    /// Take the text the user committed into the quick-entry field of the
-    /// chain this window opened as `open_id`, or `None` when the session
-    /// holds none for it.
+    /// Ask for the text the user committed into the quick-entry field of the
+    /// chain this window opened as `open_id`, landing as
+    /// [`Answer::MenuText`]: `None` when the session holds none for it.
     ///
     /// The answer to a [`MenuOutcome::Entered`](tairix_abi::window_ipc::MenuOutcome::Entered):
-    /// that outcome names *which field* was committed, and the text is pulled
-    /// because an event is one fixed frame and a name is wider than that.
+    /// that outcome names *which field* was committed, and the text is asked
+    /// for because an event is one fixed frame and a name is wider than that.
     ///
-    /// **Taken once.** A second pull of the same commit answers `None`, and so
-    /// does a pull naming an open the session is no longer holding a text for
-    /// — the next open on this window clears it — so a stale pull can never
+    /// **Taken once.** A second ask for the same commit lands `None`, and so
+    /// does one naming an open the session is no longer holding a text for —
+    /// the next open on this window clears it — so a stale ask can never
     /// return a name the user typed into an earlier gesture.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such live window owned by this client.
-    /// * [`Errno::NotSupported`] — the session serves no menu chains.
-    /// * Any transport refusal, or a malformed reply (fail closed, never a
-    ///   guessed name).
-    pub fn take_menu_text(
-        &mut self,
-        window_id: u64,
-        open_id: u64,
-    ) -> Result<Option<String>, Errno> {
-        let reply = self.pull(&WindowRequest::TakeMenuText { window_id, open_id })?;
-        Ok(decode_menu_text_reply(reply)?.map(String::from))
+    /// A transport failure.
+    pub fn ask_menu_text(&mut self, window_id: u64, open_id: u64) -> Result<(), Errno> {
+        self.post_own(
+            window_id,
+            PostedRequest::MenuText(open_id),
+            &WindowRequest::TakeMenuText { window_id, open_id },
+            Carried::Nothing,
+        )
     }
 
-    /// Take the text the user committed into this application's icon-bar
+    /// Ask for the text the user committed into this application's icon-bar
     /// row `item` on the menu of its declaration `revision`, answering a
     /// [`WindowEvent::AppBarEntered`] with the row and revision it carried:
-    /// `None` where the row holds none under that revision, or it was already
-    /// taken.
+    /// it lands as [`Answer::AppBarText`], `None` where the row holds none
+    /// under that revision, or it was already taken.
     ///
     /// # Errors
     ///
-    /// The call's refusal, or a reply that does not decode.
-    pub fn take_app_bar_text(
-        &mut self,
-        item: tairix_abi::window_ipc::AppMenuItemId,
-        revision: u32,
-    ) -> Result<Option<String>, Errno> {
-        let reply = self.pull(&WindowRequest::TakeAppBarText { item, revision })?;
-        Ok(decode_menu_text_reply(reply)?.map(String::from))
+    /// A transport failure.
+    pub fn ask_app_bar_text(&mut self, item: AppMenuItemId, revision: u32) -> Result<(), Errno> {
+        self.post_own(
+            0,
+            PostedRequest::AppBarText(item, revision),
+            &WindowRequest::TakeAppBarText { item, revision },
+            Carried::Nothing,
+        )
     }
 
     /// Ask the session to reach the live instance of the bundle whose entry
-    /// binary is `run_path`, handing it `target`.
+    /// binary is `run_path`, handing it `target`, answering the token its
+    /// [`Answer::HandOver`] names.
     ///
     /// The single-instance funnel for a launcher that is not the desktop: a
     /// file manager that spawns a viewer per document otherwise bypasses it
@@ -2309,22 +2694,27 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// * [`Errno::LengthOutOfRange`] — `run_path` is longer than a hand-over
-    ///   may name; the caller launches the bundle the ordinary way.
-    /// * The session's own refusal (a grant it could not redeem, a queue
-    ///   already full), a transport failure, or a malformed reply.
+    /// [`Errno::LengthOutOfRange`] — `run_path` is longer than a hand-over
+    /// may name; the caller launches the bundle the ordinary way — or a
+    /// transport failure.
     pub fn hand_over_launch(
         &mut self,
         run_path: &str,
         target: HandOverTarget,
-    ) -> Result<HandOverOutcome, Errno> {
+    ) -> Result<u64, Errno> {
         let request = WindowRequest::HandOverLaunch {
             run_path: BundleRunPath::new(run_path)?,
             target,
         };
-        let mut reply = [0u8; WINDOW_HAND_OVER_REPLY_LEN];
-        let n = self.call(&request, &mut reply)?;
-        decode_hand_over_reply(reply.get(..n).ok_or(Errno::LengthOutOfRange)?)
+        let token = self.next_token;
+        self.post_own(
+            0,
+            PostedRequest::HandOver(token),
+            &request,
+            Carried::Nothing,
+        )?;
+        self.next_token = token.wrapping_add(1).max(1);
+        Ok(token)
     }
 
     /// Ask the desktop to show the user, in the file manager, the document
@@ -2332,22 +2722,30 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `fd_grant_location` handle minted to the [`session`](Self::session)
     /// from the document's descriptor — tells the desktop the place of.
     ///
-    /// The caller never learns the path, and gets nothing back but whether
-    /// the document was shown.
+    /// The caller never learns the path. Answers the token its
+    /// [`Answer::Revealed`] names, which lands whether or not the window has
+    /// closed since, since a document is shown as its window goes:
+    /// [`Errno::NotFound`] when no file manager is running to show it,
+    /// [`Errno::PermissionDenied`] when the user is not working in the window
+    /// or the desktop may not be told where the document is, and
+    /// [`Errno::NotSupported`] from a desktop that shows no documents.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such window of this client's, or no file
-    ///   manager is running to show it.
-    /// * [`Errno::PermissionDenied`] — the user is not working in the window,
-    ///   or the desktop may not be told where the document is.
-    /// * [`Errno::NotSupported`] — the desktop shows no documents.
-    /// * Any transport refusal, or a malformed reply.
-    pub fn reveal_document(&mut self, window_id: u64, location: u64) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::RevealDocument {
-            window_id,
-            location,
-        })
+    /// A transport failure.
+    pub fn reveal_document(&mut self, window_id: u64, location: u64) -> Result<u64, Errno> {
+        let token = self.next_token;
+        self.post_own(
+            0,
+            PostedRequest::RevealDocument(token),
+            &WindowRequest::RevealDocument {
+                window_id,
+                location,
+            },
+            Carried::Nothing,
+        )?;
+        self.next_token = token.wrapping_add(1).max(1);
+        Ok(token)
     }
 
     /// Declare — or withdraw — the tooltip for `region` of `window_id`.
@@ -2356,22 +2754,20 @@ impl<T: WindowTransport> WindowClient<T> {
     /// before the tip appears, where its plate goes, what it is drawn with,
     /// and every reason it comes down are the desktop's. A window holds at
     /// most one declaration, so this replaces any previous one, and empty
-    /// `text` withdraws it — taking a tip that is on screen down with it.
+    /// `text` withdraws it — taking a tip that is on screen down with it. A
+    /// session that shows no tooltips refuses [`Errno::NotSupported`]; the
+    /// tip is incidental, so the caller reports it and carries on.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such window, or not this caller's.
-    /// * [`Errno::NotSupported`] — the session shows no tooltips. The tip is
-    ///   incidental to the application's purpose, so the caller reports it
-    ///   and carries on rather than ending.
-    /// * Any transport or encode refusal.
+    /// A transport failure.
     pub fn set_tooltip(
         &mut self,
         window_id: u64,
         region: WindowRegion,
         text: TooltipText,
     ) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::Tooltip(region, text))
+        self.post_or_hold(window_id, Asked::Tooltip(region, text), Carried::Nothing)
     }
 
     /// Show `shape` for the pointer over the client area of this client's
@@ -2379,62 +2775,83 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// The session's refusal: `NotFound` for a window not this client's.
+    /// A transport failure.
     pub fn set_cursor(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
-        self.post_or_hold(window_id, Asked::Cursor(shape))
+        self.post_or_hold(window_id, Asked::Cursor(shape), Carried::Nothing)
     }
 
     /// Raise this client's own window `window_id` and give it the keyboard,
     /// under an activation the session handed this client or while one of its
-    /// windows already holds the keyboard.
+    /// windows already holds the keyboard; refused [`Errno::PermissionDenied`]
+    /// with neither.
     ///
     /// # Errors
     ///
-    /// `PermissionDenied` with neither an activation nor the keyboard, and
-    /// `NotFound` for a window not this client's.
+    /// A transport failure.
     pub fn activate_window(&mut self, window_id: u64) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::ActivateWindow { window_id })
+        self.post_own(
+            window_id,
+            PostedRequest::Activate,
+            &WindowRequest::ActivateWindow { window_id },
+            Carried::Nothing,
+        )
     }
 
-    /// Put the first `len` bytes of the region `shm_handle`, granted to the
-    /// session, on the clipboard as `kind`, from this client's own focused
-    /// window `window_id`.
+    /// Put `bytes` on the clipboard as `kind`, from this client's own focused
+    /// window `window_id`, through a region granted to the session and kept
+    /// mapped until it has answered. The session refuses
+    /// [`Errno::PermissionDenied`] for a window without the keyboard.
     ///
     /// # Errors
     ///
-    /// The session's refusal: `PermissionDenied` for a window without the
-    /// keyboard, `NotFound` for one not this client's.
+    /// [`Errno::LengthOutOfRange`] past [`CLIPBOARD_MAX_BYTES`];
+    /// [`Errno::OutOfMemory`] when the region cannot be made; or a transport
+    /// failure.
     pub fn set_clipboard(
         &mut self,
         window_id: u64,
-        shm_handle: u64,
-        len: u64,
         kind: ClipboardKind,
+        bytes: &[u8],
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetClipboard {
+        if bytes.len() > CLIPBOARD_MAX_BYTES {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let (mut region, shm_handle) = self.transport.grant_region(bytes.len().max(1))?;
+        region
+            .bytes_mut()
+            .get_mut(..bytes.len())
+            .ok_or(Errno::OutOfMemory)?
+            .copy_from_slice(bytes);
+        let len = u64::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        self.post_own(
             window_id,
-            shm_handle,
-            len,
-            kind,
-        })
+            PostedRequest::SetClipboard,
+            &WindowRequest::SetClipboard {
+                window_id,
+                shm_handle,
+                len,
+                kind,
+            },
+            Carried::Region(region, false),
+        )
     }
 
-    /// Ask for the clipboard, copied into the region `shm_handle` granted to
-    /// the session, from this client's own focused window `window_id`.
+    /// Ask for what the clipboard holds, for this client's own focused window
+    /// `window_id`, landing as [`Answer::Clipboard`]: offered through a region
+    /// most payloads fit, and a longer one through a second region of the
+    /// length the session stated.
     ///
     /// # Errors
     ///
-    /// As [`set_clipboard`](Self::set_clipboard), or a reply that cannot be
-    /// believed.
-    pub fn get_clipboard(
-        &mut self,
-        window_id: u64,
-        shm_handle: u64,
-    ) -> Result<ClipboardHeld, Errno> {
-        decode_clipboard_reply(self.pull(&WindowRequest::GetClipboard {
+    /// [`Errno::OutOfMemory`] when the region cannot be made, or a transport
+    /// failure.
+    pub fn ask_clipboard(&mut self, window_id: u64) -> Result<(), Errno> {
+        let (region, shm_handle) = self.transport.grant_region(clipboard::FIRST_OFFER)?;
+        self.post_or_hold(
             window_id,
-            shm_handle,
-        })?)
+            Asked::Clipboard(shm_handle),
+            Carried::Region(region, false),
+        )
     }
 
     /// Declare this **application's** presence on the desktop's icon bar:
@@ -2443,20 +2860,24 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// Scoped to the process, not to a window, so an application keeps its
     /// slot with no window open — which is what makes a "new window"
-    /// primary click and a *Quit* menu row reachable. Issuing it again
+    /// primary click and a *Quit* menu row reachable. Declaring it again
     /// replaces the declaration whole, which is how a row's enablement or
-    /// mark changes.
+    /// mark changes; declared again while one is unanswered, only the newest
+    /// is sent. A session that composes no icon bar refuses
+    /// [`Errno::NotSupported`]; the declaration is incidental, so the caller
+    /// reports it and carries on.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotSupported`] — the session composes no icon bar. The
-    ///   declaration is incidental to the application's purpose, so the
-    ///   caller reports it and carries on rather than ending.
-    /// * [`Errno::OutOfRange`] — a reserved event endpoint, caught by the
-    ///   protocol before any call.
-    /// * A transport failure, or a corrupt status frame.
+    /// [`Errno::OutOfRange`] — a reserved event endpoint, caught by the
+    /// protocol before any request — or a transport failure.
     pub fn set_app_bar(&mut self, bar: &AppBar) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetAppBar(*bar))
+        self.post_own(
+            0,
+            PostedRequest::AppBar,
+            &WindowRequest::SetAppBar(*bar),
+            Carried::Nothing,
+        )
     }
 
     /// Set window `window_id`'s backdrop-blur radius to `radius_px`
@@ -2473,15 +2894,10 @@ impl<T: WindowTransport> WindowClient<T> {
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a radius above
-    /// [`tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX`],
-    /// [`Errno::NotFound`] if `window_id` is not one of the caller's own
-    /// windows, a transport failure, or a corrupt status frame.
+    /// [`tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX`], caught before
+    /// any request, or a transport failure.
     pub fn set_backdrop_blur(&mut self, window_id: u64, radius_px: u16) -> Result<(), Errno> {
-        let request = WindowRequest::SetBackdropBlur {
-            window_id,
-            radius_px,
-        };
-        self.status_call(&request)
+        self.post_or_hold(window_id, Asked::BackdropBlur(radius_px), Carried::Nothing)
     }
 
     /// Re-present window `window_id`'s last presented frame with
@@ -2495,8 +2911,7 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// The session's typed refusal, a transport failure, or a corrupt
-    /// status frame — exactly as [`Self::present`].
+    /// A transport failure.
     pub fn answer_redraw(&mut self, window_id: u64) -> Result<bool, Errno> {
         let Some(record) = self
             .presented
@@ -2511,47 +2926,102 @@ impl<T: WindowTransport> WindowClient<T> {
         let (Frames::Mapped, Some(frame_index)) = (record.frames, record.frame_index) else {
             return Ok(false);
         };
-        let whole = DamageList::new(&[DamageRect {
-            x: 0,
-            y: 0,
-            width_px: record.width_px,
-            height_px: record.height_px,
-        }])?;
-        // Held behind a present still in flight rather than waited for: this
-        // runs inside the application's event drain.
-        self.post_or_hold(window_id, Asked::Present(frame_index, whole))?;
+        let damage = whole(record.width_px, record.height_px)?;
+        self.post_or_hold(
+            window_id,
+            Asked::Present(frame_index, damage),
+            Carried::Nothing,
+        )?;
         Ok(true)
+    }
+
+    /// The oldest answer landed and not yet taken. Answers land as the event
+    /// drain takes in what the session sent back, and a
+    /// [`WindowEvents::wait`] returns once one has.
+    pub fn take_answer(&mut self) -> Option<Answer> {
+        self.answers.pop_front()
+    }
+
+    /// Wait until nothing posted is unanswered, answering the oldest refusal
+    /// among what was: what a thread that owes no frame — a worker carrying
+    /// requests for an interactive loop — makes of a posted request a call.
+    ///
+    /// # Errors
+    ///
+    /// The oldest refusal, or why the wait ended with a request unanswered.
+    pub fn await_answers(&mut self) -> Result<(), Errno> {
+        self.send_waiting_as_calls();
+        while let Some(index) = self
+            .posted
+            .iter()
+            .position(|posting| posting.ticket.is_some())
+        {
+            let Some(ticket) = self.posted[index].ticket else {
+                break;
+            };
+            let Self {
+                transport,
+                reply,
+                posted,
+                lost,
+                ..
+            } = self;
+            let answer = match transport.await_reply(ticket, reply) {
+                Ok(len) => reply.get(..len).ok_or(Errno::BufferTooSmall),
+                // A call still live when its await ends is a reaper's again;
+                // forgotten, its answer would keep the reply member ready for
+                // ever.
+                Err(errno) => match transport.reap(ticket, reply) {
+                    Ok(None) => return Err(errno),
+                    Ok(Some(len)) => reply.get(..len).ok_or(Errno::BufferTooSmall),
+                    Err(over) => {
+                        *lost |= over == Errno::BrokenPipe;
+                        Err(over)
+                    }
+                },
+            };
+            let outcome = read_answer(&mut posted[index], answer, transport);
+            self.answered(index, outcome);
+            self.send_waiting_as_calls();
+        }
+        self.refused
+            .pop_front()
+            .map_or(Ok(()), |refused| Err(refused.errno))
     }
 
     /// Remember `window_id`'s client extent, discarding any frame index
     /// recorded against a previous extent and any present not yet sent, which
-    /// names a frame of the region the extent replaced. A window first
-    /// recorded here was just created at it, so the session has accepted it.
+    /// names a frame of the region the extent replaced.
     fn note_extent(&mut self, window_id: u64, width_px: u32, height_px: u32) {
-        if let Some(record) = self.record_mut(window_id) {
-            record.width_px = width_px;
-            record.height_px = height_px;
-            record.frame_index = None;
-            // A fresh region, which the application paints whole; a hidden
-            // window stays hidden until the session asks for it again.
-            if record.frames == Frames::Released {
-                record.frames = Frames::Mapped;
-            }
-            record.owed_whole = false;
-            self.forget_unsent(window_id, |kind| kind == PostedRequest::Present);
+        let Some(record) = self.record_mut(window_id) else {
             return;
+        };
+        record.width_px = width_px;
+        record.height_px = height_px;
+        record.frame_index = None;
+        // A fresh region, which the application paints whole; a hidden
+        // window stays hidden until the session asks for it again.
+        if record.frames == Frames::Released {
+            record.frames = Frames::Mapped;
         }
-        self.presented.push(LastPresent {
-            window_id,
-            width_px,
-            height_px,
-            frame_index: None,
-            accepted: (width_px, height_px),
-            reported: None,
-            deferred: false,
-            frames: Frames::Mapped,
-            owed_whole: false,
-        });
+        record.owed_whole = false;
+        self.forget_unsent(window_id, |kind| kind == PostedRequest::Present);
+    }
+
+    /// Forget window `window_id`: its record, what it asked and has not sent,
+    /// and what landed for it. What it has in flight is still reaped,
+    /// unreported.
+    fn forget(&mut self, window_id: u64) {
+        self.presented
+            .retain(|record| record.window_id != window_id);
+        self.forget_unsent(window_id, |_| true);
+        for posting in &mut self.posted {
+            if posting.window_id == window_id {
+                posting.orphaned = true;
+            }
+        }
+        self.answers
+            .retain(|answer| answer.window_id() != Some(window_id));
     }
 
     /// Forget what window `window_id` asked of each kind `forgets` names and
@@ -2583,66 +3053,149 @@ impl<T: WindowTransport> WindowClient<T> {
         }
     }
 
-    /// Post `asked` for `window_id`, or, while one of its kind is
-    /// unanswered, hold it as the newest wanted, replacing any held before.
-    fn post_or_hold(&mut self, window_id: u64, asked: Asked) -> Result<(), Errno> {
-        self.reap_posted();
+    /// Whether a request waits for room, so one asked now waits behind it.
+    fn waits_for_room(&self) -> bool {
+        self.posted.iter().any(|posting| posting.ticket.is_none())
+    }
+
+    /// Post `asked` for `window_id`, keeping `carried` until it is answered —
+    /// or hold it: where its kind supersedes, behind an unanswered one of its
+    /// kind as the newest wanted; otherwise behind whatever waits for room,
+    /// so requests reach the session in the order asked.
+    fn post_or_hold(
+        &mut self,
+        window_id: u64,
+        asked: Asked,
+        carried: Carried<T::Region>,
+    ) -> Result<(), Errno> {
         let kind = asked.kind();
         // Encoded first, so what the wire cannot carry is refused now rather
         // than when a held request is posted.
         let len = asked.request(window_id).encode(&mut self.frame)?;
-        if let Some(posting) = self
-            .posted
-            .iter_mut()
-            .find(|posting| posting.window_id == window_id && posting.kind.folds(kind))
-        {
-            posting.held = Some(asked);
+        if kind.supersedes() {
+            let extent = self
+                .record_mut(window_id)
+                .map(|record| (record.width_px, record.height_px));
+            if let Some(posting) = self
+                .posted
+                .iter_mut()
+                .find(|posting| posting.window_id == window_id && posting.kind.folds(kind))
+            {
+                let newest = match (posting.held.take(), asked) {
+                    (Some(Held::Asked(Asked::Present(frame, damage))), Asked::Present(..)) => {
+                        merged_present((frame, damage), asked, extent)
+                    }
+                    _ => asked,
+                };
+                posting.held = Some(Held::Asked(newest));
+                return Ok(());
+            }
+        }
+        self.posted.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let ticket = self.post_frame(len)?;
+        self.posted.push(Posting {
+            window_id,
+            kind,
+            ticket,
+            held: ticket.is_none().then_some(Held::Asked(asked)),
+            carried,
+            orphaned: false,
+        });
+        Ok(())
+    }
+
+    /// Post `request`, of `kind`, for `window_id`, keeping `carried` until it
+    /// is answered: as its own, or — where its kind supersedes — held behind
+    /// an unanswered one of its kind as the newest wanted. One that waits for
+    /// room keeps its encoded frame.
+    fn post_own(
+        &mut self,
+        window_id: u64,
+        kind: PostedRequest,
+        request: &WindowRequest,
+        carried: Carried<T::Region>,
+    ) -> Result<(), Errno> {
+        let len = request.encode(&mut self.frame)?;
+        let index = kind
+            .supersedes()
+            .then(|| {
+                self.posted
+                    .iter()
+                    .position(|posting| posting.window_id == window_id && posting.kind.folds(kind))
+            })
+            .flatten();
+        if let Some(index) = index {
+            self.posted[index].held = Some(Held::Frame(kept(&self.frame[..len])?));
             return Ok(());
         }
-        let (ticket, held) = match self.transport.post(&self.frame[..len]) {
-            Ok(ticket) => (Some(ticket), None),
-            Err(Errno::WouldBlock) => (None, Some(asked)),
-            Err(err) => return Err(err),
+        self.posted.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let ticket = self.post_frame(len)?;
+        let held = match ticket {
+            Some(_) => None,
+            None => Some(Held::Frame(kept(&self.frame[..len])?)),
         };
         self.posted.push(Posting {
             window_id,
             kind,
             ticket,
             held,
+            carried,
             orphaned: false,
         });
         Ok(())
     }
 
+    /// Post the request encoded in the first `len` bytes of the frame
+    /// scratch, answering its ticket, or `None` when it must wait for room:
+    /// behind a request already waiting, or for this process's place at the
+    /// endpoint.
+    fn post_frame(&mut self, len: usize) -> Result<Option<u64>, Errno> {
+        if self.waits_for_room() {
+            return Ok(None);
+        }
+        let frame = self.frame.get(..len).ok_or(Errno::BufferTooSmall)?;
+        match self.transport.post(frame) {
+            Ok(ticket) => Ok(Some(ticket)),
+            Err(Errno::WouldBlock) => Ok(None),
+            Err(errno) => Err(errno),
+        }
+    }
+
     /// Take in every posted request's answer that has landed, never waiting:
-    /// a refusal is kept for the application, a resize settles its window's
-    /// geometry, and the newest request held behind an answered one is
-    /// posted in its place. The requests waiting for room are then posted,
-    /// oldest first — any call of this process can free room, not only one
-    /// reaped here — and a resize that waited for room has its size delivered
-    /// again.
+    /// a refusal is kept for the application, data is landed for it, a resize
+    /// settles its window's geometry, and whatever goes in an answered one's
+    /// place is posted. The requests waiting for room are then posted, oldest
+    /// first — any call of this process can free room, not only one reaped
+    /// here — and a resize that waited for room has its size delivered again.
     pub fn reap_posted(&mut self) {
         let mut answered = false;
         let mut index = 0;
-        while let Some(&posting) = self.posted.get(index) {
-            let Some(ticket) = posting.ticket else {
+        while let Some(&Posting { ticket: maybe, .. }) = self.posted.get(index) {
+            let Some(ticket) = maybe else {
                 index += 1;
                 continue;
             };
-            let mut reply = [0u8; POSTED_REPLY_MAX];
-            let answer = match self.transport.reap(ticket, &mut reply) {
+            let Self {
+                transport,
+                reply,
+                posted,
+                lost,
+                ..
+            } = self;
+            let answer = match transport.reap(ticket, reply) {
                 Ok(None) => {
                     index += 1;
                     continue;
                 }
                 Ok(Some(len)) => reply.get(..len).ok_or(Errno::BufferTooSmall),
                 Err(err) => {
-                    self.lost |= err == Errno::BrokenPipe;
+                    *lost |= err == Errno::BrokenPipe;
                     Err(err)
                 }
             };
+            let outcome = read_answer(&mut posted[index], answer, transport);
             answered = true;
-            if self.answered(index, answer) {
+            if self.answered(index, outcome) {
                 index += 1;
             }
         }
@@ -2651,35 +3204,52 @@ impl<T: WindowTransport> WindowClient<T> {
         }
     }
 
-    /// Act on `answer` to the posting at `index`, posting the newest request
-    /// held behind it in its place, and answer whether a posting stays there.
-    fn answered(&mut self, index: usize, answer: Result<&[u8], Errno>) -> bool {
-        let Some(&posting) = self.posted.get(index) else {
+    /// Act on `outcome`, the answer to the posting at `index`, and post what
+    /// goes in its place — the request reading on from it, else the newest of
+    /// its kind held behind it — answering whether a posting stays at `index`.
+    fn answered(&mut self, index: usize, outcome: Outcome) -> bool {
+        if index >= self.posted.len() {
             return false;
-        };
-        self.settle(&posting, answer);
-        let Some(held) = posting.held else {
-            self.posted.remove(index);
-            return false;
-        };
-        let posting = Posting {
-            kind: held.kind(),
-            ..posting
-        };
-        let ticket = match self.post(&held.request(posting.window_id)) {
-            Ok(ticket) => Some(ticket),
-            Err(Errno::WouldBlock) => None,
-            Err(errno) => {
-                self.settle(&posting, Err(errno));
-                self.posted.remove(index);
-                return false;
+        }
+        let mut posting = self.posted.remove(index);
+        let next = match outcome {
+            Outcome::Status(status) => {
+                self.settle_status(&posting, status);
+                None
+            }
+            Outcome::Read(landed, next) => {
+                if let Some(answer) = landed.filter(|_| !posting.orphaned) {
+                    self.land(answer);
+                }
+                next.map(|next| Held::Asked(next.asked()))
             }
         };
-        self.posted[index] = Posting {
-            ticket,
-            held: ticket.is_none().then_some(held),
-            ..posting
+        // What reads on from the answer stands for its held twin.
+        let held = posting.held.take();
+        let Some(follow) = next.or(held).filter(|_| !posting.orphaned) else {
+            self.retire(&posting);
+            return false;
         };
+        posting.kind = follow.kind(posting.kind);
+        match send(
+            &mut self.transport,
+            &mut self.frame,
+            &follow,
+            posting.window_id,
+        ) {
+            Ok(ticket) => posting.ticket = Some(ticket),
+            Err(Errno::WouldBlock) => {
+                posting.ticket = None;
+                posting.held = Some(follow);
+            }
+            Err(errno) => {
+                posting.ticket = None;
+                let outcome = read_answer(&mut posting, Err(errno), &mut self.transport);
+                self.posted.insert(index, posting);
+                return self.answered(index, outcome);
+            }
+        }
+        self.posted.insert(index, posting);
         true
     }
 
@@ -2689,91 +3259,147 @@ impl<T: WindowTransport> WindowClient<T> {
     fn post_waiting(&mut self) -> bool {
         let mut posted = false;
         let mut index = 0;
-        while let Some(&posting) = self.posted.get(index) {
-            let (None, Some(held)) = (posting.ticket, posting.held) else {
+        while index < self.posted.len() {
+            let Self {
+                transport,
+                frame,
+                posted: postings,
+                ..
+            } = self;
+            let posting = &mut postings[index];
+            if posting.ticket.is_some() {
                 index += 1;
                 continue;
+            }
+            let Some(held) = posting.held.as_ref() else {
+                // Nothing left to send: what it asked was forgotten.
+                postings.remove(index);
+                continue;
             };
-            let posting = Posting {
-                kind: held.kind(),
-                ..posting
-            };
-            match self.post(&held.request(posting.window_id)) {
+            match send(transport, frame, held, posting.window_id) {
                 Ok(ticket) => {
-                    self.posted[index] = Posting {
-                        ticket: Some(ticket),
-                        held: None,
-                        ..posting
-                    };
+                    posting.kind = held.kind(posting.kind);
+                    posting.ticket = Some(ticket);
+                    posting.held = None;
                     posted = true;
                     index += 1;
                 }
                 Err(Errno::WouldBlock) => break,
                 Err(errno) => {
-                    self.settle(&posting, Err(errno));
-                    self.posted.remove(index);
+                    posting.held = None;
+                    let outcome = read_answer(posting, Err(errno), transport);
+                    if self.answered(index, outcome) {
+                        index += 1;
+                    }
                 }
             }
         }
         posted
     }
 
+    /// Send every request waiting for room as a call, oldest first, so one
+    /// made after them is served after them: what a call costs a thread that
+    /// may wait.
+    fn send_waiting_as_calls(&mut self) {
+        while let Some(index) = self
+            .posted
+            .iter()
+            .position(|posting| posting.ticket.is_none())
+        {
+            let Self {
+                transport,
+                frame,
+                reply,
+                posted,
+                lost,
+                ..
+            } = self;
+            let posting = &mut posted[index];
+            let Some(held) = posting.held.take() else {
+                posted.remove(index);
+                continue;
+            };
+            posting.kind = held.kind(posting.kind);
+            let called = match &held {
+                Held::Asked(asked) => asked
+                    .request(posting.window_id)
+                    .encode(frame)
+                    .and_then(|len| transport.call(&frame[..len], reply)),
+                Held::Frame(encoded) => transport.call(encoded, reply),
+            };
+            let answer = match called {
+                Ok(len) => reply.get(..len).ok_or(Errno::BufferTooSmall),
+                Err(err) => {
+                    *lost |= err == Errno::BrokenPipe;
+                    Err(err)
+                }
+            };
+            let outcome = read_answer(posting, answer, transport);
+            self.answered(index, outcome);
+        }
+    }
+
     /// Deliver what every window whose resize waited for room is owed
     /// ([`LastPresent::deferred_event`]), now that room was made, unless a
     /// resize of it is still in flight — whose own answer delivers it.
     fn redeliver_deferred(&mut self) {
-        let Self {
-            presented,
-            posted,
-            owed,
-            ..
-        } = self;
-        for record in presented.iter_mut().filter(|record| record.deferred) {
-            let in_flight = posted.iter().any(|posting| {
+        let mut index = 0;
+        while let Some(record) = self.presented.get(index).copied() {
+            index += 1;
+            let in_flight = self.posted.iter().any(|posting| {
                 posting.window_id == record.window_id && posting.kind == PostedRequest::Resize
             });
-            if in_flight {
+            if !record.deferred || in_flight {
                 continue;
             }
-            record.deferred = false;
+            if let Some(stored) = self.record_mut(record.window_id) {
+                stored.deferred = false;
+            }
             if let Some(event) = record.deferred_event() {
-                owed.push_back(event);
+                self.owe(event);
             }
         }
-    }
-
-    /// Act on the reply `answer` to `posting`, as its kind reads one.
-    fn settle(&mut self, posting: &Posting, answer: Result<&[u8], Errno>) {
-        if let PostedRequest::OfferedFile(serial) = posting.kind {
-            if !posting.orphaned {
-                self.media.push_back(OfferedMedia {
-                    window_id: posting.window_id,
-                    serial,
-                    media: answer.and_then(decode_offered_file_reply).map(String::from),
-                });
-            }
-            return;
-        }
-        self.settle_status(posting, answer.and_then(decode_status_reply));
     }
 
     /// Act on the status `answer` to `posting`.
-    fn settle_status(&mut self, posting: &Posting, answer: Result<(), Errno>) {
-        if matches!(posting.kind, PostedRequest::LandingEnded(_)) {
-            return;
-        }
-        if posting.kind == PostedRequest::Present {
-            if let Err(errno) = answer {
-                if self.present_refused(posting.window_id, errno) {
+    fn settle_status(&mut self, posting: &Posting<T::Region>, answer: Result<(), Errno>) {
+        match posting.kind {
+            // A window, drop or alert the session no longer knows is closed,
+            // ended or answered already.
+            PostedRequest::LandingEnded(_)
+            | PostedRequest::Close
+            | PostedRequest::CloseAlert(_) => {}
+            PostedRequest::Present => {
+                if let Err(errno) = answer {
+                    if self.present_refused(posting.window_id, errno) {
+                        self.refuse(posting, errno);
+                    }
+                }
+            }
+            PostedRequest::Create => {
+                if let Err(errno) = answer {
+                    self.refuse(posting, errno);
+                    // It never existed, so neither did what was asked of it.
+                    if !posting.orphaned {
+                        self.forget(posting.window_id);
+                    }
+                }
+            }
+            PostedRequest::Resize => self.settle_resize(posting, answer),
+            _ => {
+                if let Err(errno) = answer {
                     self.refuse(posting, errno);
                 }
             }
-            return;
         }
+    }
+
+    /// Settle a window's geometry on the `answer` to its resize `posting`.
+    fn settle_resize(&mut self, posting: &Posting<T::Region>, answer: Result<(), Errno>) {
         if let Err(errno) = answer {
             self.refuse(posting, errno);
         }
-        if posting.kind != PostedRequest::Resize || posting.orphaned {
+        if posting.orphaned {
             return;
         }
         let Some(record) = self.record_mut(posting.window_id) else {
@@ -2801,7 +3427,7 @@ impl<T: WindowTransport> WindowClient<T> {
             kept
         };
         if let Some(event) = owed {
-            self.owed.push_back(event);
+            self.owe(event);
         }
     }
 
@@ -2811,7 +3437,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// whether the application hears of it, which it does not of a release.
     fn present_refused(&mut self, window_id: u64, errno: Errno) -> bool {
         let Some(record) = self.record_mut(window_id) else {
-            return false;
+            return true;
         };
         if errno == Errno::NotAttached {
             if record.frames == Frames::Mapped {
@@ -2832,16 +3458,55 @@ impl<T: WindowTransport> WindowClient<T> {
         }
     }
 
+    /// `posting`, answered with nothing to go in its place: a window whose
+    /// paint waited on its present is owed it now.
+    fn retire(&mut self, posting: &Posting<T::Region>) {
+        if posting.kind != PostedRequest::Present || posting.orphaned {
+            return;
+        }
+        let window_id = posting.window_id;
+        let owed = self
+            .record_mut(window_id)
+            .is_some_and(|record| core::mem::take(&mut record.frame_owed));
+        if owed {
+            self.land(Answer::FrameReturned { window_id });
+        }
+    }
+
     /// Keep `errno` for the application as the answer to `posting`, unless
     /// its window was closed since.
-    fn refuse(&mut self, posting: &Posting, errno: Errno) {
-        if !posting.orphaned {
-            self.refused.push_back(Refused {
-                window_id: posting.window_id,
-                request: posting.kind,
-                errno,
-            });
+    fn refuse(&mut self, posting: &Posting<T::Region>, errno: Errno) {
+        if posting.orphaned {
+            return;
         }
+        if self.refused.try_reserve(1).is_err() {
+            self.broken = Some(Errno::OutOfMemory);
+            return;
+        }
+        self.refused.push_back(Refused {
+            window_id: posting.window_id,
+            request: posting.kind,
+            errno,
+        });
+    }
+
+    /// Land `answer` for the application to take.
+    fn land(&mut self, answer: Answer) {
+        if self.answers.try_reserve(1).is_err() {
+            self.broken = Some(Errno::OutOfMemory);
+            return;
+        }
+        self.answers.push_back(answer);
+        self.unannounced = true;
+    }
+
+    /// Owe the application `event` before its next delivered one.
+    fn owe(&mut self, event: WindowEvent) {
+        if self.owed.try_reserve(1).is_err() {
+            self.broken = Some(Errno::OutOfMemory);
+            return;
+        }
+        self.owed.push_back(event);
     }
 
     /// Whether a request posted to the session waits for its answer.
@@ -2884,19 +3549,18 @@ impl<T: WindowTransport> WindowClient<T> {
             .find(|record| record.window_id == window_id)
     }
 
-    /// Issue `request` and decode the shared status reply.
+    /// Issue `request` as a call and decode the shared status reply.
     fn status_call(&mut self, request: &WindowRequest) -> Result<(), Errno> {
-        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(request, &mut reply)?;
-        decode_status_reply(&reply[..len])
+        decode_status_reply(self.pull(request)?)
     }
 
-    /// Encode `request` into a frame of its own length and issue one call,
-    /// returning the reply length.
+    /// Issue `request` as a call answered into `reply`, returning the reply
+    /// length, once whatever waits for room has gone ahead of it.
     ///
-    /// The single place a request is encoded, so no call site can send a
-    /// frame whose length disagrees with its operation.
+    /// The single place a call is encoded, so no call site can send a frame
+    /// whose length disagrees with its operation.
     fn call(&mut self, request: &WindowRequest, reply: &mut [u8]) -> Result<usize, Errno> {
+        self.send_waiting_as_calls();
         let Self {
             transport, frame, ..
         } = self;
@@ -2904,18 +3568,340 @@ impl<T: WindowTransport> WindowClient<T> {
         transport.call(&frame[..len], reply)
     }
 
-    /// [`call`](Self::call) for a request whose reply is pulled into the
-    /// client's own reply buffer, answering the reply.
+    /// [`call`](Self::call) answered into the client's own reply buffer,
+    /// answering the reply.
     fn pull(&mut self, request: &WindowRequest) -> Result<&[u8], Errno> {
+        let len = self.call_reply(request)?;
+        self.reply.get(..len).ok_or(Errno::BufferTooSmall)
+    }
+
+    /// [`call`](Self::call) answered into the client's own reply buffer,
+    /// answering the reply's length.
+    fn call_reply(&mut self, request: &WindowRequest) -> Result<usize, Errno> {
+        self.send_waiting_as_calls();
         let Self {
             transport,
             frame,
-            pull_reply,
+            reply,
             ..
         } = self;
         let len = request.encode(frame)?;
-        let n = transport.call(&frame[..len], pull_reply)?;
-        pull_reply.get(..n).ok_or(Errno::BufferTooSmall)
+        transport.call(&frame[..len], reply)
+    }
+}
+
+/// Post `held` for `window_id`, encoded into `frame` where it is not already.
+fn send<T: WindowTransport>(
+    transport: &mut T,
+    frame: &mut [u8],
+    held: &Held,
+    window_id: u64,
+) -> Result<u64, Errno> {
+    match held {
+        Held::Asked(asked) => {
+            let len = asked.request(window_id).encode(frame)?;
+            transport.post(&frame[..len])
+        }
+        Held::Frame(encoded) => transport.post(encoded),
+    }
+}
+
+/// `frame`, kept until it can be posted.
+fn kept(frame: &[u8]) -> Result<Vec<u8>, Errno> {
+    let mut kept = Vec::new();
+    kept.try_reserve_exact(frame.len())
+        .map_err(|_| Errno::OutOfMemory)?;
+    kept.extend_from_slice(frame);
+    Ok(kept)
+}
+
+/// Damage naming the whole of a `width_px` × `height_px` window.
+fn whole(width_px: u32, height_px: u32) -> Result<DamageList, Errno> {
+    DamageList::new(&[DamageRect {
+        x: 0,
+        y: 0,
+        width_px,
+        height_px,
+    }])
+}
+
+/// The present `newer` held behind the present of frame `earlier`, held
+/// before it, in a window of `extent`: the same frame drawn again declares
+/// what both changed, and another frame the whole window, since what it lacks
+/// of the first is unknown.
+fn merged_present(
+    (frame, damage): (u32, DamageList),
+    newer: Asked,
+    extent: Option<(u32, u32)>,
+) -> Asked {
+    let Asked::Present(newer_frame, newer_damage) = newer else {
+        return newer;
+    };
+    let both = if newer_frame == frame {
+        DamageList::fitted(damage.rects().iter().chain(newer_damage.rects()).copied())
+    } else {
+        extent.and_then(|(width_px, height_px)| whole(width_px, height_px).ok())
+    };
+    Asked::Present(newer_frame, both.unwrap_or(newer_damage))
+}
+
+/// `text`, owned.
+fn owned(text: &str) -> Result<String, Errno> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(text.len())
+        .map_err(|_| Errno::OutOfMemory)?;
+    owned.push_str(text);
+    Ok(owned)
+}
+
+/// UTF-8 `bytes`, owned.
+fn owned_text(bytes: &[u8]) -> Result<String, Errno> {
+    owned(core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?)
+}
+
+/// The name `bytes` spell, owned, or none where it cannot be kept: a name
+/// travels with a delegation, which is never let go over its name.
+fn name_or_empty(bytes: &[u8]) -> String {
+    owned_text(bytes).unwrap_or_default()
+}
+
+/// What the `answer` to `posting` came to, as its kind reads one. A paste
+/// whose payload outgrew the region offered is asked again through a region
+/// `transport` grants of the length the session stated.
+fn read_answer<T: WindowTransport>(
+    posting: &mut Posting<T::Region>,
+    answer: Result<&[u8], Errno>,
+    transport: &mut T,
+) -> Outcome {
+    let window_id = posting.window_id;
+    match posting.kind {
+        PostedRequest::OfferedFile(serial) => Outcome::landed(Answer::OfferedFile(OfferedMedia {
+            window_id,
+            serial,
+            media: answer.and_then(decode_offered_file_reply).and_then(owned),
+        })),
+        PostedRequest::HandOver(token) => Outcome::landed(Answer::HandOver {
+            token,
+            outcome: answer.and_then(decode_hand_over_reply),
+        }),
+        PostedRequest::RevealDocument(token) => Outcome::landed(Answer::Revealed {
+            token,
+            shown: answer.and_then(decode_status_reply),
+        }),
+        PostedRequest::OpenTarget => read_open_target(answer),
+        PostedRequest::MenuText(open_id) => Outcome::landed(Answer::MenuText {
+            window_id,
+            open_id,
+            text: answer
+                .and_then(decode_menu_text_reply)
+                .and_then(|text| text.map(owned).transpose()),
+        }),
+        PostedRequest::AppBarText(item, revision) => Outcome::landed(Answer::AppBarText {
+            item,
+            revision,
+            text: answer
+                .and_then(decode_menu_text_reply)
+                .and_then(|text| text.map(owned).transpose()),
+        }),
+        PostedRequest::DragSpot(serial) => Outcome::landed(Answer::DragSpot {
+            window_id,
+            serial,
+            folder: answer.and_then(decode_drag_spot_reply).and_then(owned),
+        }),
+        PostedRequest::DropTarget => Outcome::landed(Answer::DropTarget {
+            window_id,
+            target: answer
+                .and_then(decode_drop_target_reply)
+                .and_then(|target| {
+                    Ok(Dropped {
+                        run_path: owned(target.run_path.as_str())?,
+                        writes_documents: target.writes_documents,
+                    })
+                }),
+        }),
+        PostedRequest::PickedName => Outcome::landed(Answer::PickedName {
+            window_id,
+            name: answer
+                .and_then(decode_picked_name_reply)
+                .and_then(|name| owned(name.as_str())),
+        }),
+        PostedRequest::PickedFile => {
+            let file = answer
+                .and_then(decode_picked_file_reply)
+                .map(|file| Picked {
+                    handle: file.handle,
+                    name: name_or_empty(file.name.as_str().as_bytes()),
+                });
+            let read_on = file.is_ok().then_some(ReadOn::PickedFile);
+            Outcome::Read(Some(Answer::PickedFile { window_id, file }), read_on)
+        }
+        PostedRequest::OfferedItems(drag) => read_items(posting, drag, answer),
+        PostedRequest::Clipboard => read_clipboard(posting, answer, transport),
+        PostedRequest::Terrain => Outcome::landed(Answer::Terrain {
+            window_id,
+            plates: answer.and_then(read_terrain),
+        }),
+        _ => Outcome::Status(answer.and_then(decode_status_reply)),
+    }
+}
+
+/// The open target `answer` brings, and the queue read on after it: a
+/// target the client could not read is landed as the error and the queue
+/// still read on, since the session has given it up.
+fn read_open_target(answer: Result<&[u8], Errno>) -> Outcome {
+    match answer.and_then(decode_open_target_reply) {
+        Ok(Some(target)) => Outcome::Read(
+            Some(Answer::OpenTarget(Target::of(target).map(Some))),
+            Some(ReadOn::OpenTarget),
+        ),
+        drained => Outcome::landed(Answer::OpenTarget(drained.map(|_| None))),
+    }
+}
+
+/// A page of a drag's items `answer` brings, gathered into `posting`'s, and
+/// the page read on after it; the whole once the last page is in.
+fn read_items<R>(posting: &mut Posting<R>, drag: u32, answer: Result<&[u8], Errno>) -> Outcome {
+    let window_id = posting.window_id;
+    let landed = |items| {
+        Outcome::landed(Answer::OfferedItems {
+            window_id,
+            drag,
+            items,
+        })
+    };
+    let Carried::Items(items) = &mut posting.carried else {
+        return landed(Err(Errno::OutOfRange));
+    };
+    let page = match answer.and_then(decode_offered_items_reply) {
+        Ok(page) => page,
+        Err(errno) => return landed(Err(errno)),
+    };
+    if items.try_reserve(usize::from(page.len())).is_err() {
+        return landed(Err(Errno::OutOfMemory));
+    }
+    for item in page.iter() {
+        match owned(item.path) {
+            Ok(path) => items.push(OfferedPath { path, id: item.id }),
+            Err(errno) => return landed(Err(errno)),
+        }
+    }
+    let Ok(from) = u32::try_from(items.len()) else {
+        return landed(Err(Errno::OutOfRange));
+    };
+    if from >= page.total() {
+        return landed(Ok(core::mem::take(items)));
+    }
+    // A page that brings nothing it owes would read on for ever.
+    if page.is_empty() {
+        return landed(Err(Errno::OutOfRange));
+    }
+    Outcome::Read(None, Some(ReadOn::OfferedItems(drag, from)))
+}
+
+/// What a paste's `answer` brings out of `posting`'s region, or the paste
+/// asked again through a region `transport` grants of the length stated.
+fn read_clipboard<T: WindowTransport>(
+    posting: &mut Posting<T::Region>,
+    answer: Result<&[u8], Errno>,
+    transport: &mut T,
+) -> Outcome {
+    let window_id = posting.window_id;
+    let landed = |contents| {
+        Outcome::landed(Answer::Clipboard {
+            window_id,
+            contents,
+        })
+    };
+    let Carried::Region(region, second) = &mut posting.carried else {
+        return landed(Err(Errno::OutOfRange));
+    };
+    let held = match answer.and_then(decode_clipboard_reply) {
+        Ok(held) => held,
+        Err(errno) => return landed(Err(errno)),
+    };
+    match clipboard::landed(held, region.bytes_mut(), *second) {
+        Ok(Landing::Taken(contents)) => landed(Ok(contents)),
+        Ok(Landing::Again(len)) => match transport.grant_region(len) {
+            Ok((fresh, shm_handle)) => {
+                posting.carried = Carried::Region(fresh, true);
+                Outcome::Read(None, Some(ReadOn::Clipboard(shm_handle)))
+            }
+            Err(errno) => landed(Err(errno)),
+        },
+        Err(errno) => landed(Err(errno)),
+    }
+}
+
+/// The plates a terrain reply carries, owned.
+fn read_terrain(bytes: &[u8]) -> Result<Vec<TerrainPlate>, Errno> {
+    let none = TerrainPlate {
+        x: 0,
+        y: 0,
+        width_px: 0,
+        height_px: 0,
+    };
+    let mut decoded = [none; DESKTOP_LAYER_MAX_PLATES as usize];
+    let plates = decode_terrain_reply(bytes, &mut decoded)?;
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(plates.len())
+        .map_err(|_| Errno::OutOfMemory)?;
+    owned.extend_from_slice(plates);
+    Ok(owned)
+}
+
+impl Target {
+    /// `target`, owned.
+    fn of(target: OpenTarget<'_>) -> Result<Self, Errno> {
+        Ok(match target {
+            OpenTarget::Path(path) => Self::Path(owned_text(path)?),
+            OpenTarget::Image(path) => Self::Image(owned_text(path)?),
+            OpenTarget::Document {
+                name,
+                grant,
+                writable,
+            } => Self::Document {
+                name: name_or_empty(name),
+                grant,
+                writable,
+            },
+            OpenTarget::Pane(pane) => Self::Pane(owned_text(pane)?),
+            OpenTarget::Placed {
+                window_id,
+                x,
+                y,
+                name,
+                grant,
+            } => Self::Placed {
+                window_id,
+                at: (x, y),
+                name: name_or_empty(name),
+                grant,
+            },
+        })
+    }
+}
+
+impl Answer {
+    /// The window the answer is about, if it is about one.
+    const fn window_id(&self) -> Option<u64> {
+        match self {
+            Self::OfferedFile(media) => Some(media.window_id),
+            Self::MenuText { window_id, .. }
+            | Self::DragSpot { window_id, .. }
+            | Self::DropTarget { window_id, .. }
+            | Self::PickedName { window_id, .. }
+            | Self::PickedFile { window_id, .. }
+            | Self::OfferedItems { window_id, .. }
+            | Self::Clipboard { window_id, .. }
+            | Self::Terrain { window_id, .. }
+            | Self::FrameReturned { window_id } => Some(*window_id),
+            Self::OpenTarget(_)
+            | Self::AppBarText { .. }
+            | Self::HandOver { .. }
+            | Self::Revealed { .. } => None,
+        }
     }
 }
 
@@ -3087,6 +4073,9 @@ impl<S: EventDrain> WindowEvents<S> {
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
+        if let Some(errno) = client.broken {
+            return Err(EventError::Mailbox(errno));
+        }
         match client.take_owed() {
             Some(Ok(event)) => return Ok(Some(event)),
             Some(Err(refused)) => return Err(EventError::Refused(refused)),
@@ -3168,8 +4157,10 @@ impl<S: EventSource> WindowEvents<S> {
     /// it again would return at once, for ever.
     ///
     /// It answers `None` with no event when the park was interrupted, the
-    /// loop owning what woke it, or once a read the application asked has
-    /// landed for it to take ([`WindowClient::take_offered_media`]).
+    /// loop owning what woke it, or once an answer has landed for the
+    /// application to take ([`WindowClient::take_answer`]): once for each
+    /// landing, so a loop that leaves an answer untaken parks again rather
+    /// than spinning on it.
     ///
     /// # Errors
     ///
@@ -3187,7 +4178,7 @@ impl<S: EventSource> WindowEvents<S> {
             return Ok(Some(event));
         }
         loop {
-            if !client.media.is_empty() {
+            if core::mem::take(&mut client.unannounced) {
                 return Ok(None);
             }
             match self.source.park().map_err(EventError::Mailbox)? {

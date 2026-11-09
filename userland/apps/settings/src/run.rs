@@ -66,7 +66,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AuthorisedOutcome, DialogModality, PreviewOutcome, PreviewSubject, SystemTask, WindowEvent,
     };
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::Errno;
     use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
     use tairix_appconf::{Document, Registry};
     use tairix_appdata::RtHost;
@@ -102,8 +102,8 @@ mod program {
     use tairix_window::app::{self, AppWindow, Fitted, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
-        Desktop, EventDrain, EventError, EventMailbox, EventSource, Owed, Parked, Repaint, Target,
-        WindowEvents, EVENT_MAILBOX_CAPACITY,
+        Answer as Landed, Desktop, EventDrain, EventError, EventMailbox, EventSource, Owed, Parked,
+        Refused, Repaint, Target, WindowEvents, EVENT_MAILBOX_CAPACITY,
     };
 
     /// The wait-set token of the applier's wake pipe: readable exactly when
@@ -702,9 +702,12 @@ mod program {
                 )
             }
             DesktopAsk::Savers => DesktopAnswer::Savers(fetch_savers(client)),
-            DesktopAsk::Authorise { window_id, task } => {
-                DesktopAnswer::Authorise(client.authorise(Some(*window_id), task))
-            }
+            // Posted, and waited for here: the worker owes no frame.
+            DesktopAsk::Authorise { window_id, task } => DesktopAnswer::Authorise(
+                client
+                    .authorise(Some(*window_id), task)
+                    .and_then(|()| client.await_answers()),
+            ),
             DesktopAsk::TakeOutput {
                 window_id,
                 exit_code,
@@ -1514,18 +1517,17 @@ mod program {
 
     impl SettingsWindow {
         /// Open a window at the current mode and present the shell's first
-        /// frame, answering the session's [`ProcId`] or the reserved exit code
-        /// for the refusal.
+        /// frame, answering the reserved exit code for a window that could
+        /// not be asked for; the desktop's own refusal arrives later.
         fn open(
             &mut self,
             event_endpoint: u64,
             shell: &Shell,
             themes: &ThemeRegistry,
             scale: Scale,
-        ) -> Result<ProcId, i32> {
+        ) -> Result<(), i32> {
             self.title = shell.title();
-            let server = self
-                .window
+            self.window
                 .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             // Before the first present, so no frame is shown unfrosted.
@@ -1537,7 +1539,7 @@ mod program {
                 self.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
-            Ok(server)
+            Ok(())
         }
 
         /// Close the open window, leaving the app on the icon bar.
@@ -1769,79 +1771,68 @@ mod program {
         }
     }
 
-    /// Drain every target the desktop queued for this instance and show the
-    /// last pane it named, answering whether the window moved; a pane shown
-    /// brings the window forward under the activation the hand-over lent.
+    /// Show the pane `target` names, one of those the desktop queued for this
+    /// instance, answering whether the window moved.
     ///
-    /// One event may cover several targets, and another may arrive while
-    /// this drain is running, so it loops until the queue answers empty. A
-    /// target that is not a pane is not one this application can act on —
+    /// A target that is not a pane is not one this application can act on —
     /// it declares no file association and holds no filesystem capability —
     /// and is stated rather than silently dropped. A pane it does not carry
     /// leaves the window where it is, which is the whole point of a target
     /// that confers nothing.
-    fn drain_open_targets(
+    fn open_target(
         shell: &mut Shell,
-        surface: &mut SettingsWindow,
-        theme: &Theme,
-        scale: Scale,
+        surface: &SettingsWindow,
+        target: Target,
+        (theme, scale): (&Theme, Scale),
     ) -> bool {
-        let viewport = surface.viewport();
-        let mut moved = false;
-        loop {
-            match surface.window.client().take_open_target() {
-                Ok(Some(Target::Pane(pane))) => {
-                    let mut sink = tairix_controls::damage::sink();
-                    if shell.go_to_pane(&pane, viewport, scale, theme, &mut sink) {
-                        moved = true;
-                    } else {
-                        app::report(
-                            APP_NAME,
-                            format_args!("there is no `{pane}` here; the window stays where it is"),
-                        );
-                    }
-                }
-                Ok(Some(Target::Path(path) | Target::Image(path))) => {
+        match target {
+            Target::Pane(pane) => {
+                let mut sink = tairix_controls::damage::sink();
+                let moved = shell.go_to_pane(&pane, surface.viewport(), scale, theme, &mut sink);
+                if !moved {
                     app::report(
                         APP_NAME,
-                        format_args!(
-                            "{path} was handed over, but this window shows settings, not \
-                         files"
-                        ),
+                        format_args!("there is no `{pane}` here; the window stays where it is"),
                     );
                 }
-                // Taken and let go, so no delegation is left pending for this
-                // process's life.
-                Ok(Some(
-                    Target::Document { name, grant, .. } | Target::Placed { name, grant, .. },
-                )) => {
-                    drop(tairix_rt::File::from_delegation(grant));
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "{name} was handed over as a document, which this window has \
-                         nowhere to show"
-                        ),
-                    );
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
-                    break;
-                }
+                moved
+            }
+            Target::Path(path) | Target::Image(path) => {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{path} was handed over, but this window shows settings, not files"
+                    ),
+                );
+                false
+            }
+            // Taken and let go, so no delegation is left pending for this
+            // process's life.
+            Target::Document { name, grant, .. } | Target::Placed { name, grant, .. } => {
+                drop(tairix_rt::File::from_delegation(grant));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{name} was handed over as a document, which this window has nowhere \
+                     to show"
+                    ),
+                );
+                false
             }
         }
-        if moved {
-            if let Some(id) = surface.window.window_id() {
-                if let Err(err) = surface.window.client().activate_window(id) {
-                    app::report(
-                        APP_NAME,
-                        format_args!("the window could not be brought forward ({err})"),
-                    );
-                }
+    }
+
+    /// Bring the window forward under the activation a hand-over lent, once
+    /// the targets it queued have been read and one of them moved it.
+    fn bring_forward(surface: &mut SettingsWindow) {
+        if let Some(id) = surface.window.window_id() {
+            if let Err(err) = surface.window.client().activate_window(id) {
+                app::report(
+                    APP_NAME,
+                    format_args!("the window could not be brought forward ({err})"),
+                );
             }
         }
-        moved
     }
 
     /// What the loop does with what the shell concluded.
@@ -2474,11 +2465,10 @@ mod program {
                 Carried::answered_if(desks.desktop.submit(shell, &DesktopAsk::Lock))
             }
             Acted::Opened => {
-                if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
-                    Carried::Moved
-                } else {
-                    Carried::Nothing
+                if let Err(err) = surface.window.client().ask_open_targets() {
+                    app::report(APP_NAME, format_args!("cannot ask for what to open: {err}"));
                 }
+                Carried::Nothing
             }
             Acted::PreviewScreensaver(document) => {
                 // Submitted, not awaited, as the lock is; a document the wire
@@ -2671,17 +2661,13 @@ mod program {
             };
             let dialog = zone::dialog(rows, held);
             let (width, height) = dialog.opening_extent(scale, theme);
-            let (Some(owner), Some(server), Some(surface)) = (
-                owner,
-                window.window.client().session(),
-                Surface::new(width, height),
-            ) else {
+            let (Some(owner), Some(surface)) = (owner, Surface::new(width, height)) else {
                 refused(window, "The settings window is not open.");
                 return None;
             };
             let opened = WindowPane::open_dialog(
                 window.window.client(),
-                (owner, server),
+                owner,
                 endpoint,
                 &app::mode_for(width, height),
                 DialogModality::OwnerModal,
@@ -2919,14 +2905,15 @@ mod program {
     enum Taken {
         /// An event to serve.
         Event(WindowEvent),
+        /// A request the session refused.
+        Refused(Refused),
         /// Nothing is queued: the turn is drained.
         Empty,
         /// The channel ended; the program ends with this status.
         Lost(i32),
     }
 
-    /// The next event queued, never waiting: a refusal the session answered
-    /// with is stated and the drain goes on, and a malformed frame from the
+    /// The next event queued, never waiting; a malformed frame from the
     /// authenticated session is refused rather than guessed at.
     fn take_event(
         events: &mut WindowEvents<RtEventSource<'_>>,
@@ -2936,7 +2923,7 @@ mod program {
             match events.try_wait(surface.window.client()) {
                 Ok(Some(event)) => return Taken::Event(event),
                 Ok(None) => return Taken::Empty,
-                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                Err(EventError::Refused(refused)) => return Taken::Refused(refused),
                 Err(EventError::Undecodable(_)) => {}
                 Err(EventError::Mailbox(_)) => {
                     let code = app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost");
@@ -2950,6 +2937,8 @@ mod program {
     enum Waited {
         /// An event, served first in the next turn's drain.
         Event(WindowEvent),
+        /// A request the session refused.
+        Refused(Refused),
         /// Nothing to serve: the next turn catches up on what ended the park.
         Again,
         /// The program ends with this status.
@@ -2967,10 +2956,7 @@ mod program {
         match events.wait(surface.window.client()) {
             Ok(Some(event)) => Waited::Event(event),
             Ok(None) | Err(EventError::Undecodable(_)) => Waited::Again,
-            Err(EventError::Refused(refused)) => {
-                app::report(APP_NAME, refused);
-                Waited::Again
-            }
+            Err(EventError::Refused(refused)) => Waited::Refused(refused),
             Err(EventError::Mailbox(_)) => {
                 Waited::Ended(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost"))
             }
@@ -3073,12 +3059,13 @@ mod program {
         let mut zones: Option<ZoneChooser> = None;
         // The event the last park ended on, served first in the next drain.
         let mut woken = None;
+        // A target the desktop handed over moved the window since its queue
+        // was last read to the end.
+        let mut targets_moved = false;
         let code = 'serve: loop {
             let mut round = Round::default();
             let mut damage = tairix_controls::damage::sink();
-            let moved =
-                adopt_desktop_turn((surface, shell), (themes, desktop), desktop_moved, pictures);
-            if moved {
+            if adopt_desktop_turn((surface, shell), (themes, desktop), desktop_moved, pictures) {
                 round.whole = true;
                 if let Some(chooser) = zones.as_mut() {
                     chooser.owed.owe_whole();
@@ -3097,6 +3084,12 @@ mod program {
                     Some(event) => event,
                     None => match take_event(&mut events, surface) {
                         Taken::Event(event) => event,
+                        Taken::Refused(refused) => {
+                            match settle_refusal(&refused, &mut zones, surface, endpoint) {
+                                Ok(()) => continue,
+                                Err(code) => break 'serve code,
+                            }
+                        }
                         Taken::Empty => {
                             drained = true;
                             break;
@@ -3117,6 +3110,12 @@ mod program {
                 };
                 round = round.and(owed);
             }
+            take_answers(
+                (surface, shell),
+                (themes, desktop),
+                &mut zones,
+                (&mut targets_moved, &mut round),
+            );
             round.answered |= ask_for_what_shows(
                 (surface, shell),
                 (themes, desktop),
@@ -3135,12 +3134,103 @@ mod program {
             }
             match wait_event(&mut events, surface) {
                 Waited::Event(event) => woken = Some(event),
+                Waited::Refused(refused) => {
+                    if let Err(code) = settle_refusal(&refused, &mut zones, surface, endpoint) {
+                        break 'serve code;
+                    }
+                }
                 Waited::Again => {}
                 Waited::Ended(code) => break 'serve code,
             }
         };
         desks.see_out();
         code
+    }
+
+    /// Act on a request the session refused: the settings window it would
+    /// not open leaves the application nothing to be, which ends it; a zone
+    /// chooser it would not open never existed, which the user is told.
+    ///
+    /// # Errors
+    ///
+    /// The exit status, the reason stated, when the window was refused.
+    fn settle_refusal(
+        refused: &Refused,
+        zones: &mut Option<ZoneChooser>,
+        surface: &mut SettingsWindow,
+        endpoint: u64,
+    ) -> Result<(), i32> {
+        app::report(APP_NAME, refused);
+        if surface.window.refused(refused) {
+            return Err(app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop would not open the window",
+            ));
+        }
+        let chooser = zones.as_ref().map(|chooser| chooser.pane.id());
+        if chooser.is_some_and(|chooser| app::refused_create(refused, chooser)) {
+            *zones = None;
+            let owner = surface.window.window_id();
+            let _ = app::refuse(
+                surface.window.client(),
+                (APP_NAME, endpoint),
+                owner,
+                "The time zone cannot be chosen",
+                &alloc::format!(
+                    "The desktop would not open the chooser ({}).",
+                    refused.errno
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Take every answer that has landed: a pane the desktop handed over,
+    /// shown — the window brought forward once the handed-over queue is read
+    /// to its end — and a frame given back to the zone chooser, which
+    /// presents what was drawn behind it; the settings window's the shell
+    /// presents itself.
+    fn take_answers(
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+        zones: &mut Option<ZoneChooser>,
+        (targets_moved, round): (&mut bool, &mut Round),
+    ) {
+        let reading = (themes.active(), desktop.scale());
+        while let Some(answer) = surface.window.take_answer() {
+            match answer {
+                Landed::OpenTarget(Ok(Some(target))) => {
+                    if open_target(shell, surface, target, reading) {
+                        *targets_moved = true;
+                        round.whole = true;
+                    }
+                }
+                Landed::OpenTarget(ended) => {
+                    if let Err(err) = ended {
+                        app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
+                    }
+                    if core::mem::take(targets_moved) {
+                        bring_forward(surface);
+                    }
+                }
+                Landed::FrameReturned { window_id } => {
+                    if let Some(chooser) = zones
+                        .as_mut()
+                        .filter(|chooser| chooser.pane.id() == window_id)
+                    {
+                        let presented = chooser
+                            .pane
+                            .present_deferred(surface.window.client(), &chooser.surface);
+                        if presented.is_err() {
+                            chooser.owed.owe_whole();
+                        }
+                    }
+                }
+                // Nothing else is asked for on this window's channel.
+                _ => {}
+            }
+        }
     }
 
     /// Present what one round changed: the damage reported, or the pane an
@@ -3535,9 +3625,15 @@ mod program {
 
         seat_first_frame(&mut shell, &mut surface, &desktop, &themes);
 
-        let server = match surface.open(event_endpoint, &shell, &themes, desktop.scale()) {
-            Ok(server) => server,
-            Err(code) => return code,
+        if let Err(code) = surface.open(event_endpoint, &shell, &themes, desktop.scale()) {
+            return code;
+        }
+        let Some(server) = surface.window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
 
         let desktop_moved = Cell::new(false);

@@ -78,10 +78,10 @@ chose, the machine's own time zone, the rate the desktop composes frames at,
 and a generation that moves when the file manager's settings in the desktop's
 document change — and it reaches an application two ways:
 
-- `WindowRequest::QueryDesktop`, wrapped as `WindowClient::desktop`, is a
-  read-only request an app issues **before** it creates its first window, so
-  its opening frame is already the right size at the right density. It carries
-  no capability: the reply describes the caller's own screen and theme, names
+- `WindowRequest::Connect`, wrapped as `WindowClient::connect`, answers it — a
+  call an app makes once, **before** it creates its first window, so its
+  opening frame is already the right size at the right density. It carries no
+  capability: the reply describes the caller's own screen and theme, names
   no other principal's data, and grants no authority, so gating it would only
   force every application to guess (`AGENTS.md` §5.2 — the capability set stays
   small, and a descriptive fact is not a security boundary).

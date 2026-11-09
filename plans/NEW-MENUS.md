@@ -394,7 +394,7 @@ special case the general chain generalises.
 - ~~The per-gesture open: an anchor, and the three-way outcome
   `Chosen(id)` / `Dismissed` / `Refused(reason)` delivered **once** to the
   requesting window~~ — landed as M1c, with the outcome keyed to a
-  session-minted open id so one gesture's answer cannot read as another's.
+  never-reused open id so one gesture's answer cannot read as another's.
 - ~~A row kind for an app-provided attached window, plus the present request
   and the arrival/refusal events~~ — landed as M1d and **deleted in M3.4**: no
   client ever wanted it (D19), so the chain's one non-plate child is the
@@ -496,9 +496,10 @@ offers none. Both operations share **one** menu block codec
 a declaration and another by an open.
 
 **The outcome is one event, and the open id is what makes it unmistakable.**
-The reply is only the acceptance and carries the session-minted, never-reused
-open id — the shared `WINDOW_MINTED_ID_REPLY_LEN` frame a `Create` reply now
-also begins with, rather than a second near-identical shape. The answer is
+The app names the open from the id range its connect was given
+(`plans/FIX-DESKTOP.md` DESK-28), the session admits it only above the last it
+admitted there, so it is never reused, and the reply is only the acceptance.
+The answer is
 exactly one `WindowEvent::MenuClosed { window_id, open_id, outcome }` with
 `MenuOutcome::{Chosen, Dismissed, Refused}`. **One** kind, not three, so an
 app's handling is a total `match` and the engine's "this event answers an

@@ -117,21 +117,19 @@ when convenient).
   load census sampled the run queue. The `LoadTracker` maths, the observer
   exclusion, and every park path were verified correct; the herd was the
   sole cause (the `AGENTS.md` §27.3 wake-one defect).
-- **Landed behaviour:** addressed IPC events wake exactly their target.
-  `CallEndpoint` records the serving task's scheduler id at first receive
-  (`record_server_task`, set by the `call_recv` handler and the in-kernel
-  store serve loop) and each `post` captures the poster's scheduler id;
-  `reply` returns it. `ipc_call` wakes only the recorded server
-  (`waitq::serve_wake_task` over the new `WaitQueue::wake_task`) and every
-  reply site wakes only the ticket's poster (`call_wake_task`), falling back
-  to the broadcast only for an unrecorded server / id-less poster. Endpoint
-  destruction keeps the broadcast so cancelled callers re-poll fail-closed.
-  Covered by unit tests in `kernel/ipc/src/call.rs`
-  (`reply_returns_the_posters_scheduler_id`,
-  `server_task_is_recorded_once_and_zero_is_rejected`) and
-  `kernel/core/src/waitq.rs`
-  (`wake_task_unparks_only_the_named_registered_waiter`); the wake
-  discipline is documented in `docs/src/architecture/scheduler.md`.
+- **Landed behaviour:** addressed IPC events wake exactly their targets.
+  Every thread waiting for calls on an endpoint — a blocking receive, the
+  in-kernel store serve loop, a wait-set watching it — files under that
+  endpoint's key on `SERVE_WAITQ`, and a post wakes that key alone
+  (`waitq::serve_wake`); each `post` captures the poster's scheduler id and
+  `reply` returns it, so every reply site wakes only the ticket's poster
+  (`call_wake_task`), falling back to the broadcast only for an id-less
+  poster. Covered by unit tests in `kernel/ipc/src/call.rs`
+  (`reply_returns_the_posters_scheduler_id`), `kernel/core/src/waitq.rs`
+  (`wake_task_unparks_only_the_named_registered_waiter`) and
+  `kernel/core/src/syscalls.rs`
+  (`a_post_wakes_the_thread_waiting_on_its_endpoint_not_the_last_receiver`);
+  the wake discipline is documented in `docs/src/architecture/scheduler.md`.
 
 ### I2. Process memory is never reclaimed on exit — login/logout RAM growth
 

@@ -39,7 +39,7 @@ mod program {
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{AppBarClick, WindowEvent, WindowSizing};
-    use tairix_abi::{Errno, ProcId};
+    use tairix_abi::Errno;
     use tairix_controls::Keystroke;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
@@ -154,8 +154,9 @@ mod program {
 
     impl GalleryWindow {
         /// Open a `mode`-shaped window and present the gallery's first frame,
-        /// answering the desktop session's [`ProcId`] from the create reply
-        /// or the reserved exit code for the refusal.
+        /// answering the window's id or the reserved exit code for a window
+        /// that could not be asked for. The desktop's own refusal arrives
+        /// later, as the create's.
         ///
         /// Every refusal is stated on `stderr`, so a caller that carries on
         /// with no window has already reported it — the slot is still there
@@ -167,11 +168,10 @@ mod program {
             gallery: &Gallery,
             theme: &Theme,
             scale: Scale,
-        ) -> Result<ProcId, i32> {
+        ) -> Result<u64, i32> {
             // Fixed size: the gallery is never resized, so it declares no
             // floor.
-            let server = self
-                .window
+            self.window
                 .open(event_endpoint, mode, "widgets", WindowSizing::default())
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             if self
@@ -181,7 +181,9 @@ mod program {
                 self.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
-            Ok(server)
+            self.window
+                .window_id()
+                .ok_or_else(|| app::fail(APP_NAME, EXIT_CHANNEL_LOST, "no window was opened"))
         }
 
         /// Close the open window, if any, leaving the app on the icon bar.
@@ -400,16 +402,27 @@ mod program {
         }
     }
 
+    /// State `refused`, answering whether it refused the create of the
+    /// gallery's first window: started to be looked at, it has nothing to be
+    /// without one.
+    fn first_window_refused(
+        surface: &mut GalleryWindow,
+        refused: &tairix_window::Refused,
+        first_window: u64,
+    ) -> bool {
+        app::report(APP_NAME, refused);
+        surface.window.refused(refused) && refused.window_id == first_window
+    }
+
     /// The event loop: park for the first event or a deadline, drain what
     /// else is queued, step held controls and moving traces, then present once.
     /// A dead channel ends the app fail-loud; a clean close ends it at zero.
     #[allow(clippy::too_many_arguments)] // The loop's whole mutable state, threaded explicitly.
     fn run_event_loop(
         surface: &mut GalleryWindow,
-        desktop: &mut Desktop,
-        themes: &mut ThemeRegistry,
+        (desktop, themes): (&mut Desktop, &mut ThemeRegistry),
         gallery: &mut Gallery,
-        event_endpoint: u64,
+        (event_endpoint, first_window): (u64, u64),
         mode: &DisplayMode,
         desktop_moved: &Cell<bool>,
         deadline_ns: &Cell<Option<u64>>,
@@ -431,10 +444,7 @@ mod program {
             let held = gallery.repeat_deadline(now_ns, viewport, scale, theme);
             let moves = shown.on_show && !shown.released && surface.window.window_id().is_some();
             let moving = next_frame.filter(|_| moves);
-            deadline_ns.set(match (held, moving) {
-                (Some(held), Some(moving)) => Some(held.min(moving)),
-                (held, moving) => held.or(moving),
-            });
+            deadline_ns.set(held.into_iter().chain(moving).min());
             let mut first = true;
             loop {
                 let next = if first {
@@ -451,7 +461,10 @@ mod program {
                     // guessed at. Either way there is nothing to route.
                     Ok(None) | Err(EventError::Undecodable(_)) => break,
                     Err(EventError::Refused(refused)) => {
-                        app::report(APP_NAME, refused);
+                        if first_window_refused(surface, &refused, first_window) {
+                            let reason = "no window could be opened";
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, reason);
+                        }
                         continue;
                     }
                     Err(EventError::Mailbox(_)) => {
@@ -490,6 +503,9 @@ mod program {
                 }
                 shown.observe(&event, surface);
             }
+            // A frame given back is presented by the shell itself, and the
+            // gallery asks for nothing else.
+            while surface.window.take_answer().is_some() {}
             // A desktop change re-themes and re-densifies every pixel, so no
             // report could describe it.
             let whole = adopt_desktop(desktop, themes, desktop_moved);
@@ -562,15 +578,22 @@ mod program {
         // The gallery was started to be looked at, so a first window that
         // will not open leaves it nothing to be and it ends fail-loud; every
         // later one is a click on its slot, which reports and carries on.
-        let server = match surface.open(
+        let first_window = match surface.open(
             event_endpoint,
             &mode,
             &gallery,
             themes.active(),
             desktop.scale(),
         ) {
-            Ok(server) => server,
+            Ok(window) => window,
             Err(code) => return code,
+        };
+        let Some(server) = surface.window.client().session() else {
+            return app::fail(
+                APP_NAME,
+                EXIT_CHANNEL_LOST,
+                "the desktop did not identify itself",
+            );
         };
 
         let desktop_moved = Cell::new(false);
@@ -583,10 +606,9 @@ mod program {
         });
         run_event_loop(
             &mut surface,
-            &mut desktop,
-            &mut themes,
+            (&mut desktop, &mut themes),
             &mut gallery,
-            event_endpoint,
+            (event_endpoint, first_window),
             &mode,
             &desktop_moved,
             &deadline_ns,

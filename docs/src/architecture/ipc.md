@@ -187,6 +187,12 @@ fast path:
 Every rejection emits exactly one audit event before returning.
 `Port::destroy` drains in-flight messages and is idempotent.
 
+A delivered message wakes the threads waiting on its port and no other: a
+port belongs to the process that bound it and any of its threads may wait on
+it, so waiters file on `PORT_WAITQ` under the port's key rather than as the
+process. A call endpoint's servers wait the same way on `SERVE_WAITQ`, under
+the endpoint's key, so a post wakes whichever threads wait on that endpoint.
+
 The receive side offers two shapes. `Port::recv` takes the next message in
 turn unconditionally. `Port::recv_with(f)` is a **peek/commit** variant for
 receivers that must move the payload across a fallible boundary before they

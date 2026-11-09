@@ -36,17 +36,19 @@ use tairix_abi::window_ipc::{
     AlertSeverity, DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle,
     WINDOW_ENDPOINT,
 };
-use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
+use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
 use tairix_raster::Surface;
+use tairix_rt::shm::SharedRegion;
 use tairix_rt::work::{Desk, Worker};
 use tairix_theme::{Accessibility, ThemeRegistry};
 use tairix_visible::Shown;
 
 use crate::client::{
-    notice_alert, presented_damage, retained_damage, WindowClient, WindowTransport,
+    notice_alert, presented_damage, retained_damage, Answer, PayloadRegion, PostedRequest,
+    PresentState, Refused, WindowClient, WindowTransport,
 };
 use crate::desktop::Desktop;
-use crate::frames::{draw_frame, FrameRing, WindowFrames};
+use crate::frames::{draw_frame, granted_region, FrameRing, WindowFrames};
 pub use crate::frames::{region_bytes, FRAME_COUNT};
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
 
@@ -158,7 +160,8 @@ pub fn report_line(line: &str) {
 /// State on `stderr` under `name`, and in an error alert holding window
 /// `owner` when it is some, that what `headline` names was not done because
 /// of `detail`: the user acted, and is owed the answer where they can see it.
-/// An alert the desktop will not put up is reported, and its id is `None`.
+/// An alert that could not be asked for is reported, and its id is `None`;
+/// one the desktop will not put up is refused later, as any request is.
 pub fn refuse<T: WindowTransport>(
     client: &mut WindowClient<T>,
     (name, event_endpoint): (&str, u64),
@@ -254,6 +257,18 @@ impl WindowTransport for RtWindowTransport {
 
     fn await_reply(&mut self, ticket: u64, reply: &mut [u8]) -> Result<usize, Errno> {
         tairix_rt::call_await(WINDOW_ENDPOINT, ticket, reply)
+    }
+
+    type Region = SharedRegion;
+
+    fn grant_region(&mut self, len: usize) -> Result<(SharedRegion, u64), Errno> {
+        granted_region(len).ok_or(Errno::OutOfMemory)
+    }
+}
+
+impl PayloadRegion for SharedRegion {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        SharedRegion::bytes_mut(self)
     }
 }
 
@@ -572,9 +587,9 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
     Ok(Binding { endpoint, set })
 }
 
-/// Ask the session for its desktop and build this app's [`Desktop`] model and
-/// [`ThemeRegistry`], with the session's current appearance and accessibility
-/// axes already applied.
+/// Connect to the session ([`WindowClient::connect`]) and build this app's
+/// [`Desktop`] model and [`ThemeRegistry`], with the session's current
+/// appearance and accessibility axes already applied.
 ///
 /// The screen, the density, and the look are current before anything is sized
 /// or painted, so the first frame is right rather than a guess corrected once
@@ -582,7 +597,7 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
 ///
 /// # Errors
 ///
-/// [`EXIT_NO_WINDOW`] for a refused query, or for a desktop this client cannot
+/// [`EXIT_NO_WINDOW`] for a refused connect, or for a desktop this client cannot
 /// draw at (a scale outside the range [`Desktop`] admits is refused, never
 /// clamped — drawing at a density the session did not ask for would misplace
 /// every hit-test in the window).
@@ -590,8 +605,8 @@ pub fn bring_up_desktop<T: WindowTransport>(
     client: &mut WindowClient<T>,
 ) -> Result<(Desktop, ThemeRegistry), ShellError> {
     let info = client
-        .desktop()
-        .map_err(|err| ShellError::new(EXIT_NO_WINDOW, "desktop query refused", err))?;
+        .connect()
+        .map_err(|err| ShellError::new(EXIT_NO_WINDOW, "the desktop refused the connect", err))?;
     let desktop = Desktop::new(info)
         .map_err(|err| ShellError::new(EXIT_NO_WINDOW, "cannot draw this desktop", err))?;
     let mut themes = ThemeRegistry::with_builtins();
@@ -689,6 +704,9 @@ pub struct WindowPane {
     frames: WindowFrames,
     mode: DisplayMode,
     ring: FrameRing,
+    /// What was drawn into the picture while both frames were the session's,
+    /// presented once one comes back ([`Self::present_deferred`]).
+    deferred: Option<DamageList>,
 }
 
 impl WindowPane {
@@ -699,6 +717,7 @@ impl WindowPane {
             frames,
             mode: *mode,
             ring: FrameRing::new(mode),
+            deferred: None,
         }
     }
 
@@ -729,12 +748,14 @@ impl WindowPane {
     }
 
     /// Open a top-level window of `mode`, titled `title`, sized as `sizing`
-    /// allows, and answer it with the serving session's [`ProcId`].
+    /// allows. The session's refusal arrives later as an
+    /// [`EventError::Refused`](crate::client::EventError::Refused) of its
+    /// create ([`refused_create`]).
     ///
     /// # Errors
     ///
     /// [`EXIT_NO_FRAMES`] when the shared region could not be sized, created,
-    /// or granted, and [`EXIT_NO_WINDOW`] when the session refused the create.
+    /// or granted, and [`EXIT_NO_WINDOW`] when the create could not be asked.
     /// Every refusal unmaps whatever it had allocated.
     pub fn open<T: WindowTransport>(
         client: &mut WindowClient<T>,
@@ -742,23 +763,18 @@ impl WindowPane {
         mode: &DisplayMode,
         title: &str,
         sizing: WindowSizing,
-    ) -> Result<(Self, ProcId), ShellError> {
+    ) -> Result<Self, ShellError> {
         let (frames, grant) = Self::region(mode)?;
-        let (window, server) = client
+        let window = client
             .create(grant, event_endpoint, FRAME_COUNT, mode, title, sizing)
             .map_err(|err| {
-                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the window", err)
+                ShellError::new(EXIT_NO_WINDOW, "the window could not be asked for", err)
             })?;
-        Ok((Self::adopt(window, frames, mode), server))
+        Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open an undecorated popup of `mode` at `offset` from `parent`'s client
-    /// origin, refusing a create reply that did not come from `server` — the
-    /// session that opened the parent.
-    ///
-    /// A reply naming another sender is something else answering for the window
-    /// endpoint, so the window it named is closed and the region dropped rather
-    /// than drawn into.
+    /// origin.
     ///
     /// A negative offset is legitimate: the session resolves it against the
     /// parent's screen position and clamps the popup on screen, so a popup
@@ -766,19 +782,17 @@ impl WindowPane {
     ///
     /// # Errors
     ///
-    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
-    /// create, and [`Errno::PermissionDenied`] under [`EXIT_NO_WINDOW`] for the
-    /// imposter reply above.
+    /// [`EXIT_NO_FRAMES`] for the region, and [`EXIT_NO_WINDOW`] when the
+    /// popup could not be asked for.
     pub fn open_popup<T: WindowTransport>(
         client: &mut WindowClient<T>,
         parent: u64,
-        server: ProcId,
         event_endpoint: u64,
         mode: &DisplayMode,
         offset: (i32, i32),
     ) -> Result<Self, ShellError> {
         let (frames, grant) = Self::region(mode)?;
-        let (window, replied) = client
+        let window = client
             .create_popup(&PopupSpec {
                 transient: TransientSpec {
                     parent_window_id: parent,
@@ -791,33 +805,22 @@ impl WindowPane {
                 offset_y: offset.1,
             })
             .map_err(|err| {
-                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the popup", err)
+                ShellError::new(EXIT_NO_WINDOW, "the popup could not be asked for", err)
             })?;
-        if replied != server {
-            let _ = client.close(window);
-            return Err(ShellError::new(
-                EXIT_NO_WINDOW,
-                "popup reply came from another sender",
-                Errno::PermissionDenied,
-            ));
-        }
         Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a tool window of client `mode` titled `title`, sized as `sizing`
     /// allows, hung from `parent` at `offset` from its client origin or
-    /// carried by the press it holds at `carry` along the band, refusing a
-    /// create reply that did not come from `server` exactly as
-    /// [`Self::open_popup`] does.
+    /// carried by the press it holds at `carry` along the band.
     ///
     /// # Errors
     ///
-    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
-    /// title or create, and [`Errno::PermissionDenied`] under
-    /// [`EXIT_NO_WINDOW`] for an imposter reply.
+    /// [`EXIT_NO_FRAMES`] for the region, and [`EXIT_NO_WINDOW`] for a refused
+    /// title or a tool window that could not be asked for.
     pub fn open_tool<T: WindowTransport>(
         client: &mut WindowClient<T>,
-        (parent, server): (u64, ProcId),
+        parent: u64,
         event_endpoint: u64,
         (mode, sizing): (&DisplayMode, WindowSizing),
         offset: (i32, i32),
@@ -828,7 +831,7 @@ impl WindowPane {
             ShellError::new(EXIT_NO_WINDOW, "the tool window's title was refused", err)
         })?;
         let (frames, grant) = Self::region(mode)?;
-        let (window, replied) = client
+        let window = client
             .create_tool(&ToolSpec {
                 transient: TransientSpec {
                     parent_window_id: parent,
@@ -846,33 +849,23 @@ impl WindowPane {
             .map_err(|err| {
                 ShellError::new(
                     EXIT_NO_WINDOW,
-                    "desktop session refused the tool window",
+                    "the tool window could not be asked for",
                     err,
                 )
             })?;
-        if replied != server {
-            let _ = client.close(window);
-            return Err(ShellError::new(
-                EXIT_NO_WINDOW,
-                "tool-window reply came from another sender",
-                Errno::PermissionDenied,
-            ));
-        }
         Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a dialog window of client `mode` titled `title`, owned by `owner`
-    /// and holding it as `modality` says, refusing a create reply that did
-    /// not come from `server` exactly as [`Self::open_popup`] does.
+    /// and holding it as `modality` says.
     ///
     /// # Errors
     ///
-    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
-    /// title or create, and [`Errno::PermissionDenied`] under
-    /// [`EXIT_NO_WINDOW`] for an imposter reply.
+    /// [`EXIT_NO_FRAMES`] for the region, and [`EXIT_NO_WINDOW`] for a refused
+    /// title or a dialog that could not be asked for.
     pub fn open_dialog<T: WindowTransport>(
         client: &mut WindowClient<T>,
-        (owner, server): (u64, ProcId),
+        owner: u64,
         event_endpoint: u64,
         mode: &DisplayMode,
         modality: DialogModality,
@@ -882,7 +875,7 @@ impl WindowPane {
             ShellError::new(EXIT_NO_WINDOW, "the dialog's title was refused", err)
         })?;
         let (frames, grant) = Self::region(mode)?;
-        let (window, replied) = client
+        let window = client
             .create_dialog(&DialogSpec {
                 transient: TransientSpec {
                     parent_window_id: owner,
@@ -895,49 +888,35 @@ impl WindowPane {
                 title,
             })
             .map_err(|err| {
-                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the dialog", err)
+                ShellError::new(EXIT_NO_WINDOW, "the dialog could not be asked for", err)
             })?;
-        if replied != server {
-            let _ = client.close(window);
-            return Err(ShellError::new(
-                EXIT_NO_WINDOW,
-                "dialog reply came from another sender",
-                Errno::PermissionDenied,
-            ));
-        }
         Ok(Self::adopt(window, frames, mode))
     }
 
     /// Open a desktop layer surface of `mode` at screen point `at` in
-    /// stacking layer `depth`, refusing a reply that did not come from
-    /// `server`.
+    /// stacking layer `depth`.
     ///
     /// The same region, present, and resize bookkeeping every pane has —
     /// a layer surface is a window in the session's one registry, so it
     /// needs no second copy of any of it. What differs is only the opening:
     /// it requires `CAP_DESKTOP_LAYER`, and it names a screen point instead
-    /// of a parent.
-    ///
-    /// A refusal is an ordinary outcome, not a fault: an account whose
-    /// ceiling does not carry the capability gets [`Errno::PermissionDenied`]
-    /// here and the caller carries on without a desktop presence.
+    /// of a parent. The refusal of an account whose ceiling does not carry the
+    /// capability arrives as the create's does, and is an ordinary outcome,
+    /// not a fault: the caller carries on without a desktop presence.
     ///
     /// # Errors
     ///
-    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
-    /// open (including the missing capability), and
-    /// [`Errno::PermissionDenied`] under [`EXIT_NO_WINDOW`] for a reply from
-    /// another sender.
+    /// [`EXIT_NO_FRAMES`] for the region, and [`EXIT_NO_WINDOW`] when the
+    /// surface could not be asked for.
     pub fn open_layer<T: WindowTransport>(
         client: &mut WindowClient<T>,
-        server: ProcId,
         event_endpoint: u64,
         mode: &DisplayMode,
         at: (i32, i32),
         depth: LayerDepth,
     ) -> Result<Self, ShellError> {
         let (frames, grant) = Self::region(mode)?;
-        let (window, replied) = client
+        let window = client
             .open_layer(&LayerSpec {
                 shm_handle: grant,
                 event_endpoint,
@@ -950,18 +929,10 @@ impl WindowPane {
             .map_err(|err| {
                 ShellError::new(
                     EXIT_NO_WINDOW,
-                    "desktop session refused the layer surface",
+                    "the layer surface could not be asked for",
                     err,
                 )
             })?;
-        if replied != server {
-            let _ = client.close(window);
-            return Err(ShellError::new(
-                EXIT_NO_WINDOW,
-                "layer-surface reply came from another sender",
-                Errno::PermissionDenied,
-            ));
-        }
         Ok(Self::adopt(window, frames, mode))
     }
 
@@ -970,8 +941,8 @@ impl WindowPane {
     ///
     /// # Errors
     ///
-    /// The session's refusal — a pane that is not a layer surface, or a
-    /// transport failure.
+    /// A transport failure; the session's refusal — a pane that is not a
+    /// layer surface — arrives later, as the client's refusals do.
     pub fn place<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
@@ -981,7 +952,7 @@ impl WindowPane {
         client.place_layer(self.window, at.0, at.1, depth)
     }
 
-    /// The session's id for this window, which its delivered events name.
+    /// The window's id, which its delivered events name.
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.window
@@ -1010,19 +981,24 @@ impl WindowPane {
     /// The frame drawn into is the one the session is not reading, brought up
     /// to date from `surface` with whatever the other frame's presents changed
     /// since it was last drawn; `surface` is therefore the whole window's
-    /// picture. A region the session released is re-attached first and sent
-    /// whole, since the fresh region holds none of the pixels a partial
-    /// present would leave standing — but not while the window is hidden
-    /// ([`WindowClient::is_hidden`]): nothing is presented then, since nobody
-    /// can see it and re-attaching would map again the memory the release
-    /// gave back. Nor is anything presented while the re-attach waits for room
-    /// at the session; the window is asked to paint again once it has some.
+    /// picture. While the window's last present is unanswered both frames are
+    /// the session's, so nothing is drawn: the rectangle is kept and presented
+    /// from the picture once [`Answer::FrameReturned`] says one is back
+    /// ([`Self::present_deferred`]), and the window paints at most once per
+    /// present the desktop serves. A region the session released is
+    /// re-attached first and sent whole, since the fresh region holds none of
+    /// the pixels a partial present would leave standing — but not while the
+    /// window is hidden ([`WindowClient::is_hidden`]): nothing is presented
+    /// then, since nobody can see it and re-attaching would map again the
+    /// memory the release gave back. Nor is anything presented while the
+    /// re-attach waits for room at the session; the window is asked to paint
+    /// again once it has some.
     ///
     /// # Errors
     ///
     /// [`Errno::NotAttached`] when the region could not be re-attached,
     /// whatever the frame codec refuses (a rectangle outside the surface or
-    /// past the region), and otherwise the session's refusal of the present.
+    /// past the region), and a transport failure.
     pub fn present<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
@@ -1049,12 +1025,17 @@ impl WindowPane {
     ) -> Result<(), Errno> {
         let (window, mode) = (self.window, self.mode);
         if client.is_hidden(window) {
+            self.deferred = None;
             return Ok(());
         }
-        // Settled first, so a release its answer reports is re-attached now.
-        client.await_present(window)?;
+        if client.present_state(window) == PresentState::InFlight {
+            self.defer(damage);
+            client.owe_frame(window);
+            return Ok(());
+        }
         let fresh = self.frames.is_released() || client.content_released(window);
         if fresh {
+            self.deferred = None;
             let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;
             if let Err(errno) = client.resize(window, grant, FRAME_COUNT, &mode) {
                 // The session never took the fresh region, so none is kept.
@@ -1070,11 +1051,53 @@ impl WindowPane {
             }
             self.ring.reset(&mode);
         }
-        let damage = presented_damage(&mode, fresh, *damage)?;
+        let wanted = match self.deferred.take() {
+            Some(held) => DamageList::fitted(held.rects().iter().chain(damage.rects()).copied())
+                .unwrap_or(*damage),
+            None => *damage,
+        };
+        let damage = presented_damage(&mode, fresh, wanted)?;
         let pixels = self.frames.pixels().ok_or(Errno::NotAttached)?;
-        self.ring.present(client, window, damage, |index, owed| {
+        let sent = self.ring.present(client, window, damage, |index, owed| {
             draw_frame(pixels, index, owed, surface, &mode, &damage)
-        })
+        });
+        match sent {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.defer(&damage);
+                Ok(())
+            }
+            Err(errno) => {
+                self.defer(&wanted);
+                Err(errno)
+            }
+        }
+    }
+
+    /// Present from `surface` what was drawn while both frames were the
+    /// session's: the answer to [`Answer::FrameReturned`] for this window.
+    ///
+    /// # Errors
+    ///
+    /// [`present`](Self::present)'s.
+    pub fn present_deferred<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        surface: &Surface,
+    ) -> Result<(), Errno> {
+        match self.deferred.take() {
+            Some(deferred) => self.present_list(client, surface, &deferred),
+            None => Ok(()),
+        }
+    }
+
+    /// Keep `damage` for the present a returned frame makes.
+    fn defer(&mut self, damage: &DamageList) {
+        self.deferred = Some(match self.deferred {
+            Some(held) => DamageList::fitted(held.rects().iter().chain(damage.rects()).copied())
+                .unwrap_or(*damage),
+            None => *damage,
+        });
     }
 
     /// Re-map the frame region onto `new_mode`.
@@ -1123,6 +1146,8 @@ impl WindowPane {
         self.frames = spare;
         self.mode = *new_mode;
         self.ring.reset(new_mode);
+        // The fresh region is painted whole.
+        self.deferred = None;
         Fitted::Adopted
     }
 
@@ -1153,21 +1178,29 @@ impl WindowPane {
     /// The pages only go when both halves let go, which is the whole point.
     pub fn release_frames(&mut self) {
         self.frames.release();
+        self.deferred = None;
     }
 
-    /// Close the window and answer what the session said.
+    /// Close the window.
     ///
-    /// The pane is consumed either way — so the frame region is unmapped and
-    /// nothing is left pinned even when the session refuses — which is why a
-    /// caller with nothing to report may ignore the answer.
+    /// The pane is consumed, so the frame region is unmapped and nothing is
+    /// left pinned whatever the session answers, and the client forgets the
+    /// window at once.
     ///
     /// # Errors
     ///
-    /// The session's refusal, which for a window it no longer knows about means
-    /// the teardown this call was asking for has already happened.
+    /// A transport failure.
     pub fn close<T: WindowTransport>(self, client: &mut WindowClient<T>) -> Result<(), Errno> {
         client.close(self.window)
     }
+}
+
+/// Whether `refused` is the refusal of window `window`'s create: the window
+/// never existed, so its pane is dropped and whatever it was opened for
+/// treated as not done.
+#[must_use]
+pub fn refused_create(refused: &Refused, window: u64) -> bool {
+    refused.request == PostedRequest::Create && refused.window_id == window
 }
 
 /// A single-window app's open window: the pane and the surface every frame is
@@ -1249,16 +1282,17 @@ impl AppWindow {
         }
     }
 
-    /// Open a window of `mode`, titled `title`, sized as `sizing` allows, and
-    /// answer the serving session's [`ProcId`] from the create reply.
+    /// Open a window of `mode`, titled `title`, sized as `sizing` allows.
     ///
     /// The drawing surface is allocated before the session is asked, so a
-    /// window the app could not draw into is never put on screen.
+    /// window the app could not draw into is never put on screen. The
+    /// session's refusal arrives later, and [`Self::refused`] ends the window
+    /// over it.
     ///
     /// # Errors
     ///
     /// [`EXIT_NO_WINDOW`] when the surface could not be allocated or the
-    /// session refused the create, [`EXIT_NO_FRAMES`] for the shared region,
+    /// create could not be asked, [`EXIT_NO_FRAMES`] for the shared region,
     /// and [`EXIT_NO_WINDOW`] again when a window is already open: an app that
     /// asks for a second through this one channel has lost track of the first.
     pub fn open(
@@ -1267,7 +1301,7 @@ impl AppWindow {
         mode: &DisplayMode,
         title: &str,
         sizing: WindowSizing,
-    ) -> Result<ProcId, ShellError> {
+    ) -> Result<(), ShellError> {
         if self.retained.is_some() {
             return Err(ShellError::new(
                 EXIT_NO_WINDOW,
@@ -1282,14 +1316,46 @@ impl AppWindow {
                 Errno::OutOfMemory,
             ));
         };
-        let (pane, server) =
-            WindowPane::open(&mut self.client, event_endpoint, mode, title, sizing)?;
+        let pane = WindowPane::open(&mut self.client, event_endpoint, mode, title, sizing)?;
         self.retained = Some(Retained {
             pane,
             surface,
             torn: None,
         });
-        Ok(server)
+        Ok(())
+    }
+
+    /// The oldest answer landed for the application, a frame returned to the
+    /// open window presented here rather than handed on: what its paint was
+    /// deferred for is sent from the retained picture.
+    pub fn take_answer(&mut self) -> Option<Answer> {
+        loop {
+            let answer = self.client.take_answer()?;
+            let Answer::FrameReturned { window_id } = answer else {
+                return Some(answer);
+            };
+            let Some(held) = self
+                .retained
+                .as_mut()
+                .filter(|held| held.pane.id() == window_id)
+            else {
+                return Some(answer);
+            };
+            // A failed present keeps what it was to send for the next one.
+            let _ = held.pane.present_deferred(&mut self.client, &held.surface);
+        }
+    }
+
+    /// Whether `refused` ended the open window: its create was refused, so it
+    /// never existed and is dropped, leaving the app on the icon bar.
+    pub fn refused(&mut self, refused: &Refused) -> bool {
+        let ended = self
+            .window_id()
+            .is_some_and(|window| refused_create(refused, window));
+        if ended {
+            self.retained = None;
+        }
+        ended
     }
 
     /// Draw `damage` of the window through `paint` and present that rectangle,
@@ -1389,7 +1455,7 @@ impl AppWindow {
     }
 
     /// Restate the range the window manager may resize the open window
-    /// within, answering the session's word on it.
+    /// within.
     ///
     /// For an app whose content constraints move while its window is open —
     /// a board switching to a larger one, a layout remeasured at a new
@@ -1401,8 +1467,9 @@ impl AppWindow {
     ///
     /// # Errors
     ///
-    /// The session's refusal, unchanged: the previously declared range
-    /// stands and the window is still resizable within it.
+    /// A transport failure; the session's refusal arrives later, the
+    /// previously declared range standing and the window still resizable
+    /// within it.
     pub fn set_sizing(&mut self, sizing: WindowSizing) -> Result<(), Errno> {
         let Some(held) = self.retained.as_ref() else {
             return Ok(());
@@ -1416,7 +1483,8 @@ impl AppWindow {
     ///
     /// # Errors
     ///
-    /// The session's refusal, unchanged: the window keeps the blur it had.
+    /// A radius past the bound, or a transport failure; the session's refusal
+    /// arrives later, the window keeping the blur it had.
     pub fn set_backdrop_blur(&mut self, radius_px: u16) -> Result<(), Errno> {
         let Some(held) = self.retained.as_ref() else {
             return Ok(());
@@ -1430,7 +1498,8 @@ impl AppWindow {
     ///
     /// # Errors
     ///
-    /// The session's refusal; the window keeps the title it had.
+    /// A title the protocol refuses, or a transport failure; the session's
+    /// refusal arrives later, the window keeping the title it had.
     pub fn set_title(&mut self, title: &str) -> Result<(), Errno> {
         let Some(held) = self.retained.as_ref() else {
             return Ok(());
@@ -1446,18 +1515,14 @@ impl AppWindow {
         }
     }
 
-    /// Close the open window, if any, leaving the app on the icon bar, and
-    /// answer what the session said.
+    /// Close the open window, if any, leaving the app on the icon bar.
     ///
-    /// The pane is dropped either way — so the frame region is unmapped and
-    /// nothing is left pinned even when the session refuses — which is why a
-    /// caller with nothing to report may ignore the answer. One that owes its
-    /// own caller an outcome hands this on rather than inventing success.
+    /// The pane is dropped whatever the session answers, so the frame region
+    /// is unmapped and nothing is left pinned.
     ///
     /// # Errors
     ///
-    /// The session's refusal, which for a window it no longer knows about means
-    /// the teardown this call was asking for has already happened.
+    /// A transport failure.
     pub fn close(&mut self) -> Result<(), Errno> {
         match self.retained.take() {
             Some(held) => held.pane.close(&mut self.client),

@@ -106,7 +106,7 @@ const REPLY_DENIED_UNKNOWN_TICKET: Field<'static> = Field {
     key: "reason",
     value: tairix_log::FieldValue::Str("unknown_ticket"),
 };
-use crate::loom_compat::{AtomicU32, AtomicU64, Ordering};
+use crate::loom_compat::{AtomicU32, Ordering};
 use crate::port::EndpointId;
 
 /// Fixed atomic states a [`CallEndpoint`] can be in, encoded into one
@@ -876,12 +876,6 @@ pub struct CallEndpoint {
     /// The instance of [`Self::owner`] that bound the endpoint. The endpoint
     /// can be reached after its owner has ended, and the number with it.
     owner_instance: ProcId,
-    /// The serving task's *scheduler* id, recorded the first time the server
-    /// receives on this endpoint (`0` until then). The post path wakes
-    /// exactly this task instead of broadcasting to every parked server; a
-    /// plain store/load suffices because the value is a wake *hint* —
-    /// correctness is carried by the server's register-before-poll park loop.
-    server_task: AtomicU64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
     inner: tairix_sync::SpinLock<Inner>,
@@ -1142,7 +1136,6 @@ impl CallEndpoint {
             call_charge: limits.call_charge(),
             owner: creator.process().0,
             owner_instance: creator.proc_id(),
-            server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
             inner: tairix_sync::SpinLock::new(Inner {
                 next_ticket: 0,
@@ -1257,33 +1250,6 @@ impl CallEndpoint {
     /// stays.
     pub fn note_senders_in(&self, index: Arc<SenderIndex<u64>>) {
         self.inner.lock().noted.note_in(index);
-    }
-
-    /// Record the serving task's *scheduler* id so a post can wake exactly
-    /// this server (see the `server_task` field). Called by the receive
-    /// paths (the `call_recv` syscall handler and the in-kernel store serve
-    /// loop) with the kernel-attested current task — never a caller-supplied
-    /// value — after the endpoint-ownership gate has already passed, so it
-    /// can only ever name the endpoint's own server. Idempotent; `0` is
-    /// never a valid scheduler id and is rejected so the "unrecorded"
-    /// sentinel cannot be forged back in.
-    pub fn record_server_task(&self, sched_task: u64) {
-        if sched_task != 0 {
-            self.server_task.store(sched_task, Ordering::Release);
-        }
-    }
-
-    /// The serving task's recorded *scheduler* id, or [`None`] before the
-    /// server's first receive. The post path uses this to wake exactly the
-    /// bound server; `None` falls back to the broadcast wake (fail-safe —
-    /// a server that never received yet drains its queue on its first
-    /// poll regardless).
-    #[must_use]
-    pub fn server_task(&self) -> Option<u64> {
-        match self.server_task.load(Ordering::Acquire) {
-            0 => None,
-            id => Some(id),
-        }
     }
 
     /// `true` once [`Self::destroy`] has run.
@@ -3666,29 +3632,6 @@ mod tests {
         // The reply names exactly the scheduler id the post captured, so the
         // syscall layer wakes that one caller and no other.
         assert_eq!(replied(&ep, ticket, &sink), [0xBEEF]);
-    }
-
-    #[test]
-    fn server_task_is_recorded_once_and_zero_is_rejected() {
-        let sink = RecordingSink::new();
-        let ep = open_endpoint(&sink);
-        // Unrecorded until the server's first receive: posts fall back to
-        // the broadcast wake.
-        assert_eq!(ep.server_task(), None);
-        // A zero id is the "unrecorded" sentinel and must not overwrite a
-        // real recording (or be recordable at all).
-        ep.record_server_task(0);
-        assert_eq!(ep.server_task(), None);
-        ep.record_server_task(42);
-        assert_eq!(ep.server_task(), Some(42));
-        // Recording is idempotent for the same server and a later record
-        // (a restarted server task) supersedes the old id.
-        ep.record_server_task(42);
-        ep.record_server_task(43);
-        assert_eq!(ep.server_task(), Some(43));
-        // Zero still cannot forge the sentinel back in.
-        ep.record_server_task(0);
-        assert_eq!(ep.server_task(), Some(43));
     }
 
     #[test]

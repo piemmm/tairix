@@ -67,7 +67,7 @@ mod program {
         self, AnswerWake, DocumentApp, Handle, Host, Outcome, Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
-    use tairix_window::{clipboard, Desktop};
+    use tairix_window::Desktop;
 
     const APP_NAME: &str = "Draw";
 
@@ -1085,7 +1085,8 @@ mod program {
             tairix_font::trim_glyph_cache();
             let band = tairix_rt::pressure::gauge().band();
             for window in &mut host.windows {
-                window.view.adopt_pressure(band);
+                window.view.adopt_pressure(band, &mut window.damage);
+                window.owe_reported();
             }
         }
 
@@ -1096,35 +1097,39 @@ mod program {
                         host.windows[index].state("There is no room to copy now");
                     }
                 }
-                Own::Paste => {
-                    let id = host.windows[index].id();
-                    let taken = clipboard::take(&mut host.client, id);
-                    let bytes = match taken {
-                        Ok(Some((ClipboardKind::Text, bytes))) => bytes,
-                        Ok(_) => {
-                            host.windows[index].state("The clipboard holds no drawing");
-                            return;
-                        }
-                        Err(err) => {
-                            host.windows[index].state(alloc::format!("Could not paste: {err}"));
-                            return;
-                        }
-                    };
-                    let job = LoadJob {
-                        stamp: host.windows[index].stamp(),
-                        work: LoadWork::Paste(bytes),
-                    };
-                    match host.app.loader.submit(Some(job)) {
-                        Ok(answered) => host.note_answered(answered),
-                        Err(_) => host.windows[index].state("There is no room to paste now"),
-                    }
-                }
+                Own::Paste => host.paste(index),
                 Own::NewWindow => host.new_window(),
                 Own::Compute(compute) => {
                     if !host.queue(index, Work::Compute(*compute)) {
                         host.windows[index].state("There is no room for that work now");
                     }
                 }
+            }
+        }
+
+        fn pasted(
+            host: &mut Host<Self>,
+            index: usize,
+            contents: Result<Option<(ClipboardKind, Vec<u8>)>, Errno>,
+        ) {
+            let bytes = match contents {
+                Ok(Some((ClipboardKind::Text, bytes))) => bytes,
+                Ok(_) => {
+                    host.windows[index].state("The clipboard holds no drawing");
+                    return;
+                }
+                Err(err) => {
+                    host.windows[index].state(alloc::format!("Could not paste: {err}"));
+                    return;
+                }
+            };
+            let job = LoadJob {
+                stamp: host.windows[index].stamp(),
+                work: LoadWork::Paste(bytes),
+            };
+            match host.app.loader.submit(Some(job)) {
+                Ok(answered) => host.note_answered(answered),
+                Err(_) => host.windows[index].state("There is no room to paste now"),
             }
         }
 
@@ -1140,13 +1145,10 @@ mod program {
                 Answer::Clipped(clipped) => {
                     let id = host.windows[index].id();
                     let put = match clipped {
-                        Ok(text) => clipboard::put(
-                            &mut host.client,
-                            id,
-                            ClipboardKind::Text,
-                            text.as_bytes(),
-                        )
-                        .map_err(|err| alloc::format!("{err}")),
+                        Ok(text) => host
+                            .client
+                            .set_clipboard(id, ClipboardKind::Text, text.as_bytes())
+                            .map_err(|err| alloc::format!("{err}")),
                         Err(why) => Err(String::from(why)),
                     };
                     put.err().map(|why| alloc::format!("Could not copy: {why}"))

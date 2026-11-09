@@ -129,20 +129,20 @@ use tairix_abi::window_ipc::{
     WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
-    decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
-    decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
-    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_offered_file_reply, decode_offered_items_reply, decode_open_target_reply,
-    decode_picked_name_reply, decode_wallpapers_reply, encode_drag_spot_reply,
-    encode_drop_target_reply, encode_offered_file_reply, encode_offered_items_reply,
-    encode_open_target_reply, encode_picked_name_reply, AlertButton, AlertButtonRole, AlertOutcome,
-    AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText,
-    AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-    AppMenuShortcut, AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName,
-    DragAt, DragItems, DragOwnIcon, DragOwnSource, DragPicture, DropOperation, DropSite,
-    HandOverDocument, HandOverTarget, IconAsset, IconPath, MenuOutcome, MenuRefusal, PaneName,
-    PickPurpose, PreviewOutcome, PreviewSubject, SaveFormat, SaveFormats, ToolOver, TooltipText,
-    WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    decode_clipboard_reply, decode_connect_reply, decode_cursor_sets_reply, decode_drag_spot_reply,
+    decode_drop_target_reply, decode_hand_over_reply, decode_handle_reply, decode_menu_text_reply,
+    decode_notify_sources_reply, decode_offered_file_reply, decode_offered_items_reply,
+    decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
+    encode_drag_spot_reply, encode_drop_target_reply, encode_offered_file_reply,
+    encode_offered_items_reply, encode_open_target_reply, encode_picked_name_reply, AlertButton,
+    AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
+    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
+    ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DragOwnIcon, DragOwnSource,
+    DragPicture, DropOperation, DropSite, HandOverDocument, HandOverTarget, IconAsset, IconPath,
+    MenuOutcome, MenuRefusal, PaneName, PickPurpose, PreviewOutcome, PreviewSubject, SaveFormat,
+    SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
+    WindowTitle,
 };
 use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
 use tairix_abi::BUNDLE_ID_MAX;
@@ -1305,9 +1305,8 @@ fn exercise_window_ipc(bytes: &[u8]) {
             .expect("round-trip of an accepted event must succeed");
         assert_eq!(event, redecoded);
     }
-    let _ = decode_create_reply(bytes);
-    let _ = decode_desktop_reply(bytes);
-    let _ = decode_minted_id_reply(bytes);
+    let _ = decode_connect_reply(bytes);
+    let _ = decode_handle_reply(bytes);
     if let Ok(held) = decode_clipboard_reply(bytes) {
         // Whatever a reply claims, it never claims more than the clipboard
         // may hold.
@@ -3635,6 +3634,7 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
 fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     let mut seeds = std::vec![
         WindowRequest::Create {
+            window_id: tairix_abi::window_ipc::object_id(4, 1),
             shm_handle: 7,
             event_endpoint: 0x900d,
             frame_count: 2,
@@ -3731,6 +3731,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
 fn window_request_transient_seeds() -> [WindowRequest; 4] {
     [
         WindowRequest::CreatePopup {
+            window_id: tairix_abi::window_ipc::object_id(4, 2),
             parent_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -3743,6 +3744,7 @@ fn window_request_transient_seeds() -> [WindowRequest; 4] {
             offset_y: 24,
         },
         WindowRequest::CreateTool {
+            window_id: tairix_abi::window_ipc::object_id(4, 3),
             parent_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -3758,6 +3760,7 @@ fn window_request_transient_seeds() -> [WindowRequest; 4] {
             sizing: WindowSizing::Fixed,
         },
         WindowRequest::CreateTool {
+            window_id: tairix_abi::window_ipc::object_id(4, 4),
             parent_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -3778,6 +3781,7 @@ fn window_request_transient_seeds() -> [WindowRequest; 4] {
             },
         },
         WindowRequest::CreateDialog {
+            window_id: tairix_abi::window_ipc::object_id(4, 5),
             owner_window_id: 3,
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -4000,6 +4004,7 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
         },
         WindowRequest::OpenMenu {
             window_id: 3,
+            open_id: tairix_abi::window_ipc::object_id(4, 6),
             anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
             menu: fuzz_menu(AppMenu::titled(
                 AppMenuLabel::new("Edit").expect("a valid title"),
@@ -4047,7 +4052,7 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             region: WindowRegion::new(0, 0, 0, 0).expect("the point case"),
             text: TooltipText::new("").expect("empty withdraws"),
         },
-        WindowRequest::QueryDesktop,
+        WindowRequest::Connect,
     ]
 }
 
@@ -4056,6 +4061,7 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
 fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
     std::vec![
         WindowRequest::OpenAlert {
+            alert_id: tairix_abi::window_ipc::object_id(4, 7),
             event_endpoint: tairix_abi::window_ipc::event_endpoint_for(9),
             owner_window_id: 0,
             alert: AlertSpec::new(
@@ -4067,6 +4073,7 @@ fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
             .expect("the narrowest alert"),
         },
         WindowRequest::OpenAlert {
+            alert_id: tairix_abi::window_ipc::object_id(4, 8),
             event_endpoint: tairix_abi::window_ipc::event_endpoint_for(9),
             owner_window_id: 3,
             alert: AlertSpec::new(

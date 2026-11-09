@@ -455,7 +455,8 @@ chosen after a re-declaration is resolved against the menu the user saw.
   past a hundred rows in all. It is why a whole menu may hold four plates'
   worth of rows (`APP_MENU_MAX_TOTAL_ROWS`). Its Layers and Sprites menus
   carry entry fields — the layer or sprite to go to, a sprite's new name —
-  answered as `MenuOutcome::Entered` and read back with `take_menu_text`.
+  answered as `MenuOutcome::Entered` and the text asked for with
+  `ask_menu_text`, landing as `Answer::MenuText`.
   See [Paint](./paint.md).
 - **Draw** (`userland/apps/draw`) — the same shape again: File, Page, Edit,
   Object, Path, Layer, View and Tools as submenus, each command's row drawn

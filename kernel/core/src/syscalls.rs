@@ -1161,9 +1161,10 @@ where
 
         // Register on the wake channels *before* the first scan so an
         // event arriving in the register/park window is not lost:
-        // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
-        // `NO_DEADLINE`) and `IRQ_WAITQ` (a member line firing, plus the timed
-        // sweep that enforces the timeout). `register` is idempotent.
+        // `SERVE_WAITQ` and `PORT_WAITQ` (a request posted to a member
+        // endpoint, a message to a member port, `NO_DEADLINE`) and `IRQ_WAITQ`
+        // (a member line firing, plus the timed sweep that enforces the
+        // timeout). `register` is idempotent.
         // `SEAT_INPUT_WAITQ` is joined only by a set that actually holds a
         // `SeatInput` member, so the pointer-rate wakes a drag produces never
         // touch an unrelated waitset waiter.
@@ -1288,14 +1289,24 @@ where
         // hear its event, so the wait fails closed rather than park deaf.
         let mut deaf = false;
         let mut hear = |filed: Result<(), crate::waitq::WaitRefused>| deaf |= filed.is_err();
-        // A post to a member endpoint or a message to a member port wakes its
-        // server here, so only a set holding one joins.
-        if crate::waitset::hears_requests(members) {
-            hear(file(
-                &crate::waitq::SERVE_WAITQ,
-                WakeKey::NONE,
-                crate::waitq::NO_DEADLINE,
-            ));
+        // A post to a member endpoint, or a message to a member port, wakes
+        // the threads waiting on that endpoint or port, each under its own key:
+        // both are their process's, and whichever thread waits on one is the
+        // one to wake.
+        for m in members {
+            match m.kind {
+                WaitSourceKind::Endpoint => hear(file(
+                    &crate::waitq::SERVE_WAITQ,
+                    crate::waitq::endpoint_key(m.id),
+                    crate::waitq::NO_DEADLINE,
+                )),
+                WaitSourceKind::Port => hear(file(
+                    &crate::waitq::PORT_WAITQ,
+                    crate::waitq::port_key(m.id),
+                    crate::waitq::NO_DEADLINE,
+                )),
+                _ => {}
+            }
         }
         // The unkeyed row is the wait's timer; each member line waits under its
         // own key, so another line's fire leaves this wait parked.
@@ -1605,8 +1616,9 @@ where
             // Arm the one-shot to the nearest pending deadline across every
             // timed wait-queue (which includes this wait's, and never drops
             // another queue's earlier wake), then *park* off the run queue until
-            // woken by an endpoint post (`serve_wake`), a member line firing
-            // (`irq_wake`), or the timed sweep — never a busy spin. The
+            // woken by an endpoint post (`serve_wake`), a message to a member
+            // port (`port_wake`), a member line firing (`irq_wake`), or the
+            // timed sweep — never a busy spin. The
             // wake-pending token closes the poll/park race exactly as
             // `call_recv` / `irq_wait` rely on.
             self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
@@ -1624,7 +1636,15 @@ where
             }
         };
 
-        crate::waitq::SERVE_WAITQ.deregister(sched_task);
+        for m in members {
+            match m.kind {
+                WaitSourceKind::Endpoint => crate::waitq::SERVE_WAITQ
+                    .deregister_keyed(crate::waitq::endpoint_key(m.id), sched_task),
+                WaitSourceKind::Port => crate::waitq::PORT_WAITQ
+                    .deregister_keyed(crate::waitq::port_key(m.id), sched_task),
+                _ => {}
+            }
+        }
         crate::waitq::IRQ_WAITQ.deregister_task(sched_task);
         if let Some(key) = child_key {
             crate::waitq::PROCWAIT_WAITQ.deregister_keyed(key, sched_task);
@@ -8193,7 +8213,6 @@ where
         // against the caller's effective set, re-checks the payload size and
         // charges the message to the caller's own budget, returning a stable
         // `Errno` for every refusal; a slot this thread holds there is its.
-        let owner = port.owner();
         let task = caller.task_id.0;
         port.send(
             caller.caps,
@@ -8203,16 +8222,12 @@ where
             self.audit,
         )?;
         drop(ipc);
-        // Wake exactly the port's owner: a receiver parks off the run
-        // queue on a wait-set observing this port (registered on
-        // `SERVE_WAITQ`, like an IPC server between requests), so the
-        // delivery must unpark it or the message would sit until some
-        // unrelated wake. Waking one recorded task — never a broadcast —
-        // avoids the thundering herd; the woken owner re-scans its
-        // members, and the scheduler's wake-pending token closes the
-        // send/park race so a message delivered while the owner is
-        // mid-commit-to-park is never lost.
-        crate::waitq::serve_wake_task(owner);
+        // A receiver parks off the run queue on a wait-set observing this
+        // port, so the delivery must unpark it or the message would sit until
+        // some unrelated wake. Its waiters are keyed by the port, since any
+        // thread of the owning process may be the one waiting; the scheduler's
+        // wake-pending token closes the send/park race.
+        crate::waitq::port_wake(endpoint);
         Ok(0)
     }
 
@@ -11830,18 +11845,12 @@ where
         // is released only by the server's reply or the endpoint's teardown.
         let ticket = self.post_blocking(&ep, caller, payload.as_bytes(), reply_cap)?;
 
-        // Wake the bound server: an IPC server parks off the run queue on
-        // `SERVE_WAITQ` between requests (no busy-yield), so the posted
-        // request must unpark it or the call would block until some
-        // unrelated wake. Wake exactly the endpoint's recorded server — a
-        // broadcast here is a thundering herd that spuriously readies every
-        // other parked server and distorts the load census — falling back to
-        // the broadcast only for an endpoint whose server has never received
-        // (no id recorded yet). The server re-checks its endpoint after
-        // every wake; the scheduler's wake-pending token closes the
-        // post/park race so a request posted while the server is
-        // mid-commit-to-park is never lost.
-        crate::waitq::serve_wake_server(ep.server_task());
+        // Wake the server: it parks off the run queue on `SERVE_WAITQ` between
+        // requests, under this endpoint's key, so the post must unpark it or
+        // the call would block until some unrelated wake. Only the threads
+        // waiting on this endpoint wake — never every parked server — and
+        // the scheduler's wake-pending token closes the post/park race.
+        crate::waitq::serve_wake(endpoint);
 
         // Block until the bound server replies, parking off the run queue
         // (no busy yield). `ipc_call` carries no timeout,
@@ -11956,9 +11965,8 @@ where
             self.audit,
         )?;
 
-        // Wake the bound server exactly as `ipc_call` does (wake-one, falling
-        // back to a broadcast only before the server has ever received).
-        crate::waitq::serve_wake_server(ep.server_task());
+        // Wake the server exactly as `ipc_call` does.
+        crate::waitq::serve_wake(endpoint);
 
         // Write the minted ticket out. If the caller's `ticket_out` faults it
         // can never learn — and so never reap — this ticket, so the orphaned
@@ -13533,7 +13541,7 @@ where
                     }
                     WaitSourceKind::Port => {
                         // A wait-set may observe a message port only for
-                        // the task that bound it — the same owner gate
+                        // the process that bound it — the same owner gate
                         // `ipc_recv` applies, so observing readiness can
                         // never outreach draining. Unknown and foreign
                         // ports collapse to the same `NotFound` (no
@@ -55201,6 +55209,114 @@ mod tests {
         );
     }
 
+    /// A post wakes the thread waiting on its endpoint through a wait-set even
+    /// when another thread of the process received from it last.
+    ///
+    /// Regression: a post woke only the thread that last received from the
+    /// endpoint, so a sibling parked on it through a wait-set slept through
+    /// the call.
+    #[test]
+    fn a_post_wakes_the_thread_waiting_on_its_endpoint_not_the_last_receiver() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let boot = HostBoot::claim();
+        let arch = Arc::new(TestArch::on_cpu(boot.cpu()));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let waiter = crate::test_boot::claim_task();
+        let process = crate::test_boot::claim_peer_task();
+        let receiver = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_peer_task();
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(process), space, physmap)
+            .expect("registration succeeds");
+        let (space, physmap) = call_aspace(b"ping");
+        aspaces
+            .write()
+            .register(ProcessId(client), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(process, &[], sink);
+        let waiting = CallerContext {
+            task_id: SecTaskId(waiter),
+            caps: &caps,
+        };
+        let receiving = CallerContext {
+            task_id: SecTaskId(receiver),
+            caps: &caps,
+        };
+        let client_caps = make_caps_record(client, &[], sink);
+        let calling = CallerContext {
+            task_id: SecTaskId(client),
+            caps: &client_caps,
+        };
+        let id = 0xCA11_5004;
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &caps,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    per_sender: 4,
+                },
+                tairix_abi::RLIMIT_INFINITY,
+                sink,
+            )
+            .expect("endpoint"),
+        );
+        crate::callreg::register(ep, sink).expect("registered");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.call_recv(
+                &receiving,
+                id,
+                0x1000,
+                64,
+                0x2000,
+                CallRecvFlags::NON_BLOCKING
+            ),
+            Err(Errno::WouldBlock),
+            "a sibling received from it last, finding nothing"
+        );
+        let set = h.waitset_create(&waiting).expect("create");
+        h.waitset_ctl(&waiting, set, WS_OP_ADD, WS_KIND_ENDPOINT, id, 0x78)
+            .expect("the process's own endpoint");
+
+        let (entered, admitted) = std::sync::mpsc::channel();
+        let answer = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _client = boot.enter();
+                entered.send(()).expect("the waiter hears it");
+                boot.until_blocked(waiter);
+                assert_eq!(
+                    h.call_post(&calling, id, 0x1000, 4, 0x2000, u64::MAX),
+                    Ok(0)
+                );
+            });
+            // A waker of the boot before the wait parks, so the wait is never
+            // left with nobody to wake it.
+            admitted.recv().expect("the client entered");
+            h.waitset_wait(&waiting, set, u64::MAX, 0x2000)
+        });
+        assert_eq!(answer, Ok(0), "the post woke the thread waiting on it");
+        assert_eq!(boot.waits(waiter), 1, "which parked once, until it came");
+
+        crate::callreg::unregister(EndpointId(id));
+        assert_eq!(crate::waitset::release_owned_by(process), 1);
+    }
+
     /// Two members ready at once are reported in turn, not by registration
     /// order.
     ///
@@ -55911,6 +56027,81 @@ mod tests {
         teardown_ports_owned_by(&ipc, owner, sink);
         teardown_ports_owned_by(&ipc, 0xF0F0, sink);
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A message wakes the thread waiting on its port, whichever thread of the
+    /// owning process that is.
+    ///
+    /// Regression: a delivery woke the task numbered as the owning process,
+    /// its first thread, so another thread parked on the port slept through
+    /// every message, and Music fed its stream only when something else woke
+    /// its playback thread.
+    #[test]
+    fn a_message_wakes_the_thread_waiting_on_its_port_not_the_process_leader() {
+        install_trace_filter();
+        let sink = make_sink();
+        let boot = HostBoot::claim();
+        let arch = Arc::new(TestArch::on_cpu(boot.cpu()));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        // The waiting thread is this test's own task; its process is numbered
+        // otherwise, as a second thread's is.
+        let thread = crate::test_boot::claim_task();
+        let process = crate::test_boot::claim_peer_task();
+        let sender = crate::test_boot::claim_peer_task();
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(process), space, physmap)
+            .expect("registration succeeds");
+        let payload = [0x5Au8; 4];
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &payload);
+        aspaces
+            .write()
+            .register(ProcessId(sender), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(process, &[], sink);
+        let waiting = CallerContext {
+            task_id: SecTaskId(thread),
+            caps: &caps,
+        };
+        let sender_caps = make_caps_record(sender, &[], sink);
+        let sending = CallerContext {
+            task_id: SecTaskId(sender),
+            caps: &sender_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let port = 0x5EAD_0030u64;
+        assert_eq!(h.port_bind(&waiting, port, 64, 4), Ok(0));
+        let set = h.waitset_create(&waiting).expect("create");
+        h.waitset_ctl(&waiting, set, WS_OP_ADD, WS_KIND_PORT, port, 0x34)
+            .expect("the process's own port");
+
+        let (entered, admitted) = std::sync::mpsc::channel();
+        let answer = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _sender = boot.enter();
+                entered.send(()).expect("the waiter hears it");
+                boot.until_blocked(thread);
+                assert_eq!(h.ipc_send(&sending, port, 0x1000, payload.len()), Ok(0));
+            });
+            // A waker of the boot before the wait parks, so the wait is never
+            // left with nobody to wake it.
+            admitted.recv().expect("the sender entered");
+            h.waitset_wait(&waiting, set, u64::MAX, 0x2000)
+        });
+        assert_eq!(answer, Ok(0), "the message woke the thread waiting on it");
+        assert_eq!(boot.waits(thread), 1, "which parked once, until it came");
+
+        teardown_ports_owned_by(&ipc, process, sink);
+        assert_eq!(crate::waitset::release_owned_by(process), 1);
     }
 
     /// A `PortRoom` member observes the caller's own lane: another sender

@@ -15,7 +15,7 @@ window that opens larger than the display, a layout at the wrong density, or
 a window still dark after the user switched the desktop to light.
 
 So every graphical app starts the same way, before it sizes or paints
-anything: `WindowClient::desktop` returns the seat's
+anything: `WindowClient::connect` returns the seat's
 `tairix_abi::desktop::DesktopInfo`, and `tairix_window::Desktop` holds it.
 From that, uniformly:
 
@@ -3218,9 +3218,9 @@ in force. A key press is claimed by an open menu or settings sheet, else by a
 terminal accelerator, else encoded through the one shared `lib/keymap` rule
 and written to the shell (releases send nothing); shell output is pumped into
 the grid as fast as it parses, and a window is presented once the desktop has
-answered its last frame (`WindowClient::present_in_flight`) — owed its paint
-until then, given before the next park — so a stream costs a frame a desktop
-frame and never waits on the desktop. The shell exiting closes its
+answered its last frame (`WindowClient::present_state`) — owed its paint until
+`Answer::FrameReturned`, given before the next park — so a stream costs a frame
+a desktop frame and never waits on the desktop. The shell exiting closes its
 window. The user choosing *Close*, or a `CloseRequested` from the desktop,
 closes the window and ends its shell with `Terminate`; the window's child
 member stays on the wait-set until the shell is reaped. Each shell anchors a

@@ -137,8 +137,9 @@ speculative:
   vocabulary: `WindowRequest` (`Create` with the granted shm surface, the
   app's event endpoint — reserved endpoints refused — geometry, and a
   bounded control-character-free `WindowTitle`; `Present` by frame index
-  + non-empty damage; `Close`), the 12-byte create reply carrying the
-  session-minted non-zero window id, and the app-ward `WindowEvent`s
+  + non-empty damage; `Close`), the window ids the app names from the range
+  its `Connect` was given (`plans/FIX-DESKTOP.md` DESK-28), and the app-ward
+  `WindowEvent`s
   (`Focus`, `Key` embedding the one `KeyInput` codec, window-local
   `Pointer`, `CloseRequested`, `RedrawRequested`). `WINDOW_ENDPOINT`
   (`0x5749_1001`) joined `is_reserved_endpoint`; the decoders are
@@ -359,7 +360,7 @@ Done (code + host coverage). What now holds:
   concludes only through `conclude_pick`, which requires-and-clears the
   pending pick and holds the name, so exactly one conclusion follows each
   acceptance; the client half is `WindowClient::pick_file` and
-  `take_picked_name`.
+  `ask_picked_name`, whose answer lands as `Answer::PickedName`.
 - **A folder pick** (`PickPurpose::Folder`) chooses a folder, never hands one
   over. The session lists it under its own authority and keeps its regular
   files — no links, each opened `NO_FOLLOW` — whose content type the
@@ -465,8 +466,7 @@ Done. What now holds:
   because a popup carries no title (never a taskbar entry) and no
   `resizable` flag. The frame-layout block is shared verbatim with
   `Create`/`Resize`, so one definition validates the geometry of all
-  three. The reply is the `Create` reply shape (minted id + the serving
-  session's `ProcId`).
+  three. The popup is named and answered as a `Create` is.
 - **Placement is parent-relative; the session resolves and clamps it.**
   An app is never told its own window's screen position, so the offsets
   are physical pixels from the **parent's client origin** and any signed

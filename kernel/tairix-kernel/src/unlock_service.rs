@@ -480,10 +480,9 @@ pub fn store_endpoint_binder_caps() -> CapabilitySet {
 /// published once at admission (Design D D2b-2c).
 ///
 /// The driver-store server parks on [`tairix_kernel_core::SERVE_WAITQ`]
-/// between requests (a real park, never a busy-yield);
-/// the `ipc_call` handler's [`tairix_kernel_core::serve_wake`] unparks
-/// **by id**, so the kthread's scheduler id must be reachable from the
-/// serve loop. The init seam learns the id only when
+/// between requests (a real park, never a busy-yield), filed under its
+/// endpoint's key as its own scheduler id, so that id must be reachable from
+/// the serve loop. The init seam learns the id only when
 /// [`tairix_kernel_core::InitSpawnCtx::spawn_kernel_service`] returns
 /// (after the body that runs the serve loop was already built), so it is
 /// stashed here and read by the loop on its first park. Single producer

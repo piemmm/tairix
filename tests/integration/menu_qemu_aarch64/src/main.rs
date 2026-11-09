@@ -21,8 +21,8 @@
 //! input and display driver bundles, and the host drives the desktop blind
 //! through the QEMU monitor: unlock, log in, start the desktop, launch the
 //! terminal from the program library, right-click its client, photograph the
-//! plate, and click the *Settings…* row. Only the audit sink is swapped, for
-//! the PASS witnesses below.
+//! plate, and click the *Settings…* row. Only the sinks are swapped, for one
+//! gate latching the PASS witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -30,38 +30,29 @@
 //!
 //! 1. **The application launched.** An `APP_LOADED` record naming the bundle
 //!    [`MENU_APP_NAME`] spells — the library row's own launch.
-//! 2. **A menu was asked for and served.** A 12-byte
-//!    `WINDOW_MINTED_ID_REPLY_LEN` reply on the reserved window endpoint,
-//!    which is the reply of exactly one operation: `OpenMenu`.
-//! 3. **A row's command reached the application.** A `WINDOW_CREATE_REPLY_LEN`
-//!    reply observed *after* that one — the settings sheet the chosen
+//! 2. **A menu came up.** The desktop's own record that a chain's plates
+//!    reached the display, after that launch.
+//! 3. **A row's command reached the application.** The desktop's record of a
+//!    window first shown *after* that one — the settings sheet the chosen
 //!    *Settings…* row opens. The application is the only client in this world
-//!    that creates a window (the desktop's own surfaces, the chain's plates
-//!    included, are session-painted compositor windows that never call the
-//!    window channel), and it opens that sheet on nothing but the
-//!    `MenuOutcome::Chosen` naming that row. So the third latch attests the
-//!    whole round trip: the press reached the client, the open was accepted, a
-//!    chain came up, the click hit the row the chain had drawn, and the one
-//!    answer the desktop owes was delivered back.
+//!    that opens a window (the desktop's own surfaces, the chain's plates
+//!    included, are session-painted and never call the window channel), and it
+//!    opens that sheet on nothing but the `MenuOutcome::Chosen` naming that
+//!    row. So the third latch attests the whole round trip: the press reached
+//!    the client, the open was accepted, a chain came up, the click hit the row
+//!    the chain had drawn, and the one answer the desktop owes was delivered
+//!    back.
 //!
-//! Ordering is what makes each latch attributable. Counting creates from boot
-//! would already be satisfied by the terminal's own launch window, so a create
-//! only counts once the menu reply has been seen.
-//!
-//! # Why the guest latches no frame
-//!
-//! Reading the screen is the host's job and is gated on the *session's* own
-//! `WINDOW_SHOWN` and `MENU_SHOWN` announcements, because only the session
-//! knows when a window's or a plate's pixels reached the display. Those records
-//! are emitted by userland through `lib/log`, which reaches the kernel's
-//! diagnostic sink and the serial line — not the audit sink this guest
-//! installs — so the guest could not see them even if it wanted to.
+//! Ordering is what makes each latch attributable: the terminal's own window
+//! was shown before the menu, so only a window first shown after it counts.
+//! The desktop's records are log records, which the kernel delivers to the
+//! diagnostic sink, so the gate is both sinks.
 //!
 //! # Why the guest cannot exit early
 //!
 //! The sheet is opened by the script's final click, and the runner sends no
 //! pointer step until every screendump it has already asked for has been taken
-//! and parsed. So the create that completes the PASS cannot happen until the
+//! and parsed. So the sheet that completes the PASS cannot open until the
 //! plate's dump is safely on disk, and the guest can never exit out from under
 //! the evidence.
 //!
@@ -79,13 +70,13 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::names_bundle;
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_desktop_witness::{menu_shown, window_shown, ShownWindows};
+    use tairix_itest_witness::{field_str, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_menu_qemu_aarch64::MENU_APP_NAME;
-    use tairix_util::fmt::format_hex_u64;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -103,123 +94,68 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// three PASS witnesses described in the module docs.
-    struct MenuSink {
+    /// The gate both sinks are handed: it latches the three PASS witnesses
+    /// described in the module docs and replays the whole trail to serial.
+    struct MenuGate {
         /// The application's bundle was loaded.
         app_launched: AtomicBool,
-        /// An `OpenMenu` was served on the reserved window endpoint.
-        menu_asked: AtomicBool,
-        /// A window was created after that — the sheet the chosen row opened.
-        sheet_opened: AtomicBool,
+        /// The desktop drew a menu's plates after that.
+        menu_shown: AtomicBool,
+        /// The windows first shown once the menu was: the sheet its row opens.
+        sheets: ShownWindows<1>,
     }
 
-    impl MenuSink {
-        /// A sink with no witness latched.
+    impl MenuGate {
+        /// A gate with no witness latched.
         const fn new() -> Self {
             Self {
                 app_launched: AtomicBool::new(false),
-                menu_asked: AtomicBool::new(false),
-                sheet_opened: AtomicBool::new(false),
+                menu_shown: AtomicBool::new(false),
+                sheets: ShownWindows::new(),
             }
         }
 
-        /// Latch what one served reply on the reserved window endpoint says.
-        ///
-        /// The endpoint is matched against the exact hex spelling the
-        /// kernel/ipc audit fields render (`format_hex_u64`), so the match can
-        /// neither false-positive on another endpoint nor drift from the
-        /// emitter. The operation is then recognised by its reply's wire
-        /// length, which is what distinguishes the two that matter here from
-        /// every other request on the endpoint. Nothing else about a reply is
-        /// read: its ordinal belongs to no client in particular, because the
-        /// rendezvous is shared.
-        ///
-        /// The order is the attribution. A create before the menu reply is the
-        /// application's own launch window and is not counted; one after it can
-        /// only be the surface a chosen row asked for.
-        fn note_call_replied(&self, event: &Event<'_>) {
-            if !self.app_launched.load(Ordering::Acquire) {
-                return;
-            }
-            let mut endpoint_hex = [0u8; 16];
-            let expected =
-                format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            let mut on_window_endpoint = false;
-            let mut reply_len = 0usize;
-            for field in event.fields {
-                let tairix_log::FieldValue::Str(value) = field.value else {
-                    continue;
-                };
-                match field.key {
-                    "endpoint" => on_window_endpoint = value == expected,
-                    // An unparsable length stays zero, matching no reply
-                    // length and latching nothing (fail closed).
-                    "len" => {
-                        reply_len = usize::try_from(
-                            tairix_util::count::parse_decimal(value).unwrap_or_default(),
-                        )
-                        .unwrap_or_default();
-                    }
-                    _ => {}
+        /// Latch what `event` attests.
+        fn note(&self, event: &Event<'_>) {
+            if event.id.0 == tairix_appload::events::APP_LOADED.0 {
+                let launched = field_str(event, "bundle").is_some_and(|bundle| {
+                    names_bundle(bundle, tairix_abi::SYSTEM_APPLICATION_STORE, MENU_APP_NAME)
+                });
+                if launched {
+                    self.app_launched.store(true, Ordering::Release);
                 }
-            }
-            if !on_window_endpoint {
-                return;
-            }
-            if reply_len == tairix_abi::window_ipc::WINDOW_MINTED_ID_REPLY_LEN {
-                self.menu_asked.store(true, Ordering::Release);
-            } else if reply_len == tairix_abi::window_ipc::WINDOW_CREATE_REPLY_LEN
-                && self.menu_asked.load(Ordering::Acquire)
-            {
-                self.sheet_opened.store(true, Ordering::Release);
-            }
-        }
-
-        /// Latch the launch witness from an `APP_LOADED` record naming the
-        /// application's bundle.
-        fn note_bundle_loaded(&self, event: &Event<'_>) {
-            for field in event.fields {
-                if field.key != "bundle" {
-                    continue;
-                }
-                if let tairix_log::FieldValue::Str(value) = field.value {
-                    if names_bundle(value, tairix_abi::SYSTEM_APPLICATION_STORE, MENU_APP_NAME) {
-                        self.app_launched.store(true, Ordering::Release);
-                    }
-                }
+            } else if let Some(window) = window_shown(event) {
+                self.sheets.note(window);
+            } else if menu_shown(event) && self.app_launched.load(Ordering::Acquire) {
+                self.menu_shown.store(true, Ordering::Release);
+                self.sheets.arm();
             }
         }
 
         /// Whether every witness is in.
         fn passed(&self) -> bool {
             self.app_launched.load(Ordering::Acquire)
-                && self.menu_asked.load(Ordering::Acquire)
-                && self.sheet_opened.load(Ordering::Acquire)
+                && self.menu_shown.load(Ordering::Acquire)
+                && self.sheets.count() >= 1
         }
     }
 
-    impl Sink for MenuSink {
+    impl Sink for MenuGate {
         fn write_event(&self, event: &Event<'_>) {
-            // Replay through the serial sink first, so the QEMU transcript
-            // records the full boot → unlock → desktop → menu timeline and
-            // the host can gate its injection on it.
+            // Latched before the record reaches serial, so the line the host
+            // acts on cannot precede what it attests; replayed so the QEMU
+            // transcript records the full boot → unlock → desktop → menu
+            // timeline the host gates its injection on.
+            self.note(event);
             SerialSink::new().write_event(event);
-            if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
-            } else if event.id.0 == tairix_appload::events::APP_LOADED.0 {
-                self.note_bundle_loaded(event);
-            } else {
-                return;
-            }
             if self.passed() {
                 qemu_exit::exit_success();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: MenuSink = MenuSink::new();
+    /// The gate the boot pipeline is handed as both its sinks.
+    static GATE: MenuGate = MenuGate::new();
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -233,16 +169,16 @@ mod kernel {
     /// calls (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the audit
-    /// observer in place.
+    /// address is forwarded to the production boot pipeline with the gate in
+    /// place of both sinks.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
-            &AUDIT_SINK,
+            &GATE,
+            &GATE,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the
             // default `Info` filter; the host waits for that record's
             // `sc=irq_bind` marker before typing the unlock passphrase, so

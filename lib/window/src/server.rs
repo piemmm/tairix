@@ -51,21 +51,20 @@ use tairix_abi::window_ipc::{
     WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
-    encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
-    encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
-    encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
-    encode_offered_file_reply, encode_offered_items_reply, encode_open_target_reply,
-    encode_picked_file_reply, encode_picked_name_reply, encode_terrain_reply,
-    encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu, ClipboardHeld,
-    ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems, DropOperation,
-    DropSite, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, OfferDrop, OfferedItem,
-    OpenTarget, PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX,
+    encode_clipboard_reply, encode_connect_reply, encode_cursor_sets_reply, encode_drag_spot_reply,
+    encode_drop_target_reply, encode_hand_over_reply, encode_handle_reply, encode_menu_text_reply,
+    encode_notify_sources_reply, encode_offered_file_reply, encode_offered_items_reply,
+    encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
+    encode_terrain_reply, encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu,
+    ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
+    DropOperation, DropSite, DropTarget, HandOverOutcome, HandOverTarget, LayerDepth, ObjectIds,
+    OfferDrop, OfferedItem, OpenTarget, PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX,
     DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
-    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
-    WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+    OBJECT_RANGES_MAX, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CONNECT_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_FOLDER_PICK_MAX, WINDOW_HANDLE_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
     WINDOW_OFFERED_FILE_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
@@ -98,11 +97,11 @@ pub const WINDOW_REPLY_MAX: usize = {
         }
     }
     wider(
-        wider(WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN),
+        wider(STATUS_REPLY_LEN, WINDOW_CONNECT_REPLY_LEN),
         wider(
             wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN),
             wider(
-                wider(WINDOW_MINTED_ID_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
+                wider(WINDOW_HANDLE_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX),
                 wider(
                     WINDOW_TERRAIN_REPLY_MAX,
                     wider(
@@ -238,9 +237,6 @@ enum DropHeld {
     Placed(Placement),
 }
 
-/// The minted-id reply a menu open answers with is the shortest of the three,
-/// so the one buffer above already holds it.
-const _: () = assert!(WINDOW_MINTED_ID_REPLY_LEN <= WINDOW_REPLY_MAX);
 const _: () = assert!(WINDOW_CLIPBOARD_REPLY_LEN <= WINDOW_REPLY_MAX);
 const _: () = assert!(WINDOW_AUTHORISED_OUTPUT_REPLY_MAX <= WINDOW_REPLY_MAX);
 
@@ -1588,6 +1584,7 @@ const fn surface_of(
 /// engine's create path takes the request as a unit.
 #[derive(Copy, Clone)]
 struct CreateSpec {
+    window_id: u64,
     shm_handle: u64,
     event_endpoint: u64,
     frame_count: u32,
@@ -1989,7 +1986,7 @@ struct WindowRecord<R> {
     renders_pending: Vec<PreviewSize>,
     /// The id of an accepted `OpenMenu` whose outcome has not been
     /// delivered yet, or `None`. At most one open is unanswered per window;
-    /// the engine mints the id on acceptance and clears it when the
+    /// the engine records the id on acceptance and clears it when the
     /// outcome is delivered, so the protocol's one-outcome-per-acceptance
     /// shape is enforced in one place and an application can tell one
     /// gesture's answer from the next's.
@@ -2020,6 +2017,54 @@ struct WindowRecord<R> {
     /// What the last captured task printed, until the owner takes it or asks
     /// for another task.
     authorised_output: Option<Vec<u8>>,
+}
+
+/// What every newly opened window's record starts from: its owner, event
+/// route and frame layout.
+#[derive(Copy, Clone)]
+struct Opened {
+    owner: ProcId,
+    event_endpoint: u64,
+    surface: DisplayMode,
+    frame_count: u32,
+    frame_len: usize,
+}
+
+impl<R> WindowRecord<R> {
+    /// The record of a window just opened over `region`, hung from
+    /// `transient` or stacked at `layer` where it is one, with nothing yet
+    /// pending.
+    fn opened(
+        opened: Opened,
+        region: R,
+        transient: Option<Transient>,
+        layer: Option<LayerDepth>,
+    ) -> Self {
+        Self {
+            owner: opened.owner,
+            event_endpoint: opened.event_endpoint,
+            surface: opened.surface,
+            frame_count: opened.frame_count,
+            frame_len: opened.frame_len,
+            region: Some(region),
+            pending: Pending::new(),
+            pick_pending: None,
+            picked_name: None,
+            picked_files: VecDeque::new(),
+            drag_pending: false,
+            drag_count: 0,
+            drag_spot: None,
+            landings: VecDeque::new(),
+            dropped: None,
+            renders_pending: Vec::new(),
+            menu_open: None,
+            menu_text: None,
+            transient,
+            layer,
+            authorising: false,
+            authorised_output: None,
+        }
+    }
 }
 
 /// The window a transient hangs from, and what it is to that window.
@@ -2184,9 +2229,15 @@ pub struct WindowServer<M: ShmMapper> {
     /// squat-protected rendezvous, so the stamp is trustworthy).
     server: ProcId,
     windows: BTreeMap<u64, WindowRecord<M::Region>>,
-    /// The next window id to mint. Ids start at 1 and are never reused,
-    /// so a stale id held by an app can never name a newer window.
-    next_id: u64,
+    /// The id ranges connected clients name what they create by, keyed by
+    /// prefix: the process holding each and the next serial it may name, so
+    /// no id is named twice and none reaches another process's objects.
+    ranges: BTreeMap<u32, (ProcId, ObjectIds)>,
+    /// How many ranges each process holds, at most [`OBJECT_RANGES_MAX`].
+    ranges_held: BTreeMap<ProcId, usize>,
+    /// The prefix the next connect is given; zero once every prefix has been
+    /// given, which refuses further connects.
+    next_prefix: u32,
     /// Where each application that declared an icon-bar presence receives
     /// its bar events. The declaration's *content* is the host's — the
     /// engine keeps only the route, so an application-scoped event can be
@@ -2215,15 +2266,8 @@ pub struct WindowServer<M: ShmMapper> {
     /// void once the keyboard has moved, so a gesture long past cannot be
     /// cashed in over the user's work.
     activations: BTreeMap<ProcId, Option<u64>>,
-    /// The next menu-open id to mint. Its own sequence rather than the
-    /// window ids': an open names a gesture, not a window, and the two are
-    /// never interchangeable. Ids start at 1 and are never reused, so an
-    /// outcome can only ever answer the open it names.
-    next_menu_open: u64,
     /// The alerts up, each owed exactly one answer.
     alerts: BTreeMap<u64, AlertRecord>,
-    /// The next alert id to mint, never reused, so an answer names one alert.
-    next_alert: u64,
     /// Bytes of window frame one client may hold mapped here at once
     /// ([`client_frame_budget_bytes`]).
     client_frame_max: u64,
@@ -2246,10 +2290,10 @@ impl<M: ShmMapper> WindowServer<M> {
             mapper,
             server,
             windows: BTreeMap::new(),
-            next_id: 1,
-            next_menu_open: 1,
+            ranges: BTreeMap::new(),
+            ranges_held: BTreeMap::new(),
+            next_prefix: 1,
             alerts: BTreeMap::new(),
-            next_alert: 1,
             app_bars: BTreeMap::new(),
             app_bar_texts: BTreeMap::new(),
             slot_authorisations: BTreeMap::new(),
@@ -2375,7 +2419,7 @@ impl<M: ShmMapper> WindowServer<M> {
             };
             if let Some(err) = refusal {
                 host.layer_refused(caller, err);
-                return layer_refusal(decoded, reply, err, self.server);
+                return status(reply, Err(err));
             }
         }
         // Reserved for one application: the host decides against the
@@ -2432,7 +2476,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 let granted = identity
                     .caller_app(ticket)
                     .and_then(|app| host.zone_store(caller, app.as_ref()));
-                return minted_id_reply(reply, granted);
+                return handle_reply(reply, granted);
             }
             WindowRequest::Authorise {
                 window_id,
@@ -2460,54 +2504,21 @@ impl<M: ShmMapper> WindowServer<M> {
         reply: &mut [u8; WINDOW_REPLY_MAX],
     ) -> usize {
         match *decoded {
-            WindowRequest::Create {
-                shm_handle,
-                event_endpoint,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-                title,
-                sizing,
-            } => {
-                let spec = CreateSpec {
-                    shm_handle,
-                    event_endpoint,
-                    frame_count,
-                    surface: surface_of(width_px, height_px, stride_bytes, format),
-                    title,
-                    sizing,
-                };
-                create_reply(reply, self.create(host, caller, spec), self.server)
-            }
-            WindowRequest::CreatePopup { .. }
+            WindowRequest::Create { .. }
+            | WindowRequest::CreatePopup { .. }
             | WindowRequest::CreateTool { .. }
-            | WindowRequest::CreateDialog { .. } => create_reply(
-                reply,
-                self.create_transient(host, caller, decoded),
-                self.server,
-            ),
-            WindowRequest::OpenLayer { .. } => {
-                let opened = match layer_spec(decoded) {
-                    Some(spec) => self.open_layer(host, caller, &spec),
-                    None => Err(Errno::NotSupported),
-                };
-                create_reply(reply, opened, self.server)
+            | WindowRequest::CreateDialog { .. }
+            | WindowRequest::OpenLayer { .. }
+            | WindowRequest::OpenMenu { .. }
+            | WindowRequest::OpenAlert { .. } => {
+                status(reply, self.dispatch_open(host, caller, decoded))
             }
-            WindowRequest::OpenMenu {
-                window_id,
-                anchor,
-                ref menu,
-            } => minted_id_reply(reply, self.open_menu(host, caller, window_id, anchor, menu)),
-            WindowRequest::OpenAlert {
-                event_endpoint,
-                owner_window_id,
-                ref alert,
-            } => minted_id_reply(
-                reply,
-                self.open_alert(host, caller, event_endpoint, owner_window_id, alert),
-            ),
+            WindowRequest::Connect => {
+                let connected = host
+                    .desktop()
+                    .and_then(|desktop| Ok((desktop, self.connect(caller)?)));
+                connect_reply(reply, connected, self.server)
+            }
             WindowRequest::CloseAlert { alert_id } => {
                 status(reply, self.close_alert(host, sink, caller, alert_id))
             }
@@ -2557,6 +2568,66 @@ impl<M: ShmMapper> WindowServer<M> {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
             ref other => self.dispatch_status_op(host, caller, other, reply),
+        }
+    }
+
+    /// Open what `decoded` asks `caller` to create, under the id it names.
+    fn dispatch_open(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        decoded: &WindowRequest,
+    ) -> Result<(), Errno> {
+        match *decoded {
+            WindowRequest::Create {
+                window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                title,
+                sizing,
+            } => {
+                let spec = CreateSpec {
+                    window_id,
+                    shm_handle,
+                    event_endpoint,
+                    frame_count,
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
+                    title,
+                    sizing,
+                };
+                self.create(host, caller, spec)
+            }
+            WindowRequest::CreatePopup { .. }
+            | WindowRequest::CreateTool { .. }
+            | WindowRequest::CreateDialog { .. } => self.create_transient(host, caller, decoded),
+            WindowRequest::OpenLayer { window_id, .. } => match layer_spec(decoded) {
+                Some(spec) => self.open_layer(host, caller, window_id, &spec),
+                None => Err(Errno::NotSupported),
+            },
+            WindowRequest::OpenMenu {
+                window_id,
+                open_id,
+                anchor,
+                ref menu,
+            } => self.open_menu(host, caller, (window_id, open_id), anchor, menu),
+            WindowRequest::OpenAlert {
+                alert_id,
+                event_endpoint,
+                owner_window_id,
+                ref alert,
+            } => self.open_alert(
+                host,
+                caller,
+                alert_id,
+                (event_endpoint, owner_window_id),
+                alert,
+            ),
+            _ => Err(Errno::NotSupported),
         }
     }
 
@@ -2950,24 +3021,10 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::SetBackdropBlur { .. } => {
                 status(reply, self.dispatch_setting(host, caller, decoded))
             }
-            // Ungated: it describes the caller's own seat and grants nothing.
-            WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop(), self.server),
-            // A create mints a window id and is answered by the caller with
-            // the create-reply frame; refusing it here keeps this total
-            // without a second copy of that path, and refuses rather than
-            // opening a window down a route that never validated one.
-            WindowRequest::Create { .. }
-            | WindowRequest::CreatePopup { .. }
-            | WindowRequest::CreateTool { .. }
-            | WindowRequest::CreateDialog { .. }
-            | WindowRequest::OpenLayer { .. } => {
-                create_reply(reply, Err(Errno::NotSupported), self.server)
-            }
-            // Likewise a menu open, which mints an open id, and the zone store,
-            // which `serve` decides before dispatch is reached.
-            WindowRequest::OpenMenu { .. }
-            | WindowRequest::OpenAlert { .. }
-            | WindowRequest::TakeZoneStore => minted_id_reply(reply, Err(Errno::NotSupported)),
+            // Each is answered before dispatch reaches here; refusing it keeps
+            // this total without a second copy of its path.
+            WindowRequest::Connect => connect_reply(reply, Err(Errno::NotSupported), self.server),
+            WindowRequest::TakeZoneStore => handle_reply(reply, Err(Errno::NotSupported)),
             // ...and a target pull, which answers with its own frame.
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
             // ...and a catalog page, likewise.
@@ -2982,7 +3039,14 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::QueryNotifySources => {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
-            WindowRequest::Present { .. }
+            WindowRequest::Create { .. }
+            | WindowRequest::CreatePopup { .. }
+            | WindowRequest::CreateTool { .. }
+            | WindowRequest::CreateDialog { .. }
+            | WindowRequest::OpenLayer { .. }
+            | WindowRequest::OpenMenu { .. }
+            | WindowRequest::OpenAlert { .. }
+            | WindowRequest::Present { .. }
             | WindowRequest::LockScreen
             | WindowRequest::Authorise { .. }
             | WindowRequest::TakeAuthorisedOutput { .. }
@@ -3034,21 +3098,23 @@ impl<M: ShmMapper> WindowServer<M> {
         self.windows.keys().copied().collect()
     }
 
-    /// Open a window for `caller`: bound the client, map the granted
-    /// region once, validate it holds every frame, tell the host, and
-    /// mint the id.
+    /// Open a window for `caller`, named `spec.window_id`: admit the id,
+    /// bound the client, map the granted region once, validate it holds
+    /// every frame, and tell the host.
     fn create(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
         spec: CreateSpec,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         // A window belongs to a user process instance; the kernel
         // sentinel is not a client and would alias every in-kernel
         // caller onto one "owner".
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
+        self.admit(caller, spec.window_id)?;
+        let window_id = spec.window_id;
         let frame_len = frame_bytes(&spec.surface)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
@@ -3057,10 +3123,6 @@ impl<M: ShmMapper> WindowServer<M> {
             return Err(Errno::NoSpace);
         }
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
-        let window_id = self.next_id;
-        // Minting never wraps in practice (2^64 creates); refuse rather
-        // than reuse an id if it ever would.
-        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         // Room for the answer a present of it may hold, so that answer falls
         // due without allocating.
         self.answers.reserve(self.windows.len().saturating_add(1))?;
@@ -3073,35 +3135,50 @@ impl<M: ShmMapper> WindowServer<M> {
             spec.title.as_str(),
             spec.sizing,
         )?;
-        self.next_id = next;
-        self.windows.insert(
-            window_id,
-            WindowRecord {
-                owner: caller,
-                event_endpoint: spec.event_endpoint,
-                surface: spec.surface,
-                frame_count: spec.frame_count,
-                frame_len,
-                region: Some(region),
-                pending: Pending::new(),
-                pick_pending: None,
-                picked_name: None,
-                picked_files: VecDeque::new(),
-                drag_pending: false,
-                drag_count: 0,
-                drag_spot: None,
-                landings: VecDeque::new(),
-                dropped: None,
-                renders_pending: Vec::new(),
-                menu_open: None,
-                menu_text: None,
-                transient: None,
-                layer: None,
-                authorising: false,
-                authorised_output: None,
-            },
-        );
-        Ok(window_id)
+        let opened = Opened {
+            owner: caller,
+            event_endpoint: spec.event_endpoint,
+            surface: spec.surface,
+            frame_count: spec.frame_count,
+            frame_len,
+        };
+        self.windows
+            .insert(window_id, WindowRecord::opened(opened, region, None, None));
+        Ok(())
+    }
+
+    /// A fresh id range for the client of `caller` that is connecting.
+    fn connect(&mut self, caller: ProcId) -> Result<ObjectIds, Errno> {
+        if caller.is_kernel() {
+            return Err(Errno::PermissionDenied);
+        }
+        let held = self.ranges_held.get(&caller).copied().unwrap_or(0);
+        if held >= OBJECT_RANGES_MAX {
+            return Err(Errno::LimitExceeded);
+        }
+        let prefix = core::num::NonZeroU32::new(self.next_prefix).ok_or(Errno::NoSpace)?;
+        let ids = ObjectIds::new(prefix, 1).ok_or(Errno::NoSpace)?;
+        self.ranges.insert(prefix.get(), (caller, ids));
+        self.ranges_held.insert(caller, held + 1);
+        self.next_prefix = self.next_prefix.checked_add(1).unwrap_or(0);
+        Ok(ids)
+    }
+
+    /// Admit `id` as the name `caller` gives what it is creating.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotConnected`] for a process holding no range, and
+    /// [`Errno::OutOfRange`] for an id outside its ranges or one it has
+    /// named before ([`ObjectIds::admit`]).
+    fn admit(&mut self, caller: ProcId, id: u64) -> Result<(), Errno> {
+        let prefix = id.to_be_bytes();
+        let prefix = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
+        match self.ranges.get_mut(&prefix) {
+            Some((owner, ids)) if *owner == caller => ids.admit(id),
+            _ if self.ranges_held.contains_key(&caller) => Err(Errno::OutOfRange),
+            _ => Err(Errno::NotConnected),
+        }
     }
 
     /// Open the popup, tool window or dialog `decoded` asks for, for
@@ -3112,9 +3189,10 @@ impl<M: ShmMapper> WindowServer<M> {
         host: &mut dyn WindowHost,
         caller: ProcId,
         decoded: &WindowRequest,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         match *decoded {
             WindowRequest::CreatePopup {
+                window_id,
                 parent_window_id,
                 shm_handle,
                 event_endpoint,
@@ -3134,7 +3212,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     surface: surface_of(width_px, height_px, stride_bytes, format),
                 };
                 let kind = TransientKind::Popup;
-                self.open_transient(host, caller, &spec, kind, |host, window_id| {
+                self.open_transient(host, (caller, window_id), &spec, kind, |host, window_id| {
                     host.popup_opened(
                         window_id,
                         parent_window_id,
@@ -3145,6 +3223,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 })
             }
             WindowRequest::CreateTool {
+                window_id,
                 parent_window_id,
                 shm_handle,
                 event_endpoint,
@@ -3174,11 +3253,13 @@ impl<M: ShmMapper> WindowServer<M> {
                     sizing,
                 };
                 let kind = TransientKind::Tool;
-                self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
+                let named = (caller, window_id);
+                self.open_transient(host, named, &spec.transient, kind, |host, window_id| {
                     host.tool_opened(window_id, &spec)
                 })
             }
             WindowRequest::CreateDialog {
+                window_id,
                 owner_window_id,
                 shm_handle,
                 event_endpoint,
@@ -3201,7 +3282,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     modality,
                     title,
                 };
-                self.open_dialog(host, caller, &spec)
+                self.open_dialog(host, (caller, window_id), &spec)
             }
             _ => Err(Errno::NotSupported),
         }
@@ -3212,21 +3293,21 @@ impl<M: ShmMapper> WindowServer<M> {
     fn open_dialog(
         &mut self,
         host: &mut dyn WindowHost,
-        caller: ProcId,
+        (caller, window_id): (ProcId, u64),
         spec: &DialogSpec,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         // Earned as an alert's is, and spent the same way: one activation
         // brings one surface over the user's work.
         let focus = self.holds_the_front(host, caller);
         let kind = TransientKind::Dialog;
-        let window_id =
-            self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
-                host.dialog_opened(window_id, focus, spec)
-            })?;
+        let named = (caller, window_id);
+        self.open_transient(host, named, &spec.transient, kind, |host, window_id| {
+            host.dialog_opened(window_id, focus, spec)
+        })?;
         if focus {
             self.activations.remove(&caller);
         }
-        Ok(window_id)
+        Ok(())
     }
 
     /// Open a transient of `kind` for `caller`, hung from the caller's own
@@ -3245,14 +3326,15 @@ impl<M: ShmMapper> WindowServer<M> {
     fn open_transient(
         &mut self,
         host: &mut dyn WindowHost,
-        caller: ProcId,
+        (caller, window_id): (ProcId, u64),
         spec: &TransientSpec,
         kind: TransientKind,
         opened: impl FnOnce(&mut dyn WindowHost, u64) -> Result<(), Errno>,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
+        self.admit(caller, window_id)?;
         let parent = owned_window(&self.windows, caller, spec.parent_window_id)?;
         if parent.transient.is_some() || parent.layer.is_some() {
             return Err(Errno::NotSupported);
@@ -3265,42 +3347,24 @@ impl<M: ShmMapper> WindowServer<M> {
             return Err(Errno::NoSpace);
         }
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
-        let window_id = self.next_id;
-        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         self.answers.reserve(self.windows.len().saturating_add(1))?;
         opened(host, window_id)?;
-        self.next_id = next;
+        let transient = Transient {
+            parent: spec.parent_window_id,
+            kind,
+        };
+        let opened = Opened {
+            owner: caller,
+            event_endpoint: spec.event_endpoint,
+            surface: spec.surface,
+            frame_count: spec.frame_count,
+            frame_len,
+        };
         self.windows.insert(
             window_id,
-            WindowRecord {
-                owner: caller,
-                event_endpoint: spec.event_endpoint,
-                surface: spec.surface,
-                frame_count: spec.frame_count,
-                frame_len,
-                region: Some(region),
-                pending: Pending::new(),
-                pick_pending: None,
-                picked_name: None,
-                picked_files: VecDeque::new(),
-                drag_pending: false,
-                drag_count: 0,
-                drag_spot: None,
-                landings: VecDeque::new(),
-                dropped: None,
-                renders_pending: Vec::new(),
-                menu_open: None,
-                menu_text: None,
-                transient: Some(Transient {
-                    parent: spec.parent_window_id,
-                    kind,
-                }),
-                layer: None,
-                authorising: false,
-                authorised_output: None,
-            },
+            WindowRecord::opened(opened, region, Some(transient), None),
         );
-        Ok(window_id)
+        Ok(())
     }
 
     /// Open a desktop layer surface for `caller`.
@@ -3316,11 +3380,13 @@ impl<M: ShmMapper> WindowServer<M> {
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
+        window_id: u64,
         spec: &LayerSpec,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
+        self.admit(caller, window_id)?;
         if self.layer_count(Some(caller)) >= DESKTOP_LAYER_MAX_PER_CLIENT
             || self.layer_count(None) >= DESKTOP_LAYER_MAX_PER_SEAT
         {
@@ -3334,39 +3400,20 @@ impl<M: ShmMapper> WindowServer<M> {
             return Err(Errno::NoSpace);
         }
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
-        let window_id = self.next_id;
-        let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         self.answers.reserve(self.windows.len().saturating_add(1))?;
         host.layer_opened(caller, window_id, &spec.surface, spec.x, spec.y, spec.depth)?;
-        self.next_id = next;
+        let opened = Opened {
+            owner: caller,
+            event_endpoint: spec.event_endpoint,
+            surface: spec.surface,
+            frame_count: spec.frame_count,
+            frame_len,
+        };
         self.windows.insert(
             window_id,
-            WindowRecord {
-                owner: caller,
-                event_endpoint: spec.event_endpoint,
-                surface: spec.surface,
-                frame_count: spec.frame_count,
-                frame_len,
-                region: Some(region),
-                pending: Pending::new(),
-                pick_pending: None,
-                picked_name: None,
-                picked_files: VecDeque::new(),
-                drag_pending: false,
-                drag_count: 0,
-                drag_spot: None,
-                landings: VecDeque::new(),
-                dropped: None,
-                renders_pending: Vec::new(),
-                menu_open: None,
-                menu_text: None,
-                transient: None,
-                layer: Some(spec.depth),
-                authorising: false,
-                authorised_output: None,
-            },
+            WindowRecord::opened(opened, region, None, Some(spec.depth)),
         );
-        Ok(window_id)
+        Ok(())
     }
 
     /// How many live layer surfaces there are, for one `owner` or across
@@ -3962,28 +4009,26 @@ impl<M: ShmMapper> WindowServer<M> {
             .is_some_and(|record| record.owner == caller)
     }
 
-    /// Accept a menu open for `caller`'s window `window_id`, returning the
-    /// minted open id its one outcome will name.
+    /// Accept a menu open for `caller`'s window `window_id`, named `open_id`,
+    /// which its one outcome will name.
     ///
     /// At most one open is unanswered per window: while one is, a second is
     /// refused, which a well-behaved application cannot reach — its chain
     /// holds the seat's grab, so the press that would open another is
     /// consumed there. The host must accept before anything is recorded, so
-    /// a refused open leaves no state and no spent id.
+    /// a refused open leaves no state.
     fn open_menu(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
-        window_id: u64,
+        (window_id, open_id): (u64, u64),
         anchor: WindowRegion,
         menu: &AppMenu,
-    ) -> Result<u64, Errno> {
-        let open_id = self.next_menu_open;
-        // Minting never wraps in practice; refuse rather than reuse an id
-        // that an outcome could then answer twice.
-        let next = open_id.checked_add(1).ok_or(Errno::NoSpace)?;
+    ) -> Result<(), Errno> {
         // Owned-window check first: a window the caller does not own
         // answers exactly like one that never existed.
+        owned_window(&self.windows, caller, window_id)?;
+        self.admit(caller, open_id)?;
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.menu_open.is_some() {
             return Err(Errno::AlreadyExists);
@@ -3993,8 +4038,7 @@ impl<M: ShmMapper> WindowServer<M> {
         // A commit the application never pulled belongs to the gesture that
         // is now over, so it goes with the open that replaces it.
         record.menu_text = None;
-        self.next_menu_open = next;
-        Ok(open_id)
+        Ok(())
     }
 
     /// Record the text the user committed into the quick-entry field of the
@@ -4230,26 +4274,26 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
-    /// Accept an alert for `caller`, returning the id its one answer names.
+    /// Accept an alert for `caller`, named `alert_id`, which its one answer
+    /// names.
     ///
     /// The owner, when named, must be one of the caller's own top-level
     /// windows or dialogs: a popup or tool window comes and goes with a
     /// gesture, and a layer surface never takes the keyboard an answer is
     /// typed with. The host
-    /// must accept before anything is recorded, so a refusal spends no id.
+    /// must accept before anything is recorded.
     fn open_alert(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
-        event_endpoint: u64,
-        owner_window_id: u64,
+        alert_id: u64,
+        (event_endpoint, owner_window_id): (u64, u64),
         spec: &AlertSpec,
-    ) -> Result<u64, Errno> {
+    ) -> Result<(), Errno> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
-        let alert_id = self.next_alert;
-        let next = alert_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        self.admit(caller, alert_id)?;
         let window = match owner_window_id {
             0 => None,
             id => {
@@ -4291,8 +4335,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 buttons: spec.button_count(),
             },
         );
-        self.next_alert = next;
-        Ok(alert_id)
+        Ok(())
     }
 
     /// Withdraw `caller`'s own alert `alert_id`, answering it `Dismissed`.
@@ -4445,6 +4488,9 @@ impl<M: ShmMapper> WindowServer<M> {
         }
         // Its calls ended with it, so nothing it was owed has anyone to take it.
         self.answers.forget(client);
+        if self.ranges_held.remove(&client).is_some() {
+            self.ranges.retain(|_, (owner, _)| *owner != client);
+        }
         if self.app_bars.remove(&client).is_some() {
             host.app_bar_withdrawn(client);
         }
@@ -5008,6 +5054,7 @@ fn preview_request(request: &WindowRequest) -> Option<((u64, u64), PreviewSize)>
 /// `None` for any other request.
 fn layer_spec(request: &WindowRequest) -> Option<LayerSpec> {
     let WindowRequest::OpenLayer {
+        window_id: _,
         shm_handle,
         event_endpoint,
         frame_count,
@@ -5044,23 +5091,6 @@ fn is_layer_op(request: &WindowRequest) -> bool {
             | WindowRequest::PlaceLayer { .. }
             | WindowRequest::TakeTerrain { .. }
     )
-}
-
-/// Write the refusal frame `request`'s own reply shape requires.
-///
-/// An open mints an id and so answers with the create frame; the other two
-/// answer with a plain status word, which a terrain decode reads as the
-/// refusal it is rather than as an empty page.
-fn layer_refusal(
-    request: &WindowRequest,
-    reply: &mut [u8; WINDOW_REPLY_MAX],
-    err: Errno,
-    server: ProcId,
-) -> usize {
-    match request {
-        WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
-        _ => status(reply, Err(err)),
-    }
 }
 
 /// Look up `window_id` **as owned by** `caller`. A window owned by
@@ -5290,40 +5320,26 @@ fn wallpapers_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
     len
 }
 
-/// Write a minted-id reply into `reply`, returning its length.
-fn minted_id_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
-    reply[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
-    WINDOW_MINTED_ID_REPLY_LEN
+/// Write a handle reply into `reply`, returning its length.
+fn handle_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
+    reply[..WINDOW_HANDLE_REPLY_LEN].copy_from_slice(&encode_handle_reply(result));
+    WINDOW_HANDLE_REPLY_LEN
 }
 
-/// Write a create reply into `reply`, returning its length.
-fn create_reply(
+/// Write a connect reply into `reply`, returning its length: the desktop,
+/// this session's own attested identity — what an app requires of every
+/// event's sender — and the caller's id range.
+fn connect_reply(
     reply: &mut [u8; WINDOW_REPLY_MAX],
-    result: Result<u64, Errno>,
+    result: Result<(DesktopInfo, ObjectIds), Errno>,
     server: ProcId,
 ) -> usize {
-    reply[..WINDOW_CREATE_REPLY_LEN].copy_from_slice(&encode_create_reply(result, server));
-    WINDOW_CREATE_REPLY_LEN
-}
-
-/// Write a desktop reply into `reply`, returning its length.
-///
-/// It carries this session's own attested identity for the same reason the
-/// create reply does — it is what an app requires of every event's sender —
-/// and on this reply too, because an app may declare an icon-bar presence
-/// before it owns any window.
-fn desktop_reply(
-    reply: &mut [u8; WINDOW_REPLY_MAX],
-    result: Result<DesktopInfo, Errno>,
-    server: ProcId,
-) -> usize {
-    reply[..WINDOW_DESKTOP_REPLY_LEN].copy_from_slice(&encode_desktop_reply(result, server));
-    WINDOW_DESKTOP_REPLY_LEN
+    reply[..WINDOW_CONNECT_REPLY_LEN].copy_from_slice(&encode_connect_reply(result, server));
+    WINDOW_CONNECT_REPLY_LEN
 }
 
 /// The refusal `request` is owed for `err`, in the frame it would have been
-/// answered with: a request that mints an id answers with the frame that
-/// carries one.
+/// answered with.
 fn refused(
     request: &WindowRequest,
     reply: &mut [u8; WINDOW_REPLY_MAX],
@@ -5331,14 +5347,8 @@ fn refused(
     server: ProcId,
 ) -> usize {
     match request {
-        WindowRequest::Create { .. }
-        | WindowRequest::CreatePopup { .. }
-        | WindowRequest::CreateTool { .. }
-        | WindowRequest::CreateDialog { .. }
-        | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
-        WindowRequest::OpenMenu { .. }
-        | WindowRequest::OpenAlert { .. }
-        | WindowRequest::TakeZoneStore => minted_id_reply(reply, Err(err)),
+        WindowRequest::Connect => connect_reply(reply, Err(err), server),
+        WindowRequest::TakeZoneStore => handle_reply(reply, Err(err)),
         _ => status(reply, Err(err)),
     }
 }

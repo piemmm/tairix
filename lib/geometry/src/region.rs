@@ -370,6 +370,16 @@ impl From<Rect> for Region {
     }
 }
 
+/// Every rectangle yielded is added as [`Region::add`] adds one, so an
+/// `Option<Rect>` adds what it holds.
+impl Extend<Rect> for Region {
+    fn extend<I: IntoIterator<Item = Rect>>(&mut self, rects: I) {
+        for rect in rects {
+            self.add(rect);
+        }
+    }
+}
+
 /// `true` when shifting `bounds` by `(dx, dy)` keeps every edge inside `i32`.
 fn shift_fits(bounds: Rect, dx: i32, dy: i32) -> bool {
     let fits = |edge: i32, delta: i32| i32::try_from(i64::from(edge) + i64::from(delta)).is_ok();

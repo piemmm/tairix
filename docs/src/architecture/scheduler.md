@@ -876,17 +876,19 @@ primitive is `kernel/core::waitq::WaitQueue`: a waiter registers (with an
 optional absolute monotonic-ns deadline), then suspends with
 `RescheduleAction::Park`; it is woken either by an **explicit event** or,
 with a deadline, by the **timed sweep** (`WaitQueue::sweep`). An explicit
-event that is **addressed** — a request posted to one endpoint's server, a
-reply for one caller's ticket — wakes exactly its target
-(`WaitQueue::wake_task`, the wake-one discipline of `AGENTS.md` §27): the
-`ipc_call` post wakes the endpoint's recorded server task, a
-`call_reply` wakes the ticket's recorded poster and awaiter, and the
-threads watching for its caller's answers only when neither of those
-watches, and an endpoint's destruction wakes the threads
-its cancelled calls, room waits and answer watches name, so unrelated
-parked servers and callers stay parked (a broadcast there is a thundering
-herd that keeps spuriously-woken tasks runnable and floors the idle load
-average at ~1). A **condition broadcast** — console input, a child exit, a
+event that is **addressed** — a request posted to one endpoint, a message to
+one port, a reply for one caller's ticket — wakes exactly its targets
+(`WaitQueue::wake_task` or `wake_key`, the wake-one discipline of `AGENTS.md`
+§27): a post wakes the threads waiting on its endpoint and a message those
+waiting on its port, each queue keyed by the object (`SERVE_WAITQ`,
+`PORT_WAITQ`), since either belongs to a process and any of its threads may
+be the one waiting; a `call_reply` wakes the ticket's recorded poster and
+awaiter, and the threads watching for its caller's answers only when
+neither of those watches; and an endpoint's destruction wakes the threads
+waiting on it and those its cancelled calls, room waits and answer watches
+name, so unrelated parked servers and callers stay parked (a broadcast there
+is a thundering herd that keeps spuriously-woken tasks runnable and floors
+the idle load average at ~1). A **condition broadcast** — console input, a child exit, a
 hardware-tree bump — still wakes every registered waiter
 (`WaitQueue::wake_all`), each of which re-checks its own condition and
 re-parks on a miss.

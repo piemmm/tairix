@@ -423,6 +423,7 @@ members = [
     "tests/integration/finisher",
     "tests/integration/translation_witness",
     "tests/integration/witness",
+    "tests/integration/desktop_witness",
     "tests/integration/memory_isolation",
     "tests/integration/accessed_bit_qemu_x86_64",
     "tests/integration/accessed_bit_qemu_aarch64",

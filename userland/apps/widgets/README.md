@@ -34,7 +34,7 @@ One `shm_create`d frame region granted to the reserved window endpoint
 (the zero-copy window surface the desktop session maps once at create),
 one `port_bind`-bound event mailbox the app **parks** on through its
 wait-set (never a busy-poll; every accepted event is authenticated against
-the kernel-attested session identity the create reply named), and the
+the kernel-attested session identity the connect answered), and the
 `WindowClient` create/present/close calls. On the host the binary is an
 inert stub so `cargo build --workspace`, clippy, and fmt still cover it.
 

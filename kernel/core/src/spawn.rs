@@ -241,7 +241,8 @@ pub trait InitSpawnCtx {
     /// caller can wake the service by id — e.g. register it on a
     /// [`crate::waitq::WaitQueue`] (the driver-store server parks on
     /// [`crate::waitq::SERVE_WAITQ`] and is unparked by
-    /// [`crate::waitq::serve_wake`] when an `ipc_call` request is posted — a real wake, never a busy-yield). [`None`] means
+    /// [`crate::waitq::serve_wake`] when a request is posted to its endpoint —
+    /// a real wake, never a busy-yield). [`None`] means
     /// the service was not admitted.
     ///
     /// The default implementation admits nothing and returns [`None`]

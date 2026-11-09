@@ -167,7 +167,7 @@ the restarted service's first announcement is therefore always an edge.
 ## The query/edge pairing
 
 An application still *asks* for the desktop before it opens anything (the
-window channel's `QueryDesktop`), and converges on the notice thereafter. That
+window channel's `Connect`), and converges on the notice thereafter. That
 is not two paths for one job: the query answers the value the application needs
 before it can size anything, and the notice carries the changes — which is what
 keeps a just-spawned application correct without depending on the session

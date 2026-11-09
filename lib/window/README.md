@@ -11,6 +11,9 @@ server and every app's client can never drift apart.
   It decodes each fixed-width `WindowRequest`, attests the in-flight
   caller through the injected `CallerIdentity` seam (the kernel's
   `call_peer_origin` — an unforgeable `ProcId`, never a claimed id),
+  gives each `Connect` a fresh id range and admits an object's id only in a
+  range its caller holds and above the last it admitted there (at most
+  `OBJECT_RANGES_MAX` ranges a process, all gone with `client_exited`),
   keys every window to that owner, maps the app's endpoint-directed
   `shm_grant` region **once** at `Create` through the shared
   `tairix_display::ShmMapper` seam, and records each `Present`: a window's
@@ -48,45 +51,45 @@ server and every app's client can never drift apart.
   when it finally goes. A sink that accepts a pick conclusion is answering
   for it either way, which is what clears the pending pick.
 - **Client** (`WindowClient` / `WindowEvents`): the app-side half over
-  the injected `WindowTransport` seam (`ipc_call` and its posted halves,
-  `call_post`/`call_reap`, and `call_await` for one posted request's answer,
-  in production). A `present` is posted once the window's previous one is
-  answered — the session reads the frame a present names until a later one
-  replaces it — and that answer comes with the desktop's next frame when the
-  present replaced one not yet shown, so a present waits only for an app that
-  outruns the desktop's frames; one that must never wait asks
-  `present_in_flight` first and owes its window the paint until the answer
-  lands. A
-  present refused for room goes as a call, which waits for the room; a
-  refused present is handed out like any posted request's refusal, and the
-  window's next present declares the whole window. The requests an app makes as
-  input moves — `resize`, `set_cursor`, `set_tooltip`, `drag_verdict`,
-  `set_title`, `set_sizing` — are **posted, never awaited**
-  (`plans/FIX-DESKTOP.md` DESK-21): at most one of each kind per window is in
-  flight, a newer one is held as the latest wanted and posted when that one
-  is answered, and the endpoint serves a client's requests in order, so a
-  posted resize reaches the session before the present painted at its size.
-  `WindowEvents::try_wait` takes in landed answers before it drains: a
-  refusal is handed out as `EventError::Refused`, which the app reports and
-  carries on from, and a refused resize is followed by a `Resized` at the
-  size the session kept. A resize asked while one is unanswered is
-  `Fitted::Deferred` — no region is made for it — and its size is delivered
-  again once that one is answered. `create` validates and sends the window geometry, grant
-  handle, event endpoint, title, and the app's `WindowSizing` — whether it
-  is resizable and the smallest client extent it can lay out at, `0`
-  declaring none — returning the session-minted window id. The minimum is
-  a *declaration*: the window manager enforces it (alongside its own
-  furniture floor) so a drag stops there, and an app never clamps a
-  granted size by resizing its own window back up, which would fight the
-  drag once per pointer sample. `present` sends a frame index plus
-  damage, never pixels;
-  `set_backdrop_blur` asks for the content behind the window to be
-  frosted, a radius in logical pixels with `0` off and anything above
-  `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the
-  window down. `WindowEvents` is the app's event stream over the injected
-  mailbox seam — never a poll — decoding each delivered `WindowEvent`
-  fail-closed. The seam states its two halves as two traits: `EventDrain`
-  (`try_next`, which reads a queued frame and never waits) and
+  the injected `WindowTransport` seam (`ipc_call` for the connect and the
+  calls only a context owing no frame makes, and its posted halves
+  `call_post`/`call_reap`, in production). `connect` answers the desktop,
+  the serving session's identity and a fresh range of ids of the client's
+  own (`ObjectIds`): the client names every window, transient, layer
+  surface, menu open and alert it creates from that range, so no create
+  waits on the session's loop (`plans/FIX-DESKTOP.md` DESK-28). Every
+  request an interactive loop makes is posted and taken in by the event
+  drain (DESK-29): at most one of a kind per object in flight where a newer
+  one supersedes it, the newest held behind it, any other posted as its own,
+  all served in the order asked. A reply that is data — an open target, a
+  menu's or the icon bar's committed text, a drag's spot, a drop target, a
+  picked file and its name, a drag's items, the clipboard, the terrain, a
+  hand-over's or a reveal's outcome — lands as one `Answer` the loop takes
+  (`take_answer`), and a wait returns once one has. A refusal is handed out
+  as `EventError::Refused`, which the app reports and carries on from; a
+  refused create ends what was posted for the object it named, and a
+  refused resize is followed by a `Resized` at the size the session kept. A
+  window has one present in flight: a paint asked while it is unanswered is
+  deferred, its damage kept, and owed back as `Answer::FrameReturned` once
+  that one is answered (`present_state`, `owe_frame`), so a window paints at
+  most once per present the desktop serves. A resize asked while one is
+  unanswered is `Fitted::Deferred` — no region is made for it — and its size
+  is delivered again once that one is answered. `create` validates and sends
+  the window geometry, grant handle, event endpoint, title, and the app's
+  `WindowSizing` — whether it is resizable and the smallest client extent it
+  can lay out at, `0` declaring none — returning the id the client named it
+  by. The minimum is a *declaration*: the window manager enforces it
+  (alongside its own furniture floor) so a drag stops there, and an app
+  never clamps a granted size by resizing its own window back up, which
+  would fight the drag once per pointer sample. `present` sends a frame
+  index plus damage, never pixels; `set_backdrop_blur` asks for the content
+  behind the window to be frosted, a radius in logical pixels with `0` off
+  and anything above `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode;
+  `close` tears the window down, and with it every transient hung from it,
+  as the session does. `WindowEvents` is the app's event stream over the
+  injected mailbox seam — never a poll — decoding each delivered
+  `WindowEvent` fail-closed. The seam states its two halves as two traits:
+  `EventDrain` (`try_next`, which reads a queued frame and never waits) and
   `EventSource: EventDrain` (`park`, the app's own wait-set park).
   `WindowEvents::wait` alternates them, taking in every answer to a posted
   request before each park: the wait-set's reply member stays ready until
@@ -100,7 +103,7 @@ server and every app's client can never drift apart.
   stream rather than spelling a mailbox drain of its own.
   `EventMailbox` is that drain against the app's own endpoint, dropping
   any frame of the wrong length or from any sender but the session the
-  create reply named: the kernel-attested origin is the authentication,
+  connect answered: the kernel-attested origin is the authentication,
   and it has one definition rather than one per app. The endpoint's id is
   derived from the app's pid, so `bind_event_mailbox` admits only the
   session serving windows to it (`port_admit`), and no other process can
@@ -186,11 +189,11 @@ server and every app's client can never drift apart.
   cannot draw honestly without knowing the screen it is on, the desktop's
   UI scale, and whether the theme runs light or dark — and the compositor
   that owns all three is another process it must not reach into.
-  `WindowClient::desktop` asks for them as one `tairix_abi::desktop::
+  `WindowClient::connect` is answered them as one `tairix_abi::desktop::
   DesktopInfo`, before the first window is created so the opening frame is
   already the right size at the right density in the right colours; the
   server answers from the injected `WindowHost::desktop`, which reads the
-  live compositor rather than a cached copy. The query is read-only and
+  live compositor rather than a cached copy. The record is read-only and
   carries no capability: it describes the caller's own seat, names no
   other principal's data, and grants no authority. `Desktop` is the
   app-side holder — it resolves the reported percentage into a `Scale`
@@ -247,10 +250,9 @@ server and every app's client can never drift apart.
   `WindowPane` is **one window**, however many the app has: the id the
   session knows it by, the shared frame region, and the layout both are shaped
   as. `open` and `open_popup` are the create dance — size the region, create
-  it, grant it, ask the session — with every refusal unmapping what it had;
-  `open_popup` additionally refuses a create reply that did not come from the
-  session that opened the parent, closing the window it named rather than
-  drawing into it. The region holds `FRAME_COUNT` frames, two: `present`
+  it, grant it, ask the session — with every refusal unmapping what it had,
+  and a refusal the session answers later ending the pane
+  (`app::refused_create`). The region holds `FRAME_COUNT` frames, two: `present`
   draws into the one the session is not reading, first bringing it up to date
   from the caller's surface with what the other frame was presented with since
   (`tairix_geometry::StaleFrames`, the record the display client keeps for its

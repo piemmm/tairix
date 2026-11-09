@@ -148,7 +148,7 @@ as no change — and its first announcement always wakes the subscribers.
 
 ## The query/edge pairing
 
-`WindowClient::desktop()` remains an application's **initial** read, and the
+`WindowClient::connect()` remains an application's **initial** read, and the
 notice carries **changes**. That is not two paths for one job: it is the same
 pairing `SysinfoQueryId::MEMORY_PRESSURE` already has with the band edge, and it
 is what keeps a just-spawned application correct without depending on the

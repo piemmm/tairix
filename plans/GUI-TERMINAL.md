@@ -296,9 +296,9 @@ claimed, so intercepting one never swallows input a program was waiting for.
 model and the window-local point the press was reported at — the only space the
 terminal can speak truthfully, since it is never told where its window sits —
 and the session titles, places, draws, grabs, routes and dismisses. The answer
-is one `MenuClosed` naming the session-minted open id, matched against the id
-this window is waiting on so an answer to a settled gesture can never run a
-stale command. The terminal never learns a pointer position inside the plate
+is one `MenuClosed` naming the open id the terminal named it by, matched
+against the id this window is waiting on so an answer to a settled gesture can
+never run a stale command. The terminal never learns a pointer position inside the plate
 and cannot hold one open.
 
 **A refused menu is an answer, not a death.** The refusal is reported on

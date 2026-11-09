@@ -28,7 +28,7 @@ use crate::input::ViewOutcome;
 use crate::inspector::{LayerCommand, Tab};
 use crate::layout::Layout;
 use crate::tools::Tool;
-use crate::view::{MenuKind, Own, View};
+use crate::view::{MenuKind, Own, View, APP_TITLE};
 use crate::viewport::STEPS;
 
 /// Where the menu's tool rows are numbered from.
@@ -785,7 +785,7 @@ impl View {
     }
 
     fn window_menu(&self) -> AppMenu {
-        let mut menu = MenuBuilder::titled("Draw");
+        let mut menu = MenuBuilder::titled(APP_TITLE);
         let mut caption = String::new();
         for (title, symbol, rows) in MENU {
             let Some(plate) = menu.submenu(title, symbol, Plate::Root) else {

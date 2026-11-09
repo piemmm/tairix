@@ -3255,6 +3255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-itest-desktop-witness"
+version = "0.0.0"
+dependencies = [
+ "tairix-desktop-session",
+ "tairix-itest-witness",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-itest-finisher"
 version = "0.0.0"
 
@@ -5317,13 +5326,12 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-ipc",
  "tairix-log",
- "tairix-util",
 ]
 
 [[package]]
@@ -5709,13 +5717,12 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-ipc",
  "tairix-log",
- "tairix-util",
 ]
 
 [[package]]
@@ -5739,16 +5746,15 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
- "tairix-kernel-ipc",
  "tairix-log",
  "tairix-reclaim",
  "tairix-test-appbar-qemu-aarch64",
- "tairix-util",
 ]
 
 [[package]]
@@ -6841,14 +6847,13 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-ipc",
  "tairix-log",
  "tairix-test-appbar-qemu-aarch64",
- "tairix-util",
 ]
 
 [[package]]
@@ -6922,15 +6927,14 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-ipc",
  "tairix-kernel-syscall",
  "tairix-log",
- "tairix-util",
 ]
 
 [[package]]
@@ -7740,14 +7744,13 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-confd",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
- "tairix-kernel-ipc",
  "tairix-log",
- "tairix-util",
  "tairix-wallpaper",
 ]
 
@@ -8921,13 +8924,12 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-ipc",
  "tairix-log",
- "tairix-util",
 ]
 
 [[package]]

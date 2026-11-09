@@ -55,10 +55,10 @@ impl Withheld {
 /// session only of a title that changed.
 pub(super) struct Title {
     shown: String,
-    /// What the title now reads: written over before it is compared with
-    /// `shown`, so a paint builds no title of its own, and left as it was by
-    /// a writer that only writes a change.
-    pub(super) draft: String,
+    /// What the title now reads: written afresh into its own room before it
+    /// is compared with `shown`, so a paint builds no title of its own, and
+    /// left as it was by a writer that only writes a change.
+    draft: String,
 }
 
 impl Title {
@@ -79,10 +79,21 @@ impl Title {
         self.shown.clone_from(&self.draft);
     }
 
+    /// Set the draft to what `write` writes into it emptied, reusing its
+    /// room, so no writer can leave the title it replaces behind.
+    pub(super) fn write(&mut self, write: impl FnOnce(&mut String)) {
+        self.draft.clear();
+        write(&mut self.draft);
+    }
+
     /// Set the draft to `title`, reusing its room.
     pub(super) fn read(&mut self, title: &str) {
-        self.draft.clear();
-        self.draft.push_str(title);
+        self.write(|draft| draft.push_str(title));
+    }
+
+    /// What the title now reads.
+    pub(super) fn draft(&self) -> &str {
+        &self.draft
     }
 }
 
@@ -146,6 +157,21 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(title.changed(), None, "nor a sent one");
         }
+    }
+
+    /// A document's title is written on every paint that owes anything, so a
+    /// writer that only appends still reads its title once, and one written
+    /// again unchanged is not sent again.
+    #[test]
+    fn a_title_written_on_every_paint_reads_once() {
+        let mut title = Title::new(String::from("Untitled \u{2014} Draw"));
+        for _ in 0..3 {
+            title.write(|draft| draft.push_str("Untitled \u{2014} Draw"));
+            assert_eq!(title.draft(), "Untitled \u{2014} Draw");
+            assert_eq!(title.changed(), None);
+        }
+        title.write(|draft| draft.push_str("*Untitled \u{2014} Draw"));
+        assert_eq!(title.changed(), Some("*Untitled \u{2014} Draw"));
     }
 
     /// A title the session refused stays owed until it is sent.

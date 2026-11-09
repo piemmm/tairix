@@ -6,6 +6,7 @@
 use alloc::boxed::Box;
 
 use tairix_abi::window_ipc::{AlertOutcome, AlertSpec};
+use tairix_abi::Errno;
 
 /// Why a question could not be asked: another is.
 pub const ANSWERING_ANOTHER: &str = "the window is waiting for an answer to another question";
@@ -13,10 +14,11 @@ pub const ANSWERING_ANOTHER: &str = "the window is waiting for an answer to anot
 /// Why a question could not be asked: an alert could not carry it.
 pub const UNASKABLE: &str = "the question asking first could not be made";
 
-/// Where a question is: what it says until it is up, then the alert asking it.
+/// Where a question is: what it says until it is up, then the alert asking
+/// it, still saying it until answered, so a refusal can ask it again.
 enum Ask {
     Waiting(Box<AlertSpec>),
-    Up(u64),
+    Up(u64, Box<AlertSpec>),
 }
 
 struct Pending<C> {
@@ -24,6 +26,19 @@ struct Pending<C> {
     /// The index of the button that confirms.
     yes: usize,
     confirms: C,
+}
+
+/// What the desktop's refusal of an alert came to.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Refusal<C> {
+    /// The alert refused was not this window's question.
+    Other,
+    /// The application has every alert up it may: the question waits to go
+    /// up again once one is answered.
+    Waiting,
+    /// The desktop will not ask it, so it is withdrawn, handing back what it
+    /// would have confirmed.
+    Withdrawn(C),
 }
 
 /// What an answer came to.
@@ -81,7 +96,7 @@ impl<C> Question<C> {
     pub fn is_up(&self) -> Option<bool> {
         self.pending
             .as_ref()
-            .map(|pending| matches!(pending.ask, Ask::Up(_)))
+            .map(|pending| matches!(pending.ask, Ask::Up(..)))
     }
 
     /// What the question says, while it waits to go up.
@@ -89,17 +104,41 @@ impl<C> Question<C> {
     pub fn waiting(&self) -> Option<&AlertSpec> {
         match &self.pending.as_ref()?.ask {
             Ask::Waiting(spec) => Some(spec),
-            Ask::Up(_) => None,
+            Ask::Up(..) => None,
         }
     }
 
-    /// The question waiting went up as alert `alert`.
+    /// The question waiting was asked to go up as alert `alert`.
     pub fn raised(&mut self, alert: u64) {
-        if let Some(pending) = self.pending.as_mut() {
-            if matches!(pending.ask, Ask::Waiting(_)) {
-                pending.ask = Ask::Up(alert);
-            }
+        self.pending = self.pending.take().map(|pending| {
+            let ask = match pending.ask {
+                Ask::Waiting(spec) => Ask::Up(alert, spec),
+                up @ Ask::Up(..) => up,
+            };
+            Pending { ask, ..pending }
+        });
+    }
+
+    /// The desktop refused alert `alert` for `errno`.
+    pub fn refused(&mut self, alert: u64, errno: Errno) -> Refusal<C> {
+        let asked = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.ask, Ask::Up(up, _) if up == alert));
+        if !asked {
+            return Refusal::Other;
         }
+        if errno != Errno::LimitExceeded {
+            return self.withdraw().map_or(Refusal::Other, Refusal::Withdrawn);
+        }
+        self.pending = self.pending.take().map(|pending| {
+            let ask = match pending.ask {
+                Ask::Up(_, spec) => Ask::Waiting(spec),
+                waiting @ Ask::Waiting(_) => waiting,
+            };
+            Pending { ask, ..pending }
+        });
+        Refusal::Waiting
     }
 
     /// Take the question back unanswered — the desktop would not ask it —
@@ -113,7 +152,7 @@ impl<C> Question<C> {
         let asked = self
             .pending
             .as_ref()
-            .is_some_and(|pending| matches!(pending.ask, Ask::Up(up) if up == alert));
+            .is_some_and(|pending| matches!(pending.ask, Ask::Up(up, _) if up == alert));
         let Some(pending) = self.pending.take_if(|_| asked) else {
             return Answer::Other;
         };

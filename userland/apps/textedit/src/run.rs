@@ -67,7 +67,7 @@ mod program {
         self, AnswerWake, DocWindow, DocumentApp, Handle, Host, NoAppView, Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
-    use tairix_window::{clipboard, Desktop};
+    use tairix_window::Desktop;
 
     /// The name this program's bundle, help and refusals go by.
     const APP_NAME: &str = "TextEdit";
@@ -630,6 +630,22 @@ mod program {
             carry_out(host, index, request);
         }
 
+        fn pasted(
+            host: &mut Host<Self>,
+            index: usize,
+            contents: Result<Option<(ClipboardKind, Vec<u8>)>, Errno>,
+        ) {
+            let window = &mut host.windows[index];
+            match contents {
+                Ok(Some((_, bytes))) => {
+                    let outcome = window.view.paste(&bytes, &mut window.damage);
+                    host.apply(index, outcome);
+                }
+                Ok(None) => window.state("The clipboard is empty"),
+                Err(err) => window.state(alloc::format!("Could not paste: {err}")),
+            }
+        }
+
         fn answered(host: &mut Host<Self>, index: usize, answer: Answer) {
             match answer {
                 Answer::Loaded { load, editor: None } => {
@@ -1077,18 +1093,11 @@ mod program {
                 } else {
                     ClipboardKind::Octets
                 };
-                if let Err(err) = clipboard::put(&mut host.client, id, kind, &bytes) {
+                if let Err(err) = host.client.set_clipboard(id, kind, &bytes) {
                     window.state(alloc::format!("Could not copy: {err}"));
                 }
             }
-            Own::Paste => match clipboard::take(&mut host.client, id) {
-                Ok(Some((_, bytes))) => {
-                    let outcome = window.view.paste(&bytes, &mut window.damage);
-                    host.apply(index, outcome);
-                }
-                Ok(None) => window.state("The clipboard is empty"),
-                Err(err) => window.state(alloc::format!("Could not paste: {err}")),
-            },
+            Own::Paste => host.paste(index),
             Own::Search {
                 id: search,
                 search: pattern,

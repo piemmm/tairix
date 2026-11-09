@@ -293,7 +293,8 @@ pub trait DocumentView: SavedDocument {
     /// What the document is called.
     fn name(&self) -> &str;
 
-    /// Write what the window's title reads over `title`, reusing its room.
+    /// Write what the window's title reads into `title`, which the host has
+    /// emptied, keeping its room.
     fn write_title(&self, title: &mut String);
 
     /// Lay the view out for a `width`×`height` window, reporting what moved.

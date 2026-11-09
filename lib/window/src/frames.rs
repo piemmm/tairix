@@ -27,7 +27,7 @@ use tairix_abi::window_ipc::WINDOW_ENDPOINT;
 use tairix_rt::shm::SharedRegion;
 #[cfg(any(test, freestanding))]
 use {
-    crate::client::{WindowClient, WindowTransport},
+    crate::client::{PresentState, WindowClient, WindowTransport},
     tairix_abi::driver::display::DamageList,
     tairix_abi::Errno,
     tairix_display::winframe::{self, damage_in},
@@ -178,28 +178,43 @@ impl FrameRing {
     }
 
     /// Present `damage` as window `window`'s next frame, which `draw` brings
-    /// up to date given its index in the region and the ring's record.
+    /// up to date given its index in the region and the ring's record,
+    /// answering whether it was drawn.
     ///
     /// The session reads the frame a present names until a later present
-    /// replaces it, so the window's previous present is answered before the
-    /// other frame is drawn.
+    /// replaces it, so while the window's last present is unanswered both
+    /// frames are the session's: nothing is drawn, and the window is owed an
+    /// [`Answer::FrameReturned`](crate::client::Answer::FrameReturned) once
+    /// that one is answered. A present still waiting for room names a frame
+    /// the session has not been sent, which is drawn again and sent with it.
     ///
     /// # Errors
     ///
-    /// `draw`'s refusal, and the session's refusal of the present.
+    /// `draw`'s refusal, and a transport failure.
     pub(crate) fn present<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         window: u64,
         damage: DamageList,
         draw: impl FnOnce(usize, (&mut StaleFrames, &mut Region)) -> Result<(), Errno>,
-    ) -> Result<(), Errno> {
-        client.await_present(window)?;
-        draw(self.back, (&mut self.stale, &mut self.changed))?;
-        let index = u32::try_from(self.back).map_err(|_| Errno::OutOfRange)?;
-        client.present(window, index, damage)?;
-        self.back = (self.back + 1) % FRAME_COUNT as usize;
-        Ok(())
+    ) -> Result<bool, Errno> {
+        let index = match client.present_state(window) {
+            PresentState::InFlight => {
+                client.owe_frame(window);
+                return Ok(false);
+            }
+            PresentState::Waiting(frame) => {
+                usize::try_from(frame).map_err(|_| Errno::OutOfRange)?
+            }
+            PresentState::Idle => self.back,
+        };
+        draw(index, (&mut self.stale, &mut self.changed))?;
+        let frame = u32::try_from(index).map_err(|_| Errno::OutOfRange)?;
+        client.present(window, frame, damage)?;
+        if index == self.back {
+            self.back = (self.back + 1) % FRAME_COUNT as usize;
+        }
+        Ok(true)
     }
 }
 

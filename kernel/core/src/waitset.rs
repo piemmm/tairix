@@ -85,15 +85,6 @@ pub struct Member {
     pub pin: Option<crate::fs::NodeRef>,
 }
 
-/// Whether a wait on `members` hears requests: only one holding an endpoint
-/// or a port joins the queue a post wakes, so a post wakes no other wait.
-#[must_use]
-pub fn hears_requests(members: &[Member]) -> bool {
-    members
-        .iter()
-        .any(|m| matches!(m.kind, WaitSourceKind::Endpoint | WaitSourceKind::Port))
-}
-
 /// A volume's watch table held by a member; two are equal only when they are
 /// the same table.
 #[derive(Clone)]
@@ -167,10 +158,11 @@ enum Pledged {
     Budget,
     Call,
     FsWatch,
+    Port,
 }
 
 impl Pledged {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Serve,
         Self::Irq,
         Self::ProcWait,
@@ -187,6 +179,7 @@ impl Pledged {
         Self::Budget,
         Self::Call,
         Self::FsWatch,
+        Self::Port,
     ];
 
     fn queue(self) -> &'static crate::waitq::WaitQueue {
@@ -208,6 +201,7 @@ impl Pledged {
             Self::Budget => &q::BUDGET_WAITQ,
             Self::Call => &q::CALL_WAITQ,
             Self::FsWatch => &q::FSWATCH_WAITQ,
+            Self::Port => &q::PORT_WAITQ,
         }
     }
 }
@@ -221,7 +215,8 @@ fn rows_for<'a>(members: impl IntoIterator<Item = &'a Member>) -> [usize; Pledge
     let mut shared = [false; Pledged::ALL.len()];
     for m in members {
         let (share, own): (&[Pledged], Option<Pledged>) = match m.kind {
-            WaitSourceKind::Endpoint | WaitSourceKind::Port => (&[Pledged::Serve], None),
+            WaitSourceKind::Endpoint => (&[], Some(Pledged::Serve)),
+            WaitSourceKind::Port => (&[], Some(Pledged::Port)),
             WaitSourceKind::Irq => (&[], Some(Pledged::Irq)),
             WaitSourceKind::Child => (&[Pledged::ProcWait], None),
             WaitSourceKind::SeatInput => (&[Pledged::SeatInput], None),
@@ -1024,7 +1019,8 @@ mod tests {
         ];
         let filed = rows(&set);
         let at = |queue: Pledged| filed[queue as usize];
-        assert_eq!(at(Pledged::Serve), 1, "endpoints and ports share one row");
+        assert_eq!(at(Pledged::Serve), 1, "a row an endpoint");
+        assert_eq!(at(Pledged::Port), 1, "a row a port");
         assert_eq!(at(Pledged::Irq), 3, "the timer and a row a line");
         assert_eq!(at(Pledged::Stream), 2);
         assert_eq!((at(Pledged::Console), at(Pledged::Foreground)), (1, 1));
@@ -1085,28 +1081,6 @@ mod tests {
             pacing: crate::fswatch::Pacing::default(),
             table: None,
             pin: None,
-        }
-    }
-
-    /// Only a wait holding an endpoint or a port hears requests, so a post
-    /// wakes no wait on a stream, a line, a child or a notice.
-    ///
-    /// Regression: every wait joined the queue posts wake, so each request to
-    /// any server unparked every wait-set waiter on the machine.
-    #[test]
-    fn only_an_endpoint_or_port_member_hears_requests() {
-        let quiet = [
-            of(WaitSourceKind::Stream, 3, 1),
-            of(WaitSourceKind::Irq, 4, 2),
-            of(WaitSourceKind::Child, 0, 3),
-            of(WaitSourceKind::SystemNotice, 1, 4),
-        ];
-        assert!(!hears_requests(&quiet));
-        assert!(!hears_requests(&[]));
-        for kind in [WaitSourceKind::Endpoint, WaitSourceKind::Port] {
-            let mut members = quiet.to_vec();
-            members.push(of(kind, 9, 5));
-            assert!(hears_requests(&members), "{kind:?}");
         }
     }
 

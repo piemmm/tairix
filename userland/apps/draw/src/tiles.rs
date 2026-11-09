@@ -418,15 +418,23 @@ impl Tiles {
     /// The tile at `key`, rendered from `scene`, landed: kept if nothing
     /// since that scene has touched what it shows, `visible` the tiles in
     /// view so the cache lets go of what is furthest from them first.
-    pub fn landed(&mut self, scene: u64, key: TileKey, surface: Surface, visible: &[TileKey]) {
+    /// Answers whether it was kept, and so shows from now on where it lies.
+    pub fn landed(
+        &mut self,
+        scene: u64,
+        key: TileKey,
+        surface: Surface,
+        visible: &[TileKey],
+    ) -> bool {
         self.asked.retain(|asked| *asked != key);
         if !self.still_shows(scene, &key) {
-            return;
+            return false;
         }
         // A tile the heap cannot hold is held off as one a render could not
         // make, until the memory pressure changes.
         let Ok(surface) = try_arc(surface) else {
-            return self.refused_landing(key);
+            self.refused_landing(key);
+            return false;
         };
         let held = Held {
             surface,
@@ -434,9 +442,11 @@ impl Tiles {
             fresh: true,
         };
         if self.held.try_insert(key, held).is_err() {
-            return self.refused_landing(key);
+            self.refused_landing(key);
+            return false;
         }
         self.evict(visible);
+        true
     }
 
     /// `key` landed and could not be held.

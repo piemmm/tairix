@@ -528,17 +528,17 @@ fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
         Priority::High,
         move |yielder: &mut Yielder<ContextSwitchHal>| {
             let id = body_id.load(Ordering::Acquire);
-            body_endpoint.record_server_task(id);
+            let key = tairix_kernel_core::waitq::endpoint_key(body_endpoint.id().0);
             loop {
                 if tairix_kernel_core::waitq::SERVE_WAITQ
-                    .register(id, tairix_kernel_core::waitq::NO_DEADLINE)
+                    .register_keyed(key, id, tairix_kernel_core::waitq::NO_DEADLINE)
                     .is_err()
                 {
                     qemu_exit::exit_failure(FAIL_SERVER);
                 }
                 match body_endpoint.recv_call(8) {
                     RecvCall::Received(call) => {
-                        tairix_kernel_core::waitq::SERVE_WAITQ.deregister(id);
+                        tairix_kernel_core::waitq::SERVE_WAITQ.deregister_keyed(key, id);
                         let woken =
                             match body_endpoint.reply(call.ticket, &call.request, &SERIAL_SINK) {
                                 Ok(woken) => woken,
@@ -549,7 +549,7 @@ fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
                     }
                     RecvCall::Empty => {
                         yielder.park();
-                        tairix_kernel_core::waitq::SERVE_WAITQ.deregister(id);
+                        tairix_kernel_core::waitq::SERVE_WAITQ.deregister_keyed(key, id);
                     }
                     RecvCall::TooLarge { .. } => qemu_exit::exit_failure(FAIL_SERVER),
                 }
