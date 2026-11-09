@@ -67,7 +67,10 @@ store), `docs/src/security/sandbox.md`.
   and a frame arriving before the display latched the last waits in the region
   for the latch; elsewhere, or once a display refuses one, it goes into the
   screensaver's window (`winframe::lay_opaque_region`). Neither side copies a
-  frame more than that one lay.
+  frame more than that one lay. Until a frame arrives, and once a saver ends,
+  the window is solid black and holds no pixels, which a layer engine shows as
+  no layer at all (`plans/GPU.md` GD10); a saver that drew straight into the
+  display leaves the compositor owing the whole output when it ends.
 - **Nothing waits on a saver.** The session drives it through the duplex
   sandbox session, never blocking; a saver late past its deadline, or crashed,
   or speaking out of turn, is ended, the screen goes Blank, and the end is

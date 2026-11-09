@@ -188,6 +188,19 @@ impl ChannelOrder {
         }
         written
     }
+
+    /// Encode `count` copies of `pixel` into `out`, returning the number of
+    /// whole pixels written: what [`encode_run`](Self::encode_run) writes for
+    /// a run of that one pixel, its bytes encoded once.
+    #[must_use]
+    pub fn encode_fill(self, pixel: Pixel, count: usize, out: &mut [u8]) -> usize {
+        let (groups, _trailing) = out.as_chunks_mut::<4>();
+        let filled = groups.len().min(count);
+        if let Some(groups) = groups.get_mut(..filled) {
+            groups.fill(self.encode(pixel));
+        }
+        filled
+    }
 }
 
 /// The length in bytes of one scan-out frame for `mode`.

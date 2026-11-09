@@ -155,15 +155,47 @@ jobs:
         if: always()
         run: |
           . tools/ci/lib.sh
-          ci_collect_qemu_artefacts "${{ runner.temp }}/tairix-soak-logs/qemu"
+          ci_collect_qemu_artefacts "${{ runner.temp }}/tairix-ci-logs/qemu"
 
-      # Run every fuzz harness and proptest model in parallel for
-      # a minimum of 120 s each. soak.sh enumerates both registries (the
-      # single source of truth) and fans them out one process per target, each
-      # given 120 s of its own run by `--secs`. This is more than the per-PR
-      # `--once` gate inside `cargo xtask ci` and well short of the nightly
-      # seven-hour `soak` window. Fails closed: any harness crash, hang, or
-      # invariant/counterexample failure fails the job.
+      - name: Upload QEMU post-mortems
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/tairix-ci-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Every fuzz harness and proptest model in parallel for a minimum of 120 s
+  # each, once `cargo xtask ci` has passed. A job of its own, so neither the
+  # pipeline nor the soak spends the other's time limit; it runs on the same
+  # runner and target directory, where `ci` has already built every harness.
+  # soak.sh enumerates both registries (the single source of truth) and fans
+  # them out one process per target, each given 120 s of its own run by
+  # `--secs`: more than the per-PR `--once` gate inside `cargo xtask ci` and
+  # well short of the nightly seven-hour `soak` window. Fails closed: any
+  # harness crash, hang, or invariant/counterexample failure fails the job.
+  soak:
+    name: soaks (fuzz + proptest, parallel, >= 120 s each)
+    needs: xtask-ci
+    if: github.repository == 'piemmm/tairix' && github.actor == 'piemmm'
+    runs-on: [self-hosted, linux]
+    # A backstop no healthy run reaches: each soak child is killed as hung an
+    # ordinary step's allowance past its 120 s.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - name: cargo xtask keys init
+        run: cargo xtask keys init
+
       - name: Run soaks (fuzz + proptest, parallel, >= 120 s each)
         env:
           # Keep soak logs out of the tracked tree; upload them

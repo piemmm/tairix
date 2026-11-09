@@ -186,6 +186,10 @@ pub struct Window {
     /// until the client's own pixels arrive — never a hole onto the
     /// desktop, and never short of the decoration around it.
     plate: Option<Pixel>,
+    /// What a solid window shows across its client area in place of pixels:
+    /// one colour held in no buffer, so covering the screen in it costs a fill
+    /// rather than a screen of memory. `None` for every other window.
+    fill: Option<Pixel>,
     /// The owning application's identity artwork, rasterised at the title
     /// bar's slot side for the active scale. One small square per decorated
     /// window, re-derivable from the owner's bundle at any time, so it is
@@ -381,6 +385,17 @@ impl Window {
         }
     }
 
+    /// Build a solid window of client extent `size` at `origin`: `colour`
+    /// across it, and no pixels held.
+    pub(crate) fn solid(id: WindowId, origin: Point, size: (u32, u32), colour: Pixel) -> Self {
+        Self {
+            client_size: size,
+            fill: Some(colour),
+            participation: Participation::DRAWN,
+            ..Self::placed(id, origin)
+        }
+    }
+
     /// The window every constructor above starts from: at `origin`, holding
     /// no content, hidden, undecorated, and drawn by nobody.
     fn placed(id: WindowId, origin: Point) -> Self {
@@ -400,6 +415,7 @@ impl Window {
             band: None,
             rim: None,
             plate: None,
+            fill: None,
             identity_artwork: None,
             size_state: WindowSizeState::Restored,
             restore_outer: None,
@@ -826,6 +842,20 @@ impl Window {
         self.content.as_ref().map_or(0, CachedBytes::payload_bytes)
     }
 
+    /// Show `colour` across the client area in place of the pixels held, which
+    /// are handed back overwritten for the caller to drop.
+    pub(crate) fn make_solid(&mut self, colour: Pixel) -> Option<Surface> {
+        self.fill = Some(colour);
+        self.take_content_wiped()
+    }
+
+    /// The one colour a solid window shows across its whole client area: one
+    /// with a fill and no pixels of its own.
+    #[must_use]
+    pub(crate) fn solid_colour(&self) -> Option<Pixel> {
+        self.fill.filter(|_| self.content.is_none())
+    }
+
     /// Take the content pixels out of the window, overwritten, and hand
     /// the spent buffer to the caller to drop.
     ///
@@ -1048,7 +1078,9 @@ impl Window {
             None => (&[][..], 0),
         };
         let decoration = self.decoration_spans(ly, chrome);
-        let backdrop = content_row.and(self.plate).filter(|_| client_cols > 0);
+        let backdrop = content_row
+            .and(self.plate.or(self.fill))
+            .filter(|_| client_cols > 0);
         if content.is_empty()
             && backdrop.is_none()
             && decoration[0].pixels.is_empty()
@@ -2088,8 +2120,9 @@ pub(crate) struct WindowRow<'a> {
     /// row's tail or the client has yet to present at the window's size,
     /// and empty where nothing of it is drawable.
     content: &'a [Pixel],
-    /// The colour the client columns `content` does not reach take, or
-    /// `None` for a row with no client columns or an undecorated window.
+    /// The colour the client columns `content` does not reach take — the
+    /// frame's plate, or a solid window's fill — or `None` for a row with no
+    /// client columns or a window with neither.
     backdrop: Option<Pixel>,
     /// Decoration pixels, from at most two furniture strips (a row is
     /// either in the top or bottom band — one strip, the other span empty —
@@ -2130,7 +2163,7 @@ impl RowLayer<'_> {
     }
 }
 
-impl WindowRow<'_> {
+impl<'a> WindowRow<'a> {
     /// The composited contribution at screen column `x`: the source pixel
     /// scaled by the combined opacity and clip coverage, or `None` where this
     /// window draws nothing there.
@@ -2294,42 +2327,84 @@ impl WindowRow<'_> {
                 .unwrap_or(all)
                 .clamp(1, all.max(1));
         };
-        // Past the client's own pixels — the furniture beyond the gutter, or a
-        // short content buffer — nothing further along the row can begin one.
+        // Past the client's own pixels only the plate or fill can begin one,
+        // and where it does not, nothing further along the row can.
         let Some(span) = self.drawable().get(lx..).filter(|s| !s.is_empty()) else {
             return all;
         };
         tairix_raster::leading_translucent(span).clamp(1, all.max(1))
     }
 
-    /// The longest run of source pixels this row contributes from screen
-    /// column `x` towards `limit` that each replace whatever is beneath them
-    /// exactly, or `None` when the pixel at `x` is not one.
+    /// The longest run this row lays from screen column `x` towards `limit`
+    /// whose every pixel replaces whatever is beneath it exactly, or `None`
+    /// when the pixel at `x` is not one.
     ///
-    /// A caller may copy such a run and skip every layer below it without
+    /// A caller may lay such a run and skip every layer below it without
     /// changing one byte of the result, because *over* with a fully opaque
     /// source is the source. Three things must hold, and they are the only
     /// three: full window opacity and no clip on the row (either would scale
-    /// or drop the pixel), and a source alpha of 255. Only the client's own
-    /// pixels qualify — furniture is left to the general blend, which keeps
-    /// this a loop specialisation rather than a second blend.
+    /// or drop the pixel), and a source alpha of 255. The client's own pixels
+    /// qualify, and past them the plate or fill the rest of its columns take,
+    /// where none of the window's furniture reaches into them — furniture is
+    /// left to the general blend, which keeps this a loop specialisation
+    /// rather than a second blend.
     #[must_use]
-    pub(crate) fn opaque_run(&self, x: i32, limit: i32) -> Option<&[Pixel]> {
+    pub(crate) fn opaque_run(&self, x: i32, limit: i32) -> Option<OpaqueRun<'a>> {
         if self.opacity != u8::MAX || self.cut.is_some() {
             return None;
         }
         let start = usize::try_from(x.checked_sub(self.client_x)?).ok()?;
-        // A client column past the drawable extent contributes nothing at
-        // all, so the run stops where the gutter or a short buffer does.
-        let drawable = usize::try_from(self.client_cols)
-            .unwrap_or(usize::MAX)
-            .min(self.content.len());
-        let end = usize::try_from(limit.checked_sub(self.client_x)?)
-            .ok()?
-            .min(drawable);
-        let span = self.content.get(start..end)?;
-        span.get(..tairix_raster::leading_opaque(span))
-            .filter(|run| !run.is_empty())
+        let end = usize::try_from(limit.checked_sub(self.client_x)?).ok()?;
+        let cols = usize::try_from(self.client_cols).unwrap_or(usize::MAX);
+        let drawable = cols.min(self.content.len());
+        if start < drawable {
+            let span = self.content.get(start..end.min(drawable))?;
+            return span
+                .get(..tairix_raster::leading_opaque(span))
+                .filter(|run| !run.is_empty())
+                .map(OpaqueRun::Pixels);
+        }
+        let colour = self.backdrop.filter(|colour| colour.a == u8::MAX)?;
+        if self
+            .decoration
+            .iter()
+            .any(|span| self.overlaps_client(span))
+        {
+            return None;
+        }
+        let len = end.min(cols).checked_sub(start).filter(|&len| len > 0)?;
+        Some(OpaqueRun::Fill(colour, len))
+    }
+}
+
+/// A run of a row that replaces everything beneath it exactly
+/// ([`WindowRow::opaque_run`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OpaqueRun<'a> {
+    /// The client's own opaque pixels, copied.
+    Pixels(&'a [Pixel]),
+    /// Columns of one opaque colour: the plate or fill the client's pixels
+    /// stop short of, laid as a fill.
+    Fill(Pixel, usize),
+}
+
+impl OpaqueRun<'_> {
+    /// How many columns it lays.
+    #[must_use]
+    pub(crate) const fn len(&self) -> usize {
+        match self {
+            Self::Pixels(run) => run.len(),
+            Self::Fill(_, len) => *len,
+        }
+    }
+
+    /// The run cut to no more than `cols` columns.
+    #[must_use]
+    pub(crate) fn within(self, cols: usize) -> Self {
+        match self {
+            Self::Pixels(run) => Self::Pixels(run.get(..cols).unwrap_or(run)),
+            Self::Fill(colour, len) => Self::Fill(colour, len.min(cols)),
+        }
     }
 }
 

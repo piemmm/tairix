@@ -589,7 +589,7 @@ where
             }
             // An output coming up that cannot show the stack shows black, and
             // the presenter's next stack is built for it with the others.
-            Shows::Frames if !self.stack.is_empty() => {
+            Shows::Frames => {
                 if let Ok((built, index)) = self
                     .build_stack(at, timing)
                     .and_then(|built| Ok((built, self.free_slot(at)?)))
@@ -1593,7 +1593,7 @@ where
             return Err(DriverError::Stale);
         }
         let caps = self.accel_caps();
-        if layers.is_empty() || layers.len() > caps.max_layers as usize {
+        if layers.len() > caps.max_layers as usize {
             return Err(DriverError::LengthOutOfRange);
         }
         let mut stack = ArrayVec::new();

@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 use crate::color::Color;
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect};
-use crate::tests::{mode, new_compositor, opaque, solid_cursor, MockDisplay};
-use crate::{Compositor, FrameStats, WindowId};
+use crate::tests::{decorated, mode, new_compositor, opaque, solid_cursor, MockDisplay};
+use crate::{Compositor, FrameStats, WindowFrame, WindowId};
 use tairix_abi::sysinfo::DesktopFrameTotals;
 
 /// A 64×48 compositor over a near-black root fill: small enough that a whole
@@ -276,6 +276,56 @@ fn a_covered_window_contributes_no_blending() {
     add(&mut comp, 0, 0, 64, 48, Color::rgb(5, 5, 5));
     first_frame(&mut comp);
     assert_eq!(comp.frame_stats().blended_px, 0);
+}
+
+#[test]
+fn a_solid_window_composes_identically() {
+    assert_run_path_is_exact("solid", |comp| {
+        add(comp, 0, 0, 64, 48, Color::rgb(200, 30, 30));
+        comp.add_solid_window(Point::new(4, 6), (40, 30), Color::rgb(10, 20, 30));
+    });
+    assert_run_path_is_exact("solid under a translucent window", |comp| {
+        comp.add_solid_window(Point::ORIGIN, (64, 48), Color::rgb(10, 20, 30));
+        let over = add(comp, 8, 8, 30, 20, Color::rgb(0, 200, 0));
+        comp.set_opacity(over, 120);
+    });
+    assert_run_path_is_exact("translucent solid", |comp| {
+        add(comp, 0, 0, 64, 48, Color::rgb(200, 30, 30));
+        comp.add_solid_window(Point::new(4, 6), (40, 30), Color::rgba(10, 20, 30, 100));
+    });
+}
+
+/// The plate a framed client's pixels stop short of is laid as a fill where no
+/// furniture reaches into it, onto the bytes the general blend gives.
+#[test]
+fn a_plate_past_a_short_client_composes_identically() {
+    assert_run_path_is_exact("plate", |comp| {
+        add(comp, 0, 0, 64, 48, Color::rgb(30, 90, 30));
+        let id = add(comp, 6, 4, 20, 12, Color::rgb(200, 30, 30));
+        assert!(comp.set_window_frame(id, WindowFrame::new(decorated())));
+        assert!(comp.resize_window_client(id, 40, 26));
+    });
+}
+
+/// A solid window over the whole screen is one fill a row, and nothing beneath
+/// it is blended or copied.
+#[test]
+fn a_full_screen_solid_window_fills_and_blends_nothing_beneath_itself() {
+    let mut comp = compositor();
+    comp.set_desktop(opaque(64, 48, Color::rgb(60, 40, 20)));
+    add(&mut comp, 10, 10, 20, 20, Color::rgb(200, 0, 0));
+    comp.add_solid_window(Point::ORIGIN, (64, 48), Color::BLACK);
+    first_frame(&mut comp);
+    let stats = comp.frame_stats();
+    assert_eq!(stats.damaged_px, 64 * 48);
+    assert_eq!(stats.opaque_px, stats.damaged_px, "{stats:?}");
+    assert_eq!(stats.blended_px, 0, "{stats:?}");
+    assert!(comp
+        .frame()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| *pixel == [0, 0, 0, 255]));
 }
 
 #[test]

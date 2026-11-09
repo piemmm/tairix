@@ -792,6 +792,58 @@ fn an_output_coming_up_to_a_stack_whose_buffer_is_gone_shows_black() {
     assert_eq!(rig.model.read(None, hvs::displist(0)), black);
 }
 
+/// The list `channel` latches next: a stack of the pointer's plane alone, over
+/// a background filled black.
+fn assert_pointer_alone_over_black(rig: &Rig, channel: usize) {
+    let listed = rig.model.read(None, hvs::displist(channel)) as usize;
+    assert_ne!(
+        listed,
+        slot(channel, List::Black),
+        "a stack, which has the pointer"
+    );
+    assert_ne!(
+        rig.model.list_word(listed) & (1 << 30),
+        0,
+        "the pointer's plane first"
+    );
+    assert_eq!(
+        rig.model.list_word(listed + plane_len(rig, listed)),
+        1 << 31,
+        "then the end"
+    );
+    let background = rig.model.read(None, hvs::dispbkgnd(channel));
+    assert_ne!(background & hvs::DISPBKGND_FILL, 0, "filled");
+    assert_eq!(background & hvs::DISPBKGND_COLOUR, 0, "black");
+}
+
+#[test]
+fn no_layer_shows_the_pointer_alone_over_the_black_background() {
+    let rig = Rig::new();
+    let mut engine = rig.open().expect("opened");
+    let mode = engine.output().expect("an output");
+    let frame = filled(&rig, &mut engine, &mode, 1);
+    engine
+        .present(frame.id, &[DamageRect::full(&mode)])
+        .expect("queued");
+    rig.model.next_frame(0);
+    engine.service_events().expect("serviced");
+    assert_eq!(engine.present_layers(&[]), Ok(Presented::Queued));
+    assert_pointer_alone_over_black(&rig, 0);
+}
+
+/// An output coming up while no layer is shown is given the pointer over
+/// black as well, not the black list, which has no pointer.
+#[test]
+fn an_output_coming_up_to_no_layer_is_given_the_pointer_over_black() {
+    let rig = Rig::new();
+    let mut engine = rig.open().expect("opened");
+    assert_eq!(engine.set_power(DisplayPower::Off), Ok(()));
+    assert_eq!(engine.present_layers(&[]), Ok(Presented::Shown));
+    assert_eq!(engine.set_power(DisplayPower::On), Ok(()));
+    assert_eq!(rig.hdmi0.steps().last(), Some(&"enable"), "up, not failed");
+    assert_pointer_alone_over_black(&rig, 0);
+}
+
 /// A present writes only the stack slot neither the composited nor the
 /// pending list names, and waits while both are stack slots.
 #[test]

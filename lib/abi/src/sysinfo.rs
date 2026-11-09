@@ -5526,8 +5526,8 @@ pub struct DesktopFrameTotals {
     /// times and this can exceed `damaged_px` — that ratio is the overdraw
     /// reading.
     pub blended_px: u64,
-    /// Damaged pixels resolved by copying a fully opaque run instead,
-    /// skipping every layer beneath.
+    /// Damaged pixels resolved by laying a fully opaque run instead, copied
+    /// or filled, skipping every layer beneath.
     pub opaque_px: u64,
     /// Pixels rewritten by a *recomputed* backdrop frost. A frost served
     /// from the retained one is copied rather than blurred and counts

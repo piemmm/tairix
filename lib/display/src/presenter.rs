@@ -146,7 +146,8 @@ pub trait LayerPresenter {
     /// place, the one [`Presenter::present_drawn`] would — of which only its
     /// damage changed, laid beneath them as the whole output at the base's
     /// opacity. A base with nothing new names the frame on screen again, so
-    /// a change of its opacity alone moves no pixel.
+    /// a change of its opacity alone moves no pixel. Neither base nor layer
+    /// shows the engine's opaque black alone.
     ///
     /// Each layer's buffer is read until the next present is
     /// [`ready`](Presenter::ready), so a compositor bakes a changed layer

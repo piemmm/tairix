@@ -98,7 +98,7 @@ pub fn eps(drawing: &Drawing, glyphs: &dyn Glyphs) -> Result<Eps, DrawingError> 
         "%%LanguageLevel: 3\n%%DocumentData: Clean7Bit\n%%Pages: 1\n%%EndComments\n\
          %%BeginProlog\n%%EndProlog\n%%Page: 1 1\ngsave\n",
     ))?;
-    written(out.write_str(content.as_str()))?;
+    within_lines(&mut out, content.as_str())?;
     written(out.write_str("grestore\nshowpage\n%%Trailer\n%%EOF\n"))?;
     Ok(Eps {
         bytes: out.into_string().into_bytes(),
@@ -132,6 +132,26 @@ fn string_literal(out: &mut Text, text: &str, room: usize) -> Result<(), Drawing
         length += spelled.len();
     }
     written(out.write_char(')'))
+}
+
+/// `content` onto `out` with every line within the conventions, one past them
+/// broken between its tokens: the walk writes no string or comment a break
+/// could land inside, and no token longer than a line.
+fn within_lines(out: &mut Text, content: &str) -> Result<(), DrawingError> {
+    for line in content.split_inclusive('\n') {
+        let (body, ended) = line
+            .strip_suffix('\n')
+            .map_or((line, false), |body| (body, true));
+        if body.len() <= MAX_LINE {
+            written(out.write_str(line))?;
+            continue;
+        }
+        wrapped(out, body)?;
+        if ended {
+            written(out.write_char('\n'))?;
+        }
+    }
+    Ok(())
 }
 
 /// `text`, a run of tokens apart by spaces, written onto `out` in lines no
@@ -297,8 +317,7 @@ impl Sink for EpsSink {
         self.flattened |=
             opacity < 1.0 || gradient.stops.iter().any(|stop| stop.colour.a < u8::MAX);
         let shading = geometry.shading(gradient, Channel::Colour)?;
-        written(out.reserve(shading.len() + shading.len() / MAX_LINE + 8))?;
-        wrapped(out, shading.as_str())?;
+        written(out.write_str(shading.as_str()))?;
         written(out.write_str(" shfill\n"))
     }
 

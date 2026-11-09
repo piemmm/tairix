@@ -107,7 +107,7 @@ A driver whose hardware composites a stack of planes also implements
 | Method           | Purpose |
 |------------------|---------|
 | `accel_caps`     | `AccelCaps { max_layers, max_width_px, max_height_px, per_layer_opacity, hw_scaling, band_free_blend }` |
-| `present_layers` | show a bottom-first `AccelLayer` stack, as `present` answers |
+| `present_layers` | show a bottom-first `AccelLayer` stack over opaque black, as `present` answers; no layer shows the black alone |
 
 An `AccelLayer` names a buffer the driver allocated: the part of it shown
 (`src`), where it lands (`dst_x`, `dst_y`, which may be negative) and at what
@@ -144,7 +144,8 @@ caller that draws the frame in place, `set_power` — and, where the device has
 them, `LayerPresenter` (the caps, layer buffers it bakes into, and
 `present_layers` over the output frame as the bottom layer — a `Base` at an
 opacity of its own, its frame copied in, `BaseFrame::Copied`, or drawn in
-place, `BaseFrame::Drawn`) and `CursorPlane`.
+place, `BaseFrame::Drawn` — or over the engine's black where neither base nor
+layer is given) and `CursorPlane`.
 `RemoteDisplay` implements all three over `DISPLAY_ENDPOINT`:
 it maps the frames the driver granted at `Configure`, copies each present's
 damage into the frame the device does not read — or hands that frame to the
@@ -523,7 +524,8 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   display service grants it. A present writes each running channel a list
   naming the buffers — the output frame or one plane per layer, bottom first,
   cut where a layer runs off the surface and scaled by the HVS's filters, and
-  the pointer on a plane of its own above — into the stack slot the channel
+  the pointer on a plane of its own above, over the channel's background
+  filled black, which is all a stack of no layer shows — into the stack slot the channel
   neither composites nor latches next, and is `Busy` while no slot is free.
   Every running output's list is built before any is written: a stack one
   output cannot composite, its scaled layers outrunning that output's share of
@@ -533,8 +535,9 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
   presenter draws its next frame into the buffer no list names. An output
   brought down or switched off latches what it waited for at once, and a
   present the display service abandons at its deadline is withdrawn, leaving
-  the stack the outputs latched before it. An output coming up that cannot
-  show the stack shows black until the presenter's next one.
+  the stack the outputs latched before it. An output coming up is given the
+  stack standing, and one that cannot show it shows black until the
+  presenter's next one.
 - **The cursor plane.** A pointer image is copied into one of the engine's
   own, and the pointer's position, size and image words are rewritten in the
   lists the channels read, so moving the pointer presents nothing; a changed

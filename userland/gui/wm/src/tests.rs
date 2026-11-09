@@ -9579,6 +9579,27 @@ fn releasing_content_drops_the_retained_bytes_to_zero() {
 }
 
 #[test]
+fn a_window_made_solid_gives_back_its_pixels_and_shows_its_colour() {
+    let mut c = new_compositor(mode(64, 48), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(8, 8), opaque(20, 10, RED));
+    c.composite();
+    assert_eq!(c.content_bytes(), 20 * 10 * size_of::<Pixel>());
+    assert!(c.make_solid(id, GREEN));
+    assert_eq!(c.content_bytes(), 0, "a solid window holds no pixels");
+    c.composite();
+    assert!(c.make_solid(id, GREEN));
+    assert!(!c.has_damage(), "already solid in it: nothing repainted");
+    let back = c.back_buffer();
+    assert_eq!(back.get(8, 8), Some(GREEN.premultiply()));
+    assert_eq!(back.get(27, 17), Some(GREEN.premultiply()));
+    assert_eq!(
+        back.get(28, 8),
+        Some(BLUE.premultiply()),
+        "and nothing past it"
+    );
+}
+
+#[test]
 fn a_released_window_shows_its_own_plate_and_leaves_the_desktop_identical() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // A window whose pixels went back is still a window, so its client area

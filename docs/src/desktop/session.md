@@ -2266,9 +2266,15 @@ session that cannot verify a password never locks on its own, and a session
 another user's desktop has in the background neither covers nor sleeps a
 screen that is not its own.
 
-The screensaver (`saver::Screensaver`) is one full-screen surface, raised over
+The screensaver (`saver::Screensaver`) is one full-screen window, raised over
 everything before each composite, with the lock kept directly beneath it; an
-order that already stands restacks and repaints nothing. It hides the pointer:
+order that already stands restacks and repaints nothing. Black is a solid
+window (`Compositor::add_solid_window`) that holds no pixels, so covering a
+screen of any size allocates nothing: the software composite lays it as one
+fill a row, and a display with a layer engine is handed no layer at all and
+shows its own black ([the window manager](./wm.md)). The dimmed backdrop and a
+saver's frames are what give it a surface, and a saver that ends leaves it
+black again, holding none. It hides the pointer:
 the compositor keeps whether the cursor is shown apart from its artwork, so a
 cursor refresh cannot put the pointer back over the screensaver.
 
@@ -2394,9 +2400,11 @@ energy saving sleeps its display through too. A display
 that is off is presented nothing and arms no frame deadline: its damage waits
 for it to wake. A display that cannot switch itself off keeps the screensaver
 black and still instead, so the desktop spends nothing on it either way, and
-says so once a session; a refusal is stated each time it happens. A screensaver
-the heap would not give still switches the display off, which needs no memory.
-The first input switches it back on before the screensaver goes; a display
+says so once a session; a refusal is stated each time it happens. With no
+screensaver up the display is switched off all the same. A saver that drew
+straight into the display leaves the compositor owing the whole output when it
+ends, since the display shows a frame the compositor never presented. The
+first input switches it back on before the screensaver goes; a display
 that will not light keeps the screensaver up and dark, and the next input asks
 again. The power switch is a display-protocol request served by the same
 service, in turn, as the presents are, so it adds no wait of a new kind to the

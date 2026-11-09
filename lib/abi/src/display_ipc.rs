@@ -24,6 +24,8 @@
 //! an out-of-bounds count, an empty rectangle, a zero buffer id or a dirty
 //! reserved field refuses rather than guessing.
 
+use core::ops::RangeInclusive;
+
 use crate::driver::display::{
     AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayDeviceReport,
     DisplayFormat, DisplayMode, DisplayPower, OutputMode, Presented, RefreshRate, MAX_ACCEL_LAYERS,
@@ -68,28 +70,38 @@ pub const DISPLAY_MAX_BUFFERS: usize = DISPLAY_MAX_FRAMES as usize + 2 * MAX_ACC
 /// one fixed-width [`DisplayRequest`].
 pub const DISPLAY_MAX_REQUEST: usize = DisplayRequest::WIRE_LEN;
 
-/// The layers of one [`DisplayRequest::PresentLayers`]: one to
-/// [`MAX_ACCEL_LAYERS`], held inline so the request stays a plain value.
+/// The layers of one [`DisplayRequest::PresentLayers`]: none to
+/// [`MAX_ACCEL_LAYERS`], held inline so the request stays a plain value. None
+/// shows the engine's black alone.
 #[derive(Copy, Clone, Debug)]
 pub struct LayerList {
     layers: [AccelLayer; MAX_ACCEL_LAYERS],
     len: usize,
 }
 
+/// What a list's slots past its length hold, which nothing reads.
+const UNUSED_LAYER: AccelLayer = AccelLayer {
+    buffer: BufferId::MIN,
+    src: NO_RECT,
+    dst_x: 0,
+    dst_y: 0,
+    dst_width_px: 0,
+    dst_height_px: 0,
+    opacity: 0,
+};
+
 impl LayerList {
     /// The list of `layers`, bottom-most first.
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] for no layer or more than
-    /// [`MAX_ACCEL_LAYERS`].
+    /// [`Errno::LengthOutOfRange`] for more than [`MAX_ACCEL_LAYERS`].
     pub fn new(layers: &[AccelLayer]) -> Result<Self, Errno> {
-        let (&first, _) = layers.split_first().ok_or(Errno::LengthOutOfRange)?;
-        if layers.len() > MAX_ACCEL_LAYERS {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let mut slots = [first; MAX_ACCEL_LAYERS];
-        slots[..layers.len()].copy_from_slice(layers);
+        let mut slots = [UNUSED_LAYER; MAX_ACCEL_LAYERS];
+        slots
+            .get_mut(..layers.len())
+            .ok_or(Errno::LengthOutOfRange)?
+            .copy_from_slice(layers);
         Ok(Self {
             layers: slots,
             len: layers.len(),
@@ -466,7 +478,7 @@ fn decode_configure(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno>
 
 /// The body of a `Present`.
 fn decode_present(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
-    let count = bounded(read_u32(bytes, BODY_AT + 4), MAX_DAMAGE_RECTS)?;
+    let count = bounded(read_u32(bytes, BODY_AT + 4), 1..=MAX_DAMAGE_RECTS)?;
     // Slots past the live count are reserved: a rectangle smuggled behind the
     // count is refused, never ignored.
     reserved_zero(bytes, PRESENT_RECTS_AT + count * DAMAGE_RECT_LEN)?;
@@ -484,13 +496,13 @@ fn decode_present(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
 
 /// The body of a `PresentLayers`.
 fn decode_layers(bytes: &[u8], seat_id: u64) -> Result<DisplayRequest, Errno> {
-    let count = bounded(read_u32(bytes, BODY_AT), MAX_ACCEL_LAYERS)?;
+    let count = bounded(read_u32(bytes, BODY_AT), 0..=MAX_ACCEL_LAYERS)?;
     if read_u32(bytes, BODY_AT + 4) != 0 {
         return Err(Errno::BadMagic);
     }
     reserved_zero(bytes, LAYERS_AT + count * LAYER_LEN)?;
-    let mut layers = [read_layer(bytes, LAYERS_AT)?; MAX_ACCEL_LAYERS];
-    for (index, slot) in layers.iter_mut().enumerate().take(count).skip(1) {
+    let mut layers = [UNUSED_LAYER; MAX_ACCEL_LAYERS];
+    for (index, slot) in layers.iter_mut().enumerate().take(count) {
         *slot = read_layer(bytes, LAYERS_AT + index * LAYER_LEN)?;
     }
     Ok(DisplayRequest::PresentLayers {
@@ -504,11 +516,11 @@ fn wire_count(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }
 
-/// `count` as a list length: one to `max`.
-fn bounded(count: u32, max: usize) -> Result<usize, Errno> {
+/// `count` as a list length within `allowed`.
+fn bounded(count: u32, allowed: RangeInclusive<usize>) -> Result<usize, Errno> {
     usize::try_from(count)
         .ok()
-        .filter(|count| (1..=max).contains(count))
+        .filter(|count| allowed.contains(count))
         .ok_or(Errno::LengthOutOfRange)
 }
 
@@ -805,7 +817,7 @@ pub fn decode_configure_reply(bytes: &[u8]) -> Result<ConfiguredFrames, Errno> {
         return Err(Errno::BufferTooSmall);
     }
     crate::reply::decode_status_reply(&bytes[..4])?;
-    let count = bounded(read_u32(bytes, 4), DISPLAY_MAX_FRAMES as usize)?;
+    let count = bounded(read_u32(bytes, 4), 1..=DISPLAY_MAX_FRAMES as usize)?;
     let stride_bytes = read_u32(bytes, 8);
     if stride_bytes == 0 {
         return Err(Errno::LengthOutOfRange);

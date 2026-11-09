@@ -382,7 +382,8 @@ or nothing, never the outgoing presenter's last frame.
 
 `AcceleratedDisplay` composites a stack of layers in hardware:
 `accel_caps()` bounds each stack (`AccelCaps`), and `present_layers(layers)`
-shows one — refused `LengthOutOfRange` or `Unsupported` past the caps, and
+shows one over opaque black, an empty one the black alone with the cursor
+plane over it — refused `LengthOutOfRange` or `Unsupported` past the caps, and
 `OutOfRange` for a stack within them an output cannot composite at once, with
 nothing on screen moved. `HardwareCursor` draws the pointer on a cursor plane:
 `cursor_caps()`, `set_cursor(id, hot_x, hot_y)`, `move_cursor(x, y)` and

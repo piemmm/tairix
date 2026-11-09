@@ -50,6 +50,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD9 | A frost layer is its window's field, cropped by the engine: a drag writes display memory only at the corners | done |
 | GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | done |
 | GD5 | The screen fade as a lone layer's opacity | done |
+| GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, agreeing with `lib/raster` within a stated tolerance | blocked: GP4 |
 | GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3, GP11 |
 
@@ -73,7 +74,7 @@ proceed past a milestone whose criterion is unmet.
 | **MG3 — untrusted shaders** | GP8 | A shader module supplied at run time by an unprivileged process is compiled in a sandbox, admitted, executed, and cannot read another context's memory; a malicious module is refused or contained, and the fuzz corpus is clean. |
 | **MG4 — native silicon** | GP9 | The Pi's V3D executes the pinned set from TAIRiX-generated ISA, conformant against the software reference. |
 | **MG5 — a ported game runs** | GP10 | A third-party application, built against the published surface and linking no TAIRiX source, renders and presents. |
-| **MD — the display engine carries the desktop** | GD1–GD5, GD8, GD9 | A frosted window's drag blurs nothing inside its field and writes into display memory only its corners and the strip it uncovered; every translucent window that reads no backdrop moves as a layer; what the HVS states of its blend is what its metal comparison showed. |
+| **MD — the display engine carries the desktop** | GD1–GD5, GD8–GD10 | A frosted window's drag blurs nothing inside its field and writes into display memory only its corners and the strip it uncovered; every translucent window that reads no backdrop moves as a layer; what the HVS states of its blend is what its metal comparison showed. |
 
 MG2 is the milestone that proves or kills the strategy: it is the first point at
 which arbitrary shader code runs on a real GPU, and it is reachable **without
@@ -947,6 +948,26 @@ with it because a fade takes the pointer off the cursor plane into the frame.
   frame of its own only when the base was opaque; at an opacity, the refusal
   may be of the opacity, which ends the stack instead.
 
+**GD10 — black as no layer.** A solid window holds no pixels, only a colour,
+so covering the screen in it costs no memory and composes as one fill a row.
+Where the topmost window is solid opaque black over the whole screen, unshaped,
+undecorated, with nothing of the pointer drawn over it, the layered present
+hands the engine no base and no layer: an empty stack shows the engine's own
+background, opaque black, which is part of every engine's contract. It needs no
+layer room, scaling or opacity, so it is taken on any engine, ahead of the fade
+and the scaled desktop, whose black it equals.
+- **Everything beneath is held.** Every layer is given back and the base's
+  damage is held exactly as beneath a promoted window, and replayed when the
+  black goes.
+- **An unchanged stack presents once.** While a hidden-base stack — the black
+  or a promoted window — stands unchanged at the same reveal, a frame whose only
+  changes are beneath it presents nothing. A sink that has seen none of it, a
+  new one or a display another presenter drew into, is owed it again
+  (`owe_output`).
+- **The pointer's plane stands.** On the HVS an empty stack is the pointer's
+  plane alone over the channel's background, so a hardware pointer stays over
+  the black; an output coming up while it stands is given it.
+
 **GD6 — the desktop's passes on a GPU.** The box blur's passes, the dithered
 premultiplied *over*, copy, fill and the channel-order encode join GP4's pinned
 set. They need not be bit-identical to `lib/raster`: they agree with it within a
@@ -1045,6 +1066,13 @@ Each needs sign-off before the item that depends on it; none is assumed.
 - **GD5**: a fade presents no pixel after its first step on an engine with
   per-layer opacity, and each step's screen matches the software reveal within
   one level.
+- **GD10**: a solid black cover presents an empty stack, gives every layer
+  back and holds what changes beneath it, presenting nothing more until it goes
+  or a sink is owed it; any other colour, a short or translucent cover, a
+  window above it or a pointer drawn over it is not blank; a solid window
+  composes what the general blend does and fills over everything beneath it;
+  the display ABI carries an empty stack and the HVS shows it as the pointer
+  over black, to an output coming up too.
 - **GP1**: binds by discovery-match under `devmgr` on aarch64 `virt`, riscv64
   `virt` and x86_64 q35; resource create/transfer/flush/flip; flip completion
   parks on the interrupt; the display seam drives it end to end.

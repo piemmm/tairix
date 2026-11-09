@@ -17,7 +17,9 @@ The compositor turns a stack of windows into one scan-out frame:
    memory pressure (see [Releasable window content](#releasable-window-content));
    a window whose pixels have gone keeps every other property and shows its
    own plate (see [The client plate](#the-client-plate)) until its app
-   presents again.
+   presents again. A **solid** window (`add_solid_window`, `make_solid`)
+   holds no buffer at all: its client area shows one colour, so covering the
+   screen in it costs nothing to hold and one fill a row to compose.
 2. `Compositor::composite` walks the damaged screen regions and, for
    every dirty pixel, blends each covering window *over* the opaque
    background, bottom-to-top in z-order, using the Porter–Duff *over*
@@ -25,7 +27,9 @@ The compositor turns a stack of windows into one scan-out frame:
    recomposited (screen-clipped), which is what the present step moves.
    Each blend rounds at that pixel's own share of the shared ordered
    dither (see [Dithered blending](#dithered-blending)); an opaque run is
-   copied rather than blended and pays nothing for it.
+   copied rather than blended and pays nothing for it, and an opaque solid
+   colour or plate past a client's pixels is laid as a fill, where none of the
+   window's furniture reaches into it.
 3. Each composited pixel is scaled by the screen reveal (see
    [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
    for the active `DisplayMode` (`Rgba8888` or `Bgra8888`): the display's own
@@ -279,10 +283,10 @@ desktop layer's owner rather than swallowed: see *Input routing*, below.
 
 The compositor presents through `tairix_display::Presenter`, never a driver
 trait. Where the display reports a layer engine (`Presenter::layers`, at least
-two layers, and hardware scaling if the desktop is scaled), and while a screen
-reveal runs one that lays a layer at an opacity of its own (see
-[Screen reveal](#screen-reveal)), `Compositor::present` takes the layered
-path; otherwise, and whenever no stack is taken, it composites the frame in
+two layers, and hardware scaling if the desktop is scaled; any engine at all
+for the black below), and while a screen reveal runs one that lays a layer at
+an opacity of its own (see [Screen reveal](#screen-reveal)),
+`Compositor::present` takes the layered path; otherwise, and whenever no stack is taken, it composites the frame in
 software and presents its damage, so a hardware frame is never partial.
 
 A layered present shows a **base** — the output frame, holding the desktop
@@ -343,6 +347,16 @@ frame at a new size is held back until what the client presented covers it.
 Only a fullscreen window's content is read for that, as it changes. A
 desktop composed smaller than its output is presented as one desktop-sized
 layer the engine scales onto it.
+
+A **solid black window over the whole screen**, with nothing of the pointer
+drawn over it, is what the engine shows with **no layer at all**: its own
+background, opaque black, so the screen goes black without a pixel written,
+baked or held, at any scale or reveal (`Presentation::Blanked`). Every layer
+is given back, the base's damage is kept as for a promoted window, and the
+pointer's plane, which needs no layer, stays where it is. While a promoted
+window or the black stands unchanged, a change beneath it presents nothing; a
+sink that has seen none of it — a new one, or a display another presenter
+drew into (`owe_output`) — is shown it again.
 
 A refusal shrinks the stack rather than failing the frame. A window the
 display cannot give buffers, or the lowest window on a layer of a stack the
@@ -1235,7 +1249,7 @@ wrapped one would read as a suspiciously small frame.
 |---|---|
 | `damaged_px` | Screen pixels inside the frame's dirty rectangles, after screen clipping and after any blurred window whose frost had to be recomputed widened the damage it touched. The size of the job — the denominator for everything else. |
 | `blended_px` | Layer contributions blended through *over*. Contributions, not screen positions: a pixel two windows both draw at is one damaged pixel and two blends, so this may legitimately exceed the damage — and that ratio is what says whether the frame paid for depth nobody can see. |
-| `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
+| `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels, or by filling one of its solid colour or plate. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
 | `blur_px` | Pixels rewritten by a *recomputed* backdrop frost. A frost served from the retained one is copied rather than blurred and counts nothing here, so this is exactly the blur work the frame could not avoid — and zero is what a repaint inside a frosted window should read. |
 | `encoded_px` | Damaged pixels converted to scan-out bytes. What a frame the display drew in missed while another was shown, caught up from the back buffer, is upkeep rather than the frame's work and is not counted, so this never exceeds the damage. |
 | `dirty_rects` | Dirty rectangles the frame redrew, whether by recomposing them or by encoding them afresh from the back buffer (a fade step). |

@@ -395,7 +395,7 @@ impl FeedPicture<'_> {
 
 /// The ground every scene draws on: the black a saver's picture starts as and
 /// the host's screen shows until the first frame.
-pub const GROUND: Color = Color::rgb(0, 0, 0);
+pub const GROUND: Color = Color::BLACK;
 
 /// The side of the tiles a scene tracks a scattered change in, covered by at
 /// most [`SAVER_DAMAGE_RECTS`](tairix_abi::saver_ipc::SAVER_DAMAGE_RECTS) of

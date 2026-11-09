@@ -12,7 +12,7 @@ use crate::drawing::{Drawing, Grid, Page, Unit};
 use crate::id::Ids;
 use crate::node::{Kind, Node};
 use crate::shape::{RectShape, Shape};
-use crate::style::{Paint, Style};
+use crate::style::{Paint, Stroke, Style};
 use crate::testing::OnlyA;
 use crate::vector::tests::sample;
 use crate::SharedSlice;
@@ -356,4 +356,74 @@ fn a_partly_shown_pixel_is_written_shown_or_not_and_said_to_be() {
     )
     .expect("a drawing");
     assert!(eps(&drawing, &OnlyA).expect("written").flattened);
+}
+
+/// A stroke dashed as long as a pattern may be still writes every line within
+/// the conventions, its pattern whole and in order.
+#[test]
+fn the_longest_dash_pattern_keeps_every_line_within_the_conventions() {
+    let dashes: alloc::vec::Vec<f64> = (0..crate::limits::MAX_DASH_ENTRIES)
+        .map(|at| 123_456_789.125 + f64::from(u32::try_from(at).expect("few")))
+        .collect();
+    let mut ids = Ids::new();
+    let rect = Node::new(
+        ids.issue(),
+        Kind::Shape {
+            shape: Shape::Rect(RectShape {
+                x: 10.0,
+                y: 10.0,
+                width: 20.0,
+                height: 20.0,
+                rx: 0.0,
+                ry: 0.0,
+            }),
+            style: Arc::new(Style {
+                stroke: Stroke {
+                    paint: Paint::Colour(Rgba::new(0, 0, 0, 255)),
+                    dashes: SharedSlice::try_from_slice(&dashes).expect("held"),
+                    ..Stroke::default()
+                },
+                ..Style::default()
+            }),
+        },
+    )
+    .expect("a rectangle");
+    let layer = Node::new(
+        ids.issue(),
+        Kind::Group {
+            children: Children::from_nodes(vec![Arc::new(rect)]).expect("held"),
+            clip: None,
+        },
+    )
+    .expect("a layer");
+    let drawing = Drawing::new(
+        Page {
+            width: 1.0,
+            height: 1.0,
+            unit: Unit::In,
+            background: None,
+        },
+        Children::from_nodes(vec![Arc::new(layer)]).expect("held"),
+        SharedSlice::new(),
+        Grid::default(),
+    )
+    .expect("a drawing");
+    let text = String::from_utf8(eps(&drawing, &OnlyA).expect("written").bytes).expect("ascii");
+    let longest = text.lines().map(str::len).max().unwrap_or(0);
+    assert!(longest <= MAX_LINE, "a line of {longest} characters");
+    let tokens: alloc::vec::Vec<&str> = text.split_whitespace().collect();
+    let open = tokens
+        .iter()
+        .position(|&token| token == "[")
+        .expect("a pattern");
+    let pattern: alloc::vec::Vec<&str> = tokens[open + 1..]
+        .iter()
+        .take_while(|&&token| token != "]")
+        .copied()
+        .collect();
+    let expected: alloc::vec::Vec<String> = dashes
+        .iter()
+        .map(|dash| alloc::format!("{}", crate::vector::Real(*dash)))
+        .collect();
+    assert_eq!(pattern, expected, "the pattern whole and in order");
 }

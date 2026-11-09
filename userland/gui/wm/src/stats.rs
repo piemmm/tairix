@@ -44,9 +44,10 @@ pub struct FrameStats {
     /// per-pixel cost the desktop actually pays.
     pub blended_px: u64,
     /// Screen pixels resolved by copying a fully opaque run of the front
-    /// window's own pixels. Each cost no blend at all, and everything beneath
-    /// it — the windows below, the desktop layer, the root fill — was skipped,
-    /// which is why `blended_px` falls as this rises.
+    /// window's own pixels, or filling one of its solid colour or plate. Each
+    /// cost no blend at all, and everything beneath it — the windows below,
+    /// the desktop layer, the root fill — was skipped, which is why
+    /// `blended_px` falls as this rises.
     pub opaque_px: u64,
     /// Pixels rewritten by a *recomputed* backdrop frost. A frost served from
     /// the retained one is copied rather than blurred and counts nothing here,

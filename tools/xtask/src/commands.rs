@@ -48,7 +48,6 @@ mod netpeer;
 pub(crate) mod parallel;
 mod pie_build;
 mod proptest;
-mod prune;
 mod qemu_tests;
 mod rngsoak;
 mod sbom;
@@ -69,7 +68,6 @@ mod wasm_tests;
 pub enum Command {
     Build,
     Clean,
-    Prune,
     Keys,
     Test,
     Clippy,
@@ -116,7 +114,6 @@ impl Command {
     pub const ALL: &'static [Command] = &[
         Command::Build,
         Command::Clean,
-        Command::Prune,
         Command::Keys,
         Command::Test,
         Command::Clippy,
@@ -162,7 +159,6 @@ impl Command {
         Some(match name {
             "build" => Command::Build,
             "clean" => Command::Clean,
-            "prune" => Command::Prune,
             "keys" => Command::Keys,
             "test" => Command::Test,
             "clippy" => Command::Clippy,
@@ -210,7 +206,6 @@ impl Command {
         match self {
             Command::Build => "build",
             Command::Clean => "clean",
-            Command::Prune => "prune",
             Command::Keys => "keys",
             Command::Test => "test",
             Command::Clippy => "clippy",
@@ -258,9 +253,6 @@ impl Command {
             Command::Build => "Compile every workspace crate for the host target.",
             Command::Clean => "Delete cargo build artefacts to reclaim target/ disk space.",
             Command::Keys => "Create the build's secret signing key set (`keys init`).",
-            Command::Prune => {
-                "Remove superseded build-script output to reclaim target/ disk space."
-            }
             Command::Test => "Run host-side unit and integration tests.",
             Command::Clippy => {
                 "Run clippy with warnings denied, for the host and every Tier-1 target."
@@ -351,7 +343,6 @@ impl Command {
         match self {
             Command::Build => run_build(ctx, args),
             Command::Clean => run_clean(ctx, args),
-            Command::Prune => prune::run(ctx, args),
             Command::Keys => keys::run(ctx, args),
             Command::Test => run_test(ctx, args),
             Command::Clippy => run_clippy(ctx, args),
@@ -408,11 +399,6 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     {
         return run_image(ctx, args);
     }
-
-    // Reclaim the superseded build-script output trees an earlier build left
-    // behind before compiling again, so `target/` does not grow without
-    // bound across a normal edit/build loop (see `prune`).
-    prune_before_build(ctx);
 
     // `--headless` builds the first-class headless configuration required
     // by: every `userland/gui/*` crate is excluded
@@ -494,29 +480,6 @@ fn run_clean(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         relative(&ctx.workspace_root, &target_dir),
     );
     Ok(())
-}
-
-/// Reclaim superseded build-script output before a build, reporting only
-/// when something was freed.
-///
-/// Run as the first step of every workspace/image build (`prune` documents
-/// why the trees accumulate). Pruning regenerable cache must never block the
-/// build it precedes, so this is best-effort and silent when there is
-/// nothing to reclaim — it never returns an error.
-fn prune_before_build(ctx: &Context) {
-    let reclaimed = prune::prune(ctx);
-    if reclaimed.dirs > 0 {
-        noteln!(
-            "xtask: [prune] reclaimed {} of superseded build-script output ({} {})",
-            format_bytes(reclaimed.bytes),
-            reclaimed.dirs,
-            if reclaimed.dirs == 1 {
-                "directory"
-            } else {
-                "directories"
-            },
-        );
-    }
 }
 
 /// Total size in bytes of every regular file at or below `path`.
@@ -2352,11 +2315,6 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     } = args;
     let profile = kind.profile();
 
-    // Reclaim the superseded build-script output an earlier kernel build left
-    // behind before rebuilding it; the kernel build script's embedded-program
-    // trees are the bulk of what accumulates (see `prune`).
-    prune_before_build(ctx);
-
     // 1. Build the freestanding aarch64 production kernel (PI.md P1) in
     //    the Cargo profile that matches the image profile (see
     //    `kernel_build_profile`): the `debug` image gets a
@@ -3137,21 +3095,6 @@ mod tests {
     #[test]
     fn docs_rustdoc_does_not_multiply_cargo_parallelism() {
         assert_eq!(DOCS_RUSTDOCFLAGS, "-D warnings");
-    }
-
-    /// `prune` is a first-class, parseable subcommand listed in the closed
-    /// command set, so `cargo xtask prune` reaches the pre-build cleanup and
-    /// the generated `--help`/usage lists it.
-    #[test]
-    fn prune_is_a_registered_subcommand() {
-        assert!(
-            matches!(Command::parse("prune"), Some(Command::Prune)),
-            "`prune` must parse to the Prune subcommand"
-        );
-        assert!(
-            Command::ALL.iter().any(|c| c.name() == "prune"),
-            "`prune` must appear in the closed command set"
-        );
     }
 
     /// `dir_size` sums regular files recursively and treats an absent

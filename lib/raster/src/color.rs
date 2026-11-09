@@ -97,6 +97,9 @@ impl Color {
         a: 0,
     };
 
+    /// Opaque black.
+    pub const BLACK: Self = Self::rgb(0, 0, 0);
+
     /// Construct an opaque colour.
     #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {

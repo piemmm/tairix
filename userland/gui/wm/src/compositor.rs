@@ -60,7 +60,8 @@ use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
-    Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow, WindowShape,
+    OpaqueRun, Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow,
+    WindowShape,
 };
 
 #[path = "layers.rs"]
@@ -160,6 +161,9 @@ pub enum Presentation {
     /// Handed to the layer engine as the scene's one layer: this window,
     /// which covers the scan-out.
     Promoted(WindowId),
+    /// Handed to the layer engine as no layer at all: its own black, which
+    /// this solid window shows across the scan-out.
+    Blanked(WindowId),
 }
 
 impl Presentation {
@@ -170,6 +174,7 @@ impl Presentation {
             Self::Composited => "composited",
             Self::Layered => "layered",
             Self::Promoted(_) => "promoted",
+            Self::Blanked(_) => "blanked",
         }
     }
 }
@@ -701,6 +706,7 @@ impl Compositor {
         self.undelivered.add(self.output_rect());
         // The new sink may hold frames of its own to draw into.
         self.refused.drawn = false;
+        self.unpresent_layers();
     }
 
     /// The whole-screen rectangle: the desktop as windows, the pointer and
@@ -1713,6 +1719,27 @@ impl Compositor {
     /// identifier. The new window's bounds are marked dirty.
     pub fn add_window(&mut self, origin: Point, surface: Surface) -> WindowId {
         self.push(|id| Window::new(id, origin, surface))
+    }
+
+    /// Add a solid window of `size` at `origin`, top-most, showing `colour`
+    /// across it and holding no pixels, returning its identifier: a cover of
+    /// the whole screen costs a fill, or nothing where the display shows the
+    /// colour by itself. The new window's bounds are marked dirty.
+    pub fn add_solid_window(&mut self, origin: Point, size: (u32, u32), colour: Color) -> WindowId {
+        let colour = colour.premultiply();
+        self.push(|id| Window::solid(id, origin, size, colour))
+    }
+
+    /// Show `colour` across window `id` in place of its pixels, which are
+    /// overwritten and given back; one already solid in `colour` repaints
+    /// nothing. Returns `false` for an unknown id.
+    pub fn make_solid(&mut self, id: WindowId, colour: Color) -> bool {
+        let colour = colour.premultiply();
+        self.mutate(id, |window| {
+            let changed = window.solid_colour() != Some(colour);
+            let _wiped = window.make_solid(colour);
+            changed
+        })
     }
 
     /// Add the top-most window a client is *about* to present into: client
@@ -4329,13 +4356,14 @@ impl Compositor {
 
     /// Whether the frame now on the display was produced from `id`'s pixels:
     /// a visible window of a composited or layered frame, or the one window
-    /// a promoted frame is. Nothing is on the display before a frame reached
-    /// it, and a promoted frame carries no window but its own.
+    /// a promoted or blanked frame is. Nothing is on the display before a
+    /// frame reached it, and a promoted or blanked frame carries no window
+    /// but its own.
     #[must_use]
     pub fn on_display(&self, id: WindowId) -> bool {
         match self.presented {
             None => false,
-            Some(Presentation::Promoted(cover)) => cover == id,
+            Some(Presentation::Promoted(cover) | Presentation::Blanked(cover)) => cover == id,
             Some(Presentation::Composited | Presentation::Layered) => {
                 self.window(id).is_some_and(Window::is_visible)
             }
@@ -5521,6 +5549,27 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
     }
 }
 
+/// Lay `run` into `dst`, which holds exactly its columns.
+fn lay_opaque(run: OpaqueRun<'_>, dst: &mut [Pixel]) {
+    match run {
+        OpaqueRun::Pixels(src) => {
+            if let Some(src) = src.get(..dst.len()) {
+                dst.copy_from_slice(src);
+            }
+        }
+        OpaqueRun::Fill(colour, _) => dst.fill(colour),
+    }
+}
+
+/// Encode `run` into the frame bytes `out` in `order`, answering the whole
+/// pixels written.
+fn encode_opaque(order: ChannelOrder, run: OpaqueRun<'_>, out: &mut [u8]) -> usize {
+    match run {
+        OpaqueRun::Pixels(pixels) => order.encode_run(pixels, out),
+        OpaqueRun::Fill(colour, len) => order.encode_fill(colour, len, out),
+    }
+}
+
 /// What composing one row cost.
 struct RowWork {
     /// Layer contributions blended.
@@ -5559,7 +5608,7 @@ fn compose_row(
         if let Some(run) = layers
             .front
             .and_then(|row| row.opaque_run(x, limit))
-            .and_then(|run| run.get(..run.len().min(cols - col)))
+            .map(|run| run.within(cols - col))
         {
             let len = if layers.overlays.is_empty() {
                 // The frame slice is exactly four bytes per pixel of the run,
@@ -5568,15 +5617,15 @@ fn compose_row(
                 let len = match frame.as_deref_mut() {
                     Some(bytes) => bytes
                         .get_mut(col * 4..(col + run.len()) * 4)
-                        .map_or(0, |bytes| order.encode_run(run, bytes)),
+                        .map_or(0, |bytes| encode_opaque(order, run, bytes)),
                     None => run.len(),
                 };
-                if let (Some(dst), Some(src)) = (back.get_mut(col..col + len), run.get(..len)) {
-                    dst.copy_from_slice(src);
+                if let Some(dst) = back.get_mut(col..col + len) {
+                    lay_opaque(run.within(len), dst);
                 }
                 len
             } else {
-                // A shadow is cast over the run, so it is copied, darkened, and
+                // A shadow is cast over the run, so it is laid, darkened, and
                 // encoded from what that leaves. Nothing is written unless the
                 // frame holds the run's bytes, so a run that cannot be encoded
                 // falls through to the general path untouched.
@@ -5585,7 +5634,7 @@ fn compose_row(
                     .is_none_or(|bytes| bytes.len() >= (col + run.len()) * 4);
                 match back.get_mut(col..col + run.len()).filter(|_| encodable) {
                     Some(dst) => {
-                        dst.copy_from_slice(run);
+                        lay_opaque(run, dst);
                         for overlay in layers.overlays {
                             work.blended = work
                                 .blended

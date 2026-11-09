@@ -120,6 +120,7 @@ fn requests_round_trip() {
             seat_id: 3,
             buffer: id(9),
         },
+        sample_layers(0),
         sample_layers(1),
         sample_layers(MAX_ACCEL_LAYERS),
         DisplayRequest::SetCursor {
@@ -310,6 +311,8 @@ fn decode_refuses_dirty_reserved_tails() {
             },
             BODY_AT + 4,
         ),
+        (sample_layers(0), BODY_AT + 4),
+        (sample_layers(0), LAYERS_AT),
         (sample_layers(1), BODY_AT + 4),
         (sample_layers(1), LAYERS_AT + LAYER_LEN),
         (sample_layers(1), LAYERS_AT + 37),
@@ -371,8 +374,8 @@ fn a_configure_or_allocation_names_a_drawable_extent() {
 }
 
 #[test]
-fn a_layer_list_is_bounded_never_empty_and_every_layer_whole() {
-    assert_eq!(LayerList::new(&[]).err(), Some(Errno::LengthOutOfRange));
+fn a_layer_list_is_bounded_and_every_layer_whole() {
+    assert_eq!(LayerList::new(&[]).map(|list| list.layers().len()), Ok(0));
     let past = [layer(1); MAX_ACCEL_LAYERS + 1];
     assert_eq!(LayerList::new(&past).err(), Some(Errno::LengthOutOfRange));
     let good = sample_layers(2).to_le_bytes();

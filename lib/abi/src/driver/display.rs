@@ -872,6 +872,9 @@ pub const MAX_ACCEL_LAYERS: usize = 8;
 pub struct BufferId(core::num::NonZeroU32);
 
 impl BufferId {
+    /// The least id, which fills an inline list's slots past its length.
+    pub(crate) const MIN: Self = Self(core::num::NonZeroU32::MIN);
+
     /// The id `raw`, or `None` for `0`, which names no buffer.
     #[must_use]
     pub const fn new(raw: u32) -> Option<Self> {
@@ -1223,7 +1226,8 @@ pub trait AcceleratedDisplay {
     fn accel_caps(&self) -> AccelCaps;
 
     /// Composite `layers` back-to-front over opaque black and scan the result
-    /// out.
+    /// out: no layer at all shows the black alone, with the pointer's plane
+    /// over it where one is shown.
     ///
     /// # Errors
     ///

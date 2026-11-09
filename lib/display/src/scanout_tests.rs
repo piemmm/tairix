@@ -358,3 +358,33 @@ fn a_region_past_the_bound_degrades_to_its_bounding_box() {
         Some(MAX_DAMAGE_RECTS)
     );
 }
+
+/// A fill writes what a run of its one pixel writes, truncating as a run does
+/// and leaving the bytes past it untouched.
+#[test]
+fn a_fill_encodes_like_a_run_of_its_one_pixel() {
+    let pixel = Pixel {
+        r: 0x12,
+        g: 0x34,
+        b: 0x56,
+        a: 0xff,
+    };
+    let run = [pixel; MAX_RUN];
+    for order in ORDERS {
+        for (count, bytes) in [
+            (0, 0),
+            (1, 4),
+            (5, 20),
+            (MAX_RUN, MAX_RUN * 4),
+            (MAX_RUN, 9),
+        ] {
+            let mut filled = [UNTOUCHED; MAX_RUN * 4];
+            let mut encoded = [UNTOUCHED; MAX_RUN * 4];
+            assert_eq!(
+                order.encode_fill(pixel, count, &mut filled[..bytes]),
+                order.encode_run(&run[..count], &mut encoded[..bytes])
+            );
+            assert_eq!(filled, encoded);
+        }
+    }
+}

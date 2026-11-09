@@ -17,11 +17,11 @@ use tairix_abi::saver_ipc::{SaverDamage, SaverMessage, WallReading, SAVER_START_
 use tairix_abi::sysinfo::MemoryBand;
 use tairix_abi::window_ipc::{SaverOrigin, SaverStanding};
 use tairix_abi::{BundleId, DriverError, Errno, APPINFO_FLAG_FEED_MACHINE};
-use tairix_display::Presenter;
+use tairix_display::{DrawInPlace, Presenter};
 use tairix_log::{DiscardSink, Sink};
 use tairix_reclaim::PressureBand;
 use tairix_wallpaper::{SaverValues, TaskNames};
-use tairix_wm::{Color, Compositor, Point, Scale, Surface};
+use tairix_wm::{Color, Compositor, Point, Region, Scale, Surface};
 
 use super::fixtures::{Launches, Pipes, Records};
 use super::{
@@ -32,11 +32,14 @@ use crate::tests::compositor;
 
 type Saving = Screensaver<Pipes, DiscardSink>;
 
-/// A panel that records the switches asked of it.
+/// A panel that records the switches asked of it, and the frames drawn
+/// straight into it.
 struct Panel {
     can_switch: bool,
     refuse: Option<DriverError>,
     switches: Vec<DisplayPower>,
+    frame: Vec<u8>,
+    drawn: usize,
 }
 
 impl Panel {
@@ -45,6 +48,8 @@ impl Panel {
             can_switch: true,
             refuse: None,
             switches: Vec::new(),
+            frame: Vec::new(),
+            drawn: 0,
         }
     }
 
@@ -82,6 +87,19 @@ impl Presenter for Panel {
             return Err(refusal);
         }
         self.switches.push(power);
+        Ok(())
+    }
+
+    fn present_drawn(
+        &mut self,
+        damage: &Region,
+        draw: &mut DrawInPlace<'_>,
+    ) -> Result<(), DriverError> {
+        let stride = self.mode().stride_bytes;
+        let len = usize::try_from(stride * self.mode().height_px).expect("small");
+        self.frame.resize(len, 0);
+        draw(&mut self.frame, stride, damage)?;
+        self.drawn += 1;
         Ok(())
     }
 }
@@ -142,13 +160,13 @@ fn context(values: &SaverValues) -> SaverContext<'_> {
     }
 }
 
-/// Cover the screen black at `now_ns`, asserting it covered it.
+/// Cover the screen black at `now_ns`.
 fn start_blank(saver: &mut Saving, comp: &mut Compositor, now_ns: u64) {
     let setup = SaverSetup::<Launches> {
         ground: None,
         launch: None,
     };
-    assert_eq!(saver.start(setup, comp, now_ns), Ok(true));
+    assert_eq!(saver.start(setup, comp, now_ns), Ok(()));
 }
 
 /// Host `bundle` over pipes held in memory, answering the pipes.
@@ -168,7 +186,7 @@ fn host<S: Sink + Clone>(
             launcher: &mut launches,
         }),
     };
-    assert_eq!(saver.start(setup, comp, now_ns), Ok(true));
+    assert_eq!(saver.start(setup, comp, now_ns), Ok(()));
     assert_eq!(launches.entries, ["/System/Screensavers/Waves.app/Run"]);
     launches.pipes.pop().expect("launched")
 }
@@ -184,6 +202,58 @@ fn centre(compositor: &Compositor) -> Point {
 /// Flush what the screensaver queued for the saver.
 fn flush<S: Sink + Clone>(saver: &mut Screensaver<Pipes, S>, comp: &mut Compositor) {
     assert!(saver.on_writable(0, comp).is_none());
+}
+
+/// A black screensaver holds no pixels, however large the screen.
+#[test]
+fn a_black_screensaver_holds_no_pixels() {
+    let mut comp = compositor();
+    let held = comp.content_bytes();
+    let mut saver = Saving::new(DiscardSink);
+    start_blank(&mut saver, &mut comp, 0);
+    assert_eq!(comp.content_bytes(), held);
+    comp.composite();
+    assert_eq!(
+        comp.back_buffer().get(960, 540),
+        Some(Color::BLACK.premultiply())
+    );
+}
+
+/// A saver that drew straight into the display leaves the whole output owed
+/// when it ends: the display shows a frame the compositor never presented.
+#[test]
+fn a_saver_that_drew_straight_into_the_display_leaves_the_output_owed() {
+    let mut comp = compositor();
+    let mut panel = Panel::switchable();
+    let mut saver = Saving::new(DiscardSink);
+    let pipes = host(&mut saver, &saver_bundle(), &mut comp, 0);
+    comp.present(&mut panel).expect("presented");
+    assert!(!comp.has_damage());
+    pipes.say(&SaverMessage::Ready);
+    let mut errands = super::fixtures::Errands::default();
+    assert!(saver
+        .on_readable(0, (&mut comp, Some(&mut panel)), &mut errands)
+        .is_none());
+    assert!(saver
+        .advance(1, &WallReading::unset(1), &mut comp)
+        .is_none());
+    flush(&mut saver, &mut comp);
+    pipes.say(&SaverMessage::Presented {
+        serial: 1,
+        damage: None,
+        next: tairix_abi::saver_ipc::NextFrame::Soon,
+    });
+    assert!(saver
+        .on_readable(1, (&mut comp, Some(&mut panel)), &mut errands)
+        .is_none());
+    assert!(saver.scans_out());
+    assert!(panel.drawn > 0);
+    assert!(!comp.has_damage(), "drawn behind the compositor's back");
+    assert_eq!(
+        saver.switch_display_off(&mut comp, Some(&mut panel)),
+        Some(SwitchedOff::Off)
+    );
+    assert!(comp.has_damage());
 }
 
 #[test]
@@ -246,7 +316,7 @@ fn a_dimmed_screensaver_is_the_ground_it_was_given() {
         ground: Some(ground),
         launch: None,
     };
-    assert_eq!(saver.start(setup, &mut comp, 0), Ok(true));
+    assert_eq!(saver.start(setup, &mut comp, 0), Ok(()));
     assert!(saver.is_shown());
     assert_eq!(
         saver.park_deadline_ns(0, u64::MAX),
@@ -394,7 +464,7 @@ fn a_preview_holds_through_motion_for_its_first_moment_only() {
         ground: None,
         launch: None,
     };
-    assert_eq!(saver.start_preview(setup, &mut comp, 100), Ok(true));
+    assert_eq!(saver.start_preview(setup, &mut comp, 100), Ok(()));
     assert!(!saver.woken_by(Waking::Moved, 100));
     assert!(!saver.woken_by(Waking::Moved, 100 + PREVIEW_STEADY_NS - 1));
     assert!(saver.woken_by(Waking::Moved, 100 + PREVIEW_STEADY_NS));
@@ -425,7 +495,7 @@ fn a_preview_over_a_running_screensaver_leaves_it_as_it_is() {
         ground: None,
         launch: None,
     };
-    assert_eq!(saver.start_preview(setup, &mut comp, 0), Ok(true));
+    assert_eq!(saver.start_preview(setup, &mut comp, 0), Ok(()));
     assert_eq!(saver.window(), window);
     assert!(saver.woken_by(Waking::Moved, 0));
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));

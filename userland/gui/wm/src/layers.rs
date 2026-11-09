@@ -47,7 +47,7 @@ use super::{
     RowRound, RowTargets, Scanout, ShownBy, MIN_PARALLEL_BAND_PX,
 };
 use crate::chrome::WindowChrome;
-use crate::color::{DitherRow, Pixel};
+use crate::color::{Color, DitherRow, Pixel};
 use crate::frost::{self, FrostField};
 use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{PointerRoute, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
@@ -103,6 +103,17 @@ enum Shape {
     Promoted,
     /// The desktop's own layer, scaled onto the output.
     Desktop,
+    /// No layer at all: the engine's own black is the topmost window, solid
+    /// black across the output.
+    Blank,
+}
+
+impl Shape {
+    /// Whether nothing of the base can be seen, so its damage is held rather
+    /// than composited.
+    const fn hides_base(self) -> bool {
+        matches!(self, Self::Promoted | Self::Blank)
+    }
 }
 
 /// One of a layer's two buffers and what it lacks, in the layer's own pixels.
@@ -413,6 +424,10 @@ pub(super) struct Stack {
     /// The layers' other vector, which each reconcile builds the next stack
     /// in, so a layered frame allocates none.
     spare: Vec<Layer>,
+    /// The reveal the display was last shown the stack at as it stands, or
+    /// `None` once its make-up changed or a sink arrived that has seen none of
+    /// it.
+    presented_at: Option<u8>,
 }
 
 impl Stack {
@@ -425,6 +440,7 @@ impl Stack {
             shown: Region::new(),
             scratch: Vec::new(),
             spare: Vec::new(),
+            presented_at: None,
         }
     }
 
@@ -641,6 +657,14 @@ impl Compositor {
         (stack.split, zones)
     }
 
+    /// Owe the display the stack as it stands: a sink arrived that has seen
+    /// none of it.
+    pub(super) fn unpresent_layers(&mut self) {
+        if let Some(stack) = self.layers.as_mut() {
+            stack.presented_at = None;
+        }
+    }
+
     /// Whether the engine scales the desktop onto the output, so the frame
     /// is not resampled.
     pub(super) fn scaled_in_hardware(&self) -> bool {
@@ -706,12 +730,16 @@ impl Compositor {
     }
 
     /// Whether this frame may go to `presenter`'s layer engine at all: a fade
-    /// only where the engine shows it as its one layer's opacity.
+    /// only where the engine shows it as its one layer's opacity, and a blank
+    /// screen wherever there is an engine, since it needs no layer.
     pub(super) fn layers_wanted(&self, presenter: &mut dyn Presenter) -> bool {
         if self.refused.stack {
             return false;
         }
         presenter.layers().is_some_and(|engine| {
+            if self.blank_cover().is_some() {
+                return true;
+            }
             let caps = engine.caps();
             let room = if self.fades() {
                 caps.per_layer_opacity && caps.max_layers >= 1
@@ -815,9 +843,24 @@ impl Compositor {
         engine: &mut dyn LayerPresenter,
         plan: &Plan,
     ) -> Result<(), DriverError> {
+        // Black over the engine's black is black at any reveal.
+        let unchanged = || {
+            !self.layers_owe()
+                && self.layers.as_ref().is_some_and(|stack| {
+                    stack
+                        .presented_at
+                        .is_some_and(|reveal| plan.shape == Shape::Blank || reveal == self.reveal)
+                })
+        };
+        if plan.shape.hides_base() && unchanged() {
+            // Nothing that can be seen changed: what did is held until it can.
+            self.hide_base_damage();
+            self.presented = Some(self.presentation_of(plan));
+            return Ok(());
+        }
         let mut encoded = core::mem::take(&mut self.composed);
         encoded.clear();
-        let planned = if plan.shape == Shape::Promoted {
+        let planned = if plan.shape.hides_base() {
             self.hide_base_damage();
             None
         } else {
@@ -879,14 +922,29 @@ impl Compositor {
         }
         self.stats
             .set_layers(layers.len().saturating_add(usize::from(based.is_some())));
-        for layer in self.layers.iter_mut().flat_map(|stack| &mut stack.layers) {
-            layer.presented();
+        let reveal = self.reveal;
+        if let Some(stack) = self.layers.as_mut() {
+            for layer in &mut stack.layers {
+                layer.presented();
+            }
+            stack.presented_at = Some(reveal);
         }
-        self.presented = Some(match (plan.shape, plan.windows.last()) {
-            (Shape::Promoted, Some(&(id, _))) => Presentation::Promoted(id),
-            _ => Presentation::Layered,
-        });
+        self.presented = Some(self.presentation_of(plan));
         Ok(())
+    }
+
+    /// How a present of `plan` reached the display.
+    fn presentation_of(&self, plan: &Plan) -> Presentation {
+        match (plan.shape, plan.windows.last()) {
+            (Shape::Promoted, Some(&(id, _))) => Presentation::Promoted(id),
+            (Shape::Blank, _) => self
+                .windows
+                .get(plan.split)
+                .map_or(Presentation::Layered, |cover| {
+                    Presentation::Blanked(cover.id())
+                }),
+            _ => Presentation::Layered,
+        }
     }
 
     /// The layers as the engine is to show them — at the reveal's opacity,
@@ -1063,6 +1121,14 @@ impl Compositor {
     /// Which windows this frame puts on layers, or `None` when the scene is
     /// not one the engine can take.
     fn plan_layers(&self, caps: &AccelCaps, pointer_layer: bool) -> Option<Plan> {
+        // Black over black is black at any scale or reveal.
+        if let Some(cover) = self.blank_cover() {
+            return Some(Plan {
+                split: self.index_of(cover.id())?,
+                windows: ArrayVec::new(),
+                shape: Shape::Blank,
+            });
+        }
         let fits = |rect: Rect| {
             !rect.is_empty() && rect.width <= caps.max_width_px && rect.height <= caps.max_height_px
         };
@@ -1175,6 +1241,27 @@ impl Compositor {
             windows,
             shape: Shape::Promoted,
         })
+    }
+
+    /// The topmost window where it is solid black across the whole screen with
+    /// nothing of the pointer drawn over it: what the engine shows with no
+    /// layer at all.
+    fn blank_cover(&self) -> Option<&Window> {
+        let cover = self
+            .windows
+            .iter()
+            .rev()
+            .find(|window| window.is_visible())?;
+        let screen = self.screen_rect();
+        let pointer_drawn =
+            self.pointer.route() != PointerRoute::Plane && self.pointer.sprite_bounds().is_some();
+        (cover.solid_colour() == Some(Color::BLACK.premultiply())
+            && cover.opacity() == u8::MAX
+            && cover.shape().is_none()
+            && !cover.is_decorated()
+            && cover.client_rect().intersection(&screen) == screen
+            && !pointer_drawn)
+            .then_some(cover)
     }
 
     /// Whether the engine refused `window` buffers the size of `at`.
@@ -1323,6 +1410,7 @@ impl Compositor {
                 layer.shows = shows;
                 layer
             } else if let Ok(layer) = Layer::new(engine, source, (at, shows), capacity) {
+                stack.presented_at = None;
                 if let Source::Window(..) = source {
                     // The window leaves the base, or its footprint starts to
                     // be composited to another depth.
@@ -1350,22 +1438,39 @@ impl Compositor {
             placed |= matches!(layer.source, Source::Window(..) | Source::Desktop);
             kept.push(layer);
         }
-        if !whole || !(placed || self.fades()) {
+        if !whole || !(placed || self.fades() || plan.shape == Shape::Blank) {
             stack.layers.append(&mut kept);
             stack.spare = kept;
             self.layers = Some(stack);
             return false;
         }
-        // What no longer has a layer of its own joins the base.
+        self.adopt(engine, stack, kept, plan);
+        true
+    }
+
+    /// Make `kept`, the layers taken top down, the stack `plan` shows: what no
+    /// longer has a layer of its own joins the base, and a base no longer
+    /// hidden is owed what changed while it was.
+    fn adopt(
+        &mut self,
+        engine: &mut dyn LayerPresenter,
+        mut stack: Stack,
+        mut kept: Vec<Layer>,
+        plan: &Plan,
+    ) {
+        let screen = self.screen_rect();
+        if !stack.layers.is_empty() || stack.shape != plan.shape {
+            stack.presented_at = None;
+        }
         for layer in stack.layers.drain(..) {
             self.mark_left(&layer, screen);
             layer.free(engine);
         }
-        if stack.shape == Shape::Promoted && plan.shape != Shape::Promoted {
+        if stack.shape.hides_base() && !plan.shape.hides_base() {
             self.damage.add_region(&stack.hidden);
             stack.hidden.clear();
         }
-        // Taken top down; the stack holds them bottom up, the pointer's last.
+        // The stack holds them bottom up, the pointer's last.
         kept.reverse();
         stack.split = match plan.shape {
             Shape::Based => kept
@@ -1373,12 +1478,11 @@ impl Compositor {
                 .find_map(Layer::window)
                 .and_then(|id| self.index_of(id))
                 .unwrap_or(plan.split),
-            Shape::Promoted | Shape::Desktop => plan.split,
+            Shape::Promoted | Shape::Desktop | Shape::Blank => plan.split,
         };
         stack.spare = core::mem::replace(&mut stack.layers, kept);
         stack.shape = plan.shape;
         self.layers = Some(stack);
-        true
     }
 
     /// Remember that the engine could not give `source` buffers of
@@ -1401,7 +1505,7 @@ impl Compositor {
         Some((id, (bounds.width, bounds.height)))
     }
 
-    /// Hold the base's damage while a promoted window covers it, so a frame
+    /// Hold the base's damage while nothing of it can be seen, so a frame
     /// nothing can see composites nothing and the desktop settles.
     fn hide_base_damage(&mut self) {
         let screen = self.screen_rect();
@@ -1412,10 +1516,21 @@ impl Compositor {
         let mut owed = core::mem::take(&mut self.damage);
         let mut undelivered = core::mem::take(&mut self.undelivered);
         let mut rescan = core::mem::take(&mut self.scanout);
+        // Output pixels name desktop ones only where the desktop is not
+        // scaled; a scaled one owes the whole of itself for them.
+        let resampled = self.scaled.as_mut().is_some_and(|scaled| {
+            let stale = !scaled.owed.is_empty() || !undelivered.is_empty();
+            scaled.owed.clear();
+            undelivered.clear();
+            stale
+        });
         if let Some(stack) = self.layers.as_mut() {
             for owing in [&mut owed, &mut undelivered, &mut rescan] {
                 owing.clip(screen);
                 stack.hidden.add_region(owing);
+            }
+            if resampled {
+                stack.hidden.add(screen);
             }
             for rect in &settled {
                 stack.hidden.add(rect.intersection(&screen));

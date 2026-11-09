@@ -1383,12 +1383,8 @@ mod program {
         } else {
             saver.start(setup, compositor, now_ns)
         };
-        match started {
-            Ok(true) => {}
-            Ok(false) => io::write_stderr_line(
-                "desktop: no memory for the screensaver; the screen stays as it is",
-            ),
-            Err(end) => report_saver_end(&end),
+        if let Err(end) = started {
+            report_saver_end(&end);
         }
     }
 

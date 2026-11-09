@@ -3481,7 +3481,7 @@ fn display_caps() -> (AccelCaps, CursorCaps) {
 }
 
 /// One well-formed seed per display-service request.
-fn display_request_seeds() -> [DisplayRequest; 12] {
+fn display_request_seeds() -> [DisplayRequest; 13] {
     let rect = DamageRect {
         x: 4,
         y: 8,
@@ -3529,6 +3529,10 @@ fn display_request_seeds() -> [DisplayRequest; 12] {
         DisplayRequest::PresentLayers {
             seat_id: 1,
             layers: LayerList::new(&[layer, layer]).expect("two layers"),
+        },
+        DisplayRequest::PresentLayers {
+            seat_id: 1,
+            layers: LayerList::new(&[]).expect("no layer"),
         },
         DisplayRequest::SetCursor {
             seat_id: 1,

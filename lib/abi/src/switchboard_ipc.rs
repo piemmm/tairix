@@ -811,8 +811,8 @@ pub struct FrameReport {
     pub damaged_px: u64,
     /// Layer contributions blended to resolve them.
     pub blended_px: u64,
-    /// Damaged pixels resolved by copying a fully opaque run instead,
-    /// skipping every layer beneath.
+    /// Damaged pixels resolved by laying a fully opaque run instead, copied
+    /// or filled, skipping every layer beneath.
     pub opaque_px: u64,
     /// Rectangles the frame recomposed.
     pub dirty_rects: u32,

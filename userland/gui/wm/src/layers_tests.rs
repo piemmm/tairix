@@ -2087,11 +2087,13 @@ fn a_fullscreen_window_is_promoted_and_what_lies_under_it_settles() {
     assert_eq!(pixel(&engine.screen, output, 0, 0), [255, 0, 0, 255]);
 
     assert!(c.move_window(under, Point::new(30, 30)));
+    let stacks = engine.stacks.len();
     c.present(&mut engine).expect("presents");
     assert!(
         !c.has_damage(),
         "a change no one can see is held, not presented for ever"
     );
+    assert_eq!(engine.stacks.len(), stacks, "and shows nothing new");
 
     c.set_window_size_state(id, WindowSizeState::Restored, c.screen_rect())
         .expect("restored");
@@ -2103,6 +2105,91 @@ fn a_fullscreen_window_is_promoted_and_what_lies_under_it_settles() {
         [0, 255, 0, 255],
         "what moved while hidden is shown once it can be"
     );
+}
+
+/// A solid black window over the whole screen is the engine's own black: no
+/// base and no layer, every buffer given back, and what lies beneath held
+/// until it can be seen.
+#[test]
+fn a_solid_black_cover_is_shown_as_no_layer_and_what_lies_under_it_settles() {
+    let output = mode(80, 60);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let under = c.add_window(Point::new(4, 4), opaque(10, 10, GREEN));
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+
+    let cover = c.add_solid_window(Point::ORIGIN, (80, 60), Color::BLACK);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Blanked(cover)));
+    assert_eq!(engine.stacks.last(), Some(&(false, Vec::new())));
+    assert!(engine.buffers.is_empty(), "every layer given back");
+    assert_eq!(c.frame_stats().layers, 0);
+    assert_eq!(pixel(&engine.screen, output, 40, 30), [0, 0, 0, 255]);
+    assert!(c.on_display(cover) && !c.on_display(under));
+
+    assert!(c.move_window(under, Point::new(30, 30)));
+    let stacks = engine.stacks.len();
+    c.present(&mut engine).expect("presents");
+    assert!(!c.has_damage(), "a change no one can see is held");
+    assert_eq!(engine.stacks.len(), stacks, "and shows nothing new");
+    assert!(c.set_reveal(90));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(engine.stacks.len(), stacks, "black at any reveal");
+    c.owe_output();
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        engine.stacks.len(),
+        stacks + 1,
+        "a sink that has seen none of it is shown it"
+    );
+    assert!(c.set_reveal(u8::MAX));
+    assert_eq!(engine.stacks.last(), Some(&(false, Vec::new())));
+
+    assert!(c.remove(cover));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+    assert_eq!(
+        pixel(&engine.screen, output, 32, 32),
+        [0, 255, 0, 255],
+        "what moved while hidden is shown once it can be"
+    );
+    assert_eq!(pixel(&engine.screen, output, 2, 2), [0, 0, 255, 255]);
+}
+
+/// Only black over the whole screen with nothing of the pointer drawn on it is
+/// what the engine shows with no layer.
+#[test]
+fn a_cover_of_another_colour_extent_or_under_a_drawn_pointer_is_not_blank() {
+    let output = mode(80, 60);
+    let blanked = |scene: &dyn Fn(&mut Compositor)| {
+        let mut c = new_compositor(output, BLUE).expect("compositor");
+        scene(&mut c);
+        let mut engine = MockEngine::new(output);
+        c.present(&mut engine).expect("presents");
+        matches!(c.presentation(), Some(Presentation::Blanked(_)))
+    };
+    assert!(blanked(&|c| {
+        c.add_solid_window(Point::ORIGIN, (80, 60), Color::BLACK);
+    }));
+    assert!(!blanked(&|c| {
+        c.add_solid_window(Point::ORIGIN, (80, 60), Color::rgb(1, 0, 0));
+    }));
+    assert!(!blanked(&|c| {
+        c.add_solid_window(Point::ORIGIN, (80, 59), Color::BLACK);
+    }));
+    assert!(!blanked(&|c| {
+        let cover = c.add_solid_window(Point::ORIGIN, (80, 60), Color::BLACK);
+        assert!(c.set_opacity(cover, 254));
+    }));
+    assert!(!blanked(&|c| {
+        c.add_solid_window(Point::ORIGIN, (80, 60), Color::BLACK);
+        c.add_window(Point::new(4, 4), opaque(10, 10, GREEN));
+    }));
+    assert!(!blanked(&|c| {
+        c.add_solid_window(Point::ORIGIN, (80, 60), Color::BLACK);
+        c.set_cursor(solid_cursor(4, RED), Point::new(20, 20));
+    }));
 }
 
 #[test]

@@ -13751,7 +13751,7 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
             ground: None,
             launch: None,
         };
-        assert_eq!(saver.start(setup, comp, 0), Ok(true));
+        assert_eq!(saver.start(setup, comp, 0), Ok(()));
         saver
     };
     let shell = shell();

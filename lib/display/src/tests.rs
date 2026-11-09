@@ -1036,6 +1036,28 @@ fn layers_reach_only_a_compositor_and_only_buffers_it_can_show() {
     );
 }
 
+/// No layer at all is a stack like any other, through the service and through
+/// a remote presenter alike: the device shows its black.
+#[test]
+fn no_layer_reaches_the_compositor_as_an_empty_stack() {
+    let mut served = Rig::new();
+    served.display.accel = Some(CAPS);
+    let _ = served.frames();
+    let reply = served.present_layers(&[]).expect("shown");
+    assert_eq!(reply.presented, Presented::Shown);
+    assert_eq!(served.display.layers, vec![Vec::new()]);
+
+    let mut rig = Rig::new();
+    rig.display.accel = Some(CAPS);
+    let (rig, mut remote) = remote(rig);
+    remote
+        .layers()
+        .expect("a compositor")
+        .present_layers(None, &[])
+        .expect("shown");
+    assert_eq!(rig.borrow().display.layers, vec![Vec::new()]);
+}
+
 #[test]
 fn the_pointer_is_drawn_by_a_cursor_plane_from_a_buffer_it_fits() {
     let mut rig = Rig::new();

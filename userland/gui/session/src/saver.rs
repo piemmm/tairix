@@ -234,7 +234,6 @@ impl fmt::Display for Reason<'_> {
 /// One screensaver on the screen.
 struct Shown<T: SessionTransport, S: Sink> {
     wm: WindowId,
-    size: (u32, u32),
     /// The saver drawing on it, while one is.
     hosted: Option<HostedSaver<T, S>>,
 }
@@ -295,12 +294,12 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
         setup: SaverSetup<'_, L>,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<bool, SaverEnd> {
+    ) -> Result<(), SaverEnd> {
         if !self.would_start() {
-            return Ok(true);
+            return Ok(());
         }
         let started = self.start(setup, compositor, now_ns);
-        if matches!(started, Ok(true)) {
+        if started.is_ok() {
             self.steady_until_ns = Some(now_ns.saturating_add(PREVIEW_STEADY_NS));
         }
         started
@@ -339,13 +338,9 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
         self.sleep.is_off()
     }
 
-    /// Cover the screen at monotonic `now_ns` and hide the pointer: black, or
-    /// the dimmed `ground`, beneath the saver `setup` launches if it names
-    /// one.
-    ///
-    /// Answers whether the screen is covered: a surface the heap would not
-    /// give covers nothing, and the desktop stays as it was. A saver that
-    /// could not be started leaves the screen covered black, and says why.
+    /// Cover the screen at monotonic `now_ns` and hide the pointer: black,
+    /// which holds no pixels, or the dimmed `ground`, beneath the saver
+    /// `setup` launches if it names one.
     ///
     /// # Errors
     ///
@@ -355,32 +350,27 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
         setup: SaverSetup<'_, L>,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<bool, SaverEnd> {
+    ) -> Result<(), SaverEnd> {
         if !self.would_start() {
-            return Ok(true);
+            return Ok(());
         }
         let screen = compositor.screen_rect();
-        let size = (screen.width, screen.height);
-        let frame = match setup.ground {
+        let wm = match setup.ground {
             Some(mut ground) => {
                 let (width, height) = (ground.width(), ground.height());
                 // Composited over the ground: a plain fill would replace it.
                 ground.fill_round_rect(0, 0, width, height, 0, Color::rgba(0, 0, 0, DIM_ALPHA));
-                Some(ground)
+                compositor.add_window(screen.origin, ground)
             }
-            None => black(size),
+            None => compositor.add_solid_window(
+                screen.origin,
+                (screen.width, screen.height),
+                Color::BLACK,
+            ),
         };
-        let Some(frame) = frame else {
-            return Ok(false);
-        };
-        let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
         compositor.set_cursor_hidden(true);
-        let mut shown = Shown {
-            wm,
-            size,
-            hosted: None,
-        };
+        let mut shown = Shown { wm, hosted: None };
         let started = setup
             .launch
             .map(|launch| host(launch, self.log.clone(), now_ns));
@@ -393,13 +383,13 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
                     instance: self.hosted,
                     announced: false,
                 });
-                Ok(true)
+                Ok(())
             }
             Some(Err(end)) => {
                 self.record_end(&end);
                 Err(end)
             }
-            None => Ok(true),
+            None => Ok(()),
         };
         self.shown = Some(shown);
         outcome
@@ -441,10 +431,10 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
     /// screensaver black and still where it cannot be, answering what came
     /// of it; `None` when it already sleeps.
     ///
-    /// A screensaver the heap would not give still switches the display off:
-    /// that needs no memory. With none up and the display refusing, the
-    /// desktop stays as it is and takes input as it did. Either way the saver
-    /// drawing on it is ended: nothing it drew could be seen.
+    /// With no screensaver up the display is switched off all the same, and
+    /// where it refuses the desktop stays as it is and takes input as it did.
+    /// Either way the saver drawing on it is ended: nothing it drew could be
+    /// seen.
     pub fn switch_display_off(
         &mut self,
         compositor: &mut Compositor,
@@ -468,9 +458,12 @@ impl<T: SessionTransport, S: Sink + Clone> Screensaver<T, S> {
         let shown = self.shown.as_mut()?;
         let saver = shown.hosted.take()?;
         if blank {
-            if let Some(frame) = black(shown.size) {
-                let _ = compositor.set_surface(shown.wm, frame);
-            }
+            let _ = compositor.make_solid(shown.wm, Color::BLACK);
+        }
+        // The display shows the saver's last frame, which the compositor
+        // never presented.
+        if saver.hosted.scans_out() {
+            compositor.owe_output();
         }
         let code = saver.hosted.end();
         Some((saver.name, code))
@@ -902,13 +895,6 @@ pub fn ceilings(saver: &Saver, len: usize, (cores, memory): (u16, u64)) -> (u64,
 /// ladder, so every depth is one the protocol spells.
 fn memory_band(band: PressureBand) -> MemoryBand {
     MemoryBand::new(band.depth()).unwrap_or(MemoryBand::NORMAL)
-}
-
-/// A black surface of `size`, or `None` when the heap will not give one.
-fn black(size: (u32, u32)) -> Option<Surface> {
-    let mut surface = Surface::new(size.0, size.1)?;
-    surface.fill(Color::rgb(0, 0, 0));
-    Some(surface)
 }
 
 #[cfg(test)]
