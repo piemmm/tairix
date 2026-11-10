@@ -76,15 +76,18 @@ neither cracks nor doubled pixels.
 That rule is one integer half-plane per edge: a sample `(x, y)` lies at or
 past an edge's crossing exactly where `a·x + b·y + c ≥ 0`, the rounding of the
 crossing folded into `c`, and a triangle covers a sample where both of the
-sides spanning its row hold it. `Triangle::covers` asks it of one sample, and
-`Triangle::block` of every sample of an eight-pixel-square block at once — a
+sides spanning its row hold it. A triangle's `Footprint` holds that rule:
+`covers` asks it of one sample, and `block` of every sample of an
+eight-pixel-square block at once — a
 fragment tile — as a mask a sample, at the pixel centre or the four standard
 positions of a four-sample image (`Lattice`). The row walker the fill steps by
 and the block evaluator cover the same samples, and each of the four positions
 covers what the centre covers of the triangle moved onto it, so a mesh owns
 every sample of four exactly once too.
 
-`Depth` is reciprocal and reversed — larger is nearer, `Depth::CLEAR` lies
+`Depth` is reciprocal and reversed — larger is nearer, so a `DepthTest`'s
+`CompareOp::Greater` is the reversed-Z configuration of the one comparison
+every depth, stencil and sampler test reads — `Depth::CLEAR` lies
 beyond anything drawn and `Depth::NEAREST` is the near plane. The reciprocal
 is affine across the screen, so it interpolates exactly, and it is the
 perspective weight: a fragment's `Weights` are its corners' perspective-correct
@@ -106,6 +109,42 @@ a figure's strips hidden wherever the ground is nearer. The buffer is read and
 never written, so the figure's own parts still cover one another by their
 paint order alone.
 
+## The general pipeline's stages
+
+A draw's triangles are clipped, set up and tested by the same stages, in
+`f64` for geometry and `f32` for colour, each a fixed order of operations so
+the software device draws the same bits on every target.
+
+- **Clipping** (`clip`). One cut, every edge from its inside end, serves the
+  view space `Perspective` clips in and the homogeneous clip space a draw's
+  vertex stage writes. A `Viewport` — a rectangle, its height negative where
+  the draw flips it, and the depths its near and far planes map to — cuts a
+  triangle to a positive `w`, near and far (unless depth is clamped) and a guard
+  band a quarter of the converter's extent about its centre, and maps what
+  remains onto the
+  converter's grid: each `Mapped` corner with its depth, its reciprocal `w`,
+  and its share of the triangle the draw named, in clip space and across the
+  screen. At most `MAX_CLIP_CORNERS` corners remain.
+- **Set-up and interpolation** (`primitive`). A `Primitive` over three mapped
+  corners covers through its `Footprint`, carries its depth as a plane across
+  the screen with its steepest slope a pixel, and gives each sample the weights
+  of the draw's own corners under an `Interpolation`: perspective-correct,
+  linear across the screen, or flat at the provoking corner. A value
+  interpolated across any piece of a clipped triangle is the one the whole
+  triangle gives there.
+- **Depth** (`depth`). `DepthFormat` stores a depth in `0..=1` as sixteen- or
+  twenty-four-bit unsigned normalised or as a float, its words ordering as the
+  depths they hold, and states its resolution: a normalised step, or a float's
+  unit in the last place at a polygon's deepest exponent. `DepthBias` is the
+  slope and constant offset, held to its clamp either way.
+- **Stencil** (`stencil`). A `StencilFace` compares its reference with the value
+  held through the compare mask and writes each `Outcome`'s `StencilOp` through
+  the write mask.
+- **Blending** (`blend`). `Blend` is the device's pair of equations over the
+  source, a second source, the colour held and the blend constant, every value
+  and factor held to a normalised attachment's `BlendRange` first; `LogicOp`
+  replaces it on stored bits. The desktop's own composite stays `Pixel::over`.
+
 ## The perspective
 
 `view::Perspective` is the view a mesh is seen through: an eye, a forward, a
@@ -116,7 +155,8 @@ focal length times its across and down over its distance, onto the converter's
 own sub-unit grid, carrying `scale / distance` as its depth.
 
 A triangle any corner of which does not project is **clipped**, not dropped:
-`clip` cuts it to the near plane and to a guard band around the screen whose
+`clip` cuts it, through the cut every clip shares, to the near plane and to a
+guard band around the screen whose
 every corner projects within the converter's exact range. `vertex` refuses
 exactly the corners the clip would cut, so a triangle is drawn whole only where
 the clip would leave it whole, and meets a clipped neighbour along their edge.

@@ -39,44 +39,7 @@ pub enum BorderColor {
     OpaqueWhite,
 }
 
-/// How a value is compared against what is held: a depth reference against a
-/// texel, or a fragment against its depth or stencil attachment.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum CompareOp {
-    /// Never passes.
-    Never,
-    /// Passes where the value is less than what is held.
-    Less,
-    /// Passes where they are equal.
-    Equal,
-    /// Passes where the value is less or equal.
-    LessOrEqual,
-    /// Passes where the value is greater.
-    Greater,
-    /// Passes where they differ.
-    NotEqual,
-    /// Passes where the value is greater or equal.
-    GreaterOrEqual,
-    /// Always passes.
-    Always,
-}
-
-impl CompareOp {
-    /// Whether `value` passes against `held`.
-    #[must_use]
-    pub fn passes<T: PartialOrd + Copy>(self, value: T, held: T) -> bool {
-        match self {
-            Self::Never => false,
-            Self::Less => value < held,
-            Self::Equal => value == held,
-            Self::LessOrEqual => value <= held,
-            Self::Greater => value > held,
-            Self::NotEqual => value != held,
-            Self::GreaterOrEqual => value >= held,
-            Self::Always => true,
-        }
-    }
-}
+pub use tairix_raster::CompareOp;
 
 /// The furthest a level-of-detail bias moves the level sampled.
 pub const MAX_LOD_BIAS: f32 = 16.0;

@@ -14,7 +14,7 @@
 //! fragment's [`Weights`] are its vertices' perspective-correct barycentric
 //! coordinates.
 //!
-//! Coverage is integer, exactly the converter's. The depth and weight planes
+//! Footprint is integer, exactly the converter's. The depth and weight planes
 //! are set up in `f64` once per triangle and evaluated per pixel in a fixed
 //! order with nothing fused, so a mesh draws the same pixels on every target.
 
@@ -24,6 +24,7 @@ use core::slice::ChunksMut;
 
 use tairix_inline::ArrayVec;
 
+use crate::depth::CompareOp;
 use crate::scan::{
     edge_between, first_centre_from, Edge, HalfPlane, COORD_LIMIT, MAX_DRAWING_EXTENT, UNIT,
 };
@@ -38,7 +39,7 @@ pub const MESH_SUB_UNITS: i32 = UNIT as i32;
 /// The sum of a fragment's [`Weights`].
 pub const WEIGHT_ONE: u32 = 1 << 16;
 
-/// Pixels a side of the block [`Triangle::block`] evaluates at once: a
+/// Pixels a side of the block [`Footprint::block`] evaluates at once: a
 /// fragment tile, sixteen 2 × 2 quads.
 pub const BLOCK: u32 = 8;
 
@@ -87,34 +88,12 @@ impl Depth {
     pub const NEAREST: Self = Self(u32::MAX);
 }
 
-/// How an incoming fragment's depth is compared with the one held.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DepthCompare {
-    /// It passes where it is strictly nearer.
-    Nearer,
-    /// It passes where it is nearer or level.
-    NearerOrEqual,
-    /// It always passes.
-    Always,
-}
-
-impl DepthCompare {
-    /// Whether a fragment at `incoming` passes over one at `held`.
-    #[must_use]
-    pub const fn passes(self, incoming: Depth, held: Depth) -> bool {
-        match self {
-            Self::Nearer => incoming.0 > held.0,
-            Self::NearerOrEqual => incoming.0 >= held.0,
-            Self::Always => true,
-        }
-    }
-}
-
-/// The depth test a draw is made under.
+/// The depth test a draw is made under: the reversed-Z configuration of the
+/// one comparison, a nearer fragment's [`Depth`] being the greater.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DepthTest {
     /// How a fragment is compared with what is held.
-    pub compare: DepthCompare,
+    pub compare: CompareOp,
     /// Whether a fragment that passes and is kept writes its depth.
     pub write: bool,
 }
@@ -122,7 +101,7 @@ pub struct DepthTest {
 impl DepthTest {
     /// Opaque geometry: nearer fragments win and record themselves.
     pub const OPAQUE: Self = Self {
-        compare: DepthCompare::Nearer,
+        compare: CompareOp::Greater,
         write: true,
     };
 }
@@ -416,16 +395,16 @@ pub enum EdgeRecord {
 
 /// A value affine across the screen, about a reference pixel centre.
 #[derive(Copy, Clone, Debug)]
-struct Plane {
+pub(crate) struct Plane {
     at: f64,
-    dx: f64,
-    dy: f64,
+    pub(crate) dx: f64,
+    pub(crate) dy: f64,
 }
 
 impl Plane {
     /// The plane taking `values` at three points `across` and `down` of the
     /// first, whose frame's determinant is `det`.
-    fn through(values: [f64; 3], across: [f64; 2], down: [f64; 2], det: f64) -> Self {
+    pub(crate) fn through(values: [f64; 3], across: [f64; 2], down: [f64; 2], det: f64) -> Self {
         let (rise1, rise2) = (values[1] - values[0], values[2] - values[0]);
         Self {
             at: values[0],
@@ -436,6 +415,12 @@ impl Plane {
 
     fn row(self, dy: f64) -> f64 {
         self.at + self.dy * dy
+    }
+
+    /// Its value `across` and `down` of the reference, in the order a row
+    /// walk evaluates it.
+    pub(crate) fn at(self, across: f64, down: f64) -> f64 {
+        self.row(down) + self.dx * across
     }
 }
 
@@ -525,46 +510,34 @@ impl EdgeWalk {
     }
 }
 
-/// A triangle set up to be filled band by band.
+/// Which samples a triangle covers: its edges as the converter crosses them,
+/// and which side of each is its inside.
 #[derive(Clone, Debug)]
-pub struct Triangle {
+pub struct Footprint {
     edges: ArrayVec<Edge, 3>,
     /// The sign of its signed area, which side of each edge is its inside.
     winding: i64,
     /// The first row whose centre it reaches, and one past the last.
     rows: (i64, i64),
-    /// Vertex zero's position, a pixel centre at each whole number.
-    reference: (f64, f64),
-    depth: Plane,
-    first: Plane,
-    second: Plane,
-    sides: [Side; 3],
 }
 
-impl Triangle {
-    /// Set up the triangle with corners `vertices`, or `None` where it covers
-    /// no area, a corner carries [`Depth::CLEAR`], or a corner lies further
-    /// out than [`MAX_DRAWING_EXTENT`] pixels,
-    /// where its arithmetic could not be kept exact. Such a triangle draws
-    /// nothing rather than a distorted shape: a caller clips its geometry to
-    /// the view first.
-    #[must_use]
-    pub fn new(vertices: [MeshVertex; 3]) -> Option<Self> {
-        if vertices.iter().any(|v| {
-            v.depth == Depth::CLEAR
-                || i64::from(v.x).abs() > COORD_LIMIT
-                || i64::from(v.y).abs() > COORD_LIMIT
-        }) {
+impl Footprint {
+    /// The coverage of the triangle with corners `at`, in sub-units, and its
+    /// signed area — twice the triangle's, in sub-units squared — or `None`
+    /// where it has no area or a corner lies past [`COORD_LIMIT`], where its
+    /// arithmetic could not be kept exact.
+    pub(crate) fn new(at: [(i64, i64); 3]) -> Option<(Self, i64)> {
+        if at
+            .iter()
+            .any(|&(x, y)| x.abs() > COORD_LIMIT || y.abs() > COORD_LIMIT)
+        {
             return None;
         }
-        let at = vertices.map(|v| (i64::from(v.x), i64::from(v.y)));
         let area =
             (at[1].0 - at[0].0) * (at[2].1 - at[0].1) - (at[2].0 - at[0].0) * (at[1].1 - at[0].1);
         if area == 0 {
             return None;
         }
-        let sign = area.signum();
-
         let mut edges = ArrayVec::new();
         for index in 0..3 {
             if let Some(edge) = edge_between(at[index], at[(index + 1) % 3]) {
@@ -574,34 +547,29 @@ impl Triangle {
         }
         let top = at.iter().map(|p| p.1).min().unwrap_or(0);
         let bottom = at.iter().map(|p| p.1).max().unwrap_or(0);
-
-        let pixels = |sub: i64| coordinate(sub) / coordinate(UNIT);
-        let reference = (pixels(at[0].0 - UNIT / 2), pixels(at[0].1 - UNIT / 2));
-        let across = [pixels(at[1].0 - at[0].0), pixels(at[2].0 - at[0].0)];
-        let down = [pixels(at[1].1 - at[0].1), pixels(at[2].1 - at[0].1)];
-        // From the exact area, so a sliver's determinant cannot round to
-        // nought or change sign the way the difference of two large products
-        // could.
-        let det = area_pixels(area);
-        let q = vertices.map(|v| f64::from(v.depth.0));
-        Some(Self {
+        let footprint = Self {
             edges,
-            winding: sign,
+            winding: area.signum(),
             rows: (first_centre_from(top), first_centre_from(bottom)),
-            reference,
-            depth: Plane::through(q, across, down, det),
-            first: Plane::through([0.0, q[1], 0.0], across, down, det),
-            second: Plane::through([0.0, 0.0, q[2]], across, down, det),
-            sides: [
-                Side::between(at[1], at[2], sign),
-                Side::between(at[2], at[0], sign),
-                Side::between(at[0], at[1], sign),
-            ],
-        })
+        };
+        Some((footprint, area))
+    }
+
+    /// Whether its corners run clockwise on the screen, rows counted down.
+    #[must_use]
+    pub const fn clockwise(&self) -> bool {
+        self.winding > 0
+    }
+
+    /// The rows whose centres it reaches, clamped at the top of the drawing.
+    #[must_use]
+    pub fn rows(&self) -> Range<u32> {
+        let clamp = |row: i64| u32::try_from(row.max(0)).unwrap_or(u32::MAX);
+        clamp(self.rows.0)..clamp(self.rows.1)
     }
 
     /// Whether it covers the sample `(x, y)`, in [`MESH_SUB_UNITS`] from the
-    /// drawing's origin: what [`Self::fill`] covers, asked of one sample.
+    /// drawing's origin: what [`Triangle::fill`] covers, asked of one sample.
     ///
     /// The two sides spanning the sample's row must both hold it.
     #[must_use]
@@ -658,27 +626,12 @@ impl Triangle {
         masks
     }
 
-    /// The rows it reaches, clamped at the top of the drawing.
-    #[must_use]
-    pub fn rows(&self) -> Range<u32> {
-        let clamp = |row: i64| u32::try_from(row.max(0)).unwrap_or(u32::MAX);
-        clamp(self.rows.0)..clamp(self.rows.1)
-    }
-
-    /// Fill the part of the triangle `band` holds under `test`, handing each
-    /// fragment that passes to `shade`, which answers whether it keeps it; a
-    /// kept fragment writes its depth where the test does.
-    pub fn fill(
-        &self,
-        band: &mut DepthBand<'_>,
-        test: DepthTest,
-        record: EdgeRecord,
-        mut shade: impl FnMut(Fragment) -> bool,
-    ) {
-        let held = band.rows();
-        let start = self.rows.0.max(i64::from(held.start));
-        let end = self.rows.1.min(i64::from(held.end));
-        let width = i64::from(band.width);
+    /// Hand `visit` each of `rows` whose centre it reaches, in order down,
+    /// with the columns of `0..width` whose centres it covers there: the
+    /// crossings stepped row by row exactly as [`Edge::x_at`] rounds them.
+    fn walk(&self, rows: Range<i64>, width: i64, mut visit: impl FnMut(u32, Range<u32>)) {
+        let start = self.rows.0.max(rows.start);
+        let end = self.rows.1.min(rows.end);
         let mut walks: [Option<EdgeWalk>; 3] = [None; 3];
         for row in start..end {
             let y = row * UNIT + UNIT / 2;
@@ -709,13 +662,94 @@ impl Triangle {
             else {
                 continue;
             };
-            if from >= to {
-                continue;
-            }
-            if let Some(depths) = band.row_mut(row) {
-                self.span(depths, row, from..to, test, record, &mut shade);
+            if from < to {
+                visit(row, from..to);
             }
         }
+    }
+}
+
+/// A triangle set up to be filled band by band, its depth the reversed
+/// reciprocal that is also its perspective weight.
+#[derive(Clone, Debug)]
+pub struct Triangle {
+    footprint: Footprint,
+    /// Vertex zero's position, a pixel centre at each whole number.
+    reference: (f64, f64),
+    depth: Plane,
+    first: Plane,
+    second: Plane,
+    sides: [Side; 3],
+}
+
+impl Triangle {
+    /// Set up the triangle with corners `vertices`, or `None` where it covers
+    /// no area, a corner carries [`Depth::CLEAR`], or a corner lies further
+    /// out than [`MAX_DRAWING_EXTENT`] pixels,
+    /// where its arithmetic could not be kept exact. Such a triangle draws
+    /// nothing rather than a distorted shape: a caller clips its geometry to
+    /// the view first.
+    #[must_use]
+    pub fn new(vertices: [MeshVertex; 3]) -> Option<Self> {
+        if vertices.iter().any(|v| v.depth == Depth::CLEAR) {
+            return None;
+        }
+        let at = vertices.map(|v| (i64::from(v.x), i64::from(v.y)));
+        let (footprint, area) = Footprint::new(at)?;
+        let sign = area.signum();
+        let pixels = |sub: i64| coordinate(sub) / coordinate(UNIT);
+        let reference = (pixels(at[0].0 - UNIT / 2), pixels(at[0].1 - UNIT / 2));
+        let across = [pixels(at[1].0 - at[0].0), pixels(at[2].0 - at[0].0)];
+        let down = [pixels(at[1].1 - at[0].1), pixels(at[2].1 - at[0].1)];
+        // From the exact area, so a sliver's determinant cannot round to
+        // nought or change sign the way the difference of two large products
+        // could.
+        let det = area_pixels(area);
+        let q = vertices.map(|v| f64::from(v.depth.0));
+        Some(Self {
+            footprint,
+            reference,
+            depth: Plane::through(q, across, down, det),
+            first: Plane::through([0.0, q[1], 0.0], across, down, det),
+            second: Plane::through([0.0, 0.0, q[2]], across, down, det),
+            sides: [
+                Side::between(at[1], at[2], sign),
+                Side::between(at[2], at[0], sign),
+                Side::between(at[0], at[1], sign),
+            ],
+        })
+    }
+
+    /// Which samples it covers.
+    #[must_use]
+    pub const fn footprint(&self) -> &Footprint {
+        &self.footprint
+    }
+
+    /// The rows it reaches, clamped at the top of the drawing.
+    #[must_use]
+    pub fn rows(&self) -> Range<u32> {
+        self.footprint.rows()
+    }
+
+    /// Fill the part of the triangle `band` holds under `test`, handing each
+    /// fragment that passes to `shade`, which answers whether it keeps it; a
+    /// kept fragment writes its depth where the test does.
+    pub fn fill(
+        &self,
+        band: &mut DepthBand<'_>,
+        test: DepthTest,
+        record: EdgeRecord,
+        mut shade: impl FnMut(Fragment) -> bool,
+    ) {
+        let held = band.rows();
+        let rows = i64::from(held.start)..i64::from(held.end);
+        let width = i64::from(band.width);
+        self.footprint.walk(rows, width, |row, columns| {
+            if let Some(depths) = band.row_mut(row) {
+                self.span(depths, row, columns, test, record, &mut shade);
+            }
+        });
     }
 
     /// Test and shade the covered columns `columns` of row `row`.
@@ -845,7 +879,7 @@ pub(crate) fn to_depth(value: f64) -> Depth {
     clippy::cast_precision_loss,
     reason = "a coordinate is within 2^29, which a double holds exactly"
 )]
-fn coordinate(value: i64) -> f64 {
+pub(crate) fn coordinate(value: i64) -> f64 {
     value as f64
 }
 
@@ -856,7 +890,7 @@ fn coordinate(value: i64) -> f64 {
     clippy::cast_precision_loss,
     reason = "a double rounds the area once, keeping its sign and its magnitude"
 )]
-fn area_pixels(area: i64) -> f64 {
+pub(crate) fn area_pixels(area: i64) -> f64 {
     area as f64 / coordinate(UNIT * UNIT)
 }
 
@@ -928,7 +962,7 @@ pub struct Occlusion<'a> {
     /// The fill's own depth.
     pub plane: DepthPlane,
     /// How the two are compared.
-    pub compare: DepthCompare,
+    pub compare: CompareOp,
 }
 
 impl Occlusion<'_> {

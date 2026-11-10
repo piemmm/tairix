@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::*;
+use crate::depth::CompareOp;
 use crate::scan::{Coverage, FillRule, ScanScratch};
 
 const WIDTH: u32 = 48;
@@ -140,7 +141,7 @@ fn triangles_sharing_edges_cover_every_centre_once() {
     let counts = visits(
         &triangles,
         DepthTest {
-            compare: DepthCompare::Always,
+            compare: CompareOp::Always,
             write: false,
         },
         5,
@@ -208,7 +209,7 @@ fn blocked(triangles: &[Triangle], lattice: Lattice, sample: usize) -> Vec<u32> 
     for triangle in triangles {
         for top in (0..HEIGHT).step_by(BLOCK as usize) {
             for left in (0..WIDTH).step_by(BLOCK as usize) {
-                let mask = triangle.block((left, top), lattice)[sample];
+                let mask = triangle.footprint().block((left, top), lattice)[sample];
                 for bit in 0..64 {
                     let (x, y) = (left + bit % BLOCK, top + bit / BLOCK);
                     if mask & (1 << bit) != 0 && x < WIDTH && y < HEIGHT {
@@ -222,7 +223,7 @@ fn blocked(triangles: &[Triangle], lattice: Lattice, sample: usize) -> Vec<u32> 
 }
 
 const NO_DEPTH: DepthTest = DepthTest {
-    compare: DepthCompare::Always,
+    compare: CompareOp::Always,
     write: false,
 };
 
@@ -251,7 +252,7 @@ fn the_block_evaluator_and_one_sample_cover_what_the_row_walker_fills() {
                     i32::try_from(at).expect("small") * MESH_SUB_UNITS + MESH_SUB_UNITS / 2
                 };
                 assert_eq!(
-                    u32::from(triangle.covers(centre(x), centre(y))),
+                    u32::from(triangle.footprint().covers(centre(x), centre(y))),
                     filled[(y * WIDTH + x) as usize],
                     "{corners:?} at ({x}, {y})"
                 );
@@ -346,10 +347,16 @@ fn a_block_past_the_drawing_is_uncovered() {
     let far = i32::try_from(crate::scan::MAX_DRAWING_EXTENT).expect("small") * MESH_SUB_UNITS;
     let triangle =
         Triangle::new([vertex(0, 0, 9), vertex(far, 0, 9), vertex(0, far, 9)]).expect("a triangle");
-    assert_ne!(triangle.block((0, 0), Lattice::Centre)[0], 0);
+    assert_ne!(triangle.footprint().block((0, 0), Lattice::Centre)[0], 0);
     let past = crate::scan::MAX_DRAWING_EXTENT + 1;
-    assert_eq!(triangle.block((past, 0), Lattice::Four), [0; MAX_SAMPLES]);
-    assert_eq!(triangle.block((0, past), Lattice::Four), [0; MAX_SAMPLES]);
+    assert_eq!(
+        triangle.footprint().block((past, 0), Lattice::Four),
+        [0; MAX_SAMPLES]
+    );
+    assert_eq!(
+        triangle.footprint().block((0, past), Lattice::Four),
+        [0; MAX_SAMPLES]
+    );
 }
 
 /// Two overlapping triangles, the second nearer, as ids by pixel after
@@ -402,7 +409,7 @@ fn compare_and_write_do_what_they_say() {
     let mut passed = 0;
     for mut band in depth.bands_mut(HEIGHT) {
         let read_only = DepthTest {
-            compare: DepthCompare::Nearer,
+            compare: CompareOp::Greater,
             write: false,
         };
         triangle.fill(&mut band, read_only, EdgeRecord::Skip, |_| true);
@@ -417,7 +424,7 @@ fn compare_and_write_do_what_they_say() {
         });
         assert_eq!(passed, 0, "an equal depth is not nearer");
         let level = DepthTest {
-            compare: DepthCompare::NearerOrEqual,
+            compare: CompareOp::GreaterOrEqual,
             write: false,
         };
         triangle.fill(&mut band, level, EdgeRecord::Skip, |_| {
@@ -617,7 +624,7 @@ fn a_depth_plane_answers_its_points_and_occludes() {
     let occlusion = Occlusion {
         depth: &depth,
         plane,
-        compare: DepthCompare::Nearer,
+        compare: CompareOp::Greater,
     };
     assert!(!occlusion.shows(1, 1), "behind what is drawn");
     assert!(occlusion.shows(9, 1), "in front of it");
@@ -666,7 +673,7 @@ fn an_occluded_fill_shows_only_in_front_and_is_the_plain_fill_there() {
     let behind = Occlusion {
         depth: &depth,
         plane: DepthPlane::flat(Depth(500)),
-        compare: DepthCompare::Nearer,
+        compare: CompareOp::Greater,
     };
     let mut plain = Surface::new(WIDTH, HEIGHT).expect("a surface");
     Canvas::fill_polygon_subpixel(&mut plain, &disc, ink, &mut ScanScratch::new());

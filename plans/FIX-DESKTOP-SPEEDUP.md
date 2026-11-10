@@ -13,11 +13,11 @@
 | F.0 | Raster families select on the `ByPriority` capability axis | done |
 | F.1 | The loops made vectorisable before any intrinsic | done |
 | F.2 | Packed `lib/cpuops` candidates — SSE2 on x86_64, NEON on aarch64 — for the span blend, the box blur's sliding window and the row scan | done |
-| F.3 | The remaining candidate families, in order | blocked: `resample` (item 6) waits on decision 1; items 1–5 done |
+| F.3 | The remaining candidate families, in order | done |
 | F.5 | Each family's self-verify vectors, differential fuzz and docs | done |
 | G | x86_64 hard-float kernel and user space, with per-task FP/SSE/AVX state | done |
-| G.2 | riscv64 vector state | blocked: whether to take it is a User decision |
-| G.3 | aarch64 SVE state | blocked: whether to take it is a User decision |
+| G.2 | riscv64 vector state | planned |
+| G.3 | aarch64 SVE state | planned |
 | H | A popup window publishes its region's own pages instead of re-freezing the space | done |
 | I | A dirty rectangle's rows composed in bands across a worker pool | done |
 | J | One window-frame codec, and the desktop's decode spread across it | done |
@@ -1494,9 +1494,11 @@ the delivered set is already the same on every run.
 5. `encode_run` is not a family: F.1 measured its byte-order shuffle at
    0.132 ns/px against 0.031 for the matching order, leaving a candidate
    nothing to win.
-6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling. F.1
-   established the `i64` accumulator forbids vectorisation on both ISAs; a
-   narrower one would change the output and is a User decision.
+6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling — is not a
+   family. F.1 established the `i64` accumulator forbids vectorisation on both
+   ISAs, and a narrower one would change the output; the resample runs once
+   per asset and pixel size, never on a frame, so its exact accumulator stays
+   (User-delegated ruling, 2026-11-10).
 
 All are secret-free and bit-identical, so all are legal on the capability axis
 (`plans/FIX-HARDWARE-FEATURES.md` invariant 8). None may be benchmark-selected.
@@ -1557,13 +1559,17 @@ riscv64 scalar state is D37's, and the kernel computes in floating point on
 every port.
 
 ### G.2 riscv64 vector state
-The port switches no `V` state, so every task runs with `VS` off
+Taken (User-delegated ruling, 2026-11-10): a Tier-1 target whose vector unit no
+task can reach leaves the raster kernels on their scalar form there. The port
+switches no `V` state, so every task runs with `VS` off
 and `V` is not offered (D364). Enabling it means per-task lazy `VS` state
 beside `FS` — the register file sized by `vlenb`, `vtype`/`vl`/`vstart`/`vcsr`
 — with a QEMU witness under a `v=true` CPU, before any vector candidate.
 
 ### G.3 aarch64 SVE state
-The port switches the NEON file only, and leaves SVE trapped (`CPACR_EL1.ZEN`),
+Taken (User-delegated ruling, 2026-11-10): the generic ARMv8 servers the
+aarch64 target covers implement SVE, as Linux supports. The port switches the
+NEON file only, and leaves SVE trapped (`CPACR_EL1.ZEN`),
 so no task is offered it. Enabling it means per-task lazy `Z0`–`Z31`,
 `P0`–`P15` and `FFR`, sized by the vector length `ZCR_EL1` grants, with the
 NEON halves they alias kept coherent — and a QEMU witness under an SVE-capable
@@ -1798,15 +1804,6 @@ Stated so a later change cannot quietly take a shortcut:
 | J | one window-frame codec, and the desktop's decode spread across it; J.2 premultiplied frames | A, I | J.2 the window frame's alpha | no |
 
 A–E are expected to dominate F entirely.
-
----
-
-## Decisions required (§15.7)
-
-1. **A narrower `resample` accumulator** would change the output (F.3 item 6),
-   so no `resample` candidate lands without a decision on it.
-2. **G.2 and G.3**: whether, and when, to take riscv64 vector state and aarch64
-   SVE state.
 
 ---
 

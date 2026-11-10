@@ -26,6 +26,9 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The runner a command's work is shared across cores through, the process's
 # own: the device makes no pool of its own.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The one software 3D pipeline's stages the software device drives: the
+# comparison every depth, stencil and sampler test reads among them.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
 # The futex-backed lock the device's state is kept under, the condition
 # variable a wait parks on, and the thread the device's worker runs on.
 tairix-rt = { path = "../rt", version = "=0.0.0" }

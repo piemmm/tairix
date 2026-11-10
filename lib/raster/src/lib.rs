@@ -47,12 +47,16 @@ extern crate alloc;
 
 pub mod accel;
 pub mod artwork;
+pub mod blend;
 pub mod blur;
+pub mod clip;
 pub mod color;
+pub mod depth;
 pub mod dither;
 mod lent;
 pub mod mesh;
 pub mod paint;
+pub mod primitive;
 pub mod pyramid;
 pub mod reorient;
 pub mod resample;
@@ -60,6 +64,7 @@ pub mod ring;
 pub mod round;
 pub mod scan;
 pub mod shape;
+pub mod stencil;
 pub mod surface;
 mod transformed;
 pub mod view;
@@ -71,6 +76,7 @@ mod tests;
 pub use artwork::{
     for_each_fill, layer_count, Group, Image, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
+pub use blend::{Blend, BlendFactor, BlendInputs, BlendOp, BlendRange, LogicOp};
 #[cfg(any(test, feature = "test-util"))]
 pub use blur::halved_reference;
 pub use blur::{
@@ -81,16 +87,19 @@ pub use color::{
     blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,
     leading_translucent, mix_span, unpremultiply_span, Color, Pixel, Pixel16, ROUND_NEAREST,
 };
+pub use depth::{CompareOp, DepthBias, DepthFormat};
 pub use dither::DitherRow;
 pub use lent::PixelMemory;
 pub use mesh::{
-    Depth, DepthBand, DepthBuffer, DepthCompare, DepthPlane, DepthTest, EdgeNear, EdgeRecord,
-    Fragment, MeshVertex, Occlusion, Toward, Triangle, Weights, MESH_SUB_UNITS, WEIGHT_ONE,
+    Depth, DepthBand, DepthBuffer, DepthPlane, DepthTest, EdgeNear, EdgeRecord, Footprint,
+    Fragment, Lattice, MeshVertex, Occlusion, Toward, Triangle, Weights, BLOCK, MAX_SAMPLES,
+    MESH_SUB_UNITS, WEIGHT_ONE,
 };
 pub use paint::{
     Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,
     MAX_TILE_FOLD,
 };
+pub use primitive::{Interpolation, Primitive};
 pub use pyramid::Pyramid;
 pub use reorient::Reorient;
 pub use resample::{
@@ -101,6 +110,7 @@ pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};
 pub use shape::{Placed, Shape};
+pub use stencil::{Outcome, StencilFace, StencilOp};
 pub use surface::{
     band_rows, pointwise, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand, RowBands, Surface,
     BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,

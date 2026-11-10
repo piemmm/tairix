@@ -35,7 +35,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP3.2 | Bind set layouts, bind sets, pipeline layouts with stage visibility, and shader modules | done |
 | GP3.3 | The interpreter over `plans/SHADER.md`'s lowering view, compute pipelines and dispatch | done |
 | GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | in progress |
-| GP3.4.1 | `lib/raster`'s 3D stages, evolved in place: the converter's coverage as an integer half-plane predicate per edge its row walker and a block evaluator share, homogeneous clip-space clipping, perspective-correct, linear and flat interpolation, depth for every depth format and compare operation (its reciprocal depth the reversed-Z configuration), stencil, the four-sample lattice and the general blend; WinterSun's pictures unchanged | in progress |
+| GP3.4.1 | `lib/raster`'s 3D stages, evolved in place: the converter's coverage as an integer half-plane predicate per edge its row walker and a block evaluator share, homogeneous clip-space clipping, perspective-correct, linear and flat interpolation, depth for every depth format and compare operation (its reciprocal depth the reversed-Z configuration), stencil, the four-sample lattice and the general blend; WinterSun's pictures unchanged | done |
 | GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, discards and the `InterpolateAt` family; the coverage test's fragment exception gone | planned |
 | GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped, set up and binned in bounded batches in parallel, its bins rasterised in parallel and loaded, stored and resolved | planned |
 | GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | planned |
@@ -57,7 +57,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode as pinned compute passes (`lib/shaders`), `lib/raster`'s arithmetic to the bit | done |
 | GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3, GP11 |
-| GD11 | The desktop drawing its frost and flattened layers through GD6's passes on a device | blocked: GP11, GP5 |
+| GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | blocked: GP11, GP5 |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
@@ -988,16 +988,18 @@ is built. Where a GPU's natural arithmetic draws the frost faster and looks the
 same, `lib/raster` adopts that definition rather than the GPU emulating the
 CPU's (§0 decision 11), and the stated tolerance moves with it.
 
-**GD11 — the desktop on a device.** A frosted window renders its frost and its
-flattened layer through GD6's passes on whatever device serves it, its
-surfaces device memory the display can scan (GP6), and on the CPU through
-`lib/raster` where none does. It waits on a device to serve it: the device
-channel (GP11) and a hardware backend (GP5).
-
-**GD7 — copy engines.** The rectangle copies and fills between device-visible
-images that remain after GD1 and GD2 go to the device's copy engine — the
-BCM2711's DMA4 2D mode, NVIDIA's copy engine, AMD's SDMA, Intel's blitter — as
-`lib/gpu`'s transfer queue.
+**GD11 — the desktop on a device.** The compositor's pixel work goes through a
+compositing engine of which there are two, drawing one definition: `lib/raster`,
+on every target, and GD6's passes on a `lib/gpu` device, its surfaces device
+memory the display scans (GP6). The session picks the engine once, from the
+device it was given — exactly as it reads the display's planes once
+(`plans/FIX-DISPLAY-ACCELERATION.md` B) — and never per draw, so the compositor
+writes one path against the engine and both engines draw every frame whole.
+GD6's conformance cases hold them to the bit. The `lib/gpu` software device is
+never the compositing engine: interpreting a pass the CPU already draws natively
+would only be slower, so a session given no hardware composes through
+`lib/raster` (User-delegated ruling, 2026-11-10). It waits on a device to serve
+it: the device channel (GP11) and a hardware backend (GP5).
 
 ## 8. Refused by name
 
@@ -1007,7 +1009,10 @@ BCM2711's DMA4 2D mode, NVIDIA's copy engine, AMD's SDMA, Intel's blitter — as
   borrowed; the conformance claim is not made.
 - **An external graphics crate, or Mesa in any form** (§1, §2.12).
 - **A GPU-only code path with no software equivalent**, and any consumer branch
-  of the form "if accelerated, draw it this way" (§17.3, §2.2).
+  of the form "if accelerated, draw it this way" (§17.3, §2.2). An engine
+  chosen once by the device a session was given — the display's layer engine,
+  GD11's compositing engine — is not such a branch: each engine draws the whole
+  of one definition.
 - **A private game or compositor back-channel to the device** (§17.3).
 - **A second rasteriser or blend path.** The software backend's 3D stages —
   clipping, coverage, interpolation, depth, stencil, multisampling and

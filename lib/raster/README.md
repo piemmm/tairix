@@ -145,6 +145,12 @@ This crate owns:
   of samples at the centre or the four-sample `Lattice`. The depth and
   weight planes are `f64` set up once per triangle and evaluated in a fixed
   order, so a mesh draws the same pixels on every target.
+- `clip`, `primitive`, `depth`, `stencil`, `blend` — the general pipeline's
+  stages: the one cut every clip shares and a `Viewport` mapping clip space
+  onto the grid; a `Primitive`'s coverage, depth plane and perspective-correct,
+  linear or flat weights; the depth formats, the eight-way `CompareOp` and the
+  depth bias; the stencil face; the device's blend equations and logic
+  operations.
 - `view::Perspective` — the view a mesh is seen through: world points into
   view space from an eye and an orthonormalised basis, projected onto the
   converter's sub-unit grid with their reciprocal depth (`vertex`, which

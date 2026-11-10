@@ -15,6 +15,7 @@
 use tairix_inline::ArrayVec;
 use tairix_util::mathf;
 
+use crate::clip::{self, Cut, Volume, GUARD_PIXELS};
 use crate::mesh::{to_depth, MeshVertex, MESH_SUB_UNITS};
 use crate::scan::MAX_DRAWING_EXTENT;
 
@@ -22,16 +23,9 @@ use crate::scan::MAX_DRAWING_EXTENT;
 /// by adds at most one.
 pub const MAX_CLIPPED: usize = 8;
 
-/// How far from the screen's centre a clipped corner may land, in pixels.
-///
-/// A quarter of the converter's extent, so with the centre anywhere a surface
-/// can put it, every corner that survives the clip projects to where the
-/// converter's arithmetic stays exact.
-const GUARD_PIXELS: u32 = MAX_DRAWING_EXTENT / 4;
-
 /// The planes a triangle is clipped to.
 #[derive(Copy, Clone, Debug)]
-enum Bound {
+pub(crate) enum Bound {
     Near,
     Left,
     Right,
@@ -86,13 +80,6 @@ pub struct Clipped {
     pub weights: [f64; 3],
     /// Where it lands on the screen.
     pub vertex: MeshVertex,
-}
-
-/// A corner while the clip is still cutting: not yet projected.
-#[derive(Copy, Clone, Debug)]
-struct Cut {
-    view: [f64; 3],
-    weights: [f64; 3],
 }
 
 impl Perspective {
@@ -233,7 +220,10 @@ impl Perspective {
     /// clipped neighbour along their edge.
     #[must_use]
     pub fn vertex(&self, view: [f64; 3]) -> Option<MeshVertex> {
-        if BOUNDS.iter().any(|&bound| self.distance(bound, view) < 0.0) {
+        if BOUNDS
+            .iter()
+            .any(|&bound| self.distance(bound, &view) < 0.0)
+        {
             return None;
         }
         self.place(view)
@@ -321,70 +311,31 @@ impl Perspective {
         if triangle.iter().any(|v| v.iter().any(|c| !c.is_finite())) {
             return;
         }
-        let mut kept = ArrayVec::<Cut, MAX_CLIPPED>::new();
-        for (index, view) in triangle.into_iter().enumerate() {
-            let mut weights = [0.0; 3];
-            weights[index] = 1.0;
-            if kept.try_push(Cut { view, weights }).is_err() {
-                return;
-            }
-        }
-        let mut cut = ArrayVec::<Cut, MAX_CLIPPED>::new();
-        for bound in BOUNDS {
-            if kept
-                .iter()
-                .all(|corner| self.distance(bound, corner.view) >= 0.0)
-            {
-                continue;
-            }
-            cut.clear();
-            for (index, &from) in kept.iter().enumerate() {
-                let to = kept[(index + 1) % kept.len()];
-                let (d_from, d_to) = (
-                    self.distance(bound, from.view),
-                    self.distance(bound, to.view),
-                );
-                let inside = d_from >= 0.0;
-                if inside && cut.try_push(from).is_err() {
-                    return;
-                }
-                if inside != (d_to >= 0.0) {
-                    let (a, b, d_a, d_b) = if inside {
-                        (from, to, d_from, d_to)
-                    } else {
-                        (to, from, d_to, d_from)
-                    };
-                    let t = d_a / (d_a - d_b);
-                    let corner = Cut {
-                        view: self.onto(bound, between(a.view, b.view, t)),
-                        weights: between(a.weights, b.weights, t),
-                    };
-                    if cut.try_push(corner).is_err() {
-                        return;
-                    }
-                }
-            }
-            core::mem::swap(&mut kept, &mut cut);
-            if kept.len() < 3 {
-                return;
-            }
+        let mut kept = ArrayVec::<Cut<[f64; 3]>, MAX_CLIPPED>::new();
+        if !clip::cut(self, &BOUNDS, triangle, &mut kept) {
+            return;
         }
         for corner in &kept {
-            let Some(vertex) = self.place(corner.view) else {
+            let Some(vertex) = self.place(corner.at) else {
                 out.clear();
                 return;
             };
             // Room for every corner kept: both hold the same number.
             let _ = out.try_push(Clipped {
-                view: corner.view,
+                view: corner.at,
                 weights: corner.weights,
                 vertex,
             });
         }
     }
+}
+
+impl Volume for Perspective {
+    type Point = [f64; 3];
+    type Plane = Bound;
 
     /// How far inside `bound` the view-space point `p` lies.
-    fn distance(&self, bound: Bound, p: [f64; 3]) -> f64 {
+    fn distance(&self, bound: Bound, p: &[f64; 3]) -> f64 {
         match bound {
             Bound::Near => p[2] - self.near,
             Bound::Left => self.guard * p[2] + p[0],
@@ -412,6 +363,10 @@ impl Perspective {
         }
         p
     }
+
+    fn between(a: &[f64; 3], b: &[f64; 3], t: f64) -> [f64; 3] {
+        clip::between(a, b, t)
+    }
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -424,14 +379,6 @@ fn minus(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 fn scaled(a: [f64; 3], by: f64) -> [f64; 3] {
     [a[0] * by, a[1] * by, a[2] * by]
-}
-
-fn between(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
 }
 
 /// How much of a direction must be left once the axes before it are taken

@@ -196,7 +196,7 @@ impl GBuffer {
             for corners in corners {
                 if let Some(triangle) = Triangle::new(corners) {
                     let test = DepthTest {
-                        compare: tairix_raster::mesh::DepthCompare::Always,
+                        compare: tairix_raster::CompareOp::Always,
                         write: true,
                     };
                     triangle.fill(&mut band, test, EdgeRecord::Skip, |_| true);

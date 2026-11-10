@@ -60,23 +60,6 @@ fn anisotropy_needs_linear_filtering_and_stays_within_the_device() {
 }
 
 #[test]
-fn a_comparison_passes_as_its_operator_says() {
-    assert!(CompareOp::Less.passes(1, 2));
-    assert!(!CompareOp::Less.passes(2, 2));
-    assert!(CompareOp::LessOrEqual.passes(2, 2));
-    assert!(CompareOp::Greater.passes(3, 2));
-    assert!(CompareOp::GreaterOrEqual.passes(2, 2));
-    assert!(CompareOp::Equal.passes(2, 2));
-    assert!(CompareOp::NotEqual.passes(1, 2));
-    assert!(CompareOp::Always.passes(f32::NAN, 0.0));
-    assert!(!CompareOp::Never.passes(0, 0));
-    assert!(
-        !CompareOp::LessOrEqual.passes(f32::NAN, 1.0),
-        "a NaN fails an ordered test"
-    );
-}
-
-#[test]
 fn unnormalised_coordinates_take_their_restricted_form_only() {
     let texels = SamplerDesc {
         mag_filter: Filter::Nearest,

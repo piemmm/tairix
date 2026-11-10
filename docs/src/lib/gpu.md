@@ -141,7 +141,8 @@ array needs a device that runs `SampledCubeArray` (`Error::Unsupported`). A
 `BufferView` is a texel buffer: a buffer's aligned range of whole texels of a
 format the device states for the texel-buffer use the buffer was made for, at
 most `max_texel_buffer_elements`. A `Sampler` filters, addresses, clamps its
-level of detail and compares as its `SamplerDesc` says; anisotropy and
+level of detail and compares as its `SamplerDesc` says — its `CompareOp` the
+one `lib/raster` defines for every depth and stencil test — anisotropy and
 mirror-clamp-to-edge need their features, and unnormalised coordinates take
 only their restricted form.
 

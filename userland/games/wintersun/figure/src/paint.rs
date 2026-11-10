@@ -12,9 +12,10 @@
 //! the moment one of them grows a part.
 
 use tairix_inline::ArrayVec;
-use tairix_raster::mesh::{DepthBuffer, DepthCompare, DepthPlane, Occlusion};
+use tairix_raster::mesh::{DepthBuffer, DepthPlane, Occlusion};
 use tairix_raster::shape::{fill, fill_occluded, Placed, Scratch};
 use tairix_raster::surface::{Canvas, SUBPIXEL};
+use tairix_raster::CompareOp;
 use tairix_raster::{Color, ScanScratch};
 use tairix_util::mathf;
 
@@ -151,7 +152,7 @@ pub fn ground_occluded<C: Canvas + ?Sized>(
     let occlusion = Occlusion {
         depth: scene,
         plane,
-        compare: DepthCompare::Nearer,
+        compare: CompareOp::Greater,
     };
     for ring in shadow {
         let seen = Placed {
@@ -192,7 +193,7 @@ pub fn figure_occluded<C: Canvas + ?Sized>(
         let occlusion = Occlusion {
             depth: scene,
             plane: strip.plane,
-            compare: DepthCompare::Nearer,
+            compare: CompareOp::Greater,
         };
         canvas.fill_polygon_subpixel_occluded(
             &brush.outline,
