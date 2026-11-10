@@ -1137,7 +1137,10 @@ draws is a **trial**; behind a lock or a screensaver, where the user could not
 see it to keep it, it is answered `Busy` instead.
 The session holds the call, draws the new size at once, and asks in a prompt
 of its own, *Keep this resolution?*, counting fifteen seconds down on a park
-deadline with *Keep Changes* focused: `Enter` keeps, and `Escape`, *Revert*,
+deadline from the moment it is first on screen, with *Keep Changes* focused.
+Its buttons, like the confirmation prompt's, arm `ALERT_ARM_NS` after that
+moment, so a key or click aimed at what was there before answers nothing.
+`Enter` keeps, and `Escape`, *Revert*,
 the countdown, or a trial the session must abandon — switching user, logging
 out, locking — revert. Keep merges the held request over the settings in force
 by then and persists it under the held call, and the size stays drawn until
@@ -1918,9 +1921,10 @@ the frame is presented, whichever path the change came in by.
 A trial of a new desktop resolution (below) has a witness at each step a host
 must wait on rather than race:
 
-- `TRIAL_SHOWN` ("resolution trial shown") when the prompt is up and holds
-  the keyboard, so a key answering it never waits on anything slower than the
-  prompt — the countdown is the user's;
+- `TRIAL_SHOWN` ("resolution trial shown") once a presented frame has carried
+  the prompt, holding the keyboard, and its buttons have armed, so a key
+  answering it is taken rather than racing the arm — the countdown is the
+  user's;
 - `DESKTOP_RESIZED` ("desktop on screen at its new size"), with the desktop's
   `width` and `height` (`ResizedRecord`), after the first frame showing the
   desktop whole at a new size reached the display: the wallpaper fitted to it

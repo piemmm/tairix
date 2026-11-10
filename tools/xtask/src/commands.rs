@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tairix_fuzzseed::firmware::{PI_FIRMWARE_CACHE, PI_FIRMWARE_ENV};
-use tairix_itest_harness::pie::PieArch;
+use tairix_itest_harness::pie::{PieArch, Profile};
 use tairix_procinfo::display::format_bytes;
 
 use crate::{elapsed_line, output_or_reason, Context, LONG_BUILD_COMMAND_TIMEOUT};
@@ -2006,30 +2006,18 @@ fn fetch_missing_firmware(
     Ok(())
 }
 
-/// The Cargo build profile the production kernel is compiled with for a
-/// given image profile, as `(extra cargo args, target subdirectory)`.
+/// The Cargo profile an image's kernel and user-space programs compile in.
 ///
-/// The single freestanding kernel binary cannot read `cfg!(debug_assertions)`
-/// from the image it is planted in, so the boot-log routing the aarch64
-/// console performs (`kernel/arch/aarch64/src/serial.rs` —
-/// debug build → UART, release build → screen) is only correct if each image
-/// profile compiles the kernel in the matching Cargo profile:
-///
-/// * The `debug` image is the non-shippable development form (it seeds the
-///   `root`/`root` test account and must never ship), so its
-///   kernel is built in Cargo's `dev` profile — `debug_assertions` on — and
-///   the console diverts the boot-log/debug stream to the UART.
-/// * The `installer` image is the shippable form, built `--release`
-///   (optimised, `debug_assertions` off), so its log stream renders on the
-///   user-facing screen.
-fn kernel_build_profile(
-    profile: tairix_mkimage::ImageProfile,
-) -> (&'static [&'static str], &'static str) {
-    // The image → Cargo-profile mapping lives once on `ImageProfile`
-    // (`cargo_build_args`/`cargo_profile_dir`), shared with the user-space
-    // `Run` cross-compiles in `pie_build`, so the kernel and the programs it
-    // spawns can never build in mismatched profiles.
-    (profile.cargo_build_args(), profile.cargo_profile_dir())
+/// The kernel cannot read `cfg!(debug_assertions)` from the image it is
+/// planted in, so its boot-log routing (`kernel/arch/aarch64/src/serial.rs`:
+/// a debug build logs to the UART, a release build to the screen) is right
+/// only when each image builds in the matching profile: the non-shippable
+/// `debug` image in `dev`, the shippable `installer` image `--release`.
+pub(crate) const fn cargo_profile(profile: tairix_mkimage::ImageProfile) -> Profile {
+    match profile {
+        tairix_mkimage::ImageProfile::Debug => Profile::Dev,
+        tairix_mkimage::ImageProfile::Installer => Profile::Release,
+    }
 }
 
 /// The kernel features that make up the debug image's diagnostics: the
@@ -2049,7 +2037,7 @@ pub(crate) const SCENE_TESTS_FEATURE: &str = "scene-tests";
 /// of the shippable `installer` image.
 ///
 /// This is the single selection point for the gate, paired with
-/// [`kernel_build_profile`] so the diagnostics track the same image profile
+/// [`cargo_profile`] so the diagnostics track the same image profile
 /// the console UART routing already keys on: the `debug` image (a
 /// `debug_assertions`-on kernel that diverts the log stream to the UART)
 /// also compiles in the address-bearing developer aids, and the `installer`
@@ -2317,11 +2305,12 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
 
     // 1. Build the freestanding aarch64 production kernel (PI.md P1) in
     //    the Cargo profile that matches the image profile (see
-    //    `kernel_build_profile`): the `debug` image gets a
+    //    `cargo_profile`): the `debug` image gets a
     //    `debug_assertions`-on kernel so the console diverts the boot-log
     //    stream to the UART, the shippable `installer` image gets an
     //    optimised `--release` kernel that renders the log on screen.
-    let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
+    let (build_profile_args, kernel_profile_dir) =
+        (cargo_profile(profile).args(), cargo_profile(profile).dir());
     // The flashable image is the universal ARM media, so its kernel builds
     // against that image's CPU floor. Injecting the floor's `rustflags` via
     // `CARGO_ENCODED_RUSTFLAGS` *replaces* the shared `.cargo/config.toml`
@@ -2483,7 +2472,8 @@ fn build_virt_run_kernel(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
 ) -> Result<PathBuf, String> {
-    let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
+    let (build_profile_args, kernel_profile_dir) =
+        (cargo_profile(profile).args(), cargo_profile(profile).dir());
     let target_dir = ctx.target_dir().join("virt-kernel");
     // The `run` development kernel targets the QEMU `virt` board (not shipped
     // hardware); it builds against that image's CPU floor, injected the same
@@ -2645,11 +2635,11 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, ci_long_plan, dir_size, host_clippy, host_command,
-        host_order_args, host_pass, image_drivers, kernel_build_profile, kernel_diag_feature_args,
-        libtest, parse_image_args, parse_run_args, parse_test_options, run_session_spec, CiStage,
-        Command, HostLane, HostRun, HostStep, LongStep, PassOrder, Path, RunBudget, RunMachine,
-        CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PI_FIRMWARE_ENV,
+        cargo_profile, cargo_subcommand_available, ci_long_plan, dir_size, host_clippy,
+        host_command, host_order_args, host_pass, image_drivers, kernel_diag_feature_args, libtest,
+        parse_image_args, parse_run_args, parse_test_options, run_session_spec, CiStage, Command,
+        HostLane, HostRun, HostStep, LongStep, PassOrder, Path, RunBudget, RunMachine, CI_STAGES,
+        CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PI_FIRMWARE_ENV,
         PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
     };
     use crate::commands::soak::{Budget, NIGHTLY};
@@ -3128,22 +3118,17 @@ mod tests {
     /// defect where both images shared a single `--release` kernel and the
     /// debug log never reached the UART.
     #[test]
-    fn kernel_build_profile_matches_image_profile() {
-        let (debug_args, debug_dir) = kernel_build_profile(tairix_mkimage::ImageProfile::Debug);
-        assert!(
-            debug_args.is_empty(),
-            "the debug image must build the kernel in Cargo's dev profile (no --release)"
-        );
-        assert_eq!(debug_dir, "debug");
-
-        let (installer_args, installer_dir) =
-            kernel_build_profile(tairix_mkimage::ImageProfile::Installer);
+    fn an_image_builds_in_the_cargo_profile_its_profile_names() {
         assert_eq!(
-            installer_args,
-            &["--release"],
-            "the installer image must build the kernel optimised"
+            cargo_profile(tairix_mkimage::ImageProfile::Debug),
+            tairix_itest_harness::pie::Profile::Dev,
+            "the debug image must build in Cargo's dev profile (no --release)"
         );
-        assert_eq!(installer_dir, "release");
+        assert_eq!(
+            cargo_profile(tairix_mkimage::ImageProfile::Installer),
+            tairix_itest_harness::pie::Profile::Release,
+            "the installer image must build optimised"
+        );
     }
 
     /// The kernel diagnostics are gated to the non-shippable `debug` image:

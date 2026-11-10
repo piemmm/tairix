@@ -54,12 +54,10 @@ fn main() {
 
     let program_dir = format!("{manifest_dir}/../cc5_program");
     let c_source = format!("{program_dir}/csrc/main.c");
-    // The PIE link script is the architecture-neutral one the CC3 fixture
-    // already owns; reusing it keeps a single definition.
-    let link_script = tairix_itest_harness::program_fixture::PROGRAM_LD;
+    let link_script = tairix_itest_harness::pie::run_ld();
     let include_dir = format!("{manifest_dir}/../../../include");
     println!("cargo:rerun-if-changed={c_source}");
-    println!("cargo:rerun-if-changed={link_script}");
+    println!("cargo:rerun-if-changed={}", link_script.display());
 
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
 
@@ -71,7 +69,7 @@ fn main() {
             manifest_dir,
             &out_dir,
             Path::new(&c_source),
-            Path::new(&link_script),
+            &link_script,
             Path::new(&include_dir),
         );
         write_fixture(&rxe_path, &rxe);
@@ -95,7 +93,6 @@ fn build_c_program(
         out_dir,
         arch: ARCH,
         package: "tairix-test-cc5-program",
-        variant: None,
         env: &[],
     }
     .static_archive();

@@ -1760,9 +1760,10 @@ What the vertical needed, and now guarantees:
   the only place the appearance is changed; its choice takes the one
   persist-then-adopt path, and a standing prompt follows any change of look
   through the shell's style generation.
-- **A witness for each step of a resolution trial.** `TRIAL_SHOWN` follows
-  the prompt taking the keyboard, so `Enter` keeps it at once and never races
-  the user's countdown; `DESKTOP_RESIZED` follows the first frame showing the
+- **A witness for each step of a resolution trial.** `TRIAL_SHOWN` follows a
+  presented frame carrying the prompt, holding the keyboard, and its buttons
+  arming, so `Enter` keeps it at once and races neither the arm nor the
+  user's countdown; `DESKTOP_RESIZED` follows the first frame showing the
   desktop whole at its new size, its wallpaper fitted and settled; and
   `TRIAL_CONCLUDED` follows the trial's call being answered, after which the
   desktop takes settings calls again. An interactive resize announces

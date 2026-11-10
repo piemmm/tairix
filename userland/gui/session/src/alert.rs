@@ -251,6 +251,13 @@ impl AlertWindow {
         }
     }
 
+    /// When the buttons start answering input, once the alert has been
+    /// stamped.
+    #[must_use]
+    pub const fn armed_at(&self) -> Option<u64> {
+        self.armed_at
+    }
+
     /// Whether the buttons answer input at `now_ns`.
     fn armed(&self, now_ns: u64) -> bool {
         self.armed_at.is_some_and(|at| now_ns >= at)

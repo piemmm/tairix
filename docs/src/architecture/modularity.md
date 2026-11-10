@@ -565,13 +565,16 @@ dependency closure, each one's manifest, and the lockfile — because a
 hand-kept `rerun-if-changed` list naming only the guest's `src/main.rs`
 matches nothing when a `lib/*` crate it links is edited, so the build
 script never reruns and the vertical passes against code that has left the
-tree. Two inputs cargo's own fingerprint cannot see — the linker script's
-content, which `RUSTFLAGS` carries only as a path, and the pinned
-environment — are recorded in a sidecar stamp, and the private target
-directory is wiped only when that stamp moves
-(`pie::wipe_target_dir_on_stamp_change`, shared with the image pipeline's
-`Run`-binary builds), so an ordinary edit rebuilds incrementally instead of
-recompiling `-Z build-std` from scratch.
+tree. The guest is built through `pie_build`, the one recipe the kernel's
+embedded programs and the image pipeline's bundles share, in a target
+directory beneath the cargo build root that every build of the same
+configuration uses, so the sysroot and the runtime's closure are compiled once
+rather than per fixture. The directory is named for its whole configuration,
+the content of the linker script and the x86_64 target spec included, which
+cargo fingerprints only by path, so builds that differ never share one; the
+pinned environment reaches the guest through `env!`, whose values cargo does
+fingerprint. A build holds the directory's lock from its `cargo` invocation to
+its last read of the artefact.
 
 That harness is a *build* dependency, so nothing it holds can be linked
 by a running test kernel. Logic the kernel bodies themselves share needs

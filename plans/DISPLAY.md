@@ -286,7 +286,8 @@ Pi's firmware framebuffer and HVS included — with no driver change.
   than the one the setting in force draws is held — behind a lock or a
   screensaver it is answered `Busy` — and the size is drawn at once under a
   session-owned prompt, *Keep this resolution?*, counting 15 s down on a park
-  deadline with *Keep Changes* focused. Keep merges the held request over the
+  deadline from its first frame on screen, with *Keep Changes* focused and its
+  buttons armed after the alert delay. Keep merges the held request over the
   settings then in force and persists it under the held call, and the size
   stays drawn until the store answers that call. Revert, `Escape`, the
   countdown, and a trial the session abandons (switching user, logging out,

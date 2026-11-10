@@ -13,9 +13,7 @@
 //!    re-rolls it.
 //! 2. Compile the pure-Rust driver-stub fixture program
 //!    (`tests/integration/driver_register_program`) **position-independent**
-//!    for the freestanding aarch64 target (the shared `program.ld` roots
-//!    `tairix-rt`'s `_start`), into a private target directory under
-//!    `OUT_DIR`.
+//!    for the freestanding aarch64 target in the shared guest target directory.
 //! 3. Convert the linked PIE ELF to an `rxe` blob, baking relocations for the
 //!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the production spawn producer
 //!    maps every child image at and stamping the kernel's compiled-in syscall
@@ -58,7 +56,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-driver-register-program",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

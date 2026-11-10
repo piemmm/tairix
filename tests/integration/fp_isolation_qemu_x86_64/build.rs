@@ -44,7 +44,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-fp-probe",
-            variant: None,
             env: &[("TAIRIX_FP_ROUNDS", ROUNDS_PER_TASK.to_string())],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
@@ -53,7 +52,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-entry-hygiene",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

@@ -53,7 +53,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-el0-spinner",
-            variant: None,
             env: &[("TAIRIX_EL0_SPINS", SPINS.to_string())],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

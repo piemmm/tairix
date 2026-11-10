@@ -10,16 +10,17 @@
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    wait_program`) **twice** — once as the `child` role and once as the
 //!    `parent` role — position-independent for the freestanding x86_64 target
-//!    (the shared `program.ld` roots `tairix-rt`'s `_start`), into two private
-//!    target directories under `OUT_DIR`, pinning the child's exit code through
-//!    the `TAIRIX_WAIT_CHILD_CODE` environment variable (and the role through
-//!    `TAIRIX_WAIT_ROLE`) so this script is the single source of truth for both, then convert each linked PIE ELF to an `rxe` blob with
+//!    in the shared guest target directory, pinning the child's exit code
+//!    through the `TAIRIX_WAIT_CHILD_CODE` environment variable (and the role
+//!    through `TAIRIX_WAIT_ROLE`) so this script is the single source of truth
+//!    for both, then convert each linked PIE ELF to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
-//!    two blobs, the bias, and the matching [`CHILD_EXIT_CODE`] constant as a
-//!    Rust source the test `include!`s.
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the two blobs, the
+//!    bias, and the matching [`CHILD_EXIT_CODE`] constant as a Rust source the
+//!    test `include!`s.
 //!
 //! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
@@ -77,7 +78,6 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, role: &str) -> V
         out_dir,
         arch: ARCH,
         package: "tairix-test-wait",
-        variant: Some(role),
         env: &[
             ("TAIRIX_WAIT_ROLE", role.to_string()),
             ("TAIRIX_WAIT_CHILD_CODE", CHILD_EXIT_CODE.to_string()),

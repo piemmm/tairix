@@ -44,7 +44,8 @@ use std::process::Command;
 
 use build_support::{is_freestanding, kernel_isa, linker_script_for};
 use tairix_itest_harness::driver_image::build_signed_driver_image;
-use tairix_itest_harness::pie::{self, PieArch};
+use tairix_itest_harness::pie::{PieArch, Profile};
+use tairix_itest_harness::pie_build::{self, PieBuild, Recipe};
 use tairix_itest_harness::program_fixture::{format_grouped_hex, GROUPED_HEX_LEN};
 use tairix_itest_harness::USER_IMAGE_BIAS;
 use tairix_signkeys::{Domain, SigningKeys};
@@ -614,15 +615,12 @@ fn build_epoch_secs() -> u64 {
 /// aarch64, X3a on x86_64, RV-P3 on riscv64) and `init` can launch the session
 /// program (`plans/SPAWN.md` `SP3b`).
 ///
-/// On a freestanding production target (one [`PieArch`] names) each program
-/// is compiled position-independent
-/// against its own `Run.ld` into a private target directory under `OUT_DIR`
-/// (so it never collides with the outer kernel build, one
-/// program source built for each target), then the linked PIE ELF is
-/// converted into an `rxe` blob with
-/// [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
-/// [`USER_IMAGE_BIAS`] and stamping the kernel's compiled-in syscall CFI tag
-/// (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+/// On a freestanding production target (one [`PieArch`] names) every program
+/// is compiled position-independent in the kernel unit's own profile, in one
+/// `cargo` invocation in the directory every build of that configuration
+/// shares, and each linked ELF converted into an `rxe` blob with relocations
+/// baked for [`USER_IMAGE_BIAS`] and the kernel's syscall CFI tag
+/// (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) stamped in, so
 /// [`tairix_abi::rxe::LoadImage::parse`] accepts it.
 ///
 /// On every other target (host `cargo build --workspace`, clippy) each
@@ -630,136 +628,58 @@ fn build_epoch_secs() -> u64 {
 /// compile only for a freestanding production target.
 fn emit_program_rxes(target: &str, embed_spawn_rows: bool) {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let manifest_dir = manifest_dir.trim_end_matches('/');
-
-    // Every embedded program links the one shared PIE script (this crate lives
-    // two levels below the workspace root), and they all build into one shared
-    // target directory. Because the link recipe `rustc` sees is then identical
-    // for every program, cargo builds the `-Z build-std` sysroot and the
-    // shared user-space libraries once and reuses them for each subsequent
-    // program instead of rebuilding them per program. The single staleness
-    // guard is therefore run once, before the loop, against that shared
-    // directory.
-    let run_ld = format!(
-        "{manifest_dir}/../../{}",
-        tairix_itest_harness::pie::RUN_LD_WORKSPACE_RELPATH
-    );
-    let target_dir = format!("{out_dir}/programs-target");
-    wipe_target_dir_on_linker_change(&run_ld, &target_dir, &out_dir);
-
-    for program in PROGRAMS {
-        // Only PID 1 `init` is embedded on a target whose runtime `spawn`
-        // resolves the on-disk store bundles instead of embedded rows.
-        if !embed_spawn_rows && program.prefix != "INIT" {
-            continue;
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    // Only PID 1 `init` is embedded on a target whose runtime `spawn`
+    // resolves the on-disk store bundles instead of embedded rows.
+    let programs: Vec<&Program> = PROGRAMS
+        .iter()
+        .filter(|program| embed_spawn_rows || program.prefix == "INIT")
+        .collect();
+    let Some(arch) = PieArch::from_target_triple(target) else {
+        for program in programs {
+            write_fixture(&out_dir.join(program.fixture), program, &[]);
         }
-        emit_program_rxe(
-            target,
-            manifest_dir,
-            &out_dir,
-            &run_ld,
-            &target_dir,
-            program,
-        );
-    }
-}
-
-/// Build one [`Program`] and write its generated fixture under `OUT_DIR`.
-fn emit_program_rxe(
-    target: &str,
-    manifest_dir: &str,
-    out_dir: &str,
-    run_ld: &str,
-    target_dir: &str,
-    program: &Program,
-) {
-    let rxe = match PieArch::from_target_triple(target) {
-        Some(arch) => build_and_convert(manifest_dir, run_ld, target_dir, program, arch),
-        None => Vec::new(),
+        return;
     };
-    let fixture_path = PathBuf::from(out_dir).join(program.fixture);
-    write_fixture(&fixture_path, program, &rxe);
-}
-
-/// Wipe the shared programs `target_dir` — forcing a clean relink — when the
-/// shared `Run.ld` content has changed since the last build, and otherwise
-/// leave it intact so the nested `cargo` builds incrementally.
-///
-/// Cargo fingerprints the linker script by *path* (through the RUSTFLAGS
-/// string), not content, so a `Run.ld` edit would otherwise leave a stale
-/// linked ELF in place. The script content is kept as a single sidecar copy
-/// under `OUT_DIR`; the wipe fires only on a real content change (or first
-/// build / missing sidecar), so this build script re-running on every build
-/// does not rebuild `build-std` each time. A read failure compares as
-/// different and simply forces the (correct, safe) clean rebuild — fail safe,
-/// never silently stale.
-fn wipe_target_dir_on_linker_change(run_ld: &str, target_dir: &str, out_dir: &str) {
-    let current = fs::read(run_ld).ok();
-    let sidecar = PathBuf::from(out_dir).join("programs-target.run_ld");
-    let previous = fs::read(&sidecar).ok();
-    if current.is_none() || current != previous {
-        let _ = fs::remove_dir_all(target_dir);
-        if let Some(bytes) = &current {
-            let _ = fs::write(&sidecar, bytes);
-        }
-    }
-}
-
-/// Compile a program's `Run` bin PIE for `arch` and convert the linked ELF
-/// into an `rxe` blob; the PIE link recipe rides the target-scoped
-/// `CARGO_TARGET_<NAME>_RUSTFLAGS` variable (one build path for every
-/// production target).
-fn build_and_convert(
-    manifest_dir: &str,
-    run_ld: &str,
-    target_dir: &str,
-    program: &Program,
-    arch: PieArch,
-) -> Vec<u8> {
-    // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
-    // roots the `tairix-rt` runtime trampoline; it is built
-    // position-independent, with `core` /
-    // `compiler_builtins` / `alloc` built PIC alongside it (`-Z
-    // build-std`). `alloc` is required because the program packages name it
-    // transitively, even though the banner-printing `Run` binaries never
-    // allocate (the unreachable allocating paths are dead-stripped, so no
-    // global allocator is needed). Scope the PIE link flags to the chosen
-    // production target so the program's own host build script is unaffected.
-    let status = pie::nested_cargo(manifest_dir)
-        .env(
-            arch.rustflags_env_var(),
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),
-        )
-        .args(["build", "-p", program.pkg, "--bin", program.bin, "--target"])
-        .arg(arch.cargo_target_spec())
-        .args(["-Z", pie::SYSROOT_BUILD_STD, "--target-dir", target_dir])
+    let profile = Profile::of_build_script(&std::env::var("PROFILE").unwrap_or_default());
+    let root = pie_build::build_root(&out_dir, target).unwrap_or_else(|e| panic!("{e}"));
+    let build = PieBuild {
+        root: &root,
+        workspace: Path::new(&manifest_dir),
+        arch,
+        recipe: Recipe::Program,
+        profile,
+        floor: &[],
+        env: &[],
+    };
+    let shared = build.lock().unwrap_or_else(|e| panic!("{e}"));
+    let packages: Vec<&str> = programs.iter().map(|program| program.pkg).collect();
+    let bins: Vec<&str> = programs.iter().map(|program| program.bin).collect();
+    let status = shared
+        .command(&packages, &bins, &[])
         .status()
-        .unwrap_or_else(|e| panic!("spawn cargo to build the {} Run program: {e}", program.pkg));
+        .unwrap_or_else(|e| panic!("spawn cargo to build the embedded Run programs: {e}"));
     assert!(
         status.success(),
-        "building the {} Run program failed",
-        program.pkg
+        "building the embedded Run programs failed"
     );
-
-    let elf_path = format!(
-        "{target_dir}/{}/debug/{}",
-        arch.target_triple(),
-        program.bin
-    );
-    let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
-
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        USER_IMAGE_BIAS,
-    )
-    .unwrap_or_else(|e| {
-        panic!(
-            "convert the {} Run program ELF into an rxe image: {e:?}",
-            program.pkg
+    for program in programs {
+        let elf_path = shared.artefact(program.bin);
+        let elf =
+            fs::read(&elf_path).unwrap_or_else(|e| panic!("read {}: {e}", elf_path.display()));
+        let rxe = tairix_itest_harness::elf2rxe::elf_to_rxe(
+            &elf,
+            &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
+            USER_IMAGE_BIAS,
         )
-    })
+        .unwrap_or_else(|e| {
+            panic!(
+                "convert the {} Run program ELF into an rxe image: {e:?}",
+                program.pkg
+            )
+        });
+        write_fixture(&out_dir.join(program.fixture), program, &rxe);
+    }
 }
 
 /// Emit `<PREFIX>_RXE` and `<PREFIX>_USER_BIAS` as a Rust source the boot

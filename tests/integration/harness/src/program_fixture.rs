@@ -1,76 +1,47 @@
 //! The glue every freestanding fixture program's build script shares: the
-//! one linker script they all link with, the one nested cross-compile recipe
-//! ([`GuestBuild`](crate::program_fixture::GuestBuild)) that turns a guest
-//! crate into the `rxe` image the kernel spawn path loads, and the one
-//! emitter of the `PROGRAM_RXE` + `USER_BIAS` source they `include!`.
-//!
-//! Each vertical used to carry its own byte-identical copy of all three, so
-//! a change to the program layout, the link recipe, or the emitted source
-//! had to be made dozens of times to stay consistent. They live here once
-//! instead.
+//! one nested build ([`GuestBuild`](crate::program_fixture::GuestBuild)) that
+//! turns a guest crate into the `rxe` image the kernel spawn path loads, and
+//! the one emitter of the `PROGRAM_RXE` + `USER_BIAS` source they `include!`.
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use tairix_abi::syscall::SYSCALL_TABLE_HASH_LEN;
 
-use crate::dep_info;
-use crate::pie::{self, PieArch};
+use crate::pie::{PieArch, Profile};
+use crate::pie_build::{self, PieBuild, Recipe};
 use crate::USER_IMAGE_BIAS;
 
-/// The single linker script every freestanding fixture program links with:
-/// it roots `tairix-rt`'s `_start` and lays the PIE image out for the bias
-/// the kernel spawn path maps a child at.
-///
-/// Absolute, resolved when this crate is compiled, so a consuming build
-/// script names it without walking a relative path of its own.
-/// [`GuestBuild::program_rxe`] registers it and guards against its content
-/// changing; a script that hands the path to a *linker of its own* (the C
-/// verticals' `tairix_cc` link step) registers it itself.
-pub const PROGRAM_LD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/program.ld");
-
 /// One nested `cargo build` of a fixture's guest crate for a freestanding
-/// target.
-///
-/// Every vertical that spawns a separately-linked EL0 program shares this
-/// recipe: a private target directory under `OUT_DIR`, the outer build's
-/// `RUSTFLAGS` cleared so the target-scoped position-independent recipe
-/// wins, `-Z build-std` compiling `core`/`compiler_builtins`/`alloc` as PIC
-/// alongside the guest, and — the part no hand-kept list can get right —
-/// the outer fixture's freshness taken from the compiler's own dep-info
-/// record, so an edit anywhere in the guest's dependency closure rebuilds
-/// the embedded blob instead of leaving the vertical to pass against code
-/// that is no longer in the tree.
+/// target, in the directory every build of its configuration shares
+/// ([`PieBuild`]), with the outer fixture's freshness taken from the
+/// compiler's own dep-info record: an edit anywhere in the guest's dependency
+/// closure rebuilds the embedded blob rather than leaving the vertical to pass
+/// against code no longer in the tree.
 pub struct GuestBuild<'a> {
     /// Directory the nested `cargo` runs in — the fixture's own manifest
     /// directory, so it resolves this workspace.
     pub manifest_dir: &'a str,
-    /// The fixture's `OUT_DIR`. The private target directory and its
-    /// freshness sidecar live inside it.
+    /// The fixture's `OUT_DIR`, which the shared directory's root is found
+    /// from and an archive is kept in.
     pub out_dir: &'a str,
     /// Freestanding target the guest is cross-compiled for.
     pub arch: PieArch,
     /// Cargo package to build, which also names its artefact.
     pub package: &'a str,
-    /// Distinguishes two builds of one `package` that differ only in
-    /// [`Self::env`] — a parent/child role. One directory holds one artefact
-    /// per package, so sharing it would leave each role reading whichever
-    /// binary was linked last. `None` for a package built once.
-    pub variant: Option<&'a str>,
     /// Environment the guest's own source reads through `env!`, so this
     /// script stays the single source of truth for the constants both halves
-    /// of a fixture share. It is part of the freshness stamp, so a changed
-    /// value rebuilds the guest whether or not the guest crate declared
-    /// `cargo:rerun-if-env-changed` for it.
+    /// of a fixture share. Cargo rebuilds the guest when a value changes.
     pub env: &'a [(&'a str, String)],
 }
 
 impl GuestBuild<'_> {
-    /// Cross-compile the guest position-independent against the shared
-    /// [`PROGRAM_LD`] and convert the linked ELF into the `rxe` load image
-    /// the kernel spawn path accepts, with relocations baked for
-    /// [`USER_IMAGE_BIAS`] and the kernel's syscall `cfi_tag` stamped in.
+    /// Cross-compile the guest position-independent against the one PIE link
+    /// script and convert the linked ELF into the `rxe` load image the kernel
+    /// spawn path accepts, with relocations baked for [`USER_IMAGE_BIAS`] and
+    /// the kernel's syscall `cfi_tag` stamped in.
     ///
     /// # Panics
     ///
@@ -79,167 +50,74 @@ impl GuestBuild<'_> {
     /// build loudly rather than embed a stale or empty blob.
     #[must_use]
     pub fn program_rxe(&self, cfi_tag: &[u8; SYSCALL_TABLE_HASH_LEN]) -> Vec<u8> {
-        let elf_path = self.run(&self.program_recipe());
-        let elf =
-            fs::read(&elf_path).unwrap_or_else(|e| panic!("read {}: {e}", elf_path.display()));
+        let elf = self.build(Recipe::Program, Profile::Dev, |elf| fs::read(elf));
         crate::elf2rxe::elf_to_rxe(&elf, cfi_tag, USER_IMAGE_BIAS)
-            .unwrap_or_else(|e| panic!("convert {} into an rxe image: {e:?}", elf_path.display()))
+            .unwrap_or_else(|e| panic!("convert {} into an rxe image: {e:?}", self.label()))
     }
 
-    /// Cross-compile the guest as a position-independent `staticlib` and
-    /// return the archive path, for a vertical that links a foreign object
-    /// against the runtime rather than spawning a Rust program directly.
-    ///
-    /// `compiler-builtins-mem` is built in because the foreign object
-    /// expects `memcpy` and friends from the runtime it links, and `alloc`
-    /// is left out because an archive registers no global allocator.
+    /// Cross-compile the guest as a position-independent `staticlib`, for a
+    /// vertical that links a foreign object against the runtime rather than
+    /// spawning a Rust program, and return the archive, kept in `OUT_DIR`.
     ///
     /// # Panics
     ///
-    /// If the nested build fails, for the reason
+    /// If the nested build fails or the archive cannot be kept, for the reason
     /// [`program_rxe`](Self::program_rxe) states.
     #[must_use]
     pub fn static_archive(&self) -> PathBuf {
-        self.run(&self.archive_recipe())
+        self.build(Recipe::Archive, Profile::Release, |archive| {
+            let kept = Path::new(self.out_dir).join(archive.file_name().unwrap_or_default());
+            fs::copy(archive, &kept).map(|_| kept)
+        })
     }
 
-    /// The recipe [`Self::program_rxe`] builds under.
-    fn program_recipe(&self) -> Recipe<'static> {
-        Recipe {
-            linker_script: Some(PROGRAM_LD),
-            unstable: &["-Z", pie::SYSROOT_BUILD_STD],
-            profile_args: &[],
-            profile_dir: "debug",
-            artefact: self.package.to_string(),
-        }
-    }
-
-    /// The recipe [`Self::static_archive`] builds under.
-    fn archive_recipe(&self) -> Recipe<'static> {
-        Recipe {
-            linker_script: None,
-            unstable: &[
-                "-Z",
-                "build-std=core,compiler_builtins",
-                "-Z",
-                "build-std-features=compiler-builtins-mem",
-            ],
-            profile_args: &["--release"],
-            profile_dir: "release",
-            artefact: format!("lib{}.a", self.package.replace('-', "_")),
-        }
-    }
-
-    /// Drive the nested `cargo build` and return the artefact's path,
-    /// having registered every input it consumed with the outer cargo.
-    fn run(&self, recipe: &Recipe<'_>) -> PathBuf {
-        let triple = self.arch.target_triple();
-        let target_dir = PathBuf::from(self.out_dir).join(self.private_target_dir_name());
-
-        let mut rustflags = String::from("-C relocation-model=pie");
-        if let Some(script) = recipe.linker_script {
-            println!("cargo:rerun-if-changed={script}");
-            let _ = write!(rustflags, " -C link-arg=-pie -C link-arg=-T{script}");
-        }
-        pie::wipe_target_dir_on_stamp_change(&target_dir, self.stamp(recipe).as_deref());
-
-        let mut cmd = pie::nested_cargo(self.manifest_dir);
-        // Target-scoped, so the flags reach only the guest's freestanding
-        // crates — never its own host build script.
-        cmd.env(self.arch.rustflags_env_var(), rustflags)
-            // `--locked` so a build script can never rewrite the committed
-            // lockfile behind the outer build's back.
-            .args(["build", "--locked", "-p", self.package, "--target"])
-            .arg(self.arch.cargo_target_spec())
-            .args(recipe.unstable)
-            .args(recipe.profile_args)
-            .arg("--target-dir")
-            .arg(&target_dir);
-        for (key, value) in self.env {
-            cmd.env(key, value);
-        }
-        let status = cmd
+    /// Drive the nested build, register every input it consumed with the
+    /// outer cargo, and `take` from the artefact while the shared directory
+    /// is still held, so no other build relinks it in between.
+    fn build<T>(
+        &self,
+        recipe: Recipe,
+        profile: Profile,
+        take: impl FnOnce(&Path) -> io::Result<T>,
+    ) -> T {
+        let label = self.label();
+        let root = pie_build::build_root(Path::new(self.out_dir), self.arch.target_triple())
+            .unwrap_or_else(|e| panic!("building {label}: {e}"));
+        let build = PieBuild {
+            root: &root,
+            workspace: Path::new(self.manifest_dir),
+            arch: self.arch,
+            recipe,
+            profile,
+            floor: &[],
+            env: self.env,
+        };
+        let shared = build
+            .lock()
+            .unwrap_or_else(|e| panic!("building {label}: {e}"));
+        let status = shared
+            .command(&[self.package], &[], &[])
             .status()
-            .unwrap_or_else(|e| panic!("spawn cargo to build {}: {e}", self.label()));
-        assert!(status.success(), "building {} failed", self.label());
-
-        let artefacts = target_dir.join(triple).join(recipe.profile_dir);
-        dep_info::emit_dep_info_reruns(
-            &artefacts.join(recipe.dep_info_name()),
-            Path::new(self.manifest_dir),
-            &target_dir,
-        );
-        artefacts.join(&recipe.artefact)
+            .unwrap_or_else(|e| panic!("spawn cargo to build {label}: {e}"));
+        assert!(status.success(), "building {label} failed");
+        let artefact = shared.artefact(self.package);
+        shared.emit_reruns(&artefact);
+        take(&artefact).unwrap_or_else(|e| panic!("{} for {label}: {e}", artefact.display()))
     }
 
-    /// The private target directory's name inside `OUT_DIR`.
-    fn private_target_dir_name(&self) -> String {
-        match self.variant {
-            Some(variant) => format!("{}-{variant}-target", self.package),
-            None => format!("{}-target", self.package),
-        }
-    }
-
-    /// How this build names itself in a failure message: what a reader would
-    /// have to type to reproduce it.
+    /// How this build names itself in a failure message: its package, and
+    /// the environment that tells two builds of it apart.
     fn label(&self) -> String {
-        match self.variant {
-            Some(variant) => format!("{} ({variant})", self.package),
-            None => self.package.to_string(),
+        let mut label = self.package.to_string();
+        for (index, (key, value)) in self.env.iter().enumerate() {
+            label.push_str(if index == 0 { " (" } else { ", " });
+            let _ = write!(label, "{key}={value}");
         }
-    }
-
-    /// The inputs this build cannot leave to cargo's own fingerprint — the
-    /// linker script's *content*, of which the `RUSTFLAGS` string carries
-    /// only the path, and the environment, which cargo tracks only where the
-    /// guest crate itself declared `cargo:rerun-if-env-changed` for it —
-    /// framed length-first so two different sets cannot render the same
-    /// bytes.
-    ///
-    /// `None` when the script cannot be read, which the freshness guard
-    /// treats as changed.
-    fn stamp(&self, recipe: &Recipe<'_>) -> Option<Vec<u8>> {
-        let mut stamp = Vec::new();
-        if let Some(script) = recipe.linker_script {
-            push_stamp_field(&mut stamp, &fs::read(script).ok()?);
+        if !self.env.is_empty() {
+            label.push(')');
         }
-        for (key, value) in self.env {
-            push_stamp_field(&mut stamp, key.as_bytes());
-            push_stamp_field(&mut stamp, value.as_bytes());
-        }
-        Some(stamp)
+        label
     }
-}
-
-/// The half of the nested recipe that differs between a position-independent
-/// program image and the archive a foreign object links against.
-struct Recipe<'a> {
-    /// Linker script the guest links with, named in the target-scoped
-    /// `RUSTFLAGS` and hashed into the freshness stamp. `None` for an
-    /// archive, which links nothing.
-    linker_script: Option<&'a str>,
-    /// The `-Z` arguments, `build-std` among them.
-    unstable: &'a [&'a str],
-    /// Profile-selecting arguments; empty for cargo's `dev` profile.
-    profile_args: &'a [&'a str],
-    /// Directory cargo writes this profile's artefacts under.
-    profile_dir: &'a str,
-    /// The artefact's file name inside that directory.
-    artefact: String,
-}
-
-impl Recipe<'_> {
-    /// The dep-info file rustc writes beside this artefact, recording every
-    /// source the compilation read.
-    fn dep_info_name(&self) -> PathBuf {
-        Path::new(&self.artefact).with_extension("d")
-    }
-}
-
-/// Append one length-prefixed field to a freshness stamp.
-fn push_stamp_field(stamp: &mut Vec<u8>, field: &[u8]) {
-    stamp.extend_from_slice(&field.len().to_le_bytes());
-    stamp.extend_from_slice(field);
 }
 
 /// Buffer length [`format_grouped_hex`] renders into: `0x`, sixteen hex
@@ -380,7 +258,6 @@ mod tests {
             out_dir: "/out",
             arch: PieArch::Aarch64,
             package: "tairix-test-probe",
-            variant: None,
             env,
         }
     }
@@ -422,75 +299,19 @@ mod tests {
         );
     }
 
-    /// Each variant of one package gets its own private target directory,
-    /// because cargo fingerprints neither the environment that selected the
-    /// role nor the artefact it produced: sharing a directory would hand
-    /// the second role the first one's binary.
+    /// A build names itself by its package and the environment that tells
+    /// two builds of it apart.
     #[test]
-    fn a_variant_gets_its_own_target_directory_and_says_so_when_it_fails() {
-        let single = probe(&[]);
-        assert_eq!(single.private_target_dir_name(), "tairix-test-probe-target");
-        assert_eq!(single.label(), "tairix-test-probe");
-
-        let roled = GuestBuild {
-            variant: Some("parent"),
-            ..probe(&[])
-        };
+    fn a_build_names_its_package_and_environment_when_it_fails() {
+        assert_eq!(probe(&[]).label(), "tairix-test-probe");
+        let roled = [
+            ("TAIRIX_WAIT_ROLE", String::from("parent")),
+            ("TAIRIX_WAIT_CHILD_CODE", String::from("23")),
+        ];
         assert_eq!(
-            roled.private_target_dir_name(),
-            "tairix-test-probe-parent-target"
+            probe(&roled).label(),
+            "tairix-test-probe (TAIRIX_WAIT_ROLE=parent, TAIRIX_WAIT_CHILD_CODE=23)"
         );
-        assert_eq!(roled.label(), "tairix-test-probe (parent)");
-    }
-
-    /// Cargo writes the dep-info beside the artefact under the artefact's
-    /// own stem, which differs between a program binary and an archive.
-    #[test]
-    fn the_dep_info_sits_beside_the_artefact_it_describes() {
-        assert_eq!(
-            probe(&[]).program_recipe().dep_info_name(),
-            Path::new("tairix-test-probe.d")
-        );
-        let archive = probe(&[]).archive_recipe();
-        assert_eq!(archive.artefact, "libtairix_test_probe.a");
-        assert_eq!(archive.dep_info_name(), Path::new("libtairix_test_probe.d"));
-    }
-
-    /// The stamp frames every field by length, so two environments whose
-    /// concatenation is identical still compare as different and force the
-    /// clean rebuild.
-    #[test]
-    fn the_freshness_stamp_frames_each_field_by_length() {
-        let env_only = probe(&[]).archive_recipe();
-        let split_early = [("AB", String::from("C"))];
-        let split_late = [("A", String::from("BC"))];
-        assert_ne!(
-            probe(&split_early).stamp(&env_only),
-            probe(&split_late).stamp(&env_only)
-        );
-        assert_eq!(
-            probe(&split_early).stamp(&env_only),
-            probe(&split_early).stamp(&env_only)
-        );
-    }
-
-    /// The program recipe stamps the linker script's content, since the
-    /// `RUSTFLAGS` string cargo fingerprints carries only its path. An
-    /// unreadable script yields no stamp, which the guard reads as changed.
-    #[test]
-    fn the_freshness_stamp_covers_the_linker_script_content() {
-        let build = probe(&[]);
-        let stamped = build
-            .stamp(&build.program_recipe())
-            .expect("the shared program.ld is readable");
-        let script = fs::read(PROGRAM_LD).expect("read the shared program.ld");
-        assert!(stamped.ends_with(&script), "the script content is stamped");
-
-        let missing = Recipe {
-            linker_script: Some("/tairix-no-such-program.ld"),
-            ..build.program_recipe()
-        };
-        assert!(build.stamp(&missing).is_none());
     }
 
     /// A composed fixture source carries the shared bias as a grouped

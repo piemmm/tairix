@@ -9,12 +9,11 @@
 //! 2. Compile the pure-Rust ring-3 fixture program
 //!    (`tests/integration/wild_fault_program`) **once** — the four roles are
 //!    selected at runtime from the registry argument vector —
-//!    position-independent against the shared fixture PIE layout
-//!    (`tests/integration/harness/program.ld`), then convert the linked ELF
-//!    to an `rxe` blob with
-//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
-//!    the [`tairix_itest_harness::USER_IMAGE_BIAS`] the production spawn producer maps every image at
-//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    position-independent against the shared PIE layout
+//!    (`lib/rt/Run.ld`), then convert the linked ELF to an `rxe` blob with
+//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the production spawn producer
+//!    maps every image at and stamping the kernel's compiled-in syscall CFI tag
 //!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
 //!    `tairix_abi::rxe::LoadImage::parse` accepts it; emit the blob and the
 //!    bias as a Rust source the test `include!`s.
@@ -56,7 +55,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-wild-fault",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

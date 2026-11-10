@@ -33,6 +33,8 @@ tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0" }
 # `tairix-abi` is `no_std` but builds on the host, which
 # is where this build-time helper runs.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The keyed hash a shared guest target directory is named with.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The QEMU runner's own per-arch defaults, so the `virt` tree a build script
 # dumps describes the same machine the runner starts (one definition of the
 # default guest RAM, not a copy in each).

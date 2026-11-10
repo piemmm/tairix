@@ -78,6 +78,11 @@ impl ChoicePrompt {
         self.window.stamp(now_ns);
     }
 
+    /// When its buttons start answering input, once it has been stamped.
+    pub(crate) const fn armed_at(&self) -> Option<u64> {
+        self.window.armed_at()
+    }
+
     /// The prompt's compositor window.
     pub(crate) const fn wm(&self) -> WindowId {
         self.window.wm()

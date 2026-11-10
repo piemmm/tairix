@@ -40,6 +40,12 @@ pub use tairix_qemu::{Board, DmaTranslation, InterruptControllers};
 /// freestanding build so the selection cannot drift between them.
 pub mod pie;
 
+/// The one recipe a freestanding program is cross-compiled position-independent
+/// by — the fixtures', the kernel's embedded programs' and the image
+/// pipeline's alike — in a target directory every build of the same
+/// configuration shares.
+pub mod pie_build;
+
 /// Dep-info-driven `cargo:rerun-if-changed` emission for build scripts that
 /// run an inner `cargo build` and embed its output: freshness is derived
 /// from the compiler's own dep-info record, never a hand-kept source list
@@ -47,8 +53,8 @@ pub mod pie;
 pub mod dep_info;
 
 /// The generated-source glue every freestanding fixture program's build
-/// script shares: the one `program.ld` they link with, and the one emitter
-/// of the `PROGRAM_RXE` + `USER_BIAS` source they `include!`.
+/// script shares: the nested build of its guest crate, and the one emitter of
+/// the `PROGRAM_RXE` + `USER_BIAS` source they `include!`.
 pub mod program_fixture;
 
 /// The M1 demand-paged file-mapping fixture: the single definition of the

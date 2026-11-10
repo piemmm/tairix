@@ -78,7 +78,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-mmio-map",
-            variant: None,
             env: &[
                 ("TAIRIX_MMIO_GRANT_HANDLE", GRANT_HANDLE.to_string()),
                 ("TAIRIX_MMIO_MAGIC", u64::from(MAGIC).to_string()),

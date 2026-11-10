@@ -87,6 +87,7 @@ use crate::savepanel::{
     format_media, places, where_menu, PanelFocus, PanelHit, PanelLayout, Place, Said, SavePanel,
 };
 use crate::shell::DesktopShell;
+use crate::shown::Announced;
 
 /// What an open picker's title says it asks — on the taskbar and in the window
 /// chrome, after the application it asks for, so the user always sees which UI
@@ -219,17 +220,6 @@ impl<S, F: FnMut() -> S> PickSources<S> for F {
     fn source_for(&mut self, _pick: PickId) -> S {
         self()
     }
-}
-
-/// How far a pick's [`PICKER_SHOWN`] announcement has come.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Announced {
-    /// No presented frame has carried it with its listing landed.
-    Unseen,
-    /// One has; the announcement waits on its arm.
-    Presented,
-    /// [`PICKER_SHOWN`] has been announced.
-    Shown,
 }
 
 /// One-shot: a frame carrying the picker, with its listing landed, reached
@@ -1375,11 +1365,8 @@ impl<S: DirectorySource, F: PickSources<S>> SessionPicker<S, F> {
     /// of the rows a user picks from nor invites a click the picker ignores.
     pub fn report_newly_shown(&mut self, now_ns: u64, presented: bool, mut report: impl FnMut()) {
         for open in self.picks.values_mut() {
-            if open.announced == Announced::Unseen && presented && !open.browser.is_listing() {
-                open.announced = Announced::Presented;
-            }
-            if open.announced == Announced::Presented && open.armed(now_ns) {
-                open.announced = Announced::Shown;
+            let landed = presented && !open.browser.is_listing();
+            if open.announced.advance(landed, open.armed_at, now_ns) {
                 report();
             }
         }
@@ -1391,8 +1378,7 @@ impl<S: DirectorySource, F: PickSources<S>> SessionPicker<S, F> {
     pub fn shown_deadline(&self) -> Option<u64> {
         self.picks
             .values()
-            .filter(|open| open.announced == Announced::Presented)
-            .filter_map(|open| open.armed_at)
+            .filter_map(|open| open.announced.due(open.armed_at))
             .min()
     }
 

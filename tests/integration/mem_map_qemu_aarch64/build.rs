@@ -13,18 +13,18 @@
 //!    re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    mem_map_program`) **position-independent** for the freestanding aarch64
-//!    target (the shared `program.ld` roots `tairix-rt`'s `_start`), into a
-//!    private target directory under `OUT_DIR`, pinning the anonymous-region
+//!    target in the shared guest target directory, pinning the anonymous-region
 //!    base + length through the `TAIRIX_MEM_MAP_ADDR` / `TAIRIX_MEM_MAP_LEN`
 //!    environment variables so this script is the single source of truth for
 //!    the region the program maps *and* the kernel's fault check verifies.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
-//!    bytes, the bias, and the matching [`REGION_VA`] / [`REGION_LEN`]
-//!    constants as a Rust source the test `include!`s.
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the bytes, the
+//!    bias, and the matching [`REGION_VA`] / [`REGION_LEN`] constants as a Rust
+//!    source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
@@ -74,7 +74,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-mem-map",
-            variant: None,
             env: &[
                 ("TAIRIX_MEM_MAP_ADDR", REGION_VA.to_string()),
                 ("TAIRIX_MEM_MAP_LEN", REGION_LEN.to_string()),

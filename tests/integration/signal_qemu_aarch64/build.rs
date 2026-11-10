@@ -11,19 +11,19 @@
 //!    pointer (`x0 = 0`), so the board tree is embedded at build time; the dump
 //!    helper lives in the shared harness so no aarch64 build script re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
-//!    signal_program`) **three times** — as the `child`, `parent`, and
-//!    `intake` roles — position-independent for the freestanding aarch64 target
-//!    (the shared `program.ld` roots `tairix-rt`'s `_start`), into two private
-//!    target directories under `OUT_DIR`, selecting the role through the
+//!    signal_program`) **three times** — as the `child`, `parent`, and `intake`
+//!    roles — position-independent for the freestanding aarch64 target in the
+//!    shared guest target directory, selecting the role through the
 //!    `TAIRIX_SIGNAL_ROLE` environment variable so this script is its single
 //!    source of truth. Unlike the `wait` vertical the child's PID is threaded
 //!    at *runtime* (the kernel writes it into the parent's startup arguments
 //!    once the scheduler assigns it), so no build-time code is pinned.
 //! 3. Convert each linked PIE ELF to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the three blobs
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the three blobs
 //!    and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -74,7 +74,6 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, role: &str) -> V
         out_dir,
         arch: ARCH,
         package: "tairix-test-signal",
-        variant: Some(role),
         env: &[("TAIRIX_SIGNAL_ROLE", role.to_string())],
     }
     .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH)

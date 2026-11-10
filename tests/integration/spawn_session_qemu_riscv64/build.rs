@@ -10,19 +10,20 @@
 //! 2. Compile the pure-Rust spawn-session fixture program
 //!    (`tests/integration/spawn_session_program`) **twice** — once as the
 //!    **parent** role and once as the **child** (session) role, selected by the
-//!    `TAIRIX_SPAWN_ROLE` environment variable — **position-independent** for the
-//!    freestanding riscv64 target (the shared `program.ld` roots `tairix-rt`'s
-//!    `_start`), each into a private target directory under `OUT_DIR`, pinning
-//!    the yield count through `TAIRIX_SPAWN_YIELDS` so this script is the single
-//!    source of truth for the count. Each linked PIE ELF is
-//!    converted to an `rxe` blob with
+//!    `TAIRIX_SPAWN_ROLE` environment variable — **position-independent** for
+//!    the freestanding riscv64 target each in the shared guest target
+//!    directory, pinning the yield count through `TAIRIX_SPAWN_YIELDS` so this
+//!    script is the single source of truth for the count. Each linked PIE ELF
+//!    is converted to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps each image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
-//!    two blobs, the shared bias, and the matching [`YIELDS_PER_TASK`] constant
-//!    as a Rust source the test `include!`s. One source serves both roles: the per-process isolation is the separate page-table
-//!    hierarchies the kernel builds, not separate sources.
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps each image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the two blobs, the
+//!    shared bias, and the matching [`YIELDS_PER_TASK`] constant as a Rust
+//!    source the test `include!`s. One source serves both roles: the
+//!    per-process isolation is the separate page-table hierarchies the kernel
+//!    builds, not separate sources.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
@@ -81,7 +82,6 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, role: &str) -> V
         out_dir,
         arch: ARCH,
         package: "tairix-test-spawn-session-program",
-        variant: Some(role),
         env: &[
             ("TAIRIX_SPAWN_ROLE", role.to_string()),
             ("TAIRIX_SPAWN_YIELDS", YIELDS_PER_TASK.to_string()),

@@ -1662,7 +1662,7 @@ mod program {
         fade: &mut ScreenFade,
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
-        picker: &mut SessionPicker<S, F>,
+        prompts: (&mut SessionPicker<S, F>, &mut ResolutionPrompt),
         (apps, desktop): (&mut AppBarService, &mut Desktop<D>),
         suspended: &mut Option<bool>,
         text: TextDrawn<'_>,
@@ -1677,7 +1677,7 @@ mod program {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
                 let bars = (apps, desktop);
-                report_surfaces_shown(shell, compositor, fade, windows, menu, picker, bars, text);
+                report_surfaces_shown(shell, compositor, fade, windows, menu, prompts, bars, text);
                 return Ok(true);
             }
             Err(refused) => refused,
@@ -1742,7 +1742,7 @@ mod program {
         fade: &ScreenFade,
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
-        picker: &mut SessionPicker<S, F>,
+        (picker, resolution): (&mut SessionPicker<S, F>, &mut ResolutionPrompt),
         (apps, desktop): (&mut AppBarService, &mut Desktop<D>),
         text: TextDrawn<'_>,
     ) {
@@ -1827,8 +1827,12 @@ mod program {
             };
             log_info(MENU_SHOWN, MENU_SHOWN_MESSAGE, &[field]);
         });
-        picker.report_newly_shown(tairix_rt::clock_get(), true, || {
+        let now_ns = tairix_rt::clock_get();
+        picker.report_newly_shown(now_ns, true, || {
             log_info(PICKER_SHOWN, PICKER_SHOWN_MESSAGE, &[]);
+        });
+        resolution.report_newly_shown(now_ns, true, || {
+            log_info(TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, &[]);
         });
         shell
             .session_mut()
@@ -2406,18 +2410,11 @@ mod program {
             before,
             after: parts.compositor.placements(),
         };
-        match parts
-            .prompts
-            .2
-            .ask(trial, tairix_rt::clock_get(), parts.shell, parts.compositor)
-        {
-            Ok(()) => log_info(TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, &[]),
-            Err(trial) => {
-                io::write_stderr_line(
-                    "desktop: the new resolution could not be put to you, so it was not kept",
-                );
-                reply_pinboard(trial.ticket, Err(Errno::Declined));
-            }
+        if let Err(trial) = parts.prompts.2.ask(trial, parts.shell, parts.compositor) {
+            io::write_stderr_line(
+                "desktop: the new resolution could not be put to you, so it was not kept",
+            );
+            reply_pinboard(trial.ticket, Err(Errno::Declined));
         }
         Some(placements)
     }
@@ -3516,6 +3513,7 @@ mod program {
             .unwrap_or_default();
         let mut picker = SessionPicker::new(PickerListings(alloc::sync::Arc::clone(&listings)))
             .starting_at(picker_start);
+        let mut resolution = ResolutionPrompt::new();
         if let Err(code) = present(
             &mut shell,
             &mut compositor,
@@ -3523,7 +3521,7 @@ mod program {
             &mut fade,
             &mut windows,
             &mut menu,
-            &mut picker,
+            (&mut picker, &mut resolution),
             (&mut apps.service, &mut desktop),
             &mut suspended,
             TextDrawn {
@@ -3996,9 +3994,6 @@ mod program {
         // offered to the console's broker, never to an application; an
         // unanswered prompt offers nothing.
         let mut elevate = AuthorisePrompt::new();
-        // A new desktop resolution on trial: drawn at once, put to the user,
-        // and kept only if they keep it.
-        let mut resolution = ResolutionPrompt::new();
         // The screen lock, and the account it re-verifies. `USER` is what
         // login exported for this session; it names whose password the
         // prompt is asking for and nothing more — the broker reads the
@@ -4475,15 +4470,20 @@ mod program {
                 park = frame_stats.park_deadline_ns(now_ns, park);
                 park = frames.park_deadline_ns(now_ns, park);
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
-                // A presented picker's arm can fall due with nothing to paint.
+                // A presented picker's or prompt's arm can fall due with
+                // nothing to paint.
                 picker.report_newly_shown(now_ns, false, || {
                     log_info(PICKER_SHOWN, PICKER_SHOWN_MESSAGE, &[]);
+                });
+                resolution.report_newly_shown(now_ns, false, || {
+                    log_info(TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, &[]);
                 });
                 let held = picker
                     .scroll_repeat_deadline(now_ns)
                     .into_iter()
                     .chain(windows.alerts.repeat_deadline(now_ns))
                     .chain(picker.shown_deadline())
+                    .chain(resolution.shown_deadline())
                     .min();
                 park = park_within(park, held.map(|due| due.saturating_sub(now_ns)));
                 park = shell.tooltip_park_deadline_ns(now_ns, park);
@@ -4691,7 +4691,7 @@ mod program {
                         &mut fade,
                         &mut windows,
                         &mut menu,
-                        &mut picker,
+                        (&mut picker, &mut resolution),
                         (&mut apps.service, &mut desktop),
                         &mut suspended,
                         TextDrawn {
@@ -6276,11 +6276,13 @@ mod program {
             // the whole frame, as on the deadline path above: the animation
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
-            // An alert or a dialog's content first shows in this frame, so
-            // its arm delay runs from now.
+            // An alert, a dialog or a prompt first shows in this frame, so its
+            // arm delay runs from now.
             windows.alerts.stamp(now_ns);
             windows.stamp_dialogs(now_ns);
             picker.stamp(now_ns);
+            confirm.stamp(now_ns);
+            resolution.stamp(now_ns);
             serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
             // A lone tap of Ctrl typed this wake shows where the pointer is and
             // one of Meta opens or closes the program library, unless a button
@@ -6384,7 +6386,7 @@ mod program {
                     &mut fade,
                     &mut windows,
                     &mut menu,
-                    &mut picker,
+                    (&mut picker, &mut resolution),
                     (&mut apps.service, &mut desktop),
                     &mut suspended,
                     TextDrawn {
@@ -12774,7 +12776,7 @@ mod program {
                 // Never on the strength of the click alone: put the
                 // consequence to the user first. A prompt that cannot be
                 // shown asks nothing and relays nothing.
-                if !confirm.ask(action, tairix_rt::clock_get(), shell, compositor) {
+                if !confirm.ask(action, shell, compositor) {
                     io::write_stderr_line(
                         "desktop: could not ask for confirmation; nothing was done",
                     );

@@ -12874,7 +12874,7 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
 
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("a prompt window is showing");
     let bounds = comp.window(wm).expect("live").bounds();
     assert_eq!(
@@ -12884,7 +12884,7 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
     assert_eq!(confirm.pending(), Some(PowerAction::PowerOff));
 
     assert!(
-        !confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp),
+        !confirm.ask(PowerAction::Restart, &mut shell, &mut comp),
         "one prompt at a time"
     );
     assert_eq!(
@@ -12900,7 +12900,8 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
 fn escape_declines_the_prompt_and_relays_nothing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    confirm.stamp(0);
     let wm = confirm.wm_id().expect("showing");
 
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
@@ -12919,13 +12920,39 @@ fn escape_declines_the_prompt_and_relays_nothing() {
     assert!(mailbox.sent.is_empty(), "a decline sends nothing");
 }
 
+/// A prompt's arm runs from the moment it is first on screen, so an answer
+/// before it is stamped there, or before the arm delay since, is no answer.
+#[test]
+fn a_prompt_answers_nothing_until_it_has_been_on_screen_for_the_arm_delay() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut confirm = ConfirmPrompt::new();
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    assert_eq!(
+        confirm.handle_key(&escape, ALERT_ARM_NS * 4, &mut shell, &mut comp),
+        None,
+        "not yet on screen"
+    );
+    let shown = ALERT_ARM_NS * 2;
+    confirm.stamp(shown);
+    assert_eq!(
+        confirm.handle_key(&escape, shown + ALERT_ARM_NS - 1, &mut shell, &mut comp),
+        None
+    );
+    assert_eq!(
+        confirm.handle_key(&escape, shown + ALERT_ARM_NS, &mut shell, &mut comp),
+        Some(Answer::Declined)
+    );
+}
+
 /// The safe button holds keyboard focus when the prompt opens, so `Enter`
 /// without a deliberate move to the other button answers "no".
 #[test]
 fn enter_on_an_untouched_prompt_declines() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    confirm.stamp(0);
 
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
@@ -12942,7 +12969,8 @@ fn enter_on_an_untouched_prompt_declines() {
 fn moving_focus_then_enter_confirms_and_relays_exactly_once() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    confirm.stamp(0);
 
     let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
     assert_eq!(
@@ -12978,14 +13006,16 @@ fn prompt_clicks_answer_through_the_shared_button_geometry() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
 
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    confirm.stamp(0);
     let cancel = prompt_action_centre(&confirm, 0, &shell, &comp);
     assert_eq!(
         confirm.handle_click(cancel, ALERT_ARM_NS, &mut shell, &mut comp),
         Some(Answer::Declined)
     );
 
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    confirm.stamp(0);
     let accept = prompt_action_centre(&confirm, 1, &shell, &comp);
     assert_eq!(
         confirm.handle_click(accept, ALERT_ARM_NS - 1, &mut shell, &mut comp),
@@ -13004,7 +13034,7 @@ fn prompt_clicks_answer_through_the_shared_button_geometry() {
 fn a_press_off_the_prompt_buttons_answers_nothing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
 
     assert_eq!(
         confirm.handle_click(Point::new(4, 4), ALERT_ARM_NS, &mut shell, &mut comp),
@@ -13023,7 +13053,7 @@ fn a_press_off_the_prompt_buttons_answers_nothing() {
 fn an_abandoned_prompt_is_not_a_confirmation() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
 
     confirm.abandon(&mut shell, &mut comp);
@@ -13077,7 +13107,7 @@ fn a_confirmation_the_holder_refuses_says_why_rather_than_passing_silently() {
 fn the_prompt_repaints_on_a_theme_switch() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
     let before: Vec<_> = comp
         .window(wm)
@@ -16984,7 +17014,7 @@ fn session_surfaces_adapt_to_display_scale() {
     // it takes the extent its content asks for at each, which on a screen
     // this small is wider only up to the screen's share but always taller.
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
     let confirm_id = confirm.wm_id().expect("confirm window exists");
     let prompt = tairix_controls::Alert::from_spec(
         &crate::confirm::build_spec(PowerAction::Restart).expect("the prompt fits an alert"),
@@ -19447,12 +19477,12 @@ fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
         request: String::from("resolution = native\n"),
         ticket: 1,
     };
-    assert!(resolution.ask(trial, 0, &mut shell, &mut comp).is_ok());
+    assert!(resolution.ask(trial, &mut shell, &mut comp).is_ok());
     assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     assert!(resolution.abandon(&mut shell, &mut comp));
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
-    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     confirm.abandon(&mut shell, &mut comp);
     assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));

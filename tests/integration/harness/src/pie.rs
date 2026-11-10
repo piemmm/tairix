@@ -14,30 +14,22 @@
 //! `x86_64-unknown-none`, which is soft-float: rustc refuses to change a
 //! target's float ABI through `-C target-feature`. A JSON target has no
 //! rustup sysroot, and cargo accepts it only by path.
-//!
-//! [`wipe_target_dir_on_stamp_change`](crate::pie::wipe_target_dir_on_stamp_change)
-//! is the other fact every nested build needs: the guard that keeps a private
-//! target directory honest about the inputs cargo does not fingerprint.
 
-use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The one PIE link script every pure-Rust `Run` program links against,
-/// as a path relative to the workspace root.
-///
-/// Every `Run` program — PID 1, the system services, and every application
-/// and `/System/Drivers` bundle — shares this single layout (it names only
-/// architecture-neutral section classes), so it lives in exactly one file
-/// rather than being copied beside each program crate. Both PIE build
-/// recipes — the kernel `build.rs` embedded-program build and the
-/// `tools/xtask` image pipeline — resolve the script through this one
-/// constant, so the layout cannot drift between them and, because the script
-/// path they hand `rustc` is now identical for every program, the
-/// `-Z build-std` artefacts are built once and shared across all of them
-/// instead of being rebuilt per program.
-pub const RUN_LD_WORKSPACE_RELPATH: &str = "lib/rt/Run.ld";
+/// The one PIE link script every program links against — the system's own
+/// and every test fixture's — relative to the workspace root. It names only
+/// architecture-neutral section classes, so one layout serves every target.
+const RUN_LD_WORKSPACE_RELPATH: &str = "lib/rt/Run.ld";
+
+/// The one PIE link script every program links against, as an absolute path:
+/// every build names it by the same string, which cargo fingerprints.
+#[must_use]
+pub fn run_ld() -> PathBuf {
+    workspace_root().join(RUN_LD_WORKSPACE_RELPATH)
+}
 
 /// A freestanding Tier-1 target the image pipeline can cross-compile a
 /// position-independent `Run` binary for.
@@ -83,12 +75,55 @@ fn workspace_root() -> &'static Path {
 /// string, or cargo treats the two as different targets and rebuilds.
 #[must_use]
 pub fn cargo_target_spec(name: &str) -> OsString {
-    if name == PieArch::X86_64.target_triple() {
-        workspace_root()
-            .join(X86_64_TARGET_SPEC_RELPATH)
-            .into_os_string()
-    } else {
-        OsString::from(name)
+    target_spec_file(name).map_or_else(|| OsString::from(name), PathBuf::into_os_string)
+}
+
+/// The first-party spec file the target `name` is defined by, or `None` for a
+/// target rustc builds in.
+#[must_use]
+pub fn target_spec_file(name: &str) -> Option<PathBuf> {
+    (name == PieArch::X86_64.target_triple())
+        .then(|| workspace_root().join(X86_64_TARGET_SPEC_RELPATH))
+}
+
+/// The cargo profile a build compiles in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Profile {
+    /// Cargo's `dev` profile: `debug_assertions` on.
+    Dev,
+    /// `--release`: optimised, `debug_assertions` off.
+    Release,
+}
+
+impl Profile {
+    /// The profile of a build script's own unit, from the `PROFILE` cargo
+    /// hands it: `release` for any profile inheriting from release.
+    #[must_use]
+    pub fn of_build_script(profile: &str) -> Self {
+        if profile == "release" {
+            Self::Release
+        } else {
+            Self::Dev
+        }
+    }
+
+    /// The `cargo build` arguments that select it.
+    #[must_use]
+    pub const fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Dev => &[],
+            Self::Release => &["--release"],
+        }
+    }
+
+    /// The directory beneath `<target-dir>/<triple>/` cargo writes its
+    /// artefacts to.
+    #[must_use]
+    pub const fn dir(self) -> &'static str {
+        match self {
+            Self::Dev => "debug",
+            Self::Release => "release",
+        }
     }
 }
 
@@ -190,7 +225,7 @@ impl PieArch {
 /// under the outer run's settings and fail the build script on findings that
 /// run reports itself.
 #[must_use]
-pub fn nested_cargo(manifest_dir: impl AsRef<Path>) -> Command {
+pub(crate) fn nested_cargo(manifest_dir: impl AsRef<Path>) -> Command {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
     command
@@ -200,60 +235,6 @@ pub fn nested_cargo(manifest_dir: impl AsRef<Path>) -> Command {
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CLIPPY_ARGS");
     command
-}
-
-/// Wipe `target_dir` when an input cargo cannot fingerprint has changed
-/// since the nested build that last used it, and otherwise leave it for that
-/// build to extend incrementally.
-///
-/// Cargo fingerprints the `RUSTFLAGS` *string* — which names a linker script
-/// by path — but not that script's *content*, so a script edit alone can
-/// change while every fingerprint cargo keeps stays equal, leaving the
-/// previous artefact looking fresh. A caller passes such an input as `stamp`
-/// and it is recorded in a sidecar beside the directory. `None` means a stamp
-/// input could not be read; it compares as different, so the clean rebuild
-/// happens rather than a silently stale artefact.
-///
-/// The sidecar is written before the build runs, which is safe because it
-/// gates only the *wipe*: a wiped directory rebuilds from scratch whether or
-/// not the build that follows succeeds. A wipe that could not be carried out
-/// leaves the sidecar alone, so the next build retries it instead of reading
-/// the stale directory as current.
-pub fn wipe_target_dir_on_stamp_change(target_dir: &Path, stamp: Option<&[u8]>) {
-    let sidecar = stamp_sidecar(target_dir);
-    let previous = fs::read(&sidecar).ok();
-    if stamp.is_none() || stamp != previous.as_deref() {
-        if !wipe(target_dir) {
-            return;
-        }
-        if let Some(bytes) = stamp {
-            if let Some(parent) = sidecar.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&sidecar, bytes);
-        }
-    }
-}
-
-/// Remove `target_dir` and everything in it, reporting whether it is now
-/// gone. A directory that was never there counts as removed — that is the
-/// first build.
-fn wipe(target_dir: &Path) -> bool {
-    match fs::remove_dir_all(target_dir) {
-        Ok(()) => true,
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-    }
-}
-
-/// The sidecar recording the stamp `target_dir` was last built against. It
-/// sits *beside* the directory, not inside it, so a wipe cannot take it.
-fn stamp_sidecar(target_dir: &Path) -> PathBuf {
-    let mut name = target_dir
-        .file_name()
-        .map(OsStr::to_os_string)
-        .unwrap_or_default();
-    name.push(".stamp");
-    target_dir.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -287,17 +268,49 @@ mod tests {
     }
 
     /// The x86_64 spec is named by its file stem, which is the name every
-    /// other fact derives from, and it is a real file in the tree.
+    /// other fact derives from, and it is a real file in the tree; no other
+    /// target has one.
     #[test]
     fn the_x86_64_spec_is_the_file_its_name_derives_from() {
         let spec = PathBuf::from(PieArch::X86_64.cargo_target_spec());
         assert!(spec.is_absolute(), "{}", spec.display());
         assert!(spec.is_file(), "{} is not a file", spec.display());
         assert_eq!(
-            spec.file_stem().and_then(OsStr::to_str),
+            spec.file_stem().and_then(std::ffi::OsStr::to_str),
             Some(PieArch::X86_64.target_triple())
         );
         assert!(PieArch::X86_64.target_triple().contains("-none"));
+        assert_eq!(
+            target_spec_file(PieArch::X86_64.target_triple()),
+            Some(spec)
+        );
+        for arch in [PieArch::Aarch64, PieArch::Riscv64] {
+            assert_eq!(target_spec_file(arch.target_triple()), None, "{arch:?}");
+        }
+    }
+
+    /// The one link script is a real file, named by an absolute path every
+    /// build spells alike.
+    #[test]
+    fn the_link_script_is_one_absolute_file() {
+        let script = run_ld();
+        assert!(script.is_absolute(), "{}", script.display());
+        assert!(script.is_file(), "{} is not a file", script.display());
+        assert!(!script
+            .components()
+            .any(|part| part == std::path::Component::ParentDir));
+    }
+
+    /// The profile a build script reads selects cargo's own arguments and
+    /// directory for it.
+    #[test]
+    fn a_profile_selects_cargos_arguments_and_directory() {
+        assert_eq!(Profile::of_build_script("release"), Profile::Release);
+        assert_eq!(Profile::of_build_script("debug"), Profile::Dev);
+        assert!(Profile::Dev.args().is_empty());
+        assert_eq!(Profile::Dev.dir(), "debug");
+        assert_eq!(Profile::Release.args(), ["--release"]);
+        assert_eq!(Profile::Release.dir(), "release");
     }
 
     /// A builtin target is selected by name and brings its own sysroot; the
@@ -362,71 +375,6 @@ mod tests {
             );
             assert!(arch.index() < PieArch::COUNT);
         }
-    }
-
-    #[test]
-    fn the_stamp_sidecar_sits_beside_the_target_directory() {
-        assert_eq!(
-            stamp_sidecar(Path::new("/out/guest-target")),
-            Path::new("/out/guest-target.stamp"),
-        );
-    }
-
-    /// A stamp that moved clears the directory; an unchanged one leaves it
-    /// for cargo to build incrementally; an unreadable one clears it every
-    /// time rather than certifying a stale artefact.
-    #[test]
-    fn a_moved_stamp_wipes_the_target_directory() {
-        let root =
-            std::env::temp_dir().join(format!("tairix-pie-stamp-wipe-{}", std::process::id()));
-        let target = root.join("guest-target");
-        let witness = target.join("witness");
-        let _ = fs::remove_dir_all(&root);
-        let plant = || {
-            fs::create_dir_all(&target).expect("create the private target dir");
-            fs::write(&witness, b"artefact").expect("plant the artefact witness");
-        };
-
-        plant();
-        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
-        assert!(!witness.exists(), "no recorded stamp must force a wipe");
-
-        plant();
-        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
-        assert!(witness.exists(), "an unchanged stamp must keep the dir");
-
-        wipe_target_dir_on_stamp_change(&target, Some(b"second"));
-        assert!(!witness.exists(), "a changed stamp must wipe the dir");
-
-        for _ in 0..2 {
-            plant();
-            wipe_target_dir_on_stamp_change(&target, None);
-            assert!(!witness.exists(), "an unreadable stamp must wipe the dir");
-        }
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    /// A wipe that could not be carried out must not record the stamp: doing
-    /// so would let the next build read the directory it failed to clear as
-    /// current. A regular file standing where the directory belongs is a
-    /// removal error that is not "already absent".
-    #[test]
-    fn a_refused_wipe_records_no_stamp() {
-        let root =
-            std::env::temp_dir().join(format!("tairix-pie-stamp-refused-{}", std::process::id()));
-        let target = root.join("guest-target");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create the enclosing dir");
-        fs::write(&target, b"not a directory").expect("plant a file where the dir belongs");
-
-        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
-
-        assert!(
-            !stamp_sidecar(&target).exists(),
-            "a refused wipe must leave the next build to retry it"
-        );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

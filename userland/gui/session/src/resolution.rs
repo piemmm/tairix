@@ -20,9 +20,11 @@ use tairix_wm::{Compositor, Point, Rect, Scale, WindowId};
 
 use crate::choice::{question, Choice, ChoicePrompt};
 use crate::shell::DesktopShell;
+use crate::shown::Announced;
 use crate::switchuser::park_within;
 
-/// How long a new resolution stands unanswered before it is reverted.
+/// How long a new resolution stands unanswered, from the moment its prompt is
+/// first on screen, before it is reverted.
 pub const TRIAL_SECONDS: u64 = 15;
 
 /// What a settings apply asks of the desktop's resolution.
@@ -58,8 +60,9 @@ pub fn resolution_ask(
     }
 }
 
-/// One-shot per trial: the prompt is open and holding the keyboard, so a host
-/// answering it waits on the prompt rather than racing the change that asked.
+/// One-shot per trial: a presented frame carries the prompt, it holds the
+/// keyboard, and its buttons have armed, so a host answering it is answered
+/// rather than racing the change that asked or the arm.
 pub const TRIAL_SHOWN: EventId = EventId(20_023);
 
 /// The exact message [`TRIAL_SHOWN`] is logged with.
@@ -195,7 +198,10 @@ pub enum TrialEnd {
 struct Active {
     trial: Trial,
     prompt: ChoicePrompt,
-    due_ns: u64,
+    /// When the trial reverts unanswered, counted from the moment the prompt
+    /// is first on screen; `None` until then.
+    due_ns: Option<u64>,
+    announced: Announced,
 }
 
 /// The session's resolution-trial slot: idle, or holding the one trial whose
@@ -253,7 +259,9 @@ impl ResolutionPrompt {
         self.active.is_some()
     }
 
-    /// Put `trial` to the user at `now_ns`, the new resolution already drawn.
+    /// Put `trial` to the user, the new resolution already drawn. Its
+    /// countdown and its buttons' arm start once it is
+    /// [`stamp`](Self::stamp)ed on screen.
     ///
     /// # Errors
     ///
@@ -263,37 +271,68 @@ impl ResolutionPrompt {
     pub fn ask(
         &mut self,
         trial: Trial,
-        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Result<(), Trial> {
         if self.active.is_some() {
             return Err(trial);
         }
-        let due_ns = now_ns.saturating_add(TRIAL_SECONDS * u64::from(NANOS_PER_SEC));
-        let Some(mut prompt) = build_spec(seconds_left(due_ns, now_ns))
+        let Some(prompt) = build_spec(TRIAL_SECONDS)
             .and_then(|spec| ChoicePrompt::open(&spec, None, shell, compositor))
         else {
             return Err(trial);
         };
-        prompt.stamp(now_ns);
         self.active = Some(Active {
             trial,
             prompt,
-            due_ns,
+            due_ns: None,
+            announced: Announced::Unseen,
         });
         Ok(())
+    }
+
+    /// Start the countdown and the arm from `now_ns`, the moment the prompt is
+    /// first on screen; a prompt already counting keeps its moment.
+    pub fn stamp(&mut self, now_ns: u64) {
+        if let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.due_ns.is_none())
+        {
+            active.prompt.stamp(now_ns);
+            active.due_ns = Some(now_ns.saturating_add(TRIAL_SECONDS * u64::from(NANOS_PER_SEC)));
+        }
+    }
+
+    /// Hand `report` the trial's [`TRIAL_SHOWN`] once a frame carrying its
+    /// prompt has been `presented` and the buttons have armed at `now_ns`.
+    pub fn report_newly_shown(&mut self, now_ns: u64, presented: bool, report: impl FnOnce()) {
+        if let Some(active) = self.active.as_mut() {
+            if active
+                .announced
+                .advance(presented, active.prompt.armed_at(), now_ns)
+            {
+                report();
+            }
+        }
+    }
+
+    /// When the [`TRIAL_SHOWN`] held back for the arm falls due.
+    #[must_use]
+    pub fn shown_deadline(&self) -> Option<u64> {
+        let active = self.active.as_ref()?;
+        active.announced.due(active.prompt.armed_at())
     }
 
     /// `park_ns` shortened to when the countdown next moves.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        let Some(active) = &self.active else {
+        let Some(due_ns) = self.active.as_ref().and_then(|active| active.due_ns) else {
             return park_ns;
         };
         park_within(
             park_ns,
-            Some(next_step(active.due_ns, now_ns).saturating_sub(now_ns)),
+            Some(next_step(due_ns, now_ns).saturating_sub(now_ns)),
         )
     }
 
@@ -305,13 +344,17 @@ impl ResolutionPrompt {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
-        let Some(active) = self.active.as_mut() else {
+        let Some((active, due_ns)) = self
+            .active
+            .as_mut()
+            .and_then(|active| active.due_ns.map(|due_ns| (active, due_ns)))
+        else {
             return false;
         };
-        if now_ns >= active.due_ns {
+        if now_ns >= due_ns {
             return self.conclude(shell, compositor, Choice::Declined);
         }
-        let message = countdown(seconds_left(active.due_ns, now_ns));
+        let message = countdown(seconds_left(due_ns, now_ns));
         if active.prompt.detail() != message {
             active.prompt.set_detail(&message, shell, compositor);
         }

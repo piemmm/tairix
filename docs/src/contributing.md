@@ -484,11 +484,14 @@ usual cargo selectors (`--release`, `--doc`, `--target <triple>`,
 `-p <crate>`) to scope the clean, and reports how much space was freed.
 
 Every build unit — a package at one feature set, profile and target — keeps
-its own outputs, and the build script of the kernel and of each QEMU vertical
-compiles its embedded programs into a `-Z build-std` tree of its own beneath
-that unit's output directory, so the tens of gigabytes `target/` holds are
-live: no rule over the directory names can tell an orphan from a variant
-another build still reads. `clean` is how the space is reclaimed.
+its own outputs, so the tens of gigabytes `target/` holds are live: no rule
+over the directory names can tell an orphan from a variant another build still
+reads. The programs cross-compiled position-independent — the kernel's
+embedded ones, each QEMU vertical's guests and the image pipeline's bundles —
+build in `target/guest/<configuration>/`, one directory each configuration
+shares however many builds ask for it, so the sysroot and the runtime's
+closure are compiled once per configuration. `clean` is how the space is
+reclaimed.
 
 [agents]: https://github.com/tairix-project/tairix/blob/main/AGENTS.md
 [plan]: https://github.com/tairix-project/tairix/blob/main/PLAN.md

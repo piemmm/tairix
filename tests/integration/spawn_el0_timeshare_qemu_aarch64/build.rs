@@ -13,17 +13,17 @@
 //!    shared harness so no aarch64 build script re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    el0_yielder_program`) **position-independent** for the freestanding
-//!    aarch64 target (the shared `program.ld` roots `tairix-rt`'s `_start`), into a
-//!    private target directory under `OUT_DIR`, pinning its yield count through
-//!    the `TAIRIX_EL0_YIELDS` environment variable so this script is the single
-//!    source of truth for the count.
+//!    aarch64 target in the shared guest target directory, pinning its yield
+//!    count through the `TAIRIX_EL0_YIELDS` environment variable so this script
+//!    is the single source of truth for the count.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
-//!    bytes, the bias, and the matching [`YIELDS_PER_TASK`] constant as a Rust
-//!    source the test `include!`s.
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the bytes, the
+//!    bias, and the matching [`YIELDS_PER_TASK`] constant as a Rust source the
+//!    test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
@@ -67,7 +67,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-el0-yielder",
-            variant: None,
             env: &[("TAIRIX_EL0_YIELDS", YIELDS_PER_TASK.to_string())],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

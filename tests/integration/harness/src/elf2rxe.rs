@@ -7,8 +7,8 @@
 //! program ELF into an `rxe` blob with [`elf_to_rxe`] and embeds the bytes.
 //!
 //! The converter is deliberately strict (fail closed). It
-//! accepts only what the hardening invariants and the fixture's link
-//! recipe (`tests/integration/cc3_program/program.ld`) produce:
+//! accepts only what the hardening invariants and the one PIE link script
+//! (`lib/rt/Run.ld`) produce:
 //!
 //! * a little-endian ELF64 **`ET_DYN`** (PIE) image for one of the three native
 //!   Tier-1 machines;

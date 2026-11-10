@@ -320,15 +320,7 @@ fn sign_bundle(
     // A driver crate's `Run` binary shares the package name; cargo resolves
     // the crate from `-p <package>`, and every program links the one shared
     // PIE script, so no per-crate source directory is needed here.
-    let elf = cross_compile_pie_elf(
-        ctx,
-        arch,
-        "image-drivers",
-        package,
-        package,
-        features,
-        profile,
-    )?;
+    let elf = cross_compile_pie_elf(ctx, arch, package, package, features, profile)?;
     let rxe = elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,

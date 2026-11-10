@@ -64,6 +64,17 @@ fn trial() -> Trial {
     }
 }
 
+/// Put `trial()` to the user, its prompt first on screen at `shown_ns`.
+fn ask_shown(
+    prompt: &mut ResolutionPrompt,
+    shown_ns: u64,
+    shell: &mut crate::shell::DesktopShell,
+    comp: &mut tairix_wm::Compositor,
+) {
+    assert!(prompt.ask(trial(), shell, comp).is_ok());
+    prompt.stamp(shown_ns);
+}
+
 fn pressed(key: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
         key: KeyValue::Named(key),
@@ -76,13 +87,19 @@ fn pressed(key: NamedKeyCode) -> KeyInput {
 fn the_prompt_opens_once_counting_down_and_parks_on_each_second() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    assert!(prompt.ask(trial(), &mut shell, &mut comp).is_ok());
     assert!(prompt.wm_id().is_some());
+    assert_eq!(
+        prompt.park_deadline_ns(0, u64::MAX),
+        u64::MAX,
+        "nothing counts before it is on screen"
+    );
+    prompt.stamp(0);
     assert_eq!(prompt.park_deadline_ns(0, u64::MAX), SECOND);
     assert_eq!(prompt.park_deadline_ns(SECOND / 2, u64::MAX), SECOND / 2);
     assert_eq!(prompt.park_deadline_ns(0, 10), 10, "a nearer park stands");
     assert_eq!(
-        prompt.ask(trial(), 0, &mut shell, &mut comp),
+        prompt.ask(trial(), &mut shell, &mut comp),
         Err(trial()),
         "one trial at a time"
     );
@@ -100,9 +117,16 @@ fn the_prompt_opens_once_counting_down_and_parks_on_each_second() {
 fn the_countdown_running_out_reverts() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    assert!(prompt.ask(trial(), &mut shell, &mut comp).is_ok());
+    assert!(
+        !prompt.tick(TRIAL_SECONDS * SECOND * 2, &mut shell, &mut comp),
+        "the countdown runs from the moment the prompt is on screen"
+    );
+    let shown = 3 * SECOND;
+    prompt.stamp(shown);
+    prompt.stamp(shown + SECOND);
     let wm = prompt.wm_id().expect("showing");
-    let due = TRIAL_SECONDS * SECOND;
+    let due = shown + TRIAL_SECONDS * SECOND;
     assert!(!prompt.tick(due - 1, &mut shell, &mut comp));
     assert!(prompt.tick(due, &mut shell, &mut comp));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Reverted(trial())));
@@ -115,7 +139,7 @@ fn the_countdown_running_out_reverts() {
 fn enter_keeps_and_escape_or_the_other_button_reverts() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    ask_shown(&mut prompt, 0, &mut shell, &mut comp);
     assert!(prompt.handle_key(
         &pressed(NamedKeyCode::Enter),
         ALERT_ARM_NS,
@@ -124,7 +148,7 @@ fn enter_keeps_and_escape_or_the_other_button_reverts() {
     ));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Kept(trial())));
 
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    ask_shown(&mut prompt, 0, &mut shell, &mut comp);
     assert!(prompt.handle_key(
         &pressed(NamedKeyCode::Escape),
         ALERT_ARM_NS,
@@ -133,7 +157,7 @@ fn enter_keeps_and_escape_or_the_other_button_reverts() {
     ));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Reverted(trial())));
 
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    ask_shown(&mut prompt, 0, &mut shell, &mut comp);
     assert!(!prompt.handle_key(
         &pressed(NamedKeyCode::Tab),
         ALERT_ARM_NS,
@@ -157,7 +181,7 @@ fn enter_keeps_and_escape_or_the_other_button_reverts() {
 fn a_click_on_keep_keeps_and_a_click_beside_the_buttons_asks_on() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    ask_shown(&mut prompt, 0, &mut shell, &mut comp);
     let keep = prompt
         .button_centre(crate::choice::ACCEPT, &shell, &comp)
         .expect("showing");
@@ -176,12 +200,44 @@ fn a_click_on_keep_keeps_and_a_click_beside_the_buttons_asks_on() {
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Kept(trial())));
 }
 
+/// The trial is announced only once a presented frame carries the prompt and
+/// its buttons have armed, so the Enter a host types on the announcement is
+/// taken; one typed before the prompt is on screen, or before it arms, is not.
+#[test]
+fn the_trial_is_announced_once_shown_and_armed_and_then_takes_its_answer() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ResolutionPrompt::new();
+    let mut announced = 0;
+    assert!(prompt.ask(trial(), &mut shell, &mut comp).is_ok());
+    prompt.report_newly_shown(0, true, || announced += 1);
+    assert_eq!(announced, 0, "not stamped on screen yet");
+    let enter = pressed(NamedKeyCode::Enter);
+    assert!(
+        !prompt.handle_key(&enter, ALERT_ARM_NS, &mut shell, &mut comp),
+        "not armed before it is on screen"
+    );
+    let shown = 5 * SECOND;
+    prompt.stamp(shown);
+    let armed = shown + ALERT_ARM_NS;
+    prompt.report_newly_shown(shown, true, || announced += 1);
+    assert_eq!(announced, 0, "presented, not armed");
+    assert_eq!(prompt.shown_deadline(), Some(armed));
+    assert!(!prompt.handle_key(&enter, armed - 1, &mut shell, &mut comp));
+    prompt.report_newly_shown(armed, false, || announced += 1);
+    assert_eq!(announced, 1);
+    assert_eq!(prompt.shown_deadline(), None);
+    prompt.report_newly_shown(armed + SECOND, true, || announced += 1);
+    assert_eq!(announced, 1, "once");
+    assert!(prompt.handle_key(&enter, armed, &mut shell, &mut comp));
+    assert_eq!(prompt.take_ended(), Some(TrialEnd::Kept(trial())));
+}
+
 #[test]
 fn an_abandoned_trial_reverts() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
     assert!(!prompt.abandon(&mut shell, &mut comp), "nothing to abandon");
-    assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
+    assert!(prompt.ask(trial(), &mut shell, &mut comp).is_ok());
     assert!(prompt.abandon(&mut shell, &mut comp));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Reverted(trial())));
 }

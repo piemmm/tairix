@@ -928,11 +928,12 @@ bit for bit what the per-pixel walk gives, with a regression test comparing the
 two over cut rows of decorated and plain windows.
 
 **CI-PAR.** `cargo xtask ci` takes about 15 minutes warm on 24 cores, and its 319
-`pie_build` spawns (about 193 s) run serially. The private target directory is
-per triple, so builds for different triples can overlap, but the grouping has to
-be by triple across every `pie_build` caller (the image pipeline, the kernel
-build script and the QEMU fixtures), and the change needs proof that the ELFs it
-produces are byte-identical. Measured and ruled out: concurrent cargo runs on one
+`pie_build` spawns (about 193 s) run serially. Every caller — the image
+pipeline, the kernel build script and the QEMU fixtures — builds in one shared
+directory per configuration, each triple its own, and a build holds its
+directory's lock, so builds for different triples can overlap: the image
+pipeline's spawns have to be grouped by triple, with proof that the ELFs they
+produce are byte-identical. Measured and ruled out: concurrent cargo runs on one
 target directory serialise on its lock, and merging `target_clippy`'s strata
 would unify features and link `lib/rt`'s allocator into the kernel. The QEMU
 budget (`nproc/3`) is deliberate headroom, not a lever. Even at its floor the

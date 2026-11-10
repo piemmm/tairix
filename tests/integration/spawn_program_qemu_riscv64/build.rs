@@ -5,15 +5,14 @@
 //! (`tests/integration/cc3_program`). The kernel spawn path consumes an `rxe`
 //! load image, not a raw ELF, so this script:
 //!
-//! 1. compiles the fixture program **position-independent** for the freestanding
-//!    riscv64 target (the shared `program.ld` roots crt0's `_start`), into a
-//!    private target directory under `OUT_DIR` so it never collides with the
-//!    outer build (one program source, built two ways);
+//! 1. compiles the fixture program **position-independent** for the
+//!    freestanding riscv64 target in the shared guest target directory;
 //! 2. converts the linked PIE ELF to an `rxe` blob with
 //!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and stamping the kernel's
-//!    compiled-in syscall CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`tairix_abi::rxe::LoadImage::parse`] accepts it;
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at
+//!    and stamping the kernel's compiled-in syscall CFI tag
+//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it;
 //! 3. emits the bytes and `USER_BIAS` as a Rust source the test `include!`s.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
@@ -44,7 +43,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-cc3-program",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

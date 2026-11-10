@@ -55,7 +55,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-service-ceiling",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

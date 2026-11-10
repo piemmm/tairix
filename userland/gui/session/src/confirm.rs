@@ -98,21 +98,27 @@ impl ConfirmPrompt {
     pub fn ask(
         &mut self,
         action: PowerAction,
-        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
         if self.active.is_some() {
             return false;
         }
-        let Some(mut prompt) =
+        let Some(prompt) =
             build_spec(action).and_then(|spec| ChoicePrompt::open(&spec, None, shell, compositor))
         else {
             return false;
         };
-        prompt.stamp(now_ns);
         self.active = Some(ActivePrompt { action, prompt });
         true
+    }
+
+    /// Start the showing prompt's arm from `now_ns`, the moment it is first on
+    /// screen; a prompt already armed keeps its moment.
+    pub fn stamp(&mut self, now_ns: u64) {
+        if let Some(active) = self.active.as_mut() {
+            active.prompt.stamp(now_ns);
+        }
     }
 
     /// Apply one key press at `now_ns` to the showing prompt.

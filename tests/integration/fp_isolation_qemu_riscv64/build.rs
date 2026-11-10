@@ -8,19 +8,19 @@
 //!    per-arch script the architecture port owns), exactly
 //!    as the sibling riscv64 integration binaries do.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
-//!    fp_probe_program`) **position-independent** for the freestanding
-//!    riscv64 target (the shared `program.ld` roots `tairix-rt`'s `_start`), into a
-//!    private target directory under `OUT_DIR`, pinning its yield count through
-//!    the `TAIRIX_FP_ROUNDS` environment variable so this script is the single
-//!    source of truth for the count, then convert the linked
-//!    PIE ELF to an `rxe` blob with [`tairix_itest_harness::elf2rxe::elf_to_rxe`],
-//!    baking relocations for the [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel maps the image at and
-//!    stamping the kernel's compiled-in syscall CFI tag
+//!    fp_probe_program`) **position-independent** for the freestanding riscv64
+//!    target in the shared guest target directory, pinning its yield count
+//!    through the `TAIRIX_FP_ROUNDS` environment variable so this script is the
+//!    single source of truth for the count, then convert the linked PIE ELF to
+//!    an `rxe` blob with [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking
+//!    relocations for the [`tairix_itest_harness::USER_IMAGE_BIAS`] the kernel
+//!    maps the image at and stamping the kernel's compiled-in syscall CFI tag
 //!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
-//!    bytes, the bias, and the matching [`ROUNDS_PER_TASK`] constant as a Rust
-//!    source the test `include!`s. Both tasks run the one image: the per-task isolation is the separate page-table hierarchies the
-//!    kernel builds, not separate binaries.
+//!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the bytes, the
+//!    bias, and the matching [`ROUNDS_PER_TASK`] constant as a Rust source the
+//!    test `include!`s. Both tasks run the one image: the per-task isolation is
+//!    the separate page-table hierarchies the kernel builds, not separate
+//!    binaries.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
@@ -62,7 +62,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-fp-probe",
-            variant: None,
             env: &[("TAIRIX_FP_ROUNDS", ROUNDS_PER_TASK.to_string())],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
@@ -71,7 +70,6 @@ fn main() {
             out_dir: &out_dir,
             arch: ARCH,
             package: "tairix-test-entry-hygiene",
-            variant: None,
             env: &[],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);

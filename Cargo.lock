@@ -3285,6 +3285,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-crypto",
  "tairix-fdt",
+ "tairix-hash",
  "tairix-net",
  "tairix-qemu",
  "tairix-syshelp",
