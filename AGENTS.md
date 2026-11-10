@@ -729,6 +729,7 @@ tairix/
 │   ├── saver/           # The saver side of a screensaver: its loop, region, font relay.
 │   ├── scatter/         # Keyed scatter: places on a land-fixed lattice, thinned by rank.
 │   ├── seat/            # Arch-neutral seat model.
+│   ├── shaders/         # The pinned shader set: the desktop's passes as committed SPIR-V.
 │   ├── smb/             # The pure SMB 3 protocol engine (no I/O, clock, or RNG).
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated

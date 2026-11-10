@@ -1,0 +1,38 @@
+[package]
+name = "tairix-shaders"
+description = "TAIRiX pinned shader set: the desktop's passes as GPU programs — the frost's reduce, blur, spread and mix, and the compositor's dithered over, copy, fill and channel-order encode — each written in Rust through lib/spirv's builder, committed as SPIR-V and verified on drift by `cargo xtask shaders`, and held bit for bit to lib/raster's own arithmetic (plans/GPU.md GD6, plans/SHADER.md SH3). no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The builder each pass's source is written through, and the validator that
+# admits what it writes.
+tairix-spirv = { path = "../spirv", version = "=0.0.0" }
+# The ordered dither's biases and the rounding point the passes take from the
+# software path's own definitions rather than restating them.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The fallible growth every vector a pass's source fills goes through.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The software device the conformance cases run each committed pass on.
+tairix-gpu = { path = "../gpu", version = "=0.0.0" }
+# The clock the device's deadlines read.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The host's stand-in for the syscalls the device's runtime would make.
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
+# The display byte orders the encode is held to.
+tairix-display = { path = "../display", version = "=0.0.0" }
+# The serial runner the device works on.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The half-resolution blur spelled as its definition, the frost's oracle.
+tairix-raster = { path = "../raster", version = "=0.0.0", features = ["test-util"] }
+# The per-run seed the conformance cases draw their pictures from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

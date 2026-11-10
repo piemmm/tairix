@@ -19,6 +19,10 @@
 //!    is refused as missing it.
 //! 7. The view answers what every type an admitted module declares is, and
 //!    answers no type for any other id.
+//! 8. A module the builder writes from a random structured program — nested
+//!    selections and loops, early returns, arithmetic, extended instructions
+//!    and the locals that carry values out of a construct — is admitted, and
+//!    the same program builds the same bytes.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -30,8 +34,8 @@ use tairix_spirv::enumerant::{
     ImageFormat, ImageOperands, MemoryModel, StorageClass,
 };
 use tairix_spirv::{
-    Admitted, Arg, Disagreement, EncodeError, Encoder, Id, Layout, Module, Op, SpecError,
-    SpecValue, Specialized, Type, Version,
+    Admitted, Arg, BuildError, Builder, Disagreement, EncodeError, Encoder, Function, GlslStd450,
+    Id, Layout, Module, Op, SpecError, SpecValue, Specialized, Type, Version,
 };
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -624,4 +628,177 @@ const fn declares_type(op: Op) -> bool {
             | Op::TYPE_POINTER
             | Op::TYPE_FUNCTION
     )
+}
+
+/// What a random program's statements reach: the buffer each stores to, the
+/// types they compute in, and the local they carry a value out of a
+/// construct through.
+struct Reach {
+    uint: Id,
+    boolean: Id,
+    word: Id,
+    buffer: Id,
+    carried: Id,
+    counter: Id,
+}
+
+/// The deepest a random program nests its constructs.
+const PROGRAM_DEPTH: u32 = 4;
+
+/// Write a random run of statements over the values in `scope` at `depth`
+/// constructs still to nest; what one defines stays in scope after it, and
+/// what a construct defines does not.
+fn statements(
+    f: &mut Function<'_>,
+    reach: &Reach,
+    rng: &mut Prng,
+    scope: &mut Vec<Id>,
+    depth: u32,
+) -> Result<(), BuildError> {
+    for _ in 0..=rng.below(4) {
+        let value = |rng: &mut Prng, scope: &[Id]| *rng.pick(scope);
+        let nested = depth > 0;
+        match rng.below(if nested { 9 } else { 4 }) {
+            0 | 1 => {
+                let op = *rng.pick(&[
+                    Op::I_ADD,
+                    Op::I_SUB,
+                    Op::I_MUL,
+                    Op::U_DIV,
+                    Op::U_MOD,
+                    Op::BITWISE_AND,
+                    Op::BITWISE_OR,
+                    Op::BITWISE_XOR,
+                    Op::SHIFT_LEFT_LOGICAL,
+                    Op::SHIFT_RIGHT_LOGICAL,
+                ]);
+                let (a, b) = (value(rng, scope), value(rng, scope));
+                scope.push(f.op(op, reach.uint, &[a, b])?);
+            }
+            2 => {
+                let inst = *rng.pick(&[GlslStd450::U_MIN, GlslStd450::U_MAX]);
+                let (a, b) = (value(rng, scope), value(rng, scope));
+                scope.push(f.glsl(inst, reach.uint, &[a, b])?);
+            }
+            3 => {
+                let (at, stored) = (value(rng, scope), value(rng, scope));
+                let zero = f.module().uint(0)?;
+                let slot = f.op(Op::ACCESS_CHAIN, reach.word, &[reach.buffer, zero, at])?;
+                f.emit(Op::STORE, &[slot, stored])?;
+            }
+            kind => {
+                let (a, b) = (value(rng, scope), value(rng, scope));
+                let holds = f.op(Op::U_LESS_THAN, reach.boolean, &[a, b])?;
+                let laps = u32::from(rng.next_u8() & 7);
+                let mut inner = scope.clone();
+                let mut more = |f: &mut Function<'_>, inner: &mut Vec<Id>| {
+                    statements(f, reach, rng, inner, depth - 1)?;
+                    let last = *inner.last().unwrap_or(&a);
+                    f.emit(Op::STORE, &[reach.carried, last])
+                };
+                match kind {
+                    4 | 5 => f.if_then(holds, |f| more(f, &mut inner))?,
+                    6 => f.if_else(
+                        holds,
+                        |f| more(f, &mut inner),
+                        |f| f.emit(Op::STORE, &[reach.carried, b]),
+                    )?,
+                    7 => f.if_then(holds, |f| f.emit(Op::RETURN, &[]))?,
+                    _ => {
+                        let bound = f.module().uint(laps)?;
+                        let zero = f.module().uint(0)?;
+                        let one = f.module().uint(1)?;
+                        f.emit(Op::STORE, &[reach.counter, zero])?;
+                        f.while_loop(
+                            |f| {
+                                let at = f.op(Op::LOAD, reach.uint, &[reach.counter])?;
+                                f.op(Op::U_LESS_THAN, reach.boolean, &[at, bound])
+                            },
+                            |f| more(f, &mut inner),
+                            |f| {
+                                let at = f.op(Op::LOAD, reach.uint, &[reach.counter])?;
+                                let next = f.op(Op::I_ADD, reach.uint, &[at, one])?;
+                                f.emit(Op::STORE, &[reach.counter, next])
+                            },
+                        )?;
+                    }
+                }
+                scope.push(f.op(Op::LOAD, reach.uint, &[reach.carried])?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A compute module whose `main` is a random structured program drawn from
+/// `rng`.
+fn built(rng: &mut Prng) -> Result<Admitted, BuildError> {
+    let mut b = Builder::new(Version::NEWEST, 0)?;
+    b.capability(Capability::SHADER)?;
+    let (uint, boolean) = (b.int(32, false)?, b.boolean()?);
+    let v3uint = b.vector(uint, 3)?;
+    let array = b.runtime_array(uint)?;
+    b.decorate(array, Decoration::ARRAY_STRIDE, &[4])?;
+    let block = b.structure(&[array])?;
+    b.decorate(block, Decoration::BLOCK, &[])?;
+    b.member_decorate(block, 0, Decoration::OFFSET, &[0])?;
+    let block_ptr = b.pointer(StorageClass::STORAGE_BUFFER, block)?;
+    let buffer = b.variable(block_ptr, StorageClass::STORAGE_BUFFER)?;
+    b.decorate(buffer, Decoration::DESCRIPTOR_SET, &[0])?;
+    b.decorate(buffer, Decoration::BINDING, &[0])?;
+    let input = b.pointer(StorageClass::INPUT, v3uint)?;
+    let global = b.variable(input, StorageClass::INPUT)?;
+    b.decorate(
+        global,
+        Decoration::BUILT_IN,
+        &[BuiltIn::GLOBAL_INVOCATION_ID.0],
+    )?;
+    let word = b.pointer(StorageClass::STORAGE_BUFFER, uint)?;
+    let local = b.pointer(StorageClass::FUNCTION, uint)?;
+    let (void, main) = (b.void()?, b.id()?);
+    b.define(main, void, &[], |f, _| {
+        let reach = Reach {
+            uint,
+            boolean,
+            word,
+            buffer,
+            carried: f.local(local)?,
+            counter: f.local(local)?,
+        };
+        let id = f.op(Op::LOAD, v3uint, &[global])?;
+        let index = f.op_args(Op::COMPOSITE_EXTRACT, uint, &[Arg::Id(id), Arg::Word(0)])?;
+        let three = f.module().uint(3)?;
+        f.emit(Op::STORE, &[reach.carried, three])?;
+        let mut scope = vec![index, three];
+        statements(f, &reach, rng, &mut scope, PROGRAM_DEPTH)?;
+        f.emit(Op::RETURN, &[])
+    })?;
+    b.entry_point(ExecutionModel::GL_COMPUTE, main, "main", &[global, buffer])?;
+    b.execution_mode(main, ExecutionMode::LOCAL_SIZE, &[64, 1, 1])?;
+    b.finish()
+}
+
+#[test]
+fn the_builder_writes_only_modules_the_validator_admits() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "the_builder_writes_only_modules_the_validator_admits",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..ROUNDS_PER_SWEEP {
+            let program = rng.next_u64();
+            let first = built(&mut Prng::new(program));
+            let admitted = first.unwrap_or_else(|error| panic!("program {program:#x}: {error}"));
+            let again = built(&mut Prng::new(program)).expect("built again");
+            assert_eq!(
+                admitted.module().bytes(),
+                again.module().bytes(),
+                "program {program:#x} built two ways"
+            );
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
 }

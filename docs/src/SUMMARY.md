@@ -133,6 +133,7 @@
   - [`tairix-saver`](./lib/saver.md)
   - [`tairix-scatter`](./lib/scatter.md)
   - [`tairix-smb`](./lib/smb.md)
+  - [`tairix-shaders`](./lib/shaders.md)
   - [`tairix-sound`](./lib/sound.md)
   - [`tairix-spirv`](./lib/spirv.md)
   - [`tairix-soundtheme`](./lib/soundtheme.md)

@@ -245,6 +245,38 @@ holding a nul, an instruction past its word count, and a module past
 decoded before anything relies on it, so there is one judge of what a module
 may hold, and a builder's mistake is a refusal at build time.
 
+## The builder
+
+`Builder` writes a module from Rust, for the first-party modules TAIRiX
+commits (`lib/shaders`). It gathers each section as it is written —
+capabilities and extensions once each, the `GLSL.std.450` import, entry
+points, execution modes, decorations, the types, constants and variables the
+functions share, and the functions — and `finish` lays them out in SPIR-V's
+order, decodes the words and validates them, answering the `Admitted` module
+or the refusal. A module the builder wrote is held to the same judge as one
+that arrived from anywhere else.
+
+- **Interning.** A scalar, vector, matrix, pointer or function type, and every
+  constant, is one id however often it is asked for, since SPIR-V refuses two
+  non-aggregate types alike. An array or structure is fresh each time, for its
+  maker to decorate. `declare` writes any other declaration.
+- **Functions.** `define` writes a function into an id from `id`, so a call
+  may name one defined later. Its body is a `Function` written a block at a
+  time from an entry block it begins: `op` and `emit` write an instruction
+  with or without a result, a terminator closes the block, `local` lays a
+  `Function`-class variable at the head of the first block wherever it is
+  asked for, and `glsl` writes an extended instruction.
+- **Structured constructs.** `if_then`, `if_else` and `while_loop` open, merge
+  and close their own blocks; a branch that returns leaves nothing to merge
+  from it. A loop's test is a block of its own after the header, its
+  conditional branch to the merge a break.
+- **Misuse is a value.** An instruction with no block open is `NoBlock`, a
+  block begun or a function ended with one still open is `Unterminated`, and a
+  section the heap will not grow is `OutOfMemory`; nothing panics.
+
+The table generator also emits `GlslStd450`, each extended instruction by
+name, for the instructions a builder writes.
+
 ## The test assembler
 
 `assemble` (the `test-support` feature, which only tests enable) turns SPIR-V
@@ -260,6 +292,11 @@ validates. `lib/spirv`'s own tests and `lib/gpu`'s write their modules this
 way.
 
 ## Tests
+
+- The builder's tests write compute modules through it and have them
+  admitted: interning, determinism, both selections, a counted loop through a
+  local laid at the first block, an extended instruction imported once, a
+  call to a function defined after its caller, and each misuse refused.
 
 - The decoder's tests build a compute shader through the encoder using every
   shape the decoder reads — strings, enumerants with parameters, a bit set with
@@ -293,6 +330,10 @@ way.
   written with the test assembler, holds specialization constants that every
   family of specialization operation reaches, and a specialized workgroup
   size.
+  Beside the mutations, it has the builder write random structured programs —
+  nested selections and loops, early returns, arithmetic, extended
+  instructions and the locals that carry values out of a construct — and
+  holds each to being admitted and to building the same bytes twice.
 - `cargo xtask miri` interprets the crate's tests, dealt across the host's
   cores, and the harness. It leaves out eight whose extent is their assertion
   and costs minutes to hours interpreted: the bounds on nesting, call depth,

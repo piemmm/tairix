@@ -73,6 +73,17 @@ crossings and tie rule the coverage fill uses for centre sampling, so two
 triangles sharing an edge own every centre along it exactly once: a mesh has
 neither cracks nor doubled pixels.
 
+That rule is one integer half-plane per edge: a sample `(x, y)` lies at or
+past an edge's crossing exactly where `a·x + b·y + c ≥ 0`, the rounding of the
+crossing folded into `c`, and a triangle covers a sample where both of the
+sides spanning its row hold it. `Triangle::covers` asks it of one sample, and
+`Triangle::block` of every sample of an eight-pixel-square block at once — a
+fragment tile — as a mask a sample, at the pixel centre or the four standard
+positions of a four-sample image (`Lattice`). The row walker the fill steps by
+and the block evaluator cover the same samples, and each of the four positions
+covers what the centre covers of the triangle moved onto it, so a mesh owns
+every sample of four exactly once too.
+
 `Depth` is reciprocal and reversed — larger is nearer, `Depth::CLEAR` lies
 beyond anything drawn and `Depth::NEAREST` is the near plane. The reciprocal
 is affine across the screen, so it interpolates exactly, and it is the

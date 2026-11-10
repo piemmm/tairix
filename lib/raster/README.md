@@ -140,7 +140,9 @@ This crate owns:
   into any band of a `DepthBuffer` cut as a surface's rows are, under a
   `DepthTest`, handing each fragment that passes to the caller's shader and
   recording, if asked (`EdgeRecord`), how near its triangle's edge lies — what
-  a silhouette pass resolves against. Coverage is integer; the depth and
+  a silhouette pass resolves against. Coverage is integer: one half-plane
+  per edge, which `covers` asks of a sample and `block` of a fragment tile
+  of samples at the centre or the four-sample `Lattice`. The depth and
   weight planes are `f64` set up once per triangle and evaluated in a fixed
   order, so a mesh draws the same pixels on every target.
 - `view::Perspective` — the view a mesh is seen through: world points into

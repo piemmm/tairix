@@ -249,6 +249,65 @@ impl Edge {
         }
         self.x_top + rounded_div(run * (y - self.top), rise)
     }
+
+    /// The samples at or past this edge's crossing, [`Self::x_at`], on every
+    /// row it spans.
+    ///
+    /// The crossing rounds half away from zero from `x_top`, so for an
+    /// integer sample the comparison is an integer inequality, its constant
+    /// differing with the sign of the run.
+    pub(crate) fn at_or_past(&self) -> HalfPlane {
+        let rise = self.bottom - self.top;
+        let run = self.x_bottom - self.x_top;
+        let half = rise / 2;
+        let slack = if run > 0 { rise - half - 1 } else { half };
+        HalfPlane {
+            a: rise,
+            b: -run,
+            c: run * self.top - rise * self.x_top + slack,
+        }
+    }
+
+    /// The samples inside this edge of a polygon whose signed area has the
+    /// sign `winding`: past the crossing where the edge runs against the
+    /// winding, short of it where it runs with it.
+    pub(crate) fn inside(&self, winding: i64) -> HalfPlane {
+        let past = self.at_or_past();
+        if i64::from(self.direction) * winding < 0 {
+            past
+        } else {
+            past.complement()
+        }
+    }
+}
+
+/// The samples one side of an edge: `(x, y)` sub-units, `y` among the rows
+/// the edge spans, is inside where `a·x + b·y + c ≥ 0`.
+///
+/// The converter's coverage rule stated once, for a row walker and a block
+/// evaluator alike: every product stays far inside `i64` for samples within
+/// [`COORD_LIMIT`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HalfPlane {
+    pub(crate) a: i64,
+    pub(crate) b: i64,
+    pub(crate) c: i64,
+}
+
+impl HalfPlane {
+    /// Its value at `(x, y)`: inside where non-negative.
+    pub(crate) const fn at(self, x: i64, y: i64) -> i64 {
+        self.a * x + self.b * y + self.c
+    }
+
+    /// The samples this half-plane leaves out.
+    pub(crate) const fn complement(self) -> Self {
+        Self {
+            a: -self.a,
+            b: -self.b,
+            c: -self.c - 1,
+        }
+    }
 }
 
 /// A straight piece of an edge, clipped to one pixel row and travelling

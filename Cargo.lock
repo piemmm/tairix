@@ -4822,6 +4822,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-shaders"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-abi-trap",
+ "tairix-display",
+ "tairix-fuzzseed",
+ "tairix-gpu",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-spirv",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-signkeys"
 version = "0.0.0"
 dependencies = [
@@ -9699,6 +9714,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-sandbox",
  "tairix-settings",
+ "tairix-shaders",
  "tairix-signkeys",
  "tairix-sound",
  "tairix-soundd",

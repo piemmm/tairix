@@ -5,6 +5,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 use core::sync::atomic::Ordering::Relaxed;
 
 use tairix_geometry::{Rect, Region};
@@ -17,10 +18,11 @@ use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::mathf::single;
 
 use super::{
-    along, bernstein, curtain, falloff_reach, index_of, monotone, needed_pushes, sample_across,
-    tone_entry, tone_index, Fall, Light, Rows, Scratch, Tally, CHUNK, CHUNK_LANES, CONTROLS,
-    DITHER_LANES, EDGE_MARGIN, EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN,
-    PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
+    along, bernstein, curtain, falloff_reach, gang_of, gather, index_of, monotone, needed_pushes,
+    sample_across, tone_entry, tone_index, Fall, Lanes, Light, Rows, Scratch, Tally, CHUNK,
+    CHUNK_LANES, CONTROLS, DITHER_LANES, EDGE_MARGIN, EMBER, EMBER_TOP, GANG, LANE_ONES,
+    LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN, PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS, STRAND_COUNT,
+    TERM_CUT, TONE_LEN,
 };
 
 const WIDE: (u32, u32) = (640, 360);
@@ -575,6 +577,90 @@ fn a_frame_repainted_in_strips_matches_the_frame_painted_whole() {
     }
 }
 
+/// Sum `columns` of `light` over sample `rows`, a column to a lane, as each
+/// lane's exact bits.
+fn gathered(light: &Light, columns: Lanes<usize>, rows: Range<u32>) -> Vec<Lanes<u32>> {
+    let mut sums = vec![[0.0; GANG]; index_of(rows.end - rows.start)];
+    let (Some(column), Some(placed)) = (
+        gang_of(&light.columns, columns),
+        gang_of(&light.placed, columns),
+    ) else {
+        panic!("{columns:?} past the grid");
+    };
+    gather(column, placed, &light.shape, rows, &mut sums);
+    sums.iter().map(|sum| sum.map(f32::to_bits)).collect()
+}
+
+/// A column sums the same light to the bit in any lane of any gang, beside
+/// columns near it or far from it, and a run of rows sums what the whole
+/// column does there.
+#[test]
+fn a_column_sums_the_same_light_in_any_gang() {
+    for (size, clock) in LAYOUTS {
+        let mut light = Light::new(size, clock, 4.0).expect("a ribbon");
+        let mut damage = Region::new();
+        light.step(4.6, clock, &mut damage);
+        let (columns, depth) = (index_of(light.grid.0), light.grid.1);
+        for column in (0..columns).step_by(5) {
+            let whole: Vec<u32> = gathered(&light, [column; GANG], 0..depth)
+                .iter()
+                .map(|sum| sum[0])
+                .collect();
+            assert!(whole.iter().any(|sum| *sum != 0), "column {column} is dark");
+            for rows in [0..depth, depth / 3..depth, 1..depth / 2, depth - 1..depth] {
+                let expected = &whole[index_of(rows.start)..index_of(rows.end)];
+                let neighbours = [column.saturating_sub(1), column, column + 1, column + 2]
+                    .map(|at| at.min(columns - 1));
+                let strangers = [
+                    (column * 7 + 3) % columns,
+                    columns - 1 - column,
+                    0,
+                    column / 2,
+                ];
+                for others in [neighbours, strangers] {
+                    for lane in 0..GANG {
+                        let mut gang = others;
+                        gang[lane] = column;
+                        let sums = gathered(&light, gang, rows.clone());
+                        let lane_sums: Vec<u32> = sums.iter().map(|sum| sum[lane]).collect();
+                        assert!(
+                            lane_sums == expected,
+                            "{size:?}: column {column} in lane {lane} of {gang:?} over {rows:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every layout's pixels, painted whole and then moved through a few frames,
+/// are pinned: a change that moves one is a rendering decision, not an
+/// optimisation.
+#[test]
+fn every_layout_paints_its_pinned_pixels() {
+    let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut hash = |surface: &Surface| {
+        for pixel in surface.pixels() {
+            for byte in [pixel.r, pixel.g, pixel.b, pixel.a] {
+                digest = (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    };
+    for (size, clock) in LAYOUTS {
+        let mut light = Light::new(size, clock, 2.0).expect("a ribbon");
+        let mut surface = painted(&mut light);
+        hash(&surface);
+        let mut damage = Region::new();
+        for step in 1..=4 {
+            light.step(2.0 + f64::from(step) * 0.45, clock, &mut damage);
+            light.paint_moved(&mut surface, &SERIAL);
+            hash(&surface);
+        }
+    }
+    assert_eq!(digest, 0xce00_6048_8027_a2fe, "{digest:#018x}");
+}
+
 /// Any part of the ribbon, however it is asked for, is the same pixels as the
 /// ribbon painted whole.
 #[test]
@@ -899,24 +985,36 @@ fn a_falloff_ends_below_its_cut() {
     assert!(falloff_reach(TERM_CUT / 2.0, TERM_CUT) <= 0.0);
 }
 
-/// A curtain is drawn as far as its drape reaches and no further.
+/// A curtain is drawn as far as its drape reaches and no further, in every
+/// lane of a gang whose paths lie apart.
 #[test]
 fn a_curtain_ends_where_its_drape_fades_out() {
-    let (light, path) = (0.2_f32, 20.0);
+    let light = 0.2_f32;
     let drape = Fall::new(8.0, f64::from(light), TERM_CUT);
-    let mut sums = alloc::vec![0.0_f32; 360];
+    let paths = [20.0, 23.0, 27.5, 36.25];
+    let mut sums = vec![[0.0_f32; GANG]; 360];
     let rows = Rows {
         start: 0,
         count: sums.len(),
     };
-    curtain((light, drape), (path, 2.0), rows, &mut sums);
-    let ends = usize::try_from(Rows::first_from(path + drape.reach)).expect("a row");
-    assert!(ends < sums.len(), "the rows run on past the drape");
-    assert!(sums[ends - 1] > 0.0, "lit up to its reach");
-    assert!(
-        sums[ends..].iter().all(|sum| *sum <= 0.0),
-        "drawn past its reach"
+    curtain(
+        ([light; GANG], [drape; GANG]),
+        (paths, [2.0; GANG]),
+        rows,
+        &mut sums,
     );
+    for (lane, path) in paths.into_iter().enumerate() {
+        let ends = usize::try_from(Rows::first_from(path + drape.reach)).expect("a row");
+        assert!(ends < sums.len(), "the rows run on past the drape");
+        assert!(
+            sums[ends - 1][lane] > 0.0,
+            "lane {lane} lit up to its reach"
+        );
+        assert!(
+            sums[ends..].iter().all(|sum| sum[lane] <= 0.0),
+            "lane {lane} drawn past its reach"
+        );
+    }
 }
 
 /// Every strand hangs a curtain the whole width across, each fades to
@@ -938,21 +1036,25 @@ fn every_strands_curtain_fades_and_overlaps_additively() {
         start: 0,
         count: 360,
     };
-    let mut once = [0.0_f32; 360];
-    let mut overlap = [0.0_f32; 360];
-    curtain((light, drape), (path, 2.0), rows, &mut once);
-    curtain((light, drape), (path, 2.0), rows, &mut overlap);
-    curtain((light, drape), (path, 2.0), rows, &mut overlap);
+    let gang = ([light; GANG], [drape; GANG]);
+    let hung = ([path; GANG], [2.0; GANG]);
+    let mut once = [[0.0_f32; GANG]; 360];
+    let mut overlap = [[0.0_f32; GANG]; 360];
+    curtain(gang, hung, rows, &mut once);
+    curtain(gang, hung, rows, &mut overlap);
+    curtain(gang, hung, rows, &mut overlap);
     for (single, doubled) in once.iter().zip(overlap) {
-        assert!((doubled - 2.0 * single).abs() < f32::EPSILON);
+        for lane in 0..GANG {
+            assert!((doubled[lane] - 2.0 * single[lane]).abs() < f32::EPSILON);
+        }
     }
-    let peak = once.iter().copied().fold(0.0_f32, f32::max);
+    let peak = once.iter().map(|sample| sample[0]).fold(0.0_f32, f32::max);
     let last = once
         .iter()
-        .rposition(|sample| *sample > 0.0)
+        .rposition(|sample| sample[0] > 0.0)
         .expect("a curtain");
-    assert!(once[last] < peak / 100.0);
-    assert!(once[last + 1..].iter().all(|sample| *sample == 0.0));
+    assert!(once[last][0] < peak / 100.0);
+    assert!(once[last + 1..].iter().all(|sample| sample[0] == 0.0));
 }
 
 /// The station curve passes through every station and never strays past the

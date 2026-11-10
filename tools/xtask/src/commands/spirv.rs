@@ -599,6 +599,7 @@ fn generate(root: &Path) -> Result<String, String> {
     emit_versions(&mut out, &grammar);
     emit_ops(&mut out, &grammar.instructions)?;
     emit_enumerants(&mut out, &grammar.kinds, &names)?;
+    emit_glsl(&mut out, &grammar.glsl);
     emit_kinds(&mut out, &grammar.kinds, &names)?;
     emit_tables(&mut out, &grammar, &names)?;
     emit_names(&mut out, &grammar);
@@ -901,6 +902,28 @@ fn emit_tables(w: &mut String, grammar: &Grammar, names: &Names) -> Result<(), S
 
 /// The grammar's names for the enumerants and the `GLSL.std.450`
 /// instructions, which the test assembler reads; no other build carries them.
+/// The `GLSL.std.450` instructions by name, for the extended instructions a
+/// builder writes.
+fn emit_glsl(w: &mut String, glsl: &[ExtInst]) {
+    let _ = writeln!(
+        w,
+        "/// A `GLSL.std.450` extended instruction.\n\
+         #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]\n\
+         pub struct GlslStd450(pub u32);\n\n\
+         impl GlslStd450 {{"
+    );
+    for inst in glsl {
+        let _ = writeln!(
+            w,
+            "    /// `{}`.\n    pub const {}: Self = Self({});",
+            inst.name,
+            upper_snake(&inst.name),
+            inst.number
+        );
+    }
+    let _ = writeln!(w, "}}\n");
+}
+
 fn emit_names(w: &mut String, grammar: &Grammar) {
     let mut enumerants: Vec<(&str, &str, u32)> = grammar
         .kinds

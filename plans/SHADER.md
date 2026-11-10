@@ -26,7 +26,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 | SH1 | `lib/spirv`: the module model, and the total, bounded binary decoder and encoder | done | SH2 |
 | SH2 | The validator: the capability allow-list, the addressing-model refusal, structural control flow, types, and resource binding | done | GP3 |
 | SH8 | The lowering view: an admitted module's resolved types and explicit layouts kept and exposed, its specialization evaluated once for every backend, and stage visibility in a pipeline layout's agreement | done | GP3.2, GP3.3 |
-| SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | planned | GP4 |
+| SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | done | GP4 |
 | SH4 | The compile sandbox: the service process, its request/answer protocol, its capability floor, and containment on crash | planned | GP8 |
 | SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | planned | GP8 |
 | SH6 | Enforced robustness: the access model that makes an admitted module safe to run, and the injection pass that guarantees it | planned | GP8 |
@@ -285,21 +285,31 @@ be the duplication §2.2 forbids, and two readings can disagree.
 
 ## 3. SH3 — the builder and the pinned set
 
-A Rust API that constructs modules programmatically: types, constants,
-functions, control-flow constructs, and the instruction set the allow-list
-admits. It emits only modules its own validator then admits, so a builder bug is
-a build failure rather than a shipped defect.
+`lib/spirv`'s `Builder` writes a module from Rust: its sections gathered as
+they are written and laid out in SPIR-V's order, scalar, vector, matrix,
+pointer and function types and every constant interned, aggregates fresh, and
+its functions written a block at a time through structured constructs
+(`if_then`, `if_else`, `while_loop`) that open, merge and close their own
+blocks. `finish` decodes what it wrote and answers it only as the validator
+admits it, so a builder bug is a build failure rather than a shipped defect.
+Misuse — an instruction with no block open, a block left unterminated —
+is a typed refusal, and no section grows infallibly. The table generator
+names every `GLSL.std.450` instruction (`GlslStd450`) for it.
 
-`cargo xtask shaders` builds the first-party set — the compositor's chrome and
-effects, and `plans/WINTERSUN.md`'s terrain, sprite, particle and light passes —
-into committed artefacts. `--write` regenerates; the bare form **verifies and
-fails closed on drift**, so it belongs in `ci`. This is the pattern
-`cargo xtask c-header --write` and `cargo xtask font-atlas` already establish,
-and it is what gives the desktop programmable shading with **no runtime compiler
+The pinned set lives in `lib/shaders`: each module's source beside its
+committed SPIR-V under `lib/shaders/spv/`, and the bindings and push words
+its consumer binds. Its first members are the desktop's passes
+(`plans/GPU.md` GD6); the chrome's draws join with GP4, the game's passes with
+GP7. `cargo xtask shaders` builds every module of the set and fails closed in
+`ci` where a committed one has drifted, is missing, or names no module;
+`--write` commits what the sources build. That is the pattern
+`cargo xtask c-header --write` and `cargo xtask font-atlas` established, and
+it is what gives the desktop programmable shading with **no runtime compiler
 surface whatsoever**.
 
-The build is reproducible (§19.3): the same source yields byte-identical
-modules, so the committed artefacts are reviewable and a change to one is
+The build is reproducible (§19.3): one source builds one sequence of bytes,
+which the fuzz harness checks of every random program it has the builder
+write, so the committed artefacts are reviewable and a change to one is
 visible in the diff.
 
 ## 4. SH4 — the sandbox
@@ -386,10 +396,12 @@ why it is its own item rather than a note inside the validator.
   lexer/parser/resolver. These are the highest-value fuzz targets in the tree:
   they are the parsers standing between an application and the GPU. Crashing
   inputs enter the regression corpus with a unit test.
-- **Property model** (`cargo xtask proptest`): a generated module that the
-  builder produced is always admitted; any single-byte mutation of a valid
-  module is either admitted as a still-valid module or refused with a typed
-  error — never accepted as something different, never a panic.
+- **Property model**: a generated module that the builder produced is always
+  admitted — `tests/fuzz_spirv.rs` has the builder write random structured
+  programs and holds each to admission and to building the same bytes twice;
+  any single-byte mutation of a valid module is either admitted as a
+  still-valid module or refused with a typed error — never accepted as
+  something different, never a panic.
 - **Robustness is demonstrated, not asserted**: a module deliberately indexing
   past every resource kind reads or writes nothing outside it, on every backend.
 - **Sandbox containment**: a compiler process cannot open a file, reach the

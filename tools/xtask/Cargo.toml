@@ -414,6 +414,9 @@ tairix-video = { path = "../../lib/video", version = "=0.0.0" }
 # have a single definition instead of a captured baseline that would drift
 # the moment the artwork or the fit changed.
 tairix-raster = { path = "../../lib/raster", version = "=0.0.0" }
+# The pinned shader set, each module built from its Rust source and held to
+# the bytes committed beside it.
+tairix-shaders = { path = "../../lib/shaders", version = "=0.0.0" }
 # The desktop's own SVG decoder. A shipped vector master is validated through
 # exactly the decoder the desktop will draw it with, and the icon gate reads
 # the authored design box from it: the decoder letter-boxes a rectangular

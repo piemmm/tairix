@@ -67,6 +67,8 @@
 //! - `spirv`        — verifies the SPIR-V grammar tables in
 //!   `lib/spirv/src/tables.rs` against the pinned Khronos grammar in
 //!   `lib/spirv/assets/` (`--write` to regenerate)
+//! - `shaders`      — verifies the pinned shader set in `lib/shaders/spv/`
+//!   against the Rust sources that build it (`--write` to regenerate)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation

@@ -56,6 +56,14 @@
 //! [`EntryPoint::agree`] decides a layout against it. Termination is not
 //! claimed: an admitted module may loop forever, and the submission deadline
 //! contains it.
+//!
+//! # The builder
+//!
+//! A [`Builder`] writes a module from Rust: its types and constants interned,
+//! its functions a block at a time through structured constructs, and
+//! [`Builder::finish`] answers it only as the validator admits it, so a module
+//! the builder wrote is held to the same judge as one that arrived from
+//! elsewhere.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -65,6 +73,7 @@ extern crate alloc;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod assemble;
+mod build;
 mod decode;
 mod encode;
 mod error;
@@ -75,10 +84,11 @@ mod validate;
 #[rustfmt::skip]
 mod tables;
 
+pub use build::{BuildError, Builder, Function};
 pub use encode::{Arg, Encoder};
 pub use error::{DecodeError, EncodeError, Fault};
 pub use module::{Id, Instruction, Module, Op, Operand, Value, Version};
-pub use tables::{enumerant, Kind};
+pub use tables::{enumerant, GlslStd450, Kind};
 pub use validate::{
     Access, Admitted, Binding, BindingKind, Component, Constant, ConstantId, Disagreement,
     EntryPoint, ImageShape, ImageType, Layout, Limit, Member, Refusal, Rule, Scalar, SpecError,

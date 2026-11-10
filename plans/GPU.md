@@ -34,8 +34,12 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP3.1 | Device-stated capabilities, features and format features, the render ones left to GP3.4; formats, images, views, buffer views and samplers; the buffer-image, image-image and clear commands; word memory, the device's own worker and the process's `JobRunner` | done |
 | GP3.2 | Bind set layouts, bind sets, pipeline layouts with stage visibility, and shader modules | done |
 | GP3.3 | The interpreter over `plans/SHADER.md`'s lowering view, compute pipelines and dispatch | done |
-| GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | planned |
-| GP4 | The pinned first-party pipeline set: OS chrome and the game's passes as build-time SPIR-V, with the conformance suite | planned |
+| GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | in progress |
+| GP3.4.1 | `lib/raster`'s 3D stages, evolved in place: the converter's coverage as an integer half-plane predicate per edge its row walker and a block evaluator share, homogeneous clip-space clipping, perspective-correct, linear and flat interpolation, depth for every depth format and compare operation (its reciprocal depth the reversed-Z configuration), stencil, the four-sample lattice and the general blend; WinterSun's pictures unchanged | in progress |
+| GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, discards and the `InterpolateAt` family; the coverage test's fragment exception gone | planned |
+| GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped, set up and binned in bounded batches in parallel, its bins rasterised in parallel and loaded, stored and resolved | planned |
+| GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | planned |
+| GP4 | The pinned first-party pipeline set past the desktop's passes (GD6): OS chrome's draws and the game's passes as build-time SPIR-V, with their conformance cases | planned |
 | GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
@@ -51,8 +55,9 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD2 | The composite writes where the engine reads: a flattened layer baked by the pass that composes it, and the base composed into the display's own frame | done |
 | GD5 | The screen fade as a lone layer's opacity | done |
 | GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
-| GD6 | The desktop's frost, dithered blend, copy, fill and encode in GP4's pinned set, agreeing with `lib/raster` within a stated tolerance | blocked: GP4 |
+| GD6 | The desktop's frost, dithered blend, copy, fill and encode as pinned compute passes (`lib/shaders`), `lib/raster`'s arithmetic to the bit | done |
 | GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3, GP11 |
+| GD11 | The desktop drawing its frost and flattened layers through GD6's passes on a device | blocked: GP11, GP5 |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
@@ -968,14 +973,26 @@ and the scaled desktop, whose black it equals.
   plane alone over the channel's background, so a hardware pointer stays over
   the black; an output coming up while it stands is given it.
 
-**GD6 — the desktop's passes on a GPU.** The box blur's passes, the dithered
-premultiplied *over*, copy, fill and the channel-order encode join GP4's pinned
-set. They need not be bit-identical to `lib/raster`: they agree with it within a
-tolerance the conformance cases state, and where a GPU's natural arithmetic
-draws the frost faster and looks the same, `lib/raster` adopts that definition
-rather than the GPU emulating the CPU's (§0 decision 11). A frosted window then
-renders its frost and its flattened layer on whatever backend the device has,
-and on the CPU where it has none.
+**GD6 — the desktop's passes on a GPU.** The frost's passes — `frost_reduce`,
+`frost_blur` along each axis, `frost_spread` and `frost_mix` — and the
+compositor's dithered premultiplied `over`, `copy`, `fill` and channel-order
+`encode` are the first members of the pinned set, in `lib/shaders`
+(`plans/SHADER.md` SH3). They are compute passes, so they need neither GP3.4's
+draws nor the rest of GP4, and land ahead of both (User ruling, 2026-11-10).
+Each is `lib/raster`'s own integer arithmetic, so the tolerance its conformance
+cases state is zero: run on the software device, the frost equals
+`halved_reference` and, mixed back, `Surface::frost_halved_from`, the over
+`blend_span`, and the encode `ChannelOrder::encode_run`, pixel for pixel. The
+dither's biases and the rounding point are read from `lib/raster` as each module
+is built. Where a GPU's natural arithmetic draws the frost faster and looks the
+same, `lib/raster` adopts that definition rather than the GPU emulating the
+CPU's (§0 decision 11), and the stated tolerance moves with it.
+
+**GD11 — the desktop on a device.** A frosted window renders its frost and its
+flattened layer through GD6's passes on whatever device serves it, its
+surfaces device memory the display can scan (GP6), and on the CPU through
+`lib/raster` where none does. It waits on a device to serve it: the device
+channel (GP11) and a hardware backend (GP5).
 
 **GD7 — copy engines.** The rectangle copies and fills between device-visible
 images that remain after GD1 and GD2 go to the device's copy engine — the
@@ -1066,6 +1083,10 @@ Each needs sign-off before the item that depends on it; none is assumed.
 - **GD5**: a fade presents no pixel after its first step on an engine with
   per-layer opacity, and each step's screen matches the software reveal within
   one level.
+- **GD6**: every committed pass is admitted and needs exactly the bindings and
+  push words its pass states; each, run on the software device, equals the
+  software path to the bit (`lib/shaders/tests/conformance.rs`); `cargo xtask
+  shaders` fails `ci` on a module drifted from its source.
 - **GD10**: a solid black cover presents an empty stack, gives every layer
   back and holds what changes beneath it, presenting nothing more until it goes
   or a sink is owed it; any other colour, a short or translucent cover, a

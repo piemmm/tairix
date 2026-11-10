@@ -23,7 +23,7 @@
 | J | One window-frame codec, and the desktop's decode spread across it | done |
 | J.2 | Window frames carry premultiplied alpha: an application's present is a byte-order copy, the session's decode a copy and a coverage clamp | done |
 | K | Damage merged a region at a time: one walk per region folded into another, through the frosts and the layers alike | done |
-| L | The ribbon's light at packed speed: its widening onto pixels on the `raster-blend` kernels, and its gathering summed four columns to a vector | in progress: the widening is done; the gathering is next |
+| L | The ribbon's light at packed speed: its widening onto pixels on the `raster-blend` kernels, and its gathering summed four columns to a vector | done |
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -1741,18 +1741,25 @@ transparency) or where the destination is a control's eight-rectangle repaint.
 
 ## Stage L — The ribbon's light at packed speed
 
-The ribbon (`lib/ribbon`) is the login screen's and its saver's whole cost:
-1.79 ms a 1080p frame on one core when measured. Its samples are toned into
-wide pixels (`tairix_raster::wide`) and blended up to every pixel, dithered,
-by `wide::widen`, a `raster-blend` member with SSE2 and NEON candidates held
-to the portable form by the family's verify cases and digest; a chunk row that
-tones to nothing is one fill. That is 1.54–1.58 ms, bit-identical. What is left
-is the gathering, 45% of a frame: each term's falloff is a chain of multiplies
-down one column, latency-bound, and each strand row a table lookup. Rows
-cannot be regrouped without changing the sums, and interleaving one column's
-terms or finding each row's centre on its own measured slower; summing four
-adjacent columns in a vector's lanes, each lane its own chain under its own
-row mask, keeps every sum's operations and order and is the next step.
+The ribbon (`lib/ribbon`) is the login screen's and its saver's whole cost.
+Its samples are toned into wide pixels (`tairix_raster::wide`) and blended up
+to every pixel, dithered, by `wide::widen`, a `raster-blend` member with SSE2
+and NEON candidates held to the portable form by the family's verify cases and
+digest; a chunk row that tones to nothing is one fill. Its light is gathered a
+gang of four neighbouring sample columns at a time, one column to a vector
+lane, in portable code the compiler vectorises: each lane keeps its own
+column's terms, rows and order of operations under its own row mask, and
+lanes it does not reach add nought, which leaves a sum exactly as it was since
+none is ever negative zero. Each falloff's chain of multiplies, the
+latency-bound part, so steps four columns at once. A column therefore sums the
+same light to the bit in any gang over any run of its rows
+(`a_column_sums_the_same_light_in_any_gang`), and every layout's frames are
+pinned (`every_layout_paints_its_pinned_pixels`).
+
+**Measured** (one x86_64 core, 1920 × 1080, a release build, best of six
+1 200-frame runs): a frame paints in 1.37 ms, against 1.56 ms gathering a
+column at a time. What remains is spread: the widening, about a tenth, and
+the strands' profile and the toning's table lookups, a load a lane.
 
 ## What this plan refuses
 

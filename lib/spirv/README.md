@@ -17,6 +17,11 @@ view backends read an admitted module through, and its encoder.
 - `Module` — the instructions, their typed operands (`Operand`, `Kind`,
   `Value`), each id's defining instruction, and the module's bytes in
   little-endian order.
+- `Builder` — a module written from Rust: its sections laid out in SPIR-V's
+  order, types and constants interned, functions written a block at a time
+  through `if_then`, `if_else` and `while_loop`, and `finish` answering it
+  only as the validator admits it; `GlslStd450` names each extended
+  instruction. `lib/shaders`' pinned set is written through it.
 - `Admitted::new` — the validator: a module refused naming the word at fault
   and the `Rule` broken, or admitted with the capabilities a device must
   support and each `EntryPoint`'s stage, workgroup size, bindings, push

@@ -176,6 +176,182 @@ fn a_stepped_crossing_is_the_computed_one() {
     }
 }
 
+#[test]
+fn an_edges_half_plane_is_its_rounded_crossing_and_the_tie_rule() {
+    let mut rng = Prng::new(0x7121_0010);
+    for _ in 0..4000 {
+        let pick =
+            |rng: &mut Prng, bits: u32| i64::from(rng.next_u32() % (1 << bits)) - (1 << (bits - 1));
+        let bits = 4 + rng.next_u32() % 25;
+        let Some(edge) = edge_between(
+            (pick(&mut rng, bits), pick(&mut rng, bits)),
+            (pick(&mut rng, bits), pick(&mut rng, bits)),
+        ) else {
+            continue;
+        };
+        let (past, short) = (edge.at_or_past(), edge.at_or_past().complement());
+        for _ in 0..8 {
+            let y = edge.top + i64::from(rng.next_u32()) % (edge.bottom - edge.top);
+            let crossing = edge.x_at(y);
+            for x in crossing - 3..=crossing + 3 {
+                assert_eq!(past.at(x, y) >= 0, x >= crossing, "{edge:?} at ({x}, {y})");
+                assert_eq!(short.at(x, y) >= 0, x < crossing, "{edge:?} at ({x}, {y})");
+            }
+        }
+    }
+}
+
+/// The centres each of `triangles` covers, a count a pixel, as the block
+/// evaluator finds them at `sample` of `lattice`.
+fn blocked(triangles: &[Triangle], lattice: Lattice, sample: usize) -> Vec<u32> {
+    let mut counts = vec![0u32; (WIDTH * HEIGHT) as usize];
+    for triangle in triangles {
+        for top in (0..HEIGHT).step_by(BLOCK as usize) {
+            for left in (0..WIDTH).step_by(BLOCK as usize) {
+                let mask = triangle.block((left, top), lattice)[sample];
+                for bit in 0..64 {
+                    let (x, y) = (left + bit % BLOCK, top + bit / BLOCK);
+                    if mask & (1 << bit) != 0 && x < WIDTH && y < HEIGHT {
+                        counts[(y * WIDTH + x) as usize] += 1;
+                    }
+                }
+            }
+        }
+    }
+    counts
+}
+
+const NO_DEPTH: DepthTest = DepthTest {
+    compare: DepthCompare::Always,
+    write: false,
+};
+
+#[test]
+fn the_block_evaluator_and_one_sample_cover_what_the_row_walker_fills() {
+    let mut rng = Prng::new(0x7121_0011);
+    let mut compared = 0;
+    for _ in 0..400 {
+        let corners = [
+            random_vertex(&mut rng),
+            random_vertex(&mut rng),
+            random_vertex(&mut rng),
+        ];
+        let Some(triangle) = Triangle::new(corners) else {
+            continue;
+        };
+        let filled = visits(core::slice::from_ref(&triangle), NO_DEPTH, HEIGHT);
+        assert_eq!(
+            blocked(core::slice::from_ref(&triangle), Lattice::Centre, 0),
+            filled,
+            "{corners:?}"
+        );
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let centre = |at: u32| {
+                    i32::try_from(at).expect("small") * MESH_SUB_UNITS + MESH_SUB_UNITS / 2
+                };
+                assert_eq!(
+                    u32::from(triangle.covers(centre(x), centre(y))),
+                    filled[(y * WIDTH + x) as usize],
+                    "{corners:?} at ({x}, {y})"
+                );
+            }
+        }
+        compared += 1;
+    }
+    assert!(compared > 300, "the sweep met real triangles");
+}
+
+#[test]
+fn each_of_four_samples_is_the_centre_of_the_triangle_moved_onto_it() {
+    let mut rng = Prng::new(0x7121_0012);
+    for _ in 0..300 {
+        let corners = [
+            random_vertex(&mut rng),
+            random_vertex(&mut rng),
+            random_vertex(&mut rng),
+        ];
+        let Some(triangle) = Triangle::new(corners) else {
+            continue;
+        };
+        for (sample, &(dx, dy)) in Lattice::Four.samples().iter().enumerate() {
+            let (shift_x, shift_y) = (MESH_SUB_UNITS / 2 - dx, MESH_SUB_UNITS / 2 - dy);
+            let moved = corners.map(|v| vertex(v.x + shift_x, v.y + shift_y, v.depth.0));
+            let expected = Triangle::new(moved).map_or_else(
+                || vec![0; (WIDTH * HEIGHT) as usize],
+                |t| visits(&[t], NO_DEPTH, HEIGHT),
+            );
+            assert_eq!(
+                blocked(core::slice::from_ref(&triangle), Lattice::Four, sample),
+                expected,
+                "{corners:?} at sample {sample}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_mesh_owns_every_sample_of_four_once() {
+    const SIDE: u32 = 5;
+    let mut rng = Prng::new(0x7121_0013);
+    let step = (WIDTH.min(HEIGHT) * 256) / SIDE;
+    let jitter = |rng: &mut Prng, at: u32, rim: bool| {
+        let base = i32::try_from(at * step).expect("small");
+        if rim {
+            base
+        } else {
+            base + i32::try_from(rng.next_u32() % 400).expect("small") - 200
+        }
+    };
+    let mut grid = Vec::new();
+    for row in 0..=SIDE {
+        for column in 0..=SIDE {
+            let rim = row == 0 || column == 0 || row == SIDE || column == SIDE;
+            grid.push(vertex(
+                jitter(&mut rng, column, rim),
+                jitter(&mut rng, row, rim),
+                1000,
+            ));
+        }
+    }
+    let at = |row: u32, column: u32| grid[(row * (SIDE + 1) + column) as usize];
+    let mut triangles = Vec::new();
+    for row in 0..SIDE {
+        for column in 0..SIDE {
+            let (a, b, c, d) = (
+                at(row, column),
+                at(row, column + 1),
+                at(row + 1, column + 1),
+                at(row + 1, column),
+            );
+            triangles.extend(Triangle::new([a, b, c]));
+            triangles.extend(Triangle::new([a, c, d]));
+        }
+    }
+    let side = i32::try_from(SIDE * step).expect("small");
+    for (sample, &(dx, dy)) in Lattice::Four.samples().iter().enumerate() {
+        let (shift_x, shift_y) = (MESH_SUB_UNITS / 2 - dx, MESH_SUB_UNITS / 2 - dy);
+        let outline =
+            [(0, 0), (side, 0), (side, side), (0, side)].map(|(x, y)| (x + shift_x, y + shift_y));
+        assert_eq!(
+            blocked(&triangles, Lattice::Four, sample),
+            centre_coverage(&outline),
+            "sample {sample}"
+        );
+    }
+}
+
+#[test]
+fn a_block_past_the_drawing_is_uncovered() {
+    let far = i32::try_from(crate::scan::MAX_DRAWING_EXTENT).expect("small") * MESH_SUB_UNITS;
+    let triangle =
+        Triangle::new([vertex(0, 0, 9), vertex(far, 0, 9), vertex(0, far, 9)]).expect("a triangle");
+    assert_ne!(triangle.block((0, 0), Lattice::Centre)[0], 0);
+    let past = crate::scan::MAX_DRAWING_EXTENT + 1;
+    assert_eq!(triangle.block((past, 0), Lattice::Four), [0; MAX_SAMPLES]);
+    assert_eq!(triangle.block((0, past), Lattice::Four), [0; MAX_SAMPLES]);
+}
+
 /// Two overlapping triangles, the second nearer, as ids by pixel after
 /// drawing in `order`.
 fn winners(order: [usize; 2]) -> Vec<u8> {

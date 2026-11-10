@@ -42,7 +42,9 @@ allocates nothing; a heap that refuses one is `None`, never a panic. The light
 is summed at every other pixel each way and blended up as it is toned and
 dithered, and a frame repaints only the rows its light reaches and reached —
 under half the screen. A paint's bands are whole columns, since the light is
-summed down them, so no band repeats another's sums.
+summed down them, so no band repeats another's sums, and four neighbouring
+columns are summed side by side in a vector's lanes, each lane exactly as its
+column alone would be.
 
 ## Tests
 
@@ -51,5 +53,6 @@ smooth curve across the width, the strands roaming freely and moving
 independently, the clear space kept `SKY` with no light that shows beneath it,
 the ribbon rising nearer the text than its glow's whole tail allows, strips
 matching the whole and sharing no pixel, a paint in bands matching one band,
+a column summing the same light in any gang, every layout's pinned pixels,
 and the light soft everywhere. The clock that paces it is tested with
 `tairix_theme::motion::SceneClock`.

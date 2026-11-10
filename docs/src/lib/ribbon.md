@@ -72,7 +72,11 @@ A paint large enough is split into bands of whole strips' columns
 (`tairix_raster::ColumnBand`), one a participant of its runner, each working in
 a scratch room a column deep. The light is summed down each column, so a band
 sums each of its columns once and repeats nothing of another's, and the ribbon
-crosses every column, so the bands share the work evenly. Bands of rows would
+crosses every column, so the bands share the work evenly. Four neighbouring
+columns are summed side by side, one to each lane of a vector, each lane
+keeping its own column's terms, rows and order of operations, so every
+falloff's chain of multiplies steps four columns at once and a column sums
+the same light to the bit whichever columns share its gang. Bands of rows would
 do neither: each repeats every column's setup, and the band holding the
 strands carries most of the work. The greeter paints across a thread per
 online core, the screensaver across every thread it is granted.
@@ -106,7 +110,10 @@ handing out a whole column of room for each band it holds, the light to being
 soft everywhere and
 black beyond the rows it reports, an unlit area to laying the sky over itself
 alone, a paint to summing under half the screen's sample rows and a strip to
-being two chunks, and a frame to repainting under half the screen. The clock's own tests live with `SceneClock` in `lib/theme`.
+being two chunks, a frame to repainting under half the screen, a column to
+summing the same light to the bit in any lane of any gang over any run of its
+rows, and every layout's frames to their pinned pixels. The clock's own tests
+live with `SceneClock` in `lib/theme`.
 
 ## Stability
 

@@ -52,6 +52,7 @@ mod qemu_tests;
 mod rngsoak;
 mod sbom;
 mod seed;
+mod shaders;
 mod soak;
 mod sound_encode;
 mod source_text;
@@ -82,6 +83,7 @@ pub enum Command {
     Devids,
     Unicode,
     Spirv,
+    Shaders,
     DepsCheck,
     CfgCheck,
     BoardCheck,
@@ -128,6 +130,7 @@ impl Command {
         Command::Devids,
         Command::Unicode,
         Command::Spirv,
+        Command::Shaders,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::BoardCheck,
@@ -173,6 +176,7 @@ impl Command {
             "devids" => Command::Devids,
             "unicode" => Command::Unicode,
             "spirv" => Command::Spirv,
+            "shaders" => Command::Shaders,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "board-check" => Command::BoardCheck,
@@ -220,6 +224,7 @@ impl Command {
             Command::Devids => "devids",
             Command::Unicode => "unicode",
             Command::Spirv => "spirv",
+            Command::Shaders => "shaders",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::BoardCheck => "board-check",
@@ -285,6 +290,10 @@ impl Command {
             }
             Command::Spirv => {
                 "Verify the SPIR-V grammar tables against the pinned Khronos grammar \
+                 (`--write` to regenerate)."
+            }
+            Command::Shaders => {
+                "Verify the pinned shader set against the sources that build it \
                  (`--write` to regenerate)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
@@ -357,6 +366,7 @@ impl Command {
             Command::Devids => devids::run(ctx, args),
             Command::Unicode => unicode::run(ctx, args),
             Command::Spirv => spirv::run(ctx, args),
+            Command::Shaders => shaders::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::BoardCheck => run_board_check(ctx),
@@ -1619,6 +1629,8 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     ("devids", |c| devids::run(c, &[])),
     ("unicode", |c| unicode::run(c, &[])),
     ("spirv", |c| spirv::run(c, &[])),
+    // The pinned shader set against the sources that build it.
+    ("shaders", |c| shaders::run(c, &[])),
     // The shipped figure art against its bounds and the committed ledger
     // (plans/FIGURE.md FG5).
     ("artsheet", |c| run_artsheet(c, &[])),

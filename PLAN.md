@@ -308,7 +308,10 @@ traits, which every user-space filesystem driver serves its volume through),
 software device implementing it on every target, `plans/GPU.md`),
 `lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
 total and bounded decoder over the generated Khronos grammar, its validator,
-and its encoder, `plans/SHADER.md`),
+its encoder, and the builder a first-party module is written from Rust
+through, `plans/SHADER.md`),
+`lib/shaders` (the pinned shader set: the desktop's passes as committed
+SPIR-V, each `lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6),
 `lib/video` (the one VP8 codec, which a lossy WebP picture and a screen
 recording are made of, and the WebM container a recording is kept in,
 `plans/CAPTURE.md`),
@@ -326,7 +329,7 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
 | `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the screen recorder, the file manager, Settings, Date & Time, Music, Paint, Draw, `netmap`, `smbfs`, WinterSun's client |
-| `fallible` | `lib/audio`, `lib/bezier`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/drawing`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, Draw, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
+| `fallible` | `lib/audio`, `lib/bezier`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/drawing`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/shaders`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, Draw, WinterSun, the Life, ray tracer, Retro Games and Starfield screensavers |
 | `flags` | `lib/gpu`, `lib/smb`, `lib/spirv` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |

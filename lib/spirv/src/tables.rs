@@ -2489,6 +2489,175 @@ pub mod enumerant {
 
 }
 
+/// A `GLSL.std.450` extended instruction.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GlslStd450(pub u32);
+
+impl GlslStd450 {
+    /// `Round`.
+    pub const ROUND: Self = Self(1);
+    /// `RoundEven`.
+    pub const ROUND_EVEN: Self = Self(2);
+    /// `Trunc`.
+    pub const TRUNC: Self = Self(3);
+    /// `FAbs`.
+    pub const F_ABS: Self = Self(4);
+    /// `SAbs`.
+    pub const S_ABS: Self = Self(5);
+    /// `FSign`.
+    pub const F_SIGN: Self = Self(6);
+    /// `SSign`.
+    pub const S_SIGN: Self = Self(7);
+    /// `Floor`.
+    pub const FLOOR: Self = Self(8);
+    /// `Ceil`.
+    pub const CEIL: Self = Self(9);
+    /// `Fract`.
+    pub const FRACT: Self = Self(10);
+    /// `Radians`.
+    pub const RADIANS: Self = Self(11);
+    /// `Degrees`.
+    pub const DEGREES: Self = Self(12);
+    /// `Sin`.
+    pub const SIN: Self = Self(13);
+    /// `Cos`.
+    pub const COS: Self = Self(14);
+    /// `Tan`.
+    pub const TAN: Self = Self(15);
+    /// `Asin`.
+    pub const ASIN: Self = Self(16);
+    /// `Acos`.
+    pub const ACOS: Self = Self(17);
+    /// `Atan`.
+    pub const ATAN: Self = Self(18);
+    /// `Sinh`.
+    pub const SINH: Self = Self(19);
+    /// `Cosh`.
+    pub const COSH: Self = Self(20);
+    /// `Tanh`.
+    pub const TANH: Self = Self(21);
+    /// `Asinh`.
+    pub const ASINH: Self = Self(22);
+    /// `Acosh`.
+    pub const ACOSH: Self = Self(23);
+    /// `Atanh`.
+    pub const ATANH: Self = Self(24);
+    /// `Atan2`.
+    pub const ATAN2: Self = Self(25);
+    /// `Pow`.
+    pub const POW: Self = Self(26);
+    /// `Exp`.
+    pub const EXP: Self = Self(27);
+    /// `Log`.
+    pub const LOG: Self = Self(28);
+    /// `Exp2`.
+    pub const EXP2: Self = Self(29);
+    /// `Log2`.
+    pub const LOG2: Self = Self(30);
+    /// `Sqrt`.
+    pub const SQRT: Self = Self(31);
+    /// `InverseSqrt`.
+    pub const INVERSE_SQRT: Self = Self(32);
+    /// `Determinant`.
+    pub const DETERMINANT: Self = Self(33);
+    /// `MatrixInverse`.
+    pub const MATRIX_INVERSE: Self = Self(34);
+    /// `Modf`.
+    pub const MODF: Self = Self(35);
+    /// `ModfStruct`.
+    pub const MODF_STRUCT: Self = Self(36);
+    /// `FMin`.
+    pub const F_MIN: Self = Self(37);
+    /// `UMin`.
+    pub const U_MIN: Self = Self(38);
+    /// `SMin`.
+    pub const S_MIN: Self = Self(39);
+    /// `FMax`.
+    pub const F_MAX: Self = Self(40);
+    /// `UMax`.
+    pub const U_MAX: Self = Self(41);
+    /// `SMax`.
+    pub const S_MAX: Self = Self(42);
+    /// `FClamp`.
+    pub const F_CLAMP: Self = Self(43);
+    /// `UClamp`.
+    pub const U_CLAMP: Self = Self(44);
+    /// `SClamp`.
+    pub const S_CLAMP: Self = Self(45);
+    /// `FMix`.
+    pub const F_MIX: Self = Self(46);
+    /// `IMix`.
+    pub const I_MIX: Self = Self(47);
+    /// `Step`.
+    pub const STEP: Self = Self(48);
+    /// `SmoothStep`.
+    pub const SMOOTH_STEP: Self = Self(49);
+    /// `Fma`.
+    pub const FMA: Self = Self(50);
+    /// `Frexp`.
+    pub const FREXP: Self = Self(51);
+    /// `FrexpStruct`.
+    pub const FREXP_STRUCT: Self = Self(52);
+    /// `Ldexp`.
+    pub const LDEXP: Self = Self(53);
+    /// `PackSnorm4x8`.
+    pub const PACK_SNORM4X8: Self = Self(54);
+    /// `PackUnorm4x8`.
+    pub const PACK_UNORM4X8: Self = Self(55);
+    /// `PackSnorm2x16`.
+    pub const PACK_SNORM2X16: Self = Self(56);
+    /// `PackUnorm2x16`.
+    pub const PACK_UNORM2X16: Self = Self(57);
+    /// `PackHalf2x16`.
+    pub const PACK_HALF2X16: Self = Self(58);
+    /// `PackDouble2x32`.
+    pub const PACK_DOUBLE2X32: Self = Self(59);
+    /// `UnpackSnorm2x16`.
+    pub const UNPACK_SNORM2X16: Self = Self(60);
+    /// `UnpackUnorm2x16`.
+    pub const UNPACK_UNORM2X16: Self = Self(61);
+    /// `UnpackHalf2x16`.
+    pub const UNPACK_HALF2X16: Self = Self(62);
+    /// `UnpackSnorm4x8`.
+    pub const UNPACK_SNORM4X8: Self = Self(63);
+    /// `UnpackUnorm4x8`.
+    pub const UNPACK_UNORM4X8: Self = Self(64);
+    /// `UnpackDouble2x32`.
+    pub const UNPACK_DOUBLE2X32: Self = Self(65);
+    /// `Length`.
+    pub const LENGTH: Self = Self(66);
+    /// `Distance`.
+    pub const DISTANCE: Self = Self(67);
+    /// `Cross`.
+    pub const CROSS: Self = Self(68);
+    /// `Normalize`.
+    pub const NORMALIZE: Self = Self(69);
+    /// `FaceForward`.
+    pub const FACE_FORWARD: Self = Self(70);
+    /// `Reflect`.
+    pub const REFLECT: Self = Self(71);
+    /// `Refract`.
+    pub const REFRACT: Self = Self(72);
+    /// `FindILsb`.
+    pub const FIND_I_LSB: Self = Self(73);
+    /// `FindSMsb`.
+    pub const FIND_S_MSB: Self = Self(74);
+    /// `FindUMsb`.
+    pub const FIND_U_MSB: Self = Self(75);
+    /// `InterpolateAtCentroid`.
+    pub const INTERPOLATE_AT_CENTROID: Self = Self(76);
+    /// `InterpolateAtSample`.
+    pub const INTERPOLATE_AT_SAMPLE: Self = Self(77);
+    /// `InterpolateAtOffset`.
+    pub const INTERPOLATE_AT_OFFSET: Self = Self(78);
+    /// `NMin`.
+    pub const N_MIN: Self = Self(79);
+    /// `NMax`.
+    pub const N_MAX: Self = Self(80);
+    /// `NClamp`.
+    pub const N_CLAMP: Self = Self(81);
+}
+
 /// A kind of operand the grammar names.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Kind {

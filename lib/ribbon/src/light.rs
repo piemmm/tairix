@@ -512,6 +512,13 @@ const CHUNK: u32 = 16;
 /// left over that joins it, and the right neighbour they blend into.
 const CHUNK_LANES: usize = CHUNK as usize + 2;
 
+/// Neighbouring sample columns summed side by side, one to a lane, so each
+/// term's falloff steps a gang of columns down at once rather than one.
+const GANG: usize = 4;
+
+/// One value for each column of a gang.
+type Lanes<T> = [T; GANG];
+
 /// Sample columns whose pixels are repainted as one strip.
 const STRIP: u32 = 32;
 
@@ -658,8 +665,8 @@ pub struct Light {
 /// What paints sum and tone light in: a room for each band of a paint, every
 /// room a whole column deep, since the light is summed down the columns.
 struct Scratch {
-    /// One sample column's light, summed down it.
-    sums: Vec<f32>,
+    /// A gang of sample columns' light, summed down them.
+    sums: Vec<Lanes<f32>>,
     /// A chunk's samples toned, row by row, a chunk and its right neighbour
     /// wide.
     toned: Vec<u64>,
@@ -672,7 +679,7 @@ struct Scratch {
 
 /// One band's room in the scratch.
 struct Room<'a> {
-    sums: &'a mut [f32],
+    sums: &'a mut [Lanes<f32>],
     toned: &'a mut [u64],
     between: &'a mut [u64],
 }
@@ -706,7 +713,7 @@ impl Scratch {
         let Some(toned) = sums.checked_mul(CHUNK_LANES) else {
             return;
         };
-        if fallible::grow_to(&mut self.sums, sums, 0.0)
+        if fallible::grow_to(&mut self.sums, sums, [0.0; GANG])
             && fallible::grow_to(&mut self.toned, toned, 0)
             && fallible::grow_to(&mut self.between, between, 0)
         {
@@ -1322,13 +1329,10 @@ impl View<'_> {
             // pixel, and the one below.
             let rows =
                 lit.start / PIXELS_PER_SAMPLE..(lit.end / PIXELS_PER_SAMPLE + 1).min(self.grid.1);
-            let from = u32::from(carried.as_ref() == Some(&rows));
-            for lane in from..=(end - first) {
-                let column = (first + lane).min(self.grid.0 - 1);
-                self.tone_column(room, column, rows.clone(), index_of(lane));
-            }
-            let depth = index_of(rows.end - rows.start);
+            let from = usize::from(carried.as_ref() == Some(&rows));
             let used = index_of(end - first) + 1;
+            self.tone_lanes(room, first, from..used, rows.clone());
+            let depth = index_of(rows.end - rows.start);
             #[cfg(test)]
             self.count_chunk(&owned, &lit);
             write_chunk(room, target, (first, owned), (rows.start, depth, lit), used);
@@ -1368,37 +1372,45 @@ impl View<'_> {
         start..low.clamp(start, rows.end)
     }
 
-    /// Sum sample `column`'s light over sample `rows` and tone it into `lane`
-    /// of the chunk in `room`.
-    fn tone_column(&self, room: &mut Room<'_>, column: u32, rows: Range<u32>, lane: usize) {
+    /// Sum the light of a chunk's `lanes` — the sample columns from `first`
+    /// on — over sample `rows`, a gang at a time, and tone each column into
+    /// its lane of the chunk in `room`.
+    fn tone_lanes(&self, room: &mut Room<'_>, first: u32, lanes: Range<usize>, rows: Range<u32>) {
         let depth = index_of(rows.end - rows.start);
-        #[cfg(test)]
-        self.tally.summed.fetch_add(depth, Relaxed);
-        let Some(sums) = room.sums.get_mut(..depth) else {
+        let (Some(sums), Ok(tone)) = (
+            room.sums.get_mut(..depth),
+            <&[u64; TONE_LEN]>::try_from(self.shape.tone.as_slice()),
+        ) else {
             return;
         };
-        sums.fill(0.0);
-        let index = index_of(column);
-        gather(
-            &self.columns[index],
-            &self.placed[index],
-            self.shape,
-            rows,
-            sums,
-        );
-        for (row, exposure) in room
-            .toned
-            .as_chunks_mut::<CHUNK_LANES>()
-            .0
-            .iter_mut()
-            .zip(sums.iter())
-        {
-            row[lane] = self
-                .shape
-                .tone
-                .get(tone_index(*exposure))
-                .copied()
-                .unwrap_or(0);
+        let last = index_of(self.grid.0 - 1);
+        for lane in lanes.clone().step_by(GANG) {
+            let held = (lanes.end - lane).min(GANG);
+            #[cfg(test)]
+            self.tally.summed.fetch_add(depth * held, Relaxed);
+            // A gang the chunk leaves short repeats its last column.
+            let columns =
+                core::array::from_fn(|at| (index_of(first) + lane + at.min(held - 1)).min(last));
+            let (Some(column), Some(placed)) = (
+                gang_of(self.columns, columns),
+                gang_of(self.placed, columns),
+            ) else {
+                return;
+            };
+            sums.fill([0.0; GANG]);
+            gather(column, placed, self.shape, rows.clone(), sums);
+            for (row, exposures) in room
+                .toned
+                .as_chunks_mut::<CHUNK_LANES>()
+                .0
+                .iter_mut()
+                .zip(sums.iter())
+            {
+                let toned = row.get_mut(lane..lane + held).unwrap_or_default();
+                for (toned, exposure) in toned.iter_mut().zip(exposures) {
+                    *toned = tone[tone_index(*exposure)];
+                }
+            }
         }
     }
 
@@ -1710,33 +1722,117 @@ fn reached(column: &Column, placed: &Placed, height: u32) -> (u32, u32) {
     )
 }
 
-/// Sum a placed column's light over sample `rows` into `sums`, one entry a
-/// sample row.
-fn gather(column: &Column, placed: &Placed, shape: &Shape, rows: Range<u32>, sums: &mut [f32]) {
+/// The entries of `all` at a gang's indices `at`, or `None` when one lies
+/// past its end.
+fn gang_of<T>(all: &[T], at: Lanes<usize>) -> Option<Lanes<&T>> {
+    let [a, b, c, d] = at;
+    Some([all.get(a)?, all.get(b)?, all.get(c)?, all.get(d)?])
+}
+
+/// Sum a gang of placed columns' light over sample `rows` into `sums`, one
+/// entry a sample row, each column in its own lane.
+///
+/// A lane sums its column's terms in the order and arithmetic one column
+/// summed alone would, so a column's light does not depend on its gang.
+fn gather(
+    columns: Lanes<&Column>,
+    placed: Lanes<&Placed>,
+    shape: &Shape,
+    rows: Range<u32>,
+    sums: &mut [Lanes<f32>],
+) {
+    if i32::try_from(sums.len()).is_err() {
+        return;
+    }
     let rows = Rows {
         start: i64::from(rows.start),
         count: sums.len(),
     };
     for index in 0..STRAND_COUNT {
         curtain(
-            (placed.curtain[index], column.drape[index]),
-            (placed.at[index], placed.glow[index] * single(CORE)),
+            (
+                placed.map(|placed| placed.curtain[index]),
+                columns.map(|column| column.drape[index]),
+            ),
+            (
+                placed.map(|placed| placed.at[index]),
+                placed.map(|placed| placed.glow[index] * single(CORE)),
+            ),
             rows,
             sums,
         );
     }
-    glow_about((column.halo, placed.top), column.halo_fall, rows, sums);
+    glow_about(
+        (
+            columns.map(|column| column.halo),
+            placed.map(|placed| placed.top),
+        ),
+        columns.map(|column| column.halo_fall),
+        rows,
+        sums,
+    );
     let Ok(profile) = <&[f32; PROFILE_LEN]>::try_from(shape.profile.as_slice()) else {
         return;
     };
     for index in 0..STRAND_COUNT {
         strand(
-            (placed.light[index], column.reach[index]),
-            (placed.at[index], placed.glow[index]),
+            (
+                placed.map(|placed| placed.light[index]),
+                columns.map(|column| column.reach[index]),
+            ),
+            (
+                placed.map(|placed| placed.at[index]),
+                placed.map(|placed| placed.glow[index]),
+            ),
             profile,
             rows,
             sums,
         );
+    }
+}
+
+/// A lane's part of a run of sample rows, as slots among the run's sums: from
+/// the first it holds up to the one past its last. An empty part is
+/// [`Slots::NONE`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Slots {
+    from: i32,
+    to: i32,
+}
+
+impl Slots {
+    const NONE: Self = Self { from: 0, to: 0 };
+
+    fn is_empty(self) -> bool {
+        self.from >= self.to
+    }
+
+    fn holds(self, slot: i32) -> bool {
+        self.from <= slot && slot < self.to
+    }
+
+    /// The slots from the first any of `parts` holds to the last.
+    fn spanning(parts: impl IntoIterator<Item = Self>) -> Self {
+        parts
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .reduce(|span, part| Self {
+                from: span.from.min(part.from),
+                to: span.to.max(part.to),
+            })
+            .unwrap_or(Self::NONE)
+    }
+
+    /// The sums these slots name.
+    fn of(self, sums: &mut [Lanes<f32>]) -> &mut [Lanes<f32>] {
+        let slot = |at: i32| usize::try_from(at).unwrap_or(0);
+        sums.get_mut(slot(self.from)..slot(self.to))
+            .unwrap_or_default()
+    }
+
+    /// The slot numbers these slots run over.
+    fn each(self) -> Range<i32> {
+        self.from..self.to.max(self.from)
     }
 }
 
@@ -1783,15 +1879,28 @@ impl Rows {
         start..range.end.min(self.end()).max(start)
     }
 
-    /// Where sample row `row`, which the run holds, sits among its sums.
-    fn slot(self, row: i64) -> usize {
-        usize::try_from(row - self.start).unwrap_or(0)
+    /// Where sample row `row` sits among the run's sums: before the first
+    /// slot, the first; past the last, the one past it.
+    fn slot(self, row: i64) -> i32 {
+        let count = i64::try_from(self.count).unwrap_or(i64::MAX);
+        i32::try_from((row - self.start).clamp(0, count)).unwrap_or(i32::MAX)
     }
 
-    /// The sums of the sample rows `range`, which the run holds.
-    fn sums<'a>(self, range: &Range<i64>, sums: &'a mut [f32]) -> &'a mut [f32] {
-        let (from, to) = (self.slot(range.start), self.slot(range.end));
-        sums.get_mut(from..to).unwrap_or_default()
+    /// The slots of the part of the sample rows `range` the run holds.
+    fn slots(self, range: Range<i64>) -> Slots {
+        let held = self.held(range);
+        if held.is_empty() {
+            return Slots::NONE;
+        }
+        Slots {
+            from: self.slot(held.start),
+            to: self.slot(held.end),
+        }
+    }
+
+    /// The sample row at `slot` of the run.
+    fn row(self, slot: i32) -> i64 {
+        self.start + i64::from(slot)
     }
 }
 
@@ -1803,43 +1912,146 @@ fn centres(row: i64) -> impl Iterator<Item = f32> {
     })
 }
 
-/// A strand's curtain: its `light` hanging from its `path`, eased in about
-/// the path over its `core` and falling off down its drape until it fades out.
+/// Where one lane's curtain falls in a run: the rows above its path it eases
+/// in over, those below it still easing, the plain fall beneath, and the
+/// sample row its falloff steps down from.
+#[derive(Copy, Clone, Debug)]
+struct Hanging {
+    above: Slots,
+    easing: Slots,
+    plain: Slots,
+    below: i64,
+}
+
+impl Hanging {
+    const NONE: Self = Self {
+        above: Slots::NONE,
+        easing: Slots::NONE,
+        plain: Slots::NONE,
+        below: 0,
+    };
+}
+
+/// Add each lane's `term` to its sum where it is `lit`.
+///
+/// No sum is ever negative zero, so adding nought leaves an unlit lane's sum
+/// exactly as it was.
+fn add_where(sum: &mut Lanes<f32>, term: Lanes<f32>, lit: Lanes<bool>) {
+    *sum = core::array::from_fn(|lane| sum[lane] + if lit[lane] { term[lane] } else { 0.0 });
+}
+
+/// A gang's curtains: each lane's `light` hanging from its `path`, eased in
+/// about the path over its `core` and falling off down its drape until it
+/// fades out.
 ///
 /// The falloff always steps down from the first sample below the path, so a
 /// sample's light does not depend on which rows were asked for.
-fn curtain((light, drape): (f32, Fall), (path, core): (f32, f32), rows: Rows, sums: &mut [f32]) {
-    if light <= 0.0 {
+fn curtain(
+    (light, drape): (Lanes<f32>, Lanes<Fall>),
+    (path, core): (Lanes<f32>, Lanes<f32>),
+    rows: Rows,
+    sums: &mut [Lanes<f32>],
+) {
+    let ease = core.map(curtain_ease);
+    let mut hangs = [Hanging::NONE; GANG];
+    let mut starts = [None; GANG];
+    for lane in 0..GANG {
+        if light[lane] <= 0.0 {
+            continue;
+        }
+        let (path, ease, drape) = (path[lane], ease[lane], drape[lane]);
+        let end = Rows::first_from(path + drape.reach);
+        let below = Rows::first_beyond(path).min(end);
+        let hanging = rows.held(below..end);
+        let eased = Rows::first_from(path + ease)
+            .max(hanging.start)
+            .min(hanging.end);
+        hangs[lane] = Hanging {
+            above: rows.slots(Rows::first_beyond(path - ease)..below),
+            easing: rows.slots(hanging.start..eased),
+            plain: rows.slots(eased..hanging.end),
+            below,
+        };
+        if !hanging.is_empty() {
+            starts[lane] = Some((Rows::centre(below) - path, drape));
+        }
+    }
+    let lit = Slots::spanning(
+        hangs
+            .iter()
+            .flat_map(|hang| [hang.above, hang.easing, hang.plain]),
+    );
+    if lit.is_empty() {
         return;
     }
-    let ease = curtain_ease(core);
-    let end = Rows::first_from(path + drape.reach);
-    let below = Rows::first_beyond(path).min(end);
-    let above = rows.held(Rows::first_beyond(path - ease)..below);
-    for (sum, centre) in rows.sums(&above, sums).iter_mut().zip(centres(above.start)) {
-        *sum += light * edge(centre - path, ease);
-    }
-    let hanging = rows.held(below..end);
-    if hanging.is_empty() {
-        return;
-    }
-    let mut fall = Falloff::from(Rows::centre(below) - path, drape);
-    fall.skip_to(below, hanging.start);
-    let eased = Rows::first_from(path + ease)
-        .max(hanging.start)
-        .min(hanging.end);
-    let easing = hanging.start..eased;
-    for (sum, centre) in rows
-        .sums(&easing, sums)
-        .iter_mut()
-        .zip(centres(easing.start))
+    let mut falls = Falls::from(starts);
+    falls.skip(core::array::from_fn(|lane| {
+        let behind = rows.row(lit.from) - hangs[lane].below;
+        starts[lane].map_or(0, |_| behind.max(0))
+    }));
+    let begins = hangs.map(|hang| rows.slot(hang.below));
+    // The rows any lane eases over take the edge; beneath them every lane
+    // falls plainly, its falloff stepping unmasked once every lane's has
+    // begun.
+    let edged = Slots::spanning(hangs.iter().flat_map(|hang| [hang.above, hang.easing]))
+        .to
+        .clamp(lit.from, lit.to);
+    let begun = hangs
+        .iter()
+        .zip(begins)
+        .filter(|(hang, _)| !hang.plain.is_empty())
+        .map(|(_, begins)| begins)
+        .max()
+        .unwrap_or(edged)
+        .clamp(edged, lit.to);
+    let easing = Slots {
+        from: lit.from,
+        to: edged,
+    };
+    for ((slot, sum), centre) in easing
+        .each()
+        .zip(easing.of(sums))
+        .zip(centres(rows.row(lit.from)))
     {
-        *sum += light * fall.value() * edge(centre - path, ease);
-        fall.advance();
+        let value = falls.values();
+        let term = core::array::from_fn(|lane| {
+            let (hang, light) = (hangs[lane], light[lane]);
+            let edge = edge(centre - path[lane], ease[lane]);
+            if hang.above.holds(slot) {
+                light * edge
+            } else if hang.easing.holds(slot) {
+                light * value[lane] * edge
+            } else {
+                light * value[lane]
+            }
+        });
+        let lit = hangs.map(|hang| {
+            hang.above.holds(slot) || hang.easing.holds(slot) || hang.plain.holds(slot)
+        });
+        add_where(sum, term, lit);
+        falls.advance_where(begins.map(|begins| slot >= begins));
     }
-    for sum in rows.sums(&(eased..hanging.end), sums) {
-        *sum += light * fall.value();
-        fall.advance();
+    let starting = Slots {
+        from: edged,
+        to: begun,
+    };
+    for (slot, sum) in starting.each().zip(starting.of(sums)) {
+        let value = falls.values();
+        let term = core::array::from_fn(|lane| light[lane] * value[lane]);
+        add_where(sum, term, hangs.map(|hang| hang.plain.holds(slot)));
+        falls.advance_where(begins.map(|begins| slot >= begins));
+    }
+    // Every lane's plain fall has begun by here, so only its end masks it.
+    let ends = hangs.map(|hang| hang.plain.to);
+    let falling = Slots {
+        from: begun,
+        to: lit.to,
+    };
+    for (slot, sum) in falling.each().zip(falling.of(sums)) {
+        let value = falls.values();
+        let term = core::array::from_fn(|lane| light[lane] * value[lane]);
+        add_where(sum, term, ends.map(|end| slot < end));
+        falls.advance();
     }
 }
 
@@ -1849,64 +2061,107 @@ fn curtain_ease(core: f32) -> f32 {
     (2.0 * core).max(LEAST_EASE)
 }
 
-/// A glow of `light` about the `line`, falling off upward by `above` and
-/// downward by `below`: the rows centred above the line take the one, the
-/// rest the other.
+/// A gang's glows: each lane's `light` about its `line`, falling off upward
+/// by the first of its `falls` and downward by the second: the rows centred
+/// above the line take the one, the rest the other.
 ///
 /// Each side steps out from the sample nearest the line, so a sample's light
 /// does not depend on which rows were asked for.
 fn glow_about(
-    (light, line): (f32, f32),
-    (above, below): (Fall, Fall),
+    (light, line): (Lanes<f32>, Lanes<f32>),
+    falls: Lanes<(Fall, Fall)>,
     rows: Rows,
-    sums: &mut [f32],
+    sums: &mut [Lanes<f32>],
 ) {
-    if light <= 0.0 {
-        return;
-    }
-    let split = Rows::first_from(line);
-    let upward = rows.held(Rows::first_beyond(line - above.reach)..split);
-    if !upward.is_empty() {
-        let nearest = split - 1;
-        let mut fall = Falloff::from(line - Rows::centre(nearest), above);
-        // Stepping upward, the rows beneath the run come first.
-        fall.skip_to(upward.end - 1, nearest);
-        for sum in rows.sums(&upward, sums).iter_mut().rev() {
-            *sum += light * fall.value();
-            fall.advance();
+    let mut splits = [0; GANG];
+    let mut upward = [Slots::NONE; GANG];
+    let mut downward = [Slots::NONE; GANG];
+    let mut ups = [None; GANG];
+    let mut downs = [None; GANG];
+    for lane in 0..GANG {
+        if light[lane] <= 0.0 {
+            continue;
+        }
+        let ((above, below), line) = (falls[lane], line[lane]);
+        let split = Rows::first_from(line);
+        splits[lane] = split;
+        upward[lane] = rows.slots(Rows::first_beyond(line - above.reach)..split);
+        downward[lane] = rows.slots(split..Rows::first_from(line + below.reach));
+        if !upward[lane].is_empty() {
+            ups[lane] = Some((line - Rows::centre(split - 1), above));
+        }
+        if !downward[lane].is_empty() {
+            downs[lane] = Some((Rows::centre(split) - line, below));
         }
     }
-    let downward = rows.held(split..Rows::first_from(line + below.reach));
-    if !downward.is_empty() {
-        let mut fall = Falloff::from(Rows::centre(split) - line, below);
-        fall.skip_to(split, downward.start);
-        for sum in rows.sums(&downward, sums) {
-            *sum += light * fall.value();
-            fall.advance();
+    let rising = Slots::spanning(upward);
+    if !rising.is_empty() {
+        // Stepping upward, the rows beneath the run come first.
+        let first = rows.row(rising.to - 1);
+        let mut up = Falls::from(ups);
+        up.skip(core::array::from_fn(|lane| {
+            let behind = splits[lane] - 1 - first;
+            ups[lane].map_or(0, |_| behind.max(0))
+        }));
+        let nearest = splits.map(|split| rows.slot(split - 1));
+        for (slot, sum) in rising.each().rev().zip(rising.of(sums).iter_mut().rev()) {
+            let value = up.values();
+            let term = core::array::from_fn(|lane| light[lane] * value[lane]);
+            add_where(sum, term, upward.map(|part| part.holds(slot)));
+            up.advance_where(nearest.map(|nearest| slot <= nearest));
+        }
+    }
+    let falling = Slots::spanning(downward);
+    if !falling.is_empty() {
+        let first = rows.row(falling.from);
+        let mut down = Falls::from(downs);
+        down.skip(core::array::from_fn(|lane| {
+            let behind = first - splits[lane];
+            downs[lane].map_or(0, |_| behind.max(0))
+        }));
+        let begins = splits.map(|split| rows.slot(split));
+        for (slot, sum) in falling.each().zip(falling.of(sums)) {
+            let value = down.values();
+            let term = core::array::from_fn(|lane| light[lane] * value[lane]);
+            add_where(sum, term, downward.map(|part| part.holds(slot)));
+            down.advance_where(begins.map(|begins| slot >= begins));
         }
     }
 }
 
-/// One strand's `light` about its `path`, drawn `reach` glow radii out, its
-/// `glow` radius measured along the vertical.
+/// A gang of strands: each lane's `light` about its `path`, drawn `reach`
+/// glow radii out, its `glow` radius measured along the vertical.
 fn strand(
-    (light, reach): (f32, f32),
-    (path, glow): (f32, f32),
+    (light, reach): (Lanes<f32>, Lanes<f32>),
+    (path, glow): (Lanes<f32>, Lanes<f32>),
     profile: &[f32; PROFILE_LEN],
     rows: Rows,
-    sums: &mut [f32],
+    sums: &mut [Lanes<f32>],
 ) {
-    if light <= 0.0 || glow <= 0.0 || reach <= 0.0 {
-        return;
+    let mut drawn = [Slots::NONE; GANG];
+    let mut steps = [0.0; GANG];
+    for lane in 0..GANG {
+        if light[lane] <= 0.0 || glow[lane] <= 0.0 || reach[lane] <= 0.0 {
+            continue;
+        }
+        let extent = glow[lane] * reach[lane];
+        drawn[lane] = rows
+            .slots(Rows::first_beyond(path[lane] - extent)..Rows::first_from(path[lane] + extent));
+        steps[lane] = f32::from(PROFILE_STEPS) / glow[lane];
     }
-    let range =
-        rows.held(Rows::first_beyond(path - glow * reach)..Rows::first_from(path + glow * reach));
-    let steps = f32::from(PROFILE_STEPS) / glow;
+    let span = Slots::spanning(drawn);
     // Each row's distance from its own exact centre, so a row sums the same
     // light wherever the run asked for it begins.
-    for (sum, centre) in rows.sums(&range, sums).iter_mut().zip(centres(range.start)) {
-        let step = table_index((centre - path).abs() * steps).min(PROFILE_LEN - 1);
-        *sum += light * profile[step];
+    for ((slot, sum), centre) in span
+        .each()
+        .zip(span.of(sums))
+        .zip(centres(rows.row(span.from)))
+    {
+        let term = core::array::from_fn(|lane| {
+            let step = table_index((centre - path[lane]).abs() * steps[lane]).min(PROFILE_LEN - 1);
+            light[lane] * profile[step]
+        });
+        add_where(sum, term, drawn.map(|part| part.holds(slot)));
     }
 }
 
@@ -1980,46 +2235,73 @@ fn strand_reach(light: f64) -> f64 {
     )
 }
 
-/// A smooth light falling off with distance, `(1 + x)·e^−x` for `x` the
-/// distance over its length: flat where it starts, so a glow meets whatever
-/// it grows from without a crease, and exponential beyond.
-struct Falloff {
-    x: f32,
-    dx: f32,
-    decay: f32,
-    step: f32,
+/// A gang's falloffs, each lane's `(1 + x)·e^−x` for `x` its distance over
+/// its length: flat where it starts, so a glow meets whatever it grows from
+/// without a crease, and exponential beyond.
+///
+/// Every lane steps a sample at a time, exactly as a run holding the rows
+/// stepped over would have, so the light it gives a row does not depend on
+/// where a run began.
+#[derive(Copy, Clone, Debug)]
+struct Falls {
+    x: Lanes<f32>,
+    dx: Lanes<f32>,
+    decay: Lanes<f32>,
+    step: Lanes<f32>,
 }
 
-impl Falloff {
-    /// The falloff `distance` pixels along `fall`, stepped a sample at a
-    /// time.
-    fn from(distance: f32, fall: Fall) -> Self {
-        let length = f64::from(fall.length);
-        let x = f64::from(distance) / length;
+impl Falls {
+    /// Each lane's falloff `distance` pixels along its fall; a lane with
+    /// none gives nought however far it steps.
+    fn from(starts: Lanes<Option<(f32, Fall)>>) -> Self {
+        let lanes: Lanes<[f32; 4]> = core::array::from_fn(|lane| {
+            starts[lane].map_or([0.0; 4], |(distance, fall)| {
+                let length = f64::from(fall.length);
+                let x = f64::from(distance) / length;
+                [
+                    single(x),
+                    single(f64::from(PIXELS_PER_SAMPLE) / length),
+                    single(mathf::exp(-x)),
+                    fall.step,
+                ]
+            })
+        });
         Self {
-            x: single(x),
-            dx: single(f64::from(PIXELS_PER_SAMPLE) / length),
-            decay: single(mathf::exp(-x)),
-            step: fall.step,
+            x: lanes.map(|lane| lane[0]),
+            dx: lanes.map(|lane| lane[1]),
+            decay: lanes.map(|lane| lane[2]),
+            step: lanes.map(|lane| lane[3]),
         }
     }
 
-    fn value(&self) -> f32 {
-        (1.0 + self.x) * self.decay
+    /// Each lane's light where its falloff stands.
+    fn values(&self) -> Lanes<f32> {
+        core::array::from_fn(|lane| (1.0 + self.x[lane]) * self.decay[lane])
     }
 
+    /// Every lane a sample on.
     fn advance(&mut self) {
-        self.x += self.dx;
-        self.decay *= self.step;
+        self.advance_where([true; GANG]);
     }
 
-    /// Step on from sample row `at` to sample row `to`, when `to` lies ahead.
+    /// The lanes `stepping` names a sample on, the rest where they stand.
     ///
-    /// One sample at a time, exactly as a run that held those rows would have,
-    /// so the light the falloff gives beyond them is the same either way.
-    fn skip_to(&mut self, at: i64, to: i64) {
-        for _ in at..to {
-            self.advance();
+    /// No `x` is ever negative zero, so stepping by nought and decaying by
+    /// one leave a lane exactly where it was.
+    fn advance_where(&mut self, stepping: Lanes<bool>) {
+        self.x = core::array::from_fn(|lane| {
+            self.x[lane] + if stepping[lane] { self.dx[lane] } else { 0.0 }
+        });
+        self.decay = core::array::from_fn(|lane| {
+            self.decay[lane] * if stepping[lane] { self.step[lane] } else { 1.0 }
+        });
+    }
+
+    /// Step each lane on its `count` of samples.
+    fn skip(&mut self, counts: Lanes<i64>) {
+        let most = counts.iter().copied().max().unwrap_or(0);
+        for done in 0..most {
+            self.advance_where(counts.map(|count| done < count));
         }
     }
 }
@@ -2171,10 +2453,11 @@ fn row_at(at: f32, height: u32) -> u32 {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     reason = "every caller passes a non-negative, finite position and clamps the \
-              index into its table; the cast saturates rather than wrapping"
+              index into a table far shorter than `u32`; the cast saturates \
+              rather than wrapping, and a 32-bit one is the cheaper"
 )]
 fn table_index(position: f32) -> usize {
-    position as usize
+    usize::try_from(position as u32).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

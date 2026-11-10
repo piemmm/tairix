@@ -43,7 +43,7 @@ says why on the line before its closing `FAILED in`. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `c-header`, `font-atlas`, `icons`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `shaders`, `c-header`, `font-atlas`, `icons`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
@@ -235,6 +235,7 @@ concurrently as the one `static gates` stage:
 | `devids` | Verifies the PCI, USB and IEEE OUI tables against their vetted snapshots, regenerated in-process |
 | `unicode` | Verifies the Unicode property tables against the pinned UCD snapshot, regenerated in-process |
 | `spirv` | Verifies the SPIR-V grammar tables against the pinned Khronos grammar, regenerated in-process |
+| `shaders` | Builds the pinned shader set from its Rust sources and compares each module with its committed file |
 | `artsheet` | Measures the shipped figure art against its bounds and the committed ledger |
 | `icons` | Redraws the file-type icon masters in-process and compares each with its committed file |
 | `model-check` | Exhaustively model-checks the capability + IPC state machine and the hand-on of freed room, failing on any invariant counterexample |

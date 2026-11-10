@@ -24,7 +24,9 @@ use core::slice::ChunksMut;
 
 use tairix_inline::ArrayVec;
 
-use crate::scan::{edge_between, first_centre_from, Edge, COORD_LIMIT, UNIT};
+use crate::scan::{
+    edge_between, first_centre_from, Edge, HalfPlane, COORD_LIMIT, MAX_DRAWING_EXTENT, UNIT,
+};
 
 /// Sub-units per pixel of a [`MeshVertex`] position: the converter's own grid.
 #[allow(
@@ -35,6 +37,41 @@ pub const MESH_SUB_UNITS: i32 = UNIT as i32;
 
 /// The sum of a fragment's [`Weights`].
 pub const WEIGHT_ONE: u32 = 1 << 16;
+
+/// Pixels a side of the block [`Triangle::block`] evaluates at once: a
+/// fragment tile, sixteen 2 × 2 quads.
+pub const BLOCK: u32 = 8;
+
+/// The most samples a [`Lattice`] places in a pixel.
+pub const MAX_SAMPLES: usize = 4;
+
+/// A sixteenth of a pixel, the unit sample positions are stated in.
+const SIXTEENTH: i32 = MESH_SUB_UNITS / 16;
+
+/// Where in a pixel a fill samples, in [`MESH_SUB_UNITS`] from its top-left.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Lattice {
+    /// One sample at the centre: what [`Triangle::fill`] covers.
+    Centre,
+    /// The standard positions of a four-sample image.
+    Four,
+}
+
+impl Lattice {
+    /// Its samples, in order.
+    #[must_use]
+    pub const fn samples(self) -> &'static [(i32, i32)] {
+        match self {
+            Self::Centre => &[(MESH_SUB_UNITS / 2, MESH_SUB_UNITS / 2)],
+            Self::Four => &[
+                (6 * SIXTEENTH, 2 * SIXTEENTH),
+                (14 * SIXTEENTH, 6 * SIXTEENTH),
+                (2 * SIXTEENTH, 10 * SIXTEENTH),
+                (10 * SIXTEENTH, 14 * SIXTEENTH),
+            ],
+        }
+    }
+}
 
 /// Reciprocal depth: larger is nearer.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -492,6 +529,8 @@ impl EdgeWalk {
 #[derive(Clone, Debug)]
 pub struct Triangle {
     edges: ArrayVec<Edge, 3>,
+    /// The sign of its signed area, which side of each edge is its inside.
+    winding: i64,
     /// The first row whose centre it reaches, and one past the last.
     rows: (i64, i64),
     /// Vertex zero's position, a pixel centre at each whole number.
@@ -505,7 +544,7 @@ pub struct Triangle {
 impl Triangle {
     /// Set up the triangle with corners `vertices`, or `None` where it covers
     /// no area, a corner carries [`Depth::CLEAR`], or a corner lies further
-    /// out than [`MAX_DRAWING_EXTENT`](crate::scan::MAX_DRAWING_EXTENT) pixels,
+    /// out than [`MAX_DRAWING_EXTENT`] pixels,
     /// where its arithmetic could not be kept exact. Such a triangle draws
     /// nothing rather than a distorted shape: a caller clips its geometry to
     /// the view first.
@@ -547,6 +586,7 @@ impl Triangle {
         let q = vertices.map(|v| f64::from(v.depth.0));
         Some(Self {
             edges,
+            winding: sign,
             rows: (first_centre_from(top), first_centre_from(bottom)),
             reference,
             depth: Plane::through(q, across, down, det),
@@ -558,6 +598,64 @@ impl Triangle {
                 Side::between(at[0], at[1], sign),
             ],
         })
+    }
+
+    /// Whether it covers the sample `(x, y)`, in [`MESH_SUB_UNITS`] from the
+    /// drawing's origin: what [`Self::fill`] covers, asked of one sample.
+    ///
+    /// The two sides spanning the sample's row must both hold it.
+    #[must_use]
+    pub fn covers(&self, x: i32, y: i32) -> bool {
+        let (x, y) = (i64::from(x), i64::from(y));
+        let mut spanning = 0;
+        for edge in self.edges.iter().filter(|edge| spans(edge, y)) {
+            if edge.inside(self.winding).at(x, y) < 0 {
+                return false;
+            }
+            spanning += 1;
+        }
+        spanning >= 2
+    }
+
+    /// Which samples of the [`BLOCK`]-square block of pixels whose top-left
+    /// is pixel `origin` it covers: for each sample of `lattice` in order,
+    /// the block's pixels a bit each, row by row from bit 0, exactly as
+    /// [`Self::covers`] asks of them one by one. A block past
+    /// [`MAX_DRAWING_EXTENT`] pixels, where no triangle reaches, is
+    /// uncovered.
+    #[must_use]
+    pub fn block(&self, origin: (u32, u32), lattice: Lattice) -> [u64; MAX_SAMPLES] {
+        let mut masks = [0; MAX_SAMPLES];
+        if origin.0 > MAX_DRAWING_EXTENT || origin.1 > MAX_DRAWING_EXTENT {
+            return masks;
+        }
+        let (left, top) = (i64::from(origin.0) * UNIT, i64::from(origin.1) * UNIT);
+        let mut sides = ArrayVec::<(&Edge, HalfPlane), 3>::new();
+        for edge in &self.edges {
+            // Room for every edge: both hold three.
+            let _ = sides.try_push((edge, edge.inside(self.winding)));
+        }
+        for (mask, &(dx, dy)) in masks.iter_mut().zip(lattice.samples()) {
+            let x = left + i64::from(dx);
+            for row in 0..BLOCK {
+                let y = top + i64::from(row) * UNIT + i64::from(dy);
+                let (mut columns, mut spanning) = (u8::MAX, 0);
+                for (_, inside) in sides.iter().filter(|(edge, _)| spans(edge, y)) {
+                    let (mut value, step) = (inside.at(x, y), inside.a * UNIT);
+                    let mut held = 0u8;
+                    for column in 0..BLOCK {
+                        held |= u8::from(value >= 0) << column;
+                        value += step;
+                    }
+                    columns &= held;
+                    spanning += 1;
+                }
+                if spanning >= 2 {
+                    *mask |= u64::from(columns) << (row * BLOCK);
+                }
+            }
+        }
+        masks
     }
 
     /// The rows it reaches, clamped at the top of the drawing.
@@ -679,6 +777,11 @@ impl Triangle {
             }
         }
     }
+}
+
+/// Whether `edge` spans the sample row at `y`, the rows its crossing decides.
+fn spans(edge: &Edge, y: i64) -> bool {
+    edge.top <= y && y < edge.bottom
 }
 
 /// The nearest of a fragment's sides within a pixel, given each side's value

@@ -145,6 +145,7 @@ members = [
     "lib/saver",
     "lib/scatter",
     "lib/seat",
+    "lib/shaders",
     "lib/smb",
     "lib/spirv",
     "lib/unicode",
