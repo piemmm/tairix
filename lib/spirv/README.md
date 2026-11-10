@@ -25,7 +25,9 @@ view backends read an admitted module through, and its encoder.
 - `Admitted::new` — the validator: a module refused naming the word at fault
   and the `Rule` broken, or admitted with the capabilities a device must
   support and each `EntryPoint`'s stage, workgroup size, bindings, push
-  constants, stage interface and the module-scope variables it names;
+  constants, stage interface — each slot's variable, interpolation and
+  centroid — whether a fragment stage tests early, and the module-scope
+  variables it names;
   `EntryPoint::agree` decides a pipeline layout against them, the stages that
   may see each binding included. `Admitted::held_bytes` states the host memory
   an admitted module keeps.

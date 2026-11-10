@@ -8,7 +8,10 @@ use tairix_colour::srgb_to_linear;
 use tairix_spirv::Component;
 use tairix_util::mathf::{from_half, single, to_half};
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::format::{Encoding, Format};
+use crate::software::shader::ops::low32;
 
 /// One plane of a texel: its colour, or one aspect of depth and stencil.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -121,6 +124,19 @@ fn write_channel(encoding: Encoding, bits: u32, value: u32, srgb: &Srgb, alpha: 
         Encoding::Snorm8 | Encoding::Snorm16 => float_to_snorm(float, max >> 1) & max,
         Encoding::Float16 => u32::from(to_half(float)),
         _ => value & max,
+    }
+}
+
+/// The bits of a texel of `format` plane `plane` lies in: its depth's or
+/// its stencil's, none for a plane it lacks, and every bit of a colour.
+pub(crate) const fn plane_bits(format: Format, plane: Plane) -> [u32; 4] {
+    match (format.encoding(), plane) {
+        (Encoding::Depth16, Plane::Depth) => [0xffff, 0, 0, 0],
+        (Encoding::Depth32 | Encoding::Depth32Stencil8, Plane::Depth) => [u32::MAX, 0, 0, 0],
+        (Encoding::Stencil8, Plane::Stencil) => [0xff, 0, 0, 0],
+        (Encoding::Depth32Stencil8, Plane::Stencil) => [0, 0xff, 0, 0],
+        (_, Plane::Colour) => [u32::MAX; 4],
+        _ => [0; 4],
     }
 }
 
@@ -426,6 +442,71 @@ fn to_shared_exponent(value: [u32; 4]) -> u32 {
         packed |= mantissa << (9 * index);
     }
     packed
+}
+
+/// The `bytes` bytes at byte `byte` of `words`, as up to four words: each
+/// word they touch loaded once.
+pub(crate) fn raw_at(words: &[AtomicU32], byte: u64, bytes: u64) -> [u32; 4] {
+    let bytes = bytes.min(16);
+    let skew = byte % 4;
+    let first = byte / 4;
+    let mut stored = [0u32; 5];
+    let touched = (skew + bytes).div_ceil(4);
+    for (k, slot) in (0..touched).zip(&mut stored) {
+        *slot = usize::try_from(first + k)
+            .ok()
+            .and_then(|i| words.get(i))
+            .map_or(0, |w| w.load(Ordering::Relaxed));
+    }
+    let mut raw = [0u32; 4];
+    for (k, slot) in raw.iter_mut().enumerate() {
+        let low = stored.get(k).copied().unwrap_or(0);
+        let high = stored.get(k + 1).copied().unwrap_or(0);
+        *slot = if skew == 0 {
+            low
+        } else {
+            low >> (8 * skew) | high << (32 - 8 * skew)
+        };
+    }
+    for (k, slot) in (0u64..).zip(&mut raw) {
+        let kept = bytes.saturating_sub(4 * k).min(4);
+        if kept < 4 {
+            *slot &= (1u32 << (8 * kept)).wrapping_sub(1);
+        }
+    }
+    raw
+}
+
+/// Write the first `bytes` bytes of `raw` at byte `byte` of `words`: whole
+/// words stored, a part of one cleared and set.
+pub(crate) fn put_raw(words: &[AtomicU32], byte: u64, bytes: u64, raw: [u32; 4]) {
+    let mut k = 0;
+    while k < bytes.min(16) {
+        let at = byte + k;
+        let Some(word) = usize::try_from(at / 4).ok().and_then(|i| words.get(i)) else {
+            return;
+        };
+        let within = at % 4;
+        let take = (4 - within).min(bytes - k);
+        // The bytes from `k` on may straddle two of `raw`'s words.
+        let part = |index: u64| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| raw.get(i))
+                .map_or(0, |&word| u64::from(word))
+        };
+        let pair = part(k / 4) | part(k / 4 + 1) << 32;
+        let source = low32(pair >> ((k % 4) * 8));
+        if within == 0 && take == 4 {
+            word.store(source, Ordering::Relaxed);
+        } else {
+            let field = u32::MAX >> (32 - take * 8);
+            let shift = within * 8;
+            word.fetch_and(!(field << shift), Ordering::Relaxed);
+            word.fetch_or((source & field) << shift, Ordering::Relaxed);
+        }
+        k += take;
+    }
 }
 
 #[cfg(test)]

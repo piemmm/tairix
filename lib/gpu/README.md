@@ -4,7 +4,8 @@ Stability tier: **experimental**
 
 The device-neutral GPU seam (`plans/GPU.md`): the memory and submission model
 every backend implements, and the software device that implements it on the CPU
-on every target, a SPIR-V interpreter running its compute pipelines.
+on every target, a SPIR-V interpreter running its compute and render pipelines
+and `lib/raster`'s stages rasterising its passes.
 
 ## What it provides
 
@@ -33,12 +34,16 @@ on every target, a SPIR-V interpreter running its compute pipelines.
 - `ComputePipeline` — a compute entry point agreed against its layout,
   specialized and lowered once, at creation, which refuses what the device
   cannot run.
+- `RenderPipeline` — a vertex and an optional fragment stage, each lowered
+  once, their interfaces matched with the vertex buffers, each other and the
+  colour targets, and the fixed-function state a draw runs them through, all
+  checked against what the device states.
 - `CommandBuffer`, `Queue`, `Submission` — copies, fills, updates, copies
-  between buffers and images and between images, clears, and dispatches direct
-  and indirect, checked whole when submitted: a refusal names the command and
-  changes nothing but the room its queues made ahead of it, and no range is
-  clamped. A queue runs its work in the order
-  submitted.
+  between buffers and images and between images, clears, dispatches direct
+  and indirect, and render passes and the draws recorded into them, checked
+  whole when submitted: a refusal names the command — a pass's draw counting as
+  one — and changes nothing but the room its queues made ahead of it, and no
+  range is clamped. A queue runs its work in the order submitted.
 - `Timeline`, `Fence` — a value is reached only once every signal up to it has
   landed; a wait parks and is woken by what advances it.
 - Deadlines — every submission carries one, and one that overruns loses its own
@@ -73,6 +78,16 @@ on every target, a SPIR-V interpreter running its compute pipelines.
   kept of the heap until they come back — a dispatch counts its work and stops
   within a fixed amount of it of its deadline, and lowering is held to a fixed
   budget.
+- A pass is drawn a flush of bounded batches at a time: the batches' vertices
+  shaded and their primitives set up across the runner's participants, then the
+  bins they reach drawn across them, in place in the attachments' memory, each
+  bin's primitives in order and its quads shaded sixteen to a tile. Bins meet
+  where every attachment's texels start on a word, so they never share one and
+  a pass leaves the same bytes on any number of cores. A pass
+  refuses a draw that binds, or reads as vertices or indices, what it renders
+  to, through a table of the byte spans each bind set's descriptors reach made
+  when the set is made, so the check costs a draw a set's logarithm, not its
+  descriptors.
 - No `unsafe`. The crate is enrolled in `cargo xtask miri` for the contention
   its threads put `lib/rt`'s lock and condition variable to; the tests it
   leaves out, and why, are listed in `docs/src/lib/gpu.md`.
@@ -84,8 +99,11 @@ and reset; the device's tests run the seam on the software device, threads and
 its worker included; the format, texel, image and sampler tests hold every
 encoding, refusal, copy and clear to what it should land; the binding tests
 hold every bind set check and a pipeline layout's agreement; the interpreter's
-tests run every instruction a compute shader may use and pin its defined
-values, reconvergence, images and robustness; the dispatch tests hold deadlines,
+tests run every instruction a shader may use and pin its defined values,
+reconvergence, images, robustness, and its vertex and fragment stages' ports,
+quads, helpers and discards; the render pipeline and pass tests hold every
+creation and submission check, and the render tests pin the pixels each rule
+of a draw gives; the dispatch tests hold deadlines,
 determinism across cores, isolation between contexts, indirect counts, limits
 and working memory; `tests/fuzz_gpu.rs` holds the submission path to a
 byte-array reference, and `tests/fuzz_shader.rs` holds the interpreter total,

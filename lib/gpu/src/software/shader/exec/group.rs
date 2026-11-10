@@ -27,6 +27,7 @@ impl Machine<'_, '_, '_> {
                 .saturating_sub(u32::from(first));
             let at = local_id(local, size);
             let words: [u64; 4] = match which {
+                Builtin::HelperInvocation => [self.place.helpers >> lane & 1, 0, 0, 0],
                 Builtin::LocalInvocationId => widen3(at),
                 Builtin::GlobalInvocationId => widen3(core::array::from_fn(|axis| {
                     group[axis].wrapping_mul(size[axis]).wrapping_add(at[axis])
@@ -78,8 +79,26 @@ impl Machine<'_, '_, '_> {
         found
     }
 
+    /// Subgroup operation `op` over the lanes in focus: a helper takes no
+    /// part, and reads zero.
+    pub(super) fn group(&mut self, op: Group, dst: Reg, operands: (Reg, Reg)) {
+        let lanes = self.mask;
+        let helpers = lanes & self.place.helpers;
+        if helpers == 0 {
+            self.subgroup_op(op, dst, operands);
+            return;
+        }
+        self.focus(helpers);
+        self.zero(dst, result_words(op));
+        if lanes != helpers {
+            self.focus(lanes & !helpers);
+            self.subgroup_op(op, dst, operands);
+        }
+        self.focus(lanes);
+    }
+
     #[expect(clippy::too_many_lines, reason = "one arm per subgroup operation")]
-    pub(super) fn group(&mut self, op: Group, dst: Reg, (a, b): (Reg, Reg)) {
+    fn subgroup_op(&mut self, op: Group, dst: Reg, (a, b): (Reg, Reg)) {
         match op {
             Group::Elect => {
                 let mut out = [0; LANES];
@@ -386,6 +405,24 @@ impl Machine<'_, '_, '_> {
         self.span = (span.start & !3)..(span.end.next_multiple_of(4)).min(LANES);
         self.fetch(reg, word, wide, out);
         self.span = span;
+    }
+}
+
+/// The words the result of `op` takes.
+const fn result_words(op: Group) -> u32 {
+    match op {
+        Group::Ballot => 4,
+        Group::Broadcast { words } | Group::BroadcastFirst { words } => words,
+        Group::Fold { num, count, .. } => num.words() * count,
+        Group::Elect
+        | Group::All
+        | Group::Any
+        | Group::AllEqual { .. }
+        | Group::InverseBallot
+        | Group::BallotBitExtract
+        | Group::BallotBitCount(_)
+        | Group::BallotFindLsb
+        | Group::BallotFindMsb => 1,
     }
 }
 

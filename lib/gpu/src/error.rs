@@ -58,7 +58,9 @@ pub enum Error {
     Usage,
     /// The memory is not one the CPU can reach.
     NotHostVisible,
-    /// A copy whose destination ranges overlap each other or its sources.
+    /// A copy whose destination ranges overlap each other or its sources, a
+    /// pass naming one attachment twice, or a draw binding what an attachment
+    /// its pass writes lies in.
     Overlap,
     /// A timeline signal that would not advance it past every earlier one.
     TimelineOrder,
@@ -95,6 +97,12 @@ pub enum Error {
     /// one given twice or wider than its constant, or a workgroup size they
     /// make zero.
     Specialization(tairix_spirv::SpecError),
+    /// A render pipeline's stages or targets disagree on what passes between
+    /// them: a vertex input no attribute provides or provides as another
+    /// component type, a fragment input no vertex output provides, a fragment
+    /// output with no target or of another component type, or a draw or pass
+    /// whose attachments are not those its pipeline renders to.
+    Interface,
 }
 
 impl fmt::Display for Error {
@@ -124,7 +132,7 @@ impl fmt::Display for Error {
             Self::OutOfRange => "a range or a value past what it may be",
             Self::Usage => "the buffer or image was not made for that use",
             Self::NotHostVisible => "the memory is not reachable by the CPU",
-            Self::Overlap => "a copy's destination overlaps",
+            Self::Overlap => "a destination overlaps what it may not",
             Self::TimelineOrder => "the signal would not advance the timeline",
             Self::Deadline => "the deadline is zero or past the device's longest",
             Self::TooMany => "more than a submission, command or layout may carry",
@@ -138,6 +146,9 @@ impl fmt::Display for Error {
             Self::EntryPoint => "the module has no such entry point",
             Self::Disagreement(_) => "the layout does not provide what the entry point uses",
             Self::Specialization(_) => "the module refused the specialization values",
+            Self::Interface => {
+                "the stages, targets or attachments disagree on what passes between them"
+            }
         };
         f.write_str(text)
     }

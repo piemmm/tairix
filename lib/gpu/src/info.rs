@@ -6,7 +6,7 @@ use tairix_inline::ArrayVec;
 use tairix_spirv::enumerant::Capability;
 
 use crate::format::{Format, FormatFeatures};
-use crate::Error;
+use crate::{Error, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS, MAX_VERTEX_ATTRIBUTES};
 
 tairix_util::flags! {
     /// What a memory type's memory is.
@@ -40,6 +40,10 @@ tairix_util::flags! {
         const STORAGE_TEXEL = 1 << 5;
         /// Read as an indirect dispatch's arguments.
         const INDIRECT = 1 << 6;
+        /// Read as a draw's vertex attributes.
+        const VERTEX = 1 << 7;
+        /// Read as a draw's indices.
+        const INDEX = 1 << 8;
     }
 }
 
@@ -51,7 +55,9 @@ impl BufferUsage {
         .with(Self::STORAGE)
         .with(Self::UNIFORM_TEXEL)
         .with(Self::STORAGE_TEXEL)
-        .with(Self::INDIRECT);
+        .with(Self::INDIRECT)
+        .with(Self::VERTEX)
+        .with(Self::INDEX);
 }
 
 tairix_util::flags! {
@@ -61,12 +67,14 @@ tairix_util::flags! {
         const TRANSFER = 1;
         /// Dispatches.
         const COMPUTE = 1 << 1;
+        /// Render passes and their draws.
+        const GRAPHICS = 1 << 2;
     }
 }
 
 impl QueueCapabilities {
     /// Every kind of work.
-    pub const ALL: Self = Self::TRANSFER.with(Self::COMPUTE);
+    pub const ALL: Self = Self::TRANSFER.with(Self::COMPUTE).with(Self::GRAPHICS);
 }
 
 tairix_util::flags! {
@@ -76,12 +84,34 @@ tairix_util::flags! {
         const SAMPLER_ANISOTROPY = 1;
         /// The mirror-clamp-to-edge address mode.
         const MIRROR_CLAMP_TO_EDGE = 1 << 1;
+        /// Blend factors that read a fragment's second colour.
+        const DUAL_SOURCE_BLEND = 1 << 2;
+        /// A logic operation in place of blending.
+        const LOGIC_OP = 1 << 3;
+        /// Depth clamped to the viewport's range in place of clipped.
+        const DEPTH_CLAMP = 1 << 4;
+        /// Lines wider than a pixel.
+        const WIDE_LINES = 1 << 5;
+        /// Points larger than a pixel.
+        const LARGE_POINTS = 1 << 6;
+        /// Storage writes and atomics from a vertex stage.
+        const VERTEX_STORES = 1 << 7;
+        /// Storage writes and atomics from a fragment stage.
+        const FRAGMENT_STORES = 1 << 8;
     }
 }
 
 impl Features {
     /// Every feature.
-    pub const ALL: Self = Self::SAMPLER_ANISOTROPY.with(Self::MIRROR_CLAMP_TO_EDGE);
+    pub const ALL: Self = Self::SAMPLER_ANISOTROPY
+        .with(Self::MIRROR_CLAMP_TO_EDGE)
+        .with(Self::DUAL_SOURCE_BLEND)
+        .with(Self::LOGIC_OP)
+        .with(Self::DEPTH_CLAMP)
+        .with(Self::WIDE_LINES)
+        .with(Self::LARGE_POINTS)
+        .with(Self::VERTEX_STORES)
+        .with(Self::FRAGMENT_STORES);
 }
 
 /// What a device states each format can be used for.
@@ -203,6 +233,32 @@ pub struct Limits {
     pub max_invocation_memory: u32,
     /// The invocations a subgroup holds.
     pub subgroup_size: u32,
+    /// The most vertex attributes a render pipeline reads, and one past the
+    /// highest location one feeds: at most
+    /// [`MAX_VERTEX_ATTRIBUTES`].
+    pub max_vertex_input_attributes: u32,
+    /// The most vertex buffers a render pipeline reads: at most
+    /// [`MAX_DRAW_VERTEX_BUFFERS`].
+    pub max_vertex_input_bindings: u32,
+    /// The furthest an attribute starts into its vertex.
+    pub max_vertex_input_attribute_offset: u32,
+    /// The longest a vertex buffer's stride is.
+    pub max_vertex_input_binding_stride: u32,
+    /// The most 32-bit components a vertex stage's outputs hold together.
+    pub max_vertex_output_components: u32,
+    /// The most 32-bit components a fragment stage's inputs hold together.
+    pub max_fragment_input_components: u32,
+    /// The most colour targets a render pipeline writes and a pass holds: at
+    /// most [`MAX_PASS_ATTACHMENTS`].
+    pub max_color_attachments: u32,
+    /// The widest and tallest viewport.
+    pub max_viewport_dimensions: [u32; 2],
+    /// The lowest and highest a viewport's edges reach, in order.
+    pub viewport_bounds_range: [i32; 2],
+    /// The largest point's side, in pixels, where points may be large.
+    pub max_point_size: u32,
+    /// The widest line, in pixels, where lines may be wide.
+    pub max_line_width: u32,
 }
 
 /// The most shader capabilities a device states.
@@ -250,7 +306,11 @@ impl DeviceInfo {
             && limits.max_job_time.saturating_total_nanos() > 0
             && limits.subgroup_size.is_power_of_two()
             && limits.subgroup_size <= MAX_SUBGROUP_SIZE
-            && limits.max_bind_sets > 0;
+            && limits.max_bind_sets > 0
+            && limits.max_vertex_input_attributes <= MAX_VERTEX_ATTRIBUTES
+            && limits.max_vertex_input_bindings as usize <= MAX_DRAW_VERTEX_BUFFERS
+            && limits.max_color_attachments as usize <= MAX_PASS_ATTACHMENTS
+            && limits.viewport_bounds_range[0] <= limits.viewport_bounds_range[1];
         let ordered = self.capabilities.windows(2).all(|w| w[0] < w[1]);
         if typed && sized && served && bounded && ordered && !self.memory_types.is_empty() {
             Ok(())

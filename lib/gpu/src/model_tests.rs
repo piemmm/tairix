@@ -476,7 +476,28 @@ fn a_description_no_context_could_be_served_by_is_refused() {
     odd_alignment.limits.buffer_alignment = 24;
     let mut no_deadline = valid();
     no_deadline.limits.max_job_time = Duration64::ZERO;
-    for info in [missing_heap, no_queues, crowded, odd_alignment, no_deadline] {
+    // Render limits past what a pass or a pipeline can record.
+    let mut targets = valid();
+    targets.limits.max_color_attachments =
+        u32::try_from(crate::MAX_PASS_ATTACHMENTS).expect("small") + 1;
+    let mut buffers = valid();
+    buffers.limits.max_vertex_input_bindings =
+        u32::try_from(crate::MAX_DRAW_VERTEX_BUFFERS).expect("small") + 1;
+    let mut attributes = valid();
+    attributes.limits.max_vertex_input_attributes = crate::MAX_VERTEX_ATTRIBUTES + 1;
+    let mut bounds = valid();
+    bounds.limits.viewport_bounds_range = [1, -1];
+    for info in [
+        missing_heap,
+        no_queues,
+        crowded,
+        odd_alignment,
+        no_deadline,
+        targets,
+        buffers,
+        attributes,
+        bounds,
+    ] {
         assert!(matches!(Model::new(info, &[1]), Err(Error::Malformed)));
     }
     assert!(matches!(Model::new(valid(), &[]), Err(Error::Malformed)));
@@ -687,7 +708,7 @@ fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
     let taken = model.work_heap_taken();
     // Its pipeline's last holder gone where nothing looks at the pool.
     drop(hold);
-    let (planned, released) = model.plan_pipeline(poor, need, 0);
+    let (planned, released) = model.plan_pipeline((poor, crate::pipeline::computes), need, 0);
     assert_eq!(planned.err(), Some(Error::OverLimit));
     drop(released);
     assert!(

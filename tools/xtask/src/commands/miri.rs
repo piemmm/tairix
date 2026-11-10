@@ -386,6 +386,9 @@ pub const TARGETS: &[Target] = &[
                 "software::shader::lower::tests::a_constant_structure_of_the_most_members_is_laid_out_in_one_walk",
                 "software::shader::tests::every_case_runs_as_expected",
                 "software::shader::tests::every_admitted_instruction_has_a_case_that_runs_it",
+                "software::render::tests::a_pass_of_many_bins_and_flushes_draws_whole",
+                "software::render::tests::a_pass_of_many_draws_binding_distinct_sets_gathers_their_memories_once",
+                "software::render::tests::a_pass_of_many_draws_sharing_a_large_set_resolves_it_once",
             ],
             reason: "the first asks the host for an exbibyte so that the allocator's refusal is a \
                      real one, which the interpreter cannot represent and ends the run as \
@@ -396,7 +399,13 @@ pub const TARGETS: &[Target] = &[
                      lowering-budget ones were unfinished after three hours, the widest constant \
                      structure took 43 minutes, the clear across three checks 25, the \
                      specialization budget's 16, the instruction-case test 69 as it lowers and \
-                     runs hundreds of modules, and the coverage test 8 as it admits them. None \
+                     runs hundreds of modules, and the coverage test 8 as it admits them. The \
+                     pass tests of many draws and flushes are their extent too — past five \
+                     hundred primitives to cut a second flush, three thousand draws over sets \
+                     of their own, two thousand over one set of four thousand descriptors — \
+                     and the first two were unfinished after fifty minutes interpreted, the \
+                     third took forty-six; the kept render tests draw the same paths, threads \
+                     included, at a size the interpreter finishes. None \
                      carries `unsafe`, the dispatch, locks and threads they reach are the kept \
                      tests' too, every one that finished passed interpreted, and all run in full \
                      under the ordinary test matrix. Two integration tests are excluded as \

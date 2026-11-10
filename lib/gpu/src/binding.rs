@@ -4,6 +4,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 
 use tairix_spirv::enumerant::{Dim, ImageFormat};
 use tairix_spirv::{Access, Admitted, Binding, BindingKind, ImageShape, Layout, Stages};
@@ -173,18 +174,153 @@ impl Bound {
             Self::Sampler(_) => None,
         }
     }
+
+    /// Feed `each` the bytes of its memory it reaches.
+    fn spans(&self, mut each: impl FnMut(Range<u64>)) {
+        match self {
+            Self::Buffer {
+                buffer,
+                offset,
+                size,
+            } => {
+                let start = buffer.offset + offset;
+                each(start..start + size);
+            }
+            Self::TexelBuffer(texels) => {
+                let start = texels.buffer.offset + texels.desc.offset;
+                each(start..start + texels.desc.size);
+            }
+            Self::Image(view) | Self::ImageSampler(view, _) => view.spans(each),
+            Self::Sampler(_) => {}
+        }
+    }
 }
 
 /// A bind set: every descriptor of its layout, binding by binding in the
 /// layout's order, every memory they reach, once each, in the order memories
-/// are locked in, and each descriptor's memory by its place among those.
+/// are locked in, each descriptor's memory by its place among those, and
+/// what its descriptors a draw's stages see reach.
 #[derive(Debug)]
 pub(crate) struct BindSetState {
     pub(crate) layout: Arc<BindSetLayoutState>,
     pub(crate) resources: Vec<Bound>,
     pub(crate) memories: Vec<Arc<crate::memory::Memory>>,
     pub(crate) places: Vec<u32>,
+    pub(crate) reach: Reach,
     _charge: Charge,
+}
+
+/// The bytes a bind set's descriptors that a vertex or fragment stage sees
+/// reach, merged into disjoint spans ordered by memory, as its set places
+/// them, and address: those all such descriptors reach, and those reached by
+/// descriptors those stages may write. A pass refuses a draw whose sets
+/// reach what it renders to, at a cost of the spans' logarithm.
+#[derive(Debug, Default)]
+pub(crate) struct Reach {
+    any: Vec<(u32, Range<u64>)>,
+    written: Vec<(u32, Range<u64>)>,
+}
+
+/// A span of the memory at a place among a set's, and whether a stage may
+/// write it.
+type Placed = (u32, Range<u64>, bool);
+
+impl Reach {
+    /// What `resources`, laid out as `layout` lays them out and each in the
+    /// memory its entry of `places` names, reach.
+    fn of(layout: &BindSetLayoutState, resources: &[Bound], places: &[u32]) -> Result<Self, Error> {
+        let seen = Stages::VERTEX.with(Stages::FRAGMENT);
+        let walk = |each: &mut dyn FnMut(u32, bool, &Bound)| -> Result<(), Error> {
+            for (binding, &first) in layout.bindings.iter().zip(&layout.firsts) {
+                if !binding.stages.intersects(seen) {
+                    continue;
+                }
+                let first = usize::try_from(first).map_err(exhausted)?;
+                let held = first..first.saturating_add(binding.count as usize);
+                let (Some(bound), Some(places)) = (resources.get(held.clone()), places.get(held))
+                else {
+                    return Err(Error::Malformed);
+                };
+                let writes = binding.access.contains(Access::WRITE);
+                for (resource, &place) in bound.iter().zip(places) {
+                    if place != crate::software::dispatch::NO_MEMORY {
+                        each(place, writes, resource);
+                    }
+                }
+            }
+            Ok(())
+        };
+        let mut count = 0usize;
+        walk(&mut |_, _, resource| resource.spans(|_| count += 1))?;
+        if count == 0 {
+            return Ok(Self::default());
+        }
+        let mut spans: Vec<Placed> = Vec::new();
+        spans.try_reserve_exact(count).map_err(exhausted)?;
+        walk(&mut |place, writes, resource| {
+            resource.spans(|span| {
+                // Counted above, so within what is reserved.
+                if spans.len() < spans.capacity() {
+                    spans.push((place, span, writes));
+                }
+            });
+        })?;
+        spans.sort_unstable_by_key(|(place, span, _)| (*place, span.start));
+        Ok(Self {
+            any: merged(&spans, |_| true)?,
+            written: merged(&spans, |(_, _, writes)| *writes)?,
+        })
+    }
+
+    /// Whether a byte of `span` of the memory at `place` among its set's is
+    /// reached by a descriptor a draw's stages see — where `written`, by one
+    /// they may write.
+    pub(crate) fn meets(&self, place: u32, span: &Range<u64>, written: bool) -> bool {
+        let spans = if written { &self.written } else { &self.any };
+        let after = spans.partition_point(|(held, reached)| {
+            *held < place || (*held == place && reached.end <= span.start)
+        });
+        spans
+            .get(after)
+            .is_some_and(|(held, reached)| *held == place && reached.start < span.end)
+    }
+
+    /// The host bytes it keeps.
+    fn held_bytes(&self) -> u64 {
+        fallible::held(&self.any).saturating_add(fallible::held(&self.written))
+    }
+}
+
+/// The disjoint spans those of `sorted`, by place and then start, that `keep`
+/// keeps merge into.
+fn merged(
+    sorted: &[Placed],
+    keep: impl Fn(&Placed) -> bool,
+) -> Result<Vec<(u32, Range<u64>)>, Error> {
+    let runs = |each: &mut dyn FnMut(u32, Range<u64>)| {
+        let mut open: Option<(u32, Range<u64>)> = None;
+        for (place, span, _) in sorted.iter().filter(|placed| keep(placed)) {
+            match &mut open {
+                Some((held, run)) if held == place && span.start <= run.end => {
+                    run.end = run.end.max(span.end);
+                }
+                _ => {
+                    if let Some((held, run)) = open.replace((*place, span.clone())) {
+                        each(held, run);
+                    }
+                }
+            }
+        }
+        if let Some((held, run)) = open {
+            each(held, run);
+        }
+    };
+    let mut count = 0usize;
+    runs(&mut |_, _| count += 1);
+    let mut out = Vec::new();
+    out.try_reserve_exact(count).map_err(exhausted)?;
+    runs(&mut |place, run| out.push((place, run)));
+    Ok(out)
 }
 
 /// The push constants a pipeline layout holds.
@@ -372,10 +508,12 @@ impl Model {
             }
         }
         let (memories, places) = crate::software::dispatch::memories_of(&resources)?;
+        let reach = Reach::of(&layout, &resources, &places)?;
         let bytes = shared_bytes::<BindSetState>()
             .saturating_add(fallible::held(&resources))
             .saturating_add(fallible::held(&memories))
-            .saturating_add(fallible::held(&places));
+            .saturating_add(fallible::held(&places))
+            .saturating_add(reach.held_bytes());
         self.file_charged(
             key,
             |context| &mut context.bind_sets,
@@ -386,6 +524,7 @@ impl Model {
                     resources,
                     memories,
                     places,
+                    reach,
                     _charge: charge,
                 })
             },
@@ -908,4 +1047,4 @@ impl fmt::Debug for ShaderModule {
 
 #[cfg(test)]
 #[path = "binding_tests.rs"]
-mod tests;
+pub(crate) mod tests;

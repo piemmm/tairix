@@ -10,7 +10,7 @@ mod vector;
 
 use core::ops::Range;
 
-use super::ir::{Block, Builtin, Edge, Inst, Num, Op1, Program, Reg, Term, LANES};
+use super::ir::{Block, Builtin, Edge, Inst, Num, Op1, Port, Program, Reg, Root, Term, LANES};
 use super::ops::{self, high32, low32};
 use crate::software::texel::Srgb;
 use crate::software::Meter;
@@ -49,6 +49,10 @@ pub(crate) struct Env<'d> {
 #[derive(Clone, Debug)]
 pub(crate) struct Placement {
     pub(crate) live: u64,
+    /// The live lanes that run only to lend their quads' derivatives their
+    /// values: they write no memory but their own and take part in no
+    /// subgroup operation.
+    pub(crate) helpers: u64,
     pub(crate) local: [u32; LANES],
     /// The ids of the tile's workgroups, by their place among them.
     pub(crate) group_id: [[u32; 3]; LANES],
@@ -62,11 +66,44 @@ impl Placement {
     /// A placement of no lanes.
     pub(crate) const EMPTY: Self = Self {
         live: 0,
+        helpers: 0,
         local: [0; LANES],
         group_id: [[0; 3]; LANES],
         group_slot: [0; LANES],
         subgroup: [(0, 0); LANES],
     };
+
+    /// A batch of `count` consecutive vertices, a vertex to a lane, its
+    /// subgroups `width` lanes apiece.
+    pub(crate) fn batch(count: usize, width: u32) -> Self {
+        let count = count.min(LANES);
+        let mut place = Self::chunked(width, count);
+        place.live = span_mask(&(0..count));
+        place
+    }
+
+    /// A fragment tile of sixteen quads, a quad's lanes in row order: `live`
+    /// running, `helpers` among them, its subgroups `width` lanes apiece.
+    pub(crate) fn quads(live: u64, helpers: u64, width: u32) -> Self {
+        let mut place = Self::chunked(width, LANES);
+        place.live = live | helpers;
+        place.helpers = helpers;
+        place
+    }
+
+    /// No lane live, the first `len` in subgroups of `width` lanes each.
+    fn chunked(width: u32, len: usize) -> Self {
+        let width = (width as usize).clamp(1, LANES);
+        let mut place = Self::EMPTY;
+        for (lane, slot) in place.subgroup.iter_mut().enumerate().take(len) {
+            let first = lane - lane % width;
+            *slot = (
+                u8::try_from(first).unwrap_or(0),
+                u8::try_from(width.min(len - first)).unwrap_or(0),
+            );
+        }
+        place
+    }
 }
 
 /// A tile's own memory, which holds it between runs: its register planes
@@ -81,6 +118,8 @@ pub(crate) struct Space<'w> {
     pub(crate) masks: &'w mut [u64],
     pub(crate) pending: &'w mut [u64],
     pub(crate) live: &'w mut u64,
+    /// The lanes a fragment's discard ended.
+    pub(crate) killed: &'w mut u64,
     pub(crate) workgroup: &'w mut [u32],
 }
 
@@ -157,6 +196,7 @@ impl<'r, 'd, 'w> Machine<'r, 'd, 'w> {
         let given = self.env.program.given.len() * 4 * LANES;
         self.meter.charge((cleared + given) as u64);
         *self.space.live = self.place.live;
+        *self.space.killed = 0;
         self.give();
         self.arrive(0, self.place.live);
         true
@@ -232,7 +272,11 @@ impl<'r, 'd, 'w> Machine<'r, 'd, 'w> {
                 cases,
                 default,
             } => self.switch(selector, wide, cases, default, lanes)?,
-            Term::Exit | Term::Kill => *self.space.live &= !lanes,
+            Term::Exit => *self.space.live &= !lanes,
+            Term::Kill => {
+                *self.space.live &= !lanes;
+                *self.space.killed |= lanes;
+            }
             Term::Barrier(edge) => {
                 self.take(edge, lanes)?;
                 self.meter.charge(width);
@@ -821,6 +865,34 @@ impl<'r, 'd, 'w> Machine<'r, 'd, 'w> {
         self.store(dst, 0, false, &out);
     }
 
+    /// Word `word` of port `port` written from `values` for every live lane.
+    fn feed(&mut self, port: &Port, word: u32, values: &Lanes) {
+        if word < port.words {
+            let root = Root::Private {
+                first: port.first,
+                words: port.words,
+            };
+            memory::give(self, root, word as usize, values);
+        }
+    }
+
+    /// Word `word` of port `port` for each lane, as the tile left it: zero
+    /// past the port.
+    fn yielded(&self, port: &Port, word: u32, out: &mut Lanes) {
+        let base = (port.first as usize + word as usize) * LANES;
+        let held = (word < port.words)
+            .then(|| self.space.private.get(base..base + LANES))
+            .flatten();
+        match held {
+            Some(held) => {
+                for (value, &word) in out.iter_mut().zip(held) {
+                    *value = u64::from(word);
+                }
+            }
+            None => out.fill(0),
+        }
+    }
+
     /// Write each built-in the program reads from memory into its root, for
     /// every lane of the tile.
     fn give(&mut self) {
@@ -835,6 +907,71 @@ impl<'r, 'd, 'w> Machine<'r, 'd, 'w> {
             }
         }
     }
+}
+
+/// A vertex or fragment tile's whole run: begun, each input port's words fed
+/// from `feed`, run to its end, and each output port's words handed to
+/// `take`, each with the port's place among its program's. Answers the lanes
+/// a discard ended, or why the run stopped short.
+pub(crate) fn shade(
+    (env, place): (&Env<'_>, &Placement),
+    space: Space<'_>,
+    meter: &mut Meter<'_>,
+    feed: impl FnMut(usize, u32, &mut Lanes),
+    take: impl FnMut(usize, u32, &Lanes),
+) -> Result<u64, Ran> {
+    // A meter of the tile's own, as long as its bindings, counting on from
+    // the caller's and given back to it.
+    let mut own = Meter {
+        stop: meter.stop,
+        clock: meter.clock,
+        deadline: meter.deadline,
+        unchecked: meter.unchecked,
+        read: meter.read,
+    };
+    let ran = shade_counted((env, place), space, &mut own, (feed, take));
+    meter.unchecked = own.unchecked;
+    meter.read = own.read;
+    ran
+}
+
+fn shade_counted<'d>(
+    (env, place): (&Env<'d>, &Placement),
+    space: Space<'_>,
+    meter: &mut Meter<'d>,
+    (mut feed, mut take): (
+        impl FnMut(usize, u32, &mut Lanes),
+        impl FnMut(usize, u32, &Lanes),
+    ),
+) -> Result<u64, Ran> {
+    let program = env.program;
+    let mut machine = Machine::new(env, place, space, meter);
+    if !machine.begin() {
+        return Err(Ran::Stopped);
+    }
+    let mut values = [0; LANES];
+    for (index, port) in program.inputs.iter().enumerate() {
+        for word in 0..port.words {
+            values.fill(0);
+            feed(index, word, &mut values);
+            machine.feed(port, word, &values);
+        }
+        machine.meter.charge(u64::from(port.words) * LANES as u64);
+    }
+    match machine.run() {
+        Ran::Finished => {}
+        // Only a compute workgroup's barrier spans tiles.
+        Ran::Barrier | Ran::Fault => return Err(Ran::Fault),
+        Ran::Stopped => return Err(Ran::Stopped),
+    }
+    for (index, port) in program.outputs.iter().enumerate() {
+        for word in 0..port.words {
+            machine.yielded(port, word, &mut values);
+            take(index, word, &values);
+        }
+        machine.meter.charge(u64::from(port.words) * LANES as u64);
+    }
+    Ok(*machine.space.killed)
 }
 
 /// How many words a built-in holds.

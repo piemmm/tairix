@@ -167,7 +167,7 @@ fn entries<'a>(each: &'a [Resource<'a>; 8]) -> [BindSetEntry<'a>; 8] {
 }
 
 /// A device stating what the software device does, edited.
-fn device_stating(edit: impl FnOnce(&mut DeviceInfo)) -> Device {
+pub(crate) fn device_stating(edit: impl FnOnce(&mut DeviceInfo)) -> Device {
     let mut info = crate::software::info(RAM).expect("the software device");
     edit(&mut info);
     let clock: Arc<dyn MonotonicClock + Send + Sync> = Arc::new(Clock::default());
@@ -1018,4 +1018,45 @@ fn a_set_past_its_contexts_limit_is_refused_before_its_descriptors_are_looked_up
         Some(Error::OverLimit),
         "no buffer of the wrong use is reached"
     );
+}
+
+#[test]
+fn a_sets_reach_merges_its_spans_and_meets_only_the_bytes_they_take() {
+    use super::{merged, Reach};
+    // Two memories: in the first, spans that overlap, touch, and stand apart,
+    // one of them written; in the second, a span written.
+    let spans = [
+        (0u32, 0u64..16, false),
+        (0, 8..24, true),
+        (0, 24..32, false),
+        (0, 64..80, false),
+        (1, 100..200, true),
+    ];
+    let reach = Reach {
+        any: merged(&spans, |_| true).expect("merged"),
+        written: merged(&spans, |(_, _, writes)| *writes).expect("merged"),
+    };
+    assert_eq!(reach.any, [(0, 0..32), (0, 64..80), (1, 100..200)]);
+    assert_eq!(reach.written, [(0, 8..24), (1, 100..200)]);
+    for (place, span, written, meets) in [
+        (0, 0..1, false, true),
+        (0, 31..40, false, true),
+        (0, 32..64, false, false),
+        (0, 79..80, false, true),
+        (0, 80..90, false, false),
+        (1, 0..100, false, false),
+        (1, 199..300, false, true),
+        (2, 0..u64::MAX, false, false),
+        (0, 0..8, true, false),
+        (0, 23..24, true, true),
+        (0, 24..80, true, false),
+        (1, 150..151, true, true),
+    ] {
+        assert_eq!(
+            reach.meets(place, &span, written),
+            meets,
+            "{span:?} of memory {place}, written {written}"
+        );
+    }
+    assert!(!Reach::default().meets(0, &(0..u64::MAX), false));
 }

@@ -6,7 +6,9 @@ use tairix_spirv::assemble::admit;
 use tairix_spirv::Stage;
 
 use super::{lower, Fault, MAX_CONSTANT_WORDS};
-use crate::software::shader::ir::{Conv, Inst, Program};
+use alloc::vec::Vec;
+
+use crate::software::shader::ir::{Builtin, Carries, Conv, Fixed, Inst, Port, Program};
 
 /// The program the entry point `name` of `text` lowers to: a compute
 /// entry point's in its own workgroups, any other's one invocation apiece.
@@ -195,6 +197,180 @@ OpFunctionEnd
             program.workgroup_words, 6144,
             "{name} counts its own memory only"
         );
+    }
+}
+
+#[test]
+fn a_vertex_stages_values_are_its_ports_in_its_lanes_own_words() {
+    let text = r#"OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %vertex %instance %at %pv %uv %w
+OpDecorate %vertex BuiltIn VertexIndex
+OpDecorate %instance BuiltIn InstanceIndex
+OpDecorate %at Location 2
+OpMemberDecorate %per_vertex 0 BuiltIn Position
+OpMemberDecorate %per_vertex 1 BuiltIn PointSize
+OpMemberDecorate %per_vertex 2 BuiltIn ClipDistance
+OpMemberDecorate %per_vertex 3 BuiltIn CullDistance
+OpDecorate %per_vertex Block
+OpDecorate %uv Location 1
+OpDecorate %w Location 1
+OpDecorate %w Component 2
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%v2float = OpTypeVector %float 2
+%v3float = OpTypeVector %float 3
+%v4float = OpTypeVector %float 4
+%one = OpConstant %uint 1
+%clip = OpTypeArray %float %one
+%per_vertex = OpTypeStruct %v4float %float %clip %clip
+%in_int = OpTypePointer Input %int
+%in_v3 = OpTypePointer Input %v3float
+%out_pv = OpTypePointer Output %per_vertex
+%out_v2 = OpTypePointer Output %v2float
+%out_float = OpTypePointer Output %float
+%vertex = OpVariable %in_int Input
+%instance = OpVariable %in_int Input
+%at = OpVariable %in_v3 Input
+%pv = OpVariable %out_pv Output
+%uv = OpVariable %out_v2 Output
+%w = OpVariable %out_float Output
+%out_v4 = OpTypePointer Output %v4float
+%izero = OpConstant %int 0
+%ione = OpConstant %int 1
+%fone = OpConstant %float 1.0
+%corner = OpConstantComposite %v4float %fone %fone %fone %fone
+%pair = OpConstantComposite %v2float %fone %fone
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%vi = OpLoad %int %vertex
+%ii = OpLoad %int %instance
+%a = OpLoad %v3float %at
+%position = OpAccessChain %out_v4 %pv %izero
+OpStore %position %corner
+%size = OpAccessChain %out_float %pv %ione
+OpStore %size %fone
+OpStore %uv %pair
+OpStore %w %fone
+OpReturn
+OpFunctionEnd
+"#;
+    let program = lowered(text, "main").expect("lowered");
+    let carried = |ports: &[Port]| -> Vec<(Carries, u32)> {
+        ports.iter().map(|p| (p.carries, p.words)).collect()
+    };
+    assert_eq!(
+        carried(&program.inputs),
+        [
+            (Carries::Fixed(Fixed::VertexIndex), 1),
+            (Carries::Fixed(Fixed::InstanceIndex), 1),
+            (located(2, 0, 0), 3),
+        ]
+    );
+    assert_eq!(
+        carried(&program.outputs),
+        [
+            (Carries::Fixed(Fixed::Position), 4),
+            (Carries::Fixed(Fixed::PointSize), 1),
+            (located(1, 0, 0), 2),
+            (located(1, 2, 0), 1),
+        ]
+    );
+    // The block's built-ins lie where its members do, its latent distances
+    // beyond them carried by no port.
+    let position = program.outputs[0].first;
+    assert_eq!(program.outputs[1].first, position + 4);
+    let mut spans: Vec<(u32, u32)> = program
+        .inputs
+        .iter()
+        .chain(&program.outputs)
+        .map(|p| (p.first, p.first + p.words))
+        .collect();
+    spans.sort_unstable();
+    assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{spans:?}");
+    assert!(spans.iter().all(|&(_, end)| end <= program.private_words));
+    assert!(program.given.is_empty());
+}
+
+#[test]
+fn a_fragment_stages_helper_flag_is_given_and_its_outputs_are_ports() {
+    let text = r#"OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %coord %facing %helper %id %colour %second %depth
+OpExecutionMode %main OriginUpperLeft
+OpExecutionMode %main DepthReplacing
+OpDecorate %coord BuiltIn FragCoord
+OpDecorate %facing BuiltIn FrontFacing
+OpDecorate %helper BuiltIn HelperInvocation
+OpDecorate %id Location 3
+OpDecorate %id Flat
+OpDecorate %colour Location 0
+OpDecorate %second Location 0
+OpDecorate %second Index 1
+OpDecorate %depth BuiltIn FragDepth
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%in_v4 = OpTypePointer Input %v4float
+%in_bool = OpTypePointer Input %bool
+%in_uint = OpTypePointer Input %uint
+%out_v4 = OpTypePointer Output %v4float
+%out_float = OpTypePointer Output %float
+%coord = OpVariable %in_v4 Input
+%facing = OpVariable %in_bool Input
+%helper = OpVariable %in_bool Input
+%id = OpVariable %in_uint Input
+%colour = OpVariable %out_v4 Output
+%second = OpVariable %out_v4 Output
+%depth = OpVariable %out_float Output
+%half = OpConstant %float 0.5
+%grey = OpConstantComposite %v4float %half %half %half %half
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%c = OpLoad %v4float %coord
+%f = OpLoad %bool %facing
+%h = OpLoad %bool %helper
+%i = OpLoad %uint %id
+OpStore %colour %grey
+OpStore %second %c
+OpStore %depth %half
+OpReturn
+OpFunctionEnd
+"#;
+    let program = lowered(text, "main").expect("lowered");
+    let carried: Vec<Carries> = program.inputs.iter().map(|p| p.carries).collect();
+    assert_eq!(
+        carried,
+        [
+            Carries::Fixed(Fixed::FragCoord),
+            Carries::Fixed(Fixed::FrontFacing),
+            located(3, 0, 0),
+        ]
+    );
+    assert_eq!(program.given.len(), 1);
+    assert_eq!(program.given[0].which, Builtin::HelperInvocation);
+    let carried: Vec<Carries> = program.outputs.iter().map(|p| p.carries).collect();
+    assert_eq!(
+        carried,
+        [
+            located(0, 0, 0),
+            located(0, 0, 1),
+            Carries::Fixed(Fixed::FragDepth),
+        ]
+    );
+}
+
+const fn located(location: u32, component: u32, index: u32) -> Carries {
+    Carries::Located {
+        location,
+        component,
+        index,
     }
 }
 

@@ -1,7 +1,7 @@
-//! Lowering an admitted module's compute entry point into the program a
-//! tile runs: calls inlined, blocks laid out in structured order, every
-//! pointer's root resolved, values the same in every lane computed once a
-//! tile, and registers allocated over live ranges.
+//! Lowering an admitted module's entry point into the program a tile runs:
+//! calls inlined, blocks laid out in structured order, every pointer's root
+//! resolved, values the same in every lane computed once a tile, and
+//! registers allocated over live ranges.
 //!
 //! Lowering trusts the validator's verdict but never its own reading of it:
 //! an invariant it finds broken refuses the module ([`Fault::Malformed`]),
@@ -654,7 +654,8 @@ pub(crate) const fn component(scalar: Scalar) -> Component {
 }
 
 /// The program entry point `entry` of `admitted` lowers to, under
-/// `specialized`'s constants, run in workgroups of `workgroup`.
+/// `specialized`'s constants, run in workgroups of `workgroup`: a vertex or
+/// fragment stage's invocations are workgroups of one.
 pub(crate) fn lower(
     admitted: &Admitted,
     entry: &EntryPoint,

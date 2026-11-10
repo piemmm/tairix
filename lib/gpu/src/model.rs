@@ -23,6 +23,7 @@ use crate::info::{
 };
 use crate::memory::{Budget, Charge, Held, Memory, MemoryUse};
 use crate::pipeline::ComputePipelineState;
+use crate::render::RenderPipelineState;
 use crate::resource::{BufferViewState, ImageState, SamplerState, ViewState};
 use crate::room::{Charged, Table};
 use crate::software::dispatch::{Grown, Hold, Need, Plan, Workspace, Workspaces};
@@ -61,6 +62,7 @@ key!(
     PipelineLayoutKey,
     ShaderModuleKey,
     ComputePipelineKey,
+    RenderPipelineKey,
     TimelineKey,
     JobKey,
 );
@@ -220,10 +222,8 @@ pub(crate) struct ContextState {
     pub(crate) bind_sets: Table<BindSetKey, Arc<BindSetState>>,
     pub(crate) pipeline_layouts: Table<PipelineLayoutKey, Arc<PipelineLayoutState>>,
     pub(crate) shader_modules: Table<ShaderModuleKey, Arc<crate::binding::ShaderModuleState>>,
-    pub(crate) compute_pipelines: Table<ComputePipelineKey, Arc<ComputePipelineState>>,
-    /// Pipelines planned and not yet filed, whose entries `compute_pipelines`
-    /// keeps room for.
-    planning: usize,
+    pub(crate) compute_pipelines: Pipelines<ComputePipelineKey, Arc<ComputePipelineState>>,
+    pub(crate) render_pipelines: Pipelines<RenderPipelineKey, Arc<RenderPipelineState>>,
     timelines: Table<TimelineKey, TimelineState>,
     jobs: Table<JobKey, Job>,
     queues: Vec<QueueState>,
@@ -235,6 +235,16 @@ pub(crate) struct ContextState {
 
 /// Which of a context's tables a request files its object in.
 pub(crate) type Pick<K, V> = fn(&mut ContextState) -> &mut Table<K, V>;
+
+/// A context's pipelines of one kind, and how many it has planned and not
+/// yet filed, which the table keeps room for.
+pub(crate) struct Pipelines<K, V> {
+    pub(crate) table: Table<K, V>,
+    planning: usize,
+}
+
+/// Which kind of pipeline a request makes.
+pub(crate) type PickPipelines<K, V> = fn(&mut ContextState) -> &mut Pipelines<K, V>;
 
 impl ContextState {
     fn live(&self) -> Result<(), Error> {
@@ -528,7 +538,7 @@ impl Model {
     fn grow<K: Key, V>(
         &mut self,
         key: ContextKey,
-        pick: Pick<K, V>,
+        pick: impl FnOnce(&mut ContextState) -> &mut Table<K, V>,
         growth: Option<(usize, u64)>,
     ) -> Result<(), Error> {
         let Some((more, bytes)) = growth else {
@@ -589,26 +599,27 @@ impl Model {
         }
     }
 
-    /// The first phase of making a pipeline of the context needing `need`
-    /// and keeping `held` bytes beside: its room kept in the context's table,
-    /// `held` charged, and the workspaces planned, all admitted before any is
-    /// taken, so what the plan makes is not made only to be refused after;
-    /// and what the pool let go meanwhile, to be dropped without the device's
-    /// lock. Filed with [`Self::create_compute_pipeline`], or its room given
-    /// back with [`Self::unreserve_pipeline`].
-    pub(crate) fn plan_pipeline(
+    /// The first phase of making a pipeline of the kind `pick` names, of the
+    /// context, needing `need` and keeping `held` bytes beside: its room kept
+    /// in the context's table, `held` charged, and the workspaces planned, all
+    /// admitted before any is taken, so what the plan makes is not made only
+    /// to be refused after; and what the pool let go meanwhile, to be dropped
+    /// without the device's lock. Filed with the kind's own creation, or its
+    /// room given back with [`Self::unreserve_pipeline`].
+    pub(crate) fn plan_pipeline<K: Key, V>(
         &mut self,
-        key: ContextKey,
+        (key, pick): (ContextKey, PickPipelines<K, V>),
         need: Need,
         held: u64,
     ) -> (Result<(Plan, Charge), Error>, Grown) {
         let growth = self.live_mut(key).map(|context| {
-            let room = context
-                .compute_pipelines
+            let pipelines = pick(context);
+            let room = pipelines
+                .table
                 .len()
-                .saturating_add(context.planning)
+                .saturating_add(pipelines.planning)
                 .saturating_add(1);
-            context.compute_pipelines.growth_to(room)
+            pipelines.table.growth_to(room)
         });
         let growth = match growth {
             Ok(growth) => growth,
@@ -622,11 +633,11 @@ impl Model {
         };
         // Admitted with the plan, so only the host can refuse them now.
         let charged = self
-            .grow(key, |context| &mut context.compute_pipelines, growth)
+            .grow(key, |context| &mut pick(context).table, growth)
             .and_then(|()| self.host_charge(key, held))
             .and_then(|charge| {
-                let context = self.live_mut(key)?;
-                context.planning = context.planning.saturating_add(1);
+                let pipelines = pick(self.live_mut(key)?);
+                pipelines.planning = pipelines.planning.saturating_add(1);
                 Ok(charge)
             });
         match charged {
@@ -635,11 +646,15 @@ impl Model {
         }
     }
 
-    /// Give back the room kept for a pipeline [`Self::plan_pipeline`]
-    /// planned and that is not to be filed.
-    pub(crate) fn unreserve_pipeline(&mut self, key: ContextKey) {
+    /// Give back the room kept for a pipeline of the kind `pick` names that
+    /// [`Self::plan_pipeline`] planned and that is not to be filed.
+    pub(crate) fn unreserve_pipeline<K, V>(
+        &mut self,
+        (key, pick): (ContextKey, PickPipelines<K, V>),
+    ) {
         if let Ok(context) = self.existing_mut(key) {
-            context.planning = context.planning.saturating_sub(1);
+            let pipelines = pick(context);
+            pipelines.planning = pipelines.planning.saturating_sub(1);
         }
     }
 
@@ -782,8 +797,14 @@ impl Model {
             bind_sets: Charged::new(SlotMap::new(), none()?)?,
             pipeline_layouts: Charged::new(SlotMap::new(), none()?)?,
             shader_modules: Charged::new(SlotMap::new(), none()?)?,
-            compute_pipelines: Charged::new(SlotMap::new(), none()?)?,
-            planning: 0,
+            compute_pipelines: Pipelines {
+                table: Charged::new(SlotMap::new(), none()?)?,
+                planning: 0,
+            },
+            render_pipelines: Pipelines {
+                table: Charged::new(SlotMap::new(), none()?)?,
+                planning: 0,
+            },
             timelines: Charged::new(fences, fences_room)?,
             jobs: Charged::new(SlotMap::new(), none()?)?,
             queues,
@@ -1141,7 +1162,12 @@ impl Model {
         if request.span == 0 || request.span > longest {
             return Err(Error::Deadline.into());
         }
-        let commands: usize = request.buffers.iter().map(|buffer| buffer.len()).sum();
+        let commands: usize = request
+            .buffers
+            .iter()
+            .flat_map(|buffer| buffer.iter())
+            .map(Command::count)
+            .fold(0, usize::saturating_add);
         if request.buffers.len() > MAX_SUBMISSION_BUFFERS
             || commands > MAX_SUBMISSION_COMMANDS
             || request.waits.len() > MAX_SUBMISSION_POINTS
@@ -1171,24 +1197,13 @@ impl Model {
             .queue_families
             .get(queue.engine)
             .map_or(QueueCapabilities::NONE, |family| family.capabilities);
-        resolved.try_reserve_exact(commands).map_err(exhausted)?;
-        for (index, command) in request
-            .buffers
-            .iter()
-            .flat_map(|buffer| buffer.iter())
-            .enumerate()
-        {
-            let refused = |error| SubmitError {
-                command: Some(index),
-                error,
-            };
-            if !runs.contains(command.needs()) {
-                return Err(refused(Error::Unsupported));
-            }
-            resolved.push(resolve(&self.info, context, command).map_err(refused)?);
-        }
+        resolve_all(&self.info, (context, runs), request.buffers, resolved)?;
         let need = resolved.iter().fold(Need::default(), |need, op| match op {
             Op::Dispatch(dispatch) => need.max(dispatch.pipeline.need),
+            Op::Pass(pass) => pass
+                .draws
+                .iter()
+                .fold(need, |need, draw| need.max(draw.pipeline.need)),
             _ => need,
         });
         let fence = (queue.fence, queue.next_fence);
@@ -1642,6 +1657,35 @@ fn lose(
     for wake in timelines.values().filter_map(TimelineState::waited) {
         wake.notify_all();
     }
+}
+
+/// Resolve every command of `buffers` against `context`, each run by a
+/// family running `runs`, into `resolved`: a refusal names the command, a
+/// pass's draws counted after it.
+fn resolve_all(
+    info: &DeviceInfo,
+    (context, runs): (&ContextState, QueueCapabilities),
+    buffers: &[&[Command]],
+    resolved: &mut Vec<Op>,
+) -> Result<(), SubmitError> {
+    let listed: usize = buffers.iter().map(|buffer| buffer.len()).sum();
+    resolved.try_reserve_exact(listed).map_err(exhausted)?;
+    let mut index = 0usize;
+    for command in buffers.iter().flat_map(|buffer| buffer.iter()) {
+        let refused = |at: usize, error| SubmitError {
+            command: Some(index.saturating_add(at)),
+            error,
+        };
+        if !runs.contains(command.needs()) {
+            return Err(refused(0, Error::Unsupported));
+        }
+        resolved.push(
+            resolve(info, context, command)
+                .map_err(|refusal| refused(refusal.at, refusal.error))?,
+        );
+        index = index.saturating_add(command.count());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

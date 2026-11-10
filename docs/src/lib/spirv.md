@@ -145,11 +145,16 @@ the root forbids that access. What an entry point reads and writes is
 therefore known, and held to its declarations, through any depth of calls.
 
 **Entry points.** Each `EntryPoint` states what a pipeline must provide it:
-- its stage and workgroup size;
+- its stage and workgroup size, and for a fragment stage whether its tests
+  run early (`EntryPoint::early_fragment_tests`);
 - the resource bindings its call tree statically uses, each as a set, binding,
   `BindingKind`, descriptor count and `Access`;
 - the bytes of push constants it reads;
-- the locations its user-defined inputs and outputs occupy (`Varying`);
+- the locations its user-defined inputs and outputs occupy (`Varying`): each
+  slot's location, component and index, its scalar type and width, the
+  variable it belongs to and the 32-bit components before it there, and a
+  fragment input's `Interpolation` — `Smooth`, `NoPerspective` or `Flat` — and
+  whether it is taken at the centroid;
 - the module-scope variables its call tree names (`EntryPoint::globals`), so a
   consumer lowering one entry point of a module of several leaves the others'
   variables alone.
@@ -171,7 +176,9 @@ binding order.
 
 A built-in block may declare `ClipDistance` and `CullDistance` members without
 their capabilities, as glslang's `gl_PerVertex` does. Such a member is latent:
-reading or writing it, or the whole block, is refused.
+reading or writing it, or the whole block, is refused. An array of built-in
+blocks, the form only the geometry and tessellation stages the allow-list does
+not admit declare, is refused.
 
 Like the decoder, the validator is total and bounded. No input panics it, and
 every allocation fails closed as `OutOfMemory`. Its walks over control flow and

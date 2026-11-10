@@ -3,6 +3,7 @@
 //! naming it and queued work share, released when the last lets it go.
 
 use alloc::sync::Arc;
+use core::ops::Range;
 
 use tairix_spirv::enumerant::Capability;
 
@@ -33,6 +34,36 @@ pub(crate) struct ViewState {
     pub(crate) image: Arc<ImageState>,
     pub(crate) desc: ImageViewDesc,
     _charge: Charge,
+}
+
+impl ViewState {
+    /// Feed `each` the bytes of its image's memory it sees, in address
+    /// order: a span a level, its layers together, adjacent levels as one.
+    pub(crate) fn spans(&self, mut each: impl FnMut(Range<u64>)) {
+        let (image, range) = (&self.image, &self.desc.range);
+        let mut run: Option<Range<u64>> = None;
+        for level in image
+            .layout
+            .levels
+            .iter()
+            .skip(range.base_level as usize)
+            .take(range.levels as usize)
+        {
+            let start = image.offset + level.base + u64::from(range.base_layer) * level.layer;
+            let span = start..start + u64::from(range.layers) * level.layer;
+            match &mut run {
+                Some(open) if open.end == span.start => open.end = span.end,
+                _ => {
+                    if let Some(done) = run.replace(span) {
+                        each(done);
+                    }
+                }
+            }
+        }
+        if let Some(done) = run {
+            each(done);
+        }
+    }
 }
 
 /// A texel buffer over a buffer.

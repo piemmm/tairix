@@ -6,7 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::assemble::{admit, admit_version};
-use crate::{Access, BindingKind, Component, Stage, Varying, Version};
+use crate::enumerant::Decoration;
+use crate::{Access, BindingKind, Component, Interpolation, Stage, Varying, Version};
 
 /// The declarations a storage-buffer compute shader shares; `{body}` is the
 /// function's body after its first label.
@@ -404,6 +405,11 @@ OpFunctionEnd
     let entry = admitted
         .entry_point("main", Stage::Fragment)
         .expect("the entry point");
+    let variable = entry.inputs()[0].variable;
+    assert_eq!(
+        admitted.decoration(variable, None, Decoration::LOCATION),
+        Some(1)
+    );
     assert_eq!(
         entry.inputs(),
         &[Varying {
@@ -413,8 +419,144 @@ OpFunctionEnd
             scalar: Component::Uint,
             width: 32,
             index: 0,
+            variable,
+            offset: 0,
+            interpolation: Interpolation::Flat,
+            centroid: false,
         }]
     );
+}
+
+#[test]
+fn a_fragment_inputs_interpolation_is_what_its_decorations_mean() {
+    let module = r#"
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %smooth %linear %middle %flat %flat_middle
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %smooth Location 0
+OpDecorate %linear Location 1
+OpDecorate %linear NoPerspective
+OpDecorate %middle Location 2
+OpDecorate %middle Centroid
+OpDecorate %middle NoPerspective
+OpDecorate %flat Location 3
+OpDecorate %flat Flat
+OpDecorate %flat_middle Location 4
+OpDecorate %flat_middle Flat
+OpDecorate %flat_middle Centroid
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%in_float = OpTypePointer Input %float
+%smooth = OpVariable %in_float Input
+%linear = OpVariable %in_float Input
+%middle = OpVariable %in_float Input
+%flat = OpVariable %in_float Input
+%flat_middle = OpVariable %in_float Input
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+"#;
+    let admitted = admit(module).expect("admitted");
+    let entry = admitted
+        .entry_point("main", Stage::Fragment)
+        .expect("the entry point");
+    let read: Vec<(Interpolation, bool)> = entry
+        .inputs()
+        .iter()
+        .map(|v| (v.interpolation, v.centroid))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            (Interpolation::Smooth, false),
+            (Interpolation::NoPerspective, false),
+            (Interpolation::NoPerspective, true),
+            (Interpolation::Flat, false),
+            (Interpolation::Flat, false),
+        ]
+    );
+}
+
+#[test]
+fn each_slot_names_its_variable_and_the_components_before_it() {
+    let module = r#"
+OpCapability Shader
+OpCapability Float64
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %pair %wide %list %block
+OpDecorate %pair Location 0
+OpDecorate %wide Location 1
+OpDecorate %list Location 3
+OpDecorate %list Component 1
+OpDecorate %block_t Block
+OpMemberDecorate %block_t 0 Location 6
+OpMemberDecorate %block_t 1 Location 7
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%double = OpTypeFloat 64
+%uint = OpTypeInt 32 0
+%v2 = OpTypeVector %float 2
+%v3 = OpTypeVector %float 3
+%dv3 = OpTypeVector %double 3
+%three = OpConstant %uint 3
+%floats = OpTypeArray %float %three
+%block_t = OpTypeStruct %v3 %float
+%out_v2 = OpTypePointer Output %v2
+%out_dv3 = OpTypePointer Output %dv3
+%out_floats = OpTypePointer Output %floats
+%out_block = OpTypePointer Output %block_t
+%pair = OpVariable %out_v2 Output
+%wide = OpVariable %out_dv3 Output
+%list = OpVariable %out_floats Output
+%block = OpVariable %out_block Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+"#;
+    let admitted = admit(module).expect("admitted");
+    let entry = admitted
+        .entry_point("main", Stage::Vertex)
+        .expect("the entry point");
+    let slots: Vec<(u32, u32, u32, u32, u32)> = entry
+        .outputs()
+        .iter()
+        .map(|v| (v.location, v.component, v.components, v.width, v.offset))
+        .collect();
+    assert_eq!(
+        slots,
+        [
+            (0, 0, 2, 32, 0),
+            (1, 0, 4, 64, 0),
+            (2, 0, 2, 64, 4),
+            (3, 1, 1, 32, 0),
+            (4, 1, 1, 32, 1),
+            (5, 1, 1, 32, 2),
+            (6, 0, 3, 32, 0),
+            (7, 0, 1, 32, 3),
+        ]
+    );
+    let variables: Vec<_> = entry.outputs().iter().map(|v| v.variable).collect();
+    let groups = [
+        &variables[..1],
+        &variables[1..3],
+        &variables[3..6],
+        &variables[6..],
+    ];
+    for (group, location) in groups.iter().zip([Some(0), Some(1), Some(3), None]) {
+        assert!(group.iter().all(|&v| v == group[0]), "{variables:?}");
+        assert_eq!(
+            admitted.decoration(group[0], None, Decoration::LOCATION),
+            location
+        );
+    }
+    let mut distinct = [variables[0], variables[1], variables[3], variables[6]];
+    distinct.sort_unstable();
+    assert!(distinct.windows(2).all(|w| w[0] != w[1]), "{variables:?}");
 }
 
 #[test]

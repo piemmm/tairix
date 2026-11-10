@@ -147,8 +147,9 @@ This crate owns:
   order, so a mesh draws the same pixels on every target.
 - `clip`, `primitive`, `depth`, `stencil`, `blend` — the general pipeline's
   stages: the one cut every clip shares and a `Viewport` mapping clip space
-  onto the grid; a `Primitive`'s coverage, depth plane and perspective-correct,
-  linear or flat weights; the depth formats, the eight-way `CompareOp` and the
+  onto the grid, a triangle's polygon or a segment's two ends; a `Primitive`'s
+  coverage, depth plane, reciprocal `w` and perspective-correct, linear or flat
+  weights; the depth formats, the eight-way `CompareOp` and the
   depth bias; the stencil face; the device's blend equations and logic
   operations.
 - `view::Perspective` — the view a mesh is seen through: world points into

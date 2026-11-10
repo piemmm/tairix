@@ -38,6 +38,17 @@ pub enum WorkgroupSize {
     Constant(Id),
 }
 
+/// How a fragment input varies across its primitive.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Interpolation {
+    /// Perspective-correct.
+    Smooth,
+    /// Linear in framebuffer space.
+    NoPerspective,
+    /// Not at all: the provoking vertex's value.
+    Flat,
+}
+
 /// One location an entry point's input or output occupies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Varying {
@@ -53,6 +64,15 @@ pub struct Varying {
     pub width: u32,
     /// A fragment output's blend index; zero otherwise.
     pub index: u32,
+    /// The variable it is part of.
+    pub variable: Id,
+    /// How many 32-bit components of the variable's value precede it in
+    /// declaration order, a 64-bit value taking two.
+    pub offset: u32,
+    /// How it is interpolated: a flat value takes no centroid.
+    pub interpolation: Interpolation,
+    /// Whether it is interpolated within the samples a pixel covers.
+    pub centroid: bool,
 }
 
 /// An admitted entry point: what it is, and what a pipeline must provide
@@ -68,6 +88,7 @@ pub struct EntryPoint {
     pub(crate) inputs: Vec<Varying>,
     pub(crate) outputs: Vec<Varying>,
     pub(crate) globals: Vec<Id>,
+    pub(crate) early_fragment_tests: bool,
 }
 
 impl EntryPoint {
@@ -93,6 +114,13 @@ impl EntryPoint {
     #[must_use]
     pub const fn workgroup(&self) -> Option<WorkgroupSize> {
         self.workgroup
+    }
+
+    /// Whether a fragment entry point's fragments are depth and stencil
+    /// tested before it runs: its `EarlyFragmentTests` mode.
+    #[must_use]
+    pub const fn early_fragment_tests(&self) -> bool {
+        self.early_fragment_tests
     }
 
     /// The resource bindings it statically uses, by ascending set and
@@ -198,7 +226,8 @@ impl Validator<'_> {
             self.complete(&reach, &interface).map_err(refuse)?;
             self.model_needs(stage, &reach).map_err(refuse)?;
             let (inputs, outputs) = self.stage_interface(stage, &interface).map_err(refuse)?;
-            let workgroup = self.modes_of(function, stage, &reach).map_err(refuse)?;
+            let (workgroup, early_fragment_tests) =
+                self.modes_of(function, stage, &reach).map_err(refuse)?;
             let (bindings, push_constants) = self.resources(&reach, stage).map_err(refuse)?;
             let mut globals: Vec<Id> = with_capacity(reach.globals.len())?;
             globals.extend(
@@ -223,6 +252,7 @@ impl Validator<'_> {
                     inputs,
                     outputs,
                     globals,
+                    early_fragment_tests,
                 },
             )?;
         }
@@ -553,13 +583,14 @@ impl Validator<'_> {
 
     /// The execution modes set for `function`, each admitted for `stage`
     /// and set once, those the model requires present; a compute entry
-    /// point's workgroup size.
+    /// point's workgroup size, and whether a fragment entry point's tests
+    /// run early.
     fn modes_of(
         &self,
         function: Id,
         stage: Stage,
         reach: &Reach,
-    ) -> Result<Option<WorkgroupSize>, Rule> {
+    ) -> Result<(Option<WorkgroupSize>, bool), Rule> {
         let start = self.modes.partition_point(|&(target, _)| target < function);
         let own = self.modes.get(start..).unwrap_or(&[]);
         let own = own
@@ -624,17 +655,17 @@ impl Validator<'_> {
                 {
                     return Err(Rule::ExecutionMode(ExecutionMode::DEPTH_REPLACING));
                 }
-                Ok(None)
+                Ok((None, has(ExecutionMode::EARLY_FRAGMENT_TESTS)))
             }
             Stage::Compute => {
                 if let Some(constant) = self.workgroup_constant() {
-                    return Ok(Some(WorkgroupSize::Constant(constant)));
+                    return Ok((Some(WorkgroupSize::Constant(constant)), false));
                 }
                 workgroup
-                    .map(Some)
+                    .map(|size| (Some(size), false))
                     .ok_or(Rule::ExecutionMode(ExecutionMode::LOCAL_SIZE))
             }
-            Stage::Vertex => Ok(None),
+            Stage::Vertex => Ok((None, false)),
         }
     }
 

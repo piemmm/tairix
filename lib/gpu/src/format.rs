@@ -24,6 +24,12 @@ tairix_util::flags! {
         const UNIFORM_TEXEL_BUFFER = 1 << 6;
         /// Read and written through a storage texel buffer.
         const STORAGE_TEXEL_BUFFER = 1 << 7;
+        /// Blended into as a colour attachment.
+        const BLENDED = 1 << 8;
+        /// Resolved from four samples to one as a colour attachment.
+        const RESOLVED = 1 << 9;
+        /// Read as a vertex attribute.
+        const VERTEX_INPUT = 1 << 10;
     }
 }
 
@@ -175,34 +181,41 @@ pub enum Format {
 // What the software device states of each format: everything the format's
 // encoding can mean.
 
-/// A colour format that samples, filters, renders and multisamples, and is
-/// read through a texel buffer.
+/// A colour format that samples, filters, renders, blends, multisamples and
+/// resolves, and is read through a texel buffer.
 const FLOAT_COLOR: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::FILTERED)
     .with(FormatFeatures::COLOR_ATTACHMENT)
+    .with(FormatFeatures::BLENDED)
     .with(FormatFeatures::MULTISAMPLED)
+    .with(FormatFeatures::RESOLVED)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER);
 
-/// [`FLOAT_COLOR`], and read and written by texel.
+/// [`FLOAT_COLOR`], read and written by texel, and read as a vertex
+/// attribute.
 const STORED_FLOAT: FormatFeatures = FLOAT_COLOR
     .with(FormatFeatures::STORAGE)
-    .with(FormatFeatures::STORAGE_TEXEL_BUFFER);
+    .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
+    .with(FormatFeatures::VERTEX_INPUT);
 
-/// A signed normalised format: filtered and stored, but no attachment.
+/// A signed normalised format: filtered, stored and read as a vertex
+/// attribute, but no attachment.
 const SNORM: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::FILTERED)
     .with(FormatFeatures::STORAGE)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER)
-    .with(FormatFeatures::STORAGE_TEXEL_BUFFER);
+    .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
+    .with(FormatFeatures::VERTEX_INPUT);
 
-/// An integer colour format: sampled unfiltered, stored, and rendered and
-/// multisampled without blending or resolve.
+/// An integer colour format: sampled unfiltered, stored, read as a vertex
+/// attribute, and rendered and multisampled without blending or resolve.
 const INTEGER: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::STORAGE)
     .with(FormatFeatures::COLOR_ATTACHMENT)
     .with(FormatFeatures::MULTISAMPLED)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER)
-    .with(FormatFeatures::STORAGE_TEXEL_BUFFER);
+    .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
+    .with(FormatFeatures::VERTEX_INPUT);
 
 /// A depth or stencil format.
 const DEPTH: FormatFeatures = FormatFeatures::SAMPLED
@@ -459,6 +472,19 @@ impl Format {
 
     pub(crate) const fn encoding(self) -> Encoding {
         self.info().encoding
+    }
+
+    /// Whether its colour channels are floating-point, held unbounded.
+    pub(crate) const fn is_float(self) -> bool {
+        matches!(
+            self.encoding(),
+            Encoding::Float16 | Encoding::Float32 | Encoding::Rg11B10Float | Encoding::Rgb9E5Float
+        )
+    }
+
+    /// Whether its colour channels are signed normalised.
+    pub(crate) const fn is_signed_normalised(self) -> bool {
+        matches!(self.encoding(), Encoding::Snorm8 | Encoding::Snorm16)
     }
 
     /// Whether its channels are stored blue first.

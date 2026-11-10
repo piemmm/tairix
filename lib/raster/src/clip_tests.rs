@@ -332,3 +332,61 @@ fn a_corner_whose_shares_lose_their_sign_is_refused_not_mapped() {
     };
     assert_eq!(viewport(true).map(&corner, [-1e15, 1e15, 1e15]), None);
 }
+
+#[test]
+fn a_segment_inside_every_plane_maps_its_ends_whole() {
+    let viewport = viewport(false);
+    let [a, b] = viewport
+        .clip_line([-0.5, 0.0, 0.25, 1.0], [0.5, 0.5, 0.75, 2.0])
+        .expect("inside");
+    assert_eq!(
+        (a.weights.map(f64::to_bits), b.weights.map(f64::to_bits)),
+        (
+            [1.0f64, 0.0, 0.0].map(f64::to_bits),
+            [0.0f64, 1.0, 0.0].map(f64::to_bits)
+        )
+    );
+    assert!(near(a.depth, 0.25, 1e-12) && near(b.depth, 0.375, 1e-12));
+    assert!(near(a.inverse_w, 1.0, 1e-12) && near(b.inverse_w, 0.5, 1e-12));
+}
+
+#[test]
+fn a_segment_is_cut_where_it_leaves_a_plane_and_one_outside_leaves_nothing() {
+    let viewport = viewport(false);
+    // From depth one half to past the far plane, `w` one throughout: cut a
+    // third of the way along.
+    let [a, b] = viewport
+        .clip_line([0.0, 0.0, 0.5, 1.0], [0.0, 0.0, 2.0, 1.0])
+        .expect("half inside");
+    assert_eq!(
+        a.weights.map(f64::to_bits),
+        [1.0f64, 0.0, 0.0].map(f64::to_bits)
+    );
+    assert!(near(b.weights[1], 1.0 / 3.0, 1e-12) && near(b.weights[0], 2.0 / 3.0, 1e-12));
+    assert!(near(b.depth, 1.0, 1e-12), "on the far plane");
+    // The same, its ends swapped, is cut at the same point.
+    let [c, d] = viewport
+        .clip_line([0.0, 0.0, 2.0, 1.0], [0.0, 0.0, 0.5, 1.0])
+        .expect("half inside");
+    assert!(near(c.depth, 1.0, 1e-12) && near(d.depth, 0.5, 1e-12));
+    assert!(viewport
+        .clip_line([0.0, 0.0, 2.0, 1.0], [0.0, 0.0, 3.0, 1.0])
+        .is_none());
+    assert!(viewport
+        .clip_line([0.0, 0.0, 0.5, -1.0], [0.0, 0.0, 0.5, -2.0])
+        .is_none());
+    assert!(viewport
+        .clip_line([f64::NAN, 0.0, 0.5, 1.0], [0.0, 0.0, 0.5, 1.0])
+        .is_none());
+}
+
+#[test]
+fn a_clamped_viewport_cuts_no_segments_depth() {
+    let [_, b] = viewport(true)
+        .clip_line([0.0, 0.0, 0.5, 1.0], [0.0, 0.0, 2.0, 1.0])
+        .expect("kept whole");
+    assert_eq!(
+        b.weights.map(f64::to_bits),
+        [0.0f64, 1.0, 0.0].map(f64::to_bits)
+    );
+}

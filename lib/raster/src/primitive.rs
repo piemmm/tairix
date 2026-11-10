@@ -93,6 +93,13 @@ impl Primitive {
         self.depth.at(x - self.origin.0, y - self.origin.1)
     }
 
+    /// The reciprocal of its clip-space `w` at `(x, y)`, in pixels: the
+    /// perspective weight a value there is divided by.
+    #[must_use]
+    pub fn inverse_w(&self, x: f64, y: f64) -> f64 {
+        self.weight.at(x - self.origin.0, y - self.origin.1)
+    }
+
     /// The most its depth changes over a pixel, across or down: what a
     /// slope-scaled depth bias scales.
     #[must_use]

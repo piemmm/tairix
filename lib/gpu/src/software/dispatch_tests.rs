@@ -1315,7 +1315,7 @@ fn a_dispatch_lends_the_set_fitted_to_what_is_still_held() {
     let fitted = model
         .live(context.key)
         .ok()
-        .and_then(|state| state.compute_pipelines.get(small.pipeline.key))
+        .and_then(|state| state.compute_pipelines.table.get(small.pipeline.key))
         .and_then(|pipeline| pipeline.need.classes())
         .map(Need::of_classes)
         .expect("the small pipeline's need");
@@ -2886,8 +2886,12 @@ fn tiles_that_never_wait_on_one_another_share_one_tiles_memory() {
         let rig = rig(&context, &placed(1024, [1, 1, 1], barrier), 4096, &[]).expect("a pipeline");
         let model = context.shared.model.lock();
         let live = model.live(context.key).expect("live");
-        let state = live.compute_pipelines.get(rig.pipeline.key).expect("filed");
-        (state.need, super::Tiling::of(&state.program))
+        let state = live
+            .compute_pipelines
+            .table
+            .get(rig.pipeline.key)
+            .expect("filed");
+        (state.need, super::Tiling::of(&state.stages))
     };
     let (alone, tiling) = pipeline(false);
     assert_eq!((tiling.tiles, tiling.resident), (16, 1));
@@ -2931,6 +2935,7 @@ fn a_queued_dispatch_is_charged_for_its_push_constants_and_their_sharing() {
         (
             alloc::sync::Arc::clone(
                 live.compute_pipelines
+                    .table
                     .get(wide.pipeline.key)
                     .expect("filed"),
             ),

@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 
 use super::binding::Component;
-use super::entry::{Stage, Varying};
+use super::entry::{Interpolation, Stage, Varying};
 use super::types::{Holds, Scalar, Ty};
 use super::{push, Rule, Validator, MAX_LOCATIONS, NONE};
 use crate::enumerant::{BuiltIn, Decoration, StorageClass};
@@ -76,9 +76,12 @@ impl Validator<'_> {
             let block = Some(self.innermost(pointee))
                 .filter(|&t| self.ty(t).holds.contains(Holds::BUILT_IN));
             if let Some(block) = block {
-                if blocks
-                    .get_mut(side)
-                    .is_some_and(|b| core::mem::replace(b, true))
+                // Only tessellation and geometry stages, none admitted, take
+                // an array of them.
+                if block != pointee
+                    || blocks
+                        .get_mut(side)
+                        .is_some_and(|b| core::mem::replace(b, true))
                 {
                     return Err(Rule::BuiltIn);
                 }
@@ -234,11 +237,12 @@ impl Validator<'_> {
                     index,
                     interpolation,
                     fragment_input,
+                    variable: id,
                 };
                 self.consume(
                     pointee,
                     at,
-                    slots,
+                    (slots, &mut 0),
                     self.decorated(id, Decoration::COMPONENT),
                 )?;
             }
@@ -248,6 +252,7 @@ impl Validator<'_> {
                 if !self.decorated(struct_id, Decoration::BLOCK) {
                     return Err(Rule::Location);
                 }
+                let mut offset = 0;
                 for (member, &member_ty) in self.list(first, count).iter().enumerate() {
                     let member = u32::try_from(member).unwrap_or(NONE);
                     let location = self
@@ -269,8 +274,14 @@ impl Validator<'_> {
                         index,
                         interpolation: member_interpolation,
                         fragment_input,
+                        variable: id,
                     };
-                    self.consume(member_ty, at, slots, component.is_some())?;
+                    self.consume(
+                        member_ty,
+                        at,
+                        (&mut *slots, &mut offset),
+                        component.is_some(),
+                    )?;
                 }
             }
             (None, None) => return Err(Rule::Location),
@@ -293,12 +304,13 @@ impl Validator<'_> {
         bits
     }
 
-    /// Take the slots a value of type `ty` placed at `at` occupies.
+    /// Take the slots a value of type `ty` placed at `at` occupies, `offset`
+    /// counting the variable's components taken before them.
     fn consume(
         &self,
         ty: u32,
         at: Place,
-        slots: &mut Occupancy,
+        (slots, offset): (&mut Occupancy, &mut u32),
         explicit_component: bool,
     ) -> Result<u32, Rule> {
         let info = *self.ty(ty);
@@ -352,8 +364,13 @@ impl Validator<'_> {
                             scalar: kind,
                             width: scalar.width(),
                             index: at.index,
+                            variable: at.variable,
+                            offset: *offset,
+                            interpolation: interpolation_of(at.interpolation),
+                            centroid: at.interpolation & (CENTROID | FLAT) == CENTROID,
                         },
                     })?;
+                    *offset = offset.checked_add(here).ok_or(Rule::Location)?;
                     left -= here;
                     location += 1;
                     component = 0;
@@ -366,14 +383,14 @@ impl Validator<'_> {
                 if explicit_component {
                     return Err(Rule::Location);
                 }
-                self.consume_many(column, columns, at, slots, false)
+                self.consume_many(column, columns, at, (slots, offset), false)
             }
             Ty::Array { element, length } => {
                 let bottom = self.ty(self.innermost(element)).ty;
                 if explicit_component && !matches!(bottom, Ty::Scalar(_) | Ty::Vector { .. }) {
                     return Err(Rule::Location);
                 }
-                self.consume_many(element, length, at, slots, explicit_component)
+                self.consume_many(element, length, at, (slots, offset), explicit_component)
             }
             Ty::Struct { first, count } => {
                 // A structure of no members holds no value an interface
@@ -388,7 +405,7 @@ impl Validator<'_> {
                         component: 0,
                         ..at
                     };
-                    used += self.consume(member, place, slots, false)?;
+                    used += self.consume(member, place, (&mut *slots, &mut *offset), false)?;
                 }
                 Ok(used)
             }
@@ -403,7 +420,7 @@ impl Validator<'_> {
         element: u32,
         count: u32,
         at: Place,
-        slots: &mut Occupancy,
+        (slots, offset): (&mut Occupancy, &mut u32),
         explicit_component: bool,
     ) -> Result<u32, Rule> {
         let mut used = 0u32;
@@ -412,13 +429,29 @@ impl Validator<'_> {
                 location: at.location.checked_add(used).ok_or(Rule::Location)?,
                 ..at
             };
-            let taken = self.consume(element, place, slots, explicit_component)?;
+            let taken = self.consume(
+                element,
+                place,
+                (&mut *slots, &mut *offset),
+                explicit_component,
+            )?;
             used = used.checked_add(taken).ok_or(Rule::Location)?;
             if at.location.saturating_add(used) > MAX_LOCATIONS {
                 return Err(Rule::Limit(super::Limit::Locations));
             }
         }
         Ok(used)
+    }
+}
+
+/// The interpolation the decorations' `bits` name.
+const fn interpolation_of(bits: u8) -> Interpolation {
+    if bits & FLAT != 0 {
+        Interpolation::Flat
+    } else if bits & NO_PERSPECTIVE != 0 {
+        Interpolation::NoPerspective
+    } else {
+        Interpolation::Smooth
     }
 }
 
@@ -474,7 +507,8 @@ impl Occupancy {
 }
 
 /// Where a value is placed: its first location and component, its blend
-/// index, its interpolation, and whether it is a fragment input.
+/// index, its interpolation, whether it is a fragment input, and the variable
+/// it is part of.
 #[derive(Copy, Clone, Debug)]
 struct Place {
     location: u32,
@@ -482,4 +516,5 @@ struct Place {
     index: u32,
     interpolation: u8,
     fragment_input: bool,
+    variable: Id,
 }

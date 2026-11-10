@@ -343,7 +343,9 @@ impl<'d> Machine<'_, 'd, '_> {
         let program = self.env.program;
         let mut offset = [0; LANES];
         self.fetch(ptr, 1, false, &mut offset);
-        let lanes = self.mask;
+        // A helper still writes its own words through the word plan, but
+        // never a buffer, which only the scalar plan reaches.
+        let lanes = self.mask & !self.place.helpers;
         let mut values = [0; LANES];
         match program.plans.get(plan as usize)? {
             Plan::Words(words) => {
@@ -566,7 +568,8 @@ impl<'d> Machine<'_, 'd, '_> {
     }
 
     /// An atomic on the word a pointer names, lane by lane in order, so the
-    /// results within a tile follow its lanes.
+    /// results within a tile follow its lanes; a helper makes none and reads
+    /// zero.
     pub(super) fn atomic(
         &mut self,
         op: Atomic,
@@ -577,7 +580,7 @@ impl<'d> Machine<'_, 'd, '_> {
         (a, b): (Reg, Reg),
     ) {
         let mut out = [0; LANES];
-        for lane in each_lane(self.mask) {
+        for lane in each_lane(self.mask & !self.place.helpers) {
             let (element, offset) = (self.word(ptr, 0, lane), self.word(ptr, 1, lane));
             let operands = (
                 super::low32(self.word(a, 0, lane)),

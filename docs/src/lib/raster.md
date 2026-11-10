@@ -124,14 +124,18 @@ the software device draws the same bits on every target.
   remains onto the
   converter's grid: each `Mapped` corner with its depth, its reciprocal `w`,
   and its share of the triangle the draw named, in clip space and across the
-  screen. At most `MAX_CLIP_CORNERS` corners remain.
+  screen. At most `MAX_CLIP_CORNERS` corners remain. `Viewport::clip_line` cuts
+  a segment by the same planes and maps its two ends, shared between the
+  segment's own; a point is the segment of one vertex, dropped when it is
+  clipped.
 - **Set-up and interpolation** (`primitive`). A `Primitive` over three mapped
   corners covers through its `Footprint`, carries its depth as a plane across
   the screen with its steepest slope a pixel, and gives each sample the weights
   of the draw's own corners under an `Interpolation`: perspective-correct,
-  linear across the screen, or flat at the provoking corner. A value
-  interpolated across any piece of a clipped triangle is the one the whole
-  triangle gives there.
+  linear across the screen, or flat at the provoking corner, and its
+  reciprocal `w` at any point (`inverse_w`), a fragment's `FragCoord.w`. A
+  value interpolated across any piece of a clipped triangle is the one the
+  whole triangle gives there.
 - **Depth** (`depth`). `DepthFormat` stores a depth in `0..=1` as sixteen- or
   twenty-four-bit unsigned normalised or as a float, its words ordering as the
   depths they hold, and states its resolution: a normalised step, or a float's

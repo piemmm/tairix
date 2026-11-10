@@ -2,7 +2,11 @@ use tairix_colour::{linear_to_srgb, srgb_to_linear};
 use tairix_spirv::Component;
 use tairix_util::mathf::single;
 
-use super::{decode, encode, small_float, to_shared_exponent, to_small_float, Plane, Srgb};
+use core::sync::atomic::AtomicU32;
+
+use super::{
+    decode, encode, put_raw, raw_at, small_float, to_shared_exponent, to_small_float, Plane, Srgb,
+};
 use crate::format::{Aspects, Format};
 
 fn float(value: f32) -> u32 {
@@ -277,4 +281,54 @@ fn depth_and_stencil_planes_are_stored_apart() {
         &srgb,
     );
     assert_eq!(short[0], 32768);
+}
+
+#[test]
+fn a_texel_s_bytes_are_read_at_any_alignment_and_nothing_past_them() {
+    let stored: alloc::vec::Vec<u32> = (0..8u32).map(|k| 0x0403_0201 + k * 0x1010_1010).collect();
+    let words: alloc::vec::Vec<AtomicU32> = stored.iter().map(|&w| AtomicU32::new(w)).collect();
+    let bytes: alloc::vec::Vec<u8> = stored.iter().flat_map(|w| w.to_le_bytes()).collect();
+    for byte in 0..20u64 {
+        for len in 1..=16u64 {
+            let mut expected = [0u32; 4];
+            for k in 0..len {
+                let at = usize::try_from(byte + k).expect("small");
+                let value = u32::from(bytes.get(at).copied().unwrap_or(0));
+                expected[usize::try_from(k / 4).expect("small")] |= value << (k % 4 * 8);
+            }
+            assert_eq!(
+                raw_at(&words, byte, len),
+                expected,
+                "{len} bytes at byte {byte}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_texel_s_bytes_are_written_at_any_alignment_and_nothing_else() {
+    let raw = [0x4433_2211, 0x8877_6655, 0xccbb_aa99, 0x00ff_eedd];
+    let bytes_of: alloc::vec::Vec<u8> = raw.iter().flat_map(|w: &u32| w.to_le_bytes()).collect();
+    for byte in 0..20u64 {
+        for len in 1..=16u64 {
+            let before: alloc::vec::Vec<u32> = (0..10u32).map(|k| 0x5a5a_5a5a ^ k).collect();
+            let words: alloc::vec::Vec<AtomicU32> =
+                before.iter().map(|&w| AtomicU32::new(w)).collect();
+            put_raw(&words, byte, len, raw);
+            let after: alloc::vec::Vec<u8> = words
+                .iter()
+                .flat_map(|w| w.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes())
+                .collect();
+            let old: alloc::vec::Vec<u8> = before.iter().flat_map(|w| w.to_le_bytes()).collect();
+            for (at, (&now, &was)) in after.iter().zip(&old).enumerate() {
+                let at = at as u64;
+                let expected = if (byte..byte + len).contains(&at) {
+                    bytes_of[usize::try_from(at - byte).expect("small")]
+                } else {
+                    was
+                };
+                assert_eq!(now, expected, "byte {at} of {len} written at {byte}");
+            }
+        }
+    }
 }

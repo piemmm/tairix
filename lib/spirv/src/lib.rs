@@ -91,11 +91,11 @@ pub use module::{Id, Instruction, Module, Op, Operand, Value, Version};
 pub use tables::{enumerant, GlslStd450, Kind};
 pub use validate::{
     Access, Admitted, Binding, BindingKind, Component, Constant, ConstantId, Disagreement,
-    EntryPoint, ImageShape, ImageType, Layout, Limit, Member, Refusal, Rule, Scalar, SpecError,
-    SpecValue, Specialized, Stage, Stages, Type, TypeId, Varying, WorkgroupSize, CAPABILITIES,
-    MAX_BINDINGS, MAX_CALL_DEPTH, MAX_ENTRY_POINTS, MAX_GLOBALS, MAX_INDEXES, MAX_LOCALS,
-    MAX_LOCATIONS, MAX_MATRIX_COLUMNS, MAX_MEMBERS, MAX_MODES, MAX_NESTING, MAX_SPECIALIZED,
-    MAX_STRING, MAX_TYPE_DEPTH, MAX_VECTOR_COMPONENTS,
+    EntryPoint, ImageShape, ImageType, Interpolation, Layout, Limit, Member, Refusal, Rule, Scalar,
+    SpecError, SpecValue, Specialized, Stage, Stages, Type, TypeId, Varying, WorkgroupSize,
+    CAPABILITIES, MAX_BINDINGS, MAX_CALL_DEPTH, MAX_ENTRY_POINTS, MAX_GLOBALS, MAX_INDEXES,
+    MAX_LOCALS, MAX_LOCATIONS, MAX_MATRIX_COLUMNS, MAX_MEMBERS, MAX_MODES, MAX_NESTING,
+    MAX_SPECIALIZED, MAX_STRING, MAX_TYPE_DEPTH, MAX_VECTOR_COMPONENTS,
 };
 
 /// The largest module decoded or encoded, in bytes.

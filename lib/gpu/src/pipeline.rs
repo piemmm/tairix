@@ -4,16 +4,17 @@
 
 use alloc::sync::Arc;
 
-use tairix_spirv::{Admitted, SpecError, SpecValue, Stage};
-
-use alloc::vec::Vec;
+use tairix_collections::Key;
+use tairix_spirv::{Admitted, EntryPoint, SpecError, SpecValue, Stage};
 
 use crate::binding::{BindSet, PipelineLayout, PipelineLayoutState, ShaderModule};
-use crate::command::{Command, Count, DispatchRecord};
+use crate::command::{push_words, set_keys, Command, Count, DispatchRecord};
 use crate::device::{owned, Buffer, CommandBuffer, Context};
 use crate::info::Limits;
 use crate::memory::Charge;
-use crate::model::{exhausted, shared_bytes, ComputePipelineKey, ContextKey, Model};
+use crate::model::{
+    shared_bytes, ComputePipelineKey, ContextKey, ContextState, Model, PickPipelines, Pipelines,
+};
 use crate::software::dispatch::{self, Grown, Hold, Need};
 use crate::software::shader::ir::{Program, LANES};
 use crate::software::shader::lower;
@@ -32,47 +33,59 @@ pub struct ComputePipelineDesc<'a> {
     pub specialization: &'a [SpecValue],
 }
 
-/// A compute pipeline, as a dispatch runs it.
-pub(crate) struct ComputePipelineState {
-    pub(crate) program: Program,
+/// A pipeline as its commands run it: its lowered stages `P`, its layout,
+/// and its need of the device's workspaces, held while it lives.
+pub(crate) struct PipelineState<P> {
+    pub(crate) stages: P,
     pub(crate) layout: Arc<PipelineLayoutState>,
     pub(crate) need: Need,
     _hold: Hold,
     _charge: Charge,
 }
 
-impl core::fmt::Debug for ComputePipelineState {
+/// A compute pipeline: its one program.
+pub(crate) type ComputePipelineState = PipelineState<Program>;
+
+impl<P> core::fmt::Debug for PipelineState<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ComputePipelineState")
-            .finish_non_exhaustive()
+        f.debug_struct("PipelineState").finish_non_exhaustive()
     }
 }
 
-impl ComputePipelineState {
+impl<P> PipelineState<P> {
     /// Its hold let go, so the workspaces can be fitted without it; its
-    /// program and the charge for it answered, to be let go without the
+    /// stages and the charge for them answered, to be let go without the
     /// device's lock.
-    fn let_go(self) -> (Program, Charge) {
+    fn let_go(self) -> (P, Charge) {
         let Self {
-            program,
+            stages,
             _hold: hold,
             _charge: charge,
             ..
         } = self;
         drop(hold);
-        (program, charge)
+        (stages, charge)
     }
 }
 
 /// What a pipeline's making or release let go, to be dropped without the
-/// device's lock: what the workspaces let go, and its program with the
-/// charge for it.
-#[derive(Default)]
-pub(crate) struct Released {
+/// device's lock: what the workspaces let go, and its stages with the charge
+/// for them.
+pub(crate) struct Released<P> {
     _grown: [Grown; 2],
-    _program: Option<Program>,
-    // After the program, so it stands for it until it is gone.
+    _stages: Option<P>,
+    // After the stages, so it stands for them until they are gone.
     _charge: Option<Charge>,
+}
+
+impl<P> Default for Released<P> {
+    fn default() -> Self {
+        Self {
+            _grown: [Grown::default(), Grown::default()],
+            _stages: None,
+            _charge: None,
+        }
+    }
 }
 
 impl Context {
@@ -124,33 +137,49 @@ impl Context {
         };
         let limits = &self.shared.info.limits;
         let program = lower_compute(limits, &module.admitted, desc, &layout)?;
-        let (planned, released) = self.shared.model.lock().plan_pipeline(
-            self.key,
-            dispatch::need(&program),
-            held_bytes(&program),
-        );
-        drop(released);
-        let (plan, charge) = planned?;
-        // Made between two holds of the device's lock, as zeroing it takes as
-        // long as it is large; its charges stand for it meanwhile.
-        let grown = match plan.make() {
-            Ok(grown) => grown,
-            Err(error) => {
-                self.shared.model.lock().unreserve_pipeline(self.key);
-                return Err(error);
-            }
-        };
-        let (key, released) = self.shared.model.lock().create_compute_pipeline(
-            self.key,
-            (program, layout),
-            (grown, charge),
-        );
-        drop(released);
+        let (need, held) = (dispatch::need(&program), held_bytes(&program));
         Ok(ComputePipeline {
             shared: Arc::clone(&self.shared),
             context: self.key,
-            key: key?,
+            key: self.file_pipeline(computes, (program, layout), (need, held))?,
         })
+    }
+
+    /// File `stages` under `layout` as a pipeline of the kind `pick` names,
+    /// needing `need` of the workspaces and keeping `held` bytes beside: its
+    /// room and charges planned, its working memory made between two holds
+    /// of the device's lock, as zeroing it takes as long as it is large, and
+    /// filed.
+    pub(crate) fn file_pipeline<K: Key, P>(
+        &self,
+        pick: PickPipelines<K, Arc<PipelineState<P>>>,
+        (stages, layout): (P, Arc<PipelineLayoutState>),
+        (need, held): (Need, u64),
+    ) -> Result<K, Error> {
+        let (planned, released) =
+            self.shared
+                .model
+                .lock()
+                .plan_pipeline((self.key, pick), need, held);
+        drop(released);
+        let (plan, charge) = planned?;
+        let grown = match plan.make() {
+            Ok(grown) => grown,
+            Err(error) => {
+                self.shared
+                    .model
+                    .lock()
+                    .unreserve_pipeline((self.key, pick));
+                return Err(error);
+            }
+        };
+        let (key, released) = self.shared.model.lock().create_pipeline(
+            (self.key, pick),
+            (stages, layout, need),
+            (grown, charge),
+        );
+        drop(released);
+        key
     }
 }
 
@@ -172,6 +201,13 @@ fn place_bindings(program: &mut Program, layout: &PipelineLayoutState) -> Result
     Ok(())
 }
 
+/// The context's compute pipelines.
+pub(crate) fn computes(
+    context: &mut ContextState,
+) -> &mut Pipelines<ComputePipelineKey, Arc<ComputePipelineState>> {
+    &mut context.compute_pipelines
+}
+
 /// The host memory a pipeline of `program` keeps beside its working memory.
 fn held_bytes(program: &Program) -> u64 {
     shared_bytes::<ComputePipelineState>().saturating_add(program.held_bytes())
@@ -184,37 +220,60 @@ fn lower_compute(
     desc: &ComputePipelineDesc<'_>,
     layout: &PipelineLayoutState,
 ) -> Result<Program, Error> {
+    let (program, _) = lower_stage(
+        limits,
+        module,
+        (Stage::Compute, desc.entry_point, desc.specialization),
+        layout,
+    )?;
+    Ok(program)
+}
+
+/// The program the entry point of `stage` named `name` lowers to under
+/// `specialization` and `layout`, checked against `limits`, and the entry
+/// point.
+pub(crate) fn lower_stage<'m>(
+    limits: &Limits,
+    module: &'m Admitted,
+    (stage, name, specialization): (Stage, &str, &[SpecValue]),
+    layout: &PipelineLayoutState,
+) -> Result<(Program, &'m EntryPoint), Error> {
     let index = module
         .entry_points()
         .iter()
-        .position(|e| e.stage() == Stage::Compute && e.name() == desc.entry_point)
+        .position(|e| e.stage() == stage && e.name() == name)
         .ok_or(Error::EntryPoint)?;
     let entry = module.entry_points().get(index).ok_or(Error::EntryPoint)?;
     entry
         .agree(&layout.agreement())
         .map_err(Error::Disagreement)?;
     let specialized = module
-        .specialize(desc.specialization)
+        .specialize(specialization)
         .map_err(|refusal| match refusal {
             SpecError::OutOfMemory => Error::OutOfMemory,
             SpecError::Budget => Error::TooLarge,
             SpecError::Malformed => Error::Malformed,
             values => Error::Specialization(values),
         })?;
-    let size = specialized.workgroup_size(index).ok_or(Error::Malformed)?;
-    let invocations = size
-        .iter()
-        .fold(1u64, |n, &s| n.saturating_mul(u64::from(s)));
-    let fits = size
-        .iter()
-        .zip(&limits.max_workgroup_size)
-        .all(|(axis, most)| axis <= most);
-    if !fits
-        || invocations > u64::from(limits.max_workgroup_invocations)
-        || invocations > (dispatch::MAX_TILES * LANES) as u64
-    {
-        return Err(Error::TooLarge);
-    }
+    let size = if stage == Stage::Compute {
+        let size = specialized.workgroup_size(index).ok_or(Error::Malformed)?;
+        let invocations = size
+            .iter()
+            .fold(1u64, |n, &s| n.saturating_mul(u64::from(s)));
+        let fits = size
+            .iter()
+            .zip(&limits.max_workgroup_size)
+            .all(|(axis, most)| axis <= most);
+        if !fits
+            || invocations > u64::from(limits.max_workgroup_invocations)
+            || invocations > (dispatch::MAX_TILES * LANES) as u64
+        {
+            return Err(Error::TooLarge);
+        }
+        size
+    } else {
+        [1, 1, 1]
+    };
     let mut program = lower::lower(module, entry, &specialized, size)?;
     place_bindings(&mut program, layout)?;
     let per_lane = u64::from(program.varying_words) + u64::from(program.private_words);
@@ -228,33 +287,32 @@ fn lower_compute(
     {
         return Err(Error::TooLarge);
     }
-    Ok(program)
+    Ok((program, entry))
 }
 
 impl Model {
-    /// File a pipeline of `program` in the context, in the room
-    /// [`Self::plan_pipeline`] kept for it under `charge`, the workspaces
-    /// `grown` made for it installed. Answers what was let go, to be dropped
-    /// without the device's lock.
-    pub(crate) fn create_compute_pipeline(
+    /// File a pipeline of `stages` of the kind `pick` names in the context,
+    /// in the room [`Self::plan_pipeline`] kept for it under `charge`, the
+    /// workspaces `grown` made for it installed. Answers what was let go, to
+    /// be dropped without the device's lock.
+    pub(crate) fn create_pipeline<K: Key, P>(
         &mut self,
-        key: ContextKey,
-        (program, layout): (Program, Arc<PipelineLayoutState>),
+        (key, pick): (ContextKey, PickPipelines<K, Arc<PipelineState<P>>>),
+        (stages, layout, need): (P, Arc<PipelineLayoutState>, Need),
         (grown, charge): (Grown, Charge),
-    ) -> (Result<ComputePipelineKey, Error>, Released) {
-        self.unreserve_pipeline(key);
-        let need = dispatch::need(&program);
+    ) -> (Result<K, Error>, Released<P>) {
+        self.unreserve_pipeline((key, pick));
         let (hold, installed) = self.install_workspaces(grown);
         let Some(hold) = hold else {
             let released = Released {
                 _grown: [installed, Grown::default()],
-                _program: Some(program),
+                _stages: Some(stages),
                 _charge: Some(charge),
             };
             return (Err(Error::Malformed), released);
         };
-        let state = match crate::shared(ComputePipelineState {
-            program,
+        let state = match crate::shared(PipelineState {
+            stages,
             layout,
             need,
             _hold: hold,
@@ -273,7 +331,7 @@ impl Model {
         let kept = Arc::clone(&state);
         let filed = self
             .live_mut(key)
-            .and_then(|context| context.compute_pipelines.try_insert(state));
+            .and_then(|context| pick(context).table.try_insert(state));
         match filed {
             Ok(filed) => {
                 drop(kept);
@@ -286,12 +344,10 @@ impl Model {
             Err(error) => {
                 // Its last holder: the hold goes here, before the pool is
                 // fitted without it.
-                let (program, charge) = Arc::into_inner(kept)
-                    .map(ComputePipelineState::let_go)
-                    .unzip();
+                let (stages, charge) = Arc::into_inner(kept).map(PipelineState::let_go).unzip();
                 let released = Released {
                     _grown: [installed, self.prune_workspaces()],
-                    _program: program,
+                    _stages: stages,
                     _charge: charge,
                 };
                 (Err(error), released)
@@ -299,27 +355,38 @@ impl Model {
         }
     }
 
-    /// Release the pipeline, its hold going with its last holder, which may
-    /// be queued work. Answers what was let go — its program, where this was
-    /// its last holder, and what the workspaces let go once fitted without
-    /// it — to be dropped without the device's lock.
+    /// Release the pipeline of the kind `pick` names, its hold going with
+    /// its last holder, which may be queued work. Answers what was let go —
+    /// its stages, where this was its last holder, and what the workspaces
+    /// let go once fitted without it — to be dropped without the device's
+    /// lock.
+    pub(crate) fn destroy_pipeline<K: Key, P>(
+        &mut self,
+        (key, pick): (ContextKey, PickPipelines<K, Arc<PipelineState<P>>>),
+        pipeline: K,
+    ) -> Released<P> {
+        // Into its inner state, so that of this and a job dropping its own
+        // hold elsewhere, exactly the last lets it go.
+        let held = self
+            .existing_mut(key)
+            .ok()
+            .and_then(|context| pick(context).table.remove(pipeline))
+            .and_then(Arc::into_inner)
+            .map(PipelineState::let_go);
+        let (stages, charge) = held.unzip();
+        Released {
+            _grown: [self.prune_workspaces(), Grown::default()],
+            _stages: stages,
+            _charge: charge,
+        }
+    }
+
     pub(crate) fn destroy_compute_pipeline(
         &mut self,
         key: ContextKey,
         pipeline: ComputePipelineKey,
-    ) -> Released {
-        // Into its inner state, so that of this and a job dropping its own
-        // hold elsewhere, exactly the last lets it go.
-        let held = self
-            .release(key, |context| &mut context.compute_pipelines, pipeline)
-            .and_then(Arc::into_inner)
-            .map(ComputePipelineState::let_go);
-        let (program, charge) = held.unzip();
-        Released {
-            _grown: [self.prune_workspaces(), Grown::default()],
-            _program: program,
-            _charge: charge,
-        }
+    ) -> Released<Program> {
+        self.destroy_pipeline((key, computes), pipeline)
     }
 }
 
@@ -397,25 +464,8 @@ impl CommandBuffer {
         if sets.len() > MAX_DISPATCH_SETS || push_constants.len() > MAX_PUSH_BYTES {
             return Err(Error::TooMany);
         }
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(sets.len()).map_err(exhausted)?;
-        for set in sets {
-            owned(&set.shared, set.context, &self.shared, self.context)?;
-            keys.push(set.key);
-        }
-        // Decoded once, here: a length of no whole words never matches a
-        // layout's, which holds whole words, so it is refused at submission.
-        let (words, _) = push_constants.as_chunks::<4>();
-        let push = if words.is_empty() {
-            None
-        } else {
-            let words = tairix_util::fallible::collected(
-                words.len(),
-                words.iter().map(|bytes| u32::from_le_bytes(*bytes)),
-            )
-            .ok_or(Error::OutOfMemory)?;
-            Some(crate::shared(words)?)
-        };
+        let keys = set_keys(self, sets)?;
+        let push = push_words(push_constants)?;
         self.record(Command::Dispatch(DispatchRecord {
             pipeline: pipeline.key,
             sets: keys,

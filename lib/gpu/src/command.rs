@@ -4,12 +4,16 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::binding::BindSet;
+use crate::device::{owned, CommandBuffer};
 use crate::image::{BufferImageCopy, ClearValue, ImageCopy, ImageRange};
 use crate::info::{BufferUsage, DeviceInfo, QueueCapabilities};
 use crate::memory::{Charge, Memory};
 use crate::model::{
-    shared_bytes, BindSetKey, BufferKey, BufferState, ComputePipelineKey, ContextState, ImageKey,
+    exhausted, shared_bytes, BindSetKey, BufferKey, BufferState, ComputePipelineKey, ContextState,
+    ImageKey,
 };
+use crate::pass::{PassRecord, PassWork};
 use crate::resource::ImageState;
 use crate::software::dispatch::{Dispatch, Groups};
 use crate::transfer::{self, Direction};
@@ -98,6 +102,7 @@ pub(crate) enum Command {
         ranges: Vec<ImageRange>,
     },
     Dispatch(DispatchRecord),
+    Pass(alloc::boxed::Box<PassRecord>),
 }
 
 /// A dispatch as it is recorded, its objects named by key.
@@ -132,8 +137,62 @@ impl Command {
             | Self::CopyImage { .. }
             | Self::ClearImage { .. } => QueueCapabilities::TRANSFER,
             Self::Dispatch(_) => QueueCapabilities::COMPUTE,
+            Self::Pass(_) => QueueCapabilities::GRAPHICS,
         }
     }
+
+    /// How many commands it counts as: a pass one, and each of its draws
+    /// another.
+    pub(crate) fn count(&self) -> usize {
+        match self {
+            Self::Pass(pass) => pass.draws.len().saturating_add(1),
+            _ => 1,
+        }
+    }
+}
+
+/// Why a command was refused, and which of the commands it counts as: a
+/// pass's draws follow it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Refused {
+    pub(crate) at: usize,
+    pub(crate) error: Error,
+}
+
+impl From<Error> for Refused {
+    fn from(error: Error) -> Self {
+        Self { at: 0, error }
+    }
+}
+
+/// The keys of `sets`, each of the buffer's context.
+pub(crate) fn set_keys(
+    buffer: &CommandBuffer,
+    sets: &[&BindSet],
+) -> Result<Vec<BindSetKey>, Error> {
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(sets.len()).map_err(exhausted)?;
+    for set in sets {
+        owned(&set.shared, set.context, &buffer.shared, buffer.context)?;
+        keys.push(set.key);
+    }
+    Ok(keys)
+}
+
+/// `bytes` of push constants as their whole words, decoded once: a length of
+/// no whole words never matches a layout's, which holds whole words, so it is
+/// refused at submission.
+pub(crate) fn push_words(bytes: &[u8]) -> Result<Option<Arc<Vec<u32>>>, Error> {
+    let (words, _) = bytes.as_chunks::<4>();
+    if words.is_empty() {
+        return Ok(None);
+    }
+    let words = tairix_util::fallible::collected(
+        words.len(),
+        words.iter().map(|bytes| u32::from_le_bytes(*bytes)),
+    )
+    .ok_or(Error::OutOfMemory)?;
+    Ok(Some(crate::shared(words)?))
 }
 
 /// One span of a resolved copy, by offset into the memories themselves.
@@ -181,6 +240,7 @@ pub(crate) enum Op {
         ranges: Vec<ImageRange>,
     },
     Dispatch(alloc::boxed::Box<Dispatch>),
+    Pass(alloc::boxed::Box<PassWork>),
 }
 
 impl core::fmt::Debug for Dispatch {
@@ -201,6 +261,7 @@ impl Op {
             Self::CopyImage { regions, .. } => held(regions),
             Self::ClearImage { ranges, .. } => held(ranges),
             Self::Dispatch(dispatch) => dispatch.held_bytes(),
+            Self::Pass(pass) => pass.held_bytes(),
         }
     }
 
@@ -209,6 +270,7 @@ impl Op {
     pub(crate) fn run_bytes(&self, participants: usize) -> u64 {
         match self {
             Self::Dispatch(dispatch) => dispatch.run_bytes(participants),
+            Self::Pass(pass) => crate::software::render::run_bytes(pass, participants),
             _ => 0,
         }
     }
@@ -264,7 +326,15 @@ pub(crate) fn resolve(
     info: &DeviceInfo,
     context: &ContextState,
     command: &Command,
-) -> Result<Op, Error> {
+) -> Result<Op, Refused> {
+    match command {
+        Command::Pass(pass) => crate::pass::resolve(info, context, pass),
+        other => resolve_one(info, context, other).map_err(Refused::from),
+    }
+}
+
+/// [`resolve`] for a command that counts as one.
+fn resolve_one(info: &DeviceInfo, context: &ContextState, command: &Command) -> Result<Op, Error> {
     match command {
         Command::Copy { src, dst, regions } => {
             let src = buffer(context, *src, BufferUsage::TRANSFER_SRC)?;
@@ -360,6 +430,7 @@ pub(crate) fn resolve(
             ranges,
         } => transfer::clear(context, *image, *value, ranges),
         Command::Dispatch(recorded) => dispatch(info, context, recorded),
+        Command::Pass(_) => Err(Error::Malformed),
     }
 }
 
@@ -382,6 +453,7 @@ fn dispatch(
     let pipeline = Arc::clone(
         context
             .compute_pipelines
+            .table
             .get(*pipeline)
             .ok_or(Error::Stale)?,
     );

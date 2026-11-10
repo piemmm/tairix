@@ -501,6 +501,7 @@ impl Context {
             shared: Arc::clone(&self.shared),
             context: self.key,
             commands: Vec::new(),
+            counted: 0,
         }
     }
 }
@@ -934,34 +935,40 @@ pub struct CommandBuffer {
     pub(crate) shared: Arc<Shared>,
     pub(crate) context: ContextKey,
     commands: Vec<Command>,
+    /// The commands they count as: a pass one, and each of its draws another.
+    counted: usize,
 }
 
 impl CommandBuffer {
-    /// How many commands it holds.
+    /// How many commands it holds, a pass's draws each counted.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.commands.len()
+    pub const fn len(&self) -> usize {
+        self.counted
     }
 
     /// Whether it holds none.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.commands.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.counted == 0
     }
 
     /// Drop every command, keeping the room they took.
     pub fn clear(&mut self) {
         self.commands.clear();
+        self.counted = 0;
     }
 
     pub(crate) fn record(&mut self, command: Command) -> Result<(), Error> {
-        if self.commands.len() >= MAX_SUBMISSION_COMMANDS {
-            return Err(Error::TooMany);
-        }
+        let counted = self
+            .counted
+            .checked_add(command.count())
+            .filter(|&counted| counted <= MAX_SUBMISSION_COMMANDS)
+            .ok_or(Error::TooMany)?;
         self.commands
             .try_reserve(1)
             .map_err(|_| Error::OutOfMemory)?;
         self.commands.push(command);
+        self.counted = counted;
         Ok(())
     }
 
@@ -1047,7 +1054,7 @@ impl CommandBuffer {
 impl fmt::Debug for CommandBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommandBuffer")
-            .field("commands", &self.commands.len())
+            .field("commands", &self.counted)
             .finish_non_exhaustive()
     }
 }

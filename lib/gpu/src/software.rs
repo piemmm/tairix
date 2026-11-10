@@ -26,6 +26,7 @@ use crate::{Device, Error};
 
 pub(crate) mod dispatch;
 pub(crate) mod layout;
+pub(crate) mod render;
 pub(crate) mod shader;
 pub(crate) mod texel;
 mod transfer;
@@ -223,8 +224,25 @@ pub(crate) const fn limits(heap: u64) -> Limits {
         max_workgroup_memory: 32 << 10,
         max_invocation_memory: MAX_INVOCATION_MEMORY,
         subgroup_size: DEFAULT_SUBGROUP_SIZE,
+        max_vertex_input_attributes: 32,
+        max_vertex_input_bindings: 32,
+        max_vertex_input_attribute_offset: 4095,
+        max_vertex_input_binding_stride: 4096,
+        max_vertex_output_components: 128,
+        max_fragment_input_components: 128,
+        max_color_attachments: 8,
+        max_viewport_dimensions: [MAX_IMAGE_2D; 2],
+        viewport_bounds_range: VIEWPORT_BOUNDS,
+        max_point_size: 256,
+        max_line_width: 64,
     }
 }
+
+/// What a viewport's edges may reach: twice its widest either way.
+const VIEWPORT_BOUNDS: [i32; 2] = {
+    let reach = MAX_IMAGE_2D.cast_signed() * 2;
+    [-reach, reach - 1]
+};
 
 /// How a run of a job ended.
 pub(crate) enum Outcome {
@@ -236,7 +254,7 @@ pub(crate) enum Outcome {
     /// reached past its memory or ran a program the interpreter found broken,
     /// which its checks proved it cannot.
     Fault,
-    /// The host refused a table a dispatch makes as it starts.
+    /// The host refused a table a dispatch or a pass makes as it runs.
     OutOfMemory,
 }
 
@@ -284,8 +302,8 @@ impl Meter<'_> {
 }
 
 /// Run `ops` in order, stopping between two pieces of work once the deadline
-/// has passed; dispatches run in `workspaces`, their tiles placed in a table
-/// the job's dispatches share. Each op looks at the clock before its own
+/// has passed; dispatches and passes shade in `workspaces`, dispatches' tiles
+/// placed in a table the job's dispatches share. Each op looks at the clock before its own
 /// work, so one with none, a dispatch of no workgroups over nothing, does
 /// not.
 pub(crate) fn run(
@@ -305,11 +323,20 @@ pub(crate) fn run(
     // Shared by the job's dispatches, so it is made once.
     let mut places = Vec::new();
     for op in ops {
-        if let Op::Dispatch(work) = op {
-            match dispatch::run(work, &mut meter, device, (workspaces, &mut places)) {
-                Outcome::Done => continue,
-                stopped => return stopped,
-            }
+        let ran = match op {
+            Op::Dispatch(work) => Some(dispatch::run(
+                work,
+                &mut meter,
+                device,
+                (workspaces, &mut places),
+            )),
+            Op::Pass(pass) => Some(render::run(pass, &mut meter, device, workspaces)),
+            _ => None,
+        };
+        match ran {
+            Some(Outcome::Done) => continue,
+            Some(stopped) => return stopped,
+            None => {}
         }
         let moved = transfer::apply(op, &device.srgb, &mut meter)
             .unwrap_or_else(|| apply(op, &mut meter).unwrap_or(Moved::Fault));
@@ -425,9 +452,11 @@ fn apply(op: &Op, meter: &mut Meter<'_>) -> Option<Moved> {
             }
             meter.charge(data.bytes.len() as u64);
         }
-        Op::BufferImage { .. } | Op::CopyImage { .. } | Op::ClearImage { .. } | Op::Dispatch(_) => {
-            return None
-        }
+        Op::BufferImage { .. }
+        | Op::CopyImage { .. }
+        | Op::ClearImage { .. }
+        | Op::Dispatch(_)
+        | Op::Pass(_) => return None,
     }
     Some(Moved::Done)
 }

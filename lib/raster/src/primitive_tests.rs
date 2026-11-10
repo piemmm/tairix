@@ -58,6 +58,7 @@ fn the_weights_meet_each_corner_and_sum_to_one() {
             );
         }
         assert!((primitive.depth(at.0, at.1) - corner.depth).abs() < 1e-12);
+        assert!((primitive.inverse_w(at.0, at.1) - corner.inverse_w).abs() < 1e-12);
     }
     let weights = primitive.weights(Interpolation::Perspective, 300.0, 240.0);
     assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);

@@ -425,9 +425,10 @@ fn a_pipeline_is_charged_all_it_keeps_before_its_working_memory_is_made() {
     };
     let program = super::lower_compute(&device.info().limits, &admitted.admitted, &desc, &state)
         .expect("lowered");
+    let need = crate::software::dispatch::need(&program);
     let (planned, released) = context.shared.model.lock().plan_pipeline(
-        context.key,
-        crate::software::dispatch::need(&program),
+        (context.key, super::computes),
+        need,
         super::held_bytes(&program),
     );
     drop(released);
@@ -435,9 +436,9 @@ fn a_pipeline_is_charged_all_it_keeps_before_its_working_memory_is_made() {
     let grown = plan.make().expect("made");
     // The heap filled between the two phases, as another context's work may.
     let _full = crate::device_tests::fill_heap(&device);
-    let (filed, released) = context.shared.model.lock().create_compute_pipeline(
-        context.key,
-        (program, state),
+    let (filed, released) = context.shared.model.lock().create_pipeline(
+        (context.key, super::computes),
+        (program, state, need),
         (grown, charge),
     );
     drop(released);

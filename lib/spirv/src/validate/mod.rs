@@ -42,7 +42,7 @@ pub use allow::CAPABILITIES;
 pub use binding::{
     Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, Stages,
 };
-pub use entry::{EntryPoint, Stage, Varying, WorkgroupSize};
+pub use entry::{EntryPoint, Interpolation, Stage, Varying, WorkgroupSize};
 pub use specialize::{Constant, ConstantId, SpecError, SpecValue, Specialized, MAX_SPECIALIZED};
 pub use types::{MAX_MATRIX_COLUMNS, MAX_VECTOR_COMPONENTS};
 pub use view::{ImageType, Member, Scalar, Type, TypeId};

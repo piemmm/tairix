@@ -1,7 +1,8 @@
 //! The interpreter's instructions, each run in a compute shader on the
-//! software device: a case names the values each lane reads, the body that
-//! computes from them, and the words each lane must write. The coverage test
-//! holds every instruction the validator admits to a case that runs it.
+//! software device, or in the stage only it runs in: a case names the values
+//! each lane reads, the body that computes from them, and the words each lane
+//! must write. The coverage test holds every instruction the validator admits
+//! to a case that runs it.
 
 mod arith;
 mod composite;
@@ -13,6 +14,7 @@ mod image;
 mod memory;
 mod robust;
 mod sampling;
+mod stage;
 
 use alloc::format;
 use alloc::string::String;
@@ -550,24 +552,6 @@ pub(crate) fn named(body: &str, ops: &mut Vec<Op>, glsl: &mut Vec<u32>) {
     }
 }
 
-/// The instructions only a fragment shader runs: their tests are the
-/// fragment stage's, which lowers a fragment entry point.
-const FRAGMENT_ONLY: [&str; 10] = [
-    "OpKill",
-    "OpTerminateInvocation",
-    "OpImageSampleImplicitLod",
-    "OpImageSampleDrefImplicitLod",
-    "OpImageSampleProjImplicitLod",
-    "OpImageSampleProjDrefImplicitLod",
-    "OpImageQueryLod",
-    "OpDPdx",
-    "OpDPdy",
-    "OpFwidth",
-];
-
-/// The `GLSL.std.450` instructions only a fragment shader runs.
-const FRAGMENT_ONLY_GLSL: [u32; 3] = [76, 77, 78];
-
 /// Every case of every family.
 fn all_cases() -> Vec<Case> {
     let mut cases = Vec::new();
@@ -602,18 +586,16 @@ fn every_admitted_instruction_has_a_case_that_runs_it() {
         .chain(group::bodies())
         .chain(memory::bodies())
         .chain(control::bodies())
+        .chain(stage::bodies())
     {
         named(&body, &mut ops, &mut numbers);
     }
     let missing: Vec<&str> = admitted_body_ops()
         .filter(|op| !ops.contains(op))
         .filter_map(Op::name)
-        .filter(|name| !FRAGMENT_ONLY.contains(name))
         .collect();
     assert_eq!(missing, Vec::<&str>::new(), "instructions no case runs");
-    let missing_glsl: Vec<u32> = admitted_glsl()
-        .filter(|n| !numbers.contains(n) && !FRAGMENT_ONLY_GLSL.contains(n))
-        .collect();
+    let missing_glsl: Vec<u32> = admitted_glsl().filter(|n| !numbers.contains(n)).collect();
     assert_eq!(
         missing_glsl,
         Vec::<u32>::new(),

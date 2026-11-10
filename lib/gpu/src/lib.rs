@@ -107,7 +107,9 @@ mod info;
 mod memory;
 mod model;
 mod objects;
+mod pass;
 mod pipeline;
+mod render;
 mod resource;
 mod room;
 mod sampler;
@@ -137,7 +139,17 @@ pub use info::{
 };
 pub use memory::MemoryUse;
 pub use objects::{BufferView, Image, ImageView, Sampler};
+pub use pass::{
+    ColourAttachment, DepthStencilAttachment, Draw, Drawer, IndexFormat, Indices, Load, Pass, Rect,
+    Viewport, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS,
+};
 pub use pipeline::{ComputePipeline, ComputePipelineDesc, MAX_DISPATCH_SETS, MAX_PUSH_BYTES};
+pub use render::{
+    Blend, BlendFactor, BlendOp, ColourMask, ColourTarget, CullMode, DepthBias, DepthStencilState,
+    FrontFace, LogicOp, Multisample, Rasterization, RenderPipeline, RenderPipelineDesc, StageDesc,
+    StencilFaceState, StencilOp, Topology, VertexAttribute, VertexBuffer, VertexStep,
+    MAX_VERTEX_ATTRIBUTES,
+};
 pub use resource::MemoryRequirements;
 pub use sampler::{AddressMode, BorderColor, CompareOp, Filter, SamplerDesc, MAX_LOD_BIAS};
 pub use software::{NoThreads, RuntimeThreads, SoftwareDesc, Spawn, DEFAULT_SUBGROUP_SIZE};

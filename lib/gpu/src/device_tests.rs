@@ -68,7 +68,7 @@ pub(crate) fn until(mut done: impl FnMut() -> bool) -> bool {
 
 pub(crate) const RAM: u64 = 4 << 20;
 const MEBIBYTE: u64 = 1 << 20;
-const SECOND: Duration64 = Duration64::from_secs(1);
+pub(crate) const SECOND: Duration64 = Duration64::from_secs(1);
 
 /// A software device of `memory` bytes whose work runs on the thread whose
 /// act made it ready, so a test sees it done when the call returns.

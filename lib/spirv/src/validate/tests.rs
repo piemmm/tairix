@@ -8,8 +8,8 @@ use crate::enumerant::{AddressingModel, Capability, Dim, ImageFormat};
 use crate::grammar;
 use crate::tables::{GLSL_STD_450, INSTRUCTIONS};
 use crate::{
-    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, Rule, Stage,
-    Varying, Version, WorkgroupSize,
+    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Interpolation, Layout, Rule,
+    Stage, Varying, Version, WorkgroupSize,
 };
 use crate::{Kind, Module, Op, Stages};
 
@@ -167,16 +167,37 @@ fn a_fragment_shader_is_admitted_with_its_texture_and_locations() {
             stages: Stages::FRAGMENT,
         }]
     );
-    let varying = |components| Varying {
+    let varying = |components, variable| Varying {
         location: 0,
         component: 0,
         components,
         scalar: Component::Float,
         width: 32,
         index: 0,
+        variable,
+        offset: 0,
+        interpolation: Interpolation::Smooth,
+        centroid: false,
     };
-    assert_eq!(entry.inputs(), &[varying(2)]);
-    assert_eq!(entry.outputs(), &[varying(4)]);
+    let (input, output) = (entry.inputs()[0].variable, entry.outputs()[0].variable);
+    assert_ne!(input, output);
+    assert_eq!(entry.inputs(), &[varying(2, input)]);
+    assert_eq!(entry.outputs(), &[varying(4, output)]);
+}
+
+#[test]
+fn a_fragment_entry_point_states_whether_its_tests_run_early() {
+    let early = FRAGMENT.replace(
+        "OpExecutionMode %main OriginUpperLeft",
+        "OpExecutionMode %main OriginUpperLeft\nOpExecutionMode %main EarlyFragmentTests",
+    );
+    for (text, expected) in [(FRAGMENT, false), (early.as_str(), true)] {
+        let admitted = admit(text).expect("admitted");
+        let entry = admitted
+            .entry_point("main", Stage::Fragment)
+            .expect("the entry point");
+        assert_eq!(entry.early_fragment_tests(), expected);
+    }
 }
 
 #[test]

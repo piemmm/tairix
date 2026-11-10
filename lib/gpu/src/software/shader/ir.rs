@@ -357,9 +357,10 @@ pub(crate) enum BitField {
     UExtract,
 }
 
-/// A value a compute invocation is given rather than computes.
+/// A value an invocation is given from where its tile placed it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Builtin {
+    HelperInvocation,
     LocalInvocationId,
     GlobalInvocationId,
     WorkgroupId,
@@ -998,6 +999,42 @@ pub(crate) struct Given {
     pub(crate) root: Root,
 }
 
+/// A built-in a vertex or fragment stage's fixed function feeds its
+/// invocations or takes from them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Fixed {
+    VertexIndex,
+    InstanceIndex,
+    Position,
+    PointSize,
+    FragCoord,
+    FrontFacing,
+    PointCoord,
+    SampleMask,
+    FragDepth,
+}
+
+/// What a port carries: a fixed-function built-in, or a location's run of
+/// components under a fragment output's blend index.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Carries {
+    Fixed(Fixed),
+    Located {
+        location: u32,
+        component: u32,
+        index: u32,
+    },
+}
+
+/// A value a vertex or fragment invocation is fed or gives back, `words`
+/// words of each lane's private memory from word `first`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Port {
+    pub(crate) carries: Carries,
+    pub(crate) first: u32,
+    pub(crate) words: u32,
+}
+
 /// Whether a workgroup of `invocations` takes tiles of its own: one of more
 /// than half a tile does, and smaller ones share a tile.
 pub(crate) const fn owns_tiles(invocations: usize) -> bool {
@@ -1023,6 +1060,10 @@ pub(crate) struct Program {
     /// The descriptors its bindings read, all together.
     pub(crate) descriptors: u64,
     pub(crate) given: Vec<Given>,
+    /// A vertex or fragment stage's ports: what its fixed function feeds
+    /// before the tile runs, and what it reads back after.
+    pub(crate) inputs: Vec<Port>,
+    pub(crate) outputs: Vec<Port>,
     /// The constants the uniform registers start with, from slot zero.
     pub(crate) constants: Vec<u32>,
     /// How many words of planes, uniform registers, private memory, shared
@@ -1066,6 +1107,8 @@ impl Program {
             bindings: Vec::new(),
             descriptors: 0,
             given: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
             constants: Vec::new(),
             varying_words: 0,
             uniform_words: 0,
@@ -1099,6 +1142,8 @@ impl Program {
         trim(&mut self.scalars);
         trim(&mut self.bindings);
         trim(&mut self.given);
+        trim(&mut self.inputs);
+        trim(&mut self.outputs);
         trim(&mut self.constants);
     }
 
@@ -1117,6 +1162,8 @@ impl Program {
             held(&self.scalars),
             held(&self.bindings),
             held(&self.given),
+            held(&self.inputs),
+            held(&self.outputs),
             held(&self.constants),
         ]
         .into_iter()

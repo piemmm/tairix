@@ -173,7 +173,7 @@ impl Tiling {
 
 /// Where each of a tile's parts lies in its workspace, in words and masks.
 #[derive(Copy, Clone, Debug)]
-struct Parts {
+pub(crate) struct Parts {
     planes: usize,
     uniforms: usize,
     private: usize,
@@ -183,7 +183,7 @@ struct Parts {
 }
 
 impl Parts {
-    fn of(program: &Program) -> Self {
+    pub(crate) fn of(program: &Program) -> Self {
         let blocks = program.blocks.len();
         Self {
             planes: program.varying_words as usize * LANES,
@@ -195,13 +195,13 @@ impl Parts {
         }
     }
 
-    const fn words(self) -> usize {
+    pub(crate) const fn words(self) -> usize {
         self.planes + self.uniforms + self.private + self.shared
     }
 
-    /// A tile's masks, its pending bits and its live lanes.
-    const fn masks_len(self) -> usize {
-        self.masks + self.pending + 1
+    /// A tile's masks, its pending bits, and its live and killed lanes.
+    pub(crate) const fn masks_len(self) -> usize {
+        self.masks + self.pending + 2
     }
 }
 
@@ -239,6 +239,22 @@ impl Workspace {
             masks,
             charge,
         })
+    }
+
+    /// A tile's space for `program`, carved from its start: its registers
+    /// and blocks as the last tile it held left them, which ends with no lane
+    /// waiting.
+    pub(crate) fn tile(&mut self, program: &Program) -> Option<Space<'_>> {
+        let parts = Parts::of(program);
+        let words = self.words.get_mut(..parts.words())?;
+        let masks = self.masks.get_mut(..parts.masks_len())?;
+        carve(words, masks, parts, &mut [])
+    }
+
+    /// Every word and mask zeroed, as it last served another job, perhaps
+    /// another context's: `false` once the job is stopped.
+    pub(crate) fn clear(&mut self, meter: &mut Meter<'_>) -> bool {
+        clear(&mut self.words, meter) && clear(&mut self.masks, meter)
     }
 
     /// The need it is fitted to.
@@ -933,7 +949,7 @@ impl Dispatch {
     /// The host bytes the placements its tiles take on a device of
     /// `participants`, kept for its job: a job's dispatches share them.
     pub(crate) fn place_bytes(&self, participants: usize) -> u64 {
-        let tiles = Tiling::of(&self.pipeline.program).tiles.max(1) as u64;
+        let tiles = Tiling::of(&self.pipeline.stages).tiles.max(1) as u64;
         (participants as u64)
             .saturating_mul(tiles)
             .saturating_mul(size_of::<Placement>() as u64)
@@ -949,7 +965,7 @@ impl Dispatch {
         let placed = self.sets.iter().fold(0u64, |total, set| {
             total.saturating_add(wide(set.memories.len()))
         });
-        let program = &self.pipeline.program;
+        let program = &self.pipeline.stages;
         table_bytes([
             (
                 placed.saturating_add(1),
@@ -999,97 +1015,134 @@ pub(crate) fn run(
     if lists.try_reserve_exact(dispatch.sets.len() + 1).is_err() {
         return Outcome::OutOfMemory;
     }
-    for (at, set) in dispatch.sets.iter().enumerate() {
-        let repeated = dispatch
-            .sets
-            .iter()
-            .take(at)
-            .any(|seen| Arc::ptr_eq(seen, set));
+    add_sets(&mut lists, &dispatch.sets);
+    if let Groups::Indirect { memory, .. } = &dispatch.groups {
+        lists.push(core::slice::from_ref(memory));
+    }
+    let ran = with_locked(&mut lists, meter, |locked, meter| {
+        let program = &dispatch.pipeline.stages;
+        let mapping = place_sets(&dispatch.sets, locked.memories, meter)?;
+        let table = resolve(program, &dispatch.sets, (locked.views, &mapping), meter)?;
+        let rows = rows_of(program, &table)?;
+        // Counted, not checked: a dispatch of no workgroups has no work left,
+        // and every piece checks before its first workgroup.
+        meter.charge(rows.len() as u64);
+        let limits = &device.info.limits;
+        let view = |memory: &Arc<Memory>| locked.view(memory);
+        let groups =
+            counts(&dispatch.groups, &view, &limits.max_workgroup_count).ok_or(Outcome::Fault)?;
+        let total = u64::from(groups[0]) * u64::from(groups[1]) * u64::from(groups[2]);
+        if total == 0 {
+            return Ok(Outcome::Done);
+        }
+        let env = Env {
+            program,
+            bindings: &rows,
+            push: dispatch.push.as_deref().map_or(&[], Vec::as_slice),
+            srgb: &device.srgb,
+            subgroup_size: limits.subgroup_size,
+            groups,
+        };
+        Ok(share(&env, total, meter, device, (workspaces, places)))
+    });
+    match ran {
+        Ok(outcome) | Err(outcome) => outcome,
+    }
+}
+
+/// Each distinct set of `sets`' memories, in the order memories are locked
+/// in, added to `lists`, which has room for them.
+fn add_sets<'m>(lists: &mut Vec<&'m [Arc<Memory>]>, sets: &'m [Arc<BindSetState>]) {
+    for (at, set) in sets.iter().enumerate() {
+        let repeated = sets.iter().take(at).any(|seen| Arc::ptr_eq(seen, set));
         if !repeated {
             lists.push(&set.memories);
         }
     }
-    if let Groups::Indirect { memory, .. } = &dispatch.groups {
-        lists.push(core::slice::from_ref(memory));
+}
+
+/// The memories a run locked, in the order it locked them, and the atomic
+/// view of each.
+pub(crate) struct Locked<'v> {
+    pub(crate) memories: &'v [&'v Arc<Memory>],
+    pub(crate) views: &'v [&'v [AtomicU32]],
+}
+
+impl Locked<'_> {
+    /// The view of `memory`, where the run locked it.
+    pub(crate) fn view(&self, memory: &Arc<Memory>) -> Option<&[AtomicU32]> {
+        let at = self
+            .memories
+            .binary_search_by_key(&Arc::as_ptr(memory), |held| Arc::as_ptr(held))
+            .ok()?;
+        self.views.get(at).copied()
     }
+}
+
+/// `body` run with the memories `lists` name — each list in address order —
+/// merged into one list in that order, each once, locked in that order and
+/// viewed as atomic words; merging, locking and viewing are counted as they
+/// go, a memory at a time, so a run of millions reads the clock among them.
+pub(crate) fn with_locked<R>(
+    lists: &mut [&[Arc<Memory>]],
+    meter: &mut Meter<'_>,
+    body: impl FnOnce(&Locked<'_>, &mut Meter<'_>) -> Result<R, Outcome>,
+) -> Result<R, Outcome> {
     let named = lists.iter().map(|list| list.len()).sum::<usize>();
     let mut memories: Vec<&Arc<Memory>> = Vec::new();
-    if memories.try_reserve_exact(named).is_err() {
-        return Outcome::OutOfMemory;
-    }
-    // Merging, locking, viewing and resolving are counted as they go, a
-    // memory or a descriptor at a time, so a dispatch of millions reads the
-    // clock among them.
-    if !merge(&mut lists, &mut memories, meter) {
-        return Outcome::Overran;
+    memories
+        .try_reserve_exact(named)
+        .map_err(|_| Outcome::OutOfMemory)?;
+    if !merge(lists, &mut memories, meter) {
+        return Err(Outcome::Overran);
     }
     let mut guards: Vec<memory::Words<'_>> = Vec::new();
-    if guards.try_reserve_exact(memories.len()).is_err() {
-        return Outcome::OutOfMemory;
-    }
+    guards
+        .try_reserve_exact(memories.len())
+        .map_err(|_| Outcome::OutOfMemory)?;
     for memory in &memories {
         if !meter.proceed(1) {
-            return Outcome::Overran;
+            return Err(Outcome::Overran);
         }
         guards.push(memory.lock());
     }
     let mut views: Vec<&[AtomicU32]> = Vec::new();
-    if views.try_reserve_exact(guards.len()).is_err() {
-        return Outcome::OutOfMemory;
-    }
+    views
+        .try_reserve_exact(guards.len())
+        .map_err(|_| Outcome::OutOfMemory)?;
     for guard in &mut guards {
         if !meter.proceed(1) {
-            return Outcome::Overran;
+            return Err(Outcome::Overran);
         }
         views.push(AtomicU32::from_mut_slice(guard.as_mut_slice()));
     }
-    let view = |memory: &Arc<Memory>| -> Option<&[AtomicU32]> {
-        let at = memories
-            .binary_search_by_key(&Arc::as_ptr(memory), |held| Arc::as_ptr(held))
-            .ok()?;
-        views.get(at).copied()
-    };
-    let mapping = match place_sets(&dispatch.sets, &memories, meter) {
-        Ok(mapping) => mapping,
-        Err(outcome) => return outcome,
-    };
-    let program = &dispatch.pipeline.program;
-    let table = match resolve(program, &dispatch.sets, (&views, &mapping), meter) {
-        Ok(table) => table,
-        Err(outcome) => return outcome,
-    };
+    body(
+        &Locked {
+            memories: &memories,
+            views: &views,
+        },
+        meter,
+    )
+}
+
+/// `table`, `program`'s descriptors resolved binding by binding, as one row
+/// of them for each binding.
+pub(crate) fn rows_of<'t, 'd>(
+    program: &Program,
+    table: &'t [Resolved<'d>],
+) -> Result<Vec<&'t [Resolved<'d>]>, Outcome> {
     let mut rows: Vec<&[Resolved<'_>]> = Vec::new();
-    if rows.try_reserve_exact(program.bindings.len()).is_err() {
-        return Outcome::OutOfMemory;
-    }
-    let mut rest = table.as_slice();
+    rows.try_reserve_exact(program.bindings.len())
+        .map_err(|_| Outcome::OutOfMemory)?;
+    let mut rest = table;
     for binding in &program.bindings {
-        let Some((row, after)) = rest.split_at_checked(binding.count as usize) else {
-            return Outcome::Fault;
-        };
+        let (row, after) = rest
+            .split_at_checked(binding.count as usize)
+            .ok_or(Outcome::Fault)?;
         rows.push(row);
         rest = after;
     }
-    // Counted, not checked: a dispatch of no workgroups has no work left,
-    // and every piece checks before its first workgroup.
-    meter.charge(rows.len() as u64);
-    let limits = &device.info.limits;
-    let Some(groups) = counts(&dispatch.groups, &view, &limits.max_workgroup_count) else {
-        return Outcome::Fault;
-    };
-    let total = u64::from(groups[0]) * u64::from(groups[1]) * u64::from(groups[2]);
-    if total == 0 {
-        return Outcome::Done;
-    }
-    let env = Env {
-        program,
-        bindings: &rows,
-        push: dispatch.push.as_deref().map_or(&[], Vec::as_slice),
-        srgb: &device.srgb,
-        subgroup_size: limits.subgroup_size,
-        groups,
-    };
-    share(&env, total, meter, device, (workspaces, places))
+    Ok(rows)
 }
 
 /// The memories `lists` name, each list in address order and naming each
@@ -1245,7 +1298,7 @@ fn share(
 /// it read the clock; and whether any read it. A reading covers all the job
 /// had counted, so once one is taken the others count only their own work;
 /// a piece that claimed none has nothing to count.
-fn counted_on(counted: u64, left: impl Iterator<Item = (u64, bool)>) -> (u64, bool) {
+pub(crate) fn counted_on(counted: u64, left: impl Iterator<Item = (u64, bool)>) -> (u64, bool) {
     let (mut claimed, mut read) = (false, false);
     let (mut readers, mut others) = (0, 0);
     for (count, own) in left {
@@ -1276,7 +1329,7 @@ const CLAIMS_PER_PIECE: usize = 8;
 /// searches, each counted on `meter`. A set holding every merged memory — a
 /// lone set, unless an indirect dispatch reads its counts from another memory —
 /// needs none: its own places are the merged ones.
-fn place_sets(
+pub(crate) fn place_sets(
     sets: &[Arc<BindSetState>],
     merged: &[&Arc<Memory>],
     meter: &mut Meter<'_>,
@@ -1318,7 +1371,7 @@ fn place_sets(
 
 /// Each set's memories by their place among a dispatch's, and where each
 /// set's run of them starts: `None` for a set whose own are the dispatch's.
-struct Mapping {
+pub(crate) struct Mapping {
     places: Vec<u32>,
     starts: tairix_inline::ArrayVec<Option<usize>, { crate::pipeline::MAX_DISPATCH_SETS }>,
 }
@@ -1362,7 +1415,7 @@ fn place_from(merged: &[&Arc<Memory>], from: usize, memory: &Arc<Memory>) -> Opt
 /// [`Outcome::Fault`] where one cannot be, [`Outcome::OutOfMemory`] where the
 /// host refuses the table, and [`Outcome::Overran`] where the deadline passes
 /// first.
-fn resolve<'d>(
+pub(crate) fn resolve<'d>(
     program: &Program,
     sets: &'d [Arc<BindSetState>],
     (views, mapping): (&[&'d [AtomicU32]], &Mapping),
@@ -1560,7 +1613,7 @@ fn clear<T: Copy + Default>(part: &mut [T], meter: &mut Meter<'_>) -> bool {
 pub(crate) const MAX_TILES: usize = 1024 / LANES;
 
 /// A tile's parts carved from its words and masks.
-fn carve<'w>(
+pub(crate) fn carve<'w>(
     words: &'w mut [u32],
     masks: &'w mut [u64],
     parts: Parts,
@@ -1572,7 +1625,9 @@ fn carve<'w>(
     let shared = rest.get_mut(..parts.shared)?;
     let (block_masks, rest) = masks.split_at_mut(parts.masks.min(masks.len()));
     let (pending, rest) = rest.split_at_mut(parts.pending.min(rest.len()));
-    let live = rest.first_mut()?;
+    let [live, killed, ..] = rest else {
+        return None;
+    };
     Some(Space {
         planes,
         uniforms,
@@ -1581,6 +1636,7 @@ fn carve<'w>(
         masks: block_masks,
         pending,
         live,
+        killed,
         workgroup,
     })
 }

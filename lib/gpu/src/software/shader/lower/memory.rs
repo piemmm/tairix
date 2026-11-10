@@ -6,11 +6,13 @@
 use alloc::vec::Vec;
 
 use tairix_spirv::enumerant::{BuiltIn, Decoration, StorageClass};
-use tairix_spirv::{BindingKind, Id, Type, TypeId};
+use tairix_spirv::{BindingKind, Id, Member, Type, TypeId};
 
 use super::layout::Instance;
 use super::{num, push, Count, Fault, Layout, Lowering, Val, MAX_PROGRAM_INSTRUCTIONS};
-use crate::software::shader::ir::{Builtin, Given, Inst, Plan, Reg, Root, Scalar, Step};
+use crate::software::shader::ir::{
+    Builtin, Carries, Fixed, Given, Inst, Plan, Port, Reg, Root, Scalar, Step,
+};
 
 /// The most scalars the plans of one program list.
 const MAX_SCALARS: usize = 1 << 22;
@@ -60,27 +62,8 @@ impl Lowering<'_> {
             column: None,
         };
         let val = match class {
-            StorageClass::INPUT => {
-                let Some(built_in) = self.admitted.decoration(id, None, Decoration::BUILT_IN)
-                else {
-                    return Err(Fault::Malformed);
-                };
-                let which = builtin(BuiltIn(built_in)).ok_or(Fault::Malformed)?;
-                let words = self.words(pointee)?;
-                let root = if self.shared_builtin(which) {
-                    let first = self.program.shared_words;
-                    self.program.shared_words = first.checked_add(words).ok_or(Fault::Budget)?;
-                    Root::Shared { first, words }
-                } else {
-                    let first = self.program.private_words;
-                    self.program.private_words = first.checked_add(words).ok_or(Fault::Budget)?;
-                    Root::Private { first, words }
-                };
-                push(
-                    &mut self.program.given,
-                    Given { which, root },
-                    MAX_PROGRAM_INSTRUCTIONS,
-                )?;
+            StorageClass::INPUT | StorageClass::OUTPUT => {
+                let root = self.interface_variable(id, pointee, class == StorageClass::INPUT)?;
                 rooted(root, Layout::Words, false)
             }
             StorageClass::UNIFORM
@@ -113,8 +96,7 @@ impl Lowering<'_> {
             StorageClass::PUSH_CONSTANT => rooted(Root::PushConstants, explicit, false),
             StorageClass::PRIVATE => {
                 let words = self.words(pointee)?;
-                let first = self.program.private_words;
-                self.program.private_words = first.checked_add(words).ok_or(Fault::Budget)?;
+                let first = self.private(words)?;
                 rooted(Root::Private { first, words }, Layout::Words, false)
             }
             StorageClass::WORKGROUP => {
@@ -126,6 +108,143 @@ impl Lowering<'_> {
             _ => return Err(Fault::Malformed),
         };
         Ok(val)
+    }
+
+    /// `words` more words of each lane's private memory: the first of them.
+    fn private(&mut self, words: u32) -> Result<u32, Fault> {
+        let first = self.program.private_words;
+        self.program.private_words = first.checked_add(words).ok_or(Fault::Budget)?;
+        Ok(first)
+    }
+
+    /// The root of an input or output variable. A built-in the tile gives
+    /// one value apiece is the tile's; any other is each lane's own words,
+    /// every built-in in it given by the tile or a port of the stage's fixed
+    /// function, and every location it holds a port.
+    fn interface_variable(&mut self, id: Id, pointee: TypeId, input: bool) -> Result<Root, Fault> {
+        let words = self.words(pointee)?;
+        let built_in = self
+            .admitted
+            .decoration(id, None, Decoration::BUILT_IN)
+            .map(BuiltIn);
+        if let Some(which) = built_in.filter(|_| input).and_then(builtin) {
+            if self.shared_builtin(which) {
+                let first = self.program.shared_words;
+                self.program.shared_words = first.checked_add(words).ok_or(Fault::Budget)?;
+                let root = Root::Shared { first, words };
+                push(
+                    &mut self.program.given,
+                    Given { which, root },
+                    MAX_PROGRAM_INSTRUCTIONS,
+                )?;
+                return Ok(root);
+            }
+        }
+        let first = self.private(words)?;
+        if let Some(built_in) = built_in {
+            self.built_in_at(built_in, (first, words), input)?;
+        } else if let Some(members) = self.built_in_block(pointee)? {
+            for member in 0..members {
+                let Member { ty, built_in, .. } = self.member(pointee, member)?;
+                let at = first
+                    .checked_add(self.words_before(pointee, members, member)?)
+                    .ok_or(Fault::Budget)?;
+                match built_in {
+                    Some(BuiltIn::CLIP_DISTANCE | BuiltIn::CULL_DISTANCE) => {}
+                    Some(built_in) => {
+                        let words = self.words(ty)?;
+                        self.built_in_at(built_in, (at, words), input)?;
+                    }
+                    None => return Err(Fault::Malformed),
+                }
+            }
+        } else {
+            self.located(id, (first, words), input)?;
+        }
+        Ok(Root::Private { first, words })
+    }
+
+    /// The members of `ty` where it is a block of built-ins.
+    fn built_in_block(&mut self, ty: TypeId) -> Result<Option<u32>, Fault> {
+        let Type::Struct { members } = self.ty(ty)? else {
+            return Ok(None);
+        };
+        if members == 0 {
+            return Ok(None);
+        }
+        Ok(self.member(ty, 0)?.built_in.map(|_| members))
+    }
+
+    /// Built-in `built_in` in `words` words from private word `first`: given
+    /// by the tile where it is an input the tile knows, a port otherwise.
+    fn built_in_at(
+        &mut self,
+        built_in: BuiltIn,
+        (first, words): (u32, u32),
+        input: bool,
+    ) -> Result<(), Fault> {
+        if let Some(which) = builtin(built_in).filter(|_| input) {
+            let root = Root::Private { first, words };
+            return push(
+                &mut self.program.given,
+                Given { which, root },
+                MAX_PROGRAM_INSTRUCTIONS,
+            );
+        }
+        let fixed = fixed(built_in).ok_or(Fault::Malformed)?;
+        self.port(Carries::Fixed(fixed), (first, words), input)
+    }
+
+    /// A port for each location the entry point's interface lists in the
+    /// variable `id`, whose `words` words start at private word `first`.
+    fn located(&mut self, id: Id, (first, words): (u32, u32), input: bool) -> Result<(), Fault> {
+        let entry = self.entry;
+        let varyings = if input {
+            entry.inputs()
+        } else {
+            entry.outputs()
+        };
+        let mut found = false;
+        for varying in varyings.iter().filter(|v| v.variable == id) {
+            let end = varying.offset.checked_add(varying.components);
+            if end.is_none_or(|end| end > words) {
+                return Err(Fault::Malformed);
+            }
+            let carries = Carries::Located {
+                location: varying.location,
+                component: varying.component,
+                index: varying.index,
+            };
+            self.port(carries, (first + varying.offset, varying.components), input)?;
+            found = true;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(Fault::Malformed)
+        }
+    }
+
+    fn port(
+        &mut self,
+        carries: Carries,
+        (first, words): (u32, u32),
+        input: bool,
+    ) -> Result<(), Fault> {
+        let ports = if input {
+            &mut self.program.inputs
+        } else {
+            &mut self.program.outputs
+        };
+        push(
+            ports,
+            Port {
+                carries,
+                first,
+                words,
+            },
+            MAX_PROGRAM_INSTRUCTIONS,
+        )
     }
 
     /// Whether an array of `class` is an array of descriptors: of images,
@@ -668,6 +787,23 @@ const fn builtin(built_in: BuiltIn) -> Option<Builtin> {
         BuiltIn::SUBGROUP_GT_MASK => Builtin::SubgroupGtMask,
         BuiltIn::SUBGROUP_LE_MASK => Builtin::SubgroupLeMask,
         BuiltIn::SUBGROUP_LT_MASK => Builtin::SubgroupLtMask,
+        BuiltIn::HELPER_INVOCATION => Builtin::HelperInvocation,
+        _ => return None,
+    })
+}
+
+/// The fixed-function built-in `built_in` is.
+const fn fixed(built_in: BuiltIn) -> Option<Fixed> {
+    Some(match built_in {
+        BuiltIn::VERTEX_INDEX => Fixed::VertexIndex,
+        BuiltIn::INSTANCE_INDEX => Fixed::InstanceIndex,
+        BuiltIn::POSITION => Fixed::Position,
+        BuiltIn::POINT_SIZE => Fixed::PointSize,
+        BuiltIn::FRAG_COORD => Fixed::FragCoord,
+        BuiltIn::FRONT_FACING => Fixed::FrontFacing,
+        BuiltIn::POINT_COORD => Fixed::PointCoord,
+        BuiltIn::SAMPLE_MASK => Fixed::SampleMask,
+        BuiltIn::FRAG_DEPTH => Fixed::FragDepth,
         _ => return None,
     })
 }

@@ -1424,6 +1424,20 @@ fn a_latent_clip_or_cull_distance_is_refused_once_it_is_read_or_written() {
 }
 
 #[test]
+fn an_array_of_built_in_blocks_is_refused_in_a_vertex_shader() {
+    let arrayed = with(
+        GLSLANG_VERTEX,
+        "%_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex\n%_ = OpVariable %_ptr_Output_gl_PerVertex Output\n",
+        "%blocks = OpTypeArray %gl_PerVertex %uint_1\n%_ptr_Output_blocks = OpTypePointer Output %blocks\n%_ = OpVariable %_ptr_Output_blocks Output\n",
+    );
+    let arrayed = arrayed.replace(
+        "%20 = OpAccessChain %_ptr_Output_v4float %_ %int_0",
+        "%20 = OpAccessChain %_ptr_Output_v4float %_ %int_0 %int_0",
+    );
+    assert_eq!(refused(&arrayed), Rule::BuiltIn);
+}
+
+#[test]
 fn a_blend_index_other_than_dual_source_blendings_two_is_refused() {
     let dual = after(
         FRAGMENT,

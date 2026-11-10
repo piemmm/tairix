@@ -5,9 +5,10 @@ work, and what it does when there is none (`plans/GPU.md`). This page covers
 the memory and submission model every backend implements and the software
 device that implements it on every target; the images, views, texel buffers,
 samplers and transfers of `plans/GPU.md` GP3.1; GP3.2's bind set layouts, bind
-sets, pipeline layouts and shader modules; and GP3.3's compute pipelines, their
-dispatches and the interpreter that runs them. Render pipelines and passes
-arrive with GP3.4; reaching a hardware device's driver arrives with GP11.
+sets, pipeline layouts and shader modules; GP3.3's compute pipelines, their
+dispatches and the interpreter that runs them; and GP3.4's render pipelines,
+passes and draws, rasterised through `lib/raster`'s stages. Indirect draws
+arrive with GP3.4.4; reaching a hardware device's driver arrives with GP11.
 
 ## A device and what it is
 
@@ -17,18 +18,21 @@ A `Device` is described by a `DeviceInfo`:
 |---|---|
 | `heaps` | pools of memory, each with its size and whether it is the device's own |
 | `memory_types` | the kinds of memory an allocation is made in, each over one heap, with its `MemoryProperties`: device-local, host-visible, host-coherent, host-cached |
-| `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE` — and how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY` |
-| `limits` | the bounds it puts on what is asked of it: the largest allocation and the alignments a buffer and its bindings take, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, and the longest a submission may run |
+| `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE`, `GRAPHICS` — and how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY` |
+| `limits` | the bounds it puts on what is asked of it: the largest allocation and the alignments a buffer and its bindings take, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, and a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths |
 | `capabilities` | the shader capabilities of `lib/spirv`'s allow-list it runs |
-| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge |
-| `formats` | what it states each `Format` can be used for (`FormatFeatures`) |
+| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge, dual-source blending, logic operations, depth clamping, wide lines, large points, and storage writes and atomics from a vertex or fragment stage |
+| `formats` | what it states each `Format` can be used for (`FormatFeatures`): sampled, filtered, stored, a colour or depth-stencil attachment, blended, multisampled, resolved, a texel buffer, a vertex attribute |
 
 The portable core is what Vulkan 1.1 requires of every device; anything past
 it is a feature a device states, and creation refuses what it has not stated.
 A description with a memory type over a missing heap, an empty heap, a family
 with no queues, too many or no capability, an alignment that is not a power of
 two, a subgroup size that is not a power of two up to `MAX_SUBGROUP_SIZE`,
-capabilities out of order, or no deadline at all is refused (`Error::Malformed`).
+capabilities out of order, no deadline at all, more colour targets than
+`MAX_PASS_ATTACHMENTS`, vertex buffers than `MAX_DRAW_VERTEX_BUFFERS` or vertex
+attributes than `MAX_VERTEX_ATTRIBUTES`, or viewport bounds out of order is
+refused (`Error::Malformed`).
 
 `Device::software` makes the software device from a `SoftwareDesc`: the
 machine's memory, a clock, the process's `JobRunner`, what starts its worker
@@ -36,9 +40,12 @@ machine's memory, a clock, the process's `JobRunner`, what starts its worker
 it runs at, `DEFAULT_SUBGROUP_SIZE` unless the reference is being run at the
 width of a device it is compared with. It has one heap of half the machine's
 memory, one memory type that is every kind at once, and one queue family
-running transfers and dispatches one job at a time. It states every capability a
-module may declare, every feature, and every use of each format its encoding
-can mean. Its buffers align to 16 bytes, the widest vector its copies move,
+running transfers, dispatches and passes one job at a time. It states every
+capability a module may declare, every feature, and every use of each format
+its encoding can mean: a colour format of float or unsigned normalised
+channels renders, blends and resolves, but for the shared-exponent one, which
+is only sampled; an integer one renders without either; a signed normalised
+one is no attachment. Its buffers align to 16 bytes, the widest vector its copies move,
 and its submissions run for at most a minute.
 
 ## Contexts
@@ -87,8 +94,8 @@ its need, a set's descriptors) when it is made, and gives them back when its
 last holder lets it go. An update's bytes are charged once, as they are
 recorded, however often the command buffer is submitted. A submission is
 charged for what its commands keep queued, for the tables its largest
-dispatch makes as it runs, and for the placements of the tiles its dispatches
-share, so a submission past the limit is refused before anything queues. The context's own state is charged as it is made, and each of
+dispatch or pass makes as it runs, and for the placements of the tiles its
+dispatches share, so a submission past the limit is refused before anything queues. The context's own state is charged as it is made, and each of
 its tables and queues — the objects of each kind, its queued jobs, each queue's
 order and each timeline's pending signals — grows only by room charged to it
 first: a table keeps its room, still charged, once its objects go, so the
@@ -112,8 +119,9 @@ The CPU reaches host-visible memory through `Allocation::write` and
 A `Buffer` is a span of one allocation, at an offset that is a multiple of the
 device's `buffer_alignment`, made for the `BufferUsage` it states:
 `TRANSFER_SRC` and `TRANSFER_DST` to be copied from and into, `UNIFORM`,
-`STORAGE`, `UNIFORM_TEXEL` and `STORAGE_TEXEL` to be bound, and `INDIRECT` to
-be read by an indirect dispatch. It holds its memory while it lives.
+`STORAGE`, `UNIFORM_TEXEL` and `STORAGE_TEXEL` to be bound, `INDIRECT` to be
+read by an indirect dispatch, and `VERTEX` and `INDEX` to be read by a draw. It
+holds its memory while it lives.
 
 ## Images, views and samplers
 
@@ -221,6 +229,80 @@ calling thread and not under the device's lock. Creation refuses:
 A lowering that finds an invariant the validator promised broken refuses the
 module (`Error::Malformed`) rather than trusting it.
 
+## Render pipelines
+
+`Context::create_render_pipeline` makes a `RenderPipeline` from a
+`RenderPipelineDesc`: a vertex stage and, unless the pipeline renders depth and
+stencil alone, a fragment stage, each an entry point of its stage in a module
+with its specialization values; a pipeline layout; the vertex buffers a draw
+binds, each with its stride, its step — by vertex or by instance — and its
+attributes; the topology and primitive restart; rasterization, depth-stencil,
+multisample and blend state; and the colour targets. Each stage is agreed,
+specialized and lowered as a compute entry point is, once, without the device's
+lock. Each vertex input is fed by the attribute at its location; each fragment
+input component by the vertex output component at its location, of the same
+type and width; each fragment output writes the target at its location.
+Creation refuses of each stage what a compute pipeline's creation does — its
+entry point, layout, specialization, lowering and memory — and:
+
+| Refused | As |
+|---|---|
+| a vertex input no attribute feeds, or feeds as another component type or 64 bits wide; two attributes at one location; a fragment input no vertex output provides; a fragment output with no target, of another component type or 64 bits wide; a second colour output at a location but 0; a blend reading a second colour the stage does not write, or for a target past the first | `Error::Interface` |
+| vertex buffers, attributes or targets past `max_vertex_input_bindings`, `max_vertex_input_attributes` or `max_color_attachments` | `Error::TooMany` |
+| a stride, an attribute offset, a line width, or the vertex outputs' or fragment inputs' components past the device's | `Error::TooLarge` |
+| an attribute location past `max_vertex_input_attributes` | `Error::OutOfRange` |
+| a format without its use — an attribute's `VERTEX_INPUT`, a target's `COLOR_ATTACHMENT`, a blended target's `BLENDED`, a depth-stencil `DEPTH_STENCIL`, any of them `MULTISAMPLED` at four samples — or a feature the device has not stated: dual-source blending, a logic operation, depth clamping, a line wider than a pixel, a stage writing storage, images or atomics; restart of a list topology | `Error::Unsupported` |
+| a sample count other than one or four | `Error::Samples` |
+| a depth test or write of a format without depth, or a stencil test of one without stencil | `Error::Aspect` |
+| a line width under one or not finite, a depth bias not finite, a write mask past four channels | `Error::Shape` |
+
+A draw renders as Vulkan 1.1 states, with every rule a picture depends on
+fixed:
+
+- **Assembly.** Points, lines, line strips, triangles, triangle strips — an odd
+  one's corners `i, i+2, i+1` — and fans, whose corners are `i+1, i+2, 0`; a
+  primitive's first corner provokes it. Restart starts a strip or fan afresh at
+  an index of all ones.
+- **Points and lines** are two triangles each: a point the square of its
+  `PointSize`, held to `1..=max_point_size` where points may be large and one
+  otherwise, dropped when its centre is clipped, `PointCoord` from its upper
+  left; a line the rectangle its width wide about its clipped segment. Both face
+  the front.
+- **A draw touches no pixel outside its viewport**, its scissor or its pass's
+  area: a primitive is clipped in clip space to a guard band about its
+  viewport, and each sample is held to the viewport's rectangle — its left and
+  top edges in, its right and bottom out — as a clipped edge would hold it.
+- **Triangles** are clipped in clip space, their depth clamped to the
+  viewport's range in place of clipped where the pipeline clamps; culled by the
+  winding of their first piece with area, the front counter-clockwise or
+  clockwise as stated, the framebuffer's y axis down; and offset in depth by
+  their bias, found once a primitive.
+- **Interpolation** is perspective-correct, linear in the framebuffer
+  (`NoPerspective`), or the provoking vertex's (`Flat`); a `Centroid` input is
+  interpolated at the pixel's centre where the primitive covers it, else at the
+  first sample it covers, whatever the tests make of them.
+- **Coverage** is what the primitive covers within the pipeline's sample mask,
+  the fragment's `SampleMask` input — before any test — then narrowed by its
+  `SampleMask` output and by alpha-to-coverage: the first target's alpha's share
+  of the samples, from the first, rounded to the nearest. Depth is found at each
+  sample unless the fragment writes its own, then clamped to the viewport's
+  range where depth is clamped and to `[0, 1]` for a normalised format.
+- **Tests and writes.** With `EarlyFragmentTests`, depth and stencil are tested
+  and written before shading and nothing the shader does undoes them, its
+  `FragDepth` ignored. Otherwise they are tested before shading only where the
+  result cannot differ — no storage writes or atomics, no `FragDepth`, and,
+  where the shader can discard or change coverage, no stencil fail or depth-fail
+  operation but keep — a sample that fails written then and one that passes
+  tested again and written after it. Each sample's tests, blend and write are
+  made in the order its primitives were drawn.
+- **Colour.** A float or normalised target blends as its blend says. A logic
+  operation, where the pipeline has one, takes blending's place in every target:
+  it combines an integer or non-sRGB normalised target's bits, and the rest are
+  written unblended. A target's write mask keeps the channels it does not name.
+  A target no output of the fragment stage writes is left as it was; an output
+  of fewer components than its target writes zero to the rest. A four-sample
+  target resolves by its samples' average, in linear light for an sRGB format.
+
 ## Submitting work
 
 A `CommandBuffer` records:
@@ -235,6 +317,8 @@ A `CommandBuffer` records:
 | `clear_image` | writes one value over ranges of an image, in each aspect a range names | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
 | `dispatch` | runs a compute pipeline's workgroups, so many along each axis, with its bind sets and push constants, read as words once as they are recorded and shared by every submission | one bind set for each set of the pipeline's layout, each laid out as that set (`Error::Bindings`); the push constants exactly the layout's bytes (`Error::Shape`); counts within `max_workgroup_count` (`Error::TooLarge`); at most `MAX_DISPATCH_SETS` sets and `MAX_PUSH_BYTES` bytes (`Error::TooMany`, when recorded) |
 | `dispatch_indirect` | `dispatch` with its counts three little-endian words read from a buffer when it runs | the buffer made `INDIRECT` (`Error::Usage`), the offset whole words (`Error::Misaligned`), and twelve bytes within the buffer (`Error::OutOfRange`) |
+| `render_pass` | loads its attachments — keeping what each held or clearing it within the pass's area — runs the draws its closure records in order, and resolves its four-sample targets | some attachment (`Error::Empty`); each a two-dimensional view of one level and layer of an image made for the attachment use (`Error::Usage`, `Error::Shape`), in a format the device states the use and sample count of (`Error::Unsupported`), a depth-stencil view of all its format's aspects (`Error::Aspect`); all of one extent (`Error::Shape`) and sample count (`Error::Samples`), none overlapping another in memory (`Error::Overlap`); a resolve from four samples to one (`Error::Samples`) of the same extent and format (`Error::Shape`) the device resolves (`Error::Unsupported`); a clear of the format's kind, its depth within `0.0..=1.0` (`Error::Shape`); an area not empty (`Error::Empty`) and within the attachments (`Error::OutOfRange`); at most `max_color_attachments` targets (`Error::TooMany`), and `MAX_PASS_ATTACHMENTS` when recorded |
+| `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices or indices, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
 
 Recording checks only that what is named belongs to the context. Everything
 else is checked when a `Submission` carries the buffer to `Queue::submit`,
@@ -247,7 +331,14 @@ command buffers, `MAX_SUBMISSION_COMMANDS` commands, `MAX_SUBMISSION_POINTS`
 waits and as many signals. A refusal is a `SubmitError` naming the command,
 counted across the submission's command buffers, and changes nothing but the
 room its queues made ahead of it: no byte is written, no signal is queued, no
-fence is used. Nothing is clamped into range.
+fence is used. Nothing is clamped into range. A pass counts as a command and
+each of its draws as another, so a refusal names the draw.
+
+A draw's scissor is held to its pass's area, and its samples to its viewport.
+Its vertex attributes and indices
+past their buffers read zero, as a shader's accesses past a binding do; an
+attribute's format lacking a channel its input reads gives it zero, its alpha
+one.
 
 The bounds are security bounds rather than capacities: they cap the work one
 request asks of the checker and do not move to admit an oversize submission.
@@ -285,7 +376,12 @@ Releasing a timeline while queued work still waits on or signals it lets that
 work finish first.
 
 A dispatch's workgroups run in no order against each other; every command after
-it sees everything it wrote. An indirect dispatch whose counts, read when it
+it sees everything it wrote. So with a pass: its draws' samples are tested,
+blended and written in the order drawn, but the memory its shaders write is
+ordered with nothing else in the pass, and a pass that reads through a binding
+memory one of its shaders writes, or whose fragments store to one word, leaves
+what it read and that word to the device, as racing workgroups do; every
+command after it sees everything it wrote. An indirect dispatch whose counts, read when it
 runs, pass the device's loses its context (`Loss::Fault`), and a count of zero
 along an axis runs nothing.
 
@@ -346,6 +442,31 @@ its format's encoding: unsigned and signed normalised, integer and float
 channels, the sRGB transfer through tables made from `lib/colour`'s once a
 device, and the packed 10:10:10:2, 11:11:10 and 9:9:9:5 encodings.
 
+A pass locks every memory it reaches once, as a dispatch does: gathered from
+its attachments, its draws' buffers and each distinct set they bind and sorted
+once, so a pass of many draws costs its memories' logarithm. A run of draws
+of one pipeline and the same sets resolves their descriptors once. It runs its
+draws a flush at a time in bounded memory: up to 16 batches of 32 primitives
+of one instance, each batch's distinct vertices fetched and shaded a tile at a
+time and its primitives assembled, clipped, culled and set up, the batches
+spread across the runner's participants; then every bin of the pass's area a
+batch reaches is drawn across them. Bins are squares ruled from the
+framebuffer's origin, at most 128 pixels a side and small enough that their
+samples, every attachment's together, take at most 256 KiB, down to an 8×8
+block. A bin is drawn in place in the attachments' memory, its primitives in
+order: each piece of a primitive's clipped polygon set up as it is reached,
+its coverage found a block at a time, the covered quads packed sixteen to a
+fragment tile and shaded together, then each sample tested, blended and
+written in the order drawn. Bins meet at multiples of their side, where every
+attachment's texels start on a word as each row does, so bins drawn at once
+never write one word, and a pass leaves the same bytes however many
+participants draw it. The first flush
+clears every bin the pass clears before drawing in it, and the last resolves
+every bin, so a pass of no draws clears and resolves too. The tables a pass
+makes as it runs — its gathered memories, locks and views, each run's
+descriptors, its draws' own, a flush's batches and each participant's tile
+outputs — are charged when it is submitted.
+
 ## The interpreter
 
 A pipeline's entry point is lowered into a program for a *tile* of up to 64
@@ -372,6 +493,18 @@ kept live as long as the part; and a copy of the whole of one register into a
 fresh one of its size and class, where the first was written before and is
 last read there, gives the second its slot and goes, so a chain of insertions
 writes each part once.
+
+A vertex or fragment entry point is lowered as a compute one, its workgroup of
+one invocation: its located inputs and outputs, and the built-ins the fixed
+function feeds and takes, become ports onto the private words they are loaded
+from and stored to; the built-ins a tile's placing gives — `HelperInvocation`
+among them — are given. A vertex tile shades up to 64 of a batch's distinct
+vertices; a fragment tile sixteen 2×2 quads, a quad's lane bit 0 across and bit
+1 down. A helper lane — a quad's pixel its primitive does not cover — takes part
+in derivatives and makes no buffer store, atomic or image write; subgroup
+operations leave it out and it reads zero from them. A discarded lane ends, its
+tile told which, and a derivative across a lane that has ended reads its own
+lane's value.
 
 A tile runs each instruction over the span of its lanes in the block it is in,
 each value a plane of words, a lane apiece. It keeps every block's waiting
@@ -561,9 +694,12 @@ fill of the whole heap runs far past a deadline.
   push constants — and refuse a module, or a cube-array view, a device does not
   state the capability for.
 - The interpreter's tests run a case for every instruction the allow-list
-  admits a compute shader and every `GLSL.std.450` instruction, and fail when
-  one is admitted with no case; the instructions only a fragment shader runs
-  gain theirs with the fragment stage. The scalar tests pin every defined
+  admits and every `GLSL.std.450` instruction, and fail when one is admitted
+  with no case; the stage tests feed a vertex batch its indices and attributes
+  and take its position, take derivatives across a quad's row or column — a
+  helper's lent, a discarded neighbour's its own lane's — report a discarded
+  lane, choose an implicit level from a quad's derivatives, and keep a helper
+  from buffers, atomics and subgroup operations. The scalar tests pin every defined
   value; the control tests pin reconvergence after a selection, a loop each
   lane leaves at its own count, an early return and an unreachable loop body;
   the image tests read, write, fetch, sample, gather — a cube's across its
@@ -577,11 +713,36 @@ fill of the whole heap runs far past a deadline.
   a join after both its branches, a case fallen into from one declared after
   it, a phi past a line instruction, a negative 16-bit case, and a value the
   tile shares carried out of a loop another lane runs again.
+- The render pipeline tests make a pipeline and refuse each disagreement of
+  its stages, targets and state, an attribute past the device's locations, a
+  second colour read where its stage writes none or past the first target, and
+  a stage writing storage on a device not stating it. The pass tests refuse a
+  pass whose attachments or area disagree, a resolve into another extent or
+  from one sample, a draw its pipeline could not run, a draw binding or reading
+  as vertices or indices what its pass renders to — but only through the
+  stages that see it, and a depth-stencil attachment only tested read but not
+  written — and an attachment in a format the device does not render to. The
+  render tests pin the pixels of coverage and shared edges, each
+  interpolation qualifier across a near-plane clip, depth, depth bias, stencil,
+  blending, write masks and the blend constant, points and lines, strips, fans
+  and a restarted indexed strip, four samples resolved and masked, early and
+  late tests counted, discards, quads of many primitives blended in order, a
+  pass of many bins and flushes, a culled face and a flipped viewport, a pass
+  of no draws, a target no output writes and an output of fewer components, a
+  depth-fail operation written though a fragment stage shades, a viewport
+  smaller than its scissor, plain and flipped, a sample mask holding early
+  depth writes to its samples, and a fragment's `SampleMask` input and centroid
+  before its tests; they draw a pass to the same bytes on one participant,
+  several in reverse order and several threads, pass over a draw of billions of
+  empty instances, restarting or not, gather the memories of thousands of
+  draws' distinct sets once, resolve a large set shared by thousands of draws
+  once, charge a queued pass for its own bytes, and name a refused draw among
+  its pass's commands.
 - The lowering tests build one edge for a switch's many labels of one target,
   share runs of zeros, refuse constants past their budget, lay out a
   structure of the most members in one walk, leave another entry point's
-  variables alone, and read a level-of-detail query's coordinate; the
-  register tests widen ranges over a deep nest of loops and refuse widening
+  variables alone, read a level-of-detail query's coordinate, and give a vertex
+  and a fragment stage their ports and built-ins; the register tests widen ranges over a deep nest of loops and refuse widening
   past its steps.
 - The dispatch tests stop a module looping forever, a huge straight-line block
   and a fan-out of calls at the first check past their deadline, and refuse a
@@ -629,21 +790,23 @@ fill of the whole heap runs far past a deadline.
   giving the same bytes on one participant and several.
 - `cargo xtask miri` interprets the crate's tests and the submission fuzz
   harness for the contention its threads put `lib/rt`'s lock and condition
-  variable to, and for a dispatch's pieces sharing memory as atomic views on
-  threads of their own, which the determinism test runs at a size the
-  interpreter finishes. It skips the test that asks the host for an exbibyte,
+  variable to, and for a dispatch's pieces and a pass's bins sharing memory as
+  atomic views on threads of their own, which the determinism tests run at a
+  size the interpreter finishes. It skips the test that asks the host for an exbibyte,
   which the interpreter cannot represent, and the deadline, lowering- and
-  specialization-budget and instruction-case tests whose extent is their
-  assertion, and leaves out the `lowering_memory` binary, built to the lowering
+  specialization-budget, instruction-case and many-draw pass tests whose
+  extent is their assertion, and leaves out the `lowering_memory` binary, built to the lowering
   bound, and the `fuzz_shader` harness, whose runners deal their pieces on one
   thread; those run in full in the ordinary matrix. The crate forbids `unsafe`.
 - Loom has nothing to model. Every hand-off is made under a lock — the
   worker's wake flag, each piece's own workspace, the lease and the turns of
   the fair lock the device's model and every memory are had through included
   — or by the runner's join, but for these, none of which publishes anything
-  else. The cursor a dispatch's pieces claim workgroups from is a counter
-  whose every claim is its own range. The worker's running flag is a
-  set-once publication read with acquire ordering. The counts of the needs
+  else. The cursors a dispatch's pieces claim workgroups and a pass's claim
+  batches and bins from are counters whose every claim is its own range, each
+  batch then had under its own lock and each bin's words by one piece alone.
+  The worker's running flag is a set-once publication read with acquire
+  ordering. The counts of the needs
   pipelines hold are added to under the device's lock and taken from under
   the lease's as a hold drops: read under the device's lock alone, a count
   stale for a hold just dropped only keeps a free set larger until the next
@@ -652,5 +815,5 @@ fill of the whole heap runs far past a deadline.
   learns, under the lease's lock, whether any hold still covers each part of
   it. A budget is taken from only under the device's lock and
   given back from any thread as a charge drops, so a stale read can only
-  refuse. A dispatch's stop and fault flags carry no data, are only ever set,
-  and are read for their verdict after the join.
+  refuse. A dispatch's and a pass's stop and fault flags carry no data, are
+  only ever set, and are read for their verdict after the join.

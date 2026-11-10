@@ -36,8 +36,8 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP3.3 | The interpreter over `plans/SHADER.md`'s lowering view, compute pipelines and dispatch | done |
 | GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | in progress |
 | GP3.4.1 | `lib/raster`'s 3D stages, evolved in place: the converter's coverage as an integer half-plane predicate per edge its row walker and a block evaluator share, homogeneous clip-space clipping, perspective-correct, linear and flat interpolation, depth for every depth format and compare operation (its reciprocal depth the reversed-Z configuration), stencil, the four-sample lattice and the general blend; WinterSun's pictures unchanged | done |
-| GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, discards and the `InterpolateAt` family; the coverage test's fragment exception gone | planned |
-| GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped, set up and binned in bounded batches in parallel, its bins rasterised in parallel and loaded, stored and resolved | planned |
+| GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, and discards; the coverage test's fragment exception gone | done |
+| GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped and set up in bounded batches in parallel, its bins rasterised in parallel in place, cleared and resolved | done |
 | GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | planned |
 | GP4 | The pinned first-party pipeline set past the desktop's passes (GD6): OS chrome's draws and the game's passes as build-time SPIR-V, with their conformance cases | planned |
 | GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
@@ -254,8 +254,10 @@ device has not stated.
 - **`DeviceInfo`** states, beyond GP2's heaps, types, families and limits: the
   shader capabilities of `plans/SHADER.md`'s allow-list it runs; its optional
   features — anisotropic filtering and mirror-clamp-to-edge, and with GP3.4's
-  draws dual-source blending, logic operations, depth clamping, wide lines and
-  large points; each format's features; and its subgroup size. A statement is
+  draws dual-source blending, logic operations, depth clamping, wide lines,
+  large points, and storage writes and atomics from a vertex or a fragment
+  stage, which Vulkan 1.1 does not require; each format's features; and its
+  subgroup size. A statement is
   added with the creation-time check that reads it, never ahead of it. Each limit is either a fixed bound (§24.4)
   or, for the software device, a capacity derived from discovered memory.
 - **`Format`** — the 8-, 16- and 32-bit-per-channel unorm, snorm, uint, sint
@@ -312,14 +314,16 @@ device has not stated.
   operation. Creation refuses an entry point of another stage, a layout it
   disagrees with, a vertex input no attribute provides or provides as another
   component type, a fragment input no vertex output provides, a fragment
-  output with no target or of another component type, blending on a format
-  that does not blend, a capability, feature or format feature the device has
+  output with no target or of another component type, a second colour a
+  blend reads that its fragment stage does not write or for a target past the
+  first, blending on a format that does not blend, a capability, feature or
+  format feature the device has
   not stated, a workgroup or workgroup memory past the device's after
   specialization, and a program past the lowering budget. Immutable once made.
 - **Commands** — buffer-to-image, image-to-buffer and image-to-image copies and
   image clears; `dispatch` and `dispatch_indirect`; and `render_pass`, a `Pass`
   of colour attachments with optional resolves, an optional depth-stencil
-  attachment, a load and store action each, and an area. Its draws — `draw`,
+  attachment, each loaded — kept or cleared — and an area. Its draws — `draw`,
   `draw_indexed` and their indirect forms — are each a self-describing call
   naming its pipeline, bind sets, push constants, vertex and index buffers,
   viewport (of either height's sign), scissor, stencil reference and blend
@@ -337,8 +341,9 @@ device has not stated.
   are unordered. **Within a pass** a draw sees an earlier draw's attachment
   writes only through depth, stencil and blending, and the storage writes of a
   pass's draws are unordered within it and seen by every command after it; a
-  draw binding a view or buffer that overlaps an attachment the pass writes is
-  refused (a depth-stencil attachment the pass only tests may be sampled). That
+  draw whose stages see a view or buffer overlapping an attachment the pass
+  writes, or that reads one as vertices or indices, is refused (a
+  depth-stencil attachment the pass only tests may be read, not written). That
   is what lets a backend batch a pass's draws and keep its attachments on chip.
   A hardware backend derives the dependencies it needs from each command's
   resources and each entry point's static `Access`, which the validator states.
@@ -521,11 +526,15 @@ device has not stated.
   linear and flat interpolation; a depth stage for every depth format and
   compare operation, of which its reciprocal depth is the reversed-Z
   configuration; stencil; the four-sample lattice; and the general blend.
-  `lib/gpu`'s software backend drives those stages: it shades, clips, sets up
-  and bins a pass's draws in bounded batches in parallel, then rasterises its
-  bins in parallel, each bin's primitives in order and its colour, depth and
-  stencil samples in a buffer of its own, loaded and stored as the pass's
-  actions say and resolved there. WinterSun's renderer is a configuration of
+  `lib/gpu`'s software backend drives those stages: it shades, clips and sets
+  up a pass's draws in bounded batches in parallel, then rasterises its bins in
+  parallel, each bin's primitives in order, in place in the attachments'
+  memory — bins meet where every attachment's texels start on a word, so they
+  never share one — cleared on the first flush and resolved on the last. A
+  pass's loads keep or clear; it has no discard loads or store operations,
+  whose contents a device may choose and which on a device drawing in place
+  would save nothing: a tiling backend that gains by them adds them with their
+  meaning fixed. WinterSun's renderer is a configuration of
   the same stages until WS19 routes it through `lib/gpu`.
 - **The rules a picture depends on are stated.**
   - A point is the square of side `PointSize`, clamped to `1..=max_point_size`
@@ -549,8 +558,13 @@ device has not stated.
     shader does undoes them. Without it, they are tested before shading only
     where the result cannot differ — no storage or image writes or atomics, no
     `FragDepth`, and where the shader can discard or change coverage, no stencil
-    fail or depth-fail operation but keep, writing only after shading. A pixel
-    that fails an early test stays in its quad as a helper. Quads of several
+    fail or depth-fail operation but keep: a failing sample's outcome written
+    then, a passing one tested again and written after shading. A pixel that
+    fails an early test stays in its quad as a helper. The pipeline's sample
+    mask applies before any test, and the `SampleMask` input and centroid are
+    the coverage before them. A primitive clipped to its guard band has its
+    samples held to its viewport's rectangle, so a draw touches no pixel outside
+    it. Quads of several
     primitives share a tile; every per-sample test, blend and write is made in
     primitive order.
   - Derivatives are fine, taken per quad row and column. The level of detail,
@@ -567,7 +581,8 @@ device has not stated.
 
 What neither Vulkan 1.1 requires nor this section names as a stated feature —
 geometry and tessellation stages, mesh and ray-tracing pipelines, per-sample
-shading, sparse resources, and sample counts other than 1 and 4, among them —
+shading and the `InterpolateAt` family, whose capability Vulkan grants only
+with it, sparse resources, and sample counts other than 1 and 4, among them —
 is outside it until a consumer states its reason, and is revisited when §11's
 second open decision sets GP10's target.
 
@@ -1138,14 +1153,13 @@ Each needs sign-off before the item that depends on it; none is assumed.
     charged to its limit and refused past it; and a harness lowers and runs the
     fuzzed admitted modules over random inputs, held total and contained.
   - **GP3.4**: the instructions only a fragment shader runs — derivatives,
-    implicit-level samples and queries, discards and the `InterpolateAt` family
-    — gain their interpreter cases, and the coverage test's fragment exception
-    goes; `lib/raster`'s row walker and block evaluator agree on every
+    implicit-level samples and queries, and discards — gain their interpreter
+    cases, and the coverage test's fragment exception goes; `lib/raster`'s row walker and block evaluator agree on every
     sample under a property test, and WinterSun's pictures are unchanged
     through the evolved stages; points, lines and fans, a near-plane clip of
     each interpolation qualifier, centroid, per-sample depth, `SampleMask`,
     alpha-to-coverage, `EarlyFragmentTests`, overlapping quads in one tile and
-    every resolve each pin their pixels; a pass larger than its bin budget
+    every resolve each pin their pixels; a pass of many bins and flushes
     renders whole; `tests/fuzz_gpu.rs` generates images, bind sets, passes,
     draws and dispatches as it does copies.
 - **GP4**: the pinned modules are regenerated reproducibly, verify-mode fails on

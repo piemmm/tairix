@@ -7,7 +7,7 @@
 //! samples — reads what a texel of zeros decodes to, zero in every channel
 //! the format holds and one for an alpha it lacks, and writes nothing.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::AtomicU32;
 
 use tairix_spirv::Component;
 use tairix_util::mathf;
@@ -19,7 +19,7 @@ use crate::image::ViewDimension;
 use crate::sampler::{AddressMode, BorderColor, CompareOp, Filter, SamplerDesc, MAX_LOD_BIAS};
 use crate::software::shader::ir::{Image, ImageOp, Num, Reg, LANES};
 use crate::software::shader::ops;
-use crate::software::texel::{self, missing, Plane, ONE};
+use crate::software::texel::{self, missing, put_raw, raw_at, Plane, ONE};
 
 /// A texel as a shader reads it: four words.
 type Texel = [u32; 4];
@@ -100,7 +100,11 @@ impl Machine<'_, '_, '_> {
         // A uniform handle names one descriptor for every lane.
         let first = self.mask.trailing_zeros() as usize;
         let uniform = image.handle.is_uniform().then(|| self.bound(image, first));
-        for lane in each_lane(self.mask) {
+        let lanes = match image.op {
+            ImageOp::Write { .. } => self.mask & !self.place.helpers,
+            _ => self.mask,
+        };
+        for lane in each_lane(lanes) {
             let bound = uniform.unwrap_or_else(|| self.bound(image, lane));
             let Some(result) = self.image_lane(image, &bound, lane) else {
                 continue;
@@ -926,71 +930,6 @@ fn buffer_texel(
         _ => [0; 4],
     };
     texel::decode(format, Plane::Colour, raw, srgb)
-}
-
-/// The `bytes` bytes at byte `byte` of `words`, as up to four words: each
-/// word they touch loaded once.
-fn raw_at(words: &[AtomicU32], byte: u64, bytes: u64) -> [u32; 4] {
-    let bytes = bytes.min(16);
-    let skew = byte % 4;
-    let first = byte / 4;
-    let mut stored = [0u32; 5];
-    let touched = (skew + bytes).div_ceil(4);
-    for (k, slot) in (0..touched).zip(&mut stored) {
-        *slot = usize::try_from(first + k)
-            .ok()
-            .and_then(|i| words.get(i))
-            .map_or(0, |w| w.load(Ordering::Relaxed));
-    }
-    let mut raw = [0u32; 4];
-    for (k, slot) in raw.iter_mut().enumerate() {
-        let low = stored.get(k).copied().unwrap_or(0);
-        let high = stored.get(k + 1).copied().unwrap_or(0);
-        *slot = if skew == 0 {
-            low
-        } else {
-            low >> (8 * skew) | high << (32 - 8 * skew)
-        };
-    }
-    for (k, slot) in (0u64..).zip(&mut raw) {
-        let kept = bytes.saturating_sub(4 * k).min(4);
-        if kept < 4 {
-            *slot &= (1u32 << (8 * kept)).wrapping_sub(1);
-        }
-    }
-    raw
-}
-
-/// Write the first `bytes` bytes of `raw` at byte `byte` of `words`: whole
-/// words stored, a part of one cleared and set.
-fn put_raw(words: &[AtomicU32], byte: u64, bytes: u64, raw: [u32; 4]) {
-    let mut k = 0;
-    while k < bytes.min(16) {
-        let at = byte + k;
-        let Some(word) = usize::try_from(at / 4).ok().and_then(|i| words.get(i)) else {
-            return;
-        };
-        let within = at % 4;
-        let take = (4 - within).min(bytes - k);
-        // The bytes from `k` on may straddle two of `raw`'s words.
-        let part = |index: u64| {
-            usize::try_from(index)
-                .ok()
-                .and_then(|i| raw.get(i))
-                .map_or(0, |&word| u64::from(word))
-        };
-        let pair = part(k / 4) | part(k / 4 + 1) << 32;
-        let source = low32(pair >> ((k % 4) * 8));
-        if within == 0 && take == 4 {
-            word.store(source, Ordering::Relaxed);
-        } else {
-            let field = u32::MAX >> (32 - take * 8);
-            let shift = within * 8;
-            word.fetch_and(!(field << shift), Ordering::Relaxed);
-            word.fetch_or((source & field) << shift, Ordering::Relaxed);
-        }
-        k += take;
-    }
 }
 
 /// How many of a view's coordinates address within a layer.

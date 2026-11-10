@@ -274,6 +274,48 @@ impl Viewport {
         }
     }
 
+    /// Clip the segment `a`–`b`, clip-space positions `[x, y, z, w]`, by the
+    /// planes a triangle is clipped by, and map what remains onto the
+    /// viewport: its two ends, each a share of the segment's own — its
+    /// weights' first for `a` and second for `b`, their third nought — or
+    /// `None` where nothing survives or an end is not finite.
+    #[must_use]
+    pub fn clip_line(&self, a: [f64; 4], b: [f64; 4]) -> Option<[Mapped; 2]> {
+        if a.iter().chain(&b).any(|value| !value.is_finite()) {
+            return None;
+        }
+        let planes: &[ClipPlane] = if self.clamp { &CLAMPED } else { &CLIPPED };
+        let mut ends = [
+            Cut {
+                at: a,
+                weights: [1.0, 0.0, 0.0],
+            },
+            Cut {
+                at: b,
+                weights: [0.0, 1.0, 0.0],
+            },
+        ];
+        for &plane in planes {
+            let distances = ends.map(|end| self.distance(plane, &end.at));
+            match (distances[0] >= 0.0, distances[1] >= 0.0) {
+                (true, true) => {}
+                (false, false) => return None,
+                (inside, _) => {
+                    let (kept, moved) = if inside { (0, 1) } else { (1, 0) };
+                    let t = distances[kept] / (distances[kept] - distances[moved]);
+                    let (from, to) = (ends[kept], ends[moved]);
+                    ends[moved] = Cut {
+                        at: self.onto(plane, between(&from.at, &to.at, t)),
+                        weights: between(&from.weights, &to.weights, t),
+                    };
+                }
+            }
+        }
+        let w = [a[3], b[3], b[3]];
+        let [first, second] = ends;
+        Some([self.map(&first, w)?, self.map(&second, w)?])
+    }
+
     /// `corner`, one the clip kept of a triangle whose corners' `w` are `w`,
     /// on the viewport, or `None` where it would leave the converter's range.
     fn map(&self, corner: &Cut<[f64; 4]>, w: [f64; 3]) -> Option<Mapped> {
