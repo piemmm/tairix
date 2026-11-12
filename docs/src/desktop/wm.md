@@ -1719,6 +1719,10 @@ memory model, two mechanisms suited to two different kinds of memory.
   (`WindowPane::present_list`), presenting nothing before it. A present
   against a released window is refused `NotAttached` rather than reading a
   mapping neither side has.
+- **A covered window is not released.** A screensaver, the lock or a dark
+  display leaves every window visible to the compositor, so no release takes
+  its pixels; the session tells its client instead (`WindowEvent::Shown`, in
+  [the session](./session.md)), and uncovering shows the pixels it kept at once.
 - **A window nobody can see is not asked to present.** Asking one would have
   its client establish the buffer the release just freed, for pixels nobody can
   see: the release would free nothing and cost a repaint per hidden window,

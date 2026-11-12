@@ -1106,3 +1106,65 @@ fn a_cycle_that_costs_a_whole_period_still_parks_for_one() {
         "a cycle before the adopted deadline samples nothing"
     );
 }
+
+/// No panel model is built for a window closed or not on show, however the
+/// machine moves; showing the window builds it from the newest sample.
+#[test]
+fn a_window_closed_or_not_on_show_costs_no_model_until_it_is_shown() {
+    let records = |pid| {
+        alloc::vec![process_record(
+            pid,
+            test_proc_id(pid),
+            DEFAULT_UID,
+            ProcessState::Running,
+            b"task"
+        )]
+    };
+    let first = ProcessListTransport::new(records(10));
+    let second = ProcessListTransport::new(records(20));
+    let pids = |service: &Service| -> Vec<ProcId> {
+        service
+            .panel()
+            .model()
+            .model
+            .tasks
+            .iter()
+            .map(|task| task.proc_id)
+            .collect()
+    };
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, (None, None), GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &first, 0, &NO_AUTHORITY);
+    assert!(pids(&service).is_empty(), "no window, no model");
+    assert_eq!(host.published.len(), 1, "the tray is told all the same");
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+        &NO_AUTHORITY,
+    );
+    assert_eq!(pids(&service), [test_proc_id(10)], "opening builds it");
+    service.panel_mut().flush(&mut host);
+    let presents = host.presents;
+
+    service.set_shown(&mut host, &NO_AUTHORITY, false);
+    service.cycle(&mut host, &second, crate::SAMPLE_PERIOD_NS, &NO_AUTHORITY);
+    service.panel_mut().flush(&mut host);
+    assert_eq!(
+        pids(&service),
+        [test_proc_id(10)],
+        "not rebuilt while hidden"
+    );
+    assert_eq!(host.presents, presents, "nor presented");
+
+    service.set_shown(&mut host, &NO_AUTHORITY, true);
+    assert_eq!(
+        pids(&service),
+        [test_proc_id(20)],
+        "shown, it reads the newest sample"
+    );
+    service.panel_mut().flush(&mut host);
+    assert_eq!(host.presents, presents + 1);
+}

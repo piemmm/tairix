@@ -64,6 +64,7 @@ lie about.
 | — | The shared selection-identity rule, the one list walk (`ListInfo::offer`), `PressureClock`, `FaultClock`, the `ProcId` crash match | — | S4 | done |
 | — | Recovery's interior: fault cards, detail tabs, impact stack, action rail, resolved tally | — | S4 | done |
 | — | The eight controls this surface already contributed to `lib/controls` | — | S7 | done |
+| **Z2** | A window nobody can see costs nothing: no model is built for a window closed, minimised, given back or under a covered desktop, nothing is presented for it, and the sample and the tray go on | — | S12 | done |
 
 **A1 through X4 are one change, and it is a large one.** A1 deletes four
 sections, so every pane that absorbs their readings has to exist in the same
@@ -1373,6 +1374,16 @@ this wrong on.
 - **The frame report never measures this window.** The suppression rule in S4
   is a responsiveness obligation as much as an honesty one: without it the
   Graphics pane re-excites its own repaint forever.
+- **A window nobody can see costs nothing.** `WindowEvent::on_show` decides
+  it: minimised, its pixels given back, or the desktop covered (`Shown` —
+  a screensaver, the lock, a dark display, another session on the screen).
+  While it is not on show the cycle still samples and publishes, so the tray
+  and the meters' history go on, but no model is built (`Service::cycle`
+  rebuilds only through `rebuild_if_shown`, which asks `Panel::is_on_show`)
+  and `Panel::flush` presents nothing, keeping what the window owes. Shown
+  again, the newest sample is built into the model once and what moved is
+  presented once. A window closed costs no model either; opening one builds
+  it first.
 
 ## S13 — Open: what the storyboards still show that the surface does not
 

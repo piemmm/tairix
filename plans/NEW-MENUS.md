@@ -22,6 +22,7 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M8 | A row may name class artwork by asset id (`AppMenuItem::with_icon_asset`) | **done** |
 | M9 | The *Info* child is a sheet, and dies with its application | **done** |
 | M10 | Every row states its function: the closed `AppMenuSymbol` vocabulary, a mark gutter beside the icon column, the danger hue on a destructive row's symbol, glyphs rasterised once per chain | done |
+| M11 | A row whose work is done in place may be chosen with the chain kept up: a secondary click chooses it and lights it a moment, the owner restates the rows, and every answer names the revision of the rows it was chosen from | done |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
 moves to 80% opacity as one shared value, and the blur stays the one the
@@ -79,6 +80,7 @@ stage that closes it carries its regression test (§2.18, §7).
 | D32 | `render::selection_name_rect` landed with its own regression test and **no caller**: `files.app` still drew the in-place rename editor at `selection_rect`, the whole item rectangle, in both the paint and the key-handling bounds. The geometry was fixed and the defect it was for was not, which a host test over the primitive alone could never show. **Closed in M6**: both sites take the name rect, and `selection_rect` — whose last consumer this was — is deleted rather than left as a wrapper with no caller. | **closed in M6** |
 | D34 | The grab began one drain too late. `DesktopShell::pump` applied every queued pointer event before the serve loop routed any outcome, so on a busy desktop a right-click on a slot and the click on the row it asks for were drained together: the row click was hit-tested against what lay behind a chain that did not exist yet, and the chain then opened with nothing left to choose it — the nightly soak's `appbar-qemu-aarch64` hang. The keyboard drain had the same flaw (whether a chain held the seat was read once, before the pointer outcomes that could open one), and `drain_menu_chain` handed one key to a chain the pointer had already closed. **Closed**: `pump` stops at each edge (any event but a motion or scroll sample) and says so (`Stopped::AtEdge`); the seat drain (`tairix_desktop_session::SeatDrain`, host-tested rather than living in the freestanding serve loop) drains the rest into whoever holds the seat by then in the same wake and at the same instant — so a gesture an edge split is still timed as one — re-reads the holder before every key, and drains into a chain only while it is open. Regression tests `a_row_click_queued_behind_the_press_that_opens_a_bar_menu_is_the_chains` (driving the real drain) and `pump_stops_at_each_edge_and_leaves_the_rest_queued`. | **closed in M2** |
 | D35 | A plate's first and last rows laid their highlight, selection rail and focus ring square, and the band filled its heading ground square over a plate already rounded, so at the plate's corners each covered the rim's arc and reached past the silhouette — hidden only because the compositor cut every plate a second time, which weakened its anti-aliased edge twice. **Closed**: row marks are clipped to the plate's interior shape (`PlateInterior`), the band's ground is laid by the plate (`paint_titled_surface_plate`), and every chain surface is presented `Corners::Painted` (`plans/COMPOSITOR-WORK.md` L). Regression tests in `lib/controls`' `menu_tests` and `userland/gui/session` assert that nothing a plate draws reaches past its own arc. | **closed** |
+| D36 | `music.app` asked for the output devices as its menu opened but built the menu from the list it already held, then read a chosen device row against whatever list had landed since, so a device added or gone while the menu was up made a row choose another device than the one it named. The menu now offers the devices it was built with, a device row is read against them, and a fresh list is shown under a revision of its own (M11). | **closed in M11** |
 
 **This is an architecture change, not a performance one.** The ~300 ms
 context-menu stall that first prompted it was a kernel defect and is closed
@@ -315,9 +317,11 @@ never a second model with a second set of behaviours (§2.2).
    piece of seat state, not a set.
 2. **The app describes; the desktop decides (§5.4).** An app sends a model
    and an anchor. The session titles, places, draws, grabs, routes,
-   dismisses, and answers with *one* outcome. An app never learns pointer
-   positions inside a menu, never draws a plate pixel, and cannot pin a
-   chain open.
+   dismisses, and answers with *one* outcome, telling the app along the way
+   of each row the user chose with the chain kept up. An app never learns
+   pointer positions inside a menu, never draws a plate pixel, and cannot pin
+   a chain open: only the user's secondary click keeps one up, and only on a
+   row the app declared may stay.
 3. **One renderer, one behaviour.** The service drives `lib/controls`' `Menu`
    for rows and `TitleBar` for bands. No second menu widget, no second
    title-bar control, no per-app menu shell. Migrating a surface **deletes**
@@ -996,6 +1000,64 @@ and a redrawn picture lands in every menu at once.
   (`ChainModel::resolve_glyphs`; `Menu::resolve_glyphs` for a menu built
   alone) and kept on the model row, so a highlight move tints two retained
   masks and a submenu reopened at the same side rasterises nothing.
+
+### M11 — choosing with the chain kept up
+
+A secondary click on a row whose work is done where the menu is chooses it and
+keeps the chain up; a primary click still ends it. The row is drawn in the
+accent for `MENU_ACKNOWLEDGE_NS` (160 ms), a deadline folded into the seat's
+park, and the owner then restates what the choice changed.
+
+- **The row says, never the gesture.** `AppMenuItem::repeatable` crosses the
+  wire as `APP_MENU_ROW_FLAG_REPEATABLE`; the decoder refuses it on any row that
+  is not a chooseable item and on a row whose choice is its quick-entry field.
+  `ChainRow::repeatable` is the desktop's own form, and a row with no id cannot
+  carry it (`ChainRow::is_repeatable`). Where a row may not stay — it opens a
+  window, a picker, an alert or a field, closes or quits, or ends or destroys
+  what the menu acts on — a secondary click does what a primary one does, and on
+  a row with no command it opens the row's child.
+- **`MenuBuilder` classifies once.** Every `mark` and `radio` row stays, as does
+  any `repeating` row; a `command`, `command_mark` or `command_radio` row asks
+  its command's `MenuCommand::acts_in_place`, which TextEdit, Paint and Draw
+  implement once beside their command enums and build every typed row through,
+  so a switch that opens a window (Paint's *Float palette*) does not stay.
+- **A kept choice is not an answer.** `WindowEvent::MenuChosen { window_id,
+  open_id, revision, item }` tells the owner; the open's one `MenuClosed` is
+  still owed. `WindowRequest::RestateMenu { window_id, open_id, revision,
+  menu }` is the open's owner's alone: one crossing the answer is accepted and
+  restates nothing, any other open's is refused.
+- **An answer names the rows it was chosen from.** `revision` is the
+  application's own number, never interpreted by the session, handed back with
+  every `MenuChosen` and `MenuClosed`; the open's rows answer
+  `MENU_OPEN_REVISION`. A menu whose row ids keep one meaning in every
+  statement restates under that and reads every answer alike; one whose ids are
+  places in a list that can move (the network map's node menu, the music
+  player's output devices) numbers its statements through
+  `tairix_window::menu::MenuStatements`, which resolves a row against the rows
+  shown or the statement their last restate replaced, and refuses any older.
+- **A restate keeps the chain where it is.** Each plate whose opener the new
+  rows still have keeps its place, pin, band, open row and highlight, carried by
+  row identity — the same id, or for a row naming none the same label opening
+  the same kind of child, each new row standing for one old row at most — so
+  rows put above or between move nothing the user is on. A pinned plate is
+  measured for its new rows at its origin and clamped onto the screen; a drag
+  under way carries on with the band that took the press. The first plate whose
+  opener has gone closes with everything beneath it; the information sheet and
+  the entry field stay only where the row still offers them, the field with its
+  text. Rows identical to those shown — pictures adopted first — are a
+  comparison, nothing more.
+- **The desktop's own menus follow their state** in process: the backdrop's
+  sort and arrangement rows as a settings publish lands, the capture bar's
+  options, a launcher program's favourites rows as the shelf moves, and an
+  application's declared icon-bar menu as it re-declares — its information
+  sheet sourced from the attested bundle exactly as at the open.
+- **Clients.** Every application that opens a window menu handles
+  `MenuChosen`: the terminal, View, the file manager (Cut, Copy, Select All,
+  Clear Selection and Display's views and orders, restated over the candidates
+  and documents the open offered), the network map, Patience, music, the PC
+  emulator's card and machine menus, the Switchboard (which restates when a
+  task's verdicts move with the next sample) and the document host for
+  TextEdit, Paint and Draw.
 
 ## 6. Decisions required (§15.7)
 

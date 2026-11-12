@@ -14,6 +14,19 @@ use crate::link::layout::PIXEL;
 /// card's dots and lines.
 pub const ASPECT: (u32, u32) = (4, 3);
 
+/// A VGA screen's dots and lines, which a machine window opens to show at one
+/// pixel a dot.
+pub const VGA_SCREEN: (u32, u32) = (640, 480);
+
+const _: () = assert!(VGA_SCREEN.0 * ASPECT.1 == VGA_SCREEN.1 * ASPECT.0);
+
+/// The client a machine window opens at over a bar `bar` pixels tall: a VGA
+/// screen at one pixel a dot, the picture [`fit`] places, above the bar.
+#[must_use]
+pub const fn opening_extent(bar: u32) -> (u32, u32) {
+    (VGA_SCREEN.0, VGA_SCREEN.1.saturating_add(bar))
+}
+
 /// The largest picture of the monitor's shape a `width`×`height` window
 /// holds, centred, on whole pixels; `None` for a window too small to hold
 /// one.
@@ -84,7 +97,7 @@ pub fn thumbnail(width: u32, height: u32, pixels: &[u8], size: (u32, u32)) -> Op
 }
 
 /// The narrowest a screenshot is: a VGA screen's width.
-const SHOT_WIDTH: u32 = 640;
+const SHOT_WIDTH: u32 = VGA_SCREEN.0;
 
 /// A `width`×`height` frame of `pixels` as its monitor showed it, for keeping
 /// as a picture: four units wide for every three high, each of the card's

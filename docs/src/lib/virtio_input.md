@@ -64,9 +64,12 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   surface — `INPUT_PROP_DIRECT`, or no `INPUT_PROP_POINTER`, is a
   touchscreen; `INPUT_PROP_BUTTONPAD` a clickpad; otherwise a touchpad —
   and a stated resolution gives it its physical size. `BTN_LEFT`/`RIGHT`/
-  `MIDDLE` ride the frame as its buttons and `MT_TOOL_PALM` marks a palm. On
-  `SYN_DROPPED` everything up to the next report is discarded and that report
-  lifts every contact, so lost events never leave a finger down.
+  `MIDDLE` ride the frame as its buttons and `MT_TOOL_PALM` marks a palm; a
+  gear press turns the wheel exactly as on a pointer, since QEMU sends a
+  mouse's buttons and wheel to the device taking buttons that was activated
+  last, which may be the touchscreen. On `SYN_DROPPED` everything up to the next report
+  is discarded and that report lifts every contact, so lost events never leave
+  a finger down.
   `touch_lifted` is the frame a driver injects when its device stops.
 - **`VIRTIO_INPUT_DEVICE_ID`**: the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from — the single source of truth the device

@@ -20,7 +20,9 @@ Cychwyn, neu glic dwbl, yn cychwyn y peiriant a ddewiswyd mewn ffenestr ei
 hun, neu'n codi ei ffenestr; mae sawl peiriant yn rhedeg ar yr un pryd. Mae
 Gosodiadau yn newid caledwedd peiriant tra bo wedi'i ddiffodd, mae Dyblygu yn
 copïo peiriant gyda'i ddisgiau, ac mae Dileu yn dileu un gyda'i ddisgiau
-unwaith y caiff hynny ei gadarnhau. Y tro cyntaf iddo gychwyn, mae PCEmulator
+unwaith y caiff hynny ei gadarnhau. Mae clicio'r botwm de ar deilsen peiriant yn
+cynnig y rhain ar gyfer y peiriant hwnnw, a dewislen y peiriant hefyd tra bo'n
+rhedeg. Y tro cyntaf iddo gychwyn, mae PCEmulator
 yn gwneud XT turbo. Mae'r hyn y mae peiriant yn ei ysgrifennu i'w ddisgiau, a'r
 amser y gosodwyd ei gloc iddo, yn cael eu cadw o un rhediad i'r nesaf.
 
@@ -43,9 +45,9 @@ Allan. Mae delwedd disg hyblyg a ollyngir ar y ffenestr yn mynd i'r gyriant
 y caiff ei gollwng arno, neu fel arall i'r cyntaf, ac ni ellir ysgrifennu
 iddi yno.
 
-Ar ben draw'r bar hwnnw, mae dewislen y peiriant yn oedi'r peiriant, yn ei
-ailosod, yn anfon Ctrl+Alt+Delete ato, ac yn gosod cyflymder ei brosesydd ar
-gyfer y rhediad. Mae Arddangos yn troi llinellau sganio, tywyn, ôl-olau'r
+Ar ben draw'r bar hwnnw, mae'r botwm Peiriant yn agor dewislen y peiriant, sy'n
+oedi'r peiriant, yn ei ailosod, yn anfon Ctrl+Alt+Delete ato, ac yn gosod
+cyflymder ei brosesydd ar gyfer y rhediad. Mae Arddangos yn troi llinellau sganio, tywyn, ôl-olau'r
 ffosffor, sŵn a siglo'r llun ymlaen ac i ffwrdd, ac mae'r peiriant yn cadw'r
 hyn a ddewisir. Mae Tynnu Sgrinlun yn cadw sgrin y peiriant fel llun PNG lle
 mae'r panel Cadw yn ei ddweud. Mae Sgrin Lawn yn llenwi'r dangosydd â'r
@@ -90,10 +92,13 @@ dilyn pwyntydd y bwrdd gwaith lle bynnag y mae dros y llun. Mae rhaglen sy'n
 darllen y llygoden ei hun yn ei chymryd pan gaiff y llun ei glicio, ac yn ei
 rhoi'n ôl pan gaiff y fysell Meta ei tharo'n ysgafn.
 
-Mae cau ffenestr y llyfrgell yn gadael i beiriannau sy'n rhedeg ddal i redeg,
-ac mae Llyfrgell Peiriannau yn newislen y bar eiconau yn dod â hi'n ôl. Mae pob
-peiriant yn rhedeg mewn gweithiwr ei hun nad oes ganddo unrhyw awdurdod o
-gwbl: nid oes neb byth yn ymddiried yn ei feddalwedd na'i ddisgiau.
+Mae cau ffenestr y llyfrgell yn gadael i beiriannau sy'n rhedeg ddal i redeg, ac
+mae cau pob ffenestr yn gadael yr efelychydd ar y bar eiconau: mae clic ar ei
+eicon, neu Llyfrgell Peiriannau yn ei ddewislen, yn dod â'r llyfrgell yn ôl, ac
+mae Gadael yn y ddewislen honno yn atal pob peiriant sy'n rhedeg dros dro ac yn
+dod â'r efelychydd i ben. Mae pob peiriant yn rhedeg mewn gweithiwr ei hun nad
+oes ganddo unrhyw awdurdod o gwbl: nid oes neb byth yn ymddiried yn ei
+feddalwedd na'i ddisgiau.
 
 ## OPTIONS
 
@@ -102,6 +107,6 @@ gwbl: nid oes neb byth yn ymddiried yn ei feddalwedd na'i ddisgiau.
 
 ## EXIT STATUS
 
-Sero unwaith y caiff ei ffenestr olaf ei chau. Heb fod yn sero pan wrthodwyd sianel
-y ffenestr, blwch post y digwyddiadau, neu sesiwn y bwrdd gwaith; nodir y
-rheswm ar y ffrwd gwallau safonol.
+Sero unwaith y dewisir Gadael yn ei ddewislen ar y bar eiconau. Heb fod yn sero
+pan wrthodwyd sianel y ffenestr, blwch post y digwyddiadau, neu sesiwn y bwrdd
+gwaith; nodir y rheswm ar y ffrwd gwallau safonol.

@@ -348,7 +348,10 @@ sort orders, the two arrangements, `Tidy Up ▸ By Name / By Date / By Size`,
 `Refresh`, `Open Desktop Folder`, and `Change Background…`, with the sort and
 the arrangement in force shown as their group's chosen member and not offered
 again. *Tidy Up* lays every icon out on the grid in the order chosen, from the
-arrangement's corner, and keeps them there in one write.
+arrangement's corner, and keeps them there in one write. The sort, arrangement,
+*Tidy Up* and *Refresh* rows may be chosen with the menu kept up
+([menus](./menus.md#choosing-with-the-menu-kept-up)); the menu follows the
+setting as the choice lands.
 
 Managing an entry — rename, copy, delete, properties — is deliberately
 absent. Those verbs belong to [the file manager](./apps.md), which owns them

@@ -30,6 +30,9 @@ output and whether tracks are levelled by the loudness their own tags state.
 
 A file the player cannot read is left out with its reason on the status line.
 
+Closing the window leaves the player on the icon bar, playing on: a click on
+its icon brings the window back, and Quit in its menu ends the player.
+
 * `Space` — play or pause
 * `Enter` — play the track selected
 * `Left` / `Right` — ten seconds back or on
@@ -50,6 +53,6 @@ A file the player cannot read is left out with its reason on the status line.
 
 ## EXIT STATUS
 
-Zero after the window is closed or Quit is chosen. Non-zero when the window
+Zero once Quit is chosen in its icon-bar menu. Non-zero when the window
 channel, the shared frame region, or the desktop session was refused; the
 reason is stated on the standard error stream.

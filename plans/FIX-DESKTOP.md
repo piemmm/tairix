@@ -35,6 +35,8 @@
 | DESK-29 | No window-channel request is awaited on an interactive loop: every request posted, data answers landed for the loop to take, a present never waits | done |
 | DESK-30 | Every windowed application, component and the document host on DESK-28 and DESK-29 | done |
 | DESK-31 | Draw repaints what an input changes: a drag's marks, what follows an edit, where a tile lands | done |
+| DESK-32 | A window nobody can see draws nothing: the session tells each served window when the desktop is covered and uncovered, and the Switchboard, Widgets, Files and Patience pause | done |
+| DESK-33 | The applications that still draw on a timer while not on show — PCEmulator, Terminal's animated effects, View's animations, Network Map's animation, Music and Sapper's clock — present nothing until shown | planned |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -1429,6 +1431,37 @@ Each stage is independently reviewable and must leave the whole-project
   gesture, Shift and Alt, typing, nudges, tool keys, inspector changes, a
   landing and pressure, each also bounding what of the canvas it repaints.
 
+### DESK-32 — A window nobody can see draws nothing
+- A screensaver, the lock, a dark or absent display and another account's
+  session on the screen leave every window visible to the compositor, so no
+  event said nobody could see one, and an application drawing on a timer —
+  the Switchboard, every two seconds — kept rendering and presenting under
+  the cover. `WindowEvent::Shown { window_id, shown }` says it, and
+  `WindowEvent::on_show` reads it beside `Minimized`, `ContentReleased` and
+  the events that show a window again.
+- Before each park the session reads whether anyone can see the desktop and,
+  on each edge, tells the served windows (`SessionWindows::follow_desktop_shown`):
+  covering tells each window on screen and each yet to present its first
+  frame; uncovering tells those of them still so, never one minimised
+  meanwhile; a window opened while covered is told as it opens; a minimised
+  one is told nothing. The hold-back folds `Shown` as a state edge.
+- The Switchboard builds no model and presents nothing for a window not on
+  show, and none for a window closed, while it still samples and publishes;
+  shown again it builds the newest sample once. Widgets and Files pause their
+  motion through `on_show`, and Patience its clock through `set_visible`.
+- Tests: the covering rules over on-screen, unpresented, minimised and
+  opened-while-covered windows; the event's wire form; the hold-back fold;
+  the Switchboard's panel and service gates.
+
+### DESK-33 — The rest stop drawing while not on show
+- Each of these draws on a one-shot deadline whether or not it can be seen:
+  PCEmulator presents a frame per refresh, Terminal steps its animated screen
+  effects, View its animations, Network Map its animation, Music its playback
+  readings and Sapper its clock. Each follows `on_show` as Patience does: the
+  machine, the game or the playback runs on, but nothing is rendered or
+  presented, and the deadline that only draws is not armed, until the window
+  is shown again, when it presents what it shows now.
+
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs off its loop, on the
   reader serving the volume it touches (`plans/NEW-FILEMANAGER.md` FM25), and
@@ -1709,6 +1742,10 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-31.** Draw repaints what an input changes: a hover the controls it
   crosses and the pointer's reading, a drag's move its marks, an edit the
   overlay and the parts that follow it, a landing where it lands.
+- **DESK-32.** Every served window is told when nobody can see the desktop and
+  when it shows again, once per edge; the Switchboard, Widgets, Files and
+  Patience draw nothing meanwhile, and the Switchboard builds no model for a
+  window not on show.
 
 ---
 

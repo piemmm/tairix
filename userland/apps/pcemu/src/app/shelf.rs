@@ -40,6 +40,14 @@ pub enum Request {
     Duplicate(u32),
     /// Delete machine `id`, once asked.
     Delete(u32),
+    /// Machine `id`'s menu, at `at` in the window: a secondary press on its
+    /// card.
+    Menu {
+        /// The machine.
+        id: u32,
+        /// Where the press was.
+        at: Point,
+    },
 }
 
 /// The commands along the top, in order.
@@ -543,6 +551,14 @@ impl Shelf {
         damage: &mut Region,
     ) -> Option<Request> {
         let area = self.layout.area;
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary
+            }
+        ) {
+            return self.card_menu(damage);
+        }
         let pressed = matches!(
             event,
             InputEvent::PointerPressed {
@@ -571,6 +587,25 @@ impl Shelf {
             self.choose(n, damage);
         }
         None
+    }
+
+    /// The menu of the card under the pointer, which a secondary press chooses
+    /// as a primary one would; none off every card.
+    fn card_menu(&mut self, damage: &mut Region) -> Option<Request> {
+        let area = self.layout.area;
+        if !area.contains(self.pointer) {
+            return None;
+        }
+        let n = self
+            .layout
+            .cards
+            .iter()
+            .position(|rect| rect.intersection(&area).contains(self.pointer))?;
+        self.choose(n, damage);
+        Some(Request::Menu {
+            id: self.cards.get(n)?.id,
+            at: self.pointer,
+        })
     }
 
     /// When the held scrollbar press steps next, for the owner's wait.

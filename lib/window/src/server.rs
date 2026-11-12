@@ -928,6 +928,30 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `RestateMenu`: the attested owner of live window
+    /// `window_id`, whose open `open_id` is still unanswered, asked for that
+    /// chain to show `menu` from now on — bounded and shape-checked by the
+    /// ABI decode exactly as an open's — answering every row chosen from it
+    /// with `revision`. A chain that ended while the request was on its way
+    /// has its answer queued, so the host restates nothing and succeeds.
+    ///
+    /// The default refuses, as [`Self::menu_open_requested`] does.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot restate the chain for; the chain is left
+    /// as it was.
+    fn menu_restate_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        revision: u32,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, open_id, revision, menu);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `OpenAlert`: put `open` up in a window of its own, and
     /// answer it later through [`WindowServer::answer_alert`] — exactly once,
     /// unless the engine withdraws it first ([`alert_withdrawn`]).
@@ -2021,6 +2045,9 @@ struct WindowRecord<R> {
     /// shape is enforced in one place and an application can tell one
     /// gesture's answer from the next's.
     menu_open: Option<u64>,
+    /// The open whose outcome was delivered last, so a restate that crossed
+    /// that answer in flight is a no-op rather than a refusal.
+    menu_answered: Option<u64>,
     /// The text the user committed into a menu chain's quick-entry field,
     /// with the open it belongs to, until the owning application pulls it.
     ///
@@ -2088,6 +2115,7 @@ impl<R> WindowRecord<R> {
             dropped: None,
             renders_pending: Vec::new(),
             menu_open: None,
+            menu_answered: None,
             menu_text: None,
             transient,
             layer,
@@ -2576,6 +2604,15 @@ impl<M: ShmMapper> WindowServer<M> {
                 let taken = self.take_app_bar_text(caller, item, revision);
                 menu_text_reply(reply, Ok(taken.as_deref()))
             }
+            WindowRequest::RestateMenu {
+                window_id,
+                open_id,
+                revision,
+                ref menu,
+            } => status(
+                reply,
+                self.restate_menu(host, caller, (window_id, open_id, revision), menu),
+            ),
             WindowRequest::HandOverLaunch { .. }
             | WindowRequest::RevealDocument { .. }
             | WindowRequest::PlaceDropped { .. } => {
@@ -3084,6 +3121,7 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::CreateDialog { .. }
             | WindowRequest::OpenLayer { .. }
             | WindowRequest::OpenMenu { .. }
+            | WindowRequest::RestateMenu { .. }
             | WindowRequest::OpenAlert { .. }
             | WindowRequest::Present { .. }
             | WindowRequest::LockScreen
@@ -4080,6 +4118,28 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
+    /// Restate the rows of `caller`'s window `window_id`'s chain `open_id`,
+    /// which must be the window's unanswered open. One just answered is
+    /// accepted and restates nothing — the application asked before the
+    /// answer reached it — and any other is refused.
+    fn restate_menu(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        (window_id, open_id, revision): (u64, u64, u32),
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        let record = owned_window(&self.windows, caller, window_id)?;
+        if record.menu_open != Some(open_id) {
+            return if record.menu_answered == Some(open_id) {
+                Ok(())
+            } else {
+                Err(Errno::OutOfRange)
+            };
+        }
+        host.menu_restate_requested(window_id, open_id, revision, menu)
+    }
+
     /// Record the text the user committed into the quick-entry field of the
     /// chain opened as `open_id` on window `window_id`, for its application
     /// to pull.
@@ -4916,7 +4976,9 @@ impl<M: ShmMapper> WindowServer<M> {
     /// window's, is refused. The outcome concludes it, which is what makes
     /// exactly-once a property rather than a convention: a second outcome
     /// for one open cannot be delivered, and one gesture's dismissal can
-    /// never arrive as another's answer.
+    /// never arrive as another's answer. A `MenuChosen` is held to the same
+    /// open and concludes nothing, so any number may precede the answer and
+    /// none may follow it.
     ///
     /// # Errors
     ///
@@ -4990,7 +5052,9 @@ impl<M: ShmMapper> WindowServer<M> {
             _ => None,
         };
         let names_open = match *event {
-            WindowEvent::MenuClosed { open_id, .. } => Some(open_id),
+            WindowEvent::MenuClosed { open_id, .. } | WindowEvent::MenuChosen { open_id, .. } => {
+                Some(open_id)
+            }
             _ => None,
         };
         if names_open.is_some() && names_open != record.menu_open {
@@ -5004,7 +5068,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 record.renders_pending.swap_remove(owed);
             }
             if concludes_open {
-                record.menu_open = None;
+                record.menu_answered = record.menu_open.take();
             }
         }
         if matches!(*event, WindowEvent::Focus { focused: true, .. }) {

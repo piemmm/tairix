@@ -49,6 +49,12 @@ millimetre, and pinch at their centre, the centre carried with each step so the
 application can pan as it zooms. A second finger landing during a press ends
 the press; fingers left after a gesture do nothing until every finger lifts.
 
+A touchscreen's own buttons are pressed and released as a touchpad's are —
+one `DeviceButtons` follows both — each press at the place the frame's fingers
+left the pointer. QEMU sends a mouse's buttons to the device taking buttons
+that was activated last, so where a touchscreen's driver came up after the
+mouse's a mouse's clicks arrive this way.
+
 ## Pinch
 
 A pinch begins once the fingers' spread has changed by 2 mm before their

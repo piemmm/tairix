@@ -615,14 +615,25 @@ impl MapView {
             self.hit(self.pointer, scale.scale_length(NODE_RADIUS))
                 .map(|plate| plate.id)
         };
-        let subject = pressed
-            .and_then(|id| self.map.node(id))
-            .map(|node| Subject {
-                node,
-                services: self.offered.get(&node.id).map_or(0, Vec::len),
-                spread: self.is_spread(&node.key),
-            });
-        menu(subject, self.pointer).map(Box::new)
+        menu(pressed.and_then(|id| self.subject(id)), self.pointer).map(Box::new)
+    }
+
+    /// The menu `shown` as it would be opened now, on the same node and at
+    /// the same point; `None` once that node has gone.
+    pub fn reopened(&self, shown: &NodeMenu) -> Option<Result<Box<NodeMenu>, Errno>> {
+        let subject = match shown.subject() {
+            Some(key) => Some(self.subject(self.map.id_for(key)?)?),
+            None => None,
+        };
+        Some(menu(subject, shown.anchor()).map(Box::new))
+    }
+
+    fn subject(&self, id: NodeId) -> Option<Subject<'_>> {
+        self.map.node(id).map(|node| Subject {
+            node,
+            services: self.offered.get(&node.id).map_or(0, Vec::len),
+            spread: self.is_spread(&node.key),
+        })
     }
 
     /// Spread `host`'s services and fold every other host's, answering whether

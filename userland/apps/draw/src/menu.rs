@@ -19,7 +19,7 @@ use tairix_geometry::Region;
 use tairix_input::{Key, Modifiers, NamedKey};
 use tairix_window::docapp::{Outcome, Request};
 use tairix_window::document::SavedDocument;
-use tairix_window::menu::{MenuBuilder, Plate};
+use tairix_window::menu::{MenuBuilder, MenuCommand, Plate};
 
 use crate::compute::{Compute, Reshape};
 use crate::edit::{self, Arrange};
@@ -379,6 +379,27 @@ impl Command {
 impl From<Command> for u16 {
     fn from(command: Command) -> Self {
         command as Self
+    }
+}
+
+impl MenuCommand for Command {
+    /// Everything done to the drawing where it is, but not the document's own
+    /// rows, what opens a dialog or a picker, or what takes away the
+    /// selection or layer acted on.
+    fn acts_in_place(self) -> bool {
+        !matches!(
+            self,
+            Self::NewWindow
+                | Self::Open
+                | Self::Save
+                | Self::SaveAs
+                | Self::SaveCopy
+                | Self::Close
+                | Self::Delete
+                | Self::RemoveLayer
+                | Self::PageSetup
+                | Self::PlacePicture
+        )
     }
 }
 
@@ -821,11 +842,13 @@ impl View {
         let label = self.label_of(command, spec.label);
         let enabled = self.allows(spec.when);
         match spec.look {
-            Look::Plain => menu.item(command, spec.symbol, &label, caption, enabled, plate),
+            Look::Plain => menu.command(command, spec.symbol, &label, caption, enabled, plate),
             Look::Destructive => {
                 menu.destructive(command, spec.symbol, &label, caption, enabled, plate);
             }
-            Look::Mark(on) => menu.mark(command, spec.symbol, &label, caption, on(self), plate),
+            Look::Mark(on) => {
+                menu.command_mark(command, spec.symbol, &label, caption, on(self), plate);
+            }
         }
     }
 

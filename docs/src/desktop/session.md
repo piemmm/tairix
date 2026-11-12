@@ -277,10 +277,11 @@ Four taskbar responses reach the declaring process or its windows:
 - `AppMenuChosen { owner, item, revision }` → the same path, carrying
   `WindowEvent::AppBarMenu { item, revision }`. The id is the application's
   own and the session never interprets one; `revision` is the application's
-  number for the declaration the open menu was copied from (`AppBar::revision`,
-  recorded with the declaration and carried by the slot into the chain's
-  `MenuSubject::App`), so a row chosen after a re-declaration is resolved
-  against the declaration it was chosen from.
+  number for the declaration the open menu's rows were copied from
+  (`AppBar::revision`, recorded with the declaration and carried by the slot
+  into the chain's `MenuSubject::App`) — the one it opened from, or the
+  re-declaration that last restated it — so a row is resolved against the
+  declaration it was chosen from.
 - `AppMenuEntered { owner, item, revision, text }` → a quick-entry field
   committed on that menu: the session holds `text` for the application's row
   with its revision (`WindowServer::record_app_bar_text`) and relays
@@ -1597,7 +1598,7 @@ conclusion is *accepted*.
   owner's windows round-robin, so one window's backlog cannot starve a
   sibling's resize.
 - **Folding by what the quantity means.** A state edge (`Focus`, `Resized`,
-  `RedrawRequested`, `CloseRequested`, `Minimized`) is a value the app
+  `RedrawRequested`, `CloseRequested`, `Minimized`, `Shown`) is a value the app
   converges on, so a later one replaces the held one where it stands and a
   window owes at most one of each. A position is
   level-triggered (newest wins) and a wheel run is additive (a reversal ends
@@ -2291,6 +2292,20 @@ timer, and one whose policy names none of them never wakes for idleness. A
 session that cannot verify a password never locks on its own, and a session
 another user's desktop has in the background neither covers nor sleeps a
 screen that is not its own.
+
+**A desktop nobody can see draws nothing.** Before each park the session
+reads whether anyone can see the served windows — a display output held, no
+screensaver up or display asleep behind it, no lock, the session not in the
+background — and on each edge of it tells them (`WindowEvent::Shown`,
+`SessionWindows::follow_desktop_shown`). Covering tells every window on
+screen, and every one yet to present its first frame, which is mapped by
+that frame and would otherwise never learn; a minimised window already
+knows and is told nothing. Uncovering tells the windows covering told that
+are still on screen or yet to present, so one minimised meanwhile is not told
+it is shown, and a window opened while the desktop is covered is told as it
+opens.
+The window keeps its pixels and its place, so an application that stops
+drawing meanwhile presents only what moved once shown again.
 
 The screensaver (`saver::Screensaver`) is one full-screen window, raised over
 everything before each composite, with the lock kept directly beneath it; an

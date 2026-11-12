@@ -150,8 +150,15 @@ window is open, because the window is a view onto a monitor that never stops
 monitoring. The system is re-sampled strictly on its 2 s deadline: an input
 or command wake never re-queries the system.
 
-The model is rebuilt on the same sample cadence, and the panel presents at
-most once per wake — and only what it still owes the screen. That account is
+The model is rebuilt on the same sample cadence, but only for a window the
+desktop shows: one closed costs no model, and opening it builds one first.
+A window minimised, given its pixels back, or behind a covered desktop — a
+screensaver, the lock, a dark display, another account's session on the
+screen (`WindowEvent::Shown`) — is not on show (`WindowEvent::on_show`):
+sampling and the tray go on, but nothing is built or presented for it until
+it is shown again, when the newest sample is built and what moved is
+presented once. The panel presents at most once per wake — and only what it
+still owes the screen. That account is
 authoritative: a wake that reports no rectangle presents nothing at all, so a
 pointer move that crosses no control, and a sample whose readings all read the
 same, each cost no render and no present.
@@ -756,7 +763,7 @@ honest absence, so these stay empty.
 
 | Control | Effect |
 |---|---|
-| A Tasks row's menu | `WindowRequest::OpenMenu` for that task, at the press or the row; its one `MenuClosed` answer acts as below |
+| A Tasks row's menu | `WindowRequest::OpenMenu` for that task, at the press or the row; its one `MenuClosed` answer acts as below, and so does a `MenuChosen` for *Pause*, *Resume* or *Lower priority* chosen with the menu kept up, the menu restated as the next sample moves the task's verdicts |
 | Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session — raising the window is how this system shows a reader where it is, so both commands make the same request |
 | Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` on the menu's task — requires `CAP_PROC_CONTROL` |
 | Task *Lower priority* | `sched_set_priority(pid, Low)` on the menu's task — requires `CAP_PROC_CONTROL`, and is spent on a task already at `Low` |

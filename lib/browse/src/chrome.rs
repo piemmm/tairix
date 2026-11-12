@@ -51,7 +51,7 @@ use crate::entry::{Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::media::BlankDocument;
-use crate::open_with::{AppAssociation, OPEN_WITH_QUICK_MAX};
+use crate::open_with::{OpenWithCandidate, OPEN_WITH_QUICK_MAX};
 use crate::places::{Ejector, Place};
 use crate::presentation::HiddenEndings;
 use crate::render::ListColumns;
@@ -566,6 +566,17 @@ impl ContextCommand {
         )
     }
 
+    /// Whether this command's work is done where the menu is, so its row may
+    /// be chosen with the menu kept up: what it changes is the clipboard or
+    /// the selection. Every other command opens something, or ends or
+    /// destroys what the menu acts on.
+    const fn acts_in_place(self) -> bool {
+        matches!(
+            self,
+            Self::Cut | Self::Copy | Self::SelectAll | Self::ClearSelection
+        )
+    }
+
     /// Whether carrying this command out destroys something, so its row draws
     /// with the destructive emphasis rather than the neutral one.
     const fn is_destructive(self) -> bool {
@@ -826,9 +837,10 @@ pub struct ContextQuick<'a> {
     /// [`rename_text`](crate::rename_text) gives it.
     pub chosen: Option<&'a Entry>,
     /// The applications that can open the selection, highest-ranked first
-    /// ([`quick_applications`](crate::open_with::quick_applications)); a plate
-    /// offers at most [`OPEN_WITH_QUICK_MAX`].
-    pub candidates: &'a [&'a AppAssociation],
+    /// ([`quick_applications`](crate::open_with::quick_applications)), as the
+    /// gesture keeps them to launch what a row names; a plate offers at most
+    /// [`OPEN_WITH_QUICK_MAX`].
+    pub candidates: &'a [OpenWithCandidate],
     /// The documents New ▸ offers after Folder
     /// ([`blank_documents`](crate::open_with::blank_documents)).
     pub documents: &'a [BlankDocument],
@@ -1060,6 +1072,9 @@ fn command_item(
     if command.is_destructive() {
         item = item.with_role(AppMenuRole::Destructive);
     }
+    if command.acts_in_place() {
+        item = item.repeatable();
+    }
     if !reason.is_empty() {
         return Ok(item.disabled().with_reason(AppMenuReason::new(reason)?));
     }
@@ -1191,7 +1206,8 @@ fn push_display_rows(menu: &mut AppMenu, parent: usize, shown: ViewMode) -> Resu
             item_id(FIRST_DISPLAY + index)?,
             AppMenuLabel::new(display.label())?,
             display.symbol(),
-        );
+        )
+        .repeatable();
         if display == shown {
             item = item
                 .with_mark(AppMenuMark::Radio)
@@ -1253,7 +1269,7 @@ fn push_order_row(
     (id, label, symbol): (AppMenuItemId, &str, AppMenuSymbol),
     in_force: bool,
 ) -> Result<(), Errno> {
-    let mut item = AppMenuItem::new(id, AppMenuLabel::new(label)?, symbol);
+    let mut item = AppMenuItem::new(id, AppMenuLabel::new(label)?, symbol).repeatable();
     if in_force {
         item = item
             .with_mark(AppMenuMark::Radio)
@@ -1280,7 +1296,7 @@ fn push_order_row(
 fn push_candidates(
     menu: &mut AppMenu,
     parent: usize,
-    candidates: &[&AppAssociation],
+    candidates: &[OpenWithCandidate],
 ) -> Result<(), Errno> {
     for (index, candidate) in candidates.iter().take(OPEN_WITH_QUICK_MAX).enumerate() {
         let Ok(label) = AppMenuLabel::new(candidate.name()) else {

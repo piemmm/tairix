@@ -293,3 +293,25 @@ fn accelerator_returns_none_for_an_unrelated_ctrl_combination() {
     assert_eq!(Command::accelerator(Key::Char('z'), ctrl()), None);
     assert_eq!(Command::accelerator(Key::Char('q'), ctrl_shift()), None);
 }
+
+#[test]
+fn a_command_acting_on_the_screen_keeps_the_menu_up_and_one_opening_or_closing_does_not() {
+    let menu = model().expect("the model builds");
+    let kept: Vec<(Command, bool)> = menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some((
+                Command::from_item(item.id).expect("a command"),
+                item.repeatable,
+            )),
+            _ => None,
+        })
+        .collect();
+    for (command, repeatable) in kept {
+        assert_eq!(
+            repeatable,
+            !matches!(command, Command::Settings | Command::Close),
+            "{command:?}"
+        );
+    }
+}

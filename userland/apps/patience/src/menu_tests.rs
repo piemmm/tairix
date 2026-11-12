@@ -51,6 +51,25 @@ fn every_row_id_names_one_command() {
 }
 
 #[test]
+fn every_row_acting_on_the_table_may_be_chosen_with_its_menu_kept_up() {
+    let prefs = Preferences::default();
+    for deal in [None, Some(42)] {
+        let built = menu(&prefs, offering(&ALL_OFFERED), deal);
+        for (row, _) in built.rows() {
+            let AppMenuRowView::Item(item) = row else {
+                continue;
+            };
+            let id = item.id.get();
+            let elsewhere = matches!(id, STATISTICS | QUIT_ROW | DEAL_ROW | FINISH);
+            assert_eq!(
+                item.repeatable, !elsewhere,
+                "{id}: an alert, a won or ended game or a field is not chosen in place"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_row_of_both_menus_is_carried() {
     let prefs = Preferences::default();
     let bar = menu(&prefs, offering(&ALL_OFFERED), None);

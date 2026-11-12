@@ -670,9 +670,9 @@ impl AreaView {
         let pictures = self.chosen_pictures().next().is_some();
         let count = self.document.entries().len();
         let root = Plate::Root;
-        menu.item(Action::EditEntry, S::Open, "Edit", "Enter", pictures, root);
+        menu.command(Action::EditEntry, S::Open, "Edit", "Enter", pictures, root);
         menu.separator(root);
-        menu.item(
+        menu.command(
             Action::NewEntry,
             S::NewDocument,
             "New sprite\u{2026}",
@@ -691,7 +691,7 @@ impl AreaView {
             &name,
             root,
         );
-        menu.item(
+        menu.command(
             Action::DuplicateEntry,
             S::Duplicate,
             "Duplicate",
@@ -708,7 +708,7 @@ impl AreaView {
             root,
         );
         let at = one.unwrap_or(0);
-        menu.item(
+        menu.command(
             Action::EntryUp,
             S::MoveUp,
             "Move up",
@@ -716,7 +716,7 @@ impl AreaView {
             one.is_some() && at > 0,
             root,
         );
-        menu.item(
+        menu.command(
             Action::EntryDown,
             S::MoveDown,
             "Move down",
@@ -726,9 +726,9 @@ impl AreaView {
         );
         menu.separator(root);
         let (undo, redo) = self.document.can_undo_redo();
-        menu.item(Action::Undo, S::Undo, "Undo", "Ctrl+Z", undo, root);
-        menu.item(Action::Redo, S::Redo, "Redo", "Ctrl+Shift+Z", redo, root);
-        menu.item(
+        menu.command(Action::Undo, S::Undo, "Undo", "Ctrl+Z", undo, root);
+        menu.command(Action::Redo, S::Redo, "Redo", "Ctrl+Shift+Z", redo, root);
+        menu.command(
             Action::SelectAll,
             S::SelectAll,
             "Select all",
@@ -736,7 +736,7 @@ impl AreaView {
             count > 0,
             root,
         );
-        menu.item(
+        menu.command(
             Action::Deselect,
             S::SelectNone,
             "Clear selection",
@@ -746,10 +746,10 @@ impl AreaView {
         );
         menu.separator(root);
         if let Some(file) = menu.submenu("File", S::File, root) {
-            menu.item(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, file);
+            menu.command(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, file);
             menu.separator(file);
-            menu.item(Action::Save, S::Save, "Save", "Ctrl+S", true, file);
-            menu.item(
+            menu.command(Action::Save, S::Save, "Save", "Ctrl+S", true, file);
+            menu.command(
                 Action::SaveAs,
                 S::SaveAs,
                 "Save as\u{2026}",
@@ -758,7 +758,7 @@ impl AreaView {
                 file,
             );
             menu.separator(file);
-            menu.item(Action::Close, S::Close, "Close", "Ctrl+W", true, file);
+            menu.command(Action::Close, S::Close, "Close", "Ctrl+W", true, file);
         }
     }
 

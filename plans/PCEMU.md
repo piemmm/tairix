@@ -875,23 +875,34 @@ are silent the 80387 reference's lists of how it differs from them decide.
   the blobs no machine in the record owns.
 - **The library window** shows each machine as a card with its last screen, its
   specification and its state; creating, duplicating, starting, configuring and
-  deleting are its commands, and deleting asks first. The cards scroll, and a
+  deleting are its commands, and deleting asks first. A secondary press on a
+  card chooses it and opens its menu: *Start* (*Resume* while it is suspended,
+  *Show Window* while it runs), *Settings…*, *Duplicate* and *Delete…*, the
+  last two only for a machine at rest, and, while it runs, the machine's own
+  rows from its *Machine* menu. The cards scroll, and a
   change repaints only the cards it touched. Several machines run at once,
   each in a window of its own over a worker of its own; closing the library
-  leaves them running, the icon bar's *Machine Library* row brings it back,
-  and the program ends with its last window. The first run makes the Turbo XT
+  leaves them running, closing every window leaves the program on the icon
+  bar — its slot's click or the *Machine Library* row brings the library back
+  — and only *Quit* ends it, suspending every running machine first. A
+  suspending machine's window stays open until its state is kept
+  (`app::keeping::Suspends`), so a session logging out waits for the write. The first run makes the Turbo XT
   with the default disk. **The new-machine assistant** is an owner-modal
   dialog offering the four templates, the name and the disk choice — the
   default disk made for it, or none; a template with no fixed-disk controller
   is offered none. **Settings** is an owner-modal dialog per machine, its
-  controls the shared ones (`lib/controls`); a running machine's settings open
-  read-only, since a change of hardware needs the machine off. Every read and
+  controls the shared ones (`lib/controls`) in one field column: a choice list
+  stays open under the pointer until a choice or a press elsewhere takes it
+  away, a press that takes it away presses nothing beneath it, and a switch
+  shows the value it is set to. A running machine's settings open read-only,
+  since a change of hardware needs the machine off. Every read and
   write of the store is on the library worker and every running machine's
   sectors on the disk worker, so a long copy never stalls a guest; the loop
   asks and collects. Both workers answer in order, which keeps a machine from
   opening a disk a copy has not finished. **The machine window** carries the screen, the drive lights with
   their media menus, speed, pause, reset, Ctrl+Alt+Del, screenshot and
-  fullscreen. Images dropped on the window are inserted read-only; a writable
+  fullscreen. It opens to show a VGA screen at one pixel a dot
+  (`VGA_SCREEN`, 640×480) above the bar, no larger than the screen holds. Images dropped on the window are inserted read-only; a writable
   disk comes from the picker. A lamp is lit while its drive works — a
   diskette's motor, a fixed disk's command — and held 60 ms of emulated time
   after; the worker sends lamps on change and a lamp of a drive the machine
@@ -899,11 +910,19 @@ are silent the 80387 reference's lists of how it differs from them decide.
   the ImageDisk magic alone, and `lib/browse` types `.img` as a raw disk
   image, `.ima`, `.vfd` and `.flp` as raw floppy images and `.imd` as an
   ImageDisk archive, which is served as no volume. The bar's trailing *Machine*
-  menu carries pause, reset, Ctrl+Alt+Delete, the processor's speed (the
-  settings' speeds, for the run), the tube's effects (kept per machine in the
-  record), a screenshot (the moment's screen, 4:3 in whole dots, a PNG through
-  the Save panel), full screen, which keeps the bar as the way out, and the
-  debugger (§3.1).
+  button shows a display and *Machine* — *Paused* with a pause sign while it
+  is paused, *Saving…* as it suspends — and a down chevron, so it reads as the
+  menu it opens; a primary or secondary click on it opens the menu, and a
+  secondary click on any slot of the bar opens that slot's. The menu carries
+  pause, reset, Ctrl+Alt+Delete, the processor's speed (the settings' speeds,
+  for the run), the tube's effects (kept per machine in the record), a
+  screenshot (the moment's screen, 4:3 in whole dots, a PNG through the Save
+  panel), full screen, which keeps the bar as the way out, and the debugger
+  (§3.1). The rows that act on the machine in place may be chosen with the
+  menu kept up (`plans/NEW-MENUS.md` M11). Every menu up — bar, drive, share
+  or library card — is a `Followed` holding the rows it was last given; once
+  per pass of the loop, after the events are in, its rows are built again and
+  restated only where they differ, so no state change has to remember it.
 - **Snapshots** suspend a machine on close and on quitting, and resume it on
   start; *Shut Down* in the machine's menu turns it off. The snapshot is the
   worker's (`snapshot`): a version, the configuration and fixed-disk drives it

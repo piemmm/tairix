@@ -1625,6 +1625,37 @@ fn an_entry_menu_offers_what_the_account_can_do_with_the_program() {
     );
 }
 
+/// A favourite's own rows keep the menu up under a secondary click, and the
+/// bar states the rows anew from the shelf once a choice has moved it; every
+/// other row opens something or erases a record.
+#[test]
+fn an_entry_menu_kept_up_shows_the_favourites_as_they_now_stand() {
+    let mut bar = bottom_bar();
+    bar.set_library_shelf(shelf(&["calc", "chess"], &[]));
+    let model = bar.entry_model(&id("calc")).expect("a listed entry");
+    let kept: Vec<(String, bool)> = model
+        .rows()
+        .iter()
+        .map(|row| (String::from(row.drawn().label()), row.is_repeatable()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (String::from("Open"), false),
+            (String::from("Remove from Favourites"), true),
+            (String::from("Move Later"), true),
+            (String::from("Create Desktop Shortcut"), false),
+        ]
+    );
+    bar.set_library_shelf(shelf(&["chess", "calc"], &[]));
+    let moved = bar.entry_model(&id("calc")).expect("a listed entry");
+    assert!(moved
+        .rows()
+        .iter()
+        .any(|row| row.drawn().label() == "Move Earlier"));
+    assert!(bar.entry_model(&id("nothing")).is_none());
+}
+
 #[test]
 fn an_entry_menu_closes_with_the_programs_own_information() {
     let mut bar = bottom_bar();

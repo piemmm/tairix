@@ -336,6 +336,8 @@ pub(crate) struct RecordingHost {
     pub(crate) presented_rects: Vec<Option<DamageRect>>,
     /// Every menu the desktop was asked to open, with its anchor, in order.
     pub(crate) menus: Vec<(WindowRegion, AppMenu)>,
+    /// Every restate asked for: the open, and the rows.
+    pub(crate) restated: Vec<(u64, AppMenu)>,
     /// Refusal to answer a menu open with.
     pub(crate) menu_refusal: Option<Errno>,
     /// Every owner-directed request attempted, in order.
@@ -405,6 +407,7 @@ impl RecordingHost {
             presents: 0,
             presented_rects: Vec::new(),
             menus: Vec::new(),
+            restated: Vec::new(),
             menu_refusal: None,
             requests: Vec::new(),
             published: Vec::new(),
@@ -505,6 +508,11 @@ impl ServiceHost for RecordingHost {
         }
         self.menus.push((anchor, *menu));
         Ok(u64::try_from(self.menus.len()).unwrap_or(u64::MAX))
+    }
+
+    fn restate_menu(&mut self, open_id: u64, menu: &AppMenu) -> Result<(), Errno> {
+        self.restated.push((open_id, *menu));
+        Ok(())
     }
 
     fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {

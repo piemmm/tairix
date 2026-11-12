@@ -18,7 +18,7 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
-use tairix_abi::window_ipc::{MenuOutcome, MenuRefusal, WindowRegion, WindowSizing};
+use tairix_abi::window_ipc::{AppMenuItemId, MenuOutcome, MenuRefusal, WindowRegion, WindowSizing};
 use tairix_abi::{CapabilityQuery, Errno, ProcId, Signal};
 use tairix_controls::damage;
 use tairix_font::BitmapFont;
@@ -50,6 +50,9 @@ pub struct Panel {
     damage: Region,
     /// The task menu the desktop accepted and has not yet answered.
     menu: Option<OpenMenu>,
+    /// Whether the desktop shows the window: neither minimised, given its
+    /// pixels back, nor under a screensaver, the lock or a dark display.
+    shown: bool,
 }
 
 /// One accepted task menu: the open id its one answer will name, and the task
@@ -76,6 +79,7 @@ impl Panel {
             whole: true,
             damage: damage::sink(),
             menu: None,
+            shown: true,
         }
     }
 
@@ -83,6 +87,18 @@ impl Panel {
     #[must_use]
     pub const fn is_open(&self) -> bool {
         self.view.is_some()
+    }
+
+    /// Whether a window is open and the desktop shows it.
+    #[must_use]
+    pub const fn is_on_show(&self) -> bool {
+        self.view.is_some() && self.shown
+    }
+
+    /// Adopt whether the desktop shows the window. Nothing is presented while
+    /// it does not, and what the window owes meanwhile waits for it.
+    pub fn set_shown(&mut self, shown: bool) {
+        self.shown = shown;
     }
 
     /// The panel's current model.
@@ -211,6 +227,8 @@ impl Panel {
                 return;
             }
             self.view = Some(Switchboard::new(&self.model.model));
+            // A window just made is on show until the desktop says otherwise.
+            self.shown = true;
         } else if let Err(refusal) = host.request(SwitchboardRequest::ActivateOwner {
             owner: self.own_pid,
         }) {
@@ -242,16 +260,30 @@ impl Panel {
     /// a handful of moved digits costs a render, a whole-window encode, and a
     /// whole-frame decode on the session's own serve thread. A window with no
     /// bounds to adopt against holds none of the pixels a partial present
-    /// would leave standing, so it is drawn whole instead.
-    pub fn refresh(&mut self, host: &dyn ServiceHost, model: PanelModel) {
+    /// would leave standing, so it is drawn whole instead, as is one the
+    /// desktop does not show, which measures nothing it cannot be seen to
+    /// change.
+    ///
+    /// A task menu up over a task whose verdicts moved is shown as they stand
+    /// now, so a row chosen with it kept up leaves it saying what is true.
+    pub fn refresh(&mut self, host: &mut dyn ServiceHost, model: PanelModel) {
         if model == self.model {
             return;
         }
+        let verdicts_moved = self.menu.is_some_and(|open| {
+            self.model
+                .task(open.subject)
+                .map(|(_, task)| task.authority)
+                != model.task(open.subject).map(|(_, task)| task.authority)
+        });
         self.model = model;
+        if let (true, Some(open)) = (verdicts_moved, self.menu) {
+            self.restate_task_menu(host, open);
+        }
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let Some(layout) = host.layout() else {
+        let Some(layout) = host.layout().filter(|_| self.shown) else {
             view.adopt_unshown(&self.model.model);
             self.repaint_whole();
             return;
@@ -361,6 +393,47 @@ impl Panel {
         }
     }
 
+    /// A row of the open `open_id` was chosen with the menu kept up: act on it
+    /// as on any choice, checked against the model held now.
+    ///
+    /// The rows are left as they are: what the command changes reaches the
+    /// verdicts only with a later sample, and [`Self::refresh`] restates the
+    /// menu when it does.
+    pub fn menu_chosen(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        open_id: u64,
+        item: AppMenuItemId,
+        authority: &dyn CapabilityQuery,
+    ) {
+        let Some(open) = self.menu.filter(|open| open.open_id == open_id) else {
+            return;
+        };
+        if let Some(control) = task_control(item) {
+            self.act(
+                host,
+                SwitchboardAction::Task {
+                    proc_id: open.subject,
+                    control,
+                },
+                authority,
+            );
+        }
+    }
+
+    /// Show the task menu `open` with the rows its task's verdicts now give.
+    fn restate_task_menu(&self, host: &mut dyn ServiceHost, open: OpenMenu) {
+        let rows = self
+            .model
+            .task(open.subject)
+            .map(|(_, task)| task_menu(task));
+        if let Some(Ok(rows)) = rows {
+            if let Err(refusal) = host.restate_menu(open.open_id, &rows) {
+                host.report_refusal(MENU_ACTION, refusal);
+            }
+        }
+    }
+
     /// Send one owner-directed request, stating a refusal rather than
     /// ending the session over it.
     fn attempt(host: &mut dyn ServiceHost, action: &str, request: SwitchboardRequest) {
@@ -406,6 +479,9 @@ impl Panel {
     /// a window just opened) marks the client whole through
     /// [`repaint_whole`](Self::repaint_whole).
     ///
+    /// Nothing is presented while the desktop does not show the window; the
+    /// account waits for it to be shown.
+    ///
     /// The account is cleared whether or not the present is accepted: a
     /// refusal is already reported once through
     /// [`ServiceHost::report_refusal`], and re-attempting it on every wake
@@ -416,7 +492,7 @@ impl Panel {
     /// two pull against each other a round over-reports, and an over-reported
     /// rectangle costs one redundant repaint.
     pub fn flush(&mut self, host: &mut dyn ServiceHost) {
-        let Some(view) = self.view.as_mut() else {
+        let Some(view) = self.view.as_mut().filter(|_| self.shown) else {
             return;
         };
         let repaint = if self.whole {

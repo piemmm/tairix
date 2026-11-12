@@ -400,3 +400,47 @@ fn showing_the_machines_again_damages_only_the_cards_that_changed() {
         "a machine gone redraws the cards"
     );
 }
+
+#[test]
+fn a_right_press_on_a_card_chooses_it_and_asks_for_its_menu_there() {
+    let (mut shelf, ..) = setup();
+    let second = shelf.layout().cards[1].center();
+    feed(&mut shelf, &InputEvent::PointerMoved { to: second }, 0);
+    let asked = feed(
+        &mut shelf,
+        &InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        0,
+    );
+    let id = shelf
+        .selected()
+        .map(|(id, _)| id)
+        .expect("a card is chosen");
+    assert_eq!(
+        asked,
+        Some(Request::Menu { id, at: second }),
+        "the card the press is on, and the press's place"
+    );
+    assert_eq!(
+        shelf.selected(),
+        Some((id, Standing::Running)),
+        "the second card, whatever it runs"
+    );
+    let off_the_cards = Point::new(2, 2);
+    feed(
+        &mut shelf,
+        &InputEvent::PointerMoved { to: off_the_cards },
+        0,
+    );
+    assert_eq!(
+        feed(
+            &mut shelf,
+            &InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            },
+            0,
+        ),
+        None
+    );
+}

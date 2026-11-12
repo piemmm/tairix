@@ -7320,7 +7320,10 @@ fn a_full_menu_still_offers_every_view_and_order() {
             )
         })
         .collect();
-    let candidates: alloc::vec::Vec<_> = apps.iter().collect();
+    let candidates: alloc::vec::Vec<_> = apps
+        .iter()
+        .map(crate::open_with::OpenWithCandidate::of)
+        .collect();
     let chosen = browser.chosen_entry().cloned();
     let quick = ContextQuick {
         chosen: chosen.as_ref(),
@@ -7375,7 +7378,10 @@ fn more_candidates_than_a_plate_offers_never_reach_the_new_rows_ids() {
             )
         })
         .collect();
-    let candidates: alloc::vec::Vec<_> = apps.iter().collect();
+    let candidates: alloc::vec::Vec<_> = apps
+        .iter()
+        .map(crate::open_with::OpenWithCandidate::of)
+        .collect();
     let menu = context_menu(
         ContextMenuModel::for_browser(&browser, false),
         "Files",
@@ -8471,6 +8477,55 @@ fn the_quick_open_with_candidates_are_the_top_of_the_ranked_list() {
     assert!(quick_applications(&[]).is_empty());
 }
 
+/// A row keeps its menu up under a secondary click only where its work is done
+/// in place: the clipboard and selection verbs, and Display's views and orders.
+#[test]
+fn only_a_context_row_acting_in_place_keeps_its_menu_up() {
+    use crate::chrome::{
+        context_choice_from_item, context_menu, ContextChoice, ContextCommand, ContextMenuModel,
+        ContextQuick,
+    };
+    use crate::open_with::{AppAssociation, OpenWithCandidate};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let viewer = AppAssociation::new("Viewer", "/System/Applications/Viewer.app", alloc::vec![]);
+    let candidates = alloc::vec![OpenWithCandidate::of(&viewer)];
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let notes = Entry::file("notes.txt");
+    let quick = ContextQuick {
+        chosen: Some(&notes),
+        candidates: &candidates,
+        documents: &[],
+    };
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, true),
+        "Files",
+        quick,
+    )
+    .expect("the rows fit");
+    let mut kept = 0;
+    for (row, _) in menu.rows() {
+        let AppMenuRowView::Item(item) = row else {
+            continue;
+        };
+        let in_place = match context_choice_from_item(item.id).expect("a row it declares") {
+            ContextChoice::Command(command) => matches!(
+                command,
+                ContextCommand::Cut
+                    | ContextCommand::Copy
+                    | ContextCommand::SelectAll
+                    | ContextCommand::ClearSelection
+            ),
+            ContextChoice::Display(_) | ContextChoice::SortBy(_) | ContextChoice::SortIn(_) => true,
+            _ => false,
+        };
+        assert_eq!(item.repeatable, in_place, "{}", item.label);
+        kept += usize::from(in_place);
+    }
+    assert!(kept > 0, "the menu offers rows that act in place");
+}
+
 /// The Rename row carries a pre-filled field and the "Open With…" row carries
 /// the candidates, each only where its own row is actionable.
 #[test]
@@ -8482,7 +8537,7 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     use tairix_abi::window_ipc::AppMenuRowView;
 
     let viewer = AppAssociation::new("Viewer", "/System/Applications/Viewer.app", alloc::vec![]);
-    let candidates = alloc::vec![&viewer];
+    let candidates = alloc::vec![crate::open_with::OpenWithCandidate::of(&viewer)];
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let model = ContextMenuModel::for_browser(&browser, true);

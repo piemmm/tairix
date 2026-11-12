@@ -766,6 +766,41 @@ fn a_secondary_press_asks_for_the_menu_of_what_it_lands_on() {
 }
 
 #[test]
+fn a_menu_reopened_offers_what_its_node_now_holds_until_the_node_goes() {
+    let mut view = printing_view(instant());
+    let printer = window_point(&view, &host(2));
+    let menu = secondary_press(&mut view, printer);
+    let canvas = secondary_press(&mut view, Point::new(799, 599));
+    let reopened = |view: &MapView, shown: &NodeMenu| {
+        view.reopened(shown)
+            .map(|built| built.expect("the rows fit the menu bounds"))
+    };
+    assert_eq!(
+        reopened(&view, &menu).map(|now| *now.model()),
+        Some(*menu.model()),
+        "nothing moved, so the rows stand"
+    );
+
+    assert!(view.steer(&Steer::ShowServices(host(2)), NOW));
+    let now = reopened(&view, &menu).expect("the printer is on the map");
+    assert_eq!((now.anchor(), now.subject()), (printer, Some(&host(2))));
+    assert_eq!(row_labels(&now)[0], "Hide Services");
+
+    let mut emptied = Map::new();
+    emptied
+        .intern(NodeKey::LocalHost, NodeKind::LocalHost, 0)
+        .unwrap();
+    layout(&mut emptied);
+    view.set_map(emptied);
+    assert!(reopened(&view, &menu).is_none(), "its node has gone");
+    assert_eq!(
+        reopened(&view, &canvas).map(|now| row_labels(&now)),
+        Some(row_labels(&canvas)),
+        "the map's own menu outlives every node"
+    );
+}
+
+#[test]
 fn what_a_menu_row_asks_is_what_the_view_does() {
     let mut view = printing_view(instant());
     let printer = window_point(&view, &host(2));

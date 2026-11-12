@@ -34,6 +34,10 @@ nach der Lautheit angeglichen werden, die ihre eigenen Tags angeben.
 Eine Datei, die der Spieler nicht lesen kann, wird ausgelassen, mit dem Grund
 in der Statuszeile.
 
+Das Schließen des Fensters lässt den Spieler in der Symbolleiste weiterspielen:
+Ein Klick auf sein Symbol holt das Fenster zurück, und Beenden in seinem Menü
+beendet den Spieler.
+
 * `Space` — abspielen oder pausieren
 * `Enter` — den gewählten Titel spielen
 * `Left` / `Right` — zehn Sekunden zurück oder vor
@@ -54,6 +58,6 @@ in der Statuszeile.
 
 ## EXIT STATUS
 
-Null, nachdem das Fenster geschlossen oder Beenden gewählt wurde. Ungleich
+Null, sobald Beenden in seinem Menü in der Symbolleiste gewählt wurde. Ungleich
 null, wenn der Fensterkanal, der gemeinsame Bildbereich oder die Desktop-Sitzung
 abgelehnt wurde; der Grund steht auf der Standardfehlerausgabe.

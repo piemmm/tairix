@@ -28,9 +28,9 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_rect, AboutSheet, ChainChild, ChainModel, ClipboardChord, ControlState, Menu, MenuAction,
-    MenuItem, MenuMark, PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent,
-    ABOUT_ICON_SIDE,
+    plate_rect, AboutSheet, ChainChild, ChainModel, ChainRow, ClipboardChord, ControlState, Menu,
+    MenuAction, MenuItem, MenuMark, PlatePlacement, RowIcon, TextAction, TextField, TitleBar,
+    TitleBarEvent, ABOUT_ICON_SIDE,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -64,10 +64,16 @@ pub enum ChainOwner {
         window_id: u64,
         /// The session-minted id of the open this chain answers.
         open_id: u64,
+        /// The application's number for the rows the chain shows, which an
+        /// answer chosen from them hands back.
+        revision: u32,
     },
     /// The desktop's own pinboard backdrop. The answer is resolved in
     /// process against the desktop model.
-    Backdrop,
+    Backdrop {
+        /// Whether it opened over an icon, which decides the rows it has.
+        on_icon: bool,
+    },
     /// The desktop's own icon bar. The answer is resolved in process against
     /// the bar's own subject, which is what a chosen row of it acts on.
     ///
@@ -107,6 +113,16 @@ pub enum ChainOutcome {
     /// than about the request: a malformed or unauthorised ask is refused by
     /// the open call itself and mints nothing.
     Refused(MenuRefusal),
+}
+
+/// What a chain says to the owner that asked for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChainAnswer {
+    /// A repeatable row was chosen and the chain is still up: the owner acts
+    /// on it, and its chain's end is answered later.
+    Repeated(AppMenuItemId),
+    /// The chain ended.
+    Ended(ChainOutcome),
 }
 
 /// What routing one event into the chain asks the session to do.
@@ -266,6 +282,10 @@ impl EntrySurface {
 /// open child before the crossing counts as choosing that row.
 pub const SUBMENU_SETTLE_NS: u64 = 300 * tairix_abi::time::NANOS_PER_MILLI;
 
+/// How long a row chosen with its chain kept up is drawn in the accent: long
+/// enough to read as taken, short enough not to linger over the next choice.
+pub const MENU_ACKNOWLEDGE_NS: u64 = 160 * tairix_abi::time::NANOS_PER_MILLI;
+
 /// How far, in logical pixels, a path may wander from where it left the open
 /// row before it has a heading: a move that small is the hand settling, not a
 /// direction.
@@ -282,6 +302,14 @@ struct Settle {
     row: usize,
     /// When the crossing becomes a choice.
     due_ns: u64,
+}
+
+/// A row drawn as just chosen, until `until_ns`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Flash {
+    depth: usize,
+    row: usize,
+    until_ns: u64,
 }
 
 /// A drag in flight: which plate the band press landed on, and where the
@@ -324,14 +352,16 @@ impl ChainGeometry<'_> {
 #[derive(Debug, Default)]
 pub struct MenuChain {
     open: Option<OpenChain>,
-    /// Answers owed to chains that have closed, in the order they closed.
+    /// Answers owed, in the order given: every row chosen with its chain kept
+    /// up and every chain's one ending, each addressed to its owner as it
+    /// stood when the row was chosen.
     ///
     /// A chain very often ends where its answer cannot be delivered — inside
     /// the window engine's own serve pass, which already holds the borrow
     /// `deliver_event` needs. Queueing them all rather than only those is what
     /// makes the delivery point single, so no close can answer twice and none
     /// can answer not at all.
-    answers: Vec<(ChainOwner, ChainOutcome)>,
+    answers: Vec<(ChainOwner, ChainAnswer)>,
 }
 
 /// Everything one open chain is.
@@ -369,6 +399,11 @@ struct OpenChain {
     lent: Option<usize>,
     /// The answer this chain has settled on, once something has ended it.
     outcome: Option<ChainOutcome>,
+    /// A repeatable row chosen by the event being routed, owed to the owner
+    /// as a choice that ends nothing.
+    kept: Option<AppMenuItemId>,
+    /// The row drawn as just chosen, while it is.
+    flash: Option<Flash>,
     /// The screen and output mode the chain was placed against.
     mode: (Rect, ChromeEpoch),
     /// Whether a frame carrying this chain has reached the display, so the
@@ -388,12 +423,13 @@ impl MenuChain {
         }
     }
 
-    /// Take the answers owed to chains that have closed since the last call.
+    /// Take the answers owed since the last call: chains that have closed,
+    /// and rows chosen on chains still up.
     ///
     /// The session's one delivery point: an application's chain is answered
-    /// with the `MenuClosed` the engine holds it to, and the desktop's own is
-    /// answered in-process.
-    pub fn take_answers(&mut self) -> Vec<(ChainOwner, ChainOutcome)> {
+    /// with the `MenuClosed` the engine holds it to, and a kept choice with a
+    /// `MenuChosen`; the desktop's own are answered in-process.
+    pub fn take_answers(&mut self) -> Vec<(ChainOwner, ChainAnswer)> {
         core::mem::take(&mut self.answers)
     }
 
@@ -441,7 +477,7 @@ impl MenuChain {
     pub fn owner_window(&self) -> Option<u64> {
         match self.owner()? {
             ChainOwner::Window { window_id, .. } => Some(*window_id),
-            ChainOwner::Backdrop
+            ChainOwner::Backdrop { .. }
             | ChainOwner::Bar(_)
             | ChainOwner::Picker { .. }
             | ChainOwner::Capture => None,
@@ -489,6 +525,8 @@ impl MenuChain {
             settle: None,
             lent: None,
             outcome: None,
+            kept: None,
+            flash: None,
             mode: geom.mode(),
             shown: false,
         };
@@ -502,7 +540,8 @@ impl MenuChain {
         let Some(chain) = self.open.take() else {
             return false;
         };
-        self.answers.push((chain.owner, ChainOutcome::Dismissed));
+        self.answers
+            .push((chain.owner, ChainAnswer::Ended(ChainOutcome::Dismissed)));
         true
     }
 
@@ -821,7 +860,8 @@ impl MenuChain {
     /// the seat at this instant, not a reason to take down a menu the user is
     /// already using.
     pub fn refuse(&mut self, owner: ChainOwner, reason: MenuRefusal) {
-        self.answers.push((owner, ChainOutcome::Refused(reason)));
+        self.answers
+            .push((owner, ChainAnswer::Ended(ChainOutcome::Refused(reason))));
     }
 
     /// End the chain that is up because the session cannot give it a surface,
@@ -834,8 +874,10 @@ impl MenuChain {
         let Some(chain) = self.open.take() else {
             return false;
         };
-        self.answers
-            .push((chain.owner, ChainOutcome::Refused(MenuRefusal::NoResources)));
+        self.answers.push((
+            chain.owner,
+            ChainAnswer::Ended(ChainOutcome::Refused(MenuRefusal::NoResources)),
+        ));
         true
     }
 
@@ -868,22 +910,59 @@ impl MenuChain {
     }
 
     /// The park this seat needs, shortened to the moment a deferred crossing
-    /// becomes a choice. No deferral, no deadline: a quiet chain wakes nothing.
+    /// becomes a choice or a chosen row stops being drawn as one. Neither, no
+    /// deadline: a quiet chain wakes nothing.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        match self.open.as_ref().and_then(|chain| chain.settle) {
-            Some(settle) => park_ns.min(settle.due_ns.saturating_sub(now_ns)),
-            None => park_ns,
-        }
+        let Some(chain) = self.open.as_ref() else {
+            return park_ns;
+        };
+        [
+            chain.settle.map(|settle| settle.due_ns),
+            chain.flash.map(|flash| flash.until_ns),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(park_ns, |park, due| park.min(due.saturating_sub(now_ns)))
     }
 
-    /// Settle a deferred crossing that has come due at `now_ns`, answering
-    /// whether the chain changed. A pointer at rest sends nothing, so this is
-    /// what makes a rest on a crossed row choose it.
+    /// Settle a deferred crossing, and let a chosen row's moment go, where
+    /// either has come due at `now_ns`, answering whether the chain changed.
+    /// A pointer at rest sends nothing, so this is what makes a rest on a
+    /// crossed row choose it.
     pub fn tick(&mut self, now_ns: u64, geom: &ChainGeometry<'_>) -> bool {
-        self.open
-            .as_mut()
-            .is_some_and(|chain| chain.settle_due(now_ns, geom))
+        self.open.as_mut().is_some_and(|chain| {
+            let settled = chain.settle_due(now_ns, geom);
+            chain.flash_due(now_ns, geom) || settled
+        })
+    }
+
+    /// Show `model` in the chain `owner` has up, its answers going to `to`
+    /// from now on — the owner itself, or the same owner under the
+    /// declaration the rows now come from — keeping its place, the plates
+    /// opened and dragged and the highlight wherever `model` still has them.
+    /// Answers whether one was up to restate: a chain that has ended has its
+    /// answer queued or delivered already.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelRefused`] for a model that cannot be shown; the chain is left
+    /// exactly as it was.
+    pub fn restate(
+        &mut self,
+        owner: &ChainOwner,
+        to: ChainOwner,
+        model: ChainModel,
+        geom: &ChainGeometry<'_>,
+    ) -> Result<bool, ModelRefused> {
+        match self.open.as_mut() {
+            Some(chain) if chain.owner == *owner => {
+                chain.restate(model, geom)?;
+                chain.owner = to;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Carry out a clipboard chord in the open quick-entry field, answering
@@ -958,10 +1037,15 @@ impl MenuChain {
             }
             _ => chain.on_pointer(event, pointer, geom, now_ns),
         };
+        if let Some(item) = chain.kept.take() {
+            self.answers
+                .push((chain.owner.clone(), ChainAnswer::Repeated(item)));
+        }
         if matches!(acted, ChainAction::Closed) {
             let outcome = chain_outcome(self.open.as_mut());
             if let Some(chain) = self.open.take() {
-                self.answers.push((chain.owner, outcome));
+                self.answers
+                    .push((chain.owner, ChainAnswer::Ended(outcome)));
             }
         }
         acted
@@ -1073,9 +1157,12 @@ impl OpenChain {
     /// Measure every plate and the information panel again, re-place what is
     /// not pinned, and owe every surface whole.
     fn refit(&mut self, geom: &ChainGeometry<'_>) {
+        // A plate the user placed keeps its place, but stays on the screen it
+        // was dragged across however its rows have grown.
         for plate in self.plates.iter_mut().filter(|plate| plate.pinned) {
             let (width, height) = plate_extent(plate, geom);
-            plate.rect = Rect::new(plate.rect.left(), plate.rect.top(), width, height);
+            plate.rect = Rect::new(plate.rect.left(), plate.rect.top(), width, height)
+                .clamped_onto(geom.screen);
         }
         if let Some(panel) = self.info.as_mut() {
             let (width, height) = panel.sheet.measured_size(geom.scale, geom.theme);
@@ -1366,6 +1453,9 @@ impl OpenChain {
         self.mark_plate(depth, &damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(depth, index, geom),
+            Some(MenuAction::AlternateActivated { index }) => {
+                self.choose_kept((depth, index), now_ns, geom)
+            }
             // A click on a row that opens a child keeps its child open
             // rather than acting: the child is what the row is for.
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(depth, index, geom),
@@ -1753,6 +1843,173 @@ impl OpenChain {
         }
     }
 
+    /// A row of the plate at `depth` was clicked with the secondary button: a
+    /// repeatable row is chosen with the chain kept up and drawn as taken; any
+    /// other is chosen exactly as a primary click chooses it.
+    fn choose_kept(
+        &mut self,
+        (depth, index): (usize, usize),
+        now_ns: u64,
+        geom: &ChainGeometry<'_>,
+    ) -> ChainAction {
+        let Some(&model_row) = self.plates.get(depth).and_then(|p| p.rows.get(index)) else {
+            return ChainAction::Consumed;
+        };
+        let kept = self
+            .model
+            .rows()
+            .get(model_row)
+            .filter(|row| row.is_repeatable())
+            .and_then(ChainRow::id);
+        let Some(item) = kept else {
+            return self.choose(depth, index, geom);
+        };
+        self.kept = Some(item);
+        self.show_flash(
+            Some(Flash {
+                depth,
+                row: index,
+                until_ns: now_ns.saturating_add(MENU_ACKNOWLEDGE_NS),
+            }),
+            geom,
+        );
+        ChainAction::Redraw
+    }
+
+    /// Draw `flash`'s row as just chosen, and the one drawn before it no
+    /// longer.
+    fn show_flash(&mut self, flash: Option<Flash>, geom: &ChainGeometry<'_>) {
+        for (depth, row) in [self.flash.map(|was| (was.depth, None))]
+            .into_iter()
+            .chain([flash.map(|now| (now.depth, Some(now.row)))])
+            .flatten()
+        {
+            let Some(plate) = self.plates.get_mut(depth) else {
+                continue;
+            };
+            let rows = rows_rect(plate, geom);
+            let mut damage = damage::sink();
+            plate
+                .menu
+                .acknowledge(row, rows, geom.scale, geom.theme, &mut damage);
+            self.mark_plate(depth, &damage);
+        }
+        self.flash = flash;
+    }
+
+    /// Stop drawing a chosen row as one where its moment has passed by
+    /// `now_ns`, answering whether that changed anything drawn.
+    fn flash_due(&mut self, now_ns: u64, geom: &ChainGeometry<'_>) -> bool {
+        if self.flash.is_none_or(|flash| now_ns < flash.until_ns) {
+            return false;
+        }
+        self.show_flash(None, geom);
+        true
+    }
+
+    /// Show `model` from now on, keeping each plate whose opener `model`
+    /// still has where it was — its place, its band, its open row, its
+    /// highlight, each on the row it stood on — and closing the plates past
+    /// the first whose opener it no longer has. A plate the user placed keeps
+    /// its place and is measured again for its rows.
+    fn restate(
+        &mut self,
+        mut model: ChainModel,
+        geom: &ChainGeometry<'_>,
+    ) -> Result<(), ModelRefused> {
+        // The pictures already resolved are taken first, so rows that say
+        // what is shown compare equal and cost nothing to show again.
+        model.adopt_pictures(&self.model);
+        if model == self.model {
+            return Ok(());
+        }
+        model.resolve_glyphs(geom.scale, geom.theme);
+        let mut plates = alloc::vec![plate_for(&model, None)?];
+        let mut mappings = Vec::with_capacity(self.plates.len());
+        for (depth, was) in self.plates.iter().enumerate() {
+            let mapping = same_places(&self.model, was, &model, &plates[depth]);
+            let opener = was
+                .open_row
+                .and_then(|row| mapping.get(row).copied().flatten())
+                .and_then(|row| plates[depth].rows.get(row).copied())
+                .filter(|&row| {
+                    model.rows().get(row).is_some_and(|opener| {
+                        matches!(opener.child(), ChainChild::Submenu)
+                            && opener.drawn().state().is_actionable()
+                    })
+                });
+            mappings.push(mapping);
+            if depth + 1 == self.plates.len() {
+                break;
+            }
+            let Some(Ok(plate)) = opener.map(|row| plate_for(&model, Some(row))) else {
+                break;
+            };
+            plates.push(plate);
+        }
+        for ((now, was), mapping) in plates.iter_mut().zip(&self.plates).zip(&mappings) {
+            let at = |row: usize| mapping.get(row).copied().flatten();
+            // The band keeps a press a drag is under way with.
+            let title = String::from(now.band.title());
+            now.band = was.band.clone();
+            now.band.set_title(&title);
+            now.rect = was.rect;
+            now.pinned = was.pinned;
+            now.open_row = was.open_row.and_then(at);
+            now.menu.carry_highlight(&was.menu, at);
+        }
+        let kept = plates.len();
+        let deepest = kept - 1;
+        let open_child = plates[deepest]
+            .open_row
+            .and_then(|row| plates[deepest].rows.get(row))
+            .and_then(|&row| model.rows().get(row))
+            .map(ChainRow::child);
+        let whole = kept == self.plates.len();
+        let keeps_info =
+            whole && self.info.is_some() && matches!(open_child, Some(ChainChild::Info(_)));
+        let keeps_entry = whole
+            && matches!(
+                (open_child, self.entry.as_ref()),
+                (Some(ChainChild::Entry { id, .. }), Some(entry)) if *id == entry.id
+            );
+        if !keeps_info {
+            self.info = None;
+        }
+        if !keeps_entry {
+            self.entry = None;
+        }
+        if !keeps_info && !keeps_entry {
+            plates[deepest].open_row = None;
+        }
+        self.model = model;
+        self.plates = plates;
+        let depths = self.plates.len();
+        self.settle = self.settle.and_then(|settle| {
+            let row = mappings
+                .get(settle.depth)?
+                .get(settle.row)
+                .copied()
+                .flatten()?;
+            Some(Settle { row, ..settle })
+        });
+        self.drag = self.drag.filter(|drag| drag.plate < depths);
+        self.lent = self.lent.filter(|&depth| depth < depths);
+        self.flash = self.flash.and_then(|flash| {
+            let row = self.plates.get(flash.depth)?.menu.acknowledged()?;
+            Some(Flash { row, ..flash })
+        });
+        for (depth, plate) in self.plates.iter_mut().enumerate() {
+            plate.menu.hold(if self.lent == Some(depth) {
+                None
+            } else {
+                plate.open_row
+            });
+        }
+        self.refit(geom);
+        Ok(())
+    }
+
     /// Route a key. Traversal is the service's, not any application's.
     fn on_key(&mut self, key: Key, modifiers: Modifiers, geom: &ChainGeometry<'_>) -> ChainAction {
         let deepest = self.plates.len().saturating_sub(1);
@@ -1797,7 +2054,9 @@ impl OpenChain {
             .on_key(key, rows, geom.scale, geom.theme, &mut damage);
         self.mark_plate(deepest, &damage);
         match acted {
-            Some(MenuAction::Activated { index }) => self.choose(deepest, index, geom),
+            Some(MenuAction::Activated { index } | MenuAction::AlternateActivated { index }) => {
+                self.choose(deepest, index, geom)
+            }
             Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, index, geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
             None => {
@@ -1855,6 +2114,43 @@ enum Hit {
     Info,
     /// The quick-entry surface hanging off the deepest plate.
     Entry,
+}
+
+/// Where each row of the plate `was`, built from `shown`, stands among the
+/// rows of `now`, built from `model`: the row naming the same command, or for
+/// a row naming none, the one of its label opening the same kind of child.
+/// Each row of `now` stands for one row of `was` at most, so rows alike — the
+/// separators, say — keep their order rather than all becoming the first.
+fn same_places(
+    shown: &ChainModel,
+    was: &Plate,
+    model: &ChainModel,
+    now: &Plate,
+) -> Vec<Option<usize>> {
+    let mut taken = alloc::vec![false; now.rows.len()];
+    was.rows
+        .iter()
+        .map(|&old| {
+            let old = shown.rows().get(old)?;
+            let at = now.rows.iter().zip(&taken).position(|(&new, &taken)| {
+                !taken && model.rows().get(new).is_some_and(|new| same_row(old, new))
+            })?;
+            taken[at] = true;
+            Some(at)
+        })
+        .collect()
+}
+
+/// Whether `new` is the row `old` was.
+fn same_row(old: &ChainRow, new: &ChainRow) -> bool {
+    match (old.id(), new.id()) {
+        (Some(was), Some(now)) => was == now,
+        (None, None) => {
+            old.drawn().label() == new.drawn().label()
+                && core::mem::discriminant(old.child()) == core::mem::discriminant(new.child())
+        }
+        _ => false,
+    }
 }
 
 /// Build the plate holding the rows filed under `opener` (`None` for the

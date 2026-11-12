@@ -1,15 +1,18 @@
 //! A machine window's bar: a lamp for each drive the machine has, lit while
 //! the drive works, each diskette drive naming the image it holds, each
 //! shared folder and the drive it is, and the machine's own menu at its
-//! trailing end. A press on a diskette drive, a share or the machine asks for
-//! its menu.
+//! trailing end, a pull-down button. A click with either button on a diskette
+//! drive, a share or the machine asks for its menu.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{StatusBand, StatusTone};
+use tairix_controls::{
+    Button, ButtonAction, ButtonContent, ControlRole, ControlState, StatusBand, StatusTone,
+};
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -54,11 +57,22 @@ pub struct Shared {
     pub read_only: bool,
 }
 
-/// What the machine's own slot reads, running, paused, and being kept as it
+/// What the machine's own button shows, running, paused, and being kept as it
 /// suspends.
-const MACHINE_LABEL: &str = "Machine \u{25be}";
-const PAUSED_LABEL: &str = "Paused \u{25be}";
-const SAVING_LABEL: &str = "Saving\u{2026}";
+const MACHINE: (IconKind, &str) = (IconKind::Display, "Machine");
+const PAUSED: (IconKind, &str) = (IconKind::Pause, "Paused");
+const SAVING: (IconKind, &str) = (IconKind::Display, "Saving\u{2026}");
+
+/// The room the machine's button keeps above and below it in the bar, in
+/// logical pixels.
+const BUTTON_INSET: u32 = 2;
+
+fn machine_content((icon, label): (IconKind, &str)) -> ButtonContent {
+    ButtonContent::IconLabel {
+        icon,
+        label: String::from(label),
+    }
+}
 
 /// Which menu a press on the bar asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,13 +116,15 @@ pub struct MachineBar {
     drives: Vec<Drive>,
     lights: Lights,
     bounds: Rect,
-    /// The machine's own slot, at the trailing end.
-    machine: Rect,
+    /// The machine's own menu, at the trailing end.
+    machine: Button,
+    machine_at: Rect,
     paused: bool,
     /// The machine is being kept as it suspends: nothing more is asked of it.
     saving: bool,
     pointer: Point,
-    pressed: Option<Pressed>,
+    /// What a held press began on, and the button holding it.
+    pressed: Option<(Pressed, PointerButton)>,
 }
 
 /// What a drive is called: the letter DOS gives the first two diskette
@@ -157,7 +173,8 @@ impl MachineBar {
             drives,
             lights: Lights::default(),
             bounds: Rect::EMPTY,
-            machine: Rect::EMPTY,
+            machine: Button::new(machine_content(MACHINE), ControlRole::Neutral).pulls_down(),
+            machine_at: Rect::EMPTY,
             paused: false,
             saving: false,
             pointer: Point::ORIGIN,
@@ -165,10 +182,13 @@ impl MachineBar {
         }
     }
 
-    /// The bar's height.
+    /// The bar's height: a status band's, or more where the machine's button
+    /// needs it.
     #[must_use]
     pub fn height(scale: Scale, theme: &Theme) -> u32 {
-        StatusBand::new(theme, scale).height()
+        let button = Button::height(scale, theme)
+            .saturating_add(scale.scale_length(BUTTON_INSET).saturating_mul(2));
+        StatusBand::new(theme, scale).height().max(button)
     }
 
     /// Lay the bar out along `bounds`.
@@ -176,16 +196,28 @@ impl MachineBar {
         self.bounds = bounds;
         let band = StatusBand::new(theme, scale);
         let lamp = band.face().line_height();
-        let machine_width = band
-            .slot_width(MACHINE_LABEL)
-            .max(band.slot_width(PAUSED_LABEL))
-            .max(band.slot_width(SAVING_LABEL))
-            .min(bounds.width);
-        self.machine = Rect::new(
-            bounds.right().saturating_sub_unsigned(machine_width),
-            bounds.top(),
+        let gap = scale.scale_length(theme.metrics().control_gap);
+        // As wide as the widest it ever shows, so a pause never moves it.
+        let machine_width = [MACHINE, PAUSED, SAVING]
+            .map(|shown| {
+                Button::new(machine_content(shown), ControlRole::Neutral)
+                    .pulls_down()
+                    .measured_width(scale, theme)
+            })
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+            .min(bounds.width.saturating_sub(gap));
+        let machine_height = Button::height(scale, theme).min(bounds.height);
+        self.machine_at = Rect::new(
+            bounds
+                .right()
+                .saturating_sub_unsigned(machine_width.saturating_add(gap)),
+            bounds
+                .top()
+                .saturating_add_unsigned(bounds.height.saturating_sub(machine_height) / 2),
             machine_width,
-            bounds.height,
+            machine_height,
         );
         let fixed_width = band.slot_width("C:") + lamp;
         let fixed = self
@@ -196,7 +228,7 @@ impl MachineBar {
         let named = self.drives.len() - fixed;
         let room = bounds
             .width
-            .saturating_sub(machine_width)
+            .saturating_sub(machine_width.saturating_add(gap * 2))
             .saturating_sub(u32::try_from(fixed).unwrap_or(0) * fixed_width);
         let each = u32::try_from(named)
             .ok()
@@ -283,21 +315,27 @@ impl MachineBar {
         damage.add(self.bounds);
     }
 
-    /// Show the machine paused, or running, adding its slot to `damage`.
+    /// Show the machine paused, or running, adding its button to `damage`.
     pub fn set_paused(&mut self, paused: bool, damage: &mut Region) {
         if self.paused != paused {
             self.paused = paused;
-            damage.add(self.machine);
+            if !self.saving {
+                let shown = if paused { PAUSED } else { MACHINE };
+                self.machine.set_content(machine_content(shown));
+                damage.add(self.machine_at);
+            }
         }
     }
 
-    /// Show the machine being kept as it suspends, adding its slot to
+    /// Show the machine being kept as it suspends, adding its button to
     /// `damage`: from now on no press asks for a menu.
     pub fn set_saving(&mut self, damage: &mut Region) {
         if !self.saving {
             self.saving = true;
             self.pressed = None;
-            damage.add(self.machine);
+            self.machine.set_content(machine_content(SAVING));
+            self.machine.set_state(ControlState::disabled());
+            damage.add(self.machine_at);
         }
     }
 
@@ -346,15 +384,9 @@ impl MachineBar {
         let parts: Vec<(Rect, &str, StatusTone)> = texts
             .iter()
             .map(|(slot, text, tone)| (*slot, text.as_str(), *tone))
-            .chain([if self.saving {
-                (self.machine, SAVING_LABEL, StatusTone::Muted)
-            } else if self.paused {
-                (self.machine, PAUSED_LABEL, StatusTone::Warning)
-            } else {
-                (self.machine, MACHINE_LABEL, StatusTone::Ink)
-            }])
             .collect();
         band.paint(surface, self.bounds, theme, &parts);
+        self.machine.render(surface, self.machine_at, scale, theme);
         let side = (lamp * 2 / 3).max(2);
         for drive in &self.drives {
             let colour = match (lit(self.lights, drive), drive.kind) {
@@ -392,7 +424,7 @@ impl MachineBar {
         if self.saving {
             return None;
         }
-        if self.machine.contains(self.pointer) {
+        if self.machine_at.contains(self.pointer) {
             return Some(Pressed::Machine);
         }
         self.drives
@@ -401,31 +433,37 @@ impl MachineBar {
             .map(Pressed::Drive)
     }
 
-    /// Take `event`: the menu a diskette drive's slot or the machine's asks
-    /// for, once pressed and let go over it.
-    pub fn on_input(&mut self, event: &InputEvent) -> Option<MenuRequest> {
+    /// Take `event`, adding what it redrew to `damage`: the menu a diskette
+    /// drive's slot, a share's or the machine's button asks for, once pressed
+    /// and let go over it with the same button, primary or secondary.
+    pub fn on_input(&mut self, event: &InputEvent, damage: &mut Region) -> Option<MenuRequest> {
+        if let InputEvent::PointerMoved { to } = event {
+            self.pointer = *to;
+        }
+        let clicked = self.machine.on_pointer(event, self.machine_at, damage)
+            == Some(ButtonAction::Activated);
         match event {
-            InputEvent::PointerMoved { to } => {
-                self.pointer = *to;
+            InputEvent::PointerPressed { button } => {
+                self.pressed = self.under_pointer().map(|on| (on, *button));
                 None
             }
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary,
-            } => {
-                self.pressed = self.under_pointer();
-                None
-            }
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            } => {
-                let pressed = self.pressed.take()?;
-                if self.under_pointer() != Some(pressed) {
+            InputEvent::PointerReleased { button } => {
+                let (pressed, with) = self.pressed.take()?;
+                if with != *button || self.under_pointer() != Some(pressed) {
+                    return None;
+                }
+                let opens = match with {
+                    PointerButton::Primary => clicked || pressed != Pressed::Machine,
+                    PointerButton::Secondary => true,
+                    PointerButton::Middle => false,
+                };
+                if !opens {
                     return None;
                 }
                 Some(match pressed {
                     Pressed::Machine => MenuRequest {
                         menu: Menu::Machine,
-                        anchor: self.machine,
+                        anchor: self.machine_at,
                     },
                     Pressed::Drive(n) => {
                         let drive = self.drives.get(n)?;

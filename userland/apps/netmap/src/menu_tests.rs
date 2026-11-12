@@ -155,6 +155,79 @@ fn a_host_offering_services_can_spread_them_and_names_how_to_reach_it() {
 }
 
 #[test]
+fn every_row_but_the_one_opening_a_window_can_be_chosen_with_the_menu_kept_up() {
+    let mut map = Map::new();
+    let printer = node(
+        &mut map,
+        NodeKey::Neighbour(v4(20)),
+        NodeKind::Neighbour,
+        "printer.local",
+        &[v4(20)],
+    );
+    let built = menu(
+        Some(Subject {
+            node: &printer,
+            services: 2,
+            spread: false,
+        }),
+        Point::ORIGIN,
+    )
+    .unwrap();
+    assert_eq!(built.subject(), Some(&printer.key));
+    let kept: Vec<(String, bool)> = built
+        .model()
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some((item.label.to_string(), item.repeatable)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (String::from("Show Services"), true),
+            (String::from("Copy Address"), true),
+            (String::from("Copy Name"), true),
+            (String::from("Fit Map to Window"), true),
+            (String::from("Probe Settings…"), false),
+        ]
+    );
+    assert_eq!(menu(None, Point::ORIGIN).unwrap().subject(), None);
+}
+
+/// A restate can put another command at a row's id — Show Services becomes
+/// Hide Services once they are spread — which is why the map numbers its
+/// statements and reads a row against the rows it was chosen from.
+#[test]
+fn a_rows_id_stands_for_another_command_once_restated() {
+    let mut map = Map::new();
+    let printer = node(
+        &mut map,
+        NodeKey::Neighbour(v4(20)),
+        NodeKind::Neighbour,
+        "printer.local",
+        &[v4(20)],
+    );
+    let built = |spread| {
+        let subject = Subject {
+            node: &printer,
+            services: 2,
+            spread,
+        };
+        menu(Some(subject), Point::ORIGIN).unwrap()
+    };
+    let first = AppMenuItemId::for_index(0).unwrap();
+    assert_eq!(
+        built(false).command(first),
+        Some(&Command::Steer(Steer::ShowServices(printer.key.clone())))
+    );
+    assert_eq!(
+        built(true).command(first),
+        Some(&Command::Steer(Steer::HideServices(printer.key.clone())))
+    );
+}
+
+#[test]
 fn an_unnamed_host_offers_no_name_and_one_address_per_family() {
     let mut map = Map::new();
     let bare = node(

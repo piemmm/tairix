@@ -7,9 +7,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    Button, ButtonContent, ControlRole, ControlState, Dialog, DialogAction, FieldAction,
-    FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, TextField,
-    Toggle,
+    Button, ButtonContent, ColumnAction, ColumnPlace, ControlRole, ControlState, Dialog,
+    DialogAction, FieldAction, FieldColumn, FieldControl, FieldGroup, FieldRow, Keystroke,
+    TextField,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
@@ -253,7 +253,7 @@ pub enum Answer {
 /// Which part a press began in, which its release goes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Part {
-    Group(usize),
+    Fields,
     Actions,
 }
 
@@ -261,7 +261,7 @@ enum Part {
 #[derive(Debug)]
 pub struct Settings {
     dialog: Dialog,
-    groups: [FieldGroup; 2],
+    column: FieldColumn,
     choices: Choices,
     /// The hardware cannot be changed where the machine stands.
     locked: bool,
@@ -287,10 +287,7 @@ impl Settings {
                 FieldRow::choice("Speed", &names(&SPEEDS), choices.speed),
                 FieldRow::choice("Memory", &names(&MEMORY), choices.memory),
                 FieldRow::choice("Expanded memory", &names(&EXPANDED), choices.expanded),
-                FieldRow::new(
-                    "8087 coprocessor",
-                    FieldControl::Toggle(Toggle::new("", choices.coprocessor)),
-                ),
+                FieldRow::toggle("8087 coprocessor", choices.coprocessor),
             ],
         );
         let parts = FieldGroup::new(
@@ -301,14 +298,8 @@ impl Settings {
                 FieldRow::choice("Sound card", &SOUNDS, choices.sound),
                 FieldRow::choice("Drive A", &names(&DRIVES), choices.drives[0]),
                 FieldRow::choice("Drive B", &names(&DRIVES), choices.drives[1]),
-                FieldRow::new(
-                    "Game port",
-                    FieldControl::Toggle(Toggle::new("", choices.game)),
-                ),
-                FieldRow::new(
-                    "Clock card",
-                    FieldControl::Toggle(Toggle::new("", choices.clock)),
-                ),
+                FieldRow::toggle("Game port", choices.game),
+                FieldRow::toggle("Clock card", choices.clock),
             ],
         );
         let actions = if locked.is_some() {
@@ -326,20 +317,24 @@ impl Settings {
         if let Some(why) = locked {
             dialog = dialog.with_message(why);
         }
-        let mut settings = Self {
+        let mut column = FieldColumn::new(vec![machine_group, parts]);
+        if locked.is_some() {
+            for row in column
+                .groups_mut()
+                .iter_mut()
+                .flat_map(FieldGroup::rows_mut)
+            {
+                row.set_state(ControlState::disabled());
+            }
+        }
+        Self {
             dialog,
-            groups: [machine_group, parts],
+            column,
             choices,
             locked: locked.is_some(),
             armed: None,
             pointer: Point::ORIGIN,
-        };
-        if settings.locked {
-            for row in settings.groups.iter_mut().flat_map(FieldGroup::rows_mut) {
-                row.set_state(ControlState::disabled());
-            }
         }
-        settings
     }
 
     /// What the dialog holds now.
@@ -353,51 +348,37 @@ impl Settings {
     pub fn extent(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
         let width = scale.scale_length(WIDTH);
         let band = self.dialog.content_width(width, scale, theme);
-        let column = FieldGroup::shared_column(&self.groups, band, scale, theme);
-        let gap = scale.scale_length(theme.metrics().control_gap);
-        let content = self
-            .groups
-            .iter()
-            .map(|group| group.measured_height(band, column, scale, theme))
-            .sum::<u32>()
-            + gap;
+        let content = self.column.measured_height(band, scale, theme);
         (
             width,
             self.dialog.height_for_content(content, width, scale, theme),
         )
     }
 
-    fn layout(&self, scale: Scale, theme: &Theme) -> (Rect, [FieldLayout; 2]) {
+    /// The client, and where the groups stack down it: a choice list may hang
+    /// anywhere in the client, over the actions included, since it is modal.
+    fn place<'t>(&self, scale: Scale, theme: &'t Theme) -> (Rect, ColumnPlace<'t>) {
         let (width, height) = self.extent(scale, theme);
         let bounds = Rect::new(0, 0, width, height);
         let content = self
             .dialog
             .content_rect(bounds, scale, theme)
             .unwrap_or(Rect::EMPTY);
-        let column = FieldGroup::shared_column(&self.groups, content.width, scale, theme);
-        let gap = i32::try_from(scale.scale_length(theme.metrics().control_gap)).unwrap_or(0);
-        let mut top = content.top();
-        let layouts = [0, 1].map(|n| {
-            let height = self.groups[n].measured_height(content.width, column, scale, theme);
-            let rect = Rect::new(content.left(), top, content.width, height);
-            top = top
-                .saturating_add(i32::try_from(height).unwrap_or(0))
-                .saturating_add(gap);
-            FieldLayout::new(rect, column).within(content)
-        });
-        (bounds, layouts)
+        let place = ColumnPlace {
+            bounds: content,
+            viewport: bounds,
+            scale,
+            theme,
+        };
+        (bounds, place)
     }
 
     /// Paint the whole client.
     pub fn render(&self, surface: &mut Surface, scale: Scale, theme: &Theme) {
-        let (bounds, layouts) = self.layout(scale, theme);
+        let (bounds, place) = self.place(scale, theme);
         self.dialog.render(surface, bounds, scale, theme);
-        for (group, layout) in self.groups.iter().zip(layouts) {
-            group.render(surface, layout, scale, theme);
-        }
-        for (group, layout) in self.groups.iter().zip(layouts) {
-            group.render_popup(surface, layout.bounds, scale, theme);
-        }
+        self.column.render(surface, place);
+        self.column.render_popup(surface, place);
     }
 
     /// Take `event` at monotonic `at_ns`: the answer, once there is one.
@@ -408,32 +389,30 @@ impl Settings {
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> Option<Answer> {
-        let (bounds, layouts) = self.layout(scale, theme);
+        let (bounds, place) = self.place(scale, theme);
         if let Some(stroke) = Keystroke::pressed(*event, at_ns) {
-            return self.on_key(stroke, layouts, (scale, theme), damage);
+            return self.on_key(stroke, place, damage);
         }
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
+        let listing = self.column.is_listing();
         if matches!(event, InputEvent::PointerPressed { .. }) {
-            self.armed = Some(
-                self.open_list()
-                    .or_else(|| layouts.iter().position(|l| l.bounds.contains(self.pointer)))
-                    .map_or(Part::Actions, Part::Group),
-            );
+            // A press that takes an open list away is not also a press on
+            // whatever the list hung over.
+            self.armed = Some(if listing || place.bounds.contains(self.pointer) {
+                Part::Fields
+            } else {
+                Part::Actions
+            });
         }
         let mut answer = None;
-        for (n, layout) in layouts.iter().enumerate() {
-            if matches!(self.armed, Some(Part::Group(m)) if m != n)
-                || self.armed == Some(Part::Actions)
-            {
-                continue;
-            }
-            if let Some(action) = self.groups[n].on_pointer(event, *layout, scale, theme, damage) {
-                self.take(n, &action, bounds, damage);
+        if self.armed != Some(Part::Actions) {
+            if let Some(action) = self.column.on_pointer(event, place, damage) {
+                self.take(&action, place, damage);
             }
         }
-        if !matches!(self.armed, Some(Part::Group(_))) {
+        if self.armed != Some(Part::Fields) && !listing {
             if let Some(DialogAction::ActionActivated { index }) =
                 self.dialog.on_pointer(event, bounds, scale, theme, damage)
             {
@@ -449,46 +428,37 @@ impl Settings {
         answer
     }
 
-    /// The group whose choice list is drawn, which takes every event.
-    fn open_list(&self) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|group| group.rows().iter().any(FieldRow::popup_open))
-    }
-
     fn on_key(
         &mut self,
         stroke: Keystroke,
-        layouts: [FieldLayout; 2],
-        (scale, theme): (Scale, &Theme),
+        place: ColumnPlace<'_>,
         damage: &mut Region,
     ) -> Option<Answer> {
-        let focused = self
-            .open_list()
-            .or_else(|| self.groups.iter().position(|group| group.focus().is_some()));
-        if stroke.key == Key::Named(NamedKey::Escape) && self.open_list().is_none() {
+        let listing = self.column.is_listing();
+        if stroke.key == Key::Named(NamedKey::Escape) && !listing {
             return Some(Answer::Cancel);
         }
-        if let Some(n) = focused {
-            if let Some(action) = self.groups[n].on_key(stroke, layouts[n], scale, theme, damage) {
-                self.take(n, &action, layouts[n].bounds, damage);
-                return None;
-            }
+        if let Some(action) = self.column.on_key(stroke, place, damage) {
+            self.take(&action, place, damage);
+            return None;
         }
-        if let Some(DialogAction::ActionActivated { index }) = self.dialog.on_key(stroke.key) {
-            return Some(self.answer(index));
+        if listing {
+            return None;
         }
-        None
+        self.dialog
+            .on_key(stroke.key)
+            .map(|DialogAction::ActionActivated { index }| self.answer(index))
     }
 
-    fn take(&mut self, group: usize, action: &FieldGroupAction, whole: Rect, damage: &mut Region) {
+    fn take(&mut self, acted: &ColumnAction, place: ColumnPlace<'_>, damage: &mut Region) {
         if self.locked {
             return;
         }
+        let (group, row) = (acted.group, acted.action.row);
         let c = &mut self.choices;
-        match (group, action.row, &action.action) {
+        match (group, row, &acted.action.action) {
             (at::MACHINE, at::NAME, FieldAction::Text(_)) => {
-                if let Some(FieldControl::Text(field)) = self.groups[at::MACHINE]
+                if let Some(FieldControl::Text(field)) = self.column.groups()[at::MACHINE]
                     .rows()
                     .get(at::NAME)
                     .map(FieldRow::control)
@@ -505,15 +475,18 @@ impl Settings {
                 at::EXPANDED => c.expanded = *index,
                 _ => {}
             },
-            (at::MACHINE, at::COPROCESSOR, FieldAction::Set { on }) => c.coprocessor = *on,
             (at::PARTS, at::CARD, FieldAction::Selected { index }) => {
                 c.card = *index;
                 c.monitor = 0;
-                let row = FieldRow::choice("Monitor", &names(monitors(c.card)), 0);
-                if let Some(held) = self.groups[at::PARTS].rows_mut().get_mut(at::MONITOR) {
-                    *held = row;
-                    damage.add(whole);
+                let monitor = FieldRow::choice("Monitor", &names(monitors(c.card)), 0);
+                let parts = &mut self.column.groups_mut()[at::PARTS];
+                if let Some(held) = parts.rows_mut().get_mut(at::MONITOR) {
+                    *held = monitor;
+                    // The new list's widest monitor may move the column every
+                    // control lines up on.
+                    damage.add(place.bounds);
                 }
+                parts.adopt_focus(parts.focus());
             }
             (at::PARTS, row, FieldAction::Selected { index }) => match row {
                 at::MONITOR => c.monitor = *index,
@@ -522,12 +495,53 @@ impl Settings {
                 at::DRIVE_B => c.drives[1] = *index,
                 _ => {}
             },
-            (at::PARTS, row, FieldAction::Set { on }) => match row {
-                at::GAME => c.game = *on,
-                at::CLOCK => c.clock = *on,
-                _ => {}
-            },
+            (_, _, FieldAction::Set { on }) => {
+                let on = *on;
+                match (group, row) {
+                    (at::MACHINE, at::COPROCESSOR) => c.coprocessor = on,
+                    (at::PARTS, at::GAME) => c.game = on,
+                    (at::PARTS, at::CLOCK) => c.clock = on,
+                    _ => return,
+                }
+                self.show_toggle((group, row), on, place, damage);
+            }
             _ => {}
+        }
+    }
+
+    /// Show the switch at `group`'s `row` as `on`: a switch only asks, so the
+    /// value it shows is the one the dialog took.
+    fn show_toggle(
+        &mut self,
+        (group, row): (usize, usize),
+        on: bool,
+        place: ColumnPlace<'_>,
+        damage: &mut Region,
+    ) {
+        let seated = self
+            .column
+            .layouts(place)
+            .into_iter()
+            .find_map(|(at, layout)| (at == group).then_some(layout));
+        let drawn = seated.and_then(|layout| {
+            self.column
+                .groups()
+                .get(group)?
+                .row_rect(row, layout, place.scale, place.theme)
+        });
+        let switch = self
+            .column
+            .groups_mut()
+            .get_mut(group)
+            .and_then(|group| group.rows_mut().get_mut(row))
+            .map(FieldRow::control_mut);
+        if let Some(FieldControl::Toggle(toggle)) = switch {
+            if toggle.is_on() != on {
+                toggle.set_on(on);
+                if let Some(rect) = drawn {
+                    damage.add(rect);
+                }
+            }
         }
     }
 

@@ -27,6 +27,7 @@ by — and the time every pointer report carries to the application.
 | PO15 | Pointer lock: `LockPointer`, the device's own displacement as `WindowEvent::PointerMotion`, `WindowEvent::PointerLock`, the session-owned release, the hidden pointer (`CursorShape::None`, `CursorHint`, the compositor's blank) | done |
 | PO16 | Every button of a client gesture: the client grab holds a set of buttons, the secondary release reaches the window, a second button joins the first | done |
 | PO17 | The seat's channels never lose a release: a full pointer channel keeps a slot for every owed button release and folds motion into its newest record | done |
+| PO18 | A touchscreen's own buttons press at the pointer as a touchpad's do, and a gear key a touch device reports turns the wheel, so a mouse whose clicks and wheel QEMU routes to the touchscreen still clicks and scrolls | done |
 
 ## The scroll unit
 
@@ -136,6 +137,17 @@ fingers scroll, how far a fingertip moves the pointer.
   the press first. Content follows the fingers there, 10 units a millimetre. A
   touchscreen that states no size covers the screen, measured by the desktop's
   density.
+- **A touchscreen's own buttons.** The buttons a frame says are held press at
+  the pointer and release across frames on a touchscreen as on a touchpad —
+  one `DeviceButtons` in `lib/touch` for both — reported after the frame's
+  fingers, so a press lands where that frame put the pointer. QEMU's input
+  core sends a mouse's buttons, and its wheel as the gear keys, to the device
+  taking buttons that was activated last — the one whose driver came up last,
+  the touchscreen on a windowed run that attaches both — so a guest with both
+  clicks and scrolls through the touchscreen's frames. The virtio-input touch
+  decode turns a gear
+  key's press into one wheel detent, its release into nothing, and keeps the
+  wheel out of a run the device reported dropped.
 - **Pinch to the application.** `WindowEvent::Pinch` carries the phase
   (begin, update, end, cancel), the scale since the pinch began in 16.16
   fixed point, the window-local place and the modifiers. A pinch belongs to

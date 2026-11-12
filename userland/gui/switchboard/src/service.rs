@@ -127,6 +127,15 @@ pub trait ServiceHost {
     /// and carries on.
     fn open_menu(&mut self, anchor: WindowRegion, menu: &AppMenu) -> Result<u64, Errno>;
 
+    /// Show `menu` in the open window's chain `open_id` from now on, under
+    /// the open's own revision: each row id names one command in every
+    /// statement of a task menu.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_menu`].
+    fn restate_menu(&mut self, open_id: u64, menu: &AppMenu) -> Result<(), Errno>;
+
     /// Send one owner-directed request to the desktop session's Switchboard
     /// endpoint.
     ///
@@ -369,9 +378,9 @@ impl Service {
     /// a no-op that returns immediately, so an input or command wake never
     /// re-queries the system.
     ///
-    /// Every step happens whether or not a window is open — the panel
-    /// refresh simply draws nothing while closed — so a closed window never
-    /// stops the tray summary from being published.
+    /// The sample is taken and published whether or not a window is open or
+    /// shown, so neither stops the tray summary from being published; the
+    /// panel's model is built only for a window the desktop shows.
     pub fn cycle(
         &mut self,
         host: &mut dyn ServiceHost,
@@ -403,7 +412,13 @@ impl Service {
             .record(&sample, self.hysteresis, self.panel.session_report());
         self.last_sample = sample;
         self.sampled = true;
-        self.rebuild(host, authority);
+        // The reported owners follow the machine, not the history of it: an
+        // owner the live process list no longer names is dropped here rather
+        // than kept until some later prune.
+        self.bundles.retain_live(&self.last_sample.processes);
+        // Nobody would see a model built for a window closed or hidden; the
+        // one it shows next is built when it is.
+        self.rebuild_if_shown(host, authority);
 
         self.next_sample_ns = crate::schedule::advance_deadline(self.next_sample_ns, now_ns);
 
@@ -662,20 +677,31 @@ impl Service {
     /// through [`Service::command`]'s `OpenPanel` arm, which rebuilds first,
     /// so the first frame a user sees already carries every report that
     /// arrived while they were not looking.
-    fn rebuild_if_shown(&mut self, host: &dyn ServiceHost, authority: &dyn CapabilityQuery) {
-        if self.panel.is_open() {
+    fn rebuild_if_shown(&mut self, host: &mut dyn ServiceHost, authority: &dyn CapabilityQuery) {
+        if self.panel.is_on_show() {
             self.rebuild(host, authority);
+        }
+    }
+
+    /// Adopt whether the desktop shows the window, building the model it
+    /// shows again once it does: none was built for it meanwhile.
+    pub fn set_shown(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        authority: &dyn CapabilityQuery,
+        shown: bool,
+    ) {
+        let was = self.panel.is_on_show();
+        self.panel.set_shown(shown);
+        if !was {
+            self.rebuild_if_shown(host, authority);
         }
     }
 
     /// Rebuild the live model from the sample and meter state in hand and
     /// hand it to the panel, which re-renders only if it actually changed.
-    fn rebuild(&mut self, host: &dyn ServiceHost, authority: &dyn CapabilityQuery) {
+    fn rebuild(&mut self, host: &mut dyn ServiceHost, authority: &dyn CapabilityQuery) {
         let session = *self.panel.session_report();
-        // The reported owners follow the machine, not the history of it: an
-        // owner the live process list no longer names is dropped here rather
-        // than kept until some later prune.
-        self.bundles.retain_live(&self.last_sample.processes);
         let model = build_model(
             PANEL_TITLE,
             self.home.as_deref(),

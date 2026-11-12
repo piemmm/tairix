@@ -217,6 +217,15 @@ impl PinboardCommand {
         )
     }
 
+    /// Whether the command acts on the desktop in place, so a secondary click
+    /// may choose it with the menu kept up.
+    const fn repeatable(self) -> bool {
+        matches!(
+            self,
+            Self::SortBy(_) | Self::ArrangeFrom(_) | Self::TidyUp(_) | Self::Refresh
+        )
+    }
+
     /// Whether `settings` already has this command's effect in force.
     ///
     /// The sort orders and the arrangements are each a group of alternatives
@@ -345,6 +354,9 @@ pub fn model(over: Over<'_>, settings: &DesktopSettings) -> ChainModel {
             item = item.with_state(ControlState::disabled());
         }
         let mut row = command.row(id, over, item);
+        if command.repeatable() {
+            row = row.repeatable();
+        }
         let already = in_force.then(|| command.already_reason()).flatten();
         if let Some(why) = already.or(refused) {
             row = row.explained(why);

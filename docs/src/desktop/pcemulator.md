@@ -968,17 +968,31 @@ still being copied.
   machine, resuming one suspended, or raises its window; a running machine is
   neither copied nor deleted, one being kept is left alone until it is, and
   *Delete…* asks first. A suspended machine is copied with its snapshot. A
-  change repaints only the cards it touched. Closing the library window while
-  a machine runs leaves the program running; the icon bar's *Machine Library*
-  brings the window back, and the program ends with its last window.
+  secondary press on a card chooses it and opens its menu: *Start* (*Resume*
+  while it is suspended, *Show Window* while it runs), *Settings…*,
+  *Duplicate* and *Delete…*, and while it runs the machine's own rows (below).
+  A change repaints only the cards it touched. Closing the library window
+  leaves running machines running, and closing every window leaves the program
+  on the icon bar: a click on its slot (`AppBarClick::RaiseOrOpen`) or the
+  *Machine Library* row brings the library back, and only *Quit* ends it,
+  suspending every running machine first. A suspending machine's window stays
+  open, its bar saying *Saving…*, until its snapshot and the images it was
+  taken against are kept (`app::keeping::Suspends`), so a session logging out —
+  which waits on open windows and then ends what is left — never ends the
+  program part-way through writing one.
 - **The new-machine assistant** and **Settings** are owner-modal dialogs over
-  the library window, of the shared controls. The assistant offers the four
-  machines, the name, and whether the default disk is made; a machine with no
-  fixed-disk controller — the IBM PC — is offered none. Settings change a
+  the library window, of the shared controls in one field column: a choice
+  list stays open under the pointer until a choice or a press elsewhere takes
+  it away, and the press that takes it away presses nothing beneath it. The
+  assistant offers the four machines, the name, and whether the default disk
+  is made; a machine with no fixed-disk controller — the IBM PC — is offered
+  none. Settings change a
   machine's hardware but never its disks, and open read-only unless it is
   off: a suspended machine is started and shut down to be changed.
-- **A machine window** shows the picture at the monitor's shape, four units
-  wide for every three high, centred and bordered in black: each frame is
+- **A machine window** opens to show a VGA screen at one pixel a dot,
+  640×480 above the drive bar, no larger than the screen holds. It shows the
+  picture at the monitor's shape, four units wide for every three high,
+  centred and bordered in black: each frame is
   enlarged through `lib/raster`'s frame scaler, each of the card's dots a block
   of whole pixels, and only the rows a changed frame reaches are drawn again
   and presented. Closing it suspends the machine (below); the machine's menu
@@ -998,15 +1012,26 @@ still being copied.
   standard diskette sizes; anything else is refused before the machine sees
   it. A press that begins on the bar never reaches the guest, and one the
   guest took ends with the guest.
-- **The machine's menu**, at the bar's trailing end, which reads *Paused*
-  while the machine is: *Pause*, *Reset* (off and on), *Send
+- **The machine's menu** opens from the *Machine* button at the bar's
+  trailing end — a display and a down chevron, *Paused* with a pause sign
+  while the machine is, *Saving…* as it suspends — on a primary or a
+  secondary click; a secondary click on any slot of the bar opens that slot's
+  menu. It holds *Pause*, *Reset* (off and on), *Send
   Ctrl+Alt+Delete* — the desktop keeps the chord, so the window offers it —
   *Copy Screen Text* and *Paste* (below), the processor's *Speed*, chosen
   from the speeds the settings offer, as a turbo switch would for the run,
   *Display*, *Share a Folder…* (below), *Take Screenshot…*, *Full Screen*,
   *Debugger* (below), checked while its window is open, and *Shut Down*,
-  which turns it off and keeps only its last screen. The bar
-  stays in full screen, since only the application can leave it.
+  which turns it off and keeps only its last screen. A row acting on the
+  machine in place — *Pause*, *Reset*, the speeds and the tube's effects
+  among them — may be chosen with the menu kept up
+  ([menus](./menus.md#choosing-with-the-menu-kept-up)). A menu up — the
+  bar's, a drive's or a card's in the library — shows the machine as it now
+  stands: once each pass of events is in, the rows it would build are
+  compared with those it was given and only a change is restated, so a
+  diskette ejected, a paste ending or the window filling the display reaches
+  it however it came about. The bar stays in full screen, since only the
+  application can leave it.
 - **Sharing a folder.** *Share a Folder…* asks the trusted picker for a
   folder, handed over confined beneath itself (`docs/src/desktop/session.md`)
   and writable only where the picker says so. It is served as the machine's

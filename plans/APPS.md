@@ -809,6 +809,28 @@ deliberately no way to ask the session to open a path on an application's
 behalf. A path confers no access as before: the application opens it under its
 own authority, exactly as it would an argument.
 
+## 10.2 An application on the icon bar ends only on *Quit*
+
+Every application holding an icon-bar slot outlives its windows: closing the
+last one leaves the process resident on the bar, and only the slot menu's
+*Quit* ends it. Every new application is written so; none ends because its
+windows closed.
+
+- The slot is the way back to a window. The declaration's `AppBarClick` is
+  `RaiseOrOpen` (or `Open`), and `AppBarDefault` opens one at the size the
+  desktop now gives it. A row that needs a window — a picker hangs from one —
+  chosen while none is open opens it first.
+- What it does with no window — playback, a running machine — goes on. A
+  session logging out asks every window to close and ends whatever is left
+  once none is open, so a window whose closing starts durable work (a
+  machine's suspend) stays open until that work is done.
+- A window the desktop would not open is stated and let go; the application
+  stays on the bar.
+- An application with no slot (`icon-bar = false` — Settings, Date & Time) has
+  no *Quit* to wait for and ends with its window. `AppBarClick::Raise` is left
+  only to a program that ends with its window, the WinterSun client; no new
+  application declares it.
+
 ## 11. Security summary
 
 Every mechanism here obeys the charter's fail-closed, least-authority model:

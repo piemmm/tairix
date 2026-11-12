@@ -1,8 +1,10 @@
 use super::*;
 use crate::app::library::Library;
 use crate::board::Board;
+use crate::cpu::CpuModel;
 use crate::machine::Template;
-use tairix_input::Modifiers;
+use tairix_controls::FieldLayout;
+use tairix_input::{Modifiers, PointerButton};
 
 fn machine(template: Template) -> Machine {
     let mut library = Library::new();
@@ -90,44 +92,158 @@ fn every_choice_of_every_setting_is_one_the_board_takes() {
     }
 }
 
+/// Where the control of `group`'s `row` is drawn.
+fn control_at(settings: &Settings, (group, row): (usize, usize), theme: &Theme) -> Point {
+    let (_, place) = settings.place(Scale::ONE, theme);
+    let layout = settings
+        .column
+        .layouts(place)
+        .into_iter()
+        .find_map(|(at, layout)| (at == group).then_some(layout))
+        .expect("the group is laid out");
+    let seated = &settings.column.groups()[group];
+    let bounds = seated
+        .row_rect(row, layout, Scale::ONE, theme)
+        .expect("the row is drawn");
+    seated.rows()[row]
+        .control_rect(FieldLayout { bounds, ..layout }, Scale::ONE, theme)
+        .expect("the row seats its control")
+        .center()
+}
+
+/// Where the open choice list of `group` shows its choice `index`.
+fn choice_at(settings: &Settings, group: usize, index: usize, theme: &Theme) -> Point {
+    let (_, place) = settings.place(Scale::ONE, theme);
+    let popup = settings
+        .column
+        .layouts(place)
+        .into_iter()
+        .find_map(|(at, layout)| (at == group).then_some(layout.popup))
+        .expect("the group is laid out");
+    assert!(!popup.is_empty(), "the open list is placed");
+    let combo = settings.column.groups()[group]
+        .rows()
+        .iter()
+        .find_map(|row| match row.control() {
+            FieldControl::Combo(combo) if combo.is_expanded() => Some(combo),
+            _ => None,
+        })
+        .expect("a list is open");
+    combo
+        .menu()
+        .row_rect(index, popup, Scale::ONE, theme)
+        .expect("the choice is drawn")
+        .center()
+}
+
+fn pointer(settings: &mut Settings, event: InputEvent, theme: &Theme) -> Option<Answer> {
+    settings.on_input(&event, 0, (Scale::ONE, theme), &mut Region::new())
+}
+
+fn click(settings: &mut Settings, at: Point, theme: &Theme) -> Option<Answer> {
+    let primary = PointerButton::Primary;
+    pointer(settings, InputEvent::PointerMoved { to: at }, theme);
+    pointer(
+        settings,
+        InputEvent::PointerPressed { button: primary },
+        theme,
+    );
+    pointer(
+        settings,
+        InputEvent::PointerReleased { button: primary },
+        theme,
+    )
+}
+
+fn switch_on(settings: &Settings, (group, row): (usize, usize)) -> bool {
+    match settings.column.groups()[group].rows()[row].control() {
+        FieldControl::Toggle(toggle) => toggle.is_on(),
+        other => panic!("not a switch: {other:?}"),
+    }
+}
+
 #[test]
-fn the_coprocessor_toggle_fits_or_removes_the_8087() {
+fn a_choice_list_stays_open_under_the_pointer_and_takes_the_choice_clicked() {
     tairix_font::install_test_transport();
-    let (scale, theme) = (Scale::ONE, Theme::light());
+    let theme = Theme::light();
+    let machine = machine(Template::IbmXt);
+    let mut settings = Settings::new(&machine, Standing::Off);
+    let field = control_at(&settings, (at::MACHINE, at::PROCESSOR), &theme);
+    click(&mut settings, field, &theme);
+    assert!(settings.column.is_listing(), "a click opens the list");
+    let v20 = choice_at(&settings, at::MACHINE, 2, &theme);
+    pointer(&mut settings, InputEvent::PointerMoved { to: v20 }, &theme);
+    assert!(
+        settings.column.is_listing(),
+        "the pointer moving onto the list leaves it open"
+    );
+    assert_eq!(click(&mut settings, v20, &theme), None);
+    assert!(!settings.column.is_listing(), "choosing closes it");
+    assert_eq!(
+        settings.choices().configured(&machine.config).cpu,
+        CpuModel::V20
+    );
+}
+
+#[test]
+fn a_press_that_takes_a_list_away_presses_nothing_beneath_it() {
+    tairix_font::install_test_transport();
+    let theme = Theme::light();
+    let machine = machine(Template::IbmXt);
+    let mut settings = Settings::new(&machine, Standing::Off);
+    let field = control_at(&settings, (at::PARTS, at::DRIVE_B), &theme);
+    click(&mut settings, field, &theme);
+    assert!(settings.column.is_listing());
+    let (bounds, _) = settings.place(Scale::ONE, &theme);
+    let cancel = settings.dialog.action_rects(bounds, Scale::ONE, &theme)[0].center();
+    assert_eq!(
+        click(&mut settings, cancel, &theme),
+        None,
+        "only the list closes"
+    );
+    assert!(!settings.column.is_listing());
+    assert_eq!(click(&mut settings, cancel, &theme), Some(Answer::Cancel));
+}
+
+#[test]
+fn a_switch_shows_what_it_is_set_to_and_a_second_click_turns_it_back() {
+    tairix_font::install_test_transport();
+    let theme = Theme::light();
     let machine = machine(Template::IbmXt);
     assert!(!machine.config.coprocessor);
     let mut settings = Settings::new(&machine, Standing::Off);
-    let (bounds, _) = settings.layout(scale, &theme);
-    let fit = FieldGroupAction {
-        row: at::COPROCESSOR,
-        action: FieldAction::Set { on: true },
-    };
-    settings.take(at::MACHINE, &fit, bounds, &mut Region::new());
-    assert!(settings.choices().configured(&machine.config).coprocessor);
+    for (row, before) in [
+        ((at::MACHINE, at::COPROCESSOR), false),
+        ((at::PARTS, at::GAME), machine.config.ports.game),
+        ((at::PARTS, at::CLOCK), machine.config.ports.clock),
+    ] {
+        let at = control_at(&settings, row, &theme);
+        click(&mut settings, at, &theme);
+        assert_eq!(switch_on(&settings, row), !before, "{row:?} turns");
+        click(&mut settings, at, &theme);
+        assert_eq!(switch_on(&settings, row), before, "{row:?} turns back");
+    }
+    let coprocessor = control_at(&settings, (at::MACHINE, at::COPROCESSOR), &theme);
+    click(&mut settings, coprocessor, &theme);
+    let config = settings.choices().configured(&machine.config);
+    assert!(config.coprocessor);
+    assert_eq!(config.ports.game, machine.config.ports.game);
 }
 
 #[test]
 fn a_choice_made_is_kept_and_a_new_card_offers_its_own_monitors() {
     tairix_font::install_test_transport();
-    let (scale, theme) = (Scale::ONE, Theme::light());
+    let theme = Theme::light();
     let machine = machine(Template::IbmXt);
     let mut settings = Settings::new(&machine, Standing::Off);
-    let (bounds, _) = settings.layout(scale, &theme);
-    let mut damage = Region::new();
-    let mono = FieldGroupAction {
-        row: at::CARD,
-        action: FieldAction::Selected { index: 1 },
-    };
-    settings.take(at::PARTS, &mono, bounds, &mut damage);
-    let offered = settings.groups[at::PARTS].rows()[at::MONITOR]
-        .control()
-        .clone();
-    assert!(matches!(offered, FieldControl::Combo(_)));
-    let amber = FieldGroupAction {
-        row: at::MONITOR,
-        action: FieldAction::Selected { index: 1 },
-    };
-    settings.take(at::PARTS, &amber, bounds, &mut damage);
+    let card = control_at(&settings, (at::PARTS, at::CARD), &theme);
+    click(&mut settings, card, &theme);
+    let hercules = choice_at(&settings, at::PARTS, 1, &theme);
+    click(&mut settings, hercules, &theme);
+    let monitor = control_at(&settings, (at::PARTS, at::MONITOR), &theme);
+    click(&mut settings, monitor, &theme);
+    let amber = choice_at(&settings, at::PARTS, 1, &theme);
+    click(&mut settings, amber, &theme);
     let config = settings.choices().configured(&machine.config);
     assert_eq!(
         config.video,
@@ -142,37 +258,30 @@ fn a_choice_made_is_kept_and_a_new_card_offers_its_own_monitors() {
 #[test]
 fn a_running_or_suspended_machines_settings_change_nothing() {
     tairix_font::install_test_transport();
+    let theme = Theme::light();
     let machine = machine(Template::TurboXt);
-    for standing in [Standing::Saving, Standing::Suspended] {
+    for standing in [Standing::Saving, Standing::Suspended, Standing::Running] {
         let mut settings = Settings::new(&machine, standing);
-        let (bounds, _) = settings.layout(Scale::ONE, &Theme::light());
-        let changed = FieldGroupAction {
-            row: at::PROCESSOR,
-            action: FieldAction::Selected { index: 0 },
-        };
-        settings.take(at::MACHINE, &changed, bounds, &mut Region::new());
+        let field = control_at(&settings, (at::MACHINE, at::PROCESSOR), &theme);
+        click(&mut settings, field, &theme);
+        assert!(!settings.column.is_listing(), "{standing:?}: no list opens");
+        let switch = control_at(&settings, (at::MACHINE, at::COPROCESSOR), &theme);
+        click(&mut settings, switch, &theme);
+        assert_eq!(
+            switch_on(&settings, (at::MACHINE, at::COPROCESSOR)),
+            machine.config.coprocessor,
+            "{standing:?}: no switch turns"
+        );
         assert_eq!(settings.choices(), &Choices::of(&machine), "{standing:?}");
         assert_eq!(settings.answer(1), Answer::Cancel, "{standing:?}");
     }
     let mut settings = Settings::new(&machine, Standing::Running);
-    let (bounds, _) = settings.layout(Scale::ONE, &Theme::light());
-    let mut damage = Region::new();
-    let changed = FieldGroupAction {
-        row: at::PROCESSOR,
-        action: FieldAction::Selected { index: 0 },
-    };
-    settings.take(at::MACHINE, &changed, bounds, &mut damage);
-    assert_eq!(settings.choices(), &Choices::of(&machine));
     assert_eq!(settings.answer(0), Answer::Cancel, "its one button closes");
-    let mut damage = Region::new();
     let escape = InputEvent::KeyPressed {
         key: Key::Named(NamedKey::Escape),
         modifiers: Modifiers::default(),
     };
-    assert_eq!(
-        settings.on_input(&escape, 0, (Scale::ONE, &Theme::light()), &mut damage),
-        Some(Answer::Cancel)
-    );
+    assert_eq!(pointer(&mut settings, escape, &theme), Some(Answer::Cancel));
 }
 
 #[test]

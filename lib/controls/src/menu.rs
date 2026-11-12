@@ -75,6 +75,15 @@ pub enum MenuAction {
         /// The zero-based index of the row whose child to open.
         index: usize,
     },
+    /// The item at `index` was clicked with the secondary button: chosen,
+    /// with its owner keeping the menu up where the row allows it.
+    ///
+    /// Reported for every actionable row, as [`Activated`](Self::Activated)
+    /// is; the owner decides what it means for a row that only opens a child.
+    AlternateActivated {
+        /// The zero-based index of the activated row.
+        index: usize,
+    },
     /// The menu should be dismissed without activating anything (Escape).
     Dismissed,
 }
@@ -480,8 +489,13 @@ impl MenuItem {
     /// The colour this row's glyph is tinted: the row's foreground, the
     /// danger hue for a destructive row that can act, and the foreground the
     /// danger highlight itself carries when current.
-    fn glyph_color(&self, palette: &Palette, current: bool, label: Rgba) -> Rgba {
-        let on_emphasis = current && self.emphasis_fill(palette).is_some();
+    fn glyph_color(
+        &self,
+        palette: &Palette,
+        (current, acknowledged): (bool, bool),
+        label: Rgba,
+    ) -> Rgba {
+        let on_emphasis = acknowledged || (current && self.emphasis_fill(palette).is_some());
         if self.role == ControlRole::Destructive && self.is_actionable() && !on_emphasis {
             palette.danger
         } else {
@@ -561,6 +575,7 @@ impl MenuItem {
             leading,
             current,
             focused,
+            acknowledged,
         } = look;
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 {
@@ -578,7 +593,11 @@ impl MenuItem {
         // solid. A non-actionable current row (denied, disabled, pending) is
         // the one that stays a background: it shades quietly to the pressed
         // tint so it can never masquerade as an available action.
-        if current {
+        // A row chosen while its menu stays up says so in the accent, the one
+        // fill no highlight takes, until its owner lets the moment go.
+        if acknowledged {
+            plate.lay(surface, rect, Color::from(palette.accent));
+        } else if current {
             let fill = match self.emphasis_fill(palette) {
                 Some(emphasis) => emphasis,
                 None if actionable => palette.surface_selected,
@@ -609,7 +628,14 @@ impl MenuItem {
             );
         }
 
-        self.paint_content(surface, rect, (leading, current), scale, theme, font);
+        self.paint_content(
+            surface,
+            rect,
+            (leading, current, acknowledged),
+            scale,
+            theme,
+            font,
+        );
     }
 
     /// Paint the row foreground — mark, icon, label, caption, Signal Bead, and
@@ -619,7 +645,7 @@ impl MenuItem {
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
-        (leading, current): (Leading, bool),
+        (leading, current, acknowledged): (Leading, bool, bool),
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
@@ -634,13 +660,14 @@ impl MenuItem {
         // reads on it. A shade-highlighted row keeps the plate's own
         // foreground, since the ground beneath it has only changed shade. A
         // disabled row mutes; everything else is the normal foreground.
-        let (label_color, muted_color) = if current && self.emphasis_fill(palette).is_some() {
-            (palette.on_accent, palette.on_accent)
-        } else if disposition == ControlDisposition::DisabledByState {
-            (palette.on_surface_muted, palette.on_surface_muted)
-        } else {
-            (palette.on_surface, palette.on_surface_muted)
-        };
+        let (label_color, muted_color) =
+            if acknowledged || (current && self.emphasis_fill(palette).is_some()) {
+                (palette.on_accent, palette.on_accent)
+            } else if disposition == ControlDisposition::DisabledByState {
+                (palette.on_surface_muted, palette.on_surface_muted)
+            } else {
+                (palette.on_surface, palette.on_surface_muted)
+            };
 
         let glyph_h = font.glyph_height();
         let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
@@ -655,7 +682,8 @@ impl MenuItem {
         if icon_slot > 0 {
             let iy = y + (h.saturating_sub(icon_slot)) / 2;
             let mark_ink = Color::from(label_color);
-            let glyph_ink = Color::from(self.glyph_color(palette, current, label_color));
+            let glyph_ink =
+                Color::from(self.glyph_color(palette, (current, acknowledged), label_color));
             // A row that cannot act mutes its artwork as it mutes its label: a
             // full-colour picture would still read as something to choose.
             let tone = if disposition == ControlDisposition::DisabledByState {
@@ -749,6 +777,8 @@ struct RowLook {
     /// Whether the highlight came from the keyboard, drawing a focus ring so
     /// keyboard focus reads differently from a pointer hover (spec §15).
     focused: bool,
+    /// Whether the row was just chosen with its menu kept up.
+    acknowledged: bool,
 }
 
 /// The columns a plate's rows reserve before their labels.
@@ -827,7 +857,8 @@ struct RowBand {
 ///
 /// Equal menus draw the same pixels, so a host may use `==` as its repaint
 /// gate: the rows, the highlighted row, whether that highlight came from the
-/// keyboard, and the window's first row all compare. The pointer coordinate,
+/// keyboard, the window's first row and the row drawn as just chosen all
+/// compare. The pointer coordinate,
 /// the pressed-row latch, the held row, the wheel's carry and the typed prefix
 /// do not — no render path reads any of them, and the *visible* consequence of
 /// each is the highlight or window the same event sets.
@@ -839,10 +870,12 @@ pub struct Menu {
     /// The last pointer position, mapped to a row on the next press or
     /// release — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
-    /// The row a primary press landed on, held until release so a click that
-    /// slides onto a different row does not activate it; the pressed row's
-    /// *look* is `current`.
-    armed: RenderInvariant<Option<usize>>,
+    /// The row a press landed on and the button pressing it, held until that
+    /// button's release so a click that slides onto a different row does not
+    /// activate it; the pressed row's *look* is `current`.
+    armed: RenderInvariant<Option<(usize, PointerButton)>>,
+    /// The row just chosen with the menu kept up, drawn in the accent.
+    acknowledged: Option<usize>,
     /// The row the owner keeps the pointer's highlight on whatever row the
     /// pointer is over: the row whose child is open, while the pointer
     /// travels to that child.
@@ -885,6 +918,7 @@ impl Menu {
             keyboard_focus: false,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
+            acknowledged: None,
             held: RenderInvariant::new(None),
             first: None,
             wheel_carry: RenderInvariant::new(0),
@@ -986,6 +1020,56 @@ impl Menu {
     ) {
         let over = self.row_at(bounds, scale, theme, *self.pointer);
         self.hover(over, bounds, scale, theme, damage);
+    }
+
+    /// Draw row `index` as just chosen with the menu kept up, or no row with
+    /// `None`; an out-of-range index draws none. Reports the rows whose look
+    /// changed.
+    pub fn acknowledge(
+        &mut self,
+        index: Option<usize>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let next = self.on_menu(index);
+        if self.acknowledged == next {
+            return;
+        }
+        for row in [self.acknowledged, next].into_iter().flatten() {
+            if let Some(rect) = self.row_rect(row, bounds, scale, theme) {
+                damage.add(rect);
+            }
+        }
+        self.acknowledged = next;
+    }
+
+    /// The row drawn as just chosen, if one is.
+    #[must_use]
+    pub const fn acknowledged(&self) -> Option<usize> {
+        self.acknowledged
+    }
+
+    /// Take `from`'s highlight, the way it got there, the press it armed,
+    /// the row it holds, the row drawn as just chosen, the pointer it last saw
+    /// and the window it shows, for an owner restating a menu's rows in place:
+    /// each onto the row `same` says stands where `from`'s did, and none where
+    /// it names none. A row drawn as just chosen carries only onto one that
+    /// can still be chosen.
+    pub fn carry_highlight(&mut self, from: &Self, same: impl Fn(usize) -> Option<usize>) {
+        let len = self.items.len();
+        let carried = |row: Option<usize>| row.and_then(&same).filter(|&row| row < len);
+        self.current = carried(from.current);
+        self.keyboard_focus = from.keyboard_focus && self.current.is_some();
+        *self.held = carried(*from.held);
+        *self.armed = from
+            .armed
+            .and_then(|(row, button)| carried(Some(row)).map(|row| (row, button)));
+        *self.pointer = *from.pointer;
+        self.first = carried(from.first).or(from.first.filter(|&first| first < len));
+        self.acknowledged =
+            carried(from.acknowledged).filter(|&row| self.items[row].is_actionable());
     }
 
     /// Highlight the held row, else `over`, the row under the pointer — unless
@@ -1543,6 +1627,7 @@ impl Menu {
                 leading,
                 current,
                 focused: current && self.keyboard_focus,
+                acknowledged: self.acknowledged == Some(band.index),
             };
             item.paint(
                 surface,
@@ -1655,8 +1740,10 @@ impl Menu {
     }
 
     /// Feed a pointer event; hover highlights the held row, else the row
-    /// under the pointer, and a completed primary click over an actionable
-    /// row activates it (opening a submenu parent).
+    /// under the pointer, and a press and release of one button over one
+    /// actionable row activates it (opening a submenu parent), a secondary
+    /// click answering [`MenuAction::AlternateActivated`]. Another button's
+    /// release leaves the press as it was.
     ///
     /// A moved highlight reports the two rows it moved between, never the whole
     /// popup, and a sample that stays on one row reports nothing.
@@ -1678,9 +1765,9 @@ impl Menu {
                 None
             }
             InputEvent::PointerPressed {
-                button: PointerButton::Primary,
+                button: button @ (PointerButton::Primary | PointerButton::Secondary),
             } => {
-                *self.armed = over;
+                *self.armed = over.map(|row| (row, *button));
                 if over.is_some() {
                     self.highlight(over, false, bounds, scale, theme, damage);
                 }
@@ -1690,14 +1777,17 @@ impl Menu {
                 *self.armed = None;
                 None
             }
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            } => {
-                let armed = self.armed.take();
-                match (armed, over) {
-                    (Some(a), Some(o)) if a == o => self.activate(o),
-                    _ => None,
+            InputEvent::PointerReleased { button } => {
+                let (row, with) = (*self.armed).filter(|&(_, with)| with == *button)?;
+                *self.armed = None;
+                if over != Some(row) {
+                    return None;
                 }
+                let action = self.activate(row)?;
+                Some(match with {
+                    PointerButton::Secondary => MenuAction::AlternateActivated { index: row },
+                    PointerButton::Primary | PointerButton::Middle => action,
+                })
             }
             InputEvent::PointerScrolled { dy, .. } => {
                 self.wheel(*dy, bounds, scale, theme, damage);
@@ -1885,6 +1975,8 @@ pub struct ChainRow {
     /// Never drawn on the row: help text beside a label widens every plate
     /// that carries it, whether or not anyone reads it.
     tip: Option<String>,
+    /// Whether a secondary click chooses it and keeps the chain up.
+    repeatable: bool,
     /// Everything the shared row control draws.
     item: MenuItem,
 }
@@ -1900,6 +1992,7 @@ impl ChainRow {
             child: ChainChild::None,
             icon: None,
             tip: None,
+            repeatable: false,
             item: item.with_icon(menu_symbol_icon(symbol)),
         }
     }
@@ -1914,6 +2007,7 @@ impl ChainRow {
             child: ChainChild::Submenu,
             icon: None,
             tip: None,
+            repeatable: false,
             item: item.with_submenu(true).with_icon(menu_symbol_icon(symbol)),
         }
     }
@@ -1927,6 +2021,7 @@ impl ChainRow {
             child: ChainChild::Info(Box::new(sheet)),
             icon: None,
             tip: None,
+            repeatable: false,
             item: item
                 .with_submenu(true)
                 .with_icon(menu_symbol_icon(AppMenuSymbol::Info)),
@@ -1957,6 +2052,7 @@ impl ChainRow {
             },
             icon: None,
             tip: None,
+            repeatable: false,
             item: item.with_submenu(true).with_icon(menu_symbol_icon(symbol)),
         }
     }
@@ -2029,6 +2125,22 @@ impl ChainRow {
         self.icon = Some(RowIcon::Class(kind));
         self.item = self.item.with_icon(kind);
         self
+    }
+
+    /// This row chosen again and again with its chain up: a secondary click
+    /// chooses it and leaves the chain open. For a row that sets something in
+    /// place, never one that opens a surface the chain would stand over.
+    #[must_use]
+    pub const fn repeatable(mut self) -> Self {
+        self.repeatable = true;
+        self
+    }
+
+    /// Whether a secondary click chooses this row and keeps the chain up: a
+    /// row that answers with an id of its own and asked to be.
+    #[must_use]
+    pub const fn is_repeatable(&self) -> bool {
+        self.repeatable && self.id.is_some()
     }
 
     /// This row explaining, on dwell, why it cannot be chosen.
@@ -2142,6 +2254,44 @@ impl ChainModel {
         let side = Menu::icon_side(scale, theme);
         for row in &mut self.rows {
             row.item.resolve_glyph(side);
+        }
+    }
+
+    /// Take the pictures `shown` holds for what these rows show — a glyph
+    /// for the same symbol, artwork for the same source, the information
+    /// sheet's picture — so a model restating `shown` rasterises and resolves
+    /// only what it adds, and rows saying what `shown` says compare equal to
+    /// it. A glyph of another side is resolved again by
+    /// [`Self::resolve_glyphs`].
+    pub fn adopt_pictures(&mut self, shown: &Self) {
+        for row in &mut self.rows {
+            if row.item.glyph.is_none() {
+                let drawn = shown
+                    .rows
+                    .iter()
+                    .find(|old| old.item.icon == row.item.icon && old.item.glyph.is_some());
+                if let Some(old) = drawn {
+                    (*row.item.glyph).clone_from(&old.item.glyph);
+                }
+            }
+            if row.icon.is_some() && row.item.artwork.is_none() {
+                let resolved = shown
+                    .rows
+                    .iter()
+                    .find(|old| old.icon == row.icon && old.item.artwork.is_some());
+                if let Some(old) = resolved {
+                    row.item.artwork.clone_from(&old.item.artwork);
+                }
+            }
+            if let ChainChild::Info(sheet) = &mut row.child {
+                let pictured = shown.rows.iter().find_map(|old| match &old.child {
+                    ChainChild::Info(was) if was.source() == sheet.source() => was.artwork(),
+                    _ => None,
+                });
+                if let (None, Some(art)) = (sheet.artwork(), pictured) {
+                    sheet.set_artwork(art.clone());
+                }
+            }
         }
     }
 
@@ -2264,6 +2414,9 @@ fn wire_row(
             };
             if !item.reason.is_empty() {
                 row = row.explained(item.reason);
+            }
+            if item.repeatable {
+                row = row.repeatable();
             }
             Some(row)
         }

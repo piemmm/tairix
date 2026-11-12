@@ -28,7 +28,8 @@ use tairix_abi::window_ipc::{
     encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, KeyboardMode,
     LayerDepth, MenuRefusal, OfferedItem, PickPurpose, PointerAction, PreviewSubject, SystemTask,
-    TerrainPlate, ToolOver, WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
+    TerrainPlate, ToolOver, WindowEvent, WindowRegion, MENU_OPEN_REVISION,
+    WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
@@ -46,7 +47,8 @@ use tairix_window::{
 use crate::launch::{
     open_entry, resolve_launch, DocumentAuthority, DocumentRelay, Launch, LaunchHost, LaunchTarget,
 };
-use tairix_taskbar::menu::about_sheet;
+use tairix_taskbar::menu::{about_sheet, app_menu};
+use tairix_taskbar::MenuSubject;
 use tairix_window::WindowSizing;
 use tairix_wm::{
     Color, Compositor, CursorHint, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
@@ -369,6 +371,9 @@ struct WindowRecord {
     owner: ProcId,
     /// When a press first reaches the window.
     armed: Armed,
+    /// Whether it was told the desktop stopped showing it, and not yet told
+    /// the desktop shows it again.
+    covered: bool,
 }
 
 impl WindowRecord {
@@ -475,6 +480,9 @@ pub struct SessionWindows {
     /// The hold each pick took on the window that asked for it, while it is
     /// up.
     pick_holds: BTreeMap<PickId, Hold>,
+    /// Whether the served windows were last told that nobody can see the
+    /// desktop.
+    desktop_covered: bool,
 }
 
 /// The reports that move apps told the keyboard rests on `told` to where it
@@ -872,9 +880,50 @@ impl SessionWindows {
                     Standing::Dialog(_) => Armed::Unseen,
                     Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => Armed::Always,
                 },
+                covered: self.desktop_covered,
             },
         );
         self.by_wm.insert(wm, ipc);
+        // One opened while nobody can see the desktop is told so before its
+        // first frame, so it need draw nothing until it can be seen.
+        if self.desktop_covered {
+            self.owed.push(WindowEvent::Shown {
+                window_id: ipc,
+                shown: false,
+            });
+        }
+    }
+
+    /// The events telling the served windows the desktop has stopped
+    /// showing — `shown` false — or shows again, empty unless `shown` moved.
+    ///
+    /// Each edge tells the windows on screen or yet to present their first
+    /// frame, `visible` answering whether the compositor shows one; a
+    /// minimised window already knows. Uncovering tells only windows covering
+    /// told, so one minimised meanwhile is not told it is shown.
+    pub fn follow_desktop_shown(
+        &mut self,
+        shown: bool,
+        visible: impl Fn(WindowId) -> bool,
+    ) -> Vec<WindowEvent> {
+        if shown != self.desktop_covered {
+            return Vec::new();
+        }
+        self.desktop_covered = !shown;
+        let mut told = Vec::new();
+        for (&window_id, record) in &mut self.records {
+            let on_screen = record.first_frame == FirstFrame::Unpresented || visible(record.wm);
+            let tell = if shown {
+                core::mem::take(&mut record.covered) && on_screen
+            } else {
+                record.covered = on_screen;
+                on_screen
+            };
+            if tell {
+                told.push(WindowEvent::Shown { window_id, shown });
+            }
+        }
+        told
     }
 
     /// The process the kernel attested owns the served window `ipc`.
@@ -1487,6 +1536,54 @@ impl LaunchHost for DeskReach<'_, '_> {
 }
 
 impl ShellWindowHost<'_> {
+    /// The chain model an application's menu `menu` over its window
+    /// `window_id` shows.
+    ///
+    /// The information row's text is the session's, from the bundle's signed
+    /// manifest, so an application cannot state an identity that is not its
+    /// own — and a process with nothing attesting one gets no information row
+    /// at all rather than a fabricated panel.
+    fn window_menu(&self, window_id: u64, menu: &AppMenu) -> ChainModel {
+        let sheet = self.windows.owner_of(window_id).and_then(|owner| {
+            let identity = self.apps.attested_identity(owner)?;
+            let mut sheet = about_sheet(&identity);
+            if let Some(bundle) = self.apps.attested_bundle(owner) {
+                sheet.set_source(RowIcon::Bundle(bundle));
+            }
+            Some(sheet)
+        });
+        ChainModel::from_app_menu(menu.title(), menu, sheet.as_ref())
+    }
+
+    /// Restate `owner`'s icon-bar menu from the declaration `bar` it now
+    /// makes, if that menu's chain is up: a row chosen with it kept up is
+    /// answered by the application declaring what the choice changed. A
+    /// declaration offering no menu any longer closes it.
+    fn follow_app_bar_menu(&mut self, owner: ProcId, bar: &AppBar) {
+        let shown = match self.menu.owner() {
+            Some(
+                shown @ ChainOwner::Bar(MenuSubject::App {
+                    owner: declared, ..
+                }),
+            ) if *declared == owner => shown.clone(),
+            _ => return,
+        };
+        let Some(identity) = self.apps.attested_identity(owner) else {
+            self.menu.dismiss();
+            return;
+        };
+        let mut model = app_menu(&identity.name, &bar.menu, &identity);
+        self.apps.source_sheet(owner, &mut model);
+        let to = ChainOwner::Bar(MenuSubject::App {
+            owner,
+            revision: bar.revision,
+        });
+        let geom = chain_geometry(self.shell.session(), self.compositor);
+        if self.menu.restate(&shown, to, model, &geom).is_err() {
+            self.menu.dismiss();
+        }
+    }
+
     /// `titled` applied to whom `owner`'s windows speak for: its bundle's
     /// signed title, never anything the process says, and one claiming the
     /// desktop's own word by its bundle path instead.
@@ -2464,27 +2561,51 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // of a chain. Refusing the call would spend no id and leave the
         // application unable to tell "the desktop cannot" from "I asked
         // wrongly".
-        let owner = ChainOwner::Window { window_id, open_id };
+        let owner = ChainOwner::Window {
+            window_id,
+            open_id,
+            revision: MENU_OPEN_REVISION,
+        };
         if let Some(reason) = self.seat_refusal(window_id) {
             self.menu.refuse(owner, reason);
             return Ok(());
         }
-        // The information row's text is the session's, from the bundle's
-        // signed manifest, so an application cannot state an identity that is
-        // not its own — and a process with nothing attesting one gets no
-        // information row at all rather than a fabricated panel.
-        let sheet = self.windows.owner_of(window_id).and_then(|owner| {
-            let identity = self.apps.attested_identity(owner)?;
-            let mut sheet = about_sheet(&identity);
-            if let Some(bundle) = self.apps.attested_bundle(owner) {
-                sheet.set_source(RowIcon::Bundle(bundle));
-            }
-            Some(sheet)
-        });
-        let model = ChainModel::from_app_menu(menu.title(), menu, sheet.as_ref());
+        let model = self.window_menu(window_id, menu);
         let geom = chain_geometry(self.shell.session(), self.compositor);
         self.menu
             .open(owner, model, window_menu_placement(anchor), &geom)
+            .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
+    }
+
+    fn menu_restate_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        revision: u32,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        let shown = match self.menu.owner() {
+            Some(
+                shown @ ChainOwner::Window {
+                    window_id: owning,
+                    open_id: answering,
+                    ..
+                },
+            ) if (*owning, *answering) == (window_id, open_id) => shown.clone(),
+            // A chain no longer up has its answer on the way, so asking to
+            // restate it is no fault of the application's.
+            _ => return Ok(()),
+        };
+        let model = self.window_menu(window_id, menu);
+        let geom = chain_geometry(self.shell.session(), self.compositor);
+        let to = ChainOwner::Window {
+            window_id,
+            open_id,
+            revision,
+        };
+        self.menu
+            .restate(&shown, to, model, &geom)
+            .map(|_| ())
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
     }
 
@@ -2925,7 +3046,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // The engine attested the caller and bounded the declaration; the
         // icon-bar service records it, and the strip is re-resolved from the
         // dirty latch before the next present.
-        self.apps.app_bar_declared(owner, bar)
+        self.apps.app_bar_declared(owner, bar)?;
+        self.follow_app_bar_menu(owner, bar);
+        Ok(())
     }
 
     fn app_bar_withdrawn(&mut self, owner: ProcId) {
@@ -7633,6 +7756,75 @@ mod tests {
         assert!(shell.session().taskbar().tasks().is_minimised(task));
     }
 
+    /// Covering the desktop tells each served window on screen, or yet to
+    /// present, once — a minimised one already knows — and one opened while
+    /// it is covered as it opens; uncovering tells exactly the windows told.
+    #[test]
+    fn a_covered_desktop_tells_its_windows_once_and_uncovering_tells_them_again() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
+        };
+        open_one(&mut host, 7);
+        let minimised = open_one(&mut host, 8);
+        let m = mode(40, 30, DisplayFormat::Rgba8888);
+        host.window_opened(window_owner(1), 9, &m, "app", WindowSizing::default())
+            .expect("opens unpresented");
+        assert!(host.shell.minimize_window(host.compositor, minimised));
+        // What the opens owed is not this test's.
+        let _ = host.windows.take_owed_events();
+        let visible = |compositor: &Compositor, wm| {
+            compositor
+                .window(wm)
+                .is_some_and(tairix_wm::Window::is_visible)
+        };
+        let compositor = &*host.compositor;
+        assert!(
+            host.windows
+                .follow_desktop_shown(true, |wm| visible(compositor, wm))
+                .is_empty(),
+            "nothing moved"
+        );
+        let covered = host
+            .windows
+            .follow_desktop_shown(false, |wm| visible(compositor, wm));
+        let told = |window_id, shown| WindowEvent::Shown { window_id, shown };
+        assert_eq!(covered, [told(7, false), told(9, false)]);
+        assert!(host
+            .windows
+            .follow_desktop_shown(false, |wm| visible(compositor, wm))
+            .is_empty());
+        host.window_opened(window_owner(1), 10, &m, "app", WindowSizing::default())
+            .expect("opens while covered");
+        assert_eq!(host.windows.take_owed_events(), [told(10, false)]);
+        let presented = open_one(&mut host, 11);
+        let _ = host.windows.take_owed_events();
+        assert!(host.shell.minimize_window(host.compositor, presented));
+        let compositor = &*host.compositor;
+        let uncovered = host
+            .windows
+            .follow_desktop_shown(true, |wm| visible(compositor, wm));
+        assert_eq!(
+            uncovered,
+            [told(7, true), told(9, true), told(10, true)],
+            "neither minimised window is told it is shown"
+        );
+    }
+
     #[test]
     fn put_to_back_restacks_without_an_app_event() {
         let (mut shell, mut compositor) = desktop();
@@ -8832,5 +9024,79 @@ mod tests {
         assert!(compositor.window(window).expect("window").has_content());
         assert!(compositor.take_released_notices().is_empty());
         assert!(compositor.pending_redraws().is_empty());
+    }
+
+    /// A menu restated because its application re-declared keeps the picture
+    /// of its information sheet: the regression opened the sheet with the
+    /// built-in glyph once the rows were restated.
+    #[test]
+    fn a_bar_menu_restated_by_a_re_declaration_keeps_its_sheets_picture() {
+        use tairix_abi::window_ipc::{
+            AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
+        };
+        use tairix_controls::RowIcon;
+
+        use crate::menu::ChainPicture;
+
+        let (mut shell, mut compositor, mut windows) = (
+            crate::tests::shell(),
+            crate::tests::compositor(),
+            SessionWindows::new(),
+        );
+        with_owner((&mut shell, &mut compositor, &mut windows), false, |host| {
+            let owner = window_owner(1);
+            let declared = |label: &str| {
+                let mut menu = AppMenu::EMPTY;
+                menu.push(AppMenuRow::Info).expect("fits");
+                let id = AppMenuItemId::new(1).expect("non-zero");
+                let item = AppMenuItem::new(
+                    id,
+                    AppMenuLabel::new(label).expect("short"),
+                    AppMenuSymbol::Open,
+                );
+                menu.push(AppMenuRow::Item(item.repeatable()))
+                    .expect("fits");
+                menu
+            };
+            let identity = host.apps.attested_identity(owner).expect("attested");
+            let mut model = app_menu(&identity.name, &declared("Wrap"), &identity);
+            host.apps.source_sheet(owner, &mut model);
+            let subject = |revision| ChainOwner::Bar(MenuSubject::App { owner, revision });
+            let geom = chain_geometry(host.shell.session(), host.compositor);
+            host.menu
+                .open(
+                    subject(0),
+                    model,
+                    window_menu_placement(Rect::new(100, 100, 0, 0)),
+                    &geom,
+                )
+                .expect("the bar menu opens");
+
+            let bar = AppBar {
+                event_endpoint: 0,
+                click: AppBarClick::Open,
+                menu: declared("Unwrap"),
+                revision: 1,
+            };
+            assert_eq!(host.app_bar_declared(owner, &bar), Ok(()));
+            assert_eq!(host.menu.owner(), Some(&subject(1)), "restated, not closed");
+
+            let geom = chain_geometry(host.shell.session(), host.compositor);
+            let at = host
+                .menu
+                .row_rect(0, 0, &geom)
+                .expect("the sheet's row")
+                .center();
+            host.menu
+                .handle(&InputEvent::PointerMoved { to: at }, at, &geom, 0);
+            let source = RowIcon::Bundle(String::from("/System/Applications/TextEdit.app"));
+            assert!(
+                host.menu
+                    .icon_wants(&geom)
+                    .iter()
+                    .any(|want| want.target == ChainPicture::Info && want.source == source),
+                "the sheet asks for its bundle's picture"
+            );
+        });
     }
 }

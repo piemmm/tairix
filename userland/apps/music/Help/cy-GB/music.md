@@ -35,6 +35,10 @@ nodi.
 Gadewir allan ffeil na all y chwaraewr ei darllen, gyda'r rheswm ar y llinell
 statws.
 
+Mae cau'r ffenestr yn gadael y chwaraewr ar y bar eiconau, yn dal i chwarae: mae
+clic ar ei eicon yn dod â'r ffenestr yn ôl, ac mae Gadael yn ei ddewislen yn dod
+â'r chwaraewr i ben.
+
 * `Space` — chwarae neu oedi
 * `Enter` — chwarae'r trac a ddewiswyd
 * `Left` / `Right` — deg eiliad yn ôl neu ymlaen
@@ -55,6 +59,6 @@ statws.
 
 ## EXIT STATUS
 
-Sero ar ôl cau'r ffenestr neu ddewis Gadael. Nid sero pan wrthodwyd sianel y
-ffenestr, y rhanbarth ffrâm a rennir, neu sesiwn y bwrdd gwaith; nodir y
-rheswm ar y ffrwd gwall safonol.
+Sero unwaith y dewisir Gadael yn ei ddewislen ar y bar eiconau. Nid sero pan
+wrthodwyd sianel y ffenestr, y rhanbarth ffrâm a rennir, neu sesiwn y bwrdd
+gwaith; nodir y rheswm ar y ffrwd gwall safonol.

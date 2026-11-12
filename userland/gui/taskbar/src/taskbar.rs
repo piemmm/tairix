@@ -25,7 +25,7 @@ use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, ProcId};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_content_inset, readout_hover, ControlRole, FactList, IconButton, Measured,
+    plate_content_inset, readout_hover, ChainModel, ControlRole, FactList, IconButton, Measured,
     PlatePlacement, PlateSeating, PointerState, TaskbarItem, TraySignalAction,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -1461,38 +1461,45 @@ impl Taskbar {
 
     /// The chain the desktop should open for a program-library entry, anchored
     /// at where it is shown, or `None` for an entry the catalog does not list.
-    ///
-    /// Its rows are read from what the bar was told: the account's shelf,
-    /// the entry's manifest facts, and whether the console can authorise an
-    /// account. Every unknown reads as not offered.
     pub(crate) fn entry_menu(
         &self,
         entry: EntryId,
         anchor: Rect,
         scale: Scale,
     ) -> Option<MenuRequest> {
-        let listed = self.library.catalog().entry(&entry)?;
+        Some(MenuRequest {
+            model: self.entry_model(&entry)?,
+            subject: MenuSubject::Entry { entry },
+            placement: self.menu_placement(anchor, scale),
+        })
+    }
+
+    /// The rows a program-library entry's menu offers now, or `None` for an
+    /// entry the catalog does not list: what a menu kept up after one of its
+    /// rows changed the shelf is restated with.
+    ///
+    /// They are read from what the bar was told: the account's shelf, the
+    /// entry's manifest facts, and whether the console can authorise an
+    /// account. Every unknown reads as not offered.
+    #[must_use]
+    pub fn entry_model(&self, entry: &EntryId) -> Option<ChainModel> {
+        let listed = self.library.catalog().entry(entry)?;
         let favourites = &self.library.shelf().favourites;
-        let place = favourites.iter().position(|kept| *kept == entry);
+        let place = favourites.iter().position(|kept| kept == entry);
         let state = menu::EntryState {
             favourite: place.map(|at| menu::Neighbours {
                 earlier: at > 0,
                 later: at + 1 < favourites.len(),
             }),
-            used: self.library.has_use(&entry),
+            used: self.library.has_use(entry),
             elevation: self.elevation_available,
         };
-        let model = menu::entry_menu(
+        Some(menu::entry_menu(
             listed.name().as_str(),
             state,
-            self.library.facts_of(&entry),
+            self.library.facts_of(entry),
             listed.bundle().as_str(),
-        );
-        Some(MenuRequest {
-            subject: MenuSubject::Entry { entry },
-            model,
-            placement: self.menu_placement(anchor, scale),
-        })
+        ))
     }
 
     /// The chain the desktop should open for the system quick actions,

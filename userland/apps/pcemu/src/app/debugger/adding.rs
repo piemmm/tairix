@@ -82,6 +82,9 @@ pub struct Adding {
     /// The registers an address naming one reads.
     regs: Regs,
     pointer: Point,
+    /// The press under way began on an open choice list, so none of it is
+    /// the actions'.
+    list_press: bool,
 }
 
 fn field() -> TextField {
@@ -141,6 +144,7 @@ impl Adding {
             kind,
             regs,
             pointer: Point::ORIGIN,
+            list_press: false,
         }
     }
 
@@ -175,7 +179,10 @@ impl Adding {
             .group
             .measured_height(content.width, column, scale, theme);
         let rect = Rect::new(content.left(), content.top(), content.width, height);
-        (bounds, FieldLayout::new(rect, column).within(content))
+        // A choice list may hang anywhere in the client, over the actions
+        // included, since it is modal.
+        let layout = FieldLayout::new(rect, column).within(bounds);
+        (bounds, self.group.place_popup(layout, scale, theme))
     }
 
     /// Paints the whole client.
@@ -183,8 +190,11 @@ impl Adding {
         let (bounds, layout) = self.layout(scale, theme);
         self.dialog.render(surface, bounds, scale, theme);
         self.group.render(surface, layout, scale, theme);
-        self.group
-            .render_popup(surface, layout.bounds, scale, theme);
+        self.group.render_popup(surface, layout.popup, scale, theme);
+    }
+
+    fn listing(&self) -> bool {
+        self.group.rows().iter().any(FieldRow::popup_open)
     }
 
     /// Takes `event` at monotonic `at_ns`: the answer, once there is one.
@@ -196,13 +206,16 @@ impl Adding {
         damage: &mut Region,
     ) -> Option<Answer> {
         let (bounds, layout) = self.layout(scale, theme);
+        let listing = self.listing();
         if let Some(stroke) = Keystroke::pressed(*event, at_ns) {
-            let open = self.group.rows().iter().any(FieldRow::popup_open);
-            if stroke.key == Key::Named(NamedKey::Escape) && !open {
+            if stroke.key == Key::Named(NamedKey::Escape) && !listing {
                 return Some(Answer::Cancel);
             }
             if let Some(action) = self.group.on_key(stroke, layout, scale, theme, damage) {
                 self.take(&action, bounds, damage);
+                return None;
+            }
+            if listing {
                 return None;
             }
             return match self.dialog.on_key(stroke.key) {
@@ -213,8 +226,23 @@ impl Adding {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
+        if matches!(event, InputEvent::PointerPressed { .. }) {
+            // A press that takes an open list away is not also a press on
+            // whatever the list hung over.
+            self.list_press = listing;
+        }
         if let Some(action) = self.group.on_pointer(event, layout, scale, theme, damage) {
             self.take(&action, bounds, damage);
+        }
+        let to_actions = !listing && !self.list_press;
+        if matches!(
+            event,
+            InputEvent::PointerReleased { .. } | InputEvent::PointerCancelled
+        ) {
+            self.list_press = false;
+        }
+        if !to_actions {
+            return None;
         }
         match self.dialog.on_pointer(event, bounds, scale, theme, damage) {
             Some(DialogAction::ActionActivated { index }) => self.answer(index, damage, bounds),

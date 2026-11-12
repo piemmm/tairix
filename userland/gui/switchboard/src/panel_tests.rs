@@ -261,7 +261,7 @@ fn closing_returns_to_headless_sampling() {
     // A later model change draws nothing: there is no window to draw into,
     // and the panel never re-opens one on its own.
     let presents = host.presents;
-    panel.refresh(&host, task_model(10));
+    panel.refresh(&mut host, task_model(10));
     assert_eq!(host.presents, presents);
     assert!(!panel.is_open());
 }
@@ -295,7 +295,7 @@ fn refreshing_with_an_unchanged_model_draws_nothing() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(&host, empty_model());
+    panel.refresh(&mut host, empty_model());
 
     assert_eq!(host.presents, presents);
 }
@@ -307,7 +307,7 @@ fn refreshing_with_a_changed_model_redraws_and_keeps_the_section() {
     open(&mut panel, &mut host, CommandSection::Recovery);
     let presents = host.presents;
 
-    panel.refresh(&host, stopped_model(7, false));
+    panel.refresh(&mut host, stopped_model(7, false));
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);
@@ -323,7 +323,7 @@ fn a_reading_from_another_subject_repaints_the_rail_and_not_the_window() {
     // A task appears. The rail states every subject's reading whichever one
     // is on show, so this is on screen even from Recovery — but it is one
     // column of it, never the window.
-    panel.refresh(&host, task_model(10));
+    panel.refresh(&mut host, task_model(10));
     panel.flush(&mut host);
 
     let rect = host.last_presented_rect().expect("the rail moved");
@@ -340,7 +340,7 @@ fn a_fresh_frame_reading_costs_the_rail_and_not_the_window() {
     let mut panel = Panel::new(OWN_PID, frame_model(3_200));
     open(&mut panel, &mut host, CommandSection::Tasks);
 
-    panel.refresh(&host, frame_model(6_400));
+    panel.refresh(&mut host, frame_model(6_400));
     panel.flush(&mut host);
 
     // The session reports a frame per compositor frame, and the display
@@ -360,7 +360,7 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     assert_eq!(wheel(&mut panel, 4), detents_px(4));
 
-    panel.refresh(&host, busy_model(200));
+    panel.refresh(&mut host, busy_model(200));
     panel.flush(&mut host);
 
     assert_eq!(panel.section(), Some(Section::Tasks));
@@ -708,7 +708,7 @@ fn refreshing_with_an_unchanged_model_then_flushing_presents_nothing() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(&host, empty_model());
+    panel.refresh(&mut host, empty_model());
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents);
@@ -754,7 +754,7 @@ fn a_fresh_reading_presents_what_moved_and_not_the_client() {
     // Every row's CPU cell moved — the widest a refresh of this section can
     // honestly report — and that is still short of the client, which also
     // carries the headings and the navigation rail beside the table.
-    panel.refresh(&host, busy_at(100, Some(640)));
+    panel.refresh(&mut host, busy_at(100, Some(640)));
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);
@@ -776,13 +776,51 @@ fn a_reading_that_did_not_move_presents_nothing() {
     // A distinct model value that derives the very same rows — the task
     // identities moved and no drawn cell did — so the refresh gate lets it
     // through and every section then reports nothing.
-    panel.refresh(&host, busy_model(200));
+    panel.refresh(&mut host, busy_model(200));
     panel.flush(&mut host);
 
     assert_eq!(
         host.presents, presents,
         "nothing on screen moved, so nothing is presented"
     );
+}
+
+/// A window the desktop does not show presents nothing — not a fresh
+/// reading, not a whole repaint — and is drawn whole once it is shown.
+#[test]
+fn a_window_the_desktop_does_not_show_presents_nothing_until_it_is_shown() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+    assert!(panel.is_on_show());
+
+    panel.set_shown(false);
+    assert!(!panel.is_on_show());
+    panel.refresh(&mut host, busy_at(100, Some(640)));
+    panel.flush(&mut host);
+    panel.repaint_whole();
+    panel.flush(&mut host);
+    assert_eq!(host.presents, presents, "nobody could see it");
+
+    panel.set_shown(true);
+    panel.flush(&mut host);
+    assert_eq!(host.presents, presents + 1);
+    assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
+}
+
+/// A window opened again after one minimised and closed starts on show.
+#[test]
+fn a_window_opened_again_is_on_show() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    panel.set_shown(false);
+    panel.close(&mut host);
+    let presents = host.presents;
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    assert!(panel.is_on_show());
+    assert_eq!(host.presents, presents + 1);
 }
 
 #[test]
@@ -794,7 +832,7 @@ fn a_reading_adopted_onto_released_pixels_draws_the_client_whole() {
     // resolve a rectangle against and nothing partial could stand on them.
     host.attached = false;
 
-    panel.refresh(&host, busy_at(100, Some(640)));
+    panel.refresh(&mut host, busy_at(100, Some(640)));
     host.attached = true;
     panel.flush(&mut host);
 
@@ -924,7 +962,10 @@ fn a_chosen_row_acts_on_the_task_its_menu_was_opened_on_after_the_rows_move() {
 
     // Samples go on landing while the menu is up, and this one puts another
     // task where the chosen one was.
-    panel.refresh(&host, running_model(&[20, 30, 10], &PROC_CONTROL_AUTHORITY));
+    panel.refresh(
+        &mut host,
+        running_model(&[20, 30, 10], &PROC_CONTROL_AUTHORITY),
+    );
     let force = row_of(&host, TaskControl::ForceQuit);
     panel.menu_closed(
         &mut host,
@@ -945,24 +986,7 @@ fn a_command_the_task_no_longer_permits_is_not_carried_out() {
     let pause = row_of(&host, TaskControl::Pause);
 
     // Someone else paused it while the menu was up.
-    let paused = sample_with(alloc::vec![process_summary(
-        10,
-        ProcessState::Stopped,
-        b"task",
-        None
-    )]);
-    panel.refresh(
-        &host,
-        build_model(
-            PANEL_TITLE,
-            None,
-            &paused,
-            &SessionReport::HEALTHY,
-            &OwnerBundles::new(),
-            &mut RollingMeters::new(),
-            &PROC_CONTROL_AUTHORITY,
-        ),
-    );
+    panel.refresh(&mut host, paused_model(&PROC_CONTROL_AUTHORITY));
     panel.menu_closed(
         &mut host,
         open_id,
@@ -981,7 +1005,7 @@ fn a_command_on_a_task_that_went_while_its_menu_was_up_does_nothing() {
     let open_id = ask_menu(&mut panel, &mut host, 10);
     let force = row_of(&host, TaskControl::ForceQuit);
 
-    panel.refresh(&host, running_model(&[20], &PROC_CONTROL_AUTHORITY));
+    panel.refresh(&mut host, running_model(&[20], &PROC_CONTROL_AUTHORITY));
     panel.menu_closed(
         &mut host,
         open_id,
@@ -990,6 +1014,96 @@ fn a_command_on_a_task_that_went_while_its_menu_was_up_does_nothing() {
     );
 
     assert!(host.signals.is_empty(), "never the task that stayed");
+}
+
+/// A sample in which task 10 is paused, under `authority`.
+fn paused_model(authority: &dyn tairix_abi::CapabilityQuery) -> PanelModel {
+    let paused = sample_with(alloc::vec![process_summary(
+        10,
+        ProcessState::Stopped,
+        b"task",
+        None
+    )]);
+    build_model(
+        PANEL_TITLE,
+        None,
+        &paused,
+        &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
+        &mut RollingMeters::new(),
+        authority,
+    )
+}
+
+#[test]
+fn a_row_chosen_with_its_menu_kept_up_acts_and_leaves_the_open_owed() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+    let pause = row_of(&host, TaskControl::Pause);
+
+    panel.menu_chosen(&mut host, open_id, pause, &PROC_CONTROL_AUTHORITY);
+    assert_eq!(host.signals, alloc::vec![(10, Signal::Stop)]);
+    assert!(
+        host.restated.is_empty(),
+        "nothing the rows show has moved before the next sample"
+    );
+
+    panel.menu_chosen(&mut host, open_id + 1, pause, &PROC_CONTROL_AUTHORITY);
+    assert_eq!(host.signals.len(), 1, "an id this panel never held");
+
+    let force = row_of(&host, TaskControl::ForceQuit);
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+    assert_eq!(
+        host.signals,
+        alloc::vec![(10, Signal::Stop), (10, Signal::Kill)],
+        "the open is still the one owed its answer"
+    );
+    assert!(host.refusals.is_empty());
+}
+
+#[test]
+fn a_menu_kept_up_is_restated_when_its_tasks_verdicts_move_and_only_then() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10, 20], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+
+    panel.refresh(&mut host, running_model(&[20, 10], &PROC_CONTROL_AUTHORITY));
+    assert!(
+        host.restated.is_empty(),
+        "the task moved, its verdicts did not"
+    );
+
+    panel.refresh(&mut host, paused_model(&PROC_CONTROL_AUTHORITY));
+    let subject = proc_id_of(panel.model(), 10);
+    let (_, task) = panel
+        .model()
+        .task(subject)
+        .expect("the task is still sampled");
+    assert_eq!(
+        host.restated,
+        alloc::vec![(
+            open_id,
+            task_menu(task).expect("the rows fit the menu bounds")
+        )],
+        "the menu now offers Resume where it offered Pause"
+    );
+
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Dismissed,
+        &PROC_CONTROL_AUTHORITY,
+    );
+    panel.refresh(&mut host, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    assert_eq!(host.restated.len(), 1, "a settled open is never restated");
 }
 
 #[test]

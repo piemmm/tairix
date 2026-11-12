@@ -37,6 +37,23 @@ fn the_picture_is_the_largest_four_by_three_the_window_holds_centred() {
 }
 
 #[test]
+fn a_machine_window_opens_to_show_a_vga_screen_at_one_pixel_a_dot() {
+    for bar in [0, 26, 40] {
+        let (width, height) = opening_extent(bar);
+        assert_eq!(
+            fit(width, height - bar),
+            Some(Region {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480
+            }),
+            "over a {bar}-pixel bar"
+        );
+    }
+}
+
+#[test]
 fn a_window_point_is_the_frames_dot_under_it() {
     let target = Region {
         x: 100,

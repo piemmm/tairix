@@ -1,8 +1,11 @@
 //! A touchscreen: one finger is the pointer at the place touched, two scroll
-//! and pinch at their centre.
+//! and pinch at their centre, and the surface's own buttons press at the
+//! pointer.
 
+use tairix_abi::touch::TouchButtons;
 use tairix_input::PointerButton;
 
+use crate::buttons::DeviceButtons;
 use crate::fingers::Fingers;
 use crate::two::{ScrollRate, Two};
 use crate::{Gesture, SurfacePoint, TouchPress};
@@ -48,6 +51,7 @@ enum State {
 pub(crate) struct Screen {
     state: State,
     two: Two,
+    buttons: DeviceButtons,
 }
 
 impl Screen {
@@ -55,10 +59,25 @@ impl Screen {
         Self {
             state: State::Idle,
             two: Two::Off,
+            buttons: DeviceButtons::new(),
         }
     }
 
-    pub fn frame(&mut self, fingers: &Fingers, now_ns: u64, out: &mut dyn FnMut(Gesture)) {
+    pub fn frame(
+        &mut self,
+        fingers: &Fingers,
+        buttons: TouchButtons,
+        now_ns: u64,
+        out: &mut dyn FnMut(Gesture),
+    ) {
+        let edges = self.buttons.adopt(buttons);
+        self.follow(fingers, now_ns, out);
+        // After the fingers, so a press lands where this frame put the pointer.
+        self.buttons
+            .report(edges, |_, code| TouchPress::Device(code), out);
+    }
+
+    fn follow(&mut self, fingers: &Fingers, now_ns: u64, out: &mut dyn FnMut(Gesture)) {
         let count = fingers.count();
         self.state = match self.state {
             State::Idle | State::Spent if count == 0 => State::Idle,
@@ -169,17 +188,18 @@ impl Screen {
         }
     }
 
-    /// Release a press and undo a pinch.
+    /// Release every press and undo a pinch.
     pub fn end(&mut self, out: &mut dyn FnMut(Gesture)) {
         self.two.cancel(out);
         if let State::Pressing { .. } = self.state {
             out(Gesture::Released(PRESS));
         }
+        self.buttons.end(out);
         *self = Self::new();
     }
 
     pub fn is_idle(&self) -> bool {
-        self.state == State::Idle && self.two.is_off()
+        self.state == State::Idle && self.two.is_off() && self.buttons.is_idle()
     }
 }
 

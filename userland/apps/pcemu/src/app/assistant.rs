@@ -153,6 +153,9 @@ impl Assistant {
         )
     }
 
+    /// The client, and where the fields are laid out in it: a choice list
+    /// may hang anywhere in the client, over the actions included, since it
+    /// is modal.
     fn layout(&self, scale: Scale, theme: &Theme) -> (Rect, FieldLayout) {
         let (width, height) = self.extent(scale, theme);
         let bounds = Rect::new(0, 0, width, height);
@@ -160,8 +163,7 @@ impl Assistant {
             .dialog
             .content_rect(bounds, scale, theme)
             .unwrap_or(Rect::EMPTY);
-        let column = self.fields.slot_column(content.width, scale, theme);
-        (bounds, FieldLayout::new(content, column))
+        (bounds, self.fields.layout(content, bounds, scale, theme))
     }
 
     /// Paint the whole client.
@@ -170,7 +172,11 @@ impl Assistant {
         self.dialog.render(surface, bounds, scale, theme);
         self.fields.render(surface, fields, scale, theme);
         self.fields
-            .render_popup(surface, fields.bounds, scale, theme);
+            .render_popup(surface, fields.popup, scale, theme);
+    }
+
+    fn listing(&self) -> bool {
+        self.fields.rows().iter().any(FieldRow::popup_open)
     }
 
     /// Take `event` at monotonic `at_ns`: the answer, once there is one, and
@@ -189,8 +195,11 @@ impl Assistant {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
+        let listing = self.listing();
         if matches!(event, InputEvent::PointerPressed { .. }) {
-            self.armed = Some(if fields.bounds.contains(self.pointer) {
+            // A press that takes an open list away is not also a press on
+            // whatever the list hung over.
+            self.armed = Some(if listing || fields.bounds.contains(self.pointer) {
                 Part::Fields
             } else {
                 Part::Actions
@@ -202,7 +211,7 @@ impl Assistant {
                 self.take(&action, damage, bounds);
             }
         }
-        if self.armed != Some(Part::Fields) {
+        if self.armed != Some(Part::Fields) && !listing {
             if let Some(DialogAction::ActionActivated { index }) =
                 self.dialog.on_pointer(event, bounds, scale, theme, damage)
             {
@@ -225,13 +234,15 @@ impl Assistant {
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> Option<Answer> {
-        if stroke.key == Key::Named(NamedKey::Escape)
-            && !self.fields.rows().iter().any(FieldRow::popup_open)
-        {
+        let listing = self.listing();
+        if stroke.key == Key::Named(NamedKey::Escape) && !listing {
             return Some(Answer::Cancel);
         }
         if let Some(action) = self.fields.on_key(stroke, fields, scale, theme, damage) {
             self.take(&action, damage, fields.bounds);
+            return None;
+        }
+        if listing {
             return None;
         }
         if let Some(DialogAction::ActionActivated { index }) = self.dialog.on_key(stroke.key) {

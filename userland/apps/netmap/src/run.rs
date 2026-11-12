@@ -37,7 +37,8 @@ mod program {
     use tairix_abi::net_ipc::{address_parts, ip_from_parts, NetAddrFamily};
     use tairix_abi::waitset::WaitSourceKind;
     use tairix_abi::window_ipc::{
-        AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion, WindowSizing,
+        AppBarClick, AppMenuItemId, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion,
+        WindowSizing,
     };
     use tairix_abi::{Errno, FieldValue, ORIGIN_WIRE_LEN};
     use tairix_appdata::{Opening, Publication, PublishWorker, RtHost, Settings};
@@ -66,6 +67,7 @@ mod program {
     use tairix_theme::ThemeRegistry;
     use tairix_window::app::WindowPane;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::menu::MenuStatements;
     use tairix_window::{
         damage_in, held_modifiers, key_input_event, pinch_input_events, pointer_input_events,
         pointer_point, scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain,
@@ -605,8 +607,8 @@ mod program {
         naming_notice: Option<String>,
         /// Why reachability is not actively probed, if it is not.
         probe_notice: Option<String>,
-        /// The context menu asked for and not yet answered, by its open id.
-        menu: Option<(u64, Box<NodeMenu>)>,
+        /// The context menu asked for and not yet answered.
+        menu: Option<MenuStatements<Box<NodeMenu>>>,
         /// The tooltip last declared over the window.
         tip: DeclaredTip,
         /// The probe posture, published off the loop and read at start.
@@ -674,7 +676,11 @@ mod program {
                 self.settings = None;
             }
             if let PostedRequest::OpenMenu(open) = refused.request {
-                if self.menu.as_ref().is_some_and(|(asked, _)| *asked == open) {
+                if self
+                    .menu
+                    .as_ref()
+                    .is_some_and(|shown| shown.open_id() == open)
+                {
                     self.menu = None;
                 }
             }
@@ -867,7 +873,7 @@ mod program {
                 .client()
                 .open_menu(window_id, anchor, menu.model())
             {
-                Ok(open_id) => self.menu = Some((open_id, menu)),
+                Ok(open_id) => self.menu = Some(MenuStatements::new(open_id, menu)),
                 Err(err) => app::report(APP_NAME, format_args!("menu refused ({err}); not shown")),
             }
         }
@@ -876,28 +882,22 @@ mod program {
         /// answering whether the picture changed. An answer naming any other
         /// open settles a gesture already over, so acting on it would run a
         /// stale command.
-        fn menu_closed(&mut self, open_id: u64, outcome: MenuOutcome, now_ns: u64) -> bool {
-            let Some((asked, menu)) = self.menu.take() else {
+        fn menu_closed(
+            &mut self,
+            open_id: u64,
+            (revision, outcome): (u32, MenuOutcome),
+            now_ns: u64,
+        ) -> bool {
+            let Some(shown) = self.menu.take_if(|shown| shown.open_id() == open_id) else {
                 return false;
             };
-            if asked != open_id {
-                self.menu = Some((asked, menu));
-                return false;
-            }
             match outcome {
-                // A row id this map never declared names no command.
-                MenuOutcome::Chosen(item) => match menu.command(item) {
-                    Some(Command::Steer(steer)) => self.view.steer(steer, now_ns),
-                    Some(Command::Copy(text)) => {
-                        self.copy(text);
-                        false
-                    }
-                    Some(Command::OpenSettings) => {
-                        self.open_settings();
-                        false
-                    }
-                    None => false,
-                },
+                MenuOutcome::Chosen(item) => {
+                    let command = shown
+                        .chosen_from(revision)
+                        .and_then(|rows| rows.command(item));
+                    self.run(command, now_ns)
+                }
                 // The menu declares no quick-entry field.
                 MenuOutcome::Entered(_) | MenuOutcome::Dismissed => false,
                 MenuOutcome::Refused(reason) => {
@@ -905,6 +905,69 @@ mod program {
                     app::report(APP_NAME, format_args!("no menu was shown: {why}"));
                     false
                 }
+            }
+        }
+
+        /// A row of the menu opened as `open_id` was chosen with the menu
+        /// kept up: run it, then show the rows the view now offers there,
+        /// answering whether the picture changed.
+        fn menu_chosen(
+            &mut self,
+            open_id: u64,
+            (revision, item): (u32, AppMenuItemId),
+            now_ns: u64,
+        ) -> bool {
+            let Some(mut shown) = self.menu.take_if(|shown| shown.open_id() == open_id) else {
+                return false;
+            };
+            let command = shown
+                .chosen_from(revision)
+                .and_then(|rows| rows.command(item));
+            let changed = self.run(command, now_ns);
+            match self.view.reopened(shown.shown()) {
+                Some(Ok(rows)) if rows.model() != shown.shown().model() => {
+                    self.restate(&mut shown, rows);
+                }
+                Some(Err(err)) => app::report(APP_NAME, format_args!("menu not rebuilt ({err})")),
+                // Its node has gone, or the rows stand as they are.
+                _ => {}
+            }
+            self.menu = Some(shown);
+            changed
+        }
+
+        /// Ask the desktop to show `rows` in place of what `shown` shows.
+        fn restate(&mut self, shown: &mut MenuStatements<Box<NodeMenu>>, rows: Box<NodeMenu>) {
+            let Some(window_id) = self.window.window_id() else {
+                return;
+            };
+            let revision = shown.next_revision();
+            let restated = self.window.client().restate_menu(
+                window_id,
+                shown.open_id(),
+                revision,
+                rows.model(),
+            );
+            match restated {
+                Ok(()) => shown.adopt(revision, rows),
+                Err(err) => app::report(APP_NAME, format_args!("menu not restated ({err})")),
+            }
+        }
+
+        /// Run `command`, a chosen row's, answering whether the picture
+        /// changed.
+        fn run(&mut self, command: Option<&Command>, now_ns: u64) -> bool {
+            match command {
+                Some(Command::Steer(steer)) => self.view.steer(steer, now_ns),
+                Some(Command::Copy(text)) => {
+                    self.copy(text);
+                    false
+                }
+                Some(Command::OpenSettings) => {
+                    self.open_settings();
+                    false
+                }
+                None => false,
             }
         }
 
@@ -1075,8 +1138,17 @@ mod program {
                     false
                 }
                 WindowEvent::MenuClosed {
-                    open_id, outcome, ..
-                } => self.menu_closed(open_id, outcome, now_ns),
+                    open_id,
+                    revision,
+                    outcome,
+                    ..
+                } => self.menu_closed(open_id, (revision, outcome), now_ns),
+                WindowEvent::MenuChosen {
+                    open_id,
+                    revision,
+                    item,
+                    ..
+                } => self.menu_chosen(open_id, (revision, item), now_ns),
                 // The map opens no documents, pickers, drags or layer
                 // surfaces, so none of their answers can arrive for it.
                 WindowEvent::AlternateCloseRequested { .. }
@@ -1091,6 +1163,7 @@ mod program {
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
+                | WindowEvent::Shown { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }

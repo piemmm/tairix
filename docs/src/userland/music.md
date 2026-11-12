@@ -4,6 +4,13 @@ The desktop player (`plans/SOUND.md` SND14): one window, one playlist, played
 gapless by `tairix-player`'s engine. Its keys are its own Help document; this
 page is how it is built.
 
+The player is resident on the icon bar. Closing its window leaves it there,
+playing on; the slot's click (`AppBarClick::RaiseOrOpen`, `AppBarDefault`)
+opens the window again at the size the desktop now gives it, and *Open file…*
+or *Open folder…* chosen with the window closed opens it and then the picker
+over it. Only *Quit* ends the process. A window the desktop would not open is
+stated and let go, the player staying on the bar.
+
 ## No filesystem capability
 
 The player opens nothing itself. A file reaches it as a one-shot delegation:

@@ -683,6 +683,8 @@ pub enum PostedRequest {
     Create,
     /// [`WindowClient::open_menu`], for the open it names.
     OpenMenu(u64),
+    /// [`WindowClient::restate_menu`], for the open it restates.
+    RestateMenu(u64),
     /// [`WindowClient::open_alert`], for the alert it names.
     OpenAlert(u64),
     /// [`WindowClient::close`].
@@ -768,6 +770,7 @@ impl PostedRequest {
                 | Self::OpenTarget
                 | Self::PickedFile
                 | Self::AppBar
+                | Self::RestateMenu(_)
         )
     }
 
@@ -800,6 +803,7 @@ impl PostedRequest {
             Self::OfferedFile(_) => "a file offer's media type",
             Self::Create => "a window",
             Self::OpenMenu(_) => "a menu",
+            Self::RestateMenu(_) => "restating a menu",
             Self::OpenAlert(_) => "an alert",
             Self::Close => "a window's closing",
             Self::SizeState => "a window's size",
@@ -2558,6 +2562,45 @@ impl<T: WindowTransport> WindowClient<T> {
             Carried::Nothing,
         )?;
         Ok(open_id)
+    }
+
+    /// Show `menu` in the chain opened as `open_id` on `window_id` from now
+    /// on: what its rows say once a [`WindowEvent::MenuChosen`] has changed
+    /// it, or once anything else has. The chain keeps its place, its open
+    /// plates and its highlight wherever the rows still have them, and every
+    /// row chosen from `menu` answers with `revision`, so one chosen from the
+    /// rows before it is told apart.
+    ///
+    /// A restate that crosses the chain's answer in flight changes nothing
+    /// and is not refused; one naming another window's open, or an open
+    /// never made, is. One asked while another of the same open is
+    /// unanswered is held in its place, so a burst reaches the session as
+    /// its first and its newest.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an empty menu, or a transport failure.
+    ///
+    /// [`WindowEvent::MenuChosen`]: tairix_abi::window_ipc::WindowEvent::MenuChosen
+    pub fn restate_menu(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        revision: u32,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        let request = WindowRequest::RestateMenu {
+            window_id,
+            open_id,
+            revision,
+            menu: *menu,
+        };
+        self.post_own(
+            window_id,
+            PostedRequest::RestateMenu(open_id),
+            &request,
+            Carried::Nothing,
+        )
     }
 
     /// Put `alert` to the user in a window of its own, holding `owner` — one

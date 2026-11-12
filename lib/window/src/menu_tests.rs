@@ -1,8 +1,10 @@
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenuMark, AppMenuRole, AppMenuRowView, AppMenuSymbol};
+use tairix_abi::window_ipc::{
+    AppMenuMark, AppMenuRole, AppMenuRowView, AppMenuSymbol, MENU_OPEN_REVISION,
+};
 
-use super::{MenuBuilder, Plate};
+use super::{MenuBuilder, MenuCommand, MenuStatements, Plate};
 
 /// Each row as `(label, parent)`, a rule as `"-"`.
 fn shape(builder: MenuBuilder) -> Vec<(alloc::string::String, Option<usize>)> {
@@ -65,6 +67,133 @@ fn marks_state_what_a_row_turns_on_or_chooses() {
             (AppMenuMark::Radio, true),
             (AppMenuMark::None, true),
             (AppMenuMark::None, false),
+        ]
+    );
+}
+
+#[test]
+fn a_switch_an_alternative_and_an_in_place_command_keep_their_menu_up_and_nothing_else() {
+    let mut menu = MenuBuilder::new();
+    menu.mark(1u16, AppMenuSymbol::Open, "Grid", "", false, Plate::Root);
+    menu.radio(2u16, AppMenuSymbol::Open, "100%", "", false, Plate::Root);
+    menu.repeating(3u16, AppMenuSymbol::Undo, "Undo", "", true, Plate::Root);
+    menu.item(
+        4u16,
+        AppMenuSymbol::Open,
+        "Open\u{2026}",
+        "",
+        true,
+        Plate::Root,
+    );
+    menu.destructive(5u16, AppMenuSymbol::Delete, "Delete", "", true, Plate::Root);
+    let built = menu.finish();
+    let kept: Vec<bool> = built
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(item.repeatable),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept, [true, true, true, false, false]);
+}
+
+/// A command that knows where its work is done.
+#[derive(Copy, Clone)]
+enum Verb {
+    Undo,
+    Open,
+    Float,
+}
+
+impl From<Verb> for u16 {
+    fn from(verb: Verb) -> Self {
+        match verb {
+            Verb::Undo => 1,
+            Verb::Open => 2,
+            Verb::Float => 3,
+        }
+    }
+}
+
+impl MenuCommand for Verb {
+    fn acts_in_place(self) -> bool {
+        matches!(self, Self::Undo)
+    }
+}
+
+#[test]
+fn a_command_row_keeps_its_menu_up_as_its_command_says() {
+    let mut menu = MenuBuilder::new();
+    menu.command(
+        Verb::Undo,
+        AppMenuSymbol::Undo,
+        "Undo",
+        "Ctrl+Z",
+        false,
+        Plate::Root,
+    );
+    menu.command(
+        Verb::Open,
+        AppMenuSymbol::Open,
+        "Open\u{2026}",
+        "",
+        true,
+        Plate::Root,
+    );
+    let built = menu.finish();
+    let rows: Vec<(u16, bool, bool)> = built
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some((item.id.get(), item.enabled, item.repeatable)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [(1, false, true), (2, true, false)]);
+}
+
+/// A switch or an alternative built from a command is kept up as the command
+/// says, not as every switch is.
+#[test]
+fn a_command_mark_or_alternative_keeps_its_menu_up_as_its_command_says() {
+    let mut menu = MenuBuilder::new();
+    menu.command_mark(
+        Verb::Undo,
+        AppMenuSymbol::Undo,
+        "Undo",
+        "",
+        true,
+        Plate::Root,
+    );
+    menu.command_mark(
+        Verb::Float,
+        AppMenuSymbol::Open,
+        "Float",
+        "",
+        false,
+        Plate::Root,
+    );
+    menu.command_radio(
+        Verb::Open,
+        AppMenuSymbol::Open,
+        "Docked",
+        "",
+        true,
+        Plate::Root,
+    );
+    let built = menu.finish();
+    let rows: Vec<(AppMenuMark, bool)> = built
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some((item.mark, item.repeatable)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (AppMenuMark::Check, true),
+            (AppMenuMark::None, false),
+            (AppMenuMark::Radio, false),
         ]
     );
 }
@@ -145,5 +274,51 @@ fn the_information_row_sits_on_the_root_plate() {
             (alloc::string::String::from("Game"), None),
             (alloc::string::String::from("Deal"), Some(1)),
         ]
+    );
+}
+
+/// A row chosen from the rows shown, or from those the last restate replaced,
+/// names what they stood for; one chosen from any older rows names nothing.
+#[test]
+fn a_menu_answers_from_the_rows_shown_and_those_its_last_restate_replaced() {
+    let mut menu = MenuStatements::new(9, "first");
+    assert_eq!(menu.open_id(), 9);
+    assert_eq!(menu.revision(), MENU_OPEN_REVISION);
+    assert_eq!(menu.chosen_from(MENU_OPEN_REVISION), Some(&"first"));
+    let second = menu.next_revision();
+    menu.adopt(second, "second");
+    assert_eq!(menu.shown(), &"second");
+    assert_eq!(menu.chosen_from(second), Some(&"second"));
+    assert_eq!(
+        menu.chosen_from(MENU_OPEN_REVISION),
+        Some(&"first"),
+        "chosen as the restate crossed it"
+    );
+    menu.adopt(second, "second, its places moved");
+    assert_eq!(
+        menu.chosen_from(MENU_OPEN_REVISION),
+        Some(&"first"),
+        "a restate under the revision shown keeps the one before"
+    );
+    let third = menu.next_revision();
+    menu.adopt(third, "third");
+    assert_eq!(menu.chosen_from(second), Some(&"second, its places moved"));
+    assert_eq!(
+        menu.chosen_from(MENU_OPEN_REVISION),
+        None,
+        "two restates back"
+    );
+    assert_eq!(menu.chosen_from(third.wrapping_add(1)), None);
+}
+
+#[test]
+fn a_menu_numbers_its_statements_past_the_last_revision() {
+    let mut menu = MenuStatements::new(1, 0u8);
+    menu.adopt(u32::MAX, 1);
+    assert_eq!(menu.next_revision(), 0);
+    menu.adopt(menu.next_revision(), 2);
+    assert_eq!(
+        (menu.chosen_from(0), menu.chosen_from(u32::MAX)),
+        (Some(&2), Some(&1))
     );
 }

@@ -766,6 +766,13 @@ column of centred captions. A container that stacks buttons imposes that on the
 items it is given — `ActionRail` does — so no caller has to remember it and two
 stacks can never disagree.
 
+**A button that opens a menu says so.** `Button::pulls_down` draws a
+down-pointing chevron at the content's trailing edge, measured into the
+button's width, so it reads as a menu before it is pressed. What a button says
+and shows may change in place (`Button::set_content`), so it can report a
+status; an owner that lays it out at the widest content it can take keeps it
+from changing width as it does.
+
 ### 11.2 IconButton
 
 Icon buttons use the same state model as buttons. The icon must come from a theme-aware glyph source and must support high-contrast rendering.
@@ -953,6 +960,13 @@ Menus are pinned command plates. They are not floating ornament.
   again steps to the next row it begins; letters compare without case. A
   combo box's open list takes typed letters as a seek and never as a choice
   (`ComboBox::on_key` takes the stamped `Keystroke` for it).
+- **A click is reported by its button.** A press arms its row with the button
+  that made it, and only a release of that button over that row activates it:
+  a secondary click answers `MenuAction::AlternateActivated`, which a combo box
+  takes as a choice and the desktop's chain as a choice made with the menu
+  kept up, on a row that may stay (`plans/NEW-MENUS.md` M11). A row so chosen
+  is drawn in the accent a moment (`Menu::acknowledge`), and a menu rebuilt
+  under the pointer keeps its highlight (`Menu::carry_highlight`).
 
 ### 11.11 Toolbar and Toolstrip
 

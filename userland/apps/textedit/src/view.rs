@@ -27,7 +27,7 @@ use tairix_theme::Theme;
 use tairix_util::report::ReportLine;
 use tairix_window::docapp::{DialogWindow, DocumentView};
 use tairix_window::document::{Access, SavedDocument};
-use tairix_window::menu::{MenuBuilder, Plate};
+use tairix_window::menu::{MenuBuilder, MenuCommand, Plate};
 
 use crate::answer::Unlisted;
 use crate::code::{CodeDisplay, CodeListing};
@@ -2373,10 +2373,10 @@ impl View {
             Focus::Grid => !self.editor.selection().is_empty(),
             Focus::Find | Focus::Replace => self.field_selection().is_some(),
         };
-        menu.item(Action::Cut, S::Cut, "Cut", "Ctrl+X", selected, plate);
-        menu.item(Action::Copy, S::Copy, "Copy", "Ctrl+C", selected, plate);
-        menu.item(Action::Paste, S::Paste, "Paste", "Ctrl+V", true, plate);
-        menu.item(
+        menu.command(Action::Cut, S::Cut, "Cut", "Ctrl+X", selected, plate);
+        menu.command(Action::Copy, S::Copy, "Copy", "Ctrl+C", selected, plate);
+        menu.command(Action::Paste, S::Paste, "Paste", "Ctrl+V", true, plate);
+        menu.command(
             Action::SelectAll,
             S::SelectAll,
             "Select all",
@@ -2390,7 +2390,7 @@ impl View {
         let text = self.editor.mode() == Mode::Text;
         let history = self.focus == Focus::Grid;
         let (undo, redo) = self.editor.can_undo_redo();
-        menu.item(
+        menu.command(
             Action::Undo,
             S::Undo,
             "Undo",
@@ -2398,7 +2398,7 @@ impl View {
             history && undo,
             plate,
         );
-        menu.item(
+        menu.command(
             Action::Redo,
             S::Redo,
             "Redo",
@@ -2407,8 +2407,8 @@ impl View {
             plate,
         );
         menu.separator(plate);
-        menu.item(Action::Indent, S::Indent, "Indent", "Ctrl+]", text, plate);
-        menu.item(
+        menu.command(Action::Indent, S::Indent, "Indent", "Ctrl+]", text, plate);
+        menu.command(
             Action::Outdent,
             S::Outdent,
             "Outdent",
@@ -2417,7 +2417,7 @@ impl View {
             plate,
         );
         let comment = self.can_comment();
-        menu.item(
+        menu.command(
             Action::ToggleComment,
             S::Comment,
             "Toggle comment",
@@ -2427,7 +2427,7 @@ impl View {
         );
         menu.separator(plate);
         let overwrite = self.editor.overwrite();
-        menu.mark(
+        menu.command_mark(
             Action::ToggleOverwrite,
             S::Overwrite,
             "Overwrite",
@@ -2440,8 +2440,8 @@ impl View {
     fn find_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let problems = !self.editor.diagnostics().0.is_empty();
-        menu.item(Action::Find, S::Find, "Find\u{2026}", "Ctrl+F", true, plate);
-        menu.item(
+        menu.command(Action::Find, S::Find, "Find\u{2026}", "Ctrl+F", true, plate);
+        menu.command(
             Action::Replace,
             S::Replace,
             "Replace\u{2026}",
@@ -2449,7 +2449,7 @@ impl View {
             true,
             plate,
         );
-        menu.item(
+        menu.command(
             Action::FindNext,
             S::FindNext,
             "Find next",
@@ -2457,7 +2457,7 @@ impl View {
             true,
             plate,
         );
-        menu.item(
+        menu.command(
             Action::FindPrevious,
             S::FindPrevious,
             "Find previous",
@@ -2466,7 +2466,7 @@ impl View {
             plate,
         );
         menu.separator(plate);
-        menu.item(
+        menu.command(
             Action::GoToLine,
             S::GoTo,
             "Go to line\u{2026}",
@@ -2474,7 +2474,7 @@ impl View {
             text,
             plate,
         );
-        menu.item(
+        menu.command(
             Action::NextProblem,
             S::NextProblem,
             "Next problem",
@@ -2503,7 +2503,7 @@ impl View {
 
     fn modes(&self, menu: &mut MenuBuilder, plate: Plate) {
         let shown = self.display_shown().is_some();
-        menu.radio(
+        menu.command_radio(
             Action::Mode(Mode::Text),
             S::ViewText,
             "Text",
@@ -2511,7 +2511,7 @@ impl View {
             !shown && self.editor.mode() == Mode::Text,
             plate,
         );
-        menu.radio(
+        menu.command_radio(
             Action::Mode(Mode::Hex),
             S::ViewHex,
             "Hex",
@@ -2522,16 +2522,16 @@ impl View {
         let display = match &self.display {
             Some(Display::Code(display)) => display,
             Some(Display::Data(_)) => {
-                menu.radio(Action::ShowData, S::ViewData, "Data", "", shown, plate);
+                menu.command_radio(Action::ShowData, S::ViewData, "Data", "", shown, plate);
                 return;
             }
             None => return,
         };
-        menu.radio(Action::ShowCode, S::ViewCode, "Code", "", shown, plate);
+        menu.command_radio(Action::ShowCode, S::ViewCode, "Code", "", shown, plate);
         if let Some(sets) = menu.submenu("Instruction set", S::InstructionSet, plate) {
             let read_as = display.choice().or(display.isa());
             for isa in Isa::ALL {
-                menu.radio(
+                menu.command_radio(
                     Action::Isa(isa),
                     S::InstructionSet,
                     isa.name(),
@@ -2545,7 +2545,7 @@ impl View {
 
     fn formats(&self, menu: &mut MenuBuilder, plate: Plate) {
         for format in Format::ALL {
-            menu.radio(
+            menu.command_radio(
                 Action::Format(format),
                 S::Syntax,
                 format.label(),
@@ -2558,7 +2558,7 @@ impl View {
 
     fn tab_widths(&self, menu: &mut MenuBuilder, plate: Plate) {
         for (width, label) in TAB_WIDTHS.into_iter().zip(TAB_LABELS) {
-            menu.radio(
+            menu.command_radio(
                 Action::TabWidth(width),
                 S::TabWidth,
                 label,
@@ -2571,7 +2571,7 @@ impl View {
 
     fn indents(&self, menu: &mut MenuBuilder, plate: Plate) {
         for (indent, label) in INDENTS.into_iter().zip(INDENT_LABELS) {
-            menu.radio(
+            menu.command_radio(
                 Action::Indentation(indent),
                 S::Indent,
                 label,
@@ -2584,7 +2584,7 @@ impl View {
 
     fn endings(&self, menu: &mut MenuBuilder, plate: Plate) {
         for ending in ENDINGS {
-            menu.radio(
+            menu.command_radio(
                 Action::LineEnding(ending),
                 S::LineEndings,
                 ending.label(),
@@ -2610,7 +2610,7 @@ const INDENT_LABELS: [&str; 4] = [
 
 /// The File menu's rows, the same whatever the document.
 fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
-    menu.item(
+    menu.command(
         Action::NewWindow,
         S::NewWindow,
         "New window",
@@ -2618,10 +2618,10 @@ fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
         true,
         plate,
     );
-    menu.item(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, plate);
+    menu.command(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, plate);
     menu.separator(plate);
-    menu.item(Action::Save, S::Save, "Save", "Ctrl+S", true, plate);
-    menu.item(
+    menu.command(Action::Save, S::Save, "Save", "Ctrl+S", true, plate);
+    menu.command(
         Action::SaveAs,
         S::SaveAs,
         "Save as\u{2026}",
@@ -2630,12 +2630,30 @@ fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
         plate,
     );
     menu.separator(plate);
-    menu.item(Action::Close, S::Close, "Close", "Ctrl+W", true, plate);
+    menu.command(Action::Close, S::Close, "Close", "Ctrl+W", true, plate);
 }
 
 impl From<Action> for u16 {
     fn from(action: Action) -> Self {
         action.id()
+    }
+}
+
+impl MenuCommand for Action {
+    /// Everything but the document's own rows and those that take the
+    /// keyboard elsewhere — the find bar, the line to go to.
+    fn acts_in_place(self) -> bool {
+        !matches!(
+            self,
+            Self::NewWindow
+                | Self::Open
+                | Self::Save
+                | Self::SaveAs
+                | Self::Close
+                | Self::Find
+                | Self::Replace
+                | Self::GoToLine
+        )
     }
 }
 

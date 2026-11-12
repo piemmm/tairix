@@ -129,7 +129,7 @@ mod program {
         WATCH_BUFFER_LEN,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_controls::{damage, RowIcon};
+    use tairix_controls::{damage, ChainModel};
     use tairix_desktop_session::about::SystemFacts;
     use tairix_desktop_session::alert::{alert_title, Speaker};
     use tairix_desktop_session::capture::{
@@ -151,7 +151,9 @@ mod program {
         elevated_launch, launched_entries, load_personal, running_bundles, store_personal,
         LauncherMemory, LoadedPersonal,
     };
-    use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
+    use tairix_desktop_session::menu::{
+        open_desktop_menu, ChainAnswer, ChainOutcome, ChainOwner, MenuChain,
+    };
     use tairix_desktop_session::output::{Follow, Refusal};
     use tairix_desktop_session::picker::{PickId, PickSources};
     use tairix_desktop_session::pinboard::{
@@ -1816,7 +1818,7 @@ mod program {
         menu.report_newly_shown(|owner| {
             let owner = match owner {
                 ChainOwner::Window { .. } => "window",
-                ChainOwner::Backdrop => "backdrop",
+                ChainOwner::Backdrop { .. } => "backdrop",
                 ChainOwner::Picker { .. } => "picker",
                 ChainOwner::Bar(_) => "bar",
                 ChainOwner::Capture => "capture",
@@ -4406,6 +4408,21 @@ mod program {
             picker.paint_owed(&mut shell, &mut compositor);
             post_push(&mut effects, &mut cue_posts, set);
             watch_saver(&mut saver_members, &mut saver, &mut compositor);
+            let on_show = display.is_some()
+                && !saver.is_shown()
+                && !lock.is_locked()
+                && !switch.is_background();
+            follow_desktop_shown(
+                on_show,
+                &mut server,
+                &mut sink,
+                &mut shell,
+                &mut compositor,
+                &mut windows,
+                &mut picker,
+                &mut apps.service,
+                &mut menu,
+            );
             serve_capture(
                 (&mut capture, &mut recorder),
                 (&mut shell, &mut compositor),
@@ -5224,6 +5241,15 @@ mod program {
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
+                if settings_landed {
+                    follow_backdrop_menu(
+                        &mut menu,
+                        &desktop,
+                        &mut shell,
+                        &mut compositor,
+                        &windows,
+                    );
+                }
                 if let Some((want, landed)) = wallpapers.take_slide() {
                     if let Err(why) = &landed {
                         app::report(APP_NAME, format_args!("a slide could not be shown: {why}"));
@@ -6270,6 +6296,7 @@ mod program {
                 &mut launched,
                 &mut apps,
                 (&mut shell, &mut compositor),
+                (&mut menu, &windows),
             );
             arrangement_turn(
                 &mut memory.arrangement,
@@ -11357,14 +11384,18 @@ mod program {
             let geom = chain_geometry(shell.session(), compositor);
             menu.settle_mode(&geom);
         }
-        for (owner, outcome) in menu.take_answers() {
+        for (owner, answer) in menu.take_answers() {
             // A total match, so a third kind of owner cannot silently be
             // answered as the desktop's own.
-            let (window_id, open_id) = match owner {
-                ChainOwner::Window { window_id, open_id } => (window_id, open_id),
-                ChainOwner::Backdrop => {
+            let (window_id, open_id, revision) = match owner {
+                ChainOwner::Window {
+                    window_id,
+                    open_id,
+                    revision,
+                } => (window_id, open_id, revision),
+                ChainOwner::Backdrop { on_icon } => {
                     let refused = answer_backdrop_menu(
-                        &outcome,
+                        &answer,
                         shell,
                         compositor,
                         desk,
@@ -11380,60 +11411,70 @@ mod program {
                     if let Some(refusal) = refused {
                         state_refusal(&refusal, windows, shell, compositor);
                     }
+                    if matches!(answer, ChainAnswer::Repeated(_)) {
+                        let model = desk.desktop.menu(on_icon);
+                        restate_desktop_menu(menu, &owner, model, shell, compositor);
+                    }
                     continue;
                 }
                 ChainOwner::Bar(subject) => {
-                    answer_bar_menu(
-                        &subject,
-                        &outcome,
-                        (shell, compositor.scale(), now_ns),
-                        desk,
-                    );
+                    answer_bar_menu(&subject, &answer, (shell, compositor.scale(), now_ns), desk);
                     continue;
                 }
                 ChainOwner::Picker { pick, .. } => {
-                    picker.menu_answered(pick, &outcome, shell, compositor);
+                    // A pick's panels offer no row a secondary click keeps up,
+                    // so a pick is answered only as its chain ends.
+                    if let ChainAnswer::Ended(outcome) = &answer {
+                        picker.menu_answered(pick, outcome, shell, compositor);
+                    }
                     continue;
                 }
                 ChainOwner::Capture => {
-                    desk.capture.menu_answered(&outcome);
+                    if let Some(model) = desk.capture.menu_answered(&answer) {
+                        restate_desktop_menu(menu, &owner, model, shell, compositor);
+                    }
                     continue;
                 }
             };
-            let outcome = match outcome {
-                ChainOutcome::Chosen(item) => MenuOutcome::Chosen(item),
-                // The text is wider than the one fixed event frame, so the
-                // answer names the field and the engine holds the text for
-                // the application to pull. Recorded *before* the answer goes
-                // out, so a pull cannot arrive ahead of what it asks for; a
-                // refusal to record leaves the gesture a dismissal rather
-                // than an answer naming a text nobody holds.
-                ChainOutcome::Entered(entry, text) => {
-                    match server.record_menu_text(window_id, open_id, &text) {
-                        Ok(()) => MenuOutcome::Entered(entry),
-                        Err(err) => {
-                            app::report(APP_NAME, format_args!("menu text refused ({err:?})"));
-                            MenuOutcome::Dismissed
-                        }
-                    }
-                }
-                ChainOutcome::Dismissed => MenuOutcome::Dismissed,
-                ChainOutcome::Refused(reason) => MenuOutcome::Refused(reason),
-            };
-            deliver(
-                server,
-                sink,
-                shell,
-                compositor,
-                windows,
-                picker,
-                apps,
-                menu,
-                &WindowEvent::MenuClosed {
+            let event = match answer {
+                ChainAnswer::Repeated(item) => WindowEvent::MenuChosen {
                     window_id,
                     open_id,
-                    outcome,
+                    revision,
+                    item,
                 },
+                ChainAnswer::Ended(outcome) => WindowEvent::MenuClosed {
+                    window_id,
+                    open_id,
+                    revision,
+                    outcome: match outcome {
+                        ChainOutcome::Chosen(item) => MenuOutcome::Chosen(item),
+                        // The text is wider than the one fixed event frame,
+                        // so the answer names the field and the engine holds
+                        // the text for the application to pull. Recorded
+                        // *before* the answer goes out, so a pull cannot
+                        // arrive ahead of what it asks for; a refusal to
+                        // record leaves the gesture a dismissal rather than an
+                        // answer naming a text nobody holds.
+                        ChainOutcome::Entered(entry, text) => {
+                            match server.record_menu_text(window_id, open_id, &text) {
+                                Ok(()) => MenuOutcome::Entered(entry),
+                                Err(err) => {
+                                    app::report(
+                                        APP_NAME,
+                                        format_args!("menu text refused ({err:?})"),
+                                    );
+                                    MenuOutcome::Dismissed
+                                }
+                            }
+                        }
+                        ChainOutcome::Dismissed => MenuOutcome::Dismissed,
+                        ChainOutcome::Refused(reason) => MenuOutcome::Refused(reason),
+                    },
+                },
+            };
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );
         }
         present_menu_chain(menu, shell, compositor, windows);
@@ -11449,17 +11490,24 @@ mod program {
     /// carries on.
     fn answer_bar_menu<S: DirectorySource>(
         subject: &MenuSubject,
-        outcome: &ChainOutcome,
+        answer: &ChainAnswer,
         (shell, scale, now_ns): (&mut DesktopShell, tairix_wm::Scale, u64),
         desk: &mut DesktopMenuDesk<'_, S>,
     ) {
         let taskbar = shell.session_mut().taskbar_mut();
-        let response = match outcome {
-            ChainOutcome::Chosen(item) => taskbar.menu_chosen(subject, *item, now_ns, scale),
+        let response = match answer {
+            // A row chosen with the chain kept up acts as one ending it does;
+            // what it changed restates the chain — an application's menu by
+            // its re-declaration, a library entry's by its record.
+            ChainAnswer::Repeated(item) | ChainAnswer::Ended(ChainOutcome::Chosen(item)) => {
+                taskbar.menu_chosen(subject, *item, now_ns, scale)
+            }
             // Only an application's own menu declares a quick-entry field.
-            ChainOutcome::Entered(item, text) => subject.entered(*item, text.clone()),
-            ChainOutcome::Dismissed => return,
-            ChainOutcome::Refused(reason) => {
+            ChainAnswer::Ended(ChainOutcome::Entered(item, text)) => {
+                subject.entered(*item, text.clone())
+            }
+            ChainAnswer::Ended(ChainOutcome::Dismissed) => return,
+            ChainAnswer::Ended(ChainOutcome::Refused(reason)) => {
                 app::report(APP_NAME, format_args!("no bar menu ({reason:?})"));
                 return;
             }
@@ -11487,9 +11535,7 @@ mod program {
     ) {
         let mut model = request.model;
         if let MenuSubject::App { owner, .. } = request.subject {
-            if let Some(bundle) = apps.attested_bundle(owner) {
-                model.set_info_source(&RowIcon::Bundle(alloc::string::String::from(bundle)));
-            }
+            apps.source_sheet(owner, &mut model);
         }
         let geom = chain_geometry(shell.session(), compositor);
         match open_desktop_menu(
@@ -11516,13 +11562,17 @@ mod program {
     /// session merely carries it out. A row id the menu never declared names
     /// no command and is dropped (fail closed — never guessed at).
     fn answer_backdrop_menu<S: DirectorySource>(
-        outcome: &ChainOutcome,
+        answer: &ChainAnswer,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         desk: &mut DesktopMenuDesk<'_, S>,
         reach: &mut LaunchReach<'_>,
         now_ns: u64,
     ) -> Option<GestureRefusal> {
+        let outcome = match answer {
+            ChainAnswer::Repeated(item) => &ChainOutcome::Chosen(*item),
+            ChainAnswer::Ended(outcome) => outcome,
+        };
         let (acted, refresh) = match outcome {
             ChainOutcome::Chosen(item) => {
                 let command = PinboardCommand::from_item(*item)?;
@@ -14171,13 +14221,15 @@ mod program {
     }
 
     /// Count the launches the user asked for this turn into the launcher's
-    /// record, and hand the launcher its shelf whenever the record moved and
-    /// what runs whenever the strip or the desktop's children did.
+    /// record, and hand the launcher its shelf whenever the record moved — a
+    /// menu up on one of its entries following it — and what runs whenever
+    /// the strip or the desktop's children did.
     fn launcher_turn(
         memory: &mut LauncherMemory,
         launched: &mut LaunchTable,
         apps: &mut AppBarPanel,
         (shell, compositor): (&mut DesktopShell, &mut Compositor),
+        (menu, windows): (&mut MenuChain, &SessionWindows),
     ) {
         let used = launched.take_used();
         if !used.is_empty() {
@@ -14196,6 +14248,7 @@ mod program {
         }
         if memory.take_moved() {
             shell.set_library_shelf(compositor, memory.shelf(launcher_now()));
+            follow_entry_menu(menu, (shell, compositor), windows);
         }
         // Both latches drained, so neither survives a wake the other caused.
         let strip_moved = apps.take_moved();
@@ -14443,7 +14496,7 @@ mod program {
         let geom = chain_geometry(shell.session(), compositor);
         match open_desktop_menu(
             menu,
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon },
             model,
             window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
             seat_modal,
@@ -14453,6 +14506,64 @@ mod program {
             Err(refused) => {
                 app::report(APP_NAME, format_args!("no backdrop menu ({refused:?})"));
             }
+        }
+    }
+
+    /// Restate the backdrop's chain, if one is up, from the desktop as it now
+    /// stands, and present it: a sort or an arrangement chosen with the chain
+    /// kept up takes effect once the settings worker has published it.
+    fn follow_backdrop_menu<S: DirectorySource>(
+        menu: &mut MenuChain,
+        desktop: &Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &SessionWindows,
+    ) {
+        let Some(&ChainOwner::Backdrop { on_icon }) = menu.owner() else {
+            return;
+        };
+        let owner = ChainOwner::Backdrop { on_icon };
+        restate_desktop_menu(menu, &owner, desktop.menu(on_icon), shell, compositor);
+        present_menu_chain(menu, shell, compositor, windows);
+    }
+
+    /// Show the menu up on a program-library entry as the bar's shelf now has
+    /// it: a row chosen with it kept up changed the record. An entry the
+    /// catalogue no longer lists takes its menu down.
+    fn follow_entry_menu(
+        menu: &mut MenuChain,
+        (shell, compositor): (&mut DesktopShell, &mut Compositor),
+        windows: &SessionWindows,
+    ) {
+        let Some(owner) = menu.owner().cloned() else {
+            return;
+        };
+        let ChainOwner::Bar(MenuSubject::Entry { entry }) = &owner else {
+            return;
+        };
+        match shell.session().taskbar().entry_model(entry) {
+            Some(model) => restate_desktop_menu(menu, &owner, model, shell, compositor),
+            None => {
+                menu.dismiss();
+            }
+        }
+        present_menu_chain(menu, shell, compositor, windows);
+    }
+
+    /// Show `model` in the desktop's own chain `owner` has up.
+    fn restate_desktop_menu(
+        menu: &mut MenuChain,
+        owner: &ChainOwner,
+        model: ChainModel,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let geom = chain_geometry(shell.session(), compositor);
+        if let Err(refused) = menu.restate(owner, owner.clone(), model, &geom) {
+            app::report(
+                APP_NAME,
+                format_args!("the menu could not be updated ({refused:?})"),
+            );
         }
     }
 
@@ -16622,6 +16733,34 @@ mod program {
                 apps,
                 menu,
                 &WindowEvent::RedrawRequested { window_id },
+            );
+        }
+    }
+
+    /// Tell the served windows, on each edge of `on_show`, that nobody can see
+    /// the desktop — a screensaver or the lock over it, its display off or
+    /// gone, another account's session on the screen — or that it shows
+    /// again, so a window draws nothing nobody would see.
+    #[allow(clippy::too_many_arguments)] // The delivery path's whole mutable state, threaded explicitly.
+    fn follow_desktop_shown<S: DirectorySource, F: PickSources<S>>(
+        on_show: bool,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        let told = windows.follow_desktop_shown(on_show, |wm| {
+            compositor
+                .window(wm)
+                .is_some_and(tairix_wm::Window::is_visible)
+        });
+        for event in told {
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );
         }
     }

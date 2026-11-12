@@ -2032,8 +2032,9 @@ impl DesktopShell {
         let _ = chain.handle(event, self.router.pointer(), &geom, now_ns);
     }
 
-    /// Let `chain` settle a crossing whose deadline has passed, answering
-    /// whether it changed and so owes a presentation.
+    /// Let `chain` settle a crossing, or stop drawing a row as just chosen,
+    /// where the deadline has passed, answering whether it changed and so
+    /// owes a presentation.
     pub fn tick_menu_chain(
         &self,
         compositor: &Compositor,

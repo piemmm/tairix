@@ -20,7 +20,9 @@ su un modello con un controller del disco rigido, con un disco rigido da
 in una finestra tutta sua, o ne porta in primo piano la finestra; più
 macchine funzionano insieme. Impostazioni cambia l'hardware di una macchina
 mentre è spenta, Duplica copia una macchina con i suoi dischi, ed Elimina ne
-elimina una con i suoi dischi una volta confermato. Al primo avvio PCEmulator
+elimina una con i suoi dischi una volta confermato. Un clic destro sul riquadro
+di una macchina offre questi comandi per quella macchina e, mentre è in
+funzione, anche il menu della macchina. Al primo avvio PCEmulator
 crea un XT turbo. Ciò che una macchina scrive sui suoi dischi, e l'ora a cui è
 regolato il suo orologio, restano da un'esecuzione all'altra.
 
@@ -43,9 +45,9 @@ ed Espelli. Un'immagine di dischetto trascinata sulla finestra va nell'unità
 su cui viene rilasciata, o altrimenti nella prima, e lì non si può
 scrivere.
 
-All'estremità di quella barra, il menu della macchina la mette in pausa, la
-reimposta, le invia Ctrl+Alt+Canc e fissa la velocità del suo processore per
-la sessione. Visualizzazione attiva e disattiva le linee di scansione, il
+All'estremità di quella barra, il pulsante Macchina apre il menu della
+macchina, che la mette in pausa, la reimposta, le invia Ctrl+Alt+Canc e fissa
+la velocità del suo processore per la sessione. Visualizzazione attiva e disattiva le linee di scansione, il
 bagliore, la persistenza del fosforo, il rumore e l'ondulazione dell'immagine,
 e la macchina conserva ciò che è scelto. Cattura schermata salva lo schermo
 della macchina come immagine PNG dove indica il pannello Salva. Schermo intero
@@ -90,7 +92,9 @@ che legge il mouse da sé lo prende quando si fa clic sull'immagine e lo
 restituisce quando si preme brevemente il tasto Meta.
 
 Chiudere la finestra della libreria lascia in funzione le macchine accese, e
-Libreria delle macchine, nel menu della barra delle icone, la riapre. Ogni
+chiudere tutte le finestre lascia l'emulatore nella barra delle icone: un clic
+sulla sua icona, o Libreria delle macchine nel suo menu, riapre la libreria, ed
+Esci in quel menu sospende tutte le macchine accese e termina l'emulatore. Ogni
 macchina gira in un processo di lavoro tutto suo che non detiene alcuna
 autorità: dei suoi programmi e dei suoi dischi non ci si fida mai.
 
@@ -101,6 +105,6 @@ autorità: dei suoi programmi e dei suoi dischi non ci si fida mai.
 
 ## EXIT STATUS
 
-Zero una volta chiusa l'ultima finestra. Diverso da zero quando sono stati
-rifiutati il canale della finestra, la casella degli eventi o la sessione del
-desktop; il motivo è indicato sullo standard error.
+Zero una volta scelto Esci nel suo menu della barra delle icone. Diverso da zero
+quando sono stati rifiutati il canale della finestra, la casella degli eventi o
+la sessione del desktop; il motivo è indicato sullo standard error.

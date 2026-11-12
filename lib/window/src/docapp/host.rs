@@ -36,7 +36,7 @@ use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
     AppMenuSymbol, ClipboardKind, CursorShape, DialogModality, DocumentName, MenuOutcome,
-    PickPurpose, ToolOver, WindowEvent, WindowRegion, WindowSizing,
+    PickPurpose, ToolOver, WindowEvent, WindowRegion, WindowSizing, MENU_OPEN_REVISION,
 };
 use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, DOCUMENT_WRITABLE_ROLE_ARG, STDIN};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -458,9 +458,10 @@ pub struct DocWindow<A: DocumentApp> {
     /// closing.
     own_held: usize,
     /// The menu open over it or one of its tool windows: the open, so an
-    /// outcome is matched to the gesture that asked for it, and the window it
-    /// opened over, which holds the text an entry row commits.
-    menu: Option<(u64, u64)>,
+    /// outcome is matched to the gesture that asked for it, the window it
+    /// opened over, which holds the text an entry row commits, and which of
+    /// the view's menus it is, which a row chosen with it kept up restates.
+    menu: Option<(u64, u64, MenuKindOf<A>)>,
     /// The tool windows and the dialog it has open, as its view last asked.
     owned: Vec<OwnedPane>,
     /// Whether its view was last told it has the keyboard: it has while the
@@ -2350,7 +2351,7 @@ impl<A: DocumentApp> Host<A> {
             return;
         };
         match self.client.open_menu(over, region, &window.view.menu(kind)) {
-            Ok(open) => window.menu = Some((open, over)),
+            Ok(open) => window.menu = Some((open, over, kind)),
             Err(err) => window.state(format!("The desktop composes no menu ({err})")),
         }
     }
@@ -2359,7 +2360,7 @@ impl<A: DocumentApp> Host<A> {
     /// another gesture is one already settled, and is not acted on.
     fn menu_closed(&mut self, index: usize, open_id: u64, outcome: MenuOutcome) {
         let window = &mut self.windows[index];
-        let Some((_, over)) = window.menu.filter(|&(open, _)| open == open_id) else {
+        let Some((_, over, _)) = window.menu.filter(|&(open, ..)| open == open_id) else {
             return;
         };
         window.menu = None;
@@ -2383,6 +2384,48 @@ impl<A: DocumentApp> Host<A> {
             MenuOutcome::Dismissed => return,
         };
         self.apply(index, outcome);
+    }
+
+    /// Window `index`'s open menu answered, or had a row chosen with it kept
+    /// up.
+    fn menu_event(&mut self, index: usize, event: &WindowEvent) {
+        match *event {
+            WindowEvent::MenuClosed {
+                open_id, outcome, ..
+            } => self.menu_closed(index, open_id, outcome),
+            WindowEvent::MenuChosen { open_id, item, .. } => {
+                self.menu_chosen(index, open_id, item);
+            }
+            _ => {}
+        }
+    }
+
+    /// A row of window `index`'s open menu was chosen with the menu kept up:
+    /// act on it as on any choice, then show the menu as the view now has it.
+    fn menu_chosen(&mut self, index: usize, open_id: u64, item: AppMenuItemId) {
+        let window = &mut self.windows[index];
+        let Some((_, over, kind)) = window.menu.filter(|&(open, ..)| open == open_id) else {
+            return;
+        };
+        if window.loading() {
+            return;
+        }
+        let id = window.id();
+        let outcome = window.view.chosen(item, &mut window.damage);
+        self.apply(index, outcome);
+        // Found again by its id: what the choice did may have moved it.
+        let Some(window) = self.index_of(id).map(|at| &mut self.windows[at]) else {
+            return;
+        };
+        if window.menu.is_some_and(|(open, ..)| open == open_id) {
+            let menu = window.view.menu(kind);
+            if let Err(err) = self
+                .client
+                .restate_menu(over, open_id, MENU_OPEN_REVISION, &menu)
+            {
+                window.state(format!("The menu could not be updated ({err})"));
+            }
+        }
     }
 
     /// Window `index`'s pointer is at `at` in its view's drawing — over the
@@ -2567,9 +2610,9 @@ impl<A: DocumentApp> Host<A> {
                 release(*handle);
                 let _ = window.file.end_pick();
             }
-            WindowEvent::MenuClosed {
-                open_id, outcome, ..
-            } => self.menu_closed(index, *open_id, *outcome),
+            WindowEvent::MenuClosed { .. } | WindowEvent::MenuChosen { .. } => {
+                self.menu_event(index, event);
+            }
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
                     let key = core::iter::once(key_input_event(*key));
@@ -2582,6 +2625,7 @@ impl<A: DocumentApp> Host<A> {
                 self.pointed(index, event);
             }
             WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -2720,7 +2764,9 @@ impl<A: DocumentApp> Host<A> {
             WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -2781,6 +2827,58 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
+    /// Route a pointer's press or motion, a scroll or a pinch to the window at
+    /// `owned` that document window `index` owns, in its view's place.
+    fn owned_pointed(&mut self, (index, owned): (usize, usize), event: &WindowEvent) {
+        let pane = &mut self.windows[index].owned[owned];
+        match *event {
+            WindowEvent::Pointer {
+                x,
+                y,
+                action,
+                modifiers,
+                at_ns,
+                ..
+            } => {
+                let at = pane.to_view(pointer_point(x, y));
+                let inputs = pointer_input_events(action, at);
+                self.point((index, Some(owned)), at, modifiers, inputs, at_ns);
+            }
+            WindowEvent::Scrolled {
+                x,
+                y,
+                dx,
+                dy,
+                modifiers,
+                ..
+            } => {
+                if pane.scroll_by((dx, dy), self.desktop.scale()) {
+                    pane.chrome.owe(Repaint::Whole);
+                    pane.chrome.pointing.owed = true;
+                    return;
+                }
+                let at = pane.to_view(pointer_point(x, y));
+                let inputs = scroll_input_events(at, dx, dy);
+                let now = tairix_rt::clock_get();
+                self.point((index, Some(owned)), at, modifiers, inputs, now);
+            }
+            WindowEvent::Pinch {
+                x,
+                y,
+                phase,
+                scale,
+                modifiers,
+                ..
+            } => {
+                let at = pane.to_view(pointer_point(x, y));
+                let pinch = pinch_input_events(at, phase, scale);
+                let now = tairix_rt::clock_get();
+                self.point((index, Some(owned)), at, modifiers, pinch, now);
+            }
+            _ => {}
+        }
+    }
+
     /// Route one window-scoped event to the window at `owned` that document
     /// window `index` owns: a tool window's input is the window's own and its
     /// close mark, moves and resizes are its view's to answer; a dialog's
@@ -2816,59 +2914,22 @@ impl<A: DocumentApp> Host<A> {
                     self.feed(index, fed, key, tairix_rt::clock_get());
                 }
             }
-            WindowEvent::Pointer {
-                x,
-                y,
-                action,
-                modifiers,
-                at_ns,
-                ..
-            } => {
-                let at = pane.to_view(pointer_point(*x, *y));
-                let inputs = pointer_input_events(*action, at);
-                self.point((index, Some(owned)), at, *modifiers, inputs, *at_ns);
-            }
-            WindowEvent::Scrolled {
-                x,
-                y,
-                dx,
-                dy,
-                modifiers,
-                ..
-            } => {
-                if pane.scroll_by((*dx, *dy), self.desktop.scale()) {
-                    pane.chrome.owe(Repaint::Whole);
-                    pane.chrome.pointing.owed = true;
-                    return;
-                }
-                let at = pane.to_view(pointer_point(*x, *y));
-                let inputs = scroll_input_events(at, *dx, *dy);
-                let now = tairix_rt::clock_get();
-                self.point((index, Some(owned)), at, *modifiers, inputs, now);
-            }
-            WindowEvent::Pinch {
-                x,
-                y,
-                phase,
-                scale,
-                modifiers,
-                ..
-            } => {
-                let at = pane.to_view(pointer_point(*x, *y));
-                let pinch = pinch_input_events(at, *phase, *scale);
-                let now = tairix_rt::clock_get();
-                self.point((index, Some(owned)), at, *modifiers, pinch, now);
-            }
+            WindowEvent::Pointer { .. }
+            | WindowEvent::Scrolled { .. }
+            | WindowEvent::Pinch { .. } => self.owned_pointed((index, owned), event),
             // A tool window's menu is its window's.
-            WindowEvent::MenuClosed {
-                open_id, outcome, ..
-            } if fed == Fed::Window => self.menu_closed(index, *open_id, *outcome),
-            // Never minimised but with its window, and asking for no picker
-            // or preview, nor a dialog for a menu.
+            WindowEvent::MenuClosed { .. } | WindowEvent::MenuChosen { .. }
+                if fed == Fed::Window =>
+            {
+                self.menu_event(index, event);
+            }
+            // Minimised and shown only with its window, it asks for no picker.
             WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }
@@ -3417,7 +3478,7 @@ impl<A: DocumentApp> Host<A> {
                 let window = self
                     .windows
                     .iter_mut()
-                    .find(|window| window.menu.is_some_and(|(open, _)| open == open_id));
+                    .find(|window| window.menu.is_some_and(|(open, ..)| open == open_id));
                 if let Some(window) = window {
                     window.menu = None;
                     window.state(format!("The desktop composes no menu ({})", refused.errno));

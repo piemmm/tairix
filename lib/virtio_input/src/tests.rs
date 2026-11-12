@@ -961,6 +961,41 @@ fn a_touchpads_buttons_and_palms_ride_the_frame() {
     assert_eq!(frames[1].buttons(), TouchButtons::NONE);
 }
 
+/// QEMU hands the host's wheel to whichever pointing device holds its
+/// buttons, so a touchscreen can be the one reporting it.
+#[test]
+fn a_touch_devices_gear_press_turns_the_wheel_unless_the_run_was_lost() {
+    let (t, events) = build_touch_device(0, 1_000, 0, None);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
+    let mut queue = events.borrow_mut();
+    queue.push_back((wire::EV_KEY, wire::BTN_GEAR_DOWN, 1));
+    queue.push_back((wire::EV_KEY, wire::BTN_GEAR_DOWN, 0));
+    queue.push_back(REPORT);
+    queue.push_back((wire::EV_SYN, wire::SYN_DROPPED, 0));
+    queue.push_back((wire::EV_KEY, wire::BTN_GEAR_UP, 1));
+    queue.push_back(REPORT);
+    queue.push_back((wire::EV_KEY, wire::BTN_GEAR_UP, 1));
+    queue.push_back(REPORT);
+    drop(queue);
+    let mut reports = [Report::Event(batch::<1>()[0]); 16];
+    let mut wheel = alloc::vec::Vec::new();
+    while let Ok(count @ 1..) = dev.poll_reports(&mut reports) {
+        wheel.extend(reports[..count].iter().filter_map(|report| match report {
+            Report::Event(event) => Some((event.kind, event.code, event.value)),
+            Report::Touch(_) => None,
+        }));
+    }
+    assert_eq!(
+        wheel,
+        [
+            (InputEventKind::Scroll, AXIS_Y, SCROLL_UNITS_PER_DETENT),
+            (InputEventKind::Scroll, AXIS_Y, -SCROLL_UNITS_PER_DETENT),
+        ],
+        "one detent a press, none for a release or for the run SYN_DROPPED lost"
+    );
+}
+
 #[test]
 fn a_device_with_no_slotted_axes_is_no_touch_surface() {
     let (t, _events) = build_device_reporting(&[wire::REL_X, wire::REL_Y]);

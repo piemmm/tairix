@@ -2274,6 +2274,17 @@ mod program {
                         }
                     }
                 }
+                // A row chosen with the menu kept up; the rows say the same
+                // whatever the screen is doing, so there is nothing to restate.
+                WindowEvent::MenuChosen { open_id, item, .. } if open.menu == Some(open_id) => {
+                    if let Some(command) = Command::from_item(item).filter(|c| c.in_place()) {
+                        return finish(
+                            run_command(command, window, &mut open.terminal, publication),
+                            redrawn,
+                            edited,
+                        );
+                    }
+                }
                 WindowEvent::Pointer { x, y, action, .. } => {
                     // A secondary press asks the desktop for this window's
                     // menu at that point; the screen is the shell's, so every
@@ -2351,6 +2362,7 @@ mod program {
                 | WindowEvent::AppBarMenu { .. }
                 | WindowEvent::AppBarEntered { .. }
                 | WindowEvent::MenuClosed { .. }
+                | WindowEvent::MenuChosen { .. }
                 // The layer-surface feeds and a tool window's moves address
                 // surfaces this application never opens, so none can arrive
                 // here.
@@ -2363,6 +2375,7 @@ mod program {
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
+                | WindowEvent::Shown { .. }
                 | WindowEvent::OpenRequested
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
@@ -2454,11 +2467,13 @@ mod program {
             // address surfaces and requests the sheet never makes.
             WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }

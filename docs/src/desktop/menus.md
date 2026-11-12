@@ -2,8 +2,9 @@
 
 Every menu on a TAIRiX desktop is the desktop's. There is one chain per seat,
 one renderer, and one place a submenu's rules live. An application describes
-its menu and receives one answer; it never draws a plate pixel, never learns
-where the pointer is inside one, and cannot hold one open.
+its menu and receives one answer, told along the way of any row the user chose
+with the menu kept up; it never draws a plate pixel, never learns where the
+pointer is inside one, and cannot hold one open.
 
 ## What a menu is
 
@@ -276,6 +277,64 @@ While a chain is up the seat's pointer and keyboard route to it:
   or theme switched — dismisses the chain rather than re-placing it. A plate
   the user has dragged has a position that is theirs, and no rule can carry it
   onto a different screen.
+
+## Choosing with the menu kept up
+
+A **secondary click** on a row whose work is done where the menu is — a switch,
+one of a group's alternatives, a command such as *Undo* or *Zoom In* that opens
+nothing — chooses it and keeps the chain up. The row is drawn in the accent for
+a moment (`MENU_ACKNOWLEDGE_NS`, 160 ms) so the choice is seen to have been
+taken, and the chain then shows what the choice changed. A primary click on the
+same row still chooses it and closes the chain.
+
+Where the chain cannot sensibly stay up the secondary click does what the
+primary one does: a row that opens a window, a picker, an alert or a field,
+that closes or quits, or that ends or destroys what the menu acts on (*Delete*,
+*Remove Layer*, *Force Quit*) closes the chain as it is chosen. A row with no
+command of its own, a submenu's parent, opens its child.
+
+Whether a row stays up is the row's to say, never the gesture's:
+
+- on the wire, `AppMenuItem::repeatable`; the decode refuses the flag on any
+  row that is not a chooseable item, and on a row whose choice is its
+  quick-entry field;
+- through `tairix_window::menu::MenuBuilder`, every `mark` and `radio` row, any
+  row built with `repeating`, and a `command`, `command_mark` or
+  `command_radio` row whose command says so through
+  `MenuCommand::acts_in_place` — the editors classify their whole command set
+  once, beside the enum, so even a switch that opens a window (Paint's *Float
+  palette*) closes the chain;
+- in the desktop's own models, `ChainRow::repeatable`.
+
+A kept choice is **not an answer**. The application is told with
+`WindowEvent::MenuChosen` naming the open and the row, does what the row says,
+and restates whatever the choice changed with `WindowRequest::RestateMenu`. The
+open's one `MenuClosed` is still owed. A restate keeps the chain where it is:
+each plate whose opener the new rows still have keeps its place, its open row
+and its highlight, each on the row it stood on — the row naming the same id, or
+for a row naming none, the one of its label opening the same kind of child — so
+a row put above them moves nothing the user is on. A plate the user dragged is
+measured for its new rows where they put it, kept on the screen, and a drag
+under way carries on. A plate whose opener has gone closes with everything
+beneath it, and rows identical to those shown cost nothing to show again.
+
+**Every answer names the rows it was chosen from.** A restate carries the
+application's own number for its rows, which the session hands back as the
+`revision` of every `MenuChosen` and `MenuClosed` chosen from them; the open's
+own rows answer with `MENU_OPEN_REVISION`. A row chosen in the instant before a
+restate landed is so read against the rows the user saw. A menu each of whose
+row ids means one thing in every statement restates under `MENU_OPEN_REVISION`
+and reads any answer alike. A menu whose ids are places in a list that can move
+— the network map's node menu, the music player's output devices — numbers its
+statements through `tairix_window::menu::MenuStatements`, which keeps the one
+before the rows shown for a row chosen as their restate crossed it, and refuses
+a row chosen from any older statement rather than act on whatever now stands
+at that place.
+
+The desktop's own menus keep themselves current the same way, in process: the
+backdrop's sort and arrangement rows, the capture bar's options, a program's
+favourites rows in the launcher, and an application's declared icon-bar menu,
+which is restated when the application re-declares its bar.
 
 ## Dragging
 

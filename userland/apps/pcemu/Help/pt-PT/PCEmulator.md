@@ -20,7 +20,9 @@ arranca o TAIRiX DOS. Iniciar, ou um duplo clique, inicia a máquina escolhida
 numa janela própria, ou traz a sua janela para a frente; várias máquinas
 funcionam ao mesmo tempo. Definições altera o hardware de uma máquina enquanto
 está desligada, Duplicar copia uma máquina com os seus discos, e Eliminar
-elimina uma com os seus discos depois de confirmado. Na primeira vez que é
+elimina uma com os seus discos depois de confirmado. Um clique com o botão
+direito no cartão de uma máquina oferece estas opções para essa máquina e,
+enquanto funciona, também o menu da máquina. Na primeira vez que é
 iniciado, o PCEmulator cria um XT turbo. O que uma máquina escreve nos seus
 discos, e a hora a que o seu relógio está acertado, mantêm-se de uma execução
 para a seguinte.
@@ -43,8 +45,9 @@ oferece Inserir disco, que escolhe uma imagem de disquete para a unidade, e
 Ejetar. Uma imagem de disquete largada sobre a janela entra na unidade sobre
 a qual é largada, ou então na primeira, e aí não pode ser escrita.
 
-No fim dessa barra, o menu da máquina põe-na em pausa, reinicia-a, envia-lhe
-Ctrl+Alt+Delete e define a velocidade do seu processador durante a execução.
+No fim dessa barra, o botão Máquina abre o menu da máquina, que a põe em
+pausa, a reinicia, lhe envia Ctrl+Alt+Delete e define a velocidade do seu
+processador durante a execução.
 Visualização liga e desliga as linhas de varrimento, o brilho, a persistência
 do fósforo, o ruído e a ondulação da imagem, e a máquina guarda o que for
 escolhido. Fazer captura de ecrã guarda o ecrã da máquina como imagem PNG onde
@@ -87,8 +90,10 @@ rato do DOS segue o ponteiro do ambiente de trabalho onde quer que esteja
 sobre a imagem. Um programa que lê o rato por si próprio fica com ele quando
 se clica na imagem e devolve-o quando se toca brevemente na tecla Meta.
 
-Fechar a janela da biblioteca deixa as máquinas ligadas a funcionar, e
-Biblioteca de máquinas, no menu da barra de ícones, volta a abri-la. Cada
+Fechar a janela da biblioteca deixa as máquinas ligadas a funcionar, e fechar
+todas as janelas deixa o emulador na barra de ícones: um clique no seu ícone, ou
+Biblioteca de máquinas no seu menu, volta a abrir a biblioteca, e Sair nesse
+menu suspende todas as máquinas ligadas e termina o emulador. Cada
 máquina corre num processo de trabalho próprio que não detém qualquer
 autoridade: nunca se confia nos seus programas nem nos seus discos.
 
@@ -99,6 +104,6 @@ autoridade: nunca se confia nos seus programas nem nos seus discos.
 
 ## EXIT STATUS
 
-Zero depois de a última janela ser fechada. Diferente de zero quando o canal da
-janela, a caixa de eventos ou a sessão do ambiente de trabalho foram
-recusados; o motivo é indicado na saída de erro padrão.
+Zero depois de se escolher Sair no seu menu da barra de ícones. Diferente de
+zero quando o canal da janela, a caixa de eventos ou a sessão do ambiente de
+trabalho foram recusados; o motivo é indicado na saída de erro padrão.

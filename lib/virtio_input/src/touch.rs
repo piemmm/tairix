@@ -8,7 +8,7 @@ use tairix_abi::touch::{
 };
 use tairix_virtio::Transport;
 
-use crate::{event_bits, reports, wire};
+use crate::{event_bits, gear_detent, is_gear, reports, wire, Report};
 
 /// One axis's reported range: its least value and how far it reaches past it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,16 +83,17 @@ impl MultiTouch {
         })
     }
 
-    /// Read one event, answering the frame a `SYN_REPORT` closes.
-    pub(crate) fn decode(&mut self, etype: u16, code: u16, value: i32) -> Option<TouchFrame> {
+    /// Read one event, answering the frame a `SYN_REPORT` closes, or the
+    /// wheel detent a gear press turns.
+    pub(crate) fn decode(&mut self, etype: u16, code: u16, value: i32) -> Option<Report> {
         match (etype, code) {
             (wire::EV_SYN, wire::SYN_REPORT) if self.dropped => {
                 self.dropped = false;
                 self.slots = [Slot::default(); TOUCH_CONTACTS_MAX];
                 self.buttons = 0;
-                Some(self.lifted())
+                Some(Report::Touch(self.lifted()))
             }
-            (wire::EV_SYN, wire::SYN_REPORT) => Some(self.frame()),
+            (wire::EV_SYN, wire::SYN_REPORT) => Some(Report::Touch(self.frame())),
             (wire::EV_SYN, wire::SYN_DROPPED) => {
                 self.dropped = true;
                 None
@@ -102,6 +103,9 @@ impl MultiTouch {
                 self.absolute(code, value);
                 None
             }
+            // QEMU hands the host's wheel to whichever pointing device holds
+            // its buttons, a touchscreen included.
+            (wire::EV_KEY, _) if is_gear(code) => gear_detent(code, value).map(Report::Event),
             (wire::EV_KEY, _) => {
                 self.key(code, value);
                 None

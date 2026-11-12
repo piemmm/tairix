@@ -819,6 +819,14 @@ pub const APP_MENU_MAX_ROWS: usize = 32;
 /// the per-plate bound still bites.
 pub const APP_MENU_MAX_TOTAL_ROWS: usize = 128;
 
+/// The revision of the rows a menu opened with, which its answers carry
+/// until a [`WindowRequest::RestateMenu`] names another.
+///
+/// A menu each of whose row ids means one thing in every statement of it is
+/// restated under this one too: any answer then reads alike, whichever rows
+/// it was chosen from.
+pub const MENU_OPEN_REVISION: u32 = 0;
+
 /// Deepest chain of plates a menu may describe: the root plate is depth 1,
 /// so four permits a root and three levels of submenu beneath it.
 ///
@@ -1183,6 +1191,7 @@ pub struct AppMenuItem {
     role: AppMenuRole,
     entry: Option<AppMenuEntry>,
     icon: AppMenuIcon,
+    repeatable: bool,
 }
 
 impl AppMenuItem {
@@ -1201,7 +1210,25 @@ impl AppMenuItem {
             role: AppMenuRole::Neutral,
             entry: None,
             icon: AppMenuIcon::None,
+            repeatable: false,
         }
+    }
+
+    /// This row chosen again and again with its menu up: a secondary click
+    /// chooses it and leaves the chain open — answered with
+    /// [`WindowEvent::MenuChosen`] in a window's menu, or with
+    /// [`WindowEvent::AppBarMenu`] in the icon-bar menu, whose next
+    /// declaration restates the chain. For a row that sets something in place
+    /// — a switch, an alternative, a command that opens nothing — never one
+    /// that opens a window, a picker or an alert, which the chain still
+    /// holding the seat would stand over.
+    ///
+    /// A row whose choosing opens its quick-entry field cannot be one: its
+    /// choice is the field.
+    #[must_use]
+    pub const fn repeatable(mut self) -> Self {
+        self.repeatable = true;
+        self
     }
 
     /// This row greyed and unchooseable. A disabled row never acts.
@@ -1352,6 +1379,9 @@ pub struct AppMenuItemView<'a> {
     pub entry: Option<AppMenuEntryView<'a>>,
     /// Where the row's picture comes from.
     pub icon: AppMenuIconView<'a>,
+    /// Whether a secondary click chooses it and keeps the menu up
+    /// ([`AppMenuItem::repeatable`]).
+    pub repeatable: bool,
 }
 
 /// Where a row's picture comes from, as a built menu reports it.
@@ -1508,12 +1538,17 @@ impl RowRecord {
         self.flags & APP_MENU_ROW_FLAG_OPENS_ENTRY != 0
     }
 
+    /// Whether a secondary click chooses the row and keeps the menu up.
+    const fn repeatable(&self) -> bool {
+        self.flags & APP_MENU_ROW_FLAG_REPEATABLE != 0
+    }
+
     /// The flag byte of a row stating these things.
     const fn flags_of(
         enabled: bool,
         mark: AppMenuMark,
         role: AppMenuRole,
-        (asset, opens_entry): (bool, bool),
+        (asset, opens_entry, repeatable): (bool, bool, bool),
     ) -> u8 {
         let mut flags = (mark as u8) << APP_MENU_ROW_MARK_SHIFT;
         if enabled {
@@ -1527,6 +1562,9 @@ impl RowRecord {
         }
         if opens_entry {
             flags |= APP_MENU_ROW_FLAG_OPENS_ENTRY;
+        }
+        if repeatable {
+            flags |= APP_MENU_ROW_FLAG_REPEATABLE;
         }
         flags
     }
@@ -1722,6 +1760,7 @@ impl AppMenu {
                         opens_on_choose: record.opens_entry(),
                     }),
                 icon,
+                repeatable: record.repeatable(),
             }),
             RowKind::Separator => AppMenuRowView::Separator,
             RowKind::Submenu(symbol) => AppMenuRowView::Submenu {
@@ -1759,7 +1798,7 @@ impl AppMenu {
             ..RowRecord::VACANT
         };
         let mut entry_text = AppMenuEntryText::EMPTY;
-        let mut opens_entry = false;
+        let (mut opens_entry, mut repeatable) = (false, false);
         let mut icon = AppMenuIcon::None;
         let (mut enabled, mut mark, mut role) = (false, AppMenuMark::None, AppMenuRole::Neutral);
         let (label, shortcut, reason) = match *row {
@@ -1775,7 +1814,7 @@ impl AppMenu {
                     entry_text = entry.initial;
                     opens_entry = entry.opens_on_choose;
                 }
-                icon = item.icon;
+                (repeatable, icon) = (item.repeatable, item.icon);
                 (item.label, item.shortcut, item.reason)
             }
             AppMenuRow::Separator => (
@@ -1844,7 +1883,7 @@ impl AppMenu {
             enabled,
             mark,
             role,
-            (icon_asset && !icon_text.is_empty(), opens_entry),
+            (icon_asset && !icon_text.is_empty(), opens_entry, repeatable),
         );
         self.rows[at] = record;
         self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
@@ -1885,7 +1924,8 @@ impl AppMenu {
         self.check_ids(row, at)?;
         match row {
             AppMenuRow::Item(item) => {
-                if item.label.is_empty() {
+                let choice_is_field = item.entry.is_some_and(|entry| entry.opens_on_choose);
+                if item.label.is_empty() || (item.repeatable && choice_is_field) {
                     return Err(Errno::OutOfRange);
                 }
             }
@@ -3480,6 +3520,35 @@ pub enum WindowRequest {
         /// The rows to open, and the title of the root plate's band.
         menu: AppMenu,
     },
+    /// Restate the rows of the chain opened as `open_id` on the caller's own
+    /// window `window_id`, which is still up: what the rows say once a
+    /// [`WindowEvent::MenuChosen`] has changed it — a switch turned, an
+    /// alternative chosen — or once anything else has.
+    ///
+    /// The chain keeps its place, the plates the user opened and dragged, and
+    /// its highlight wherever the new rows still have the rows they stood on;
+    /// a plate whose opener the new rows no longer have closes. The rows are
+    /// bounded and shape-checked exactly as an open's, and an empty menu is
+    /// refused.
+    ///
+    /// It carries no capability, exactly as [`Self::OpenMenu`]: the caller's
+    /// own window is the scope. A restate that crossed its chain's answer —
+    /// naming the open the window was answered for last — restates nothing
+    /// and succeeds; any other open, or another window's, is refused.
+    RestateMenu {
+        /// The caller's own window the chain belongs to.
+        window_id: u64,
+        /// The open whose chain is restated, from that open's reply.
+        open_id: u64,
+        /// The caller's own number for these rows, which the session never
+        /// interprets: it hands it back with every answer chosen from them,
+        /// so a row chosen before the restate landed is resolved against the
+        /// rows it was chosen from. The open's own rows answer with
+        /// [`MENU_OPEN_REVISION`].
+        revision: u32,
+        /// The rows the chain shows from now on, and its root plate's title.
+        menu: AppMenu,
+    },
     /// Take the text the user committed into the quick-entry field of the
     /// chain opened as `open_id` on the caller's own window `window_id`.
     ///
@@ -3809,6 +3878,8 @@ const OP_SET_TITLE: u16 = 12;
 const OP_SET_APP_BAR: u16 = 13;
 /// Wire operation discriminant of [`WindowRequest::OpenMenu`].
 const OP_OPEN_MENU: u16 = 14;
+/// Wire operation discriminant of [`WindowRequest::RestateMenu`].
+const OP_RESTATE_MENU: u16 = 57;
 /// Wire operation discriminant of [`WindowRequest::TakeOpenTarget`].
 const OP_TAKE_OPEN_TARGET: u16 = 15;
 /// Wire operation discriminant of [`WindowRequest::SetTooltip`].
@@ -4405,30 +4476,59 @@ const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, AP
 /// [`WindowRegion::write_to`] lays them out.
 const WINDOW_REGION_WIRE_LEN: usize = 16;
 
+/// Byte offsets, within the titled menu block an open and a restate carry,
+/// of the root plate's title length, the row count, the length of the rows'
+/// text, and the first fixed-width row record. The rows' text follows the
+/// last record, and the title's text follows that.
+const TITLED_MENU_TITLE_LEN: usize = 0;
+const TITLED_MENU_ROW_COUNT: usize = TITLED_MENU_TITLE_LEN + 1;
+const TITLED_MENU_TEXT_LEN: usize = TITLED_MENU_ROW_COUNT + 1;
+const TITLED_MENU_ROWS: usize = TITLED_MENU_TEXT_LEN + 2;
+
+/// Encoded size of a titled menu block of `rows` rows whose text runs to
+/// `text` bytes, under a `title` of that many bytes.
+///
+/// The title is length-prefixed and trails the rows' text rather than
+/// occupying a widest-case field, for the same reason a row's own text does:
+/// a menu costs what it says.
+const fn titled_menu_len(rows: usize, text: usize, title: usize) -> usize {
+    TITLED_MENU_ROWS + menu_block_len(rows, text) + title
+}
+
 /// Byte offset of a [`WindowRequest::OpenMenu`]'s open id, after the window
 /// the chain belongs to.
 const OPEN_MENU_ID_OFFSET: usize = 16;
 /// Byte offset of an open's anchor.
 const OPEN_MENU_ANCHOR_OFFSET: usize = OPEN_MENU_ID_OFFSET + 8;
-/// Byte offset of the length of an open's root-plate title.
-const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + WINDOW_REGION_WIRE_LEN;
-/// Byte offset of an open's declared row count.
-const OPEN_MENU_ROW_COUNT_OFFSET: usize = OPEN_MENU_TITLE_LEN_OFFSET + 1;
-/// Byte offset of the length of an open's rows' text block.
-const OPEN_MENU_TEXT_LEN_OFFSET: usize = OPEN_MENU_ROW_COUNT_OFFSET + 1;
-/// Byte offset of the first of an open's fixed-width row records. The rows'
-/// text follows the last of them, and the title's text follows that.
-const OPEN_MENU_ROWS_OFFSET: usize = OPEN_MENU_TEXT_LEN_OFFSET + 2;
+/// Byte offset of an open's titled menu block.
+const OPEN_MENU_MENU_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + WINDOW_REGION_WIRE_LEN;
 
 /// Encoded size of a [`WindowRequest::OpenMenu`] carrying `rows` rows whose
 /// text runs to `text` bytes, under a `title` of that many bytes.
-///
-/// The title is length-prefixed and trails the rows' text rather than
-/// occupying a widest-case field, for the same reason a row's own text does:
-/// a menu costs what it says.
 const fn open_menu_wire_len(rows: usize, text: usize, title: usize) -> usize {
-    OPEN_MENU_ROWS_OFFSET + menu_block_len(rows, text) + title
+    OPEN_MENU_MENU_OFFSET + titled_menu_len(rows, text, title)
 }
+
+/// Byte offset of a [`WindowRequest::RestateMenu`]'s open id, after the
+/// window the chain belongs to.
+const RESTATE_MENU_ID_OFFSET: usize = 16;
+/// Byte offset of a restate's revision.
+const RESTATE_MENU_REVISION_OFFSET: usize = RESTATE_MENU_ID_OFFSET + 8;
+/// Byte offset of a restate's titled menu block.
+const RESTATE_MENU_MENU_OFFSET: usize = RESTATE_MENU_REVISION_OFFSET + 4;
+
+/// Encoded size of a [`WindowRequest::RestateMenu`] carrying `rows` rows
+/// whose text runs to `text` bytes, under a `title` of that many bytes.
+const fn restate_menu_wire_len(rows: usize, text: usize, title: usize) -> usize {
+    RESTATE_MENU_MENU_OFFSET + titled_menu_len(rows, text, title)
+}
+
+/// Encoded size of the longest possible [`WindowRequest::RestateMenu`].
+const RESTATE_MENU_MAX_WIRE_LEN: usize = restate_menu_wire_len(
+    APP_MENU_MAX_TOTAL_ROWS,
+    APP_MENU_TEXT_BYTES,
+    APP_MENU_LABEL_MAX,
+);
 
 /// Encoded size of the longest possible [`WindowRequest::OpenMenu`]: the
 /// widest menu under the widest title.
@@ -4475,12 +4575,16 @@ const APP_MENU_ROW_FLAG_DESTRUCTIVE: u8 = 1 << 3;
 const APP_MENU_ROW_FLAG_ASSET: u8 = 1 << 4;
 /// Bit of a menu row's flag byte meaning choosing the row opens its field.
 const APP_MENU_ROW_FLAG_OPENS_ENTRY: u8 = 1 << 5;
+/// Bit of a menu row's flag byte meaning a secondary click chooses it and
+/// keeps the menu up.
+const APP_MENU_ROW_FLAG_REPEATABLE: u8 = 1 << 6;
 /// Every flag bit a menu row defines; anything else is refused.
 const APP_MENU_ROW_FLAG_MASK: u8 = APP_MENU_ROW_FLAG_ENABLED
     | APP_MENU_ROW_MARK_MASK
     | APP_MENU_ROW_FLAG_DESTRUCTIVE
     | APP_MENU_ROW_FLAG_ASSET
-    | APP_MENU_ROW_FLAG_OPENS_ENTRY;
+    | APP_MENU_ROW_FLAG_OPENS_ENTRY
+    | APP_MENU_ROW_FLAG_REPEATABLE;
 
 /// Wire kind of [`AppMenuRow::Item`].
 const APP_MENU_KIND_ITEM: u8 = 1;
@@ -4508,7 +4612,10 @@ impl WindowRequest {
                 ),
                 HAND_OVER_MAX_WIRE_LEN,
             ),
-            longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
+            longer(
+                APP_BAR_MAX_WIRE_LEN,
+                longer(OPEN_MENU_MAX_WIRE_LEN, RESTATE_MENU_MAX_WIRE_LEN),
+            ),
         ),
         longer(
             longer(PREVIEW_SCREENSAVER_MAX_WIRE_LEN, OPEN_ALERT_MAX_WIRE_LEN),
@@ -4603,6 +4710,11 @@ impl WindowRequest {
                 menu.text_len as usize,
                 menu.title.len_byte() as usize,
             ),
+            Self::RestateMenu { ref menu, .. } => restate_menu_wire_len(
+                menu.len(),
+                menu.text_len as usize,
+                menu.title.len_byte() as usize,
+            ),
             Self::SetTooltip { .. } => SET_TOOLTIP_WIRE_LEN,
         }
     }
@@ -4619,10 +4731,12 @@ impl WindowRequest {
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the whole frame.
     /// * [`Errno::OutOfRange`] — a [`SetAppBar`](Self::SetAppBar) whose menu
     ///   states a title of its own, which an icon-bar menu never does
-    ///   ([`AppMenu::titled`]), or an [`OpenMenu`](Self::OpenMenu) carrying
-    ///   no rows, which would open nothing, or a [`Create`](Self::Create),
-    ///   [`CreateTool`](Self::CreateTool) or [`SetSizing`](Self::SetSizing)
-    ///   whose declared resize maximum is below its own minimum.
+    ///   ([`AppMenu::titled`]); an [`OpenMenu`](Self::OpenMenu) or
+    ///   [`RestateMenu`](Self::RestateMenu) carrying no rows, which would show
+    ///   nothing; an [`Authorise`](Self::Authorise) handing its program no
+    ///   words; or a [`Create`](Self::Create), [`CreateTool`](Self::CreateTool)
+    ///   or [`SetSizing`](Self::SetSizing) whose declared resize maximum is
+    ///   below its own minimum.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         self.encodable()?;
         let len = self.wire_len();
@@ -4648,7 +4762,11 @@ impl WindowRequest {
             // so the declaration has no title field to carry one and a menu
             // that states its own is refused rather than silently retitled.
             Self::SetAppBar(ref bar) if !bar.menu.title.is_empty() => Err(Errno::OutOfRange),
-            Self::OpenMenu { ref menu, .. } if menu.is_empty() => Err(Errno::OutOfRange),
+            Self::OpenMenu { ref menu, .. } | Self::RestateMenu { ref menu, .. }
+                if menu.is_empty() =>
+            {
+                Err(Errno::OutOfRange)
+            }
             Self::Authorise { ref task, .. } if !task.encodable() => Err(Errno::OutOfRange),
             // A ceiling under its own floor names no size the window could
             // be dragged to. `0` is how "no ceiling" is spelled, so such a
@@ -4712,6 +4830,7 @@ impl WindowRequest {
             Self::RenderPreview { .. } => OP_RENDER_PREVIEW,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
+            Self::RestateMenu { .. } => OP_RESTATE_MENU,
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
             Self::TakeMenuText { .. } => OP_TAKE_MENU_TEXT,
             Self::TakeAppBarText { .. } => OP_TAKE_APP_BAR_TEXT,
@@ -4928,12 +5047,38 @@ impl WindowRequest {
             | Self::RenderPreview { .. }
             | Self::PreviewScreensaver { .. } => self.write_preview_operands(out),
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
+            Self::OpenMenu { .. } | Self::RestateMenu { .. } => self.write_menu_operands(out),
+        }
+    }
+
+    /// Write a menu open's operand block, or a restate's: the window and the
+    /// open, an open's anchor, then the titled menu. A no-op for any other
+    /// request.
+    fn write_menu_operands(&self, out: &mut [u8]) {
+        match *self {
             Self::OpenMenu {
                 window_id,
                 open_id,
                 anchor,
                 ref menu,
-            } => write_open_menu(out, (window_id, open_id), anchor, menu),
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, OPEN_MENU_ID_OFFSET, open_id);
+                anchor.write_to(out, OPEN_MENU_ANCHOR_OFFSET);
+                write_titled_menu(out, OPEN_MENU_MENU_OFFSET, menu);
+            }
+            Self::RestateMenu {
+                window_id,
+                open_id,
+                revision,
+                ref menu,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, RESTATE_MENU_ID_OFFSET, open_id);
+                put_u32(out, RESTATE_MENU_REVISION_OFFSET, revision);
+                write_titled_menu(out, RESTATE_MENU_MENU_OFFSET, menu);
+            }
+            _ => {}
         }
     }
 
@@ -5286,6 +5431,7 @@ impl WindowRequest {
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_OPEN_MENU => read_open_menu(bytes),
+            OP_RESTATE_MENU => read_restate_menu(bytes),
             OP_SET_BACKDROP_BLUR => read_set_backdrop_blur(bytes),
             OP_CONNECT => exact_len(bytes, CONNECT_WIRE_LEN).map(|()| Self::Connect),
             OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
@@ -6286,45 +6432,32 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }))
 }
 
-/// Write a menu open's operand block: the window the chain belongs to, the
-/// anchor, the three lengths, the shared menu block, and the root plate's
-/// title (mirrors [`read_open_menu`]).
-///
-/// The title trails the rows' text so the shared block keeps one layout;
-/// where a declaration's block simply ends, an open's carries the title
-/// after it.
-fn write_open_menu(
-    out: &mut [u8],
-    (window_id, open_id): (u64, u64),
-    anchor: WindowRegion,
-    menu: &AppMenu,
-) {
-    put_u64(out, 8, window_id);
-    put_u64(out, OPEN_MENU_ID_OFFSET, open_id);
-    anchor.write_to(out, OPEN_MENU_ANCHOR_OFFSET);
-    out[OPEN_MENU_TITLE_LEN_OFFSET] = menu.title.len_byte();
-    out[OPEN_MENU_ROW_COUNT_OFFSET] = menu.len;
-    put_u16(out, OPEN_MENU_TEXT_LEN_OFFSET, menu.text_len);
-    let title_at = write_menu_block(out, OPEN_MENU_ROWS_OFFSET, menu);
+/// Write `menu` as the titled menu block at `at`: the prologue, the rows and
+/// their text, then the title.
+fn write_titled_menu(out: &mut [u8], at: usize, menu: &AppMenu) {
+    out[at + TITLED_MENU_TITLE_LEN] = menu.title.len_byte();
+    out[at + TITLED_MENU_ROW_COUNT] = menu.len;
+    put_u16(out, at + TITLED_MENU_TEXT_LEN, menu.text_len);
+    let title_at = write_menu_block(out, at + TITLED_MENU_ROWS, menu);
     let title = &menu.title.raw_bytes()[..usize::from(menu.title.len_byte())];
     out[title_at..title_at + title.len()].copy_from_slice(title);
 }
 
-/// Decode a menu open (mirrors [`write_open_menu`]).
+/// Decode the titled menu block at `at`, which must end the request exactly
+/// (mirrors [`write_titled_menu`]).
 ///
 /// The title is bounded and content-checked by the very validator a row
 /// label goes through, because that is exactly what it is: a name the
 /// desktop draws in its own chrome, never a credential. A menu with no rows
-/// is refused — there would be nothing to open — and the anchor's far edge
-/// must be a representable window-local coordinate, so the session's
-/// placement arithmetic has no unrepresentable input.
-fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    if bytes.len() < OPEN_MENU_ROWS_OFFSET {
+/// is refused — there would be nothing to show.
+fn read_titled_menu(bytes: &[u8], at: usize) -> Result<AppMenu, Errno> {
+    let rows_at = at + TITLED_MENU_ROWS;
+    if bytes.len() < rows_at {
         return Err(Errno::BufferTooSmall);
     }
-    let title_len = usize::from(bytes[OPEN_MENU_TITLE_LEN_OFFSET]);
-    let count = usize::from(bytes[OPEN_MENU_ROW_COUNT_OFFSET]);
-    let text_len = usize::from(read_u16(bytes, OPEN_MENU_TEXT_LEN_OFFSET));
+    let title_len = usize::from(bytes[at + TITLED_MENU_TITLE_LEN]);
+    let count = usize::from(bytes[at + TITLED_MENU_ROW_COUNT]);
+    let text_len = usize::from(read_u16(bytes, at + TITLED_MENU_TEXT_LEN));
     if count > APP_MENU_MAX_TOTAL_ROWS
         || text_len > APP_MENU_TEXT_BYTES
         || title_len > APP_MENU_LABEL_MAX
@@ -6334,26 +6467,42 @@ fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if count == 0 {
         return Err(Errno::OutOfRange);
     }
-    exact_len(bytes, open_menu_wire_len(count, text_len, title_len))?;
-    let window_id = nonzero_id(read_u64(bytes, 8))?;
-    let open_id = nonzero_id(read_u64(bytes, OPEN_MENU_ID_OFFSET))?;
-    let anchor = WindowRegion::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?;
+    exact_len(bytes, at + titled_menu_len(count, text_len, title_len))?;
     // The title trails the whole menu block, whose length the counts above
     // already state, so it is read before the rows the menu is then filled
     // with rather than needing a second pass to find.
-    let title_at = OPEN_MENU_ROWS_OFFSET + menu_block_len(count, text_len);
+    let title_at = rows_at + menu_block_len(count, text_len);
     let mut cursor = 0usize;
     let title = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
         &bytes[title_at..],
         &mut cursor,
-        bytes[OPEN_MENU_TITLE_LEN_OFFSET],
+        bytes[at + TITLED_MENU_TITLE_LEN],
     )?;
     let mut menu = AppMenu::titled(title);
-    read_menu_block(&mut menu, bytes, OPEN_MENU_ROWS_OFFSET, count, text_len)?;
+    read_menu_block(&mut menu, bytes, rows_at, count, text_len)?;
+    Ok(menu)
+}
+
+/// Decode a menu open. The anchor's far edge must be a representable
+/// window-local coordinate, so the session's placement arithmetic has no
+/// unrepresentable input.
+fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let menu = read_titled_menu(bytes, OPEN_MENU_MENU_OFFSET)?;
     Ok(WindowRequest::OpenMenu {
-        window_id,
-        open_id,
-        anchor,
+        window_id: nonzero_id(read_u64(bytes, 8))?,
+        open_id: nonzero_id(read_u64(bytes, OPEN_MENU_ID_OFFSET))?,
+        anchor: WindowRegion::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?,
+        menu,
+    })
+}
+
+/// Decode a menu restate.
+fn read_restate_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let menu = read_titled_menu(bytes, RESTATE_MENU_MENU_OFFSET)?;
+    Ok(WindowRequest::RestateMenu {
+        window_id: nonzero_id(read_u64(bytes, 8))?,
+        open_id: nonzero_id(read_u64(bytes, RESTATE_MENU_ID_OFFSET))?,
+        revision: read_u32(bytes, RESTATE_MENU_REVISION_OFFSET),
         menu,
     })
 }
@@ -6374,6 +6523,7 @@ fn read_app_menu_row(
     }
     let enabled = flags & APP_MENU_ROW_FLAG_ENABLED != 0;
     let opens_entry = flags & APP_MENU_ROW_FLAG_OPENS_ENTRY != 0;
+    let repeatable = flags & APP_MENU_ROW_FLAG_REPEATABLE != 0;
     let mark = AppMenuMark::from_u8((flags & APP_MENU_ROW_MARK_MASK) >> APP_MENU_ROW_MARK_SHIFT)?;
     let role = if flags & APP_MENU_ROW_FLAG_DESTRUCTIVE == 0 {
         AppMenuRole::Neutral
@@ -6429,6 +6579,7 @@ fn read_app_menu_row(
         && initial.is_empty()
         && icon == AppMenuIcon::None
         && !opens_entry
+        && !repeatable
         && entry_id == 0
         && selected == (0..0)
         && mark == AppMenuMark::None
@@ -6444,6 +6595,7 @@ fn read_app_menu_row(
                 .with_reason(reason)
                 .with_role(role);
             item.icon = icon;
+            item.repeatable = repeatable;
             if entry_id != 0 {
                 let entry = AppMenuEntry::new(AppMenuItemId::new(entry_id)?, initial)
                     .with_selection(selected)?;
@@ -9416,6 +9568,8 @@ const EV_APP_BAR_ENTERED: u16 = 29;
 const EV_CONTENT_RELEASED: u16 = 15;
 /// Wire event discriminant of [`WindowEvent::MenuClosed`].
 const EV_MENU_CLOSED: u16 = 16;
+/// Wire event discriminant of [`WindowEvent::MenuChosen`].
+const EV_MENU_CHOSEN: u16 = 36;
 /// Wire kind discriminant of [`WindowEvent::OpenRequested`].
 const EV_OPEN_REQUESTED: u16 = 17;
 /// Wire kind discriminant of [`WindowEvent::TerrainChanged`].
@@ -9448,6 +9602,8 @@ const EV_POINTER_MOTION: u16 = 33;
 const EV_POINTER_LOCK: u16 = 34;
 /// Wire event discriminant of [`WindowEvent::SubtreePicked`].
 const EV_SUBTREE_PICKED: u16 = 35;
+/// Wire event discriminant of [`WindowEvent::Shown`].
+const EV_SHOWN: u16 = 37;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -9733,6 +9889,20 @@ pub enum WindowEvent {
         /// The window that was minimized.
         window_id: u64,
     },
+    /// The desktop stopped showing the window (`false`) without minimising
+    /// it or giving its pixels back — a screensaver or the lock screen stands
+    /// over the whole desktop, its display is off or gone, or another
+    /// account's session has the screen — or showed it again (`true`).
+    ///
+    /// The window keeps its place and its pixels. Until it is shown again
+    /// nobody can see a frame it presents, so it may stop drawing; what it
+    /// would have drawn meanwhile it presents once shown.
+    Shown {
+        /// The window.
+        window_id: u64,
+        /// Whether it is on show.
+        shown: bool,
+    },
     /// The window manager changed the window's client content size — one
     /// sample of a live resize-grab, or a maximize/restore size toggle. The
     /// app re-lays-out to the new size: it allocates a fresh frame region
@@ -9887,8 +10057,9 @@ pub enum WindowEvent {
     AppBarMenu {
         /// The chosen row's application-chosen id.
         item: AppMenuItemId,
-        /// The [`AppBar::revision`] of the declaration the menu was opened
-        /// from, which `item` is resolved against.
+        /// The [`AppBar::revision`] of the declaration the row was chosen
+        /// from — the one the menu opened from, or the one that last restated
+        /// it — which `item` is resolved against.
         revision: u32,
     },
     /// The user committed the quick-entry field of the application's own
@@ -9898,7 +10069,7 @@ pub enum WindowEvent {
     AppBarEntered {
         /// The committed row's application-chosen id.
         item: AppMenuItemId,
-        /// The [`AppBar::revision`] of the declaration the menu was opened
+        /// The [`AppBar::revision`] of the declaration the row was committed
         /// from.
         revision: u32,
     },
@@ -9919,8 +10090,31 @@ pub enum WindowEvent {
         window_id: u64,
         /// The open this answers, from its reply; never zero.
         open_id: u64,
+        /// The [`WindowRequest::RestateMenu::revision`] of the rows the chain
+        /// showed as it closed — [`MENU_OPEN_REVISION`] for the open's own —
+        /// which a chosen or committed row is resolved against.
+        revision: u32,
         /// What became of the chain.
         outcome: MenuOutcome,
+    },
+    /// A repeatable row of the chain opened as `open_id` was chosen with a
+    /// secondary click ([`AppMenuItem::repeatable`]), and the chain is still
+    /// up.
+    ///
+    /// Not an answer: the open's one [`Self::MenuClosed`] is still owed, and
+    /// any number of these may come before it. The application does what the
+    /// row says, as it would for [`MenuOutcome::Chosen`], and restates the
+    /// rows it changed with [`WindowRequest::RestateMenu`].
+    MenuChosen {
+        /// The window the chain belongs to.
+        window_id: u64,
+        /// The open whose row was chosen, from its reply; never zero.
+        open_id: u64,
+        /// The [`WindowRequest::RestateMenu::revision`] of the rows `item`
+        /// was chosen from, [`MENU_OPEN_REVISION`] for the open's own.
+        revision: u32,
+        /// The chosen row's application-chosen id.
+        item: AppMenuItemId,
     },
     /// The whole answer to one accepted [`WindowRequest::OpenAlert`],
     /// delivered **exactly once** to the endpoint the open named.
@@ -10070,8 +10264,9 @@ impl WindowEvent {
         put_u64(out, 32, at_ns);
     }
 
-    /// Write a [`Self::PointerMotion`]'s or a [`Self::PointerLock`]'s block
-    /// into the already-headed frame `out`. A no-op for any other event.
+    /// Write a [`Self::PointerMotion`]'s, a [`Self::PointerLock`]'s or a
+    /// [`Self::Shown`]'s block into the already-headed frame `out`. A no-op
+    /// for any other event.
     fn write_locked(&self, out: &mut [u8; Self::WIRE_LEN]) {
         match *self {
             Self::PointerMotion {
@@ -10090,6 +10285,10 @@ impl WindowEvent {
             Self::PointerLock { locked, .. } => {
                 put_u16(out, 6, EV_POINTER_LOCK);
                 out[16] = u8::from(locked);
+            }
+            Self::Shown { shown, .. } => {
+                put_u16(out, 6, EV_SHOWN);
+                out[16] = u8::from(shown);
             }
             _ => {}
         }
@@ -10163,10 +10362,11 @@ impl WindowEvent {
     }
 
     /// What this event says of whether its window is on show: `Some(false)`
-    /// once it is minimised or its content released, `Some(true)` once the
-    /// desktop shows it again — focus gained, a new size, or its pixels asked
-    /// for — and `None` for an event that says neither. Motion only an
-    /// onlooker would see waits on it.
+    /// once it is minimised, its content released or the desktop covered,
+    /// `Some(true)` once the desktop shows it again — focus gained, a new
+    /// size, its pixels asked for, or the desktop uncovered — and `None` for
+    /// an event that says neither. Motion only an onlooker would see waits on
+    /// it.
     #[must_use]
     pub const fn on_show(&self) -> Option<bool> {
         match self {
@@ -10174,6 +10374,7 @@ impl WindowEvent {
             Self::Focus { focused: true, .. }
             | Self::Resized { .. }
             | Self::RedrawRequested { .. } => Some(true),
+            Self::Shown { shown, .. } => Some(*shown),
             _ => None,
         }
     }
@@ -10210,10 +10411,12 @@ impl WindowEvent {
             | Self::Pinch { window_id, .. }
             | Self::PointerMotion { window_id, .. }
             | Self::PointerLock { window_id, .. }
+            | Self::Shown { window_id, .. }
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
-            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            | Self::MenuClosed { window_id, .. }
+            | Self::MenuChosen { window_id, .. } => Some(window_id),
             Self::Authorised { window_id, .. } => window_id,
             Self::AppBarDefault
             | Self::AppBarMenu { .. }
@@ -10310,7 +10513,9 @@ impl WindowEvent {
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             }
             Self::Pointer { .. } => self.write_pointer(&mut out),
-            Self::PointerMotion { .. } | Self::PointerLock { .. } => self.write_locked(&mut out),
+            Self::PointerMotion { .. } | Self::PointerLock { .. } | Self::Shown { .. } => {
+                self.write_locked(&mut out);
+            }
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
             }
@@ -10345,9 +10550,7 @@ impl WindowEvent {
             Self::AppBarDefault | Self::AppBarMenu { .. } | Self::AppBarEntered { .. } => {
                 self.write_app_bar(&mut out);
             }
-            Self::MenuClosed {
-                open_id, outcome, ..
-            } => write_menu_closed(&mut out, open_id, outcome),
+            Self::MenuClosed { .. } | Self::MenuChosen { .. } => self.write_menu_answer(&mut out),
             Self::AlertClosed { alert_id, outcome } => {
                 put_u16(&mut out, 6, EV_ALERT_CLOSED);
                 put_u64(&mut out, 16, alert_id);
@@ -10359,6 +10562,36 @@ impl WindowEvent {
             }
         }
         out
+    }
+
+    /// Write a menu answer's own operand block into the already-headed frame
+    /// `out`: the open, the revision of the rows it answers from, and the row
+    /// or the outcome. A no-op for any other event.
+    fn write_menu_answer(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let (kind, open_id, revision) = match *self {
+            Self::MenuClosed {
+                open_id,
+                revision,
+                outcome,
+                ..
+            } => {
+                write_menu_outcome(out, outcome);
+                (EV_MENU_CLOSED, open_id, revision)
+            }
+            Self::MenuChosen {
+                open_id,
+                revision,
+                item,
+                ..
+            } => {
+                put_u16(out, MENU_CHOSEN_ITEM_OFFSET, item.get());
+                (EV_MENU_CHOSEN, open_id, revision)
+            }
+            _ => return,
+        };
+        put_u16(out, 6, kind);
+        put_u64(out, 16, open_id);
+        put_u32(out, MENU_ANSWER_REVISION_OFFSET, revision);
     }
 
     /// Write a layer-feed event's own operand block into the already-headed
@@ -10449,13 +10682,7 @@ impl WindowEvent {
             }
             EV_POINTER => read_pointer_event(window_id, bytes),
             EV_POINTER_MOTION => read_pointer_motion(window_id, bytes),
-            EV_POINTER_LOCK => {
-                event_reserved_zero(bytes, 17)?;
-                Ok(Self::PointerLock {
-                    window_id,
-                    locked: flag_at(bytes, 16)?,
-                })
-            }
+            EV_POINTER_LOCK | EV_SHOWN => read_flag_event(kind, window_id, bytes),
             EV_FILE_PICKED | EV_SUBTREE_PICKED | EV_FOLDER_PICKED => {
                 read_pick_event(kind, window_id, bytes)
             }
@@ -10483,7 +10710,17 @@ impl WindowEvent {
                 Ok(Self::MenuClosed {
                     window_id,
                     open_id: nonzero_id(read_u64(bytes, 16))?,
+                    revision: read_u32(bytes, MENU_ANSWER_REVISION_OFFSET),
                     outcome: read_menu_outcome(bytes)?,
+                })
+            }
+            EV_MENU_CHOSEN => {
+                event_reserved_zero(bytes, MENU_CHOSEN_WIRE_END)?;
+                Ok(Self::MenuChosen {
+                    window_id,
+                    open_id: nonzero_id(read_u64(bytes, 16))?,
+                    revision: read_u32(bytes, MENU_ANSWER_REVISION_OFFSET),
+                    item: AppMenuItemId::new(read_u16(bytes, MENU_CHOSEN_ITEM_OFFSET))?,
                 })
             }
             _ => Err(Errno::OutOfRange),
@@ -10491,11 +10728,9 @@ impl WindowEvent {
     }
 }
 
-/// Write a menu's close, `open_id` ending as `outcome`, into the already-
-/// headed frame `out`.
-fn write_menu_closed(out: &mut [u8; WindowEvent::WIRE_LEN], open_id: u64, outcome: MenuOutcome) {
-    put_u16(out, 6, EV_MENU_CLOSED);
-    put_u64(out, 16, open_id);
+/// Write how a menu ended, `outcome`, into the frame `out` its close is
+/// written in.
+fn write_menu_outcome(out: &mut [u8; WindowEvent::WIRE_LEN], outcome: MenuOutcome) {
     let (kind, item, refusal) = match outcome {
         MenuOutcome::Chosen(item) => (MENU_OUTCOME_CHOSEN, item.get(), 0),
         MenuOutcome::Entered(entry) => (MENU_OUTCOME_ENTERED, entry.get(), 0),
@@ -11117,6 +11352,25 @@ fn read_app_scoped_event(kind: u16, bytes: &[u8]) -> Option<Result<WindowEvent, 
     Some(Ok(event))
 }
 
+/// Decode an event whose whole payload is its window id and one flag, a
+/// [`WindowEvent::PointerLock`] or a [`WindowEvent::Shown`] (mirrors
+/// `WindowEvent::write_locked`).
+fn read_flag_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, 17)?;
+    let flag = flag_at(bytes, 16)?;
+    match kind {
+        EV_POINTER_LOCK => Ok(WindowEvent::PointerLock {
+            window_id,
+            locked: flag,
+        }),
+        EV_SHOWN => Ok(WindowEvent::Shown {
+            window_id,
+            shown: flag,
+        }),
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
 /// Decode an event whose whole payload is its window id, or `None` when
 /// `kind` names an event that carries more than that.
 ///
@@ -11140,9 +11394,12 @@ fn read_id_only_event(
     Some(event_reserved_zero(bytes, 16).map(|()| event))
 }
 
-/// Byte offset, within a [`WindowEvent::MenuClosed`] frame, of the outcome
-/// discriminant that follows the open id.
-const MENU_CLOSED_OUTCOME_OFFSET: usize = 24;
+/// Byte offset, within a [`WindowEvent::MenuClosed`] or
+/// [`WindowEvent::MenuChosen`] frame, of the revision of the rows it answers
+/// from, after the open id.
+const MENU_ANSWER_REVISION_OFFSET: usize = 24;
+/// Byte offset of a close's outcome discriminant.
+const MENU_CLOSED_OUTCOME_OFFSET: usize = MENU_ANSWER_REVISION_OFFSET + 4;
 /// Byte offset of the chosen row's id, zero unless the outcome is
 /// [`MenuOutcome::Chosen`].
 const MENU_CLOSED_ITEM_OFFSET: usize = MENU_CLOSED_OUTCOME_OFFSET + 2;
@@ -11152,6 +11409,11 @@ const MENU_CLOSED_REFUSAL_OFFSET: usize = MENU_CLOSED_ITEM_OFFSET + 2;
 /// End of a [`WindowEvent::MenuClosed`]'s own block; the rest of the fixed
 /// event frame is reserved and required zero.
 const MENU_CLOSED_WIRE_END: usize = MENU_CLOSED_REFUSAL_OFFSET + 2;
+/// Byte offset, within a [`WindowEvent::MenuChosen`] frame, of the chosen
+/// row's id.
+const MENU_CHOSEN_ITEM_OFFSET: usize = MENU_ANSWER_REVISION_OFFSET + 4;
+/// End of a [`WindowEvent::MenuChosen`]'s own block.
+const MENU_CHOSEN_WIRE_END: usize = MENU_CHOSEN_ITEM_OFFSET + 2;
 
 /// The three-way outcome a [`WindowEvent::MenuClosed`] frame carries.
 ///
@@ -11277,10 +11539,11 @@ mod tests {
         APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
         APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_ENTRY_SELECTED_OFFSET,
         APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
-        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
-        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_TITLE_LEN_OFFSET,
+        APP_MENU_ROW_FLAG_OPENS_ENTRY, APP_MENU_ROW_FLAG_REPEATABLE, APP_MENU_ROW_ID_OFFSET,
+        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_MARK_MASK, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
+        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_TITLE_LEN_OFFSET,
         CREATE_TITLE_TEXT_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
         DESKTOP_LAYER_MAX_SIDE_LOGICAL, DESKTOP_LAYER_MAX_SIDE_PHYSICAL, DRAG_EVENT_KIND_OFFSET,
         DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
@@ -11289,19 +11552,20 @@ mod tests {
         HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PANE,
         HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, ICON_ASSET_MAX,
         ITEMS_EVENT_DRAG_OFFSET, ITEMS_EVENT_SHIFT_OFFSET, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
+        MENU_ANSWER_REVISION_OFFSET, MENU_CHOSEN_ITEM_OFFSET, MENU_CHOSEN_WIRE_END,
         MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
         MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
         MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
         NAME_LIST_NAMES_OFFSET, OFFER_END_OPERATION_OFFSET, OPEN_LAYER_WIRE_LEN,
-        OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET,
-        OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
+        OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_MENU_OFFSET,
         PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET,
         PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN,
         POINTER_MOTION_MODIFIERS_OFFSET, POINTER_MOTION_TIME_OFFSET, PRESENT_RECT_LEN,
         PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
         PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
         QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
-        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN,
+        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, RESTATE_MENU_ID_OFFSET,
+        RESTATE_MENU_MENU_OFFSET, RESTATE_MENU_REVISION_OFFSET, REVEAL_DOCUMENT_WIRE_LEN,
         SAVE_EVENT_DROPPED_OFFSET, SAVE_EVENT_DROP_X_OFFSET, SAVE_EVENT_Y_OFFSET,
         SAVE_EXTENSIONS_MAX, SAVE_EXTENSION_MAX, SAVE_FORMATS_MAX, SCROLLED_MODIFIERS_OFFSET,
         SEAT_SETTING_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
@@ -11310,6 +11574,7 @@ mod tests {
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_APP_BAR_TEXT_WIRE_LEN, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN,
+        TITLED_MENU_ROWS, TITLED_MENU_ROW_COUNT, TITLED_MENU_TEXT_LEN, TITLED_MENU_TITLE_LEN,
         TOOLTIP_TEXT_MAX, WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
         WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX,
         WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HANDLE_REPLY_LEN,
@@ -11319,6 +11584,13 @@ mod tests {
         WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
         WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
     };
+
+    /// Where an open's titled menu block lays its fields out.
+    const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_MENU_OFFSET + TITLED_MENU_TITLE_LEN;
+    const OPEN_MENU_ROW_COUNT_OFFSET: usize = OPEN_MENU_MENU_OFFSET + TITLED_MENU_ROW_COUNT;
+    const OPEN_MENU_TEXT_LEN_OFFSET: usize = OPEN_MENU_MENU_OFFSET + TITLED_MENU_TEXT_LEN;
+    const OPEN_MENU_ROWS_OFFSET: usize = OPEN_MENU_MENU_OFFSET + TITLED_MENU_ROWS;
+
     use super::{
         decode_offered_file_reply, encode_offered_file_reply, OFFERED_FILE_REPLY_TEXT_OFFSET,
         OPEN_TARGET_KIND_DOCUMENT, OPEN_TARGET_REPLY_KIND_OFFSET, PLACE_DROPPED_GRANT_OFFSET,
@@ -12566,6 +12838,152 @@ mod tests {
         }
     }
 
+    /// A chosen-and-kept row is not an answer: it names its open, the rows it
+    /// was chosen from and its row, and nothing else, in the one fixed event
+    /// frame.
+    #[test]
+    fn a_kept_choice_names_its_open_rows_and_row_and_fails_closed() {
+        let event = WindowEvent::MenuChosen {
+            window_id: 4,
+            open_id: 11,
+            revision: u32::MAX,
+            item: AppMenuItemId::new(7).expect("a valid id"),
+        };
+        let bytes = event.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+        assert_eq!(read_u32(&bytes, MENU_ANSWER_REVISION_OFFSET), u32::MAX);
+        assert_eq!(event.window_id(), Some(4));
+        assert_eq!(bytes.len(), WindowEvent::WIRE_LEN);
+        let mut nameless = bytes;
+        put_u64(&mut nameless, 16, 0);
+        assert_eq!(WindowEvent::from_bytes(&nameless), Err(Errno::OutOfRange));
+        let mut idless = bytes;
+        put_u16(&mut idless, MENU_CHOSEN_ITEM_OFFSET, 0);
+        assert!(WindowEvent::from_bytes(&idless).is_err());
+        let mut trailing = bytes;
+        trailing[MENU_CHOSEN_WIRE_END] = 1;
+        assert_eq!(WindowEvent::from_bytes(&trailing), Err(Errno::BadMagic));
+    }
+
+    /// A repeatable row; another row that cannot be one.
+    fn kept_menu() -> AppMenu {
+        let mut menu = AppMenu::titled(label("Machine"));
+        let id = |id: u16| AppMenuItemId::new(id).expect("a valid id");
+        let pause = AppMenuItem::new(id(1), label("Pause"), AppMenuSymbol::Pause)
+            .with_mark(AppMenuMark::Check)
+            .repeatable();
+        menu.push(AppMenuRow::Item(pause))
+            .expect("a repeatable row");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            id(2),
+            label("Shut Down"),
+            AppMenuSymbol::ShutDown,
+        )))
+        .expect("a plain row");
+        menu
+    }
+
+    #[test]
+    fn a_restate_carries_the_block_an_open_does_and_round_trips() {
+        let menu = kept_menu();
+        let restate = WindowRequest::RestateMenu {
+            window_id: 4,
+            open_id: 11,
+            revision: 0x0102_0304,
+            menu,
+        };
+        let frame = restate.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(restate));
+        assert_eq!(frame.len(), restate.wire_len());
+        assert_eq!(read_u32(&frame, RESTATE_MENU_REVISION_OFFSET), 0x0102_0304);
+        let open = WindowRequest::OpenMenu {
+            window_id: 4,
+            open_id: 11,
+            anchor: WindowRegion::new(0, 0, 1, 1).expect("a region"),
+            menu,
+        }
+        .frame();
+        assert_eq!(
+            &frame[RESTATE_MENU_MENU_OFFSET..],
+            &open[OPEN_MENU_MENU_OFFSET..],
+            "one menu block, laid out once"
+        );
+        let mut views = menu.rows().map(|(view, _)| view);
+        assert!(matches!(views.next(), Some(AppMenuRowView::Item(item)) if item.repeatable));
+        assert!(matches!(views.next(), Some(AppMenuRowView::Item(item)) if !item.repeatable));
+        let mut long = [0u8; WindowRequest::MAX_WIRE_LEN];
+        long[..frame.len()].copy_from_slice(&frame);
+        assert!(
+            WindowRequest::from_bytes(&long[..=frame.len()]).is_err(),
+            "exact length"
+        );
+        let mut nameless = frame;
+        put_u64(&mut nameless, RESTATE_MENU_ID_OFFSET, 0);
+        assert_eq!(WindowRequest::from_bytes(&nameless), Err(Errno::OutOfRange));
+        let empty = WindowRequest::RestateMenu {
+            window_id: 4,
+            open_id: 11,
+            revision: 1,
+            menu: AppMenu::EMPTY,
+        };
+        assert_eq!(
+            empty.encode(&mut [0; WindowRequest::MAX_WIRE_LEN]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn only_a_chooseable_row_whose_choice_is_not_its_field_is_repeatable() {
+        let entry = AppMenuEntry::new(
+            AppMenuItemId::new(9).expect("a valid id"),
+            AppMenuEntryText::new("notes").expect("a name"),
+        );
+        let row = |entry: AppMenuEntry| {
+            AppMenuRow::Item(
+                AppMenuItem::new(
+                    AppMenuItemId::new(3).expect("a valid id"),
+                    label("Rename"),
+                    AppMenuSymbol::Rename,
+                )
+                .with_entry(entry)
+                .repeatable(),
+            )
+        };
+        let mut menu = AppMenu::EMPTY;
+        assert!(menu.push(row(entry)).is_ok(), "a field it opens on arrival");
+        let mut choosing = AppMenu::EMPTY;
+        assert_eq!(
+            choosing.push(row(entry.opened_by_choosing())),
+            Err(Errno::OutOfRange),
+            "its choice is the field"
+        );
+        let open = WindowRequest::OpenMenu {
+            window_id: 4,
+            open_id: 11,
+            anchor: WindowRegion::new(0, 0, 1, 1).expect("a region"),
+            menu: kept_menu(),
+        }
+        .frame();
+        let flags_at = OPEN_MENU_ROWS_OFFSET + APP_MENU_ROW_FLAGS_OFFSET;
+        let mut submenu = open;
+        submenu[OPEN_MENU_ROWS_OFFSET] = APP_MENU_KIND_SUBMENU;
+        put_u16(
+            &mut submenu,
+            OPEN_MENU_ROWS_OFFSET + APP_MENU_ROW_ID_OFFSET,
+            0,
+        );
+        submenu[flags_at] &= !(APP_MENU_ROW_MARK_MASK);
+        assert!(
+            WindowRequest::from_bytes(&submenu).is_err(),
+            "a submenu row carrying the flag is refused"
+        );
+        submenu[flags_at] &= !APP_MENU_ROW_FLAG_REPEATABLE;
+        assert!(
+            WindowRequest::from_bytes(&submenu).is_ok(),
+            "the same row without it is a submenu"
+        );
+    }
+
     /// An outcome is one of exactly three answers, each stating only the
     /// field its own case carries, so a session cannot name a chosen row and
     /// a refusal in the same breath.
@@ -12579,10 +12997,11 @@ mod tests {
             MenuOutcome::Refused(MenuRefusal::SeatBusy),
             MenuOutcome::Refused(MenuRefusal::NoResources),
         ];
-        for outcome in outcomes {
+        for (outcome, revision) in outcomes.into_iter().zip([0, 1, 2, 3, 4, u32::MAX]) {
             let event = WindowEvent::MenuClosed {
                 window_id: 4,
                 open_id: 11,
+                revision,
                 outcome,
             };
             let bytes = event.to_le_bytes();
@@ -12596,6 +13015,7 @@ mod tests {
         let base = WindowEvent::MenuClosed {
             window_id: 4,
             open_id: 11,
+            revision: 0,
             outcome: MenuOutcome::Chosen(AppMenuItemId::new(7).expect("a valid id")),
         }
         .to_le_bytes();
@@ -14016,19 +14436,27 @@ mod tests {
         unknown[POINTER_MOTION_MODIFIERS_OFFSET + 1] = 0x80;
         assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
 
-        for locked in [true, false] {
-            let event = WindowEvent::PointerLock {
-                window_id: 9,
-                locked,
-            };
-            let bytes = event.to_le_bytes();
-            assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
-            let mut flag = bytes;
-            flag[16] = 2;
-            assert_eq!(WindowEvent::from_bytes(&flag), Err(Errno::OutOfRange));
-            let mut dirty = bytes;
-            dirty[17] = 1;
-            assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        for flag in [true, false] {
+            for event in [
+                WindowEvent::PointerLock {
+                    window_id: 9,
+                    locked: flag,
+                },
+                WindowEvent::Shown {
+                    window_id: 9,
+                    shown: flag,
+                },
+            ] {
+                let bytes = event.to_le_bytes();
+                assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+                let mut odd = bytes;
+                odd[16] = 2;
+                assert_eq!(WindowEvent::from_bytes(&odd), Err(Errno::OutOfRange));
+                let mut dirty = bytes;
+                dirty[17] = 1;
+                assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+                assert_eq!(event.window_id(), Some(9));
+            }
         }
         let mut no_window = motion.to_le_bytes();
         no_window[8..16].copy_from_slice(&0u64.to_le_bytes());
@@ -16341,6 +16769,10 @@ mod tests {
                 window_id: 4,
                 locked: true,
             },
+            WindowEvent::Shown {
+                window_id: 4,
+                shown: false,
+            },
             WindowEvent::Focus {
                 window_id: 4,
                 focused: true,
@@ -18150,6 +18582,10 @@ mod tests {
         for hidden in [
             WindowEvent::Minimized { window_id },
             WindowEvent::ContentReleased { window_id },
+            WindowEvent::Shown {
+                window_id,
+                shown: false,
+            },
         ] {
             assert_eq!(hidden.on_show(), Some(false), "{hidden:?}");
         }
@@ -18164,6 +18600,10 @@ mod tests {
                 width_px: 20,
                 height_px: 10,
                 state: WindowSizeState::Restored,
+            },
+            WindowEvent::Shown {
+                window_id,
+                shown: true,
             },
         ] {
             assert_eq!(shown.on_show(), Some(true), "{shown:?}");

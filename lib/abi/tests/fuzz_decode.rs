@@ -4069,6 +4069,14 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
                 AppMenuLabel::new("Edit").expect("a valid title"),
             )),
         },
+        WindowRequest::RestateMenu {
+            window_id: 3,
+            open_id: tairix_abi::window_ipc::object_id(4, 6),
+            revision: 2,
+            menu: fuzz_menu(AppMenu::titled(
+                AppMenuLabel::new("Edit").expect("a valid title"),
+            )),
+        },
         WindowRequest::TakeOpenTarget,
         WindowRequest::TakeMenuText {
             window_id: 3,
@@ -4280,7 +4288,8 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
                 AppMenuSymbol::ZoomFit,
             )
             .with_mark(AppMenuMark::Check)
-            .with_shortcut(AppMenuShortcut::new("Ctrl F").expect("a valid caption")),
+            .with_shortcut(AppMenuShortcut::new("Ctrl F").expect("a valid caption"))
+            .repeatable(),
         ),
         0,
     )
@@ -4431,6 +4440,11 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             outcome: PreviewOutcome::Unavailable,
         }
         .to_le_bytes(),
+        WindowEvent::Shown {
+            window_id: 3,
+            shown: false,
+        }
+        .to_le_bytes(),
     ];
     events.extend(seeded_transfer_events());
     events
@@ -4576,11 +4590,20 @@ fn structured_menu_outcome_inputs_with_corrupted_fields_never_panic() {
         let mut base = WindowEvent::MenuClosed {
             window_id: 4,
             open_id: 11,
+            revision: 3,
             outcome,
         }
         .to_le_bytes();
         each_bit_flipped(&mut base, exercise);
     }
+    let mut kept = WindowEvent::MenuChosen {
+        window_id: 4,
+        open_id: 11,
+        revision: 3,
+        item: AppMenuItemId::new(7).expect("a valid id"),
+    }
+    .to_le_bytes();
+    each_bit_flipped(&mut kept, exercise);
 }
 
 #[test]

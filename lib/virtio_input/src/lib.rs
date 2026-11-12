@@ -266,13 +266,7 @@ impl Wheels {
         // though both yield `None`.
         #[allow(clippy::match_same_arms)]
         match etype {
-            // A gear press is a detent; its release carries nothing further.
-            wire::EV_KEY if code == wire::BTN_GEAR_DOWN => {
-                (value == 1).then(|| scroll(AXIS_Y, SCROLL_UNITS_PER_DETENT))
-            }
-            wire::EV_KEY if code == wire::BTN_GEAR_UP => {
-                (value == 1).then(|| scroll(AXIS_Y, -SCROLL_UNITS_PER_DETENT))
-            }
+            wire::EV_KEY if is_gear(code) => gear_detent(code, value),
             wire::EV_KEY => Some(InputEvent {
                 kind: InputEventKind::Key,
                 reserved0: 0,
@@ -308,6 +302,25 @@ impl Wheels {
             (wire::REL_HWHEEL_HI_RES, _, WheelCode::HiRes) => Some(scroll(AXIS_X, value)),
             _ => None,
         }
+    }
+}
+
+/// Whether `code` is one of the gear buttons QEMU's pointing devices report a
+/// wheel detent with.
+const fn is_gear(code: u16) -> bool {
+    matches!(code, wire::BTN_GEAR_DOWN | wire::BTN_GEAR_UP)
+}
+
+/// The wheel detent a gear button's edge turns: its press is one detent and
+/// its release nothing further.
+fn gear_detent(code: u16, value: i32) -> Option<InputEvent> {
+    if value != 1 {
+        return None;
+    }
+    match code {
+        wire::BTN_GEAR_DOWN => Some(scroll(AXIS_Y, SCROLL_UNITS_PER_DETENT)),
+        wire::BTN_GEAR_UP => Some(scroll(AXIS_Y, -SCROLL_UNITS_PER_DETENT)),
+        _ => None,
     }
 }
 
@@ -736,7 +749,7 @@ impl<T: Transport> VirtioInput<'_, T> {
                 let code = u16::from_le_bytes([bytes[2], bytes[3]]);
                 let value = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
                 let report = match self.touch.as_mut() {
-                    Some(touch) => touch.decode(etype, code, value).map(Report::Touch),
+                    Some(touch) => touch.decode(etype, code, value),
                     None => self.wheels.decode(etype, code, value).map(Report::Event),
                 };
                 if let Some(report) = report {

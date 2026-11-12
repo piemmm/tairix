@@ -30,7 +30,7 @@ use tairix_player::{Control, EntryId, Programme, Span, Status, Transport};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_sound::{CoverRange, Metadata, SoundInfo, TagKind};
 use tairix_theme::Theme;
-use tairix_window::menu::{MenuBuilder, Plate};
+use tairix_window::menu::{MenuBuilder, MenuStatements, Plate};
 
 use crate::layout::Layout;
 use crate::playlist::{Edit, Playlist, Repeat};
@@ -189,6 +189,87 @@ impl Device {
             target: alloc::format!("{}", AudioTarget::at(descriptor)),
             name: String::from(descriptor.name.as_str()),
         }
+    }
+}
+
+/// The context menu up over the list: the output devices each statement of
+/// its rows offered, and the rows last given.
+#[derive(Clone, Debug)]
+pub struct ContextMenu {
+    devices: MenuStatements<Vec<Device>>,
+    rows: AppMenu,
+}
+
+/// The restate [`ContextMenu::follow`] asks for.
+#[derive(Clone, Debug)]
+pub struct Restatement {
+    /// The revision the rows are given.
+    pub revision: u32,
+    /// The rows.
+    pub rows: AppMenu,
+    /// The devices they offer, where the list has moved.
+    moved: Option<Vec<Device>>,
+}
+
+impl ContextMenu {
+    /// The menu opened as `open_id`, its `rows` offering `devices`.
+    #[must_use]
+    pub const fn new(open_id: u64, devices: Vec<Device>, rows: AppMenu) -> Self {
+        Self {
+            devices: MenuStatements::new(open_id, devices),
+            rows,
+        }
+    }
+
+    /// The open the desktop minted for it.
+    #[must_use]
+    pub const fn open_id(&self) -> u64 {
+        self.devices.open_id()
+    }
+
+    /// Follow `player`, answering the restate showing it as it now stands,
+    /// if its rows are not those shown. A device row names a place in the
+    /// list its rows offered, so a list that has moved is offered under a
+    /// revision of its own — unless the rows are the same, which then offer
+    /// it from now on.
+    pub fn follow(&mut self, player: &Player) -> Option<Restatement> {
+        let listed = player.devices();
+        let moved = listed != self.devices.shown().as_slice();
+        let rows = player.context_menu(if moved { listed } else { self.devices.shown() });
+        if rows == self.rows {
+            if moved {
+                self.devices.adopt(self.devices.revision(), listed.to_vec());
+            }
+            return None;
+        }
+        Some(Restatement {
+            revision: if moved {
+                self.devices.next_revision()
+            } else {
+                self.devices.revision()
+            },
+            rows,
+            moved: moved.then(|| listed.to_vec()),
+        })
+    }
+
+    /// `restatement`, which [`Self::follow`] asked for, has landed.
+    pub fn restated(&mut self, restatement: Restatement) {
+        if let Some(devices) = restatement.moved {
+            self.devices.adopt(restatement.revision, devices);
+        }
+        self.rows = restatement.rows;
+    }
+
+    /// The devices the rows of `revision` offered: those shown, or those
+    /// shown before the last restate; none for older rows, so a device row
+    /// chosen from them names nothing rather than whatever stands at its
+    /// place now.
+    #[must_use]
+    pub fn offered(&self, revision: u32) -> &[Device] {
+        self.devices
+            .chosen_from(revision)
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -955,10 +1036,10 @@ impl Player {
         outcome
     }
 
-    /// The context menu for where it was last asked: a row's own commands
-    /// over the player's.
+    /// The context menu for where it was last asked, offering the output
+    /// `devices`: a row's own commands over the player's.
     #[must_use]
-    pub fn context_menu(&self) -> AppMenu {
+    pub fn context_menu(&self, devices: &[Device]) -> AppMenu {
         let mut menu = MenuBuilder::new();
         if let Some(entry) = self.menu_for {
             self.entry_rows(&mut menu, entry);
@@ -966,14 +1047,15 @@ impl Player {
         }
         self.list_rows(&mut menu);
         menu.separator(Plate::Root);
-        self.playback_rows(&mut menu);
+        self.playback_rows(&mut menu, devices);
         menu.finish()
     }
 
-    /// The commands of the row the menu was opened on.
+    /// The commands of the row the menu was opened on: each but Remove, which
+    /// takes the row away, acts on it in place.
     fn entry_rows(&self, menu: &mut MenuBuilder, entry: EntryId) {
         let position = self.playlist.position(entry).unwrap_or(0);
-        menu.item(
+        menu.repeating(
             row::PLAY,
             AppMenuSymbol::Play,
             "Play",
@@ -989,7 +1071,7 @@ impl Player {
             true,
             Plate::Root,
         );
-        menu.item(
+        menu.repeating(
             row::MOVE_UP,
             AppMenuSymbol::MoveUp,
             "Move up",
@@ -997,7 +1079,7 @@ impl Player {
             position > 0,
             Plate::Root,
         );
-        menu.item(
+        menu.repeating(
             row::MOVE_DOWN,
             AppMenuSymbol::MoveDown,
             "Move down",
@@ -1036,7 +1118,7 @@ impl Player {
     }
 
     /// How the list plays, and where to.
-    fn playback_rows(&self, menu: &mut MenuBuilder) {
+    fn playback_rows(&self, menu: &mut MenuBuilder, devices: &[Device]) {
         menu.mark(
             row::SHUFFLE,
             AppMenuSymbol::Shuffle,
@@ -1074,7 +1156,7 @@ impl Player {
                 self.saved.device.is_none(),
                 plate,
             );
-            for (id, device) in (row::FIRST_DEVICE..).zip(&self.devices) {
+            for (id, device) in (row::FIRST_DEVICE..).zip(devices) {
                 let chosen = self.saved.device.as_deref() == Some(device.target.as_str());
                 menu.radio(
                     id,
@@ -1094,9 +1176,15 @@ impl Player {
         let row = |id: u16, symbol: AppMenuSymbol, label: &str, mark: AppMenuMark| {
             let id = AppMenuItemId::new(id).ok()?;
             let label = AppMenuLabel::new(label).ok()?;
-            Some(AppMenuRow::Item(
-                AppMenuItem::new(id, label, symbol).with_mark(mark),
-            ))
+            let item = AppMenuItem::new(id, label, symbol).with_mark(mark);
+            // Opening a picker takes the pointer elsewhere; the settings are
+            // set in place.
+            let in_place = !matches!(id.get(), row::OPEN_FILE | row::OPEN_FOLDER);
+            Some(AppMenuRow::Item(if in_place {
+                item.repeatable()
+            } else {
+                item
+            }))
         };
         let tick = |on: bool| {
             if on {
@@ -1156,8 +1244,15 @@ impl Player {
         .collect()
     }
 
-    /// The menu row `id` was chosen, from either menu.
-    pub fn choose(&mut self, id: u16, layout: &Layout, damage: &mut Region) -> Outcome {
+    /// The menu row `id` was chosen, from either menu: from one offering the
+    /// output `devices`, which a device row names a place among.
+    pub fn choose(
+        &mut self,
+        id: u16,
+        devices: &[Device],
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
         let mut outcome = Outcome::default();
         match id {
             row::OPEN_FILE => outcome.pick = Some(PickPurpose::Open),
@@ -1194,20 +1289,18 @@ impl Player {
                     .map(|(.., mode)| *mode)
                 {
                     self.set_repeat(mode, layout, damage, &mut outcome);
-                } else if let Some(index) = id
+                } else if let Some(device) = id
                     .checked_sub(row::FIRST_DEVICE)
-                    .map(usize::from)
-                    .filter(|&index| index < self.devices.len())
+                    .and_then(|index| devices.get(usize::from(index)))
                 {
-                    self.choose_device(Some(index), &mut outcome);
+                    self.choose_device(Some(device), &mut outcome);
                 }
             }
         }
         outcome
     }
 
-    fn choose_device(&mut self, index: Option<usize>, outcome: &mut Outcome) {
-        let device = index.and_then(|index| self.devices.get(index));
+    fn choose_device(&mut self, device: Option<&Device>, outcome: &mut Outcome) {
         self.saved.device = device.map(|device| device.target.clone());
         outcome.commands.push(Command::Control(Control::SetDevice(
             device.map_or(0, |device| device.id),

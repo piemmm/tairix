@@ -47,7 +47,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
-        AlertSeverity, AlertSpec, AppBarClick, MenuOutcome, WindowEvent, WindowRegion,
+        AlertSeverity, AlertSpec, AppBarClick, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_appdata::{RtHost, Settings as Store};
@@ -58,7 +58,7 @@ mod program {
     use tairix_geometry::{Point, Region, Scale};
     use tairix_hash::BuildFastHash;
     use tairix_input::InputEvent;
-    use tairix_music::view::{Command, Device, Outcome, Player, Request, Saved};
+    use tairix_music::view::{Command, ContextMenu, Device, Outcome, Player, Request, Saved};
     use tairix_music::{Edit, Layout, Playlist, Repeat, WIN_HEIGHT, WIN_WIDTH};
     use tairix_player::rt::{live, EngineWaits, HeldFiles, RtEngine, RtTags, Tokens};
     use tairix_player::{
@@ -82,12 +82,12 @@ mod program {
     use tairix_sound::{CoverRange, Metadata};
     use tairix_theme::{TextRole, Theme};
     use tairix_util::defer::JobQueue;
-    use tairix_window::app::{self, Wake, WindowPane};
+    use tairix_window::app::{self, ShellError, Wake, WindowPane};
     use tairix_window::notices::{Notices, Raised};
     use tairix_window::{
         held_modifiers, key_input_event, pointer_input_events, pointer_point, present_damage,
-        scroll_input_events, Answer, EventDrain, EventError, EventMailbox, EventSource, Parked,
-        PostedRequest, Refused, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
+        scroll_input_events, Answer, Desktop, EventDrain, EventError, EventMailbox, EventSource,
+        Parked, PostedRequest, Refused, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
     };
 
     /// The name this program states its refusals under.
@@ -661,11 +661,73 @@ mod program {
         Settings,
     }
 
+    /// The player's window and the surface it is painted from.
+    struct PlayerWindow {
+        pane: WindowPane,
+        surface: Surface,
+    }
+
+    /// Why the player's window would not open.
+    enum WindowRefused {
+        /// No memory for the surface it is painted from.
+        NoSurface,
+        /// The window shell's own refusal.
+        Shell(ShellError),
+    }
+
+    impl WindowRefused {
+        /// The exit code a refusal at start ends the program with.
+        const fn code(&self) -> i32 {
+            match self {
+                Self::NoSurface => app::EXIT_NO_WINDOW,
+                Self::Shell(err) => err.code(),
+            }
+        }
+    }
+
+    impl core::fmt::Display for WindowRefused {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::NoSurface => f.write_str("no drawing surface"),
+                Self::Shell(err) => err.fmt(f),
+            }
+        }
+    }
+
+    /// Open the player's window at the size `desktop` gives it.
+    fn open_window(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        endpoint: u64,
+        desktop: &Desktop,
+    ) -> Result<PlayerWindow, WindowRefused> {
+        let (width, height) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mode = app::mode_for(width, height);
+        let surface =
+            Surface::new(mode.width_px, mode.height_px).ok_or(WindowRefused::NoSurface)?;
+        let least = desktop.window_size(WIN_WIDTH / 2, WIN_HEIGHT / 2);
+        let sizing = WindowSizing::Resizable {
+            min_width_px: least.0,
+            min_height_px: least.1,
+            max_width_px: 0,
+            max_height_px: 0,
+        };
+        let pane = WindowPane::open(client, endpoint, &mode, APP_TITLE, sizing)
+            .map_err(WindowRefused::Shell)?;
+        Ok(PlayerWindow { pane, surface })
+    }
+
     /// Everything the window loop holds.
     struct App {
         client: WindowClient<app::RtWindowTransport>,
-        pane: WindowPane,
-        surface: Surface,
+        /// The window while it is open: closed, the player stays on the icon
+        /// bar, playing.
+        window: Option<PlayerWindow>,
+        /// The window was asked for while closed — a click on the icon bar, or
+        /// a picker — so the loop opens one.
+        reopen: bool,
+        /// The picker a row asked for while the window was closed, put up
+        /// over the window once it is open.
+        pending_pick: Option<PickPurpose>,
         player: Player,
         layout: Layout,
         /// The files the playlist names, held until no entry names them.
@@ -673,8 +735,8 @@ mod program {
         link: Arc<Link>,
         workers: Workers,
         covers: Covers,
-        /// The open context menu's id.
-        menu: Option<u64>,
+        /// The context menu while it is open.
+        menu: Option<ContextMenu>,
         presented: bool,
         /// The refusals stated in alerts, one up at a time.
         notices: Notices<Spoke>,
@@ -699,15 +761,78 @@ mod program {
     }
 
     impl App {
-        fn layout_for(&self, theme: &Theme, scale: Scale) -> Layout {
-            let mode = self.pane.mode();
-            Layout::for_window(
+        /// The layout for the window open, at `theme` and `scale`, if one is.
+        fn layout_for(&self, theme: &Theme, scale: Scale) -> Option<Layout> {
+            let mode = self.window.as_ref()?.pane.mode();
+            Some(Layout::for_window(
                 mode.width_px,
                 mode.height_px,
                 theme,
                 scale,
                 face(theme, scale),
-            )
+            ))
+        }
+
+        /// Adopt the layout for the window open, if one is.
+        fn relayout(&mut self, theme: &Theme, scale: Scale) {
+            if let Some(layout) = self.layout_for(theme, scale) {
+                self.layout = layout;
+                self.player.relayout(&self.layout);
+            }
+        }
+
+        fn window_id(&self) -> Option<u64> {
+            self.window.as_ref().map(|window| window.pane.id())
+        }
+
+        /// Close the window, leaving the player on the icon bar, playing.
+        fn close_window(&mut self) {
+            if let Some(window) = self.window.take() {
+                let _ = window.pane.close(&mut self.client);
+            }
+            // A menu hangs from the window, and goes with it.
+            self.menu = None;
+            self.presented = false;
+        }
+
+        /// Open the window again, as the desktop now has it, and put up the
+        /// picker a row asked for meanwhile. One the desktop would not open
+        /// is stated, the player staying on the icon bar.
+        fn reopen(&mut self, desktop: &Desktop, endpoint: u64, (theme, scale): (&Theme, Scale)) {
+            if self.window.is_some() {
+                return;
+            }
+            match open_window(&mut self.client, endpoint, desktop) {
+                Ok(window) => {
+                    self.window = Some(window);
+                    self.presented = false;
+                    self.relayout(theme, scale);
+                    if let Some(purpose) = self.pending_pick.take() {
+                        self.pick(&purpose);
+                    }
+                }
+                Err(err) => {
+                    self.pending_pick = None;
+                    app::report(APP_NAME, format_args!("the window would not open ({err})"));
+                }
+            }
+        }
+
+        /// Put the picker for `purpose` up over the window, opening the window
+        /// first where it is closed.
+        fn pick(&mut self, purpose: &PickPurpose) {
+            let Some(window_id) = self.window_id() else {
+                self.pending_pick = Some(*purpose);
+                self.reopen = true;
+                return;
+            };
+            if let Err(err) = self.client.pick_file(window_id, *purpose) {
+                self.notices.refuse(
+                    Spoke::Chosen,
+                    "No file chooser could be opened",
+                    &format!("the desktop would not offer one ({err})"),
+                );
+            }
         }
 
         /// Add `opened` to the playlist and have the playback thread and the
@@ -746,14 +871,8 @@ mod program {
             for request in outcome.requests {
                 self.request(request);
             }
-            if let Some(purpose) = outcome.pick {
-                if let Err(err) = self.client.pick_file(self.pane.id(), purpose) {
-                    self.notices.refuse(
-                        Spoke::Chosen,
-                        "No file chooser could be opened",
-                        &format!("the desktop would not offer one ({err})"),
-                    );
-                }
+            if let Some(purpose) = &outcome.pick {
+                self.pick(purpose);
             }
             if let Some(at) = outcome.menu {
                 self.open_menu(at);
@@ -836,7 +955,10 @@ mod program {
 
         fn chore_done(&mut self, done: ChoreDone, reported: &mut Region) {
             match done {
-                ChoreDone::Devices(Ok(devices)) => self.player.devices_listed(devices),
+                ChoreDone::Devices(Ok(devices)) => {
+                    self.player.devices_listed(devices);
+                    self.restate_menu();
+                }
                 ChoreDone::Devices(Err(err)) => self.player.notify(
                     format!("The output devices could not be listed: {err}"),
                     &self.layout,
@@ -908,15 +1030,48 @@ mod program {
             }
         }
 
+        /// Open the context menu at `at`, asking for the output devices again:
+        /// the menu is restated with them once they land.
         fn open_menu(&mut self, at: Point) {
             self.request(Request::Devices);
-            let menu = self.player.context_menu();
-            let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
+            let devices = self.player.devices().to_vec();
+            let rows = self.player.context_menu(&devices);
+            let (Ok(anchor), Some(window_id)) =
+                (WindowRegion::new(at.x, at.y, 0, 0), self.window_id())
+            else {
                 return;
             };
-            match self.client.open_menu(self.pane.id(), anchor, &menu) {
-                Ok(open) => self.menu = Some(open),
+            match self.client.open_menu(window_id, anchor, &rows) {
+                Ok(open_id) => self.menu = Some(ContextMenu::new(open_id, devices, rows)),
                 Err(_) => app::report(APP_NAME, "the desktop composes no menu service"),
+            }
+        }
+
+        fn menu_is(&self, open_id: u64) -> bool {
+            self.menu
+                .as_ref()
+                .is_some_and(|shown| shown.open_id() == open_id)
+        }
+
+        /// Show the open context menu as the player now stands.
+        fn restate_menu(&mut self) {
+            let (Some(window_id), Some(shown)) = (self.window_id(), self.menu.as_mut()) else {
+                return;
+            };
+            let Some(restatement) = shown.follow(&self.player) else {
+                return;
+            };
+            let restated = self.client.restate_menu(
+                window_id,
+                shown.open_id(),
+                restatement.revision,
+                &restatement.rows,
+            );
+            match restated {
+                Ok(()) => shown.restated(restatement),
+                Err(err) => {
+                    app::report(APP_NAME, format_args!("the menu was not restated ({err})"));
+                }
             }
         }
 
@@ -937,7 +1092,10 @@ mod program {
                 refused: 0,
                 left_out,
             });
-            if let Err(err) = self.client.ask_picked_files(self.pane.id()) {
+            let asked = self.window_id().map_or(Err(Errno::NotFound), |window_id| {
+                self.client.ask_picked_files(window_id)
+            });
+            if let Err(err) = asked {
                 app::report(
                     APP_NAME,
                     format_args!("the folder's files could not be asked for ({err})"),
@@ -1049,8 +1207,13 @@ mod program {
                     Answer::PickedName { name, .. } => {
                         self.name_chosen(name.unwrap_or_default(), reported);
                     }
-                    Answer::FrameReturned { window_id } if window_id == self.pane.id() => {
-                        let presented = self.pane.present_deferred(&mut self.client, &self.surface);
+                    Answer::FrameReturned { window_id } if Some(window_id) == self.window_id() => {
+                        let Some(window) = self.window.as_mut() else {
+                            continue;
+                        };
+                        let presented = window
+                            .pane
+                            .present_deferred(&mut self.client, &window.surface);
                         if presented.is_err() {
                             reported.add(self.layout.window());
                         }
@@ -1060,14 +1223,20 @@ mod program {
             }
         }
 
-        /// Act on a request the session refused: the window it would not open
-        /// leaves the player nothing to be, which ends it, answering why; an
+        /// Act on a request the session refused, which is stated: the window
+        /// it would not open is let go, the player staying on the icon bar; an
         /// alert it would not show waits for room or is stated, and a menu it
         /// would not open is forgotten.
-        fn refused(&mut self, refused: &Refused) -> Option<&'static str> {
+        fn refused(&mut self, refused: &Refused) {
             app::report(APP_NAME, refused);
-            if app::refused_create(refused, self.pane.id()) {
-                return Some("the desktop would not open the window");
+            if self
+                .window_id()
+                .is_some_and(|window_id| app::refused_create(refused, window_id))
+            {
+                self.window = None;
+                self.menu = None;
+                self.presented = false;
+                return;
             }
             match refused.request {
                 PostedRequest::OpenAlert(alert) => match self.notices.refused(alert, refused.errno)
@@ -1083,20 +1252,17 @@ mod program {
                     ),
                     Raised::Nothing | Raised::Up => {}
                 },
-                PostedRequest::OpenMenu(open) if self.menu == Some(open) => self.menu = None,
+                PostedRequest::OpenMenu(open) if self.menu_is(open) => self.menu = None,
                 _ => {}
             }
-            None
         }
 
         /// Put the next waiting refusal up, unless one is up or the player
         /// has every alert up it may.
         fn raise_notices(&mut self, endpoint: u64) {
             while !self.alerts_full {
-                match self
-                    .notices
-                    .raise(&mut self.client, endpoint, Some(self.pane.id()))
-                {
+                let owner = self.window_id();
+                match self.notices.raise(&mut self.client, endpoint, owner) {
                     Raised::Nothing | Raised::Up => return,
                     Raised::Full => self.alerts_full = true,
                     Raised::Refused(err, notice) => app::report(
@@ -1112,7 +1278,7 @@ mod program {
         }
 
         /// Paint what is owed and present it: nothing when nothing was
-        /// reported, nor while the window is hidden.
+        /// reported, nor while the window is closed or hidden.
         fn present(
             &mut self,
             repaint: Repaint,
@@ -1120,11 +1286,14 @@ mod program {
             theme: &Theme,
             scale: Scale,
         ) -> Result<(), Errno> {
-            if self.client.is_hidden(self.pane.id()) {
+            let Some(window) = self.window.as_mut() else {
+                return Ok(());
+            };
+            if self.client.is_hidden(window.pane.id()) {
                 return Ok(());
             }
-            let mode = *self.pane.mode();
-            let repaint = if self.pane.content_released() || !self.presented {
+            let mode = *window.pane.mode();
+            let repaint = if window.pane.content_released() || !self.presented {
                 Repaint::Whole
             } else if repaint == Repaint::Reported && reported.is_empty() {
                 Repaint::Nothing
@@ -1146,11 +1315,12 @@ mod program {
                 .heard()
                 .and_then(|entry| self.covers.peek(&art_side, &entry))
                 .map(|cover| &cover.0);
-            let (player, layout, surface) = (&self.player, &self.layout, &mut self.surface);
+            let (player, layout) = (&self.player, &self.layout);
+            let surface = &mut window.surface;
             surface.with_clip(area.x, area.y, area.width_px, area.height_px, |clipped| {
                 tairix_music::paint::paint(clipped, player, layout, art, scale, theme, clip);
             });
-            let landed = self.pane.present(&mut self.client, &self.surface, area);
+            let landed = window.pane.present(&mut self.client, &window.surface, area);
             if landed.is_ok() {
                 self.presented = true;
             }
@@ -1176,7 +1346,8 @@ mod program {
                     if tairix_window::is_quit(*item) {
                         return true;
                     }
-                    let outcome = self.player.choose(item.get(), &self.layout, reported);
+                    // The icon bar's menu offers no output device.
+                    let outcome = self.player.choose(item.get(), &[], &self.layout, reported);
                     self.declare_bar(endpoint);
                     return self.act(outcome);
                 }
@@ -1188,34 +1359,43 @@ mod program {
                         );
                     }
                 }
+                // Closing the window leaves the player on the icon bar, playing;
+                // only Quit ends it.
                 WindowEvent::CloseRequested { .. }
-                | WindowEvent::AlternateCloseRequested { .. } => {
-                    return true;
-                }
+                | WindowEvent::AlternateCloseRequested { .. } => self.close_window(),
+                WindowEvent::AppBarDefault => self.reopen = true,
                 WindowEvent::Resized {
                     width_px,
                     height_px,
                     ..
                 } => {
                     let mode = app::mode_for(*width_px, *height_px);
-                    if self
-                        .pane
-                        .resize_with(&mut self.client, &mode, &mut self.surface)
-                        == app::Fitted::Adopted
-                    {
-                        self.layout = self.layout_for(theme, scale);
-                        self.player.relayout(&self.layout);
+                    let adopted = self.window.as_mut().is_some_and(|window| {
+                        window
+                            .pane
+                            .resize_with(&mut self.client, &mode, &mut window.surface)
+                            == app::Fitted::Adopted
+                    });
+                    if adopted {
+                        self.relayout(theme, scale);
                         reported.add(self.layout.window());
                     }
                 }
-                WindowEvent::ContentReleased { .. } => self.pane.release_frames(),
+                WindowEvent::ContentReleased { .. } => {
+                    if let Some(window) = self.window.as_mut() {
+                        window.pane.release_frames();
+                    }
+                }
                 WindowEvent::FilePicked { handle, .. } => {
                     // One chosen again before the first's name landed replaces
                     // it; the first is let go rather than held.
                     if let Some(earlier) = self.chosen.replace(*handle) {
                         drop(File::from_delegation(earlier));
                     }
-                    if self.client.ask_picked_name(self.pane.id()).is_err() {
+                    let asked = self
+                        .window_id()
+                        .is_some_and(|window_id| self.client.ask_picked_name(window_id).is_ok());
+                    if !asked {
                         self.name_chosen(String::new(), reported);
                     }
                 }
@@ -1225,17 +1405,43 @@ mod program {
                 }
                 WindowEvent::FolderPicked { left_out, .. } => self.take_folder(*left_out, reported),
                 WindowEvent::MenuClosed {
-                    open_id, outcome, ..
+                    open_id,
+                    revision,
+                    outcome,
+                    ..
                 } => {
-                    if self.menu != Some(*open_id) {
+                    let Some(shown) = self.menu.take_if(|shown| shown.open_id() == *open_id) else {
                         return false;
-                    }
-                    self.menu = None;
+                    };
                     if let MenuOutcome::Chosen(item) = outcome {
-                        let outcome = self.player.choose(item.get(), &self.layout, reported);
+                        let devices = shown.offered(*revision);
+                        let outcome =
+                            self.player
+                                .choose(item.get(), devices, &self.layout, reported);
                         self.declare_bar(endpoint);
                         return self.act(outcome);
                     }
+                }
+                WindowEvent::MenuChosen {
+                    open_id,
+                    revision,
+                    item,
+                    ..
+                } => {
+                    let Some(shown) = self.menu.take_if(|shown| shown.open_id() == *open_id) else {
+                        return false;
+                    };
+                    let outcome = self.player.choose(
+                        item.get(),
+                        shown.offered(*revision),
+                        &self.layout,
+                        reported,
+                    );
+                    self.menu = Some(shown);
+                    self.declare_bar(endpoint);
+                    let quit = self.act(outcome);
+                    self.restate_menu();
+                    return quit;
                 }
                 WindowEvent::Key { key, .. } => {
                     let input = key_input_event(*key);
@@ -1286,9 +1492,7 @@ mod program {
                         self.act(outcome);
                     }
                 }
-                // The window is open for the player's whole life, so a click
-                // on its icon-bar slot only raises it, which the session does;
-                // a cancelled pick leaves the playlist as it was.
+                // A cancelled pick leaves the playlist as it was.
                 _ => {}
             }
             false
@@ -1416,22 +1620,11 @@ mod program {
 
         let theme = themes.active();
         let scale = desktop.scale();
-        let (width, height) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mode = app::mode_for(width, height);
-        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            return app::fail(APP_NAME, app::EXIT_NO_WINDOW, "no drawing surface");
-        };
-        let least = desktop.window_size(WIN_WIDTH / 2, WIN_HEIGHT / 2);
-        let sizing = WindowSizing::Resizable {
-            min_width_px: least.0,
-            min_height_px: least.1,
-            max_width_px: 0,
-            max_height_px: 0,
-        };
-        let pane = match WindowPane::open(&mut client, endpoint, &mode, APP_TITLE, sizing) {
-            Ok(opened) => opened,
+        let window = match open_window(&mut client, endpoint, &desktop) {
+            Ok(window) => window,
             Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
+        let mode = *window.pane.mode();
         let frame_bytes = usize::try_from(u64::from(mode.width_px) * u64::from(mode.height_px) * 4)
             .unwrap_or(usize::MAX);
         let covers = working_set_ui_cache(
@@ -1455,8 +1648,9 @@ mod program {
         );
         let mut app_state = App {
             client,
-            pane,
-            surface,
+            window: Some(window),
+            reopen: false,
+            pending_pick: None,
             player,
             layout,
             files: BTreeMap::new(),
@@ -1523,9 +1717,7 @@ mod program {
             if desktop_moved.replace(false) {
                 match app::adopt_desktop(&mut desktop, &mut themes) {
                     Ok(true) => {
-                        let (theme, scale) = (themes.active(), desktop.scale());
-                        app_state.layout = app_state.layout_for(theme, scale);
-                        app_state.player.relayout(&app_state.layout);
+                        app_state.relayout(themes.active(), desktop.scale());
                         repaint = Repaint::Whole;
                     }
                     Ok(false) => {}
@@ -1573,15 +1765,13 @@ mod program {
                     Err(EventError::Undecodable(_)) => {
                         app::report(APP_NAME, "a malformed window event was refused");
                     }
-                    Err(EventError::Refused(refused)) => {
-                        if let Some(why) = app_state.refused(&refused) {
-                            app_state.link.leave();
-                            return app::fail(APP_NAME, app::EXIT_NO_WINDOW, why);
-                        }
-                    }
+                    Err(EventError::Refused(refused)) => app_state.refused(&refused),
                 }
             }
             app_state.take_answers(&mut reported);
+            if core::mem::take(&mut app_state.reopen) {
+                app_state.reopen(&desktop, endpoint, (theme, scale));
+            }
             // A held scrollbar press may be due whether the last wait ended on
             // its deadline or on input.
             let now = tairix_rt::clock_get();
@@ -1604,12 +1794,7 @@ mod program {
                 Err(EventError::Undecodable(_)) => {
                     app::report(APP_NAME, "a malformed window event was refused");
                 }
-                Err(EventError::Refused(refused)) => {
-                    if let Some(why) = app_state.refused(&refused) {
-                        app_state.link.leave();
-                        return app::fail(APP_NAME, app::EXIT_NO_WINDOW, why);
-                    }
-                }
+                Err(EventError::Refused(refused)) => app_state.refused(&refused),
             }
         }
     }

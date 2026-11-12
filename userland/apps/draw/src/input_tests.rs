@@ -222,6 +222,36 @@ fn typed_text_lands_as_one_step_and_text_left_empty_is_none() {
     assert_eq!(window.objects(), 1, "nothing typed, nothing kept");
 }
 
+/// A row keeps the window menu up under a secondary click exactly where its
+/// command is done to the drawing in place; a tool, a zoom, a paper or a unit
+/// is an alternative and always does.
+#[test]
+fn the_window_menu_stays_up_for_every_command_done_in_place() {
+    use tairix_abi::window_ipc::AppMenuRowView;
+    use tairix_window::menu::MenuCommand;
+
+    use crate::menu::{chosen, Chosen};
+    use crate::view::MenuKind;
+
+    let window = Window::new();
+    let menu = window.view.build_menu(MenuKind::Window);
+    let mut kept = 0;
+    for (row, _) in menu.rows() {
+        let AppMenuRowView::Item(item) = row else {
+            continue;
+        };
+        match chosen(item.id.get()).expect("a row the menu numbered") {
+            Chosen::Command(command) => {
+                assert_eq!(item.repeatable, command.acts_in_place(), "{command:?}");
+            }
+            other => assert!(item.repeatable, "{other:?}"),
+        }
+        kept += usize::from(item.repeatable);
+    }
+    assert!(kept > 0);
+    assert!(Command::Undo.acts_in_place() && !Command::Delete.acts_in_place());
+}
+
 #[test]
 fn menu_commands_group_copy_and_remove_as_steps() {
     let mut window = Window::new();

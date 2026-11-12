@@ -21,7 +21,8 @@ den gewählten Rechner in einem eigenen Fenster oder holt dessen Fenster nach
 vorn; mehrere Rechner laufen zugleich. Einstellungen ändert die Hardware eines
 Rechners, solange er aus ist, Duplizieren kopiert einen Rechner samt seinen
 Platten, und Löschen löscht einen samt seinen Platten, sobald das bestätigt
-ist. Beim ersten Start legt PCEmulator einen Turbo-XT an. Was ein Rechner auf
+ist. Ein Rechtsklick auf die Kachel eines Rechners bietet dies für diesen
+Rechner an und, solange er läuft, auch das Menü des Rechners. Beim ersten Start legt PCEmulator einen Turbo-XT an. Was ein Rechner auf
 seine Platten schreibt und die Zeit, auf die seine Uhr gestellt ist, bleiben
 von einem Lauf zum nächsten erhalten.
 
@@ -46,9 +47,9 @@ für das Laufwerk auswählt, und Auswerfen. Ein Diskettenabbild, das auf das
 Fenster gezogen wird, kommt in das Laufwerk, auf dem es abgelegt wird, sonst
 in das erste, und kann dort nicht beschrieben werden.
 
-Am Ende dieser Leiste hält das Menü des Rechners den Rechner an, setzt ihn
-zurück, sendet ihm Strg+Alt+Entf und stellt die Geschwindigkeit seines
-Prozessors für den Lauf ein. Anzeige schaltet Zeilenraster, Leuchten,
+Am Ende dieser Leiste öffnet die Schaltfläche Rechner das Menü des Rechners,
+das den Rechner anhält, ihn zurücksetzt, ihm Strg+Alt+Entf sendet und die
+Geschwindigkeit seines Prozessors für den Lauf einstellt. Anzeige schaltet Zeilenraster, Leuchten,
 Nachleuchten, Rauschen und Wackeln des Bildes ein und aus, und der Rechner
 behält, was gewählt ist. Bildschirmfoto aufnehmen sichert den Bildschirm als
 PNG-Bild dort, wo das Sichern-Feld es angibt. Vollbild füllt den Bildschirm
@@ -94,8 +95,11 @@ DOS-Maustreiber nutzt, folgt dem Desktop-Zeiger, wo immer er über dem Bild
 steht. Ein Programm, das die Maus selbst liest, übernimmt sie, wenn man auf
 das Bild klickt, und gibt sie zurück, wenn man kurz die Meta-Taste antippt.
 
-Das Schließen des Bibliotheksfensters lässt laufende Rechner weiterlaufen,
-und Rechnerbibliothek im Menü der Symbolleiste holt es zurück. Jeder Rechner
+Das Schließen des Bibliotheksfensters lässt laufende Rechner weiterlaufen, und
+das Schließen aller Fenster lässt den Emulator in der Symbolleiste: Ein Klick
+auf sein Symbol oder Rechnerbibliothek in seinem Menü holt die Bibliothek
+zurück, und Beenden in diesem Menü versetzt jeden laufenden Rechner in den
+Ruhezustand und beendet den Emulator. Jeder Rechner
 läuft in einem eigenen Arbeitsprozess, der keinerlei Befugnisse hat: seiner
 Software und seinen Platten wird nie vertraut.
 
@@ -106,6 +110,6 @@ Software und seinen Platten wird nie vertraut.
 
 ## EXIT STATUS
 
-Null, sobald sein letztes Fenster geschlossen ist. Ungleich null, wenn der
-Fensterkanal, das Ereignispostfach oder die Desktop-Sitzung verweigert wurde;
-der Grund wird auf der Standardfehlerausgabe genannt.
+Null, sobald Beenden in seinem Menü in der Symbolleiste gewählt wurde. Ungleich
+null, wenn der Fensterkanal, das Ereignispostfach oder die Desktop-Sitzung
+verweigert wurde; der Grund wird auf der Standardfehlerausgabe genannt.

@@ -77,7 +77,9 @@ mod program {
         SwitchboardCommand, SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT,
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::window_ipc::{AppMenu, WindowEvent, WindowRegion, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{
+        AppMenu, WindowEvent, WindowRegion, MENU_OPEN_REVISION, WINDOW_ENDPOINT,
+    };
     use tairix_abi::{
         CapabilityId, CapabilityQuery, Errno, NoticeTopic, PowerAction, ProcId, SchedPriority,
         Signal, SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
@@ -523,6 +525,13 @@ mod program {
             self.window.client().open_menu(window, anchor, menu)
         }
 
+        fn restate_menu(&mut self, open_id: u64, menu: &AppMenu) -> Result<(), Errno> {
+            let window = self.window.window_id().ok_or(Errno::NotFound)?;
+            self.window
+                .client()
+                .restate_menu(window, open_id, MENU_OPEN_REVISION, menu)
+        }
+
         fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {
             call_session(&request.to_le_bytes())
         }
@@ -779,6 +788,9 @@ mod program {
         authority: &dyn CapabilityQuery,
         event: &WindowEvent,
     ) {
+        if let Some(shown) = event.on_show() {
+            service.set_shown(host, authority, shown);
+        }
         let action = match *event {
             WindowEvent::CloseRequested { .. } => {
                 service.panel_mut().close(host);
@@ -835,6 +847,12 @@ mod program {
                     .menu_closed(host, open_id, outcome, authority);
                 return;
             }
+            WindowEvent::MenuChosen { open_id, item, .. } => {
+                service
+                    .panel_mut()
+                    .menu_chosen(host, open_id, item, authority);
+                return;
+            }
             // A secondary press on Close asks to leave what the window is
             // showing; the overview has nothing to leave but itself, and a
             // primary press already closes it. The monitor declares no
@@ -856,6 +874,7 @@ mod program {
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::FilePicked { .. }
             // The monitor shows the machine, not a document: it declares no
             // file association, so no open target can name anything here.

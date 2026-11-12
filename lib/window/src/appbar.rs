@@ -113,10 +113,10 @@ pub fn declaration(
 /// The commonest icon-bar declaration: the convention's two rows and nothing
 /// else, with the slot's click doing what `click` says.
 ///
-/// An application that stays on the bar with its last window closed declares
-/// [`AppBarClick::RaiseOrOpen`], so the slot is the way back to a window; one
-/// that ends with its window has nothing to reopen and declares
-/// [`AppBarClick::Raise`].
+/// An application stays on the bar with its last window closed and ends only
+/// on *Quit*, so it declares [`AppBarClick::RaiseOrOpen`] and the slot is the
+/// way back to a window. [`AppBarClick::Raise`] is only for a program that
+/// ends with its window, so is never clicked windowless.
 ///
 /// # Errors
 ///

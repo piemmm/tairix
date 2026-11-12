@@ -56,6 +56,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppBar, AppBarClick, AppMenu};
 use tairix_abi::{AppIdentity as AttestedApp, AppInfoHeader, Errno, ProcId, PublisherId};
+use tairix_controls::{ChainModel, RowIcon};
 use tairix_geometry::Scale;
 use tairix_icon::{
     ArtworkCache, ArtworkDocument, ArtworkOutcome, ArtworkReader, ArtworkResolver, IconKind,
@@ -984,6 +985,15 @@ pub trait AppBarBridge {
 
     /// The bundle `owner` was launched from, as the kernel attests it.
     fn attested_bundle(&self, owner: ProcId) -> Option<String>;
+
+    /// Picture `owner`'s icon-bar menu's information sheet from the bundle
+    /// the kernel attests it runs from, as the menu opens and as it is
+    /// restated alike.
+    fn source_sheet(&self, owner: ProcId, model: &mut ChainModel) {
+        if let Some(bundle) = self.attested_bundle(owner) {
+            model.set_info_source(&RowIcon::Bundle(bundle));
+        }
+    }
 
     /// Whether the bundle *directory* `bundle` runs one instance per user, as
     /// its signed manifest attests. Cache-only for the same reason

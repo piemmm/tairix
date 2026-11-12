@@ -17,20 +17,25 @@ fn bar() -> (MachineBar, Rect) {
     (bar, bounds)
 }
 
-fn click(bar: &mut MachineBar, at: Point) -> Option<MenuRequest> {
+fn input(bar: &mut MachineBar, event: &InputEvent) -> Option<MenuRequest> {
+    bar.on_input(event, &mut Region::new())
+}
+
+fn click_with(bar: &mut MachineBar, at: Point, button: PointerButton) -> Option<MenuRequest> {
     let mut asked = None;
     for event in [
         InputEvent::PointerMoved { to: at },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
+        InputEvent::PointerPressed { button },
+        InputEvent::PointerReleased { button },
     ] {
-        asked = asked.or(bar.on_input(&event));
+        let answered = input(bar, &event);
+        asked = asked.or(answered);
     }
     asked
+}
+
+fn click(bar: &mut MachineBar, at: Point) -> Option<MenuRequest> {
+    click_with(bar, at, PointerButton::Primary)
 }
 
 #[test]
@@ -126,16 +131,22 @@ fn a_diskette_drive_asks_for_its_menu_and_a_fixed_disk_asks_nothing() {
     ));
     let c = bar.drives[2].slot.center();
     assert_eq!(click(&mut bar, c), None);
-    bar.on_input(&InputEvent::PointerMoved { to: a.center() });
-    bar.on_input(&InputEvent::PointerPressed {
-        button: PointerButton::Primary,
-    });
+    input(&mut bar, &InputEvent::PointerMoved { to: a.center() });
+    input(
+        &mut bar,
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    );
     assert!(bar.is_pressing(), "its release is the bar's");
-    bar.on_input(&InputEvent::PointerMoved { to: b.center() });
+    input(&mut bar, &InputEvent::PointerMoved { to: b.center() });
     assert_eq!(
-        bar.on_input(&InputEvent::PointerReleased {
-            button: PointerButton::Primary
-        }),
+        input(
+            &mut bar,
+            &InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            }
+        ),
         None,
         "let go over another drive"
     );
@@ -185,29 +196,67 @@ fn the_bar_paints_what_it_holds() {
 }
 
 #[test]
-fn the_machines_own_slot_ends_the_bar_and_asks_for_its_menu() {
+fn the_machines_own_button_ends_the_bar_and_asks_for_its_menu() {
     let (mut bar, bounds) = bar();
-    let machine = bar.machine;
-    assert_eq!(machine.right(), bounds.right());
+    let machine = bar.machine_at;
+    assert!(machine.right() <= bounds.right() && machine.right() > bounds.center().x);
+    assert!(bounds.contains(machine.origin) && machine.bottom() <= bounds.bottom());
     assert!(bar
         .drives
         .iter()
         .all(|drive| drive.slot.right() <= machine.left()));
+    let asked = Some(MenuRequest {
+        menu: Menu::Machine,
+        anchor: machine,
+    });
+    assert_eq!(click(&mut bar, machine.center()), asked);
     assert_eq!(
-        click(&mut bar, machine.center()),
+        click_with(&mut bar, machine.center(), PointerButton::Secondary),
+        asked,
+        "a menu is a right-click too"
+    );
+    assert_eq!(
+        click_with(&mut bar, machine.center(), PointerButton::Middle),
+        None
+    );
+}
+
+#[test]
+fn a_right_click_on_a_drive_asks_for_its_menu() {
+    let (mut bar, _) = bar();
+    let a = bar.drives[0].slot;
+    assert_eq!(
+        click_with(&mut bar, a.center(), PointerButton::Secondary),
         Some(MenuRequest {
-            menu: Menu::Machine,
-            anchor: machine
+            menu: Menu::Drive {
+                unit: 0,
+                holds: false
+            },
+            anchor: a
         })
     );
 }
 
 #[test]
-fn a_paused_machine_says_so_on_its_slot() {
+fn the_machines_button_is_a_pull_down_that_lights_under_the_pointer() {
+    let (mut bar, _) = bar();
+    assert_eq!(
+        bar.machine,
+        Button::new(machine_content(MACHINE), ControlRole::Neutral).pulls_down()
+    );
+    let mut damage = Region::new();
+    let over = bar.machine_at.center();
+    bar.on_input(&InputEvent::PointerMoved { to: over }, &mut damage);
+    assert!(damage.intersects(bar.machine_at), "its hover is redrawn");
+}
+
+#[test]
+fn a_paused_machine_says_so_on_its_button() {
     let (mut bar, _) = bar();
     let mut damage = Region::new();
     bar.set_paused(true, &mut damage);
-    assert!(damage.intersects(bar.machine));
+    assert!(damage.intersects(bar.machine_at));
+    assert_eq!(bar.machine.content(), &machine_content(PAUSED));
     let mut damage = Region::new();
     bar.set_paused(true, &mut damage);
     assert!(damage.is_empty(), "already said");
@@ -218,10 +267,22 @@ fn a_machine_being_kept_says_so_and_asks_for_nothing() {
     let (mut bar, _) = bar();
     let mut damage = Region::new();
     bar.set_saving(&mut damage);
-    assert!(damage.intersects(bar.machine));
-    let (machine, a) = (bar.machine.center(), bar.drives[0].slot.center());
+    assert!(damage.intersects(bar.machine_at));
+    assert_eq!(bar.machine.content(), &machine_content(SAVING));
+    let (machine, a) = (bar.machine_at.center(), bar.drives[0].slot.center());
     assert_eq!(click(&mut bar, machine), None);
     assert_eq!(click(&mut bar, a), None);
+    assert_eq!(
+        click_with(&mut bar, machine, PointerButton::Secondary),
+        None,
+        "nor does a right-click"
+    );
+    let mut damage = Region::new();
+    bar.set_paused(true, &mut damage);
+    assert!(
+        damage.is_empty(),
+        "a pause while it is kept changes nothing shown"
+    );
 }
 
 fn shared(name: &str, drive: Option<u8>, read_only: bool) -> Shared {
@@ -272,7 +333,7 @@ fn a_share_takes_a_slot_after_the_drives_and_asks_for_its_own_menu() {
     assert!(bar
         .drives
         .iter()
-        .all(|drive| drive.slot.right() <= bar.machine.left()));
+        .all(|drive| drive.slot.right() <= bar.machine_at.left()));
     let share = bar.drives[3].slot;
     let asked = click(&mut bar, Point::new(share.left() + 4, share.top() + 2));
     assert_eq!(

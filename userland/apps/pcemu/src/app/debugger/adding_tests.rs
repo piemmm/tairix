@@ -123,3 +123,50 @@ fn choosing_a_kind_relabels_its_fields_and_one_with_no_detail_disables_it() {
     assert!(disabled(&typed(0, "", "")), "an instruction has no detail");
     assert!(!disabled(&typed(1, "", "")));
 }
+
+#[test]
+fn the_kind_list_stays_open_under_the_pointer_and_takes_the_kind_clicked() {
+    tairix_font::install_test_transport();
+    let (scale, theme) = (Scale::ONE, Theme::light());
+    let mut adding = Adding::new(regs());
+    let feed = |adding: &mut Adding, event: InputEvent| {
+        adding.on_input(&event, 0, (scale, &theme), &mut Region::new());
+    };
+    let primary = tairix_input::PointerButton::Primary;
+    let (_, layout) = adding.layout(scale, &theme);
+    let bounds = adding
+        .group
+        .row_rect(row::KIND, layout, scale, &theme)
+        .unwrap();
+    let field = adding.group.rows()[row::KIND]
+        .control_rect(FieldLayout { bounds, ..layout }, scale, &theme)
+        .unwrap()
+        .center();
+    for event in [
+        InputEvent::PointerMoved { to: field },
+        InputEvent::PointerPressed { button: primary },
+        InputEvent::PointerReleased { button: primary },
+    ] {
+        feed(&mut adding, event);
+    }
+    let (_, layout) = adding.layout(scale, &theme);
+    let FieldControl::Combo(combo) = adding.group.rows()[row::KIND].control() else {
+        panic!("the kind row is a choice");
+    };
+    let port = 3;
+    let choice = combo
+        .menu()
+        .row_rect(port, layout.popup, scale, &theme)
+        .unwrap()
+        .center();
+    feed(&mut adding, InputEvent::PointerMoved { to: choice });
+    assert!(adding.listing(), "moving onto the list leaves it open");
+    for event in [
+        InputEvent::PointerPressed { button: primary },
+        InputEvent::PointerReleased { button: primary },
+    ] {
+        feed(&mut adding, event);
+    }
+    assert!(!adding.listing());
+    assert_eq!(adding.kind, KINDS[port].0);
+}

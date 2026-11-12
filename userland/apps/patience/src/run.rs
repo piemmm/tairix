@@ -38,7 +38,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AlertOutcome, AppBar, AppBarClick, AppMenu, AppMenuItemId, MenuOutcome, WindowEvent,
-        WindowRegion,
+        WindowRegion, MENU_OPEN_REVISION,
     };
     use tairix_abi::Errno;
     use tairix_appdata::{Refusal, RtHost, Settings};
@@ -180,8 +180,10 @@ mod program {
         /// The icon bar's menu as last declared, so it is declared again only
         /// when what it says has changed.
         declared: Option<AppMenu>,
-        /// The table's own menu, while it is open.
-        context: Option<u64>,
+        /// The table's own menu while it is open: the open's id, and the rows
+        /// the session was last asked to show, or `None` where it refused
+        /// them.
+        context: Option<(u64, Option<AppMenu>)>,
         /// The alerts up, and what each asks.
         alerts: Vec<(u64, Alerting)>,
         /// Set when an answer was carried out on this thread and is waiting
@@ -364,13 +366,21 @@ mod program {
                         let _ = game.on_pointer(&input, now_ns, damage);
                     }
                 }
+                // Every row id means one command in every statement of the
+                // table's menu, so a row is read alike whichever it came from.
                 WindowEvent::MenuClosed {
                     window_id,
                     open_id,
                     outcome,
-                } if self.context == Some(open_id) => {
+                    ..
+                } if self.is_context(open_id) => {
                     self.context = None;
                     self.menu_closed(game, (window_id, open_id), outcome, now_ns, damage);
+                }
+                // The menu stays up; what the command changes reaches it with
+                // the rest of the round's menu changes.
+                WindowEvent::MenuChosen { open_id, item, .. } if self.is_context(open_id) => {
+                    self.chosen(game, item, now_ns, damage);
                 }
                 WindowEvent::AlertClosed { alert_id, outcome } => {
                     if let Some(at) = self.alerts.iter().position(|&(id, _)| id == alert_id) {
@@ -383,6 +393,7 @@ mod program {
                     }
                 }
                 WindowEvent::Minimized { .. } => game.set_visible(false, now_ns),
+                WindowEvent::Shown { shown, .. } => game.set_visible(shown, now_ns),
                 WindowEvent::Focus { focused: true, .. } => game.set_visible(true, now_ns),
                 // A released region holds none of the frame, so the redraw
                 // the session asks for afterwards is painted whole.
@@ -398,6 +409,7 @@ mod program {
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarEntered { .. }
                 | WindowEvent::MenuClosed { .. }
+                | WindowEvent::MenuChosen { .. }
                 | WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Scrolled { .. }
@@ -505,7 +517,12 @@ mod program {
             }
             match refused.request {
                 PostedRequest::OpenAlert(alert) => self.alerts.retain(|&(id, _)| id != alert),
-                PostedRequest::OpenMenu(open) if self.context == Some(open) => self.context = None,
+                PostedRequest::OpenMenu(open) if self.is_context(open) => self.context = None,
+                PostedRequest::RestateMenu(open) => {
+                    if let Some((_, shown)) = self.context.as_mut().filter(|(id, _)| *id == open) {
+                        *shown = None;
+                    }
+                }
                 _ => {}
             }
             None
@@ -567,6 +584,35 @@ mod program {
             }
             if menu_moved {
                 self.declare(game);
+                self.follow_context(game);
+            }
+        }
+
+        fn is_context(&self, open_id: u64) -> bool {
+            self.context.as_ref().is_some_and(|&(id, _)| id == open_id)
+        }
+
+        /// Show the table's open menu as the game now offers it, where that
+        /// is not what the session was last asked to show.
+        fn follow_context(&mut self, game: &Game) {
+            let (Some(window_id), Some((open_id, shown))) =
+                (self.window.window_id(), self.context.as_mut())
+            else {
+                return;
+            };
+            let menu = game.context_menu();
+            if shown.as_ref() == Some(&menu) {
+                return;
+            }
+            match self
+                .window
+                .client()
+                .restate_menu(window_id, *open_id, MENU_OPEN_REVISION, &menu)
+            {
+                Ok(()) => *shown = Some(menu),
+                Err(err) => {
+                    app::report(APP_NAME, format_args!("the menu was not restated ({err})"));
+                }
             }
         }
 
@@ -578,12 +624,9 @@ mod program {
             let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
                 return;
             };
-            match self
-                .window
-                .client()
-                .open_menu(window_id, anchor, &game.context_menu())
-            {
-                Ok(open_id) => self.context = Some(open_id),
+            let menu = game.context_menu();
+            match self.window.client().open_menu(window_id, anchor, &menu) {
+                Ok(open_id) => self.context = Some((open_id, Some(menu))),
                 Err(err) => app::report(APP_NAME, format_args!("no menu was shown ({err})")),
             }
         }

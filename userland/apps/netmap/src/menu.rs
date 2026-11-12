@@ -38,6 +38,12 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether the command's work is done where the menu is, so the menu
+    /// can stay up after it: everything but opening a window.
+    const fn acts_in_place(&self) -> bool {
+        !matches!(self, Self::OpenSettings)
+    }
+
     /// The function a row asking for this shows.
     const fn symbol(&self) -> AppMenuSymbol {
         match self {
@@ -61,11 +67,12 @@ pub enum Steer {
     Fit,
 }
 
-/// One context menu: where it was asked for, the model the desktop draws,
-/// and the command behind each of its rows.
+/// One context menu: where it was asked for, the node it is for, the model
+/// the desktop draws, and the command behind each of its rows.
 #[derive(Clone, Debug)]
 pub struct NodeMenu {
     anchor: Point,
+    subject: Option<NodeKey>,
     model: AppMenu,
     commands: Vec<Command>,
 }
@@ -75,6 +82,12 @@ impl NodeMenu {
     #[must_use]
     pub fn anchor(&self) -> Point {
         self.anchor
+    }
+
+    /// The node the menu is for, or `None` for the map's own.
+    #[must_use]
+    pub fn subject(&self) -> Option<&NodeKey> {
+        self.subject.as_ref()
     }
 
     /// The model the desktop draws.
@@ -130,6 +143,7 @@ pub fn menu(subject: Option<Subject<'_>>, anchor: Point) -> Result<NodeMenu, Err
     ]))?;
     Ok(NodeMenu {
         anchor,
+        subject: subject.map(|subject| subject.node.key.clone()),
         model: built.model,
         commands: built.commands,
     })
@@ -154,11 +168,11 @@ impl Builder {
         }
         for (label, command) in rows {
             let id = AppMenuItemId::for_index(self.commands.len()).ok_or(Errno::NoSpace)?;
-            self.model.push(AppMenuRow::Item(AppMenuItem::new(
-                id,
-                AppMenuLabel::new(label)?,
-                command.symbol(),
-            )))?;
+            let mut item = AppMenuItem::new(id, AppMenuLabel::new(label)?, command.symbol());
+            if command.acts_in_place() {
+                item = item.repeatable();
+            }
+            self.model.push(AppMenuRow::Item(item))?;
             self.commands.push(command);
         }
         Ok(())

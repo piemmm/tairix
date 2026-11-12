@@ -146,3 +146,51 @@ fn a_click_on_create_answers_with_what_is_chosen() {
         "the trailing action is Create: {answer:?}"
     );
 }
+
+fn pointer(assistant: &mut Assistant, event: InputEvent) -> Option<Answer> {
+    assistant.on_input(&event, 0, (Scale::ONE, &Theme::light()), &mut Region::new())
+}
+
+fn click(assistant: &mut Assistant, at: Point) -> Option<Answer> {
+    let primary = tairix_input::PointerButton::Primary;
+    pointer(assistant, InputEvent::PointerMoved { to: at });
+    pointer(assistant, InputEvent::PointerPressed { button: primary });
+    pointer(assistant, InputEvent::PointerReleased { button: primary })
+}
+
+#[test]
+fn the_model_list_stays_open_under_the_pointer_and_takes_the_model_clicked() {
+    let (mut assistant, scale, theme) = setup();
+    let (_, fields) = assistant.layout(scale, &theme);
+    let bounds = assistant
+        .fields
+        .row_rect(MODEL, fields, scale, &theme)
+        .unwrap();
+    let field = assistant.fields.rows()[MODEL]
+        .control_rect(FieldLayout { bounds, ..fields }, scale, &theme)
+        .unwrap()
+        .center();
+    click(&mut assistant, field);
+    let (_, fields) = assistant.layout(scale, &theme);
+    assert!(!fields.popup.is_empty(), "a click opens a placed list");
+    let FieldControl::Combo(combo) = assistant.fields.rows()[MODEL].control() else {
+        panic!("the model row is a choice");
+    };
+    let pc = combo
+        .menu()
+        .row_rect(0, fields.popup, scale, &theme)
+        .unwrap()
+        .center();
+    pointer(&mut assistant, InputEvent::PointerMoved { to: pc });
+    assert!(assistant.listing(), "moving onto the list leaves it open");
+    click(&mut assistant, pc);
+    assert!(!assistant.listing());
+    assert_eq!(
+        assistant.answer(1),
+        Answer::Create {
+            template: Template::IbmPc,
+            name: String::from("IBM Personal Computer"),
+            disk: false
+        }
+    );
+}

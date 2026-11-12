@@ -18,7 +18,8 @@ TAIRiX DOS on a model with a hard disk controller. Start, or a double-click,
 starts the chosen machine in a window of its own, or raises its window;
 several machines run at once. Settings changes a machine's hardware while it
 is off, Duplicate copies a machine with its disks, and Delete deletes one with
-its disks once that is confirmed. The first time PCEmulator starts it makes a
+its disks once that is confirmed. Right-clicking a machine's card offers these
+for that machine, and while it runs, its machine's menu as well. The first time PCEmulator starts it makes a
 turbo XT. What a machine writes to its disks, and the time its clock is set
 to, are kept from one run to the next.
 
@@ -40,8 +41,9 @@ Disk, which picks a diskette image to put in the drive, and Eject. A diskette
 image dropped on the window goes into the drive it is dropped on, or else the
 first, and cannot be written to there.
 
-At the end of that bar, the machine's menu pauses the machine, resets it,
-sends it Ctrl+Alt+Delete, and sets its processor's speed for the run. Display
+At the end of that bar, the Machine button opens the machine's menu, which
+pauses the machine, resets it, sends it Ctrl+Alt+Delete, and sets its
+processor's speed for the run. Display
 turns the picture's scan lines, glow, phosphor afterglow, noise and wobble on
 and off, and the machine keeps what is chosen. Take Screenshot saves the
 screen as a PNG picture where the Save panel says. Full Screen fills the
@@ -81,8 +83,10 @@ uses the mouse through the DOS mouse driver follows the desktop pointer
 wherever it is over the picture. A program that reads the mouse itself takes
 it when the picture is clicked, and gives it back when the Meta key is tapped.
 
-Closing the library window leaves running machines running, and Machine
-Library in the icon bar's menu brings it back. Each machine runs in a worker
+Closing the library window leaves running machines running, and closing every
+window leaves the emulator on the icon bar: a click on its icon, or Machine
+Library in its menu, brings the library back, and Quit in that menu suspends
+every running machine and ends the emulator. Each machine runs in a worker
 of its own that holds no authority at all: its software and its disks are
 never trusted.
 
@@ -93,6 +97,6 @@ never trusted.
 
 ## EXIT STATUS
 
-Zero once its last window is closed. Non-zero when the window channel, the event
-mailbox, or the desktop session was refused; the reason is stated on the
-standard error stream.
+Zero once Quit is chosen in its icon-bar menu. Non-zero when the window
+channel, the event mailbox, or the desktop session was refused; the reason is
+stated on the standard error stream.

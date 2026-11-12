@@ -43,6 +43,14 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether the command acts on the screen in place, so a secondary click
+    /// may choose it with the menu kept up: not one opening the settings
+    /// sheet or closing the window.
+    #[must_use]
+    pub const fn in_place(self) -> bool {
+        !matches!(self, Self::Settings | Self::Close)
+    }
+
     /// Every command, in the order the menu lists them.
     pub const ALL: [Self; 7] = [
         Self::Settings,
@@ -184,6 +192,9 @@ pub fn model() -> Result<AppMenu, Errno> {
         );
         if let Some(caption) = command.shortcut() {
             item = item.with_shortcut(AppMenuShortcut::new(caption)?);
+        }
+        if command.in_place() {
+            item = item.repeatable();
         }
         menu.push(AppMenuRow::Item(item))?;
     }

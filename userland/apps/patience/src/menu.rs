@@ -191,10 +191,12 @@ fn nth_row(first: u16, index: usize) -> u16 {
     first.saturating_add(u16::try_from(index).unwrap_or(u16::MAX))
 }
 
-/// The rows that play: dealing, the deal's number, and the moves.
+/// The rows that play: dealing, the deal's number, and the moves. Each but
+/// the deal's number and Finish, which wins the deal, acts on the table in
+/// place, so may be chosen with its menu kept up.
 fn play_rows(menu: &mut MenuBuilder, offers: Offers, deal: Option<u32>) {
     let root = Plate::Root;
-    menu.item(
+    menu.repeating(
         NEW_GAME,
         AppMenuSymbol::NewGame,
         "New game",
@@ -202,7 +204,7 @@ fn play_rows(menu: &mut MenuBuilder, offers: Offers, deal: Option<u32>) {
         true,
         root,
     );
-    menu.item(
+    menu.repeating(
         RESTART,
         AppMenuSymbol::Refresh,
         "Restart this deal",
@@ -227,22 +229,19 @@ fn play_rows(menu: &mut MenuBuilder, offers: Offers, deal: Option<u32>) {
         (REDO, AppMenuSymbol::Redo, "Redo", "Ctrl+Y", Offer::Redo),
     ];
     for (id, symbol, label, shortcut, offer) in offered {
-        menu.item(id, symbol, label, shortcut, offers.has(offer), root);
+        menu.repeating(id, symbol, label, shortcut, offers.has(offer), root);
     }
-    menu.item(HINT, AppMenuSymbol::Find, "Hint", "H", true, root);
-    let offered = [
-        (
-            REWIND,
-            AppMenuSymbol::Previous,
-            "Back to last winnable",
-            "Ctrl+B",
-            Offer::Rewind,
-        ),
-        (FINISH, AppMenuSymbol::MoveUp, "Finish", "F", Offer::Finish),
-    ];
-    for (id, symbol, label, shortcut, offer) in offered {
-        menu.item(id, symbol, label, shortcut, offers.has(offer), root);
-    }
+    menu.repeating(HINT, AppMenuSymbol::Find, "Hint", "H", true, root);
+    menu.repeating(
+        REWIND,
+        AppMenuSymbol::Previous,
+        "Back to last winnable",
+        "Ctrl+B",
+        offers.has(Offer::Rewind),
+        root,
+    );
+    let finish = offers.has(Offer::Finish);
+    menu.item(FINISH, AppMenuSymbol::MoveUp, "Finish", "F", finish, root);
 }
 
 /// The games, one chosen.

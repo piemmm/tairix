@@ -137,10 +137,10 @@ mod program {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{MountAvailability, VolumeRemovalRecord, VOLUME_REMOVALS_KEPT};
     use tairix_abi::window_ipc::{
-        AlertOutcome, AppMenuItemId, AuthorisedOutcome, DialogModality, DocumentName, DragAt,
-        DragItems, DropOperation, DropSite, HandOverDocument, HandOverOutcome, HandOverTarget,
-        MenuOutcome, PaneName, PointerAction, SystemTask, WindowEvent, WindowRegion,
-        WindowSizeState, WindowSizing, DRAG_SHOWN_MAX,
+        AlertOutcome, AppMenu, AppMenuItemId, AuthorisedOutcome, DialogModality, DocumentName,
+        DragAt, DragItems, DropOperation, DropSite, HandOverDocument, HandOverOutcome,
+        HandOverTarget, MenuOutcome, PaneName, PointerAction, SystemTask, WindowEvent,
+        WindowRegion, WindowSizeState, WindowSizing, DRAG_SHOWN_MAX, MENU_OPEN_REVISION,
     };
     use tairix_abi::window_ipc::{LandingOutcome, LandingStep};
     use tairix_abi::{
@@ -1607,6 +1607,8 @@ mod program {
         /// The rail row the menu was opened on, by where it navigates: `None`
         /// for the listing's own menu.
         place: Option<Vec<String>>,
+        /// The rows the session was last asked to show.
+        rows: AppMenu,
     }
 
     /// Fold one round's conclusion about `win`, and the region it reported,
@@ -9474,6 +9476,17 @@ mod program {
                 browser, overlays, acts, &gesture, canvas, viewport, outcome, damage,
             );
         }
+        if let WindowEvent::MenuChosen { open_id, item, .. } = *event {
+            return apply_kept_choice(
+                browser,
+                overlays,
+                acts,
+                canvas,
+                viewport,
+                (open_id, item),
+                damage,
+            );
+        }
 
         // The "Open With…" chooser is not handled here. It is a window of its
         // own and takes the keyboard when it opens, so the session addresses
@@ -9844,6 +9857,7 @@ mod program {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
@@ -9856,6 +9870,7 @@ mod program {
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::Resized { .. }
@@ -11906,10 +11921,6 @@ mod program {
         // no I/O at all, and asking again now is what has the next one
         // current.
         adopt_bundles(reads, installed);
-        let model = ContextMenuModel::for_browser(browser, overlays.clipboard.is_some());
-        let model = viewer
-            .map_or(model, |uid| model.viewed_by(uid))
-            .showing_trash(shows_trash(browser));
         let target = open_with_target(browser);
         let held = installed.borrow();
         let ranked = target
@@ -11922,31 +11933,20 @@ mod program {
                 )
             })
             .unwrap_or_default();
-        let quick = quick_applications(&ranked);
+        let candidates: Vec<OpenWithCandidate> = quick_applications(&ranked)
+            .iter()
+            .map(|app| OpenWithCandidate::of(app))
+            .collect();
         let documents = blank_documents(held.as_deref().unwrap_or_default());
-        let built = if browser.is_network() {
-            network_context_menu(browser, MANAGER_MENU_TITLE)
-        } else {
-            context_menu(
-                model,
-                MANAGER_MENU_TITLE,
-                ContextQuick {
-                    chosen: browser.chosen_entry(),
-                    candidates: &quick,
-                    documents: &documents,
-                },
-            )
-        };
-        let rows = match built {
+        drop(held);
+        let offered = (candidates.as_slice(), documents.as_slice());
+        let rows = match context_rows(browser, (overlays.clipboard.is_some(), viewer), offered) {
             Ok(rows) => rows,
             Err(err) => {
                 report_error(&alloc::format!("menu model refused ({err}); not shown"));
                 return (true, false);
             }
         };
-        let candidates: Vec<OpenWithCandidate> =
-            quick.iter().map(|app| OpenWithCandidate::of(app)).collect();
-        drop(held);
         let anchor = match WindowRegion::new(point.x, point.y, 0, 0) {
             Ok(anchor) => anchor,
             Err(err) => {
@@ -11963,6 +11963,7 @@ mod program {
                     documents,
                     endings: browser.presentation().endings,
                     place: None,
+                    rows,
                 });
             }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
@@ -12016,6 +12017,100 @@ mod program {
             name,
             recorded,
         })
+    }
+
+    /// The rows the context menu over `browser` shows as it stands, for
+    /// `viewer` and with a clipboard `held` or not, offering `candidates` and
+    /// `documents` — the open's own, so a restate keeps every row id's
+    /// meaning.
+    fn context_rows<S: DirectorySource>(
+        browser: &Browser<S>,
+        (held, viewer): (bool, Option<u32>),
+        (candidates, documents): (&[OpenWithCandidate], &[BlankDocument]),
+    ) -> Result<AppMenu, Errno> {
+        if browser.is_network() {
+            return network_context_menu(browser, MANAGER_MENU_TITLE);
+        }
+        let model = ContextMenuModel::for_browser(browser, held);
+        let model = viewer
+            .map_or(model, |uid| model.viewed_by(uid))
+            .showing_trash(shows_trash(browser));
+        let quick = ContextQuick {
+            chosen: browser.chosen_entry(),
+            candidates,
+            documents,
+        };
+        context_menu(model, MANAGER_MENU_TITLE, quick)
+    }
+
+    /// A row of the open context menu was chosen with it kept up: carry it
+    /// out as the same row ending the menu would be, then show the menu as
+    /// the window now stands.
+    fn apply_kept_choice<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
+        viewport: Rect,
+        (open_id, item): (u64, AppMenuItemId),
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let Some(mut gesture) = acts.menu.open.take_if(|open| open.open_id == open_id) else {
+            return (Repaint::Nothing, false);
+        };
+        // The rail's menu has no row a secondary click keeps it up for.
+        if gesture.place.is_some() {
+            *acts.menu.open = Some(gesture);
+            return (Repaint::Nothing, false);
+        }
+        let chosen = MenuOutcome::Chosen(item);
+        let acted = apply_menu_outcome(
+            browser, overlays, acts, &gesture, canvas, viewport, chosen, damage,
+        );
+        restate_context_menu(browser, overlays.clipboard.is_some(), acts, &mut gesture);
+        *acts.menu.open = Some(gesture);
+        acted
+    }
+
+    /// Show `gesture`'s menu as `browser` now stands, where that differs from
+    /// what it shows. Its candidates were ranked for the file it opened on,
+    /// so they are offered for that file alone.
+    fn restate_context_menu<S: DirectorySource>(
+        browser: &Browser<S>,
+        held: bool,
+        acts: &mut Acts<'_>,
+        gesture: &mut OpenMenuState,
+    ) {
+        let viewer = acts.launcher.borrow().viewer;
+        let target = open_with_target(browser);
+        let same_file = target.as_ref().map(|file| file.path.as_str())
+            == gesture.target.as_ref().map(|file| file.path.as_str());
+        let candidates = if same_file {
+            gesture.candidates.as_slice()
+        } else {
+            &[]
+        };
+        let offered = (candidates, gesture.documents.as_slice());
+        let rows = match context_rows(browser, (held, viewer), offered) {
+            Ok(rows) => rows,
+            Err(err) => {
+                report_error(&alloc::format!("menu model refused ({err}); not restated"));
+                return;
+            }
+        };
+        if rows == gesture.rows {
+            return;
+        }
+        let restated = acts.menu.client.restate_menu(
+            acts.menu.window,
+            gesture.open_id,
+            MENU_OPEN_REVISION,
+            &rows,
+        );
+        match restated {
+            Ok(()) => gesture.rows = rows,
+            Err(err) => report_error(&alloc::format!("menu not restated ({err})")),
+        }
     }
 
     /// Act on the one outcome the desktop owes this window's open.
@@ -12299,6 +12394,7 @@ mod program {
                     documents: Vec::new(),
                     endings: HiddenEndings::NONE,
                     place: Some(place.components().to_vec()),
+                    rows,
                 });
             }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),

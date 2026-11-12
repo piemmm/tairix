@@ -13,7 +13,9 @@ use tairix_abi::driver::audio::{
     StreamDirection,
 };
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::PickPurpose;
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuRowView, AppMenuSymbol, PickPurpose, MENU_OPEN_REVISION,
+};
 use tairix_controls::damage;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -22,7 +24,7 @@ use tairix_player::{Control, EntryId, Span, Status, Transport};
 use tairix_sound::{CoverRange, Encoding, Metadata, SoundFormat, SoundInfo, Tag, TagKind};
 use tairix_theme::{TextRole, ThemeRegistry};
 
-use super::{row, Command, Device, Outcome, Player, Request, Saved};
+use super::{row, Command, ContextMenu, Device, Outcome, Player, Request, Saved};
 use crate::layout::Layout;
 use crate::playlist::{Edit, Repeat};
 
@@ -263,7 +265,7 @@ fn the_lists_length_follows_each_reading_rereading_and_removal() {
         seconds(30),
         "a removal takes back its length"
     );
-    player.choose(row::CLEAR, &layout, &mut damage::sink());
+    player.choose(row::CLEAR, &[], &layout, &mut damage::sink());
     assert_eq!(player.listed_length(), Span::ZERO);
 }
 
@@ -436,49 +438,184 @@ fn the_menus_carry_the_listeners_settings_and_their_choices_act() {
         target: String::from("audio:hda0"),
         name: String::from("Speakers"),
     }]);
+    let offered = player.devices().to_vec();
     let mut region = damage::sink();
-    let outcome = player.choose(row::REPEAT_ALL, &layout, &mut region);
+    let outcome = player.choose(row::REPEAT_ALL, &offered, &layout, &mut region);
     assert_eq!(player.saved().repeat, Repeat::All);
     assert_eq!(
         outcome.commands,
         vec![Command::Edit(Edit::Repeat(Repeat::All))]
     );
     assert!(matches!(outcome.requests[..], [Request::Save(_)]));
-    let outcome = player.choose(row::FIRST_DEVICE, &layout, &mut region);
+    let outcome = player.choose(row::FIRST_DEVICE, &offered, &layout, &mut region);
     assert_eq!(
         outcome.commands,
         vec![Command::Control(Control::SetDevice(3))]
     );
     assert_eq!(player.saved().device.as_deref(), Some("audio:hda0"));
-    let outcome = player.choose(row::DEFAULT_DEVICE, &layout, &mut region);
+    let outcome = player.choose(row::DEFAULT_DEVICE, &offered, &layout, &mut region);
     assert_eq!(
         outcome.commands,
         vec![Command::Control(Control::SetDevice(0))]
     );
     assert_eq!(player.saved().device, None);
     assert_eq!(
-        player.choose(row::FIRST_DEVICE + 1, &layout, &mut region),
+        player.choose(row::FIRST_DEVICE + 1, &offered, &layout, &mut region),
         Outcome::default(),
         "a device past the list chooses nothing"
     );
     assert_eq!(
-        player.choose(row::OPEN_FOLDER, &layout, &mut region).pick,
+        player
+            .choose(row::OPEN_FOLDER, &offered, &layout, &mut region)
+            .pick,
         Some(PickPurpose::Folder)
     );
     let rows = player.bar_rows();
     assert!(rows.len() >= 6, "{rows:?}");
-    let menu = player.context_menu();
+    let menu = player.context_menu(&offered);
     assert!(menu.len() > 6);
     assert_eq!(
-        player.choose(row::REMOVE, &layout, &mut region),
+        player.choose(row::REMOVE, &offered, &layout, &mut region),
         Outcome::default(),
         "a row command with no row the menu was opened on does nothing"
     );
-    let outcome = player.choose(row::CLEAR, &layout, &mut region);
+    let outcome = player.choose(row::CLEAR, &offered, &layout, &mut region);
     assert_eq!(outcome.commands, vec![Command::Edit(Edit::Clear)]);
     assert!(player.playlist().is_empty());
     assert_eq!(player.selected(), None);
     let _ = added;
+}
+
+/// A device row names a place among the devices its menu offered, never
+/// whatever has come to stand there in the list since.
+#[test]
+fn a_device_row_names_the_device_its_menu_offered() {
+    let (mut player, _, layout, _registry) = player_with(&["a.flac"]);
+    let device = |id: u32, name: &str| Device {
+        id,
+        target: alloc::format!("audio:{name}"),
+        name: String::from(name),
+    };
+    let offered = vec![device(3, "speakers")];
+    player.devices_listed(vec![device(5, "headphones"), device(3, "speakers")]);
+    let mut region = damage::sink();
+    let outcome = player.choose(row::FIRST_DEVICE, &offered, &layout, &mut region);
+    assert_eq!(
+        outcome.commands,
+        vec![Command::Control(Control::SetDevice(3))]
+    );
+    assert_eq!(
+        player.choose(row::FIRST_DEVICE, &[], &layout, &mut region),
+        Outcome::default(),
+        "rows that offered no device name none"
+    );
+    let menu = player.context_menu(&offered);
+    let outputs = menu
+        .rows()
+        .filter(|(row, _)| matches!(row, AppMenuRowView::Item(item) if item.symbol == AppMenuSymbol::AudioOutput))
+        .count();
+    assert_eq!(outputs, 2, "Default and the one device offered");
+}
+
+/// An output device listed this boot under `id`.
+fn listed(id: u32, name: &str) -> Device {
+    Device {
+        id,
+        target: alloc::format!("audio:{name}"),
+        name: String::from(name),
+    }
+}
+
+/// A device list that moved under rows saying the same is what those rows
+/// offer from then on: the device a row stands at is the one listed there
+/// now, not the one an earlier boot of the service numbered.
+#[test]
+fn a_device_list_moving_under_the_same_rows_is_what_they_offer() {
+    let (mut player, _, _, _registry) = player_with(&["a.flac"]);
+    player.devices_listed(vec![listed(3, "speakers")]);
+    let rows = player.context_menu(player.devices());
+    let mut menu = ContextMenu::new(9, player.devices().to_vec(), rows);
+    assert_eq!(menu.open_id(), 9);
+    player.devices_listed(vec![listed(7, "speakers")]);
+    assert!(menu.follow(&player).is_none(), "the rows say the same");
+    assert_eq!(menu.offered(MENU_OPEN_REVISION), [listed(7, "speakers")]);
+}
+
+/// A list that moved is offered under a revision of its own, and a device row
+/// chosen as that restate crossed it still names the device it offered.
+#[test]
+fn a_device_row_chosen_as_its_restate_crossed_it_names_the_device_it_offered() {
+    let (mut player, _, _, _registry) = player_with(&["a.flac"]);
+    player.devices_listed(vec![listed(3, "speakers")]);
+    let rows = player.context_menu(player.devices());
+    let mut menu = ContextMenu::new(9, player.devices().to_vec(), rows);
+    assert!(menu.follow(&player).is_none(), "nothing has moved");
+    player.devices_listed(vec![listed(5, "headphones"), listed(3, "speakers")]);
+    let restatement = menu.follow(&player).expect("the rows moved");
+    let moved = restatement.revision;
+    assert_ne!(moved, MENU_OPEN_REVISION);
+    menu.restated(restatement);
+    assert_eq!(menu.offered(MENU_OPEN_REVISION), [listed(3, "speakers")]);
+    assert_eq!(
+        menu.offered(moved),
+        [listed(5, "headphones"), listed(3, "speakers")]
+    );
+    player.devices_listed(vec![listed(5, "headphones")]);
+    let again = menu.follow(&player).expect("the rows moved again");
+    menu.restated(again);
+    assert!(
+        menu.offered(MENU_OPEN_REVISION).is_empty(),
+        "two restates back, a place names nothing"
+    );
+}
+
+/// A row keeps its menu up under a secondary click where its work is done in
+/// place; opening a picker, or taking rows away, ends the menu.
+#[test]
+fn only_a_row_acting_in_place_keeps_its_menu_up() {
+    let (mut player, _, layout, registry) = player_with(&["a.flac", "b.flac"]);
+    let at = centre(layout.row(0, 0));
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+    ] {
+        let theme = registry.active();
+        let outcome = player.input(&event, 0, &layout, Scale::ONE, theme, &mut damage::sink());
+        assert_eq!(
+            outcome.menu.is_some(),
+            event != (InputEvent::PointerMoved { to: at })
+        );
+    }
+    let elsewhere = [row::OPEN_FILE, row::OPEN_FOLDER, row::CLEAR, row::REMOVE];
+    let menu = player.context_menu(&[]);
+    let mut seen = 0;
+    for (row, _) in menu.rows() {
+        if let AppMenuRowView::Item(item) = row {
+            assert_eq!(
+                item.repeatable,
+                !elsewhere.contains(&item.id.get()),
+                "{}",
+                item.label
+            );
+            seen += 1;
+        }
+    }
+    assert!(
+        seen > elsewhere.len(),
+        "the menu holds the row's own commands"
+    );
+    let mut bar = AppMenu::EMPTY;
+    for row in player.bar_rows() {
+        bar.push(row).expect("the bar's rows fit a menu");
+    }
+    for (row, _) in bar.rows() {
+        if let AppMenuRowView::Item(item) = row {
+            let picks = matches!(item.id.get(), row::OPEN_FILE | row::OPEN_FOLDER);
+            assert_eq!(item.repeatable, !picks, "{}", item.label);
+        }
+    }
 }
 
 fn speakers(device_id: u32, place: u64) -> AudioDeviceDescriptor {

@@ -584,6 +584,35 @@ fn the_window_menu_holds_every_menu_whole() {
     assert_eq!(offered, wanted, "every action once, and nothing else");
 }
 
+/// A row keeps the window menu up under a secondary click where its action is
+/// done in the window: never the document's own rows, the find bar or the
+/// line to go to, each of which takes the user elsewhere.
+#[test]
+fn the_window_menu_stays_up_for_every_action_done_in_place() {
+    let harness = Harness::new(b"fn main() {}\n", Format::Rust);
+    let menu = harness.view.menu(MenuKind::Window);
+    let elsewhere = [
+        Action::NewWindow,
+        Action::Open,
+        Action::Save,
+        Action::SaveAs,
+        Action::Close,
+        Action::Find,
+        Action::Replace,
+        Action::GoToLine,
+    ];
+    let mut kept = 0;
+    for (row, _) in menu.rows() {
+        let AppMenuRowView::Item(item) = row else {
+            continue;
+        };
+        let action = Action::from_id(item.id.get()).expect("a row names an action");
+        assert_eq!(item.repeatable, !elsewhere.contains(&action), "{action:?}");
+        kept += usize::from(item.repeatable);
+    }
+    assert!(kept > elsewhere.len(), "Undo, the clipboard, the views");
+}
+
 /// A secondary press anywhere in the window opens its menu at the press:
 /// over the text, the gutter, a scrollbar, the find bar and the status band.
 #[test]

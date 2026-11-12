@@ -52,7 +52,7 @@ mod program {
         AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBarClick, AppMenu,
         AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol, ClipboardKind,
         CursorShape, DialogModality, DocumentName, KeyboardMode, MenuOutcome, PickPurpose,
-        PointerAction, SaveFormats, WindowEvent, WindowRegion, WindowSizeState,
+        PointerAction, SaveFormats, WindowEvent, WindowRegion, WindowSizeState, MENU_OPEN_REVISION,
     };
     use tairix_abi::{Errno, SPAWN_SELF};
     use tairix_appdata::RtHost;
@@ -68,14 +68,17 @@ mod program {
     use tairix_pcemu::app::debugger::{self as debugging, Added, Adding, Ask, Debugger};
     use tairix_pcemu::app::disk::{self, Medium};
     use tairix_pcemu::app::input::{ctrl_alt_delete, held_title, Asks, Input, Over};
+    use tairix_pcemu::app::keeping::{Ended, Suspends};
     use tairix_pcemu::app::library::{
         self, Found, Library, Loaded, Machine, Record, StoredDisk, MAX_MACHINES, MAX_RECORD,
         RECORD_BLOBS,
     };
     use tairix_pcemu::app::media::{self, Unfit};
-    use tairix_pcemu::app::menu::{self as machine_menu, Clipboard, Command, Shown, Windows};
+    use tairix_pcemu::app::menu::{
+        self as machine_menu, CardCommand, Clipboard, Command, Followed, Shown, Windows,
+    };
     use tairix_pcemu::app::picture::{Drawing, Picture};
-    use tairix_pcemu::app::screen::{fit, screenshot, thumbnail, Screen};
+    use tairix_pcemu::app::screen::{fit, opening_extent, screenshot, thumbnail, Screen};
     use tairix_pcemu::app::settings::{self, Settings};
     use tairix_pcemu::app::shelf::{Request, Shelf, Standing};
     use tairix_pcemu::app::sound::{Sound, Stream, StreamError};
@@ -143,12 +146,12 @@ mod program {
     // Every token's wake is a bit of one 64-bit word.
     const _: () = assert!(3 + TOKENS_PER_MACHINE * MAX_MACHINES as u64 <= 64);
 
-    /// The library window's opening and least sizes, and a machine window's,
-    /// in logical pixels: a machine's is the monitor's shape at twice and half
-    /// a VGA screen.
+    /// The library window's opening and least sizes, and the least a machine
+    /// window is made, in logical pixels: the monitor's shape at half a VGA
+    /// screen. A machine window opens at its picture's own size
+    /// ([`opening_extent`]).
     const LIBRARY_SIZE: (u32, u32) = (960, 640);
     const LIBRARY_LEAST: (u32, u32) = (480, 360);
-    const OPEN_SIZE: (u32, u32) = (1280, 960);
     const LEAST_SIZE: (u32, u32) = (320, 240);
     /// The debugger window's size as it opens, and the least it is made.
     const DEBUGGER_SIZE: (u32, u32) = (1100, 760);
@@ -1781,12 +1784,13 @@ mod program {
 
     /// Route a pointer event at `(x, y)` doing `action` over machine window
     /// `window`: a press on the bar, and the release of one, are the bar's;
-    /// the rest the guest's input. What the input asks of the desktop, and the
-    /// drive menu the bar asks for.
+    /// the rest the guest's input, its motion the bar's too. What the input
+    /// asks of the desktop, and the menu the bar asks for.
     fn pointer(
         window: &mut Window,
         host: Option<&mut Host<RtSessionChannel, LogSink>>,
         (x, y, action): (u32, u32, PointerAction),
+        looks: (Scale, &Theme),
     ) -> (Asks, Option<MenuRequest>) {
         let point = pointer_point(x, y);
         let bars = match action {
@@ -1797,6 +1801,7 @@ mod program {
             PointerAction::Moved | PointerAction::Cancelled => false,
         };
         let mut request = None;
+        let mut damage = Region::new();
         let bar = &mut window.bar;
         pointer_input_events(action, point)
             .filter(|input| {
@@ -1805,7 +1810,13 @@ mod program {
                     InputEvent::PointerMoved { .. } | InputEvent::PointerCancelled
                 )
             })
-            .for_each(|input| request = request.or(bar.on_input(&input)));
+            .for_each(|input| {
+                let asked = bar.on_input(&input, &mut damage);
+                request = request.or(asked);
+            });
+        if !damage.is_empty() {
+            window.paint_bar(&damage, looks);
+        }
         let mut asks = Asks::default();
         if !bars {
             if let (Some(host), Some(over)) = (host, window.over()) {
@@ -1822,7 +1833,7 @@ mod program {
         window_id: u64,
         request: MenuRequest,
         shown: &Shown,
-    ) -> Option<u64> {
+    ) -> Option<Followed<Menu>> {
         let menu = match request.menu {
             Menu::Drive { holds, .. } => drive_menu(holds),
             Menu::Share { .. } => share_menu(),
@@ -1832,7 +1843,7 @@ mod program {
         let region =
             WindowRegion::new(anchor.left(), anchor.top(), anchor.width, anchor.height).ok()?;
         match client.open_menu(window_id, region, &menu) {
-            Ok(open) => Some(open),
+            Ok(open) => Some(Followed::new(open, request.menu, menu)),
             Err(err) => {
                 app::report(
                     APP_NAME,
@@ -1840,6 +1851,16 @@ mod program {
                 );
                 None
             }
+        }
+    }
+
+    /// Show `rows` in the menu `open` up over window `window_id`.
+    fn restate(client: &mut Client, window_id: u64, open: u64, rows: &AppMenu) {
+        if let Err(err) = client.restate_menu(window_id, open, MENU_OPEN_REVISION, rows) {
+            app::report(
+                APP_NAME,
+                format_args!("the menu could not be updated ({err})"),
+            );
         }
     }
 
@@ -1856,7 +1877,11 @@ mod program {
         let eject = item(EJECT_ROW, "Eject", AppMenuSymbol::Drive)?;
         let mut menu = AppMenu::EMPTY;
         menu.push(AppMenuRow::Item(insert)).ok()?;
-        let eject = if holds { eject } else { eject.disabled() };
+        let eject = if holds {
+            eject.repeatable()
+        } else {
+            eject.disabled()
+        };
         menu.push(AppMenuRow::Item(eject)).ok()?;
         Some(menu)
     }
@@ -1889,7 +1914,11 @@ mod program {
         (event_endpoint, title, bar, tube): (u64, &str, MachineBar, Tube),
         (desktop, theme, drawing): (&Desktop, &Theme, Drawing<'_>),
     ) -> Result<Window, String> {
-        let (width, height) = desktop.window_size(OPEN_SIZE.0, OPEN_SIZE.1);
+        let (width, height) = opening_extent(MachineBar::height(desktop.scale(), theme));
+        let (width, height) = (
+            width.min(desktop.screen_width_px()),
+            height.min(desktop.screen_height_px()),
+        );
         let least = desktop.window_size(LEAST_SIZE.0, LEAST_SIZE.1);
         let mode = app::mode_for(width, height);
         let surface = Surface::new(mode.width_px, mode.height_px)
@@ -2023,8 +2052,8 @@ mod program {
         window: Window,
         run: Option<Running>,
         sound: Option<(Opened, Sound)>,
-        /// The menu up, and what it is for.
-        menu: Option<(u64, Menu)>,
+        /// The menu up, what it is for, and the rows it was last given.
+        menu: Option<Followed<Menu>>,
         /// What a pick is for, and then the diskette drive its name is, or
         /// the folder to share it names.
         picking: Option<Pick>,
@@ -2046,6 +2075,36 @@ mod program {
         coming: [Option<Diskette>; 4],
         /// Its debugger's window, while one is open.
         debugger: Option<Box<DebugWindow>>,
+    }
+
+    impl MachineWindow {
+        /// The machine as its menus show it now.
+        fn shown(&self) -> Shown {
+            Shown {
+                paused: self.paused,
+                speed: self.speed,
+                tube: self.window.picture.tube(),
+                clipboard: Clipboard {
+                    pasting: self.clipboard.pasting
+                        || self.run.as_ref().is_some_and(|run| run.host.typing()),
+                    ..self.clipboard
+                },
+                can_share: self.shares.iter().any(Option::is_none),
+                windows: Windows {
+                    fullscreen: self.fullscreen,
+                    debugging: self.debugger.is_some(),
+                },
+            }
+        }
+
+        /// The rows of `menu` as the machine stands now.
+        fn menu_of(&self, menu: Menu) -> Option<AppMenu> {
+            match menu {
+                Menu::Machine => machine_menu::menu(&self.shown()).ok(),
+                Menu::Drive { unit, .. } => drive_menu(self.held.get(usize::from(unit))?.is_some()),
+                Menu::Share { .. } => share_menu(),
+            }
+        }
     }
 
     /// A machine's debugger window, and the dialog it adds a breakpoint
@@ -2155,26 +2214,27 @@ mod program {
         }
     }
 
-    /// A machine suspended, its window closed, whose state is not yet kept.
-    struct Suspending {
+    /// A machine taken out of the running, with the window it ran in, still
+    /// open for its caller to close now or once its state is kept.
+    struct Retired {
         id: u32,
         name: String,
-        /// Its last screen and snapshot, until its images are durable and
-        /// they go to be written.
-        waiting: Option<(LastScreen, Suspended)>,
-        /// What went to be written holds the snapshot.
-        with_snapshot: bool,
+        /// Whether it ran.
+        ran: bool,
+        /// The screen it last showed.
+        screen: Option<LastScreen>,
+        pane: WindowPane,
     }
 
     /// Where machine `id` stands: running under a window, being kept as it
     /// suspends, suspended, or off.
     fn standing_of(
-        (machines, keeping, suspended): (&[MachineWindow], &[Suspending], &[u32]),
+        (machines, keeping, suspended): (&[MachineWindow], &Suspends<WindowPane>, &[u32]),
         id: u32,
     ) -> Standing {
         if machines.iter().any(|machine| machine.id == id) {
             Standing::Running
-        } else if keeping.iter().any(|entry| entry.id == id) {
+        } else if keeping.holds(id) {
             Standing::Saving
         } else if suspended.contains(&id) {
             Standing::Suspended
@@ -2651,8 +2711,8 @@ mod program {
             .map(|(id, label)| {
                 AppMenuRow::Item(AppMenuItem::new(id, label, AppMenuSymbol::Application))
             });
-        let declared =
-            row.and_then(|row| tairix_window::declaration(endpoint, AppBarClick::Raise, &[row]));
+        let declared = row
+            .and_then(|row| tairix_window::declaration(endpoint, AppBarClick::RaiseOrOpen, &[row]));
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
             app::report(APP_NAME, format_args!("{refused}"));
         }
@@ -2712,6 +2772,9 @@ mod program {
         doomed: Vec<u32>,
         shelf: Option<ShelfWindow>,
         sheet: Option<SheetWindow>,
+        /// The menu up over a card of the library, its machine, and the rows
+        /// it was last given.
+        card_menu: Option<Followed<u32>>,
         /// The deletion asked about: its alert and its machine.
         asking: Option<(u64, u32)>,
         machines: Vec<MachineWindow>,
@@ -2726,8 +2789,9 @@ mod program {
         pictures: Pictures,
         /// The machines whose state in the store holds a snapshot.
         suspended: Vec<u32>,
-        /// The machines suspended whose state is not yet kept.
-        keeping: Vec<Suspending>,
+        /// The machines suspended whose state is not yet kept, each holding
+        /// its window open until it is.
+        keeping: Suspends<WindowPane>,
         /// When leaving must end, however much is still being kept.
         leaving: Option<u64>,
         quit: bool,
@@ -3142,7 +3206,7 @@ mod program {
             };
             let held = (
                 self.machines.as_slice(),
-                self.keeping.as_slice(),
+                &self.keeping,
                 self.suspended.as_slice(),
             );
             let mut damage = Region::new();
@@ -3178,9 +3242,26 @@ mod program {
         }
 
         fn shelf_event(&mut self, event: &WindowEvent) {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                self.close_shelf();
-                return;
+            match *event {
+                WindowEvent::CloseRequested { .. } => {
+                    self.close_shelf();
+                    return;
+                }
+                WindowEvent::MenuClosed {
+                    open_id, outcome, ..
+                } => {
+                    let item = match outcome {
+                        MenuOutcome::Chosen(item) => Some(item),
+                        _ => None,
+                    };
+                    self.card_answered(open_id, item, false);
+                    return;
+                }
+                WindowEvent::MenuChosen { open_id, item, .. } => {
+                    self.card_answered(open_id, Some(item), true);
+                    return;
+                }
+                _ => {}
             }
             let (scale, theme) = (self.desktop.scale(), self.themes.active());
             let interval = self.desktop.info().double_click();
@@ -3249,13 +3330,14 @@ mod program {
             }
         }
 
-        /// The library window closed: the program ends once no machine runs.
+        /// The library window closed, leaving the program on the icon bar.
         fn close_shelf(&mut self) {
             self.close_sheet();
+            self.card_menu = None;
             if let Some(win) = self.shelf.take() {
                 let _ = win.pane.close(&mut self.client);
             }
-            self.end_if_idle();
+            self.end_once_left();
         }
 
         fn request(&mut self, request: Request) {
@@ -3282,6 +3364,99 @@ mod program {
                 Request::Settings(id) => self.open_settings(id),
                 Request::Duplicate(id) => self.duplicate(id),
                 Request::Delete(id) => self.ask_delete(id),
+                Request::Menu { id, at } => self.open_card_menu(id, at),
+            }
+        }
+
+        /// The rows of machine `id`'s card menu as it stands now.
+        fn card_rows(&self, id: u32) -> Option<AppMenu> {
+            let running = self
+                .machine_index(id)
+                .map(|n| &self.machines[n])
+                .filter(|machine| machine.life == Life::Running)
+                .map(MachineWindow::shown);
+            machine_menu::card_menu(self.standing(id), running.as_ref()).ok()
+        }
+
+        /// Open machine `id`'s card menu at `at` in the library window.
+        fn open_card_menu(&mut self, id: u32, at: tairix_geometry::Point) {
+            let (Some(rows), Some(window_id)) = (
+                self.card_rows(id),
+                self.shelf.as_ref().map(|win| win.pane.id()),
+            ) else {
+                return;
+            };
+            let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
+                return;
+            };
+            match self.client.open_menu(window_id, anchor, &rows) {
+                Ok(open) => self.card_menu = Some(Followed::new(open, id, rows)),
+                Err(err) => app::report(
+                    APP_NAME,
+                    format_args!("the menu could not be opened ({err})"),
+                ),
+            }
+        }
+
+        /// Row `item` of the card menu `open_id` was chosen, with the menu
+        /// `kept` up or ending with it; with no row it ended without one.
+        fn card_answered(&mut self, open_id: u64, item: Option<AppMenuItemId>, kept: bool) {
+            let Some(id) = self
+                .card_menu
+                .as_ref()
+                .filter(|card| card.open() == open_id)
+                .map(Followed::kind)
+            else {
+                return;
+            };
+            if !kept {
+                self.card_menu = None;
+            }
+            match item.and_then(machine_menu::card_command) {
+                None => {}
+                Some(CardCommand::Start) => self.request(Request::Start(id)),
+                Some(CardCommand::Settings) => self.request(Request::Settings(id)),
+                Some(CardCommand::Duplicate) => self.request(Request::Duplicate(id)),
+                Some(CardCommand::Delete) => self.request(Request::Delete(id)),
+                Some(CardCommand::Machine(command)) => {
+                    if let Some(n) = self.machine_index(id) {
+                        self.machine_command(n, command);
+                    }
+                }
+            }
+        }
+
+        /// Show every menu up as what it is for now stands, once the events
+        /// of a pass are in: a row chosen with it kept up, or the machine
+        /// changing under it — a diskette ejected, a paste ended, the window
+        /// filling the display — restates exactly the rows that moved.
+        fn follow_menus(&mut self) {
+            for machine in &mut self.machines {
+                let rows = machine
+                    .menu
+                    .as_ref()
+                    .and_then(|up| machine.menu_of(up.kind()));
+                let (Some(up), Some(rows)) = (machine.menu.as_mut(), rows) else {
+                    continue;
+                };
+                let open = up.open();
+                if let Some(rows) = up.follow(rows) {
+                    restate(&mut self.client, machine.window.pane.id(), open, rows);
+                }
+            }
+            let Some(window_id) = self.shelf.as_ref().map(|win| win.pane.id()) else {
+                self.card_menu = None;
+                return;
+            };
+            let rows = self
+                .card_menu
+                .as_ref()
+                .and_then(|card| self.card_rows(card.kind()));
+            if let (Some(card), Some(rows)) = (self.card_menu.as_mut(), rows) {
+                let open = card.open();
+                if let Some(rows) = card.follow(rows) {
+                    restate(&mut self.client, window_id, open, rows);
+                }
             }
         }
 
@@ -3773,9 +3948,17 @@ mod program {
         /// Turn machine `n` off and close its window, keeping its last screen
         /// once it has run; `why` it stopped, when it was not asked to.
         fn stop(&mut self, n: usize, why: Option<String>) {
-            let Some((id, name, ran, screen)) = self.retire(n) else {
+            let Some(Retired {
+                id,
+                name,
+                ran,
+                screen,
+                pane,
+            }) = self.retire(n)
+            else {
                 return;
             };
+            let _ = pane.close(&mut self.client);
             if let Some(screen) = screen.filter(|_| ran) {
                 let picture = self.pictures.size;
                 self.ask(Job::Keep {
@@ -3791,13 +3974,12 @@ mod program {
                 self.refuse(&headline, &why);
             }
             self.show();
-            self.end_if_idle();
+            self.end_once_left();
         }
 
-        /// Take machine `n` out of the running: its session, sound and window
-        /// closed and its images let go. Its number and name, whether it ran,
-        /// and the screen it last showed.
-        fn retire(&mut self, n: usize) -> Option<(u32, String, bool, Option<LastScreen>)> {
+        /// Take machine `n` out of the running: its session and sound closed
+        /// and its images let go, its window handed back open.
+        fn retire(&mut self, n: usize) -> Option<Retired> {
             if n >= self.machines.len() {
                 return None;
             }
@@ -3825,8 +4007,13 @@ mod program {
             }
             let _ = self.disks.submit(DiskJob::Forget { id, medium: None });
             let screen = window.picture.screen().last();
-            let _ = window.pane.close(&mut self.client);
-            Some((id, name, ran, screen))
+            Some(Retired {
+                id,
+                name,
+                ran,
+                screen,
+                pane: window.pane,
+            })
         }
 
         /// Let machine `ticket`'s session go: at once, or once the compile
@@ -3875,29 +4062,39 @@ mod program {
             machine.window.paint_bar(&damage, looks);
         }
 
-        /// Machine `n` stopped and sent `kept`, its snapshot: its window
-        /// closes, and the snapshot is kept once what it wrote to its images
-        /// is durable, so it is never resumed against disks older than it.
+        /// Machine `n` stopped and sent `kept`, its snapshot, which is kept
+        /// once what it wrote to its images is durable, so it is never
+        /// resumed against disks older than it; its window, saying it is
+        /// saving, closes once the snapshot is kept.
         fn suspended_whole(&mut self, n: usize, kept: Vec<u8>) {
             let id = self.machines[n].id;
             let synced = self.disks.submit(DiskJob::Sync { id }).is_ok();
-            let Some((id, name, _, screen)) = self.retire(n) else {
+            let Some(Retired {
+                id,
+                name,
+                screen,
+                pane,
+                ..
+            }) = self.retire(n)
+            else {
                 return;
             };
             let Some(screen) = screen else {
+                let _ = pane.close(&mut self.client);
                 self.notes.push((
                     format!("\u{201c}{name}\u{201d} could not be suspended"),
                     String::from("It had shown nothing to keep, so it was turned off."),
                 ));
                 self.show();
-                self.end_if_idle();
+                self.end_once_left();
                 return;
             };
             let suspended = Suspended {
                 kept,
                 at: host_secs(),
             };
-            if !synced || self.keeping.try_reserve(1).is_err() {
+            if !synced || !self.keeping.reserve() {
+                let _ = pane.close(&mut self.client);
                 self.notes.push((
                     format!("\u{201c}{name}\u{201d} could not be suspended"),
                     String::from("Too much is waiting on the disks, so it was turned off."),
@@ -3911,38 +4108,25 @@ mod program {
                     why: Keeping::Off,
                 });
             } else {
-                self.keeping.push(Suspending {
-                    id,
-                    name,
-                    waiting: Some((screen, suspended)),
-                    with_snapshot: false,
-                });
+                self.keeping.suspend((id, name), (screen, suspended), pane);
             }
             self.show();
-            self.end_if_idle();
+            self.end_once_left();
         }
 
         /// Machine `id`'s images are durable, or why not: its snapshot goes
         /// to be kept, or, where they are not, only its last screen.
         fn synced(&mut self, id: u32, result: Result<(), String>) {
             let picture = self.pictures.size;
-            let Some(entry) = self.keeping.iter_mut().find(|entry| entry.id == id) else {
+            let Some((name, screen, suspended)) = self.keeping.synced(id, result.is_ok()) else {
                 return;
             };
-            let Some((screen, suspended)) = entry.waiting.take() else {
-                return;
-            };
-            let suspended = match result {
-                Ok(()) => Some(suspended),
-                Err(why) => {
-                    self.notes.push((
-                        format!("\u{201c}{}\u{201d} could not be suspended", entry.name),
-                        format!("Its disk could not be kept ({why}), so it was turned off."),
-                    ));
-                    None
-                }
-            };
-            entry.with_snapshot = suspended.is_some();
+            if let Err(why) = result {
+                self.notes.push((
+                    format!("\u{201c}{name}\u{201d} could not be suspended"),
+                    format!("Its disk could not be kept ({why}), so it was turned off."),
+                ));
+            }
             if !self.ask(Job::Keep {
                 id,
                 screen,
@@ -3950,8 +4134,10 @@ mod program {
                 picture,
                 why: Keeping::Suspended,
             }) {
-                self.keeping.retain(|entry| entry.id != id);
-                self.end_if_idle();
+                if let Some(ended) = self.keeping.end(id) {
+                    let _ = ended.window.close(&mut self.client);
+                }
+                self.end_once_left();
             }
         }
 
@@ -3965,12 +4151,17 @@ mod program {
                 }
                 Keeping::SetAside => self.set_aside(id, result),
                 Keeping::Suspended => {
-                    let Some(at) = self.keeping.iter().position(|entry| entry.id == id) else {
+                    let Some(Ended {
+                        name,
+                        with_snapshot,
+                        window,
+                    }) = self.keeping.end(id)
+                    else {
                         return;
                     };
-                    let entry = self.keeping.remove(at);
+                    let _ = window.close(&mut self.client);
                     match result {
-                        Ok(()) if entry.with_snapshot => {
+                        Ok(()) if with_snapshot => {
                             if !self.suspended.contains(&id)
                                 && self.suspended.try_reserve(1).is_ok()
                             {
@@ -3979,12 +4170,12 @@ mod program {
                         }
                         Ok(()) => {}
                         Err(why) => self.notes.push((
-                            format!("\u{201c}{}\u{201d} could not be suspended", entry.name),
+                            format!("\u{201c}{name}\u{201d} could not be suspended"),
                             why,
                         )),
                     }
                     self.show();
-                    self.end_if_idle();
+                    self.end_once_left();
                 }
             }
         }
@@ -4027,10 +4218,15 @@ mod program {
             self.show();
         }
 
-        /// End the program once nothing is left to it: no window and no
-        /// machine still being kept.
-        fn end_if_idle(&mut self) {
-            if self.machines.is_empty() && self.keeping.is_empty() && self.shelf.is_none() {
+        /// End the program, once *Quit* has asked it to leave, as soon as
+        /// nothing is left to it: no window and no machine still being kept.
+        /// Closing its windows alone leaves it on the icon bar.
+        fn end_once_left(&mut self) {
+            if self.leaving.is_some()
+                && self.machines.is_empty()
+                && self.keeping.is_empty()
+                && self.shelf.is_none()
+            {
                 self.quit = true;
             }
         }
@@ -4046,7 +4242,7 @@ mod program {
                 self.close(n);
             }
             self.leaving = Some(tairix_rt::clock_get().saturating_add(DRAIN_NS));
-            self.end_if_idle();
+            self.end_once_left();
         }
 
         /// Turn off every machine that was asked to suspend and has not sent
@@ -4086,6 +4282,16 @@ mod program {
                 WindowEvent::MenuClosed {
                     open_id, outcome, ..
                 } => self.menu_closed(n, open_id, outcome),
+                WindowEvent::MenuChosen { open_id, item, .. } => {
+                    let chosen = self.machines[n]
+                        .menu
+                        .as_ref()
+                        .filter(|up| up.open() == open_id)
+                        .map(Followed::kind);
+                    if let Some(menu) = chosen {
+                        self.bar_menu_command(n, menu, item);
+                    }
+                }
                 WindowEvent::FilePicked {
                     window_id,
                     handle,
@@ -4128,21 +4334,7 @@ mod program {
             } = self;
             let (looks, drawing) = ((desktop.scale(), themes.active()), drawing(pool, desktop));
             let machine = &mut machines[n];
-            let shown = Shown {
-                paused: machine.paused,
-                speed: machine.speed,
-                tube: machine.window.picture.tube(),
-                clipboard: Clipboard {
-                    pasting: machine.clipboard.pasting
-                        || machine.run.as_ref().is_some_and(|run| run.host.typing()),
-                    ..machine.clipboard
-                },
-                can_share: machine.shares.iter().any(Option::is_none),
-                windows: Windows {
-                    fullscreen: machine.fullscreen,
-                    debugging: machine.debugger.is_some(),
-                },
-            };
+            let shown = machine.shown();
             let (window, name) = (&mut machine.window, machine.name.as_str());
             let host = machine.run.as_mut().map(|run| &mut run.host);
             match *event {
@@ -4176,11 +4368,10 @@ mod program {
                     }
                 }
                 WindowEvent::Pointer { x, y, action, .. } => {
-                    let request = pointer(window, host, (x, y, action));
+                    let request = pointer(window, host, (x, y, action), looks);
                     window.ask(client, request.0, name);
                     if let Some(request) = request.1 {
-                        machine.menu = open_bar_menu(client, window.pane.id(), request, &shown)
-                            .map(|open| (open, request.menu));
+                        machine.menu = open_bar_menu(client, window.pane.id(), request, &shown);
                     }
                 }
                 WindowEvent::PointerMotion { dx, dy, .. } => {
@@ -4201,12 +4392,20 @@ mod program {
         /// Machine `n`'s menu closed with `outcome`.
         fn menu_closed(&mut self, n: usize, open_id: u64, outcome: MenuOutcome) {
             let machine = &mut self.machines[n];
-            let Some((_, menu)) = machine.menu.take_if(|(open, _)| *open == open_id) else {
+            let Some(menu) = machine
+                .menu
+                .take_if(|up| up.open() == open_id)
+                .map(|up| up.kind())
+            else {
                 return;
             };
-            let MenuOutcome::Chosen(item) = outcome else {
-                return;
-            };
+            if let MenuOutcome::Chosen(item) = outcome {
+                self.bar_menu_command(n, menu, item);
+            }
+        }
+
+        /// Do what row `item` of machine `n`'s `menu` says.
+        fn bar_menu_command(&mut self, n: usize, menu: Menu, item: AppMenuItemId) {
             match menu {
                 Menu::Machine => {
                     if let Some(command) = machine_menu::command(item) {
@@ -5093,6 +5292,7 @@ mod program {
                     _ => {}
                 }
             }
+            self.follow_menus();
             let client = &mut self.client;
             if let Some(win) = &mut self.shelf {
                 present(&mut win.pane, &win.surface, &mut win.owed, client)?;
@@ -5346,9 +5546,13 @@ mod program {
         /// Act on an event for the whole application.
         fn app_event(&mut self, event: &WindowEvent) {
             match *event {
+                // Leaving, it opens nothing new and is not asked to leave again.
+                WindowEvent::AppBarDefault | WindowEvent::AppBarMenu { .. }
+                    if self.leaving.is_some() => {}
                 WindowEvent::AppBarMenu { item, .. } if tairix_window::is_quit(item) => {
                     self.leave();
                 }
+                WindowEvent::AppBarDefault => self.open_shelf(),
                 WindowEvent::AppBarMenu { item, .. } if item.get() == LIBRARY_ROW => {
                     self.open_shelf();
                 }
@@ -5631,6 +5835,7 @@ mod program {
             doomed: Vec::new(),
             shelf: None,
             sheet: None,
+            card_menu: None,
             asking: None,
             machines: Vec::new(),
             pool: LazyPool::new(
@@ -5645,7 +5850,7 @@ mod program {
                 held: Vec::new(),
             },
             suspended: Vec::new(),
-            keeping: Vec::new(),
+            keeping: Suspends::new(),
             leaving: None,
             quit: false,
         };

@@ -34,6 +34,10 @@ por la sonoridad que indican sus propias etiquetas.
 Un archivo que el reproductor no puede leer se deja fuera, con su motivo en la
 línea de estado.
 
+Al cerrar la ventana, el reproductor permanece en la barra de iconos y sigue
+reproduciendo: un clic en su icono vuelve a abrir la ventana, y Salir en su menú
+termina el reproductor.
+
 * `Space` — reproducir o pausar
 * `Enter` — reproducir la pista seleccionada
 * `Left` / `Right` — diez segundos atrás o adelante
@@ -54,6 +58,6 @@ línea de estado.
 
 ## EXIT STATUS
 
-Cero tras cerrar la ventana o elegir Salir. Distinto de cero cuando se
-rechazó el canal de ventana, la región de imagen compartida o la sesión del
-escritorio; el motivo se indica en la salida de error estándar.
+Cero una vez elegido Salir en su menú de la barra de iconos. Distinto de cero
+cuando se rechazó el canal de ventana, la región de imagen compartida o la
+sesión del escritorio; el motivo se indica en la salida de error estándar.

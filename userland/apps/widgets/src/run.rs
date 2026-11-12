@@ -281,6 +281,7 @@ mod program {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
@@ -293,6 +294,7 @@ mod program {
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::Resized { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }

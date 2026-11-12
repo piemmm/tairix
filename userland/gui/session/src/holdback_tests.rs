@@ -476,6 +476,10 @@ fn state_edges_of_different_kinds_are_each_owed() {
         WindowEvent::RedrawRequested { window_id: WINDOW },
         WindowEvent::CloseRequested { window_id: WINDOW },
         WindowEvent::Minimized { window_id: WINDOW },
+        WindowEvent::Shown {
+            window_id: WINDOW,
+            shown: false,
+        },
     ];
     for edge in edges {
         let _ = hold(&mut held, edge);
@@ -484,6 +488,29 @@ fn state_edges_of_different_kinds_are_each_owed() {
         let _ = hold(&mut held, edge);
     }
     assert_eq!(held.depth(MAILBOX, Some(WINDOW)), edges.len());
+}
+
+/// A desktop covered and uncovered while a window's mailbox was full is owed
+/// as where it ended: shown.
+#[test]
+fn a_held_shown_edge_is_owed_as_it_last_stood() {
+    let mut held = HoldBack::new();
+    for shown in [false, true] {
+        let _ = hold(
+            &mut held,
+            WindowEvent::Shown {
+                window_id: WINDOW,
+                shown,
+            },
+        );
+    }
+    assert_eq!(
+        drain_events(&mut held),
+        vec![WindowEvent::Shown {
+            window_id: WINDOW,
+            shown: true,
+        }]
+    );
 }
 
 /// A position is level-triggered and a wheel tick is additive, so a run of

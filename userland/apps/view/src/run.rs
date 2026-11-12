@@ -67,6 +67,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
         AppMenuShortcut, AppMenuSymbol, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
+        MENU_OPEN_REVISION,
     };
     use tairix_abi::{Errno, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
@@ -805,6 +806,11 @@ mod program {
             }
             if matches!(command, Command::ToggleInfo) && view.info_open() {
                 item = item.with_mark(AppMenuMark::Check);
+            }
+            // Every command but opening a document acts on what is shown, in
+            // place.
+            if !matches!(command, Command::OpenDocument) {
+                item = item.repeatable();
             }
             if menu.push(AppMenuRow::Item(item)).is_err() {
                 skipped += 1;
@@ -1955,6 +1961,38 @@ mod program {
                 let outcome = app.windows[index].view.run(command, &layout, reported);
                 apply(app, index, outcome)
             }
+            WindowEvent::MenuChosen { open_id, item, .. } => {
+                if app.windows[index].menu != Some(*open_id) {
+                    return Acted::Idle;
+                }
+                let Some(command) = menu_command(*item) else {
+                    return Acted::Idle;
+                };
+                let shown_in = app.windows[index].pane.id();
+                let outcome = app.windows[index].view.run(command, &layout, reported);
+                let acted = apply(app, index, outcome);
+                // Found again by its id: what the choice did may have moved it.
+                let still_open = app
+                    .windows
+                    .iter()
+                    .find(|window| window.pane.id() == shown_in && window.menu == Some(*open_id));
+                if let Some(window) = still_open {
+                    let (menu, _) = build_menu(&window.view);
+                    let restated = app.client.restate_menu(
+                        window.pane.id(),
+                        *open_id,
+                        MENU_OPEN_REVISION,
+                        &menu,
+                    );
+                    if let Err(err) = restated {
+                        app::report(
+                            APP_NAME,
+                            format_args!("the menu could not be updated ({err})"),
+                        );
+                    }
+                }
+                acted
+            }
             // The wheel pans the canvas or scrolls the strip of tools,
             // whichever it turned over; with Ctrl it zooms the canvas.
             WindowEvent::Scrolled {
@@ -1998,6 +2036,7 @@ mod program {
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }

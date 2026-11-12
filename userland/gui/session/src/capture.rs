@@ -46,7 +46,7 @@ use tairix_wm::{
 use tairix_taskbar::TaskbarResponse;
 
 use crate::keep::{Keeping, Unkept, PNG_ENDING};
-use crate::menu::{marked, ChainOutcome};
+use crate::menu::{marked, ChainAnswer, ChainOutcome};
 use crate::shell::{DesktopShell, ShellOutcome};
 
 use bar::{BarAction, CaptureBar};
@@ -772,10 +772,12 @@ impl CaptureController {
     }
 
     /// What the Options menu answered: a row chosen changes that option, to be
-    /// written once.
-    pub fn menu_answered(&mut self, outcome: &ChainOutcome) {
-        let ChainOutcome::Chosen(item) = outcome else {
-            return;
+    /// written once. One chosen with the menu kept up answers the rows the
+    /// menu shows now.
+    pub fn menu_answered(&mut self, answer: &ChainAnswer) -> Option<ChainModel> {
+        let (ChainAnswer::Repeated(item) | ChainAnswer::Ended(ChainOutcome::Chosen(item))) = answer
+        else {
+            return None;
         };
         if let Some(next) = chosen(self.live, *item) {
             if next != self.live {
@@ -783,6 +785,8 @@ impl CaptureController {
                 self.owed = true;
             }
         }
+        matches!(answer, ChainAnswer::Repeated(_))
+            .then(|| options_menu(self.live, self.mode.recording))
     }
 
     fn act(
@@ -1242,7 +1246,7 @@ fn push_shows(model: &mut ChainModel, live: CaptureSettings, recording: bool) {
         } else {
             item
         };
-        let row = ChainRow::item(id, AppMenuSymbol::Visible, item);
+        let row = ChainRow::item(id, AppMenuSymbol::Visible, item).repeatable();
         model.push(if core::mem::take(&mut first) {
             row.grouped()
         } else {
@@ -1262,7 +1266,7 @@ fn push_choice(
 ) {
     if let Some(id) = option_id(group, place) {
         let item = marked(MenuItem::new(label), chosen);
-        model.push(ChainRow::item(id, symbol, item).under(parent));
+        model.push(ChainRow::item(id, symbol, item).under(parent).repeatable());
     }
 }
 

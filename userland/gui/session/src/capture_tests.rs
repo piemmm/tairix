@@ -26,7 +26,7 @@ use super::{
 };
 use crate::keep::tests::{striped, Table, FINISHED};
 use crate::keep::{scratch_path, PNG_ENDING};
-use crate::menu::ChainOutcome;
+use crate::menu::{ChainAnswer, ChainOutcome};
 use crate::shell::{DesktopShell, ShellOutcome};
 use crate::tests::{compositor, moved, shell, shell_audited, PRIMARY_PRESS, PRIMARY_RELEASE};
 use tairix_controls::AuthorityState;
@@ -484,7 +484,11 @@ fn an_option_chosen_is_written_once_and_stands_while_it_is_written() {
     assert!(placement.anchor.bottom() <= comp.screen_rect().bottom());
     let five = option_id(TIMER_GROUP, 1).expect("an id");
     assert!(model.rows().iter().any(|row| row.id() == Some(five)));
-    controller.menu_answered(&ChainOutcome::Chosen(five));
+    let kept = controller.menu_answered(&ChainAnswer::Ended(ChainOutcome::Chosen(five)));
+    assert!(
+        kept.is_none(),
+        "a choice that ended the menu restates nothing"
+    );
     assert_eq!(controller.settings().timer, CaptureTimer::Seconds5);
     controller.adopt(&stored, false);
     assert_eq!(

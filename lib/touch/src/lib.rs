@@ -17,6 +17,7 @@
 //! - **Touchscreen.** One finger is the pointer at the place touched, pressed
 //!   once it moves or rests, so a second finger landing with it begins a
 //!   gesture instead of a click; two fingers scroll and pinch at their centre.
+//!   The surface's own buttons press at the pointer, as a touchpad's do.
 //! - A contact the device judges a palm takes part in nothing.
 //!
 //! The recogniser allocates nothing. Between frames it needs waking only at
@@ -26,6 +27,7 @@
 
 #![no_std]
 
+mod buttons;
 mod fingers;
 mod pad;
 mod screen;
@@ -363,7 +365,7 @@ impl Track {
         self.fingers.update(frame, self.size);
         match &mut self.kind {
             Kind::Pad(pad) => pad.frame(&self.fingers, frame.buttons(), now_ns, settings, out),
-            Kind::Screen(screen) => screen.frame(&self.fingers, now_ns, out),
+            Kind::Screen(screen) => screen.frame(&self.fingers, frame.buttons(), now_ns, out),
         }
         self.fingers.prune();
     }

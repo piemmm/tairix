@@ -687,7 +687,10 @@ pixel.** A secondary-button (right-click) press selects the item under the
 pointer — or clears the selection on empty space — and asks the desktop's one
 menu service to bring a chain up ([menus](./menus.md)). `chrome::context_menu`
 declares the root plate as *Display ▸*, then the selection's own submenu and
-*New ▸*, then *Select All* and *Clear Selection*, then *Paste*. The selection's
+*New ▸*, then *Select All* and *Clear Selection*, then *Paste*. *Cut*, *Copy*,
+*Select All*, *Clear Selection* and Display's views and orders may be chosen
+with the menu kept up ([menus](./menus.md#choosing-with-the-menu-kept-up)),
+the menu restated over the same candidates and documents it opened with. The selection's
 submenu holds the verbs that act on it and is labelled with what it acts on:
 the one chosen item's kind and name — `File ‘notes.txt’`, `Folder ‘Docs’` —
 the name spelled as a reader is shown it (`vfs::push_shown_name`: shown as
@@ -715,7 +718,8 @@ editor instead, so a hostile name never takes the whole menu away.
 
 The answer is exactly one `WindowEvent::MenuClosed` naming the open id the
 window minted, so an answer to a gesture already settled cannot run a stale
-command; the `Run` binary routes the chosen command through
+command, and a row chosen with the menu kept up is a `WindowEvent::MenuChosen`
+carried out the same way; the `Run` binary routes the chosen command through
 `dispatch_context_command` to the **exact same** app verbs the toolbar and
 keyboard already drive — Open (`activate`), Open With… (the chooser below),
 Get Info…, Rename, Cut, Copy, Paste, and Delete (the same alert-confirmed

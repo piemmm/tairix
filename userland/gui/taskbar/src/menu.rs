@@ -280,6 +280,16 @@ impl EntryRow {
         matches!(self, Self::Open | Self::RunAsAdministrator | Self::Shortcut)
     }
 
+    /// Whether the row's change is made where the menu is and erases
+    /// nothing, so it may be chosen with the menu kept up: the favourites'
+    /// own rows.
+    const fn acts_in_place(self) -> bool {
+        matches!(
+            self,
+            Self::Favourite | Self::Unfavourite | Self::MoveEarlier | Self::MoveLater
+        )
+    }
+
     /// Whether the row starts the next group on its plate.
     const fn begins_group(self) -> bool {
         matches!(self, Self::Favourite | Self::Unfavourite | Self::Shortcut)
@@ -324,7 +334,12 @@ pub(crate) fn entry_menu(
         }
         if let Some(id) = AppMenuItemId::for_index(index) {
             let item = MenuItem::new(row.label()).with_group_break(row.begins_group());
-            model.push(ChainRow::item(id, row.symbol(), item));
+            let chain_row = ChainRow::item(id, row.symbol(), item);
+            model.push(if row.acts_in_place() {
+                chain_row.repeatable()
+            } else {
+                chain_row
+            });
         }
     }
     if let Some(identity) = identity {
@@ -345,7 +360,7 @@ pub(crate) fn entry_menu(
 /// claim the system lacks authority for a row, because the wire carries no
 /// field for that.
 #[must_use]
-pub(crate) fn app_menu(name: &str, declared: &AppMenu, identity: &AppIdentity) -> ChainModel {
+pub fn app_menu(name: &str, declared: &AppMenu, identity: &AppIdentity) -> ChainModel {
     ChainModel::from_app_menu(name, declared, Some(&about_sheet(identity)))
 }
 

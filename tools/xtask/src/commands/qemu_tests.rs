@@ -19725,7 +19725,12 @@ fn chain_path(
     }
     let mut chain = MenuChain::new();
     chain
-        .open(ChainOwner::Backdrop, model, placement, &geom)
+        .open(
+            ChainOwner::Backdrop { on_icon: false },
+            model,
+            placement,
+            &geom,
+        )
         .map_err(|err| format!("{what}: the menu opens nothing: {err:?}"))?;
     let plate = chain
         .surfaces()
@@ -22471,7 +22476,7 @@ mod tests {
         let mut browser = planted_manager_browser("test").expect("the planted home opens");
         let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
         browser.select(index).expect("the picture selects");
-        let candidates: [&tairix_browse::AppAssociation; 1] = [&viewer];
+        let candidates = [tairix_browse::OpenWithCandidate::of(&viewer)];
         let declared = tairix_browse::context_menu(
             tairix_browse::ContextMenuModel::for_browser(&browser, false),
             tairix_browse::MANAGER_MENU_TITLE,

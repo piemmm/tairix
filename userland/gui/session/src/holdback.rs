@@ -11,8 +11,9 @@
 //! Dropping the refused event is right for a *delta* — the next pointer
 //! sample supersedes the one before it — and wrong for everything else: a
 //! `Resized` the app never sees leaves it laying out at a size the
-//! compositor no longer uses, a lost `Focus`/`Minimized`/`CloseRequested`
-//! is a state edge with no second telling, and a lost
+//! compositor no longer uses, a lost
+//! `Focus`/`Minimized`/`Shown`/`CloseRequested` is a state edge with no
+//! second telling, and a lost
 //! `FilePicked`/`PickCancelled` strands the window's picker for good
 //! (the engine clears its pending pick only once the conclusion is
 //! accepted). This module is what the session owes instead.
@@ -680,6 +681,7 @@ const fn is_state_edge(event: &WindowEvent) -> bool {
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
     )
 }
 

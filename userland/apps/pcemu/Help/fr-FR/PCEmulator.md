@@ -21,7 +21,9 @@ machine choisie dans une fenêtre à elle, ou fait passer sa fenêtre au premier
 plan ; plusieurs machines tournent à la fois. Réglages change le matériel
 d'une machine tant qu'elle est éteinte, Dupliquer copie une machine avec ses
 disques, et Supprimer en supprime une avec ses disques une fois la
-suppression confirmée. Au premier lancement, PCEmulator crée un XT turbo. Ce
+suppression confirmée. Un clic droit sur la vignette d'une machine propose ces
+commandes pour cette machine et, tant qu'elle tourne, le menu de la machine
+aussi. Au premier lancement, PCEmulator crée un XT turbo. Ce
 qu'une machine écrit sur ses disques, et l'heure à laquelle son horloge est
 réglée, sont conservés d'une exécution à l'autre.
 
@@ -45,9 +47,9 @@ disquette à mettre dans le lecteur, et Éjecter. Une image de disquette
 déposée sur la fenêtre va dans le lecteur sur lequel elle est déposée, ou
 sinon dans le premier, et ne peut pas y être modifiée.
 
-Au bout de cette barre, le menu de la machine la met en pause, la
-réinitialise, lui envoie Ctrl+Alt+Suppr et règle la vitesse de son processeur
-pour la session. Affichage active et désactive les lignes de balayage, la
+Au bout de cette barre, le bouton Machine ouvre le menu de la machine, qui la
+met en pause, la réinitialise, lui envoie Ctrl+Alt+Suppr et règle la vitesse
+de son processeur pour la session. Affichage active et désactive les lignes de balayage, la
 lueur, la rémanence du phosphore, le bruit et l'ondulation de l'image, et la
 machine garde ce qui est choisi. Prendre une capture enregistre l'écran de la
 machine comme image PNG là où l'indique le panneau Enregistrer. Plein écran
@@ -92,10 +94,12 @@ Un programme qui lit la souris lui-même la prend quand on clique sur l'image,
 et la rend quand on appuie brièvement sur la touche Méta.
 
 Fermer la fenêtre de bibliothèque laisse tourner les machines en marche, et
-Bibliothèque de machines, dans le menu de la barre d'icônes, la rouvre. Chaque
-machine tourne dans un processus de travail à part qui ne détient aucune
-autorité : ses logiciels et ses disques ne sont jamais considérés comme
-fiables.
+fermer toutes les fenêtres laisse l'émulateur dans la barre d'icônes : un clic
+sur son icône, ou Bibliothèque de machines dans son menu, rouvre la
+bibliothèque, et Quitter dans ce menu met en veille toutes les machines en
+marche et met fin à l'émulateur. Chaque machine tourne dans un processus de
+travail à part qui ne détient aucune autorité : ses logiciels et ses disques ne
+sont jamais considérés comme fiables.
 
 ## OPTIONS
 
@@ -104,6 +108,6 @@ fiables.
 
 ## EXIT STATUS
 
-Zéro une fois sa dernière fenêtre fermée. Non nul lorsque le canal de fenêtre, la
-boîte aux lettres d'événements ou la session de bureau a été refusée ; la
-raison est énoncée sur la sortie d'erreur standard.
+Zéro une fois Quitter choisi dans son menu de la barre d'icônes. Non nul lorsque
+le canal de fenêtre, la boîte aux lettres d'événements ou la session de bureau a
+été refusée ; la raison est énoncée sur la sortie d'erreur standard.

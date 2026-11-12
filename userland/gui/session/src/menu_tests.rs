@@ -19,8 +19,8 @@ use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_controls::damage::Repaint;
 
 use crate::menu::{
-    ChainAction, ChainGeometry, ChainIconWant, ChainOutcome, ChainOwner, ChainPicture, MenuChain,
-    ModelRefused, SurfaceKind, SUBMENU_SETTLE_NS,
+    ChainAction, ChainAnswer, ChainGeometry, ChainIconWant, ChainOutcome, ChainOwner, ChainPicture,
+    MenuChain, ModelRefused, SurfaceKind, MENU_ACKNOWLEDGE_NS, SUBMENU_SETTLE_NS,
 };
 
 const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
@@ -29,6 +29,7 @@ const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
 const APP: ChainOwner = ChainOwner::Window {
     window_id: 7,
     open_id: 42,
+    revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
 };
 
 /// The ground the desktop opens a chain on: a plate is floating chrome, so the
@@ -299,13 +300,16 @@ fn a_chain_announces_itself_shown_once_per_open() {
     // fresh chain is a fresh open.
     open(
         &mut chain,
-        ChainOwner::Backdrop,
+        ChainOwner::Backdrop { on_icon: false },
         flat_model(),
         Point::new(200, 60),
         &g,
     );
     chain.report_newly_shown(|owner| seen.push(owner.clone()));
-    assert_eq!(seen, alloc::vec![APP, ChainOwner::Backdrop]);
+    assert_eq!(
+        seen,
+        alloc::vec![APP, ChainOwner::Backdrop { on_icon: false }]
+    );
 
     assert!(chain.dismiss());
     chain.report_newly_shown(|owner| seen.push(owner.clone()));
@@ -323,6 +327,7 @@ fn a_second_open_closes_the_first_and_answers_it_dismissed() {
     let second = ChainOwner::Window {
         window_id: 9,
         open_id: 43,
+        revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
     };
     open(
         &mut chain,
@@ -334,7 +339,7 @@ fn a_second_open_closes_the_first_and_answers_it_dismissed() {
 
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Dismissed)],
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Dismissed))],
         "the displaced chain is answered, and only it"
     );
     assert_eq!(chain.owner(), Some(&second));
@@ -349,7 +354,7 @@ fn a_model_with_no_root_rows_opens_nothing_and_leaves_the_chain_alone() {
     open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
 
     let refused = chain.open(
-        ChainOwner::Backdrop,
+        ChainOwner::Backdrop { on_icon: false },
         ChainModel::new("Empty"),
         PlatePlacement::adjacent(Rect::new(0, 0, 0, 0)),
         &g,
@@ -1166,7 +1171,7 @@ fn a_press_outside_the_chain_dismisses_it_and_is_consumed() {
     );
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Dismissed)]
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Dismissed))]
     );
     assert!(!chain.is_open());
     // Consumed, not delivered: the caller is told the chain closed and never
@@ -1228,7 +1233,7 @@ fn traversal_moves_within_a_plate_and_in_and_out_of_a_child() {
     );
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Chosen(id(1)))],
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(1))))],
         "Home landed on the first row and Enter chose it"
     );
 }
@@ -1254,7 +1259,7 @@ fn escape_closes_the_deepest_child_first_and_then_dismisses() {
     );
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Dismissed)],
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Dismissed))],
         "repeated Escape always gets the user out"
     );
 }
@@ -1291,7 +1296,7 @@ fn the_owners_death_answers_the_chain_dismissed() {
     assert!(chain.dismiss_owner(7));
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Dismissed)]
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Dismissed))]
     );
     assert!(!chain.is_open());
 }
@@ -1347,7 +1352,7 @@ fn a_mode_change_under_the_gesture_dismisses_rather_than_re_placing() {
         assert!(chain.settle_mode(&changed), "the ground moved under it");
         assert_eq!(
             chain.take_answers(),
-            alloc::vec![(APP, ChainOutcome::Dismissed)]
+            alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Dismissed))]
         );
         assert!(!chain.is_open());
     }
@@ -1523,11 +1528,15 @@ fn a_refusal_answers_the_asking_window_and_leaves_the_chain_alone() {
     let asking = ChainOwner::Window {
         window_id: 11,
         open_id: 44,
+        revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
     };
     chain.refuse(asking.clone(), MenuRefusal::SeatBusy);
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(asking, ChainOutcome::Refused(MenuRefusal::SeatBusy))]
+        alloc::vec![(
+            asking,
+            ChainAnswer::Ended(ChainOutcome::Refused(MenuRefusal::SeatBusy))
+        )]
     );
     assert_eq!(
         chain.owner(),
@@ -1548,7 +1557,10 @@ fn a_chain_the_desktop_cannot_draw_is_refused_no_resources() {
     assert!(chain.exhausted());
     assert_eq!(
         chain.take_answers(),
-        alloc::vec![(APP, ChainOutcome::Refused(MenuRefusal::NoResources))]
+        alloc::vec![(
+            APP,
+            ChainAnswer::Ended(ChainOutcome::Refused(MenuRefusal::NoResources))
+        )]
     );
     assert!(!chain.is_open());
     assert!(chain.surfaces().is_empty());
@@ -2128,4 +2140,481 @@ fn the_deepest_plate_is_the_one_that_explains_the_pointer() {
         chain.row_rect(1, 0, &g).expect("the child row is laid out"),
         "and its own rectangle on its own plate"
     );
+}
+
+const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Secondary,
+};
+const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+    button: PointerButton::Secondary,
+};
+
+/// A root plate holding a repeatable switch (`Pause`, or `Resume` once
+/// `paused`), a plain command, and a submenu of two repeatable alternatives,
+/// `fast` the one in force.
+fn kept_model(paused: bool, fast: bool) -> ChainModel {
+    let mut model = ChainModel::new("Machine");
+    let (switch, said) = if paused { (4, "Resume") } else { (1, "Pause") };
+    model.push(ChainRow::item(id(switch), AppMenuSymbol::Pause, MenuItem::new(said)).repeatable());
+    model.push(ChainRow::item(
+        id(2),
+        AppMenuSymbol::ShutDown,
+        MenuItem::new("Shut Down"),
+    ));
+    let speed = model.push(ChainRow::submenu(
+        AppMenuSymbol::Clock,
+        MenuItem::new("Speed"),
+    ));
+    for (raw, said, on) in [(10, "Slow", !fast), (11, "Fast", fast)] {
+        let mark = if on {
+            tairix_controls::MenuMark::Radio
+        } else {
+            tairix_controls::MenuMark::None
+        };
+        let item = MenuItem::new(said).with_mark(mark);
+        model.push(
+            ChainRow::item(id(raw), AppMenuSymbol::Clock, item)
+                .under(speed)
+                .repeatable(),
+        );
+    }
+    model
+}
+
+/// Click row `row` of the plate at `depth` with `(press, release)` at `now_ns`.
+fn click_row(
+    chain: &mut MenuChain,
+    (depth, row): (usize, usize),
+    (press, release): (InputEvent, InputEvent),
+    g: &ChainGeometry<'_>,
+    now_ns: u64,
+) -> ChainAction {
+    let at = chain
+        .row_rect(depth, row, g)
+        .expect("the row is drawn")
+        .center();
+    chain.handle(&moved(at.x, at.y), at, g, now_ns);
+    chain.handle(&press, at, g, now_ns);
+    chain.handle(&release, at, g, now_ns)
+}
+
+#[test]
+fn a_right_click_on_a_repeatable_row_chooses_it_and_keeps_the_chain_up_a_moment_lit() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    let now = 5_000_000;
+    let secondary = (SECONDARY_PRESS, SECONDARY_RELEASE);
+    assert_eq!(
+        click_row(&mut chain, (0, 0), secondary, &g, now),
+        ChainAction::Redraw
+    );
+    assert!(chain.is_open(), "the chain stays up");
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Repeated(id(1)))]
+    );
+    present_all(&mut chain);
+    assert_eq!(
+        chain.park_deadline_ns(now, u64::MAX),
+        MENU_ACKNOWLEDGE_NS,
+        "the seat parks until the row's moment passes"
+    );
+    assert!(!chain.tick(now + MENU_ACKNOWLEDGE_NS - 1, &g));
+    assert!(chain.tick(now + MENU_ACKNOWLEDGE_NS, &g));
+    assert_ne!(
+        owed(&chain, SurfaceKind::Plate(0)),
+        Repaint::clean(),
+        "the row is drawn plain again"
+    );
+    assert_eq!(chain.park_deadline_ns(now, u64::MAX), u64::MAX);
+    assert_eq!(
+        click_row(&mut chain, (0, 0), (PRESS, RELEASE), &g, now),
+        ChainAction::Closed,
+        "a left click on the same row still ends the chain"
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(1))))]
+    );
+}
+
+#[test]
+fn a_right_click_where_the_chain_cannot_stay_up_does_what_a_left_click_does() {
+    let theme = theme();
+    let g = geom(&theme);
+    let secondary = (SECONDARY_PRESS, SECONDARY_RELEASE);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    assert_eq!(
+        click_row(&mut chain, (0, 1), secondary, &g, 0),
+        ChainAction::Closed,
+        "a command that is not repeatable ends the chain"
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(2))))]
+    );
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    click_row(&mut chain, (0, 2), secondary, &g, 0);
+    assert_eq!(plates(&chain), 2, "a submenu row opens its child");
+    assert!(chain.take_answers().is_empty());
+}
+
+/// An answer is addressed to the owner as it stood when the row was chosen,
+/// so a row chosen before a restate is read against the rows it was chosen
+/// from, however late the owner takes it.
+#[test]
+fn an_answer_carries_the_owner_as_it_stood_when_its_row_was_chosen() {
+    let theme = theme();
+    let g = geom(&theme);
+    let secondary = (SECONDARY_PRESS, SECONDARY_RELEASE);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    click_row(&mut chain, (0, 0), secondary, &g, 0);
+    let restated = ChainOwner::Window {
+        window_id: 7,
+        open_id: 42,
+        revision: 1,
+    };
+    assert_eq!(
+        chain.restate(&APP, restated.clone(), kept_model(true, false), &g),
+        Ok(true)
+    );
+    click_row(&mut chain, (0, 0), secondary, &g, MENU_ACKNOWLEDGE_NS);
+    click_row(
+        &mut chain,
+        (0, 0),
+        (PRESS, RELEASE),
+        &g,
+        2 * MENU_ACKNOWLEDGE_NS,
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![
+            (APP, ChainAnswer::Repeated(id(1))),
+            (restated.clone(), ChainAnswer::Repeated(id(4))),
+            (restated, ChainAnswer::Ended(ChainOutcome::Chosen(id(4)))),
+        ],
+        "Pause from the rows the chain opened with, then Resume from the rows it now shows"
+    );
+}
+
+/// Rows that say what the chain already shows cost no repaint to show again.
+#[test]
+fn a_restate_of_the_rows_already_shown_repaints_nothing() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    present_all(&mut chain);
+    assert_eq!(
+        chain.restate(&APP, APP, kept_model(false, false), &g),
+        Ok(true)
+    );
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::clean());
+    assert_eq!(
+        chain.restate(&APP, APP, kept_model(true, false), &g),
+        Ok(true)
+    );
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::Whole);
+}
+
+#[test]
+fn a_restate_keeps_the_chain_where_it_is_and_shows_the_rows_it_is_given() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    let speed = chain.row_rect(0, 2, &g).expect("the speed row").center();
+    chain.handle(&moved(speed.x, speed.y), speed, &g, 0);
+    assert_eq!(plates(&chain), 2);
+    let (root, child) = (plate(&chain, 0), plate(&chain, 1));
+    let secondary = (SECONDARY_PRESS, SECONDARY_RELEASE);
+    click_row(&mut chain, (1, 1), secondary, &g, 0);
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Repeated(id(11)))]
+    );
+    present_all(&mut chain);
+    assert_eq!(
+        chain.restate(&APP, APP, kept_model(true, true), &g),
+        Ok(true)
+    );
+    assert_eq!(
+        (plates(&chain), plate(&chain, 0), plate(&chain, 1)),
+        (2, root, child),
+        "the plates the user opened stay where they were"
+    );
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::Whole);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(1)), Repaint::Whole);
+    assert_eq!(
+        click_row(&mut chain, (0, 0), (PRESS, RELEASE), &g, 0),
+        ChainAction::Closed
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(4))))],
+        "the root shows the rows it was restated with"
+    );
+}
+
+/// [`kept_model`] unpaused and slow, with a row put above the first of each
+/// plate: a restate that moves every row the user is on.
+fn kept_model_shifted() -> ChainModel {
+    let mut model = ChainModel::new("Machine");
+    model.push(ChainRow::item(
+        id(5),
+        AppMenuSymbol::Open,
+        MenuItem::new("Reset"),
+    ));
+    model.push(ChainRow::item(id(1), AppMenuSymbol::Pause, MenuItem::new("Pause")).repeatable());
+    model.push(ChainRow::item(
+        id(2),
+        AppMenuSymbol::ShutDown,
+        MenuItem::new("Shut Down"),
+    ));
+    let speed = model.push(ChainRow::submenu(
+        AppMenuSymbol::Clock,
+        MenuItem::new("Speed"),
+    ));
+    for (raw, said) in [(12, "Medium"), (10, "Slow"), (11, "Fast")] {
+        model.push(
+            ChainRow::item(id(raw), AppMenuSymbol::Clock, MenuItem::new(said))
+                .under(speed)
+                .repeatable(),
+        );
+    }
+    model
+}
+
+/// A restate that moves the rows the user is on keeps each on the row it was
+/// on rather than at the place it was at: the submenu stays open off its
+/// opener, and the highlight stays on its row.
+#[test]
+fn a_restate_carries_the_open_row_and_the_highlight_onto_the_rows_they_were_on() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    settle_on(&mut chain, 0, 2, &g);
+    let (_, fast) = settle_on(&mut chain, 1, 1, &g);
+    assert_eq!(chain.restate(&APP, APP, kept_model_shifted(), &g), Ok(true));
+    assert_eq!(plates(&chain), 2, "Speed still has its plate open");
+    assert_eq!(
+        chain.handle(&key(NamedKey::Enter), fast, &g, 0),
+        ChainAction::Closed
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(11))))],
+        "Fast, not the row now standing where Fast stood"
+    );
+}
+
+/// Two submenus alike in all but what they hold; `later` adds a row after
+/// both.
+fn twin_model(later: bool) -> ChainModel {
+    let mut model = ChainModel::new("Twins");
+    for (raw, holds) in [(1, "First's"), (2, "Second's")] {
+        let more = model.push(ChainRow::submenu(
+            AppMenuSymbol::Settings,
+            MenuItem::new("More"),
+        ));
+        model.push(ChainRow::item(id(raw), AppMenuSymbol::Open, MenuItem::new(holds)).under(more));
+    }
+    if later {
+        model.push(ChainRow::item(
+            id(3),
+            AppMenuSymbol::Open,
+            MenuItem::new("Later"),
+        ));
+    }
+    model
+}
+
+/// Rows alike are told apart by their order, so the second of two is still
+/// the second once restated.
+#[test]
+fn a_restate_tells_rows_alike_apart_by_their_order() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, twin_model(false), Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    let (_, inner) = settle_on(&mut chain, 1, 0, &g);
+    assert_eq!(chain.restate(&APP, APP, twin_model(true), &g), Ok(true));
+    assert_eq!(plates(&chain), 2);
+    assert_eq!(
+        chain.handle(&key(NamedKey::Enter), inner, &g, 0),
+        ChainAction::Closed
+    );
+    assert_eq!(
+        chain.take_answers(),
+        alloc::vec![(APP, ChainAnswer::Ended(ChainOutcome::Chosen(id(2))))],
+        "the second submenu's row, not the first's"
+    );
+}
+
+/// Press the root plate's band and drag it by `by`, leaving the button down.
+fn drag_root(chain: &mut MenuChain, by: Point, g: &ChainGeometry<'_>) -> Point {
+    let root = plate(chain, 0);
+    let band = Point::new(root.left() + 20, root.top() + 2);
+    chain.handle(&moved(band.x, band.y), band, g, 0);
+    chain.handle(&PRESS, band, g, 0);
+    let to = Point::new(band.x + by.x, band.y + by.y);
+    chain.handle(&moved(to.x, to.y), to, g, 0);
+    to
+}
+
+/// A plate the user placed keeps its place through a restate, measured for
+/// the rows it now holds and kept on the screen it was dragged across.
+#[test]
+fn a_restated_plate_the_user_placed_is_measured_again_and_stays_on_the_screen() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, flat_model(), Point::new(200, 200), &g);
+    let at = drag_root(&mut chain, Point::new(SCREEN.right(), 0), &g);
+    chain.handle(&RELEASE, at, &g, 0);
+    let placed = plate(&chain, 0);
+    assert_eq!(placed.right(), SCREEN.right(), "dragged against the edge");
+    let mut wider = flat_model();
+    wider.push(ChainRow::item(
+        id(9),
+        AppMenuSymbol::Open,
+        MenuItem::new("A row far wider than any the plate held"),
+    ));
+    assert_eq!(chain.restate(&APP, APP, wider, &g), Ok(true));
+    let now = plate(&chain, 0);
+    assert!(
+        now.width > placed.width && now.height > placed.height,
+        "measured for its rows: {placed:?} then {now:?}"
+    );
+    assert_eq!(
+        (now.right(), now.top()),
+        (SCREEN.right(), placed.top()),
+        "where the user put it, on the screen"
+    );
+}
+
+/// A drag under way carries on through a restate: the band keeps the press
+/// it is following.
+#[test]
+fn a_drag_under_way_carries_on_through_a_restate() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, flat_model(), Point::new(200, 200), &g);
+    let to = drag_root(&mut chain, Point::new(60, 40), &g);
+    let during = plate(&chain, 0);
+    let mut more = flat_model();
+    more.push(ChainRow::item(
+        id(9),
+        AppMenuSymbol::Open,
+        MenuItem::new("Four"),
+    ));
+    assert_eq!(chain.restate(&APP, APP, more, &g), Ok(true));
+    let further = Point::new(to.x + 30, to.y + 20);
+    chain.handle(&moved(further.x, further.y), further, &g, 0);
+    let followed = Point::new(during.left() + 30, during.top() + 20);
+    assert_eq!(plate(&chain, 0).origin, followed, "the plate still follows");
+    chain.handle(&RELEASE, further, &g, 0);
+    chain.handle(&moved(further.x + 50, further.y), further, &g, 0);
+    assert_eq!(plate(&chain, 0).origin, followed, "the release ended it");
+}
+
+#[test]
+fn a_restate_closes_what_its_rows_no_longer_open_and_refuses_what_cannot_be_shown() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        kept_model(false, false),
+        Point::new(40, 40),
+        &g,
+    );
+    let speed = chain.row_rect(0, 2, &g).expect("the speed row").center();
+    chain.handle(&moved(speed.x, speed.y), speed, &g, 0);
+    assert_eq!(plates(&chain), 2);
+    assert_eq!(chain.restate(&APP, APP, flat_model(), &g), Ok(true));
+    assert_eq!(
+        plates(&chain),
+        1,
+        "the opener is gone, and its plate with it"
+    );
+    assert_eq!(
+        chain.restate(&APP, APP, ChainModel::new("Empty"), &g),
+        Err(ModelRefused::NoRows)
+    );
+    assert!(
+        chain.is_open(),
+        "a refused restate leaves the chain as it was"
+    );
+    let other = ChainOwner::Window {
+        window_id: 7,
+        open_id: 43,
+        revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
+    };
+    assert_eq!(
+        chain.restate(&other, other.clone(), flat_model(), &g),
+        Ok(false),
+        "another owner's restate finds no chain of its"
+    );
+    assert_eq!(
+        chain.restate(&APP, other.clone(), flat_model(), &g),
+        Ok(true)
+    );
+    assert_eq!(
+        chain.owner(),
+        Some(&other),
+        "and its answers go where it says"
+    );
+    assert!(chain.take_answers().is_empty());
 }

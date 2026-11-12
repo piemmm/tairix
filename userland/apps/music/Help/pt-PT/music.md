@@ -34,6 +34,9 @@ próprias etiquetas indicam.
 Um ficheiro que o leitor não consegue ler fica de fora, com o motivo na linha
 de estado.
 
+Fechar a janela deixa o leitor na barra de ícones, onde continua a tocar: um
+clique no seu ícone volta a abrir a janela, e Sair no seu menu termina o leitor.
+
 * `Space` — reproduzir ou pausar
 * `Enter` — reproduzir a faixa selecionada
 * `Left` / `Right` — dez segundos para trás ou para a frente
@@ -54,7 +57,6 @@ de estado.
 
 ## EXIT STATUS
 
-Zero depois de a janela ser fechada ou de se escolher Sair. Diferente de zero
-quando o canal da janela, a região de imagem partilhada ou a sessão do
-ambiente de trabalho foi recusado; o motivo é indicado na saída de erro
-padrão.
+Zero depois de se escolher Sair no seu menu da barra de ícones. Diferente de
+zero quando o canal da janela, a região de imagem partilhada ou a sessão do
+ambiente de trabalho foi recusado; o motivo é indicado na saída de erro padrão.

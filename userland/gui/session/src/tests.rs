@@ -61,7 +61,9 @@ use tairix_wm::{
     Scale, Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
 };
 
-use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
+use crate::menu::{
+    ChainAction, ChainAnswer, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind,
+};
 use crate::shell::{SettleWork, Timed};
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
@@ -4698,7 +4700,7 @@ fn choose_bar_menu_row(
     assert_eq!(answers.len(), 1, "exactly one answer per chain");
     let (owner, outcome) = answers.into_iter().next().expect("one answer");
     assert_eq!(owner, ChainOwner::Bar(subject.clone()));
-    let ChainOutcome::Chosen(item) = outcome else {
+    let ChainAnswer::Ended(ChainOutcome::Chosen(item)) = outcome else {
         panic!("expected a chosen row, got {outcome:?}");
     };
     let scale = comp.scale();
@@ -9495,10 +9497,11 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     );
 }
 
-/// A row chosen from an icon-bar menu after its application re-declared is
-/// answered with the revision of the declaration the menu was opened from:
-/// the service records each declaration's revision and the slot it derives
-/// carries it into the menu.
+/// A bar menu's row is answered with the revision its chain's subject
+/// carries — the declaration the rows were built from — never the slot's
+/// latest, which a re-declaration has already moved on: the service records
+/// each declaration's revision and the slot it derives carries it into the
+/// menu.
 #[test]
 fn a_bar_menu_row_answers_the_revision_its_menu_was_opened_from() {
     let owner = window_owner(1);
@@ -15917,7 +15920,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     let at = Point::new(100, 100);
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             crate::pinboard::model(crate::pinboard::Over::Icon, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(at.x, at.y, 0, 0)),
             &geom,
@@ -15941,7 +15944,7 @@ fn the_backdrop_menu_is_drawn_as_chain_plates_and_taken_down_when_it_closes() {
     // A menu opened in the far corner is placed wholly on screen.
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             crate::pinboard::model(crate::pinboard::Over::Backdrop, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(
                 screen.right() - 1,
@@ -15995,7 +15998,7 @@ fn a_chain_under_a_new_owner_does_not_inherit_the_displaced_chains_windows() {
     let open = |chain: &mut MenuChain| {
         chain
             .open(
-                ChainOwner::Backdrop,
+                ChainOwner::Backdrop { on_icon: false },
                 crate::pinboard::model(crate::pinboard::Over::Icon, &DesktopSettings::default()),
                 crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
                 &geom,
@@ -16053,7 +16056,7 @@ fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
     };
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             crate::pinboard::model(crate::pinboard::Over::Icon, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
@@ -16123,7 +16126,7 @@ fn explained_chain(shell: &DesktopShell, comp: &Compositor, chain: &mut MenuChai
     );
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             model,
             crate::windows::window_menu_placement(Rect::new(40, 40, 0, 0)),
             &geom,
@@ -16470,7 +16473,7 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
     let mut chain = MenuChain::new();
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             ChainModel::from_app_menu("App", &wire, Some(&sheet)),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
@@ -16554,7 +16557,7 @@ fn an_information_sheet_opened_before_its_picture_landed_is_drawn_with_it() {
     let mut chain = MenuChain::new();
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             model,
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
@@ -16632,6 +16635,7 @@ fn chain_with_entry_open(geom: &ChainGeometry<'_>) -> MenuChain {
             ChainOwner::Window {
                 window_id: 1,
                 open_id: 7,
+                revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
             },
             renaming_menu(),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
@@ -16692,7 +16696,7 @@ fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text()
     let answers = chain.take_answers();
     assert_eq!(answers.len(), 1, "one chain, one answer");
     match &answers[0].1 {
-        ChainOutcome::Entered(id, text) => {
+        ChainAnswer::Ended(ChainOutcome::Entered(id, text)) => {
             assert_eq!(id.get(), 90, "the field's own id, never the row's");
             assert_eq!(text, "2.txt", "the text as the user left it");
         }
@@ -16733,7 +16737,7 @@ fn a_quick_entry_field_extends_a_selection_with_shift() {
         ChainAction::Closed
     );
     match &chain.take_answers()[..] {
-        [(_, ChainOutcome::Entered(_, text))] => {
+        [(_, ChainAnswer::Ended(ChainOutcome::Entered(_, text)))] => {
             assert_eq!(
                 text, "report.md",
                 "Shift+Left selected the ending it replaced"
@@ -16787,7 +16791,9 @@ fn a_quick_entry_field_cuts_copies_and_pastes_through_the_clipboard() {
         0,
     );
     match &chain.take_answers()[..] {
-        [(_, ChainOutcome::Entered(_, text))] => assert_eq!(text, "reportreport.txt"),
+        [(_, ChainAnswer::Ended(ChainOutcome::Entered(_, text)))] => {
+            assert_eq!(text, "reportreport.txt");
+        }
         other => panic!("one commit answers, not {other:?}"),
     }
     assert_eq!(
@@ -16844,7 +16850,7 @@ fn escape_closes_a_quick_entry_field_before_the_chain_and_discards_its_text() {
     );
     assert_eq!(
         chain.take_answers().first().map(|(_, out)| out.clone()),
-        Some(ChainOutcome::Dismissed)
+        Some(ChainAnswer::Ended(ChainOutcome::Dismissed))
     );
 }
 
@@ -16870,9 +16876,9 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
     );
     assert_eq!(
         chain.take_answers().first().map(|(_, out)| out.clone()),
-        Some(ChainOutcome::Chosen(
+        Some(ChainAnswer::Ended(ChainOutcome::Chosen(
             AppMenuItemId::new(4).expect("a valid id")
-        )),
+        ))),
         "the row answers its own id, not its field's"
     );
 
@@ -16881,7 +16887,7 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
     let mut chain = chain_with_entry_open(&geom);
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             renaming_menu(),
             crate::windows::window_menu_placement(Rect::new(10, 10, 0, 0)),
             &geom,
@@ -16891,7 +16897,7 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
     assert_eq!(answers.len(), 1);
     assert_eq!(
         answers[0].1,
-        ChainOutcome::Dismissed,
+        ChainAnswer::Ended(ChainOutcome::Dismissed),
         "a displaced chain is dismissed, never Entered"
     );
 
@@ -16908,7 +16914,7 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
     );
     assert_eq!(
         chain.take_answers().first().map(|(_, out)| out.clone()),
-        Some(ChainOutcome::Dismissed)
+        Some(ChainAnswer::Ended(ChainOutcome::Dismissed))
     );
 }
 
@@ -16927,7 +16933,7 @@ fn an_owned_menu_plate_frosts_what_is_behind_it() {
     let geom = crate::windows::chain_geometry(shell.session(), &comp);
     chain
         .open(
-            ChainOwner::Backdrop,
+            ChainOwner::Backdrop { on_icon: false },
             crate::pinboard::model(crate::pinboard::Over::Icon, &DesktopSettings::default()),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
@@ -17813,11 +17819,69 @@ fn no_application_menu_opens_under_a_carried_drag() {
         alloc::vec![(
             ChainOwner::Window {
                 window_id: 1,
-                open_id: 5
+                open_id: 5,
+                revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
             },
-            ChainOutcome::Refused(MenuRefusal::SeatBusy)
+            ChainAnswer::Ended(ChainOutcome::Refused(MenuRefusal::SeatBusy))
         )]
     );
+}
+
+/// A window's restate is its open's own: one naming another open restates
+/// nothing, and the revision it names is what every later answer carries.
+#[test]
+fn a_window_restate_names_the_revision_its_chains_answers_carry_from_then_on() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let _ = open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        let mut rows = AppMenu::EMPTY;
+        rows.push(AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("non-zero"),
+                AppMenuLabel::new("Wrap").expect("short"),
+                AppMenuSymbol::Open,
+            )
+            .repeatable(),
+        ))
+        .expect("fits");
+        let anchor = WindowRegion::new(0, 0, 10, 10).expect("an anchor");
+        assert_eq!(host.menu_open_requested(1, 5, anchor, &rows), Ok(()));
+        let owner = |revision| ChainOwner::Window {
+            window_id: 1,
+            open_id: 5,
+            revision,
+        };
+        assert_eq!(
+            host.menu.owner(),
+            Some(&owner(tairix_abi::window_ipc::MENU_OPEN_REVISION))
+        );
+        assert_eq!(host.menu_restate_requested(1, 6, 3, &rows), Ok(()));
+        assert_eq!(
+            host.menu.owner(),
+            Some(&owner(tairix_abi::window_ipc::MENU_OPEN_REVISION)),
+            "another open's restate finds no chain of its own"
+        );
+        assert_eq!(host.menu_restate_requested(1, 5, 3, &rows), Ok(()));
+        assert_eq!(host.menu.owner(), Some(&owner(3)));
+        assert_eq!(
+            host.menu_restate_requested(1, 5, 4, &AppMenu::EMPTY),
+            Err(Errno::OutOfRange),
+            "rows that show nothing are refused"
+        );
+        assert_eq!(host.menu.owner(), Some(&owner(3)), "and change nothing");
+        assert!(host.menu.dismiss());
+        assert_eq!(
+            host.menu.take_answers(),
+            alloc::vec![(owner(3), ChainAnswer::Ended(ChainOutcome::Dismissed))]
+        );
+        assert_eq!(
+            host.menu_restate_requested(1, 5, 5, &rows),
+            Ok(()),
+            "a restate crossing the answer is no fault"
+        );
+    });
 }
 
 /// An application's pointer shape lands on its own compositor window, and a

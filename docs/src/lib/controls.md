@@ -200,6 +200,18 @@ chain. The wire model is a **bounded subset**, structurally: it has no field for
 an authority state, so a decoded row can never claim that *the system* refused a
 command (`plans/NEW-MENUS.md` §1.6).
 
+A `Menu` reports a click by the button that made it. A primary press and
+release on one row activates it as it always has, a secondary one answers
+`MenuAction::AlternateActivated` with the row; a release of another button, or
+off the row the press armed, activates nothing. What the second means is the owner's: a
+`ComboBox` and the Settings category list take it as a choice like any other,
+and the desktop's chain keeps itself up for it on a row the model marks
+`ChainRow::repeatable`, a mark only a row with an id can carry
+(`ChainRow::is_repeatable`). `Menu::acknowledge` draws one row in the accent
+until the owner clears it, the chosen row of a menu kept up, and
+`Menu::carry_highlight` keeps the highlight on the same row when a menu is
+rebuilt under the pointer.
+
 ### One setting, and the group it lines up in
 
 A settings surface is a column of captioned groups of label/description/control
@@ -605,6 +617,11 @@ it, or frame the content that does:
   `Toolbar::visit_icons` names each icon tool's picture as `render` asks for
   it, with the seat it draws in, so an owner told which icon decodes have
   landed repaints the tools drawing through them rather than the strip.
+- `Button::pulls_down` gives a button a down-pointing chevron at its trailing
+  edge, measured into its width, so a button that opens a menu says so before
+  it is pressed. `Button::set_content` changes what a button says and shows,
+  answering whether it changed, so a status a bar's button carries is kept
+  current without rebuilding the control.
 - `ActionRail` is a column of labelled `Button` commands anchored beside
   content, where a vertical `Toolbar` is a column of icon tools, so plate,
   role, disabled, and denied

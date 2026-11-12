@@ -32,6 +32,7 @@ use tairix_window::docapp::{
     DialogWindow, DocumentView, SaveTarget, ToolGone, ToolMove, ToolOpening, ToolWindow,
 };
 use tairix_window::document::{Access, SavedDocument};
+use tairix_window::menu::MenuCommand;
 
 use crate::brush::Spray;
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
@@ -741,6 +742,37 @@ impl Action {
 impl From<Action> for u16 {
     fn from(action: Action) -> Self {
         action.id()
+    }
+}
+
+impl MenuCommand for Action {
+    /// Everything done to the picture where it is, but not what opens a
+    /// dialog, a pane, a field or another window, or what takes away the
+    /// layer or entry being shown.
+    fn acts_in_place(self) -> bool {
+        !matches!(
+            self,
+            Self::NewPicture
+                | Self::Open
+                | Self::Save
+                | Self::SaveAs
+                | Self::Close
+                | Self::Resize
+                | Self::CanvasSize
+                | Self::Convert
+                | Self::EditPrimary
+                | Self::EditSecondary
+                | Self::NewEntry
+                | Self::DeleteEntry
+                | Self::GoTo
+                | Self::Rename
+                | Self::DeleteLayer
+                | Self::GoToLayer
+                | Self::Adjust(_)
+                | Self::EditEntry
+                | Self::SpriteFile
+                | Self::FloatPalette
+        )
     }
 }
 

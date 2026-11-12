@@ -765,6 +765,46 @@ fn the_window_menu_holds_every_command() {
     );
 }
 
+/// A row keeps the window menu up under a secondary click exactly where its
+/// action is done to the picture in place.
+#[test]
+fn the_window_menu_stays_up_for_every_action_done_in_place() {
+    use tairix_window::menu::MenuCommand;
+
+    let check = |window: &Window| {
+        let menu = window.view.menu(MenuKind::Window);
+        let mut kept = 0;
+        for (row, _) in menu.rows() {
+            let AppMenuRowView::Item(item) = row else {
+                continue;
+            };
+            let action = Action::from_id(item.id.get()).expect("a row names an action");
+            assert_eq!(item.repeatable, action.acts_in_place(), "{action:?}");
+            kept += usize::from(item.repeatable);
+        }
+        assert!(kept > 0);
+    };
+    check(&tiff_pages(2));
+    check(&sprite_window());
+    for action in [
+        Action::Undo,
+        Action::ZoomIn,
+        Action::RotateLeft,
+        Action::Copy,
+    ] {
+        assert!(action.acts_in_place(), "{action:?}");
+    }
+    for action in [
+        Action::Open,
+        Action::Resize,
+        Action::EditPrimary,
+        Action::DeleteLayer,
+        Action::FloatPalette,
+    ] {
+        assert!(!action.acts_in_place(), "{action:?}");
+    }
+}
+
 /// A TIFF of `count` white pages.
 fn tiff_pages(count: usize) -> Window {
     let page = || {

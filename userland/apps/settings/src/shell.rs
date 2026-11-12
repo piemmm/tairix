@@ -3083,7 +3083,8 @@ impl Shell {
             Self::list_rect(menu, &frame, viewport, scale, theme)
         });
         match acted {
-            Some(MenuAction::Activated { index }) => {
+            // A list of places to go: either button goes there.
+            Some(MenuAction::Activated { index } | MenuAction::AlternateActivated { index }) => {
                 self.categories = None;
                 damage.add(rect);
                 let chosen = self

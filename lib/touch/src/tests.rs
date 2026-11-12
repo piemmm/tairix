@@ -533,6 +533,37 @@ fn a_touch_puts_the_pointer_there_and_presses_once_it_moves() {
     assert_eq!(screen.at(40, &[]), [Gesture::Released(PRIMARY)]);
 }
 
+/// QEMU hands a host mouse's buttons to whichever pointing device it last
+/// activated, so a virtio touchscreen reports presses with no contact down.
+#[test]
+fn a_touchscreens_own_buttons_press_at_the_pointer_and_release_across_frames() {
+    let mut screen = Sim::screen();
+    let primary = TouchPress::Device(PointerButtonCode::Primary);
+    assert_eq!(
+        screen.pressing(0, TouchButtons::PRIMARY, &[]),
+        [Gesture::Pressed(primary)]
+    );
+    assert_eq!(
+        screen.at(40, &[]),
+        [Gesture::Released(primary)],
+        "the surface stays followed while its button is down"
+    );
+    let secondary = TouchPress::Device(PointerButtonCode::Secondary);
+    assert_eq!(
+        screen.pressing(80, TouchButtons::SECONDARY, &[finger(1, 500, 500)]),
+        [
+            Gesture::MovedTo(SurfacePoint { x: 500, y: 500 }),
+            Gesture::Pressed(secondary)
+        ],
+        "a button pressed with a touch lands where the touch put the pointer"
+    );
+    assert_eq!(
+        screen.reset(),
+        [Gesture::Released(secondary)],
+        "a reset releases the button still held"
+    );
+}
+
 #[test]
 fn a_still_touch_presses_when_its_wait_runs_out() {
     let mut screen = Sim::screen();

@@ -12,6 +12,7 @@ pub mod bar;
 pub mod debugger;
 pub mod disk;
 pub mod input;
+pub mod keeping;
 pub mod library;
 pub mod media;
 pub mod menu;

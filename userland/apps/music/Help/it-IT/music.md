@@ -35,6 +35,10 @@ loro tag.
 Un file che il lettore non riesce a leggere viene escluso, con il motivo sulla
 riga di stato.
 
+Chiudere la finestra lascia il lettore nella barra delle icone, e la
+riproduzione continua: un clic sulla sua icona riapre la finestra, ed Esci nel
+suo menu termina il lettore.
+
 * `Space` — riprodurre o mettere in pausa
 * `Enter` — riprodurre il brano selezionato
 * `Left` / `Right` — dieci secondi indietro o avanti
@@ -55,6 +59,6 @@ riga di stato.
 
 ## EXIT STATUS
 
-Zero dopo la chiusura della finestra o la scelta di Esci. Diverso da zero
+Zero una volta scelto Esci nel suo menu della barra delle icone. Diverso da zero
 quando il canale della finestra, la regione d'immagine condivisa o la sessione
 del desktop è stato rifiutato; il motivo è indicato sullo standard error.

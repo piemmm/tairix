@@ -400,6 +400,8 @@ pub struct Button {
     content: ButtonContent,
     role: ControlRole,
     align: ContentAlign,
+    /// Whether its one action opens a menu, which a trailing chevron says.
+    pulls_down: bool,
     state: ControlState,
     /// The last pointer position, resolved against `bounds` on the next press
     /// or release — hit-testing input, never a drawn property.
@@ -434,19 +436,27 @@ impl Button {
     #[must_use]
     pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
         let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap);
         let content = match &self.content {
             ButtonContent::Label(text) => font.text_width(text),
-            ButtonContent::Icon(_) => {
+            ButtonContent::Icon(_) if !self.pulls_down => {
                 return Self::height(scale, theme);
             }
+            ButtonContent::Icon(_) => font.glyph_height(),
             ButtonContent::IconLabel { label, .. } => font
                 .glyph_height()
-                .saturating_add(scale.scale_length(theme.metrics().control_gap))
+                .saturating_add(gap)
                 .saturating_add(font.text_width(label)),
+        };
+        let chevron = if self.pulls_down {
+            font.glyph_height().saturating_add(gap)
+        } else {
+            0
         };
         plate_text_edge(theme, scale)
             .saturating_mul(2)
             .saturating_add(content)
+            .saturating_add(chevron)
     }
 
     /// A button with the given content and role, in the resting state.
@@ -456,10 +466,31 @@ impl Button {
             content,
             role,
             align: ContentAlign::Center,
+            pulls_down: false,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
         }
+    }
+
+    /// The same button opening a menu when it is activated, which a down
+    /// chevron at its trailing edge says before it is pressed.
+    ///
+    /// Still one action, the menu, which is what keeps it apart from a
+    /// [`SplitButton`].
+    #[must_use]
+    pub fn pulls_down(mut self) -> Self {
+        self.pulls_down = true;
+        self
+    }
+
+    /// Replace the button's content, answering whether what it draws changed.
+    pub fn set_content(&mut self, content: ButtonContent) -> bool {
+        if self.content == content {
+            return false;
+        }
+        self.content = content;
+        true
     }
 
     /// A neutral labelled button — the common case.
@@ -530,20 +561,34 @@ impl Button {
         let font = role_font(theme, scale, TextRole::Body);
         let res = resolve(theme, self.role, self.state, PlateSeating::Panel);
         paint_frame(surface, bounds, scale, theme, &res);
-        if let Some(rect) = surface_rect(bounds) {
-            paint_content(
-                surface,
-                rect,
-                scale,
-                theme,
-                &res,
-                &ContentGroup {
-                    content: &self.content,
-                    align: self.align,
-                },
-                font,
-            );
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        let mut content = (x, y, w, h);
+        if self.pulls_down {
+            // The chevron takes a glyph's square at the trailing text edge,
+            // and the content the rest, one gap short of it.
+            let side = font.glyph_height();
+            let gap = scale.scale_length(theme.metrics().control_gap);
+            let end = x
+                .saturating_add(w)
+                .saturating_sub(plate_text_edge(theme, scale));
+            let chevron = Rect::new(to_i32(end.saturating_sub(side)), to_i32(y), side, h);
+            paint_chevron(surface, chevron, ChevronDir::Down, res.label);
+            content.2 = w.saturating_sub(side.saturating_add(gap));
         }
+        paint_content(
+            surface,
+            content,
+            scale,
+            theme,
+            &res,
+            &ContentGroup {
+                content: &self.content,
+                align: self.align,
+            },
+            font,
+        );
     }
 
     /// Feed a pointer event, given the button's current `bounds`, updating its

@@ -644,6 +644,65 @@ fn a_chain_resolves_its_glyphs_once_for_every_plate_built_from_it() {
     );
 }
 
+/// A model restating a shown one takes the pictures that one holds — the
+/// glyphs of the symbols both show, the artwork of the sources both name —
+/// so only what it adds is resolved, and rows saying the same compare equal.
+#[test]
+fn a_restated_model_takes_the_pictures_it_already_holds() {
+    let theme = Theme::dark();
+    let mut shown = ChainModel::new("App");
+    shown.push(ChainRow::item(
+        wire_id(1),
+        AppMenuSymbol::Copy,
+        MenuItem::new("Copy"),
+    ));
+    shown.push(ChainRow::item(
+        wire_id(2),
+        AppMenuSymbol::Delete,
+        MenuItem::new("Delete"),
+    ));
+    shown.resolve_glyphs(Scale::ONE, &theme);
+
+    let mut restated = ChainModel::new("App");
+    restated.push(ChainRow::item(
+        wire_id(2),
+        AppMenuSymbol::Delete,
+        MenuItem::new("Delete"),
+    ));
+    restated.push(ChainRow::item(
+        wire_id(3),
+        AppMenuSymbol::Paste,
+        MenuItem::new("Paste"),
+    ));
+    restated.adopt_pictures(&shown);
+    let side = Menu::icon_side(Scale::ONE, &theme);
+    let held = |model: &ChainModel| -> alloc::vec::Vec<Option<u32>> {
+        model
+            .rows()
+            .iter()
+            .map(|row| row.drawn().held_glyph_side())
+            .collect()
+    };
+    assert_eq!(
+        held(&restated),
+        [Some(side), None],
+        "Delete taken, Paste new"
+    );
+    restated.resolve_glyphs(Scale::ONE, &theme);
+    assert_eq!(held(&restated), [Some(side), Some(side)]);
+
+    let bundle = "/System/Applications/Editor.app";
+    let row = |item: MenuItem| ChainRow::item(wire_id(4), AppMenuSymbol::Application, item);
+    let art = Surface::new(side, side).expect("a picture");
+    let mut pictured = ChainModel::new("App");
+    pictured.push(row(MenuItem::new("Editor").with_artwork(art)).from_bundle(bundle));
+    let mut fresh = ChainModel::new("App");
+    fresh.push(row(MenuItem::new("Editor")).from_bundle(bundle));
+    assert_ne!(fresh, pictured, "a picture landed on the shown row");
+    fresh.adopt_pictures(&pictured);
+    assert_eq!(fresh, pictured, "and the restated row takes it");
+}
+
 // --- Keyboard -----------------------------------------------------------
 
 #[test]
@@ -2271,5 +2330,198 @@ fn a_row_that_cannot_act_greys_and_fades_its_artwork() {
     assert!(
         reach(at) > 0 && reach(at) < reach(grey),
         "and faded toward the plate: {at:?} against grey {grey:?} on {ground:?}"
+    );
+}
+
+// --- Chosen with the menu kept up ---------------------------------------
+
+/// A press and release of `button` over row `row` of `menu` laid in `bounds`.
+fn click_with(
+    menu: &mut Menu,
+    row: u32,
+    button: PointerButton,
+    bounds: Rect,
+    theme: &Theme,
+) -> Option<MenuAction> {
+    let damage = &mut sink();
+    menu.on_pointer(
+        &moved(xi(W / 2), row_centre_y(row)),
+        bounds,
+        Scale::ONE,
+        theme,
+        damage,
+    );
+    menu.on_pointer(
+        &InputEvent::PointerPressed { button },
+        bounds,
+        Scale::ONE,
+        theme,
+        damage,
+    );
+    menu.on_pointer(
+        &InputEvent::PointerReleased { button },
+        bounds,
+        Scale::ONE,
+        theme,
+        damage,
+    )
+}
+
+#[test]
+fn a_secondary_click_is_its_own_activation_and_a_mixed_pair_is_none() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    assert_eq!(
+        click_with(&mut menu, 1, PointerButton::Secondary, bounds, &theme),
+        Some(MenuAction::AlternateActivated { index: 1 })
+    );
+    assert_eq!(
+        click_with(&mut menu, 2, PointerButton::Primary, bounds, &theme),
+        Some(MenuAction::Activated { index: 2 })
+    );
+    assert_eq!(
+        click_with(&mut menu, 0, PointerButton::Middle, bounds, &theme),
+        None,
+        "the middle button chooses nothing"
+    );
+    let damage = &mut sink();
+    menu.on_pointer(
+        &moved(xi(W / 2), row_centre_y(0)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        damage,
+    );
+    menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme, damage);
+    let let_go = InputEvent::PointerReleased {
+        button: PointerButton::Secondary,
+    };
+    assert_eq!(
+        menu.on_pointer(&let_go, bounds, Scale::ONE, &theme, damage),
+        None,
+        "a press of one button is not ended by the other"
+    );
+    let middle = InputEvent::PointerReleased {
+        button: PointerButton::Middle,
+    };
+    assert_eq!(
+        menu.on_pointer(&middle, bounds, Scale::ONE, &theme, damage),
+        None
+    );
+    assert_eq!(
+        menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, damage),
+        Some(MenuAction::Activated { index: 0 }),
+        "and is still its own to end"
+    );
+}
+
+#[test]
+fn an_acknowledged_row_reads_in_the_accent_and_says_what_it_redrew() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let mut menu = three_item_menu();
+        let h = menu.preferred_height(Scale::ONE, &theme);
+        let bounds = Rect::new(0, 0, W, h);
+        let mut damage = sink();
+        menu.acknowledge(Some(1), bounds, Scale::ONE, &theme, &mut damage);
+        let row = menu
+            .row_rect(1, bounds, Scale::ONE, &theme)
+            .expect("the row is drawn");
+        assert!(damage.intersects(row), "the row it lit is redrawn");
+        let surface = render(&menu, &theme, h);
+        let top = BORDER + ROW_H;
+        let band = ((BORDER + 2, W - BORDER - 2), (top + 2, top + ROW_H - 2));
+        assert!(region_has(&surface, band.0, band.1, premul(palette.accent)));
+        let mut damage = sink();
+        menu.acknowledge(None, bounds, Scale::ONE, &theme, &mut damage);
+        assert!(damage.intersects(row), "and redrawn plain again");
+        assert_eq!(menu.acknowledged(), None);
+    }
+}
+
+#[test]
+fn a_restated_menu_carries_the_highlight_it_still_has_rows_for() {
+    let was = three_item_menu().with_current(2);
+    let mut restated = Menu::new(vec![MenuItem::new("Open"), MenuItem::new("Save")]);
+    restated.carry_highlight(&was, Some);
+    assert_eq!(restated.current(), None, "its third row is gone");
+    let mut restated = three_item_menu();
+    restated.carry_highlight(&was, Some);
+    assert_eq!(restated.current(), Some(2));
+    assert_eq!(
+        restated, was,
+        "the keyboard's highlight carries as the keyboard's"
+    );
+}
+
+/// A restate may move a row: the highlight, the press it armed and the row
+/// drawn as just chosen follow the row the owner says it is, and a chosen row
+/// that can no longer be chosen is drawn plain.
+#[test]
+fn a_restated_menu_carries_its_state_onto_the_row_it_stood_on() {
+    let theme = Theme::dark();
+    let mut was = three_item_menu();
+    let bounds = Rect::new(0, 0, W, was.preferred_height(Scale::ONE, &theme));
+    let damage = &mut sink();
+    was.on_pointer(
+        &moved(xi(W / 2), row_centre_y(1)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        damage,
+    );
+    was.on_pointer(&PRESS, bounds, Scale::ONE, &theme, damage);
+    was.acknowledge(Some(2), bounds, Scale::ONE, &theme, damage);
+
+    // A row is inserted above every one of them.
+    let mut restated = Menu::new(vec![
+        MenuItem::new("New"),
+        MenuItem::new("Open"),
+        MenuItem::new("Save"),
+        MenuItem::new("Close").with_state(ControlState::disabled()),
+    ]);
+    restated.carry_highlight(&was, |row| Some(row + 1));
+    assert_eq!(restated.current(), Some(2), "Save is still the one lit");
+    assert_eq!(
+        restated.acknowledged(),
+        None,
+        "Close can no longer be chosen"
+    );
+    let bounds = Rect::new(0, 0, W, restated.preferred_height(Scale::ONE, &theme));
+    restated.on_pointer(
+        &moved(xi(W / 2), row_centre_y(2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        damage,
+    );
+    assert_eq!(
+        restated.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, damage),
+        Some(MenuAction::Activated { index: 2 }),
+        "the press made before the restate ends on its own row"
+    );
+}
+
+#[test]
+fn a_declared_rows_repeatable_flag_reaches_the_chain_and_only_a_row_with_an_id_has_one() {
+    let mut wire = wire_menu("App");
+    wire.push(AppMenuRow::Item(
+        AppMenuItem::new(wire_id(1), wire_label("Pause"), AppMenuSymbol::Pause).repeatable(),
+    ))
+    .expect("a row");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        wire_id(2),
+        wire_label("Quit"),
+        AppMenuSymbol::ShutDown,
+    )))
+    .expect("a row");
+    let model = ChainModel::from_app_menu("App", &wire, None);
+    let kept: alloc::vec::Vec<bool> = model.rows().iter().map(ChainRow::is_repeatable).collect();
+    assert_eq!(kept, [true, false]);
+    let submenu = ChainRow::submenu(AppMenuSymbol::Settings, MenuItem::new("More")).repeatable();
+    assert!(
+        !submenu.is_repeatable(),
+        "a row with no answer of its own keeps nothing up"
     );
 }

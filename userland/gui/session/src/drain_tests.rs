@@ -31,7 +31,7 @@ use crate::elevate::{
 };
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
-use crate::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
+use crate::menu::{open_desktop_menu, ChainAnswer, ChainOutcome, ChainOwner, MenuChain};
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, ShellOutcome, Timed};
 use crate::tests::{
@@ -133,12 +133,16 @@ impl SeatRouter for Program {
             .shell
             .present_menu_chain(seat.compositor, seat.menu, None);
         let scale = seat.compositor.scale();
-        for (owner, outcome) in seat.menu.take_answers() {
+        for (owner, answer) in seat.menu.take_answers() {
             if owner == ChainOwner::Capture {
-                seat.capture.menu_answered(&outcome);
+                let _ = seat.capture.menu_answered(&answer);
                 continue;
             }
-            if let (ChainOwner::Bar(subject), ChainOutcome::Chosen(item)) = (owner, outcome) {
+            if let (
+                ChainOwner::Bar(subject),
+                ChainAnswer::Ended(ChainOutcome::Chosen(item)) | ChainAnswer::Repeated(item),
+            ) = (owner, answer)
+            {
                 if let Some(response) = seat
                     .shell
                     .session_mut()
@@ -824,6 +828,7 @@ fn a_clipboard_chord_reaches_a_chains_open_entry_field() {
             ChainOwner::Window {
                 window_id: 1,
                 open_id: 7,
+                revision: tairix_abi::window_ipc::MENU_OPEN_REVISION,
             },
             renaming_menu(),
             crate::windows::window_menu_placement(tairix_geometry::Rect::new(100, 100, 0, 0)),

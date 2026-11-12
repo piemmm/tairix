@@ -1748,6 +1748,7 @@ mod program {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
@@ -1758,6 +1759,7 @@ mod program {
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { focused: false, .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }

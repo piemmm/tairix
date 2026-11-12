@@ -306,6 +306,47 @@ fn leading_alignment_seats_an_icon_and_label_group_together() {
     assert!(leading < centred, "{leading} should precede {centred}");
 }
 
+// --- Pull-down ----------------------------------------------------------
+
+/// Whether `want` lies in columns `from..to` of a [`render`]ed surface.
+fn columns_have(surface: &Surface, (from, to): (u32, u32), want: Pixel) -> bool {
+    crate::testkit::region_has(surface, (from, to), (0, H), want)
+}
+
+#[test]
+fn a_pull_down_button_states_its_menu_with_a_chevron_it_has_room_for() {
+    let theme = Theme::dark();
+    let content = ButtonContent::IconLabel {
+        icon: IconKind::Display,
+        label: "Machine".into(),
+    };
+    let plain = Button::new(content, ControlRole::Neutral);
+    let menu = plain.clone().pulls_down();
+    assert_ne!(plain, menu, "the chevron is drawn, so it compares");
+    let (scale, gap) = (
+        Scale::ONE,
+        Scale::ONE.scale_length(theme.metrics().control_gap),
+    );
+    assert_eq!(
+        menu.measured_width(scale, &theme),
+        plain.measured_width(scale, &theme) + font().glyph_height() + gap,
+        "the chevron is measured in, so a plate its own width holds both"
+    );
+    let label = premul(theme.palette().on_surface);
+    let edge = crate::button::plate_text_edge(&theme, scale);
+    let tail = (W - edge - font().glyph_height(), W - edge);
+    assert!(columns_have(&render(&menu, &theme), tail, label));
+    assert!(!columns_have(&render(&plain, &theme), tail, label));
+}
+
+#[test]
+fn a_button_restating_its_content_says_whether_it_changed() {
+    let mut button = Button::labelled("Machine").pulls_down();
+    assert!(!button.set_content(ButtonContent::Label("Machine".into())));
+    assert!(button.set_content(ButtonContent::Label("Paused".into())));
+    assert_eq!(button.content(), &ButtonContent::Label("Paused".into()));
+}
+
 // --- Theme switching ----------------------------------------------------
 
 #[test]

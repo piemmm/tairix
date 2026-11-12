@@ -20,7 +20,9 @@ pedido y, en un modelo con controladora de disco duro, con un disco duro de
 elegida en una ventana propia, o trae su ventana al frente; varias máquinas
 funcionan a la vez. Ajustes cambia el hardware de una máquina mientras está
 apagada, Duplicar copia una máquina con sus discos, y Eliminar elimina una
-con sus discos una vez confirmado. La primera vez que se inicia, PCEmulator
+con sus discos una vez confirmado. Hacer clic con el botón derecho en la ficha
+de una máquina ofrece todo esto para esa máquina y, mientras funciona, también
+el menú de la máquina. La primera vez que se inicia, PCEmulator
 crea un XT turbo. Lo que una máquina escribe en sus discos, y la hora a la que
 está puesto su reloj, se conservan de una ejecución a la siguiente.
 
@@ -43,8 +45,9 @@ unidad, y Expulsar. Una imagen de disquete soltada sobre la ventana entra en
 la unidad sobre la que se suelta, o si no en la primera, y allí no se puede
 escribir.
 
-Al final de esa barra, el menú de la máquina la pausa, la reinicia, le envía
-Ctrl+Alt+Supr y fija la velocidad de su procesador durante la sesión.
+Al final de esa barra, el botón Máquina abre el menú de la máquina, que la
+pausa, la reinicia, le envía Ctrl+Alt+Supr y fija la velocidad de su
+procesador durante la sesión.
 Visualización enciende y apaga las líneas de barrido, el resplandor, la
 persistencia del fósforo, el ruido y la ondulación de la imagen, y la máquina
 conserva lo elegido. Hacer captura guarda la pantalla de la máquina como
@@ -89,7 +92,9 @@ programa que lee el ratón por sí mismo lo toma al hacer clic en la imagen y lo
 devuelve al pulsar brevemente la tecla Meta.
 
 Cerrar la ventana de la biblioteca deja funcionando las máquinas en marcha, y
-Biblioteca de máquinas, en el menú de la barra de iconos, la vuelve a abrir.
+cerrar todas las ventanas deja el emulador en la barra de iconos: un clic en su
+icono, o Biblioteca de máquinas en su menú, vuelve a abrir la biblioteca, y
+Salir en ese menú suspende todas las máquinas en marcha y termina el emulador.
 Cada máquina se ejecuta en un proceso de trabajo propio que no tiene ninguna
 autoridad: nunca se confía en sus programas ni en sus discos.
 
@@ -100,6 +105,6 @@ autoridad: nunca se confía en sus programas ni en sus discos.
 
 ## EXIT STATUS
 
-Cero una vez cerrada su última ventana. Distinto de cero cuando se rechazó el canal
-de ventana, el buzón de eventos o la sesión de escritorio; el motivo se indica
-en la salida de error estándar.
+Cero una vez elegido Salir en su menú de la barra de iconos. Distinto de cero
+cuando se rechazó el canal de ventana, el buzón de eventos o la sesión de
+escritorio; el motivo se indica en la salida de error estándar.

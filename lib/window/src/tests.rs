@@ -506,6 +506,7 @@ struct RecordingHost {
     pick_focus: Vec<bool>,
     picks_refused: Vec<(ProcId, u64)>,
     menu_opens: Vec<(u64, u64, WindowRegion, AppMenu)>,
+    menu_restates: Vec<(u64, u64, u32, AppMenu)>,
     tooltips: Vec<(u64, WindowRegion, String)>,
     refuse_tooltip: Option<Errno>,
     cursors: Vec<(u64, CursorShape)>,
@@ -635,6 +636,7 @@ impl Default for RecordingHost {
             authorisations: Vec::new(),
             refuse_authorise: None,
             menu_opens: Vec::new(),
+            menu_restates: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
             cursors: Vec::new(),
@@ -1049,6 +1051,18 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.menu_opens.push((window_id, open_id, anchor, *menu));
+        Ok(())
+    }
+
+    fn menu_restate_requested(
+        &mut self,
+        window_id: u64,
+        open_id: u64,
+        revision: u32,
+        menu: &AppMenu,
+    ) -> Result<(), Errno> {
+        self.menu_restates
+            .push((window_id, open_id, revision, *menu));
         Ok(())
     }
 
@@ -7370,6 +7384,120 @@ fn sample_menu_anchor() -> WindowRegion {
     WindowRegion::new(12, 30, 0, 0).expect("a representable anchor")
 }
 
+#[test]
+fn a_kept_choice_answers_nothing_and_a_restate_is_the_open_owners_alone() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let menu = sample_open_menu();
+    let open = client
+        .open_menu(window, sample_menu_anchor(), &menu)
+        .expect("the open is accepted");
+    let item = AppMenuItemId::new(1).expect("a valid id");
+    let kept = WindowEvent::MenuChosen {
+        window_id: window,
+        open_id: open,
+        revision: 0,
+        item,
+    };
+    let mut sink = QueueSink::default();
+    for _ in 0..2 {
+        deliver(&loopback, &mut sink, &kept).expect("a kept choice delivers");
+    }
+    assert_eq!(sink.delivered.len(), 2, "any number before the answer");
+    let stray = WindowEvent::MenuChosen {
+        window_id: window,
+        open_id: open + 1,
+        revision: 0,
+        item,
+    };
+    assert_eq!(
+        deliver(&loopback, &mut sink, &stray),
+        Err(Errno::OutOfRange)
+    );
+
+    client
+        .restate_menu(window, open, 1, &menu)
+        .expect("the owner restates its open chain");
+    settled(&mut client, |_| Ok(())).expect("the restate is accepted");
+    assert_eq!(
+        loopback.borrow().host.menu_restates,
+        [(window, open, 1, menu)],
+        "it reaches the host whole"
+    );
+    let mut other = connected_as(&loopback, TICKET_B);
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        settled(&mut other, |client| client
+            .restate_menu(window, open, 1, &menu)),
+        Err(Errno::NotFound),
+        "another application's window is no window of its"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        settled(&mut client, |client| client.restate_menu(
+            window,
+            open + 7,
+            1,
+            &menu
+        )),
+        Err(Errno::OutOfRange),
+        "an open never made"
+    );
+
+    let answer = WindowEvent::MenuClosed {
+        window_id: window,
+        open_id: open,
+        revision: 1,
+        outcome: MenuOutcome::Dismissed,
+    };
+    deliver(&loopback, &mut sink, &answer).expect("the one answer still delivers");
+    assert_eq!(
+        deliver(&loopback, &mut sink, &kept),
+        Err(Errno::OutOfRange),
+        "nothing after the answer"
+    );
+    settled(&mut client, |client| {
+        client.restate_menu(window, open, 2, &menu)
+    })
+    .expect("a restate that crossed the answer is no refusal");
+    assert_eq!(
+        loopback.borrow().host.menu_restates.len(),
+        1,
+        "and restates nothing"
+    );
+}
+
+/// A burst of restates of one open keeps one in flight and ends on the
+/// newest, while another open's restate is its own.
+#[test]
+fn a_burst_of_restates_of_one_open_reaches_the_host_as_its_first_and_its_newest() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let menu = sample_open_menu();
+    let open = client
+        .open_menu(window, sample_menu_anchor(), &menu)
+        .expect("the open is accepted");
+    settled(&mut client, |_| Ok(())).expect("the open settles");
+    loopback.borrow_mut().holds_posts = true;
+    for revision in 1..=3 {
+        client
+            .restate_menu(window, open, revision, &menu)
+            .expect("posted or held");
+    }
+    for _ in 0..2 {
+        loopback.borrow_mut().serve_posted();
+        client.reap_posted();
+    }
+    assert_eq!(
+        loopback.borrow().host.menu_restates,
+        [(window, open, 1, menu), (window, open, 3, menu)],
+        "the second was never sent"
+    );
+    assert_eq!(client.take_owed(), None);
+}
+
 /// One accepted open is answered exactly once, and its answer names the open
 /// it belongs to.
 ///
@@ -7436,6 +7564,7 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
             &WindowEvent::MenuClosed {
                 window_id: window,
                 open_id: open + 1,
+                revision: 0,
                 outcome: MenuOutcome::Dismissed,
             }
         ),
@@ -7447,6 +7576,7 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
     let chosen = WindowEvent::MenuClosed {
         window_id: window,
         open_id: open,
+        revision: 0,
         outcome: MenuOutcome::Chosen(AppMenuItemId::new(1).expect("a valid id")),
     };
     deliver(&loopback, &mut sink, &chosen).expect("the outcome delivers");
@@ -7467,6 +7597,7 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
                 &WindowEvent::MenuClosed {
                     window_id: window,
                     open_id: open,
+                    revision: 0,
                     outcome,
                 }
             ),
@@ -7567,6 +7698,7 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
         &WindowEvent::MenuClosed {
             window_id: window,
             open_id: open,
+            revision: 0,
             outcome: MenuOutcome::Entered(AppMenuItemId::new(90).expect("a valid id")),
         },
     )
@@ -7585,6 +7717,7 @@ fn committed_menu_text_is_owner_bound_taken_once_and_cleared_by_the_next_open() 
         &WindowEvent::MenuClosed {
             window_id: window,
             open_id: again,
+            revision: 0,
             outcome: MenuOutcome::Dismissed,
         },
     )
@@ -7629,6 +7762,7 @@ fn each_windows_open_is_answered_on_its_own() {
             &WindowEvent::MenuClosed {
                 window_id: first,
                 open_id: second_open,
+                revision: 0,
                 outcome: MenuOutcome::Dismissed,
             }
         ),
@@ -7641,6 +7775,7 @@ fn each_windows_open_is_answered_on_its_own() {
         &WindowEvent::MenuClosed {
             window_id: first,
             open_id: first_open,
+            revision: 0,
             outcome: MenuOutcome::Dismissed,
         },
     )
@@ -7653,6 +7788,7 @@ fn each_windows_open_is_answered_on_its_own() {
         &WindowEvent::MenuClosed {
             window_id: second,
             open_id: second_open,
+            revision: 0,
             outcome: MenuOutcome::Chosen(AppMenuItemId::new(1).expect("a valid id")),
         },
     )
@@ -7691,6 +7827,7 @@ fn a_refused_menu_open_records_nothing_and_owes_nothing() {
             &WindowEvent::MenuClosed {
                 window_id: window,
                 open_id: refused_open,
+                revision: 0,
                 outcome: MenuOutcome::Dismissed,
             }
         ),
@@ -7722,6 +7859,7 @@ fn an_outcome_the_sink_refuses_stays_owed_until_one_is_accepted() {
     let refused = WindowEvent::MenuClosed {
         window_id: window,
         open_id: open,
+        revision: 0,
         outcome: MenuOutcome::Refused(MenuRefusal::NoResources),
     };
     assert_eq!(

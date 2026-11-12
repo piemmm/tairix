@@ -725,7 +725,11 @@ its place in that one list, so a chosen id reads back through the list it was
 built from. The menu then closes with its information row, *Info* — the
 signed-manifest sheet, where the manifest was read — which is no `EntryRow`.
 Only the rows that act where the launcher would stand in front of the result —
-opening it either way, and the shortcut — close the launcher.
+opening it either way, and the shortcut — close the launcher. A favourite's
+own rows may be chosen with the menu kept up ([menus](./menus.md)): once the
+launcher's record reaches the bar the session restates the menu from
+`Taskbar::entry_model`, so *Move Earlier* can be chosen again until there is
+nowhere earlier to go.
 
 ### Motion
 
@@ -835,8 +839,9 @@ and for as long as the gap lasts the bar shows a slot that opens no menu.
 
 **An application on the bar outlives its windows.** Closing the last one puts
 it away rather than ending it: the slot stays, and *Quit* on that slot's menu
-is what ends the process. So a slot must be able to produce a window, which
-is what the declaration's `AppBarClick` says:
+is what ends the process. Every application with a slot is written so
+(`plans/APPS.md` §10.2). So a slot must be able to produce a window, which is
+what the declaration's `AppBarClick` says:
 
 - `AppBarClick::Open` — every click is the application's. The session relays
   an `AppBarDefault` event and does nothing else, one click one actor. (The

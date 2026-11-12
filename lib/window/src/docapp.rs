@@ -337,7 +337,10 @@ pub trait DocumentView: SavedDocument {
         None
     }
 
-    /// The rows of the window's `kind` menu.
+    /// The rows of the window's `kind` menu as the view stands.
+    ///
+    /// A row id means one thing in every statement of a menu: one chosen
+    /// just before the menu was restated is answered with the id it had.
     fn menu(&self, kind: Self::MenuKind) -> AppMenu;
 
     /// The user asked to close the window: answer [`Request::Close`], or

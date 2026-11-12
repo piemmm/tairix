@@ -446,7 +446,11 @@ impl ComboBox {
                 .menu
                 .on_pointer(event, popup_bounds, scale, theme, damage)
             {
-                Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
+                Some(
+                    MenuAction::Activated { index }
+                    | MenuAction::AlternateActivated { index }
+                    | MenuAction::OpenSubmenu { index },
+                ) => {
                     return Some(self.take_choice(index, field_bounds, popup_bounds, damage));
                 }
                 Some(MenuAction::Dismissed) => return self.close(popup_bounds, damage),
@@ -502,9 +506,11 @@ impl ComboBox {
                 }
             }
             return match self.menu.on_key(key, popup_bounds, scale, theme, damage) {
-                Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
-                    Some(self.take_choice(index, field_bounds, popup_bounds, damage))
-                }
+                Some(
+                    MenuAction::Activated { index }
+                    | MenuAction::AlternateActivated { index }
+                    | MenuAction::OpenSubmenu { index },
+                ) => Some(self.take_choice(index, field_bounds, popup_bounds, damage)),
                 Some(MenuAction::Dismissed) => self.close(popup_bounds, damage),
                 None => None,
             };

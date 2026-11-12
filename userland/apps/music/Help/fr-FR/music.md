@@ -35,6 +35,10 @@ propres étiquettes.
 Un fichier que le lecteur ne peut pas lire est écarté, avec sa raison sur la
 ligne d'état.
 
+Fermer la fenêtre laisse le lecteur dans la barre d'icônes, où il continue de
+jouer : un clic sur son icône rouvre la fenêtre, et Quitter dans son menu met
+fin au lecteur.
+
 * `Space` — lire ou mettre en pause
 * `Enter` — jouer la piste sélectionnée
 * `Left` / `Right` — dix secondes en arrière ou en avant
@@ -55,6 +59,6 @@ ligne d'état.
 
 ## EXIT STATUS
 
-Zéro une fois la fenêtre fermée ou Quitter choisi. Non nul lorsque le canal de
-fenêtre, la zone d'image partagée ou la session du bureau a été refusé ; la
-raison est donnée sur l'erreur standard.
+Zéro une fois Quitter choisi dans son menu de la barre d'icônes. Non nul lorsque
+le canal de fenêtre, la zone d'image partagée ou la session du bureau a été
+refusé ; la raison est donnée sur l'erreur standard.

@@ -173,7 +173,8 @@ mod program {
     }
 
     /// The rows between the convention's fixed ends: a new game, the three
-    /// boards as a radio group, and the question-mark setting as a tick.
+    /// boards as a radio group, and the question-mark setting as a tick. Each
+    /// acts on the board in place, so may be chosen with the menu kept up.
     fn menu_rows(game: &Game) -> Option<alloc::vec::Vec<AppMenuRow>> {
         let item =
             |id: u16, label: &str, symbol: AppMenuSymbol, shortcut: &str| -> Option<AppMenuItem> {
@@ -183,7 +184,8 @@ mod program {
                         AppMenuLabel::new(label).ok()?,
                         symbol,
                     )
-                    .with_shortcut(AppMenuShortcut::new(shortcut).ok()?),
+                    .with_shortcut(AppMenuShortcut::new(shortcut).ok()?)
+                    .repeatable(),
                 )
             };
         let mut rows = alloc::vec![
@@ -220,7 +222,8 @@ mod program {
                 AppMenuLabel::new("Question marks").ok()?,
                 AppMenuSymbol::QuestionMarks,
             )
-            .with_mark(mark),
+            .with_mark(mark)
+            .repeatable(),
         ));
         Some(rows)
     }
@@ -524,6 +527,7 @@ mod program {
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarEntered { .. }
             | WindowEvent::MenuClosed { .. }
+            | WindowEvent::MenuChosen { .. }
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
@@ -536,6 +540,7 @@ mod program {
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::Shown { .. }
             | WindowEvent::Scrolled { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }

@@ -1,9 +1,9 @@
 //! A touchpad: pointer motion, taps, its buttons, and two-finger gestures.
 
-use tairix_abi::input::PointerButtonCode;
 use tairix_abi::touch::TouchButtons;
 use tairix_input::PointerButton;
 
+use crate::buttons::{DeviceButtons, Edges};
 use crate::fingers::{Fingers, Um};
 use crate::two::{ScrollRate, Two};
 use crate::{Gesture, TouchPress, TouchSettings};
@@ -156,22 +156,13 @@ fn pixel(um: i64, gain: i64, carry: &mut i64) -> i32 {
     i32::try_from(whole).unwrap_or(if whole < 0 { i32::MIN } else { i32::MAX })
 }
 
-/// The physical button bits, in the order their edges are read.
-const BUTTONS: [(u8, PointerButtonCode); 3] = [
-    (TouchButtons::PRIMARY, PointerButtonCode::Primary),
-    (TouchButtons::SECONDARY, PointerButtonCode::Secondary),
-    (TouchButtons::MIDDLE, PointerButtonCode::Middle),
-];
-
 /// A touchpad's recogniser.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Pad {
     clickpad: bool,
     tap: Tap,
     two: Two,
-    buttons: TouchButtons,
-    /// The press each of the surface's buttons made, in [`BUTTONS`] order.
-    pressed: [Option<TouchPress>; 3],
+    buttons: DeviceButtons,
     /// Finger motion a possible tap has held back.
     withheld: Um,
     glide: Glide,
@@ -183,8 +174,7 @@ impl Pad {
             clickpad,
             tap: Tap::Idle,
             two: Two::Off,
-            buttons: TouchButtons::NONE,
-            pressed: [None; 3],
+            buttons: DeviceButtons::new(),
             withheld: Um::new(0, 0),
             glide: Glide::new(),
         }
@@ -198,10 +188,8 @@ impl Pad {
         settings: TouchSettings,
         out: &mut dyn FnMut(Gesture),
     ) {
-        let rising = buttons.bits() & !self.buttons.bits();
-        let falling = self.buttons.bits() & !buttons.bits();
-        self.buttons = buttons;
-        let held = buttons.bits() != 0;
+        let edges = self.buttons.adopt(buttons);
+        let held = self.buttons.any_held();
         let rate = ScrollRate {
             units_per_mm: SCROLL_UNITS_PER_MM,
             natural: settings.natural_scroll,
@@ -213,9 +201,9 @@ impl Pad {
                 false
             }
         };
-        self.follow_tap(fingers, now_ns, settings, rising != 0 || decided, out);
+        self.follow_tap(fingers, now_ns, settings, edges.pressed() || decided, out);
         self.move_pointer(fingers, held, now_ns, settings, out);
-        self.press(fingers.count(), rising, falling, out);
+        self.press(fingers.count(), edges, out);
     }
 
     fn follow_tap(
@@ -303,7 +291,7 @@ impl Pad {
     fn begin(&self, count: usize, now_ns: u64, settings: TouchSettings, disqualified: bool) -> Tap {
         if settings.tap_to_click
             && !disqualified
-            && self.buttons == TouchButtons::NONE
+            && !self.buttons.any_held()
             && count <= TAP_FINGERS_MAX
         {
             Tap::Possible {
@@ -384,32 +372,25 @@ impl Pad {
         }
     }
 
-    /// The surface's own buttons: releases first, then presses. A clickpad's
-    /// press is the button its fingers count.
-    fn press(&mut self, count: usize, rising: u8, falling: u8, out: &mut dyn FnMut(Gesture)) {
-        for (index, (bit, _)) in BUTTONS.iter().enumerate() {
-            if falling & bit != 0 {
-                if let Some(press) = self.pressed[index].take() {
-                    out(Gesture::Released(press));
+    /// The surface's own buttons. A clickpad's press is the button its
+    /// fingers count.
+    fn press(&mut self, count: usize, edges: Edges, out: &mut dyn FnMut(Gesture)) {
+        let clickpad = self.clickpad;
+        self.buttons.report(
+            edges,
+            |bit, code| {
+                if clickpad && bit == TouchButtons::PRIMARY {
+                    TouchPress::Fingers(match count {
+                        2 => PointerButton::Secondary,
+                        3 => PointerButton::Middle,
+                        _ => PointerButton::Primary,
+                    })
+                } else {
+                    TouchPress::Device(code)
                 }
-            }
-        }
-        for (index, &(bit, code)) in BUTTONS.iter().enumerate() {
-            if rising & bit == 0 {
-                continue;
-            }
-            let press = if self.clickpad && bit == TouchButtons::PRIMARY {
-                TouchPress::Fingers(match count {
-                    2 => PointerButton::Secondary,
-                    3 => PointerButton::Middle,
-                    _ => PointerButton::Primary,
-                })
-            } else {
-                TouchPress::Device(code)
-            };
-            self.pressed[index] = Some(press);
-            out(Gesture::Pressed(press));
-        }
+            },
+            out,
+        );
     }
 
     pub const fn deadline_ns(&self) -> Option<u64> {
@@ -434,13 +415,11 @@ impl Pad {
         if self.tap.holds_press() {
             out(Gesture::Released(PRIMARY));
         }
-        for press in self.pressed.iter_mut().filter_map(Option::take) {
-            out(Gesture::Released(press));
-        }
+        self.buttons.end(out);
         *self = Self::new(self.clickpad);
     }
 
     pub fn is_idle(&self) -> bool {
-        self.tap == Tap::Idle && self.two.is_off() && self.pressed.iter().all(Option::is_none)
+        self.tap == Tap::Idle && self.two.is_off() && self.buttons.is_idle()
     }
 }

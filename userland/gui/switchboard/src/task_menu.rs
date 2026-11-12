@@ -89,6 +89,15 @@ pub fn task_menu(task: &TaskSummary) -> Result<AppMenu, Errno> {
         if control == TaskControl::ForceQuit {
             item = item.with_role(AppMenuRole::Destructive);
         }
+        // Switching to the task's window or revealing it takes the pointer
+        // elsewhere, and quitting it ends the menu's subject; the rest act in
+        // place.
+        if matches!(
+            control,
+            TaskControl::Pause | TaskControl::Resume | TaskControl::LowerPriority
+        ) {
+            item = item.repeatable();
+        }
         if let Err(refusal) = task.authority.check(control) {
             item = item
                 .disabled()
