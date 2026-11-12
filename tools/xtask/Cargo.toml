@@ -417,6 +417,10 @@ tairix-raster = { path = "../../lib/raster", version = "=0.0.0" }
 # The pinned shader set, each module built from its Rust source and held to
 # the bytes committed beside it.
 tairix-shaders = { path = "../../lib/shaders", version = "=0.0.0" }
+# The BBC Micro emulator: its CPU is held to the external conformance suite
+# through the crate's own vector runner, so the sample its tests replay and
+# the full suite are judged by one definition.
+tairix-beeb = { path = "../../userland/apps/beeb", version = "=0.0.0" }
 # The desktop's own SVG decoder. A shipped vector master is validated through
 # exactly the decoder the desktop will draw it with, and the icon gate reads
 # the authored design box from it: the decoder letter-boxes a rectangular

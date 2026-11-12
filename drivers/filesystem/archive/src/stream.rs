@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 use tairix_abi::DriverError;
 use tairix_compress::bzip2;
 use tairix_compress::deflate::{Deflate, Flush};
-use tairix_compress::inflate::{Checkpoint, Inflater, WINDOW_SIZE};
-use tairix_fsprobe::archive::{GzipHeader, GZIP_HEADER_MAX};
+use tairix_compress::gzip::{self, Header as GzipHeader, HEADER_MAX as GZIP_HEADER_MAX};
+use tairix_compress::inflate::{Checkpoint, WINDOW_SIZE};
 use tairix_fsserve::VolumeAccess;
 
 use crate::data::Heap;
@@ -156,22 +156,18 @@ impl Point {
 
 /// Where a gzip reader stands in its member.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Member {
+enum Stage {
     /// Before a member's header, or past the last.
     Header,
     /// In a member's deflate stream.
     Body,
 }
 
-/// A gzip reader's decoding.
+/// A gzip reader's decoding: the member's body, held to its trailer where
+/// it was decoded from its start.
 struct Gzip {
-    inflater: Heap<Inflater>,
-    member: Member,
-    /// The member's CRC and length so far, held to its trailer where the
-    /// member was decoded from its start.
-    crc: tairix_crc32::Crc32,
-    len: u64,
-    checked: bool,
+    member: Heap<gzip::Member>,
+    stage: Stage,
 }
 
 /// A bzip2 reader's decoding.
@@ -394,24 +390,17 @@ fn resume<A: VolumeAccess>(
     let (decoding, at) = match (compression, point) {
         (Compression::Gzip, Point::Head { at, .. }) => (
             Decoding::Gzip(Gzip {
-                inflater: Heap::new(Inflater::new())?,
-                member: Member::Header,
-                crc: tairix_crc32::Crc32::new(),
-                len: 0,
-                checked: true,
+                member: Heap::new(gzip::Member::new())?,
+                stage: Stage::Header,
             }),
             *at,
         ),
         (Compression::Gzip, Point::Inside { at, checkpoint, .. }) => {
-            let mut inflater = Heap::new(Inflater::new())?;
-            inflater.get()?.resume(checkpoint.get_ref()?);
+            let mut member = Heap::new(gzip::Member::new())?;
+            member.get()?.resume(checkpoint.get_ref()?);
             let gzip = Gzip {
-                inflater,
-                member: Member::Body,
-                crc: tairix_crc32::Crc32::new(),
-                len: 0,
-                // The member's start lies behind the checkpoint.
-                checked: false,
+                member,
+                stage: Stage::Body,
             };
             (Decoding::Gzip(gzip), *at)
         }
@@ -522,7 +511,7 @@ fn gzip_step<A: VolumeAccess>(
     noted: &mut Option<Point>,
 ) -> Result<usize, DriverError> {
     loop {
-        if gzip.member == Member::Header {
+        if gzip.stage == Stage::Header {
             let at = input.position();
             if at >= regions.len() {
                 return Ok(0);
@@ -532,17 +521,14 @@ fn gzip_step<A: VolumeAccess>(
                 return Ok(0);
             };
             input.seek(at + header.len as u64);
-            gzip.inflater.get()?.reset();
-            gzip.crc = tairix_crc32::Crc32::new();
-            gzip.len = 0;
-            gzip.checked = true;
-            gzip.member = Member::Body;
+            gzip.member.get()?.begin();
+            gzip.stage = Stage::Body;
             *noted = Some(Point::Head { decoded, at });
             continue;
         }
-        let inflater = gzip.inflater.get()?;
-        if inflater.is_finished() {
-            let mut trailer = [0u8; 8];
+        let member = gzip.member.get()?;
+        if member.is_finished() {
+            let mut trailer = [0u8; gzip::TRAILER_LEN];
             let mut got = 0;
             while got < trailer.len() {
                 let src = input.fill(regions)?;
@@ -554,20 +540,15 @@ fn gzip_step<A: VolumeAccess>(
                 input.consume(take);
                 got += take;
             }
-            // The member's CRC-32, then its length modulo 2^32.
-            let sum = core::mem::take(&mut gzip.crc).finish();
-            if gzip.checked
-                && (trailer[..4] != sum.to_le_bytes()
-                    || trailer[4..] != gzip.len.to_le_bytes()[..4])
-            {
+            if !member.verify(&trailer) {
                 return Err(DriverError::MediumError);
             }
-            gzip.member = Member::Header;
+            gzip.stage = Stage::Header;
             continue;
         }
-        if wants_point && noted.is_none() && inflater.at_block_start() {
+        if wants_point && noted.is_none() && member.at_block_start() {
             let mut checkpoint = Heap::new(Checkpoint::default())?;
-            if inflater.checkpoint(checkpoint.get()?) {
+            if member.checkpoint(checkpoint.get()?) {
                 *noted = Some(Point::Inside {
                     decoded,
                     at: input.position(),
@@ -580,17 +561,14 @@ fn gzip_step<A: VolumeAccess>(
             return Err(DriverError::MediumError);
         }
         let progress = if wants_point {
-            inflater.inflate_by_block(src, out)
+            member.inflate_by_block(src, out)
         } else {
-            inflater.inflate(src, out)
+            member.inflate(src, out)
         }
         .map_err(|_| DriverError::MediumError)?;
         input.consume(progress.consumed);
-        let produced = &out[..progress.produced];
-        gzip.crc.update(produced);
-        gzip.len += produced.len() as u64;
-        if !produced.is_empty() {
-            return Ok(produced.len());
+        if progress.produced > 0 {
+            return Ok(progress.produced);
         }
     }
 }

@@ -43,7 +43,7 @@
 //! before allocation; malformed compressed data returns an error, never
 //! panic*).
 //!
-//! # Foreign-format interoperability: [`deflate`], [`inflate`], and [`zlib`]
+//! # Foreign-format interoperability: [`deflate`], [`inflate`], [`zlib`] and [`gzip`]
 //!
 //! The codec above is TAIRiX's own, and is what TAIRiX-native storage uses.
 //! [`deflate`]/[`inflate`] (RFC 1951) and [`zlib`] (RFC 1950, DEFLATE's
@@ -51,14 +51,17 @@
 //! PNG decoder reads the `IDAT` stream a foreign encoder produced, and
 //! `zlib@openssh.com` needs TAIRiX to produce one a foreign decoder reads.
 //! Neither replaces the RLZ codec; they exist so TAIRiX can speak to
-//! software that was never going to speak anything else.
+//! software that was never going to speak anything else. [`gzip`] (RFC 1952)
+//! reads the framing files carry DEFLATE in: a member's header, then its body
+//! held to the CRC-32 and length its trailer records.
 //!
 //! Each direction has two shapes. A whole stream, present in one buffer,
 //! goes through a plain function ([`inflate::inflate_into`],
-//! [`zlib::decompress_into`]). A stream that arrives or leaves in pieces —
-//! one protocol packet at a time, each still back-referencing the ones
-//! before it — goes through a caller-owned state value ([`deflate::Deflate`],
-//! [`inflate::Inflater`], [`zlib::Encoder`], [`zlib::Decoder`]). Those carry
+//! [`zlib::decompress_into`], [`gzip::decompress`]). A stream that arrives or
+//! leaves in pieces — one protocol packet at a time, each still
+//! back-referencing the ones before it — goes through a caller-owned state
+//! value ([`deflate::Deflate`], [`inflate::Inflater`], [`zlib::Encoder`],
+//! [`zlib::Decoder`], [`gzip::Member`]). Those carry
 //! a full 32 KiB window and, on the encode side, a match finder, so they are
 //! tens to hundreds of kilobytes: heap-own one, do not put it on a stack.
 //!
@@ -81,6 +84,7 @@
 pub mod arc;
 pub mod bzip2;
 pub mod deflate;
+pub mod gzip;
 pub mod inflate;
 pub mod zlib;
 
@@ -121,6 +125,10 @@ const NIBBLE_MAX: usize = 15;
 
 /// 0xFF continuation byte used to extend a length past a nibble.
 const EXT_FULL: u8 = 0xFF;
+
+/// The most output one byte of a frame's body can produce: a match's
+/// length-extension byte adds at most 255, and every other byte less.
+pub const MAX_EXPANSION: usize = 255;
 
 /// Log2 of the match-finder hash table. A 4096-entry table is a few
 /// kilobytes of stack and is ample for the kilobyte-scale records `ARXFS`
@@ -338,26 +346,43 @@ pub fn compress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     Ok(out)
 }
 
+/// The length the LZ frame `src` declares it decompresses to, refused where
+/// the frame's own bytes could not produce it, so a caller can size the
+/// destination before allocating it.
+///
+/// # Errors
+///
+/// [`Error::Corrupt`] for a bad magic, a short header, or a declared length
+/// beyond [`MAX_EXPANSION`] bytes for every byte after the header.
+pub fn decompressed_len(src: &[u8]) -> Result<usize, Error> {
+    if src.len() < HEADER_LEN || src[0..4] != MAGIC {
+        return Err(Error::Corrupt);
+    }
+    let declared = to_usize(read_u32_le(src, 4));
+    if declared > (src.len() - HEADER_LEN).saturating_mul(MAX_EXPANSION) {
+        return Err(Error::Corrupt);
+    }
+    Ok(declared)
+}
+
 /// Decompress the LZ frame in `src` into `dst`, returning the number of bytes
 /// written.
 ///
-/// The declared uncompressed length is read from the frame header and checked
-/// against `dst.len()` before any output is produced, so memory is bounded up
-/// front (`docs/src/filesystem/arxfs-spec.md` §10). Every literal copy,
+/// The declared uncompressed length ([`decompressed_len`]) is checked against
+/// `dst.len()` before any output is produced, so memory is bounded up front
+/// (`docs/src/filesystem/arxfs-spec.md` §10). Every literal copy,
 /// back-reference offset, and match length is validated against the frame and
-/// the bytes produced so far.
+/// the bytes produced so far, and `src` must end with the frame's closing
+/// literal-only sequence, exactly as [`compress`] writes it.
 ///
 /// # Errors
 ///
 /// * [`Error::TooSmall`] if `dst` is smaller than the declared output length.
 /// * [`Error::Corrupt`] for a bad magic, a truncated stream, an
-///   out-of-range back-reference, or a frame that does not produce exactly
-///   the declared number of bytes.
+///   out-of-range back-reference, a frame that does not produce exactly
+///   the declared number of bytes, or bytes after its closing sequence.
 pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
-    if src.len() < HEADER_LEN || src[0..4] != MAGIC {
-        return Err(Error::Corrupt);
-    }
-    let target = to_usize(read_u32_le(src, 4));
+    let target = decompressed_len(src)?;
     if target > dst.len() {
         return Err(Error::TooSmall);
     }
@@ -365,7 +390,7 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     let mut ip = HEADER_LEN;
     let mut op = 0usize;
 
-    while op < target {
+    loop {
         let token = *src.get(ip).ok_or(Error::Corrupt)?;
         ip += 1;
         let mut lit_len = usize::from(token >> 4);
@@ -388,8 +413,11 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
         op = lit_end_dst;
 
         if op == target {
-            // Final sequence: literals only, no trailing back-reference.
-            break;
+            // The closing sequence: literals only, and the frame ends with it.
+            if match_nibble != 0 || ip != src.len() {
+                return Err(Error::Corrupt);
+            }
+            return Ok(op);
         }
 
         // A back-reference must follow: a 2-byte offset then the match length.
@@ -420,9 +448,4 @@ pub fn decompress(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
             from += 1;
         }
     }
-
-    if op != target {
-        return Err(Error::Corrupt);
-    }
-    Ok(op)
 }

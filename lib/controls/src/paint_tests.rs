@@ -1533,3 +1533,15 @@ fn a_remembered_measurement_is_taken_again_once_its_text_lands() {
         "another key is its own"
     );
 }
+
+/// The regression: `Debug` showed the memo and the process-wide generation it
+/// was taken in, so two owners alike in every drawn respect printed apart
+/// whenever another thread landed text between their layouts.
+#[test]
+fn a_remembered_measurement_is_invisible_to_equality_and_debug() {
+    let held = crate::paint::Measured::<u32>::default();
+    let empty = crate::paint::Measured::<u32>::default();
+    assert_eq!(held.get_or(7, || 12), 12);
+    assert_eq!(held, empty);
+    assert_eq!(alloc::format!("{held:?}"), alloc::format!("{empty:?}"));
+}

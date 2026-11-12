@@ -14,7 +14,7 @@ use tairix_bytedev::ByteDevice;
 
 use super::{
     arc_entry_holds, arcfs_header, bzip2_level, rar5_vint, rar_version, recognise,
-    tar_header_holds, tar_number, GzipHeader, RarVersion, ZipEnd, ARCFS_HEADER_LEN, ARCFS_MAGIC,
+    tar_header_holds, tar_number, RarVersion, ZipEnd, ARCFS_HEADER_LEN, ARCFS_MAGIC,
     RAR4_SIGNATURE, RAR5_SIGNATURE, TAR_BLOCK,
 };
 
@@ -306,31 +306,13 @@ fn a_tar_number_is_octal_or_base_256() {
 }
 
 #[test]
-fn a_gzip_header_is_read_field_by_field() {
+fn a_gzip_member_is_recognised_by_its_header() {
     let mut member = vec![0x1f, 0x8b, 8, 0x08, 1, 2, 3, 4, 0, 3];
     member.extend_from_slice(b"report.txt\0");
-    let header = GzipHeader::parse(&member).unwrap();
-    assert_eq!(header.len, member.len());
-    assert_eq!(&member[header.name.clone().unwrap()], b"report.txt");
-    assert_eq!(header.mtime, 0x0403_0201);
     member.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(recognised(&member), Some(VolumeFsType::Gzip));
-    let mut reserved = member.clone();
-    reserved[3] |= 0x20;
-    assert_eq!(GzipHeader::parse(&reserved), None);
-    let unterminated = [0x1f, 0x8b, 8, 0x08, 0, 0, 0, 0, 0, 3, b'a'];
-    assert_eq!(GzipHeader::parse(&unterminated), None);
-}
-
-#[test]
-fn a_gzip_header_checksum_must_hold() {
-    let mut member = vec![0x1f, 0x8b, 8, 0x02, 0, 0, 0, 0, 0, 255];
-    let crc = tairix_crc32::checksum(&member) & 0xFFFF;
-    member.extend_from_slice(&(crc as u16).to_le_bytes());
-    assert_eq!(GzipHeader::parse(&member).unwrap().len, 12);
-    let at = member.len() - 1;
-    member[at] ^= 1;
-    assert_eq!(GzipHeader::parse(&member), None);
+    member[3] |= 0x20;
+    assert_eq!(recognised(&member), None);
 }
 
 #[test]

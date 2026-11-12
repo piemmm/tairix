@@ -2,10 +2,12 @@
 
 The one home for lossless compression in TAIRiX. Its codecs do not compete:
 the first-party `RLZ1` codec is what TAIRiX's own storage uses, and the
-foreign codecs — RFC 1951 / RFC 1950 DEFLATE and zlib, bzip2, and the ARC
-family's methods — are what other software already speaks.
+foreign codecs — RFC 1951 / RFC 1950 DEFLATE and zlib, the RFC 1952 gzip
+member read over DEFLATE, bzip2, and the ARC family's methods — are what other
+software already speaks.
 
-The crate depends on nothing — not even `alloc` — and allocates nothing. Its
+The crate needs no `alloc` and allocates nothing, and its one dependency,
+`lib/crc32`, the checksum gzip's trailer is held to, needs neither. Its
 consumers reach from the kernel heap's compressed-page store down through a
 filesystem driver to a desktop image decoder, so a heap requirement would be
 one imposed on all of them by the least constrained.
@@ -16,7 +18,10 @@ one imposed on all of them by the least constrained.
 dependency and ARXFS needs a low-CPU codec on its record path
 (`docs/src/filesystem/arxfs-spec.md` §10). It is a single greedy LZ77 pass
 over a small hash table, with no entropy stage: fast and predictable rather
-than dense.
+than dense. A frame decodes only if it ends exactly where its encoder ended
+it, and `decompressed_len` refuses a declared length its bytes could not
+expand to, so a decoder of a stranger's frame sizes its buffer before
+allocating it.
 
 DEFLATE exists because two foreign contracts are written in it and neither
 is negotiable. A PNG's `IDAT` stream is zlib-wrapped DEFLATE, so `lib/image`
@@ -37,8 +42,8 @@ would.
 
 | Shape | Entry point | For |
 |---|---|---|
-| Whole stream | `compress` / `decompress`, `inflate::inflate_into`, `inflate::inflate_prefix`, `zlib::decompress_into` | data that is present in one buffer: a filesystem record, a PNG `IDAT`, the header of a compressed archive member |
-| Streaming | `deflate::Deflate`, `inflate::Inflater`, `zlib::Encoder`, `zlib::Decoder`, `bzip2::Decoder`, `bzip2::Encoder`, `arc::Decoder`, `arc::Encoder` | a conversation, one stream per direction flushed per message; or an archive member read from, or written to, the middle of a file larger than memory |
+| Whole stream | `compress` / `decompress` / `decompressed_len`, `inflate::inflate_into`, `inflate::inflate_prefix`, `zlib::decompress_into`, `gzip::Header::parse`, `gzip::decompress` | data that is present in one buffer: a filesystem record, a PNG `IDAT`, the header of a compressed archive member, a gzip stream of one member or several |
+| Streaming | `deflate::Deflate`, `inflate::Inflater`, `zlib::Encoder`, `zlib::Decoder`, `gzip::Member`, `bzip2::Decoder`, `bzip2::Encoder`, `arc::Decoder`, `arc::Encoder` | a conversation, one stream per direction flushed per message; or an archive member read from, or written to, the middle of a file larger than memory |
 
 A one-shot function cannot express what a protocol needs. `zlib@openssh.com`
 keeps a single zlib stream alive for the whole session and flushes it at each

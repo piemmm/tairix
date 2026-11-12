@@ -340,7 +340,10 @@ static SECONDARY_AFFINITY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// release word is non-zero **and** the target affinity is its own.
 #[no_mangle]
 #[used]
-#[link_section = ".data.secondary_release"]
+#[cfg_attr(
+    all(target_arch = "aarch64", target_os = "none"),
+    link_section = ".data.secondary_release"
+)]
 static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
 
 /// The `MPIDR_EL1` affinity (`Aff0`–`Aff2`, [`MPIDR_AFFINITY_MASK`]) of
@@ -370,7 +373,10 @@ static SECONDARY_KERNEL_RELEASE: AtomicU64 = AtomicU64::new(0);
 /// image's `.data` for the release word's reason.
 #[no_mangle]
 #[used]
-#[link_section = ".data.secondary_release"]
+#[cfg_attr(
+    all(target_arch = "aarch64", target_os = "none"),
+    link_section = ".data.secondary_release"
+)]
 static SECONDARY_KERNEL_RELEASE_TARGET: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The per-core release-gate predicate the `boot.s` park loop and the

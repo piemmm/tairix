@@ -419,8 +419,10 @@ fn atan2_at_the_origin_is_zero_not_a_nan() {
 
 /// fdlibm's kernels track a correctly rounded libm to within an ulp; the
 /// tangent, a quotient of two of them, `atan2`, the arctangent of a rounded
-/// quotient, and `sinh`, `cosh`, `tanh` and `atanh`, each one of those
-/// kernels and a further rounding or two, carry the more the module allows.
+/// quotient, and the hyperbolic functions, each one of those kernels and a
+/// further rounding or two, carry the more the module allows. A host's own
+/// inverse hyperbolic functions may be an ulp and a half out, so theirs are
+/// held to two, and [`QUOTED`] holds the points that showed it to the truth.
 #[test]
 fn the_transcendentals_track_a_correctly_rounded_libm() {
     tracks_the_host("sin", sin, f64::sin, (-40.0, 40.0, 0.000_97), 1);
@@ -454,8 +456,8 @@ fn the_transcendentals_track_a_correctly_rounded_libm() {
     tracks_the_host("sinh", sinh, f64::sinh, (-709.7, 709.7, 0.013), 2);
     tracks_the_host("cosh", cosh, f64::cosh, (-709.7, 709.7, 0.013), 2);
     tracks_the_host("tanh", tanh, f64::tanh, (-25.0, 25.0, 0.000_97), 2);
-    tracks_the_host("asinh", asinh, f64::asinh, (-1e3, 1e3, 0.000_97), 1);
-    tracks_the_host("acosh", acosh, f64::acosh, (1.0, 1e3, 0.000_97), 1);
+    tracks_the_host("asinh", asinh, f64::asinh, (-1e3, 1e3, 0.000_97), 2);
+    tracks_the_host("acosh", acosh, f64::acosh, (1.0, 1e3, 0.000_97), 2);
     // The host's `atanh` takes `ln_1p` of a sum that cancels for a negative
     // argument near -1, so it is held only on its accurate, positive half.
     let odd = |x: f64| f64::atanh(fabs(x)).copysign(x);
@@ -968,8 +970,10 @@ type QuotedPair = (fn(f64, f64) -> f64, (f64, f64), (f64, f64), f64);
 /// the inverse sine and cosine near ±1, where leading digits cancel, `exp2`
 /// where its fraction's product with `ln(2)` rounds, and the tangent beside
 /// its pole — with `exp2` where its error nears an ulp, a subnormal `log2`,
-/// and the three main branches of each of the inverse sine and cosine.
-const QUOTED: [Quoted; 24] = [
+/// the three main branches of each of the inverse sine and cosine, an `asinh`
+/// whose rounded argument carries it past an ulp, and an `acosh` where a host
+/// libm is an ulp and a half out.
+const QUOTED: [Quoted; 26] = [
     (
         log2,
         0.99,
@@ -1113,6 +1117,18 @@ const QUOTED: [Quoted; 24] = [
         5.319_372_648_326_541e255,
         (-2.133_485_385_753_704e18, 92.325_147_336_655_52),
         3.0,
+    ),
+    (
+        asinh,
+        -0.491_629_975_921_862,
+        (-0.473_712_944_027_579_63, -9.452_051_695_522_863e-18),
+        2.0,
+    ),
+    (
+        acosh,
+        1.401_579_999_999_965,
+        (0.868_625_452_983_623_8, -5.122_878_494_758_94e-17),
+        1.0,
     ),
 ];
 

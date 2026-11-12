@@ -1,0 +1,35 @@
+[package]
+name = "tairix-beeb"
+description = "TAIRiX beeb.app (plans/BEEB.md): a cycle-exact BBC Micro Model B, its disc, tape and snapshot formats, and the 6502 builder its clean-room ROMs are written with."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `no_std` + `alloc`, so the machine links unchanged into a freestanding
+# binary. The ROM sources and the conformance-vector runner are host-only; the
+# freestanding build never compiles them.
+[lib]
+name = "tairix_beeb"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# gzip and zlib, which UEF and CSW tape images are compressed with, and the
+# RLZ codec a snapshot's body is compressed with.
+tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The fingerprint a snapshot records each ROM by.
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+
+[dev-dependencies]
+# The CRC-32 a test's own gzip member is closed with.
+tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
+# The seeded PRNG and budgets the fuzz harnesses draw from.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

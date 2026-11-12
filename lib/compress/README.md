@@ -4,18 +4,25 @@ The single shared **compression codec** for TAIRiX (`AGENTS.md` §6, §16.4 —
 compression is a curated shared-library class). It holds the first-party
 `RLZ1` LZ77 codec TAIRiX's own storage uses, and the foreign codecs other
 software needs, each in both directions: RFC 1951 DEFLATE / RFC 1950 zlib,
-bzip2, and the ARC family's methods. PNG's `IDAT` stream (`lib/image`) is
-read with DEFLATE and SSH's `zlib@openssh.com` (`plans/SSH.md`) written with
-it; the archive driver (`drivers/filesystem/archive`) reads and writes gzip,
-bzip2, zip, Spark and ArcFS members with all three.
+bzip2, and the ARC family's methods; and RFC 1952 gzip's member framing, read
+over DEFLATE with its trailer's CRC-32 and length checked. PNG's `IDAT` stream
+(`lib/image`) is read with DEFLATE and SSH's `zlib@openssh.com`
+(`plans/SSH.md`) written with it; the archive driver
+(`drivers/filesystem/archive`) reads and writes gzip, bzip2, zip, Spark and
+ArcFS members with all three.
 
 - `compress(src, dst) -> Result<usize, Error>` — a single greedy LZ77 pass
   over a small hash table of recent 4-byte sequences. Writes into a
   caller-provided slice and returns the compressed length.
 - `decompress(src, dst) -> Result<usize, Error>` — a tight literal-copy /
   match-copy loop. The declared output length is bounds-checked against `dst`
-  before any byte is produced, and every back-reference is validated against
-  the bytes produced so far.
+  before any byte is produced, every back-reference is validated against
+  the bytes produced so far, and the frame must end exactly with its closing
+  literal-only sequence.
+- `decompressed_len(src) -> Result<usize, Error>` — the length a frame
+  declares, refused beyond `MAX_EXPANSION` (255) bytes for each byte after
+  its header, so a caller sizes its destination from a figure the frame's
+  own bytes bound before allocating it.
 - `max_compressed_len(input_len) -> usize` — a true upper bound on the
   compressed size, so a caller can size a scratch buffer that never provokes a
   spurious `Error::TooSmall`.
@@ -46,6 +53,11 @@ A stream that is present whole goes through a plain function:
   envelope: header validation (compression method, window size, header
   check, refusing a preset dictionary), the wrapped `inflate` body, and the
   trailing Adler-32 verified over exactly the bytes produced.
+- `gzip::Header::parse(bytes)` and `gzip::decompress(src, member, scratch,
+  sink)` — the RFC 1952 member: its header's fields and optional checksum,
+  then member after member, each body held to the CRC-32 and length its
+  trailer records and handed to `sink` as `scratch` fills. Trailing zero
+  padding ends the stream; anything else after a member must be another.
 
 A stream that arrives or leaves in pieces goes through a caller-owned state
 value, because a protocol keeps one stream per direction for a whole session
@@ -66,6 +78,9 @@ and flushes it per packet — later packets still back-reference earlier ones:
   each block so `checkpoint` can record one, `resume` stands there again,
   and `after_sync` records the block an encoder begins after `Flush::Sync`,
   so a reader seeks into a long stream without decoding it from the start.
+- `gzip::Member` — a member's body as an `Inflater` carries it, with the
+  CRC-32 and length its trailer is held to. A member resumed at a checkpoint
+  passes its trailer unchecked: what came before the checkpoint is unseen.
 
 The state values are large by nature: a decoder carries the 32 KiB history a
 back-reference may reach into (~34 KiB), and an encoder additionally carries
@@ -106,8 +121,8 @@ external code* — bars an external `zstd`/`lz4`/compression dependency. This is
 **not** the crypto carve-out (§2.12): cryptography uses audited `lib/crypto`
 primitives, but compression is ours.
 
-The crate has no dependencies and sits at the bottom of the §17.4 layering: it
-is depended on, never depends.
+Its one dependency is `lib/crc32`, the checksum gzip's trailer is held to,
+which depends on nothing.
 
 ## Stability tier
 
@@ -115,8 +130,8 @@ is depended on, never depends.
 (`docs/src/filesystem/arxfs-spec.md` §15.6, §18). It is `no_std`, performs no
 allocation (it works through caller-provided slices, caller-owned state
 values and workspace, and fixed-size internal tables, in every module), and
-has no dependencies. No `unsafe`,
-and no `unwrap`/`expect`/`panic!` in production paths: every entry point is
+depends only on `lib/crc32`. No `unsafe`, and no `unwrap`/`expect`/`panic!`
+in production paths: every entry point is
 `Result`-based and total, and malformed compressed input returns a typed
 error rather than panicking (`AGENTS.md` §2.9). A future on-disk format
 version may switch the codec globally; the `RLZ1` frame magic carries the

@@ -268,6 +268,7 @@
 - [Sapper](./desktop/sapper.md)
 - [Patience](./desktop/patience.md)
 - [Cinder](./desktop/cinder.md)
+- [BBC Micro](./desktop/beeb.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 
 # ABI

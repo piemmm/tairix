@@ -3057,6 +3057,9 @@ fn pump_applies_an_order_sensitive_stream_in_order() {
         shell.handle(moved(250, 250), comp, 0);
         shell.handle(PRIMARY_PRESS, comp, 0);
         shell.handle(PRIMARY_RELEASE, comp, 0);
+        // As another test's may: text landing between the two desktops'
+        // layouts tells them apart in nothing the desktop shows.
+        tairix_font::note_text_landed();
     }
     let window = windows[0];
 

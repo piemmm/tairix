@@ -635,8 +635,8 @@ tairix/
 │   │                    #   allocation-free ones are `lib/inline`.
 │   ├── colour/          # The sRGB colour: value, transfer, HSV/HSL, hex notation.
 │   ├── complete/        # Shared filename-completion engine.
-│   ├── compress/        # First-party LZ codec + the RFC 1951/1950 DEFLATE
-│   │                    #   and zlib codec foreign formats need.
+│   ├── compress/        # First-party LZ codec + the RFC 1951/1950/1952
+│   │                    #   DEFLATE, zlib and gzip codecs foreign formats need.
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── countryside/     # Countryside layout: holdings, ways, fields, boundaries, plots.
@@ -1746,6 +1746,7 @@ You are not exempt from any rule above. In addition:
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
     | The temporary work list from the Raspberry Pi 4 investigation: the USB host controller's serve loop never waiting (D1125), mass-storage medium detection, spin-up and deadlines, attached-volume names, removable-media ownership, DESK-21, owned dialog windows replacing in-window panels, and content-sized alerts | `plans/TEMPORARY.md` |
     | Screen capture: the desktop as the only capturer, the compositor's capture tap, the capture chords and bar, stills, the recorder component, VP8/WebM and Opus, desktop-sound monitor streams, and playing recordings back | `plans/CAPTURE.md` |
+    | The BBC Micro emulator (`beeb.app`): the cycle-exact 6502 and Model B devices, the sandboxed machine worker and its protocol, the clean-room MOS, BASIC and DFS ROMs and the Rust 6502 builder that emits them, the reference harness and its clean-room boundary, disc and tape media, snapshots, and the front end's pacing, key mapping and presentation | `plans/BEEB.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a

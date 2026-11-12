@@ -4,9 +4,10 @@
 //! An archive is a file, so it is read as its exact `len` bytes, wherever the
 //! device's last block runs past them, and nothing at or past `len` is read.
 //! The archive driver reads each format's opening structures through these
-//! same readers ([`ZipEnd`], [`tar_header_holds`], [`GzipHeader`],
-//! [`bzip2_level`], [`rar_version`], [`arcfs_header`], [`arc_entry_holds`]),
-//! so the probe and the driver never disagree about what an archive is.
+//! same readers ([`ZipEnd`], [`tar_header_holds`], [`bzip2_level`],
+//! [`rar_version`], [`arcfs_header`], [`arc_entry_holds`], and the gzip
+//! header `tairix_compress::gzip` reads), so the probe and the driver never
+//! disagree about what an archive is.
 //!
 //! Everything read is a stranger's file: every offset, length and count is
 //! checked before it is used, and anything short of a format's own signature
@@ -19,6 +20,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
+use tairix_compress::gzip;
 
 use crate::{content_identity, le_u16, le_u32, le_u64, ProbedVolume};
 
@@ -56,7 +58,7 @@ pub fn recognise<B: Block>(
         Some(VolumeFsType::ArcFs)
     } else if arc_entry_holds(&head, len) {
         Some(VolumeFsType::Spark)
-    } else if GzipHeader::parse(&head).is_some() && len >= GZIP_MIN_LEN {
+    } else if gzip::Header::parse(&head).is_some() && len >= gzip::MIN_LEN as u64 {
         Some(VolumeFsType::Gzip)
     } else if bzip2_level(&head).is_some() {
         Some(VolumeFsType::Bzip2)
@@ -349,86 +351,6 @@ pub fn tar_header_holds(block: &[u8; TAR_BLOCK]) -> bool {
                 )
             });
     stored == unsigned || i64::try_from(stored).is_ok_and(|stored| stored == signed)
-}
-
-/// gzip's magic bytes.
-pub const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
-/// The longest gzip header the probe and the driver read: a member whose
-/// extra field, name and comment run past it is not one this system opens.
-pub const GZIP_HEADER_MAX: usize = 1 << 17;
-/// The shortest gzip stream: a ten-byte header, an empty deflate block and
-/// the eight-byte trailer.
-const GZIP_MIN_LEN: u64 = 20;
-
-/// A gzip member's header (RFC 1952 §2.3).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GzipHeader {
-    /// Its length: where the compressed data starts.
-    pub len: usize,
-    /// The original file name it records, within the header's bytes, without
-    /// its terminating NUL.
-    pub name: Option<Range<usize>>,
-    /// The modification time it records, in seconds since the Unix epoch;
-    /// zero for none.
-    pub mtime: u32,
-}
-
-impl GzipHeader {
-    /// The header `bytes` open with, or `None` for bytes that open no gzip
-    /// member this system reads: no magic, a method other than deflate, a
-    /// reserved flag set, a field running past the bytes or
-    /// [`GZIP_HEADER_MAX`], or a header checksum that does not hold.
-    #[must_use]
-    pub fn parse(bytes: &[u8]) -> Option<Self> {
-        const FHCRC: u8 = 0x02;
-        const FEXTRA: u8 = 0x04;
-        const FNAME: u8 = 0x08;
-        const FCOMMENT: u8 = 0x10;
-        let bytes = bytes.get(..bytes.len().min(GZIP_HEADER_MAX))?;
-        if bytes.get(..2)? != GZIP_MAGIC || *bytes.get(2)? != 8 {
-            return None;
-        }
-        let flags = *bytes.get(3)?;
-        if flags & 0xE0 != 0 {
-            return None;
-        }
-        let mtime = le_u32(bytes, 4)?;
-        let mut at = 10usize;
-        if flags & FEXTRA != 0 {
-            let extra = usize::from(le_u16(bytes, at)?);
-            at = at.checked_add(2 + extra)?;
-        }
-        let terminated = |at: usize| -> Option<(Range<usize>, usize)> {
-            let field = bytes.get(at..)?;
-            let nul = field.iter().position(|&byte| byte == 0)?;
-            Some((at..at + nul, at + nul + 1))
-        };
-        let mut name = None;
-        if flags & FNAME != 0 {
-            let (field, next) = terminated(at)?;
-            name = Some(field);
-            at = next;
-        }
-        if flags & FCOMMENT != 0 {
-            at = terminated(at)?.1;
-        }
-        if flags & FHCRC != 0 {
-            let stored = le_u16(bytes, at)?;
-            let crc = tairix_crc32::checksum(bytes.get(..at)?);
-            if u32::from(stored) != crc & 0xFFFF {
-                return None;
-            }
-            at += 2;
-        }
-        if at > bytes.len() {
-            return None;
-        }
-        Some(Self {
-            len: at,
-            name,
-            mtime,
-        })
-    }
 }
 
 /// A bzip2 block's magic, the digits of pi.

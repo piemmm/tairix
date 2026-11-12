@@ -1228,6 +1228,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-beeb"
+version = "0.0.0"
+dependencies = [
+ "tairix-buildcfg",
+ "tairix-compress",
+ "tairix-crc32",
+ "tairix-crypto",
+ "tairix-fuzzseed",
+]
+
+[[package]]
 name = "tairix-bezier"
 version = "0.0.0"
 dependencies = [
@@ -1469,6 +1480,7 @@ dependencies = [
 name = "tairix-compress"
 version = "0.0.0"
 dependencies = [
+ "tairix-crc32",
  "tairix-fuzzseed",
 ]
 
@@ -2918,6 +2930,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-bytedev",
+ "tairix-compress",
  "tairix-crc32",
  "tairix-crypto",
  "tairix-fsmeta",
@@ -9623,6 +9636,7 @@ dependencies = [
  "tairix-appload",
  "tairix-appstore",
  "tairix-arch-api",
+ "tairix-beeb",
  "tairix-browse",
  "tairix-cinder",
  "tairix-colour",

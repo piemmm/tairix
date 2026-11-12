@@ -603,9 +603,16 @@ pub(crate) enum TextAlign {
 /// For text its owner never changes in place: a builder that changes it
 /// forgets what was remembered. A measurement taken before text drawn
 /// provisionally landed ([`tairix_font::text_generation`]) is taken again.
-/// It compares equal to any other, because nothing drawn reads it.
-#[derive(Clone, Debug)]
+/// Nothing drawn reads it, so it compares equal to any other and its `Debug`
+/// shows none of what it holds.
+#[derive(Clone)]
 pub struct Measured<K: Copy + Eq>(Cell<Option<(K, u64, u32)>>);
+
+impl<K: Copy + Eq> core::fmt::Debug for Measured<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Measured").finish_non_exhaustive()
+    }
+}
 
 // Written out because the derive would demand a default key, which an
 // empty memory never holds.

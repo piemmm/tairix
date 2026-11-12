@@ -11,7 +11,10 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{compress, decompress, max_compressed_len, Error, HEADER_LEN, MAGIC};
+use super::{
+    compress, decompress, decompressed_len, max_compressed_len, Error, HEADER_LEN, MAGIC,
+    MAX_EXPANSION,
+};
 
 /// Compress `input` into a generously sized scratch buffer and decompress it
 /// back, asserting the round-trip is the identity.
@@ -174,6 +177,47 @@ fn decompress_rejects_truncated_stream() {
     // length, so decompression must fail closed rather than panic.
     let mut out = vec![0u8; input.len()];
     assert_eq!(decompress(&packed[..n - 2], &mut out), Err(Error::Corrupt));
+}
+
+/// The regression: decoding stopped once the declared length was produced, so
+/// bytes after the closing sequence, or a closing token naming a match, were
+/// accepted as if the frame ended where its encoder ended it.
+#[test]
+fn decompress_requires_the_frame_to_end_with_its_closing_sequence() {
+    // Ending on literals, on a match then the empty closing token, and empty.
+    for input in [vec![0xDE, 0xAD, 0xBE, 0xEF], vec![0x55; 1000], Vec::new()] {
+        let mut packed = vec![0u8; max_compressed_len(input.len()) + 1];
+        let n = compress(&input, &mut packed).expect("compress");
+        let mut out = vec![0u8; input.len()];
+        assert_eq!(decompress(&packed[..n], &mut out), Ok(input.len()));
+        assert_eq!(
+            decompress(&packed[..=n], &mut out),
+            Err(Error::Corrupt),
+            "a byte after the closing sequence"
+        );
+    }
+    let mut empty = [0u8; HEADER_LEN + 1];
+    compress(&[], &mut empty).expect("compress");
+    empty[HEADER_LEN] = 0x01;
+    assert_eq!(
+        decompress(&empty, &mut [0u8; 0]),
+        Err(Error::Corrupt),
+        "a closing token naming a match"
+    );
+}
+
+#[test]
+fn decompressed_len_is_bounded_by_what_the_frame_can_expand_to() {
+    let input = vec![0x77u8; 100_000];
+    let mut packed = vec![0u8; max_compressed_len(input.len())];
+    let n = compress(&input, &mut packed).expect("compress");
+    assert_eq!(decompressed_len(&packed[..n]), Ok(input.len()));
+    let body = n - HEADER_LEN;
+    let mut inflated = packed[..n].to_vec();
+    let claim = u32::try_from(body * MAX_EXPANSION + 1).expect("small");
+    inflated[4..8].copy_from_slice(&claim.to_le_bytes());
+    assert_eq!(decompressed_len(&inflated), Err(Error::Corrupt));
+    assert_eq!(decompressed_len(&packed[..3]), Err(Error::Corrupt));
 }
 
 #[test]

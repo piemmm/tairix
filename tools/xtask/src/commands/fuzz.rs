@@ -431,6 +431,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-compress",
+        test: "fuzz_gzip",
+        description: "gzip member decode (untrusted header, deflate body, CRC-32 and length trailer, member walk)",
+    },
+    Target {
+        package: "tairix-compress",
         test: "fuzz_bzip2",
         description: "bzip2 decode (untrusted blocks, tables, selectors) + round trip + block resume",
     },
@@ -501,6 +506,18 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_riscos",
         description:
             "RISC OS application !Boot scan and sprite names (untrusted Obey text from a browsed volume)",
+    },
+    Target {
+        package: "tairix-beeb",
+        test: "fuzz_media",
+        description:
+            "BBC Micro disc and tape image decode (untrusted SSD/DSD images, UEF chunks, CSW pulses stored or zlib-compressed, gzip members) + disc and UEF round trips",
+    },
+    Target {
+        package: "tairix-beeb",
+        test: "fuzz_snapshot",
+        description:
+            "BBC Micro snapshot restore (untrusted container, sections, every device's fields and times) + hostile guest code driving every device",
     },
     Target {
         package: "tairix-image",
@@ -1121,6 +1138,16 @@ mod tests {
     }
 
     #[test]
+    fn beeb_harnesses_are_registered() {
+        for target in ["fuzz_media", "fuzz_snapshot"] {
+            let opts = parse(&argv(&["--target", target])).expect("flag parses");
+            let chosen = selected(&opts).expect("known target");
+            assert_eq!(chosen.len(), 1);
+            assert_eq!(chosen[0].package, "tairix-beeb");
+        }
+    }
+
+    #[test]
     fn compress_decode_harness_is_registered() {
         let opts = parse(&argv(&["--target", "fuzz_compress"])).expect("flag parses");
         let chosen = selected(&opts).expect("known target");
@@ -1130,7 +1157,7 @@ mod tests {
 
     #[test]
     fn deflate_harnesses_are_registered() {
-        for target in ["fuzz_inflate", "fuzz_zlib"] {
+        for target in ["fuzz_inflate", "fuzz_zlib", "fuzz_gzip"] {
             let opts = parse(&argv(&["--target", target])).expect("flag parses");
             let chosen = selected(&opts).expect("known target");
             assert_eq!(chosen.len(), 1);

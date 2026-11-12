@@ -16,6 +16,7 @@ use crate::{elapsed_line, output_or_reason, Context, LONG_BUILD_COMMAND_TIMEOUT}
 
 mod abi_check;
 mod artsheet;
+mod beeb;
 mod bench;
 mod board_check;
 mod c_header;
@@ -81,6 +82,7 @@ pub enum Command {
     Artsheet,
     Icons,
     Devids,
+    Beeb,
     Unicode,
     Spirv,
     Shaders,
@@ -128,6 +130,7 @@ impl Command {
         Command::Artsheet,
         Command::Icons,
         Command::Devids,
+        Command::Beeb,
         Command::Unicode,
         Command::Spirv,
         Command::Shaders,
@@ -174,6 +177,7 @@ impl Command {
             "artsheet" => Command::Artsheet,
             "icons" => Command::Icons,
             "devids" => Command::Devids,
+            "beeb" => Command::Beeb,
             "unicode" => Command::Unicode,
             "spirv" => Command::Spirv,
             "shaders" => Command::Shaders,
@@ -222,6 +226,7 @@ impl Command {
             Command::Artsheet => "artsheet",
             Command::Icons => "icons",
             Command::Devids => "devids",
+            Command::Beeb => "beeb",
             Command::Unicode => "unicode",
             Command::Spirv => "spirv",
             Command::Shaders => "shaders",
@@ -283,6 +288,11 @@ impl Command {
             Command::Devids => {
                 "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
                  `--fetch` to import upstream; developer-run only)."
+            }
+            Command::Beeb => {
+                "Hold the BBC Micro emulator's CPU to the SingleStepTests suite \
+                 (`--vectors <dir>`, `--write-sample` to refresh the committed sample; \
+                 developer-run only)."
             }
             Command::Unicode => {
                 "Verify the Unicode property tables against the pinned UCD snapshot \
@@ -364,6 +374,7 @@ impl Command {
             Command::Artsheet => run_artsheet(ctx, args),
             Command::Icons => icons::run(ctx, args),
             Command::Devids => devids::run(ctx, args),
+            Command::Beeb => beeb::run(ctx, args),
             Command::Unicode => unicode::run(ctx, args),
             Command::Spirv => spirv::run(ctx, args),
             Command::Shaders => shaders::run(ctx, args),

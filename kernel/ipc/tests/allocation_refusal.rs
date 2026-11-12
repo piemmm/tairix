@@ -4,7 +4,8 @@
 
 #![cfg(not(loom))]
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use tairix_abi::ipc::PortName;
 use tairix_abi::{Errno, LimitKind, ProcId, PROC_ID_LEN, RLIMIT_INFINITY};
@@ -23,24 +24,44 @@ use tairix_log::{set_max_level, Event, Level, Sink};
 #[global_allocator]
 static ALLOCATOR: Metered = Metered;
 
-/// The ids of the events recorded, kept in room made beforehand so a record
-/// made while the allocator refuses allocates nothing.
-struct Recorded(Mutex<Vec<u32>>);
+/// The ids of the events recorded, in atomics, so a record made while the
+/// allocator refuses neither allocates nor takes a lock, which some hosts box
+/// on first use.
+struct Recorded {
+    ids: [AtomicU32; RECORDED],
+    count: AtomicUsize,
+}
+
+/// The most events one sink records.
+const RECORDED: usize = 64;
 
 impl Recorded {
     fn new() -> Self {
         set_max_level(Level::Trace);
-        Self(Mutex::new(Vec::with_capacity(64)))
+        Self {
+            ids: [const { AtomicU32::new(0) }; RECORDED],
+            count: AtomicUsize::new(0),
+        }
     }
 
     fn holds(&self, event: AuditEvent) -> bool {
-        self.0.lock().expect("unpoisoned").contains(&event.id().0)
+        let count = self.count.load(Ordering::Acquire);
+        assert!(
+            count <= RECORDED,
+            "{count} events, more than a sink records"
+        );
+        self.ids[..count]
+            .iter()
+            .any(|id| id.load(Ordering::Acquire) == event.id().0)
     }
 }
 
 impl Sink for Recorded {
     fn write_event(&self, event: &Event<'_>) {
-        self.0.lock().expect("unpoisoned").push(event.id.0);
+        let at = self.count.fetch_add(1, Ordering::AcqRel);
+        if let Some(slot) = self.ids.get(at) {
+            slot.store(event.id.0, Ordering::Release);
+        }
     }
 }
 
