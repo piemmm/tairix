@@ -4,8 +4,8 @@ The one file copy every copying tool runs: `cp`, `mv` across volumes,
 `fstree`, the file manager's paste, and the runtime's `replace_file`. A copy
 moves a file's bytes with its holes, carries its extended attributes as far as
 the destination can keep them, gives what it makes the mode `cp` gives it,
-reports once what it could not carry, and never copies a directory into
-itself. The engine reaches files only through held nodes — the tree seam's
+keeps its times where asked, reports once what it could not carry, and never
+copies a directory into itself. The engine reaches files only through held nodes — the tree seam's
 `Node` and `Dir`, and the `Source` and `Target` data seams a held file is read
 and written through — so it is host-tested against the in-memory fixture.
 `tairix_rt::copy` implements the seams over the running system: a `File` is a
@@ -17,8 +17,8 @@ tool's operands are opened from.
 A tool walks a tree through directories it holds open, reaching each child by
 its name from there and never through a link it was not asked to follow, so a
 name swapped for a link between a tool's reading it and its acting on it leads
-nowhere new. `Node` is a held node (its stat, mode, owner, attributes and
-sync); `Dir` a held directory, whose children are listed whole (`entries`,
+nowhere new. `Node` is a held node (its stat, mode, owner, times, attributes, sync and
+the space of the volume it lies on); `Dir` a held directory, whose children are listed whole (`entries`,
 each `Entry` its name, kind and the identity the listing gave it), opened
 (`open_dir`, `open_file` for reading or for writing alone, `open_node`, each
 never through a link; `enter` and `follow` through a final link, where an
@@ -131,6 +131,16 @@ node is the mover's, then the owner; an owner the mover may not give stays the m
 the source's group where it may keep that, without the set-ID bit of an owner
 or group it did not keep. A link keeps no bits of its own.
 
+## Times: `copy_times`
+
+`copy_times(source, copy)` gives a copy its source's access and modification
+times through `fs_set_times`, held to the nearest instant the destination
+keeps, and answers whether that was exact. It runs once the copy's bytes and
+attributes are written, since writing moves its times, before any change of
+owner could take the change from the copier, and on a directory once its
+entries are in. `cp -p` and `mv` across volumes keep times through it, and so
+does every copy and move the operation engine makes.
+
 ## The report: `Omissions`
 
 A tool notes what each node's copy left (`note`), gathers runs together
@@ -148,6 +158,11 @@ answers a `Report` holding
 - `record`: one framed `stdinfo` `omission` record, code
   `fs.attributes_not_kept`, whose `ai` object lists the refusal codes, the
   file count, the keys named and whether that list is exhaustive.
+
+Times kept only to the nearest the destination holds (`note_times`) are a
+record of their own, `fs.times_not_exact`, counting the copies, and no clause:
+the nearest is what keeping times asks of a coarser volume, so `summary` is
+`None` where nothing else was left.
 
 ## No copy of itself: `landing` and `Descent`
 

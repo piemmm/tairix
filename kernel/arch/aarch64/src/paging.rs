@@ -1072,6 +1072,17 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
     4 << (ctr_el0 & 0xF)
 }
 
+/// Whether the instruction cache a `CTR_EL0` value describes is physically
+/// indexed: `L1Ip` (bits `[15:14]`) reads PIPT (ARM ARM D13.2.34). Only then
+/// does invalidating a line through the kernel's direct-map address reach
+/// the line a user mapping of the same frame fetched into; a virtually
+/// indexed cache (the Cortex-A53's `0x8444_8004`) may hold that alias at
+/// another index, so it is invalidated whole, as Linux assumes.
+#[must_use]
+pub const fn icache_is_pipt(ctr_el0: u64) -> bool {
+    (ctr_el0 >> 14) & 0b11 == 0b11
+}
+
 /// One page-table page: 512 × u64, naturally aligned.
 #[repr(C, align(4096))]
 struct Table([u64; ENTRIES_PER_TABLE]);

@@ -48,6 +48,8 @@ use tairix_arch_api::fatal::{Cause, KernelFault};
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{paging, qemu_exit, serial};
+#[cfg(itest_x86_64)]
+use tairix_kalloc::Arena;
 
 /// Virtual address the test maps its single 4 KiB probe page at: an address
 /// of the user half, which a process root leaves empty, so the mapping is a
@@ -77,14 +79,10 @@ const PROBE_BYTE: u8 = 0x5A;
 #[cfg(itest_x86_64)]
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-/// 4 KiB frame the test maps at [`test_vaddr`]. `#[repr(align(4096))]` so
+#[cfg(itest_x86_64)]
+/// 4 KiB frame the test maps at [`test_vaddr`]. Page-aligned, so
 /// its physical address is a valid page frame.
-#[cfg(itest_x86_64)]
-#[repr(C, align(4096))]
-struct ProbeFrame([u8; 4096]);
-
-#[cfg(itest_x86_64)]
-static mut PROBE_FRAME: ProbeFrame = ProbeFrame([0; 4096]);
+static PROBE_FRAME: Arena<4096> = Arena::ZERO;
 
 /// `true` once setup is complete. Any fault after this point is a kernel
 /// bug (this test provokes none), so the fault handler reports failure.
@@ -118,12 +116,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // Seed the probe frame with a known byte so the accesses read real
     // data. `PROBE_FRAME` is a higher-half kernel static; its physical
     // frame address is its virtual address minus the higher-half base.
-    let probe_paddr = (core::ptr::addr_of!(PROBE_FRAME) as u64) - paging::KERNEL_VMA_BASE;
+    let probe_paddr = (PROBE_FRAME.as_mut_ptr() as u64) - paging::KERNEL_VMA_BASE;
     // SAFETY: `PROBE_FRAME` is owned exclusively by this boot-time setup;
     // no other CPU exists yet (single-CPU test). Use the raw pointer to
     // avoid a `&mut` to the static.
     unsafe {
-        core::ptr::addr_of_mut!(PROBE_FRAME)
+        PROBE_FRAME
+            .as_mut_ptr()
             .cast::<u8>()
             .write_volatile(PROBE_BYTE);
     }

@@ -77,9 +77,10 @@ fn named(code: NamedKeyCode) -> WindowEvent {
     WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Pressed {
-            key: KeyValue::Named(code),
+            key: Some(KeyValue::Named(code)),
             modifiers: Modifiers::default(),
-            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+            // Which key typed it is not what a progress window reads.
+            physical: tairix_abi::input::PhysicalKey::A,
         },
     }
 }
@@ -111,9 +112,10 @@ fn typed(ch: char) -> WindowEvent {
     WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Pressed {
-            key: KeyValue::Char(ch),
+            key: Some(KeyValue::Char(ch)),
             modifiers: Modifiers::default(),
-            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+            // Which key typed it is not what a progress window reads.
+            physical: tairix_abi::input::PhysicalKey::A,
         },
     }
 }

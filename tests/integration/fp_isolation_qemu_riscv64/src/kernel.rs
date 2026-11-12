@@ -34,7 +34,7 @@ use tairix_arch_riscv64::{
     SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
@@ -123,7 +123,7 @@ static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -142,15 +142,12 @@ static PAGE_TABLES_H: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLES_I: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders draw user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; identity-
+/// Page-aligned, so each `PAGE_SIZE` slice is a valid page frame; identity-
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builders reach it through [`DirectPhysMap::identity`]. A single monotonic
 /// cursor ([`FRAME_CURSOR`]) hands disjoint frames to both program builds, so
 /// the two address spaces never share a data frame.
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Monotonic index of the next free [`FRAME_POOL`] frame, shared by both
 /// program builds.
@@ -167,7 +164,7 @@ fn next_frame() -> Option<Frame> {
     let offset = idx * paging::PAGE_SIZE;
     // The pool is identity-mapped, so its kernel virtual address is also its
     // physical address.
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let base = FRAME_POOL.as_mut_ptr() as u64 + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 

@@ -284,6 +284,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::block::DiscLayout;
+    use tairix_fat::boot::at;
+    use tairix_fat::dir::attr;
     use tairix_partition::{mbr, PartitionType};
     use tairix_test_amiga_image::rdb_disk;
 
@@ -382,21 +384,9 @@ mod tests {
         }
     }
 
-    /// A structurally valid FAT32 head written at byte `offset` of `image`.
+    /// The probe's FAT32 boot sector written at byte `offset` of `image`.
     fn write_fat32(image: &mut [u8], offset: usize, serial: [u8; 4], label11: &[u8; 11]) {
-        let boot = &mut image[offset..offset + 512];
-        boot[11..13].copy_from_slice(&512u16.to_le_bytes());
-        boot[13] = 8;
-        boot[14..16].copy_from_slice(&32u16.to_le_bytes());
-        boot[16] = 2;
-        boot[36..40].copy_from_slice(&1024u32.to_le_bytes());
-        boot[44..48].copy_from_slice(&2u32.to_le_bytes());
-        boot[66] = 0x29;
-        boot[67..71].copy_from_slice(&serial);
-        boot[71..82].copy_from_slice(label11);
-        boot[82..90].copy_from_slice(b"FAT32   ");
-        boot[510] = 0x55;
-        boot[511] = 0xAA;
+        image[offset..offset + 512].copy_from_slice(&images::fat32_boot(serial, label11)[..512]);
     }
 
     /// A structurally valid ext4 superblock written at partition byte
@@ -466,12 +456,11 @@ mod tests {
         write_fat32(&mut image, 0, *b"SRLN", b"NO NAME    ");
         // Two reserved sectors and two one-sector FATs: the root directory,
         // cluster 2 of one sector, is sector 4.
-        image[13] = 1;
-        image[14..16].copy_from_slice(&2u16.to_le_bytes());
-        image[36..40].copy_from_slice(&1u32.to_le_bytes());
+        image[at::SECTORS_PER_CLUSTER] = 1;
+        image[at::RESERVED_SECTORS..at::RESERVED_SECTORS + 2].copy_from_slice(&2u16.to_le_bytes());
+        image[at::FAT_SECTORS_32..at::FAT_SECTORS_32 + 4].copy_from_slice(&1u32.to_le_bytes());
         let root = 4 * BS;
-        image[root..root + 11].copy_from_slice(b"CAMERA CARD");
-        image[root + 11] = tairix_fsprobe::FAT_ATTR_VOLUME_ID;
+        image[root..root + 32].copy_from_slice(&images::dir_entry(b"CAMERA CARD", attr::VOLUME_ID));
         let mut dev = MemBlock {
             image,
             faulty: false,

@@ -40,6 +40,18 @@ pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
 /// kernel keeps the promise from the descriptor alone, touching no volume.
 pub const GRANT_FILE_ONLY: u64 = 1;
 
+/// The [`SyscallNumber::FD_GRANT`] flag that delegates a directory as a
+/// capability to what lies beneath it, and nothing else.
+///
+/// Every path the recipient names through it stays beneath the directory —
+/// an absolute path, a `..` at the directory and an absolute link are refused
+/// — and is authorised by the delegation rather than by the recipient's own
+/// `CAP_FS_ACCESS`. The ceiling decides writing: zero lets the recipient
+/// change nothing beneath, and anything else lets it create, remove, rename
+/// and write there, each file bounded as a writable file grant is. What the
+/// trusted picker hands an application a folder to work in with.
+pub const GRANT_SUBTREE: u64 = 2;
+
 /// The [`SyscallNumber::CALL_POST`] deadline that never passes: the posted
 /// request is answered only by its server or by the endpoint's end.
 ///
@@ -249,11 +261,14 @@ impl SyscallNumber {
     /// Release a region previously returned by [`SyscallNumber::MEM_MAP`]
     /// from the calling process's own address space (`plans/SPAWN.md` SP5).
     ///
-    /// Arguments: `base: u64` (the region's base, as returned by `mem_map`)
-    /// and `len: usize` (its length in bytes). The frames reclaimed are
-    /// zeroed on free (secret hygiene). Unmapping a region
-    /// that was never mapped, or a partial/over-long range, fails closed; a build with no memory service wired fails closed
-    /// with [`crate::Errno::NotImplemented`].
+    /// Arguments: `base: u64` (page-aligned) and `len: usize` (bytes, rounded
+    /// up to whole pages). Every page of the range must be anonymous memory
+    /// the caller mapped, any part of what it mapped, or all of it code
+    /// installed into the caller ([`SyscallNumber::CODE_INSTALL`]); a range
+    /// holding any other page fails closed with [`crate::Errno::NotFound`],
+    /// releasing nothing. The frames reclaimed are zeroed on free (secret
+    /// hygiene). A build with no memory service wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
     pub const MEM_UNMAP: Self = Self(15);
     /// Wait for a child process to exit, reaping it and reporting its
     /// exit code (`plans/SPAWN.md` SP6).
@@ -377,33 +392,26 @@ impl SyscallNumber {
     /// [`crate::Errno::NotFound`]; a build with no console wired fails
     /// closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_INPUT_MODE: Self = Self(21);
-    /// Inject one decoded keyboard *key edge* into the kernel input-focus
-    /// arbiter (`plans/PI.md` P11 — input follows the
-    /// surface owner).
+    /// Inject one key edge for a seat.
     ///
-    /// Arguments: `seat: u64` (the seat the edge belongs to — the seat
-    /// whose keyboard produced it, the boot seat `0` for a directly
-    /// attached keyboard; an unknown id fails closed with
-    /// [`crate::Errno::NotFound`]), `buf: *const u8` (one
-    /// [`crate::input::KeyInput`] record)
-    /// and `len: usize` (its length, [`crate::input::KeyInput::WIRE_LEN`]).
-    /// Returns the number of bytes consumed, or a negative error code. The
-    /// keyboard-input driver that decoded a directly attached keyboard
-    /// (USB-HID / PS-2) emits the *device-resolved key edge* — a pressed or
-    /// released [`crate::input::KeyValue`] plus the held
-    /// [`crate::input::Modifiers`] — and the kernel arbiter decides both
-    /// the **encoding** and the **destination** by who currently holds
-    /// that seat (`plans/PI.md` P11): with the text console foreground it
-    /// encodes the press to its console (tty) bytes through the shared
-    /// `lib/keymap` map and enqueues them on the focused console's input
-    /// queue (drained by a [`SyscallNumber::STREAM_READ`]); with the
-    /// desktop (window manager) foreground it routes the whole record to
-    /// the kernel keyboard channel (drained by
-    /// [`SyscallNumber::KEYBOARD_READ`]). The driver no longer chooses the
-    /// encoding or the destination — that policy left the device. Gated by
-    /// [`crate::CapabilityId::INPUT_INJECT`]: feeding the system's keyboard
-    /// stream is privileged, never ambient. A malformed
-    /// record is refused fail-closed.
+    /// Arguments: `seat: u64` (the seat whose keyboard produced the edge, the
+    /// boot seat `0` for a directly attached keyboard; an unknown id fails
+    /// closed with [`crate::Errno::NotFound`]), `buf: *const u8` (one
+    /// [`crate::input::KeyEdge`]) and `len: usize` (its length,
+    /// [`crate::input::KeyEdge::WIRE_LEN`]). Returns the bytes consumed, or a
+    /// negative error code.
+    ///
+    /// A keyboard driver reports only which physical key went down or up. The
+    /// seat reads every edge from every keyboard on it under one set of
+    /// modifiers, locks and layout, and routes the [`crate::input::KeyInput`]
+    /// each makes by who holds the seat: with the text console foreground a
+    /// press is typed into the focused console's input queue (drained by
+    /// [`SyscallNumber::STREAM_READ`]); with the desktop foreground every
+    /// record goes to the seat's keyboard channel (drained by
+    /// [`SyscallNumber::KEYBOARD_READ`]). A press of a key already down and a
+    /// release of one not down are consumed unread. Gated by
+    /// [`crate::CapabilityId::INPUT_INJECT`]: feeding a seat's keyboard is
+    /// privileged, never ambient. A malformed edge is refused fail-closed.
     pub const KEY_INJECT: Self = Self(22);
     /// Acquire ownership of a seat — one display with its keyboard — and
     /// claim its input focus (`plans/PI.md` P11 — input follows the
@@ -1819,24 +1827,29 @@ impl SyscallNumber {
     /// capability-gated System Information API.
     pub const BOOT_FACTS_GET: Self = Self(89);
 
-    /// Delegate one of the caller's own open descriptors — a filesystem file
-    /// or a pipe end — to another live process as a one-shot grant
+    /// Delegate one of the caller's own open descriptors — a filesystem
+    /// file, a pipe end or a directory — to another live process as a
+    /// one-shot grant
     /// (`plans/CAPABILITY_USE.md` CU6 — the user-mediated file picker's
     /// hand-off).
     ///
     /// Arguments: `fd` (a descriptor of the caller's own open table backed
-    /// by a filesystem file or a pipe end; a pty, resource or directory is
-    /// refused), `write_ceiling` (zero for a read-only file and for either
-    /// end of a pipe, which has no extent; for a writable file, the most
-    /// bytes from its start the recipient may write or extend to, or
-    /// [`GRANT_EXTENT_INHERIT`] to pass on the caller's own reach), and the
-    /// recipient's [`crate::ProcId`] (taken from a kernel-attested source
-    /// such as `call_peer_origin`). For a file the kernel freezes the
-    /// *caller's* identity and effective capability set with the
-    /// descriptor's node and access; a pipe end is handed on as itself, and
-    /// holds its side open until it is redeemed or let go. The recipient is
-    /// minted an unforgeable handle that resolves only when presented by the
-    /// recipient itself ([`Self::FD_REDEEM`]).
+    /// by a filesystem file or a pipe end, or by a directory open for reading
+    /// under [`GRANT_SUBTREE`]; a pty, resource or catalog is refused),
+    /// `write_ceiling` (zero for a read-only file and for either end of a
+    /// pipe, which has no extent; for a writable file, the most bytes from its
+    /// start the recipient may write or extend to, or [`GRANT_EXTENT_INHERIT`]
+    /// to pass on the caller's own reach; for a directory, zero to let the
+    /// recipient change nothing beneath it, else the bound on each file it
+    /// writes there), the recipient's [`crate::ProcId`] (taken from a
+    /// kernel-attested source such as `call_peer_origin`), and flags
+    /// ([`GRANT_FILE_ONLY`], [`GRANT_SUBTREE`], never both). For a file the
+    /// kernel freezes the *caller's* identity and effective capability set
+    /// with the descriptor's node and access, and for a directory the
+    /// caller's identity with no capability but `CAP_FS_ACCESS`; a pipe end
+    /// is handed on as itself, and holds its side open until it is redeemed
+    /// or let go. The recipient is minted an unforgeable handle that resolves
+    /// only when presented by the recipient itself ([`Self::FD_REDEEM`]).
     ///
     /// A descriptor that is itself a redeemed delegation is passed on as it
     /// was captured, under its original grantor's identity, and its ceiling
@@ -1847,8 +1860,8 @@ impl SyscallNumber {
     pub const FD_GRANT: Self = Self(90);
 
     /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task,
-    /// installing the delegated file or pipe end into the caller's own open
-    /// table.
+    /// installing the delegated file, directory or pipe end into the caller's
+    /// own open table.
     ///
     /// Arguments: `handle` (the grant handle received in-band). The
     /// redemption is **one-shot**: the grant record is consumed only when
@@ -3327,6 +3340,70 @@ impl SyscallNumber {
     /// audited.
     pub const SHM_GRANT_TO: Self = Self(171);
 
+    /// Move a region a compiler sandbox filled out of its address space and
+    /// map it read-execute into the one sandbox the caller pairs that
+    /// compiler with, at a kernel-chosen address.
+    ///
+    /// Arguments: `compiler: i64` and `target: i64`, pids as [`Self::SPAWN`]
+    /// returned them; `base: u64`, page-aligned, in the compiler's space; and
+    /// `len: usize`, rounded up to whole pages. Both must be live sandboxed
+    /// children of the caller, and distinct, and the compiler's first install
+    /// pairs it with that target for the compiler's life. Every page of the
+    /// range must be the compiler's anonymous memory and one it has written.
+    /// Its pages leave the compiler with what they hold, every CPU's
+    /// instruction fetch is made to see them, and they map read-execute,
+    /// never writable, in the target's code window. Returns the address in
+    /// the target, or `-errno`, the compiler's range left as it was on every
+    /// refusal but the last two: [`Errno::NotFound`] (no such live child, or a
+    /// range not wholly the compiler's written anonymous memory),
+    /// [`Errno::PermissionDenied`] (a child that is not sandboxed, one child
+    /// named twice, or a compiler paired with another target),
+    /// [`Errno::BadAlignment`] (`base`), [`Errno::LengthOutOfRange`] (no
+    /// length), [`Errno::OutOfRange`] (a range past the address space, or the
+    /// target's address-space bound), [`Errno::OutOfMemory`] (no room in the
+    /// target's code window), [`Errno::MediumError`] (a page of the range the
+    /// compressed tier could not restore), and then, the pages having left
+    /// the compiler, [`Errno::OutOfMemory`] (the target's page tables) and
+    /// [`Errno::DeviceFault`] (the platform refused to fence every CPU's
+    /// instruction fetch). The target releases its code with
+    /// [`Self::MEM_UNMAP`]. Gated by [`crate::CapabilityId::JIT_MAP_EXEC`];
+    /// audited.
+    pub const CODE_INSTALL: Self = Self(172);
+
+    /// Set a node's access and modification times (the `utimensat(2)`
+    /// shape).
+    ///
+    /// Arguments: `dirfd: u32`, `path: *const u8`, `path_len: usize`, resolved
+    /// as [`Self::FS_OPEN`] resolves them, `times: *const` [`crate::TimesChange`]
+    /// and its length, and `flags: u32` ([`crate::AtFlags`]):
+    /// [`crate::AtFlags::NO_FOLLOW`] changes a final link itself and
+    /// [`crate::AtFlags::EMPTY_PATH`] with an empty path the node `dirfd`
+    /// holds (`futimens`). Each time is kept, stamped now, or set to an
+    /// instant; the metadata-change time moves to now with any change, and
+    /// nothing changes, unchecked, when both are kept. Stamping both now
+    /// needs ownership or write access, and any other change ownership — or,
+    /// of a node whose format records no owner, write access: no capability
+    /// overrides it. A path named through a directory capability,
+    /// or a granted descriptor, acts as its grantor where the grant writes and
+    /// is refused where it does not; anything else acts as the caller, who
+    /// needs `CAP_FS_ACCESS`. An instant the volume cannot keep exactly is
+    /// [`crate::Errno::TimestampOutOfRange`], unless the record asks for the
+    /// nearest it can. Returns [`crate::TimesKept`] as a word: whether every
+    /// instant was kept exactly. Audited.
+    pub const FS_SET_TIMES: Self = Self(173);
+    /// Report the space accounting of the volume an open file or directory
+    /// lies on (`fstatvfs`).
+    ///
+    /// Arguments: `fd: u32`, `out: *mut u8` and `out_len: usize`. Returns the
+    /// number of bytes written: one
+    /// [`crate::driver::filesystem::VolumeStats`]
+    /// ([`VolumeStats::WIRE_LEN`](crate::driver::filesystem::VolumeStats::WIRE_LEN)
+    /// bytes), as the volume's driver reports it now. A descriptor the caller
+    /// opened needs `CAP_FS_ACCESS`, as [`Self::FS_STAT`] does; a delegated
+    /// one acts as its grantor. A descriptor on no volume — a pipe, a
+    /// resource, the storage catalog — is [`Errno::NotSupported`].
+    pub const FS_VOLUME_STATS: Self = Self(174);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3649,6 +3726,9 @@ mod tests {
         assert_eq!(SyscallNumber::VOLUME_REPLAY.as_u16(), 169);
         assert_eq!(SyscallNumber::CHILD_ORIGIN.as_u16(), 170);
         assert_eq!(SyscallNumber::SHM_GRANT_TO.as_u16(), 171);
+        assert_eq!(SyscallNumber::CODE_INSTALL.as_u16(), 172);
+        assert_eq!(SyscallNumber::FS_SET_TIMES.as_u16(), 173);
+        assert_eq!(SyscallNumber::FS_VOLUME_STATS.as_u16(), 174);
     }
 
     #[test]

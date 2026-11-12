@@ -642,9 +642,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "key_inject",
         arg_count: 3,
         args: [
-            // The seat the decoded key edge belongs to (the seat whose
-            // keyboard produced it), then the encoded record. An unknown
-            // seat id fails closed with `NotFound`.
+            // The seat whose keyboard produced the edge, then the encoded
+            // edge. An unknown seat id fails closed with `NotFound`.
             AbiType::U64,
             AbiType::UserPtr,
             AbiType::Len,
@@ -1288,10 +1287,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Returns the new file descriptor; a `Handle` minted against the
         // caller's per-process descriptor table.
         ret: AbiType::Handle,
-        // The coarse filesystem-access gate; the per-path authority is the
-        // VFS inode model under the caller's real credentials. Opening a
-        // path (which may create) is security-relevant and audited.
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         audit: true,
     },
     SyscallSpec {
@@ -1377,7 +1375,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1457,7 +1457,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         // Creates a directory; audited.
         audit: true,
     },
@@ -1481,7 +1483,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         // Removes a name; audited.
         audit: true,
     },
@@ -1530,7 +1534,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         // Moves a name (and may replace a destination); audited like the
         // other mutating filesystem calls.
         audit: true,
@@ -2915,7 +2921,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         // A pure read, high-volume like fs_stat; not audited per call.
         audit: false,
     },
@@ -2938,7 +2946,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         // Adds a name that changes what a later resolution reaches, and
         // changes when the node's storage is freed; audited like fs_symlink.
         audit: true,
@@ -3754,10 +3764,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        // The coarse filesystem-access gate, as every path-taking call has;
-        // the answer is the inode model's under the caller's credentials. A
-        // pure query, high-volume like fs_stat; not audited per call.
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability (`GRANT_SUBTREE`) is authorised by it instead.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -4112,6 +4121,70 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `shm_grant`.
         required_capability: Some(CapabilityId::SHM),
         audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CODE_INSTALL,
+        name: "code_install",
+        arg_count: 4,
+        args: [
+            // The compiler's and the target's pids, whole registers as `wait`
+            // takes them; then the region in the compiler's space, an address
+            // there rather than a pointer into the caller's, and its length.
+            AbiType::I64,
+            AbiType::I64,
+            AbiType::U64,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The region's address in the target, or `-errno`.
+        ret: AbiType::U64,
+        // The one way to make memory executable that no signed image carried.
+        required_capability: Some(CapabilityId::JIT_MAP_EXEC),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_SET_TIMES,
+        name: "fs_set_times",
+        arg_count: 6,
+        args: [
+            // The start directory, the path and its length (null and 0
+            // exactly with `EMPTY_PATH`), the `TimesChange` record and its
+            // length, and the `AtFlags` bits.
+            AbiType::U32,
+            AbiType::UserPtrOrNull,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::U32,
+        ],
+        // The `TimesKept` word, or `-errno`.
+        ret: AbiType::U64,
+        // `CAP_FS_ACCESS` checked in the handler: a path named through a
+        // directory capability, or a granted descriptor, acts as its grantor.
+        required_capability: None,
+        // Rewrites an inode's times; audited.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_VOLUME_STATS,
+        name: "fs_volume_stats",
+        arg_count: 3,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The bytes written, or `-errno`.
+        ret: AbiType::U64,
+        // As `fs_stat`: the descriptor's backing decides the authority, a
+        // descriptor the caller opened asking `CAP_FS_ACCESS` in the handler.
+        // A pure observer, not audited.
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -4492,44 +4565,48 @@ mod tests {
 
     #[test]
     fn fs_capability_requirements_are_frozen() {
-        // The *path-taking* filesystem syscalls share the single coarse
-        // CAP_FS_ACCESS entry gate (the per-path authority is the VFS inode
-        // model under the caller's real credentials, not this capability).
-        // The *descriptor-operating* calls are ungated at the dispatcher: a
-        // descriptor may be backed by a node its holder opened (under
-        // CAP_FS_ACCESS), a resource reference (opened under its namespace's
-        // own authority), or a one-shot delegation (exercised under the
-        // grantor's captured set, so its holder may hold no filesystem
-        // capability at all), so the handler applies the backing-specific
-        // check rather than a blanket gate — a descriptor its holder opened
-        // still requires CAP_FS_ACCESS there. fs_readdir keeps the blanket gate
-        // because fd_grant refuses a directory, so it has no delegated form,
-        // and the attribute changes keep it because they act as the caller
+        // The path-taking calls a directory capability may make check
+        // CAP_FS_ACCESS in the handler, since a path named through one is
+        // authorised by the capability instead; the rest, which never act
+        // through one, keep the coarse dispatcher gate (the per-path
+        // authority is the VFS inode model either way). The
+        // *descriptor-operating* calls are ungated at the dispatcher: a
+        // descriptor may be backed by a node its holder opened, a resource
+        // reference, or a delegation exercised under the grantor's captured
+        // set, so the handler applies the backing-specific check. The
+        // attribute changes keep the gate because they act as the caller
         // whatever descriptor names the node; the attribute reads act as a
-        // byte read through the descriptor does, so they are ungated here.
-        // State-mutating calls (open — which may create — write, truncate,
-        // mkdir, unlink, rename) are audited; the pure reads (read, readdir,
-        // stat, access) and the own-handle lifecycle calls (close, sync) are
-        // high-volume and not audited per call. Lock this down so a refactor
-        // cannot loosen a path gate or drop the audit on a mutator.
+        // byte read through the descriptor does, so they are ungated. Mutators
+        // are audited and the high-volume reads are not. Lock this down so a
+        // refactor cannot loosen a gate or drop the audit on a mutator.
         for n in [
             SyscallNumber::FS_OPEN,
             SyscallNumber::FS_READDIR,
-            SyscallNumber::FS_WATCH,
-            SyscallNumber::FS_WATCH_READ,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
+            SyscallNumber::FS_READLINK,
+            SyscallNumber::FS_LINK,
+            SyscallNumber::FS_ACCESS,
+            SyscallNumber::FS_SET_TIMES,
+        ] {
+            assert_eq!(
+                spec_for(n).unwrap().required_capability,
+                None,
+                "{} checks CAP_FS_ACCESS in the handler, beside a directory capability",
+                spec_for(n).unwrap().name
+            );
+        }
+        for n in [
+            SyscallNumber::FS_WATCH,
+            SyscallNumber::FS_WATCH_READ,
             SyscallNumber::FS_CHDIR,
             SyscallNumber::FS_SET_MODE,
             SyscallNumber::FS_SET_OWNER,
             SyscallNumber::FS_ATTR_SET,
             SyscallNumber::FS_ATTR_REMOVE,
             SyscallNumber::FS_SYMLINK,
-            SyscallNumber::FS_READLINK,
-            SyscallNumber::FS_LINK,
             SyscallNumber::FS_REALPATH,
-            SyscallNumber::FS_ACCESS,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,
@@ -4547,6 +4624,7 @@ mod tests {
             SyscallNumber::FS_READ,
             SyscallNumber::FS_WRITE,
             SyscallNumber::FS_STAT,
+            SyscallNumber::FS_VOLUME_STATS,
             SyscallNumber::FS_TRUNCATE,
             SyscallNumber::FS_SYNC,
             SyscallNumber::FILE_MAP,
@@ -4589,6 +4667,7 @@ mod tests {
             SyscallNumber::FS_WATCH,
             SyscallNumber::FS_WATCH_READ,
             SyscallNumber::FS_STAT,
+            SyscallNumber::FS_VOLUME_STATS,
             SyscallNumber::FS_SYNC,
             SyscallNumber::FS_ATTR_GET,
             SyscallNumber::FS_ATTR_LIST,

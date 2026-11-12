@@ -55,14 +55,14 @@ pub use tairix_test_riscv64_boot::boot;
 use crate::common::{drive_driver_lifecycle, dtb_total_size, FixtureLine, QemuEnv, ScenarioConfig};
 
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by the module-private `HEAP` static, shared by
 /// every riscv64 virtio QEMU test that links this crate.

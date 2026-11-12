@@ -9,7 +9,7 @@ use tairix_arch_aarch64::{
     handle_panic_via_serial, protection, qemu_exit, SerialSink, SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, BOOT_HEAP_BYTES};
 use tairix_kernel::aarch64::boot as boot_aarch64;
 use tairix_log::{Event, EventId, FieldValue, Level, Sink};
 use tairix_test_kheap_growth as kheap_growth;
@@ -21,7 +21,7 @@ use crate::tree::DTB_BLOB;
 
 /// The production bin's bootstrap arena, in `.bss` below `__kernel_end`, so
 /// this boot proves the pipeline fits it before the heap can grow.
-static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

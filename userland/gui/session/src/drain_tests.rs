@@ -224,28 +224,42 @@ fn queued_keys(keyboard: &KeyboardInputSource<Keys>) -> usize {
     keyboard.channel().records.len()
 }
 
+// Which key typed it is not what a drain reads.
 fn char_key(c: char) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Char(c),
+        key: Some(KeyValue::Char(c)),
         modifiers: AbiModifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 
 fn named_key(named: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Named(named),
+        key: Some(KeyValue::Named(named)),
         modifiers: AbiModifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 
+/// The left Shift key going down (`held`) or coming up.
 fn shift_held(held: bool) -> KeyInput {
-    KeyInput::ModifiersChanged {
-        modifiers: AbiModifiers {
-            shift: held,
-            ..AbiModifiers::default()
-        },
+    let modifiers = AbiModifiers {
+        shift: held,
+        ..AbiModifiers::default()
+    };
+    let physical = PhysicalKey::LEFT_SHIFT;
+    if held {
+        KeyInput::Pressed {
+            key: None,
+            modifiers,
+            physical,
+        }
+    } else {
+        KeyInput::Released {
+            key: None,
+            modifiers,
+            physical,
+        }
     }
 }
 
@@ -824,12 +838,12 @@ fn a_clipboard_chord_reaches_a_chains_open_entry_field() {
     desk.menu
         .handle(&InputEvent::PointerMoved { to: at }, at, &geom, 0);
     let copy = KeyInput::Pressed {
-        key: KeyValue::Char('c'),
+        key: Some(KeyValue::Char('c')),
         modifiers: AbiModifiers {
             ctrl: true,
             ..AbiModifiers::default()
         },
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::from_usage(0x06).expect("the C key"),
     };
     let mut program = Program::new();
     desk.wake(
@@ -1181,13 +1195,13 @@ fn a_refused_unlock_keeps_the_screen_locked() {
 /// Ctrl+Alt+Delete pressed.
 fn secure_attention() -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Named(NamedKeyCode::Delete),
+        key: Some(KeyValue::Named(NamedKeyCode::Delete)),
         modifiers: AbiModifiers {
             ctrl: true,
             alt: true,
             ..AbiModifiers::default()
         },
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::from_usage(0x4C).expect("the Delete key"),
     }
 }
 
@@ -1267,7 +1281,7 @@ fn while_the_prompt_is_up_every_key_is_its_and_the_attention_key_answers_on_it()
 
 fn capture_chord(physical: PhysicalKey) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Char('#'),
+        key: Some(KeyValue::Char('#')),
         modifiers: AbiModifiers {
             shift: true,
             meta: true,
@@ -1368,4 +1382,99 @@ fn a_screen_chord_is_a_still_and_a_press_rings_only_while_clicks_are_shown() {
     desk.wake(&mut press, &mut keyboard(&[]), &mut program)
         .expect("in-memory sources do not fault");
     assert!(rung(&desk), "the press rings the pointer");
+}
+
+/// A window reading the keyboard raw is routed every key, one that typed
+/// nothing among them, with the record it came from.
+#[test]
+fn a_raw_window_is_routed_every_key() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let window = opaque_window(&mut desk.comp, Point::new(200, 200), 300, 300);
+    let mut program = Program::new();
+    let focus = [moved(250, 250), PRIMARY_PRESS, PRIMARY_RELEASE];
+    desk.wake(
+        &mut MemoryInput::new(&focus),
+        &mut keyboard(&[]),
+        &mut program,
+    )
+    .expect("served");
+    assert!(desk.comp.set_window_raw_keys(window, true));
+    program.routed.clear();
+    let mut keys = keyboard(&[shift_held(true), char_key('a'), shift_held(false)]);
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("served");
+    let routed: Vec<_> = program
+        .routed
+        .iter()
+        .map(|(outcome, record)| (&outcome.value, *record))
+        .collect();
+    assert_eq!(routed.len(), 3);
+    assert_eq!(
+        routed[0],
+        (
+            &ShellOutcome::WindowManager(InputResponse::RawKey { window }),
+            Some(shift_held(true))
+        )
+    );
+    assert!(matches!(
+        routed[1].0,
+        ShellOutcome::WindowManager(InputResponse::Key { window: to, .. }) if *to == window
+    ));
+    assert_eq!(
+        routed[2],
+        (
+            &ShellOutcome::WindowManager(InputResponse::RawKey { window }),
+            Some(shift_held(false))
+        )
+    );
+}
+
+/// The pointer locked to a window is drained as its device's displacement and
+/// routed to that window; a holder that takes the pointer ends the lock, and
+/// the device's motion moves the pointer again.
+#[test]
+fn a_locked_pointer_drains_to_its_window_until_another_holder_takes_it() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let window = opaque_window(&mut desk.comp, Point::new(200, 200), 300, 300);
+    let mut program = Program::new();
+    let focus = [moved(250, 250), PRIMARY_PRESS, PRIMARY_RELEASE];
+    desk.wake(
+        &mut MemoryInput::new(&focus),
+        &mut keyboard(&[]),
+        &mut program,
+    )
+    .expect("served");
+    assert_eq!(desk.shell.lock_pointer(window, &mut desk.comp), Ok(()));
+    program.routed.clear();
+    let motion = [
+        InputEvent::PointerMotion { dx: 3, dy: 4 },
+        InputEvent::PointerMotion { dx: -1, dy: 2 },
+    ];
+    let mut pointer = MemoryInput::new(&motion);
+    desk.wake(&mut pointer, &mut keyboard(&[]), &mut program)
+        .expect("served");
+    assert!(pointer.locked, "the drain read it locked");
+    assert_eq!(
+        program.outcomes(),
+        [&ShellOutcome::WindowManager(InputResponse::LockedMotion {
+            window,
+            dx: 2,
+            dy: 6
+        })],
+        "one batch of motion, summed"
+    );
+
+    let _ =
+        drain_away(&mut desk.seat(), &mut pointer, &mut keyboard(&[]), 0).expect("a sound stream");
+    assert!(!pointer.locked);
+    assert_eq!(desk.shell.pointer_lock(), None);
+    assert_eq!(
+        desk.shell.take_lock_news(&mut desk.comp),
+        Some((window, true))
+    );
+    assert_eq!(
+        desk.shell.take_lock_news(&mut desk.comp),
+        Some((window, false))
+    );
+    assert_eq!(desk.shell.take_lock_news(&mut desk.comp), None);
 }

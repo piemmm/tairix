@@ -11,13 +11,8 @@ publish.workspace = true
 [dependencies]
 # The seat records the decoders produce and the errors they fail closed with.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-# The keyboard state and US layout the console producer resolves each HID
-# usage through (a `lib/*` crate).
-tairix-input = { path = "../input", version = "=0.0.0" }
-# The shared terminal key map that turns each resolved key press into the
-# `KeyInput` record a driver injects through `key_inject` — the one definition
-# of the `Key`→record map.
-tairix-keymap = { path = "../keymap", version = "=0.0.0" }
+# The fixed set a report's keys are read into.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 
 [dev-dependencies]
 # The report fuzz harness draws its inputs through the shared seed/budget

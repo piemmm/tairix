@@ -84,9 +84,9 @@ fn typed(window_id: u64) -> WindowEvent {
     WindowEvent::Key {
         window_id,
         key: KeyInput::Pressed {
-            key: KeyValue::Char('a'),
+            key: Some(KeyValue::Char('a')),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::A,
         },
     }
 }
@@ -667,25 +667,38 @@ fn overflow_sheds_input_and_never_a_state_edge_or_a_conclusion() {
     );
 }
 
-/// A held press goes with its end: the app learns of neither, rather than
-/// holding a press it is never told is over — the latch that would leave a
-/// widget dragging, or a scroll arrow repeating, for ever.
+/// A held press goes with its own release: the app learns of neither, rather
+/// than holding a press it is never told is over — the latch that would leave
+/// a widget dragging, or a scroll arrow repeating, for ever. A cancel that
+/// follows it instead stays: it ends every press the window holds, one it was
+/// told of before among them, and ends nothing where there is none.
 #[test]
-fn a_press_is_shed_together_with_its_end() {
-    for end in [released(WINDOW), cancelled(WINDOW)] {
-        let mut held = HoldBack::new();
-        let _ = hold(&mut held, pressed(WINDOW));
-        let _ = hold(&mut held, end);
-        // One past the bound, so exactly one shed is needed.
-        for _ in 0..HOLD_BACK_CAPACITY - 1 {
-            let _ = hold(&mut held, typed(WINDOW));
-        }
-
-        let drained = drain_events(&mut held);
-        assert_eq!(drained.len(), HOLD_BACK_CAPACITY - 1);
-        assert!(!drained.contains(&pressed(WINDOW)), "the press went first");
-        assert!(!drained.contains(&end), "and its end with it");
+fn a_press_is_shed_with_its_release_and_never_with_a_cancel() {
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, pressed(WINDOW));
+    let _ = hold(&mut held, released(WINDOW));
+    // One past the bound, so exactly one shed is needed.
+    for _ in 0..HOLD_BACK_CAPACITY - 1 {
+        let _ = hold(&mut held, typed(WINDOW));
     }
+    let drained = drain_events(&mut held);
+    assert_eq!(drained.len(), HOLD_BACK_CAPACITY - 1);
+    assert!(!drained.contains(&pressed(WINDOW)), "the press went first");
+    assert!(
+        !drained.contains(&released(WINDOW)),
+        "and its release with it"
+    );
+
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, pressed(WINDOW));
+    let _ = hold(&mut held, cancelled(WINDOW));
+    for _ in 0..HOLD_BACK_CAPACITY - 1 {
+        let _ = hold(&mut held, typed(WINDOW));
+    }
+    let drained = drain_events(&mut held);
+    assert_eq!(drained.len(), HOLD_BACK_CAPACITY);
+    assert!(!drained.contains(&pressed(WINDOW)), "the press went alone");
+    assert_eq!(drained.first(), Some(&cancelled(WINDOW)));
 }
 
 /// The end of a press the app was already given is all that ends it, so it
@@ -703,8 +716,8 @@ fn the_end_of_a_press_already_delivered_is_never_shed() {
     }
 }
 
-/// A secondary press is a click the window never holds: it is shed alone,
-/// and the end of the primary press the window does hold stays owed.
+/// A press shed before a cancel goes alone: the cancel ends every press the
+/// window holds, the one it was told of before among them, so it stays owed.
 #[test]
 fn a_click_is_shed_alone_and_never_takes_a_held_press_s_end() {
     let mut held = HoldBack::new();
@@ -1180,4 +1193,121 @@ fn a_save_offers_end_withdraws_the_offers_held_before_it() {
         [dropped(8)],
         "a second drop is held only for a window answering an offer it was never shown"
     );
+}
+
+fn key_edge(window_id: u64, physical: PhysicalKey, pressed: bool) -> WindowEvent {
+    let (key, modifiers) = (None, Modifiers::default());
+    WindowEvent::Key {
+        window_id,
+        key: if pressed {
+            KeyInput::Pressed {
+                key,
+                modifiers,
+                physical,
+            }
+        } else {
+            KeyInput::Released {
+                key,
+                modifiers,
+                physical,
+            }
+        },
+    }
+}
+
+fn locked_motion(window_id: u64, dx: i32, dy: i32, at_ns: u64) -> WindowEvent {
+    WindowEvent::PointerMotion {
+        window_id,
+        dx,
+        dy,
+        modifiers: Modifiers::default(),
+        at_ns,
+    }
+}
+
+fn lock(window_id: u64, locked: bool) -> WindowEvent {
+    WindowEvent::PointerLock { window_id, locked }
+}
+
+/// A key's release is never shed, and a key's press goes with its own release
+/// and no other: however much is typed into a window that does not drain, no
+/// key it saw go down is left down.
+#[test]
+fn a_key_release_is_never_shed_and_a_press_goes_with_its_own() {
+    let mut held = HoldBack::new();
+    let shift = PhysicalKey::LEFT_SHIFT;
+    let delivered = key_edge(WINDOW, PhysicalKey::SPACE, false);
+    let _ = hold(&mut held, key_edge(WINDOW, shift, true));
+    let _ = hold(&mut held, delivered);
+    let _ = hold(&mut held, key_edge(WINDOW, shift, false));
+    for _ in 0..HOLD_BACK_CAPACITY {
+        let _ = hold(&mut held, typed(WINDOW));
+    }
+    let drained = drain_events(&mut held);
+    assert_eq!(
+        drained.first(),
+        Some(&delivered),
+        "a delivered press's release stays"
+    );
+    assert!(
+        !drained.contains(&key_edge(WINDOW, shift, true)),
+        "Shift went"
+    );
+    assert!(
+        !drained.contains(&key_edge(WINDOW, shift, false)),
+        "with its own release"
+    );
+    assert!(drained.len() <= HOLD_BACK_CAPACITY);
+}
+
+/// The releases of presses already delivered are what end them, so they
+/// outlast the bound however many there are: a key is down at most once, so
+/// they are at most one per key.
+#[test]
+fn releases_of_delivered_presses_outlast_the_bound() {
+    let mut held = HoldBack::new();
+    let count = HOLD_BACK_CAPACITY + 4;
+    for at in 0..count {
+        let usage = 0x04 + u16::try_from(at).expect("small");
+        let key = PhysicalKey::from_usage(usage).expect("a key");
+        let _ = hold(&mut held, key_edge(WINDOW, key, false));
+    }
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), count);
+}
+
+/// A locked pointer's motion sums at the tail, stamped with the newest time,
+/// and a lock's start or end takes the one held before it, staying behind the
+/// motion of the lock it ends.
+#[test]
+fn a_locked_pointers_motion_sums_and_a_lock_change_takes_the_one_held() {
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, lock(WINDOW, true));
+    let _ = hold(&mut held, locked_motion(WINDOW, 3, -1, 10));
+    let _ = hold(&mut held, locked_motion(WINDOW, 2, 5, 20));
+    let _ = hold(&mut held, lock(WINDOW, false));
+    assert_eq!(
+        drain_events(&mut held),
+        [locked_motion(WINDOW, 5, 4, 20), lock(WINDOW, false)]
+    );
+
+    // A window that toggles its lock without draining owes one lock change.
+    for locked in [true, false, true, false, true] {
+        let _ = hold(&mut held, lock(WINDOW, locked));
+    }
+    assert_eq!(drain_events(&mut held), [lock(WINDOW, true)]);
+
+    // A modifier change ends a run of motion.
+    let shifted = WindowEvent::PointerMotion {
+        window_id: WINDOW,
+        dx: 1,
+        dy: 1,
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+        at_ns: 30,
+    };
+    let _ = hold(&mut held, locked_motion(WINDOW, 1, 1, 25));
+    let _ = hold(&mut held, shifted);
+    assert_eq!(drain_events(&mut held).len(), 2);
 }

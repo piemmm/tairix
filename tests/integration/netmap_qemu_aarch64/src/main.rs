@@ -71,7 +71,7 @@ mod kernel {
     use tairix_itest_desktop_witness::{window_shown, ShownWindows};
     use tairix_itest_finisher::fail_point;
     use tairix_itest_witness::{field_str, field_u64, names_bundle};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_netmap_qemu_aarch64::{EXIT_SYSCALL, NETMAP_APP_NAME, NETMAP_COMM};
@@ -83,7 +83,7 @@ mod kernel {
 
     /// Static boot heap, mirroring the production aarch64 kernel binary's
     /// `.bss`-resident heap (zeroed by the boot trampoline).
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

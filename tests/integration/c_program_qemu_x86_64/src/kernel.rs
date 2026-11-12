@@ -10,7 +10,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS}
 use tairix_arch_x86_64::paging::{self, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::UserMode;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -24,7 +24,7 @@ use tairix_log::{log, Event, EventId, Level, Sink};
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -73,13 +73,10 @@ const FRAME_COUNT: usize = 320;
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame. It is a
+/// Page-aligned, so each `PAGE_SIZE` slice is a valid page frame. It is a
 /// static of the kernel image, so its physical address is its virtual address
 /// minus [`KERNEL_VMA_BASE`], and the builder fills it through the direct map.
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Set once the round-trip has been driven so a duplicate `BootCompleted`
 /// cannot re-enter the test logic.
@@ -162,7 +159,7 @@ fn frame_source() -> impl FnMut() -> Option<Frame> {
         }
         let offset = next * paging::PAGE_SIZE;
         next += 1;
-        let virt = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+        let virt = FRAME_POOL.as_mut_ptr() as u64 + offset as u64;
         Some(Frame::containing(PhysAddr::new(virt - KERNEL_VMA_BASE)))
     }
 }

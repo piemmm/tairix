@@ -553,11 +553,56 @@ pub struct FrozenAuthority {
 }
 
 /// What an `fd_grant` hand-off attenuates.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Grant {
     /// The highest length the holder may write or truncate the file to.
     pub write_ceiling: Option<u64>,
+    /// The directory every path named through a directory capability stays
+    /// beneath; `None` for a grant of one file.
+    pub subtree: Option<Floor>,
 }
+
+impl Grant {
+    /// Whether the grant lets its holder write: a file's bytes, or what lies
+    /// beneath a directory capability.
+    #[must_use]
+    pub fn writes(&self) -> bool {
+        self.write_ceiling.is_some_and(|ceiling| ceiling > 0)
+    }
+
+    /// Whether the grant lets its holder change what lies beneath a directory
+    /// capability: create, remove, rename and write there.
+    #[must_use]
+    pub fn writes_beneath(&self) -> bool {
+        self.subtree.is_some() && self.writes()
+    }
+}
+
+/// The directory a directory capability's paths stay beneath: pinned, so it
+/// keeps its identity through renames, and held through its projection.
+#[derive(Clone, Debug)]
+pub struct Floor {
+    /// The directory.
+    pub node: NodeRef,
+    /// The projection it is held through.
+    pub projection: Arc<Projection>,
+}
+
+impl Floor {
+    /// Whether a walk standing on node `id` of `projection` stands on the floor.
+    #[must_use]
+    pub fn is(&self, projection: &Arc<Projection>, id: NodeId) -> bool {
+        Arc::ptr_eq(&self.projection, projection) && self.node.pinned() == id
+    }
+}
+
+impl PartialEq for Floor {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node && Arc::ptr_eq(&self.projection, &other.projection)
+    }
+}
+
+impl Eq for Floor {}
 
 /// The identity one byte operation runs under, built by the syscall layer
 /// from the descriptor's [`Authority`] and its caller.
@@ -587,6 +632,20 @@ pub struct NodeHandle {
     /// Whether the node is the projection's floor, whose listing shows the
     /// projections attached beneath it.
     pub at_floor: bool,
+}
+
+impl NodeHandle {
+    /// The floor of the directory capability this descriptor is, or was
+    /// opened through: what every path named through it stays beneath.
+    #[must_use]
+    pub fn subtree(&self) -> Option<&Floor> {
+        match &self.authority {
+            Authority::Frozen(FrozenAuthority {
+                grant: Some(grant), ..
+            }) => grant.subtree.as_ref(),
+            Authority::Holder | Authority::Frozen(_) => None,
+        }
+    }
 }
 
 /// Where a relative path is resolved from. An absolute path ignores it.

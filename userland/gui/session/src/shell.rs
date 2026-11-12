@@ -35,6 +35,7 @@
 //! [`TaskbarRenderer`]: tairix_taskbar::TaskbarRenderer
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -147,6 +148,10 @@ pub trait InputSource {
     /// current [`pump`](DesktopShell::pump) without disturbing the desktop
     /// state already applied; the embedder replaces or re-polls the source.
     fn poll(&mut self, now_ns: u64) -> Result<Option<Timed<InputEvent>>, Errno>;
+
+    /// Read the pointer's motion as its device's own displacement, moving no
+    /// on-screen pointer (`locked`), or as the pointer moving.
+    fn set_pointer_locked(&mut self, locked: bool);
 }
 
 /// What the [`DesktopShell`] did with one input event.
@@ -260,6 +265,9 @@ pub struct DesktopShell {
     /// What yielding the pointer left owed to the clients it took it from,
     /// until the serve loop delivers it.
     abandoned: Abandoned,
+    /// Each window whose pointer lock began (`true`) or ended (`false`), in
+    /// order, until the serve loop tells it.
+    lock_news: VecDeque<(WindowId, bool)>,
     /// The screen-sized, already-fitted wallpaper the desktop layer is painted
     /// over, or `None` while the backdrop colour is the whole base. The
     /// embedder prepares it (it holds the read capability and the decode
@@ -491,6 +499,7 @@ impl DesktopShell {
             artwork,
             artwork_resolver: ByTurn::new(starting),
             abandoned: Abandoned::default(),
+            lock_news: VecDeque::new(),
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
             menu_windows: Vec::new(),
@@ -2051,7 +2060,11 @@ impl DesktopShell {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
-        let polled = keyboard.poll_record(now_ns, self.router.focused())?;
+        let repeats = self
+            .router
+            .raw_keyboard(compositor, self.session.taskbar())
+            .is_none();
+        let polled = keyboard.poll_record(now_ns, self.router.focused(), repeats)?;
         if let Some((edge @ InputEvent::ModifiersChanged { .. }, _)) = polled {
             let _ = self.router.handle(
                 edge,
@@ -3110,6 +3123,7 @@ impl DesktopShell {
     /// window a move left are owed word of it; they are kept for the serve
     /// loop to deliver ([`take_abandoned`](Self::take_abandoned)).
     pub fn yield_pointer(&mut self, compositor: &mut Compositor) {
+        let _ = self.unlock_pointer(compositor);
         let Abandoned {
             client,
             resized,
@@ -3127,6 +3141,60 @@ impl DesktopShell {
     /// in its client it last was, which its owner is to be told.
     pub fn take_client_left(&mut self) -> Option<(WindowId, Point)> {
         self.router.take_client_left()
+    }
+
+    /// Lock the pointer to `window`, which holds the keyboard and has the
+    /// pointer over its content: it stays where it is, is drawn nowhere, and
+    /// every pointer event is the window's until the lock ends.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] when `window` may not lock it now — it
+    /// does not hold the keyboard, the pointer is not over its content, a
+    /// gesture holds the pointer, or a surface of the desktop's has the seat.
+    pub fn lock_pointer(
+        &mut self,
+        window: WindowId,
+        compositor: &mut Compositor,
+    ) -> Result<(), Errno> {
+        if self.router.pointer_lock() == Some(window) {
+            return Ok(());
+        }
+        if !self
+            .router
+            .lock_pointer(window, compositor, self.session.taskbar())
+        {
+            return Err(Errno::PermissionDenied);
+        }
+        self.lock_news.push_back((window, true));
+        self.refresh_cursor(compositor);
+        Ok(())
+    }
+
+    /// End the pointer lock, naming the window it was of: the pointer shows
+    /// again where it was locked.
+    pub fn unlock_pointer(&mut self, compositor: &mut Compositor) -> Option<WindowId> {
+        let window = self.router.unlock_pointer()?;
+        self.lock_news.push_back((window, false));
+        self.refresh_cursor(compositor);
+        Some(window)
+    }
+
+    /// The window the pointer is locked to, if any.
+    #[must_use]
+    pub const fn pointer_lock(&self) -> Option<WindowId> {
+        self.router.pointer_lock()
+    }
+
+    /// The next window whose pointer lock began (`true`) or ended (`false`)
+    /// and is still to be told, oldest first: a lock the window manager ended
+    /// itself, the keyboard having left its window, among them.
+    pub fn take_lock_news(&mut self, compositor: &mut Compositor) -> Option<(WindowId, bool)> {
+        if let Some(window) = self.router.take_lock_ended() {
+            self.lock_news.push_back((window, false));
+            self.refresh_cursor(compositor);
+        }
+        self.lock_news.pop_front()
     }
 
     /// What the last yields of the pointer left the serve loop to tell — the
@@ -3225,11 +3293,17 @@ impl DesktopShell {
             | InputResponse::Scrolled { .. }
             | InputResponse::AppScroll { .. }
             | InputResponse::AppPinch { .. }
-            // A client-area hover/drag/release acts on the already-focused
-            // window (the press that armed the grab moved focus), so none of
-            // them changes the highlighted task.
+            // A client-area hover/drag/press/release acts on the
+            // already-focused window (the press that armed the grab moved
+            // focus), and so does what reaches a window holding the keyboard
+            // raw or the pointer locked, so none of them changes the
+            // highlighted task.
             | InputResponse::ClientPointerMoved { .. }
+            | InputResponse::ClientPointerPressed { .. }
             | InputResponse::ClientPointerReleased { .. }
+            | InputResponse::RawKey { .. }
+            | InputResponse::LockedMotion { .. }
+            | InputResponse::LockedButton { .. }
             | InputResponse::Ignored => return,
         };
         let _ = self.tasks.sync_focus(self.session.taskbar_mut(), focus);
@@ -3281,6 +3355,7 @@ impl DesktopShell {
         S: InputSource + ?Sized,
     {
         outcomes.clear();
+        source.set_pointer_locked(self.router.pointer_lock().is_some());
         let mut applied = false;
         let drained = loop {
             match source.poll(now_ns) {
@@ -3291,6 +3366,7 @@ impl DesktopShell {
                     let edge = !matches!(
                         event,
                         InputEvent::PointerMoved { .. }
+                            | InputEvent::PointerMotion { .. }
                             | InputEvent::PointerScrolled { .. }
                             | InputEvent::Pinch {
                                 phase: PinchPhase::Update,
@@ -3443,6 +3519,20 @@ fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutc
             ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
             ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
         ) => None,
+        // A locked pointer's displacements add: its window is owed how far it
+        // moved, not where through.
+        (
+            ShellOutcome::WindowManager(InputResponse::LockedMotion {
+                window: into,
+                dx: rightward,
+                dy: downward,
+            }),
+            ShellOutcome::WindowManager(InputResponse::LockedMotion { window, dx, dy }),
+        ) if *into == window => {
+            *rightward = rightward.saturating_add(dx);
+            *downward = downward.saturating_add(dy);
+            None
+        }
         (
             ShellOutcome::WindowManager(InputResponse::Resized { window: into }),
             ShellOutcome::WindowManager(InputResponse::Resized { window }),

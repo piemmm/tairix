@@ -24,6 +24,32 @@ fn a_held_directory_is_its_node_wherever_its_name_goes() {
     assert_eq!(held.stat().map(|stat| stat.id).ok(), tree.id("/b"));
 }
 
+/// Each volume counts what its own files hold, a stored run at a time.
+#[test]
+fn a_volume_accounts_for_the_files_on_it_alone() {
+    let tree = Tree::new()
+        .dir("/a")
+        .file("/a/f", &[1; 1000])
+        .whole_second_volume("/other");
+    let home = tree.open_dir("/a", false).expect("opens");
+    let other = tree.open_dir("/other", false).expect("opens");
+    let before = home.volume_stats().expect("stats");
+    assert!(before.is_consistent());
+    assert_eq!(
+        before.total_blocks - before.free_blocks,
+        2,
+        "1000 bytes take two blocks"
+    );
+    let apart = other.volume_stats().expect("stats");
+    assert_eq!(apart.free_blocks, apart.total_blocks, "nothing is on it");
+    let mut file = home.create_file("g", 0o644).expect("made");
+    file.write_all_at(0, &[2; 512]).expect("written");
+    assert_eq!(
+        home.volume_stats().expect("stats").free_blocks,
+        before.free_blocks - 1
+    );
+}
+
 #[test]
 fn a_hook_runs_once_immediately_before_its_call() {
     let tree = Tree::new().dir("/d").file("/d/f", b"x");
@@ -189,4 +215,46 @@ fn each_link_and_dot_dot_on_the_way_is_resolved() {
 #[test]
 fn a_cycle_of_links_is_cut_off() {
     assert_eq!(resolve("/loop/x", links), Err(Errno::LinkLoop));
+}
+
+/// A copy's times are its source's as nearly as the copy's volume keeps
+/// them, answered exactly where they are kept exactly.
+#[test]
+fn a_copys_times_are_its_sources_as_nearly_as_its_volume_keeps_them() {
+    use tairix_abi::time::Time64;
+    let fine = Time64::new(-1_000, 750_000_000).expect("canonical");
+    let tree = Tree::new()
+        .file("/f", b"x")
+        .whole_second_volume("/coarse")
+        .file("/coarse/g", b"y");
+    let times = tairix_abi::NodeTimes {
+        accessed: fine,
+        modified: fine,
+        ..tairix_abi::NodeTimes::default()
+    };
+    let exact = tree
+        .open_dir("/", false)
+        .expect("opens")
+        .open_file("f", false)
+        .expect("opens");
+    assert_eq!(
+        crate::copy_times(&times, &exact),
+        Ok(tairix_abi::TimesKept::Exactly)
+    );
+    assert_eq!(tree.times("/f"), Some((fine, fine)));
+    let coarse = tree
+        .open_dir("/coarse", false)
+        .expect("opens")
+        .open_file("g", false)
+        .expect("opens");
+    assert_eq!(
+        crate::copy_times(&times, &coarse),
+        Ok(tairix_abi::TimesKept::Nearest)
+    );
+    let held = Time64::from_secs(-999);
+    assert_eq!(
+        tree.times("/coarse/g"),
+        Some((held, held)),
+        "the nearest second"
+    );
 }

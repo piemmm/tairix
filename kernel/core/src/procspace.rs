@@ -44,6 +44,7 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_arch_api::{AddressTag, CrossCpuTlbShootdown, EnterUser, UserEntry};
 use tairix_kernel_mem::{AllocError, LiveUserSpace, SpaceTlb, TlbContext};
@@ -68,6 +69,9 @@ pub struct ProcessSpace {
     /// The port's "enter user mode" handle, so a thread created later is
     /// entered through the same transition the first one was.
     port: &'static dyn EnterUser,
+    /// The id of the one space this one's memory may be installed into as
+    /// code, or zero, which no space's id is, before the first install.
+    code_target: AtomicU64,
 }
 
 #[cfg(test)]
@@ -98,6 +102,7 @@ impl ProcessSpace {
             space: SpinLock::new(space),
             resume,
             port,
+            code_target: AtomicU64::new(0),
         }
     }
 
@@ -105,6 +110,26 @@ impl ProcessSpace {
     #[must_use]
     pub fn tlb_context(&self) -> &TlbContext {
         &self.context
+    }
+
+    /// Pair this space, a compiler's, with `target`, the one space its memory
+    /// may ever be installed into as code, answering whether they are paired:
+    /// newly, or already.
+    ///
+    /// The pair dies with this space, and a target is named by its space's
+    /// id, which no other space of the boot bears, so a process that comes to
+    /// hold either one's number inherits nothing.
+    pub fn pair_code_target(&self, target: &Self) -> bool {
+        let target = target.context.id();
+        // The word is the whole of the state, so its atomicity alone decides
+        // which pair a race settles on.
+        match self
+            .code_target
+            .compare_exchange(0, target, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => true,
+            Err(paired) => paired == target,
+        }
     }
 
     /// Run `f` against the space under the lock.
@@ -198,6 +223,8 @@ pub(crate) fn host_test_space_over(
         8,
         VirtAddr::new(0x8000_0000),
         8,
+        VirtAddr::new(0x9000_0000),
+        8,
     )
     .expect("windows are valid");
     Box::new(live)
@@ -257,6 +284,21 @@ mod tests {
             shared.space.try_lock().is_some(),
             "the lock is released when the closure returns"
         );
+    }
+
+    #[test]
+    fn a_compiler_is_paired_with_the_first_target_it_names_and_no_other() {
+        let compiler = ProcessSpace::for_test(host_test_space!());
+        let target = ProcessSpace::for_test(host_test_space!());
+        let other = ProcessSpace::for_test(host_test_space!());
+        assert!(compiler.pair_code_target(&target), "the first pairs");
+        assert!(compiler.pair_code_target(&target), "and holds");
+        assert!(!compiler.pair_code_target(&other), "a second target never");
+        assert!(
+            other.pair_code_target(&compiler),
+            "another space pairs apart"
+        );
+        assert!(compiler.pair_code_target(&target));
     }
 
     #[test]

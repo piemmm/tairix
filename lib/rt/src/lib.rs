@@ -64,7 +64,7 @@ use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVAT
 use tairix_abi::fs::{
     Access, AtFlags, LinkFlags, NodeExpect, PathAt, RenameFlags, UnlinkFlags, FD_CWD,
 };
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::touch::TouchFrame;
@@ -73,9 +73,10 @@ use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
     InputMode, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
     Origin, PeerWatchOp, PortWidth, PowerAction, ProcId, RandomFlags, ReaddirFrom, ResourceLimit,
-    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
-    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
-    READDIR_BATCH_MAX, SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
+    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, TimesChange,
+    TimesKept, WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, ORIGIN_WIRE_LEN, READDIR_BATCH_MAX, SPAWN_UID_INHERIT, STDIN,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -88,6 +89,9 @@ mod startup;
 pub mod cachereport;
 
 pub mod changenotice;
+
+mod code;
+pub use code::stage_code;
 
 pub mod copy;
 
@@ -497,6 +501,10 @@ const NUM_FS_REALPATH: u64 = SyscallNumber::FS_REALPATH.as_u16() as u64;
 
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
+/// `fs_set_times` syscall number (as above).
+const NUM_FS_SET_TIMES: u64 = SyscallNumber::FS_SET_TIMES.as_u16() as u64;
+/// `fs_volume_stats` syscall number (as above).
+const NUM_FS_VOLUME_STATS: u64 = SyscallNumber::FS_VOLUME_STATS.as_u16() as u64;
 
 /// `fs_set_owner` syscall number (as above).
 const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
@@ -523,6 +531,9 @@ const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u6
 
 /// `child_origin` syscall number (as above).
 const NUM_CHILD_ORIGIN: u64 = SyscallNumber::CHILD_ORIGIN.as_u16() as u64;
+
+/// `code_install` syscall number (as above).
+const NUM_CODE_INSTALL: u64 = SyscallNumber::CODE_INSTALL.as_u16() as u64;
 
 /// `wall_time_get` syscall number (as above).
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
@@ -774,27 +785,19 @@ pub fn purge_terminal() -> i64 {
     ret as i64
 }
 
-/// Inject one decoded keyboard `record` for seat `seat` into the kernel
-/// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md` P11 —
-/// input follows the surface owner), returning the raw signed register (the
-/// bytes consumed when non-negative, else `-errno`).
+/// Inject one key `edge` for seat `seat` (`SyscallNumber::KEY_INJECT`),
+/// returning the bytes consumed, else `-errno`.
 ///
-/// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into a [`KeyInput`] key edge: `seat` names
-/// the seat the keyboard belongs to (`SEAT_PRIMARY` for the boot seat's
-/// directly attached keyboard); the kernel validates `CAP_INPUT_INJECT`,
-/// the seat id (`NotFound` for an unknown seat), and the `(buf, len)` pair
-/// against the caller's address space, decodes the record fail-closed,
-/// and routes it by who holds that seat — a *press* encoded to the seat's
-/// foreground text console's tty bytes, or the whole record delivered to
-/// its desktop keyboard channel. The driver no longer chooses the encoding
-/// or the destination. A malformed record or an unwired arbiter
-/// fails closed with `-errno`; the wrapper surfaces the
-/// raw signed value so the caller decides how to react.
+/// A keyboard driver reports only which physical key went down or up; the
+/// seat reads what it types under the modifiers, locks and layout every
+/// keyboard on that seat shares, and routes the record by who holds the seat
+/// — a press typed into the foreground text console, every edge to the
+/// desktop's keyboard channel. Requires `CAP_INPUT_INJECT`; an unknown seat
+/// is `NotFound`, and a malformed edge or an unwired arbiter fails closed.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
-pub fn key_inject(seat: u64, record: &KeyInput) -> i64 {
-    let bytes = record.to_le_bytes();
+pub fn key_inject(seat: u64, edge: &KeyEdge) -> i64 {
+    let bytes = edge.to_le_bytes();
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_INPUT_INJECT`, the seat id, and the `(buf, len)` pair against
@@ -814,7 +817,7 @@ pub fn key_inject(seat: u64, record: &KeyInput) -> i64 {
 /// (`SEAT_PRIMARY` for the boot seat; further seats are minted per
 /// discovered display node and enumerated through `SEAT_LIST`): the kernel
 /// records the calling task as that seat's owner, so key edges injected for
-/// the seat are delivered as [`KeyInput`] records the owner drains with
+/// the seat are delivered as [`KeyInput`](tairix_abi::input::KeyInput) records the owner drains with
 /// [`keyboard_read`], and the returned generation is the client's lease
 /// handle — the display present right is derived from it
 /// (`plans/DISPLAY.md` D4), so a stale pre-revoke handle can never be
@@ -899,7 +902,8 @@ pub fn seat_revoke(seat_id: u64) -> i64 {
 /// Read one decoded keyboard event from seat `seat`'s keyboard channel into
 /// `buf` (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md`
 /// P11), returning the raw signed register (the bytes written — one
-/// [`KeyInput`] record's [`KeyInput::WIRE_LEN`], or `0` when the channel is
+/// [`KeyInput`](tairix_abi::input::KeyInput) record's
+/// [`KeyInput::WIRE_LEN`](tairix_abi::input::KeyInput::WIRE_LEN), or `0` when the channel is
 /// momentarily drained — when non-negative, else `-errno`).
 ///
 /// The task that owns the seat (the window manager) drains the
@@ -909,7 +913,7 @@ pub fn seat_revoke(seat_id: u64) -> i64 {
 /// non-owner is refused with `SeatNotOwner` /
 /// `SeatRevoked`), and validates the `(buf, len)` pair against the caller's
 /// address space; a `buf` shorter than
-/// [`KeyInput::WIRE_LEN`] fails closed with `-errno`. A
+/// [`KeyInput::WIRE_LEN`](tairix_abi::input::KeyInput::WIRE_LEN) fails closed with `-errno`. A
 /// zero return is a valid empty read, so the caller loops.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
@@ -1988,9 +1992,10 @@ pub fn mem_map(len: usize, flags: MapFlags, addr_hint: u64) -> i64 {
 /// [`mem_map`] from the calling process's own address space
 /// (`SyscallNumber::MEM_UNMAP`, `plans/SPAWN.md` SP5).
 ///
-/// The kernel zeroes the frames it reclaims (secret
-/// hygiene) and fails closed when `(base, len)` does not name a region the
-/// caller mapped. Returns `0` on success or `-errno`
+/// The kernel zeroes the frames it reclaims (secret hygiene) and fails closed
+/// unless every page of `(base, len)` is anonymous memory the caller mapped,
+/// or all of it code installed into the caller ([`code_install`]). Returns
+/// `0` on success or `-errno`
 /// (recover the [`tairix_abi::Errno`] discriminant as `-ret`), following the
 /// standard `abi-v1` signed-result convention; the wrapper hides no error.
 #[must_use]
@@ -4802,6 +4807,37 @@ pub fn child_origin(pid: i64) -> Result<Origin, Errno> {
     Origin::from_bytes(buf.get(..len).ok_or(Errno::BufferTooSmall)?)
 }
 
+/// Move the `len`-byte region at `base` of this process's sandboxed child
+/// `compiler`, code it wrote there, into its sandboxed child `target`,
+/// read-execute at a kernel-chosen address, and answer that address
+/// (`SyscallNumber::CODE_INSTALL`).
+///
+/// The region leaves the compiler as it arrives in the target, every CPU's
+/// instruction fetch made to see it first, and is never writable there; the
+/// target gives it back with [`mem_unmap`]. The compiler's first install pairs
+/// it with `target` for the rest of its life.
+///
+/// # Errors
+///
+/// As the syscall documents: [`Errno::NotFound`] for a pid that is no live
+/// child or a range that is not the compiler's written anonymous memory,
+/// [`Errno::PermissionDenied`] for a child that is not sandboxed, one child
+/// named twice or a compiler paired elsewhere, and [`Errno::OutOfMemory`] when
+/// the target's code window is full, every one of them leaving the compiler's
+/// range as it was.
+pub fn code_install(compiler: i64, target: i64, base: u64, len: usize) -> Result<u64, Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke. Every argument is a
+    // scalar the kernel validates; `base` names memory of the compiler's,
+    // never of this process.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CODE_INSTALL,
+            [i64_arg(compiler), i64_arg(target), base, len as u64, 0, 0],
+        )
+    };
+    Errno::syscall_result(ret.cast_signed())
+}
+
 /// Read the kernel's wall-clock time and its provenance state
 /// (`SyscallNumber::WALL_TIME_GET`; P-D).
 ///
@@ -5310,9 +5346,10 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
     ret as i64
 }
 
-/// Delegate the caller's own descriptor `fd` — a filesystem file or a pipe
-/// end — to the process instance `recipient` as a one-shot grant, a file's
-/// bounded above by `write_ceiling` bytes, returning the minted handle (≥ 1)
+/// Delegate the caller's own descriptor `fd` — a filesystem file, a pipe
+/// end or a directory — to the process instance `recipient` as a one-shot
+/// grant, a file's bounded above by `write_ceiling` bytes, returning the
+/// minted handle (≥ 1)
 /// or `-errno` (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 —
 /// the file picker's user-mediated hand-off; `plans/APPDATA.md` §3.8 — the
 /// app-data service's blob descriptor).
@@ -5337,12 +5374,15 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 /// file a stated bound or [`tairix_abi::GRANT_EXTENT_INHERIT`], this task's
 /// own reach, which a delegation it was itself handed can only narrow; zero
 /// is refused for a writable file. `flags` is
-/// [`tairix_abi::GRANT_FILE_ONLY`] to delegate only a regular file, or zero.
-/// A pty end, resource or directory fails closed with `-errno`
-/// (`OutOfRange`), as does any but a regular file under `GRANT_FILE_ONLY`
-/// and a flag not defined, and a fresh delegation past the
-/// caller's pending bound to `recipient`, or a pipe end past those it may
-/// have in flight, with `LimitExceeded`.
+/// [`tairix_abi::GRANT_FILE_ONLY`] to delegate only a regular file,
+/// [`tairix_abi::GRANT_SUBTREE`] to delegate a directory as a capability to
+/// what lies beneath it — read-only under a zero ceiling, else writable with
+/// each file bounded by the ceiling — or zero. A pty end, a resource, a
+/// directory without `GRANT_SUBTREE`, anything but a regular file under
+/// `GRANT_FILE_ONLY` or a directory under `GRANT_SUBTREE`, and a flag not
+/// defined fail closed with `-errno` (`OutOfRange`), and a fresh delegation
+/// past the caller's pending bound to `recipient`, or a pipe end past those
+/// it may have in flight, with `LimitExceeded`.
 ///
 /// The caller forwards the returned handle in-band (e.g. a window-channel
 /// event field, or an app-data reply); it resolves only when presented by
@@ -6296,6 +6336,34 @@ fn stat_fd(fd: u32) -> Result<FileStat, i64> {
     FileStat::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
 }
 
+/// The space accounting of the volume the open descriptor `fd` lies on
+/// (`SyscallNumber::FS_VOLUME_STATS`, the `fstatvfs(2)` shape). Prefer
+/// [`File::volume_stats`].
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not the
+/// caller's or lies on no volume (`NotSupported`); `-BufferTooSmall` for a
+/// short record, and `-OutOfRange` for one that does not add up.
+pub fn fs_volume_stats(fd: u32) -> Result<tairix_abi::driver::filesystem::VolumeStats, i64> {
+    use tairix_abi::driver::filesystem::VolumeStats;
+    let mut buf = [0u8; VolumeStats::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `buf` is a live exclusive local for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_VOLUME_STATS,
+            [u64::from(fd), ptr, buf.len() as u64, 0, 0, 0],
+        )
+    };
+    if count_result(ret, buf.len())? < VolumeStats::WIRE_LEN {
+        return Err(-i64::from(tairix_abi::Errno::BufferTooSmall.as_i32()));
+    }
+    VolumeStats::from_le_bytes(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
 /// Set the length of the regular file open at descriptor `fd` to `size`
 /// bytes (`SyscallNumber::FS_TRUNCATE`).
 ///
@@ -6821,6 +6889,57 @@ fn fs_set_mode_at(dirfd: u32, path: &[u8], mode: u32, flags: AtFlags) -> i64 {
         )
     };
     ret as i64
+}
+
+/// Change the access and modification times of the node at `path` as
+/// `change` asks (`SyscallNumber::FS_SET_TIMES`, the `utimensat(2)` shape), a
+/// relative `path` resolved from the working directory and a final link
+/// followed, answering how exactly the volume kept them.
+///
+/// Stamping both times now needs ownership or write access, and any other
+/// change ownership — or, of a node whose format records no owner, write
+/// access; the metadata-change time moves with any change. An instant the
+/// volume cannot keep is `-TimestampOutOfRange` unless `change` asks for the
+/// nearest it can, which is then answered [`TimesKept::Nearest`].
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`).
+pub fn fs_set_times(path: &[u8], change: &TimesChange) -> Result<TimesKept, i64> {
+    fs_set_times_at(FD_CWD, path, change, AtFlags::empty())
+}
+
+/// [`fs_set_times`] with a relative `path` resolved from `dirfd`:
+/// [`AtFlags::NO_FOLLOW`] changes a final link's own times, and
+/// [`AtFlags::EMPTY_PATH`] with an empty `path` those of `dirfd`'s own node.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 word-or-errno encoding (a `TimesKept` word, else -errno).
+fn fs_set_times_at(
+    dirfd: u32,
+    path: &[u8],
+    change: &TimesChange,
+    flags: AtFlags,
+) -> Result<TimesKept, i64> {
+    let record = change.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // path's and the record's `(address, len)` pairs against the caller's
+    // address space before reading them, and both are live for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_SET_TIMES,
+            [
+                u64::from(dirfd),
+                path_or_null(path, flags),
+                path.len() as u64,
+                record.as_ptr() as u64,
+                record.len() as u64,
+                u64::from(flags.bits()),
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    TimesKept::from_u64(ret.unsigned_abs()).map_err(|errno| -i64::from(errno.as_i32()))
 }
 
 /// Set the owning user and/or group of the file or directory at `path` to
@@ -7524,6 +7643,15 @@ impl File {
         stat_fd(self.fd)
     }
 
+    /// The space accounting of the volume this handle's node lies on.
+    ///
+    /// # Errors
+    ///
+    /// As [`fs_volume_stats`].
+    pub fn volume_stats(&self) -> Result<tairix_abi::driver::filesystem::VolumeStats, i64> {
+        fs_volume_stats(self.fd)
+    }
+
     /// How long the regular file this handle holds is — or `None` for a
     /// handle on anything else, whose declared length says nothing about
     /// what a read gives. One `fs_stat`, which the descriptor's own backing
@@ -7601,6 +7729,17 @@ impl File {
     /// The raw negative kernel result (`-errno`).
     pub fn set_mode(&self, mode: u32) -> Result<(), i64> {
         errno_result(fs_set_mode_at(self.fd, &[], mode, AtFlags::EMPTY_PATH))
+    }
+
+    /// Change the times of the node this handle holds as `change` asks, under
+    /// the rules [`fs_set_times`] states, through [`AtFlags::EMPTY_PATH`]. A
+    /// handle granted with a ceiling that writes acts as its grantor.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_times(&self, change: &TimesChange) -> Result<TimesKept, i64> {
+        fs_set_times_at(self.fd, &[], change, AtFlags::EMPTY_PATH)
     }
 
     /// Give the node this handle holds the owner `uid` and group `gid`, under
@@ -7823,7 +7962,9 @@ fn positional_errno(err: io::Error) -> i64 {
 /// [`Dir::open_file`], [`Dir::unlink`], [`Dir::rename`] and the rest — resolve
 /// a relative name from this directory, wherever it has been moved since it
 /// was opened, and an absolute one as the free functions do; every one runs
-/// as the caller.
+/// as the caller. A directory redeemed from a [`tairix_abi::GRANT_SUBTREE`]
+/// delegation is a capability instead: every call through it stays beneath
+/// it, refusing an absolute name, and acts as its grantor.
 #[derive(Debug)]
 pub struct Dir {
     file: File,
@@ -7857,6 +7998,23 @@ impl Dir {
     /// `-AlreadyExists` for a name already taken.
     pub fn create(path: &[u8], mode: u32) -> Result<Self, i64> {
         Self::from_open_result(fs_open_at(FD_CWD, path, NEW_DIRECTORY, mode))
+    }
+
+    /// Redeem the one-shot delegation `handle` of a directory capability
+    /// minted to this task ([`fd_redeem`]): every path named from it stays
+    /// beneath it and acts as its grantor.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the `fd_redeem` or the
+    /// `fs_stat` after it; `-NotADirectory` for a delegation of anything but a
+    /// directory, which is let go.
+    pub fn from_delegation(handle: u64) -> Result<Self, i64> {
+        let file = File::from_delegation(handle)?;
+        if file.stat()?.kind != tairix_abi::FileKind::Directory {
+            return Err(-i64::from(Errno::NotADirectory.as_i32()));
+        }
+        Ok(Self { file })
     }
 
     /// Wrap an open of a directory as an owned handle.
@@ -8051,6 +8209,21 @@ impl Dir {
     /// The raw negative kernel result (`-errno`).
     pub fn set_mode_at(&self, name: &[u8], mode: u32, flags: AtFlags) -> Result<(), i64> {
         errno_result(fs_set_mode_at(self.fd(), name, mode, flags))
+    }
+
+    /// [`fs_set_times`] of what `name` names from here, `flags` as
+    /// [`Dir::set_mode_at`] reads them.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`).
+    pub fn set_times_at(
+        &self,
+        name: &[u8],
+        change: &TimesChange,
+        flags: AtFlags,
+    ) -> Result<TimesKept, i64> {
+        fs_set_times_at(self.fd(), name, change, flags)
     }
 
     /// [`fs_set_owner`] of what `name` names from here, `flags` as
@@ -8565,6 +8738,27 @@ mod tests {
             args[3],
             u64::try_from(ORIGIN_WIRE_LEN).expect("fits"),
             "room for one whole record"
+        );
+    }
+
+    #[test]
+    fn code_install_asks_by_both_whole_pids_and_answers_the_target_address() {
+        let (number, args) = capture(0x4_0000_0000, || {
+            assert_eq!(code_install(12, -1, 0xC000_0000, 4096), Ok(0x4_0000_0000));
+        });
+        assert_eq!(number, NUM_CODE_INSTALL);
+        assert_eq!(args[0], 12);
+        assert_eq!(
+            args[1],
+            (-1i64).cast_unsigned(),
+            "a pid is the whole register"
+        );
+        assert_eq!((args[2], args[3]), (0xC000_0000, 4096));
+        assert_eq!(&args[4..], &[0, 0]);
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(
+            code_install(12, 13, 0xC000_0000, 4096),
+            Err(Errno::PermissionDenied)
         );
     }
 
@@ -9456,40 +9650,32 @@ mod tests {
     }
 
     #[test]
-    fn key_inject_marshals_the_seat_record_pointer_and_len() {
-        use tairix_abi::input::{KeyValue, Modifiers, PhysicalKey};
-        let record = KeyInput::Pressed {
-            key: KeyValue::Char('a'),
-            modifiers: Modifiers::default(),
-            physical: PhysicalKey::A,
+    fn key_inject_marshals_the_seat_edge_pointer_and_len() {
+        let edge = KeyEdge {
+            key: tairix_abi::input::PhysicalKey::A,
+            pressed: true,
         };
-        let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
-        let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
-            assert_eq!(key_inject(3, &record), want);
+        let want = i64::try_from(KeyEdge::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(KeyEdge::WIRE_LEN as u64, || {
+            assert_eq!(key_inject(3, &edge), want);
         });
         assert_eq!(number, NUM_KEY_INJECT);
-        // arg 0 is the seat id; arg 1 the record buffer pointer; arg 2 its
-        // WIRE_LEN.
         assert_eq!(args[0], 3);
         assert_ne!(args[1], 0);
-        assert_eq!(args[2], KeyInput::WIRE_LEN as u64);
+        assert_eq!(args[2], KeyEdge::WIRE_LEN as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]
     fn key_inject_surfaces_negative_errno_encoding() {
-        use tairix_abi::input::{KeyValue, Modifiers, PhysicalKey};
-        // An unwired arbiter refuses the inject with `NotImplemented`; the
-        // wrapper surfaces the raw `-errno` register.
-        let record = KeyInput::Pressed {
-            key: KeyValue::Char('x'),
-            modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+        let edge = KeyEdge {
+            key: tairix_abi::input::PhysicalKey::ESCAPE,
+            pressed: false,
         };
         let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(key_inject(0, &record), want);
+            assert_eq!(key_inject(0, &edge), want);
         });
     }
 
@@ -9542,6 +9728,7 @@ mod tests {
 
     #[test]
     fn keyboard_read_marshals_the_seat_buffer_pointer_and_len() {
+        use tairix_abi::input::KeyInput;
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
         let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
@@ -11867,6 +12054,26 @@ mod tests {
         let (number, args) = capture(0, || assert_eq!(file.set_owner(1000, 100), Ok(())));
         assert_eq!(number, NUM_FS_SET_OWNER);
         assert_eq!(args, [9, 0, 0, 1000, 100, empty]);
+
+        let now = TimesChange {
+            accessed: tairix_abi::StampChange::Now,
+            ..TimesChange::default()
+        };
+        let (number, args) = capture(1, || {
+            assert_eq!(file.set_times(&now), Ok(TimesKept::Nearest));
+        });
+        assert_eq!(number, NUM_FS_SET_TIMES);
+        assert_eq!(
+            (args[0], args[1], args[2], args[4], args[5]),
+            (9, 0, 0, TimesChange::WIRE_LEN as u64, empty)
+        );
+        let (_, _) = capture(2, || {
+            assert_eq!(
+                file.set_times(&now),
+                Err(-i64::from(Errno::OutOfRange.as_i32())),
+                "a word naming no answer is refused"
+            );
+        });
 
         let read = u64::from(Access::READ.bits());
         let (number, args) = capture(0, || assert_eq!(file.access(Access::READ), Ok(())));

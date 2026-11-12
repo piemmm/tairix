@@ -59,7 +59,7 @@ use tairix_abi::fs::{
     DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, NodeExpect, OpenFlags,
     PathAt, FS_PATH_MAX,
 };
-use tairix_abi::input::{KeyInput, PointerButtonCode, PointerInput, TimedPointer};
+use tairix_abi::input::{KeyEdge, KeyInput, PointerButtonCode, PointerInput, TimedPointer};
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketDelivery,
     SocketRequest, SocketStreamEvent,
@@ -1900,6 +1900,10 @@ fn exercise_fsserve(bytes: &[u8]) {
         Request::Unpin { pinned: node },
         Request::Flush,
         Request::Label,
+        Request::SetTimes {
+            node,
+            change: tairix_abi::TimesChange::default(),
+        },
     ];
     for request in asked {
         let Ok(reply) = decode_reply(bytes, &request) else {
@@ -2031,10 +2035,19 @@ fn exercise_fs(bytes: &[u8]) {
     }
 }
 
-/// Drive the two records the descriptor-relative calls copy in from a
-/// caller: an accepted `PathAt` names a path a call may take and re-encodes
-/// byte for byte, and an accepted `NodeExpect` does the same.
+/// Drive the records the descriptor-relative calls copy in from a caller: an
+/// accepted `PathAt` names a path a call may take and re-encodes byte for
+/// byte, and an accepted `NodeExpect` and `TimesChange` do the same.
 fn exercise_path_operands(bytes: &[u8]) {
+    if let Some(raw) = bytes.first_chunk::<{ tairix_abi::TimesChange::WIRE_LEN }>() {
+        if let Ok(change) = tairix_abi::TimesChange::from_le_bytes(raw) {
+            assert_eq!(
+                &change.to_le_bytes(),
+                raw,
+                "a TimesChange round-trips byte for byte"
+            );
+        }
+    }
     if let Some(raw) = bytes.first_chunk::<{ PathAt::WIRE_LEN }>() {
         if let Ok(at) = PathAt::from_le_bytes(raw) {
             assert!(at.path != 0, "an accepted PathAt names an address");
@@ -2164,6 +2177,9 @@ fn exercise_input(bytes: &[u8]) {
         let redecoded = KeyInput::from_bytes(&event.to_le_bytes())
             .expect("round-trip of an accepted key event must succeed");
         assert_eq!(event, redecoded);
+    }
+    if let Ok(edge) = KeyEdge::from_bytes(bytes) {
+        assert_eq!(KeyEdge::from_bytes(&edge.to_le_bytes()), Ok(edge));
     }
     if let Ok(frame) = TouchFrame::from_bytes(bytes) {
         assert!(frame.contacts().len() <= TOUCH_CONTACTS_MAX);
@@ -2355,16 +2371,17 @@ fn timed_pointer_records_with_flipped_bits_round_trip_or_are_refused() {
 }
 
 /// Every bit of every canonical key record, flipped: each result is refused or
-/// round-trips, and a flipped physical key never refuses a key edge, whose key
-/// and modifiers stand. Random bytes almost never pass the record's magic, so
-/// its physical key is reached only from a canonical record.
+/// round-trips, and a flipped physical key either names another real key,
+/// leaving what was typed and the modifiers as they were, or is refused. Random
+/// bytes almost never pass the record's magic, so its physical key is reached
+/// only from a canonical record.
 #[test]
 fn key_records_with_flipped_bits_round_trip_or_are_refused() {
     use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode, PhysicalKey};
     use tairix_abi::Errno;
     let records = [
         KeyInput::Pressed {
-            key: KeyValue::Char('#'),
+            key: Some(KeyValue::Char('#')),
             modifiers: Modifiers {
                 shift: true,
                 meta: true,
@@ -2373,20 +2390,22 @@ fn key_records_with_flipped_bits_round_trip_or_are_refused() {
             physical: PhysicalKey::DIGIT_3,
         },
         KeyInput::Released {
-            key: KeyValue::Named(NamedKeyCode::Escape),
+            key: Some(KeyValue::Named(NamedKeyCode::Escape)),
             modifiers: Modifiers::default(),
             physical: PhysicalKey::ESCAPE,
         },
         KeyInput::Pressed {
-            key: KeyValue::Char('a'),
-            modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
-        },
-        KeyInput::ModifiersChanged {
+            key: None,
             modifiers: Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
+            physical: PhysicalKey::LEFT_CTRL,
+        },
+        KeyInput::Released {
+            key: None,
+            modifiers: Modifiers::default(),
+            physical: PhysicalKey::CAPS_LOCK,
         },
     ];
     // The record's last half-word is its physical key.
@@ -2401,18 +2420,41 @@ fn key_records_with_flipped_bits_round_trip_or_are_refused() {
             if bit < physical_bits {
                 continue;
             }
-            let decoded = KeyInput::from_bytes(&flipped);
-            if record.physical().is_some() {
-                let edge = decoded.expect("a flipped physical key leaves the edge");
-                assert_eq!(edge.key(), record.key(), "bit {bit}");
-                assert_eq!(edge.modifiers(), record.modifiers(), "bit {bit}");
-            } else {
-                assert_eq!(
-                    decoded,
-                    Err(Errno::BadMagic),
-                    "a modifier change names no key"
-                );
+            match KeyInput::from_bytes(&flipped) {
+                Ok(read) => {
+                    assert_ne!(read.physical(), record.physical(), "bit {bit}");
+                    assert_eq!(read.key(), record.key(), "bit {bit}");
+                    assert_eq!(read.modifiers(), record.modifiers(), "bit {bit}");
+                    assert_eq!(read.is_press(), record.is_press(), "bit {bit}");
+                }
+                Err(err) => assert_eq!(err, Errno::OutOfRange, "bit {bit}"),
             }
+        }
+    }
+}
+
+/// Every bit of every canonical key edge, flipped: each result is refused or
+/// round-trips, and is never read as the edge it was.
+#[test]
+fn key_edges_with_flipped_bits_round_trip_or_are_refused() {
+    use tairix_abi::input::PhysicalKey;
+    for edge in [
+        KeyEdge {
+            key: PhysicalKey::A,
+            pressed: true,
+        },
+        KeyEdge {
+            key: PhysicalKey::RIGHT_GUI,
+            pressed: false,
+        },
+    ] {
+        let canonical = edge.to_le_bytes();
+        assert_eq!(KeyEdge::from_bytes(&canonical), Ok(edge));
+        for bit in 0..KeyEdge::WIRE_LEN * 8 {
+            let mut flipped = canonical;
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            exercise_input(&flipped);
+            assert_ne!(KeyEdge::from_bytes(&flipped), Ok(edge), "bit {bit}");
         }
     }
 }
@@ -2561,6 +2603,14 @@ fn fsserve_request_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
         Request::SetLabel {
             title: tairix_abi::driver::filesystem::VolumeTitle::new("Disc 1").expect("a title"),
         },
+        Request::SetTimes {
+            node,
+            change: tairix_abi::TimesChange {
+                accessed: tairix_abi::StampChange::Keep,
+                modified: tairix_abi::StampChange::At(tairix_abi::time::Time64::from_secs(7)),
+                nearest: false,
+            },
+        },
     ];
     requests
         .iter()
@@ -2628,6 +2678,7 @@ fn fsserve_reply_frames() -> std::vec::Vec<std::vec::Vec<u8>> {
                 tairix_abi::driver::filesystem::VolumeTitle::new("Disc 1").expect("a title"),
             ),
         ),
+        (Op::SetTimes, Answer::Kept(tairix_abi::TimesKept::Nearest)),
     ] {
         let mut out = std::vec![0u8; 256];
         let len = encode_reply(op, state, Ok(answer), &mut out).expect("encodes");
@@ -3687,6 +3738,10 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 3,
             purpose: PickPurpose::Open,
         },
+        WindowRequest::PickFile {
+            window_id: 3,
+            purpose: PickPurpose::Subtree,
+        },
         WindowRequest::SetCursor {
             window_id: 3,
             shape: CursorShape::Text,
@@ -4353,6 +4408,12 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
             window_id: 3,
             handle: 9,
             writable: true,
+        }
+        .to_le_bytes(),
+        WindowEvent::SubtreePicked {
+            window_id: 3,
+            handle: 9,
+            writable: false,
         }
         .to_le_bytes(),
         WindowEvent::PickCancelled { window_id: 3 }.to_le_bytes(),

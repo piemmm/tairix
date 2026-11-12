@@ -1035,6 +1035,184 @@ impl NodeExpect {
     }
 }
 
+/// How [`SyscallNumber::FS_SET_TIMES`](crate::SyscallNumber::FS_SET_TIMES)
+/// changes one of a node's times: `utimensat(2)`'s `UTIME_OMIT`, `UTIME_NOW`
+/// or an instant.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum StampChange {
+    /// Leave the time as it is.
+    #[default]
+    Keep,
+    /// Stamp it with the wall clock, as a write stamps a file's modification
+    /// time.
+    Now,
+    /// Set it to this instant.
+    At(Time64),
+}
+
+impl StampChange {
+    /// The wire word of [`Self::Keep`].
+    pub const KEEP_WORD: u32 = 0;
+    /// The wire word of [`Self::Now`].
+    pub const NOW_WORD: u32 = 1;
+    /// The wire word of [`Self::At`].
+    pub const AT_WORD: u32 = 2;
+
+    /// The wire word naming the change, and the instant it carries.
+    const fn wire(self) -> (u32, Time64) {
+        match self {
+            Self::Keep => (Self::KEEP_WORD, Time64::UNIX_EPOCH),
+            Self::Now => (Self::NOW_WORD, Time64::UNIX_EPOCH),
+            Self::At(at) => (Self::AT_WORD, at),
+        }
+    }
+
+    /// The time this change leaves where `kept` stood, `now` being the
+    /// format's reading of the wall clock: what a format keeping a [`Time64`]
+    /// stores.
+    #[must_use]
+    pub const fn applied(self, kept: Time64, now: Time64) -> Time64 {
+        match self {
+            Self::Keep => kept,
+            Self::Now => now,
+            Self::At(at) => at,
+        }
+    }
+
+    /// The change a wire word and the instant beside it name; a keep or a now
+    /// carries no instant.
+    fn from_wire(how: u32, at: Time64) -> Result<Self, Errno> {
+        match (how, at) {
+            (Self::KEEP_WORD, Time64::UNIX_EPOCH) => Ok(Self::Keep),
+            (Self::NOW_WORD, Time64::UNIX_EPOCH) => Ok(Self::Now),
+            (Self::AT_WORD, at) => Ok(Self::At(at)),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// What [`SyscallNumber::FS_SET_TIMES`](crate::SyscallNumber::FS_SET_TIMES)
+/// sets: a node's access and modification times, `utimensat(2)`'s pair.
+/// [`WIRE_LEN`](Self::WIRE_LEN) bytes, little-endian, laid out as the C view
+/// `tairix_times_change_t`, each field at its natural alignment.
+///
+/// A node's metadata-change time moves to the wall clock with any change, and
+/// its creation time never does.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct TimesChange {
+    /// The access time.
+    pub accessed: StampChange,
+    /// The modification time.
+    pub modified: StampChange,
+    /// Hold an instant the volume cannot keep exactly — finer than its
+    /// resolution, outside its range, or of a time it does not keep — as the
+    /// nearest it can, rather than refusing it.
+    pub nearest: bool,
+}
+
+impl TimesChange {
+    /// Byte length on the wire.
+    pub const WIRE_LEN: usize = 40;
+
+    /// The wire flag asking for [`Self::nearest`].
+    pub const NEAREST: u32 = 1;
+
+    /// Whether the change sets nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.accessed == StampChange::Keep && self.modified == StampChange::Keep
+    }
+
+    /// Whether the change stamps both times now and does nothing else: the one
+    /// change write access permits without ownership.
+    #[must_use]
+    pub fn is_touch(&self) -> bool {
+        self.accessed == StampChange::Now && self.modified == StampChange::Now
+    }
+
+    /// The little-endian wire encoding.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let (accessed_how, accessed) = self.accessed.wire();
+        let (modified_how, modified) = self.modified.wire();
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_i64(&mut out, 0, accessed.secs());
+        put_i64(&mut out, 8, modified.secs());
+        put_u32(&mut out, 16, accessed.subsec_nanos());
+        put_u32(&mut out, 20, modified.subsec_nanos());
+        put_u32(&mut out, 24, accessed_how);
+        put_u32(&mut out, 28, modified_how);
+        put_u32(&mut out, 32, if self.nearest { Self::NEAREST } else { 0 });
+        out
+    }
+
+    /// Decode the wire encoding.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unknown change word, an instant beside a
+    /// keep or a now, an unknown flag or a nonzero reserved word, and
+    /// [`Errno::TimestampOutOfRange`] for nanoseconds that are not canonical.
+    pub fn from_le_bytes(raw: &[u8; Self::WIRE_LEN]) -> Result<Self, Errno> {
+        let flags = read_u32(raw, 32);
+        if flags & !Self::NEAREST != 0 || read_u32(raw, 36) != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let accessed = Time64::new(read_i64(raw, 0), read_u32(raw, 16))?;
+        let modified = Time64::new(read_i64(raw, 8), read_u32(raw, 20))?;
+        Ok(Self {
+            accessed: StampChange::from_wire(read_u32(raw, 24), accessed)?,
+            modified: StampChange::from_wire(read_u32(raw, 28), modified)?,
+            nearest: flags & Self::NEAREST != 0,
+        })
+    }
+}
+
+/// How exactly [`SyscallNumber::FS_SET_TIMES`](crate::SyscallNumber::FS_SET_TIMES)
+/// kept the instants it was given: its answer.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TimesKept {
+    /// Every instant as given.
+    #[default]
+    Exactly,
+    /// At least one as the nearest the volume holds, under
+    /// [`TimesChange::nearest`].
+    Nearest,
+}
+
+impl TimesKept {
+    /// The answer for two fields kept as `self` and `other`.
+    #[must_use]
+    pub const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Exactly, Self::Exactly) => Self::Exactly,
+            _ => Self::Nearest,
+        }
+    }
+
+    /// The syscall's return word.
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        match self {
+            Self::Exactly => 0,
+            Self::Nearest => 1,
+        }
+    }
+
+    /// The answer a return word names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a word that names none.
+    pub const fn from_u64(raw: u64) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Exactly),
+            1 => Ok(Self::Nearest),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// How much of a path
 /// [`SyscallNumber::FS_REALPATH`](crate::SyscallNumber::FS_REALPATH)
 /// requires to exist.
@@ -1253,9 +1431,8 @@ impl FileId {
 /// driver reports through [`NodeTimes`] — the one definition of a node's
 /// timestamps, translated straight through the VFS rather than restated. A
 /// backing that keeps no stamp of a given kind reports
-/// [`Time64::UNIX_EPOCH`] for it (ARXFS, for instance, tracks no access
-/// time, so its `times.accessed` is always the epoch), never a fabricated
-/// wall time.
+/// [`Time64::UNIX_EPOCH`] for it (FAT, for instance, keeps no change time),
+/// never a fabricated wall time.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FileStat {
@@ -1961,12 +2138,58 @@ mod tests {
         is_component, is_name, mode_after_owner_change, mode_string, Access, AtFlags, DirChange,
         DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId, FileKind, FileStat, Filetype,
         FinalLink, NodeExpect, NodeTimes, OpenFlags, PathAt, RealpathMode, RenameFlags,
-        UnlinkFlags, FD_CWD, FS_MODE_MASK, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS,
-        FS_UMASK_QUERY,
+        StampChange, TimesChange, TimesKept, UnlinkFlags, FD_CWD, FS_MODE_MASK, FS_NAME_MAX,
+        FS_PATH_MAX, FS_SYMLINK_MAX, FS_UMASK_BITS, FS_UMASK_QUERY,
     };
     use crate::time::Time64;
     use crate::Errno;
     use alloc::vec;
+
+    #[test]
+    fn a_times_change_round_trips_and_refuses_what_it_cannot_mean() {
+        let change = TimesChange {
+            accessed: StampChange::At(Time64::new(-1, 5).expect("canonical")),
+            modified: StampChange::Now,
+            nearest: true,
+        };
+        let wire = change.to_le_bytes();
+        assert_eq!(TimesChange::from_le_bytes(&wire), Ok(change));
+        let refused = |offset: usize, value: u32| {
+            let mut bad = wire;
+            bad[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            TimesChange::from_le_bytes(&bad)
+        };
+        assert_eq!(
+            refused(8, 1),
+            Err(Errno::OutOfRange),
+            "an instant beside a now"
+        );
+        assert_eq!(refused(24, 3), Err(Errno::OutOfRange), "an unknown change");
+        assert_eq!(refused(32, 2), Err(Errno::OutOfRange), "an unknown flag");
+        assert_eq!(refused(36, 1), Err(Errno::OutOfRange), "the reserved word");
+        assert_eq!(
+            refused(16, 1_000_000_000),
+            Err(Errno::TimestampOutOfRange),
+            "nanoseconds that are not canonical"
+        );
+        assert!(TimesChange::default().is_empty());
+        let touch = TimesChange {
+            accessed: StampChange::Now,
+            modified: StampChange::Now,
+            nearest: false,
+        };
+        assert!(touch.is_touch() && !touch.is_empty());
+        assert!(!change.is_touch());
+        assert_eq!(
+            TimesKept::from_u64(TimesKept::Nearest.as_u64()),
+            Ok(TimesKept::Nearest)
+        );
+        assert_eq!(TimesKept::from_u64(2), Err(Errno::OutOfRange));
+        assert_eq!(
+            TimesKept::Exactly.and(TimesKept::Nearest),
+            TimesKept::Nearest
+        );
+    }
 
     #[test]
     fn a_filetype_is_twelve_bits() {

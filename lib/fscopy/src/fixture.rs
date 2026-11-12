@@ -28,14 +28,23 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_abi::driver::filesystem::{StampField, VolumeStats, EVERY_INSTANT};
 use tairix_abi::fs::{
     mode_after_owner_change, SeekRegion, FS_LINK_MODE, FS_MODE_MASK, FS_OWNER_UNCHANGED,
     FS_SETGID_BIT,
 };
 use tairix_abi::{
     Access, CapabilityId, Errno, FileId, FileKind, FileStat, NodeExpect, NodeTimes, RenameFlags,
-    Time64, UnlinkFlags,
+    Time64, TimesChange, TimesKept, UnlinkFlags,
 };
+
+/// The block every fixture volume allocates in, and how many it holds.
+const VOLUME_BLOCK: u32 = 512;
+const VOLUME_BLOCKS: u64 = 1 << 16;
+
+/// What a [`Tree::whole_second_volume`]'s times hold.
+const WHOLE_SECONDS: StampField =
+    StampField::new(Time64::from_secs(i64::MIN), 1_000_000_000, 0..1 << 64);
 use tairix_path::{dir_name, join, leaf_name, parse, root_len};
 
 use crate::data::{Source, Target};
@@ -150,6 +159,7 @@ struct NodeData {
     attrs: Vec<(String, Vec<u8>)>,
     content_gen: u64,
     modified: Time64,
+    accessed: Time64,
     changed: Time64,
     /// Made through the seam, so what is put in it is watched.
     watched: bool,
@@ -175,6 +185,8 @@ struct State {
     roots: Vec<(String, usize)>,
     /// Nodes whose volume gives them no identity.
     unidentified: Vec<usize>,
+    /// Volumes that keep a time only to the second.
+    whole_seconds: Vec<u8>,
     /// Directories listed with no identity, as a mount point is.
     covered: Vec<usize>,
 }
@@ -379,7 +391,7 @@ impl State {
             times: NodeTimes {
                 created: Time64::UNIX_EPOCH,
                 modified: data.modified,
-                accessed: Time64::UNIX_EPOCH,
+                accessed: data.accessed,
                 changed: data.changed,
             },
             content_gen: data.content_gen,
@@ -401,6 +413,7 @@ impl State {
             attrs: Vec::new(),
             content_gen: 0,
             modified: now,
+            accessed: now,
             changed: now,
             watched,
             written: 0,
@@ -532,6 +545,7 @@ impl Tree {
             attrs: Vec::new(),
             content_gen: 0,
             modified: Time64::UNIX_EPOCH,
+            accessed: Time64::UNIX_EPOCH,
             changed: Time64::UNIX_EPOCH,
             watched: false,
             written: 0,
@@ -552,6 +566,7 @@ impl Tree {
                 permissions: false,
                 roots: Vec::new(),
                 unidentified: Vec::new(),
+                whole_seconds: Vec::new(),
                 covered: Vec::new(),
             })),
         }
@@ -717,6 +732,38 @@ impl Tree {
             .attr_refusals
             .push((String::from(key), errno));
         self
+    }
+
+    /// Put the directory `path` on a volume of its own, as [`Self::volume`]
+    /// does, whose times are kept only to the second.
+    #[must_use]
+    pub fn whole_second_volume(self, path: &str) -> Self {
+        let made = self.volume(path);
+        {
+            let mut state = made.state.borrow_mut();
+            let volume = state.next_volume - 1;
+            state.whole_seconds.push(volume);
+        }
+        made
+    }
+
+    /// Give `path` the access and modification times `accessed` and
+    /// `modified`.
+    #[must_use]
+    pub fn stamped(self, path: &str, accessed: Time64, modified: Time64) -> Self {
+        let node = self.node(path);
+        {
+            let mut state = self.state.borrow_mut();
+            let data = state.data_mut(node);
+            (data.accessed, data.modified) = (accessed, modified);
+        }
+        self
+    }
+
+    /// The access and modification times of `path`.
+    #[must_use]
+    pub fn times(&self, path: &str) -> Option<(Time64, Time64)> {
+        self.read(path, |data| (data.accessed, data.modified))
     }
 
     /// The directory `path`, made if it is missing, and everything beneath
@@ -1288,6 +1335,34 @@ impl Node for Handle {
         Ok(())
     }
 
+    fn set_times(&self, change: &TimesChange) -> Result<TimesKept, Errno> {
+        self.tree.begin("set_times", self.node, None)?;
+        if !self.owns() {
+            return Err(Errno::PermissionDenied);
+        }
+        let volume = self.state().data(self.node).volume;
+        let field = if self.state().whole_seconds.contains(&volume) {
+            WHOLE_SECONDS
+        } else {
+            EVERY_INSTANT
+        };
+        let fit = |stamp| {
+            field
+                .fit_change(stamp, change.nearest)
+                .map_err(|_| Errno::TimestampOutOfRange)
+        };
+        let ((accessed, a), (modified, m)) = (fit(change.accessed)?, fit(change.modified)?);
+        if !change.is_empty() {
+            let mut state = self.state_mut();
+            let now = state.tick();
+            let data = state.data_mut(self.node);
+            data.accessed = accessed.applied(data.accessed, now);
+            data.modified = modified.applied(data.modified, now);
+            data.changed = now;
+        }
+        Ok(a.and(m))
+    }
+
     fn attr_keys(&self) -> Result<Vec<String>, Errno> {
         self.tree.begin("attr_keys", self.node, None)?;
         Ok(self
@@ -1349,6 +1424,35 @@ impl Node for Handle {
 
     fn sync(&self) -> Result<(), Errno> {
         self.tree.begin("sync", self.node, None)
+    }
+
+    fn volume_stats(&self) -> Result<VolumeStats, Errno> {
+        self.tree.begin("volume_stats", self.node, None)?;
+        let state = self.state();
+        let volume = state.data(self.node).volume;
+        let used = state
+            .nodes
+            .iter()
+            .filter(|data| data.volume == volume)
+            .map(|data| match &data.body {
+                Body::File { bytes, runs: None } => bytes.len() as u64,
+                Body::File {
+                    runs: Some(runs), ..
+                } => runs.iter().map(|&(start, end)| end - start).sum(),
+                Body::Dir { .. } | Body::Link { .. } => 0,
+            })
+            .map(|bytes| bytes.div_ceil(u64::from(VOLUME_BLOCK)))
+            .sum::<u64>();
+        let free = VOLUME_BLOCKS.saturating_sub(used);
+        Ok(VolumeStats {
+            block_size: VOLUME_BLOCK,
+            in_reserve: false,
+            total_blocks: VOLUME_BLOCKS,
+            free_blocks: free,
+            avail_blocks: free,
+            files: 0,
+            files_free: 0,
+        })
     }
 }
 

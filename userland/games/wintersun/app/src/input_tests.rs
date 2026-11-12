@@ -5,19 +5,20 @@ use super::*;
 use tairix_abi::input::{Modifiers, PhysicalKey};
 use tairix_wintersun_net::bounds::MAX_DIRECTION_MAGNITUDE_SQ;
 
+// Which key typed it is not what the controls read.
 fn press(key: KeyValue) -> KeyInput {
     KeyInput::Pressed {
-        key,
+        key: Some(key),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 
 fn release(key: KeyValue) -> KeyInput {
     KeyInput::Released {
-        key,
+        key: Some(key),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 
@@ -166,8 +167,13 @@ fn a_bare_modifier_change_moves_and_commands_nothing() {
     controls.apply_key(&press(arrow(NamedKeyCode::Right)));
     let held = controls.direction();
     assert_eq!(
-        controls.apply_key(&KeyInput::ModifiersChanged {
-            modifiers: Modifiers::default(),
+        controls.apply_key(&KeyInput::Pressed {
+            key: None,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            physical: PhysicalKey::LEFT_SHIFT,
         }),
         None
     );

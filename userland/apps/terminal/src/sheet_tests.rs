@@ -14,11 +14,12 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use super::SheetScreen;
-use crate::effects::{Effects, FULL};
+use crate::effects::Effects;
 use crate::profile::Profile;
 use crate::scheme::Scheme;
 use crate::settings::{preferred_extent, Settings};
 use tairix_colour::Rgb;
+use tairix_crt::{Tube, FULL};
 
 const SCALE: Scale = Scale::ONE;
 
@@ -469,11 +470,13 @@ fn every_setting_moved() -> Profile {
         effects: Effects {
             opacity: FULL,
             blur: 100,
-            scanlines: 300,
-            glow: 400,
-            fuzz: 500,
-            phosphor: 600,
-            wobble: 700,
+            tube: Tube {
+                scanlines: 300,
+                glow: 400,
+                fuzz: 500,
+                phosphor: 600,
+                wobble: 700,
+            },
         },
         ..Profile::default()
     };

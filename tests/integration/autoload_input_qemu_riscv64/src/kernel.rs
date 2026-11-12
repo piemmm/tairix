@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 
 use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel::riscv64::boot as boot_riscv64;
 use tairix_kernel_core::AuditEvent;
 use tairix_log::{Event, FieldValue, Sink};
@@ -12,7 +12,7 @@ use tairix_log::{Event, FieldValue, Sink};
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

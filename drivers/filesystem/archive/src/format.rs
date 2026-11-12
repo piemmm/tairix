@@ -11,7 +11,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::WriteRefusal;
+use tairix_abi::driver::filesystem::{StampField, WriteRefusal, DOS_TIME, EVERY_INSTANT};
+use tairix_abi::time::Time64;
 use tairix_abi::volume::{ArchiveName, FormatName, VolumeFsType, ARCHIVE_REGION, ARCHIVE_STAGING};
 use tairix_abi::DriverError;
 use tairix_fsmeta::preset::acorn;
@@ -19,9 +20,34 @@ use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Coding, Cursors, Data};
 use crate::region::{Regions, Sink};
+use crate::riscos;
 use crate::stream::{Compression, Packing, Stream, Writer};
-use crate::tree::{Kept, Tree};
+use crate::tree::{Kept, Meta, Tree};
 use crate::{arcfs, lone, rar, spark, tar, zip};
+
+/// What a member's record keeps of its modification and access times, `None`
+/// for a time it keeps nothing of.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemberTimes {
+    pub(crate) modified: Option<StampField>,
+    pub(crate) accessed: Option<StampField>,
+}
+
+impl MemberTimes {
+    const NONE: Self = Self {
+        modified: None,
+        accessed: None,
+    };
+}
+
+/// What a zip member's extended timestamp holds: whole seconds, negative
+/// ones signed and those past 2038 unsigned, which the MS-DOS stamp beside it
+/// tells apart.
+const ZIP_MODIFIED: StampField = StampField::new(
+    Time64::from_secs(-(1 << 31)),
+    1_000_000_000,
+    0..(1 << 31) + (1 << 32),
+);
 
 /// An archive's format and what the format keeps of the archive as a whole.
 pub(crate) enum Format {
@@ -143,6 +169,37 @@ impl Format {
     /// holds that one file and no more.
     pub(crate) const fn holds_tree(&self) -> bool {
         !matches!(self, Self::Lone(_))
+    }
+
+    /// What a member with `meta` keeps of its times; nothing of a root the
+    /// format records nothing of.
+    pub(crate) fn member_times(&self, meta: &Meta, root: bool) -> MemberTimes {
+        if root && !self.keeps_root() {
+            return MemberTimes::NONE;
+        }
+        match self {
+            Self::Zip(_) => MemberTimes {
+                modified: Some(ZIP_MODIFIED),
+                accessed: None,
+            },
+            Self::Tar(_) => MemberTimes {
+                modified: Some(EVERY_INSTANT),
+                accessed: Some(EVERY_INSTANT),
+            },
+            Self::Lone(lone) => MemberTimes {
+                modified: lone.modified_field(),
+                accessed: None,
+            },
+            Self::Spark(_) => MemberTimes {
+                modified: Some(riscos::stamp_field(meta).unwrap_or(DOS_TIME)),
+                accessed: None,
+            },
+            Self::ArcFs(_) => MemberTimes {
+                modified: riscos::stamp_field(meta),
+                accessed: None,
+            },
+            Self::Rar(_) => MemberTimes::NONE,
+        }
     }
 
     /// Whether a member's POSIX mode is kept.

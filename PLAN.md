@@ -193,6 +193,7 @@ plan's ledger. A `blocked` row names its blocker.
 | PDF | The `lib/pdf` reader and opening PDFs in Draw and View.app (`plans/PDF.md`) | in progress |
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 | BEEB | The BBC Micro Model B emulator `beeb.app` and its clean-room MOS, BASIC and DFS (`plans/BEEB.md`) | in progress |
+| PCEMU | `PCEmulator.app`, the PC/XT-class emulator up to the 80186, TAIRiX DOS, and the BR26 code installation its translator needs (`plans/PCEMU.md`) | in progress |
 
 ### Desktop
 
@@ -274,9 +275,18 @@ holds its glyphs to it: `lib/vt`, `lib/curses`, `lib/util`, `lib/controls`,
 `lib/browse`, `lib/devids`, `lib/font`, `lib/fsmeta`, `lib/log`, `lib/net`,
 `lib/tz`, `lib/window`, `fontd`, the Switchboard, the desktop session's alerts,
 TextEdit, `xtask devids`),
+`lib/cp437` (the one table of IBM code page 437 and Unicode, read as text —
+zip member names, the PC emulator's shared folders — or as the glyphs a PC's
+screen draws — its copied screens and pasted text, `plans/PCEMU.md` PC16.6),
 `lib/crc16` (the one reflected-`0xA001` CRC-16, which ARC, Spark and ArcFS
 members, ext4's group descriptors and LAME's stream tag carry),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
+`lib/crt` (the one picture tube — scan lines, phosphor afterglow, faceplate
+glow, noise and wobble, and the retained pipeline that draws them — which the
+terminal and the PC emulator draw through, `plans/PCEMU.md` PC16.4),
+`lib/fat` (the one FAT12/16/32 on-disk format, which the FAT32 driver, the
+volume probe, the MBR writer's FAT types and the Atari metadata preset share,
+`plans/PCEMU.md` PC9),
 `lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
 draws, load slots and the land generator's and ray tracer's lattices key by),
 `lib/noise` (the one gradient noise, octave-summed, ridged and cellular, which
@@ -307,6 +317,10 @@ extended attributes and reporting what a destination could not keep),
 traits, which every user-space filesystem driver serves its volume through),
 `lib/gpu` (the device-neutral GPU seam's memory and submission model and the
 software device implementing it on every target, `plans/GPU.md`),
+`lib/codegen` (the one code generator: an SSA IR, its verifier and
+interpreter, linear-scan allocation, and the x86_64, aarch64 and riscv64
+backends the PC emulator's translator and the browser's compiled tiers share,
+`plans/PCEMU.md` PC18),
 `lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
 total and bounded decoder over the generated Khronos grammar, its validator,
 its encoder, and the builder a first-party module is written from Rust
@@ -338,7 +352,7 @@ README requires this file to name them:
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/bezier`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/drawing`, `lib/fontface`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/spirv`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Draw, Patience, WinterSun, the Retro Games and Starfield screensavers |
+| `mathf` | `lib/audio`, `lib/bezier`, `lib/colour`, `lib/controls`, `lib/countryside`, `lib/cursor`, `lib/drawing`, `lib/fontface`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/scatter`, `lib/sound`, `lib/spirv`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, Paint, Draw, Patience, the PC emulator, WinterSun, the Retro Games and Starfield screensavers |
 | `mode` | `chmod`, `mkdir`, `elsh`'s `umask` (`Mode`); `mkdir` (`SET_ID`) |
 | `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams, which also answer `at_terminal` for `head`, `tail`, `du`, `wc`, `readlink` and `stat`; `framed` for `lib/fscopy`, `fstree`, `play` and `unmount`; `Carried` for `cat`, `chmod`, `chown`, `cp`, `getcap`, `ln`, `mkdir`, `mv`, `rm`, `rmdir`, `setcap` |
 | `quote` | `ls`, `printf`, `elsh`, `servicectl`, `edit`, `vim`, `man`, `fstree`, the file manager, `lib/fscopy`'s omission report, and every command app that names a file or other text from elsewhere in a message, a prompt, a `-v` report or its standard output (`cat`, `cp`, `du`, `head`, `mv`, `rm`, `stat`, `tail`, `wc`, …) |

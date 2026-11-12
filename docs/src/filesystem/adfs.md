@@ -87,6 +87,10 @@ so the stamp rides with the write's own entry update where the write needs
 one; an overwrite in place pays one directory write for it. A rename keeps
 the stamp. While the clock is unset, or for a time outside the 1900–2248
 the stamp holds, the stamp is zero, which reads back as no time.
+`fs_set_times` sets a typed object's stamp as its modification time, to the
+centisecond, 1900 to 2248 but for the zero (`tairix_fsmeta`'s
+`acorn::STAMP_FIELD`); an access time is kept only as that stamp, and an
+untyped object and the root keep no time to set.
 
 ADFS has no per-inode owner, mode, ACL, or capability gate: the §5.3
 security metadata lives in the VFS layer, and the driver makes no

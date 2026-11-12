@@ -64,7 +64,7 @@ mod kernel {
         self, AddressSpace, PageTablePool, BOOT_PHYSMAP_GIB, PHYSMAP_PML4_FIRST_SLOT,
     };
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::KERNEL_BOOT_DIRECT_MAP;
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink};
     use tairix_log::{Event, EventId, FieldValue, Sink};
@@ -75,7 +75,7 @@ mod kernel {
     // per-binary attribute (see `kernel/tairix-kernel/Cargo.toml`).
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

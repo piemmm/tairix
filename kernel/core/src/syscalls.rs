@@ -81,10 +81,11 @@ use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::driver::filesystem::NodeKind;
+use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
-use tairix_abi::input::{KeyInput, PointerInput, POINTER_EDGE_UNTIMED};
+use tairix_abi::input::{KeyEdge, PointerInput, POINTER_EDGE_UNTIMED};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
@@ -103,13 +104,14 @@ use tairix_abi::{
     IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags,
     NodeExpect, OpenFlags, PathAt, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
     ProcessStart, RandomFlags, ReaddirFrom, RenameFlags, ResourceLimit, SchedPriority, Signal,
-    SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64,
-    UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CALL_DEADLINE_NONE, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FD_CWD,
-    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
-    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    SignalIntakeOp, SpawnAttach, SpawnSession, StampChange, StreamMode, SyscallNumber,
+    TerminalSize, Time64, TimesChange, TimesKept, UnlinkFlags, WaitFlags, WaitSetOp,
+    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CALL_DEADLINE_NONE,
+    CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FD_CWD, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -138,7 +140,7 @@ use tairix_log::{Event, EventId, Field, Level, Sink};
 use tairix_seat::{ConsoleIndex, SeatOwner};
 use tairix_sync::RwLock;
 use tairix_util::fallible::{collected, concatenated, copied, filled};
-use tairix_util::fmt::{format_hex_u64, format_usize};
+use tairix_util::fmt::{format_hex_u64, format_u64, format_usize};
 use tairix_util::secret::WipedBuf;
 use zeroize::Zeroize;
 
@@ -873,6 +875,30 @@ impl<'a> NodeAuthority<'a> {
     }
 }
 
+/// Who a time change through the descriptor holding `handle` acts as: a
+/// grant's frozen identity where the grant writes, refused where it does not
+/// unless the change sets nothing, and anything else the caller, as every
+/// other metadata change through a descriptor is.
+fn times_authority<'a>(
+    handle: &'a NodeHandle,
+    caller: &'a CallerContext<'_>,
+    change: &TimesChange,
+) -> Result<NodeAuthority<'a>, Errno> {
+    let grant = match &handle.authority {
+        Authority::Frozen(frozen) => frozen.grant.as_ref(),
+        Authority::Holder => None,
+    };
+    match grant {
+        Some(grant) if grant.writes() || change.is_empty() => Ok(NodeAuthority::acting_on(
+            handle,
+            caller.caps.owner().0,
+            caller.caps.effective(),
+        )),
+        Some(_) => Err(Errno::PermissionDenied),
+        None => Ok(NodeAuthority::as_caller(handle, caller)),
+    }
+}
+
 /// One path a caller named and the start it resolves from, both held for the
 /// call so no registry lock is held while the filesystem walks.
 struct NamedPath {
@@ -899,6 +925,112 @@ impl NamedPath {
             from,
             path: Cow::Borrowed(&self.path),
         }
+    }
+
+    /// The directory capability the path was named through, if it was.
+    fn through(&self) -> Option<&NodeHandle> {
+        match &self.start {
+            Cwd::Dir(handle) if handle.subtree().is_some() => Some(handle),
+            Cwd::Root | Cwd::Dir(_) | Cwd::Catalog(_) => None,
+        }
+    }
+
+    /// Refuse a path named through a directory capability, for a call that
+    /// never acts through one.
+    fn not_through(&self) -> Result<&Self, Errno> {
+        match self.through() {
+            Some(_) => Err(Errno::PermissionDenied),
+            None => Ok(self),
+        }
+    }
+}
+
+/// The identity a named path acts as: the directory capability it was named
+/// through, whose frozen identity and grant then decide the call, or the
+/// caller, who must hold `CAP_FS_ACCESS`. The one place that decision is
+/// made for a path, as [`NodeAuthority`] makes it for a descriptor.
+struct PathActing<'a> {
+    /// The uid the call acts as.
+    uid: u32,
+    /// The capability set the call acts with.
+    caps: &'a CapabilitySet,
+    /// The directory capability the path was named through.
+    through: Option<&'a NodeHandle>,
+}
+
+impl<'a> PathActing<'a> {
+    /// Who `named`, a path `caller` names, acts as.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for an identity without `CAP_FS_ACCESS`:
+    /// the same coarse gate a descriptor's own operations face.
+    fn of(named: &'a NamedPath, caller: &'a CallerContext<'_>) -> Result<Self, Errno> {
+        let acting = match named.through() {
+            Some(handle) => {
+                let Authority::Frozen(frozen) = &handle.authority else {
+                    return Err(Errno::PermissionDenied);
+                };
+                Self {
+                    uid: frozen.uid,
+                    caps: &frozen.caps,
+                    through: Some(handle),
+                }
+            }
+            None => Self {
+                uid: caller.caps.owner().0,
+                caps: caller.caps.effective(),
+                through: None,
+            },
+        };
+        if !acting.caps.contains(CapabilityId::FS_ACCESS) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(acting)
+    }
+
+    /// Who two paths of one call act as: one authority, or neither.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for paths named through different
+    /// capabilities, or one through a capability and one not, and as
+    /// [`Self::of`].
+    fn of_both(
+        first: &'a NamedPath,
+        second: &'a NamedPath,
+        caller: &'a CallerContext<'_>,
+    ) -> Result<Self, Errno> {
+        let acting = Self::of(first, caller)?;
+        let floors = (
+            first.through().map(|handle| &handle.authority),
+            second.through().map(|handle| &handle.authority),
+        );
+        if floors.0 != floors.1 {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(acting)
+    }
+
+    /// Refuse a change beneath a directory capability that lets its holder
+    /// change nothing there.
+    fn may_change(&self) -> Result<(), Errno> {
+        let grant = self.through.and_then(|handle| match &handle.authority {
+            Authority::Frozen(frozen) => frozen.grant.as_ref(),
+            Authority::Holder => None,
+        });
+        match grant {
+            Some(grant) if !grant.writes_beneath() => Err(Errno::PermissionDenied),
+            _ => Ok(()),
+        }
+    }
+
+    /// The authority a descriptor opened along the path carries: the
+    /// capability's, so what it opens stays beneath the same floor under the
+    /// same grant, or the opener's own.
+    fn authority(&self) -> Authority {
+        self.through
+            .map_or(Authority::Holder, |handle| handle.authority.clone())
     }
 }
 
@@ -990,7 +1122,7 @@ fn own_acting<'a>(caller: &'a CallerContext<'_>) -> Acting<'a> {
 
 /// What an `fs_readdir` batch lists.
 enum Listed<'a> {
-    /// A directory the caller opened itself.
+    /// A directory the caller opened itself, or a directory capability.
     Node(&'a NodeHandle),
     /// The catalog of attached volumes.
     Catalog(&'a crate::fs::Projection),
@@ -4160,6 +4292,17 @@ where
         }
     }
 
+    /// Whether a hardware fault at `va` on this CPU was spurious: the faulting
+    /// space maps the page to allow the access, so this CPU cached its absence
+    /// before another CPU mapped it — which a port may do — and, its view now
+    /// discarded, the access only needs to retry. Never consulted for a kernel
+    /// copy, which walks the tables rather than the TLB.
+    pub(crate) fn settle_spurious_fault(&self, va: u64, write: bool) -> bool {
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        crate::kthread::with_current_live_space(cpu, |live| live.settle_spurious(va, write))
+            .unwrap_or(false)
+    }
+
     /// Back the caller's page at `va` and every later page of `[va, end)` a
     /// copy that `write`s or reads it will need, spending one of `backings`
     /// on each, so the copy then runs once more instead of once per page.
@@ -4528,6 +4671,30 @@ where
             AddressSpaceRegistry::refreeze_held(self.aspaces, process, live)
         });
         drop(replaced);
+    }
+
+    /// Release the `page_count` pages from `base` of the code window of the
+    /// caller's own space, crediting the address space each installed page
+    /// was charged.
+    fn release_installed_code(
+        &self,
+        caller: &CallerContext<'_>,
+        base: u64,
+        page_count: u64,
+    ) -> SyscallResult {
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let installed = self
+            .retiring(caller.process(), |retire| {
+                crate::kthread::with_current_live_space(cpu, |live| {
+                    live.release_code(base, page_count, retire)
+                })
+            })
+            .ok_or(Errno::NotFound)?
+            .map_err(crate::live_producer::live_errno)?;
+        self.aspaces
+            .write()
+            .credit_aspace_bytes(caller.process(), installed * PAGE_SIZE as u64);
+        Ok(0)
     }
 
     /// Run `release`, a teardown in the calling task's own space, with
@@ -6207,7 +6374,12 @@ where
 
     /// The path of `len` bytes at `ptr` and the start it resolves from:
     /// `dirfd`'s directory for a relative one, nothing for an absolute one,
-    /// which ignores `dirfd` and so cannot be refused for it.
+    /// which ignores `dirfd` unless it is a directory capability.
+    ///
+    /// # Errors
+    ///
+    /// The copy's refusal, [`Errno::PermissionDenied`] for an absolute path
+    /// named through a directory capability, and [`Self::dir_of`]'s.
     fn copy_at(
         &self,
         caller: &CallerContext<'_>,
@@ -6217,11 +6389,27 @@ where
     ) -> Result<NamedPath, Errno> {
         let path = self.copy_path_in(caller, ptr, len)?;
         let start = if path.starts_with('/') {
+            // An absolute path ignores `dirfd`, except that a directory
+            // capability never names one.
+            if self.is_capability(caller, dirfd) {
+                return Err(Errno::PermissionDenied);
+            }
             Cwd::Root
         } else {
             self.dir_of(caller, dirfd)?
         };
         Ok(NamedPath { path, start })
+    }
+
+    /// Whether `dirfd` names a directory capability the caller holds.
+    fn is_capability(&self, caller: &CallerContext<'_>, dirfd: u32) -> bool {
+        dirfd != FD_CWD
+            && self
+                .aspaces
+                .read()
+                .open_file_entry(caller.process(), dirfd)
+                .and_then(|entry| entry.node().map(|handle| handle.subtree().is_some()))
+                .unwrap_or(false)
     }
 
     /// The path a [`PathAt`] at `ptr` names, and its start, as
@@ -7582,6 +7770,8 @@ enum FsAuditDetail<'a> {
     Mode { mode: u32 },
     /// A `set_owner` (chown): the new owner and owning group ids.
     Owner { owner: u32, group: u32 },
+    /// A `set_times` (utimensat): what each time became.
+    Times { change: TimesChange },
 }
 
 /// Bound a path to the audit log's per-field value limit on a character
@@ -7625,6 +7815,36 @@ fn format_mode_octal(mode: u32, buf: &mut [u8; 12]) -> &str {
     core::str::from_utf8(&buf[i..]).unwrap_or("")
 }
 
+/// The longest [`format_stamp`] spelling: a sign, twenty digits of seconds,
+/// the point and nine of nanoseconds.
+const STAMP_TEXT_MAX: usize = 31;
+
+/// How an audit record spells what a `set_times` change does to one time:
+/// `keep`, `now`, or the instant as signed seconds and nine digits of
+/// nanoseconds.
+fn format_stamp(change: StampChange, buf: &mut [u8; STAMP_TEXT_MAX]) -> &str {
+    let at = match change {
+        StampChange::Keep => return "keep",
+        StampChange::Now => return "now",
+        StampChange::At(at) => at,
+    };
+    let mut digits = [0u8; 20];
+    let secs = format_u64(at.secs().unsigned_abs(), &mut digits);
+    let mut nanos = at.subsec_nanos();
+    let mut fraction = [b'0'; 9];
+    for slot in fraction.iter_mut().rev() {
+        *slot = u8::try_from(nanos % 10).map_or(b'?', |digit| b'0' + digit);
+        nanos /= 10;
+    }
+    let sign: &[u8] = if at.secs() < 0 { b"-" } else { b"" };
+    let mut len = 0;
+    for part in [sign, secs.as_bytes(), b".", &fraction] {
+        buf[len..len + part.len()].copy_from_slice(part);
+        len += part.len();
+    }
+    core::str::from_utf8(&buf[..len]).unwrap_or("?")
+}
+
 /// Emit the audit record for a filesystem-mutating syscall through `sink`.
 ///
 /// A successful mutation logs [`AuditEvent::FsNodeMutated`] at `Info`; a
@@ -7655,6 +7875,8 @@ fn emit_fs_mutation(
     let mut mode_buf = [0u8; 12];
     let mut owner_buf = [0u8; 12];
     let mut group_buf = [0u8; 12];
+    let mut accessed_buf = [0u8; STAMP_TEXT_MAX];
+    let mut modified_buf = [0u8; STAMP_TEXT_MAX];
     let mut record = AuditRecord::of("op", op);
     record.push("uid", format_usize(uid as usize, &mut uid_buf));
     record.place("path", "from", place);
@@ -7669,6 +7891,10 @@ fn emit_fs_mutation(
         FsAuditDetail::Owner { owner, group } => {
             record.push("owner", format_usize(*owner as usize, &mut owner_buf));
             record.push("group", format_usize(*group as usize, &mut group_buf));
+        }
+        FsAuditDetail::Times { change } => {
+            record.push("accessed", format_stamp(change.accessed, &mut accessed_buf));
+            record.push("modified", format_stamp(change.modified, &mut modified_buf));
         }
     }
     record.push("errno", errno);
@@ -7814,7 +8040,7 @@ fn refusal_unbacked(refused: Errno) -> Unbacked {
 
 /// Why the compressed tier could not restore a page: its contents gone for
 /// good, or kept for a restore the machine had no memory for.
-fn ramzip_unbacked(failure: tairix_kernel_mem::FaultError) -> Unbacked {
+pub(crate) fn ramzip_unbacked(failure: tairix_kernel_mem::FaultError) -> Unbacked {
     use tairix_kernel_mem::{FaultError, PageTableError};
     match failure {
         FaultError::Authentication | FaultError::Corrupt | FaultError::Lost => Unbacked::Lost,
@@ -9580,37 +9806,24 @@ where
         len: usize,
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
-        // is non-null (`UserPtr`). A record is fixed-width: a `len` that
-        // cannot hold one fails closed rather than letting the kernel decode
-        // a truncated edge (never act on a partial
-        // input).
-        if len < KeyInput::WIRE_LEN {
+        // is non-null (`UserPtr`). An edge is fixed-width: a `len` that cannot
+        // hold one fails closed rather than acting on a truncated edge.
+        if len < KeyEdge::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        // Copy exactly one record in from the caller's address space through
-        // the validated `copy_from_user` boundary before
-        // touching the arbiter. The staging buffer lives on the stack and is
-        // wiped on every exit: a key edge can carry a typed character (a
-        // password keystroke transits here), so it must not linger
-        // (zero memory that held a credential;).
-        // `with_caller_aspace` yields `None` when the caller has no
-        // registered address space — fail closed with the same `BadAddress`
-        // an actual fault produces, never leaking which case occurred.
-        let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
-        if let Err(err) = self.copy_in_user(caller, buf, &mut record_bytes) {
-            record_bytes.zeroize();
+        // Which key went down is what was typed, so the staging copy is wiped
+        // on every exit. `with_caller_aspace` yields `None` when the caller
+        // has no registered address space — fail closed with the same
+        // `BadAddress` an actual fault produces.
+        let mut edge_bytes = [0u8; KeyEdge::WIRE_LEN];
+        if let Err(err) = self.copy_in_user(caller, buf, &mut edge_bytes) {
+            edge_bytes.zeroize();
             return Err(err);
         }
-
-        // Decode the record fail-closed: a malformed edge is refused rather
-        // than interpreted. The driver no longer
-        // chooses the encoding or destination — the seat registry routes the
-        // edge to the text console or the desktop keyboard channel by who
-        // holds the seat (`plans/PI.md` P11, `plans/DISPLAY.md` D2).
-        let decoded = KeyInput::from_bytes(&record_bytes);
-        record_bytes.zeroize();
-        let record = decoded?;
-        let consumed = self.seat_registry.inject(seat, record)?;
+        let decoded = KeyEdge::from_bytes(&edge_bytes);
+        edge_bytes.zeroize();
+        let edge = decoded?;
+        let consumed = self.seat_registry.inject(seat, edge)?;
         // Witness the first successful key delivery exactly once
         // (`plans/PI.md` P11): proof that an (autoloaded) keyboard driver
         // has come up and is routing input through the arbiter. The
@@ -10264,10 +10477,15 @@ where
         // Taken out of the caller's holding before any page is released: the
         // one step that needs memory, so a refusal releases nothing, and until
         // the release ends no fault backs a page of it and no second release
-        // takes one.
-        self.aspaces
+        // takes one. A range the holding has no part of may be installed code.
+        let begun = self
+            .aspaces
             .write()
-            .begin_anon_release(caller.process(), base, page_count)?;
+            .begin_anon_release(caller.process(), base, page_count);
+        if begun == Err(Errno::NotFound) {
+            return self.release_installed_code(caller, base, page_count);
+        }
+        begun?;
         // Hand the range to the installed producer, which tolerates the
         // never-faulted pages of the sparse region and zeroes each frame it
         // reclaims (secret hygiene) only once the page has left the registry
@@ -12522,6 +12740,17 @@ where
             .map(|()| bytes.len() as u64)
     }
 
+    fn code_install(
+        &self,
+        caller: &CallerContext<'_>,
+        compiler: i64,
+        target: i64,
+        base: u64,
+        len: usize,
+    ) -> SyscallResult {
+        crate::codeinstall::code_install(self, self.log_sink, caller, compiler, target, base, len)
+    }
+
     fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
         // The dispatcher has already checked `CAP_LOG_EMIT` and that
         // `record` is a non-null `UserPtr`. A valid
@@ -13854,7 +14083,13 @@ where
         // refused at the descriptor bound has created or truncated nothing; a
         // refused record releases the node once the registry guard is.
         let named = self.copy_at(caller, dirfd, path, path_len)?;
-        let uid = caller.caps.owner().0;
+        let acting = PathActing::of(&named, caller)?;
+        if flags.is_write()
+            || flags.contains(OpenFlags::CREATE)
+            || flags.contains(OpenFlags::TRUNCATE)
+        {
+            acting.may_change()?;
+        }
         // Only an open that may create reads its process's umask.
         let create = if flags.contains(OpenFlags::CREATE) {
             let umask = self.aspaces.read().umask(caller.process());
@@ -13863,10 +14098,10 @@ where
             crate::fs::CreateMode::NONE
         };
         let promise = crate::aspace::FdPromise::new(self.aspaces, caller.process())?;
-        let opened =
-            self.filesystem
-                .open(uid, caller.caps.effective(), named.at(), flags, create)?;
-        let recorded = promise.keep(opened, flags);
+        let opened = self
+            .filesystem
+            .open(acting.uid, acting.caps, named.at(), flags, create)?;
+        let recorded = promise.keep(opened, flags, acting.authority());
         Ok(u64::from(recorded?))
     }
 
@@ -14062,9 +14297,11 @@ where
         recipient_len: usize,
         flags: u64,
     ) -> SyscallResult {
-        if flags & !tairix_abi::GRANT_FILE_ONLY != 0 {
-            return Err(Errno::OutOfRange);
-        }
+        let handing = match flags {
+            0 | tairix_abi::GRANT_FILE_ONLY => crate::aspace::Handing::File,
+            tairix_abi::GRANT_SUBTREE => crate::aspace::Handing::Subtree,
+            _ => return Err(Errno::OutOfRange),
+        };
         // Step 2 (capability) was enforced by the dispatcher: the
         // `fd_grant` spec carries `CAP_FS_ACCESS` whatever the descriptor
         // proves to be, and the mint is dispatcher-audited. Step 3 (validate
@@ -14097,11 +14334,19 @@ where
         // caller's own through `GRANT_EXTENT_INHERIT` — never implied by a
         // zero, and a read-only file or a pipe end has no extent to bound.
         // Both halves fail closed, so a forgotten ceiling and one that would
-        // be silently ignored are refused alike.
+        // be silently ignored are refused alike. A directory is never open for
+        // writing, and its ceiling says whether anything beneath may change.
         let bounded = access.is_write() && handle.pipe().is_none();
-        if bounded != (write_ceiling > 0) {
+        if handing == crate::aspace::Handing::File && bounded != (write_ceiling > 0) {
             return Err(Errno::OutOfRange);
         }
+        // A directory capability is redeemed as the directory descriptor it
+        // is, so a check that knows a directory by its open flags — a spawn's
+        // standard-stream wire among them — knows this one.
+        let redeemed_as = match handing {
+            crate::aspace::Handing::File => access,
+            crate::aspace::Handing::Subtree => access.union(OpenFlags::DIRECTORY),
+        };
         // What the descriptor may be handed on as. A plain file the caller
         // opened itself freezes the *caller's* kernel-attested identity into a
         // new handle on the same node, so every later operation on the
@@ -14117,6 +14362,7 @@ where
                 caller.caps.owner().0,
                 *caller.caps.effective(),
                 write_ceiling,
+                handing,
             )
             .ok_or(Errno::OutOfRange)?;
         // The recipient is named by its attested process *instance*, not by
@@ -14148,7 +14394,7 @@ where
                 caller.process(),
                 caller.caps.proc_id(),
                 &conveyed,
-                access,
+                redeemed_as,
             )
         })
     }
@@ -14345,13 +14591,29 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // A resource-backed descriptor is not a directory (it has nothing to
-        // list), and neither is a delegation — `fd_grant` refuses one, so no
-        // delegated listing exists to authorise. Fail closed as an invalid
-        // operation for the descriptor's kind.
+        // A directory capability lists as the identity frozen into it; any
+        // other listing is the caller's own and needs its filesystem
+        // capability. A resource, a pipe and a delegated file have nothing to
+        // list, so each fails closed as an invalid operation for its kind.
+        let capability = handle
+            .node()
+            .filter(|node| node.subtree().is_some())
+            .map(|node| {
+                NodeAuthority::acting_on(node, caller.caps.owner().0, caller.caps.effective())
+            });
+        match &capability {
+            Some(capability) => capability.admit()?,
+            None if !caller.caps.effective().contains(CapabilityId::FS_ACCESS) => {
+                return Err(Errno::PermissionDenied);
+            }
+            None => {}
+        }
         let listed = match &handle.backing {
             OpenBacking::Catalog(projection) => Listed::Catalog(projection),
-            _ => Listed::Node(handle.own_node().ok_or(Errno::OutOfRange)?),
+            _ => Listed::Node(match &capability {
+                Some(capability) => capability.handle,
+                None => handle.own_node().ok_or(Errno::OutOfRange)?,
+            }),
         };
         let uid = caller.caps.owner().0;
         // Batches on one description serialise here, so callers sharing it
@@ -14394,8 +14656,11 @@ where
             // reached included — fails closed there.
             match listed {
                 Listed::Node(node) => {
+                    let acting = capability
+                        .as_ref()
+                        .map_or_else(|| own_acting(caller), NodeAuthority::acting);
                     self.filesystem
-                        .readdir_node(node, &own_acting(caller), &mut at, &mut take)?;
+                        .readdir_node(node, &acting, &mut at, &mut take)?;
                 }
                 Listed::Catalog(catalog) => self.filesystem.readdir_catalog(
                     uid,
@@ -14620,6 +14885,33 @@ where
             .map(|()| FileStat::WIRE_LEN as u64)
     }
 
+    fn fs_volume_stats(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        out: u64,
+        out_len: usize,
+    ) -> SyscallResult {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        // The catalog is stored on no volume, and a pipe, a resource or a pty
+        // lies on none.
+        if matches!(handle.backing, OpenBacking::Catalog(_)) {
+            return Err(Errno::NotSupported);
+        }
+        let authority = NodeAuthority::of(&handle, caller).ok_or(Errno::NotSupported)?;
+        authority.admit()?;
+        if out_len < VolumeStats::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let stats = self.filesystem.volume_stats_node(authority.handle)?;
+        self.copy_out_user(caller, out, &stats.to_le_bytes())
+            .map(|()| VolumeStats::WIRE_LEN as u64)
+    }
+
     fn fs_truncate(&self, caller: &CallerContext<'_>, fd: u32, size: u64) -> SyscallResult {
         let handle = self
             .aspaces
@@ -14740,16 +15032,17 @@ where
         mode: u32,
     ) -> SyscallResult {
         let named = self.copy_at(caller, dirfd, path, path_len)?;
-        let uid = caller.caps.owner().0;
+        let acting = PathActing::of(&named, caller)?;
+        acting.may_change()?;
         let umask = self.aspaces.read().umask(caller.process());
         let create = crate::fs::CreateMode::new(mode, umask)?;
         let outcome = self
             .filesystem
-            .mkdir(uid, caller.caps.effective(), named.at(), create);
+            .mkdir(acting.uid, acting.caps, named.at(), create);
         emit_fs_mutation(
             self.audit,
             "mkdir",
-            uid,
+            acting.uid,
             &named.audit_place(),
             &FsAuditDetail::None,
             outcome,
@@ -14782,25 +15075,23 @@ where
         // (empty) directory, and with an expectation only if the name still
         // meets it, each decided under its own lock.
         let named = self.copy_at(caller, dirfd, path, path_len)?;
+        let acting = PathActing::of(&named, caller)?;
+        acting.may_change()?;
         let expected = self.copy_expect_in(
             caller,
             flags.expects(),
             flags.contains(UnlinkFlags::EXPECT_NODE),
             expect,
         )?;
-        let uid = caller.caps.owner().0;
+        let uid = acting.uid;
         let op = if flags.is_directory_only() {
             "rmdir"
         } else {
             "unlink"
         };
-        let outcome = self.filesystem.unlink(
-            uid,
-            caller.caps.effective(),
-            named.at(),
-            flags,
-            expected.as_ref(),
-        );
+        let outcome =
+            self.filesystem
+                .unlink(uid, acting.caps, named.at(), flags, expected.as_ref());
         emit_fs_mutation(
             self.audit,
             op,
@@ -14826,11 +15117,13 @@ where
         // identity.
         let src = self.copy_at_in(caller, from)?;
         let dst = self.copy_at_in(caller, to)?;
+        let acting = PathActing::of_both(&src, &dst, caller)?;
+        acting.may_change()?;
         let expected = self.copy_expect_in(caller, flags.expects(), true, expect)?;
-        let uid = caller.caps.owner().0;
+        let uid = acting.uid;
         let outcome = self.filesystem.rename(
             uid,
-            caller.caps.effective(),
+            acting.caps,
             src.at(),
             dst.at(),
             flags,
@@ -14862,7 +15155,10 @@ where
         // UTF-8-checked but never resolved; the link's own name resolves as
         // any path does.
         let target = self.copy_link_target_in(caller, target, target_len)?;
+        // A link made beneath a directory capability could redirect its
+        // owner's own later walks, so none is.
         let named = self.copy_at(caller, dirfd, link, link_len)?;
+        named.not_through()?;
         let uid = caller.caps.owner().0;
         let outcome = self
             .filesystem
@@ -14891,19 +15187,17 @@ where
         // the caller's attested identity.
         let existing = self.copy_at_in(caller, existing)?;
         let new = self.copy_at_in(caller, new)?;
+        let acting = PathActing::of_both(&existing, &new, caller)?;
+        acting.may_change()?;
         let existing_link = if flags.follows() {
             crate::fs::FinalLink::Follow
         } else {
             crate::fs::FinalLink::Keep
         };
-        let uid = caller.caps.owner().0;
-        let outcome = self.filesystem.link(
-            uid,
-            caller.caps.effective(),
-            existing.at(),
-            new.at(),
-            existing_link,
-        );
+        let uid = acting.uid;
+        let outcome =
+            self.filesystem
+                .link(uid, acting.caps, existing.at(), new.at(), existing_link);
         let existing = existing.audit_place();
         emit_fs_mutation(
             self.audit,
@@ -14931,10 +15225,10 @@ where
         // The final component is never followed; a path naming anything but
         // a link fails closed in the secured VFS.
         let named = self.copy_at(caller, dirfd, path, path_len)?;
-        let uid = caller.caps.owner().0;
+        let acting = PathActing::of(&named, caller)?;
         let target = self
             .filesystem
-            .readlink(uid, caller.caps.effective(), named.at())?;
+            .readlink(acting.uid, acting.caps, named.at())?;
         // The whole target or nothing: a truncated path would name somewhere
         // else entirely, so an undersized buffer fails closed and the caller
         // retries with a larger one.
@@ -14957,7 +15251,10 @@ where
     ) -> SyscallResult {
         // Every link hop, every `..` and the per-directory search check are
         // the secured VFS's, from where `dirfd`'s directory stands now.
+        // A canonical path names what lies above a directory capability, which
+        // its holder is never told.
         let named = self.copy_at(caller, dirfd, path, path_len)?;
+        named.not_through()?;
         let uid = caller.caps.owner().0;
         let canonical = self
             .filesystem
@@ -15017,9 +15314,10 @@ where
             audited(&target.audit_place(), outcome)?;
         } else {
             let named = self.copy_at(caller, dirfd, path, path_len)?;
-            let outcome = self
-                .filesystem
-                .set_mode(uid, caps, named.at(), mode, flags.final_link());
+            let outcome = named.not_through().and_then(|named| {
+                self.filesystem
+                    .set_mode(uid, caps, named.at(), mode, flags.final_link())
+            });
             audited(&named.audit_place(), outcome)?;
         }
         Ok(0)
@@ -15074,14 +15372,87 @@ where
             audited(&target.audit_place(), outcome)?;
         } else {
             let named = self.copy_at(caller, dirfd, path, path_len)?;
-            let outcome =
+            let outcome = named.not_through().and_then(|named| {
                 self.filesystem
-                    .set_owner(uid, caps, named.at(), owner, group, flags.final_link());
+                    .set_owner(uid, caps, named.at(), owner, group, flags.final_link())
+            });
             audited(&named.audit_place(), outcome)?;
         }
         Ok(0)
     }
 
+    fn fs_set_times(
+        &self,
+        caller: &CallerContext<'_>,
+        dirfd: u32,
+        path: u64,
+        path_len: usize,
+        times: u64,
+        times_len: usize,
+        flags: AtFlags,
+    ) -> SyscallResult {
+        if times_len != TimesChange::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut raw = [0u8; TimesChange::WIRE_LEN];
+        self.copy_in_user(caller, times, &mut raw)?;
+        let change = TimesChange::from_le_bytes(&raw)?;
+        let audited = |uid, place: &AuditPlace<'_>, outcome: Result<TimesKept, Errno>| {
+            emit_fs_mutation(
+                self.audit,
+                "utimens",
+                uid,
+                place,
+                &FsAuditDetail::Times { change },
+                outcome.map(drop),
+            );
+            outcome
+        };
+        let uid = caller.caps.owner().0;
+        let kept = if flags.contains(AtFlags::EMPTY_PATH) {
+            let target = self.empty_path_of(caller, dirfd)?;
+            let outcome = match &target {
+                EmptyPath::Node(handle) => {
+                    times_authority(handle, caller, &change).and_then(|authority| {
+                        authority.admit()?;
+                        self.filesystem
+                            .set_times_node(handle, &authority.acting(), change)
+                    })
+                }
+                EmptyPath::Start(start) => {
+                    let caps = caller.caps.effective();
+                    if caps.contains(CapabilityId::FS_ACCESS) {
+                        self.filesystem.set_times(
+                            uid,
+                            caps,
+                            itself(start),
+                            change,
+                            crate::fs::FinalLink::Keep,
+                        )
+                    } else {
+                        Err(Errno::PermissionDenied)
+                    }
+                }
+            };
+            audited(uid, &target.audit_place(), outcome)?
+        } else {
+            let named = self.copy_at(caller, dirfd, path, path_len)?;
+            let outcome = PathActing::of(&named, caller).and_then(|acting| {
+                if !change.is_empty() {
+                    acting.may_change()?;
+                }
+                self.filesystem.set_times(
+                    acting.uid,
+                    acting.caps,
+                    named.at(),
+                    change,
+                    flags.final_link(),
+                )
+            });
+            audited(uid, &named.audit_place(), outcome)?
+        };
+        Ok(kept.as_u64())
+    }
     fn fs_access(
         &self,
         caller: &CallerContext<'_>,
@@ -15096,13 +15467,22 @@ where
         let caps = caller.caps.effective();
         if !flags.contains(AtFlags::EMPTY_PATH) {
             let named = self.copy_at(caller, dirfd, path, path_len)?;
-            self.filesystem
-                .access(uid, caps, named.at(), want, flags.final_link())?;
+            let acting = PathActing::of(&named, caller)?;
+            self.filesystem.access(
+                acting.uid,
+                acting.caps,
+                named.at(),
+                want,
+                flags.final_link(),
+            )?;
             return Ok(0);
         }
         match &self.empty_path_of(caller, dirfd)? {
             EmptyPath::Node(handle) => self.access_held(caller, handle, want)?,
             EmptyPath::Start(start) => {
+                if !caps.contains(CapabilityId::FS_ACCESS) {
+                    return Err(Errno::PermissionDenied);
+                }
                 self.filesystem.access(
                     uid,
                     caps,
@@ -15350,15 +15730,20 @@ where
         // search and pinned before it replaces the working directory, so a
         // refusal leaves the old one in place. `EMPTY_PATH` changes to what
         // `dirfd` holds: the path `.` from it.
+        // The working directory acts as the caller, so it is never a
+        // directory capability nor reached through one.
         let uid = caller.caps.owner().0;
         let cwd = if flags.contains(AtFlags::EMPTY_PATH) {
             let start = self.dir_of(caller, dirfd)?;
+            if matches!(&start, Cwd::Dir(handle) if handle.subtree().is_some()) {
+                return Err(Errno::PermissionDenied);
+            }
             self.filesystem
                 .chdir(uid, caller.caps.effective(), itself(&start))?
         } else {
             let named = self.copy_at(caller, dirfd, path, path_len)?;
             self.filesystem
-                .chdir(uid, caller.caps.effective(), named.at())?
+                .chdir(uid, caller.caps.effective(), named.not_through()?.at())?
         };
         // Bound rather than discarded, so the old directory's pin, or the
         // refused new one's, is released after the registry lock rather than
@@ -15370,10 +15755,9 @@ where
     }
 
     fn fs_getcwd(&self, caller: &CallerContext<'_>, buf: u64, buf_cap: usize) -> SyscallResult {
-        // Reading one's own working directory grants no authority, so the
-        // dispatcher required no capability. The answer is the path that names
-        // the directory now, however it has moved, and the whole path is
-        // delivered or none.
+        // The dispatcher required `CAP_FS_ACCESS`, as for every walk of the
+        // namespace. The answer is the path that names the directory now,
+        // however it has moved, and the whole path is delivered or none.
         let cwd = self.aspaces.read().cwd(caller.process());
         let path = self.filesystem.canonical_of(
             caller.caps.owner().0,
@@ -17991,6 +18375,9 @@ where
         let Err(cause) = backed else {
             return UserFaultOutcome::Resolved;
         };
+        if cause == Unbacked::Invalid && self.handlers.settle_spurious_fault(fault_va, write) {
+            return UserFaultOutcome::Resolved;
+        }
         mark(crate::watchdog::KernelBreadcrumb::FaultFatal);
         let access = FaultAccess::Data {
             va: fault_va,
@@ -18381,7 +18768,7 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
-    use tairix_abi::input::{KeyValue, Modifiers, PhysicalKey, TimedPointer};
+    use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey, TimedPointer};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::CrashAccess;
     use tairix_abi::DirEntry;
@@ -27958,7 +28345,12 @@ mod tests {
                 .read()
                 .open_file_entry(ProcessId(2), dir_fd)
                 .expect("parent entry")
-                .handed_on(1000, CapabilitySet::empty(), 0)
+                .handed_on(
+                    1000,
+                    CapabilitySet::empty(),
+                    0,
+                    crate::aspace::Handing::File
+                )
                 .is_none(),
             "a directory is not a delegatable byte descriptor"
         );
@@ -28162,6 +28554,7 @@ mod tests {
                 caps: CapabilitySet::empty(),
                 grant: Some(crate::fs::Grant {
                     write_ceiling: Some(64),
+                    subtree: None,
                 }),
             }),
             OpenFlags::READ.union(OpenFlags::WRITE),
@@ -30925,12 +31318,25 @@ mod tests {
         assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
     }
 
-    /// Build a writable user address space at `0x1000` seeded with one
-    /// encoded [`KeyInput`] record, registered against task 2, plus the
-    /// caller context. The mapping is `READ|WRITE` so the same buffer can
-    /// be read by `key_inject` and written by `keyboard_read`.
-    fn key_inject_aspace(aspaces: &RwLock<AddressSpaceRegistry>, record: KeyInput) {
-        let bytes = record.to_le_bytes();
+    /// Where [`key_inject_aspace`] stages its `i`-th edge: clear of the
+    /// record a `keyboard_read` writes back at `0x1000`.
+    fn edge_addr(i: usize) -> u64 {
+        0x1100 + (i * KeyEdge::WIRE_LEN) as u64
+    }
+
+    /// Register a writable user address space against task 2 staging `edges`
+    /// at [`edge_addr`]. The mapping is `READ|WRITE` so `keyboard_read` can
+    /// write its record back at `0x1000`.
+    fn key_inject_aspace(aspaces: &RwLock<AddressSpaceRegistry>, edges: &[KeyEdge]) {
+        let mut bytes = alloc::vec![0u8; 0x100 + edges.len() * KeyEdge::WIRE_LEN];
+        for (staged, edge) in bytes[0x100..]
+            .as_chunks_mut::<{ KeyEdge::WIRE_LEN }>()
+            .0
+            .iter_mut()
+            .zip(edges)
+        {
+            *staged = edge.to_le_bytes();
+        }
         let (space, physmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
         aspaces
@@ -30939,11 +31345,32 @@ mod tests {
             .expect("registration succeeds");
     }
 
-    fn press_char(c: char) -> KeyInput {
+    /// The key that types the lower-case letter `c`.
+    fn letter(c: char) -> PhysicalKey {
+        let offset = u16::try_from(u32::from(c) - u32::from('a')).expect("a letter");
+        PhysicalKey::from_usage(0x04 + offset).expect("a key")
+    }
+
+    fn press(c: char) -> KeyEdge {
+        KeyEdge {
+            key: letter(c),
+            pressed: true,
+        }
+    }
+
+    fn release(c: char) -> KeyEdge {
+        KeyEdge {
+            key: letter(c),
+            pressed: false,
+        }
+    }
+
+    /// What pressing the letter `c` alone reads as.
+    fn typed(c: char) -> KeyInput {
         KeyInput::Pressed {
-            key: KeyValue::Char(c),
+            key: Some(KeyValue::Char(c)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: letter(c),
         }
     }
 
@@ -30961,7 +31388,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        key_inject_aspace(&aspaces, press_char('a'));
+        key_inject_aspace(&aspaces, &[press('a')]);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30981,8 +31408,8 @@ mod tests {
         .with_seat_registry(seat);
 
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN),
+            Ok(KeyEdge::WIRE_LEN as u64)
         );
         // The encoded byte is now drainable from the text sink.
         let mut buf = [0u8; 8];
@@ -31006,7 +31433,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        key_inject_aspace(&aspaces, press_char('a'));
+        key_inject_aspace(&aspaces, &[press('a'), release('a')]);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31030,8 +31457,8 @@ mod tests {
 
         let id = AuditEvent::InputDelivered.id().0;
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN),
+            Ok(KeyEdge::WIRE_LEN as u64)
         );
         let snapshot = sink.snapshot();
         assert_eq!(
@@ -31059,8 +31486,8 @@ mod tests {
         // A second successful inject emits no further witness — never one
         // per keystroke.
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(1), KeyEdge::WIRE_LEN),
+            Ok(KeyEdge::WIRE_LEN as u64)
         );
         assert_eq!(
             sink.event_ids().iter().filter(|&&i| i == id).count(),
@@ -31083,7 +31510,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        key_inject_aspace(&aspaces, press_char('a'));
+        key_inject_aspace(&aspaces, &[press('a')]);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31099,12 +31526,12 @@ mod tests {
 
         // A short buffer is refused before the registry is consulted.
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN - 1),
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN - 1),
             Err(Errno::BufferTooSmall)
         );
         // The NULL text sink accepts no injected input.
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
     }
@@ -31391,6 +31818,7 @@ mod tests {
 
         let len = PointerInput::WIRE_LEN;
         for (at, stated) in [
+            (0x1000, NOW_NS),
             (RELEASE_AT, NOW_NS),
             (0x1000, u64::MAX - 1),
             (RELEASE_AT, NOW_NS),
@@ -31418,14 +31846,15 @@ mod tests {
                 .iter()
                 .map(|timed| timed.input)
                 .collect::<alloc::vec::Vec<_>>(),
-            [release, press]
+            [press, release, press]
         );
         assert_eq!(
-            delivered[0].at_ns, NOW_NS,
-            "the device time it was stated with"
+            [delivered[0].at_ns, delivered[1].at_ns],
+            [NOW_NS; 2],
+            "the device time each was stated with"
         );
         assert!(
-            delivered[1].at_ns > NOW_NS,
+            delivered[2].at_ns > NOW_NS,
             "an untimed press is timed by its arrival"
         );
     }
@@ -31485,14 +31914,13 @@ mod tests {
             .expect("caller has a registered space")
         }
 
-        let key = press_char('p');
         {
-            seat_handlers!(&key.to_le_bytes() => h, ctx, _arch, _sink);
+            seat_handlers!(&press('p').to_le_bytes() => h, ctx, _arch, _sink);
             let len = KeyInput::WIRE_LEN;
             assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
             assert_eq!(
-                h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
-                Ok(len as u64)
+                h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyEdge::WIRE_LEN),
+                Ok(KeyEdge::WIRE_LEN as u64)
             );
             assert_eq!(
                 h.keyboard_read(&ctx, SEAT_PRIMARY, UNMAPPED_READ_BUFFER, len),
@@ -31504,7 +31932,7 @@ mod tests {
             );
             assert_eq!(
                 KeyInput::from_bytes(&read_back::<{ KeyInput::WIRE_LEN }>(&h, &ctx)),
-                Ok(key)
+                Ok(typed('p'))
             );
             assert_eq!(h.keyboard_read(&ctx, SEAT_PRIMARY, 0x1000, len), Ok(0));
         }
@@ -31703,8 +32131,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let record = press_char('z');
-        key_inject_aspace(&aspaces, record);
+        key_inject_aspace(&aspaces, &[press('z'), release('z'), press('z')]);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31738,8 +32165,8 @@ mod tests {
         // on a fresh seat is generation 1).
         assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
         assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
+            h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN),
+            Ok(KeyEdge::WIRE_LEN as u64)
         );
         // The record routed to the desktop channel, not the text sink.
         let mut text = [0u8; 4];
@@ -31755,16 +32182,18 @@ mod tests {
             Ok(0)
         );
 
-        // Releasing returns input to the text console: the next press
-        // routes to the text sink (the buffer still holds the 'z' record).
+        // Releasing returns input to the text console: the key comes up,
+        // typing nothing, and its next press types into the text sink.
         assert_eq!(
             h.display_release(&ctx, SEAT_PRIMARY, ReleaseSurface::Text),
             Ok(0)
         );
-        assert_eq!(
-            h.key_inject(&ctx, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
-        );
+        for i in [1, 2] {
+            assert_eq!(
+                h.key_inject(&ctx, SEAT_PRIMARY, edge_addr(i), KeyEdge::WIRE_LEN),
+                Ok(KeyEdge::WIRE_LEN as u64)
+            );
+        }
         let mut text = [0u8; 4];
         assert_eq!(crate::console::ConsoleRead::read(queue, &mut text), Ok(1));
         assert_eq!(&text[..1], b"z");
@@ -31784,7 +32213,7 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(
-            h.key_inject(&ctx, 42, 0x1000, KeyInput::WIRE_LEN),
+            h.key_inject(&ctx, 42, edge_addr(0), KeyEdge::WIRE_LEN),
             Err(Errno::NotFound)
         );
         assert_eq!(
@@ -31865,8 +32294,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let record = press_char('s');
-        key_inject_aspace(&aspaces, record);
+        key_inject_aspace(&aspaces, &[press('s')]);
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31911,8 +32339,8 @@ mod tests {
         // A record injected while the seat is held queues for the owner;
         // the intruder's drain is refused and takes nothing.
         assert_eq!(
-            h.key_inject(&wm, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
-            Ok(KeyInput::WIRE_LEN as u64)
+            h.key_inject(&wm, SEAT_PRIMARY, edge_addr(0), KeyEdge::WIRE_LEN),
+            Ok(KeyEdge::WIRE_LEN as u64)
         );
         assert_eq!(
             h.keyboard_read(&intruder, SEAT_PRIMARY, 0x1000, KeyInput::WIRE_LEN),
@@ -34176,6 +34604,7 @@ mod tests {
                 0,
                 Some(crate::fs::Grant {
                     write_ceiling: Some(0),
+                    subtree: None,
                 }),
                 Err(Errno::NotSupported),
             ),
@@ -36679,6 +37108,32 @@ mod tests {
             true
         }
         fn unmap_shared(&mut self, _base: u64, _len: usize) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn detach_anonymous(
+            &mut self,
+            _base: u64,
+            _pages: u64,
+            _retire: &mut dyn Retire,
+            _into: &mut Vec<Frame>,
+        ) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn reserve_code(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn settle_spurious(&mut self, _va: u64, _write: bool) -> bool {
+            false
+        }
+        fn map_code(&mut self, _base: u64, _frames: &[Frame]) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn release_code(
+            &mut self,
+            _base: u64,
+            _pages: u64,
+            _retire: &mut dyn Retire,
+        ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
         fn freeze(&self) -> Result<FrozenAddressSpace, tairix_kernel_mem::AllocError> {
@@ -50588,6 +51043,114 @@ mod tests {
         assert!(to_recipient(rw, 4096).expect("bounded writable grant mints") >= 1);
     }
 
+    /// A directory is handed on only as a capability to what lies beneath it,
+    /// under `GRANT_SUBTREE` alone, and nothing but a directory is.
+    #[test]
+    fn fd_grant_hands_on_a_directory_only_as_a_capability() {
+        let rig = GrantRig::new(b"/f");
+        let ctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let _recipient = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
+        let grant = |fd: u32, flags: u64| {
+            h.fd_grant(
+                &ctx,
+                fd,
+                0,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+                flags,
+            )
+        };
+        let open = |flags| {
+            u32::try_from(
+                h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), flags, 0)
+                    .expect("opens"),
+            )
+            .unwrap()
+        };
+        let dir = open(OpenFlags::READ.union(OpenFlags::DIRECTORY));
+        for flags in [
+            0,
+            tairix_abi::GRANT_FILE_ONLY,
+            tairix_abi::GRANT_SUBTREE | tairix_abi::GRANT_FILE_ONLY,
+            tairix_abi::GRANT_SUBTREE << 1,
+        ] {
+            assert_eq!(grant(dir, flags), Err(Errno::OutOfRange), "{flags:#x}");
+        }
+        assert!(grant(dir, tairix_abi::GRANT_SUBTREE).expect("a directory capability") >= 1);
+        let file = open(OpenFlags::READ);
+        assert_eq!(
+            grant(file, tairix_abi::GRANT_SUBTREE),
+            Err(Errno::OutOfRange),
+            "a file is no capability to anything beneath it"
+        );
+        let (read_end, _) = rig
+            .aspaces
+            .write()
+            .open_pipe(ProcessId(2))
+            .expect("a pipe opens");
+        assert_eq!(
+            grant(read_end, tairix_abi::GRANT_SUBTREE),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// A directory capability is redeemed as the directory descriptor it is:
+    /// a recipient holding no filesystem capability opens and lists beneath
+    /// it as the grantor, and a check that knows a directory by its open flags
+    /// knows this one.
+    #[test]
+    fn a_redeemed_directory_capability_is_a_directory_descriptor() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let recipient_caps = rig.holder(
+            &GRANT_RECIPIENT,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"notes",
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let dir = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let held = u32::try_from(
+            h.fs_open(&gctx, FD_CWD, 0x1000, "/f".len(), dir, 0)
+                .expect("open directory"),
+        )
+        .unwrap();
+        let handle = h
+            .fd_grant(
+                &gctx,
+                held,
+                0,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+                tairix_abi::GRANT_SUBTREE,
+            )
+            .expect("a directory capability");
+        let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
+        let theirs = rig
+            .aspaces
+            .read()
+            .open_file_entry(ProcessId(3), rfd)
+            .expect("descriptor recorded");
+        assert_eq!(theirs.flags, dir);
+        assert!(h
+            .fs_open(&rctx, rfd, 0x1000, "notes".len(), OpenFlags::READ, 0)
+            .is_ok());
+        assert_eq!(h.fs_readdir(&rctx, rfd, 0x1000, 0x40, 0), Ok(0));
+        let calls = fs.calls();
+        let as_grantor = alloc::format!("uid={} ", gctx.caps.owner().0);
+        assert!(
+            calls.iter().all(|call| call.contains(&as_grantor)),
+            "the recipient acts as the grantor: {calls:?}"
+        );
+        assert_eq!(calls.len(), 3, "{calls:?}");
+    }
+
     /// A grant asked to carry only a regular file refuses a pipe end, and a
     /// flag no grant defines, judging the descriptor alone.
     ///
@@ -50628,7 +51191,7 @@ mod tests {
             );
         }
         assert_eq!(
-            grant(file, 2),
+            grant(file, tairix_abi::GRANT_SUBTREE << 1),
             Err(Errno::OutOfRange),
             "a flag no grant defines"
         );
@@ -57347,6 +57910,7 @@ mod tests {
                     "/Storage/x",
                 ),
                 OpenFlags::READ,
+                crate::fs::Authority::Holder,
             )
             .expect("file opened");
         assert_eq!(
@@ -57784,6 +58348,7 @@ mod tests {
                     "/Storage/x",
                 ),
                 OpenFlags::WRITE,
+                crate::fs::Authority::Holder,
             )
             .expect("file opened");
         let (read_fd, write_fd) = aspaces
@@ -59003,6 +59568,483 @@ mod tests {
         );
     }
 
+    /// A front-end and its children for `code_install`: a compiler, a target
+    /// and a second target, all sandboxed with live spaces over one frame
+    /// pool, a child that is not sandboxed, and another parent's child.
+    struct CodeWorld {
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        arch: Arc<TestArch>,
+        sink: &'static TestSink,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        wait: &'static crate::procwait::KernelProcessWait<TestArch>,
+        parent: TaskCapabilities,
+        compiler: u64,
+        target: u64,
+        other: u64,
+        open: u64,
+        stranger: u64,
+        /// The compiler's, the target's and the other target's spaces.
+        spaces: [Arc<crate::procspace::ProcessSpace>; 3],
+    }
+
+    /// A [`CodeWorld`] whose spaces draw on a frame pool of this site's own.
+    macro_rules! code_world {
+        () => {{
+            static POOL: tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator> =
+                tairix_sync::OnceCell::new();
+            CodeWorld::new(&POOL)
+        }};
+    }
+
+    impl CodeWorld {
+        /// The base of every host test space's code window.
+        const CODE_WINDOW: u64 = 0x9000_0000;
+
+        fn new(pool: &'static tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator>) -> Self {
+            use crate::procwait::{ChildListing, KernelProcessWait};
+            install_trace_filter();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let table = RwLock::new(CapTable::new());
+            let parent_task = crate::test_boot::claim_task();
+            let parent = admitted_record(&table, parent_task, &[CapabilityId::JIT_MAP_EXEC], sink);
+            let [compiler, target, other, open, stranger, other_parent] =
+                [(); 6].map(|()| crate::test_boot::claim_peer_task());
+            for child in [compiler, target, other] {
+                let record = make_owned_caps_record(child, 1000, &[], sink).as_sandboxed();
+                table.write().insert(record).expect("inserted");
+            }
+            for child in [open, stranger] {
+                let _ = admitted_record(&table, child, &[], sink);
+            }
+            let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
+            let wait: &'static KernelProcessWait<TestArch> =
+                crate::forever(Box::new(KernelProcessWait::new(wait_arch)));
+            for (from, to) in [
+                (parent_task, compiler),
+                (parent_task, target),
+                (parent_task, other),
+                (parent_task, open),
+                (other_parent, stranger),
+            ] {
+                wait.register_child(ProcessId(from), ProcessId(to), ChildListing::Listed)
+                    .expect("registered");
+            }
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let spaces = [compiler, target, other].map(|child| {
+                let space = Arc::new(crate::procspace::ProcessSpace::for_test(
+                    crate::procspace::host_test_space_over(pool, None),
+                ));
+                let frozen = space.with(|live| live.freeze()).expect("freezes");
+                let mut aspaces = aspaces.write();
+                aspaces
+                    .register(
+                        ProcessId(child),
+                        Box::new(frozen),
+                        Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE)),
+                    )
+                    .expect("registered");
+                aspaces
+                    .set_live_space(ProcessId(child), &space)
+                    .expect("recorded");
+                space
+            });
+            Self {
+                sched: make_sched(arch.clone()),
+                table,
+                arch,
+                sink,
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                wait,
+                parent,
+                compiler,
+                target,
+                other,
+                open,
+                stranger,
+                spaces,
+            }
+        }
+
+        fn handlers(&self) -> KernelSyscallHandlers<'_, TestArch> {
+            KernelSyscallHandlers::new(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_process_wait(self.wait)
+        }
+
+        /// `pages` pages of written anonymous memory in the compiler, mapped
+        /// and charged as `mem_map` and its faults leave them.
+        fn compiled(&self, pages: u64) -> u64 {
+            let base = self.spaces[0].with(|live| {
+                let base = live.reserve_anonymous(pages).expect("reserves");
+                live.map_anonymous(base, pages).expect("backs");
+                base
+            });
+            let compiler = ProcessId(self.compiler);
+            let mut aspaces = self.aspaces.write();
+            aspaces
+                .try_charge_aspace_bytes(compiler, pages * PAGE_SIZE as u64)
+                .expect("charged");
+            aspaces
+                .record_anon_region(compiler, base, pages)
+                .expect("recorded");
+            base
+        }
+
+        /// What each of the `pages` pages from `base` of space `space`
+        /// translates to.
+        fn mapped(&self, space: usize, base: u64, pages: u64) -> Vec<Option<(Frame, MapFlags)>> {
+            self.spaces[space].with(|live| {
+                (0..pages)
+                    .map(|index| {
+                        let va = VirtAddr::new(base + index * PAGE_SIZE as u64);
+                        live.translate_page(Page::from_addr(va).expect("aligned"))
+                    })
+                    .collect()
+            })
+        }
+
+        fn charged(&self, process: u64) -> u64 {
+            self.aspaces.read().mapped_aspace_bytes(ProcessId(process))
+        }
+
+        fn install(&self, compiler: u64, target: u64, base: u64, len: usize) -> SyscallResult {
+            let ctx = CallerContext {
+                task_id: SecTaskId(self.parent.process().0),
+                caps: &self.parent,
+            };
+            self.handlers().code_install(
+                &ctx,
+                compiler.cast_signed(),
+                target.cast_signed(),
+                base,
+                len,
+            )
+        }
+    }
+
+    /// The compiler's pages leave it, its holding and its charge with them,
+    /// and arrive in the target read-execute at its code window, charged there
+    /// and published to the snapshot the copy path reads; the target's
+    /// `mem_unmap` gives them back.
+    #[test]
+    fn code_moves_from_the_compiler_into_the_target_read_execute() {
+        let world = code_world!();
+        let base = world.compiled(2);
+        let frames: Vec<Frame> = world
+            .mapped(0, base, 2)
+            .into_iter()
+            .map(|mapping| mapping.expect("written").0)
+            .collect();
+
+        let at = world.install(world.compiler, world.target, base, 2 * PAGE_SIZE);
+        assert_eq!(at, Ok(CodeWorld::CODE_WINDOW));
+        assert_eq!(
+            world.mapped(0, base, 2),
+            [None, None],
+            "gone from the compiler"
+        );
+        assert!(!world
+            .aspaces
+            .read()
+            .anon_region_holds(ProcessId(world.compiler), base, 1));
+        assert_eq!(world.charged(world.compiler), 0);
+
+        let installed: Vec<_> = frames
+            .iter()
+            .map(|&frame| Some((frame, tairix_kernel_mem::CODE_FLAGS)))
+            .collect();
+        assert_eq!(world.mapped(1, CodeWorld::CODE_WINDOW, 2), installed);
+        assert_eq!(world.charged(world.target), 2 * PAGE_SIZE as u64);
+        {
+            let aspaces = world.aspaces.read();
+            let (snapshot, _) = aspaces
+                .resolve(ProcessId(world.target))
+                .expect("registered");
+            let page = Page::from_addr(VirtAddr::new(CodeWorld::CODE_WINDOW)).expect("aligned");
+            assert_eq!(snapshot.translate(page), installed[0], "published");
+        }
+
+        let cpu = crate::test_boot::claim_cpu();
+        let _published =
+            crate::kthread::publish_live_space_for_test(cpu, Arc::clone(&world.spaces[1]));
+        let arch = TestArch::on_cpu(cpu);
+        let target_caps = world
+            .table
+            .read()
+            .caps_of_process(ProcessId(world.target))
+            .cloned()
+            .expect("admitted");
+        let handlers = KernelSyscallHandlers::new(
+            &world.sched,
+            &world.table,
+            &arch,
+            world.sink,
+            &world.irq,
+            &world.ctl,
+            &world.ipc,
+            &world.aspaces,
+            &world.rng,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(world.target),
+            caps: &target_caps,
+        };
+        assert_eq!(
+            handlers.mem_unmap(&ctx, CodeWorld::CODE_WINDOW, 2 * PAGE_SIZE),
+            Ok(0)
+        );
+        assert_eq!(world.mapped(1, CodeWorld::CODE_WINDOW, 2), [None, None]);
+        assert_eq!(world.charged(world.target), 0, "the charge goes with it");
+        assert_eq!(
+            handlers.mem_unmap(&ctx, CodeWorld::CODE_WINDOW, PAGE_SIZE),
+            Err(Errno::NotFound),
+            "and only once"
+        );
+    }
+
+    /// Only two distinct, sandboxed, live children of the caller take part,
+    /// and every refusal leaves the compiler's memory where it was.
+    #[test]
+    fn code_install_refuses_all_but_two_distinct_sandboxed_children() {
+        let world = code_world!();
+        let base = world.compiled(1);
+        let len = PAGE_SIZE;
+        let parent = world.parent.process().0;
+        for (compiler, target, refused, what) in [
+            (
+                world.stranger,
+                world.target,
+                Errno::NotFound,
+                "another's child",
+            ),
+            (
+                world.compiler,
+                world.stranger,
+                Errno::NotFound,
+                "another's child",
+            ),
+            (parent, world.target, Errno::NotFound, "the caller itself"),
+            (
+                world.open,
+                world.target,
+                Errno::PermissionDenied,
+                "unsandboxed",
+            ),
+            (
+                world.compiler,
+                world.open,
+                Errno::PermissionDenied,
+                "unsandboxed",
+            ),
+            (
+                world.compiler,
+                world.compiler,
+                Errno::PermissionDenied,
+                "one child twice",
+            ),
+        ] {
+            assert_eq!(
+                world.install(compiler, target, base, len),
+                Err(refused),
+                "{what}"
+            );
+        }
+        assert!(
+            world.mapped(0, base, 1)[0].is_some(),
+            "the compiler keeps its page"
+        );
+        assert_eq!(world.charged(world.target), 0);
+        assert_eq!(
+            world.install(world.compiler, world.target, base, len),
+            Ok(CodeWorld::CODE_WINDOW)
+        );
+    }
+
+    /// A compiler installs only into the target it first installed into.
+    #[test]
+    fn a_compiler_serves_only_the_target_it_first_installed_into() {
+        let world = code_world!();
+        let first = world.compiled(1);
+        assert!(world
+            .install(world.compiler, world.target, first, PAGE_SIZE)
+            .is_ok());
+        let second = world.compiled(1);
+        assert_eq!(
+            world.install(world.compiler, world.other, second, PAGE_SIZE),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(world.mapped(0, second, 1)[0].is_some());
+        assert_eq!(world.charged(world.other), 0);
+        assert!(world
+            .install(world.compiler, world.target, second, PAGE_SIZE)
+            .is_ok());
+    }
+
+    /// What the target cannot take is refused before a page leaves the
+    /// compiler: a code window with no room, and an address-space bound.
+    #[test]
+    fn code_the_target_cannot_take_never_leaves_the_compiler() {
+        let world = code_world!();
+        let first = world.compiled(5);
+        assert!(world
+            .install(world.compiler, world.target, first, 5 * PAGE_SIZE)
+            .is_ok());
+        let base = world.compiled(4);
+        assert_eq!(
+            world.install(world.compiler, world.target, base, 4 * PAGE_SIZE),
+            Err(Errno::OutOfMemory),
+            "three of the window's eight pages are left"
+        );
+        assert!(world.mapped(0, base, 4).iter().all(Option::is_some));
+        assert_eq!(
+            world.charged(world.target),
+            5 * PAGE_SIZE as u64,
+            "refunded"
+        );
+        assert_eq!(world.charged(world.compiler), 4 * PAGE_SIZE as u64);
+
+        world
+            .aspaces
+            .write()
+            .set_limit(
+                ProcessId(world.target),
+                LimitKind::AddressSpaceBytes,
+                ResourceLimit::new(6 * PAGE_SIZE as u64, u64::MAX).expect("well-formed"),
+            )
+            .expect("set");
+        assert_eq!(
+            world.install(world.compiler, world.target, base, 2 * PAGE_SIZE),
+            Err(Errno::OutOfRange)
+        );
+        assert!(world.mapped(0, base, 4).iter().all(Option::is_some));
+        assert_eq!(
+            world.install(world.compiler, world.target, base, PAGE_SIZE),
+            Ok(CodeWorld::CODE_WINDOW + 5 * PAGE_SIZE as u64),
+            "the window and the bound were left as they were"
+        );
+    }
+
+    /// A range holding a page the compiler never wrote, or one it does not
+    /// hold, moves nothing, and the target's placement goes back.
+    #[test]
+    fn a_range_not_wholly_the_compilers_written_memory_moves_nothing() {
+        let world = code_world!();
+        let base = world.compiled(1);
+        let unwritten = world.spaces[0]
+            .with(|live| live.reserve_anonymous(1))
+            .expect("reserves");
+        world
+            .aspaces
+            .write()
+            .record_anon_region(ProcessId(world.compiler), unwritten, 1)
+            .expect("recorded");
+        assert_eq!(
+            world.install(world.compiler, world.target, unwritten, PAGE_SIZE),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            world.install(world.compiler, world.target, base, 2 * PAGE_SIZE),
+            Err(Errno::NotFound),
+            "a range past the page held"
+        );
+        assert!(world.mapped(0, base, 1)[0].is_some());
+        assert!(world
+            .aspaces
+            .read()
+            .anon_region_holds(ProcessId(world.compiler), unwritten, 1));
+        assert_eq!(world.charged(world.target), 0);
+        assert_eq!(
+            world.install(world.compiler, world.target, base, PAGE_SIZE),
+            Ok(CodeWorld::CODE_WINDOW),
+            "the placement went back"
+        );
+    }
+
+    /// A fault on a page the faulting space maps to allow the access was taken
+    /// on a stale view of this CPU's, settled for the access to retry rather
+    /// than ending the process; an absent page, or a CPU running no space, is
+    /// no such slip.
+    #[test]
+    fn a_fault_on_a_page_mapped_since_is_settled_rather_than_fatal() {
+        install_trace_filter();
+        let sink = make_sink();
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = TestArch::on_cpu(cpu);
+        let sched = make_sched(Arc::new(TestArch::with_cpus(1)));
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let handlers = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let page = 0x2000_0000;
+        assert!(
+            !handlers.settle_spurious_fault(page, false),
+            "no space runs on this CPU"
+        );
+
+        let space = Arc::new(crate::procspace::ProcessSpace::for_test(
+            crate::procspace::host_test_space!(),
+        ));
+        space.with(|live| {
+            live.reserve_anonymous_at(page, 1).expect("reserves");
+            live.map_anonymous(page, 1).expect("maps");
+        });
+        let _published = crate::kthread::publish_live_space_for_test(cpu, space);
+        assert!(handlers.settle_spurious_fault(page + 8, false));
+        assert!(handlers.settle_spurious_fault(page + 8, true));
+        assert!(
+            !handlers.settle_spurious_fault(page + PAGE_SIZE as u64, false),
+            "nothing is mapped there"
+        );
+    }
+
+    /// The region's shape is refused before anything is looked at.
+    #[test]
+    fn code_install_refuses_a_malformed_region_first() {
+        let world = code_world!();
+        let (compiler, target) = (world.compiler, world.target);
+        assert_eq!(
+            world.install(compiler, target, 0x1000, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            world.install(compiler, target, 0x1001, 1),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(
+            world.install(compiler, target, !0xFFF, PAGE_SIZE),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            world.install(world.stranger, target, 0x1000, 0),
+            Err(Errno::LengthOutOfRange),
+            "before the children"
+        );
+    }
+
     /// `wall_time_get` / `wall_time_set` round-trip the kernel wall clock
     /// through the real handlers and the address-space copy paths, and fail
     /// closed on a short buffer, a non-settable state, and a malformed
@@ -59734,6 +60776,11 @@ mod tests {
             Ok(self.stat)
         }
 
+        fn volume_stats_node(&self, node: &crate::fs::NodeHandle) -> Result<VolumeStats, Errno> {
+            self.record(alloc::format!("volume stats path={}", node.opened_as));
+            Ok(RECORDED_VOLUME)
+        }
+
         fn stat(
             &self,
             uid: u32,
@@ -59955,6 +61002,35 @@ mod tests {
                 who.granted
             ));
             Ok(())
+        }
+
+        fn set_times(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            at: At<'_>,
+            change: TimesChange,
+            final_link: crate::fs::FinalLink,
+        ) -> Result<TimesKept, Errno> {
+            self.record(alloc::format!(
+                "set_times uid={uid} path={} {change:?} link={final_link:?}",
+                shown(at)
+            ));
+            Ok(TimesKept::Exactly)
+        }
+
+        fn set_times_node(
+            &self,
+            node: &NodeHandle,
+            who: &Acting<'_>,
+            change: TimesChange,
+        ) -> Result<TimesKept, Errno> {
+            self.record(alloc::format!(
+                "set_times_node uid={} path={} {change:?}",
+                who.uid,
+                node.opened_as
+            ));
+            Ok(TimesKept::Exactly)
         }
 
         // The attribute methods record the marshalled call and serve one
@@ -60846,6 +61922,93 @@ mod tests {
         assert_eq!(h.fs_close(&ctx, fd), Err(Errno::NotFound));
         assert_eq!(
             h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// What [`RecordingFs`] says of the volume every node of it lies on.
+    const RECORDED_VOLUME: VolumeStats = VolumeStats {
+        block_size: 4096,
+        in_reserve: false,
+        total_blocks: 1 << 30,
+        free_blocks: 1 << 20,
+        avail_blocks: 1 << 19,
+        files: 0,
+        files_free: 0,
+    };
+
+    #[test]
+    fn fs_volume_stats_reports_the_volume_a_descriptor_lies_on() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&ctx, FD_CWD, 0x1000, "/f".len(), OpenFlags::READ, 0)
+                .expect("open"),
+        )
+        .unwrap();
+        assert_eq!(
+            h.fs_volume_stats(&ctx, fd, 0x1000, VolumeStats::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert!(
+            fs.calls()
+                .iter()
+                .all(|line| !line.starts_with("volume stats")),
+            "a short buffer reaches no driver"
+        );
+        assert_eq!(
+            h.fs_volume_stats(&ctx, fd, 0x1000, VolumeStats::WIRE_LEN),
+            Ok(VolumeStats::WIRE_LEN as u64)
+        );
+        let reported = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; VolumeStats::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                VolumeStats::from_le_bytes(&buf).expect("valid stats")
+            })
+            .expect("caller space");
+        assert_eq!(reported, RECORDED_VOLUME);
+
+        assert_eq!(h.pipe_create(&ctx, 0x1800), Ok(0));
+        let mut fds = [0u8; 8];
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(0x1800), &mut fds).expect("readable");
+        })
+        .expect("caller has a space");
+        let pipe = u32::from_ne_bytes([fds[0], fds[1], fds[2], fds[3]]);
+        assert_eq!(
+            h.fs_volume_stats(&ctx, pipe, 0x1000, VolumeStats::WIRE_LEN),
+            Err(Errno::NotSupported),
+            "a pipe lies on no volume"
+        );
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        assert_eq!(
+            h.fs_volume_stats(&ctx, fd, 0x1000, VolumeStats::WIRE_LEN),
             Err(Errno::NotFound)
         );
     }
@@ -62257,9 +63420,12 @@ mod tests {
             .read()
             .open_file_entry(ProcessId(fx.owner), own)
             .expect("the owner's entry");
-        let Some(crate::aspace::HandedOn::File(grant)) =
-            entry.handed_on(uid, caps_with(&[CapabilityId::FS_ACCESS]), 0)
-        else {
+        let Some(crate::aspace::HandedOn::File(grant)) = entry.handed_on(
+            uid,
+            caps_with(&[CapabilityId::FS_ACCESS]),
+            0,
+            crate::aspace::Handing::File,
+        ) else {
             panic!("a file is granted as its node");
         };
         let installed = fx.aspaces.write().install_std_entry(
@@ -63877,15 +65043,25 @@ mod tests {
             .with_filesystem(self.fs)
         }
 
-        /// Plant `file`, a descriptor conferred or granted to the caller, as
-        /// its standard output.
-        fn hand_over(&self, file: crate::aspace::OpenFile) {
+        /// Plant `file`, a descriptor conferred or granted to the caller, in
+        /// its first free standard slot past input, answering the slot.
+        fn hand_over(&self, file: crate::aspace::OpenFile) -> u32 {
+            let slot = [tairix_abi::STDOUT, tairix_abi::STDERR]
+                .into_iter()
+                .find(|&fd| {
+                    self.aspaces
+                        .read()
+                        .open_file_entry(ProcessId(2), fd)
+                        .is_none()
+                })
+                .expect("a free standard slot");
             assert!(self
                 .aspaces
                 .write()
-                .install_std_entry(ProcessId(2), tairix_abi::STDOUT, file)
+                .install_std_entry(ProcessId(2), slot, file)
                 .expect("a standard slot")
                 .is_none());
+            slot
         }
     }
 
@@ -64066,7 +65242,12 @@ mod tests {
         let Some(crate::aspace::HandedOn::File(granted)) =
             crate::aspace::OpenFile::new(OpenBacking::opened(opened), OpenFlags::READ)
                 .expect("a description")
-                .handed_on(4242, caps_with(&[CapabilityId::FS_ACCESS]), 0)
+                .handed_on(
+                    4242,
+                    caps_with(&[CapabilityId::FS_ACCESS]),
+                    0,
+                    crate::aspace::Handing::File,
+                )
         else {
             panic!("a file hands on its node");
         };
@@ -64092,6 +65273,463 @@ mod tests {
                 String::from("access_node uid=4242 path=/doc want=Execute granted=true AsQuery"),
             ]
         );
+    }
+
+    /// Hand the fixture's caller, as its standard output, a directory
+    /// capability on `/Users/bob/dos` granted by uid 4242 under `ceiling`.
+    fn hand_over_capability(fx: &RecordingFixture, grantor: &[CapabilityId], ceiling: u64) -> u32 {
+        let opened = crate::test_bundle::opened_node(
+            &fx.fs.volume,
+            7,
+            NodeKind::Directory,
+            "/Users/bob/dos",
+        );
+        let dir = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let grantor = caps_with(grantor);
+        let Some(crate::aspace::HandedOn::File(granted)) =
+            crate::aspace::OpenFile::new(OpenBacking::opened(opened), dir)
+                .expect("a description")
+                .handed_on(4242, grantor, ceiling, crate::aspace::Handing::Subtree)
+        else {
+            panic!("a directory hands on as a capability");
+        };
+        fx.hand_over(
+            crate::aspace::OpenFile::new(OpenBacking::Node(granted), dir).expect("a description"),
+        )
+    }
+
+    /// What the grantor of every capability these tests hand over holds: more
+    /// than the capability carries on.
+    const GRANTOR: &[CapabilityId] = &[CapabilityId::FS_ACCESS, CapabilityId::FS_CHOWN];
+
+    /// The handle the fixture's caller holds at `fd`.
+    fn held_at(fx: &RecordingFixture, fd: u32) -> NodeHandle {
+        fx.aspaces
+            .read()
+            .open_file_entry(ProcessId(2), fd)
+            .and_then(|entry| entry.node().cloned())
+            .expect("a node is held there")
+    }
+
+    /// Stage `from` and `to`, both named through `dirfd`, as a rename's two
+    /// `PathAt` records.
+    fn stage_rename(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        from: (u32, &str),
+        to: (u32, &str),
+    ) {
+        h.copy_out_user(ctx, 0x1400, from.1.as_bytes())
+            .expect("staged");
+        h.copy_out_user(ctx, 0x1500, to.1.as_bytes())
+            .expect("staged");
+        let at = |dirfd, len: usize, path| PathAt {
+            dirfd,
+            len: u32::try_from(len).expect("a short path"),
+            path,
+        };
+        h.copy_out_user(ctx, 0x1300, &at(from.0, from.1.len(), 0x1400).to_le_bytes())
+            .expect("staged");
+        h.copy_out_user(ctx, 0x1310, &at(to.0, to.1.len(), 0x1500).to_le_bytes())
+            .expect("staged");
+    }
+
+    /// What a holder with no filesystem capability names through a directory
+    /// capability acts as its grantor, beneath the directory, and what it opens
+    /// there stays under the capability; nothing else it names is allowed,
+    /// and no absolute path is named through one, whoever names it.
+    #[test]
+    fn a_directory_capability_is_its_holders_only_reach_and_acts_as_its_grantor() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let bare = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &bare,
+        };
+        let cap = hand_over_capability(&fx, GRANTOR, 0);
+
+        let notes = open_at(&h, &ctx, cap, "notes", OpenFlags::READ).expect("reached through it");
+        assert_eq!(
+            held_at(&fx, notes).authority,
+            held_at(&fx, cap).authority,
+            "what it opens is held under the capability"
+        );
+        assert_eq!(
+            open_at(&h, &ctx, FD_CWD, "/Users/bob/notes", OpenFlags::READ),
+            Err(Errno::PermissionDenied),
+            "nothing else is the holder's to name"
+        );
+        for named_by in [&ctx, &fx.context()] {
+            assert_eq!(
+                open_at(&h, named_by, cap, "/Users/bob/notes", OpenFlags::READ),
+                Err(Errno::PermissionDenied),
+                "no absolute path is named through a capability"
+            );
+        }
+        assert_eq!(h.fs_readdir(&ctx, cap, 0x1000, 256, 0), Ok(0));
+        let sub = open_at(&h, &ctx, cap, "sub", OpenFlags::DIRECTORY).expect("a directory beneath");
+        assert_eq!(
+            h.fs_readdir(&ctx, sub, 0x1000, 256, 0),
+            Ok(0),
+            "a directory opened beneath lists under the capability too"
+        );
+        let calls = fx.fs.calls();
+        assert_eq!(
+            calls[..3],
+            [
+                String::from("open uid=4242 path=notes from=/Users/bob/dos flags=1"),
+                String::from("readdir uid=4242 path=/Users/bob/dos"),
+                String::from("open uid=4242 path=sub from=/Users/bob/dos flags=32"),
+            ],
+            "only what the capability allows reaches the service, as its grantor"
+        );
+        assert!(calls[3].starts_with("readdir uid=4242 "), "{calls:?}");
+        assert_eq!(calls.len(), 4);
+    }
+
+    /// A directory capability frozen without `CAP_FS_ACCESS` reaches nothing,
+    /// as a descriptor acting as such an identity does nothing.
+    #[test]
+    fn a_directory_capability_without_filesystem_access_reaches_nothing() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let cap = hand_over_capability(&fx, &[CapabilityId::FS_CHOWN], 0);
+        assert_eq!(
+            open_at(&h, &ctx, cap, "notes", OpenFlags::READ),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_readdir(&ctx, cap, 0x1000, 256, 0),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(fx.fs.calls().is_empty(), "no refusal reached the service");
+    }
+
+    /// A directory capability whose ceiling is zero changes nothing beneath:
+    /// no write, create or truncate opens, and no make, remove or rename.
+    #[test]
+    fn a_read_only_directory_capability_changes_nothing_beneath() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let cap = hand_over_capability(&fx, GRANTOR, 0);
+        for flags in [
+            OpenFlags::WRITE,
+            OpenFlags::READ.union(OpenFlags::CREATE),
+            OpenFlags::READ.union(OpenFlags::TRUNCATE),
+        ] {
+            assert_eq!(
+                open_at(&h, &ctx, cap, "notes", flags),
+                Err(Errno::PermissionDenied),
+                "{flags:?}"
+            );
+        }
+        h.copy_out_user(&ctx, 0x1800, b"sub").expect("staged");
+        assert_eq!(
+            h.fs_mkdir(&ctx, cap, 0x1800, 3, 0o755),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_unlink(&ctx, cap, 0x1800, 3, UnlinkFlags::empty(), 0),
+            Err(Errno::PermissionDenied)
+        );
+        stage_rename(&h, &ctx, (cap, "a"), (cap, "b"));
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(fx.fs.calls().is_empty(), "no refusal reached the service");
+        assert!(open_at(&h, &ctx, cap, "notes", OpenFlags::READ).is_ok());
+    }
+
+    /// A writable directory capability makes, removes and renames beneath as
+    /// its grantor; a rename between it and the caller's own paths, which would
+    /// act as two authorities at once, is refused.
+    #[test]
+    fn a_writable_directory_capability_changes_what_lies_beneath_as_one_authority() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let cap = hand_over_capability(&fx, GRANTOR, tairix_abi::GRANT_EXTENT_INHERIT);
+        let flags = OpenFlags::READ
+            .union(OpenFlags::WRITE)
+            .union(OpenFlags::CREATE);
+        assert!(open_at(&h, &ctx, cap, "new", flags).is_ok());
+        h.copy_out_user(&ctx, 0x1800, b"sub").expect("staged");
+        assert_eq!(h.fs_mkdir(&ctx, cap, 0x1800, 3, 0o755), Ok(0));
+        assert_eq!(
+            h.fs_unlink(&ctx, cap, 0x1800, 3, UnlinkFlags::empty(), 0),
+            Ok(0)
+        );
+        stage_rename(&h, &ctx, (cap, "a"), (cap, "b"));
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Ok(0)
+        );
+        stage_rename(&h, &ctx, (cap, "a"), (FD_CWD, "/Users/bob/a"));
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Err(Errno::PermissionDenied),
+            "out from under the capability"
+        );
+        stage_rename(&h, &ctx, (FD_CWD, "/Users/bob/a"), (cap, "a"));
+        assert_eq!(
+            h.fs_rename(&ctx, 0x1300, 0x1310, RenameFlags::empty(), 0),
+            Err(Errno::PermissionDenied),
+            "in under it"
+        );
+        assert_eq!(
+            fx.fs.calls(),
+            alloc::vec![
+                String::from("open uid=4242 path=new from=/Users/bob/dos flags=7"),
+                String::from("mkdir uid=4242 path=sub from=/Users/bob/dos"),
+                String::from("unlink uid=4242 path=sub from=/Users/bob/dos flags=0 expect=None"),
+                String::from(
+                    "rename uid=4242 src=a from=/Users/bob/dos dst=b from=/Users/bob/dos flags=0 expect=None"
+                ),
+            ]
+        );
+    }
+
+    /// The calls that never act through a directory capability refuse a path
+    /// named through one: a link could redirect its owner's own later walks, a
+    /// canonical path names what lies above it, the working directory acts as
+    /// the caller, and mode and owner never change through a grant.
+    #[test]
+    fn calls_that_never_act_through_a_directory_capability_refuse_one() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let mut fs = RecordingFs::new();
+        fs.realpath = Some(String::from("/Users/bob/dos/x"));
+        let fx = RecordingFixture::new(fs, sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let cap = hand_over_capability(&fx, GRANTOR, tairix_abi::GRANT_EXTENT_INHERIT);
+        h.copy_out_user(&ctx, 0x1800, b"x").expect("staged");
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1800, 1, cap, 0x1800, 1),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_realpath(
+                &ctx,
+                cap,
+                0x1800,
+                1,
+                0x1000,
+                64,
+                tairix_abi::RealpathMode::Existing
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_chdir(&ctx, cap, 0x1800, 1, AtFlags::empty()),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_chdir(&ctx, cap, 0, 0, AtFlags::EMPTY_PATH),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_set_mode(&ctx, cap, 0x1800, 1, 0o644, AtFlags::empty()),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fs_set_owner(&ctx, cap, 0x1800, 1, 7, 7, AtFlags::empty()),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(fx.fs.calls().is_empty(), "none reached the service");
+    }
+
+    /// Stage `change` where `fs_set_times` reads its record.
+    fn stage_times(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        change: TimesChange,
+    ) {
+        h.copy_out_user(ctx, 0x1600, &change.to_le_bytes())
+            .expect("staged");
+    }
+
+    /// A time change named through a writable directory capability acts as
+    /// its grantor for a holder with no filesystem capability; one through a
+    /// read-only capability is refused unless it sets nothing, and a change
+    /// the holder names through nothing needs its own capability.
+    #[test]
+    fn a_time_change_acts_as_the_capability_it_is_named_through() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let bare = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &bare,
+        };
+        let touch = TimesChange {
+            accessed: StampChange::Now,
+            modified: StampChange::Now,
+            nearest: false,
+        };
+        let set = |dirfd: u32, path: &str| {
+            h.copy_out_user(&ctx, 0x1800, path.as_bytes())
+                .expect("staged");
+            h.fs_set_times(
+                &ctx,
+                dirfd,
+                0x1800,
+                path.len(),
+                0x1600,
+                TimesChange::WIRE_LEN,
+                AtFlags::empty(),
+            )
+        };
+        stage_times(&h, &ctx, touch);
+        let writable = hand_over_capability(&fx, GRANTOR, tairix_abi::GRANT_EXTENT_INHERIT);
+        assert_eq!(set(writable, "notes"), Ok(TimesKept::Exactly.as_u64()));
+        assert_eq!(
+            set(FD_CWD, "/Users/bob/notes"),
+            Err(Errno::PermissionDenied),
+            "nothing else is the holder's to name"
+        );
+        let read_only = hand_over_capability(&fx, GRANTOR, 0);
+        assert_eq!(set(read_only, "notes"), Err(Errno::PermissionDenied));
+        stage_times(&h, &ctx, TimesChange::default());
+        assert_eq!(set(read_only, "notes"), Ok(TimesKept::Exactly.as_u64()));
+        let calls = fx.fs.calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls[0].starts_with("set_times uid=4242 path=notes "),
+            "{calls:?}"
+        );
+        assert!(
+            calls[1].starts_with("set_times uid=4242 path=notes "),
+            "{calls:?}"
+        );
+    }
+
+    /// Through a descriptor, a grant that writes acts as its grantor and one
+    /// that does not changes nothing, while the caller's own descriptor acts
+    /// as the caller; a record of the wrong length or shape is refused before
+    /// anything is read.
+    #[test]
+    fn a_time_change_through_a_descriptor_acts_as_a_writing_grant_or_the_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let then = TimesChange {
+            modified: StampChange::At(Time64::from_secs(9)),
+            ..TimesChange::default()
+        };
+        stage_times(&h, &ctx, then);
+        let by_descriptor =
+            |fd: u32, len: usize| h.fs_set_times(&ctx, fd, 0, 0, 0x1600, len, AtFlags::EMPTY_PATH);
+        let writable = hand_over_capability(&fx, GRANTOR, tairix_abi::GRANT_EXTENT_INHERIT);
+        assert_eq!(by_descriptor(writable, TimesChange::WIRE_LEN), Ok(0));
+        let read_only = hand_over_capability(&fx, GRANTOR, 0);
+        assert_eq!(
+            by_descriptor(read_only, TimesChange::WIRE_LEN),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            by_descriptor(writable, TimesChange::WIRE_LEN - 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut malformed = then.to_le_bytes();
+        malformed[36] = 1;
+        h.copy_out_user(&ctx, 0x1600, &malformed).expect("staged");
+        assert_eq!(
+            by_descriptor(writable, TimesChange::WIRE_LEN),
+            Err(Errno::OutOfRange)
+        );
+        let own = open_at(&h, &ctx, FD_CWD, "/Users/bob/notes", OpenFlags::READ).expect("opened");
+        stage_times(&h, &ctx, then);
+        assert_eq!(by_descriptor(own, TimesChange::WIRE_LEN), Ok(0));
+        let calls: Vec<_> = fx
+            .fs
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("set_times"))
+            .collect();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls[0].starts_with("set_times_node uid=4242 "),
+            "{calls:?}"
+        );
+        let caller = alloc::format!("set_times_node uid={} ", ctx.caps.owner().0);
+        assert!(calls[1].starts_with(&caller), "{calls:?}");
+    }
+
+    /// Asking about the working directory needs the filesystem capability, as
+    /// a path the caller names does.
+    ///
+    /// Regression: moving the check off the dispatcher, so a path named
+    /// through a directory capability could be asked about, left the working
+    /// directory's empty-path form asking nothing of the caller.
+    #[test]
+    fn asking_about_the_working_directory_needs_the_filesystem_capability() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = RecordingFixture::new(RecordingFs::new(), sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let bare = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &bare,
+        };
+        assert_eq!(
+            h.fs_access(
+                &ctx,
+                FD_CWD,
+                0,
+                0,
+                tairix_abi::Access::empty(),
+                AtFlags::EMPTY_PATH
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        stage_times(&h, &ctx, TimesChange::default());
+        assert_eq!(
+            h.fs_set_times(
+                &ctx,
+                FD_CWD,
+                0,
+                0,
+                0x1600,
+                TimesChange::WIRE_LEN,
+                AtFlags::EMPTY_PATH
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(fx.fs.calls().is_empty(), "none reached the service");
     }
 
     /// Once the node grants an access, the projection it is held through

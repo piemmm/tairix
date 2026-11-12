@@ -19,6 +19,8 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # `PhysicalKey`, the key a keyboard edge names, which the keyboard state and
 # its layout resolve.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The fixed set the keys down are kept in.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 
 [lints]
 workspace = true

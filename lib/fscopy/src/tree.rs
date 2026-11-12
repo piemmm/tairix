@@ -9,8 +9,10 @@ use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt;
 
+use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::{
-    Access, Errno, FileId, FileKind, FileStat, NodeExpect, RenameFlags, UnlinkFlags, FS_NAME_MAX,
+    Access, Errno, FileId, FileKind, FileStat, NodeExpect, RenameFlags, TimesChange, TimesKept,
+    UnlinkFlags, FS_NAME_MAX,
 };
 use tairix_path::{leaf_name, push_name, root_len};
 use tairix_util::quote::quote;
@@ -77,6 +79,13 @@ pub trait Node {
     /// The change's refusal.
     fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno>;
 
+    /// Change the node's access and modification times as `change` asks.
+    ///
+    /// # Errors
+    ///
+    /// The change's refusal.
+    fn set_times(&self, change: &TimesChange) -> Result<TimesKept, Errno>;
+
     /// The keys of the node's extended attributes.
     ///
     /// # Errors
@@ -117,6 +126,13 @@ pub trait Node {
     ///
     /// The commit's refusal.
     fn sync(&self) -> Result<(), Errno>;
+
+    /// The space accounting of the volume the node lies on.
+    ///
+    /// # Errors
+    ///
+    /// The volume's refusal.
+    fn volume_stats(&self) -> Result<VolumeStats, Errno>;
 }
 
 /// A directory a tool holds open.

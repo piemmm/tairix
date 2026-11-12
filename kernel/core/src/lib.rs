@@ -83,6 +83,7 @@ pub mod boot_session;
 pub mod bootinfo;
 pub mod cache_control;
 pub mod callreg;
+mod codeinstall;
 pub mod console;
 pub(crate) mod console_host;
 mod cpu_state;

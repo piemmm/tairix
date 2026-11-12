@@ -966,14 +966,14 @@ target, exactly as it would for a path the caller typed, so following a link
 grants no authority the caller did not already have (§20). A link is stamped
 with its creator's ownership like any other node.
 
-ARXFS tracks **no access time (atime)**: updating a stamp on every read
-would defeat the copy-on-write model (a pure read would write metadata),
-so the format keeps only `created`/`modified`/`changed`. The 12-byte
-atime slot in the on-disk inode record is reserved (written zero, ignored
-on read) so the surrounding field offsets stay fixed, and the node
-reports `accessed = Time64::UNIX_EPOCH` — the honest "no stamp" value.
-The three tracked stamps are surfaced through `NodeInfo::times` (read in
-the same structural read as kind/size), not a separate timestamp trait.
+ARXFS keeps all four stamps, each a 12-byte `Time64` exact to the
+nanosecond over its whole range: `created` (inode bytes 40..52), `modified`
+(52..64), `accessed` (64..76) and `changed` (76..88). A **read never moves
+`accessed`** — updating a stamp on every read would defeat the copy-on-write
+model, a pure read writing metadata — so it is the creation instant until it
+is set (`fs_set_times`), which moves `changed` with it. The stamps are surfaced
+through `NodeInfo::times` (read in the same structural read as kind/size), not
+a separate timestamp trait.
 
 ARXFS must enforce:
 

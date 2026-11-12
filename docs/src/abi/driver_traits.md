@@ -510,6 +510,7 @@ The mutating surface is a second separate versioned trait,
 | `punch(file, offset, len)`            | Driver handle (writable mount).   |
 | `remove(dir, name)`                   | Driver handle (writable mount).   |
 | `rename(src_dir, src_name, dst_dir, dst_name)` | Driver handle (writable mount). |
+| `set_times(node, change)`             | Driver handle (writable mount).   |
 | `flush()`                             | Driver handle.                    |
 
 A name mutation — `create`, `create_link`, `link`, `remove`, `rename` —
@@ -525,6 +526,17 @@ the driver makes no permission decision; the VFS authorises the write
 against the §5.3 template (and refuses a write to a `READ_ONLY` mount)
 before delegating (`AGENTS.md` §5.4). The first implementation is the
 read/write [FAT32 driver](../filesystem/fat32.md).
+
+`set_times` changes a node's access and modification times as a
+`TimesChange` asks — kept, stamped now as a write stamps, or set to an
+instant — stamps its change time where the format keeps one, and answers
+`TimesKept`. Each format declares every time it keeps as a `StampField`, the
+ticks of a counter from an epoch, and holds an instant through the one
+`StampField::fit`: exactly, or under `nearest` as the nearest it holds,
+`OutOfRange` otherwise, before anything changes. A time the format keeps none
+of takes a now as nothing and refuses an instant unless the nearest is asked
+(`unkept_stamp`); a format keeping one stamp for every time keeps an access
+time only as that stamp (`kept_as_stamp`).
 
 Every mountable driver also implements a third separate versioned trait,
 `FilesystemSecurity`, and the VFS judges each node against the §5.3 record

@@ -19,13 +19,12 @@ pub enum CpError {
     Option(Refusal),
     /// The command line named fewer than two operands (`cp` needs at least
     /// one source and a destination), an empty `-t` directory, an unknown
-    /// `--sparse` or `--no-preserve` value, `-t` with `-T`, or more than one
-    /// source under `-T`. Nothing is copied.
+    /// `--sparse`, `--preserve` or `--no-preserve` value, `-t` with `-T`, or
+    /// more than one source under `-T`. Nothing is copied.
     Usage,
-    /// An option whose complete behaviour needs work this system does not
-    /// have yet (`-a`/`--archive` and the `--preserve` members other than
-    /// `links` and `xattr`). Carries the switch, a long one spelled in full.
-    /// Refused rather than delivered as a silently narrower option.
+    /// `--preserve=context`: this system keeps no security context to carry,
+    /// so the option is refused rather than delivered as a narrower one.
+    /// Carries the option as given.
     Unsupported(String),
     /// A source named a directory but `-r` was not given. Nothing about that
     /// operand is copied (`cp` refuses to recurse implicitly).
@@ -162,9 +161,7 @@ impl fmt::Display for CpError {
             Self::Usage => f.write_str("invalid usage"),
             Self::Unsupported(switch) => write!(
                 f,
-                "{} is not available: preserving a node's timestamps needs a call \
-                 this system does not have, so the option is refused rather than \
-                 honoured in part (--preserve=links,xattr is available)",
+                "{} is not available: this system keeps no security context to preserve",
                 quote_if_needed(switch)
             ),
             Self::IsDirectory(path) => {

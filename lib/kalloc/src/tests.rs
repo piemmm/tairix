@@ -15,7 +15,7 @@
 //! region growth cannot silently drift onto the slab.
 
 use super::{
-    class_size, objects_per_page, slab_class, FreeListAllocator, Heap, HEAP_BYTES, MIN_BLOCK,
+    class_size, objects_per_page, slab_class, Arena, FreeListAllocator, HEAP_BYTES, MIN_BLOCK,
     MIN_CLASS, SLAB_CLASSES,
 };
 use core::alloc::{GlobalAlloc, Layout};
@@ -1429,12 +1429,12 @@ fn freeing_from_a_filled_page_puts_it_back_on_the_partial_list() {
     assert_eq!(source.live_pages(), 1, "one page kept, the rest returned");
 }
 
-/// A `Heap` backs an allocator as a plain `static`: its arena pointer is its
+/// An `Arena` backs an allocator as a plain `static`: its arena pointer is its
 /// own first byte, page-aligned, and the memory served from it is writable —
 /// so no binary needs a `static mut` for its heap.
 #[test]
 fn a_plain_static_heap_backs_an_allocator() {
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
     let base = HEAP.as_mut_ptr();
     assert_eq!(base, core::ptr::addr_of!(HEAP).cast::<u8>().cast_mut());
     assert_eq!(base.addr() % PAGE_SIZE, 0);

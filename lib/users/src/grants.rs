@@ -88,6 +88,15 @@ use tairix_caps::CapabilitySet;
 ///   feeds stopped whenever a trusted surface is up — so a baseline holder
 ///   gains no way to reproduce or observe a credential prompt. On a
 ///   headless build there is no session to serve it and the grant is inert.
+/// * `CAP_JIT_MAP_EXEC` — move code a compiler sandbox wrote into another
+///   sandbox read-execute (`code_install`), which an emulator's or a
+///   browser's just-in-time compiler needs. Baseline because running such a
+///   program is ordinary, and the ceiling is not what bounds it: only a
+///   bundle whose signed manifest asks for it obtains it, and the bound is
+///   structural — both ends must be its holder's own capability-empty
+///   sandboxes, no mapping is ever writable and executable, and a compiler
+///   serves one target for its life — so its holder can run generated code
+///   neither in itself nor in any process holding authority.
 /// * `CAP_NET` — ordinary network use: opening datagram sockets and
 ///   originating/receiving transport traffic through the `netstack`
 ///   socket surface (`plans/NETWORK.md` §0). Baseline because using the
@@ -132,6 +141,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::INPUT_READ,
     CapabilityId::SHM,
     CapabilityId::DESKTOP_LAYER,
+    CapabilityId::JIT_MAP_EXEC,
     CapabilityId::NET,
     CapabilityId::LOG_EMIT,
 ];
@@ -537,7 +547,7 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 11);
+        assert_eq!(set.len(), 12);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
@@ -548,6 +558,7 @@ mod tests {
             CapabilityId::INPUT_READ,
             CapabilityId::SHM,
             CapabilityId::DESKTOP_LAYER,
+            CapabilityId::JIT_MAP_EXEC,
             CapabilityId::NET,
             CapabilityId::LOG_EMIT,
         ] {
@@ -558,7 +569,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 32);
+        assert_eq!(set.len(), 33);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

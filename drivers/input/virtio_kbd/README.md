@@ -27,9 +27,10 @@ a USB keyboard is `drivers/input/usb_hid`'s.
    only once the event queue is live (the host is the `VirtioHost` the device
    carves its event buffers from).
 4. Pumps `VirtioInput::poll_reports`, parking on the device's interrupt between
-   reports: a key edge becomes a `KeyInput` record, carrying its physical key,
-   through `tairix_virtio_input::VirtioKeyboardConsole` and is injected through
-   the `key_inject` syscall; pointer and touch reports go through
+   reports: a key edge names its physical key through
+   `tairix_virtio_input::key_edge` and is injected through the `key_inject`
+   syscall, which the seat reads under the modifiers, locks and layout every
+   keyboard on it shares; pointer and touch reports go through
    `pointer_inject` and `touch_inject`.
 
 Every capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); the
@@ -40,7 +41,7 @@ supervisor decides whether to relaunch.
 
 ## Why a separate crate
 
-The reusable open/poll/decode device logic and the `evdev` console producer
+The reusable open/poll/decode device logic and the `evdev` keycode table
 live in `lib/virtio_input`, and the §8 driver identity (`register` + bind table)
 in `drivers/input/virtio_input`. This crate is a *separate* binary so it can
 link the userland runtime `tairix-rt` without pulling it into the kernel-linked
@@ -66,7 +67,7 @@ Granted at spawn from its matched node's requested resources: `CAP_MMIO_MAP`
 
 ## Tests
 
-The decode/console logic is host-tested in `lib/virtio_input`; this crate is the
+The decode and keycode logic is host-tested in `lib/virtio_input`; this crate is the
 thin wiring binary (an inert host stub off bare-metal targets, so
 `cargo build --workspace` / clippy / fmt cover it). The end-to-end autoload path
 is the `-M virt` acceptance vertical (`plans/PI.md` P10 chunk 5d-2-ii).

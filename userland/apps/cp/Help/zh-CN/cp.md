@@ -4,7 +4,7 @@ cp — 复制文件和目录
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -29,11 +29,11 @@ cp — 复制文件和目录
 放，因此即使来源目录是只读的，或 umask 不给所有者写权限，也能完整复制。
 绝不会经由目标树中遇到的符号链接写入。
 
-GNU 的 `-a`/`--archive`，以及 `--preserve=links,xattr` 之外的
-`--preserve` 组合，都会被**拒绝**，而不是被缩小。`-a` 即
-`-dR --preserve=all`，而 `--preserve=all` 包括节点的时间戳，本系统没有任
-何调用能设置它们——因此遵从 `-a` 会报告一次并未发生的保留。其余部分请使用
-`-dR`。
+`-p` 保留每个副本的模式、所有者和时间，`-a` 即保留这一切的 `-dR`。副本的
+时间即其源的时间，精确到目标所能保存的程度——FAT 卷的修改时间精确到两秒——
+若一次运行中的时间未能全部精确保留，会在标准信息流上以一条 `omission` 记录
+说明，而不发出警告。目录在其条目都复制进去之后才获得自己的时间。复制者无权
+赋予副本的所有者，副本仍归复制者，与 GNU 一样，不作警告。
 
 每次复制都会在目标能够保存的地方带上源的扩展属性（RISC OS 文件类型、Mac
 的类型和创建者），并将稀疏文件的空洞保留为空洞。目标无法保存的属性会在运
@@ -63,12 +63,24 @@ GNU 的 `-a`/`--archive`，以及 `--preserve=links,xattr` 之外的
   `-H`、`-L` 或 `-P`，递归复制会重现每个链接（包括其操作数的链接），而其
   他复制则跟随其操作数的链接，与 GNU 相同；`-l` 链接被跟随的链接所指的内
   容。
+- `-a, --archive` — `-dR --preserve=all`：复制整棵树，重现其中的链接，并
+  保留副本所能保留的一切。
+- `-p` — `--preserve=mode,ownership,timestamps`；单独的 `--preserve` 与之
+  相同。
+- `--preserve=mode` — 赋予每个副本其源的确切模式，包括 set-ID 位、粘滞位
+  以及 umask 扣下的位。
+- `--preserve=ownership` — 在复制者权限所及的范围内，赋予每个副本其源的
+  所有者和组。
+- `--preserve=timestamps` — 赋予每个副本其源的访问时间和修改时间，精确到
+  目标所能保存的程度。
+- `--preserve=all` — 保留模式、所有者、时间和共享节点，并携带目标所能保存
+  的每个扩展属性。
 - `--preserve=links` — 命名同一个节点的两个来源在目标处得到两个名称，而
   不是两份副本，因此复制不会悄悄把占用翻倍。
 - `--preserve=xattr` — 必须带上每一个扩展属性：如果目标无法保存其中某一
   个，该复制将失败并指出它。`--preserve=links,xattr` 同时要求两者。
-- `--no-preserve=xattr` — 不复制任何扩展属性。也接受 `ownership` 和
-  `timestamps`，它们本来就不会被保留。
+- `--no-preserve=xattr` — 不复制扩展属性。`ownership`、`timestamps` 和
+  `links` 撤销 `-p` 或 `-a` 对各自的保留。
 - `--no-preserve=mode` — 以未指定模式时新建对象所取的模式减去 umask 来创
   建每个新文件和目录，而不是采用其来源的模式。`--no-preserve=all` 也会这
   样做。

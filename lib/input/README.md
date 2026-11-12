@@ -14,12 +14,12 @@ This crate owns the device-level input types the desktop routes:
   held, so the left/right collapsing rule (releasing one shift key while the
   other is held is not a change) and the "did the visible set actually
   change?" test cannot differ between two drivers.
-- `KeyboardState` / `KeyEdge` (`keyboard`) — what every keyboard producer
-  shares once it has named a key edge's `tairix_abi` `PhysicalKey` (a HID
-  usage is one already; the virtio-input producer maps its `evdev` keycodes
-  through one table): the held modifiers, the caps and num locks, and the US
-  layout. `edge` answers a change of the held modifiers, the `Key` the layout
-  makes of the key, or nothing, so no two drivers resolve a key differently.
+- `KeyboardState` / `KeyRead` (`keyboard`) — how a seat reads every
+  keyboard on it once each edge names its `tairix_abi` `PhysicalKey`: the keys
+  down, the held modifiers, the caps and num locks, and the US layout. `edge`
+  answers what the key typed, if anything (a release types what its press
+  did), and the modifiers it left, or nothing for a press of a key already down
+  or a release of one not down, so every key comes up exactly once.
 - `wire` — the one crossing between the wire keyboard vocabulary
   (`tairix_abi::input`) and this crate's: `key_input_event` reads a delivered
   `KeyInput` record as its `InputEvent`, and the key, named-key and modifier
@@ -29,10 +29,10 @@ This crate owns the device-level input types the desktop routes:
   `PointerPressed`, `PointerReleased` (button events act at the pointer's
   current position, which a router tracks from the motion events), the
   keyboard's `KeyPressed` / `KeyReleased`, delivered to the focused surface,
-  and `ModifiersChanged` — a modifier key produces no character and is no
-  `NamedKey`, so it reaches no surface as a key, but the state it leaves
-  behind qualifies gestures that are not keys at all (a shift-click). The seat
-  keeps the current set from these edges and stamps it onto what it routes.
+  and `ModifiersChanged` — what a key that types nothing (a modifier, a lock)
+  reads as: it reaches no surface as a key, but the state it leaves behind
+  qualifies gestures that are not keys at all (a shift-click). The seat keeps
+  the current set from these and stamps it onto what it routes.
 - `PointerFocus` — the *derived* half: `Entered { at }` / `Left`, the
   enter/leave pair a seat hands to a surface's router. No device produces it;
   the seat resolves it from the window stack, which is the one fact a surface

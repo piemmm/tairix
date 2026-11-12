@@ -5,10 +5,11 @@ images.
 
 Every freestanding boot binary (the production `tairix-kernel`, every
 `tests/integration/*` QEMU bin, and every architecture port's boot
-harness) registers a `FreeListAllocator` over a per-binary `Heap` static
+harness) registers a `FreeListAllocator` over a per-binary `Arena` static
 as its `#[global_allocator]`. The arena is a plain
-`static HEAP: Heap<N> = Heap::ZERO` handed to the allocator through
-`Heap::as_mut_ptr`, so no binary needs a `static mut` to back its heap. A
+`static HEAP: Arena<N> = Arena::ZERO` handed to the allocator through
+`Arena::as_mut_ptr`, so no binary needs a `static mut` to back its heap; a
+test kernel's frame pool, stacks and buffers are `Arena`s the same way. A
 kernel that installs a `HeapSource` reserves `BOOT_HEAP_BYTES`, what boot
 allocates before the heap can grow; a test kernel that never grows lives on
 the default `HEAP_BYTES`.
@@ -94,7 +95,7 @@ it to no registry — silently spinning on a plain lock.
 
 ## Stability tier
 
-`stable` — the public surface (`FreeListAllocator`, `Heap`, `HEAP_BYTES`,
+`stable` — the public surface (`FreeListAllocator`, `Arena`, `HEAP_BYTES`,
 `BOOT_HEAP_BYTES`, `HeapSource`, `install_irq_control`) is the kernel-heap contract consumed
 across the kernel and test trees. It is `no_std`, allocates nothing outside
 the arena it is given, and depends only on `core` and the ABI crate's page

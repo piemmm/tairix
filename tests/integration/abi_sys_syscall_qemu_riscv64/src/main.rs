@@ -96,6 +96,7 @@ mod kernel {
     const EXPECTED_CAP: CapabilityId = CapabilityId::TIME_SET;
 
     use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
+    use tairix_kalloc::Arena;
 
     /// User virtual address the stub code is aliased at. Chosen at 64 GiB
     /// — far above the 4 GiB identity window — so the alias lands on
@@ -125,12 +126,9 @@ mod kernel {
     /// Page-table pool backing the address space (lives in `.bss`).
     static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-    /// Backing storage for the U-mode stack. `align(4096)` so each page
+    /// Backing storage for the U-mode stack. Page-aligned, so each page
     /// maps to a valid frame; `USER_STACK_PAGES` pages.
-    #[repr(C, align(4096))]
-    struct UserStack([u8; paging::PAGE_SIZE * USER_STACK_PAGES]);
-
-    static mut USER_STACK: UserStack = UserStack([0; paging::PAGE_SIZE * USER_STACK_PAGES]);
+    static USER_STACK: Arena<{ paging::PAGE_SIZE * USER_STACK_PAGES }> = Arena::ZERO;
 
     /// Set once the round-trip has been driven so a re-entry can never
     /// re-run the test logic (fail closed).
@@ -237,7 +235,7 @@ mod kernel {
         let user_entry = USER_CODE_VA | (func & (page - 1));
 
         // ---- Map the U-mode stack (U|R|W). ----
-        let stack_phys = core::ptr::addr_of!(USER_STACK) as u64;
+        let stack_phys = USER_STACK.as_mut_ptr() as u64;
         let stack_flags = paging::flags::USER | paging::flags::READ | paging::flags::WRITE;
         for i in 0..USER_STACK_PAGES as u64 {
             if space

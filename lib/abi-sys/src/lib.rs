@@ -251,6 +251,10 @@ const NUM_FS_GETCWD: u64 = SyscallNumber::FS_GETCWD.as_u16() as u64;
 const NUM_RESOURCE_OPEN: u64 = SyscallNumber::RESOURCE_OPEN.as_u16() as u64;
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 const NUM_CHILD_ORIGIN: u64 = SyscallNumber::CHILD_ORIGIN.as_u16() as u64;
+const NUM_CODE_INSTALL: u64 = SyscallNumber::CODE_INSTALL.as_u16() as u64;
+/// `fs_set_times` syscall number, derived from the frozen ABI table.
+const NUM_FS_SET_TIMES: u64 = SyscallNumber::FS_SET_TIMES.as_u16() as u64;
+const NUM_FS_VOLUME_STATS: u64 = SyscallNumber::FS_VOLUME_STATS.as_u16() as u64;
 const NUM_PIPE_CREATE: u64 = SyscallNumber::PIPE_CREATE.as_u16() as u64;
 const NUM_PTY_CREATE: u64 = SyscallNumber::PTY_CREATE.as_u16() as u64;
 const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
@@ -930,20 +934,16 @@ pub extern "C" fn sys_terminal_purge(fd: u32) -> i32 {
     }
 }
 
-/// `key_inject`: inject one decoded keyboard key edge at `buf` (a key record
-/// of `len` bytes, `TAIRIX_KEY_INPUT_WIRE_LEN`) for seat `seat` into the kernel
-/// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
-/// P11 — input follows the surface owner). Returns the number of bytes
-/// consumed, or a `TAIRIX_E_*` code reinterpreted into the result.
+/// `key_inject`: inject the key edge at `buf` (`len` bytes,
+/// `TAIRIX_KEY_EDGE_WIRE_LEN`) for seat `seat` (`0` for the boot seat).
+/// Returns the bytes consumed, or a `TAIRIX_E_*` code reinterpreted into the
+/// result.
 ///
-/// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into a key edge; `seat` names the seat the
-/// keyboard belongs to (`0` for the boot seat) and an unknown id is
-/// refused with `TAIRIX_E_NOT_FOUND`. Gated kernel-side on
-/// `TAIRIX_CAP_INPUT_INJECT`; the kernel validates the capability and the
-/// `(buf, len)` pair against the caller's address space before reading it, decodes the record fail-closed, and routes it by who
-/// currently holds that seat — the driver no longer chooses the encoding
-/// or the destination.
+/// A keyboard driver reports only which physical key went down or up; the
+/// seat reads what it types under the modifiers, locks and layout every
+/// keyboard on that seat shares, and routes the record by who holds the seat.
+/// Gated kernel-side on `TAIRIX_CAP_INPUT_INJECT`; an unknown seat is
+/// `TAIRIX_E_NOT_FOUND`, and a malformed edge fails closed.
 #[must_use]
 #[export_name = "tairix_sys_key_inject"]
 pub extern "C" fn sys_key_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
@@ -2592,6 +2592,26 @@ pub extern "C" fn sys_child_origin(pid: i64, out: *mut c_void, out_cap: usize) -
     }
 }
 
+/// `code_install`: move the `len`-byte region at `base` of the caller's
+/// sandboxed child `compiler` into its sandboxed child `target`, read-execute
+/// at a kernel-chosen address (`SyscallNumber::CODE_INSTALL`). Returns that
+/// address, or a `TAIRIX_E_*` code reinterpreted into the result. The
+/// compiler's first install pairs it with `target` for good. Gated kernel-side
+/// on `TAIRIX_CAP_JIT_MAP_EXEC`; audited.
+#[must_use]
+#[export_name = "tairix_sys_code_install"]
+pub extern "C" fn sys_code_install(compiler: i64, target: i64, base: u64, len: usize) -> u64 {
+    // SAFETY: see `sys_yield`. Every argument is a scalar: the pids are
+    // authorised and `base` is an address in the compiler's space, validated
+    // there, never dereferenced in the caller's.
+    unsafe {
+        raw_syscall(
+            NUM_CODE_INSTALL,
+            [i64_arg(compiler), i64_arg(target), base, len as u64, 0, 0],
+        )
+    }
+}
+
 /// `sysinfo_introspect`: read the unfiltered, global kernel introspection
 /// view (`SyscallNumber::SYSINFO_INTROSPECT`). `domain` is a
 /// `tairix_abi::IntrospectDomain` discriminant, `arg` is the domain-specific
@@ -3430,6 +3450,26 @@ pub extern "C" fn sys_fs_stat(fd: u32, out: *mut c_void, out_len: usize) -> u64 
     }
 }
 
+/// `fs_volume_stats`: report the space accounting of the volume open handle
+/// `fd` lies on as one `tairix_volume_stats_t` record at `out`
+/// (`SyscallNumber::FS_VOLUME_STATS`, the `fstatvfs(2)` shape). Returns the
+/// number of bytes written, or a `TAIRIX_E_*` code reinterpreted into the
+/// result.
+///
+/// A buffer too small fails closed with `TAIRIX_E_BUFFER_TOO_SMALL`, and a
+/// handle on no volume — a pipe, a resource — with `TAIRIX_E_NOT_SUPPORTED`.
+#[must_use]
+#[export_name = "tairix_sys_fs_volume_stats"]
+pub extern "C" fn sys_fs_volume_stats(fd: u32, out: *mut c_void, out_len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(out, out_len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_VOLUME_STATS,
+            [u64::from(fd), ptr_arg(out), out_len as u64, 0, 0, 0],
+        )
+    }
+}
+
 /// `fs_truncate`: set the length of open file `fd` to `size` bytes
 /// (`SyscallNumber::FS_TRUNCATE`). Returns a `TAIRIX_E_*` code.
 ///
@@ -3822,6 +3862,45 @@ pub extern "C" fn sys_fs_set_mode(
     }
 }
 
+/// `fs_set_times`: change the access and modification times of the node at
+/// `(path, path_len)`, resolved from `dirfd` as `tairix_sys_fs_open` resolves
+/// it, as the `tairix_times_change_t` at `(times, times_len)` asks
+/// (`SyscallNumber::FS_SET_TIMES`, the `utimensat(2)` shape). Returns
+/// `TAIRIX_TIMES_KEPT_EXACTLY` or `TAIRIX_TIMES_KEPT_NEAREST`, or a
+/// `TAIRIX_E_*` code reinterpreted into the result.
+///
+/// `flags` is a `TAIRIX_AT_FLAG_*` word: `NO_FOLLOW` changes a final link
+/// itself, and `EMPTY_PATH`, with `path` NULL and `path_len` `0`, the node
+/// `dirfd` holds. Stamping both times now needs ownership or write access, and
+/// any other change ownership; an instant the volume cannot keep is
+/// `TAIRIX_E_TIMESTAMP_OUT_OF_RANGE` unless the record asks for the nearest.
+#[must_use]
+#[export_name = "tairix_sys_fs_set_times"]
+pub extern "C" fn sys_fs_set_times(
+    dirfd: u32,
+    path: *mut c_void,
+    path_len: usize,
+    times: *mut c_void,
+    times_len: usize,
+    flags: u32,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(address, len)`
+    // pairs against the caller's address space before reading them.
+    unsafe {
+        raw_syscall(
+            NUM_FS_SET_TIMES,
+            [
+                u64::from(dirfd),
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(times),
+                times_len as u64,
+                u64::from(flags),
+            ],
+        )
+    }
+}
+
 /// `fs_set_owner`: set the owning user and/or group of the file or
 /// directory at `(path, path_len)`, resolved from `dirfd` as
 /// `tairix_sys_fs_open` resolves it, to `uid` / `gid`
@@ -4153,24 +4232,27 @@ pub extern "C" fn sys_resource_open(
     }
 }
 
-/// `fd_grant`: delegate the caller's own descriptor `fd` — a filesystem file
-/// or a pipe end — to the process instance at `recipient` as a one-shot
-/// grant, a file's bounded above by `write_ceiling` bytes
+/// `fd_grant`: delegate the caller's own descriptor `fd` — a filesystem
+/// file, a pipe end or a directory — to the process instance at `recipient`
+/// as a one-shot grant, a file's bounded above by `write_ceiling` bytes
 /// (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant handle
 /// (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
-/// holds `fd` as a filesystem file or a pipe end (a pty, resource or
-/// directory is refused, and one the caller was itself delegated is passed
-/// on under its first grantor's authority), and mints the descriptor's *own*
-/// read/write access and nothing more, so a delegation never widens.
+/// holds `fd` (a pty or resource is refused, and one the caller was itself
+/// delegated is passed on under its first grantor's authority), and mints
+/// the descriptor's *own* read/write access and nothing more, so a
+/// delegation never widens.
 /// `write_ceiling` is the highest file length the recipient may write or
 /// truncate to: zero for a read-only file and for a pipe end, which have no
 /// extent to bound, and for a writable file a stated bound or
 /// `TAIRIX_GRANT_EXTENT_INHERIT`, the caller's own reach, which a handed-on
 /// delegation can only narrow; zero is refused for a writable file. `flags`
-/// is `TAIRIX_GRANT_FILE_ONLY` to delegate only a regular file, or zero; any
-/// other bit, and any but a regular file under that flag, is
+/// is `TAIRIX_GRANT_FILE_ONLY` to delegate only a regular file,
+/// `TAIRIX_GRANT_SUBTREE` to delegate a directory as a capability to what
+/// lies beneath it — read-only under a zero ceiling, else writable with each
+/// file bounded by the ceiling — or zero. Any other bit, a directory without
+/// `TAIRIX_GRANT_SUBTREE`, and anything but what either flag names is
 /// `TAIRIX_E_OUT_OF_RANGE`.
 ///
 /// `(recipient, recipient_len)` is the attested `tairix_proc_id_t` the
@@ -4469,6 +4551,9 @@ mod tests {
         (NUM_RESOURCE_OPEN, "resource_open", 3),
         (NUM_SELF_ORIGIN, "self_origin", 2),
         (NUM_CHILD_ORIGIN, "child_origin", 3),
+        (NUM_CODE_INSTALL, "code_install", 4),
+        (NUM_FS_SET_TIMES, "fs_set_times", 6),
+        (NUM_FS_VOLUME_STATS, "fs_volume_stats", 3),
         (NUM_PIPE_CREATE, "pipe_create", 1),
         (NUM_PTY_CREATE, "pty_create", 3),
         (NUM_PTY_SET_SIZE, "pty_set_size", 3),
@@ -5849,6 +5934,22 @@ mod tests {
     }
 
     #[test]
+    fn code_install_marshals_both_whole_pids_and_the_region() {
+        let (number, args) = capture(0x4_0000_0000, || {
+            assert_eq!(
+                sys_code_install(12, -1, 0xC000_0000, 3 * 4096),
+                0x4_0000_0000
+            );
+        });
+        assert_eq!(number, NUM_CODE_INSTALL);
+        assert_eq!(args[0], 12);
+        assert_eq!(args[1], (-1i64).cast_unsigned());
+        assert_eq!(args[2], 0xC000_0000);
+        assert_eq!(args[3], 3 * 4096);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
     fn rlimit_get_marshals_kind_and_pointer() {
         let mut limit = [0u8; 16];
         let ptr = limit.as_mut_ptr().cast::<c_void>();
@@ -6005,6 +6106,42 @@ mod tests {
         });
         assert_eq!(number, NUM_FS_WATCH_READ);
         assert_eq!(args, [0x104, ptr as usize as u64, 400, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_set_times_marshals_every_argument() {
+        let mut path = *b"notes.txt";
+        let mut record = [0u8; 40];
+        let (path_ptr, record_ptr) = (
+            path.as_mut_ptr().cast::<c_void>(),
+            record.as_mut_ptr().cast::<c_void>(),
+        );
+        let (number, args) = capture(1, || {
+            assert_eq!(sys_fs_set_times(0x104, path_ptr, 9, record_ptr, 40, 0x2), 1);
+        });
+        assert_eq!(number, NUM_FS_SET_TIMES);
+        assert_eq!(
+            args,
+            [
+                0x104,
+                path_ptr as usize as u64,
+                9,
+                record_ptr as usize as u64,
+                40,
+                0x2
+            ]
+        );
+    }
+
+    #[test]
+    fn fs_volume_stats_marshals_fd_pointer_and_len() {
+        let mut buffer = [0u8; 48];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(48, || {
+            assert_eq!(sys_fs_volume_stats(0x104, ptr, 48), 48);
+        });
+        assert_eq!(number, NUM_FS_VOLUME_STATS);
+        assert_eq!(args, [0x104, ptr as usize as u64, 48, 0, 0, 0]);
     }
 
     #[test]

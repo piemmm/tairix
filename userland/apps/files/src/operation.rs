@@ -70,7 +70,7 @@ pub fn progress_control(
         WindowEvent::Key {
             key:
                 KeyInput::Pressed {
-                    key: KeyValue::Named(NamedKeyCode::Escape),
+                    key: Some(KeyValue::Named(NamedKeyCode::Escape)),
                     ..
                 },
             ..
@@ -96,7 +96,12 @@ fn question_control(
 ) -> ProgressControl {
     let answer = match event {
         WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers, .. },
+            key:
+                KeyInput::Pressed {
+                    key: Some(key),
+                    modifiers,
+                    ..
+                },
             ..
         } => question_key(*key).and_then(|key| panel.on_key(key, modifiers.shift, frame, damage)),
         WindowEvent::Pointer { x, y, action, .. } => {

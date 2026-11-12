@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use core::ptr;
 
 use tairix_abi::driver::display::{DisplayFormat, SeatGate};
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey};
+use tairix_abi::input::{KeyEdge, KeyInput, KeyValue, Modifiers, PhysicalKey};
 use tairix_abi::seat::{SeatLease, SEAT_PRIMARY};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_arch_aarch64::{paging, video};
@@ -54,6 +54,7 @@ use tairix_seat::SeatOwner;
 use tairix_test_virtio_qemu_support::{define_mmio_boot_harness_aarch64, AArch64QemuEnv, QemuEnv};
 
 use crate::fixture::{DTB_BLOB, FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
+use tairix_kernel::kalloc::Arena;
 
 // --- Framebuffer geometry --------------------------------------------
 
@@ -84,21 +85,17 @@ const MMIO_CAP_PAGES: usize = 128;
 /// Synthetic owner process id for the driver context.
 const TASK: ProcessId = ProcessId(0xFB1);
 
-// --- Static scan-out surface -----------------------------------------
-
-/// Page-aligned wrapper so the surface meets the mapper's word-access
-/// alignment contract and starts on a frame boundary.
-#[repr(C, align(4096))]
-struct Surface([u8; FB_BYTES]);
-
 /// The `ramfb` scan-out surface, in guest RAM. QEMU maps it read-only
 /// and scans out from it for the life of the guest, so it must outlive
 /// the scenario — hence a `static` rather than a stack/heap buffer.
-static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
+///
+/// Page-aligned, so it meets the mapper's word-access alignment contract and
+/// starts on a frame boundary.
+static FRAMEBUFFER: Arena<FB_BYTES> = Arena::ZERO;
 
 /// Physical base address of [`FRAMEBUFFER`].
 fn framebuffer_phys() -> u64 {
-    paging::image_phys(ptr::addr_of!(FRAMEBUFFER) as u64)
+    paging::image_phys(FRAMEBUFFER.as_mut_ptr() as u64)
 }
 
 // --- Host plumbing ---------------------------------------------------
@@ -450,11 +447,16 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
     const CLIENT_B: u64 = 0xB22;
     const DISPLAY_NODE: u32 = 42;
 
-    fn press(c: char) -> KeyInput {
+    fn press(key: PhysicalKey) -> KeyEdge {
+        KeyEdge { key, pressed: true }
+    }
+
+    /// What pressing `key`, which types `c`, alone reads as.
+    fn typed(key: PhysicalKey, c: char) -> KeyInput {
         KeyInput::Pressed {
-            key: KeyValue::Char(c),
+            key: Some(KeyValue::Char(c)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: key,
         }
     }
 
@@ -479,10 +481,10 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
 
     // Independent input routing: each seat's key edge drains only at that
     // seat's owner, never across.
-    if SEATS.inject(SEAT_PRIMARY, press('a')).is_err() {
+    if SEATS.inject(SEAT_PRIMARY, press(PhysicalKey::A)).is_err() {
         env.fail("multi-seat: inject boot seat");
     }
-    if SEATS.inject(second, press('b')).is_err() {
+    if SEATS.inject(second, press(PhysicalKey::DIGIT_3)).is_err() {
         env.fail("multi-seat: inject hotplug seat");
     }
     let mut buf = [0u8; KeyInput::WIRE_LEN];
@@ -504,12 +506,12 @@ fn drive_multi_seat(env: &dyn QemuEnv, mapper: &dyn MmioMapper, config: Framebuf
         env.fail("multi-seat: cross-seat drain not refused");
     }
     if read_key(SEAT_PRIMARY, CLIENT_A, &mut buf) != Ok(true)
-        || KeyInput::from_bytes(&buf) != Ok(press('a'))
+        || KeyInput::from_bytes(&buf) != Ok(typed(PhysicalKey::A, 'a'))
     {
         env.fail("multi-seat: boot-seat drain");
     }
     if read_key(second, CLIENT_B, &mut buf) != Ok(true)
-        || KeyInput::from_bytes(&buf) != Ok(press('b'))
+        || KeyInput::from_bytes(&buf) != Ok(typed(PhysicalKey::DIGIT_3, '3'))
     {
         env.fail("multi-seat: hotplug-seat drain");
     }

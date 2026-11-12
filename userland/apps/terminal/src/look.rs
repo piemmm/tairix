@@ -13,9 +13,10 @@ use tairix_geometry::Scale;
 use tairix_theme::Theme;
 use tairix_window::Desktop;
 
-use crate::effects::{Effects, Phase};
+use tairix_crt::{Phase, Pipeline};
+
+use crate::effects::Effects;
 use crate::layout::{cell_font, fit_font_size};
-use crate::pipeline::Pipeline;
 use crate::profile::{Invalidation, Profile};
 use crate::scheme::Painted;
 

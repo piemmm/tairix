@@ -122,6 +122,23 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
         MediaType::RawFloppyDiskImage,
         IconKind::DiskFloppy,
     ),
+    ("Fixed.img", MediaType::RawDiskImage, IconKind::DiskHard),
+    (
+        "Dos.ima",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    (
+        "Boot.vfd",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    (
+        "Games.flp",
+        MediaType::RawFloppyDiskImage,
+        IconKind::DiskFloppy,
+    ),
+    ("Original.imd", MediaType::ImageDisk, IconKind::DiskFloppy),
     ("song.mp3", MediaType::AudioMpeg, IconKind::Audio),
     ("broadcast.mp2", MediaType::AudioMpeg, IconKind::Audio),
     ("tape.mp1", MediaType::AudioMpeg, IconKind::Audio),
@@ -1551,4 +1568,23 @@ fn a_dragged_file_or_folder_carries_its_class_picture_alone() {
         assert_eq!(picture.icon.as_str(), kind.asset_id(), "{}", entry.name());
         assert_eq!(picture.own, None, "{}", entry.name());
     }
+}
+
+#[test]
+fn an_imagedisk_archive_is_a_floppy_record_but_no_volume() {
+    assert_eq!(
+        MediaType::ImageDisk.parent(),
+        Some(MediaType::ApplicationOctetStream),
+        "bytes of its own, not a raw image"
+    );
+    assert!(!MediaType::ImageDisk.holds_a_volume());
+    assert_eq!(
+        MediaType::from_media_str("application/x-imagedisk"),
+        Some(MediaType::ImageDisk)
+    );
+    assert_eq!(
+        media_for_name("TAIRIX.IMD"),
+        Some(MediaType::ImageDisk),
+        "an extension in any case"
+    );
 }

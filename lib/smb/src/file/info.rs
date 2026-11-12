@@ -345,17 +345,22 @@ pub struct BasicUpdate {
 }
 
 impl BasicUpdate {
-    /// Append the class. A time FILETIME cannot carry exactly, or one that
-    /// would read as "unchanged", latches [`SmbError::TimeOutOfRange`].
+    /// Append the class. A time no settable FILETIME carries exactly —
+    /// [`crate::wire::SETTABLE_FILETIME`] — latches
+    /// [`SmbError::TimeOutOfRange`].
     pub fn encode(&self, enc: &mut Encoder) {
         for time in [self.created, self.accessed, self.written, self.changed] {
-            match time.map(filetime_exact) {
-                // FILETIME zero is the wire's "leave it": the epoch itself
-                // cannot be set.
-                Some(Ok(0)) => enc.fail(SmbError::TimeOutOfRange),
-                Some(Ok(filetime)) => enc.u64(filetime),
-                Some(Err(err)) => enc.fail(err),
-                None => enc.u64(0),
+            let Some(time) = time else {
+                enc.u64(0);
+                continue;
+            };
+            match crate::wire::SETTABLE_FILETIME
+                .fit(time, false)
+                .map_err(|_| SmbError::TimeOutOfRange)
+                .and_then(|(time, _)| filetime_exact(time))
+            {
+                Ok(filetime) => enc.u64(filetime),
+                Err(err) => enc.fail(err),
             }
         }
         enc.u32(self.attributes.map_or(0, FileAttributes::bits));

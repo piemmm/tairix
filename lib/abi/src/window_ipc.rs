@@ -280,6 +280,12 @@ pub enum PickPurpose {
     /// read-only in name order, at most [`WINDOW_FOLDER_PICK_MAX`] of them.
     /// The application never holds the folder itself.
     Folder,
+    /// A folder handed over whole: delegated as a directory capability
+    /// confined beneath itself, every call made through it acting as the
+    /// user. It may change what the folder holds where the requester's
+    /// signed manifest declares it edits documents and the user may write the
+    /// folder, and only read it otherwise.
+    Subtree,
     /// Where to save a document, delegated write-only: an existing file the
     /// user agrees to replace, or a new one the session creates. Nothing is
     /// truncated on the way: the requester writes from the start and cuts the
@@ -299,7 +305,7 @@ impl PickPurpose {
     /// The suggested name's length on the wire: none for an open.
     const fn suggested_len_byte(&self) -> u8 {
         match self {
-            Self::Open | Self::Import | Self::Folder => 0,
+            Self::Open | Self::Import | Self::Folder | Self::Subtree => 0,
             Self::Save { suggested, .. } => suggested.len_byte(),
         }
     }
@@ -307,7 +313,7 @@ impl PickPurpose {
     /// The formats it saves in: none for an open.
     const fn formats(&self) -> &SaveFormats {
         match self {
-            Self::Open | Self::Import | Self::Folder => &SaveFormats::ANY,
+            Self::Open | Self::Import | Self::Folder | Self::Subtree => &SaveFormats::ANY,
             Self::Save { formats, .. } => formats,
         }
     }
@@ -2470,6 +2476,9 @@ pub enum CursorShape {
     Busy,
     /// The open cross, over content where the pointer picks out one pixel.
     Crosshair,
+    /// No pointer at all, over content that draws its own or wants none: a
+    /// guest machine's screen, or a game's view.
+    None,
 }
 
 impl CursorShape {
@@ -2481,6 +2490,7 @@ impl CursorShape {
             Self::Pointer => 2,
             Self::Busy => 3,
             Self::Crosshair => 4,
+            Self::None => 5,
         }
     }
 
@@ -2493,6 +2503,41 @@ impl CursorShape {
             2 => Ok(Self::Pointer),
             3 => Ok(Self::Busy),
             4 => Ok(Self::Crosshair),
+            5 => Ok(Self::None),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// How a window reads the keyboard while it holds it
+/// ([`WindowRequest::SetKeyboardMode`]).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum KeyboardMode {
+    /// The keys that type, each repeated while held under the user's own
+    /// policy, beside the desktop's shortcuts.
+    #[default]
+    Text,
+    /// Every key going down and coming up — a modifier, a lock and a key that
+    /// types nothing among them — and no repeat: a guest machine or a game
+    /// repeats what it holds itself. The secure attention key, the capture
+    /// chords and a lone tap of Meta stay the desktop's.
+    Raw,
+}
+
+impl KeyboardMode {
+    /// The wire discriminant.
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Raw => 1,
+        }
+    }
+
+    /// Decode a wire discriminant, refusing any value outside the closed set.
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            0 => Ok(Self::Text),
+            1 => Ok(Self::Raw),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2937,6 +2982,32 @@ pub enum WindowRequest {
         /// The shape.
         shape: CursorShape,
     },
+    /// Set how the caller's own window `window_id` reads the keyboard while it
+    /// holds it, until the next such request.
+    SetKeyboardMode {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+        /// How it reads the keyboard.
+        mode: KeyboardMode,
+    },
+    /// Lock the pointer to the caller's own window `window_id`, or let it go.
+    ///
+    /// A lock is granted only while the window holds the keyboard and the
+    /// pointer is over its client area, and is otherwise `PermissionDenied`.
+    /// While it holds, the pointer stays where it was and is drawn nowhere,
+    /// its motion reaches the window as [`WindowEvent::PointerMotion`] in the
+    /// device's own counts, and its buttons and wheel reach the window at that
+    /// place wherever the device moves. The desktop ends a lock whenever the
+    /// window loses the keyboard, a surface of the desktop's own takes the
+    /// seat, or the user taps Meta alone, and every start and end is told with
+    /// [`WindowEvent::PointerLock`]; a lock the desktop ended is asked for
+    /// again, never resumed.
+    LockPointer {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+        /// Whether the pointer is to be locked to it.
+        locked: bool,
+    },
     /// Raise the caller's own window `window_id` and give it the keyboard.
     ///
     /// Restacking is the session's: it is honoured only while the caller holds
@@ -2992,7 +3063,8 @@ pub enum WindowRequest {
     /// handle for the chosen file, write-only to save, and to open read-only
     /// or — for an application whose signed manifest edits documents, where
     /// the user may write it — read-write), a [`WindowEvent::FolderPicked`]
-    /// for a folder, or a [`WindowEvent::PickCancelled`] delivered to the
+    /// for a folder's files, a [`WindowEvent::SubtreePicked`] for a folder
+    /// handed over, or a [`WindowEvent::PickCancelled`] delivered to the
     /// window's event endpoint. One pick may be pending per window and
     /// [`PICK_MAX_OPEN`] per application, one of them a folder's: past the
     /// window's it is refused `AlreadyExists`, past the application's
@@ -3005,12 +3077,13 @@ pub enum WindowRequest {
         /// What the user is asked to choose.
         purpose: PickPurpose,
     },
-    /// Take the name of the file window `window_id`'s last pick chose, once
-    /// its [`WindowEvent::FilePicked`] has arrived: a title for a document
-    /// the application could not otherwise name, since the delegation it
-    /// holds carries no path. One-shot; the reply is a
-    /// [`decode_picked_name_reply`] frame, and `NotFound` once taken or
-    /// before any pick concluded with a file.
+    /// Take the name of the file or folder window `window_id`'s last pick
+    /// chose, once its [`WindowEvent::FilePicked`] or
+    /// [`WindowEvent::SubtreePicked`] has arrived: a title for what the
+    /// application could not otherwise name, since the delegation it holds
+    /// carries no path. One-shot; the reply is a [`decode_picked_name_reply`]
+    /// frame, and `NotFound` once taken or before any pick concluded with a
+    /// file or a folder.
     TakePickedName {
         /// The window whose pick concluded.
         window_id: u64,
@@ -3810,6 +3883,10 @@ const OP_OFFERED_FILE: u16 = 52;
 const OP_PLACE_DROPPED: u16 = 53;
 /// Wire operation discriminant of [`WindowRequest::FileOfferAnswer`].
 const OP_FILE_OFFER_ANSWER: u16 = 54;
+/// Wire operation discriminant of [`WindowRequest::SetKeyboardMode`].
+const OP_SET_KEYBOARD_MODE: u16 = 55;
+/// Wire operation discriminant of [`WindowRequest::LockPointer`].
+const OP_LOCK_POINTER: u16 = 56;
 /// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
 const OP_TAKE_APP_BAR_TEXT: u16 = 48;
 /// Wire operation discriminant of [`WindowRequest::DropLanding`].
@@ -3847,6 +3924,8 @@ const PICK_PURPOSE_SAVE: u8 = 1;
 const PICK_PURPOSE_FOLDER: u8 = 2;
 /// Wire value of [`PickPurpose::Import`].
 const PICK_PURPOSE_IMPORT: u8 = 3;
+/// Wire value of [`PickPurpose::Subtree`].
+const PICK_PURPOSE_SUBTREE: u8 = 4;
 
 /// Encoded size of a [`WindowRequest::PickFile`] suggesting a `name`-byte
 /// name.
@@ -4213,6 +4292,13 @@ const SET_CURSOR_OFFSET: usize = 16;
 /// Encoded size of a [`WindowRequest::SetCursor`].
 const SET_CURSOR_WIRE_LEN: usize = SET_CURSOR_OFFSET + 1;
 
+/// Byte offset of a [`WindowRequest::SetKeyboardMode`]'s mode or a
+/// [`WindowRequest::LockPointer`]'s flag, immediately after the window id.
+const SEAT_SETTING_OFFSET: usize = 16;
+/// Encoded size of a [`WindowRequest::SetKeyboardMode`] or a
+/// [`WindowRequest::LockPointer`].
+const SEAT_SETTING_WIRE_LEN: usize = SEAT_SETTING_OFFSET + 1;
+
 /// Byte offset of a clipboard request's region handle, after its window id.
 const CLIPBOARD_HANDLE_OFFSET: usize = 16;
 /// Byte offset of a [`WindowRequest::SetClipboard`]'s payload length.
@@ -4494,6 +4580,7 @@ impl WindowRequest {
             Self::SetSizing { .. } => SET_SIZING_WIRE_LEN,
             Self::SetSizeState { .. } => SET_SIZE_STATE_WIRE_LEN,
             Self::SetCursor { .. } => SET_CURSOR_WIRE_LEN,
+            Self::SetKeyboardMode { .. } | Self::LockPointer { .. } => SEAT_SETTING_WIRE_LEN,
             Self::SetClipboard { .. } => SET_CLIPBOARD_WIRE_LEN,
             Self::GetClipboard { .. } => GET_CLIPBOARD_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
@@ -4608,6 +4695,8 @@ impl WindowRequest {
             Self::SetSizing { .. } => OP_SET_SIZING,
             Self::SetSizeState { .. } => OP_SET_SIZE_STATE,
             Self::SetCursor { .. } => OP_SET_CURSOR,
+            Self::SetKeyboardMode { .. } => OP_SET_KEYBOARD_MODE,
+            Self::LockPointer { .. } => OP_LOCK_POINTER,
             Self::SetClipboard { .. } => OP_SET_CLIPBOARD,
             Self::GetClipboard { .. } => OP_GET_CLIPBOARD,
             Self::ActivateWindow { .. } => OP_ACTIVATE_WINDOW,
@@ -4681,6 +4770,14 @@ impl WindowRequest {
             Self::SetCursor { window_id, shape } => {
                 put_u64(out, 8, window_id);
                 out[SET_CURSOR_OFFSET] = shape.wire();
+            }
+            Self::SetKeyboardMode { window_id, mode } => {
+                put_u64(out, 8, window_id);
+                out[SEAT_SETTING_OFFSET] = mode.wire();
+            }
+            Self::LockPointer { window_id, locked } => {
+                put_u64(out, 8, window_id);
+                out[SEAT_SETTING_OFFSET] = u8::from(locked);
             }
             Self::SetClipboard {
                 window_id,
@@ -4808,9 +4905,11 @@ impl WindowRequest {
             | Self::SetTitle { .. }
             | Self::SetTooltip { .. }
             | Self::SetBackdropBlur { .. } => self.write_setting_operands(out),
-            Self::SetCursor { .. } | Self::SetClipboard { .. } | Self::GetClipboard { .. } => {
-                self.write_input_operands(out);
-            }
+            Self::SetCursor { .. }
+            | Self::SetKeyboardMode { .. }
+            | Self::LockPointer { .. }
+            | Self::SetClipboard { .. }
+            | Self::GetClipboard { .. } => self.write_input_operands(out),
             Self::HandOverLaunch {
                 ref run_path,
                 ref target,
@@ -5175,9 +5274,8 @@ impl WindowRequest {
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
             OP_SET_SIZE_STATE => read_set_size_state(bytes),
-            OP_SET_CURSOR | OP_SET_CLIPBOARD | OP_GET_CLIPBOARD | OP_ACTIVATE_WINDOW => {
-                read_input_request(op, bytes)
-            }
+            OP_SET_CURSOR | OP_SET_KEYBOARD_MODE | OP_LOCK_POINTER | OP_SET_CLIPBOARD
+            | OP_GET_CLIPBOARD | OP_ACTIVATE_WINDOW => read_input_request(op, bytes),
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN).map(|()| Self::TakeOpenTarget)
             }
@@ -5392,6 +5490,7 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
                 PickPurpose::Open => (PICK_PURPOSE_OPEN, ""),
                 PickPurpose::Import => (PICK_PURPOSE_IMPORT, ""),
                 PickPurpose::Folder => (PICK_PURPOSE_FOLDER, ""),
+                PickPurpose::Subtree => (PICK_PURPOSE_SUBTREE, ""),
                 PickPurpose::Save { suggested, .. } => (PICK_PURPOSE_SAVE, suggested.as_str()),
             };
             out[PICK_PURPOSE_OFFSET] = wire;
@@ -5851,6 +5950,7 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         PICK_PURPOSE_OPEN if name_len == 0 && formats.is_empty() => PickPurpose::Open,
         PICK_PURPOSE_IMPORT if name_len == 0 && formats.is_empty() => PickPurpose::Import,
         PICK_PURPOSE_FOLDER if name_len == 0 && formats.is_empty() => PickPurpose::Folder,
+        PICK_PURPOSE_SUBTREE if name_len == 0 && formats.is_empty() => PickPurpose::Subtree,
         PICK_PURPOSE_SAVE => {
             let mut name = [0u8; crate::FS_NAME_MAX];
             name.get_mut(..len)
@@ -6017,6 +6117,20 @@ fn read_input_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
             Ok(WindowRequest::SetCursor {
                 window_id: window_id(bytes)?,
                 shape: CursorShape::from_wire(bytes[SET_CURSOR_OFFSET])?,
+            })
+        }
+        OP_SET_KEYBOARD_MODE => {
+            exact_len(bytes, SEAT_SETTING_WIRE_LEN)?;
+            Ok(WindowRequest::SetKeyboardMode {
+                window_id: window_id(bytes)?,
+                mode: KeyboardMode::from_wire(bytes[SEAT_SETTING_OFFSET])?,
+            })
+        }
+        OP_LOCK_POINTER => {
+            exact_len(bytes, SEAT_SETTING_WIRE_LEN)?;
+            Ok(WindowRequest::LockPointer {
+                window_id: window_id(bytes)?,
+                locked: flag_at(bytes, SEAT_SETTING_OFFSET)?,
             })
         }
         OP_SET_CLIPBOARD => {
@@ -9328,6 +9442,12 @@ const EV_ITEMS_OFFERED: u16 = 30;
 const EV_ITEMS_OFFER_ENDED: u16 = 31;
 /// Wire event discriminant of [`WindowEvent::FileOffered`].
 const EV_FILE_OFFERED: u16 = 32;
+/// Wire event discriminant of [`WindowEvent::PointerMotion`].
+const EV_POINTER_MOTION: u16 = 33;
+/// Wire event discriminant of [`WindowEvent::PointerLock`].
+const EV_POINTER_LOCK: u16 = 34;
+/// Wire event discriminant of [`WindowEvent::SubtreePicked`].
+const EV_SUBTREE_PICKED: u16 = 35;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -9442,6 +9562,17 @@ pub enum WindowEvent {
         /// (the reserved invalid handle).
         handle: u64,
         /// Whether the descriptor it redeems may be written.
+        writable: bool,
+    },
+    /// The user chose the folder a [`PickPurpose::Subtree`] pick hands over.
+    /// `handle` is the one-shot `fd_redeem` delegation of a directory
+    /// capability, owner-bound kernel-side as a file's is.
+    SubtreePicked {
+        /// The window whose pick concluded.
+        window_id: u64,
+        /// The `fd_redeem` handle minted to the app's task; never zero.
+        handle: u64,
+        /// Whether what lies beneath it may be changed.
         writable: bool,
     },
     /// The user dismissed the session's trusted picker without choosing
@@ -9694,6 +9825,30 @@ pub enum WindowEvent {
         /// (Ctrl to zoom) without the app shadowing the seat's modifier state.
         modifiers: Modifiers,
     },
+    /// The pointer locked to the window ([`WindowRequest::LockPointer`])
+    /// moved: its displacement in the device's own counts, unscaled and
+    /// unbounded by the screen, and no place, since the pointer stays put.
+    PointerMotion {
+        /// The window the pointer is locked to.
+        window_id: u64,
+        /// Rightward displacement.
+        dx: i32,
+        /// Downward displacement.
+        dy: i32,
+        /// The keyboard modifiers held.
+        modifiers: Modifiers,
+        /// When the device reported it, on the monotonic clock.
+        at_ns: u64,
+    },
+    /// The pointer was locked to the window (`true`) or let go (`false`): the
+    /// answer to a granted [`WindowRequest::LockPointer`], and word of a lock
+    /// the desktop ended itself.
+    PointerLock {
+        /// The window the lock was of.
+        window_id: u64,
+        /// Whether the pointer is now locked to it.
+        locked: bool,
+    },
     /// Fingers on a touch surface pinched over the window's client area: a
     /// zoom about `(x, y)`. Every step of one pinch goes to the window it
     /// began over, its place clamped into the client.
@@ -9915,6 +10070,31 @@ impl WindowEvent {
         put_u64(out, 32, at_ns);
     }
 
+    /// Write a [`Self::PointerMotion`]'s or a [`Self::PointerLock`]'s block
+    /// into the already-headed frame `out`. A no-op for any other event.
+    fn write_locked(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        match *self {
+            Self::PointerMotion {
+                dx,
+                dy,
+                modifiers,
+                at_ns,
+                ..
+            } => {
+                put_u16(out, 6, EV_POINTER_MOTION);
+                put_i32(out, 16, dx);
+                put_i32(out, 20, dy);
+                put_u16(out, POINTER_MOTION_MODIFIERS_OFFSET, modifiers.to_bits());
+                put_u64(out, POINTER_MOTION_TIME_OFFSET, at_ns);
+            }
+            Self::PointerLock { locked, .. } => {
+                put_u16(out, 6, EV_POINTER_LOCK);
+                out[16] = u8::from(locked);
+            }
+            _ => {}
+        }
+    }
+
     /// Write a [`Self::Scrolled`]'s block into the already-headed frame `out`:
     /// the place, the two deltas, and the modifiers. A no-op for any other
     /// event.
@@ -10011,6 +10191,7 @@ impl WindowEvent {
             | Self::CloseRequested { window_id }
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
+            | Self::SubtreePicked { window_id, .. }
             | Self::PickCancelled { window_id }
             | Self::FolderPicked { window_id, .. }
             | Self::DragOver { window_id, .. }
@@ -10027,6 +10208,8 @@ impl WindowEvent {
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
             | Self::Pinch { window_id, .. }
+            | Self::PointerMotion { window_id, .. }
+            | Self::PointerLock { window_id, .. }
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
@@ -10061,6 +10244,13 @@ impl WindowEvent {
                 handle, writable, ..
             } => {
                 put_u16(out, 6, EV_FILE_PICKED);
+                put_u64(out, 16, handle);
+                out[24] = u8::from(writable);
+            }
+            Self::SubtreePicked {
+                handle, writable, ..
+            } => {
+                put_u16(out, 6, EV_SUBTREE_PICKED);
                 put_u64(out, 16, handle);
                 out[24] = u8::from(writable);
             }
@@ -10120,13 +10310,17 @@ impl WindowEvent {
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             }
             Self::Pointer { .. } => self.write_pointer(&mut out),
+            Self::PointerMotion { .. } | Self::PointerLock { .. } => self.write_locked(&mut out),
             Self::CloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_CLOSE_REQUESTED);
             }
             Self::AlternateCloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_ALTERNATE_CLOSE_REQUESTED);
             }
-            Self::FilePicked { .. } | Self::PickCancelled { .. } | Self::FolderPicked { .. } => {
+            Self::FilePicked { .. }
+            | Self::SubtreePicked { .. }
+            | Self::PickCancelled { .. }
+            | Self::FolderPicked { .. } => {
                 self.write_pick(&mut out);
             }
             Self::PreviewRendered { .. } => self.write_preview_render(&mut out),
@@ -10153,19 +10347,7 @@ impl WindowEvent {
             }
             Self::MenuClosed {
                 open_id, outcome, ..
-            } => {
-                put_u16(&mut out, 6, EV_MENU_CLOSED);
-                put_u64(&mut out, 16, open_id);
-                let (kind, item, refusal) = match outcome {
-                    MenuOutcome::Chosen(item) => (MENU_OUTCOME_CHOSEN, item.get(), 0),
-                    MenuOutcome::Entered(entry) => (MENU_OUTCOME_ENTERED, entry.get(), 0),
-                    MenuOutcome::Dismissed => (MENU_OUTCOME_DISMISSED, 0, 0),
-                    MenuOutcome::Refused(refusal) => (MENU_OUTCOME_REFUSED, 0, refusal.as_u16()),
-                };
-                put_u16(&mut out, MENU_CLOSED_OUTCOME_OFFSET, kind);
-                put_u16(&mut out, MENU_CLOSED_ITEM_OFFSET, item);
-                put_u16(&mut out, MENU_CLOSED_REFUSAL_OFFSET, refusal);
-            }
+            } => write_menu_closed(&mut out, open_id, outcome),
             Self::AlertClosed { alert_id, outcome } => {
                 put_u16(&mut out, 6, EV_ALERT_CLOSED);
                 put_u64(&mut out, 16, alert_id);
@@ -10266,7 +10448,17 @@ impl WindowEvent {
                 Ok(Self::Key { window_id, key })
             }
             EV_POINTER => read_pointer_event(window_id, bytes),
-            EV_FILE_PICKED | EV_FOLDER_PICKED => read_pick_event(kind, window_id, bytes),
+            EV_POINTER_MOTION => read_pointer_motion(window_id, bytes),
+            EV_POINTER_LOCK => {
+                event_reserved_zero(bytes, 17)?;
+                Ok(Self::PointerLock {
+                    window_id,
+                    locked: flag_at(bytes, 16)?,
+                })
+            }
+            EV_FILE_PICKED | EV_SUBTREE_PICKED | EV_FOLDER_PICKED => {
+                read_pick_event(kind, window_id, bytes)
+            }
             EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
             EV_SCROLLED => read_scrolled_event(window_id, bytes),
             EV_PINCH => read_pinch_event(window_id, bytes),
@@ -10285,20 +10477,7 @@ impl WindowEvent {
                     y: read_i32(bytes, 20),
                 })
             }
-            EV_RESIZED => {
-                event_reserved_zero(bytes, 25)?;
-                let width_px = read_u32(bytes, 16);
-                let height_px = read_u32(bytes, 20);
-                if width_px == 0 || height_px == 0 {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                Ok(Self::Resized {
-                    window_id,
-                    width_px,
-                    height_px,
-                    state: WindowSizeState::from_wire(bytes[24])?,
-                })
-            }
+            EV_RESIZED => read_resized(window_id, bytes),
             EV_MENU_CLOSED => {
                 event_reserved_zero(bytes, MENU_CLOSED_WIRE_END)?;
                 Ok(Self::MenuClosed {
@@ -10312,8 +10491,41 @@ impl WindowEvent {
     }
 }
 
-/// Decode a pick's conclusion carrying what was chosen: a file's delegation,
-/// or how many of a folder's files were delegated.
+/// Write a menu's close, `open_id` ending as `outcome`, into the already-
+/// headed frame `out`.
+fn write_menu_closed(out: &mut [u8; WindowEvent::WIRE_LEN], open_id: u64, outcome: MenuOutcome) {
+    put_u16(out, 6, EV_MENU_CLOSED);
+    put_u64(out, 16, open_id);
+    let (kind, item, refusal) = match outcome {
+        MenuOutcome::Chosen(item) => (MENU_OUTCOME_CHOSEN, item.get(), 0),
+        MenuOutcome::Entered(entry) => (MENU_OUTCOME_ENTERED, entry.get(), 0),
+        MenuOutcome::Dismissed => (MENU_OUTCOME_DISMISSED, 0, 0),
+        MenuOutcome::Refused(refusal) => (MENU_OUTCOME_REFUSED, 0, refusal.as_u16()),
+    };
+    put_u16(out, MENU_CLOSED_OUTCOME_OFFSET, kind);
+    put_u16(out, MENU_CLOSED_ITEM_OFFSET, item);
+    put_u16(out, MENU_CLOSED_REFUSAL_OFFSET, refusal);
+}
+
+/// Decode a resize of window `window_id`: a size of no width or height is
+/// none.
+fn read_resized(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, 25)?;
+    let width_px = read_u32(bytes, 16);
+    let height_px = read_u32(bytes, 20);
+    if width_px == 0 || height_px == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(WindowEvent::Resized {
+        window_id,
+        width_px,
+        height_px,
+        state: WindowSizeState::from_wire(bytes[24])?,
+    })
+}
+
+/// Decode a pick's conclusion carrying what was chosen: a file's or a
+/// folder's delegation, or how many of a folder's files were delegated.
 fn read_pick_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
     if kind == EV_FOLDER_PICKED {
         event_reserved_zero(bytes, 24)?;
@@ -10335,10 +10547,19 @@ fn read_pick_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEven
     if handle == 0 {
         return Err(Errno::OutOfRange);
     }
-    Ok(WindowEvent::FilePicked {
-        window_id,
-        handle,
-        writable: flag_at(bytes, 24)?,
+    let writable = flag_at(bytes, 24)?;
+    Ok(if kind == EV_SUBTREE_PICKED {
+        WindowEvent::SubtreePicked {
+            window_id,
+            handle,
+            writable,
+        }
+    } else {
+        WindowEvent::FilePicked {
+            window_id,
+            handle,
+            writable,
+        }
     })
 }
 
@@ -10821,6 +11042,30 @@ fn read_pointer_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno
     })
 }
 
+/// Byte offset of a [`WindowEvent::PointerMotion`]'s modifier bits, after its
+/// two displacements; zero bytes follow them up to its time.
+const POINTER_MOTION_MODIFIERS_OFFSET: usize = 24;
+/// Byte offset of a [`WindowEvent::PointerMotion`]'s time.
+const POINTER_MOTION_TIME_OFFSET: usize = 32;
+
+/// Decode the locked pointer's motion: its displacement, the modifiers held,
+/// and when the device reported it.
+fn read_pointer_motion(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    if bytes[POINTER_MOTION_MODIFIERS_OFFSET + 2..POINTER_MOTION_TIME_OFFSET]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok(WindowEvent::PointerMotion {
+        window_id,
+        dx: read_i32(bytes, 16),
+        dy: read_i32(bytes, 20),
+        modifiers: Modifiers::from_bits(read_u16(bytes, POINTER_MOTION_MODIFIERS_OFFSET))?,
+        at_ns: read_u64(bytes, POINTER_MOTION_TIME_OFFSET),
+    })
+}
+
 /// Decode an event addressed to the whole application rather than to one
 /// of its windows, or `None` when `kind` names a window-scoped event.
 ///
@@ -11023,10 +11268,10 @@ mod tests {
         AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol, BundleRunPath,
         ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
         DropSite, DropTarget, HandOverDocument, HandOverOutcome, HandOverTarget, IconAsset,
-        LayerDepth, MenuOutcome, MenuRefusal, OfferDrop, OfferedItem, OpenTarget, PaneName,
-        PickPurpose, PinchPhase, PointerAction, SaveFormat, SaveFormats, TerrainPlate, TooltipText,
-        WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
-        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        KeyboardMode, LayerDepth, MenuOutcome, MenuRefusal, OfferDrop, OfferedItem, OpenTarget,
+        PaneName, PickPurpose, PinchPhase, PointerAction, SaveFormat, SaveFormats, TerrainPlate,
+        TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState,
+        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
         APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
         APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
@@ -11052,13 +11297,14 @@ mod tests {
         OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET,
         PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET,
         PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN,
-        PRESENT_RECT_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET,
-        PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
-        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
-        RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
-        REVEAL_DOCUMENT_WIRE_LEN, SAVE_EVENT_DROPPED_OFFSET, SAVE_EVENT_DROP_X_OFFSET,
-        SAVE_EVENT_Y_OFFSET, SAVE_EXTENSIONS_MAX, SAVE_EXTENSION_MAX, SAVE_FORMATS_MAX,
-        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
+        POINTER_MOTION_MODIFIERS_OFFSET, POINTER_MOTION_TIME_OFFSET, PRESENT_RECT_LEN,
+        PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
+        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
+        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
+        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN,
+        SAVE_EVENT_DROPPED_OFFSET, SAVE_EVENT_DROP_X_OFFSET, SAVE_EVENT_Y_OFFSET,
+        SAVE_EXTENSIONS_MAX, SAVE_EXTENSION_MAX, SAVE_FORMATS_MAX, SCROLLED_MODIFIERS_OFFSET,
+        SEAT_SETTING_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
         SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
         SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
@@ -11080,8 +11326,8 @@ mod tests {
     };
     use super::{
         decode_picked_file_reply, encode_picked_file_reply, PickedFile,
-        PICKED_FILE_REPLY_HANDLE_OFFSET, PICK_PURPOSE_FOLDER, WINDOW_FOLDER_PICK_MAX,
-        WINDOW_PICKED_FILE_REPLY_MAX,
+        PICKED_FILE_REPLY_HANDLE_OFFSET, PICK_PURPOSE_FOLDER, PICK_PURPOSE_IMPORT,
+        PICK_PURPOSE_SUBTREE, WINDOW_FOLDER_PICK_MAX, WINDOW_PICKED_FILE_REPLY_MAX,
     };
     use super::{
         decode_screensaver_reply, encode_screensaver_reply, SaverOrigin, SaverStanding,
@@ -11622,7 +11868,7 @@ mod tests {
     /// The pick and drag requests [`each_request`] visits: each purpose, with
     /// the narrowest and widest name.
     fn each_pick_request(visit: &mut impl FnMut(WindowRequest)) {
-        for purpose in [PickPurpose::Open, PickPurpose::Import] {
+        for purpose in [PickPurpose::Open, PickPurpose::Import, PickPurpose::Subtree] {
             visit(WindowRequest::PickFile {
                 window_id: 9,
                 purpose,
@@ -11934,6 +12180,15 @@ mod tests {
             window_id: 9,
             shape: CursorShape::Text,
         });
+        for mode in [KeyboardMode::Text, KeyboardMode::Raw] {
+            visit(WindowRequest::SetKeyboardMode { window_id: 9, mode });
+        }
+        for locked in [true, false] {
+            visit(WindowRequest::LockPointer {
+                window_id: 9,
+                locked,
+            });
+        }
         visit(WindowRequest::ActivateWindow { window_id: 9 });
         for kind in [
             ClipboardKind::Text,
@@ -13685,6 +13940,7 @@ mod tests {
             CursorShape::Pointer,
             CursorShape::Busy,
             CursorShape::Crosshair,
+            CursorShape::None,
         ] {
             let request = WindowRequest::SetCursor {
                 window_id: 9,
@@ -13700,12 +13956,83 @@ mod tests {
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         let mut unknown = base.frame();
-        unknown[SET_CURSOR_OFFSET] = 5;
+        unknown[SET_CURSOR_OFFSET] = 6;
         assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
         assert_eq!(
             WindowRequest::from_bytes(&base.frame().over_long(1)),
             Err(Errno::BadMagic)
         );
+    }
+
+    #[test]
+    fn the_keyboard_mode_and_pointer_lock_round_trip_and_refuse_what_they_must() {
+        let mode = WindowRequest::SetKeyboardMode {
+            window_id: 9,
+            mode: KeyboardMode::Raw,
+        };
+        let lock = WindowRequest::LockPointer {
+            window_id: 9,
+            locked: true,
+        };
+        for request in [mode, lock] {
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+            let mut zero_id = request.frame();
+            zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+            let mut unknown = request.frame();
+            unknown[SEAT_SETTING_OFFSET] = 2;
+            assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
+            assert_eq!(
+                WindowRequest::from_bytes(&request.frame().over_long(1)),
+                Err(Errno::BadMagic)
+            );
+        }
+    }
+
+    #[test]
+    fn the_locked_pointers_motion_and_lock_events_round_trip_and_fail_closed() {
+        let motion = WindowEvent::PointerMotion {
+            window_id: 9,
+            dx: -70_000,
+            dy: i32::MAX,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            at_ns: 0x0102_0304_0506_0708,
+        };
+        let bytes = motion.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(motion));
+        for at in POINTER_MOTION_MODIFIERS_OFFSET + 2..POINTER_MOTION_TIME_OFFSET {
+            let mut dirty = bytes;
+            dirty[at] = 1;
+            assert_eq!(
+                WindowEvent::from_bytes(&dirty),
+                Err(Errno::BadMagic),
+                "byte {at}"
+            );
+        }
+        let mut unknown = bytes;
+        unknown[POINTER_MOTION_MODIFIERS_OFFSET + 1] = 0x80;
+        assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
+
+        for locked in [true, false] {
+            let event = WindowEvent::PointerLock {
+                window_id: 9,
+                locked,
+            };
+            let bytes = event.to_le_bytes();
+            assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+            let mut flag = bytes;
+            flag[16] = 2;
+            assert_eq!(WindowEvent::from_bytes(&flag), Err(Errno::OutOfRange));
+            let mut dirty = bytes;
+            dirty[17] = 1;
+            assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        }
+        let mut no_window = motion.to_le_bytes();
+        no_window[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowEvent::from_bytes(&no_window), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -13822,13 +14149,19 @@ mod tests {
                 formats: SaveFormats::ANY,
             },
         };
-        let mut lying = named.frame();
-        lying[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_FOLDER;
-        assert_eq!(
-            WindowRequest::from_bytes(&lying[..named.wire_len()]),
-            Err(Errno::OutOfRange),
-            "a folder suggests no name"
-        );
+        for purpose in [
+            PICK_PURPOSE_FOLDER,
+            PICK_PURPOSE_SUBTREE,
+            PICK_PURPOSE_IMPORT,
+        ] {
+            let mut lying = named.frame();
+            lying[PICK_PURPOSE_OFFSET] = purpose;
+            assert_eq!(
+                WindowRequest::from_bytes(&lying[..named.wire_len()]),
+                Err(Errno::OutOfRange),
+                "purpose {purpose} suggests no name"
+            );
+        }
 
         let file = PickedFile {
             handle: 7,
@@ -13901,7 +14234,7 @@ mod tests {
         assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(save));
 
         let mut unknown = frame;
-        unknown[PICK_PURPOSE_OFFSET] = 3;
+        unknown[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_SUBTREE + 1;
         assert_eq!(
             WindowRequest::from_bytes(&unknown[..len]),
             Err(Errno::OutOfRange)
@@ -15985,18 +16318,29 @@ mod tests {
 
     fn sample_key() -> KeyInput {
         KeyInput::Pressed {
-            key: KeyValue::Char('q'),
+            key: Some(KeyValue::Char('q')),
             modifiers: Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
-            physical: PhysicalKey::from_usage(0x14),
+            physical: PhysicalKey::from_usage(0x14).expect("a key"),
         }
     }
 
     #[test]
     fn events_round_trip() {
         for event in [
+            WindowEvent::PointerMotion {
+                window_id: 4,
+                dx: 3,
+                dy: -2,
+                modifiers: Modifiers::default(),
+                at_ns: 17,
+            },
+            WindowEvent::PointerLock {
+                window_id: 4,
+                locked: true,
+            },
             WindowEvent::Focus {
                 window_id: 4,
                 focused: true,
@@ -16019,6 +16363,16 @@ mod tests {
             WindowEvent::FilePicked {
                 window_id: 4,
                 handle: 7,
+                writable: true,
+            },
+            WindowEvent::SubtreePicked {
+                window_id: 4,
+                handle: 7,
+                writable: false,
+            },
+            WindowEvent::SubtreePicked {
+                window_id: 4,
+                handle: u64::MAX,
                 writable: true,
             },
             WindowEvent::PickCancelled { window_id: 4 },
@@ -17281,17 +17635,28 @@ mod tests {
     #[test]
     fn pick_events_fail_closed_on_a_zero_handle_a_dirty_tail_or_a_bad_flag() {
         // A "picked" event must carry a redeemable (non-zero) handle.
-        let mut zero_handle = WindowEvent::FilePicked {
-            window_id: 4,
-            handle: 7,
-            writable: false,
+        for picked in [
+            WindowEvent::FilePicked {
+                window_id: 4,
+                handle: 7,
+                writable: false,
+            },
+            WindowEvent::SubtreePicked {
+                window_id: 4,
+                handle: 7,
+                writable: false,
+            },
+        ] {
+            let mut zero_handle = picked.to_le_bytes();
+            zero_handle[16..24].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(
+                WindowEvent::from_bytes(&zero_handle),
+                Err(Errno::OutOfRange)
+            );
+            let mut dirty = picked.to_le_bytes();
+            dirty[25] = 1;
+            assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
         }
-        .to_le_bytes();
-        zero_handle[16..24].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(
-            WindowEvent::from_bytes(&zero_handle),
-            Err(Errno::OutOfRange)
-        );
         // Reserved tails must be zero for both conclusions.
         let picked = WindowEvent::FilePicked {
             window_id: 4,

@@ -1,0 +1,31 @@
+[package]
+name = "tairix-codegen"
+description = "TAIRiX's code generator: an SSA IR of 32- and 64-bit integer values in blocks with parameters, its verifier and reference interpreter, a linear-scan register allocator, and x86_64, aarch64 and riscv64 backends each lowering to a machine-instruction list that is modelled against the interpreter and encoded, the encoding checked by lib/disasm. no_std + alloc, forbids unsafe; it generates code and never runs it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Each backend's machine model and the random-function generator, for the
+# fuzz harnesses; never part of a production build.
+test-util = []
+
+[dependencies]
+# The architecture the kernel attests and the processor's extensions, which
+# choose the backend.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# This crate's own fuzz harnesses, with the machine models they run code on.
+tairix-codegen = { path = ".", features = ["test-util"] }
+# The decoders every encoding is checked against: written apart from the
+# encoders, so neither can agree with the other's mistake.
+tairix-disasm = { path = "../disasm", version = "=0.0.0" }
+# The seeded stream the differential tests and fuzz harnesses draw from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

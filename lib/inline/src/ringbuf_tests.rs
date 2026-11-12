@@ -348,6 +348,25 @@ fn a_secret_ring_takes_a_record_back_at_the_front() {
     assert_eq!(ring.backing_store(), &[[0; 2]; 3]);
 }
 
+/// Rewriting the newest record leaves the one written over nowhere in the
+/// store, and an empty ring has no newest record.
+#[test]
+fn a_secret_ring_rewrites_its_newest_record_in_place() {
+    let mut ring: SecretRing<[u8; 2], 3> = SecretRing::new([0; 2]);
+    assert_eq!(ring.back_mut(), None);
+    assert_eq!(ring.try_push_back(*b"ab"), Ok(()));
+    assert_eq!(ring.try_push_back(*b"cd"), Ok(()));
+    *ring.back_mut().expect("queued") = *b"ef";
+    assert_eq!(
+        ring.iter().copied().collect::<std::vec::Vec<_>>(),
+        [*b"ab", *b"ef"]
+    );
+    assert_eq!(ring.backing_store(), &[*b"ab", *b"ef", [0; 2]]);
+    assert_eq!(ring.discard_front(2), 2);
+    assert_eq!(ring.back_mut(), None);
+    assert_eq!(ring.backing_store(), &[[0; 2]; 3]);
+}
+
 #[test]
 fn a_clone_preserves_order_and_is_independent() {
     let mut ring: RingBuf<u32, 4> = RingBuf::new();

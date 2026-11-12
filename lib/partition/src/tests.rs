@@ -261,6 +261,260 @@ fn mbr_parse_rejects_overlapping_on_disk_entries() {
     assert_eq!(mbr::parse(&sector), Err(MbrError::Overlap));
 }
 
+/// The Seagate ST-238R's geometry: 4 heads of 26 sectors a track.
+fn st238() -> mbr::Geometry {
+    mbr::Geometry::new(4, 26).expect("a geometry")
+}
+
+#[test]
+fn a_geometry_counts_what_a_chs_address_holds() {
+    assert_eq!(mbr::Geometry::new(0, 17), None);
+    assert_eq!(mbr::Geometry::new(4, 0), None);
+    assert_eq!(mbr::Geometry::new(4, 64), None);
+    assert!(mbr::Geometry::new(255, 63).is_some());
+}
+
+#[test]
+fn an_lba_packs_as_head_sector_and_ten_bit_cylinder() {
+    let geometry = st238();
+    assert_eq!(geometry.chs(0), [0, 1, 0], "cylinder 0, head 0, sector 1");
+    assert_eq!(geometry.chs(26), [1, 1, 0], "the second track");
+    // 63959 = 614 * 104 + 3 * 26 + 25: cylinder 614 (0x266), head 3, sector 26.
+    assert_eq!(geometry.chs(63_959), [3, 0x1a | 0x80, 0x66]);
+    // Past the 1,024 cylinders, the last address there is.
+    let past = 1024 * 104;
+    assert!(geometry.reaches(past - 1));
+    assert!(!geometry.reaches(past));
+    assert_eq!(geometry.chs(past), [3, 0x1a | 0xc0, 0xff]);
+    assert_eq!(geometry.chs(past - 1), geometry.chs(past));
+    let large = mbr::Geometry::new(255, 63).expect("a geometry");
+    assert_eq!(large.chs(u32::MAX), [254, 0xff, 0xff]);
+}
+
+/// The one active FAT16 partition a DOS-era 30 MB disk holds, from its
+/// second track to its end.
+fn dos_disk() -> mbr::Entry {
+    mbr::Entry {
+        type_byte: mbr::fat_type(tairix_fat::boot::Kind::Fat16, 26, 63_934, Some(st238())),
+        active: true,
+        start_lba: 26,
+        sectors: 63_934,
+    }
+}
+
+#[test]
+fn a_dos_table_records_chs_addresses_and_its_active_partition() {
+    let sector = mbr::encode_entries(&[dos_disk()], Some(st238())).expect("encodes");
+    let entry = &sector[mbr::PARTITION_TABLE_OFFSET..][..mbr::PARTITION_ENTRY_LEN];
+    assert_eq!(entry[0], 0x80, "active");
+    assert_eq!(
+        &entry[1..4],
+        &[1, 1, 0],
+        "starts at cylinder 0, head 1, sector 1"
+    );
+    assert_eq!(entry[4], mbr::PART_TYPE_FAT16_SMALL);
+    assert_eq!(&entry[5..8], &[3, 0x1a | 0x80, 0x66], "ends at 614/3/26");
+    assert_eq!(&entry[8..12], &26u32.to_le_bytes());
+    assert_eq!(&entry[12..16], &63_934u32.to_le_bytes());
+    let table = mbr::parse(&sector).expect("parses");
+    assert_eq!(table.partitions().len(), 1);
+    assert_eq!(table.partitions()[0].start_lba, 26);
+}
+
+#[test]
+fn a_table_for_no_geometry_takes_the_use_lba_form() {
+    let sector = mbr::encode_entries(&[dos_disk()], None).expect("encodes");
+    let entry = &sector[mbr::PARTITION_TABLE_OFFSET..][..mbr::PARTITION_ENTRY_LEN];
+    assert_eq!(&entry[1..4], &[0xff; 3]);
+    assert_eq!(&entry[5..8], &[0xff; 3]);
+    let role = mbr::encode(&[boot(2048, 65536)]).expect("encodes");
+    assert_eq!(role[mbr::PARTITION_TABLE_OFFSET], 0, "no role is active");
+}
+
+#[test]
+fn entries_that_are_no_table_are_refused() {
+    let unused = mbr::Entry {
+        type_byte: mbr::PART_TYPE_UNUSED,
+        ..dos_disk()
+    };
+    assert_eq!(
+        mbr::encode_entries(&[unused], Some(st238())),
+        Err(MbrError::UnusedType)
+    );
+    let second = mbr::Entry {
+        start_lba: 70_000,
+        sectors: 1000,
+        ..dos_disk()
+    };
+    assert_eq!(
+        mbr::encode_entries(&[dos_disk(), second], None),
+        Err(MbrError::SeveralActive)
+    );
+    let overlapping = mbr::Entry {
+        active: false,
+        start_lba: 30,
+        ..dos_disk()
+    };
+    assert_eq!(
+        mbr::encode_entries(&[dos_disk(), overlapping], None),
+        Err(MbrError::Overlap)
+    );
+}
+
+#[test]
+fn a_fat_partition_takes_the_type_dos_gives_it() {
+    use tairix_fat::boot::Kind;
+    let geometry = Some(st238());
+    assert_eq!(
+        mbr::fat_type(Kind::Fat12, 26, 20_000, geometry),
+        mbr::PART_TYPE_FAT12
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 26, 65_510, geometry),
+        mbr::PART_TYPE_FAT16_SMALL,
+        "ends on sector 65,535"
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 26, 65_511, geometry),
+        mbr::PART_TYPE_FAT16_CHS
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 40_000, 30_000, geometry),
+        mbr::PART_TYPE_FAT16_CHS,
+        "small, but past where early DOS numbers sectors"
+    );
+    let past = 1024 * 104;
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 26, past - 26, geometry),
+        mbr::PART_TYPE_FAT16_CHS
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 26, past - 25, geometry),
+        mbr::PART_TYPE_FAT16_LBA
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat16, 26, 1000, None),
+        mbr::PART_TYPE_FAT16_LBA
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat32, 26, 70_000, geometry),
+        mbr::PART_TYPE_FAT32_CHS
+    );
+    assert_eq!(
+        mbr::fat_type(Kind::Fat32, 2048, 70_000, None),
+        mbr::PART_TYPE_FAT32_LBA
+    );
+}
+
+#[test]
+fn entries_keep_type_bytes_and_the_active_flag() {
+    let extended = mbr::Entry {
+        type_byte: mbr::PART_TYPE_EXTENDED_CHS,
+        active: false,
+        start_lba: 70_000,
+        sectors: 30_000,
+    };
+    let sector = mbr::encode_entries(&[dos_disk(), extended], Some(st238())).expect("encodes");
+    let entries = mbr::entries(&sector).expect("reads");
+    assert_eq!(entries.as_slice(), &[dos_disk(), extended]);
+    assert!(mbr::is_extended(entries.as_slice()[1].type_byte));
+    assert_eq!(mbr::entries(&sector[..100]), Err(MbrError::ShortSector));
+}
+
+/// An EBR whose first entry is `logical` and whose second links to `next`.
+fn ebr_sector(logical: Option<(u8, u32, u32)>, next: Option<u32>) -> [u8; MBR_SECTOR_LEN] {
+    let mut sector = [0u8; MBR_SECTOR_LEN];
+    let mut put = |slot: usize, type_byte: u8, start: u32, sectors: u32| {
+        let at = mbr::PARTITION_TABLE_OFFSET + slot * mbr::PARTITION_ENTRY_LEN;
+        sector[at + 4] = type_byte;
+        sector[at + 8..at + 12].copy_from_slice(&start.to_le_bytes());
+        sector[at + 12..at + 16].copy_from_slice(&sectors.to_le_bytes());
+    };
+    if let Some((type_byte, start, sectors)) = logical {
+        put(0, type_byte, start, sectors);
+    }
+    if let Some(start) = next {
+        put(1, mbr::PART_TYPE_EXTENDED_CHS, start, 2000);
+    }
+    sector[510..].copy_from_slice(&mbr::MBR_SIGNATURE);
+    sector
+}
+
+#[test]
+fn an_ebr_names_its_logical_drive_and_the_next_record() {
+    let read = mbr::ebr(&ebr_sector(Some((0x06, 26, 1000)), Some(5000))).expect("an EBR");
+    assert_eq!(
+        read.logical.map(|entry| (entry.type_byte, entry.start_lba)),
+        Some((0x06, 26))
+    );
+    assert_eq!(read.next, Some(5000));
+    let last = mbr::ebr(&ebr_sector(Some((0x01, 26, 100)), None)).expect("the last");
+    assert_eq!(last.next, None);
+    assert_eq!(
+        mbr::ebr(&ebr_sector(Some((0x06, 26, 1000)), Some(0))),
+        Err(MbrError::CoversMbrSector),
+        "a link back to the first record loops"
+    );
+    assert_eq!(
+        mbr::ebr(&ebr_sector(Some((0x06, 26, 0)), None)),
+        Err(MbrError::EmptyPartition)
+    );
+    let mut unsigned = ebr_sector(None, None);
+    unsigned[511] = 0;
+    assert_eq!(mbr::ebr(&unsigned), Err(MbrError::BadSignature));
+}
+
+#[test]
+fn a_slot_holds_its_entry_and_an_ebr_reads_back_its_two_slots() {
+    let geometry = mbr::Geometry::new(2, 17);
+    let logical = mbr::Entry {
+        type_byte: 0x06,
+        active: false,
+        start_lba: 17,
+        sectors: 3 * 2 * 17 - 17,
+    };
+    let slot = mbr::encode_slot(&logical, geometry).expect("a slot");
+    assert_eq!(slot[1..4], [1, 1, 0], "head 1, sector 1 of cylinder 0");
+    assert_eq!(
+        slot[5..8],
+        [1, 17, 2],
+        "the last head and sector of cylinder 2"
+    );
+    let link = mbr::Entry {
+        type_byte: mbr::PART_TYPE_EXTENDED_CHS,
+        active: false,
+        start_lba: 102,
+        sectors: 102,
+    };
+    let link = mbr::encode_slot(&link, geometry).expect("a link");
+    let read = mbr::ebr(&mbr::encode_ebr(Some(&slot), Some(&link))).expect("an EBR");
+    assert_eq!((read.logical, read.next), (Some(logical), Some(102)));
+    let emptied = mbr::ebr(&mbr::encode_ebr(None, None)).expect("an emptied chain");
+    assert_eq!((emptied.logical, emptied.next), (None, None));
+    let refused = |entry| mbr::encode_slot(&entry, geometry);
+    assert_eq!(
+        refused(mbr::Entry {
+            sectors: 0,
+            ..logical
+        }),
+        Err(MbrError::EmptyPartition)
+    );
+    assert_eq!(
+        refused(mbr::Entry {
+            type_byte: 0,
+            ..logical
+        }),
+        Err(MbrError::UnusedType)
+    );
+    assert_eq!(
+        refused(mbr::Entry {
+            start_lba: u32::MAX,
+            ..logical
+        }),
+        Err(MbrError::LbaOverflow)
+    );
+}
+
 // ----------------------------------------------------------------------
 // GPT
 // ----------------------------------------------------------------------

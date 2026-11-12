@@ -6,6 +6,7 @@
 //! shows its letter when the bit is set and `-` when clear — which round-trips
 //! the raw byte losslessly, and bounds the comment to the `AmigaDOS` limit.
 
+use tairix_abi::driver::filesystem::StampField;
 use tairix_abi::time::Time64;
 
 use crate::MetadataError;
@@ -20,6 +21,14 @@ const AMIGA_EPOCH_SECS: i64 = 2922 * 86_400;
 pub const TICKS_PER_SECOND: u32 = 50;
 
 const NANOS_PER_TICK: u32 = 1_000_000_000 / TICKS_PER_SECOND;
+
+/// What a date stamp holds: every tick of its 2³² days from 1978 but the
+/// zero stamp, which a volume that knew no time leaves.
+pub const STAMP_FIELD: StampField = StampField::new(
+    Time64::from_secs(AMIGA_EPOCH_SECS),
+    NANOS_PER_TICK as u64,
+    1..(1 << 32) * 86_400 * TICKS_PER_SECOND as u128,
+);
 
 /// An `AmigaDOS` date stamp as an instant: `days` since 1978-01-01, `mins`
 /// past midnight and `ticks` (fiftieths of a second) past the minute. The

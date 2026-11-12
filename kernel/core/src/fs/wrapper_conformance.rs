@@ -283,6 +283,22 @@ fn assert_mutations_forward<W: FilesystemRead + FilesystemWrite + ?Sized>(wrappe
     wrapper
         .truncate(made, 1)
         .expect("`truncate` is not being forwarded");
+    let then = tairix_abi::time::Time64::from_secs(42);
+    let change = tairix_abi::TimesChange {
+        modified: tairix_abi::StampChange::At(then),
+        ..tairix_abi::TimesChange::default()
+    };
+    assert_eq!(
+        wrapper.set_times(made, change),
+        Ok(tairix_abi::TimesKept::Exactly),
+        "`set_times` is not being forwarded"
+    );
+    let made = child(wrapper, b"created");
+    assert_eq!(
+        wrapper.node_info(made).expect("info").times.modified,
+        then,
+        "`set_times` did not reach the inner driver"
+    );
     wrapper
         .rename(root, b"created", root, b"renamed")
         .expect("`rename` is not being forwarded");

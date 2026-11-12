@@ -3,7 +3,7 @@ extern crate std;
 use alloc::vec::Vec;
 use std::vec;
 
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerInput};
 use tairix_abi::touch::TouchSurface;
 use tairix_abi::DriverError;
 
@@ -223,7 +223,7 @@ fn each_report_reaches_its_own_application() {
         device.input(&[1, 0, 0x04, 0], &mut sink),
         Ok(Decoded::Applied)
     );
-    assert!(matches!(sink.keys[..], [KeyInput::Pressed { .. }]));
+    assert!(matches!(sink.keys[..], [KeyEdge { pressed: true, .. }]));
     assert_eq!(
         device.input(&[2, 0b1, 10, 20, 1], &mut sink),
         Ok(Decoded::Applied)
@@ -364,7 +364,10 @@ fn a_device_going_releases_everything_it_held() {
     let _ = device.input(&[2, 0b1, 10, 20, 1], &mut sink);
     let mut released = Recorder::default();
     device.release(&mut released).expect("released");
-    assert!(matches!(released.keys[..], [KeyInput::Released { .. }]));
+    assert!(matches!(
+        released.keys[..],
+        [KeyEdge { pressed: false, .. }]
+    ));
     assert!(released.touch[0].contacts().is_empty());
 }
 

@@ -469,13 +469,27 @@ mod tests {
         }
     }
 
-    /// 4-byte-aligned backing so a window base satisfies
-    /// `RegisterWindow::from_mapping`'s alignment contract.
-    static mut BACKING: [u32; 16] = [0u32; 16];
+    /// Bytes of a [`FakeMapper`]'s backing store, the most a window spans.
+    const BACKING_BYTES: usize = 64;
 
+    /// Mapper that hands out windows over its own backing store, recording
+    /// the last `(phys, len)` it was asked for.
     struct FakeMapper {
+        /// Words, so a window's base satisfies `RegisterWindow::from_mapping`'s
+        /// 4-byte alignment contract.
+        backing: core::cell::UnsafeCell<[u32; BACKING_BYTES / 4]>,
         grant: bool,
         last: Cell<Option<(u64, usize)>>,
+    }
+
+    impl FakeMapper {
+        fn new(grant: bool) -> Self {
+            Self {
+                backing: core::cell::UnsafeCell::new([0; BACKING_BYTES / 4]),
+                grant,
+                last: Cell::new(None),
+            }
+        }
     }
 
     impl MmioMapper for FakeMapper {
@@ -484,11 +498,10 @@ mod tests {
                 return Err(MmioMapError::CapabilityMissing);
             }
             self.last.set(Some((phys_base, len)));
-            let base = NonNull::new(core::ptr::addr_of_mut!(BACKING).cast::<u8>())
-                .expect("static is non-null");
-            // SAFETY: single-threaded test; the static outlives the
-            // window and the window only touches `len <= 64` bytes.
-            Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(64)) })
+            let base = NonNull::new(self.backing.get().cast::<u8>()).expect("a field is non-null");
+            // SAFETY: every test drops its window before the mapper whose
+            // backing it covers, and the window reaches only that backing.
+            Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(BACKING_BYTES)) })
         }
     }
 
@@ -605,10 +618,7 @@ mod tests {
     fn trait_object_maps_the_bar_and_turns_decoding_and_mastering_on_and_off() {
         let bus = bus();
         let dyn_bus: &dyn PciBus = &bus;
-        let mapper = FakeMapper {
-            grant: true,
-            last: Cell::new(None),
-        };
+        let mapper = FakeMapper::new(true);
         dyn_bus
             .enable_memory_space(0x0001_0000)
             .expect("memory decoding");
@@ -640,10 +650,7 @@ mod tests {
     fn missing_bar_is_not_found() {
         let bus = bus();
         let dyn_bus: &dyn PciBus = &bus;
-        let mapper = FakeMapper {
-            grant: true,
-            last: Cell::new(None),
-        };
+        let mapper = FakeMapper::new(true);
         assert!(matches!(
             dyn_bus.map_bar_window(0x0001_0000, 2, &mapper),
             Err(DriverError::NotFound)
@@ -654,10 +661,7 @@ mod tests {
     fn missing_capability_propagates_as_permission_denied() {
         let bus = bus();
         let dyn_bus: &dyn PciBus = &bus;
-        let mapper = FakeMapper {
-            grant: false,
-            last: Cell::new(None),
-        };
+        let mapper = FakeMapper::new(false);
         assert!(matches!(
             dyn_bus.map_bar_window(0x0001_0000, 0, &mapper),
             Err(DriverError::PermissionDenied)

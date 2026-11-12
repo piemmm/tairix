@@ -16,6 +16,7 @@
 
 use alloc::vec::Vec;
 use tairix_abi::Errno;
+use tairix_collections::{ByteQueue, TryReserveError};
 
 /// Largest payload a single frame may carry, in bytes.
 ///
@@ -150,6 +151,97 @@ pub fn recv_frame_into<C: Channel>(
     }
 }
 
+/// Largest payload a queue of `bytes` carries in one frame, its header paid
+/// for, never above [`MAX_FRAME`].
+pub(crate) const fn payload_room(bytes: usize) -> usize {
+    let by_queue = bytes.saturating_sub(FRAME_HEADER_LEN);
+    if by_queue < MAX_FRAME {
+        by_queue
+    } else {
+        MAX_FRAME
+    }
+}
+
+/// Frames read from a stream a read at a time, held until each is whole and
+/// then lent out in place, in a committed accumulator, so taking one never
+/// allocates.
+///
+/// Both ends of a session read this way: the owner's never-blocking seam, and
+/// a worker that waits on its pipe no longer than its own next piece of work
+/// allows ([`crate::link`]).
+pub(crate) struct Inbound {
+    queue: ByteQueue,
+}
+
+impl Inbound {
+    /// An accumulator holding `bytes` of framed traffic, committed now.
+    pub(crate) fn committed(bytes: usize) -> Result<Self, TryReserveError> {
+        Ok(Self {
+            queue: ByteQueue::committed(bytes)?,
+        })
+    }
+
+    /// Largest payload a frame may declare to be taken in.
+    pub(crate) fn max_payload(&self) -> usize {
+        payload_room(self.queue.bound())
+    }
+
+    /// Bytes another read may append.
+    pub(crate) fn room(&self) -> usize {
+        self.queue.room()
+    }
+
+    /// Bytes of storage committed, which taking frames never changes.
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> usize {
+        self.queue.storage()
+    }
+
+    /// Hand the free room to one transport `read`, keeping what it reports.
+    pub(crate) fn fill(
+        &mut self,
+        read: impl FnOnce(&mut [u8]) -> Result<usize, Errno>,
+    ) -> Result<usize, Errno> {
+        self.queue.fill(read)
+    }
+
+    /// Whether the frame at the head declares more than this accumulator
+    /// takes in: refused before a byte of its payload is read.
+    pub(crate) fn head_oversize(&self) -> bool {
+        head_declared(self.queue.pending()).is_some_and(|declared| declared > self.max_payload())
+    }
+
+    /// Whether the head frame has wholly arrived.
+    pub(crate) fn head_whole(&self) -> bool {
+        head_frame(self.queue.pending()).is_some()
+    }
+
+    /// Lend the whole frame at the head to `take` and consume it, or `None`
+    /// when none has wholly arrived.
+    pub(crate) fn take<R>(&mut self, take: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let payload = head_frame(self.queue.pending())?;
+        let end = FRAME_HEADER_LEN + payload;
+        let taken = take(&self.queue.pending()[FRAME_HEADER_LEN..end]);
+        self.queue.consume(end);
+        Some(taken)
+    }
+
+    /// Whether what is held divides exactly into whole frames: the test of a
+    /// clean end, since a stream that stops mid-frame is a truncated
+    /// conversation rather than shortened data.
+    pub(crate) fn whole(&self) -> bool {
+        let pending = self.queue.pending();
+        let mut at = 0;
+        while at < pending.len() {
+            match head_frame(&pending[at..]) {
+                Some(payload) => at += FRAME_HEADER_LEN + payload,
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
 /// The payload length the frame at the head of `buffered` declares,
 /// complete or not, or `None` when even its header has not arrived.
 ///
@@ -194,7 +286,7 @@ fn read_exact<C: Channel>(chan: &mut C, buf: &mut [u8]) -> Result<ReadOutcome, P
 }
 
 /// Write every byte of `buf`.
-fn write_all<C: Channel>(chan: &mut C, buf: &[u8]) -> Result<(), ProtoError> {
+pub(crate) fn write_all<C: Channel>(chan: &mut C, buf: &[u8]) -> Result<(), ProtoError> {
     let mut at = 0;
     while at < buf.len() {
         match chan.write(&buf[at..]) {

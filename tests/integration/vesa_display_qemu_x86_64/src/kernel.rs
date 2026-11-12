@@ -29,14 +29,14 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_x86_64::qemu_exit;
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
 use tairix_log::{Event, EventId, Sink};
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`]. The pointer to `HEAP` outlives
 /// the binary, and the allocator is the only consumer (deterministic OOM via `FreeListAllocator`).

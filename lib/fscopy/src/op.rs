@@ -15,13 +15,17 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FileId, FileKind, FileStat, NodeExpect, RenameFlags, UnlinkFlags};
+use tairix_abi::{
+    Errno, FileId, FileKind, FileStat, NodeExpect, NodeTimes, RenameFlags, UnlinkFlags,
+};
 use tairix_path::join;
 use tairix_util::fallible::{concatenated, grow_to, push};
 
 use crate::attrs::{copy_attributes, AttrError, Attributes, Omissions};
 use crate::data::{DataCopy, DataError, Sparse, Step};
-use crate::mode::{carry_owner, file_mode, DirModes, Ownership, Settle, OWNER_RW, OWNER_RWX};
+use crate::mode::{
+    carry_owner, copy_times, file_mode, DirModes, Ownership, Settle, OWNER_RW, OWNER_RWX,
+};
 use crate::tree::{unlink_node, Cursor, Dir, Entry, Kind, Node, Reached, Roots};
 use crate::within::{landing, lands_inside, Descent, Landing, Unresolved};
 use crate::CHUNK_LEN;
@@ -671,6 +675,9 @@ struct Level<D> {
     dir: D,
     id: FileId,
     leave: Leave,
+    /// The source's times, which a directory the operation made is given
+    /// once its entries are in, since making them moves its own.
+    times: Option<NodeTimes>,
     volume: [u8; 16],
     /// What a move copied into it.
     copied: Vec<Copied>,
@@ -925,12 +932,13 @@ impl<D: Dir> Copying<D> {
                     self.verb,
                     roots,
                     (&mut self.levels, &mut self.descent),
+                    log,
                 )?;
                 return Ok(Flow::More);
             }
         };
         let Some(held) = held else {
-            return self.finish(&source.name);
+            return self.finish(&source.name, log);
         };
         if let Err(errno) = walk.descend_into(held) {
             let path = walk.entry().map_or("", |(_, _, path)| path);
@@ -942,13 +950,13 @@ impl<D: Dir> Copying<D> {
     /// The walk has left the source's last entry: its own directory is given
     /// its mode, and a move puts the whole copy on the medium and records it
     /// under `name`.
-    fn finish(&mut self, name: &str) -> Result<Flow, OpError> {
+    fn finish(&mut self, name: &str, log: &mut Log) -> Result<Flow, OpError> {
         let Some(root) = self.levels.pop() else {
             return Ok(Flow::Whole);
         };
         self.descent.leave();
         let write = |errno| OpError::Write(self.target.path.clone(), errno);
-        conclude(&root).map_err(write)?;
+        conclude(&root, log).map_err(write)?;
         if self.verb == Verb::Move {
             root.dir.sync().map_err(write)?;
             self.record = Some(Copied {
@@ -1079,7 +1087,7 @@ impl<D: Dir> Copying<D> {
         }
         if let Some(level) = self.levels.pop() {
             self.descent.leave();
-            let _ = conclude(&level);
+            let _ = conclude(&level, log);
             return Stage::Winding(self, ending);
         }
         if ending.is_none() {
@@ -1336,6 +1344,8 @@ fn finish_file<D: Dir>(
     };
     carry_attributes(source, &filling.file, spot.path, &|| spot.target(), log)?;
     let write = |errno| OpError::Write(spot.target(), errno);
+    log.omissions
+        .note_times(copy_times(&stat.times, &filling.file).map_err(write)?);
     let made = filling.file.stat().map_err(write)?;
     if verb == Verb::Move {
         carry_owner(Ownership::of(stat), Ownership::of(&made), &filling.file).map_err(write)?;
@@ -1464,13 +1474,14 @@ fn leave<D: Dir>(
     verb: Verb,
     roots: (&str, &str),
     (levels, descent): (&mut Vec<Level<D>>, &mut Descent),
+    log: &mut Log,
 ) -> Result<(), OpError> {
     let Some(level) = levels.pop() else {
         return Ok(());
     };
     descent.leave();
     let write = |errno| OpError::Write(target_of(roots, path), errno);
-    conclude(&level).map_err(write)?;
+    conclude(&level, log).map_err(write)?;
     // A move's copy must be on the medium before its source goes; a commit
     // reaches one volume, so each one met inside is put there too.
     if verb == Verb::Move
@@ -1554,6 +1565,7 @@ fn make_dir<D: Dir>(
             dir: made,
             id: born.id,
             leave,
+            times: Some(source.times),
             volume: born.id.volume,
             copied: Vec::new(),
         },
@@ -1567,13 +1579,19 @@ fn merged<D: Dir>(dir: D, target: &dyn Fn() -> String) -> Result<Level<D>, OpErr
         dir,
         id: stat.id,
         leave: Leave::Merged,
+        times: None,
         volume: stat.id.volume,
         copied: Vec::new(),
     })
 }
 
-/// Give the full target directory of `level` what it is owed.
-fn conclude<D: Dir>(level: &Level<D>) -> Result<(), Errno> {
+/// Give the full target directory of `level` what it is owed: a made one its
+/// source's times, before its mode and a move's owner, which could take the
+/// change from the copier.
+fn conclude<D: Dir>(level: &Level<D>, log: &mut Log) -> Result<(), Errno> {
+    if let Some(times) = &level.times {
+        log.omissions.note_times(copy_times(times, &level.dir)?);
+    }
     match &level.leave {
         Leave::Merged => Ok(()),
         Leave::Settle(settle) => settle.finish(&level.dir),

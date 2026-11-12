@@ -53,6 +53,12 @@ tairix-devids = { path = "../../lib/devids", version = "=0.0.0" }
 tairix-fsmeta = { path = "../../lib/fsmeta", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../../kernel/syscall", version = "=0.0.0" }
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# The PCEmulator CPU conformance vectors' importer: the upstream suites are
+# gzip-framed DEFLATE checked by CRC-32, and the committed subset is
+# zlib-compressed in the record format the emulator's tests read.
+tairix-compress = { path = "../../lib/compress", version = "=0.0.0" }
+tairix-crc32 = { path = "../../lib/crc32", version = "=0.0.0" }
+tairix-pcemu = { path = "../../userland/apps/pcemu", version = "=0.0.0", features = ["vectors"] }
 # Every image plants the civil-time zone store: compiled from the vendored IANA
 # and CLDR sources by `tairix-tzcompile`, at the path its reader opens.
 tairix-tzcompile = { path = "../tzcompile", version = "=0.0.0" }
@@ -154,6 +160,9 @@ tairix-test-images = { path = "../../tests/integration/images_program", version 
 # The twin-volume vertical's fixture vocabulary — its command word, its pass,
 # and the label of the image its USB sticks hold.
 tairix-test-twins = { path = "../../tests/integration/twins_program", version = "=0.0.0", default-features = false }
+# The PC emulator's verticals' fixture vocabulary — the command word their
+# script types and the pass they wait for.
+tairix-test-pcemu = { path = "../../tests/integration/pcemu_program", version = "=0.0.0", default-features = false }
 # The archives the disk-image vertical plants: each format's least archive,
 # written back by the archive driver, and the RAR encoder's archive.
 tairix-test-archive-image = { path = "../../tests/integration/archive_image", version = "=0.0.0" }

@@ -9,9 +9,10 @@ use tairix_appdata::Settings;
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 
-use crate::effects::{Effects, FULL, MIN_OPACITY};
+use crate::effects::{Effects, MIN_OPACITY};
 use crate::scheme::{Scheme, ANSI_COLORS};
 use tairix_colour::Rgb;
+use tairix_crt::{Tube, FULL};
 
 use tairix_appconf::{Keys, Live, Registry};
 
@@ -74,11 +75,13 @@ fn edited_profile() -> Profile {
         effects: Effects {
             opacity: MIN_OPACITY,
             blur: 250,
-            scanlines: 125,
-            glow: 725,
-            fuzz: 375,
-            phosphor: 625,
-            wobble: 875,
+            tube: Tube {
+                scanlines: 125,
+                glow: 725,
+                fuzz: 375,
+                phosphor: 625,
+                wobble: 875,
+            },
         },
         custom,
     }
@@ -385,11 +388,13 @@ fn clamp_bounds_font_size_and_every_effect() {
         effects: Effects {
             opacity: MIN_OPACITY - 1,
             blur: FULL + 1,
-            scanlines: FULL + 1,
-            glow: FULL + 1,
-            fuzz: FULL + 1,
-            phosphor: FULL + 1,
-            wobble: FULL + 1,
+            tube: Tube {
+                scanlines: FULL + 1,
+                glow: FULL + 1,
+                fuzz: FULL + 1,
+                phosphor: FULL + 1,
+                wobble: FULL + 1,
+            },
         },
         custom: Scheme::Contrast.palette().expect("contrast has a palette"),
     };
@@ -398,11 +403,11 @@ fn clamp_bounds_font_size_and_every_effect() {
     assert_eq!(profile.scrollback_lines, MAX_SCROLLBACK_LINES);
     assert_eq!(profile.effects.opacity, MIN_OPACITY);
     assert_eq!(profile.effects.blur, FULL);
-    assert_eq!(profile.effects.scanlines, FULL);
-    assert_eq!(profile.effects.glow, FULL);
-    assert_eq!(profile.effects.fuzz, FULL);
-    assert_eq!(profile.effects.phosphor, FULL);
-    assert_eq!(profile.effects.wobble, FULL);
+    assert_eq!(profile.effects.tube.scanlines, FULL);
+    assert_eq!(profile.effects.tube.glow, FULL);
+    assert_eq!(profile.effects.tube.fuzz, FULL);
+    assert_eq!(profile.effects.tube.phosphor, FULL);
+    assert_eq!(profile.effects.tube.wobble, FULL);
 
     profile.font_size_px = MAX_FONT_SIZE_PX + 1;
     profile.clamp();
@@ -583,23 +588,38 @@ fn an_effect_strength_stales_only_the_passes() {
     let was = Profile::default();
     for now in [
         Effects {
-            scanlines: 400,
+            tube: Tube {
+                scanlines: 400,
+                ..was.effects.tube
+            },
             ..was.effects
         },
         Effects {
-            glow: 400,
+            tube: Tube {
+                glow: 400,
+                ..was.effects.tube
+            },
             ..was.effects
         },
         Effects {
-            fuzz: 400,
+            tube: Tube {
+                fuzz: 400,
+                ..was.effects.tube
+            },
             ..was.effects
         },
         Effects {
-            phosphor: 400,
+            tube: Tube {
+                phosphor: 400,
+                ..was.effects.tube
+            },
             ..was.effects
         },
         Effects {
-            wobble: 400,
+            tube: Tube {
+                wobble: 400,
+                ..was.effects.tube
+            },
             ..was.effects
         },
     ] {

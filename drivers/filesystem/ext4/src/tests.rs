@@ -1919,6 +1919,69 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     assert_eq!((kept.created, kept.modified, kept.changed), (t1, t2, t3));
 }
 
+/// An enlarged record keeps either time to the nanosecond from 1901 to 2446
+/// and a classic one to the second until 2038; an instant past what the
+/// record holds is refused unless the nearest is asked, the change time moves
+/// to now, and every stamp is on the medium.
+#[test]
+fn set_times_keeps_what_each_record_holds() {
+    let clock = Time64::new(2_000_000_000, 3).expect("canonical");
+    let pre_1970 = Time64::new(-2_000_000_000, 123_456_789).expect("canonical");
+    let in_2400 = Time64::new(13_569_465_600, 987_654_321).expect("canonical");
+    let change = |accessed, modified, nearest| TimesChange {
+        accessed: StampChange::At(accessed),
+        modified: StampChange::At(modified),
+        nearest,
+    };
+    let mut fs = at(
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format"),
+        Some(clock),
+    );
+    let file = fs
+        .create(fs.root(), b"f", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    assert_eq!(
+        fs.set_times(file, change(pre_1970, in_2400, false)),
+        Ok(TimesKept::Exactly)
+    );
+    let past_2446 = Time64::from_secs(15_032_385_536);
+    assert_eq!(
+        fs.set_times(file, change(pre_1970, past_2446, false)),
+        Err(DriverError::OutOfRange)
+    );
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
+    let file = fs.lookup(fs.root(), b"f").expect("found");
+    let kept = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (kept.accessed, kept.modified, kept.changed),
+        (pre_1970, in_2400, clock)
+    );
+
+    // The fixture image's 128-byte inodes have no `_extra` fields.
+    let mut fs = at(mount(), Some(clock));
+    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+    let whole = Time64::from_secs(-2_000_000_000);
+    assert_eq!(
+        fs.set_times(file, change(whole, whole, false)),
+        Ok(TimesKept::Exactly)
+    );
+    assert_eq!(
+        fs.set_times(file, change(pre_1970, whole, false)),
+        Err(DriverError::OutOfRange),
+        "a classic record keeps no nanoseconds"
+    );
+    assert_eq!(
+        fs.set_times(file, change(pre_1970, in_2400, true)),
+        Ok(TimesKept::Nearest)
+    );
+    let held = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (held.accessed, held.modified),
+        (whole, Time64::from_secs((1 << 31) - 1)),
+        "the nearest second, and 2038's last"
+    );
+}
+
 #[test]
 fn with_no_time_to_give_ext4_records_no_stamp() {
     let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");

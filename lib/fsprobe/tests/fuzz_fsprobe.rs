@@ -64,7 +64,7 @@ fn corpus() -> Vec<Seed> {
         images::FAT32_ROOT,
         &[images::dir_entry(
             b"HOLIDAYS   ",
-            tairix_fsprobe::FAT_ATTR_VOLUME_ID,
+            tairix_fat::dir::attr::VOLUME_ID,
         )],
     );
     let iso_plain = iso::image(&iso::Spec {

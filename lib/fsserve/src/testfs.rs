@@ -11,7 +11,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
     NodeTimes, Unpinned, VolumeStats, VolumeTitle,
 };
-use tairix_abi::DriverError;
+use tairix_abi::{DriverError, TimesChange, TimesKept};
 
 enum Body {
     Dir(BTreeMap<Vec<u8>, u64>),
@@ -22,6 +22,7 @@ enum Body {
 struct Node {
     body: Body,
     security: NodeSecurity,
+    times: NodeTimes,
     /// The directory holding its name; `None` once no name reaches it.
     parent: Option<u64>,
 }
@@ -56,6 +57,7 @@ impl TestFs {
             Node {
                 body: Body::Dir(BTreeMap::new()),
                 security: NodeSecurity::unrecorded(NodeKind::Directory),
+                times: NodeTimes::default(),
                 parent: Some(ROOT.raw()),
             },
         );
@@ -144,6 +146,7 @@ impl TestFs {
             Node {
                 body,
                 security: *record,
+                times: NodeTimes::default(),
                 parent: Some(dir.raw()),
             },
         );
@@ -163,7 +166,7 @@ impl TestFs {
             ino: id,
             size,
             allocated: size,
-            times: NodeTimes::default(),
+            times: node.times,
             content_gen: NodeInfo::NO_CONTENT_GEN,
         }
     }
@@ -363,6 +366,18 @@ impl FilesystemWrite for TestFs {
             node.parent = Some(dst_dir.raw());
         }
         Ok(())
+    }
+
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let held = self
+            .nodes
+            .get_mut(&node.raw())
+            .ok_or(DriverError::NotFound)?;
+        // The volume keeps no clock, so a now records its "no stamp".
+        let now = tairix_abi::time::Time64::UNIX_EPOCH;
+        held.times.accessed = change.accessed.applied(held.times.accessed, now);
+        held.times.modified = change.modified.applied(held.times.modified, now);
+        Ok(TimesKept::Exactly)
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {

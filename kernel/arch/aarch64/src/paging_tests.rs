@@ -18,6 +18,18 @@ fn dcache_line_bytes_decodes_dminline() {
     assert_eq!(dcache_line_bytes(0xFFF0_FFFF), 4);
 }
 
+/// Only a physically indexed instruction cache is invalidated line by line
+/// through the direct map: the Cortex-A53's virtually indexed one, and the
+/// encodings no ARMv8 PE may treat as physical, are invalidated whole.
+#[test]
+fn only_a_physically_indexed_instruction_cache_is_invalidated_by_line() {
+    assert!(icache_is_pipt(0x8444_C004), "Cortex-A72");
+    assert!(!icache_is_pipt(0x8444_8004), "Cortex-A53");
+    assert!(!icache_is_pipt(0x8444_4004), "AIVIVT");
+    assert!(!icache_is_pipt(0x8444_0004), "VPIPT");
+    assert!(icache_is_pipt(0xC000), "neighbouring fields do not count");
+}
+
 /// A starting Cortex-A72 invalidates its own L1 and leaves alone the L2 the
 /// running cores share, which the level of coherency would have reached.
 #[test]

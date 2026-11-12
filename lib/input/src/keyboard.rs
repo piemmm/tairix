@@ -1,39 +1,55 @@
-//! What every keyboard producer shares once it has named a key edge's
-//! [`PhysicalKey`]: the held modifiers, the caps and num locks, and the US
-//! layout.
+//! How a seat reads its keyboards: which keys are down, the held modifiers,
+//! the caps and num locks, and the US layout.
 //!
-//! A producer maps its device's codes onto the physical key — a HID usage is
-//! one already, an `evdev` keycode goes through its driver's one table — and
-//! feeds each edge to [`KeyboardState::edge`], so two drivers cannot resolve
-//! the same key differently.
+//! A keyboard driver names each edge's [`PhysicalKey`] — a HID usage is one
+//! already, an `evdev` keycode goes through its driver's one table — and the
+//! seat feeds every edge from every one of its keyboards to one
+//! [`KeyboardState::edge`], so the keyboards share their modifiers and locks
+//! and no two read the same key differently.
 
 use tairix_abi::input::PhysicalKey;
+use tairix_inline::BitSet256;
 
 use crate::{Key, ModifierKey, ModifierSide, ModifierState, Modifiers, NamedKey};
 
-/// What one key edge produced.
+/// What one key edge was read as: what it typed, if anything — a release
+/// typing what its press did — and the modifiers held once it had gone down
+/// or come up.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum KeyEdge {
-    /// The held modifiers changed to these.
-    Modifiers(Modifiers),
-    /// A key went down or came up, producing this under the modifiers held.
-    Key(Key),
+pub struct KeyRead {
+    /// What the key typed: nothing for a modifier, a lock, or a key the
+    /// layout names no value for.
+    pub key: Option<Key>,
+    /// The modifiers held once the edge was taken.
+    pub modifiers: Modifiers,
 }
 
-/// A keyboard as its key edges have left it: the modifier keys held, and the
-/// caps and num locks, both off until first pressed.
+/// A seat's keyboards as their key edges have left them: the keys down, the
+/// modifier keys held, and the caps and num locks, both off until first
+/// pressed.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardState {
+    /// The HID usage of every key down.
+    down: BitSet256,
+    /// Of the keys down, the ones pressed under Shift, Caps Lock and Num Lock,
+    /// so a release reads what its press typed whatever changed meanwhile.
+    pressed_shifted: BitSet256,
+    pressed_caps: BitSet256,
+    pressed_num: BitSet256,
     modifiers: ModifierState,
     caps_lock: bool,
     num_lock: bool,
 }
 
 impl KeyboardState {
-    /// A keyboard with no key held and both locks off.
+    /// A keyboard with no key down and both locks off.
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            down: BitSet256::EMPTY,
+            pressed_shifted: BitSet256::EMPTY,
+            pressed_caps: BitSet256::EMPTY,
+            pressed_num: BitSet256::EMPTY,
             modifiers: ModifierState::new(),
             caps_lock: false,
             num_lock: false,
@@ -46,38 +62,78 @@ impl KeyboardState {
         self.modifiers.modifiers()
     }
 
-    /// Apply one edge of `key`, a press when `pressed`, answering what it
-    /// produced.
+    /// Take one edge of `key`, a press when `pressed`, answering how it was
+    /// read.
     ///
-    /// A modifier key answers [`KeyEdge::Modifiers`] only when the held set
-    /// changed: a repeat, or letting go of one shift key while the other is
-    /// held, produces nothing. Caps Lock and Num Lock toggle on their press and
-    /// produce nothing. Any other key answers what the US layout makes of it
+    /// Every key that goes down is read, and comes up once: a press of a key
+    /// already down is its keyboard's own repeat and a release of one not down
+    /// was never seen pressed, and both answer nothing, as does a key the page
+    /// names none. A modifier key and a lock type nothing; a lock toggles on
+    /// its press. Any other key's press types what the US layout makes of it
     /// under the shift key and the locks, or nothing where the layout names
-    /// none: an unknown key, or keypad 5 with Num Lock off.
-    pub fn edge(&mut self, key: PhysicalKey, pressed: bool) -> Option<KeyEdge> {
-        if let Some((modifier, side)) = modifier_of(key) {
-            let changed = if pressed {
-                self.modifiers.press(modifier, side)
+    /// none — Print Screen, or keypad 5 with Num Lock off — and its release
+    /// reads as its press did.
+    pub fn edge(&mut self, key: PhysicalKey, pressed: bool) -> Option<KeyRead> {
+        let usage = key.usage();
+        if self.down.contains(usage) == pressed {
+            return None;
+        }
+        if pressed {
+            self.down.insert(usage);
+        } else {
+            self.down.remove(usage);
+        }
+        let key = if let Some((modifier, side)) = modifier_of(key) {
+            if pressed {
+                self.modifiers.press(modifier, side);
             } else {
-                self.modifiers.release(modifier, side)
-            };
-            return changed.then(|| KeyEdge::Modifiers(self.modifiers()));
-        }
-        if key == PhysicalKey::CAPS_LOCK {
-            if pressed {
-                self.caps_lock = !self.caps_lock;
+                self.modifiers.release(modifier, side);
             }
-            return None;
-        }
-        if key == PhysicalKey::NUM_LOCK {
-            if pressed {
-                self.num_lock = !self.num_lock;
+            None
+        } else if key == PhysicalKey::CAPS_LOCK {
+            self.caps_lock ^= pressed;
+            None
+        } else if key == PhysicalKey::NUM_LOCK {
+            self.num_lock ^= pressed;
+            None
+        } else {
+            let (shift, caps, num) = self.read_under(usage, pressed);
+            us_layout(usage, shift, caps, num)
+        };
+        Some(KeyRead {
+            key,
+            modifiers: self.modifiers(),
+        })
+    }
+
+    /// The shift key and locks a press of `usage` is read under — those held
+    /// now, kept for its release — or, for its release, those its press was.
+    fn read_under(&mut self, usage: u16, pressed: bool) -> (bool, bool, bool) {
+        let sets = [
+            &mut self.pressed_shifted,
+            &mut self.pressed_caps,
+            &mut self.pressed_num,
+        ];
+        if pressed {
+            let now = (
+                self.modifiers.modifiers().shift,
+                self.caps_lock,
+                self.num_lock,
+            );
+            for (set, on) in sets.into_iter().zip([now.0, now.1, now.2]) {
+                if on {
+                    set.insert(usage);
+                }
             }
-            return None;
+            now
+        } else {
+            let [shift, caps, num] = sets.map(|set| {
+                let was = set.contains(usage);
+                set.remove(usage);
+                was
+            });
+            (shift, caps, num)
         }
-        let shift = self.modifiers().shift;
-        us_layout(key.usage(), shift, self.caps_lock, self.num_lock).map(KeyEdge::Key)
     }
 }
 
@@ -236,19 +292,11 @@ fn keypad_digit(digit: char, nav: NamedKey, num: bool) -> Key {
 mod tests {
     use super::*;
 
-    /// What pressing `key` produced.
-    fn press(keyboard: &mut KeyboardState, key: PhysicalKey) -> Option<KeyEdge> {
-        keyboard.edge(key, true)
-    }
-
-    /// The edge of a key typing `ch`.
-    fn typed(ch: char) -> KeyEdge {
-        KeyEdge::Key(Key::Char(ch))
-    }
-
-    /// The edge of a key naming `named`.
-    fn named_edge(named: NamedKey) -> KeyEdge {
-        KeyEdge::Key(Key::Named(named))
+    /// What pressing and letting go of `key` typed.
+    fn tap(keyboard: &mut KeyboardState, key: PhysicalKey) -> Option<Key> {
+        let read = keyboard.edge(key, true).expect("a key not already down");
+        keyboard.edge(key, false).expect("a key down");
+        read.key
     }
 
     /// A pair of modifier keys and what of the held set it holds.
@@ -257,34 +305,33 @@ mod tests {
     #[test]
     fn a_letter_takes_its_case_from_shift_or_caps_lock_but_not_both() {
         let mut keyboard = KeyboardState::new();
-        assert_eq!(press(&mut keyboard, PhysicalKey::A), Some(typed('a')));
-        assert_eq!(press(&mut keyboard, PhysicalKey::CAPS_LOCK), None);
-        assert_eq!(press(&mut keyboard, PhysicalKey::A), Some(typed('A')));
-        assert!(press(&mut keyboard, PhysicalKey::LEFT_SHIFT).is_some());
-        assert_eq!(press(&mut keyboard, PhysicalKey::A), Some(typed('a')));
-        assert_eq!(keyboard.edge(PhysicalKey::A, false), Some(typed('a')));
+        assert_eq!(tap(&mut keyboard, PhysicalKey::A), Some(Key::Char('a')));
+        assert_eq!(tap(&mut keyboard, PhysicalKey::CAPS_LOCK), None);
+        assert_eq!(tap(&mut keyboard, PhysicalKey::A), Some(Key::Char('A')));
+        assert!(keyboard.edge(PhysicalKey::LEFT_SHIFT, true).is_some());
+        assert_eq!(tap(&mut keyboard, PhysicalKey::A), Some(Key::Char('a')));
     }
 
     #[test]
     fn shift_picks_the_symbol_on_a_digit_key_and_caps_lock_does_not() {
         let mut keyboard = KeyboardState::new();
-        let _ = press(&mut keyboard, PhysicalKey::CAPS_LOCK);
+        let _ = tap(&mut keyboard, PhysicalKey::CAPS_LOCK);
         let digits = [
             (PhysicalKey::DIGIT_3, '3', '#'),
             (PhysicalKey::DIGIT_4, '4', '$'),
             (PhysicalKey::DIGIT_5, '5', '%'),
         ];
         for (key, unshifted, _) in digits {
-            assert_eq!(press(&mut keyboard, key), Some(typed(unshifted)));
+            assert_eq!(tap(&mut keyboard, key), Some(Key::Char(unshifted)));
         }
-        let _ = press(&mut keyboard, PhysicalKey::RIGHT_SHIFT);
+        let _ = keyboard.edge(PhysicalKey::RIGHT_SHIFT, true);
         for (key, _, shifted) in digits {
-            assert_eq!(press(&mut keyboard, key), Some(typed(shifted)));
+            assert_eq!(tap(&mut keyboard, key), Some(Key::Char(shifted)));
         }
     }
 
     #[test]
-    fn a_modifier_key_holds_its_modifier_until_both_of_its_pair_are_up() {
+    fn every_edge_of_a_modifier_is_read_and_its_pair_holds_it_until_both_are_up() {
         let pairs: [ModifierPair; 4] = [
             (PhysicalKey::LEFT_SHIFT, PhysicalKey::RIGHT_SHIFT, |m| {
                 m.shift
@@ -295,63 +342,126 @@ mod tests {
         ];
         for (left, right, holds) in pairs {
             let mut keyboard = KeyboardState::new();
-            let Some(KeyEdge::Modifiers(down)) = press(&mut keyboard, left) else {
-                panic!("{left:?} is a modifier");
-            };
-            assert!(holds(down), "{left:?}");
-            assert_eq!(press(&mut keyboard, right), None, "already held");
-            assert_eq!(keyboard.edge(left, false), None, "{right:?} holds it");
-            assert!(holds(keyboard.modifiers()));
-            assert_eq!(
-                keyboard.edge(right, false),
-                Some(KeyEdge::Modifiers(Modifiers::default()))
+            let down = keyboard.edge(left, true).expect("read");
+            assert_eq!(down.key, None, "a modifier types nothing");
+            assert!(holds(down.modifiers), "{left:?}");
+            assert!(holds(
+                keyboard
+                    .edge(right, true)
+                    .expect("read, its pair already held")
+                    .modifiers
+            ));
+            assert!(
+                holds(keyboard.edge(left, false).expect("read").modifiers),
+                "{right:?} holds it"
             );
+            let up = keyboard.edge(right, false).expect("read");
+            assert_eq!(up.modifiers, Modifiers::default());
         }
     }
 
     #[test]
-    fn a_lock_toggles_on_its_press_alone() {
+    fn a_keys_own_repeat_and_a_release_never_pressed_are_read_as_nothing() {
+        let mut keyboard = KeyboardState::new();
+        assert!(keyboard.edge(PhysicalKey::A, true).is_some());
+        assert_eq!(keyboard.edge(PhysicalKey::A, true), None, "already down");
+        assert!(keyboard.edge(PhysicalKey::A, false).is_some());
+        assert_eq!(keyboard.edge(PhysicalKey::A, false), None, "already up");
+        assert_eq!(
+            keyboard.edge(PhysicalKey::SPACE, false),
+            None,
+            "never pressed"
+        );
+    }
+
+    #[test]
+    fn a_release_reads_as_its_press_did_whatever_changed_meanwhile() {
+        let mut keyboard = KeyboardState::new();
+        let keypad_up = PhysicalKey::from_usage(0x60).expect("keypad 8");
+        let shift = keyboard.edge(PhysicalKey::LEFT_SHIFT, true);
+        assert!(shift.is_some());
+        let digit_down = keyboard.edge(PhysicalKey::DIGIT_3, true).expect("read");
+        assert_eq!(digit_down.key, Some(Key::Char('#')));
+        let letter_down = keyboard.edge(PhysicalKey::A, true).expect("read");
+        assert_eq!(letter_down.key, Some(Key::Char('A')));
+        let pad_down = keyboard.edge(keypad_up, true).expect("read");
+        assert_eq!(pad_down.key, Some(Key::Named(NamedKey::Up)));
+        assert!(keyboard.edge(PhysicalKey::LEFT_SHIFT, false).is_some());
+        let _ = tap(&mut keyboard, PhysicalKey::CAPS_LOCK);
+        let _ = tap(&mut keyboard, PhysicalKey::NUM_LOCK);
+        for (key, typed) in [
+            (PhysicalKey::DIGIT_3, Key::Char('#')),
+            (PhysicalKey::A, Key::Char('A')),
+            (keypad_up, Key::Named(NamedKey::Up)),
+        ] {
+            let up = keyboard.edge(key, false).expect("read");
+            assert_eq!(up.key, Some(typed), "{key:?}");
+            assert_eq!(up.modifiers, Modifiers::default());
+        }
+        // The next press reads under what holds now: caps and num on, no shift.
+        assert_eq!(tap(&mut keyboard, PhysicalKey::A), Some(Key::Char('A')));
+        assert_eq!(
+            tap(&mut keyboard, PhysicalKey::DIGIT_3),
+            Some(Key::Char('3'))
+        );
+        assert_eq!(tap(&mut keyboard, keypad_up), Some(Key::Char('8')));
+    }
+
+    #[test]
+    fn a_lock_toggles_on_its_press_and_is_read_typing_nothing() {
         let mut keyboard = KeyboardState::new();
         for _ in 0..2 {
-            assert_eq!(press(&mut keyboard, PhysicalKey::CAPS_LOCK), None);
-            assert_eq!(keyboard.edge(PhysicalKey::CAPS_LOCK, false), None);
+            let press = keyboard.edge(PhysicalKey::CAPS_LOCK, true).expect("read");
+            assert_eq!(press.key, None);
+            assert_eq!(
+                keyboard
+                    .edge(PhysicalKey::CAPS_LOCK, false)
+                    .map(|read| read.key),
+                Some(None)
+            );
         }
-        assert_eq!(press(&mut keyboard, PhysicalKey::A), Some(typed('a')));
+        assert_eq!(
+            tap(&mut keyboard, PhysicalKey::A),
+            Some(Key::Char('a')),
+            "toggled twice"
+        );
     }
 
     #[test]
     fn num_lock_turns_the_keypad_from_navigation_to_digits() {
-        let keypad_end = PhysicalKey::from_usage(0x59);
-        let keypad_five = PhysicalKey::from_usage(0x5D);
+        let keypad_end = PhysicalKey::from_usage(0x59).expect("a key");
+        let keypad_five = PhysicalKey::from_usage(0x5D).expect("a key");
         let mut keyboard = KeyboardState::new();
         assert_eq!(
-            press(&mut keyboard, keypad_end),
-            Some(named_edge(NamedKey::End))
+            tap(&mut keyboard, keypad_end),
+            Some(Key::Named(NamedKey::End))
         );
-        assert_eq!(press(&mut keyboard, keypad_five), None);
-        assert_eq!(press(&mut keyboard, PhysicalKey::NUM_LOCK), None);
-        assert_eq!(press(&mut keyboard, keypad_end), Some(typed('1')));
-        assert_eq!(press(&mut keyboard, keypad_five), Some(typed('5')));
+        assert_eq!(tap(&mut keyboard, keypad_five), None);
+        let _ = tap(&mut keyboard, PhysicalKey::NUM_LOCK);
+        assert_eq!(tap(&mut keyboard, keypad_end), Some(Key::Char('1')));
+        assert_eq!(tap(&mut keyboard, keypad_five), Some(Key::Char('5')));
     }
 
     #[test]
-    fn the_named_keys_resolve_and_a_key_the_layout_leaves_unnamed_produces_nothing() {
+    fn the_named_keys_resolve_and_a_key_the_layout_leaves_unnamed_types_nothing() {
         let mut keyboard = KeyboardState::new();
         assert_eq!(
-            press(&mut keyboard, PhysicalKey::ESCAPE),
-            Some(named_edge(NamedKey::Escape))
+            tap(&mut keyboard, PhysicalKey::ESCAPE),
+            Some(Key::Named(NamedKey::Escape))
         );
         assert_eq!(
-            press(&mut keyboard, PhysicalKey::from_usage(0x3A)),
-            Some(named_edge(NamedKey::Function { number: 1 }))
+            tap(&mut keyboard, PhysicalKey::from_usage(0x3A).expect("a key")),
+            Some(Key::Named(NamedKey::Function { number: 1 }))
         );
         assert_eq!(
-            press(&mut keyboard, PhysicalKey::from_usage(0x45)),
-            Some(named_edge(NamedKey::Function { number: 12 }))
+            tap(&mut keyboard, PhysicalKey::from_usage(0x45).expect("a key")),
+            Some(Key::Named(NamedKey::Function { number: 12 }))
         );
-        assert_eq!(press(&mut keyboard, PhysicalKey::SPACE), Some(typed(' ')));
-        assert_eq!(press(&mut keyboard, PhysicalKey::UNKNOWN), None);
-        // Print Screen is a key this layout types nothing for.
-        assert_eq!(press(&mut keyboard, PhysicalKey::from_usage(0x46)), None);
+        assert_eq!(tap(&mut keyboard, PhysicalKey::SPACE), Some(Key::Char(' ')));
+        // Print Screen is read, typing nothing.
+        let print = keyboard
+            .edge(PhysicalKey::from_usage(0x46).expect("a key"), true)
+            .expect("read");
+        assert_eq!(print.key, None);
     }
 }

@@ -200,6 +200,9 @@ pub enum SpawnError {
     StartBlock(Errno),
     /// The kernel heap refused the startup-vector block's staging buffer.
     OutOfMemory,
+    /// The image's code could not be made visible to every CPU's
+    /// instruction fetch ([`PhysMap::fence_instruction_fetch`]).
+    InstructionFence,
 }
 
 impl SpawnError {
@@ -373,6 +376,7 @@ where
     }
 
     // 1. Segments: map each page and fill it with file content (BSS zeroed).
+    let mut code = false;
     for segment in image.segments() {
         let seg_base = segment.relocated_vaddr(bias)?;
         let flags = map_flags_for(segment.permission);
@@ -393,6 +397,10 @@ where
             content,
             &mut alloc_frame,
         )?;
+        code |= flags.contains(MapFlags::EXEC);
+    }
+    if code && !physmap.fence_instruction_fetch() {
+        return Err(SpawnError::InstructionFence);
     }
 
     // 2. User stack: zeroed U|R|W pages.
@@ -689,68 +697,73 @@ mod tests {
         assert_eq!(view.canary(), 0x0123_4567_89AB_CDEF);
     }
 
-    #[test]
-    fn syncs_the_instruction_cache_for_executable_segments_only() {
-        use core::cell::RefCell;
+    /// A `PhysMap` that records every `sync_instruction_cache` call, and the
+    /// syncs each fence follows, while delegating the rest to a real
+    /// `SimPhysMap`.
+    struct RecordingIcache {
+        inner: SimPhysMap,
+        synced: core::cell::RefCell<Vec<(u64, usize)>>,
+        fences: core::cell::RefCell<Vec<usize>>,
+        fence_holds: bool,
+    }
 
-        // A `PhysMap` that records every `sync_instruction_cache` call while
-        // delegating the rest to a real `SimPhysMap`. This is the regression
-        // guard for the metal-only stale-I-cache wedge: the loader must make
-        // freshly-written *code* visible to instruction fetch, and must not
-        // waste the maintenance on data/stack/startup pages that are never
-        // executed.
-        struct RecordingIcache {
-            inner: SimPhysMap,
-            synced: RefCell<Vec<(u64, usize)>>,
-        }
-        impl crate::phys::PhysMap for RecordingIcache {
-            fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
-                self.inner.translate(phys, len)
-            }
-            fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
-                self.inner.clean_invalidate(phys, len);
-            }
-            fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
-                self.synced.borrow_mut().push((phys.as_u64(), len));
+    impl RecordingIcache {
+        fn new(fence_holds: bool) -> Self {
+            Self {
+                inner: sim(),
+                synced: core::cell::RefCell::new(Vec::new()),
+                fences: core::cell::RefCell::new(Vec::new()),
+                fence_holds,
             }
         }
+    }
 
-        // One 1-page ReadExecute (code) segment followed by a 2-page
-        // ReadWrite (data) segment; `build_process_image` maps segments in
-        // order and `frame_source` hands out consecutive frames from
-        // `SIM_BASE_FRAME`, so the single code page lands on the first frame.
-        let code: Vec<u8> = (0u8..16).collect();
-        let data: Vec<u8> = vec![0xAA; 8];
+    impl crate::phys::PhysMap for RecordingIcache {
+        fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+            self.inner.translate(phys, len)
+        }
+        fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+            self.inner.clean_invalidate(phys, len);
+        }
+        fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+            self.synced.borrow_mut().push((phys.as_u64(), len));
+        }
+        fn fence_instruction_fetch(&self) -> bool {
+            self.fences.borrow_mut().push(self.synced.borrow().len());
+            self.fence_holds
+        }
+    }
+
+    /// An image of one 1-page `ReadExecute` segment followed by a 2-page
+    /// `ReadWrite` one, built through `physmap`. Segments map in order and
+    /// `frame_source` hands out consecutive frames from `SIM_BASE_FRAME`, so
+    /// the code page lands on the first frame.
+    fn build_code_then_data(physmap: &RecordingIcache) -> Result<ProcessImage, SpawnError> {
         let specs = [
             SegSpec {
                 vaddr: 0x1000,
-                file_size: code.len() as u64,
+                file_size: 16,
                 mem_size: 0x1000,
                 perm: RxePermission::ReadExecute,
-                content: code.clone(),
+                content: (0u8..16).collect(),
             },
             SegSpec {
                 vaddr: 0x2000,
-                file_size: data.len() as u64,
+                file_size: 8,
                 mem_size: 0x2000,
                 perm: RxePermission::ReadWrite,
-                content: data.clone(),
+                content: vec![0xAA; 8],
             },
         ];
         let (bytes, _) = image_bytes(0x1000, &specs);
         let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
-        let physmap = RecordingIcache {
-            inner: sim(),
-            synced: RefCell::new(Vec::new()),
-        };
-        let mut space = AddressSpace::new(HostPageTable::new());
         let stack = UserStack {
             base: 0x10_0000,
             page_count: 2,
         };
         build_process_image(
-            &mut space,
-            &physmap,
+            &mut AddressSpace::new(HostPageTable::new()),
+            physmap,
             &image,
             &bytes,
             0,
@@ -761,15 +774,37 @@ mod tests {
             &StartFacts::UNSET,
             frame_source(),
         )
-        .expect("build");
+    }
 
-        // Exactly the one executable page was synced, at the first handed-out
-        // frame — never the data, stack, or startup-block pages.
+    /// The regression guard for the metal-only stale-I-cache wedge: the loader
+    /// makes freshly written code visible to instruction fetch, and wastes no
+    /// maintenance on data, stack or startup pages that are never executed.
+    #[test]
+    fn syncs_the_instruction_cache_for_executable_segments_only() {
+        let physmap = RecordingIcache::new(true);
+        build_code_then_data(&physmap).expect("build");
         let code_phys = (SIM_BASE_FRAME as u64) * PAGE_SIZE as u64;
         assert_eq!(
             &physmap.synced.borrow()[..],
             &[(code_phys, PAGE_SIZE)],
             "only the executable segment's page is made instruction-fetch-coherent"
+        );
+        assert_eq!(
+            &physmap.fences.borrow()[..],
+            &[1],
+            "one fence, once the code is synced, reaches every CPU"
+        );
+    }
+
+    #[test]
+    fn an_image_whose_code_not_every_cpu_is_fenced_past_is_refused() {
+        let refusing = RecordingIcache::new(false);
+        assert!(
+            matches!(
+                build_code_then_data(&refusing),
+                Err(SpawnError::InstructionFence)
+            ),
+            "code no CPU is sure to fetch is no image"
         );
     }
 

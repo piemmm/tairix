@@ -83,12 +83,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::kept_as_stamp;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
     VolumeHost, VolumeStats, VolumeTitle, WriteRefusal,
 };
+use tairix_abi::fs::{StampChange, TimesChange, TimesKept};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
@@ -1277,6 +1279,27 @@ impl<B: Block> FilesystemWrite for Affs<B> {
 
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         self.write_file(file, offset, data)
+    }
+
+    /// A header's one date stamp is its modification time and stands for
+    /// each of its others, so an access time is kept only as that stamp.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let header = self.node(node)?;
+        let (modified, m) = amiga::STAMP_FIELD.fit_change(change.modified, change.nearest)?;
+        let date = match modified {
+            StampChange::Keep => header.date(),
+            StampChange::Now => self.now(),
+            StampChange::At(at) => stamp(Some(at)),
+        };
+        let a = kept_as_stamp(change.accessed, Self::time(date), change.nearest)?;
+        if date != header.date() {
+            self.change(|fs| {
+                let mut header = fs.node(node)?;
+                header.set_date(date);
+                fs.write_header(&mut header)
+            })?;
+        }
+        Ok(a.and(m))
     }
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {

@@ -11,7 +11,8 @@ address, encoding bytes, length, mnemonic, operands, branch target).
 ## What it decodes
 
 - **riscv64** — RV64GC (I, M, A, F, D, Zicsr, Zifencei, and the C
-  compressed extension). The 16/32-bit parcel-length discipline follows
+  compressed extension) and the Zbb bit-manipulation extension. The
+  16/32-bit parcel-length discipline follows
   the RISC-V expanded-length encoding exactly, so a compressed
   instruction never swallows its successor; reserved 48/64-bit parcels
   consume their declared length as `(bad)`.
@@ -29,9 +30,10 @@ address, encoding bytes, length, mnemonic, operands, branch target).
   closed), the `0xFC` prefixed set, and a `br_table` target bound.
 - **x86_64** — the variable-length decoder: legacy prefixes, REX,
   ModRM/SIB, displacement/immediate sizing over the one- and two-byte
-  opcode maps, rendered in binutils-style Intel syntax. An undecodable
-  byte is a `(bad)` single byte so the stream resynchronises exactly as
-  binutils does; `0F 38`/`0F 3A` and VEX/EVEX are staged.
+  opcode maps and the VEX-encoded BMI1 and BMI2 instructions, rendered in
+  binutils-style Intel syntax. An undecodable byte is a `(bad)` single byte
+  so the stream resynchronises exactly as binutils does; the legacy
+  `0F 38`/`0F 3A` maps, the rest of VEX and EVEX are staged.
 
 Every decoder is a pure function of a byte slice and a start address: it
 always makes forward progress (so a walk over any input terminates),

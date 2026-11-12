@@ -127,6 +127,7 @@ for filesystems, the feature section below.
 | Sound files played from the command line (`play`: AU, WAV, FLAC native or in Ogg, Vorbis, Opus, and MPEG audio, chained Ogg links read in turn, decoded in the sandbox, gapless) | ✓ | ✓ | ✓ | ▢ |
 | Program library launcher (search by name, purpose and folder; favourites and frequent use kept per account; fully keyboard-driven; animated, still under reduced motion) | ✓ | ✓ | ✓ | ▢ |
 | Desktop music player (`music.app`: playlist, gapless, album art and tags read in the sandbox, no filesystem capability) | ✓ | ✓ | ✓ | ▢ |
+| PC emulator (`PCEmulator.app`: an 8088–80186 PC/XT-class machine and its 8087 in a capability-empty worker, TAIRiX DOS on its 30 MB disk, the screen scaled sharp, raw keyboard, the mouse followed or captured, sound, a debugger) | ◐ | ◐ | ◐ | ▢ |
 | Audio follows the seat (held on its frame outside the room, resumed there; recording published as a notice) | ✓ | ✓ | ✓ | ▢ |
 | Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |
 | Desktop sound: icon-bar volume panel and recording indicator, Settings Sound pane, Switchboard Audio pane; the user's controls remembered and restored per session | ✓ | ✓ | ✓ | ▢ |

@@ -501,6 +501,10 @@ impl PhysMap for SharedSim {
     fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
         self.0.sync_instruction_cache(phys, len);
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        self.0.fence_instruction_fetch()
+    }
 }
 
 #[test]
@@ -529,6 +533,8 @@ fn a_dead_space_surrenders_to_the_quarantine_and_its_successor_frees_it() {
             8,
             VirtAddr::new(0x8000_0000),
             8,
+            VirtAddr::new(0),
+            0,
         )
         .expect("windows are valid");
         live.alloc_dma(PAGE_SIZE, 0, custodian)

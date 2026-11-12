@@ -170,9 +170,12 @@ what it means.
 ## 4. Screen effects
 
 `userland/apps/terminal/src/effects.rs` carries one strength per effect, each a
-permille `0..=1000` a slider sets directly, and turns them into the ordered
-`Pass` list a frame goes through. A zero-strength effect contributes no pass,
-so a terminal with the effects off pays nothing.
+permille `0..=1000` a slider sets directly: the window's translucency and blur,
+and a `tairix_crt::Tube` whose five strengths turn into the ordered `Pass` list
+a frame goes through. The tube, its passes and the pipeline that draws them are
+`lib/crt`'s, shared with the PC emulator (`plans/PCEMU.md` PC16.4). A
+zero-strength effect contributes no pass, so a terminal with the effects off
+pays nothing.
 
 | Effect | Where it happens | How |
 |---|---|---|
@@ -216,7 +219,7 @@ working buffers are held at the window's size while the glow is on, so a frame
 allocates nothing; a window that cannot afford them is drawn without effects.
 
 **The passes are drawn by a retained pipeline, redrawn over what changed.**
-`pipeline::Pipeline` holds three stages by what an output pixel depends on:
+`tairix_crt::Pipeline` holds three stages by what an output pixel depends on:
 `pre` (wobble, phosphor, scan lines — one screen pixel and its row), `lit`
 (glow — the neighbourhood of `pre` its reach spans) and `out` (fuzz — one pixel
 of `lit` and the step). A stage exists only while one of its passes is on, and

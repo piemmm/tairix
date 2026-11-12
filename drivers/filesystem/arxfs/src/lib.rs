@@ -62,13 +62,13 @@ use tairix_abi::driver::block::{Block, BlockClass, MAX_BLOCK_LEN};
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, Unpinned,
-    VolumeHost, VolumeStats, VolumeTitle,
+    FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, StampField,
+    Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
-use tairix_abi::fs::{SeekRegion, FS_SYMLINK_MAX};
+use tairix_abi::fs::{SeekRegion, StampChange, TimesChange, TimesKept, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::{RadixTree, RangeKey, RangeSet, TryReserveError};
@@ -560,12 +560,12 @@ const I_NLINK: usize = 20;
 const I_REQCAP: usize = 24;
 const I_ACLCOUNT: usize = 28;
 const I_SIZE: usize = 32;
-// The tracked timestamps, each a 12-byte Time64: created (40..52),
-// modified (52..64), changed (76..88). Bytes 64..76 are a reserved atime
-// slot: ARXFS does not track access time, always writes it zero, and never
-// reads it, so `NodeTimes::accessed` is always `Time64::UNIX_EPOCH`.
+// The timestamps, each a 12-byte Time64. A read never moves the access time,
+// so copy-on-write never writes metadata for a pure read; it changes only when
+// it is set.
 const I_CREATED: usize = 40;
 const I_MODIFIED: usize = 52;
+const I_ACCESSED: usize = 64;
 const I_CHANGED: usize = 76;
 const I_ACL_BASE: usize = 88;
 const I_ACL_STRIDE: usize = 8;
@@ -621,8 +621,7 @@ impl Inode {
             times: NodeTimes {
                 created: now,
                 modified: now,
-                // ARXFS does not track access time.
-                accessed: Time64::UNIX_EPOCH,
+                accessed: now,
                 changed: now,
             },
             extent_root: 0,
@@ -670,9 +669,7 @@ impl Inode {
         let times = NodeTimes {
             created: rd_time(buf, I_CREATED)?,
             modified: rd_time(buf, I_MODIFIED)?,
-            // ARXFS does not track access time; the on-disk slot is reserved
-            // and ignored on read.
-            accessed: Time64::UNIX_EPOCH,
+            accessed: rd_time(buf, I_ACCESSED)?,
             changed: rd_time(buf, I_CHANGED)?,
         };
         Ok(Some(Self {
@@ -707,8 +704,7 @@ impl Inode {
         wr_u64(buf, I_SIZE, self.size);
         wr_time(buf, I_CREATED, self.times.created);
         wr_time(buf, I_MODIFIED, self.times.modified);
-        // Bytes 64..76 are the reserved atime slot; left zero by the buffer
-        // clear above (ARXFS does not track access time).
+        wr_time(buf, I_ACCESSED, self.times.accessed);
         wr_time(buf, I_CHANGED, self.times.changed);
         for (i, entry) in acl.iter().enumerate() {
             let base = I_ACL_BASE + i * I_ACL_STRIDE;
@@ -4831,6 +4827,40 @@ impl<B: Block> ARXFS<B> {
         self.end_operation()
     }
 
+    /// [`FilesystemWrite::set_times`]: every time an exact [`Time64`].
+    ///
+    /// # Errors
+    ///
+    /// As [`FilesystemWrite::set_times`].
+    pub fn set_times(
+        &mut self,
+        node: NodeId,
+        change: TimesChange,
+    ) -> Result<TimesKept, DriverError> {
+        let (accessed, a) = STAMPS.fit_change(change.accessed, change.nearest)?;
+        let (modified, m) = STAMPS.fit_change(change.modified, change.nearest)?;
+        if !change.is_empty() {
+            self.mutation(|fs| fs.set_times_inner(node, accessed, modified))?;
+        }
+        Ok(a.and(m))
+    }
+
+    fn set_times_inner(
+        &mut self,
+        node: NodeId,
+        accessed: StampChange,
+        modified: StampChange,
+    ) -> Result<(), DriverError> {
+        let ino = self.ino_of(node)?;
+        let mut inode = self.reached_inode(ino)?;
+        let now = self.now();
+        inode.times.accessed = accessed.applied(inode.times.accessed, now);
+        inode.times.modified = modified.applied(inode.times.modified, now);
+        inode.times.changed = now;
+        self.write_inode(ino, &inode)?;
+        self.end_operation()
+    }
+
     fn create_inner(
         &mut self,
         dir: NodeId,
@@ -5910,6 +5940,10 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// steps reached — shorter than it was, longer than asked for — and reports
     /// it. That is the honest outcome: the bytes below that boundary were never
     /// touched, and the caller may simply ask again.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        ARXFS::set_times(self, node, change)
+    }
+
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         while !self.release(|fs| {
             let (ino, _) = fs.file_inode(file)?;
@@ -5998,6 +6032,9 @@ impl<B: Block> FilesystemSecurity for ARXFS<B> {
         ARXFS::set_security(self, node, security)
     }
 }
+
+/// What every ARXFS time holds: any [`Time64`], to the nanosecond.
+const STAMPS: StampField = tairix_abi::driver::filesystem::EVERY_INSTANT;
 
 impl<B: Block> FilesystemStats for ARXFS<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {

@@ -37,7 +37,7 @@ use tairix_abi::driver::filesystem::{
     NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
     VolumeStats, VolumeTitle,
 };
-use tairix_abi::fs::SeekRegion;
+use tairix_abi::fs::{SeekRegion, TimesChange, TimesKept};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
@@ -1236,6 +1236,10 @@ impl<B: Block> FilesystemWrite for Iso9660<B> {
     }
 
     fn truncate(&mut self, _file: NodeId, _size: u64) -> Result<(), DriverError> {
+        Err(DriverError::ReadOnly)
+    }
+
+    fn set_times(&mut self, _node: NodeId, _change: TimesChange) -> Result<TimesKept, DriverError> {
         Err(DriverError::ReadOnly)
     }
 

@@ -26,9 +26,9 @@ use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::LandingStep;
 use tairix_abi::window_ipc::{
     encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
-    DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, LayerDepth,
-    MenuRefusal, OfferedItem, PickPurpose, PointerAction, PreviewSubject, SystemTask, TerrainPlate,
-    ToolOver, WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
+    DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, KeyboardMode,
+    LayerDepth, MenuRefusal, OfferedItem, PickPurpose, PointerAction, PreviewSubject, SystemTask,
+    TerrainPlate, ToolOver, WindowEvent, WindowRegion, WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
@@ -49,7 +49,7 @@ use crate::launch::{
 use tairix_taskbar::menu::about_sheet;
 use tairix_window::WindowSizing;
 use tairix_wm::{
-    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
+    Color, Compositor, CursorHint, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
     WindowControlKind, WindowFrame, WindowId,
 };
 
@@ -2342,14 +2342,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 
     fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
-        let kind = match shape {
-            CursorShape::Arrow => CursorKind::Arrow,
-            CursorShape::Text => CursorKind::Text,
-            CursorShape::Pointer => CursorKind::Pointer,
-            CursorShape::Busy => CursorKind::Busy,
-            CursorShape::Crosshair => CursorKind::Crosshair,
+        let hint = match shape {
+            CursorShape::Arrow => CursorHint::Shape(CursorKind::Arrow),
+            CursorShape::Text => CursorHint::Shape(CursorKind::Text),
+            CursorShape::Pointer => CursorHint::Shape(CursorKind::Pointer),
+            CursorShape::Busy => CursorHint::Shape(CursorKind::Busy),
+            CursorShape::Crosshair => CursorHint::Shape(CursorKind::Crosshair),
+            CursorShape::None => CursorHint::Hidden,
         };
-        if !self.compositor.set_window_cursor(wm, kind) {
+        if !self.compositor.set_window_cursor(wm, hint) {
             return Err(Errno::NotFound);
         }
         // A shape asked for while the pointer rests on the window shows now,
@@ -2358,11 +2359,40 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
+    fn keyboard_mode_set(&mut self, window_id: u64, mode: KeyboardMode) -> Result<(), Errno> {
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        if !self
+            .compositor
+            .set_window_raw_keys(wm, mode == KeyboardMode::Raw)
+        {
+            return Err(Errno::NotFound);
+        }
+        Ok(())
+    }
+
+    fn pointer_lock_set(&mut self, window_id: u64, locked: bool) -> Result<(), Errno> {
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        if !locked {
+            if self.shell.pointer_lock() == Some(wm) {
+                let _ = self.shell.unlock_pointer(self.compositor);
+            }
+            return Ok(());
+        }
+        // A surface of the desktop's that holds the seat holds its pointer.
+        if self.seat_held || self.menu.is_open() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.shell.lock_pointer(wm, self.compositor)
+    }
+
     fn window_closed(&mut self, window_id: u64) {
         self.windows.closed.push(window_id);
         // Nothing a dead window declared can still be true.
         if let Some(wm) = self.windows.wm_id(window_id) {
             self.shell.forget_tooltip(wm);
+            if self.shell.pointer_lock() == Some(wm) {
+                let _ = self.shell.unlock_pointer(self.compositor);
+            }
         }
         // A chain is scoped by the window that asked for it, so the window
         // going means the chain goes; its answer is queued for the session's
@@ -3887,9 +3917,9 @@ mod tests {
             self.windows.note_delivered(&WindowEvent::Key {
                 window_id: id,
                 key: KeyInput::Pressed {
-                    key: tairix_abi::input::KeyValue::Char('a'),
+                    key: Some(tairix_abi::input::KeyValue::Char('a')),
                     modifiers: tairix_abi::input::Modifiers::default(),
-                    physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+                    physical: tairix_abi::input::PhysicalKey::A,
                 },
             });
         }

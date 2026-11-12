@@ -72,6 +72,33 @@ pub struct Options {
     /// `--no-preserve=mode` it is born with the mode a new node takes when
     /// nothing names one.
     pub source_modes: bool,
+    /// What each copy keeps of its source besides its bytes and attributes
+    /// (`-p`, `-a`, `--preserve=mode,ownership,timestamps`).
+    pub keep: Keep,
+}
+
+/// What a copy keeps of its source: its exact mode, its owner as far as the
+/// copier may give it, and its access and modification times as nearly as
+/// the destination holds them.
+// Three independent `--preserve` members, transcribed one-to-one.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Keep {
+    /// `--preserve=mode`.
+    pub mode: bool,
+    /// `--preserve=ownership`.
+    pub ownership: bool,
+    /// `--preserve=timestamps`.
+    pub timestamps: bool,
+}
+
+impl Keep {
+    /// What `-p` and a bare `--preserve` keep: all three.
+    pub const ALL: Self = Self {
+        mode: true,
+        ownership: true,
+        timestamps: true,
+    };
 }
 
 /// What a non-directory source becomes at the destination.
@@ -121,6 +148,11 @@ impl Options {
         sparse: Sparse::Auto,
         attributes: Attributes::Carry,
         source_modes: true,
+        keep: Keep {
+            mode: false,
+            ownership: false,
+            timestamps: false,
+        },
     };
 }
 
@@ -165,18 +197,18 @@ enum Flag {
     NoDereferencePreserveLinks,
     Preserve,
     NoPreserve,
+    /// `-p`, a bare `--preserve`.
+    PreserveAll,
+    /// `-a`, `-dR --preserve=all`.
+    Archive,
     Sparse,
-    /// An option refused rather than honoured in part, carrying its own
-    /// spelling for the refusal.
-    Unsupported(&'static str),
     Help,
 }
 
 /// `cp`'s options, as GNU's `cp` spells them and in its order, and the
 /// reserved help switches.
 const OPTIONS: &[Opt<Flag>] = &[
-    Opt::letter('a', Takes::Nothing, Flag::Unsupported("-a")),
-    Opt::long(&["archive"], Takes::Nothing, Flag::Unsupported("--archive")),
+    Opt::flag('a', &["archive"], Flag::Archive),
     Opt::letter('d', Takes::Nothing, Flag::NoDereferencePreserveLinks),
     Opt::flag('L', &["dereference"], Flag::Dereference),
     Opt::flag('f', &["force"], Flag::Force),
@@ -185,6 +217,7 @@ const OPTIONS: &[Opt<Flag>] = &[
     Opt::flag('l', &["link"], Flag::Link),
     Opt::flag('n', &["no-clobber"], Flag::NoClobber),
     Opt::flag('P', &["no-dereference"], Flag::NoDereference),
+    Opt::letter('p', Takes::Nothing, Flag::PreserveAll),
     Opt::long(&["no-preserve"], Takes::Value, Flag::NoPreserve),
     Opt::flag('T', &["no-target-directory"], Flag::NoTargetDirectory),
     Opt::long(&["preserve"], Takes::Attached, Flag::Preserve),
@@ -202,20 +235,24 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// [`Command`].
 ///
 /// The grammar is the GNU `cp` surface,
-/// `cp [-dfHilLnPrRsvT] [-t dir] [--] source... dest`, read as GNU's
+/// `cp [-adfHilLnPprRsvT] [-t dir] [--] source... dest`, read as GNU's
 /// `getopt_long` reads it ([`Scan`]): options anywhere among the operands,
 /// clustered, a long one by any unambiguous prefix, `--` ending them. The
 /// help switches (`-h`, `-?`, `--help`) answer at once. The later of `-i`
 /// and `-n`, of `-l` and `-s`, and of `-H`, `-L` and `-P` wins; `-d` is `-P`
-/// with `--preserve=links`. The values:
+/// with `--preserve=links`, `-p` is `--preserve=mode,ownership,timestamps`,
+/// and `-a` is `-dR --preserve=all`. The values:
 ///
-/// * `--preserve=LIST` — `links` keeps two sources' shared node shared, and
+/// * `--preserve[=LIST]` — `mode` gives each copy its source's exact mode,
+///   `ownership` its owner and group as far as the copier may give them,
+///   `timestamps` its access and modification times as nearly as the
+///   destination holds them, `links` keeps two sources' shared node shared,
 ///   `xattr` makes every extended attribute a copy must carry, failing one
-///   the destination cannot keep.
-/// * `--no-preserve=LIST` — `xattr` carries no extended attribute, `links`
-///   copies a shared node twice, `mode` makes each new node in the default
-///   mode rather than its source's; `ownership` and `timestamps` are already
-///   not preserved.
+///   the destination cannot keep, and `all` all but `xattr`'s failing; a
+///   bare `--preserve` is `mode,ownership,timestamps`.
+/// * `--no-preserve=LIST` — the same members, undone: `mode` also makes each
+///   new node in the default mode rather than its source's, `xattr` carries
+///   no extended attribute, `links` copies a shared node twice.
 /// * `--sparse=WHEN` — `auto` keeps a sparse file's holes, `always` also
 ///   leaves its stored zeros unwritten, `never` writes every byte.
 ///
@@ -226,13 +263,11 @@ const OPTIONS: &[Opt<Flag>] = &[
 /// # Errors
 ///
 /// * [`CpError::Option`] — an option `getopt` refuses, in its words.
-/// * [`CpError::Unsupported`] — `-a`/`--archive` and the `--preserve`
-///   members this system cannot honour completely: `--preserve=all`
-///   includes the timestamps no call can set here, so they are not honoured
-///   in part.
-/// * [`CpError::Usage`] — an empty `-t` directory, an unknown `--sparse` or
-///   `--no-preserve` value, `-t` combined with `-T`, or too few path
-///   operands.
+/// * [`CpError::Unsupported`] — `--preserve=context`: this system keeps no
+///   security context to carry.
+/// * [`CpError::Usage`] — an empty `-t` directory, an unknown `--sparse`,
+///   `--preserve` or `--no-preserve` value, `-t` combined with `-T`, or too
+///   few path operands.
 pub fn parse(args: &[&str]) -> Result<Command, CpError> {
     let mut options = Options::DEFAULT;
     let mut target_dir: Option<String> = None;
@@ -242,12 +277,6 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
         match arg.map_err(CpError::Option)? {
             Arg::Operand(path) => operands.push(String::from(path)),
             Arg::Opt(Flag::Help, _) => return Ok(Command::Help),
-            // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
-            // timestamps no call can set yet, so it is refused rather than
-            // delivered as a silently narrower `-dR`.
-            Arg::Opt(Flag::Unsupported(switch), _) => {
-                return Err(CpError::Unsupported(String::from(switch)));
-            }
             Arg::Opt(Flag::TargetDirectory, dir) => {
                 let dir = dir.filter(|dir| !dir.is_empty()).ok_or(CpError::Usage)?;
                 target_dir = Some(String::from(dir));
@@ -314,33 +343,52 @@ impl Options {
                 self.dereference = Dereference::Never;
                 self.preserve_links = true;
             }
+            Flag::PreserveAll => self.keep = Keep::ALL,
+            Flag::Archive => {
+                self.recursive = true;
+                self.dereference = Dereference::Never;
+                self.keep_all();
+            }
             Flag::TargetDirectory
             | Flag::NoTargetDirectory
             | Flag::Preserve
             | Flag::NoPreserve
             | Flag::Sparse
-            | Flag::Unsupported(_)
             | Flag::Help => {}
         }
     }
 
-    /// Apply `--preserve[=LIST]`.
+    /// Keep everything `--preserve=all` names: the mode, the owner, the
+    /// times, a shared node shared, and each extended attribute the
+    /// destination keeps, a failure to keep one not ending the copy.
+    fn keep_all(&mut self) {
+        self.keep = Keep::ALL;
+        self.preserve_links = true;
+        self.attributes = Attributes::Carry;
+    }
+
+    /// Apply `--preserve[=LIST]`, a bare one keeping what `-p` keeps.
     ///
     /// # Errors
     ///
-    /// [`CpError::Unsupported`], naming the option as `--preserve=LIST`, for
-    /// a bare `--preserve` or any member but `links` and `xattr`.
+    /// [`CpError::Unsupported`] for `context`, a security context this
+    /// system does not have, and [`CpError::Usage`] for a member `cp` does
+    /// not know.
     fn preserve(&mut self, list: Option<&str>) -> Result<(), CpError> {
         let Some(list) = list else {
-            return Err(CpError::Unsupported(String::from("--preserve")));
+            self.keep = Keep::ALL;
+            return Ok(());
         };
         for member in list.split(',') {
             match member {
+                "mode" => self.keep.mode = true,
+                "ownership" => self.keep.ownership = true,
+                "timestamps" => self.keep.timestamps = true,
                 "links" => self.preserve_links = true,
                 "xattr" => self.attributes = Attributes::Require,
-                // Every other member includes a node's mode, owner or
-                // timestamps, which this tool does not set.
-                _ => return Err(CpError::Unsupported(format!("--preserve={list}"))),
+                "all" => self.keep_all(),
+                "context" => return Err(CpError::Unsupported(format!("--preserve={list}"))),
+                _ => return Err(CpError::Usage),
             }
         }
         Ok(())
@@ -356,14 +404,20 @@ impl Options {
             match member {
                 "links" => self.preserve_links = false,
                 "xattr" => self.attributes = Attributes::Skip,
-                "mode" => self.source_modes = false,
+                "mode" => {
+                    self.source_modes = false;
+                    self.keep.mode = false;
+                }
+                "ownership" => self.keep.ownership = false,
+                "timestamps" => self.keep.timestamps = false,
                 "all" => {
                     self.preserve_links = false;
                     self.attributes = Attributes::Skip;
                     self.source_modes = false;
+                    self.keep = Keep::default();
                 }
-                // Already never preserved, so already as asked.
-                "ownership" | "timestamps" | "context" => {}
+                // No security context is ever kept, so already as asked.
+                "context" => {}
                 _ => return Err(CpError::Usage),
             }
         }
@@ -374,7 +428,8 @@ impl Options {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, Attributes, Clobber, Command, Contents, Dereference, Options, Sparse, TargetMode,
+        parse, Attributes, Clobber, Command, Contents, Dereference, Keep, Options, Sparse,
+        TargetMode,
     };
     use crate::error::CpError;
     use alloc::string::{String, ToString};
@@ -657,34 +712,48 @@ mod tests {
     }
 
     #[test]
-    fn archive_and_the_other_preserve_members_are_refused_naming_themselves() {
-        // Refused, never narrowed: `--preserve=all` includes timestamps that
-        // no call can set, so honouring `-a` in part would report a
-        // preservation that did not happen.
-        for arg in [
-            "-a",
-            "--archive",
-            "--preserve",
-            "--preserve=all",
-            "--preserve=mode",
-        ] {
-            assert_eq!(
-                parse(&[arg, "a", "b"]),
-                Err(CpError::Unsupported(String::from(arg))),
-                "{arg}"
-            );
-        }
-        // The members this tool can honour are accepted, alone or listed.
-        assert!(parse(&["--preserve=links", "a", "b"]).is_ok());
-        assert_eq!(
-            parse(&["--preserve=links,mode", "a", "b"]),
-            Err(CpError::Unsupported(String::from("--preserve=links,mode")))
-        );
-        let Ok(Command::Copy { options, .. }) = parse(&["--preserve=links,xattr", "a", "b"]) else {
-            panic!("expected a copy");
+    fn preserve_members_keep_what_they_name_and_p_and_a_are_gnus() {
+        let options = |args: &[&str]| match parse(args) {
+            Ok(Command::Copy { options, .. }) => options,
+            other => panic!("expected a copy: {other:?}"),
         };
-        assert!(options.preserve_links);
-        assert_eq!(options.attributes, Attributes::Require);
+        for args in [&["-p", "a", "b"][..], &["--preserve", "a", "b"]] {
+            assert_eq!(options(args).keep, Keep::ALL, "{args:?}");
+        }
+        let one = options(&["--preserve=timestamps", "a", "b"]).keep;
+        assert_eq!(
+            one,
+            Keep {
+                timestamps: true,
+                ..Keep::default()
+            }
+        );
+        let archive = options(&["-a", "a", "b"]);
+        assert_eq!(
+            archive,
+            Options {
+                recursive: true,
+                dereference: Dereference::Never,
+                preserve_links: true,
+                keep: Keep::ALL,
+                ..Options::DEFAULT
+            },
+            "-a is -dR --preserve=all"
+        );
+        assert_eq!(options(&["--archive", "a", "b"]), archive);
+        let undone = options(&["-p", "--no-preserve=ownership,timestamps", "a", "b"]).keep;
+        assert_eq!(
+            undone,
+            Keep {
+                mode: true,
+                ..Keep::default()
+            }
+        );
+        assert_eq!(
+            parse(&["--preserve=context", "a", "b"]),
+            Err(CpError::Unsupported(String::from("--preserve=context")))
+        );
+        assert_eq!(parse(&["--preserve=colour", "a", "b"]), Err(CpError::Usage));
     }
 
     #[test]

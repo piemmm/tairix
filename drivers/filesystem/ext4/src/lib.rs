@@ -35,9 +35,12 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     AclModel, AllocationClass, DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead,
     FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeHost, VolumeStats, WriteRefusal,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, StampField, Unpinned, VolumeHost, VolumeStats,
+    WriteRefusal,
 };
-use tairix_abi::fs::{is_component, SeekRegion, FS_SYMLINK_MAX};
+use tairix_abi::fs::{
+    is_component, SeekRegion, StampChange, TimesChange, TimesKept, FS_SYMLINK_MAX,
+};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::RadixTree;
@@ -240,6 +243,37 @@ fn encode_inode_time(time: Time64, extended: bool) -> Option<(u32, u32)> {
         .ok()
         .filter(|&epoch| epoch <= if extended { 3 } else { 0 })?;
     Some((base, epoch | (time.subsec_nanos() << 2)))
+}
+
+/// What a stamp with an `_extra` field holds: the nanosecond, 1901 to 2446,
+/// four 32-bit epochs of seconds.
+const EXTENDED_STAMPS: StampField = StampField::new(
+    Time64::from_secs(-(1 << 31)),
+    1,
+    0..(1 << 34) * 1_000_000_000,
+);
+
+/// What a classic seconds field holds alone: the second, 1901 to 2038.
+const CLASSIC_STAMPS: StampField =
+    StampField::new(Time64::from_secs(-(1 << 31)), 1_000_000_000, 0..1 << 32);
+
+/// What `stamp` holds in record `raw`.
+fn stamp_field(raw: &[u8], stamp: Stamp) -> &'static StampField {
+    if has_extra(raw, stamp.fields().1) {
+        &EXTENDED_STAMPS
+    } else {
+        &CLASSIC_STAMPS
+    }
+}
+
+/// Record `change` as `stamp`: a keep leaves it, a now records `now` as
+/// [`put_stamps`] does, and an instant — one the field holds — exactly.
+fn put_stamp_change(raw: &mut [u8], stamp: Stamp, change: StampChange, now: Option<Time64>) {
+    match change {
+        StampChange::Keep => {}
+        StampChange::Now => put_stamps(raw, now, &[stamp]),
+        StampChange::At(at) => put_stamps(raw, Some(at), &[stamp]),
+    }
 }
 
 /// Record `now` as each of `stamps`, or no stamp — zero fields — while the
@@ -2161,6 +2195,35 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
                 return Ok(0);
             }
             fs.write_file(ino, &mut raw, offset, data)
+        })
+    }
+
+    /// An append-only inode takes only both times stamped now, and an
+    /// immutable one no change, as `utimensat(2)` documents.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let ino = node_inode(node)?;
+        if change.is_empty() {
+            return Ok(TimesKept::Exactly);
+        }
+        self.operation(|fs| {
+            let mut raw = fs.inode_scratch()?;
+            fs.read_inode_raw(ino, &mut raw)?;
+            let (accessed, a) =
+                stamp_field(&raw, Stamp::Access).fit_change(change.accessed, change.nearest)?;
+            let (modified, m) =
+                stamp_field(&raw, Stamp::Modify).fit_change(change.modified, change.nearest)?;
+            let flags = le32(&raw, INODE_FLAGS);
+            if flags & INODE_FLAG_IMMUTABLE != 0
+                || (flags & INODE_FLAG_APPEND != 0 && !change.is_touch())
+            {
+                return Err(DriverError::PermissionDenied);
+            }
+            let now = fs.now();
+            put_stamp_change(&mut raw, Stamp::Access, accessed, now);
+            put_stamp_change(&mut raw, Stamp::Modify, modified, now);
+            put_stamps(&mut raw, now, &[Stamp::Change]);
+            fs.write_inode_raw(ino, &mut raw)?;
+            Ok(a.and(m))
         })
     }
 

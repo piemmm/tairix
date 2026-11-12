@@ -279,7 +279,7 @@ where
 {
     answered.clear();
     // No gesture of the shell's can complete while the chain takes the stream.
-    seat.shell.yield_pointer(seat.compositor);
+    take_pointer(seat, pointer);
     let mut moved = false;
     let mut handled = false;
     let pointer_empty = loop {
@@ -354,6 +354,9 @@ where
     C: KeyInputChannel,
     R: SeatRouter,
 {
+    // A drag carries the pointer it moves.
+    let _ = seat.shell.unlock_pointer(seat.compositor);
+    pointer.set_pointer_locked(false);
     let mut ended = None;
     let pointer_empty = loop {
         if ended.is_some() || !seat.shell.drag_active() {
@@ -432,7 +435,7 @@ where
     C: KeyInputChannel,
     R: SeatRouter,
 {
-    seat.shell.yield_pointer(seat.compositor);
+    take_pointer(seat, pointer);
     let pointer_empty = loop {
         if !seat.capture.holds_seat() || seat.menu.is_open() {
             break false;
@@ -514,6 +517,18 @@ impl<P: InputSource + ?Sized> InputSource for Clicks<'_, P> {
         );
         Ok(polled)
     }
+
+    fn set_pointer_locked(&mut self, locked: bool) {
+        self.inner.set_pointer_locked(locked);
+    }
+}
+
+/// Take the pointer from the shell for a holder of its own: the gesture the
+/// shell had in flight ends, a pointer lock among it, and the device's motion
+/// moves the pointer again.
+fn take_pointer<P: InputSource + ?Sized>(seat: &mut Seat<'_>, pointer: &mut P) {
+    seat.shell.yield_pointer(seat.compositor);
+    pointer.set_pointer_locked(false);
 }
 
 /// Drain the seat straight into the engaged lock: no motion, click or key
@@ -540,7 +555,7 @@ where
     C: KeyInputChannel,
 {
     // The shell will not see the release that ends any gesture in flight.
-    seat.shell.yield_pointer(seat.compositor);
+    take_pointer(seat, pointer);
     while let Some(Timed {
         value: event,
         at_ns,
@@ -580,7 +595,7 @@ where
     P: InputSource + ?Sized,
     C: KeyInputChannel,
 {
-    seat.shell.yield_pointer(seat.compositor);
+    take_pointer(seat, pointer);
     while prompt.is_up() {
         let Some(Timed {
             value: event,
@@ -676,7 +691,7 @@ where
     C: KeyInputChannel,
 {
     let mut waking = Waking::Moved;
-    seat.shell.yield_pointer(seat.compositor);
+    take_pointer(seat, pointer);
     while let Some(Timed { value: event, .. }) = pointer.poll(now_ns)? {
         match event {
             InputEvent::PointerMoved { to } => seat.shell.track_pointer(to, seat.compositor),

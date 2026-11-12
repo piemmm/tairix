@@ -16,8 +16,8 @@ Stability tier: **experimental**.
 | Item | Contents |
 |------|----------|
 | `encode_key(key, modifiers, out)` | Write the console (tty) bytes one key press sends into `out`, returning their length. |
-| `encode_key_input(record, out)` | The same for a wire `KeyInput` record, for the kernel arbiter's text sink; a release or a modifier change writes nothing. |
-| `key_record(keyboard, physical, pressed)` | The wire `KeyInput` record a keyboard producer injects for one key edge, resolved through its `lib/input` `KeyboardState`: a `ModifiersChanged` record, a press or release carrying the physical key unchanged, or nothing. |
+| `encode_key_input(record, out)` | The same for a wire `KeyInput` record, for the kernel seat's text sink; a release, or a key that typed nothing, writes nothing. |
+| `key_record(keyboard, physical, pressed)` | The wire `KeyInput` record a seat reads one key edge as through its `lib/input` `KeyboardState` — a press or release carrying the physical key, what it typed if anything, and the modifiers it left — or nothing for a repeat or an unheld release. |
 | `MAX_KEY_BYTES` | The longest sequence any key encodes to; a buffer of this size never overflows. |
 | `KeymapError` | The single failure mode — `BufferTooSmall`. |
 

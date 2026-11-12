@@ -23,7 +23,7 @@ use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::PAGE_SIZE;
 use tairix_arch_x86_64::{fault, qemu_exit};
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
@@ -53,7 +53,7 @@ const STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
 const MAX_STEPS: u64 = 1_000_000;
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

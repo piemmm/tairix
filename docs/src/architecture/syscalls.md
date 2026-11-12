@@ -75,7 +75,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 |  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
 |  21 | `stream_input_mode` | `u32 fd`, `u32 mode`               | `errno` | `CAP_CONSOLE_READ`      | no      |
-|  22 | `key_inject`   | `u64 seat`, `user_ptr` (record), `len`  | `u64` (bytes) | `CAP_INPUT_INJECT` | no    |
+|  22 | `key_inject`   | `u64 seat`, `user_ptr` (key edge), `len` | `u64` (bytes) | `CAP_INPUT_INJECT` | no    |
 |  23 | `display_acquire` | `u64 seat`                           | `u64` (lease generation) | `CAP_DISPLAY` | yes |
 |  24 | `display_release` | `u64 seat`, `u64 next` (`ReleaseSurface`) | `errno` | `CAP_DISPLAY`      | yes     |
 |  25 | `keyboard_read`| `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
@@ -99,18 +99,18 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  43 | `waitset_create` | —                                     | `Handle` (set) | —               | no      |
 |  44 | `waitset_ctl`  | `Handle` (set), `u32 op`, `u32 kind`, `u64 id`, `u64 token` | `errno` | —     | no      |
 |  45 | `waitset_wait` | `Handle` (set), `u64 timeout_ns`, `user_ptr` (token out) | `errno` | —        | no      |
-|  46 | `fs_open`      | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `u32 mode` | `u64` (fd) | `CAP_FS_ACCESS` | yes |
+|  46 | `fs_open`      | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `u32 mode` | `u64` (fd) | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | yes |
 |  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
 |  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | yes |
-|  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`, `u32 from` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+|  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`, `u32 from` | `u64` (bytes) | — (in-handler: `CAP_FS_ACCESS` of the caller, or of the directory capability listed) | no |
 |  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | —             | no    |
 |  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | —             | yes   |
 |  53 | `fs_sync`      | `u32 fd`                                | `errno`       | —             | no    |
-|  54 | `fs_mkdir`     | `u32 dirfd`, `user_ptr` (path), `len`, `u32 mode` | `errno` | `CAP_FS_ACCESS` | yes |
-|  55 | `fs_unlink`    | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | `CAP_FS_ACCESS` | yes |
+|  54 | `fs_mkdir`     | `u32 dirfd`, `user_ptr` (path), `len`, `u32 mode` | `errno` | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | yes |
+|  55 | `fs_unlink`    | `u32 dirfd`, `user_ptr` (path), `len`, `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | yes |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
-|  57 | `fs_rename`    | `user_ptr` (`PathAt` from), `user_ptr` (`PathAt` to), `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | `CAP_FS_ACCESS` | yes |
+|  57 | `fs_rename`    | `user_ptr` (`PathAt` from), `user_ptr` (`PathAt` to), `u32 flags`, `user_ptr?` (`NodeExpect`) | `errno` | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | yes |
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 |  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
@@ -166,8 +166,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 111 | `futex_wait`   | `user_ptr uaddr`, `u32 expected`, `u64 timeout_ns` | `errno` | —             | no  |
 | 112 | `futex_wake`   | `user_ptr uaddr`, `u32 count`           | `u64` (woken) | —                 | no  |
 | 113 | `fs_symlink`   | `user_ptr` (target), `len`, `u32 dirfd`, `user_ptr` (link), `len` | `errno` | `CAP_FS_ACCESS` | yes |
-| 114 | `fs_readlink`  | `u32 dirfd`, `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
-| 115 | `fs_link`      | `user_ptr` (`PathAt` existing), `user_ptr` (`PathAt` new), `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
+| 114 | `fs_readlink`  | `u32 dirfd`, `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | no |
+| 115 | `fs_link`      | `user_ptr` (`PathAt` existing), `user_ptr` (`PathAt` new), `u32 flags` | `errno` | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | yes |
 | 116 | `fs_realpath`  | `u32 dirfd`, `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 | 117 | `port_read`    | `Handle handle`, `len port`, `u32 width` | `u64` (value) | `CAP_MMIO_MAP`       | no      |
 | 118 | `port_write`   | `Handle handle`, `len port`, `u32 width`, `len value` | `errno` | `CAP_MMIO_MAP` | yes |
@@ -206,7 +206,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 151 | `fs_seek_region` | `u32 fd`, `u64 offset`, `u32 region` | `u64` (offset) | — | no |
 | 152 | `fs_punch`     | `u32 fd`, `u64 offset`, `u64 len`       | `errno`       | —                       | yes     |
 | 153 | `fs_umask`     | `u32 mask`                              | `u64` (previous mask) | —               | no      |
-| 154 | `fs_access`    | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 want`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | no |
+| 154 | `fs_access`    | `u32 dirfd`, `user_ptr?` (path), `len`, `u32 want`, `u32 flags` | `errno` | — (in-handler: `CAP_FS_ACCESS`, unless named through a directory capability) | no |
 | 155 | `volume_read`  | `u64 volume`, `u64 lba`, `user_ptr` (out), `len` | `errno` | `CAP_FS_SERVE`          | no      |
 | 156 | `volume_write` | `u64 volume`, `u64 lba`, `user_ptr`, `len` | `errno`      | `CAP_FS_SERVE`          | no      |
 | 157 | `volume_ctl`   | `u64 volume`, `user_ptr` (`VolumeCtl`), `len`, `user_ptr` (reply), `len` | `u64` (bytes) | `CAP_FS_SERVE` | no |
@@ -224,6 +224,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 169 | `volume_replay` | `user_ptr` (`VolumeReplayRequest`), `len` | `errno` (`ReadOnly`: the writes were not written, the medium no longer proving unmutated) | — (in-service, for a volume awaiting the answer: `CAP_FS_MOUNT` for any, or the process holding the seat, with `CAP_DISPLAY`, for a removable one) | yes |
 | 170 | `child_origin` | `i64 pid`, `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 | 171 | `shm_grant_to` | `Handle` (region), `*const ProcId recipient`, `usize len` | `u64` (handle) | `CAP_SHM` | yes |
+| 172 | `code_install` | `i64 compiler`, `i64 target`, `u64 base` (in the compiler's space), `len` | `u64` (address in the target) | `CAP_JIT_MAP_EXEC` | yes |
+| 173 | `fs_set_times` | `u32 dirfd`, `user_ptr?` (path), `len`, `user_ptr` (`TimesChange`), `len`, `u32 flags` | `u64` (`TimesKept`) | — (in-handler: `CAP_FS_ACCESS` of the acting identity) | yes |
+| 174 | `fs_volume_stats` | `u32 fd`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler, as `fs_stat`) | no |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -277,8 +280,21 @@ descriptor is `NotADirectory` and an unopened number `NotFound`; an absolute
 path ignores `dirfd`. The walk begins at the held node and is never spelled
 out as text: `..` names the directory the walk came through, and search
 permission is checked, as the caller, on every directory looked in, the start
-included. A descriptor confers no authority on a walk, since directories are
-never granted or conferred. An alias spelling (`Alias:/…` or the expanded
+included. A descriptor confers no authority on a walk unless it is a
+**directory capability** — a directory handed on by `fd_grant` under
+`GRANT_SUBTREE`, or one opened beneath such a capability. A path named
+through one acts as the identity frozen into it, which holds no capability but
+`CAP_FS_ACCESS`, needs none of the caller's, and stays beneath the
+capability's directory: an absolute path, a `..` at that directory and a link
+whose target is absolute are `PermissionDenied`. A zero ceiling makes it
+read-only beneath — a write, create or truncate open, `fs_mkdir`,
+`fs_unlink`, `fs_rename` and `fs_link` are `PermissionDenied` — and any other
+bounds each file written there as a writable file grant is. What it opens is
+held under the same capability. A call that names two paths acts as one
+authority, so naming one through a capability and the other not, or through
+two different ones, is `PermissionDenied`. `fs_symlink`, `fs_realpath`,
+`fs_chdir`, and the path forms of `fs_set_mode` and `fs_set_owner` never act
+through a capability and refuse one with `PermissionDenied`. An alias spelling (`Alias:/…` or the expanded
 `alias::Name/…`) or an `id::` root names a first-class storage root and starts
 there: a *machine alias* (`System:`, `Users:`, `Storage:`) is the canonical
 root the `/` view projects as `/<Name>`, so `System:/Logs/a` resolves to the
@@ -309,6 +325,28 @@ asks `CAP_FS_ACCESS`, since spelling the path reads every directory above
 it. The per-process directory lives beside the task's streams and
 limits in `kernel/core::aspace::AddressSpaceRegistry` and is released when the
 task exits.
+
+`fs_set_times` (no. 173) is `utimensat(2)`: the 40-byte `TimesChange` record
+names, for the access and the modification time each, a keep, a now or an
+instant, and whether an instant the volume cannot keep is held to the nearest
+it can rather than refused with `TimestampOutOfRange`; the answer is
+`TimesKept` — whether every instant was kept exactly. The change time moves
+with any change, and a change that sets nothing is answered unchecked.
+Stamping both times now needs ownership or write access; any other change
+needs ownership — or, of a node whose format records no owner, write access —
+and no capability overrides it. A path named through a directory capability,
+or a granted descriptor, acts as the grant's frozen identity where the grant
+writes and is refused where it does not; everything else acts as the caller.
+`AtFlags::NO_FOLLOW` changes a final link itself and `AtFlags::EMPTY_PATH`
+the node `dirfd` holds. Audited, with what each time became.
+
+`fs_volume_stats` (no. 174) is `fstatvfs(2)`: the 48-byte `VolumeStats` of the
+volume a descriptor's node lies on — block size, the reserve flag, total, free
+and available blocks, inodes and free inodes — as its driver reports it at the
+call. Holding the descriptor is the authority, checked as `fs_stat` checks it,
+so a directory capability's holder learns how much room its folder has; a
+pipe, a resource and the storage catalog lie on no volume and are
+`NotSupported`.
 
 `fs_access` (no. 154) is `faccessat(2)` under the caller's real identity:
 whether the node a path reaches grants every `Access` bit asked (`READ`,
@@ -593,7 +631,8 @@ next operation on that volume.
 **The descriptor decides the identity**, so every call operating a
 descriptor's contents is ungated at the dispatcher and applies the backing's
 own check in the handler: `fs_read`, `fs_write`, `fs_close`, `fs_stat`,
-`fs_truncate`, `fs_sync`, `file_map`, and the attribute reads `fs_attr_get`
+`fs_volume_stats`, `fs_truncate`, `fs_sync`, `file_map`, and the attribute
+reads `fs_attr_get`
 and `fs_attr_list` through a descriptor open for reading. The metadata
 changes that name a descriptor — `fs_set_mode` and `fs_set_owner` with
 `EMPTY_PATH`, `fs_attr_set` and `fs_attr_remove` — act as the caller instead,
@@ -612,12 +651,16 @@ identity owns the node and the descriptor is not a grant: an owner may restore
 any bit, so exempting it protects nothing, and it is what POSIX needs of a
 file created and then made read-only. A grant never has the exemption, so the
 owner's chmod revokes it. Search permission above a held node is never
-re-checked: a descriptor is not a name. `fs_readdir` keeps its blanket gate,
-because `fd_grant` refuses a directory and so no delegated listing exists.
-`fd_grant`'s `flags` holds `GRANT_FILE_ONLY` to delegate only a regular file,
-refusing a pipe end or anything else with `OutOfRange`, judged from the node
-the descriptor pinned, so the check reads no volume: what a relay that
-promises its recipient a document mints with. Any other bit is refused.
+re-checked: a descriptor is not a name. `fs_readdir` lists a directory
+capability as its frozen identity and anything else as the caller, who needs
+`CAP_FS_ACCESS`. `fd_grant`'s `flags` holds `GRANT_FILE_ONLY` to delegate only
+a regular file, refusing a pipe end or anything else with `OutOfRange`, judged
+from the node the descriptor pinned, so the check reads no volume: what a relay
+that promises its recipient a document mints with. `GRANT_SUBTREE` delegates a
+directory, and only a directory, as a capability floored at itself: a relayed
+capability is floored at the directory relayed and keeps the lesser ceiling,
+so it only narrows. A directory without the flag, both flags, and any other
+bit are refused.
 
 **Every descriptor counts against `open-files`.** The `LimitKind::OpenFiles`
 soft bound — one descriptor per 64 KiB of installed RAM, at least 1024, by
@@ -712,13 +755,14 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_access`, `fs_chdir` (the path-taking calls), `fs_attr_set`, `fs_attr_remove`, `fd_grant`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map`, and `fs_attr_get` and `fs_attr_list` — as that identity through a descriptor open for reading, as the caller's own otherwise; every attribute call is admitted before its key or value is copied in |
+| `CAP_FS_ACCESS`    | `fs_symlink`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_chdir` (the path-taking calls that never act through a directory capability), `fs_getcwd`, `fs_watch`, `fs_watch_read`, `fs_attr_set`, `fs_attr_remove`, `fd_grant`, `fd_redeem_location`, and — enforced *in the handler* against the identity a node-backed descriptor acts as: the caller's own, or the one frozen into a conferred or granted descriptor — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_volume_stats`, `fs_truncate`, `fs_sync`, `fs_seek_region`, `fs_punch`, `fs_lock`, `fs_lock_query`, `file_map`, and `fs_attr_get` and `fs_attr_list` — as that identity through a descriptor open for reading, as the caller's own otherwise; every attribute call is admitted before its key or value is copied in; and in the handler against the caller, or the identity frozen into the directory capability a path is named through or a listing reads: `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_readlink`, `fs_link`, `fs_access`, and `fs_set_times`, whose descriptor form acts as a writing grant's identity |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_FS_SERVE`     | `volume_read`, `volume_write`, `volume_ctl`, `volume_serve` (each also needs the caller's grant on the volume it names), `fsserve_offer` (from an attested application alone), `fsserve_ctl` |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
 | `CAP_SYSTEM_POWER` | `system_power`             |
 | `CAP_PROC_CONTROL` | `signal`, `sched_set_priority` (both enforced *in the handler*: the capability is one tier of the per-target rule — own child, else same principal, else this capability — so the dispatcher cannot gate the call flat; `sched_set_priority` additionally requires it for any *raise*) |
+| `CAP_JIT_MAP_EXEC` | `code_install`              |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -1980,6 +2024,37 @@ anonymous `RW` memory, which grants no authority over anything else — the
 same unprivileged baseline as "list my own processes" (`AGENTS.md` §16.6).
 There is no global user heap and no cross-process mapping; shared memory
 stays the capability-checked IPC object (`AGENTS.md` §4).
+
+`code_install(compiler, target, base, len)` (no. 172) is how a just-in-time
+compiler's output comes to run without any process ever holding a mapping that
+is writable and executable (`plans/BROWSER.md` BR26). `compiler` and `target`
+must be distinct, live, sandboxed children of the caller, each authorised as
+`child_origin` authorises a pid; anything else is `NotFound` or
+`PermissionDenied` before any memory is looked at. A compiler's first install
+pairs it with that target for the compiler's life — the pair names the
+target's address space, which no successor to its pid shares — so a
+compromised compiler reaches only the sandbox it already serves. Every page of
+`[base, base + len)`, rounded up to whole pages, must be anonymous memory the
+compiler mapped and wrote; a page the compressed tier parked is restored first,
+in the same hold of the compiler's space that moves it, one never written
+refuses the whole range (`NotFound`), and one the tier lost refuses it
+(`MediumError`). The target's address-space bound is
+charged and a placement taken in its code window before a page moves, so a full
+window (`OutOfMemory`) or a passed bound (`OutOfRange`) leaves the compiler's
+range as it was. The pages then leave the compiler with what they hold — out of
+its holding as `mem_unmap` takes them, off every CPU and out of its snapshot —
+and every page's data-cache lines are cleaned and every CPU's instruction fetch
+fenced past them before any is mapped read-execute, never writable, in the
+target, where they are published to the target's snapshot so the copy path
+reads what it executes. Only a page-table exhaustion (`OutOfMemory`) or a
+platform that refused the fence (`DeviceFault`) can refuse the install after
+that, the compiler's pages then scrubbed and freed. The target gives code back
+with `mem_unmap`, which recognises a range in its code window and credits each
+installed page. The two spaces are never locked at once. Audited. Wrapper
+`tairix_rt::code_install`; C stub `tairix_sys_code_install`. A compiler
+stages its code with `tairix_rt::stage_code`, which maps fresh pages, writes
+the code into them and leaves them owned by no Rust value, so their leaving
+the process is never seen.
 
 `mem_pin` (no. 92) / `mem_unpin` (no. 93) mark and clear the caller's
 entire anonymous memory — current and future — as **pinned**: ineligible

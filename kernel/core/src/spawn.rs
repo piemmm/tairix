@@ -560,6 +560,7 @@ const fn spawn_error_cause(error: SpawnError) -> &'static str {
         SpawnError::Misaligned => "misaligned",
         SpawnError::StartBlock(_) => "startup_block",
         SpawnError::OutOfMemory => "startup_block_unallocated",
+        SpawnError::InstructionFence => "instruction_fence_refused",
         // `SpawnError` is `#[non_exhaustive]`; a future variant audits as a
         // generic build failure until it earns its own stable cause string.
         _ => "build_failed",
@@ -1438,6 +1439,10 @@ mod tests {
         fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
             self.0.sync_instruction_cache(phys, len);
         }
+
+        fn fence_instruction_fetch(&self) -> bool {
+            self.0.fence_instruction_fetch()
+        }
     }
 
     /// `space` retained as a live space over `simmap` and `frames`, as the
@@ -1462,6 +1467,8 @@ mod tests {
             8,
             VirtAddr::new(0x8000_0000),
             8,
+            VirtAddr::new(0),
+            0,
         )
         .expect("windows are valid")
     }

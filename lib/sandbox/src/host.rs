@@ -214,6 +214,13 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
         self.live.is_some()
     }
 
+    /// The channel to the running worker, the one that answered the last
+    /// request: what an owner names that worker to the kernel by.
+    #[must_use]
+    pub const fn live(&self) -> Option<&L::Channel> {
+        self.live.as_ref()
+    }
+
     /// The longest document a worker of this seam may be handed
     /// ([`Launcher::document_room`]).
     #[must_use]
@@ -533,6 +540,34 @@ mod tests {
         // The caller survives and the next request starts the replacement.
         assert_eq!(sandbox.request(b"three"), Ok(b"ok".to_vec()));
         assert_eq!(sandbox.launcher.launched, 2);
+    }
+
+    #[test]
+    fn the_live_worker_is_the_one_that_answered_and_none_once_it_is_gone() {
+        let mut second = worker(1);
+        second.reply = b"second".to_vec();
+        let launcher = ScriptedLauncher {
+            scripts: vec![Ok(worker(1)), Ok(second)],
+            launched: 0,
+            disposed: 0,
+        };
+        let mut sandbox = ParserSandbox::new(launcher, RecordingSink::default());
+        assert!(sandbox.live().is_none(), "none started before a request");
+        assert_eq!(sandbox.request(b"one"), Ok(b"ok".to_vec()));
+        assert_eq!(
+            sandbox.live().map(|worker| worker.reply.as_slice()),
+            Some(&b"ok"[..])
+        );
+        assert!(sandbox.request(b"two").is_err());
+        assert!(sandbox.live().is_none(), "a worker contained is not live");
+        assert_eq!(sandbox.request(b"three"), Ok(b"second".to_vec()));
+        assert_eq!(
+            sandbox.live().map(|worker| worker.reply.as_slice()),
+            Some(&b"second"[..]),
+            "its replacement"
+        );
+        sandbox.release();
+        assert!(sandbox.live().is_none());
     }
 
     #[test]

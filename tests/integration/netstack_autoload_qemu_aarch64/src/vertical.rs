@@ -4,12 +4,12 @@
 use core::panic::PanicInfo;
 
 use tairix_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel::aarch64::boot as boot_aarch64;
 
 /// Static boot heap, mirroring the production aarch64 kernel binary's
 /// `.bss`-resident heap (zeroed by the boot trampoline).
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

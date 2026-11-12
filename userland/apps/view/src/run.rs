@@ -99,7 +99,7 @@ mod program {
     use tairix_view::{Answer, Layout, Refusal, Request, WIN_HEIGHT, WIN_WIDTH};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pinch_input_events, pointer_input_events, pointer_point,
+        held_modifiers, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
         scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain, EventError,
         EventMailbox, EventSource, Owed, Parked, PostedRequest, Refused, Repaint, Target,
         WindowClient, WindowEvents, WindowSizing, EVENT_MAILBOX_CAPACITY,
@@ -1905,7 +1905,9 @@ mod program {
             // state a refusal they already know about. A window that already
             // holds a document keeps it. The viewer asks for no folder, so a
             // folder answer is nothing chosen too.
-            WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
+            WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
+            | WindowEvent::SubtreePicked { .. } => {
                 if app.windows[index].view.document().is_some() {
                     Acted::Idle
                 } else {
@@ -1931,9 +1933,7 @@ mod program {
                 modifiers,
                 ..
             } => {
-                let held = key_input_event(KeyInput::ModifiersChanged {
-                    modifiers: *modifiers,
-                });
+                let held = held_modifiers(*modifiers);
                 let inputs = core::iter::once(held)
                     .chain(pointer_input_events(*action, pointer_point(*x, *y)));
                 route_pointer(app, index, inputs, &layout, (scale, theme), reported)
@@ -1965,9 +1965,7 @@ mod program {
                 modifiers,
                 ..
             } => {
-                let held = key_input_event(KeyInput::ModifiersChanged {
-                    modifiers: *modifiers,
-                });
+                let held = held_modifiers(*modifiers);
                 let inputs = core::iter::once(held).chain(scroll_input_events(
                     pointer_point(*x, *y),
                     *dx,
@@ -1984,9 +1982,7 @@ mod program {
                 modifiers,
                 ..
             } => {
-                let held = key_input_event(KeyInput::ModifiersChanged {
-                    modifiers: *modifiers,
-                });
+                let held = held_modifiers(*modifiers);
                 let inputs = core::iter::once(held).chain(pinch_input_events(
                     pointer_point(*x, *y),
                     *phase,
@@ -2010,6 +2006,8 @@ mod program {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }

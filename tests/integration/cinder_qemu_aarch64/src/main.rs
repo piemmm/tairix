@@ -52,7 +52,7 @@ mod kernel {
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_itest_witness::{field_str, names_bundle};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_cinder_qemu_aarch64::{COMPANION_APP_NAME, THEN_APP_NAME};
@@ -64,7 +64,7 @@ mod kernel {
 
     /// Static boot heap, mirroring the production aarch64 kernel binary's
     /// `.bss`-resident heap (zeroed by the boot trampoline).
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

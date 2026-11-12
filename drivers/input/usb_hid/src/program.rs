@@ -6,7 +6,7 @@
 //! goes to the boot seat; a device that goes, or keeps faulting, is let go of
 //! first, so nothing it held stays pressed.
 
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerInput};
 use tairix_abi::seat::SEAT_PRIMARY;
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::{DriverError, Errno, HwProperty, LOG_FIELD_VALUE_MAX};
@@ -79,8 +79,8 @@ struct Seat {
 }
 
 impl SeatSink for Seat {
-    fn key(&mut self, record: &KeyInput) -> Result<(), DriverError> {
-        let _ = tairix_rt::key_inject(SEAT_PRIMARY, record);
+    fn key(&mut self, edge: &KeyEdge) -> Result<(), DriverError> {
+        let _ = tairix_rt::key_inject(SEAT_PRIMARY, edge);
         Ok(())
     }
 

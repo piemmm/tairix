@@ -11,13 +11,15 @@
 use alloc::collections::BTreeMap;
 
 use tairix_abi::blkio::BlkCommandCost;
+use tairix_abi::driver::filesystem::fit_kept;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
-    VolumeHost, VolumeStats, WriteRefusal,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, StampField,
+    Unpinned, VolumeHost, VolumeStats, WriteRefusal,
 };
 use tairix_abi::driver::DriverHandle;
+use tairix_abi::fs::{StampChange, TimesChange, TimesKept};
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{ARCHIVE_STAGING, ARCHIVE_WORK_FILES};
 use tairix_abi::DriverError;
@@ -29,7 +31,7 @@ use crate::data::{Check, Coding, Cursors, Data, Lead, Staged};
 use crate::format::Format;
 use crate::region::Regions;
 use crate::riscos;
-use crate::tree::{Body, Meta, Node, Tree, Unheld, ROOT};
+use crate::tree::{Body, Meta, Node, Recorded, Tree, Unheld, ROOT};
 
 /// The block size a served archive reports.
 const BLOCK: u32 = 512;
@@ -446,26 +448,35 @@ impl<A: VolumeAccess> ArchiveFs<A> {
     /// much of `record` as the format keeps, and the unrecorded stand-in for
     /// the rest.
     fn born(&self, kind: NodeKind, record: &NodeSecurity) -> Meta {
-        let now = self.now();
         let mode = if self.format.keeps_modes() {
             record.mode
         } else {
             NodeSecurity::unrecorded(kind).mode
         };
-        Meta {
+        let mut meta = Meta {
             mode: mode & 0o7777,
             owner: self
                 .format
                 .keeps_owners()
                 .then_some((record.uid, record.gid)),
-            times: NodeTimes {
-                created: now,
-                modified: now,
-                accessed: now,
-                changed: now,
-            },
+            times: NodeTimes::default(),
             acorn: None,
-        }
+            recorded: Recorded::default(),
+        };
+        meta.times.modified = self.held_now(&meta, false);
+        meta
+    }
+
+    /// The clock's reading as the modification time of a member with `meta`
+    /// keeps it: the last instant its record holds at or before now, or the
+    /// reading itself where it keeps none.
+    fn held_now(&self, meta: &Meta, root: bool) -> Time64 {
+        let now = self.now();
+        self.format
+            .member_times(meta, root)
+            .modified
+            .and_then(|field| field.floor(now))
+            .unwrap_or(now)
     }
 
     /// Refuse a name the format cannot spell.
@@ -517,11 +528,9 @@ impl<A: VolumeAccess> ArchiveFs<A> {
     /// RISC OS fields that stamp leaves it: a typed object's stamp is its one
     /// time.
     fn stamp(&self, id: u64) -> Result<(Time64, Option<acorn::Object>), DriverError> {
-        let now = self.now();
-        let acorn = self
-            .tree
-            .node(id)?
-            .meta
+        let meta = &self.tree.node(id)?.meta;
+        let now = self.held_now(meta, id == ROOT);
+        let acorn = meta
             .acorn
             .map(|object| riscos::dated(object, now))
             .transpose()?;
@@ -535,10 +544,13 @@ impl<A: VolumeAccess> ArchiveFs<A> {
         (now, acorn): (Time64, Option<acorn::Object>),
     ) -> Result<(), DriverError> {
         let gen = self.tree.fresh_gen();
+        let clock = self.now();
         let node = self.tree.node_mut(id)?;
         node.content_gen = gen;
         node.meta.times.modified = now;
-        node.meta.times.changed = now;
+        if node.meta.recorded.changed {
+            node.meta.times.changed = clock;
+        }
         node.meta.acorn = acorn;
         node.kept = None;
         self.cursors.forget(id);
@@ -619,6 +631,47 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
             fs.touched(id, stamp)?;
             Ok(data.len())
         })
+    }
+
+    /// A member keeps what its record keeps of either time, a tar's access
+    /// time recorded from then on; its change time moves only where its
+    /// record keeps one.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let id = node.raw();
+        let meta = self.tree.node(id)?.meta.clone();
+        let kept = self.format.member_times(&meta, id == ROOT);
+        let (modified, m) = fit_kept(kept.modified, change.modified, change.nearest)?;
+        let (accessed, a) = fit_kept(kept.accessed, change.accessed, change.nearest)?;
+        if modified == StampChange::Keep && accessed == StampChange::Keep {
+            return Ok(a.and(m));
+        }
+        self.rewritable(id)?;
+        let clock = self.now();
+        let held =
+            |field: Option<StampField>| field.and_then(|field| field.floor(clock)).unwrap_or(clock);
+        let mut times = meta.times;
+        times.modified = modified.applied(times.modified, held(kept.modified));
+        times.accessed = accessed.applied(times.accessed, held(kept.accessed));
+        let recorded = Recorded {
+            accessed: meta.recorded.accessed || accessed != StampChange::Keep,
+            ..meta.recorded
+        };
+        if recorded.changed {
+            times.changed = clock;
+        }
+        let acorn = meta
+            .acorn
+            .map(|object| riscos::dated(object, times.modified))
+            .transpose()?;
+        self.change(|fs| {
+            let node = fs.tree.node_mut(id)?;
+            node.meta.times = times;
+            node.meta.recorded = recorded;
+            node.meta.acorn = acorn;
+            node.kept = None;
+            Ok(())
+        })?;
+        Ok(a.and(m))
     }
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {

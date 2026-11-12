@@ -88,59 +88,67 @@ units. [`PointerInput::from_device_event`] is
 the one shared spelling of that mapping, so the virtio and USB HID driver
 processes can never diverge.
 
-## The keyboard record
+## Key edges and the keyboard record
 
-[`KeyInput`] is the desktop-level counterpart of `PointerInput`: a key
-going down or coming up, the [`KeyValue`] it produced — a Unicode
-character (`Char`) or a named
-non-character key ([`NamedKeyCode`]: Enter, the arrows, F1–F12, …) — the
-[`Modifiers`] (shift / ctrl / alt / meta) held at the time, and the
-[`PhysicalKey`] it was typed on. As with the pointer, this is the *resolved*
-event, not the device report: turning raw keycodes and a keyboard layout
-into a produced character is policy above the driver, not a second copy of
-the data (`AGENTS.md` §2.2).
+A keyboard driver reports only which key went down or came up: a
+[`KeyEdge`], its [`PhysicalKey`] and whether it was pressed, injected with
+`key_inject` (`CAP_INPUT_INJECT`). What a key *types* is the seat's to read.
+The kernel seat feeds every edge from every keyboard on it through one
+`lib/input` `KeyboardState` — the keys down, the modifiers held, the caps and
+num locks, and the US layout — so the keyboards on a seat share their
+modifiers and locks, as on every desktop: Shift held on one capitalises a
+letter typed on the other. A press of a key already down (a keyboard's own
+repeat, or the same key on a second keyboard) and a release of a key not down
+are consumed unread, so every key the seat reads comes up exactly once.
 
 The physical key is where the key sits, whatever the layout makes of it: its
 usage ID on the Keyboard/Keypad page (`0x07`) of the USB HID Usage Tables.
 USB and I2C keyboards report those usages natively, and the virtio-input
-driver maps its `evdev` keycodes onto them through one table. A binding made
-by position — a system chord such as Meta+Shift+3 — therefore holds under any
-layout, though the character the key types does not (`#` on a US keyboard,
-`£` on a UK one). A usage the page assigns no key is `PhysicalKey::UNKNOWN`,
-which matches nothing; the edge still carries what it typed.
+driver maps its `evdev` keycodes onto them through one table. Only a usage the
+page assigns a key is a `PhysicalKey`; a code no table names is no edge. A
+binding made by position — a system chord such as Meta+Shift+3 — therefore
+holds under any layout, though the character the key types does not (`#` on a
+US keyboard, `£` on a UK one).
 
-A third kind names no key at all: `ModifiersChanged` reports that the set
-of held modifiers changed. A modifier produces no character and is no
-`NamedKeyCode`, so it can never be typed into a text sink — but it still
-has to be *reported*, because a consumer that only ever sees keys cannot
-know a modifier is held when something other than a key arrives, a
-pointer press most of all. The keyboard drivers emit one per *observable*
-change: a key repeat, or letting go of one shift key while the other is
-still held, produces nothing.
+A key edge is exactly [`KeyEdge::WIRE_LEN`] (12) bytes, little-endian: a
+`"KED1"` magic, the ABI version, the kind (pressed `1`, released `2`), the
+usage, and two reserved zero bytes. [`KeyEdge::from_bytes`] refuses any other
+kind, a usage that names no key, and a dirty reserved field.
+
+What the seat reads each edge as is a [`KeyInput`]: the key going down or
+coming up, the [`KeyValue`] it typed if it typed one — a Unicode character
+(`Char`) or a named non-character key ([`NamedKeyCode`]: Enter, the arrows,
+F1–F12, …) — the [`Modifiers`] (shift / ctrl / alt / meta) held once it had
+gone down or come up, and its physical key. Every key reaches the seat's
+holder as a record: a modifier, a lock and a key the layout names no value
+for (Print Screen, keypad 5 with Num Lock off) type nothing, so a window that
+reads the keyboard raw sees every key, and one that reads text sees only the
+keys that type. A release types what its press did, whatever was let go or
+toggled meanwhile, so a reader pairs the two by value as surely as by
+position.
 
 A record is exactly [`KeyInput::WIRE_LEN`] (20) bytes, little-endian:
 
-| offset | size | field       | meaning                                               |
-|-------:|-----:|-------------|-------------------------------------------------------|
-|      0 |    4 | `magic`     | `"KIN1"`                                              |
-|      4 |    2 | `version`   | the ABI version                                       |
-|      6 |    2 | `kind`      | pressed `1`, released `2`, modifiers-changed `3`      |
-|      8 |    2 | `modifiers` | shift `0x1`, ctrl `0x2`, alt `0x4`, meta `0x8`        |
-|     10 |    2 | `key_class` | char `0`, named `1`                                   |
-|     12 |    4 | `codepoint` | the produced Unicode scalar, on a char record         |
-|     16 |    2 | `named`     | the [`NamedKeyCode`], on a named record               |
-|     18 |    2 | `physical`  | the physical key's HID usage, `0` where it is unknown |
+| offset | size | field       | meaning                                             |
+|-------:|-----:|-------------|-----------------------------------------------------|
+|      0 |    4 | `magic`     | `"KIN1"`                                            |
+|      4 |    2 | `version`   | the ABI version                                     |
+|      6 |    2 | `kind`      | pressed `1`, released `2`                           |
+|      8 |    2 | `modifiers` | shift `0x1`, ctrl `0x2`, alt `0x4`, meta `0x8`      |
+|     10 |    2 | `key_class` | typed nothing `0`, char `1`, named `2`              |
+|     12 |    4 | `codepoint` | the produced Unicode scalar, on a char record       |
+|     16 |    2 | `named`     | the [`NamedKeyCode`], on a named record             |
+|     18 |    2 | `physical`  | the physical key's HID usage                        |
 
-Exactly one of the two key fields is set for a given class, and a
-modifiers-changed record carries an all-zero key field, physical key
-included — its one legal spelling, so a dirty field is refused rather than
-read as a NUL character. [`KeyInput::from_bytes`] validates every field —
-magic, version, `kind`, `key_class`, the modifier bits, the named-key code,
-and that the codepoint is a real Unicode scalar (an unpaired surrogate is
-refused) — and fails closed with the matching [`Errno`] (`AGENTS.md` §5.4 /
-§19.5); a physical key the page assigns no key reads as unknown rather than
-refusing the edge. It too is enrolled in the `lib/abi` fuzz harness
-(`AGENTS.md` §19.6), which flips every bit of canonical key records.
+Exactly one of the two value fields is set for a char or named record, and a
+record that typed nothing carries both zero — the one legal spelling of each,
+so a dirty field is refused rather than read as a NUL character.
+[`KeyInput::from_bytes`] validates every field — magic, version, `kind`,
+`key_class`, the modifier bits, the named-key code, that the codepoint is a
+real Unicode scalar (an unpaired surrogate is refused), and that the physical
+key is one — and fails closed with the matching [`Errno`] (`AGENTS.md` §5.4 /
+§19.5). Both records are enrolled in the `lib/abi` fuzz harness
+(`AGENTS.md` §19.6), which flips every bit of canonical ones.
 
 ## Touch frames
 
@@ -195,25 +203,30 @@ The desktop session backs its
 the same `lib/input` `InputEvent` stream: `DeviceInputSource` reads
 `PointerInput` records from the kernel pointer channel and touch frames from
 the touch channel, through the recogniser, and `KeyboardInputSource` reads
-`KeyInput` records from the kernel keyboard channel. The window manager delivers a decoded key event to the
-focused window; the taskbar takes no keyboard input. The shell is handed each
-decoded event beside the validated record it came from, so the session reads
-a key's physical key where it takes the secure attention key, before any seat
-holder sees it, and a focused application receives the record whole.
+`KeyInput` records from the kernel keyboard channel. The window manager
+delivers a decoded key event to the focused window; the taskbar takes no
+keyboard input. The shell is handed each decoded event beside the validated
+record it came from, so the session reads a key's physical key where it takes
+the capture chords, before any seat holder sees them, and a focused
+application receives the record whole.
 
-A `ModifiersChanged` record decodes to `InputEvent::ModifiersChanged` and
-always reaches the window-manager router, whatever the pointer is over: it
-is seat state, not a key any surface receives. The router keeps the current
-set and the session stamps it onto every `WindowEvent::Pointer` it delivers,
-so an application can qualify a click by a modifier (a shift-click) without
-shadowing state it could never see. The event also carries `at_ns`, the time
-of the record it came from, so an application pairs its clicks and paces its
-strokes by when they happened rather than by when it got to them. In *text* focus the kernel arbiter types
-nothing for it — the shared `lib/keymap` encoder yields no bytes — so a held
-modifier never reaches a console as input.
+A record whose key typed nothing decodes to `InputEvent::ModifiersChanged`
+and always reaches the window-manager router, whatever the pointer is over:
+it is seat state, and reaches no window as a key but one reading the keyboard
+raw (`SetKeyboardMode`), which is handed every record. The router keeps the
+current set and the session stamps it onto every `WindowEvent::Pointer` it
+delivers, so an application can qualify a click by a modifier (a shift-click)
+without shadowing state it could never see. The event also carries `at_ns`,
+the time of the record it came from, so an application pairs its clicks and
+paces its strokes by when they happened rather than by when it got to them. In
+*text* focus the kernel seat types nothing for it — the shared `lib/keymap`
+encoder yields no bytes — so a held modifier never reaches a console as input.
 
 [`PointerInput`]: ../../tairix_abi/input/enum.PointerInput.html
 [`KeyInput`]: ../../tairix_abi/input/enum.KeyInput.html
+[`KeyEdge`]: ../../tairix_abi/input/struct.KeyEdge.html
+[`KeyEdge::WIRE_LEN`]: ../../tairix_abi/input/struct.KeyEdge.html#associatedconstant.WIRE_LEN
+[`KeyEdge::from_bytes`]: ../../tairix_abi/input/struct.KeyEdge.html#method.from_bytes
 [`KeyInput::WIRE_LEN`]: ../../tairix_abi/input/enum.KeyInput.html#associatedconstant.WIRE_LEN
 [`KeyInput::from_bytes`]: ../../tairix_abi/input/enum.KeyInput.html#method.from_bytes
 [`KeyValue`]: ../../tairix_abi/input/enum.KeyValue.html

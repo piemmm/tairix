@@ -1,7 +1,5 @@
 //! The usages the decoders read (HID Usage Tables 1.4).
 
-use tairix_abi::input::PhysicalKey;
-
 use crate::descriptor::Usage;
 
 /// Generic Desktop page.
@@ -63,10 +61,6 @@ pub const PAD_TYPE: Usage = Usage::new(PAGE_DIGITIZER, 0x59);
 
 /// The keyboard usage an array reports when more keys are down than it holds.
 pub const KEY_ERROR_ROLL_OVER: u16 = 0x01;
-/// The first keyboard modifier usage, Left Control; the eight end at Right GUI.
-pub const MODIFIER_FIRST: u16 = PhysicalKey::LEFT_CTRL.usage();
-/// The last keyboard modifier usage.
-pub const MODIFIER_LAST: u16 = PhysicalKey::RIGHT_GUI.usage();
 
 /// [`INPUT_MODE`] for a touchscreen reporting contacts.
 pub const INPUT_MODE_TOUCHSCREEN: u32 = 2;

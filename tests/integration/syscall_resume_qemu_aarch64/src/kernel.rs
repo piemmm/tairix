@@ -21,7 +21,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
@@ -69,7 +69,7 @@ static CHILD_PARK_ENTERED: AtomicBool = AtomicBool::new(false);
 static CHILD_RESUMED: AtomicBool = AtomicBool::new(false);
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// SAFETY: the page-aligned static outlives the kernel and this allocator is
 /// its sole owner.
@@ -80,10 +80,7 @@ static ALLOCATOR: FreeListAllocator =
 static PARENT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 static CHILD_PAGE_TABLES: PageTablePool = PageTablePool::new();
 
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 fn next_frame() -> Option<Frame> {
@@ -92,7 +89,7 @@ fn next_frame() -> Option<Frame> {
         FRAME_CURSOR.store(FRAME_COUNT, Ordering::SeqCst);
         return None;
     }
-    let pool = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
+    let pool = paging::image_phys(FRAME_POOL.as_mut_ptr() as u64);
     let base = pool + (index * paging::PAGE_SIZE) as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }

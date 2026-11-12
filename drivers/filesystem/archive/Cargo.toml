@@ -36,6 +36,8 @@ tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
 tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
 # The CRC-16 every Spark and ArcFS member is checked by.
 tairix-crc16 = { path = "../../../lib/crc16", version = "=0.0.0" }
+# Code page 437, which a zip member's name is spelt in unless it says UTF-8.
+tairix-cp437 = { path = "../../../lib/cp437", version = "=0.0.0" }
 # The byte-addressed reader the archive recognisers read through.
 tairix-bytedev = { path = "../../../lib/bytedev", version = "=0.0.0" }
 # Fallible buffers and number formatting.
@@ -46,6 +48,8 @@ tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
 tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 
 [dev-dependencies]
+# The wall clock a test stamps a member's write with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
 # The log a test opens a served volume with, which keeps nothing.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

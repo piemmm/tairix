@@ -350,7 +350,12 @@ impl AlertWindow {
         shell: &DesktopShell,
         compositor: &Compositor,
     ) -> Option<usize> {
-        let KeyInput::Pressed { key, modifiers, .. } = key else {
+        let KeyInput::Pressed {
+            key: Some(key),
+            modifiers,
+            ..
+        } = key
+        else {
             return None;
         };
         let key = match key {

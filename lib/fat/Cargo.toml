@@ -1,0 +1,20 @@
+[package]
+name = "tairix-fat"
+description = "TAIRiX FAT on-disk format: the FAT12, FAT16 and FAT32 boot sector and its parameter block, the allocation table's entries, short and long directory entries, 8.3 names and their aliases, stamps, FSInfo, and the parameters and system area of a new volume — the one definition every reader and writer of FAT shares, no_std and allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one DOS date and time, which a directory entry's stamps are.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness's seeded stream and budget.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

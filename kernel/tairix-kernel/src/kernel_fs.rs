@@ -151,6 +151,14 @@ impl FilesystemWrite for Box<dyn KernelFs> {
         (**self).truncate(file, size)
     }
 
+    fn set_times(
+        &mut self,
+        node: NodeId,
+        change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        (**self).set_times(node, change)
+    }
+
     fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
         (**self).punch(file, offset, len)
     }

@@ -53,7 +53,7 @@ use tairix_arch_riscv64::{
 use tairix_caps::CapabilitySet;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UART_CONSOLES};
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
@@ -182,7 +182,7 @@ const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -196,10 +196,7 @@ static ALLOCATOR: FreeListAllocator =
 /// serves the spawn producer and the stack-growth fault path from; inside
 /// the 4 GiB identity window the producer's Sv39 page-table walk requires
 /// (the `virt` board's RAM base at 2 GiB sits within it).
-#[repr(C, align(4096))]
-struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// The dispatch-callback slot the production [`KernelDispatchHook`] is
 /// installed into (one slot per binary, set once). Both the syscall
@@ -441,7 +438,7 @@ struct Subsystems {
 fn leak_subsystems(counter_hz: u64) -> Subsystems {
     let mut memory_map = BootMemoryMap::new();
     memory_map.push(MemoryRegion {
-        start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
+        start: PhysAddr::new(FRAME_POOL.as_mut_ptr() as u64),
         length: (PAGE_SIZE * FRAME_COUNT) as u64,
         kind: RegionKind::Usable,
     });

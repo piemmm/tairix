@@ -18,13 +18,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerInput};
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::{DriverError, Errno};
 
 pub mod boot;
 pub mod config;
-pub mod console;
 pub mod descriptor;
 pub mod device;
 pub mod keyboard;
@@ -36,7 +35,6 @@ pub mod usages;
 mod test_support;
 
 pub use config::HidTransport;
-pub use console::KeyboardConsole;
 pub use descriptor::{DescriptorError, ReportDescriptor, ReportId, MAX_DESCRIPTOR, MAX_REPORT};
 pub use device::{Applications, HidDevice};
 
@@ -96,12 +94,13 @@ impl<T> Reading<T> {
 
 /// Where a decoder delivers what it read: the seat's three channels.
 pub trait SeatSink {
-    /// A resolved key edge.
+    /// A key going down or coming up, named by its physical key; the seat
+    /// reads it under its own modifiers, locks and layout.
     ///
     /// # Errors
     ///
     /// The delivery's refusal.
-    fn key(&mut self, record: &KeyInput) -> Result<(), DriverError>;
+    fn key(&mut self, edge: &KeyEdge) -> Result<(), DriverError>;
 
     /// A pointer motion, button or scroll.
     ///

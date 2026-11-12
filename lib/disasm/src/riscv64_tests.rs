@@ -373,3 +373,61 @@ fn unallocated_encodings_fail_closed() {
     assert_eq!(insn.mnemonic, BAD_MNEMONIC);
     assert_eq!(insn.length, 2);
 }
+
+/// Zbb, each word as LLVM's assembler encodes the instruction.
+#[test]
+fn zbb_decodes_as_its_assembler_encodes_it() {
+    let cases: [(u32, &str, &str); 24] = [
+        (0x60c5_9533, "rol", "a0,a1,a2"),
+        (0x6073_52b3, "ror", "t0,t1,t2"),
+        (0x60a4_943b, "rolw", "s0,s1,a0"),
+        (0x60f7_56bb, "rorw", "a3,a4,a5"),
+        (0x63f5_d513, "rori", "a0,a1,63"),
+        (0x61f5_d51b, "roriw", "a0,a1,31"),
+        (0x6045_9513, "sext.b", "a0,a1"),
+        (0x6056_9613, "sext.h", "a2,a3"),
+        (0x0807_c73b, "zext.h", "a4,a5"),
+        (0x40c5_f533, "andn", "a0,a1,a2"),
+        (0x40c5_e533, "orn", "a0,a1,a2"),
+        (0x40c5_c533, "xnor", "a0,a1,a2"),
+        (0x0ac5_c533, "min", "a0,a1,a2"),
+        (0x0ac5_d533, "minu", "a0,a1,a2"),
+        (0x0ac5_e533, "max", "a0,a1,a2"),
+        (0x0ac5_f533, "maxu", "a0,a1,a2"),
+        (0x6005_9513, "clz", "a0,a1"),
+        (0x6015_9513, "ctz", "a0,a1"),
+        (0x6025_9513, "cpop", "a0,a1"),
+        (0x6005_951b, "clzw", "a0,a1"),
+        (0x6015_951b, "ctzw", "a0,a1"),
+        (0x6025_951b, "cpopw", "a0,a1"),
+        (0x2875_d513, "orc.b", "a0,a1"),
+        (0x6b85_d513, "rev8", "a0,a1"),
+    ];
+    for (word, mnemonic, operands) in cases {
+        let insn = decode(&word.to_le_bytes(), 0).unwrap();
+        assert_eq!(
+            (insn.mnemonic.as_str(), insn.operands.as_str(), insn.length),
+            (mnemonic, operands, 4),
+            "{word:#010x}"
+        );
+    }
+}
+
+/// Encodings beside Zbb's that name no instruction stay refused.
+#[test]
+fn what_zbb_does_not_define_is_bad() {
+    for word in [
+        // `zext.h` with a second register.
+        0x0817_c73bu32,
+        // The unary group's immediates Zbb leaves undefined.
+        0x6035_9513,
+        0x6065_9513,
+        0x6035_951b,
+        0x6045_951b,
+        // A word-sized `rori` of a 64-bit shift amount's high bit.
+        0x6205_d51b,
+    ] {
+        let insn = decode(&word.to_le_bytes(), 0).unwrap();
+        assert_eq!(insn.mnemonic, BAD_MNEMONIC, "{word:#010x}");
+    }
+}

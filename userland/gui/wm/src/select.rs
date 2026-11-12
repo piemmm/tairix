@@ -11,9 +11,10 @@
 //!
 //! [`desired_cursor`] reads the pointer position the desktop's seat owns plus
 //! the interaction state held by the [`InputRouter`] and the [`Compositor`],
-//! and returns a [`CursorKind`]:
+//! and returns a [`CursorHint`]:
 //!
-//! - an in-flight grab outranks everything: a window move-grab shows
+//! - a pointer locked to a window outranks everything: it is drawn nowhere;
+//! - an in-flight grab outranks the rest: a window move-grab shows
 //!   [`CursorKind::Move`] and a resize-grab keeps the double arrow of the edge
 //!   it is dragging, even once the pointer has run past that edge;
 //! - otherwise, over a decorated window's resize edge the pointer takes the
@@ -25,7 +26,8 @@
 //! - otherwise the pointer takes the [`cursor_hint`](crate::Window::cursor_hint)
 //!   of the top-most window under it, over its content (a text editor's
 //!   [`Text`](CursorKind::Text), a control's [`Pointer`](CursorKind::Pointer),
-//!   a busy view's [`Busy`](CursorKind::Busy), …);
+//!   a busy view's [`Busy`](CursorKind::Busy), …), or none at all over
+//!   content that draws its own;
 //! - over the desktop background it is the plain [`CursorKind::Arrow`].
 //!
 //! The policy is a pure function of state, so it is trivially testable and
@@ -87,7 +89,7 @@ use tairix_theme::{CursorKind, CursorSetId};
 
 use crate::geometry::Point;
 use crate::input::InputRouter;
-use crate::window::Window;
+use crate::window::{CursorHint, Window};
 use crate::{Compositor, PointerTarget};
 
 /// Worst-case per-entry bookkeeping the cache charges on top of a cursor
@@ -111,33 +113,35 @@ const ENTRY_METADATA_BYTES: usize = 64;
 /// desktop's own bar, which this router never holds — so the position is
 /// passed in rather than read out of `router`.
 #[must_use]
-pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) -> CursorKind {
+pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) -> CursorHint {
+    if router.pointer_lock().is_some() {
+        return CursorHint::Hidden;
+    }
     // A grab holds the shape for its whole gesture: the pointer routinely
     // leaves the edge or the title bar it started on, and re-deriving the
     // shape from where it now is would flicker mid-drag.
     if let Some(edge) = router.resizing_edge() {
-        return resize_cursor(edge);
+        return CursorHint::Shape(resize_cursor(edge));
     }
     if router.is_moving() {
-        return CursorKind::Move;
+        return CursorHint::Shape(CursorKind::Move);
     }
     // The same one-pass resolution the press uses, so the shape the pointer
     // shows and the gesture a press starts can never disagree about whose
     // edge is under it. Announcing the outward band half is what makes it
     // discoverable at all: it draws nothing of its own.
+    let arrow = CursorHint::Shape(CursorKind::Arrow);
     let id = match compositor.pointer_target(at) {
         Some(PointerTarget::Window(id)) => id,
-        Some(PointerTarget::ResizeBand(_, edge)) => return resize_cursor(edge),
-        None => return CursorKind::Arrow,
+        Some(PointerTarget::ResizeBand(_, edge)) => return CursorHint::Shape(resize_cursor(edge)),
+        None => return arrow,
     };
     match compositor.frame_hit(id, at) {
-        Some(FurniturePart::ResizeEdge(edge)) => return resize_cursor(edge),
+        Some(FurniturePart::ResizeEdge(edge)) => return CursorHint::Shape(resize_cursor(edge)),
         Some(FurniturePart::Client) | None => {}
-        Some(_) => return CursorKind::Arrow,
+        Some(_) => return arrow,
     }
-    compositor
-        .window(id)
-        .map_or(CursorKind::Arrow, Window::cursor_hint)
+    compositor.window(id).map_or(arrow, Window::cursor_hint)
 }
 
 /// The double arrow for the axis `edge` moves the window along.
@@ -501,24 +505,30 @@ impl CursorController {
     /// already installed — drawn or
     /// [hidden](Compositor::set_cursor_hidden) — it does no work and returns
     /// `false`. The pointer's *position* is updated separately with
-    /// [`Compositor::move_cursor`]. Fails closed: if the chosen kind cannot
-    /// be rasterised, the current cursor is left untouched.
+    /// [`Compositor::move_cursor`]. A hint of no pointer leaves the installed
+    /// image in place and blanks it ([`Compositor::set_cursor_blank`]). Fails
+    /// closed: if the chosen kind cannot be rasterised, the current cursor is
+    /// left untouched.
     pub fn refresh(
         &mut self,
         at: Point,
         router: &InputRouter,
         compositor: &mut Compositor,
     ) -> bool {
-        let kind = self
+        let hint = self
             .held
-            .unwrap_or_else(|| desired_cursor(at, router, compositor));
+            .map_or_else(|| desired_cursor(at, router, compositor), CursorHint::Shape);
+        let CursorHint::Shape(kind) = hint else {
+            return compositor.set_cursor_blank(true);
+        };
+        let unblanked = compositor.set_cursor_blank(false);
         if kind == self.kind
             && self.shown == Some(self.drawing(compositor))
             && compositor.has_cursor()
         {
-            return false;
+            return unblanked;
         }
-        self.install(kind, at, compositor)
+        self.install(kind, at, compositor) || unblanked
     }
 
     /// The cache epoch: the physical side the pointer is drawn at, the

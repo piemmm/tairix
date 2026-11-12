@@ -6,7 +6,7 @@
 //!
 //! `CPUID` is the deterministic capability source: leaf 1 reports the
 //! SSE/AVX/AES-NI/`crc32`(SSE4.2)/`PCLMULQDQ`/`RDRAND` flags in
-//! `ECX`/`EDX`, and leaf 7 sub-leaf 0 reports AVX2/SHA-NI/`RDSEED` in
+//! `ECX`/`EDX`, and leaf 7 sub-leaf 0 reports AVX2/BMI2/SHA-NI/`RDSEED` in
 //! `EBX` (Intel SDM Vol. 2A "CPUID"; AMD64 APM Vol. 3). The cycle
 //! counter is the Time-Stamp Counter (`RDTSC`), reported as a reliable
 //! time base only when the part advertises an Invariant TSC
@@ -36,6 +36,7 @@ const LEAF1_EDX_SSE2: u32 = 26;
 
 // --- CPUID leaf 7 sub-leaf 0: EBX feature bits ---
 const LEAF7_EBX_AVX2: u32 = 5;
+const LEAF7_EBX_BMI2: u32 = 8;
 const LEAF7_EBX_ERMS: u32 = 9;
 pub(crate) const LEAF7_EBX_RDSEED: u32 = 18;
 const LEAF7_EBX_SHA: u32 = 29;
@@ -77,6 +78,7 @@ pub fn features_from_cpuid(
     on(leaf1_ecx, LEAF1_ECX_PCLMULQDQ, CpuFeature::Pclmulqdq);
     on(leaf1_ecx, LEAF1_ECX_RDRAND, CpuFeature::Rdrand);
     on(leaf7_ebx, LEAF7_EBX_ERMS, CpuFeature::Erms);
+    on(leaf7_ebx, LEAF7_EBX_BMI2, CpuFeature::Bmi2);
     on(leaf7_ebx, LEAF7_EBX_SHA, CpuFeature::ShaNi);
     on(leaf7_ebx, LEAF7_EBX_RDSEED, CpuFeature::Rdseed);
     let os_enabled = (leaf1_ecx >> LEAF1_ECX_OSXSAVE) & 1 == 1;
@@ -316,6 +318,16 @@ mod tests {
         // Nothing but the AVX pair depends on the OS state.
         let sha = features_from_cpuid(0, 0, 1 << LEAF7_EBX_SHA, 0);
         assert!(sha.contains(CpuFeature::ShaNi));
+    }
+
+    /// BMI2's instructions are VEX-encoded but touch only general registers,
+    /// so the leaf-7 bit alone reports them, whatever the OS enabled.
+    #[test]
+    fn bmi2_is_leaf_7_bit_8_and_needs_no_os_state() {
+        let set = features_from_cpuid(0, 0, 1 << 8, 0);
+        assert!(set.contains(CpuFeature::Bmi2));
+        assert!(!features_from_cpuid(0, 0, !(1 << 8), u64::MAX).contains(CpuFeature::Bmi2));
+        assert!(!CpuFeature::Bmi2.needs_extended_register_state());
     }
 
     #[test]

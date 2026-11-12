@@ -57,8 +57,7 @@ use tairix_log::{Event, EventId, Field, Level, Sink};
 
 use crate::host::{log_worker_crashed, WorkerEnd};
 use crate::proto::{
-    head_declared, head_frame, recv_frame_into, send_frame, Channel, ProtoError, FRAME_HEADER_LEN,
-    MAX_FRAME,
+    payload_room, recv_frame_into, send_frame, Channel, Inbound, ProtoError, FRAME_HEADER_LEN,
 };
 use crate::worker::ServeEnd;
 
@@ -253,7 +252,7 @@ impl SessionBounds {
 
     /// Largest payload [`SandboxSession::send`] accepts: what an empty
     /// outbound queue holds once its header is paid for, never above
-    /// [`MAX_FRAME`].
+    /// [`crate::proto::MAX_FRAME`].
     ///
     /// Deriving it from the bound is what makes
     /// [`SessionError::OutboundFull`] *transient* — an accepted payload
@@ -261,12 +260,7 @@ impl SessionBounds {
     /// than a frame that can never be sent.
     #[must_use]
     pub const fn max_send_payload(self) -> usize {
-        let by_queue = self.outbound - FRAME_HEADER_LEN;
-        if by_queue < MAX_FRAME {
-            by_queue
-        } else {
-            MAX_FRAME
-        }
+        payload_room(self.outbound)
     }
 
     /// Largest payload this session admits *from* the worker. A frame
@@ -276,27 +270,8 @@ impl SessionBounds {
     /// caps.
     #[must_use]
     pub const fn max_recv_payload(self) -> usize {
-        let by_queue = self.inbound - FRAME_HEADER_LEN;
-        if by_queue < MAX_FRAME {
-            by_queue
-        } else {
-            MAX_FRAME
-        }
+        payload_room(self.inbound)
     }
-}
-
-/// Whether `pending` divides exactly into whole frames with nothing over —
-/// the end-of-stream cleanliness test. A stream that ends mid-frame is a
-/// truncated conversation, never silently shortened data.
-fn whole_frames(pending: &[u8]) -> bool {
-    let mut at = 0;
-    while at < pending.len() {
-        match head_frame(&pending[at..]) {
-            Some(payload) => at += FRAME_HEADER_LEN + payload,
-            None => return false,
-        }
-    }
-    true
 }
 
 /// What a contained worker's failure means, which decides the event it is
@@ -323,7 +298,7 @@ pub struct SandboxSession<T: SessionTransport, S: Sink> {
     sink: S,
     bounds: SessionBounds,
     outbound: ByteQueue,
-    inbound: ByteQueue,
+    inbound: Inbound,
     /// Set when the worker closed its reply stream on a frame boundary.
     peer_finished: bool,
     /// Set by containment. Implies `transport` is `None`.
@@ -367,7 +342,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
     ) -> Result<Self, SessionError> {
         let (Ok(outbound), Ok(inbound)) = (
             ByteQueue::committed(bounds.outbound_bytes()),
-            ByteQueue::committed(bounds.inbound_bytes()),
+            Inbound::committed(bounds.inbound_bytes()),
         ) else {
             let _ = transport.dispose();
             return Err(SessionError::OutOfMemory);
@@ -485,7 +460,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         };
         match outcome {
             Ok(0) => {
-                if whole_frames(self.inbound.pending()) {
+                if self.inbound.whole() {
                     self.peer_finished = true;
                     Ok(())
                 } else {
@@ -561,13 +536,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
             return Err(SessionError::WorkerFailed);
         }
         self.check_inbound_head()?;
-        let Some(payload_len) = head_frame(self.inbound.pending()) else {
-            return Ok(None);
-        };
-        let frame_len = FRAME_HEADER_LEN + payload_len;
-        let taken = take(&self.inbound.pending()[FRAME_HEADER_LEN..frame_len]);
-        self.inbound.consume(frame_len);
-        Ok(Some(taken))
+        Ok(self.inbound.take(take))
     }
 
     /// Whether the worker closed its reply stream on a frame boundary. Any
@@ -590,17 +559,18 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
     /// ceiling — before a payload byte of it is copied, and without waiting
     /// for the rest of it to arrive.
     fn check_inbound_head(&mut self) -> Result<(), SessionError> {
-        match head_declared(self.inbound.pending()) {
-            Some(declared) if declared > self.bounds.max_recv_payload() => {
-                Err(self.contain("worker declared an oversize frame"))
-            }
-            _ => Ok(()),
+        if self.inbound.head_oversize() {
+            return Err(self.contain("worker declared an oversize frame"));
         }
+        Ok(())
     }
 
-    /// Contain the worker because its owner found what it sent unbelievable,
-    /// exactly as a framing violation is contained.
-    pub(crate) fn condemn(&mut self, reason: &'static str) {
+    /// Contain the worker because its owner found what it sent unbelievable —
+    /// a field out of its range, a reply to nothing asked — exactly as a
+    /// framing violation is contained: disposed of, logged under
+    /// [`EVENT_SESSION_FAILED`] (or replaced, for a supervised session) with
+    /// `reason`, and every later call refused.
+    pub fn condemn(&mut self, reason: &'static str) {
         let _ = self.contain(reason);
     }
 

@@ -22,11 +22,11 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, BOOT_HEAP_BYTES};
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator};
 
     /// What boot allocates before the heap can grow from the frame allocator.
-    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
     /// The global allocator, over [`HEAP`].
     ///
@@ -90,13 +90,13 @@ mod kernel {
 
     use tairix_kernel::aarch64::boot;
     use tairix_kernel::aarch64::panic_ctx::handle_panic_via_kernel_core;
-    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, BOOT_HEAP_BYTES};
     use tairix_kernel::FreeListAllocator;
 
     /// What boot allocates before the heap can grow from the frame
     /// allocator — the secondary-CPU stacks among them, which the MMU-off
     /// secondary entry reaches at their physical address.
-    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
     /// The global allocator, over [`HEAP`].
     ///
@@ -152,7 +152,7 @@ mod kernel {
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, BOOT_HEAP_BYTES};
     use tairix_kernel::riscv64::boot;
     use tairix_kernel::riscv64::panic_ctx::handle_panic_via_kernel_core;
     use tairix_kernel::FreeListAllocator;
@@ -161,7 +161,7 @@ mod kernel {
     /// allocator. In the NOLOAD `.heap` section (`riscv64-virt.ld`), after
     /// `__bss_end`, so the boot trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
     /// The global allocator, over [`HEAP`].
     ///

@@ -1,0 +1,12 @@
+[package]
+name = "tairix-cp437"
+description = "TAIRiX IBM code page 437: the one first-party table of the PC's character set and Unicode, read as text (zip member names, a DOS file's name) or as the glyphs a PC's screen draws (a text screen copied, text pasted) — no_std, allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

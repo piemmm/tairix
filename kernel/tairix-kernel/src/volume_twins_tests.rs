@@ -999,7 +999,8 @@ fn a_medium_changed_since_the_question_is_not_written_scenario(
     // The FSInfo free-cluster hint: inside the evidence window.
     let changed = {
         let mut device = back.device.lock().unwrap();
-        device.block.data[512 + 488..512 + 492].copy_from_slice(&4321u32.to_le_bytes());
+        let hint = fsinfo_free_hint(&device.block.data);
+        device.block.data[hint].copy_from_slice(&4321u32.to_le_bytes());
         device.block.data.clone()
     };
     let write = VolumeReplayRequest {

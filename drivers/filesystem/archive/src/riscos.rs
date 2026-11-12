@@ -9,12 +9,12 @@
 //! is written typed as Data, as RISC OS types a file it is told nothing
 //! about.
 
-use tairix_abi::driver::filesystem::{NodeKind, NodeSecurity, NodeTimes};
+use tairix_abi::driver::filesystem::{NodeKind, NodeSecurity, NodeTimes, StampField};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
 use tairix_fsmeta::preset::acorn::{self, Filetype, LoadExec};
 
-use crate::tree::Meta;
+use crate::tree::{Meta, Recorded};
 
 /// A member's RISC OS words, as its archive records them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -56,6 +56,7 @@ pub(crate) fn meta_of(words: Option<Words>, dated: Option<Time64>, kind: NodeKin
             exec: words.exec,
             attr: acorn::attr_from_fileswitch(words.attr) | directory,
         }),
+        recorded: Recorded::default(),
     }
 }
 
@@ -77,6 +78,19 @@ pub(crate) fn dated(object: acorn::Object, time: Time64) -> Result<acorn::Object
         exec,
         ..object
     })
+}
+
+/// What a member with `meta` keeps of its modification time in its words: a
+/// RISC OS stamp where they are typed, as a member with none is written, and
+/// nothing where they are addresses.
+pub(crate) fn stamp_field(meta: &Meta) -> Option<StampField> {
+    match meta
+        .acorn
+        .map(|object| acorn::decode_load_exec(object.load, object.exec))
+    {
+        None | Some(LoadExec::Typed { .. }) => Some(acorn::STAMP_FIELD),
+        Some(LoadExec::Untyped { .. }) => None,
+    }
 }
 
 /// The time a typed `object`'s words date it.

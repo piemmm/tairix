@@ -3,27 +3,38 @@
 //! and an application's own key handling all read a record through these, so
 //! no two of them can disagree about which key or modifier it names.
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode};
+use tairix_abi::input::{
+    KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode, PointerButtonCode,
+};
 
-use crate::{InputEvent, Key, Modifiers, NamedKey};
+use crate::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 /// The [`InputEvent`] one delivered [`KeyInput`] record means. Total: every
-/// key and every modifier has exactly one meaning, so no reader decides what
-/// an unhandled code means.
+/// key has exactly one meaning, so no reader decides what an unhandled code
+/// means. A key that typed nothing — a modifier, a lock, a key the layout
+/// names no value for — means only the modifiers it left held.
 #[must_use]
 pub const fn key_input_event(record: KeyInput) -> InputEvent {
-    match record {
-        KeyInput::Pressed { key, modifiers, .. } => InputEvent::KeyPressed {
+    let modifiers = modifiers_from_abi(record.modifiers());
+    match (record, record.key()) {
+        (_, None) => InputEvent::ModifiersChanged { modifiers },
+        (KeyInput::Pressed { .. }, Some(key)) => InputEvent::KeyPressed {
             key: key_from_abi(key),
-            modifiers: modifiers_from_abi(modifiers),
+            modifiers,
         },
-        KeyInput::Released { key, modifiers, .. } => InputEvent::KeyReleased {
+        (KeyInput::Released { .. }, Some(key)) => InputEvent::KeyReleased {
             key: key_from_abi(key),
-            modifiers: modifiers_from_abi(modifiers),
+            modifiers,
         },
-        KeyInput::ModifiersChanged { modifiers } => InputEvent::ModifiersChanged {
-            modifiers: modifiers_from_abi(modifiers),
-        },
+    }
+}
+
+/// The [`InputEvent`] telling a surface the modifiers `held`, which a pointer
+/// event the desktop delivered was made under: what it reads a shift-click by.
+#[must_use]
+pub const fn held_modifiers(held: WireModifiers) -> InputEvent {
+    InputEvent::ModifiersChanged {
+        modifiers: modifiers_from_abi(held),
     }
 }
 
@@ -108,6 +119,27 @@ pub const fn named_key_to_abi(named: NamedKey) -> Option<NamedKeyCode> {
     })
 }
 
+/// The [`PointerButton`] a wire [`PointerButtonCode`] names.
+#[must_use]
+pub const fn pointer_button_from_abi(code: PointerButtonCode) -> PointerButton {
+    match code {
+        PointerButtonCode::Primary => PointerButton::Primary,
+        PointerButtonCode::Secondary => PointerButton::Secondary,
+        PointerButtonCode::Middle => PointerButton::Middle,
+    }
+}
+
+/// The wire [`PointerButtonCode`] of `button`, the inverse of
+/// [`pointer_button_from_abi`].
+#[must_use]
+pub const fn pointer_button_to_abi(button: PointerButton) -> PointerButtonCode {
+    match button {
+        PointerButton::Primary => PointerButtonCode::Primary,
+        PointerButton::Secondary => PointerButtonCode::Secondary,
+        PointerButton::Middle => PointerButtonCode::Middle,
+    }
+}
+
 /// The [`Modifiers`] a wire modifier set names.
 #[must_use]
 pub const fn modifiers_from_abi(m: WireModifiers) -> Modifiers {
@@ -158,7 +190,7 @@ mod tests {
             ..tairix_abi::input::Modifiers::default()
         };
         let physical = tairix_abi::input::PhysicalKey::A;
-        let key = KeyValue::Char('A');
+        let key = Some(KeyValue::Char('A'));
         let read = |record| key_input_event(record);
         let held = modifiers_from_abi(shift);
         assert_eq!(
@@ -184,8 +216,13 @@ mod tests {
             }
         );
         assert_eq!(
-            read(KeyInput::ModifiersChanged { modifiers: shift }),
-            InputEvent::ModifiersChanged { modifiers: held }
+            read(KeyInput::Pressed {
+                key: None,
+                modifiers: shift,
+                physical: tairix_abi::input::PhysicalKey::LEFT_SHIFT,
+            }),
+            InputEvent::ModifiersChanged { modifiers: held },
+            "a key that types nothing tells only the modifiers it left held"
         );
     }
 
@@ -197,6 +234,18 @@ mod tests {
             key_from_abi(KeyValue::Named(NamedKeyCode::F7)),
             Key::Named(NamedKey::Function { number: 7 })
         );
+    }
+
+    /// Each button crosses both ways.
+    #[test]
+    fn each_pointer_button_crosses_both_ways() {
+        for code in [
+            PointerButtonCode::Primary,
+            PointerButtonCode::Secondary,
+            PointerButtonCode::Middle,
+        ] {
+            assert_eq!(pointer_button_to_abi(pointer_button_from_abi(code)), code);
+        }
     }
 
     /// Each modifier crosses both ways on its own.

@@ -370,12 +370,19 @@ Done (code + host coverage). What now holds:
   an application's one folder pick and the single grant of each other pick it
   may have open are pending at once within what one grantor may hold for one
   recipient. Each is delegated read-only, and `FolderPicked { files,
-  left_out }` (kind 23) concludes; the app takes them one at a time with
-  `TakePickedFile` (op 36), each reply a `PickedFile { handle, name }`. A
+  left_out }` (kind 24) concludes; the app takes them one at a time with
+  `TakePickedFile` (op 37), each reply a `PickedFile { handle, name }`. A
   minted delegation cannot be withdrawn, so the engine refuses a new pick on
   that window, and another folder pick of that application, while any is
   untaken, and a file whose grant failed is counted as left out rather than
   stated.
+- **A subtree pick** (`PickPurpose::Subtree`) hands the folder itself over:
+  opened to be listed without following a final link, granted under
+  `GRANT_SUBTREE` — writable where the requester's signed manifest edits
+  documents and the user may write the folder — and concluded with
+  `SubtreePicked` (kind 35), redeemed as `tairix_rt::Dir::from_delegation`.
+  The top level is never handed over, and the pick counts against
+  `PICK_MAX_OPEN` as an open does.
 - **The shared browser engine moved to `lib/browse`** (`tairix-browse`):
   the AW1 model/renderer/path-spelling hoisted out of the files app (its
   package is now the `Run` binary only) because the picker is its second

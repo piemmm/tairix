@@ -73,5 +73,6 @@
 #define TAIRIX_CAP_SETTINGS_WRITE ((uint16_t)51u)
 #define TAIRIX_CAP_GPIO ((uint16_t)52u)
 #define TAIRIX_CAP_FS_SERVE ((uint16_t)53u)
+#define TAIRIX_CAP_JIT_MAP_EXEC ((uint16_t)54u)
 
 #endif /* TAIRIX_CAPABILITY_H */

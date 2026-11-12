@@ -933,6 +933,75 @@ fn a_new_object_is_typed_and_stamped_and_a_write_restamps_it() {
     }
 }
 
+/// A typed object's one stamp takes a modification time to the centisecond,
+/// 1900 to 2248, and an access time only as that stamp; an untyped object and
+/// the root keep no time; and an instant finer than a centisecond is refused
+/// unless the nearest is asked.
+#[test]
+fn set_times_sets_a_typed_objects_one_stamp() {
+    let (variant, bytes) = VARIANTS[0];
+    let mut fs = at(
+        fresh(variant, bytes),
+        Some(Time64::from_secs(1_792_067_697)),
+    );
+    let root = FilesystemRead::root(&fs);
+    let node = make(&mut fs, root, b"File", b"body");
+    let in_1910 = Time64::new(-1_893_456_000, 120_000_000).expect("canonical");
+    let change = |accessed, modified, nearest| TimesChange {
+        accessed,
+        modified,
+        nearest,
+    };
+    assert_eq!(
+        fs.set_times(
+            node,
+            change(StampChange::At(in_1910), StampChange::At(in_1910), false)
+        ),
+        Ok(TimesKept::Exactly),
+        "an access time the one stamp holds"
+    );
+    let node = fs.lookup(root, b"File").expect("found");
+    assert_eq!(fs.node_info(node).expect("info").times.modified, in_1910);
+    let other = Time64::from_secs(0);
+    assert_eq!(
+        fs.set_times(
+            node,
+            change(StampChange::At(other), StampChange::Keep, false)
+        ),
+        Err(DriverError::OutOfRange),
+        "an access time apart from the stamp is not kept"
+    );
+    let fine = Time64::new(0, 5).expect("canonical");
+    assert_eq!(
+        fs.set_times(
+            node,
+            change(StampChange::Keep, StampChange::At(fine), false)
+        ),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        fs.set_times(node, change(StampChange::Keep, StampChange::At(fine), true)),
+        Ok(TimesKept::Nearest)
+    );
+    let node = fs.lookup(root, b"File").expect("found");
+    assert_eq!(fs.node_info(node).expect("info").times.modified, other);
+    assert_eq!(
+        fs.set_times(
+            root,
+            change(StampChange::Now, StampChange::At(other), false)
+        ),
+        Err(DriverError::OutOfRange),
+        "the root keeps no time"
+    );
+    fs.remove_attr(node, b"acorn.filetype").expect("untype");
+    let node = fs.lookup(root, b"File").expect("found");
+    assert_eq!(
+        fs.set_times(node, change(StampChange::Now, StampChange::Now, false)),
+        Ok(TimesKept::Exactly),
+        "a now changes nothing an untyped object does not keep"
+    );
+}
+
 #[test]
 fn an_untyped_objects_addresses_survive_a_write() {
     let (variant, bytes) = VARIANTS[0];

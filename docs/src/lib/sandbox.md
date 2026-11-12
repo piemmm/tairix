@@ -88,7 +88,21 @@ Stability tier: **experimental**.
   the ordinary blocking `Channel` while the parent's two readiness legs
   guarantee it is always woken. The worker side is `serve_session` over a
   `SessionService`, emitting through `FrameOut` straight to the channel,
-  so fanning one frame out to many allocates nothing per frame.
+  so fanning one frame out to many allocates nothing per frame. The owner
+  that finds a frame unbelievable ends its worker with `condemn`, the same
+  containment a framing violation takes.
+- **`link`** — the worker's end of a session for a worker with work of its
+  own between its parent's frames, which cannot wait on its pipe longer than
+  that work allows. `WorkerLink::recv` makes at most one read of a
+  `TimedChannel`, waiting at most the time it is given, into the same
+  committed accumulator the owner's side reads into, so a frame arrives whole
+  across any number of waits and a burst already read is lent without
+  reading again; a frame declaring more than the accumulator holds is refused
+  before its payload is read. What it sends is queued and written in one
+  transport write at each `flush`, so a worker that ends each piece of work
+  with a handful of frames pays one write for them; the write blocks until
+  the parent has room, which the parent's never-blocking side guarantees
+  comes. The PC emulator's machine worker (`PCEmulator.app`) runs on it.
 - **`loopback`** — the public in-process fakes: for the one-shot seam each
   "worker" is a fresh `Service` run inline; `LoopbackSession` is the same
   for the duplex one, running a `SessionService` behind a
@@ -357,13 +371,20 @@ Stability tier: **experimental**.
   path, `tairix_rt::spawn_piped`, which the login broker's wired launch
   shares; `--sandbox-session-worker`), reporting its two descriptor numbers
   so the owner can register them, and `session_worker_role` +
-  `serve_session_stdio` are its worker half. Ending a session kills its
+  `serve_session_stdio` are its worker half; its standard-stream channel is
+  also the `TimedChannel` a `WorkerLink` reads, a wait of nothing being the
+  shortest wait the kernel measures. Ending a session kills its
   worker and reaps it at once if it has gone; one still running is handed to
   the channel's `Reaper` where the owner gave it one (`reaped_by`), so a loop
   that answers a person never waits for a worker's teardown, and is waited
   for otherwise (`let_go`). A channel taken up from pipe ends another
   process handed over (`RtSessionChannel::redeemed`) only closes them as it
   ends: its peer is that process's to end and reap.
+  A worker this process started is named to the kernel by its pid —
+  `RtChannel::pid` for the worker `ParserSandbox::live` holds, the one that
+  answered the last request, and `RtSessionChannel::pid` for a session's —
+  which stays the worker's while its channel lives, as nothing reaps it
+  before; a peer another process started has none.
 
 ## Security posture
 

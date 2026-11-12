@@ -124,6 +124,12 @@ impl PhysMap for ConfiguredPhysMap {
             window.sync_instruction_cache(phys, len);
         }
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        // Nothing to clean on this port, but every hart's fetch must be
+        // fenced past the stores.
+        tairix_arch_riscv64::kernel_arch::fence_instruction_fetch()
+    }
 }
 
 /// The single, `'static` [`ConfiguredPhysMap`] the page-table frame source

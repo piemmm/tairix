@@ -104,14 +104,17 @@ a rename, and a removed one answers `NotFound`.
 
 A `Dir` is a place relative calls start from. `open_dir`, `open_file`,
 `create_file`, `make_dir`, `mkdir`, `unlink`, `rename`, `link`, `symlink`,
-`readlink`, `set_mode_at`, `set_owner_at` and `access` resolve a relative name
-from the directory the handle holds, wherever it has been moved, and an
-absolute one exactly as the free functions do; `chdir` makes it the working
-directory. `open_dir` opens the child directory itself, never through a link
-at its name, which answers `NotADirectory`. Each runs as the caller: a
-directory descriptor confers no authority. `rename` and `link` name each end
-by its own directory, carried to
-the kernel in a `PathAt` record. `unlink` and `rename` take an optional
+`readlink`, `set_mode_at`, `set_owner_at`, `set_times_at` and `access` resolve a
+relative name from the directory the handle holds, wherever it has been moved,
+and an absolute one exactly as the free functions do; `chdir` makes it the
+working directory. `open_dir` opens the child directory itself, never through a
+link at its name, which answers `NotADirectory`. Each runs as the caller: a
+directory descriptor confers no authority unless it is a directory capability,
+whose paths act as the identity frozen into it and stay beneath it
+([syscalls](../architecture/syscalls.md)). `Dir::from_delegation` redeems one
+handed over — the trusted picker's subtree pick — refusing a delegation of
+anything but a directory. `rename` and `link` name each end by its own
+directory, carried to the kernel in a `PathAt` record. `unlink` and `rename` take an optional
 `NodeExpect`: with an `EXPECT_*` flag the kernel compares it under the volume's
 lock and answers `Stale`, changing nothing, when the name no longer holds the
 node it describes.

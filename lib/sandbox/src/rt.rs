@@ -33,6 +33,7 @@ use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
 use tairix_rt::shm::{SharedRegion, SpawnPart, SpawnShare};
 
 use crate::host::Launcher;
+use crate::link::TimedChannel;
 use crate::memory::WorkerMemory;
 use crate::proto::Channel;
 use crate::session::{
@@ -144,6 +145,15 @@ impl Channel for StdioChannel {
             Ok(accepted) => Ok(accepted),
             Err(e) => Err(e.as_errno()),
         }
+    }
+}
+
+impl TimedChannel for StdioChannel {
+    fn read_within(&mut self, buf: &mut [u8], wait_ns: Option<u64>) -> Result<usize, Errno> {
+        // The kernel reads a zero timeout as for ever, so not waiting at all is
+        // the shortest wait it measures.
+        let timeout = wait_ns.map_or(0, |ns| ns.max(1));
+        Stdin.read_timeout(buf, timeout).map_err(IoError::as_errno)
     }
 }
 
@@ -316,6 +326,15 @@ pub struct RtChannel {
     deadline_ns: u64,
 }
 
+impl RtChannel {
+    /// The worker's process: this process's own child, unreaped while the
+    /// channel lives.
+    #[must_use]
+    pub const fn pid(&self) -> i64 {
+        self.pid
+    }
+}
+
 impl Channel for RtChannel {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
         // A timeout of zero would wait for ever, so a deadline already
@@ -479,6 +498,13 @@ impl RtSessionChannel {
                 Err(errno)
             }
         }
+    }
+
+    /// Its worker's process, where this process started it: its own child,
+    /// unreaped while the channel lives.
+    #[must_use]
+    pub const fn pid(&self) -> Option<i64> {
+        self.pid
     }
 
     /// This channel, its worker reaped by `reaper` if it is still running when

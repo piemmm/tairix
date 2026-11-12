@@ -69,7 +69,7 @@ mod kernel {
         fault, handle_panic_via_serial, qemu_exit, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel_core::kstack::{alloc_kernel_stack, install_kernel_stacks};
     use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack};
     use tairix_kernel_mem::{
@@ -120,9 +120,7 @@ mod kernel {
     /// Identity-mapped RAM the frame allocator hands out: the window's own
     /// leaf tables and the pages backing the drawn kthread stack. Sized well
     /// past both so exhaustion cannot be mistaken for a guard regression.
-    #[repr(C, align(0x1000))]
-    struct FramePool([u8; 8 * 1024 * 1024]);
-    static mut FRAME_POOL: FramePool = FramePool([0; 8 * 1024 * 1024]);
+    static FRAME_POOL: Arena<{ 8 * 1024 * 1024 }> = Arena::ZERO;
 
     /// The guard slot of the stack under test, published once it is drawn so
     /// the fault handler can name the address it expects. Zero until then,
@@ -133,7 +131,7 @@ mod kernel {
     /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
     /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -232,8 +230,8 @@ mod kernel {
         let mut map = BootMemoryMap::new();
         map.push(MemoryRegion {
             kind: RegionKind::Usable,
-            start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64),
-            length: core::mem::size_of::<FramePool>() as u64,
+            start: PhysAddr::new(FRAME_POOL.as_mut_ptr() as u64),
+            length: core::mem::size_of::<Arena<{ 8 * 1024 * 1024 }>>() as u64,
         });
         let Ok(frames) = FrameAllocator::new(&map) else {
             fail("frame allocator", FAIL_SETUP);

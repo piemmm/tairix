@@ -220,16 +220,39 @@ fn as_real(count: usize) -> f64 {
     f64::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
-/// The Kaiser-windowed lowpass kernel at `offset` input frames from its
-/// centre, over a `taps`-frame span, with its half-amplitude point at
-/// `cutoff` cycles per input frame.
-fn kernel(offset: f64, taps: usize, cutoff: f64, i0_beta: f64) -> f64 {
-    let normalised = 2.0 * offset / as_real(taps);
-    if mathf::fabs(normalised) >= 1.0 {
-        return 0.0;
+/// The Kaiser-windowed sinc every bank is cut from: a `taps`-frame span with
+/// its half-amplitude point at `cutoff` cycles per frame. Band-limited
+/// synthesis builds its steps from the same kernel, so the system has one
+/// windowed sinc.
+#[derive(Clone, Copy, Debug)]
+pub struct Lowpass {
+    taps: usize,
+    cutoff: f64,
+    i0_beta: f64,
+}
+
+impl Lowpass {
+    /// The kernel over `taps` frames cutting at `cutoff` cycles per frame.
+    #[must_use]
+    pub fn new(taps: usize, cutoff: f64) -> Self {
+        Self {
+            taps,
+            cutoff,
+            i0_beta: bessel_i0(KAISER_BETA),
+        }
     }
-    let window = bessel_i0(KAISER_BETA * mathf::sqrt(1.0 - normalised * normalised)) / i0_beta;
-    2.0 * cutoff * sinc(2.0 * cutoff * offset) * window
+
+    /// The kernel `offset` frames from its centre; zero outside its span.
+    #[must_use]
+    pub fn at(&self, offset: f64) -> f64 {
+        let normalised = 2.0 * offset / as_real(self.taps);
+        if mathf::fabs(normalised) >= 1.0 {
+            return 0.0;
+        }
+        let window =
+            bessel_i0(KAISER_BETA * mathf::sqrt(1.0 - normalised * normalised)) / self.i0_beta;
+        2.0 * self.cutoff * sinc(2.0 * self.cutoff * offset) * window
+    }
 }
 
 /// The precomputed polyphase coefficients for one resampling ratio.
@@ -285,14 +308,13 @@ impl FilterBank {
         // upsampling leaves it at the input's own band edge, since there is
         // nothing above it to fold back.
         let lower = f64::from(ratio.output().min(ratio.input()));
-        let cutoff = CUTOFF * lower / f64::from(ratio.input());
-        let i0_beta = bessel_i0(KAISER_BETA);
+        let lowpass = Lowpass::new(taps, CUTOFF * lower / f64::from(ratio.input()));
         for row in 0..rows {
             let fraction = mathf::real(row) / f64::from(phases);
             let mut sum = 0.0;
             for tap in 0..taps {
                 let offset = fraction + as_real(taps) / 2.0 - 1.0 - as_real(tap);
-                let value = kernel(offset, taps, cutoff, i0_beta);
+                let value = lowpass.at(offset);
                 coefficients[row * taps + tap] = mathf::single(value);
                 sum += value;
             }
@@ -441,6 +463,49 @@ impl Resampler {
         self.pushed = 0;
         self.whole = 0;
         self.remainder = 0;
+    }
+
+    /// Carry the stream on over `bank`, whose ratio may differ from the one
+    /// this resampler steps at: a linked clock domain's correction. The input
+    /// frames already taken and the output's place between them are kept, so
+    /// the stream goes on where a new resampler would audibly restart. A bank
+    /// of more taps reads the frames the history no longer holds as silence
+    /// until they have passed.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotSupported`] — either ratio is unity: the copying bank
+    ///   keeps no history to carry.
+    /// * [`Errno::OutOfMemory`] — a longer history could not be allocated;
+    ///   the resampler is left as it was.
+    pub fn retune(&mut self, bank: &FilterBank) -> Result<(), Errno> {
+        let ratio = bank.ratio();
+        if ratio == self.ratio {
+            return Ok(());
+        }
+        if ratio.is_unity() || self.ratio.is_unity() {
+            return Err(Errno::NotSupported);
+        }
+        if bank.taps() != self.taps.len() {
+            let taps = bank.taps();
+            let mut history =
+                fallible::filled(taps * self.channels, 0.0f32).ok_or(Errno::OutOfMemory)?;
+            let scratch = fallible::filled(taps, 0.0f32).ok_or(Errno::OutOfMemory)?;
+            let (old, new) = (self.modulus(), u64::try_from(taps).unwrap_or(1).max(1));
+            let kept = old.min(new);
+            for frame in self.pushed.saturating_sub(kept)..self.pushed {
+                let from = usize::try_from(frame % old).unwrap_or(0) * self.channels;
+                let to = usize::try_from(frame % new).unwrap_or(0) * self.channels;
+                history[to..to + self.channels]
+                    .copy_from_slice(&self.history[from..from + self.channels]);
+            }
+            self.history = history;
+            self.taps = scratch;
+        }
+        let place = u64::from(self.remainder) * u64::from(ratio.output());
+        self.remainder = u32::try_from(place / u64::from(self.ratio.output())).unwrap_or(0);
+        self.ratio = ratio;
+        Ok(())
     }
 
     /// The filter's group delay, in input frames.

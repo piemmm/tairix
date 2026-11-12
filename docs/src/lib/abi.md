@@ -21,10 +21,12 @@ protocols programs speak to the system services.
   move, a scroll, or a resolved primary/secondary/middle press/release) the
   window manager and taskbar route. Distinct from the device-level
   `driver::input::InputEvent` (see [Input events](../abi/input.md)).
-* `KeyInput` — 20-byte little-endian desktop keyboard event (a press or
-  release carrying a `KeyValue` — a produced `Char` or a `NamedKeyCode` —
-  the held `Modifiers` and the `PhysicalKey` it was typed on, or a bare
-  modifier change) the window manager delivers to the focused window (see
+* `KeyEdge` — 12-byte little-endian key edge a keyboard driver injects: the
+  `PhysicalKey` that went down or up, and nothing it typed.
+* `KeyInput` — 20-byte little-endian desktop keyboard event the seat reads an
+  edge as: a press or release, the `KeyValue` it typed if any — a produced
+  `Char` or a `NamedKeyCode` — the held `Modifiers` and the `PhysicalKey` it
+  was typed on. The window manager delivers it to the focused window (see
   [Input events](../abi/input.md)).
 * `ManifestHeader` — fixed-size prefix of the signed `rxe` manifest section,
   including the SHA-256 syscall-table fingerprint, the Ed25519 public key,

@@ -115,6 +115,11 @@ impl PhysMap for ConfiguredPhysMap {
         // Deliberate no-op: the x86_64 instruction cache is coherent with
         // kernel data writes, so freshly loaded code needs no maintenance.
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        // Coherent, as above: no CPU can fetch stale bytes of new code.
+        true
+    }
 }
 
 /// The single, `'static` [`ConfiguredPhysMap`] the page-table frame

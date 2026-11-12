@@ -49,6 +49,10 @@ from 1.02 to 2.60, was closed cleanly, and is not write-protected.
 `write_once_media`, `metadata_partition`, `several_partitions` — and
 `damaged`, below.
 
+`fs_set_times` sets an entry's access and modification times to the
+microsecond, years 1 to 9999, written as local time at UTC, and stamps its
+attribute time; a File Entry and an Extended File Entry alike.
+
 Writing creates, extends, truncates, punches holes in, renames and removes
 files, directories and links, and records owners, groups and modes. A new
 node is born with the owner, group and mode of the record it is created with,

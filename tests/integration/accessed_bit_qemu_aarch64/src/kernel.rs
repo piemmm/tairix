@@ -12,7 +12,7 @@ use tairix_arch_aarch64::{exceptions, qemu_exit, SERIAL_SINK};
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_log::{log, Event, EventId, Level};
 
 /// Virtual address the test maps its single 4 KiB probe page at: 64 GiB,
@@ -56,7 +56,7 @@ static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 const HEAP_SIZE: usize = 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -69,12 +69,9 @@ static ALLOCATOR: FreeListAllocator =
 /// Page-table pool backing the address space.
 static PAGE_TABLES: PageTablePool = PageTablePool::new();
 
-/// 4 KiB frame the test maps at [`TEST_VADDR`]. `#[repr(align(4096))]` so
+/// 4 KiB frame the test maps at [`TEST_VADDR`]. Page-aligned, so
 /// its physical address is a valid page frame.
-#[repr(C, align(4096))]
-struct ProbeFrame([u8; 4096]);
-
-static mut PROBE_FRAME: ProbeFrame = ProbeFrame([0; 4096]);
+static PROBE_FRAME: Arena<4096> = Arena::ZERO;
 
 fn note(id: EventId, message: &'static str) {
     log(
@@ -142,7 +139,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // source. This pool is the only one this image has.
     tairix_arch_api::frames::publish_active_frames(&PAGE_TABLES);
 
-    let probe_paddr = image_phys(core::ptr::addr_of!(PROBE_FRAME) as u64);
+    let probe_paddr = image_phys(PROBE_FRAME.as_mut_ptr() as u64);
 
     // Map the probe page kernel read/write through the Arch HAL MMU
     // surface (the path the architecture-neutral kernel uses). `map_page`

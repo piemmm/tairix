@@ -46,7 +46,7 @@ impl Sink for Count {
 
 fn chord(physical: PhysicalKey, ctrl: bool) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Char('#'),
+        key: Some(KeyValue::Char('#')),
         modifiers: Modifiers {
             shift: true,
             ctrl,
@@ -59,7 +59,7 @@ fn chord(physical: PhysicalKey, ctrl: bool) -> KeyInput {
 
 fn pressed(key: KeyValue, physical: PhysicalKey) -> KeyInput {
     KeyInput::Pressed {
-        key,
+        key: Some(key),
         modifiers: Modifiers::default(),
         physical,
     }
@@ -238,7 +238,7 @@ fn the_arrows_choose_the_bars_mode_and_enter_takes_it() {
     let (mut shell, mut comp) = (shell(), compositor());
     let mut controller = CaptureController::new(CaptureSettings::default());
     controller.chord(ask(ChordAsk::Bar), 0, &mut shell, &mut comp);
-    let arrow = |code| pressed(KeyValue::Named(code), PhysicalKey::UNKNOWN);
+    let arrow = |code| pressed(KeyValue::Named(code), PhysicalKey::A);
     for key in [
         arrow(NamedKeyCode::Left),
         arrow(NamedKeyCode::Right),
@@ -251,7 +251,7 @@ fn the_arrows_choose_the_bars_mode_and_enter_takes_it() {
         "bar",
         "choosing a mode takes nothing"
     );
-    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter), PhysicalKey::UNKNOWN);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter), PhysicalKey::A);
     controller.key(&enter, 0, &mut shell, &mut comp);
     assert_eq!(
         controller.holding_name(),
@@ -767,7 +767,7 @@ fn a_bar_repaint_the_heap_refused_is_painted_at_the_next_settle() {
     let bar = controller.chrome_windows()[0];
     let painted = comp.window(bar).expect("the bar").bounds();
     assert!(comp.set_surface(bar, Surface::new(1, 1).expect("a pixel")));
-    let right = pressed(KeyValue::Named(NamedKeyCode::Right), PhysicalKey::UNKNOWN);
+    let right = pressed(KeyValue::Named(NamedKeyCode::Right), PhysicalKey::A);
     controller.key(&right, 0, &mut shell, &mut comp);
     tairix_fuzzseed::meter::refusing_above(16 * 1024, || {
         controller.settle(&mut shell, &mut comp);

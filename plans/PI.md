@@ -2342,29 +2342,19 @@ two users — or the same user twice — can be logged in concurrently.
   canonical `lib/vt` `SS3`/`CSI … ~` tables (no second escape definition,
   §2.2). It is `no_std`, allocation-free (writes a caller buffer, so it
   works before the SP5b userland heap), and fail-closed (`MAX_KEY_BYTES`
-  bounds it; an unmappable key emits nothing). `drivers/input/usb_hid`
-  gained a `console` module: the US HID-usage→`tairix_input::Key` table
-  (letters/digits/shifted symbols/named keys/keypad), a stateful
-  `KeyboardConsole` tracking the modifier bits + caps/num lock, and
-  `pump_once` — the driver loop that polls the keyboard, feeds each event
-  through `KeyboardConsole::feed` + `encode_key`, and injects the bytes
-  through a `ConsoleSink` (on metal a `console_input` call against the
-  video console's index; host tests use a recording sink). The
-  HID-usage→`Key` half is HID-specific (a `ps2` keyboard resolves
-  scancode set 1 into the same vocabulary, reusing `lib/keymap`); the
-  `Key`→bytes half is the one shared map (§2.2). Proven by 13 `lib/keymap`
-  unit tests + 13 usb_hid `console` tests (layout, ctrl/alt, caps/num
-  lock, named/arrow/function sequences, fail-closed cases, and the full
-  `BootKeyboard`→keymap→sink "hi" chain). Docs:
+  bounds it; an unmappable key emits nothing). A keyboard driver injects
+  only physical key edges (`key_inject`); the kernel seat reads every
+  keyboard on it through one `lib/input` `KeyboardState` (the US layout,
+  modifiers and locks) and types a press into the text console through
+  `lib/keymap`, so no driver resolves a key itself. Docs:
   `docs/src/lib/keymap.md`, `docs/src/drivers/input.md`.
 
 **Remaining (next increments, in order):**
 
 1. **Keyboard input for the video console — VL805/xHCI metal delivery.**
-   The kernel delivery seam (`console_input` + `ConsoleInputQueue`) and
-   the host-side producer (`lib/keymap` + the usb_hid `console` module
-   above) are landed; what remains is the **metal** path that feeds the
-   producer real reports: the USB-HID-over-xHCI **VL805** wiring (the P10
+   The kernel delivery seam and the seat's reading of key edges are
+   landed; what remains is the **metal** path that feeds the seat real
+   reports: the USB-HID-over-xHCI **VL805** wiring (the P10
    alternative track) so the driver's `pump_once` loop runs against a
    real keyboard and injects into the video console. QEMU models no Pi
    USB, so this is a metal checklist (`AGENTS.md` §20 / §0.4; the UART

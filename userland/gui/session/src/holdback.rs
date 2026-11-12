@@ -55,17 +55,22 @@
 //! * The **end of a tool window's move** is where it was let go, which is
 //!   all its owner still needs of every move before it: it withdraws the
 //!   window's earlier move reports and is never shed.
+//! * A **pointer lock's start or end** is the lock's state now: it withdraws
+//!   the one held before it, joins the back so it follows the motion the
+//!   lock it ends delivered, and is never shed.
 //! * A **wheel delta** (`Scrolled`) is additive: a run in one direction
 //!   made with the same modifiers held sums, at the newest place. A reversal
 //!   is a distinct gesture — a turn that clamped at a range end is not undone
 //!   by the turn back — and so is a change of modifier (Ctrl let go mid-turn
 //!   ends the zoom), each ending the run, decided by the same
 //!   `shell::continues` predicate the live drain uses.
+//! * A locked pointer's **motion** (`PointerMotion`) is additive too: a run
+//!   made with the same modifiers held sums, stamped with the newest time.
 //! * Everything else is **discrete** — a key, a button press or release, a
 //!   pick conclusion — and every one is owed.
-//! * The **end of the press a window holds** — its primary release, or the
-//!   cancel that took the press away — is all that stops the app holding
-//!   that press for ever, and is never shed on its own.
+//! * The **end of a press a window holds** — a key's or a button's release, or
+//!   the cancel that took the pointer's away — is all that stops the app
+//!   holding that press for ever, and is never shed on its own.
 //!
 //! # Bound
 //!
@@ -81,24 +86,27 @@
 //! conclusion, a move's or an offer's end, a press's end, or the offer a held
 //! drop is of, which the window reads the drop by — and that is total, not a
 //! preference. A held press is shed together with its end, so the app learns
-//! of neither rather than holding a press it is never told is over. A window
-//! holds one press at a time, so the only end left without its press is the
-//! one ending a press already delivered. Folding therefore leaves a window
-//! owing at most six state edges, at most one pick conclusion and one
-//! authorisation's (a second of either is refused before it reaches the
-//! sink), at most one move's end, at most one such press's end, and of a save
-//! offer's ends and an items offer's each, at most one that only left, each
-//! superseding the one before, and at most one drop's, an items drop with the
-//! one offer it is of, as items and as a file: a window has every event held
-//! before a drag's offer by the time it can answer it, so a second drop is
-//! held behind a first only for a window answering an offer it was never
-//! shown, and then supersedes it. A queue at capacity therefore always holds
-//! an input event to shed.
+//! of neither rather than holding a press it is never told is over. The only
+//! end left without its press is one ending a press already delivered, and a
+//! key or a button is down at most once, so those are at most one per key and
+//! button. Folding therefore leaves a window owing at most six state edges, at
+//! most one pick conclusion and one authorisation's (a second of either is
+//! refused before it reaches the sink), at most one move's end and one pointer
+//! lock's start or end, those ends,
+//! and of a save offer's ends and an items offer's each, at most one that only
+//! left, each superseding the one before, and at most one drop's, an items
+//! drop with the one offer it is of, as items and as a file: a window has
+//! every event held before a drag's offer by the time it can answer it, so a
+//! second drop is held behind a first only for a window answering an offer it
+//! was never shown, and then supersedes it. A queue at capacity holds an input
+//! event to shed but where the ends of presses already delivered fill it; it
+//! then takes each such end beyond the bound, which the keys and buttons a
+//! seat has bound in turn.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use tairix_abi::input::PointerButtonCode;
+use tairix_abi::input::KeyInput;
 use tairix_abi::ipc::SendRefusal;
 use tairix_abi::touch::PinchPhase;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
@@ -441,34 +449,86 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     }
     // A sample or a delta folds only into an unbroken run at the tail:
     // anything queued behind it is an occurrence the app must see in order.
-    match (queue.back_mut(), *next) {
+    queue
+        .back_mut()
+        .is_some_and(|held| fold_sample(held, next) || fold_delta(held, next))
+}
+
+/// Replace the tail `held` with `next` where `next` is a newer sample of the
+/// same state, answering whether it did.
+fn fold_sample(held: &mut WindowEvent, next: &WindowEvent) -> bool {
+    match (held, *next) {
+        // The fold delivers the newest sample whole: an older field kept
+        // beside the newer position would report a state the pointer was
+        // never in, or an instant it was not there.
         (
-            Some(
-                held @ WindowEvent::Pointer {
-                    action: PointerAction::Moved,
-                    ..
-                },
-            ),
+            held @ WindowEvent::Pointer {
+                action: PointerAction::Moved,
+                ..
+            },
             WindowEvent::Pointer {
                 action: PointerAction::Moved,
                 ..
             },
-        ) => {
-            // The fold delivers the newest sample whole: an older field kept
-            // beside the newer position would report a state the pointer was
-            // never in, or an instant it was not there.
+        )
+        | (held @ WindowEvent::DragOver { .. }, WindowEvent::DragOver { .. })
+        | (held @ WindowEvent::SaveOffered { .. }, WindowEvent::SaveOffered { .. }) => {
             *held = *next;
             true
         }
         (
-            Some(WindowEvent::Scrolled {
+            WindowEvent::ToolMoved {
+                over, ended: false, ..
+            },
+            WindowEvent::ToolMoved {
+                over: newest,
+                ended: false,
+                ..
+            },
+        ) => {
+            *over = newest;
+            true
+        }
+        (
+            WindowEvent::Pinch {
+                phase: PinchPhase::Update,
+                x,
+                y,
+                scale,
+                modifiers,
+                ..
+            },
+            WindowEvent::Pinch {
+                phase: PinchPhase::Update,
+                x: newest_x,
+                y: newest_y,
+                scale: newest_scale,
+                modifiers: newest_modifiers,
+                ..
+            },
+        ) if *modifiers == newest_modifiers => {
+            *x = newest_x;
+            *y = newest_y;
+            *scale = newest_scale;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Add the delta `next` into the tail `held` where both are travel of one
+/// gesture under the same modifiers, answering whether it did.
+fn fold_delta(held: &mut WindowEvent, next: &WindowEvent) -> bool {
+    match (held, *next) {
+        (
+            WindowEvent::Scrolled {
                 x,
                 y,
                 dx: sideways,
                 dy: downward,
                 modifiers,
                 ..
-            }),
+            },
             WindowEvent::Scrolled {
                 x: newest_x,
                 y: newest_y,
@@ -487,45 +547,25 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
             *y = newest_y;
             true
         }
-        (Some(held @ WindowEvent::DragOver { .. }), WindowEvent::DragOver { .. })
-        | (Some(held @ WindowEvent::SaveOffered { .. }), WindowEvent::SaveOffered { .. }) => {
-            *held = *next;
-            true
-        }
         (
-            Some(WindowEvent::ToolMoved {
-                over, ended: false, ..
-            }),
-            WindowEvent::ToolMoved {
-                over: newest,
-                ended: false,
+            WindowEvent::PointerMotion {
+                dx: rightward,
+                dy: downward,
+                modifiers,
+                at_ns,
                 ..
             },
-        ) => {
-            *over = newest;
-            true
-        }
-        (
-            Some(WindowEvent::Pinch {
-                phase: PinchPhase::Update,
-                x,
-                y,
-                scale,
-                modifiers,
-                ..
-            }),
-            WindowEvent::Pinch {
-                phase: PinchPhase::Update,
-                x: newest_x,
-                y: newest_y,
-                scale: newest_scale,
+            WindowEvent::PointerMotion {
+                dx,
+                dy,
                 modifiers: newest_modifiers,
+                at_ns: newest_at,
                 ..
             },
         ) if *modifiers == newest_modifiers => {
-            *x = newest_x;
-            *y = newest_y;
-            *scale = newest_scale;
+            *rightward = rightward.saturating_add(dx);
+            *downward = downward.saturating_add(dy);
+            *at_ns = newest_at;
             true
         }
         _ => false,
@@ -564,10 +604,16 @@ fn fold_offer(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
 /// takes every offer held since the last drop. A drop takes every offer but
 /// the one it is of, numbered as it is, which a window may answer as late as it
 /// reads it and reads the drop by.
+///
+/// A pointer lock's start or end takes the one held before it, so a window
+/// owes at most one, and it stays behind every motion of the lock it ends.
 fn withdraw_superseded(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
     match next {
         WindowEvent::ToolMoved { ended: true, .. } => {
             queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
+        }
+        WindowEvent::PointerLock { .. } => {
+            queue.retain(|held| !matches!(held, WindowEvent::PointerLock { .. }));
         }
         WindowEvent::ItemsOfferEnded {
             serial, dropped, ..
@@ -647,6 +693,7 @@ const fn is_input(event: &WindowEvent) -> bool {
         event,
         WindowEvent::Key { .. }
             | WindowEvent::Pointer { .. }
+            | WindowEvent::PointerMotion { .. }
             | WindowEvent::Scrolled { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::ToolMoved { ended: false, .. }
@@ -665,25 +712,71 @@ const fn is_offer(event: &WindowEvent) -> bool {
     )
 }
 
-/// Whether `event` is a press the window holds until it is told it ended.
-/// The primary button is the one that grabs; any other press is a click.
+/// Whether `event` is a press the window holds until it is told it ended: a
+/// key's or a button's.
 const fn holds_press(event: &WindowEvent) -> bool {
     matches!(
         event,
         WindowEvent::Pointer {
-            action: PointerAction::Pressed(PointerButtonCode::Primary),
+            action: PointerAction::Pressed(_),
+            ..
+        } | WindowEvent::Key {
+            key: KeyInput::Pressed { .. },
             ..
         }
     )
 }
 
-/// Whether `event` ends the press a window holds: its release, or the cancel
-/// that took it away.
+/// Whether `event` ends a press a window holds: a key's or a button's
+/// release, or the cancel that took the pointer's away.
 const fn ends_press(event: &WindowEvent) -> bool {
     matches!(
         event,
         WindowEvent::Pointer {
-            action: PointerAction::Released(PointerButtonCode::Primary) | PointerAction::Cancelled,
+            action: PointerAction::Released(_) | PointerAction::Cancelled,
+            ..
+        } | WindowEvent::Key {
+            key: KeyInput::Released { .. },
+            ..
+        }
+    )
+}
+
+/// Whether `end` is the held press `press`'s own release: the same key's, or
+/// the same button's.
+fn releases(press: &WindowEvent, end: &WindowEvent) -> bool {
+    match (press, end) {
+        (
+            WindowEvent::Key {
+                key: KeyInput::Pressed { physical, .. },
+                ..
+            },
+            WindowEvent::Key {
+                key: KeyInput::Released { physical: up, .. },
+                ..
+            },
+        ) => physical == up,
+        (
+            WindowEvent::Pointer {
+                action: PointerAction::Pressed(button),
+                ..
+            },
+            WindowEvent::Pointer {
+                action: PointerAction::Released(up),
+                ..
+            },
+        ) => button == up,
+        _ => false,
+    }
+}
+
+/// Whether `event` is the cancel that ends every press of the pointer's a
+/// window holds.
+const fn cancels(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Pointer {
+            action: PointerAction::Cancelled,
             ..
         }
     )
@@ -708,12 +801,15 @@ fn after_held_drop(queue: &VecDeque<WindowEvent>) -> usize {
 
 /// Make room in a queue at capacity by shedding its oldest input event other
 /// than a press's end or the offer a held drop is of, and a held press together
-/// with its end.
+/// with its own release.
 ///
-/// A window holds one press at a time, so the first end after a held press is
-/// that press's own. The module's bound argument is why a full queue always
-/// holds something to shed; the `None` arm cannot be reached from a queue this
-/// module built, and shedding nothing is the fail-safe answer if it ever were.
+/// A key or a button is down at most once, so the first release after a held
+/// press that names its key or button is that press's own. A cancel that comes
+/// first ends it as well as every press the window was told of before, so it
+/// stays and the press goes alone. A queue of nothing but ends of presses
+/// already delivered sheds nothing: the module's bound argument says why that
+/// is bounded, and shedding nothing is the answer that keeps every press
+/// ending.
 fn shed_oldest_input(queue: &mut VecDeque<WindowEvent>) {
     let after_drop = after_held_drop(queue);
     let Some(oldest) = queue.iter().enumerate().position(|(at, event)| {
@@ -721,9 +817,14 @@ fn shed_oldest_input(queue: &mut VecDeque<WindowEvent>) {
     }) else {
         return;
     };
-    if queue.get(oldest).is_some_and(holds_press) {
-        if let Some(end) = queue.iter().skip(oldest + 1).position(ends_press) {
-            queue.remove(oldest + 1 + end);
+    if let Some(press) = queue.get(oldest).copied().filter(holds_press) {
+        let end = queue
+            .iter()
+            .skip(oldest + 1)
+            .position(|held| releases(&press, held) || cancels(held))
+            .map(|end| oldest + 1 + end);
+        if let Some(end) = end.filter(|&end| !queue.get(end).is_some_and(cancels)) {
+            queue.remove(end);
         }
     }
     queue.remove(oldest);

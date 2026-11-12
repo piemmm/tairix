@@ -54,9 +54,9 @@ surprise removal, verified re-insert), `plans/FIX-IO.md` (deadlines, health),
   from an in-kernel driver. The holds live in the server and die with it: a
   descriptor held across a lost server answers the stand-in's device fault,
   then stale once the restarted server serves the volume under a fresh
-  registration. Setting a node's times arrives
-  with D1264, which adds the trait method; declared timestamp limits with
-  D1048.
+  registration. Setting a node's times is `SetTimes` (op 31), answering how
+  exactly the driver kept them; the driver fits each instant to its own
+  declared fields.
 - **Every call is bounded by the server's liveness**, not by a guess at its
   work: a driver waiting on its device is working, and the device's own
   deadline bounds each transfer, so a call is abandoned only when the driver

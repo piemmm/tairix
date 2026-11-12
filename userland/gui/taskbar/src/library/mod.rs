@@ -823,6 +823,7 @@ impl LibraryPopup {
                 PopupOutcome::Ignored
             }
             InputEvent::PointerReleased { .. }
+            | InputEvent::PointerMotion { .. }
             | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. }

@@ -14,10 +14,11 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use crate::effects::{EffectKey, Effects, FULL, MIN_OPACITY};
+use crate::effects::{EffectKey, Effects, MIN_OPACITY};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
 use tairix_colour::Rgb;
+use tairix_crt::FULL;
 
 use super::{
     content_rect, footer_split, split_row, Focus, Layout, Settings, SheetOutcome, Style,

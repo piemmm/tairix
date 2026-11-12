@@ -36,7 +36,8 @@ named, not paraphrased.
 
 ## The four decoders
 
-- **`riscv64`** — RV64GC (I, M, A, F, D, Zicsr, Zifencei, C). The 16/32-bit
+- **`riscv64`** — RV64GC (I, M, A, F, D, Zicsr, Zifencei, C) and Zbb, the
+  basic bit-manipulation extension the code generator lowers to. The 16/32-bit
   parcel-length discipline follows the RISC-V expanded-length encoding
   exactly — the core correctness property, since a mis-lengthed compressed
   instruction desynchronises everything after it. Reserved 48/64-bit
@@ -59,8 +60,10 @@ named, not paraphrased.
 - **`x86_64`** — the variable-length decoder: legacy prefixes, REX,
   one-byte and `0F` two-byte opcode maps, ModRM/SIB, displacement and
   immediate sizing, the architectural 15-byte cap, rendered in
-  binutils-style Intel syntax. `0F 38`/`0F 3A` and VEX/EVEX are staged and
-  render `(bad)` until then.
+  binutils-style Intel syntax. Of the VEX encodings it decodes the BMI1 and
+  BMI2 instructions over the general registers, which the code generator
+  emits; the legacy `0F 38`/`0F 3A` maps, the rest of VEX and EVEX render
+  `(bad)`, their decode staged in `plans/APPS.md`.
 
 ## Testing
 

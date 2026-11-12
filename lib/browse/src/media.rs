@@ -245,10 +245,15 @@ pub enum MediaType {
     RawDiskImage,
     /// The image of an optical disc (`application/x-cd-image`).
     CdImage,
-    /// The image of a floppy disk, Acorn's or Amiga's alike
+    /// The image of a floppy disk, Acorn's, Amiga's or a PC's alike
     /// (`application/x-raw-floppy-disk-image`): which one is the kernel's probe
     /// to tell, never the name.
     RawFloppyDiskImage,
+    /// An ImageDisk archive of a floppy disk (`application/x-imagedisk`): each
+    /// track as it was read, its sectors' marks and gaps with it. A record of
+    /// the disk rather than its sectors in order, so it is served as no
+    /// volume.
+    ImageDisk,
     /// An MPEG audio file of any layer — MP3, MP2 or MP1 (`audio/mpeg`).
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
@@ -381,6 +386,7 @@ impl MediaType {
             Self::RawDiskImage => "Disk image",
             Self::CdImage => "Disc image",
             Self::RawFloppyDiskImage => "Floppy disk image",
+            Self::ImageDisk => "ImageDisk floppy archive",
             Self::AudioMpeg => "MPEG audio",
             Self::AudioFlac => "FLAC audio",
             Self::AudioOgg => "Ogg audio",
@@ -492,6 +498,7 @@ impl MediaType {
             Self::RawDiskImage => "application/x-raw-disk-image",
             Self::CdImage => "application/x-cd-image",
             Self::RawFloppyDiskImage => "application/x-raw-floppy-disk-image",
+            Self::ImageDisk => "application/x-imagedisk",
             Self::AudioMpeg => "audio/mpeg",
             Self::AudioFlac => "audio/flac",
             Self::AudioOgg => "audio/ogg",
@@ -637,6 +644,7 @@ impl MediaType {
             | Self::RiscOsArchive
             | Self::RiscOsData
             | Self::RawDiskImage
+            | Self::ImageDisk
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -766,7 +774,7 @@ impl MediaType {
             Self::RiscOsArchive => IconKind::Archive,
             Self::RawDiskImage => IconKind::DiskHard,
             Self::CdImage => IconKind::DiskOptical,
-            Self::RawFloppyDiskImage => IconKind::DiskFloppy,
+            Self::RawFloppyDiskImage | Self::ImageDisk => IconKind::DiskFloppy,
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -867,6 +875,7 @@ impl MediaType {
             | Self::RawDiskImage
             | Self::CdImage
             | Self::RawFloppyDiskImage
+            | Self::ImageDisk
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -1051,7 +1060,8 @@ impl MediaType {
             | Self::RiscOsArchive
             | Self::RawDiskImage
             | Self::CdImage
-            | Self::RawFloppyDiskImage => Some(Family::Archive),
+            | Self::RawFloppyDiskImage
+            | Self::ImageDisk => Some(Family::Archive),
             Self::TairixApp
             | Self::TairixService
             | Self::TairixScreensaver
@@ -1266,6 +1276,7 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::RawDiskImage,
     MediaType::CdImage,
     MediaType::RawFloppyDiskImage,
+    MediaType::ImageDisk,
     MediaType::AudioMpeg,
     MediaType::AudioFlac,
     MediaType::AudioOgg,
@@ -1358,9 +1369,13 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
     (MediaType::JavaArchive, &["jar"]),
-    (MediaType::RawDiskImage, &["hdf"]),
+    (MediaType::RawDiskImage, &["hdf", "img"]),
     (MediaType::CdImage, &["iso"]),
-    (MediaType::RawFloppyDiskImage, &["adf", "adl", "adm", "ads"]),
+    (
+        MediaType::RawFloppyDiskImage,
+        &["adf", "adl", "adm", "ads", "ima", "vfd", "flp"],
+    ),
+    (MediaType::ImageDisk, &["imd"]),
     (MediaType::AudioMpeg, &["mp3", "mp2", "mp1", "mpa"]),
     (MediaType::AudioFlac, &["flac"]),
     (MediaType::AudioOgg, &["ogg", "oga"]),

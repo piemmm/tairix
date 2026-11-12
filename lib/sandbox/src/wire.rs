@@ -184,6 +184,11 @@ impl<R: Room> Writer<R> {
         self.raw(&[value]);
     }
 
+    /// Append a little-endian `u16`.
+    pub fn u16(&mut self, value: u16) {
+        self.raw(&value.to_le_bytes());
+    }
+
     /// Append a little-endian `u32`.
     pub fn u32(&mut self, value: u32) {
         self.raw(&value.to_le_bytes());
@@ -286,6 +291,16 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
+    /// Consume a little-endian `u16`.
+    ///
+    /// # Errors
+    ///
+    /// [`WireError::Truncated`] when fewer than two bytes remain.
+    pub fn u16(&mut self) -> Result<u16, WireError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
     /// Consume a little-endian `u32`.
     ///
     /// # Errors
@@ -355,6 +370,7 @@ mod tests {
     fn round_trips_every_scalar_and_field_shape() {
         let mut w = Writer::new();
         w.u8(0xAB);
+        w.u16(0xC0DE);
         w.u32(0xDEAD_BEEF);
         w.u64(0x0123_4567_89AB_CDEF);
         w.bytes(b"raw");
@@ -364,6 +380,7 @@ mod tests {
         let mut r = Reader::new(&payload);
         assert_eq!(r.remaining(), payload.len());
         assert_eq!(r.u8(), Ok(0xAB));
+        assert_eq!(r.u16(), Ok(0xC0DE));
         assert_eq!(r.u32(), Ok(0xDEAD_BEEF));
         assert_eq!(r.u64(), Ok(0x0123_4567_89AB_CDEF));
         assert_eq!(r.bytes(16), Ok(&b"raw"[..]));

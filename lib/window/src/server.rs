@@ -69,7 +69,7 @@ use tairix_abi::window_ipc::{
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
-use tairix_abi::window_ipc::{LandingStep, DROP_LANDINGS_MAX};
+use tairix_abi::window_ipc::{KeyboardMode, LandingStep, DROP_LANDINGS_MAX};
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
 use tairix_display::{add_damage, damage_list, FrameRegion, ShmMapper};
@@ -993,6 +993,34 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// The caller's own window `window_id` asked to read the keyboard as
+    /// `mode` while it holds it.
+    ///
+    /// The default refuses: a host with no keyboard reads none.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot honour the mode with.
+    fn keyboard_mode_set(&mut self, window_id: u64, mode: KeyboardMode) -> Result<(), Errno> {
+        let _ = (window_id, mode);
+        Err(Errno::NotSupported)
+    }
+
+    /// The caller's own window `window_id` asked for the pointer to be locked
+    /// to it (`locked`) or let go; a granted lock and every end of one is told
+    /// to the window as [`WindowEvent::PointerLock`].
+    ///
+    /// The default refuses: a host with no pointer locks none.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] when the window may not lock the pointer
+    /// now, or any [`Errno`] the host cannot honour the request with.
+    fn pointer_lock_set(&mut self, window_id: u64, locked: bool) -> Result<(), Errno> {
+        let _ = (window_id, locked);
+        Err(Errno::NotSupported)
+    }
+
     /// The window holding the keyboard, if one of this engine's windows does.
     ///
     /// The default answers none: a host with no keyboard focuses nothing.
@@ -1814,15 +1842,17 @@ impl ClientRegion {
     }
 }
 
-/// The file a pick concluded with, as the session delegated it.
+/// The file a pick concluded with — or the folder a subtree pick hands over —
+/// as the session delegated it.
 #[derive(Clone, Copy, Debug)]
 pub struct PickedFile<'a> {
     /// The one-shot `fd_redeem` handle minted to the window's owner; never
     /// zero.
     pub handle: u64,
-    /// The file's own name, for the owner's `TakePickedName`.
+    /// Its own name, for the owner's `TakePickedName`.
     pub name: &'a DocumentName,
-    /// Whether the descriptor it redeems may be written.
+    /// Whether the descriptor it redeems may be written, or what lies beneath
+    /// a folder changed.
     pub writable: bool,
 }
 
@@ -2936,6 +2966,12 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::SetCursor { window_id, shape } if owns(window_id) => {
                 status(reply, host.cursor_set(window_id, shape))
             }
+            WindowRequest::SetKeyboardMode { window_id, mode } if owns(window_id) => {
+                status(reply, host.keyboard_mode_set(window_id, mode))
+            }
+            WindowRequest::LockPointer { window_id, locked } if owns(window_id) => {
+                status(reply, host.pointer_lock_set(window_id, locked))
+            }
             WindowRequest::SetClipboard {
                 window_id,
                 shm_handle,
@@ -2945,9 +2981,10 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 host.clipboard_set(window_id, ClientRegion::of(caller, shm_handle), len, kind),
             ),
-            WindowRequest::SetCursor { .. } | WindowRequest::SetClipboard { .. } => {
-                status(reply, Err(Errno::NotFound))
-            }
+            WindowRequest::SetCursor { .. }
+            | WindowRequest::SetKeyboardMode { .. }
+            | WindowRequest::LockPointer { .. }
+            | WindowRequest::SetClipboard { .. } => status(reply, Err(Errno::NotFound)),
             _ => status(reply, Err(Errno::NotSupported)),
         }
     }
@@ -3008,6 +3045,8 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             WindowRequest::SetTooltip { .. }
             | WindowRequest::SetCursor { .. }
+            | WindowRequest::SetKeyboardMode { .. }
+            | WindowRequest::LockPointer { .. }
             | WindowRequest::ActivateWindow { .. }
             | WindowRequest::SetClipboard { .. }
             | WindowRequest::GetClipboard { .. } => {
@@ -4544,20 +4583,20 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
-    /// Conclude window `window_id`'s pending pick: the file the user chose,
-    /// or `None` when they chose nothing.
+    /// Conclude window `window_id`'s pending pick: the file the user chose —
+    /// the folder, for a subtree pick — or `None` when they chose nothing.
     ///
-    /// Delivers `FilePicked` or `PickCancelled` and, once the sink accepted
-    /// it, clears the pending pick and holds a chosen name for the owner's
-    /// `TakePickedName`. The one way a pick concludes, so exactly one
+    /// Delivers `FilePicked`, `SubtreePicked` or `PickCancelled` and, once the
+    /// sink accepted it, clears the pending pick and holds a chosen name for
+    /// the owner's `TakePickedName`. The one way a pick concludes, so exactly one
     /// conclusion follows each accepted `PickFile` and a conclusion no one
     /// asked for is refused, not delivered.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window.
-    /// * [`Errno::OutOfRange`] — no pick is pending on it, a zero handle, or a
-    ///   file for a pick that asked for a folder.
+    /// * [`Errno::OutOfRange`] — no pick is pending on it, a zero handle, or
+    ///   one file for a pick that asked for a folder's files.
     /// * Any [`Errno`] the sink surfaces; the pick is still owed.
     pub fn conclude_pick(
         &mut self,
@@ -4569,12 +4608,24 @@ impl<M: ShmMapper> WindowServer<M> {
         let owed = match record.pick_pending {
             None => false,
             Some(PickPurpose::Folder) => chosen.is_none(),
-            Some(PickPurpose::Open | PickPurpose::Import | PickPurpose::Save { .. }) => true,
+            Some(
+                PickPurpose::Open
+                | PickPurpose::Import
+                | PickPurpose::Subtree
+                | PickPurpose::Save { .. },
+            ) => true,
         };
         if !owed || chosen.is_some_and(|file| file.handle == 0) {
             return Err(Errno::OutOfRange);
         }
         let event = match chosen {
+            Some(folder) if record.pick_pending == Some(PickPurpose::Subtree) => {
+                WindowEvent::SubtreePicked {
+                    window_id,
+                    handle: folder.handle,
+                    writable: folder.writable,
+                }
+            }
             Some(file) => WindowEvent::FilePicked {
                 window_id,
                 handle: file.handle,

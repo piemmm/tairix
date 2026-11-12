@@ -1,7 +1,7 @@
 //! Discovered-RAM sizing policy for a task's *dynamic* user virtual
 //! windows: the non-`FIXED` anonymous-heap window, the heap region above it
-//! that the runtime's heap is told of, and the demand-paged file-mapping
-//! window above that.
+//! that the runtime's heap is told of, the window code installed from another
+//! process lands in, and the demand-paged file-mapping window above that.
 //!
 //! The windows' *base* anchor and the other user-space layout offsets live
 //! in [`crate::spawn_layout`]; their *sizes* are a function of the machine,
@@ -9,15 +9,15 @@
 //! tested on the CI host without dragging the freestanding-only layout
 //! constants into the host build. Each port computes the split at spawn
 //! time from the frame allocator's discovered total and its own user-VA
-//! ceiling (`USER_VA_TOP`), then hands both windows to
+//! ceiling (`USER_VA_TOP`), then hands the windows to
 //! [`tairix_kernel_mem::LiveSpace`].
 //!
 //! The split reflects what bounds each window:
 //!
-//! * The **anonymous heap** window and the **heap region** can never
-//!   usefully exceed physical RAM — every anonymous page must be backable by
-//!   a frame — so each spans `ram_frames`, floored at
-//!   [`ANON_WINDOW_MIN_PAGES`] and capped at a quarter of the address space
+//! * The **anonymous heap** window, the **heap region** and the **code**
+//!   window can never usefully exceed physical RAM — every page in them must
+//!   be backable by a frame — so each spans `ram_frames`, floored at
+//!   [`ANON_WINDOW_MIN_PAGES`] and capped at a sixth of the address space
 //!   above the anchor so the file window keeps at least half of it. The heap
 //!   region is in no window: a `FIXED` map is refused over a window's free
 //!   space, so the runtime grows its heap there.
@@ -25,10 +25,10 @@
 //!   backed one at a time by the fault path and reclaimed under pressure,
 //!   so a mapping legitimately exceeds RAM by orders of magnitude (a
 //!   multi-terabyte file on a small machine). The file window therefore
-//!   takes all remaining address space above the heap window.
+//!   takes all remaining address space above the code window.
 //!
-//! Address space costs no RAM until backed, and both windows fail closed
-//! (deterministic OOM) at their reservation when exhausted.
+//! Address space costs no RAM until backed, and every window fails closed
+//! (deterministic OOM) at its reservation when exhausted.
 
 use tairix_abi::HeapRegion;
 use tairix_kernel_mem::PAGE_SIZE;
@@ -44,9 +44,9 @@ use tairix_kernel_mem::PAGE_SIZE;
 pub const ANON_WINDOW_MIN_PAGES: usize = 0x1000;
 
 /// The dynamic-window split for one task: how many pages the anonymous
-/// heap window spans, the heap region above it, and where the file-mapping
-/// window above that begins and ends. Produced by [`user_windows`]; consumed
-/// by every port's spawn path.
+/// heap window spans, the heap region and the code window above it, and where
+/// the file-mapping window above those begins and ends. Produced by
+/// [`user_windows`]; consumed by every port's spawn path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserWindows {
     /// Pages of address space the non-`FIXED` anonymous-heap window spans,
@@ -55,8 +55,13 @@ pub struct UserWindows {
     /// The address space set aside for the process's heap, directly above the
     /// anonymous-heap window and as large.
     pub heap: HeapRegion,
-    /// Base of the file-mapping window: the first page above the heap
-    /// region's top.
+    /// Base of the window installed code lands in: the first page above the
+    /// heap region's top.
+    pub code_base: u64,
+    /// Pages the code window spans, as many as the heap window.
+    pub code_pages: usize,
+    /// Base of the file-mapping window: the first page above the code
+    /// window's top.
     pub file_base: u64,
     /// Pages of address space the file-mapping window spans — everything
     /// remaining up to the port's user-VA ceiling. Zero on a degenerate
@@ -66,15 +71,15 @@ pub struct UserWindows {
 }
 
 /// Split the user address space above `anon_window_base` between the
-/// anonymous-heap window, the heap region and the file-mapping window for a
-/// machine with `ram_frames` total frames and a per-architecture
-/// first-non-addressable user virtual address `user_va_top`.
+/// anonymous-heap window, the heap region, the code window and the
+/// file-mapping window for a machine with `ram_frames` total frames and a
+/// per-architecture first-non-addressable user virtual address `user_va_top`.
 ///
 /// Every capacity is **derived from discovered hardware**, never a
-/// hard-wired ceiling. The heap window and the heap region each track
-/// physical RAM (the true upper bound on backable anonymous pages), floored
+/// hard-wired ceiling. The heap window, the heap region and the code window
+/// each track physical RAM (the true upper bound on backable pages), floored
 /// at [`ANON_WINDOW_MIN_PAGES`] so a tiny machine still gets a workable heap,
-/// and capped at a quarter of the available span so a RAM-rich machine never
+/// and capped at a sixth of the available span so a RAM-rich machine never
 /// starves the file window; the file window takes the whole remainder,
 /// because a demand-paged file view is bounded by address space, not RAM.
 /// On a 1 GiB machine the heap window is the same 1 GiB it always was; on
@@ -89,22 +94,26 @@ pub struct UserWindows {
 pub fn user_windows(ram_frames: u64, anon_window_base: u64, user_va_top: u64) -> UserWindows {
     let page = PAGE_SIZE as u64;
     let va_fit_pages = user_va_top.saturating_sub(anon_window_base) / page;
-    // Two RAM-sized spans must fit above the base, so the floor yields to
-    // half the span, and the cap leaves the file window at least half.
-    let floor = (ANON_WINDOW_MIN_PAGES as u64).min(va_fit_pages / 2);
-    let cap = (va_fit_pages / 4).max(floor);
+    // Three RAM-sized spans must fit above the base, so the floor yields to
+    // a third of the span, and the cap leaves the file window at least half.
+    let floor = (ANON_WINDOW_MIN_PAGES as u64).min(va_fit_pages / 3);
+    let cap = (va_fit_pages / 6).max(floor);
     let ram_sized = ram_frames.clamp(floor, cap);
     let heap = HeapRegion {
         base: anon_window_base + ram_sized * page,
         len: ram_sized * page,
     };
-    let file_pages = va_fit_pages - 2 * ram_sized;
+    let code_base = heap.base + heap.len;
+    let file_pages = va_fit_pages - 3 * ram_sized;
     // The bare-metal ports are 64-bit, so these never truncate; clamp to
     // the platform word width rather than ever panicking on the cast.
+    let ram_sized_pages = usize::try_from(ram_sized).unwrap_or(usize::MAX);
     UserWindows {
-        anon_pages: usize::try_from(ram_sized).unwrap_or(usize::MAX),
+        anon_pages: ram_sized_pages,
         heap,
-        file_base: heap.base + heap.len,
+        code_base,
+        code_pages: ram_sized_pages,
+        file_base: code_base + ram_sized * page,
         file_pages: usize::try_from(file_pages).unwrap_or(usize::MAX),
     }
 }
@@ -131,9 +140,11 @@ mod tests {
         let ram_bytes = ram_frames * PAGE_SIZE as u64;
         assert_eq!(w.heap.base, BASE + ram_bytes);
         assert_eq!(w.heap.len, ram_bytes);
-        assert_eq!(w.file_base, BASE + 2 * ram_bytes);
+        assert_eq!(w.code_base, BASE + 2 * ram_bytes);
+        assert_eq!(w.code_pages as u64, ram_frames);
+        assert_eq!(w.file_base, BASE + 3 * ram_bytes);
         let va_fit = (USER_VA_TOP - BASE) / PAGE_SIZE as u64;
-        assert_eq!(w.file_pages as u64, va_fit - 2 * ram_frames);
+        assert_eq!(w.file_pages as u64, va_fit - 3 * ram_frames);
     }
 
     #[test]
@@ -145,7 +156,8 @@ mod tests {
         let w = user_windows(ram_frames, BASE, USER_VA_TOP);
         assert_eq!(w.anon_pages, 0x4_0000);
         assert_eq!(w.heap.base, BASE + (0x4_0000u64) * PAGE_SIZE as u64);
-        assert_eq!(w.file_base, BASE + (0x8_0000u64) * PAGE_SIZE as u64);
+        assert_eq!(w.code_base, BASE + (0x8_0000u64) * PAGE_SIZE as u64);
+        assert_eq!(w.file_base, BASE + (0xC_0000u64) * PAGE_SIZE as u64);
     }
 
     #[test]
@@ -161,24 +173,31 @@ mod tests {
 
     #[test]
     fn ram_rivalling_the_address_space_still_leaves_the_file_window_half() {
-        // A machine whose RAM covers the whole user span: the heap window and
-        // the heap region are capped at a quarter each so file mappings keep
-        // the other half.
+        // A machine whose RAM covers the whole user span: the heap window,
+        // the heap region and the code window are capped at a sixth each so
+        // file mappings keep the other half.
         let va_fit = (USER_VA_TOP - BASE) / PAGE_SIZE as u64;
         let w = user_windows(va_fit * 2, BASE, USER_VA_TOP);
-        assert_eq!(w.anon_pages as u64, va_fit / 4);
-        assert_eq!(w.heap.len, va_fit / 4 * PAGE_SIZE as u64);
-        assert_eq!(w.file_pages as u64, va_fit - 2 * (va_fit / 4));
+        assert_eq!(w.anon_pages as u64, va_fit / 6);
+        assert_eq!(w.heap.len, va_fit / 6 * PAGE_SIZE as u64);
+        assert_eq!(w.code_pages as u64, va_fit / 6);
+        assert_eq!(w.file_pages as u64, va_fit - 3 * (va_fit / 6));
+        assert!(w.file_pages as u64 >= va_fit / 2);
     }
 
     #[test]
-    fn the_heap_region_lies_between_the_heap_window_and_the_file_window() {
+    fn the_heap_region_and_the_code_window_lie_between_the_heap_window_and_the_file_window() {
         for ram_frames in [100, 1 << 18, 1 << 24, 1 << 40] {
             let w = user_windows(ram_frames, BASE, USER_VA_TOP);
             let anon_top = BASE + w.anon_pages as u64 * PAGE_SIZE as u64;
             assert_eq!(w.heap.base, anon_top, "{ram_frames}");
             assert_eq!(w.heap.len, w.anon_pages as u64 * PAGE_SIZE as u64);
-            assert_eq!(w.file_base, w.heap.base + w.heap.len);
+            assert_eq!(w.code_base, w.heap.base + w.heap.len);
+            assert_eq!(w.code_pages, w.anon_pages);
+            assert_eq!(
+                w.file_base,
+                w.code_base + w.code_pages as u64 * PAGE_SIZE as u64
+            );
             let file_top = w.file_base + w.file_pages as u64 * PAGE_SIZE as u64;
             assert!(file_top <= USER_VA_TOP, "{ram_frames}");
             assert!(w.heap.is_well_formed());
@@ -197,15 +216,19 @@ mod tests {
     #[test]
     fn clamped_to_addressable_user_space() {
         // Enormous RAM but a deliberately tiny VA window above the base: the
-        // heap window and region can never exceed what the address space can
-        // hold (the floor yields to half the span), and the file window
-        // degrades to zero rather than wrapping.
+        // three RAM-sized spans can never exceed what the address space can
+        // hold (the floor yields to a third of the span), and the file window
+        // keeps only what they leave rather than wrapping.
         let tiny_top = BASE + 256 * PAGE_SIZE as u64;
         let huge_ram = 1u64 << 40;
         let w = user_windows(huge_ram, BASE, tiny_top);
-        assert_eq!(w.anon_pages, 128);
-        assert_eq!(w.heap.base + w.heap.len, tiny_top);
-        assert_eq!(w.file_pages, 0);
+        assert_eq!(w.anon_pages, 85);
+        assert_eq!(
+            w.code_base + w.code_pages as u64 * PAGE_SIZE as u64,
+            w.file_base
+        );
+        assert_eq!(w.file_pages, 1);
+        assert_eq!(w.file_base + PAGE_SIZE as u64, tiny_top);
     }
 
     #[test]
@@ -217,6 +240,7 @@ mod tests {
         let w = user_windows(1 << 30, USER_VA_TOP, USER_VA_TOP);
         assert_eq!(w.anon_pages, 0);
         assert_eq!(w.heap.len, 0);
+        assert_eq!(w.code_pages, 0);
         assert_eq!(w.file_pages, 0);
         let w = user_windows(1 << 30, USER_VA_TOP + 1, USER_VA_TOP);
         assert_eq!(w.anon_pages, 0);

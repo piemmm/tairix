@@ -3052,7 +3052,7 @@ mod program {
         let Finished {
             ending, omissions, ..
         } = finished;
-        let unkept = omissions.report(APP_NAME).map(|report| report.summary);
+        let unkept = omissions.report(APP_NAME).and_then(|report| report.summary);
         if let Some(summary) = &unkept {
             report_error(&alloc::format!("warning: {summary}"));
         }
@@ -3447,7 +3447,12 @@ mod program {
             Some(WindowKind::Browser(_)) | None => {}
         }
         let WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers, .. },
+            key:
+                KeyInput::Pressed {
+                    key: Some(key),
+                    modifiers,
+                    ..
+                },
             ..
         } = *event
         else {
@@ -4713,7 +4718,12 @@ mod program {
     /// stays reachable while it is hidden.
     fn chrome_toggle(win: &mut OpenWindow, event: &WindowEvent) -> bool {
         let WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers, .. },
+            key:
+                KeyInput::Pressed {
+                    key: Some(key),
+                    modifiers,
+                    ..
+                },
             ..
         } = event
         else {
@@ -9536,7 +9546,12 @@ mod program {
     ) -> RenameRouting {
         match event {
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, modifiers, .. },
+                key:
+                    KeyInput::Pressed {
+                        key: Some(key),
+                        modifiers,
+                        ..
+                    },
                 ..
             } => RenameRouting::Taken(apply_rename_key(
                 browser, edit, reads, frame, *key, *modifiers, damage,
@@ -9742,7 +9757,7 @@ mod program {
         let toolbar = canvas.chrome.toolbar;
         match event {
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, modifiers, .. },
+                key: KeyInput::Pressed { key: Some(key), modifiers, .. },
                 ..
             } => apply_nav_press(browser, overlays, acts, canvas, viewport, *key, *modifiers, damage),
             // A wheel gesture the desktop forwarded, in scroll units (this
@@ -9835,6 +9850,8 @@ mod program {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
@@ -9845,6 +9862,7 @@ mod program {
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
+            | WindowEvent::SubtreePicked { .. }
             // A drag's reports, and a save's offers, are answered where every
             // window is.
             | WindowEvent::DragOver { .. }
@@ -12647,7 +12665,7 @@ mod program {
             }
             WindowEvent::RedrawRequested { .. } => true,
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, .. },
+                key: KeyInput::Pressed { key: Some(key), .. },
                 ..
             } => match key {
                 KeyValue::Named(NamedKeyCode::Escape) => {
@@ -13242,7 +13260,12 @@ mod program {
         match event {
             WindowEvent::CloseRequested { .. } => return (Repaint::Nothing, true),
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, modifiers, .. },
+                key:
+                    KeyInput::Pressed {
+                        key: Some(key),
+                        modifiers,
+                        ..
+                    },
                 ..
             } => {
                 return apply_properties_key(

@@ -1,4 +1,5 @@
-//! RV64GC instruction decoder (I, M, A, F, D, Zicsr, Zifencei, C).
+//! RV64GC instruction decoder (I, M, A, F, D, Zicsr, Zifencei, C), and the
+//! Zbb basic bit-manipulation extension.
 //!
 //! The 16/32-bit length discipline is the core correctness property: the
 //! parcel length is read from the low opcode bits exactly as the RISC-V
@@ -235,10 +236,14 @@ fn decode_full(word: u32, address: u64, consumed: &[u8]) -> Insn {
                 )
             }
             1 | 5 => {
+                if let Some(name) = zbb_unary(f3, bits(word, 31, 20), false) {
+                    return ins(address, consumed, name, format!("{},{}", x(rd), x(rs1)));
+                }
                 let name = match (f3, bits(word, 31, 26)) {
                     (1, 0x00) => "slli",
                     (5, 0x00) => "srli",
                     (5, 0x10) => "srai",
+                    (5, 0x18) => "rori",
                     _ => return bad(),
                 };
                 let shamt = bits(word, 25, 20);
@@ -259,11 +264,16 @@ fn decode_full(word: u32, address: u64, consumed: &[u8]) -> Insn {
                 "addiw",
                 format!("{},{},{}", x(rd), x(rs1), imm_i(word)),
             ),
-            (1 | 5, 0x00) | (5, 0x20) => {
+            (1, 0x30) => match zbb_unary(f3, bits(word, 31, 20), true) {
+                Some(name) => ins(address, consumed, name, format!("{},{}", x(rd), x(rs1))),
+                None => bad(),
+            },
+            (1 | 5, 0x00) | (5, 0x20 | 0x30) => {
                 let name = match (f3, f7) {
                     (1, _) => "slliw",
                     (_, 0x00) => "srliw",
-                    _ => "sraiw",
+                    (_, 0x20) => "sraiw",
+                    _ => "roriw",
                 };
                 ins(
                     address,
@@ -373,6 +383,15 @@ fn decode_full(word: u32, address: u64, consumed: &[u8]) -> Insn {
                 (0x01, 5) => "divu",
                 (0x01, 6) => "rem",
                 (0x01, 7) => "remu",
+                (0x20, 4) => "xnor",
+                (0x20, 6) => "orn",
+                (0x20, 7) => "andn",
+                (0x05, 4) => "min",
+                (0x05, 5) => "minu",
+                (0x05, 6) => "max",
+                (0x05, 7) => "maxu",
+                (0x30, 1) => "rol",
+                (0x30, 5) => "ror",
                 _ => return bad(),
             };
             ins(
@@ -395,6 +414,11 @@ fn decode_full(word: u32, address: u64, consumed: &[u8]) -> Insn {
                 (0x01, 5) => "divuw",
                 (0x01, 6) => "remw",
                 (0x01, 7) => "remuw",
+                (0x30, 1) => "rolw",
+                (0x30, 5) => "rorw",
+                (0x04, 4) if rs2 == 0 => {
+                    return ins(address, consumed, "zext.h", format!("{},{}", x(rd), x(rs1)));
+                }
                 _ => return bad(),
             };
             ins(
@@ -490,6 +514,24 @@ fn decode_full(word: u32, address: u64, consumed: &[u8]) -> Insn {
         0x53 => decode_fp(word, address, consumed),
         _ => bad(),
     }
+}
+
+/// The Zbb operation of one register `OP-IMM` (or, where `word`, `OP-IMM-32`)
+/// encodes with `funct3` and the immediate field `imm12`, if it is one.
+const fn zbb_unary(funct3: u32, imm12: u32, word: bool) -> Option<&'static str> {
+    Some(match (funct3, imm12, word) {
+        (1, 0x600, false) => "clz",
+        (1, 0x601, false) => "ctz",
+        (1, 0x602, false) => "cpop",
+        (1, 0x604, false) => "sext.b",
+        (1, 0x605, false) => "sext.h",
+        (5, 0x287, false) => "orc.b",
+        (5, 0x6B8, false) => "rev8",
+        (1, 0x600, true) => "clzw",
+        (1, 0x601, true) => "ctzw",
+        (1, 0x602, true) => "cpopw",
+        _ => return None,
+    })
 }
 
 /// Decodes the OP-FP (0x53) group: F and D extension register ops.

@@ -790,16 +790,14 @@ renders.
 
 ## Timestamps (§21)
 
-Each inode stores the three 64-bit-native `Time64` timestamps `arxfs`
-maintains — `created`, `modified`, and `changed` — so absolute time is
-never a seconds-only scalar and the full pre-1970 / post-2038 range
-round-trips without truncation (`AGENTS.md` §21). **`arxfs` does not
-track access time (atime).** Updating a stamp on every read would defeat
-the copy-on-write model (a pure read would have to write metadata), so
-the format deliberately keeps no atime: it reports `accessed =
-Time64::UNIX_EPOCH` — the honest "no stamp" value, never a fabricated or
-stale time. The on-disk inode record reserves the 12-byte atime slot
-(written zero, ignored on read) so the surrounding offsets stay fixed.
+Each inode stores the four 64-bit-native `Time64` timestamps — `created`,
+`modified`, `accessed` and `changed` — so absolute time is never a
+seconds-only scalar and the full pre-1970 / post-2038 range round-trips
+without truncation, to the nanosecond (`AGENTS.md` §21). **A read never moves
+the access time**: updating a stamp on every read would defeat the
+copy-on-write model, a pure read having to write metadata. It is the creation
+instant until `fs_set_times` sets it, so a copy that keeps times keeps it
+exactly.
 
 The three stamps travel **in `NodeInfo`** (`node_info` and `read_dir`
 both fill `NodeInfo::times`), read in the same structural read as the

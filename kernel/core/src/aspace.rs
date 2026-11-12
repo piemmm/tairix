@@ -64,10 +64,12 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::fs::{FD_CWD, FS_INITIAL_UMASK};
 use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
 use tairix_abi::{
-    DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit, STD_STREAM_COUNT,
+    CapabilityId, DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit,
+    STD_STREAM_COUNT,
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::{
@@ -690,6 +692,14 @@ impl OpenBacking {
     /// on the node it reached, or on the catalog.
     #[must_use]
     pub fn opened(opened: Opened) -> Self {
+        Self::opened_as(opened, Authority::Holder)
+    }
+
+    /// The backing a fresh open's answer becomes when the node it reached
+    /// acts as `authority`: a path opened through a directory capability
+    /// stays under it.
+    #[must_use]
+    pub fn opened_as(opened: Opened, authority: Authority) -> Self {
         match opened {
             Opened::Node {
                 node,
@@ -700,7 +710,7 @@ impl OpenBacking {
             } => Self::Node(NodeHandle {
                 node,
                 projection,
-                authority: Authority::Holder,
+                authority,
                 opened_as,
                 at_floor,
             }),
@@ -859,41 +869,69 @@ impl OpenFile {
     }
 
     /// What this descriptor may be granted on as, acting as user `uid` with
-    /// `caps` when it is the holder's own file, writable up to `ceiling`
-    /// bytes: a new handle on the same node, never a directory, or another
-    /// reference to the same pipe end.
+    /// `caps` when it is the holder's own, writable up to `ceiling` bytes: a
+    /// new handle on the same node or another reference to the same pipe end,
+    /// as [`Handing::File`] — never a directory — or a directory as a
+    /// capability to what lies beneath it, as [`Handing::Subtree`].
     ///
     /// A descriptor that was itself conferred or granted is passed on with the
     /// identity frozen into it, so a relay can never widen what it was handed
     /// and no chain forms for a later reader to follow; a grant it carries
-    /// keeps the smaller of the two ceilings. A pipe end has no identity to
+    /// keeps the smaller of the two ceilings. A directory capability is floored
+    /// at the directory handed on, never above where its descriptor was
+    /// opened, and freezes no capability but `CAP_FS_ACCESS`, so a gate on a
+    /// node beneath stays shut to its holder. A pipe end has no identity to
     /// freeze: its reads and writes check only the descriptor's own access. A
-    /// pty end answers to its terminal's foreground, and a resource, catalog or
-    /// directory has an authority model of its own, so each is `None`.
+    /// pty end answers to its terminal's foreground, and a resource or catalog
+    /// has an authority model of its own, so each is `None`.
     #[must_use]
-    pub fn handed_on(&self, uid: u32, caps: CapabilitySet, ceiling: u64) -> Option<HandedOn> {
+    pub fn handed_on(
+        &self,
+        uid: u32,
+        caps: CapabilitySet,
+        ceiling: u64,
+        handing: Handing,
+    ) -> Option<HandedOn> {
         if let OpenBacking::Pipe(end) = &self.backing {
-            return Some(HandedOn::Pipe(end.clone()));
-        }
-        if self.flags.contains(OpenFlags::DIRECTORY) {
-            return None;
+            return (handing == Handing::File).then(|| HandedOn::Pipe(end.clone()));
         }
         let handle = self.node()?;
+        let directory =
+            self.flags.contains(OpenFlags::DIRECTORY) || handle.node.kind() == NodeKind::Directory;
+        if directory != (handing == Handing::Subtree) {
+            return None;
+        }
         let frozen = match &handle.authority {
             Authority::Holder => FrozenAuthority {
                 uid,
-                caps,
+                caps: match handing {
+                    Handing::File => caps,
+                    Handing::Subtree => {
+                        let mut narrowed = CapabilitySet::empty();
+                        if caps.contains(CapabilityId::FS_ACCESS) {
+                            narrowed.insert(CapabilityId::FS_ACCESS);
+                        }
+                        narrowed
+                    }
+                },
                 grant: None,
             },
             Authority::Frozen(frozen) => frozen.clone(),
         };
         let held = frozen.grant.as_ref().and_then(|grant| grant.write_ceiling);
         let write_ceiling = Some(held.map_or(ceiling, |held| held.min(ceiling)));
+        let subtree = (handing == Handing::Subtree).then(|| crate::fs::Floor {
+            node: handle.node.clone(),
+            projection: Arc::clone(&handle.projection),
+        });
         Some(HandedOn::File(NodeHandle {
             node: handle.node.clone(),
             projection: Arc::clone(&handle.projection),
             authority: Authority::Frozen(FrozenAuthority {
-                grant: Some(crate::fs::Grant { write_ceiling }),
+                grant: Some(crate::fs::Grant {
+                    write_ceiling,
+                    subtree,
+                }),
                 ..frozen
             }),
             opened_as: Arc::clone(&handle.opened_as),
@@ -1079,6 +1117,15 @@ impl OpenFile {
     }
 }
 
+/// What an `fd_grant` hands a descriptor on as.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Handing {
+    /// One file, or a pipe end.
+    File,
+    /// A directory, as a capability to what lies beneath it.
+    Subtree,
+}
+
 /// What a descriptor is handed on as to another process (`fd_grant`).
 #[derive(Clone, Debug)]
 pub enum HandedOn {
@@ -1152,9 +1199,16 @@ impl<'a> FdPromise<'a> {
     /// A [`Refused`] holding the opened node, released once the registry's
     /// lock is, when the number space has run out, the descriptor cannot be
     /// recorded, or the task is gone.
-    pub fn keep(mut self, opened: Opened, flags: OpenFlags) -> Result<u32, Refused> {
+    pub fn keep(
+        mut self,
+        opened: Opened,
+        flags: OpenFlags,
+        authority: Authority,
+    ) -> Result<u32, Refused> {
         self.kept = true;
-        self.registry.write().keep_fd(self.task, opened, flags)
+        self.registry
+            .write()
+            .keep_fd(self.task, opened, flags, authority)
     }
 }
 
@@ -1763,15 +1817,12 @@ impl Sent {
     }
 }
 
-/// Whether two authorities act as one identity with one grant ceiling.
+/// Whether two authorities act as one identity under one grant.
 fn same_authority(a: &Authority, b: &Authority) -> bool {
     match (a, b) {
         (Authority::Holder, Authority::Holder) => true,
         (Authority::Frozen(a), Authority::Frozen(b)) => {
-            a.uid == b.uid
-                && a.caps == b.caps
-                && a.grant.as_ref().map(|grant| grant.write_ceiling)
-                    == b.grant.as_ref().map(|grant| grant.write_ceiling)
+            a.uid == b.uid && a.caps == b.caps && a.grant == b.grant
         }
         _ => false,
     }
@@ -3901,8 +3952,9 @@ impl AddressSpaceRegistry {
         task: ProcessId,
         opened: Opened,
         flags: OpenFlags,
+        authority: Authority,
     ) -> Result<u32, Refused> {
-        let backing = OpenBacking::opened(opened);
+        let backing = OpenBacking::opened_as(opened, authority);
         let Some(table) = self.open_files.get_mut(&task) else {
             return Err(Refused::backing(Errno::NotFound, backing));
         };
@@ -6434,7 +6486,7 @@ mod tests {
         flags: OpenFlags,
     ) -> Result<u32, Refused> {
         match reg.promise_fd(task) {
-            Ok(()) => reg.keep_fd(task, opened, flags),
+            Ok(()) => reg.keep_fd(task, opened, flags, Authority::Holder),
             Err(errno) => Err(Refused::backing(errno, OpenBacking::opened(opened))),
         }
     }
@@ -6453,9 +6505,147 @@ mod tests {
             caps: CapabilitySet::empty(),
             grant: Some(crate::fs::Grant {
                 write_ceiling: Some(0),
+                subtree: None,
             }),
         });
         HandedOn::File(handle)
+    }
+
+    /// The authority `handed` carries.
+    fn authority_of(handed: &HandedOn) -> &FrozenAuthority {
+        match handed {
+            HandedOn::File(handle) => match &handle.authority {
+                Authority::Frozen(frozen) => frozen,
+                Authority::Holder => panic!("a hand-off always freezes its authority"),
+            },
+            HandedOn::Pipe(_) => panic!("a node was handed on"),
+        }
+    }
+
+    /// A directory is handed on only as a capability to what lies beneath it,
+    /// and a file only as itself; the capability is floored at the directory
+    /// and freezes no capability but the filesystem one.
+    #[test]
+    fn a_directory_is_handed_on_only_as_a_capability_floored_at_itself() {
+        let volume = crate::test_bundle::test_volume();
+        let dir_flags = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let dir = OpenFile::new(
+            OpenBacking::opened(crate::test_bundle::opened_node(
+                &volume,
+                3,
+                NodeKind::Directory,
+                "/Users/bob/dos",
+            )),
+            dir_flags,
+        )
+        .expect("a description");
+        let file = OpenFile::new(
+            OpenBacking::opened(crate::test_bundle::opened_node(
+                &volume,
+                4,
+                NodeKind::RegularFile,
+                "/Users/bob/notes",
+            )),
+            OpenFlags::READ,
+        )
+        .expect("a description");
+        let mut held = CapabilitySet::empty();
+        held.insert(CapabilityId::FS_ACCESS);
+        held.insert(CapabilityId::FS_CHOWN);
+        held.insert(CapabilityId::AUDIT_READ);
+
+        assert!(dir.handed_on(1000, held, 0, Handing::File).is_none());
+        assert!(file.handed_on(1000, held, 0, Handing::Subtree).is_none());
+        let handed = dir
+            .handed_on(1000, held, 4096, Handing::Subtree)
+            .expect("a directory hands on as a capability");
+        let frozen = authority_of(&handed);
+        let mut narrowed = CapabilitySet::empty();
+        narrowed.insert(CapabilityId::FS_ACCESS);
+        assert_eq!(
+            frozen.caps, narrowed,
+            "no capability beyond the filesystem one"
+        );
+        let grant = frozen.grant.as_ref().expect("a grant");
+        assert_eq!(grant.write_ceiling, Some(4096));
+        assert!(grant.writes_beneath());
+        let HandedOn::File(handle) = &handed else {
+            panic!("a node was handed on");
+        };
+        let floor = handle.subtree().expect("floored");
+        assert_eq!(floor.node, handle.node, "at the directory itself");
+        assert!(floor.is(&handle.projection, handle.node.pinned()));
+
+        let read_only = dir
+            .handed_on(1000, held, 0, Handing::Subtree)
+            .expect("a directory hands on as a capability");
+        assert!(!authority_of(&read_only)
+            .grant
+            .as_ref()
+            .expect("a grant")
+            .writes_beneath());
+    }
+
+    /// A capability relayed — or a directory opened beneath one and handed on
+    /// — keeps its grantor's identity and narrowed set, its ceiling only
+    /// shrinks, and its floor is the directory handed on, never above it.
+    #[test]
+    fn a_relayed_directory_capability_narrows_and_never_widens() {
+        let volume = crate::test_bundle::test_volume();
+        let dir_flags = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let mut held = CapabilitySet::empty();
+        held.insert(CapabilityId::FS_ACCESS);
+        let first = OpenFile::new(
+            OpenBacking::opened(crate::test_bundle::opened_node(
+                &volume,
+                3,
+                NodeKind::Directory,
+                "/Users/bob/dos",
+            )),
+            dir_flags,
+        )
+        .expect("a description")
+        .handed_on(1000, held, 4096, Handing::Subtree)
+        .expect("a capability");
+        let HandedOn::File(capability) = first else {
+            panic!("a node was handed on");
+        };
+        let beneath = OpenFile::new(
+            OpenBacking::opened_as(
+                crate::test_bundle::opened_node(
+                    &volume,
+                    5,
+                    NodeKind::Directory,
+                    "/Users/bob/dos/games",
+                ),
+                capability.authority.clone(),
+            ),
+            dir_flags,
+        )
+        .expect("a description");
+        let relayed = beneath
+            .handed_on(
+                2000,
+                CapabilitySet::empty(),
+                tairix_abi::GRANT_EXTENT_INHERIT,
+                Handing::Subtree,
+            )
+            .expect("a relay");
+        let frozen = authority_of(&relayed);
+        assert_eq!(frozen.uid, 1000, "the first grantor's identity");
+        assert_eq!(frozen.caps, held);
+        let grant = frozen.grant.as_ref().expect("a grant");
+        assert_eq!(grant.write_ceiling, Some(4096), "the ceiling never grows");
+        let HandedOn::File(handle) = &relayed else {
+            panic!("a node was handed on");
+        };
+        let floor = handle.subtree().expect("floored");
+        assert_eq!(
+            floor.node.pinned(),
+            tairix_abi::driver::filesystem::NodeId::from_raw(5),
+            "at the relayed directory"
+        );
+        assert_ne!(Some(floor), capability.subtree());
     }
 
     /// A distinct instance for each process number, as a grantor's own.
@@ -8516,7 +8706,7 @@ mod tests {
         let pipe = reg.open_pipe(t);
         let pty = reg.open_pty(t, size);
         let resource = reg.open_resource(t, ResourceBacking::Random, OpenFlags::READ);
-        let kept = reg.keep_fd(t, node, OpenFlags::READ);
+        let kept = reg.keep_fd(t, node, OpenFlags::READ, Authority::Holder);
         let redeemed = reg.redeem_fd_delegation(t, who, handle, None);
         crate::test_alloc::refuse_allocations_on_current_thread(false);
         assert_eq!(pipe, Err(Errno::OutOfMemory));

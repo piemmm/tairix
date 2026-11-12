@@ -29,6 +29,15 @@ call; this page is what the parts are for and the rules they share.
   level of its `Pyramid` — the picture at every halving — that sets no more
   than two of its pixels across a destination pixel, so a picture drawn far
   smaller is averaged rather than aliased.
+- **The frame scaler** — `SharpScaler` enlarges an opaque picture that changes
+  every frame, an emulated screen, into a rectangle with its pixels kept
+  square: each source pixel a block of whole output pixels, blended only across
+  the one output pixel a non-integer scale leaves at a block's edge, and a
+  shrink plain bilinear. Its taps are worked out once per pair of sizes, it
+  draws only the rows asked for, and `rows_reached` names the rows a change to
+  some source rows redraws. The asset resampler stays exact and runs once per
+  asset; this one costs well under 2 ns a pixel (`cargo xtask bench --filter
+  sharp`), most of its pixels copies.
 - **Meshes in depth** — `mesh` and `view`: triangles scan-converted against a
   depth buffer through a perspective, as a GPU draws them. WinterSun's 3D view
   is drawn through these, and nothing else in the tree needs a second

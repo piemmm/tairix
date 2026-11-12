@@ -25,13 +25,13 @@ use core::ptr::NonNull;
 /// Zero is refused rather than assumed unreachable: a slice over a null
 /// pointer is undefined behaviour even when it is empty, and this is the one
 /// place every mapping rules it out.
-fn mapped_at(base: u64) -> Option<usize> {
+pub(crate) fn mapped_at(base: u64) -> Option<usize> {
     usize::try_from(base).ok().filter(|addr| *addr != 0)
 }
 
 /// The kernel's mapping at `addr`, which it made outside the abstract
 /// machine, so its provenance is exposed by definition.
-fn mapping(addr: usize) -> Option<NonNull<u8>> {
+pub(crate) fn mapping(addr: usize) -> Option<NonNull<u8>> {
     NonNull::new(core::ptr::with_exposed_provenance_mut(addr))
 }
 

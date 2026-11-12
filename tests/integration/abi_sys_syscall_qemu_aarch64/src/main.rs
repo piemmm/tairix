@@ -92,6 +92,7 @@ mod kernel {
     };
     use tairix_arch_api::{EnterUser, UserEntry};
     use tairix_itest_finisher::fail_point;
+    use tairix_kalloc::Arena;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Capability id `kernel_main` passes to `tairix_sys_cap_query` and
@@ -127,12 +128,9 @@ mod kernel {
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
 
-    /// Backing storage for the EL0 stack. `align(4096)` so each page maps
+    /// Backing storage for the EL0 stack. Page-aligned, so each page maps
     /// to a valid frame; `USER_STACK_PAGES` pages.
-    #[repr(C, align(4096))]
-    struct UserStack([u8; PAGE_SIZE * USER_STACK_PAGES]);
-
-    static mut USER_STACK: UserStack = UserStack([0; PAGE_SIZE * USER_STACK_PAGES]);
+    static USER_STACK: Arena<{ PAGE_SIZE * USER_STACK_PAGES }> = Arena::ZERO;
 
     /// Set once the round-trip has been driven so a re-entry can never
     /// re-run the test logic (fail closed).
@@ -242,7 +240,7 @@ mod kernel {
         let user_entry = USER_CODE_VA | (func & (page - 1));
 
         // ---- Map the EL0 stack (read + write). ----
-        let stack_phys = image_phys(core::ptr::addr_of!(USER_STACK) as u64);
+        let stack_phys = image_phys(USER_STACK.as_mut_ptr() as u64);
         for i in 0..USER_STACK_PAGES as u64 {
             space
                 .map_4k_with_attrs(

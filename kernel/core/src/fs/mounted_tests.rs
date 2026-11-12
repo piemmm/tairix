@@ -23,9 +23,10 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::MountAvailability;
+use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, RenameFlags, SeekRegion, UnlinkFlags,
-    FS_OWNER_UNCHANGED,
+    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, RenameFlags, SeekRegion, StampChange,
+    TimesChange, TimesKept, UnlinkFlags, FS_OWNER_UNCHANGED,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, UserRecord};
@@ -1757,6 +1758,240 @@ fn set_mode_rewrites_the_permission_bits_for_the_owner() {
     assert_eq!(st.gid, TEST_GID);
 }
 
+/// A time change as `utimensat(2)` spells it: `accessed`, then `modified`.
+fn times(accessed: StampChange, modified: StampChange) -> TimesChange {
+    TimesChange {
+        accessed,
+        modified,
+        nearest: false,
+    }
+}
+
+/// The owner sets either time to an instant or stamps it now; the change time
+/// moves with any change, and the time left alone stays as it was.
+#[test]
+fn set_times_sets_what_the_owner_asks_and_moves_the_change_time() {
+    let svc = ready();
+    let caps = caps();
+    let p = path("f");
+    open_path(
+        &svc,
+        TEST_UID,
+        &caps,
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let before = svc
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
+        .expect("stat")
+        .times;
+    let then = Time64::new(-86_400, 5).expect("canonical");
+    let set = |change| svc.set_times(TEST_UID, &caps, at(&p), change, FinalLink::Follow);
+    assert_eq!(
+        set(times(StampChange::Keep, StampChange::At(then))),
+        Ok(TimesKept::Exactly)
+    );
+    let after = svc
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
+        .expect("stat")
+        .times;
+    assert_eq!(after.modified, then);
+    assert_eq!(after.accessed, before.accessed);
+    assert_eq!(after.changed, RwMockFs::NOW);
+    assert_eq!(after.created, before.created);
+    assert_eq!(
+        set(times(StampChange::Now, StampChange::Keep)),
+        Ok(TimesKept::Exactly)
+    );
+    let touched = svc
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
+        .expect("stat")
+        .times;
+    assert_eq!((touched.accessed, touched.modified), (RwMockFs::NOW, then));
+}
+
+/// Stamping both times now needs ownership or write access; any other change
+/// needs ownership, and no capability stands in for it.
+#[test]
+fn set_times_asks_ownership_except_of_a_writer_stamping_both_now() {
+    const OTHER: u32 = 1001;
+    let (svc, _) = service_over(driver(), &[OTHER]);
+    let caps = caps();
+    let p = path("f");
+    open_path(
+        &svc,
+        TEST_UID,
+        &caps,
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let touch = times(StampChange::Now, StampChange::Now);
+    let mut privileged = CapabilitySet::empty();
+    privileged.insert(CapabilityId::FS_CHOWN);
+    let as_other = |change, caps: &CapabilitySet| {
+        svc.set_times(OTHER, caps, at(&p), change, FinalLink::Follow)
+    };
+    svc.set_mode(TEST_UID, &caps, at(&p), 0o666, FinalLink::Follow)
+        .expect("chmod");
+    assert_eq!(as_other(touch, &caps), Ok(TimesKept::Exactly), "a writer");
+    for not_a_touch in [
+        times(StampChange::Now, StampChange::Keep),
+        times(StampChange::Keep, StampChange::At(Time64::from_secs(1))),
+    ] {
+        assert_eq!(as_other(not_a_touch, &caps), Err(Errno::PermissionDenied));
+        assert_eq!(
+            as_other(not_a_touch, &privileged),
+            Err(Errno::PermissionDenied),
+            "no capability overrides ownership"
+        );
+    }
+    svc.set_mode(TEST_UID, &caps, at(&p), 0o644, FinalLink::Follow)
+        .expect("chmod");
+    assert_eq!(
+        as_other(touch, &caps),
+        Err(Errno::PermissionDenied),
+        "not a writer"
+    );
+    assert_eq!(
+        as_other(TimesChange::default(), &caps),
+        Ok(TimesKept::Exactly),
+        "a change that sets nothing is not checked"
+    );
+}
+
+/// A node whose format records no owner has no ownership to ask of a time
+/// change: whoever may write it sets either time, and nobody else does.
+#[test]
+fn an_ownerless_node_takes_any_time_change_from_whoever_may_write_it() {
+    const WRITER: u32 = 1001;
+    const READER: u32 = 1002;
+    let mut fs = driver();
+    let stands_in = NodeSecurity::new(0o664, 0, WRITER);
+    let file = fs
+        .create(fs.root(), b"f", NodeKind::RegularFile, &stands_in)
+        .expect("planted");
+    fs.forget_ownership(file);
+    let (svc, _) = service_over(fs, &[WRITER, READER]);
+    let caps = caps();
+    let p = path("f");
+    let backdate = times(StampChange::Keep, StampChange::At(Time64::from_secs(3)));
+    let as_user = |uid| svc.set_times(uid, &caps, at(&p), backdate, FinalLink::Follow);
+    assert_eq!(as_user(WRITER), Ok(TimesKept::Exactly));
+    assert_eq!(as_user(READER), Err(Errno::PermissionDenied));
+}
+
+/// An instant the volume cannot keep is refused, unless the nearest is asked
+/// for, which is then what the volume keeps and what the answer says.
+#[test]
+fn an_instant_the_volume_cannot_keep_is_refused_unless_the_nearest_is_asked() {
+    let two_seconds = tairix_abi::driver::filesystem::StampField::new(
+        Time64::from_secs(0),
+        2_000_000_000,
+        0..1 << 31,
+    );
+    let (svc, _) = service_over(driver().with_stamp_field(two_seconds), &[]);
+    let caps = caps();
+    let p = path("f");
+    open_path(
+        &svc,
+        TEST_UID,
+        &caps,
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let odd = times(StampChange::Keep, StampChange::At(Time64::from_secs(3)));
+    let set = |change| svc.set_times(TEST_UID, &caps, at(&p), change, FinalLink::Follow);
+    assert_eq!(set(odd), Err(Errno::TimestampOutOfRange));
+    assert_eq!(
+        set(TimesChange {
+            nearest: true,
+            ..odd
+        }),
+        Ok(TimesKept::Nearest)
+    );
+    let held = svc
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
+        .expect("stat")
+        .times
+        .modified;
+    assert_eq!(held, Time64::from_secs(4), "a tie rounds up");
+}
+
+/// Nothing changes on a read-only mount, though a change that sets nothing is
+/// still answered there.
+#[test]
+fn set_times_on_a_read_only_mount_changes_nothing() {
+    let svc = service(true, true, true);
+    let caps = caps();
+    let set = |change| svc.set_times(TEST_UID, &caps, at(MOUNT), change, FinalLink::Follow);
+    assert_eq!(
+        set(times(StampChange::Now, StampChange::Now)),
+        Err(Errno::ReadOnly)
+    );
+    assert_eq!(set(TimesChange::default()), Ok(TimesKept::Exactly));
+}
+
+/// A descriptor's node takes the same change as its path does.
+#[test]
+fn set_times_reaches_a_held_node_as_its_path_does() {
+    let svc = ready();
+    let caps = caps();
+    let p = path("f");
+    let handle = own_handle(
+        &svc,
+        TEST_UID,
+        &caps,
+        &p,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let then = Time64::from_secs(42);
+    assert_eq!(
+        svc.set_times_node(
+            &handle,
+            &acting(TEST_UID, &caps),
+            times(StampChange::At(then), StampChange::At(then))
+        ),
+        Ok(TimesKept::Exactly)
+    );
+    let stamps = svc
+        .stat(TEST_UID, &caps, at(&p), FinalLink::Follow)
+        .expect("stat")
+        .times;
+    assert_eq!((stamps.accessed, stamps.modified), (then, then));
+    close(&svc, handle);
+}
+
+/// A held node reaches its volume's accounting as the driver reports it now,
+/// so what a write takes shows at once.
+#[test]
+fn a_held_node_reports_the_space_of_its_own_volume() {
+    let svc = ready();
+    let caps = caps();
+    let handle = own_handle(
+        &svc,
+        TEST_UID,
+        &caps,
+        &path("f"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let before = svc.volume_stats_node(&handle).expect("stats");
+    assert!(before.is_consistent() && before.total_blocks > 0);
+    svc.write_node(&handle, &acting(TEST_UID, &caps), 0, false, &[7; 4096])
+        .expect("writes");
+    let after = svc.volume_stats_node(&handle).expect("stats");
+    assert_eq!(after.total_blocks, before.total_blocks);
+    assert!(
+        after.free_blocks < before.free_blocks,
+        "{before:?} {after:?}"
+    );
+    close(&svc, handle);
+}
+
 #[test]
 fn set_mode_above_the_permission_mask_fails_closed() {
     // Defence in depth at the service seam: a file-type bit is refused
@@ -3109,6 +3344,13 @@ impl FilesystemWrite for NoAttrsFs {
     }
     fn write_at(&mut self, file: NodeId, offset: u64, data: &[u8]) -> Result<usize, DriverError> {
         self.0.write_at(file, offset, data)
+    }
+    fn set_times(
+        &mut self,
+        node: NodeId,
+        change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        self.0.set_times(node, change)
     }
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         self.0.truncate(file, size)
@@ -5291,6 +5533,158 @@ mod resolve {
             modified: Time64::UNIX_EPOCH,
             changed: Time64::UNIX_EPOCH,
         }
+    }
+
+    /// The directory `at` names, held as a directory capability floored at
+    /// itself, as `fd_grant` hands one on.
+    fn capability(svc: &dyn FilesystemService, at: At<'_>) -> NodeHandle {
+        let caps = caps();
+        let flags = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let Ok(Opened::Node {
+            node,
+            projection,
+            opened_as,
+            at_floor,
+            ..
+        }) = svc.open(TEST_UID, &caps, at, flags, CreateMode::NONE)
+        else {
+            panic!("the directory opens");
+        };
+        let floor = crate::fs::Floor {
+            node: node.clone(),
+            projection: Arc::clone(&projection),
+        };
+        NodeHandle {
+            node,
+            projection,
+            authority: Authority::Frozen(crate::fs::FrozenAuthority {
+                uid: TEST_UID,
+                caps,
+                grant: Some(crate::fs::Grant {
+                    write_ceiling: Some(0),
+                    subtree: Some(floor),
+                }),
+            }),
+            opened_as,
+            at_floor,
+        }
+    }
+
+    /// The directory `at` names, opened through `capability` and held under
+    /// it, as a descriptor opened beneath one is.
+    fn opened_beneath(
+        svc: &dyn FilesystemService,
+        capability: &NodeHandle,
+        at: At<'_>,
+    ) -> NodeHandle {
+        let caps = caps();
+        let flags = OpenFlags::READ.union(OpenFlags::DIRECTORY);
+        let Ok(Opened::Node {
+            node,
+            projection,
+            opened_as,
+            at_floor,
+            ..
+        }) = svc.open(TEST_UID, &caps, at, flags, CreateMode::NONE)
+        else {
+            panic!("the directory opens");
+        };
+        NodeHandle {
+            node,
+            projection,
+            authority: capability.authority.clone(),
+            opened_as,
+            at_floor,
+        }
+    }
+
+    /// Whether `at` resolves to something that opens for reading.
+    fn reaches(svc: &dyn FilesystemService, at: At<'_>) -> Result<(), Errno> {
+        let caps = caps();
+        match svc.open(TEST_UID, &caps, at, OpenFlags::READ, CreateMode::NONE)? {
+            Opened::Node {
+                node,
+                projection,
+                opened_as,
+                at_floor,
+                ..
+            } => close(
+                svc,
+                NodeHandle {
+                    node,
+                    projection,
+                    authority: Authority::Holder,
+                    opened_as,
+                    at_floor,
+                },
+            ),
+            Opened::Catalog(_) => {}
+        }
+        Ok(())
+    }
+
+    /// A path named through a directory capability resolves beneath its floor
+    /// and never above it: a `..` at the floor, the caller's or a link's, an
+    /// absolute link and an absolute path are refused, while a `..` beneath
+    /// climbs as anywhere, and a directory opened beneath climbs only as far as
+    /// the floor.
+    #[test]
+    fn a_directory_capability_resolves_only_beneath_its_floor() {
+        let svc = ready();
+        let caps = caps();
+        for dir in ["a", "a/b"] {
+            svc.mkdir(TEST_UID, &caps, at(&path(dir)), new_dir())
+                .expect("mkdir");
+        }
+        file_with(&svc, "a/b/f", b"f");
+        file_with(&svc, "top", b"top");
+        for (link, target) in [
+            ("a/b/up", "../../top"),
+            ("a/b/abs", "/Storage/vol/top"),
+            ("a/b/side", "../b/f"),
+        ] {
+            svc.symlink(TEST_UID, &caps, target, at(&path(link)))
+                .expect("link");
+        }
+        let floor = capability(&svc, at(&path("a")));
+
+        assert_eq!(bytes(&svc, beneath(&floor, "b/f")), Ok(b"f".to_vec()));
+        assert_eq!(bytes(&svc, beneath(&floor, "b/../b/f")), Ok(b"f".to_vec()));
+        assert_eq!(bytes(&svc, beneath(&floor, "b/side")), Ok(b"f".to_vec()));
+        for escape in [
+            "..",
+            "../top",
+            "b/../../top",
+            "b/up",
+            "b/abs",
+            "/Storage/vol/top",
+        ] {
+            assert_eq!(
+                reaches(&svc, beneath(&floor, escape)),
+                Err(Errno::PermissionDenied),
+                "{escape}"
+            );
+        }
+
+        let sub = opened_beneath(&svc, &floor, beneath(&floor, "b"));
+        assert_eq!(bytes(&svc, beneath(&sub, "../b/f")), Ok(b"f".to_vec()));
+        assert_eq!(
+            reaches(&svc, beneath(&sub, "../../top")),
+            Err(Errno::PermissionDenied),
+            "a directory opened beneath meets the same floor"
+        );
+        assert_eq!(bytes(&svc, at(&path("top"))), Ok(b"top".to_vec()));
+        close(&svc, sub);
+        close(&svc, floor);
+
+        let root = capability(&svc, at(MOUNT));
+        assert_eq!(bytes(&svc, beneath(&root, "top")), Ok(b"top".to_vec()));
+        assert_eq!(
+            reaches(&svc, beneath(&root, "..")),
+            Err(Errno::PermissionDenied),
+            "a floor at the volume's own root keeps the catalog above it out of reach"
+        );
+        close(&svc, root);
     }
 
     /// A working directory is its directory, not the path it was entered

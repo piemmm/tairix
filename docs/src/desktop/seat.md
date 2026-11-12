@@ -53,19 +53,25 @@ The kernel hosts this state machine in its seat registry
 (`tairix_kernel_core::seat::SeatRegistry`): every seat on the machine,
 each holding its own `SeatState` under its own lock next to the input
 sinks it routes between — the seat's foreground text console type-ahead
-queue and its bounded desktop keyboard, pointer and touch channels. The
-three desktop channels share one ring definition (`InputChannel`), differing
-only in capacity (64 key records; 256 pointer records — a pointing device
-emits far more events between per-frame drains; 64 touch frames, half a
-second of a touchpad scanning at 125 Hz) and all zero each record as it is
-drained, so a typed secret never lingers. The three reads are one path
-(`SeatRegistry::read` for an `InputKind`), as the three injects share one
-route-and-queue, and a record leaves its channel only by reaching its reader:
-one whose copy into the reader's buffer fails goes back to the front while the
-lease it was taken under is still live, so a keystroke is never lost to a
-buffer the kernel could not write. A channel that filled meanwhile keeps what
-it holds — the record is then the oldest, which overflow drops — and an ended
-lease's record is never handed to the next one. Every seat-addressed
+queue and its bounded desktop keyboard, pointer and touch channels, and the
+one `lib/input` `KeyboardState` every keyboard on the seat is read through, so
+the keyboards share their modifiers, locks and layout. The three desktop
+channels are bounded rings (64 key records; 256 pointer records — a pointing
+device emits far more events between per-frame drains; 64 touch frames, half
+a second of a touchpad scanning at 125 Hz) and all zero each record as it is
+drained, so a typed secret never lingers. A full channel never displaces what
+it holds: the keyboard and pointer channels keep a slot for the release of
+every press they queued and refuse a press they could not also take the
+release of, so no key or button the desktop saw go down stays down, and they
+refuse the release of any press they did not take, so none is seen to come up
+that was not seen to go down; the pointer channel folds new motion and scrolling into its
+newest record of the same kind, so no displacement is lost; and the touch
+channel drops its oldest frame, which the next supersedes. The three reads
+are one path (`SeatRegistry::read_with` for an `InputKind`), and a record
+leaves its channel only by reaching its reader: one whose copy into the
+reader's buffer fails stays first while the lease it was taken under is still
+live, so a keystroke is never lost to a buffer the kernel could not write, and
+an ended lease's records are never handed to the next one. Every seat-addressed
 syscall names its seat and fails closed with `Errno::NotFound` for one
 that does not (or no longer) exist.
 
@@ -87,12 +93,15 @@ that does not (or no longer) exist.
   `SeatState::access`: only the seat's owner drains its desktop keyboard
   channel, so a second capability holder — even the owner of *another*
   seat — can never siphon this session's keystrokes.
-- `key_inject` (`CAP_INPUT_INJECT`) carries the seat the decoded key
-  edge belongs to (the seat whose keyboard produced it; the boot seat
-  for a directly attached keyboard), and routing follows that seat's
-  `SeatState::route`: a held seat's key edges go to its owner's desktop
-  channel, an unowned seat's to its foreground text console — a released
-  seat returns the keyboard to the text login immediately.
+- `key_inject` (`CAP_INPUT_INJECT`) carries a `KeyEdge` — which physical key
+  went down or up — and the seat whose keyboard produced it (the boot seat
+  for a directly attached keyboard). The seat reads it into a `KeyInput`
+  record through its keyboard state, consuming a press of a key already down
+  and a release of one not down unread, and routing follows that seat's
+  `SeatState::route`: a held seat's records go to its owner's desktop
+  channel, an unowned seat's presses are typed into its foreground text
+  console — a released seat returns the keyboard to the text login
+  immediately.
 - `pointer_inject` (`abi-v1` 78, `CAP_INPUT_INJECT`) and `pointer_read`
   (`abi-v1` 79, `CAP_INPUT_READ`) are the pointer analogues: a
   pointer-input driver injects each decoded relative motion or resolved

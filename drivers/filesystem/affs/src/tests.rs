@@ -23,7 +23,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::GrantingHost;
 use tairix_abi::time::Time64;
-use tairix_abi::{CapabilityId, DriverError};
+use tairix_abi::{CapabilityId, DriverError, StampChange, TimesChange, TimesKept};
 use tairix_fsprobe::affs::{
     be32, put_be32, root_block, DateStamp, Offsets, BITMAP_VALID, ST_LINKDIR, ST_SOFTLINK, T_HEADER,
 };
@@ -969,6 +969,65 @@ fn an_object_is_stamped_with_the_hosts_wall_clock_to_the_tick() {
     assert_eq!(
         unknown.node_info(file).expect("info").times.modified,
         Time64::UNIX_EPOCH
+    );
+}
+
+/// A header's one date stamp takes a modification time to the tick from
+/// 1978 on, an access time only as that stamp, and nothing finer than a tick
+/// unless the nearest is asked; the change is on the medium.
+#[test]
+fn set_times_sets_a_headers_one_date_stamp() {
+    let mut fs = floppy(1);
+    fs.set_volume_host(
+        TestClock::volume(),
+        TestClock::at(Some(Time64::from_secs(1_700_000_000))),
+    );
+    let root = fs.root();
+    let file = make(&mut fs, root, "dated", b"x");
+    let in_2200 = Time64::new(7_258_118_400, 980_000_000).expect("a time");
+    let change = |accessed, modified, nearest| TimesChange {
+        accessed,
+        modified,
+        nearest,
+    };
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::At(in_2200), StampChange::At(in_2200), false)
+        ),
+        Ok(TimesKept::Exactly)
+    );
+    assert_eq!(fs.node_info(file).expect("info").times.modified, in_2200);
+    let between_ticks = Time64::new(1_000_000_000, 1).expect("a time");
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::Keep, StampChange::At(between_ticks), false)
+        ),
+        Err(DriverError::OutOfRange)
+    );
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::At(between_ticks), StampChange::Keep, false)
+        ),
+        Err(DriverError::OutOfRange),
+        "an access time apart from the stamp"
+    );
+    let before_1978 = Time64::from_secs(0);
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::Keep, StampChange::At(before_1978), true)
+        ),
+        Ok(TimesKept::Nearest)
+    );
+    let mut fs = check_fs(fs);
+    let file = fs.lookup(fs.root(), b"dated").expect("found");
+    assert_eq!(
+        fs.node_info(file).expect("info").times.modified,
+        Time64::new(252_460_800, 20_000_000).expect("a time"),
+        "1978's first tick: the zero stamp is none"
     );
 }
 

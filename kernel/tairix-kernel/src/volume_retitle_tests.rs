@@ -568,6 +568,14 @@ impl FilesystemWrite for Titling {
         Err(DriverError::Unsupported)
     }
 
+    fn set_times(
+        &mut self,
+        _node: NodeId,
+        _change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
     fn remove(&mut self, _dir: NodeId, _name: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
     }

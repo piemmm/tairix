@@ -18,19 +18,16 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # against, so it consumes the protocol without naming a concrete bus driver
 # (`lib/* → lib/*` only).
 tairix-virtio = { path = "../virtio", version = "=0.0.0" }
-# The keyboard state and US layout the console producer resolves each evdev
-# keycode's physical key through (a `lib/*` crate).
-tairix-input = { path = "../input", version = "=0.0.0" }
-# The shared terminal key map that turns each resolved key press into the
-# `KeyInput` record a driver injects through `key_inject` — the one definition
-# of the `Key`→record map, shared with `lib/hid`.
-tairix-keymap = { path = "../keymap", version = "=0.0.0" }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tairix-virtio = { path = "../virtio", version = "=0.0.0", features = ["mock"] }
+# The seat's keyboard state and record map, so the key tests read each edge as
+# the kernel does.
+tairix-input = { path = "../input", version = "=0.0.0" }
+tairix-keymap = { path = "../keymap", version = "=0.0.0" }
 # The fuzz harness draws its inputs through the shared seed/budget seam: one
 # place picks the per-run seed, logs it, and bounds the smoke/soak loop. Test
 # scaffolding only; never in a TAIRiX build.

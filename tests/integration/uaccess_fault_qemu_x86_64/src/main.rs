@@ -57,7 +57,7 @@ mod kernel {
     use tairix_arch_x86_64::paging::{self, AddressSpace, PageTablePool};
     use tairix_arch_x86_64::protection::{self, Protections};
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::KERNEL_BOOT_PROTECTIONS;
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -105,7 +105,7 @@ mod kernel {
     static PROBE_POOL: PageTablePool = PageTablePool::new();
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

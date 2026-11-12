@@ -28,11 +28,11 @@
 mod vertical {
     use core::panic::PanicInfo;
 
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_wintersun_rules::digest;
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

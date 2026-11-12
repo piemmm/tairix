@@ -428,6 +428,14 @@ impl<T: Copy, const N: usize> SecretRing<T, N> {
         self.ring.push_slice(items)
     }
 
+    /// The back element, to be rewritten in place: its slot stays occupied,
+    /// so nothing is vacated and nothing is left to scrub.
+    #[must_use]
+    pub fn back_mut(&mut self) -> Option<&mut T> {
+        let last = self.ring.len.checked_sub(1)?;
+        self.ring.get_mut(last)
+    }
+
     /// Remove and return the front element, scrubbing the slot it vacated.
     pub fn pop_front(&mut self) -> Option<T> {
         let slot = self.ring.head;

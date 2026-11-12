@@ -43,7 +43,7 @@ says why on the line before its closing `FAILED in`. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `help-lint`, `devids`, `unicode`, `spirv`, `shaders`, `c-header`, `font-atlas`, `icons`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `board-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `static-mut-check`, `help-lint`, `devids`, `unicode`, `spirv`, `shaders`, `c-header`, `font-atlas`, `icons`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
@@ -226,6 +226,7 @@ concurrently as the one `static gates` stage:
 | `help-lint` | Lints every command app's discovered `Help/` tree: the canonical `en-US/` documents, locale completeness, structure, option drift and the content policy |
 | `spec-review` | Rejects an unreviewed AI-drafted-artefact marker that reached the tree |
 | `ignore-check` | Rejects an ignored test in any spelling — `#[ignore]`, a `cfg_attr` that ignores, a doc example fenced `ignore` — since libtest reports one as skipped under a green gate |
+| `static-mut-check` | Rejects a `static mut` declaration, state with no owner and no synchronisation: storage reached by address is a plain `static` over interior mutability (`tairix_kalloc::Arena`) |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
 | `source-text` | Rejects a control byte other than tab and newline in source and documents, outside the planning and charter files |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
@@ -250,7 +251,7 @@ concurrently as the one `static gates` stage:
 | `test --qemu --wasm` | `cargo test --workspace --all-targets`, then the workspace's doctests, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix and the wasm32 verticals, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below), and is held to having run every test, none ignored (`commands/libtest.rs`); the device-tree tests read the pinned Raspberry Pi firmware, which the stage verifies against `tools/mkimage/firmware.lock` once, fetching what the cache lacks unless `TAIRIX_PI_FIRMWARE` names a directory, and names to every host pass; the scene tier is left to `ci-long` (see below) |
 | `miri` | Interprets every crate `commands/miri.rs`'s `TARGETS` enrols under the undefined-behaviour oracle |
 
-The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`)
+The tree scans (`cfg-check`, `board-check`, `charter-cite`, `source-text`, `spec-review`, `ignore-check`, `static-mut-check`)
 walk what a change can carry: `target/`, `.git` and every untracked path git
 ignores (fetched tooling, the generated book, built images) are passed over,
 and a tracked file is scanned even where an ignore pattern names it.

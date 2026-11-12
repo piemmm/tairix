@@ -57,9 +57,9 @@ use tairix_abi::{
     DirChangeBatch, DirEntry, DirWatchStatus, DriverBindKey, DriverError, DriverHandle, DriverKind,
     DriverManifest, DriverRegisterReply, Duration64, Errno, GroupDirectoryRecord, HwDeviceClass,
     HwMatchKey, HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
-    LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord, NamedKeyCode,
-    NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PhysicalKey,
+    KernelMemoryStats, KeyEdge, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags,
+    LoadAverage, LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord,
+    NamedKeyCode, NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PhysicalKey,
     PointerButtonCode, PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader,
     ProcessState, RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit,
     ResourceLimitRecord, RxePermission, SchedPriority, SeekRegion, Segment, SelfAccountRecord,
@@ -73,27 +73,27 @@ use tairix_abi::{
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
     ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_UMASK_BITS,
-    FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, GRANT_FILE_ONLY, HOSTNAME_MAX, HWTREE_VERSION_V1,
-    HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
-    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
-    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MODIFIERS_CHANGED, KIND_MOVED_BY, KIND_PRESSED,
-    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX,
-    LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
-    MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
-    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE,
-    PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
-    PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, READDIR_BATCH_MAX, RELEASE_EPOCH_SECS,
-    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX,
-    SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, VOLUME_ID_LEN, WAITSET_CHILD_ANY,
-    WAITSET_TIMEOUT_NONE,
+    FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, GRANT_FILE_ONLY, GRANT_SUBTREE, HOSTNAME_MAX,
+    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
+    KEY_CLASS_NONE, KEY_EDGE_MAGIC, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
+    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
+    MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    READDIR_BATCH_MAX, RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY,
+    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    THREAD_STACK_DEFAULT, VOLUME_ID_LEN, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1087,11 +1087,11 @@ fn generate_manifest() -> String {
 
 /// `tairix_input.h` — the desktop input event ABI.
 ///
-/// Declares the pointer ([`PointerInput`]) and keyboard ([`KeyInput`]) record
-/// magics and packed wire sizes, the untimed `pointer_inject` device time, the
+/// Declares the pointer ([`PointerInput`]), key edge ([`KeyEdge`]) and
+/// keyboard ([`KeyInput`]) record magics and packed wire sizes, the untimed `pointer_inject` device time, the
 /// `kind`, `button`, `key_class`, and modifier field codes, the
 /// [`PointerButtonCode`] / [`NamedKeyCode`] `#[repr(u16)]` discriminant sets,
-/// and the [`PhysicalKey`] usages `lib/abi` names. Both records are
+/// and the [`PhysicalKey`] usages `lib/abi` names. The records are
 /// hand-serialised little-endian byte images (not a `#[repr(C)]` struct), so the header
 /// exports their field codes and wire sizes rather than a C struct mirror; a
 /// [`Errno`] decoder on the Rust side validates the bytes. Every value is read
@@ -1103,13 +1103,16 @@ fn generate_input() -> String {
     out.push_str("#ifndef TAIRIX_INPUT_H\n#define TAIRIX_INPUT_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
 
-    // Record magics ("PIN1" / "KIN1") and their packed little-endian wire sizes.
+    // Record magics ("PIN1" / "KED1" / "KIN1") and their packed little-endian
+    // wire sizes.
     let _ = writeln!(
         out,
         "#define TAIRIX_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u"
     );
+    let _ = writeln!(out, "#define TAIRIX_KEY_EDGE_MAGIC {KEY_EDGE_MAGIC:#x}u");
     let _ = writeln!(out, "#define TAIRIX_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u");
     let pwl = PointerInput::WIRE_LEN;
+    let ewl = KeyEdge::WIRE_LEN;
     let kwl = KeyInput::WIRE_LEN;
     let _ = writeln!(out, "#define TAIRIX_POINTER_INPUT_WIRE_LEN {pwl}u");
     // What `pointer_read` writes: the record, then the `uint64_t` time it
@@ -1119,6 +1122,7 @@ fn generate_input() -> String {
         "#define TAIRIX_TIMED_POINTER_WIRE_LEN {}u",
         tairix_abi::TimedPointer::WIRE_LEN
     );
+    let _ = writeln!(out, "#define TAIRIX_KEY_EDGE_WIRE_LEN {ewl}u");
     let _ = writeln!(out, "#define TAIRIX_KEY_INPUT_WIRE_LEN {kwl}u");
     // The unit a `Scrolled` record's displacements are counted in.
     let _ = writeln!(
@@ -1147,12 +1151,12 @@ fn generate_input() -> String {
         out.push('\n');
     };
     emit(
-        "Record `kind` codes: pointer moves/clicks/scroll, key down/up, modifier change (uint16_t).",
+        "Record `kind` codes: pointer moves/clicks/scroll, key down/up (uint16_t).",
         &INPUT_KINDS,
         false,
     );
     emit(
-        "`button` (motion=none, else a button) and keyboard `key_class` codes (uint16_t).",
+        "`button` (motion=none, else a button) and keyboard `key_class` (none=typed nothing) codes (uint16_t).",
         &[
             ("TAIRIX_INPUT_BUTTON_NONE", BUTTON_NONE),
             (
@@ -1167,6 +1171,7 @@ fn generate_input() -> String {
                 "TAIRIX_POINTER_BUTTON_MIDDLE",
                 PointerButtonCode::Middle.code(),
             ),
+            ("TAIRIX_KEY_CLASS_NONE", KEY_CLASS_NONE),
             ("TAIRIX_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
             ("TAIRIX_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
         ],
@@ -1189,7 +1194,7 @@ fn generate_input() -> String {
         false,
     );
     emit(
-        "Physical keys: a key record's `physical` field (bytes 18..20) is its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t).",
+        "Physical keys: a key edge's `usage` field (bytes 8..10) and a key record's `physical` field (bytes 18..20) are its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t).",
         &PHYSICAL_KEYS,
         true,
     );
@@ -1253,22 +1258,17 @@ fn push_touch_frame(out: &mut String) {
 /// lives here (Rust offers no variant-name reflection); the numeric value is
 /// the source of truth and is pinned by the in-module test.
 /// The input records' `kind` codes, shared by the generator and its test.
-const INPUT_KINDS: [(&str, u16); 7] = [
+const INPUT_KINDS: [(&str, u16); 6] = [
     ("TAIRIX_INPUT_KIND_MOVED_BY", KIND_MOVED_BY),
     ("TAIRIX_INPUT_KIND_PRESSED", KIND_PRESSED),
     ("TAIRIX_INPUT_KIND_RELEASED", KIND_RELEASED),
     ("TAIRIX_INPUT_KIND_SCROLLED", KIND_SCROLLED),
     ("TAIRIX_INPUT_KIND_KEY_PRESSED", KIND_KEY_PRESSED),
     ("TAIRIX_INPUT_KIND_KEY_RELEASED", KIND_KEY_RELEASED),
-    (
-        "TAIRIX_INPUT_KIND_MODIFIERS_CHANGED",
-        KIND_MODIFIERS_CHANGED,
-    ),
 ];
 
 /// The [`PhysicalKey`] constants `lib/abi` names.
-const PHYSICAL_KEYS: [(&str, u16); 17] = [
-    ("TAIRIX_PHYSICAL_KEY_UNKNOWN", PhysicalKey::UNKNOWN.usage()),
+const PHYSICAL_KEYS: [(&str, u16); 16] = [
     ("TAIRIX_PHYSICAL_KEY_A", PhysicalKey::A.usage()),
     ("TAIRIX_PHYSICAL_KEY_DIGIT_3", PhysicalKey::DIGIT_3.usage()),
     ("TAIRIX_PHYSICAL_KEY_DIGIT_4", PhysicalKey::DIGIT_4.usage()),
@@ -3587,6 +3587,7 @@ fn emit_fs_contract(out: &mut String) {
     emit_fs_call_flags(out);
     emit_fs_name_flags(out);
     emit_fs_records(out);
+    emit_times_records(out);
     emit_fs_values(out);
 }
 
@@ -3759,6 +3760,61 @@ fn emit_fs_records(out: &mut String) {
     );
 }
 
+/// Emit the record `fs_set_times()` reads, and the words it answers.
+fn emit_times_records(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::{StampChange, TimesChange, TimesKept};
+    out.push_str(
+        "/* fs_set_times() record: how each of a node's access and modification times\n\
+         * changes. TAIRIX_STAMP_KEEP leaves it, TAIRIX_STAMP_NOW stamps the wall\n\
+         * clock and TAIRIX_STAMP_AT sets the instant beside it, which is zero for the\n\
+         * other two. TAIRIX_TIMES_NEAREST in `flags` holds an instant the volume cannot keep\n\
+         * as the nearest it can, rather than failing with\n\
+         * TAIRIX_E_TIMESTAMP_OUT_OF_RANGE. `reserved` is zero. Encoded\n\
+         * little-endian. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TIMES_CHANGE_LEN {}u",
+        TimesChange::WIRE_LEN
+    );
+    for (name, word) in [
+        ("KEEP", StampChange::KEEP_WORD),
+        ("NOW", StampChange::NOW_WORD),
+        ("AT", StampChange::AT_WORD),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_STAMP_{name} {word}u");
+    }
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TIMES_NEAREST {:#x}u",
+        TimesChange::NEAREST
+    );
+    out.push_str(
+        "typedef struct tairix_times_change {\n\
+         \x20   int64_t accessed_secs;\n\
+         \x20   int64_t modified_secs;\n\
+         \x20   uint32_t accessed_nanos;\n\
+         \x20   uint32_t modified_nanos;\n\
+         \x20   uint32_t accessed_how;\n\
+         \x20   uint32_t modified_how;\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint32_t reserved;\n\
+         } tairix_times_change_t;\n",
+    );
+    out.push_str(
+        "/* fs_set_times() answers: every instant kept as given, or at least one as\n\
+         * the nearest the volume holds. */\n",
+    );
+    for (name, kept) in [
+        ("EXACTLY", TimesKept::Exactly),
+        ("NEAREST", TimesKept::Nearest),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_TIMES_KEPT_{name} {}u", kept.as_u64());
+    }
+    out.push('\n');
+}
+
 /// Emit the value words, masks and bounds of the remaining calls.
 fn emit_fs_values(out: &mut String) {
     use std::fmt::Write as _;
@@ -3920,8 +3976,9 @@ fn emit_readdir_contract(out: &mut String) {
     out.push('\n');
 }
 
-/// Emit the `fd_grant()` contract item into `tairix_syscall.h`: the
-/// write ceiling that passes on the grantor's own reach, read from `lib/abi`.
+/// Emit the `fd_grant()` contract items into `tairix_syscall.h`: the write
+/// ceiling that passes on the grantor's own reach and the flags, read from
+/// `lib/abi`.
 fn emit_grant_contract(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str(
@@ -3941,6 +3998,16 @@ fn emit_grant_contract(out: &mut String) {
     let _ = writeln!(
         out,
         "#define TAIRIX_GRANT_FILE_ONLY ((uint64_t){GRANT_FILE_ONLY:#x}ull)"
+    );
+    out.push_str(
+        "/* fd_grant() flag that delegates a directory as a capability to what lies\n\
+         * beneath it: every path named through it stays beneath and acts as the\n\
+         * grantor. A zero ceiling changes nothing there; any other bounds each file\n\
+         * written. Anything but a directory fails with TAIRIX_E_OUT_OF_RANGE. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_GRANT_SUBTREE ((uint64_t){GRANT_SUBTREE:#x}ull)"
     );
     out.push('\n');
 }
@@ -4987,6 +5054,64 @@ mod tests {
         );
     }
 
+    /// The `fs_set_times()` record is its wire encoding exactly, every field
+    /// where `lib/abi`'s encoder writes it.
+    #[test]
+    fn the_times_record_lays_out_as_its_wire_encoding() {
+        use tairix_abi::{StampChange, TimesChange};
+        fn at(wire: &[u8], field: &[u8]) -> usize {
+            wire.windows(field.len())
+                .position(|window| window == field)
+                .expect("each field's bytes are distinct")
+        }
+        let h = body("tairix_syscall.h");
+        let accessed = Time64::new(0x1817_1615_1413_1211, 0x0323_2221).expect("canonical");
+        let modified = Time64::new(0x2827_2625_2423_2221 + 0x10, 0x0333_3231).expect("canonical");
+        let change = TimesChange {
+            accessed: StampChange::At(accessed),
+            modified: StampChange::At(modified),
+            nearest: true,
+        };
+        let wire = change.to_le_bytes();
+        let offsets = c_field_offsets(&h, "tairix_times_change");
+        assert_eq!(
+            offsets.len(),
+            7,
+            "every field but the reserved word: {offsets:?}"
+        );
+        assert_eq!(
+            offsets[..4],
+            named(&[
+                ("accessed_secs", at(&wire, &accessed.secs().to_le_bytes())),
+                ("modified_secs", at(&wire, &modified.secs().to_le_bytes())),
+                (
+                    "accessed_nanos",
+                    at(&wire, &accessed.subsec_nanos().to_le_bytes())
+                ),
+                (
+                    "modified_nanos",
+                    at(&wire, &modified.subsec_nanos().to_le_bytes())
+                ),
+            ])[..]
+        );
+        assert_eq!(
+            offsets[4..],
+            named(&[("accessed_how", 24), ("modified_how", 28), ("flags", 32)])[..]
+        );
+        assert_eq!(
+            u32::from_le_bytes(wire[24..28].try_into().unwrap()),
+            StampChange::AT_WORD
+        );
+        assert_eq!(
+            u32::from_le_bytes(wire[32..36].try_into().unwrap()),
+            TimesChange::NEAREST
+        );
+        assert!(h.contains(&format!(
+            "#define TAIRIX_TIMES_CHANGE_LEN {}u",
+            TimesChange::WIRE_LEN
+        )));
+    }
+
     /// Each C record a path call reads is its wire encoding exactly: every
     /// field where `lib/abi`'s encoder writes it, so a C caller fills the
     /// struct and passes its address.
@@ -5613,9 +5738,9 @@ mod tests {
     #[test]
     fn input_header_pins_constants_and_discriminants() {
         use tairix_abi::{
-            KeyInput, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE, KEY_CLASS_CHAR,
-            KEY_CLASS_NAMED, KEY_INPUT_MAGIC, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT,
-            POINTER_INPUT_MAGIC,
+            KeyEdge, KeyInput, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
+            KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_CLASS_NONE, KEY_EDGE_MAGIC, KEY_INPUT_MAGIC,
+            MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, POINTER_INPUT_MAGIC,
         };
         let h = body("tairix_input.h");
         assert!(h.contains("#ifndef TAIRIX_INPUT_H"), "guard present");
@@ -5624,11 +5749,13 @@ mod tests {
         // Values are read from lib/abi, never re-typed: assert they match.
         let mut expected = vec![
             format!("#define TAIRIX_POINTER_INPUT_MAGIC {POINTER_INPUT_MAGIC:#x}u"),
+            format!("#define TAIRIX_KEY_EDGE_MAGIC {KEY_EDGE_MAGIC:#x}u"),
             format!("#define TAIRIX_KEY_INPUT_MAGIC {KEY_INPUT_MAGIC:#x}u"),
             format!(
                 "#define TAIRIX_POINTER_INPUT_WIRE_LEN {}u",
                 PointerInput::WIRE_LEN
             ),
+            format!("#define TAIRIX_KEY_EDGE_WIRE_LEN {}u", KeyEdge::WIRE_LEN),
             format!("#define TAIRIX_KEY_INPUT_WIRE_LEN {}u", KeyInput::WIRE_LEN),
             format!(
                 "#define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t){})",
@@ -5649,6 +5776,7 @@ mod tests {
                 "TAIRIX_POINTER_BUTTON_MIDDLE",
                 PointerButtonCode::Middle.code(),
             ),
+            ("TAIRIX_KEY_CLASS_NONE", KEY_CLASS_NONE),
             ("TAIRIX_KEY_CLASS_CHAR", KEY_CLASS_CHAR),
             ("TAIRIX_KEY_CLASS_NAMED", KEY_CLASS_NAMED),
         ]) {

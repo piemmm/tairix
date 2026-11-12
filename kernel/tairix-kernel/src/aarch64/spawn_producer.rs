@@ -130,6 +130,13 @@ impl PhysMap for ConfiguredPhysMap {
             );
         }
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        // The sync's invalidate is inner-shareable, so it already reached
+        // every PE, and each synchronises its context on its next exception
+        // return before it can fetch the code.
+        true
+    }
 }
 
 /// The single, `'static` [`ConfiguredPhysMap`] the page-table frame source

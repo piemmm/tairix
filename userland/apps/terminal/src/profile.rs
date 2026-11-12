@@ -28,8 +28,9 @@ use tairix_colour::Rgb;
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 
-use crate::effects::{Effects, FULL, MIN_OPACITY};
+use crate::effects::{Effects, MIN_OPACITY};
 use crate::scheme::{ColorScheme, Scheme, ANSI_COLORS};
+use tairix_crt::FULL;
 
 /// The smallest text size the profile may name, in logical pixels.
 ///
@@ -82,16 +83,16 @@ pub enum ProfileKey {
     /// `effects.blur` — how strongly the compositor blurs the backdrop, in
     /// permille.
     Blur,
-    /// `effects.scanlines` — how deeply alternate rows are dimmed, in permille.
+    /// `effects.tube.scanlines` — how deeply alternate rows are dimmed, in permille.
     ScanLines,
-    /// `effects.glow` — how brightly lit pixels glow into their
+    /// `effects.tube.glow` — how brightly lit pixels glow into their
     /// neighbourhood, in permille.
     Glow,
-    /// `effects.fuzz` — how much per-pixel jitter is added, in permille.
+    /// `effects.tube.fuzz` — how much per-pixel jitter is added, in permille.
     Fuzz,
-    /// `effects.phosphor` — how long a lit pixel persists, in permille.
+    /// `effects.tube.phosphor` — how long a lit pixel persists, in permille.
     Phosphor,
-    /// `effects.wobble` — how far rows are displaced, in permille.
+    /// `effects.tube.wobble` — how far rows are displaced, in permille.
     Wobble,
     /// `custom.background` — the custom scheme's default background.
     CustomBackground,
@@ -134,11 +135,11 @@ impl ProfileKey {
             Self::ScrollbackLines => "scrollback.lines",
             Self::Opacity => "effects.opacity",
             Self::Blur => "effects.blur",
-            Self::ScanLines => "effects.scanlines",
-            Self::Glow => "effects.glow",
-            Self::Fuzz => "effects.fuzz",
-            Self::Phosphor => "effects.phosphor",
-            Self::Wobble => "effects.wobble",
+            Self::ScanLines => "effects.tube.scanlines",
+            Self::Glow => "effects.tube.glow",
+            Self::Fuzz => "effects.tube.fuzz",
+            Self::Phosphor => "effects.tube.phosphor",
+            Self::Wobble => "effects.tube.wobble",
             Self::CustomBackground => "custom.background",
             Self::CustomForeground => "custom.foreground",
             Self::CustomCursor => "custom.cursor",
@@ -192,11 +193,11 @@ impl Profile {
         self.scrollback_lines = self.scrollback_lines.min(MAX_SCROLLBACK_LINES);
         self.effects.opacity = self.effects.opacity.clamp(MIN_OPACITY, FULL);
         self.effects.blur = self.effects.blur.min(FULL);
-        self.effects.scanlines = self.effects.scanlines.min(FULL);
-        self.effects.glow = self.effects.glow.min(FULL);
-        self.effects.fuzz = self.effects.fuzz.min(FULL);
-        self.effects.phosphor = self.effects.phosphor.min(FULL);
-        self.effects.wobble = self.effects.wobble.min(FULL);
+        self.effects.tube.scanlines = self.effects.tube.scanlines.min(FULL);
+        self.effects.tube.glow = self.effects.tube.glow.min(FULL);
+        self.effects.tube.fuzz = self.effects.tube.fuzz.min(FULL);
+        self.effects.tube.phosphor = self.effects.tube.phosphor.min(FULL);
+        self.effects.tube.wobble = self.effects.tube.wobble.min(FULL);
     }
 
     /// The text size one step larger, clamped.
@@ -260,23 +261,23 @@ fn set_field(profile: &mut Profile, key: ProfileKey, value: &str) -> bool {
             None => return false,
         },
         ProfileKey::ScanLines => match parse_bounded(value, 0, FULL) {
-            Some(permille) => profile.effects.scanlines = permille,
+            Some(permille) => profile.effects.tube.scanlines = permille,
             None => return false,
         },
         ProfileKey::Glow => match parse_bounded(value, 0, FULL) {
-            Some(permille) => profile.effects.glow = permille,
+            Some(permille) => profile.effects.tube.glow = permille,
             None => return false,
         },
         ProfileKey::Fuzz => match parse_bounded(value, 0, FULL) {
-            Some(permille) => profile.effects.fuzz = permille,
+            Some(permille) => profile.effects.tube.fuzz = permille,
             None => return false,
         },
         ProfileKey::Phosphor => match parse_bounded(value, 0, FULL) {
-            Some(permille) => profile.effects.phosphor = permille,
+            Some(permille) => profile.effects.tube.phosphor = permille,
             None => return false,
         },
         ProfileKey::Wobble => match parse_bounded(value, 0, FULL) {
-            Some(permille) => profile.effects.wobble = permille,
+            Some(permille) => profile.effects.tube.wobble = permille,
             None => return false,
         },
         ProfileKey::CustomBackground => match Rgb::from_hex(value) {
@@ -322,11 +323,11 @@ impl Registry for Profile {
             ProfileKey::ScrollbackLines => write!(out, "{}", self.scrollback_lines),
             ProfileKey::Opacity => write!(out, "{}", self.effects.opacity),
             ProfileKey::Blur => write!(out, "{}", self.effects.blur),
-            ProfileKey::ScanLines => write!(out, "{}", self.effects.scanlines),
-            ProfileKey::Glow => write!(out, "{}", self.effects.glow),
-            ProfileKey::Fuzz => write!(out, "{}", self.effects.fuzz),
-            ProfileKey::Phosphor => write!(out, "{}", self.effects.phosphor),
-            ProfileKey::Wobble => write!(out, "{}", self.effects.wobble),
+            ProfileKey::ScanLines => write!(out, "{}", self.effects.tube.scanlines),
+            ProfileKey::Glow => write!(out, "{}", self.effects.tube.glow),
+            ProfileKey::Fuzz => write!(out, "{}", self.effects.tube.fuzz),
+            ProfileKey::Phosphor => write!(out, "{}", self.effects.tube.phosphor),
+            ProfileKey::Wobble => write!(out, "{}", self.effects.tube.wobble),
             ProfileKey::CustomBackground => write!(out, "{}", self.custom.background.hex()),
             ProfileKey::CustomForeground => write!(out, "{}", self.custom.foreground.hex()),
             ProfileKey::CustomCursor => write!(out, "{}", self.custom.cursor.hex()),
@@ -351,11 +352,18 @@ impl Live for Profile {
             }
             ProfileKey::Opacity => overwrite(&mut self.effects.opacity, from.effects.opacity),
             ProfileKey::Blur => overwrite(&mut self.effects.blur, from.effects.blur),
-            ProfileKey::ScanLines => overwrite(&mut self.effects.scanlines, from.effects.scanlines),
-            ProfileKey::Glow => overwrite(&mut self.effects.glow, from.effects.glow),
-            ProfileKey::Fuzz => overwrite(&mut self.effects.fuzz, from.effects.fuzz),
-            ProfileKey::Phosphor => overwrite(&mut self.effects.phosphor, from.effects.phosphor),
-            ProfileKey::Wobble => overwrite(&mut self.effects.wobble, from.effects.wobble),
+            ProfileKey::ScanLines => overwrite(
+                &mut self.effects.tube.scanlines,
+                from.effects.tube.scanlines,
+            ),
+            ProfileKey::Glow => overwrite(&mut self.effects.tube.glow, from.effects.tube.glow),
+            ProfileKey::Fuzz => overwrite(&mut self.effects.tube.fuzz, from.effects.tube.fuzz),
+            ProfileKey::Phosphor => {
+                overwrite(&mut self.effects.tube.phosphor, from.effects.tube.phosphor)
+            }
+            ProfileKey::Wobble => {
+                overwrite(&mut self.effects.tube.wobble, from.effects.tube.wobble)
+            }
             ProfileKey::CustomBackground => {
                 overwrite(&mut self.custom.background, from.custom.background)
             }
@@ -451,11 +459,11 @@ impl Invalidation {
         {
             stale |= Self::PAINTED;
         }
-        if was.effects.scanlines != now.effects.scanlines
-            || was.effects.glow != now.effects.glow
-            || was.effects.fuzz != now.effects.fuzz
-            || was.effects.phosphor != now.effects.phosphor
-            || was.effects.wobble != now.effects.wobble
+        if was.effects.tube.scanlines != now.effects.tube.scanlines
+            || was.effects.tube.glow != now.effects.tube.glow
+            || was.effects.tube.fuzz != now.effects.tube.fuzz
+            || was.effects.tube.phosphor != now.effects.tube.phosphor
+            || was.effects.tube.wobble != now.effects.tube.wobble
         {
             stale |= Self::PASSES;
         }

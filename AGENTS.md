@@ -630,6 +630,8 @@ tairix/
 │   ├── clock/           # Clock-controller side (clock-v1 server).
 │   ├── cmdres/          # Shared command-word resolution policy.
 │   ├── codec/           # Codec driver side (codec-v1 server).
+│   ├── codegen/         # The one code generator: SSA IR, register allocator,
+│   │                    #   x86_64, aarch64 and riscv64 backends.
 │   ├── collections/     # Heap-backed no_std containers not in core/alloc: the
 │   │                    #   hash, indexed, ordered, and concurrent tiers. The
 │   │                    #   allocation-free ones are `lib/inline`.
@@ -640,10 +642,12 @@ tairix/
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── countryside/     # Countryside layout: holdings, ways, fields, boundaries, plots.
+│   ├── cp437/           # IBM code page 437 and Unicode, as text and as screen glyphs.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.
 │   ├── crc16/           # CRC-16 (reflected 0xA001): the ARC, ext4 and LAME checksum.
 │   ├── crc32/           # CRC-32 (IEEE): the PNG and GPT framing checksum.
 │   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.
+│   ├── crt/             # Picture tube: scan lines, afterglow, glow, noise, wobble.
 │   ├── crt0/            # C-callable abi-v1 program startup object (non-Rust progs).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library.
@@ -661,6 +665,7 @@ tairix/
 │   ├── edid/            # Display-sink descriptions: EDID and its extensions, ELD.
 │   ├── encoder/         # Display encoder side (encoder-v1 server).
 │   ├── enrolment/       # Service enrolment store engine (which services may start).
+│   ├── fat/             # FAT12/16/32 on-disk format: BPB, table, entries, names, stamps.
 │   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
 │   ├── fdt/             # Shared FDT/DTB reader.
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
@@ -1663,8 +1668,8 @@ You are not exempt from any rule above. In addition:
     | Text rendering / fonts: the OS font service (`fontd`), the `/System/Fonts` store, the `FONT_ENDPOINT` glyph protocol, the thin `lib/font` client, and the kernel console-atlas subset | `plans/FONT-SERVICE.md` |
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
-    | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
-    | Pointing input: the one scroll unit, horizontal and high-resolution wheels, what a scroll tells the window it lands on, touch contacts, the seat's gesture recogniser, pinch, and the device time every pointer report carries to the application | `plans/POINTING.md` |
+    | Display, seats, input routing, graphical session; how a seat reads its keyboards (key edges, one keyboard state per seat, a window reading the keyboard raw) | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Pointing input: the one scroll unit, horizontal and high-resolution wheels, what a scroll tells the window it lands on, touch contacts, the seat's gesture recogniser, pinch, the device time every pointer report carries to the application, every button of a client gesture, pointer lock and the hidden pointer | `plans/POINTING.md` |
     | Reaching a logged-in state: the boot-time text-vs-graphical decision (`continue text\|gui`), the graphical login screen (greeter), the login service's session broker, and macOS-style fast user switching between concurrent desktop sessions | `plans/NEW-DESKTOP-LOGIN.md` |
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
@@ -1740,6 +1745,7 @@ You are not exempt from any rule above. In addition:
     | The vector editor (`Draw.app`) and what it is built on: the `lib/bezier` geometry kernel and its boolean operations, the editable drawing of `lib/drawing`, its SVG, RISC OS Draw, PDF and EPS formats, the sandboxed `drawedit` read, the tile renderer, and the tools, inspector, rulers, guides and snapping | `plans/DRAW.md` |
     | Reading PDF: the `lib/pdf` reader — structure, repair, filters, the standard security handler and its interop-only ciphers, content, fonts and text, images — the page's display list, Draw opening a chosen page as an editable drawing, and View.app's page source | `plans/PDF.md` |
     | The web browser: its process model and site isolation, the broker that holds authority and parses nothing, the engine (HTML, CSS, layout, paint) and the heap the DOM and JavaScript share, the JavaScript tier contract and its permanent interpreter, code installation and the compiled tiers, and the OS facilities it needs first — `lib/tls`, the HTTP client engine, the shaping and bidi engine, `lib/url` and the desktop's URL hand-off | `plans/BROWSER.md` |
+    | The PC emulator (`PCEmulator.app`): the 8088–80186 CPU models and their timing, the board, the video cards and their character ROMs, storage, the BIOS, sound, EMS, TAIRiX DOS and COMMAND.COM, the machine worker sandbox, the raw keyboard and pointer lock a guest machine takes, and the translator over BR26 code installation | `plans/PCEMU.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |

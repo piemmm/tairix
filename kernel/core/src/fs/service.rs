@@ -35,7 +35,7 @@ use super::listing::Listing;
 use super::mount::Projection;
 use super::node::{Acting, At, Cwd, NodeHandle, NodeRef, Start, VolumeNodes};
 use super::perm::{Access, CreateMode, Judged};
-use tairix_abi::driver::filesystem::{DirVisit, NodeKind};
+use tairix_abi::driver::filesystem::{DirVisit, NodeKind, VolumeStats};
 use tairix_abi::fs::{Access as Wanted, NodeExpect};
 
 use tairix_abi::sysinfo::{
@@ -45,7 +45,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::volume::ViewBindRequest;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    RenameFlags, SeekRegion, UnlinkFlags,
+    RenameFlags, SeekRegion, TimesChange, TimesKept, UnlinkFlags,
 };
 use zeroize::Zeroize;
 
@@ -554,6 +554,32 @@ pub trait FilesystemService: Send + Sync {
         Err(Errno::NotImplemented)
     }
 
+    /// Change the access and modification times of the node `at` names as
+    /// `change` asks (the `utimensat(2)` shape), as `uid` with `caps`; under
+    /// [`FinalLink::Keep`] a final link itself.
+    ///
+    /// A change that sets nothing changes nothing and is not checked;
+    /// stamping both times now needs ownership or write access, and any other
+    /// change ownership — write access, of a node whose format records no
+    /// owner — no capability overriding it.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (a missing path, a caller who
+    /// may not, a read-only mount), [`Errno::TimestampOutOfRange`] for an
+    /// instant the volume cannot keep and was not asked to hold to the
+    /// nearest, or [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn set_times(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _at: At<'_>,
+        _change: TimesChange,
+        _final_link: FinalLink,
+    ) -> Result<TimesKept, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     /// Whether the caller may have the node `at` names as `want` asks,
     /// answered as the caller: its mode bits, its ACL and its capability gate
     /// under the caller's own identity, then the projection's flags — a write
@@ -714,6 +740,18 @@ pub trait FilesystemService: Send + Sync {
         Err(Errno::NotImplemented)
     }
 
+    /// The space accounting of the volume the node `node` holds lies on, as
+    /// its driver reports it now (the `fstatvfs(2)` shape). Holding the node
+    /// is the authority: a volume's figures say nothing of what is on it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Stale`], or the driver's refusal. The default fails closed
+    /// with [`Errno::NotImplemented`].
+    fn volume_stats_node(&self, _node: &NodeHandle) -> Result<VolumeStats, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
     /// Hand `each` the entries of the node's directory from where `at`
     /// stands — its own entries, then, for a projection's floor, the
     /// projections attached beneath it that the volume holds no entry for —
@@ -795,6 +833,22 @@ pub trait FilesystemService: Send + Sync {
         _new_uid: u32,
         _new_gid: u32,
     ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Change the times of the node `node` holds, as `who`: the `futimens(2)`
+    /// shape of [`set_times`](Self::set_times).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_times`](Self::set_times), and [`Errno::Stale`]. The default
+    /// fails closed with [`Errno::NotImplemented`].
+    fn set_times_node(
+        &self,
+        _node: &NodeHandle,
+        _who: &Acting<'_>,
+        _change: TimesChange,
+    ) -> Result<TimesKept, Errno> {
         Err(Errno::NotImplemented)
     }
 

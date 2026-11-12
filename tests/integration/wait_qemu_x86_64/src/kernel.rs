@@ -22,7 +22,7 @@ use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -81,7 +81,7 @@ static REAP_OK: AtomicBool = AtomicBool::new(false);
 static PARENT_TID: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -96,10 +96,7 @@ static PAGE_TABLE_POOL_CHILD: paging::PageTablePool = paging::PageTablePool::new
 static PAGE_TABLE_POOL_PARENT: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders draw user pages from.
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Monotonic index of the next free [`FRAME_POOL`] frame, shared by both builds.
 static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
@@ -114,7 +111,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let virt = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let virt = FRAME_POOL.as_mut_ptr() as u64 + offset as u64;
     Some(Frame::containing(PhysAddr::new(virt - KERNEL_VMA_BASE)))
 }
 

@@ -11,7 +11,7 @@ use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_arch_riscv64::{handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_log::{log, Event, EventId, Level};
 
 use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
@@ -59,7 +59,7 @@ static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -72,13 +72,10 @@ static ALLOCATOR: FreeListAllocator =
 /// Page-table pool backing the Sv39 hierarchy (lives in `.bss`).
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-/// 4 KiB frame the test maps at [`TEST_VADDR`]. `#[repr(align(4096))]` so
+/// 4 KiB frame the test maps at [`TEST_VADDR`]. Page-aligned, so
 /// its physical address is a valid page frame; it lives in identity-mapped
 /// RAM, so its kernel virtual address equals its physical address.
-#[repr(C, align(4096))]
-struct ProbeFrame([u8; 4096]);
-
-static mut PROBE_FRAME: ProbeFrame = ProbeFrame([0; 4096]);
+static PROBE_FRAME: Arena<4096> = Arena::ZERO;
 
 fn note(id: EventId, message: &'static str) {
     log(
@@ -166,7 +163,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
 
     // The probe frame is identity-mapped RAM, so its physical address is
     // its kernel virtual address.
-    let probe_paddr = core::ptr::addr_of!(PROBE_FRAME) as u64;
+    let probe_paddr = PROBE_FRAME.as_mut_ptr() as u64;
 
     // Map the probe page supervisor read/write (no USER bit) through the
     // Arch HAL MMU surface. `map_page` sets A eagerly, so the fresh leaf

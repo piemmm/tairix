@@ -280,12 +280,12 @@ mod tests {
     fn drains_a_key_press_from_the_seat_channel() {
         let mut channel = SeatInputChannel::new(QueueReader::new());
         let record = KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Enter),
+            key: Some(KeyValue::Named(NamedKeyCode::Enter)),
             modifiers: AbiModifiers {
                 ctrl: true,
                 ..AbiModifiers::default()
             },
-            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+            physical: tairix_abi::input::PhysicalKey::from_usage(0x28).expect("the Enter key"),
         };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
         let mut source = KeyboardInputSource::new(
@@ -297,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             source
-                .poll_record(0, None)
+                .poll_record(0, None, true)
                 .map(|polled| polled.map(|(event, _)| event)),
             Ok(Some(InputEvent::KeyPressed {
                 key: Key::Named(NamedKey::Enter),
@@ -307,7 +307,7 @@ mod tests {
                 },
             }))
         );
-        assert_eq!(source.poll_record(0, None), Ok(None));
+        assert_eq!(source.poll_record(0, None, true), Ok(None));
     }
 
     #[test]

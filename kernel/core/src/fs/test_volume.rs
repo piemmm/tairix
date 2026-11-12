@@ -674,6 +674,14 @@ impl FilesystemWrite for FlushSpy {
         self.inner.create(dir, name, kind, record)
     }
 
+    fn set_times(
+        &mut self,
+        node: NodeId,
+        change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        self.inner.set_times(node, change)
+    }
+
     fn create_link(
         &mut self,
         dir: NodeId,

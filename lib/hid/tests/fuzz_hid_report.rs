@@ -12,7 +12,8 @@
 //! * a pointer button is never pressed twice or released unheld, and a
 //!   device let go of leaves no button and no contact held;
 //! * configuring a device fails only when the device has gone;
-//! * a key record names, as its physical key, the usage it was fed.
+//! * a key edge names a real key, and no key goes down twice or comes up
+//!   without having gone down.
 //!
 //! A per-run-seeded `Prng` mutates real descriptors (boot layouts, report-ID
 //! keyboards and mice, a wireless receiver's two interfaces, a high-resolution
@@ -21,15 +22,13 @@
 //! descriptors from random items, and feeds noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
 //! fresh, logged seed; `cargo xtask fuzz` extends it to a wall-clock budget.
 
-use tairix_abi::driver::input::{InputEvent, InputEventKind};
-use tairix_abi::input::{KeyInput, PointerButtonCode, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerButtonCode, PointerInput};
 use tairix_abi::touch::{TouchFrame, TOUCH_CONTACTS_MAX};
 use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
 use tairix_hid::descriptor::{DescriptorError, ReportKind};
 use tairix_hid::{
-    boot, Decoded, HidDevice, HidTransport, KeyboardConsole, ReportDescriptor, ReportId, SeatSink,
-    MAX_DESCRIPTOR,
+    boot, Decoded, HidDevice, HidTransport, ReportDescriptor, ReportId, SeatSink, MAX_DESCRIPTOR,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -585,6 +584,7 @@ fn a_long_item_or_globals_a_push_and_pop_enclose_change_nothing() {
 #[derive(Default)]
 struct Seat {
     held: [bool; 3],
+    keys: tairix_inline::BitSet256,
     last_frame: Option<TouchFrame>,
     records: usize,
 }
@@ -600,8 +600,19 @@ impl Seat {
 }
 
 impl SeatSink for Seat {
-    fn key(&mut self, record: &KeyInput) -> Result<(), DriverError> {
-        assert_eq!(KeyInput::from_bytes(&record.to_le_bytes()), Ok(*record));
+    fn key(&mut self, edge: &KeyEdge) -> Result<(), DriverError> {
+        assert_eq!(KeyEdge::from_bytes(&edge.to_le_bytes()), Ok(*edge));
+        let usage = edge.key.usage();
+        assert_ne!(
+            self.keys.contains(usage),
+            edge.pressed,
+            "{edge:?}: down twice, or up unheld"
+        );
+        if edge.pressed {
+            self.keys.insert(usage);
+        } else {
+            self.keys.remove(usage);
+        }
         self.records += 1;
         Ok(())
     }
@@ -780,54 +791,9 @@ fn a_boot_report_is_read_whatever_its_length() {
             report.is_empty(),
             "{report:?}"
         );
-        iteration += 1;
-        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
-            break;
-        }
-    }
-}
-
-#[test]
-fn the_console_producer_resolves_only_key_edges() {
-    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut rng = Prng::new(tairix_fuzzseed::start(
-        "the_console_producer_resolves_only_key_edges",
-        tairix_fuzzseed::FUZZ_SEED_ENV,
-    ));
-    let mut console = KeyboardConsole::new();
-    let mut iteration: u64 = 0;
-    loop {
-        let kind = *rng.pick(&[
-            InputEventKind::Key,
-            InputEventKind::Pointer,
-            InputEventKind::Scroll,
-        ]);
-        let value = if rng.below(4) == 0 {
-            i32::from_le_bytes(rng.next_u32().to_le_bytes())
-        } else {
-            i32::from(rng.below(2) == 0)
-        };
-        let code = if rng.below(2) == 0 {
-            u16::from(rng.next_u8())
-        } else {
-            rng.next_u16()
-        };
-        let record = console.feed(InputEvent {
-            kind,
-            reserved0: 0,
-            code,
-            value,
-        });
-        if kind != InputEventKind::Key || !(0..=1).contains(&value) {
-            assert_eq!(record, None, "{kind:?} {code:#06x} = {value}");
-        }
-        if let Some(record) = record {
-            assert_eq!(KeyInput::from_bytes(&record.to_le_bytes()), Ok(record));
-            if let Some(physical) = record.physical() {
-                assert_eq!(physical.usage(), code, "a key names the usage it was fed");
-            }
-        }
-
+        // Each report is read from nothing held, as the seat it is checked
+        // against starts afresh.
+        keyboard.release(&mut seat).expect("released");
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;

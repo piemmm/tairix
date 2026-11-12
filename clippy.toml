@@ -103,4 +103,8 @@ doc-valid-idents = [
     "PPMd",
     "BLAKE2sp",
     "SASLprep",
+    "ImageDisk",
+    "AdLib",
+    "µPD765A",
+    "WordStar",
 ]

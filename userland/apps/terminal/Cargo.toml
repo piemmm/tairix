@@ -65,8 +65,9 @@ tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # dependency rather than a `Run`-only one: the terminal states its own row and
 # never restates the order around it.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
-# The screen fuzz's reproducible per-row jitter.
-tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
+# The picture tube the screen is drawn through: its strengths, its passes and
+# the retained pipeline that draws them.
+tairix-crt = { path = "../../../lib/crt", version = "=0.0.0" }
 # The runner the effect stages spread their rows across; the pool itself is the
 # `Run` binary's, reached through `tairix_window::app::pool_across`.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
@@ -131,9 +132,10 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The WCAG contrast measure every fixed palette is held to.
 tairix-colour = { path = "../../../lib/colour", version = "=0.0.0", features = ["test-util"] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
-# The backwards runner the effect stages' splits are proved order-independent
-# with.
+# The serial runner the look's tests render through.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = ["test-util"] }
+# The seeded stream the grid's tests are driven by.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
 # The shared fake app-data service the profile's host tests drive the client
 # over: it speaks the real `appdata-v1` codec, so a test exercises the wire the
 # service actually answers rather than a mock of it.

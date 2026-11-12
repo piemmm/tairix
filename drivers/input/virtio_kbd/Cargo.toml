@@ -32,7 +32,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # never names `drivers/bus/virtio`; the `lib/usb` ↔ `drivers/bus/usb` precedent).
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 # The arch-neutral virtio-input open/poll/decode device logic and the
-# `evdev`-keycode console producer this process composes — a `lib/*` crate
+# `evdev`-keycode table naming each key edge's physical key — a `lib/*` crate
 # (the same logic the in-kernel `-M virt` verticals use).
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants

@@ -8,11 +8,12 @@ use tairix_theme::{Palette, Theme};
 use tairix_window::Desktop;
 
 use super::Look;
-use crate::effects::{Effects, FULL};
+use crate::effects::Effects;
 use crate::grid::Grid;
 use crate::profile::{Invalidation, Profile};
 use crate::render::Screen;
 use crate::scheme::Scheme;
+use tairix_crt::{Tube, FULL};
 
 /// A 1024x768 desktop in `theme`'s appearance at `scale_percent` of the
 /// reference density.
@@ -29,7 +30,10 @@ fn opaque_profile(scanlines: u16) -> Profile {
     Profile {
         effects: Effects {
             opacity: FULL,
-            scanlines,
+            tube: Tube {
+                scanlines,
+                ..defaults.effects.tube
+            },
             ..defaults.effects
         },
         ..defaults
@@ -52,7 +56,7 @@ fn draw(look: &mut Look<()>, grid: &Grid, screen: &mut Screen) {
     let frame = look.pipeline.render(
         screen.surface(),
         damage,
-        look.effects,
+        look.effects.tube,
         look.scale.percent(),
         look.phase,
         &SERIAL,

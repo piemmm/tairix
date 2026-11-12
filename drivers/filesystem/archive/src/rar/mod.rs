@@ -38,7 +38,7 @@ use crate::data::{Archived, Check as DataCheck, Coding, Data, Heap, Lead};
 use crate::format::{leaves_out, Format, Read};
 use crate::name::{as_is, spelled, Spelled};
 use crate::region::{ByteInput, Input, Regions};
-use crate::tree::{Body, Meta, Tree};
+use crate::tree::{Body, Meta, Recorded, Tree};
 use crate::zip::directory_meta;
 
 use self::bits::{Bits, Reader as BitReader};
@@ -764,6 +764,7 @@ fn admit<A: VolumeAccess>(
             changed: Time64::UNIX_EPOCH,
         },
         acorn: None,
+        recorded: Recorded::default(),
     };
     let dir = tree.directory(&parts, &directory_meta())?;
     let file = |entry: usize, len: u64| {

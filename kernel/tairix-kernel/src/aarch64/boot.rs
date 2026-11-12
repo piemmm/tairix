@@ -1227,6 +1227,10 @@ impl PhysMap for DeviceWindows {
 
     /// Register windows are never executed.
     fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {}
+
+    fn fence_instruction_fetch(&self) -> bool {
+        true
+    }
 }
 
 /// How a generic ECAM host reaches this port: its configuration region

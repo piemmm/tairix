@@ -11,13 +11,13 @@
 //! place.
 //!
 //! The image is a minimal but genuine FAT32 volume — 1 MiB, two
-//! mirrored FATs, one-sector clusters — laid out so the real
-//! `Fat32::open` validator (a zero 16-bit FAT size and zero root-entry
-//! count, a power-of-two sector and cluster size, a root cluster inside
-//! the data region) accepts it, and the volume probe recognises it by the
-//! type its boot sector names. [`build_labelled_image`] labels it, as the
-//! twin-volume vertical's USB sticks need. It is `no_std` + `alloc` so it
-//! links into both the host build tool and the freestanding guest test.
+//! mirrored FATs, one-sector clusters — written through `lib/fat`'s
+//! encoders. It has far fewer clusters than a formatted FAT32 volume, which
+//! every reader allows: FAT32 is told by its parameter block's shape (no
+//! fixed root, no 16-bit FAT size), and the volume probe recognises it by
+//! the type its boot sector names. [`build_labelled_image`] labels it, as
+//! the twin-volume vertical's USB sticks need. It is `no_std` + `alloc` so
+//! it links into both the host build tool and the freestanding guest test.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -27,6 +27,10 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use tairix_fat::boot::{Bpb, Kind, BOOT_SECTOR};
+use tairix_fat::dir::{attr, ShortEntry, ENTRY};
+use tairix_fat::format::{self, FIXED_MEDIA};
+use tairix_fat::{name, table};
 
 /// On-disk bytes-per-sector (BPB offset 11). The on-disk fields carry
 /// their natural width so the boot sector is written without any
@@ -75,73 +79,50 @@ const FAT_SECTORS: u32 = 16;
 const ROOT_CLUSTER: u32 = 2;
 /// Cluster holding [`PLANTED_FILE_CONTENT`].
 const HELLO_CLUSTER: u32 = 3;
+/// The volume's serial, which every copy of the image shares.
+const SERIAL: u32 = 0x7E57_FA32;
 
-/// End-of-chain marker written into the FAT.
-const FAT_EOC: u32 = 0x0FFF_FFFF;
-/// FAT entry 0: media descriptor in the low byte, ones elsewhere.
-const FAT_MEDIA: u32 = 0x0FFF_FFF8;
-/// On-disk directory-entry size, frozen by the FAT specification.
-const DIR_ENTRY_LEN: usize = 32;
-/// Attribute byte for an ordinary (archive) file.
-const ATTR_ARCHIVE: u8 = 0x20;
-/// Attribute byte of the volume-label entry.
-const ATTR_VOLUME_ID: u8 = 0x08;
-
-fn set_le16(img: &mut [u8], offset: usize, value: u16) {
-    img[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-}
-
-fn set_le32(img: &mut [u8], offset: usize, value: u32) {
-    img[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-/// Byte offset of `cluster`'s FAT slot within FAT copy `fat_index`.
-fn fat_slot_offset(fat_index: u32, cluster: u32) -> usize {
-    let fat_start_sector =
-        usize::from(RESERVED_SECTORS) + fat_index as usize * FAT_SECTORS as usize;
-    fat_start_sector * SECTOR_BYTES + cluster as usize * 4
-}
-
-/// Write `value` into `cluster`'s slot in every FAT copy.
-fn set_fat(img: &mut [u8], cluster: u32, value: u32) {
-    for fat_index in 0..u32::from(NUM_FATS) {
-        set_le32(img, fat_slot_offset(fat_index, cluster), value);
+/// The volume's parameter block.
+fn bpb() -> Bpb {
+    Bpb {
+        kind: Kind::Fat32,
+        bytes_per_sector: BYTES_PER_SECTOR,
+        sectors_per_cluster: SECTORS_PER_CLUSTER,
+        reserved_sectors: RESERVED_SECTORS,
+        fats: NUM_FATS,
+        root_entries: 0,
+        total_sectors: TOTAL_SECTORS_U32,
+        media: FIXED_MEDIA,
+        fat_sectors: FAT_SECTORS,
+        sectors_per_track: 0,
+        heads: 0,
+        hidden_sectors: 0,
+        root_cluster: ROOT_CLUSTER,
+        fsinfo_sector: 0,
+        backup_boot_sector: 0,
+        drive: 0x80,
+        serial: Some(SERIAL),
+        label: None,
     }
+}
+
+/// `bytes` as an index into the image.
+fn index(bytes: u64) -> usize {
+    usize::try_from(bytes).expect("inside the image")
 }
 
 /// Byte offset of `cluster`'s data within the image.
 fn cluster_byte_offset(cluster: u32) -> usize {
-    let data_start_sector =
-        usize::from(RESERVED_SECTORS) + usize::from(NUM_FATS) * FAT_SECTORS as usize;
-    let sector = data_start_sector
-        + (cluster as usize - ROOT_CLUSTER as usize) * usize::from(SECTORS_PER_CLUSTER);
-    sector * SECTOR_BYTES
+    index(
+        bpb()
+            .cluster_start(cluster)
+            .expect("a cluster of the volume"),
+    )
 }
 
-/// Build an 11-byte 8.3 short name (`base` left-justified in the first
-/// eight bytes, `ext` in the last three, both space-padded).
-fn short_name(base: &[u8], ext: &[u8]) -> [u8; 11] {
-    let mut out = [b' '; 11];
-    out[..base.len()].copy_from_slice(base);
-    out[8..8 + ext.len()].copy_from_slice(ext);
-    out
-}
-
-/// Write one 8.3 directory entry at `offset`.
-fn write_short_entry(
-    img: &mut [u8],
-    offset: usize,
-    name: &[u8; 11],
-    attr: u8,
-    cluster: u32,
-    size: u32,
-) {
-    img[offset..offset + 11].copy_from_slice(name);
-    img[offset + 11] = attr;
-    let cluster_bytes = cluster.to_le_bytes();
-    img[offset + 20..offset + 22].copy_from_slice(&cluster_bytes[2..4]);
-    img[offset + 26..offset + 28].copy_from_slice(&cluster_bytes[0..2]);
-    set_le32(img, offset + 28, size);
+/// Write `entry` at byte `offset` of the image.
+fn put_entry(img: &mut [u8], offset: usize, entry: &ShortEntry) {
+    img[offset..offset + ENTRY].copy_from_slice(&entry.encode());
 }
 
 /// Construct the FAT32 image described in the module docs.
@@ -166,8 +147,9 @@ pub fn build_labelled_image(label: &[u8; 11]) -> Vec<u8> {
 /// # Panics
 ///
 /// Never in practice: the layout constants are sized so every write
-/// stays in bounds and [`PLANTED_FILE_CONTENT`] fits one cluster. The
-/// debug assertions document those invariants for a future edit.
+/// stays in bounds, [`PLANTED_FILE_NAME`] is an 8.3 name and
+/// [`PLANTED_FILE_CONTENT`] fits one cluster. The debug assertion
+/// documents the last for a future edit.
 fn build(label: Option<&[u8; 11]>) -> Vec<u8> {
     debug_assert!(
         PLANTED_FILE_CONTENT.len() <= SECTOR_BYTES * usize::from(SECTORS_PER_CLUSTER),
@@ -175,42 +157,43 @@ fn build(label: Option<&[u8; 11]>) -> Vec<u8> {
     );
 
     let mut img = vec![0u8; TOTAL_SECTORS_U32 as usize * SECTOR_BYTES];
+    let bpb = bpb();
+    img[..BOOT_SECTOR].copy_from_slice(&format::boot_sector(&bpb, b"TAIRIX  ", &[]));
 
-    // BIOS parameter block (boot sector).
-    set_le16(&mut img, 11, BYTES_PER_SECTOR); // bytes per sector
-    img[13] = SECTORS_PER_CLUSTER; // sectors per cluster
-    set_le16(&mut img, 14, RESERVED_SECTORS); // reserved sectors
-    img[16] = NUM_FATS; // number of FATs
-    set_le16(&mut img, 17, 0); // root entry count (0 for FAT32)
-    set_le16(&mut img, 22, 0); // 16-bit FAT size (0 for FAT32)
-    set_le32(&mut img, 32, TOTAL_SECTORS_U32); // total sectors (32-bit)
-    set_le32(&mut img, 36, FAT_SECTORS); // 32-bit FAT size (sectors)
-    set_le32(&mut img, 44, ROOT_CLUSTER); // root cluster
-    img[82..90].copy_from_slice(b"FAT32   "); // filesystem type
-    img[510] = 0x55;
-    img[511] = 0xAA;
-
-    // File allocation table (mirrored across both copies).
-    set_fat(&mut img, 0, FAT_MEDIA);
-    set_fat(&mut img, 1, FAT_EOC);
-    set_fat(&mut img, ROOT_CLUSTER, FAT_EOC);
-    set_fat(&mut img, HELLO_CLUSTER, FAT_EOC);
+    // File allocation table, mirrored across both copies.
+    let [media, end] = table::head(bpb.kind, bpb.media);
+    for fat in 0..u64::from(bpb.fats) {
+        let start = index(bpb.fat_start() + fat * bpb.fat_bytes());
+        let copy = &mut img[start..start + index(bpb.fat_bytes())];
+        for (cluster, value) in [
+            (0, media),
+            (1, end),
+            (ROOT_CLUSTER, end),
+            (HELLO_CLUSTER, end),
+        ] {
+            table::set(bpb.kind, copy, cluster, value);
+        }
+    }
 
     // Root directory (cluster 2): the label entry, if any, then HELLO.TXT.
-    let hello_size = u32::try_from(PLANTED_FILE_CONTENT.len()).unwrap_or(0);
     let mut entry = cluster_byte_offset(ROOT_CLUSTER);
     if let Some(label) = label {
-        write_short_entry(&mut img, entry, label, ATTR_VOLUME_ID, 0, 0);
-        entry += DIR_ENTRY_LEN;
+        let label = ShortEntry {
+            name: *label,
+            attributes: attr::VOLUME_ID,
+            ..ShortEntry::default()
+        };
+        put_entry(&mut img, entry, &label);
+        entry += ENTRY;
     }
-    write_short_entry(
-        &mut img,
-        entry,
-        &short_name(b"HELLO", b"TXT"),
-        ATTR_ARCHIVE,
-        HELLO_CLUSTER,
-        hello_size,
-    );
+    let hello = ShortEntry {
+        name: name::field(PLANTED_FILE_NAME).expect("an 8.3 name"),
+        attributes: attr::ARCHIVE,
+        cluster: HELLO_CLUSTER,
+        size: u32::try_from(PLANTED_FILE_CONTENT.len()).expect("one cluster"),
+        ..ShortEntry::default()
+    };
+    put_entry(&mut img, entry, &hello);
 
     // HELLO.TXT contents (cluster 3).
     let hello = cluster_byte_offset(HELLO_CLUSTER);
@@ -357,7 +340,8 @@ mod tests {
 
     #[test]
     fn the_boot_sector_names_its_filesystem_type() {
-        assert_eq!(&build_image()[82..90], b"FAT32   ");
+        let at = tairix_fat::boot::at::TYPE_32;
+        assert_eq!(&build_image()[at..at + 8], Kind::Fat32.type_name());
     }
 
     #[test]
@@ -365,8 +349,9 @@ mod tests {
         const LABEL: &[u8; 11] = b"LABELLED   ";
         let image = build_labelled_image(LABEL);
         let entry = cluster_byte_offset(ROOT_CLUSTER);
-        assert_eq!(&image[entry..entry + 11], LABEL);
-        assert_eq!(image[entry + 11], ATTR_VOLUME_ID);
+        let found = ShortEntry::decode(image[entry..entry + ENTRY].try_into().expect("an entry"));
+        assert_eq!(&found.name, LABEL);
+        assert_eq!(found.attributes, attr::VOLUME_ID);
         let mut fs = Fat32::open(VecBlock { store: image }).expect("a valid FAT32 volume");
         let root = fs.root();
         let node = fs

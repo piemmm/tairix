@@ -69,7 +69,8 @@ use tairix_abi::time::Time64;
 use tairix_abi::volume::{validate_volume_name, ViewBindRequest};
 use tairix_abi::{
     CapabilityId, CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags,
-    RealpathMode, RenameFlags, SeekRegion, UnlinkFlags, FS_MODE_MASK, STORAGE_CATALOG,
+    RealpathMode, RenameFlags, SeekRegion, TimesChange, TimesKept, UnlinkFlags, FS_MODE_MASK,
+    STORAGE_CATALOG,
 };
 use tairix_caps::CapabilitySet;
 use tairix_collections::{OrderedMap, RadixTree};
@@ -3137,6 +3138,40 @@ where
         )
     }
 
+    fn set_times(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        at: At<'_>,
+        change: TimesChange,
+        final_link: FinalLink,
+    ) -> Result<TimesKept, Errno> {
+        // A change that sets nothing is answered wherever the path reaches,
+        // a read-only projection and the catalog included.
+        let purpose = if change.is_empty() {
+            MountUse::Read
+        } else {
+            MountUse::Write
+        };
+        self.resolved(
+            uid,
+            caps,
+            Way::to(at, final_link),
+            purpose,
+            |_, fs, _, cred, landing| {
+                let mut delegated = DelegatedFs::bind(fs, &landing.projection);
+                delegated.held(landing.walk)?.0.set_times(cred, change)
+            },
+            |_, _, _| {
+                if change.is_empty() {
+                    Ok(TimesKept::Exactly)
+                } else {
+                    Err(VfsError::ReadOnly)
+                }
+            },
+        )
+    }
+
     fn access(
         &self,
         uid: u32,
@@ -3291,6 +3326,13 @@ where
         })
     }
 
+    fn volume_stats_node(&self, node: &NodeHandle) -> Result<VolumeStats, Errno> {
+        self.with_live(node, |fs, _| {
+            fs.stats()
+                .map_err(|err| VfsError::to_errno(map_driver_error(err)))
+        })
+    }
+
     fn readdir_node(
         &self,
         node: &NodeHandle,
@@ -3369,6 +3411,15 @@ where
         self.with_node(node, who, |mut held, cred, _| {
             held.set_owner(cred, who.granted, owner, group)
         })
+    }
+
+    fn set_times_node(
+        &self,
+        node: &NodeHandle,
+        who: &Acting<'_>,
+        change: TimesChange,
+    ) -> Result<TimesKept, Errno> {
+        self.with_node(node, who, |mut held, cred, _| held.set_times(cred, change))
     }
 
     fn attr_get_node(

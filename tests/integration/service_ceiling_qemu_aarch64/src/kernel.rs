@@ -31,7 +31,7 @@ use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
@@ -158,7 +158,7 @@ const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -171,10 +171,7 @@ static ALLOCATOR: FreeListAllocator =
 /// Physical-frame backing store the live [`FrameAllocator`] serves the spawn
 /// producer and the stack-growth fault path from: in the image's gigabyte,
 /// which the direct map covers as RAM.
-#[repr(C, align(4096))]
-struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// The dispatch-callback slot the production [`KernelDispatchHook`] is
 /// installed into (one slot per binary, set once). Both the syscall
@@ -333,7 +330,7 @@ struct Subsystems {
 /// the production `KernelArch` wrapper, and the capability / port /
 /// address-space / random / IRQ state the production hook borrows.
 fn leak_subsystems(counter_hz: u64) -> Subsystems {
-    let pool = tairix_arch_aarch64::paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
+    let pool = tairix_arch_aarch64::paging::image_phys(FRAME_POOL.as_mut_ptr() as u64);
     let mut memory_map = BootMemoryMap::new();
     memory_map.push(MemoryRegion {
         start: PhysAddr::new(pool),

@@ -99,7 +99,7 @@ mod kernel {
     use tairix_abi::{CapabilityId, Errno, SyscallNumber};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_caps::CapabilitySet;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, BinArch, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -122,7 +122,7 @@ mod kernel {
     // see `kernel/tairix-kernel/Cargo.toml`'s top-level rationale).
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

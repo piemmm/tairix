@@ -197,7 +197,12 @@ pub fn is_refresh_request<S: DirectorySource>(
 ) -> bool {
     match event {
         WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers, .. },
+            key:
+                KeyInput::Pressed {
+                    key: Some(key),
+                    modifiers,
+                    ..
+                },
             ..
         } => {
             Accelerator::of(*key, *modifiers) == Some(Accelerator::Command(ToolbarCommand::Refresh))
@@ -367,10 +372,9 @@ pub fn apply_event<S: DirectorySource>(
     };
     let frame = (window, scale, theme);
     match event {
-        WindowEvent::Key {
-            key: KeyInput::Pressed { key, modifiers, .. },
-            ..
-        } => {
+        WindowEvent::Key { key: input, .. } => {
+            let key = input.key().filter(|_| input.is_press())?;
+            let modifiers = input.modifiers();
             if matches!(key, KeyValue::Named(NamedKeyCode::Tab))
                 && !modifiers.ctrl
                 && !modifiers.alt
@@ -379,12 +383,12 @@ pub fn apply_event<S: DirectorySource>(
                 places.set_focused(!focused);
                 return Some(marked(places, damage));
             }
-            if !places.is_focused() || Accelerator::of(*key, *modifiers).is_some() {
+            if !places.is_focused() || Accelerator::of(key, modifiers).is_some() {
                 return None;
             }
             match key {
                 KeyValue::Named(NamedKeyCode::Down | NamedKeyCode::Up) => {
-                    let step = if *key == KeyValue::Named(NamedKeyCode::Down) {
+                    let step = if key == KeyValue::Named(NamedKeyCode::Down) {
                         1
                     } else {
                         -1

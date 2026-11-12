@@ -471,3 +471,96 @@ fn a_bank_of_another_ratio_is_refused_rather_than_filtered_over() {
     );
     assert!(resampler.process(&bank, &[0.0; 16], &mut output).is_ok());
 }
+
+/// A sine of `amplitude` at `frequency` Hz sampled at `rate`, from frame
+/// `first`.
+fn sine(first: usize, frames: usize, frequency: f64, rate: f64, amplitude: f64) -> Vec<f32> {
+    (first..first + frames)
+        .map(|n| {
+            let phase = 2.0 * core::f64::consts::PI * frequency * mathf::real(n) / rate;
+            mathf::single(amplitude * mathf::sin(phase))
+        })
+        .collect()
+}
+
+#[test]
+fn a_retuned_stream_goes_on_without_a_break_at_its_new_ratio() {
+    let bank = FilterBank::new(rate(44_100), rate(48_000)).expect("bank");
+    let ratio = bank.ratio();
+    let fast = Ratio::new(ratio.input() * 1_005, ratio.output() * 1_000).expect("a ratio");
+    let retuned = FilterBank::for_ratio(fast).expect("bank");
+    let mut resampler = Resampler::new(&bank, 1).expect("mono");
+    let mut output = Vec::new();
+    let mut buffer = vec![0.0f32; 8_192];
+    let mut produced_after = 0;
+    for block in 0..20 {
+        if block == 10 {
+            resampler.retune(&retuned).expect("retuned");
+            assert_eq!(resampler.ratio(), fast);
+        }
+        let input = sine(block * 4_410, 4_410, 1_000.0, 44_100.0, 0.5);
+        let (consumed, produced) = resampler
+            .process(
+                if block < 10 { &bank } else { &retuned },
+                &input,
+                &mut buffer,
+            )
+            .expect("frames");
+        assert_eq!(consumed, 4_410);
+        if block >= 10 {
+            produced_after += produced;
+        }
+        output.extend_from_slice(&buffer[..produced]);
+    }
+    // A 1 kHz sine at 48 kHz moves at most this far between frames; a
+    // restart would jump to silence and ramp back.
+    let slope = 0.5 * 2.0 * core::f64::consts::PI * 1_000.0 / 48_000.0;
+    let settled = &output[settling(&bank)..];
+    let widest = settled
+        .windows(2)
+        .map(|pair| f64::from((pair[1] - pair[0]).abs()))
+        .fold(0.0, f64::max);
+    assert!(widest < slope * 1.02, "a step of {widest} against {slope}");
+    let expected = 44_100.0 * 1_000.0 / 1_005.0 * 48_000.0 / 44_100.0;
+    assert!(
+        (mathf::real(produced_after) - expected).abs() < 2.0,
+        "{produced_after} frames at the new ratio"
+    );
+}
+
+#[test]
+fn a_retune_to_a_wider_bank_carries_the_frames_it_can() {
+    let bank = FilterBank::new(rate(44_100), rate(48_000)).expect("bank");
+    let wider = FilterBank::new(rate(48_000), rate(44_100)).expect("bank");
+    assert!(wider.taps() > bank.taps());
+    let mut resampler = Resampler::new(&bank, 2).expect("stereo");
+    let input = vec![0.25f32; 2 * 4_410];
+    let mut buffer = vec![0.0f32; 2 * 8_192];
+    resampler
+        .process(&bank, &input, &mut buffer)
+        .expect("frames");
+    resampler.retune(&wider).expect("retuned");
+    let (_, produced) = resampler
+        .process(&wider, &input, &mut buffer)
+        .expect("frames");
+    let tail = &buffer[2 * settling(&wider)..2 * produced];
+    assert!(
+        tail.iter().all(|&level| (level - 0.25).abs() < 1e-3),
+        "the level holds once the frames the history lacked have passed"
+    );
+}
+
+#[test]
+fn the_copying_bank_cannot_be_retuned() {
+    let unity = FilterBank::new(rate(48_000), rate(48_000)).expect("bank");
+    let bank = FilterBank::new(rate(44_100), rate(48_000)).expect("bank");
+    let mut copying = Resampler::new(&unity, 1).expect("mono");
+    assert_eq!(copying.retune(&bank), Err(Errno::NotSupported));
+    let mut filtering = Resampler::new(&bank, 1).expect("mono");
+    assert_eq!(filtering.retune(&unity), Err(Errno::NotSupported));
+    assert_eq!(
+        filtering.retune(&bank),
+        Ok(()),
+        "its own ratio is no change"
+    );
+}

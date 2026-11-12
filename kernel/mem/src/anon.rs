@@ -65,6 +65,9 @@ pub enum AnonError {
     /// A caller-placed range overlaps memory the space already maps, a
     /// reservation it holds, or one of its windows.
     Overlap,
+    /// Code could not be made visible to every CPU's instruction fetch
+    /// ([`crate::phys::PhysMap::fence_instruction_fetch`]).
+    InstructionFence,
 }
 
 /// The whole-page count needed to back `len` bytes, rounded up.
@@ -291,9 +294,53 @@ pub fn unmap_anonymous<P: PageTable>(
     }
 }
 
+/// Take the `page_count` pages from `base_va` out of `space` with what they
+/// hold: each frame goes to `keep` once no CPU and no `retire` view can reach
+/// it through `space`, for the space it moves to.
+///
+/// Every page must be resident plain anonymous memory (`RW|USER`), checked
+/// before any is touched, so a range holding any other page is refused whole.
+///
+/// # Errors
+///
+/// * [`AnonError::ZeroLength`] if `page_count == 0`.
+/// * [`AnonError::Unaligned`] if `base_va` is not page-aligned.
+/// * [`AnonError::Overflow`] if a page address overflows the address space.
+/// * [`AnonError::NotMapped`] for a page not resident, or not anonymous.
+/// * The page table's refusal of an unmap; the frames taken before it still
+///   go to `keep`.
+pub fn detach_anonymous<P: PageTable>(
+    space: &mut AddressSpace<P>,
+    physmap: &dyn PhysMap,
+    base_va: u64,
+    page_count: u64,
+    retire: &mut dyn Retire,
+    keep: &mut dyn FnMut(Frame),
+) -> Result<(), AnonError> {
+    if page_count == 0 {
+        return Err(AnonError::ZeroLength);
+    }
+    if !base_va.is_multiple_of(PAGE_SIZE as u64) {
+        return Err(AnonError::Unaligned);
+    }
+    for index in 0..page_count {
+        let page = page_at(base_va, index)?;
+        if space.translate(page).map(|(_, flags)| flags) != Some(ANON_FLAGS) {
+            return Err(AnonError::NotMapped);
+        }
+    }
+    let mut retiring = Retiring::keeping(space.tlb().cloned(), retire, physmap, keep);
+    for index in 0..page_count {
+        let page = page_at(base_va, index)?;
+        let frame = space.unmap(page).map_err(map_errno)?;
+        retiring.hold(page.start().as_u64(), frame);
+    }
+    retiring.finish()
+}
+
 /// Map a [`PageTableError`] onto an [`AnonError`], folding an allocator
 /// exhaustion onto [`AnonError::OutOfMemory`] so callers see one OOM type.
-fn map_errno(err: PageTableError) -> AnonError {
+pub(crate) fn map_errno(err: PageTableError) -> AnonError {
     match err {
         PageTableError::AllocFailed(_) => AnonError::OutOfMemory,
         other => AnonError::Map(other),
@@ -465,6 +512,108 @@ mod tests {
             let slice = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), PAGE_SIZE) };
             assert!(slice.iter().all(|&b| b == 0));
         }
+    }
+
+    /// Write `byte` over frame `n` of the simulated window, as a user write
+    /// through the page would leave it.
+    fn fill_frame(sim: &SimPhysMap, n: u64, byte: u8) {
+        let phys = PhysAddr::new((SIM_BASE_FRAME as u64 + n) * PAGE_SIZE as u64);
+        let ptr = sim.translate(phys, PAGE_SIZE).unwrap();
+        // SAFETY: the sim window backs `phys` for one page; the test owns it.
+        unsafe { core::ptr::write_bytes(ptr.as_ptr(), byte, PAGE_SIZE) };
+    }
+
+    #[test]
+    fn a_detached_range_leaves_the_space_with_every_byte_it_held() {
+        let mut space = host_space();
+        let sim = sim();
+        let frames = Frames::new(8);
+        let base = 0x8000;
+        map_anonymous(
+            &mut space,
+            &sim,
+            base,
+            3,
+            || frames.alloc(),
+            |f| frames.free(f),
+        )
+        .expect("map");
+        let bytes = [0xC3, 0xC4, 0xC5];
+        for (n, &byte) in (0u64..).zip(&bytes) {
+            fill_frame(&sim, n, byte);
+        }
+        let mut kept = Vec::new();
+        super::detach_anonymous(&mut space, &sim, base, 3, &mut Unpublished, &mut |f| {
+            kept.push(f);
+        })
+        .expect("detach");
+        assert_eq!(space.mapped_pages(), 0, "no page of it is left");
+        assert_eq!(frames.freed_len(), 0, "nothing was freed");
+        assert_eq!(
+            kept,
+            [
+                Frame(SIM_BASE_FRAME),
+                Frame(SIM_BASE_FRAME + 1),
+                Frame(SIM_BASE_FRAME + 2)
+            ]
+        );
+        for (frame, &byte) in kept.iter().zip(&bytes) {
+            let ptr = sim.translate(frame.start(), PAGE_SIZE).unwrap();
+            // SAFETY: as above; reading one page the test owns.
+            let page = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), PAGE_SIZE) };
+            assert!(page.iter().all(|&b| b == byte), "{frame:?} kept its bytes");
+        }
+    }
+
+    #[test]
+    fn a_range_holding_a_page_not_resident_or_not_anonymous_is_refused_whole() {
+        let mut space = host_space();
+        let sim = sim();
+        let frames = Frames::new(8);
+        let base = 0x8000;
+        map_anonymous(
+            &mut space,
+            &sim,
+            base,
+            2,
+            || frames.alloc(),
+            |f| frames.free(f),
+        )
+        .expect("map");
+        let mut kept = Vec::new();
+        let mut keep = |f| kept.push(f);
+        let refused =
+            super::detach_anonymous(&mut space, &sim, base, 3, &mut Unpublished, &mut keep);
+        assert_eq!(
+            refused,
+            Err(AnonError::NotMapped),
+            "the third page never faulted in"
+        );
+        let code = Page::from_addr(VirtAddr::new(0x20_0000)).unwrap();
+        space
+            .map(
+                code,
+                frames.alloc().unwrap(),
+                MapFlags::READ | MapFlags::EXEC | MapFlags::USER,
+            )
+            .expect("map code");
+        let refused =
+            super::detach_anonymous(&mut space, &sim, 0x20_0000, 1, &mut Unpublished, &mut keep);
+        assert_eq!(
+            refused,
+            Err(AnonError::NotMapped),
+            "code is not anonymous memory"
+        );
+        assert_eq!(
+            super::detach_anonymous(&mut space, &sim, base + 1, 1, &mut Unpublished, &mut keep),
+            Err(AnonError::Unaligned)
+        );
+        assert_eq!(
+            super::detach_anonymous(&mut space, &sim, base, 0, &mut Unpublished, &mut keep),
+            Err(AnonError::ZeroLength)
+        );
+        assert!(kept.is_empty(), "nothing was taken");
+        assert_eq!(space.mapped_pages(), 3, "the space is as it was");
     }
 
     #[test]

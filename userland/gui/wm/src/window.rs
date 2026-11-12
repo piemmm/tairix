@@ -123,6 +123,15 @@ struct Backdrop {
     retained: bool,
 }
 
+/// What a window's content asks the pointer to look like over it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CursorHint {
+    /// This shape.
+    Shape(CursorKind),
+    /// No pointer at all: the content draws its own, or wants none.
+    Hidden,
+}
+
 /// A window: a [`Surface`] placed at a screen [`Point`] with a
 /// per-window opacity, corner style, and pointer-cursor hint.
 ///
@@ -167,7 +176,10 @@ pub struct Window {
     backdrop: Backdrop,
     corners: Corners,
     participation: Participation,
-    cursor: CursorKind,
+    cursor: CursorHint,
+    /// Whether the window reads the keyboard raw: every key edge, a modifier
+    /// and a lock among them, and no repeat.
+    raw_keys: bool,
     viewport: Option<RootViewport>,
     frame: Option<WindowFrame>,
     band: Option<FrameInsets>,
@@ -354,8 +366,8 @@ impl Window {
     /// Build a fully-opaque, square-cornered, visible window from a
     /// surface placed at `origin`. The pointer-cursor hint defaults to the
     /// plain [`CursorKind::Arrow`]; a window whose content wants a
-    /// different pointer (an editor's text I-beam, a control's hand) sets
-    /// it through [`Compositor::set_window_cursor`].
+    /// different pointer (an editor's text I-beam, a control's hand) or none
+    /// sets it through [`Compositor::set_window_cursor`].
     ///
     /// [`Compositor::set_window_cursor`]: crate::Compositor::set_window_cursor
     pub(crate) fn new(id: WindowId, origin: Point, surface: Surface) -> Self {
@@ -409,7 +421,8 @@ impl Window {
             backdrop: Backdrop::default(),
             corners: Corners::Square,
             participation: Participation::HIDDEN,
-            cursor: CursorKind::Arrow,
+            cursor: CursorHint::Shape(CursorKind::Arrow),
+            raw_keys: false,
             viewport: None,
             frame: None,
             band: None,
@@ -559,13 +572,21 @@ impl Window {
         self.corners
     }
 
-    /// The pointer-cursor hint for this window's content: the
-    /// [`CursorKind`] the compositor shows while the pointer rests over
-    /// the window and no higher-priority interaction (such as a window
-    /// move-grab) is in progress.
+    /// The pointer-cursor hint for this window's content: what the
+    /// compositor shows while the pointer rests over the window and no
+    /// higher-priority interaction (such as a window move-grab) is in
+    /// progress.
     #[must_use]
-    pub const fn cursor_hint(&self) -> CursorKind {
+    pub const fn cursor_hint(&self) -> CursorHint {
         self.cursor
+    }
+
+    /// Whether the window reads the keyboard raw: every key going down and
+    /// coming up reaches it, one that types nothing among them, and the
+    /// desktop repeats none.
+    #[must_use]
+    pub const fn takes_raw_keys(&self) -> bool {
+        self.raw_keys
     }
 
     /// `true` if the window participates in composition.
@@ -1385,8 +1406,12 @@ impl Window {
         }
     }
 
-    pub(crate) fn set_cursor_hint(&mut self, cursor: CursorKind) {
+    pub(crate) fn set_cursor_hint(&mut self, cursor: CursorHint) {
         self.cursor = cursor;
+    }
+
+    pub(crate) fn set_raw_keys(&mut self, raw: bool) {
+        self.raw_keys = raw;
     }
 
     /// Replace the content pixels with `surface`, adopting its extent as

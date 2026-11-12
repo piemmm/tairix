@@ -79,7 +79,7 @@ pub use mounted::{
     MountedFilesystemService, RegisterError, Titling, VolumeNames,
 };
 pub use node::{
-    Acting, At, Authority, Cwd, DriverGuard, DriverLock, FrozenAuthority, Grant, NodeHandle,
+    Acting, At, Authority, Cwd, DriverGuard, DriverLock, Floor, FrozenAuthority, Grant, NodeHandle,
     NodeRef, PinnedNode, ReleaseSlot, Start, VolumeNodes,
 };
 pub use path::{spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
@@ -312,6 +312,9 @@ pub enum VfsError {
     /// The directory is one a bind covers, or one on the way to it, and
     /// stays where it is while the bind stands.
     Busy,
+    /// An instant the volume cannot keep, set without asking for the nearest
+    /// it can.
+    TimestampOutOfRange,
 }
 
 impl VfsError {
@@ -360,6 +363,7 @@ impl VfsError {
             Self::Unserved => Errno::NotImplemented,
             Self::Interrupted => Errno::Interrupted,
             Self::Busy => Errno::Busy,
+            Self::TimestampOutOfRange => Errno::TimestampOutOfRange,
         }
     }
 }
@@ -391,6 +395,7 @@ impl fmt::Display for VfsError {
             Self::Unserved => "no driver serves the volume yet",
             Self::Interrupted => "caller terminated before the volume answered",
             Self::Busy => "a bind stands on the directory",
+            Self::TimestampOutOfRange => "a time the volume cannot keep",
         };
         f.write_str(message)
     }
@@ -404,6 +409,10 @@ mod tests {
     fn errno_mapping_is_stable() {
         assert_eq!(VfsError::NotFound.to_errno(), Errno::NotFound);
         assert_eq!(VfsError::ReadOnly.to_errno(), Errno::ReadOnly);
+        assert_eq!(
+            VfsError::TimestampOutOfRange.to_errno(),
+            Errno::TimestampOutOfRange
+        );
         assert_eq!(
             VfsError::PermissionDenied.to_errno(),
             Errno::PermissionDenied

@@ -134,6 +134,9 @@ pub struct DeviceInputSource<C, T> {
     /// empty, so the touch frames read after it in that wake are not each
     /// preceded by another read of it.
     pointer_dry_at: Option<u64>,
+    /// Whether the pointer is locked to a window: motion is then the device's
+    /// own displacement and moves no on-screen pointer.
+    locked: bool,
 }
 
 impl<C, T> DeviceInputSource<C, T> {
@@ -170,6 +173,7 @@ impl<C, T> DeviceInputSource<C, T> {
             recogniser: Recogniser::new(TouchSettings::DEFAULT),
             gestures: VecDeque::new(),
             pointer_dry_at: None,
+            locked: false,
         })
     }
 
@@ -350,6 +354,9 @@ impl<C, T> DeviceInputSource<C, T> {
 
     fn pointer_event(&mut self, record: PointerInput, now_ns: u64) -> InputEvent {
         match record {
+            // Unscaled: a locked pointer's window applies its own speed, as a
+            // guest machine's mouse driver does.
+            PointerInput::MovedBy { dx, dy } if self.locked => InputEvent::PointerMotion { dx, dy },
             PointerInput::MovedBy { dx, dy } => {
                 let percent = self.speed.percent();
                 let dx = scaled(dx, &mut self.carry.0, percent);
@@ -372,11 +379,15 @@ impl<C, T> DeviceInputSource<C, T> {
         }
     }
 
-    /// What a touch `gesture` is to the desktop. A touchpad's motion is
-    /// already at the user's speed and its scroll already in proportion to
-    /// the fingers' travel, so neither is scaled or accelerated again.
-    fn gesture_event(&mut self, gesture: Gesture, now_ns: u64) -> InputEvent {
-        match gesture {
+    /// What a touch `gesture` is to the desktop, or `None` for a touchscreen
+    /// placing a locked pointer, which stays where it was locked. A touchpad's
+    /// motion is already at the user's speed and its scroll already in
+    /// proportion to the fingers' travel, so neither is scaled or accelerated
+    /// again.
+    fn gesture_event(&mut self, gesture: Gesture, now_ns: u64) -> Option<InputEvent> {
+        Some(match gesture {
+            Gesture::MovedBy { dx, dy } if self.locked => InputEvent::PointerMotion { dx, dy },
+            Gesture::MovedTo(_) if self.locked => return None,
             Gesture::MovedBy { dx, dy } => InputEvent::PointerMoved {
                 to: self.displace(dx, dy),
             },
@@ -399,7 +410,7 @@ impl<C, T> DeviceInputSource<C, T> {
                     at: pinch.at.map_or(self.pointer, |at| self.on_screen(at)),
                 }
             }
-        }
+        })
     }
 }
 
@@ -558,8 +569,10 @@ impl<C: PointerInputChannel, T: TouchInputChannel> InputSource for DeviceInputSo
             // by the wake, as the key events a lone modifier is judged against
             // are.
             if let Some((gesture, at_ns)) = self.gestures.pop_front() {
-                let value = self.gesture_event(gesture, now_ns);
-                return Ok(Some(Timed { value, at_ns }));
+                if let Some(value) = self.gesture_event(gesture, now_ns) {
+                    return Ok(Some(Timed { value, at_ns }));
+                }
+                continue;
             }
             if self.pointer_dry_at != Some(now_ns) {
                 if let Some(bytes) = self.channel.next_record()? {
@@ -586,6 +599,10 @@ impl<C: PointerInputChannel, T: TouchInputChannel> InputSource for DeviceInputSo
                 }
             }
         }
+    }
+
+    fn set_pointer_locked(&mut self, locked: bool) {
+        self.locked = locked;
     }
 }
 
@@ -1339,5 +1356,54 @@ mod tests {
                 to: Point::new(639, 0)
             }))
         );
+    }
+
+    /// A locked pointer reads the device's own displacement — unscaled by the
+    /// user's speed and unbounded by the screen — and moves no pointer; its
+    /// buttons are as ever, and unlocking moves the pointer from where it was.
+    #[test]
+    fn a_locked_pointer_reads_the_devices_own_displacement() {
+        let mut source = source(&[
+            PointerInput::MovedBy { dx: 10, dy: -900 },
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            PointerInput::MovedBy { dx: 4, dy: 0 },
+        ]);
+        source.set_policy(
+            PrimaryButton::Left,
+            PointerSpeed::from_percent(300).expect("a speed"),
+        );
+        source.set_pointer_locked(true);
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(InputEvent::PointerMotion { dx: 10, dy: -900 }))
+        );
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(pressed(PointerButton::Primary)))
+        );
+        assert_eq!(source.pointer(), Point::new(320, 240), "the pointer stayed");
+        source.set_pointer_locked(false);
+        assert_eq!(
+            polled(&mut source, 0),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(332, 240)
+            }))
+        );
+    }
+
+    /// A touchscreen cannot place a locked pointer, which stays put; a
+    /// touchpad's motion reaches it as a displacement.
+    #[test]
+    fn a_touchscreen_places_no_locked_pointer() {
+        let mut source = source(&[]);
+        source.set_pointer_locked(true);
+        touch(
+            &mut source,
+            TouchSurface::Screen,
+            0,
+            &[Contact::finger(1, 0, 0)],
+        );
+        assert_eq!(drain(&mut source, 0), []);
+        assert_eq!(source.pointer(), Point::new(320, 240));
     }
 }

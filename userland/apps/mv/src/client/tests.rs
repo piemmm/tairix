@@ -528,6 +528,25 @@ fn cross_device_file_is_copied_then_removed() {
     assert!(!fs.exists("/src/a"));
 }
 
+/// A move across volumes keeps each file's and directory's times, the
+/// directory's set once its entries are in.
+///
+/// Regression: no call could set a time, so a move off its volume left every
+/// copy stamped when it was made.
+#[test]
+fn cross_device_move_keeps_every_nodes_times() {
+    let at = |secs| tairix_abi::time::Time64::from_secs(secs);
+    let fs = Tree::new()
+        .file("/src/d/f", b"top")
+        .stamped("/src/d/f", at(-5), at(-4))
+        .stamped("/src/d", at(7), at(8))
+        .volume("/src");
+    let out = Recorder::new();
+    assert_eq!(run(mv(false, &["/src/d"], "/e"), &fs, &out), Ok(()));
+    assert_eq!(fs.times("/e/f"), Some((at(-5), at(-4))));
+    assert_eq!(fs.times("/e"), Some((at(7), at(8))));
+}
+
 #[test]
 fn cross_device_large_file_streams_across_the_chunk_boundary() {
     let payload: Vec<u8> = (0..(tairix_fscopy::CHUNK_LEN * 2 + 7))

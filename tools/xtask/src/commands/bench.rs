@@ -344,6 +344,11 @@ static FAMILIES: &[Family] = &[
         measure: resample,
     },
     Family {
+        name: "sharp",
+        what: "SharpScaler::draw, an emulated screen enlarged to its window every frame",
+        measure: sharp,
+    },
+    Family {
         name: "encode",
         what: "ChannelOrder::encode_run over a scan-out row",
         measure: encode,
@@ -923,6 +928,53 @@ fn resample(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             format!("{width}x{height} -> {dest_width}x{dest_height}"),
             u64::from(dest_width) * u64::from(dest_height),
             harness.median_cycles(case, run, &warm),
+        ));
+    }
+    Ok(rows)
+}
+
+fn sharp(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
+    struct Warm {
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+        drawn: RefCell<(tairix_raster::SharpScaler, Surface)>,
+    }
+
+    fn run(_: (), warm: &Warm) -> Option<()> {
+        let frame = Rgba8Image::new(warm.width, warm.height, &warm.pixels).ok()?;
+        let (scaler, surface) = &mut *warm.drawn.borrow_mut();
+        let target = tairix_raster::resample::Region {
+            x: 0,
+            y: 0,
+            width: surface.width(),
+            height: surface.height(),
+        };
+        scaler.draw(&frame, surface, target, 0..target.height).ok()
+    }
+
+    // A CGA screen at twice its width in a 4:3 window, then the monochrome
+    // card's and a VGA screen's taking a 1080-line display whole.
+    let cases = [
+        (640u32, 200u32, 1280u32, 960u32),
+        (720, 350, 1440, 1080),
+        (640, 480, 1440, 1080),
+    ];
+    let mut rows = Vec::new();
+    for (width, height, dest_width, dest_height) in cases {
+        let warm = Warm {
+            pixels: gradient_rgba8(width, height),
+            width,
+            height,
+            drawn: RefCell::new((
+                tairix_raster::SharpScaler::new(),
+                surface(dest_width, dest_height, Color::rgb(0, 0, 0))?,
+            )),
+        };
+        rows.push(Measurement::new(
+            format!("{width}x{height} -> {dest_width}x{dest_height}"),
+            u64::from(dest_width) * u64::from(dest_height),
+            harness.median_cycles((), run, &warm),
         ));
     }
     Ok(rows)

@@ -32,6 +32,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | **D10** | A user-settable UI scale | done |
 | **D11** | A user-settable desktop resolution, resampled onto the unchanged output | done |
 | **D12** | The display follows its output: no output, an output arriving and leaving, a new mode announced, and every client converging onto it | done |
+| **D13** | The seat reads its keyboards: key edges from every driver, one keyboard state per seat, a release that types what its press did, channels that never lose a release, and a window that reads the keyboard raw | done |
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -383,6 +384,28 @@ under a running session.
   drives in QEMU can move its output. virtio-gpu, which can, is
   `plans/FIX-DISPLAY-ACCELERATION.md`'s; the HDMI engine's metal run
   (`plans/SOUND.md` SND19q) is the end-to-end acceptance.
+
+### Stage D13 — the seat reads its keyboards
+
+- **A driver reports keys, not text.** A keyboard driver injects a `KeyEdge`
+  — which physical key went down or up — through `key_inject`; it holds no
+  layout, modifier or lock state. The kernel seat reads every edge from every
+  keyboard on it through one `tairix_input::KeyboardState`, so the keyboards
+  on a seat share their modifiers, locks and layout, and a press of a key
+  already down or a release of one not down is consumed unread.
+- **Every key is a record.** The seat answers each edge with a `KeyInput`: a
+  modifier, a lock and a key the layout names no value for carry no value
+  rather than a separate modifier record, and a release carries what its press
+  typed, so a reader pairs the two by value as surely as by position.
+  `PhysicalKey` names only a key the HID page assigns.
+- **No release is lost between the device and the application.** The
+  keyboard and pointer channels keep a slot for the release of every press
+  they queued and refuse a press they could not also take the release of;
+  the session's hold-back never sheds a release.
+- **A window can read the keyboard raw.** `SetKeyboardMode` hands a window
+  every key edge while it holds the keyboard and repeats it nothing; the
+  secure attention key, the capture chords and a lone tap of Meta stay the
+  desktop's.
 
 ### Stage D1 — `lib/seat`: the arch-neutral seat model
 

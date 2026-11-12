@@ -22,7 +22,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
@@ -95,7 +95,7 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -112,14 +112,11 @@ static PAGE_TABLES_A: PageTablePool = PageTablePool::new();
 static PAGE_TABLES_B: PageTablePool = PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders allocate user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; the builders
+/// Page-aligned, so each `PAGE_SIZE` slice is a valid page frame; the builders
 /// reach it through the direct map. A single monotonic cursor
 /// ([`FRAME_CURSOR`]) hands disjoint frames to both program builds, so the two
 /// address spaces never share a data frame.
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Monotonic index of the next free [`FRAME_POOL`] frame, shared by both
 /// program builds.
@@ -134,7 +131,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let base = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64) + offset as u64;
+    let base = paging::image_phys(FRAME_POOL.as_mut_ptr() as u64) + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 

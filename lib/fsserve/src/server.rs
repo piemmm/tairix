@@ -257,6 +257,7 @@ fn run<'s, F: ServedFilesystem, W: Window + ?Sized>(
             fs.set_security(node, security)?;
             Answer::Done
         }
+        Request::SetTimes { node, change } => Answer::Kept(fs.set_times(node, change)?),
         Request::RecordsOwnership { node } => Answer::Owned(fs.records_ownership(node)?),
         Request::Stats => Answer::Stats(fs.stats()?),
         Request::GetAttr { node, key, cap } => {

@@ -17,7 +17,7 @@ use tairix_itest_translation_witness::{
     first_input_node, registers_from, Faults, TranslationWitness, Verdict, FAIL_REGISTERS,
 };
 use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::riscv64::boot as boot_riscv64;
 use tairix_kernel::FreeListAllocator;
 use tairix_kernel_core::HwTreeSource;
@@ -26,7 +26,7 @@ use tairix_log::{Event, Sink};
 /// The boot heap, in the layout's own section, which the boot path keeps out
 /// of the usable memory map.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

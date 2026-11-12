@@ -395,6 +395,14 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for PresentedFs<F> {
         self.inner.truncate(file, size)
     }
 
+    fn set_times(
+        &mut self,
+        node: NodeId,
+        change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        self.inner.set_times(node, change)
+    }
+
     fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {
         self.inner.punch(file, offset, len)
     }

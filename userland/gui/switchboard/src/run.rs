@@ -850,6 +850,8 @@ mod program {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
@@ -860,6 +862,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
+            | WindowEvent::SubtreePicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }

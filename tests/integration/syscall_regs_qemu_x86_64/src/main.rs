@@ -78,14 +78,14 @@ mod kernel {
     use tairix_arch_api::{EnterUser, UserEntry};
     use tairix_arch_x86_64::userentry::UserMode;
     use tairix_arch_x86_64::{paging, qemu_exit, syscall_entry};
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use tairix_log::{Event, EventId, Sink};
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -153,13 +153,9 @@ mod kernel {
     /// Page-table pool backing the user address space (lives in `.bss`).
     static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-    /// Backing storage for the ring-3 stack. `align(4096)` so each page
+    /// Backing storage for the ring-3 stack. Page-aligned, so each page
     /// maps to a valid frame.
-    #[repr(C, align(4096))]
-    struct UserStack([u8; paging::PAGE_SIZE * USER_STACK_PAGES as usize]);
-
-    static mut USER_STACK: UserStack =
-        UserStack([0; paging::PAGE_SIZE * USER_STACK_PAGES as usize]);
+    static USER_STACK: Arena<{ paging::PAGE_SIZE * USER_STACK_PAGES as usize }> = Arena::ZERO;
 
     /// Set once the round-trip has been driven so a stray duplicate
     /// `BootCompleted` can never re-enter the test logic (fail closed).
@@ -356,7 +352,7 @@ mod kernel {
         let user_entry = USER_CODE_VA | (func_va & (page - 1));
 
         // ---- Map the ring-3 stack (USER|R|W, never executable). ----
-        let stack_phys = core::ptr::addr_of!(USER_STACK) as u64 - paging::KERNEL_VMA_BASE;
+        let stack_phys = USER_STACK.as_mut_ptr() as u64 - paging::KERNEL_VMA_BASE;
         for i in 0..USER_STACK_PAGES {
             if space
                 .map_4k_user_wx(

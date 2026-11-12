@@ -28,7 +28,7 @@ use crate::format::{leaves_out, put_zeros, Content, Format, Out, Placed, Read};
 use crate::name::{as_is, spelled, Charset, Spelled};
 use crate::region::Regions;
 use crate::stream::{Compression, Packing, Stream};
-use crate::tree::{Body, Kept, Meta, Tree, MAX_MEMBERS, ROOT};
+use crate::tree::{Body, Kept, Meta, Recorded, Tree, MAX_MEMBERS, ROOT};
 use crate::wire::{le32, le64};
 use crate::zip::directory_meta;
 
@@ -654,6 +654,10 @@ impl<'b> Header<'b> {
                 changed: self.pax(|pax| pax.ctime).unwrap_or(Time64::UNIX_EPOCH),
             },
             acorn: acorn_fields(&self.local.acorn, &self.global.acorn),
+            recorded: Recorded {
+                accessed: self.pax(|pax| pax.atime).is_some(),
+                changed: self.pax(|pax| pax.ctime).is_some(),
+            },
         }
     }
 
@@ -888,8 +892,6 @@ impl TarNotes {
             for record in pax_records(&records) {
                 let record = record?;
                 match record.key {
-                    b"atime" => carried.atime = true,
-                    b"ctime" => carried.ctime = true,
                     b"uname" | b"gname" if !same_owner => {}
                     key if spelt_from_tree(key) => {}
                     _ => {
@@ -912,9 +914,6 @@ struct Carried {
     pax: Vec<u8>,
     /// Its owner's user and group names, as its ustar header spelt them.
     names: [u8; 64],
-    /// Whether it gave the member's access and change times.
-    atime: bool,
-    ctime: bool,
 }
 
 impl Default for Carried {
@@ -922,8 +921,6 @@ impl Default for Carried {
         Self {
             pax: Vec::new(),
             names: [0; 64],
-            atime: false,
-            ctime: false,
         }
     }
 }
@@ -1142,14 +1139,14 @@ fn put_headers<A: VolumeAccess, O: Out<A>>(
     if mtime.secs() < 0 || mtime.secs() >= 0o77_777_777_777 || mtime.subsec_nanos() != 0 {
         pax_record(&mut pax, b"mtime", time_text(mtime, &mut text))?;
     }
-    if carried.atime {
+    if meta.recorded.accessed {
         pax_record(
             &mut pax,
             b"atime",
             time_text(meta.times.accessed, &mut text),
         )?;
     }
-    if carried.ctime {
+    if meta.recorded.changed {
         pax_record(&mut pax, b"ctime", time_text(meta.times.changed, &mut text))?;
     }
     let (uid, gid) = meta.owner.unwrap_or((0, 0));

@@ -1586,12 +1586,35 @@ as its colour. See [theming](./theming.md) for the four roles.
   move-grab records the button that began it, so only that button's release
   ends it and a stray click of the other one mid-drag is consumed rather than
   dropping the window.
-- **The seat's held modifiers live here.** A modifier key produces no character
-  and is no `NamedKey`, so it reaches no surface as a key; the driver reports
-  the edge as an `InputEvent::ModifiersChanged` instead and the router keeps the
-  current set (`InputRouter::modifiers`). The session stamps it onto every
+- **The seat's held modifiers live here.** A modifier key, a lock or a key the
+  layout names no value for types nothing and is no `NamedKey`; its record
+  decodes to `InputEvent::ModifiersChanged`, and the router keeps the current
+  set from it (`InputRouter::modifiers`). The session stamps it onto every
   `WindowEvent::Pointer` it delivers, which is what lets an app qualify a click
   by a modifier (a shift-click) without shadowing state it could never see.
+- **A window can read the keyboard raw.** A window marked so
+  (`Compositor::set_window_raw_keys`, from the application's
+  `SetKeyboardMode`) is handed a key that typed nothing as well, as
+  `InputResponse::RawKey { window }`, while it holds the keyboard and its own
+  content rather than its frame's controls takes the keys
+  (`InputRouter::raw_key_window`). The keys that type reach it as for any
+  window.
+- **A press on a client holds every button of its gesture.** The client grab a
+  primary or a secondary press on content takes holds the set of buttons down
+  in it: another button pressed meanwhile joins it
+  (`InputResponse::ClientPointerPressed`), wherever the pointer is, and each
+  release comes back to the window (`ClientPointerReleased`, naming its
+  button); the grab ends with the last. A press of a button the grab already
+  holds — one whose release never came — starts afresh.
+- **The pointer can be locked to a window.** `InputRouter::lock_pointer`
+  grants a lock only to the window holding the keyboard, while the pointer is
+  over its content and no gesture holds the pointer. While it holds, every
+  pointer event is that window's: motion is the device's own displacement
+  (`InputEvent::PointerMotion` → `LockedMotion`), a button is delivered at the
+  place the pointer was locked at (`LockedButton`), a wheel turn and a pinch as
+  the window's own (`AppScroll`, `AppPinch`), and the pointer moves nowhere.
+  The lock ends with `unlock_pointer`, or by itself when the keyboard leaves
+  the window or the window goes (`take_lock_ended`).
 - **Pointer and keyboard routing.** A title-bar press begins the cooperative
   move-grab; a command-control press captures the frame, feeds the click to
   `TitleBar::on_pointer`, and emits `WindowControl { window, control }` on the
@@ -2184,6 +2207,15 @@ released this window's retained content to reclaim memory and needs it
 presented again) — delivered to that endpoint, where the app **parks**
 until one arrives; it never polls.
 
+Two requests change how a window reads the seat. `SetKeyboardMode` makes it
+read the keyboard raw while it holds it (`KeyboardMode::Raw`): every key going
+down and coming up, one that typed nothing among them, and no repeat, the
+secure attention key, the capture chords and a lone tap of Meta staying the
+desktop's. `LockPointer` asks for the pointer to be locked to it, its motion
+then arriving as `WindowEvent::PointerMotion` in the device's own counts and
+every start and end of the lock as `WindowEvent::PointerLock`
+([locking the pointer](./session.md)).
+
 Each request is framed to **its own** operation's length
 (`WindowRequest::wire_len`), and a decode requires exactly that: a shorter
 frame is truncation, a longer one is a field smuggled past the operation's
@@ -2430,7 +2462,11 @@ signed manifest edits documents and the user may write the file, read-only
 otherwise, and `FilePicked` says which. `PickPurpose::Import` chooses an
 existing file to read into a document — a picture placed in a drawing — and
 delegates it read-only whatever the manifest says, since what is read in is
-the document's to keep and never the file's to change.
+the document's to keep and never the file's to change. `PickPurpose::Folder`
+delegates a chosen folder's files the requester opens, and
+`PickPurpose::Subtree` the folder itself, as a directory capability confined
+beneath it, under the same rule of writing as an open, concluding with
+`SubtreePicked`.
 `PickPurpose::Save { suggested,
 formats }` chooses where a document goes, in the **Save panel**
 (`plans/SAVE-DIALOG.md`): a dialog of the requesting window holding the

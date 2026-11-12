@@ -64,6 +64,7 @@ pub mod ring;
 pub mod round;
 pub mod scan;
 pub mod shape;
+pub mod sharp;
 pub mod stencil;
 pub mod surface;
 mod transformed;
@@ -110,6 +111,7 @@ pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};
 pub use shape::{Placed, Shape};
+pub use sharp::{SharpError, SharpScaler};
 pub use stencil::{Outcome, StencilFace, StencilOp};
 pub use surface::{
     band_rows, pointwise, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand, RowBands, Surface,

@@ -196,6 +196,9 @@ extern "C" {
 #define TAIRIX_SYS_VOLUME_REPLAY 169u
 #define TAIRIX_SYS_CHILD_ORIGIN 170u
 #define TAIRIX_SYS_SHM_GRANT_TO 171u
+#define TAIRIX_SYS_CODE_INSTALL 172u
+#define TAIRIX_SYS_FS_SET_TIMES 173u
+#define TAIRIX_SYS_FS_VOLUME_STATS 174u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -345,6 +348,33 @@ typedef struct tairix_node_expect {
     uint32_t modified_nanos;
     uint32_t changed_nanos;
 } tairix_node_expect_t;
+
+/* fs_set_times() record: how each of a node's access and modification times
+* changes. TAIRIX_STAMP_KEEP leaves it, TAIRIX_STAMP_NOW stamps the wall
+* clock and TAIRIX_STAMP_AT sets the instant beside it, which is zero for the
+* other two. TAIRIX_TIMES_NEAREST in `flags` holds an instant the volume cannot keep
+* as the nearest it can, rather than failing with
+* TAIRIX_E_TIMESTAMP_OUT_OF_RANGE. `reserved` is zero. Encoded
+* little-endian. */
+#define TAIRIX_TIMES_CHANGE_LEN 40u
+#define TAIRIX_STAMP_KEEP 0u
+#define TAIRIX_STAMP_NOW 1u
+#define TAIRIX_STAMP_AT 2u
+#define TAIRIX_TIMES_NEAREST 0x1u
+typedef struct tairix_times_change {
+    int64_t accessed_secs;
+    int64_t modified_secs;
+    uint32_t accessed_nanos;
+    uint32_t modified_nanos;
+    uint32_t accessed_how;
+    uint32_t modified_how;
+    uint32_t flags;
+    uint32_t reserved;
+} tairix_times_change_t;
+/* fs_set_times() answers: every instant kept as given, or at least one as
+* the nearest the volume holds. */
+#define TAIRIX_TIMES_KEPT_EXACTLY 0u
+#define TAIRIX_TIMES_KEPT_NEAREST 1u
 
 /* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is
 * one value rather than bits, and any other value is rejected with
@@ -619,6 +649,11 @@ typedef struct tairix_image_attach_reply {
 /* fd_grant() flag that delegates only a regular file: a pipe end, a link
 * or anything else no document is fails with TAIRIX_E_OUT_OF_RANGE. */
 #define TAIRIX_GRANT_FILE_ONLY ((uint64_t)0x1ull)
+/* fd_grant() flag that delegates a directory as a capability to what lies
+* beneath it: every path named through it stays beneath and acts as the
+* grantor. A zero ceiling changes nothing there; any other bounds each file
+* written. Anything but a directory fails with TAIRIX_E_OUT_OF_RANGE. */
+#define TAIRIX_GRANT_SUBTREE ((uint64_t)0x2ull)
 
 /* call_post() deadline_ns that never passes: the request is answered only
 * by its server or by the endpoint's end. */
@@ -972,6 +1007,9 @@ int32_t tairix_sys_volume_retitle(void * a0, uintptr_t a1);
 int32_t tairix_sys_volume_replay(void * a0, uintptr_t a1);
 uint64_t tairix_sys_child_origin(int64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_shm_grant_to(uint64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_code_install(int64_t a0, int64_t a1, uint64_t a2, uintptr_t a3);
+uint64_t tairix_sys_fs_set_times(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);
+uint64_t tairix_sys_fs_volume_stats(uint32_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

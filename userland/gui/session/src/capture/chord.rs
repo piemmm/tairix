@@ -62,7 +62,7 @@ pub fn is_escape(key: &KeyInput) -> bool {
             physical: PhysicalKey::ESCAPE,
             ..
         } | KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Escape),
+            key: Some(KeyValue::Named(NamedKeyCode::Escape)),
             ..
         }
     )
@@ -77,7 +77,7 @@ pub fn is_space(key: &KeyInput) -> bool {
             physical: PhysicalKey::SPACE,
             ..
         } | KeyInput::Pressed {
-            key: KeyValue::Char(' '),
+            key: Some(KeyValue::Char(' ')),
             ..
         }
     )

@@ -39,7 +39,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::SeatGate;
-use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput, TimedPointer};
+use tairix_abi::input::{ClickDebounce, KeyEdge, KeyInput, PointerInput, TimedPointer};
 use tairix_abi::seat::{DisplayLease, ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -47,8 +47,9 @@ use tairix_abi::touch::TouchFrame;
 use tairix_abi::ProcId;
 use tairix_abi::{DriverError, Errno};
 use tairix_fbcon::Surface;
-use tairix_inline::SecretRing;
-use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
+use tairix_inline::{BitSet256, SecretRing};
+use tairix_input::KeyboardState;
+use tairix_keymap::{encode_key_input, key_record, MAX_KEY_BYTES};
 use tairix_log::Field;
 use tairix_seat::{ConsoleIndex, Lease, Route, SeatError, SeatOwner, SeatState};
 use tairix_sync::SpinLock;
@@ -59,25 +60,23 @@ use crate::console::{ConsoleDevice, ConsoleInput, NULL_CONSOLE_INPUT};
 
 /// Capacity, in [`KeyInput`] records, of the desktop keyboard channel's ring.
 ///
-/// A **fixed bound**, not a scaling capacity: the channel
-/// is the desktop analogue of a console's type-ahead FIFO, and a human types a
-/// handful of keys per second, so a small ring absorbs realistic type-ahead
-/// between `keyboard_read` drains. A bound rather than an unbounded queue means
-/// a wedged or absent window manager can never make the keyboard driver's
-/// pushes grow kernel memory without limit. Overflow drops the
-/// oldest record (the producer never blocks).
+/// A **fixed bound**, not a scaling capacity: the channel is the desktop
+/// analogue of a console's type-ahead FIFO, so a wedged or absent window
+/// manager can never make a keyboard driver grow kernel memory. A full channel
+/// refuses new presses rather than displacing old records, and it always has
+/// room for the release of every press it queued, so a key the desktop saw go
+/// down is always seen to come up.
 pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 
 /// Capacity, in [`TimedPointer`] records, of the desktop pointer channel's
 /// ring.
 ///
 /// The same **fixed bound** rationale as [`KEYBOARD_CHANNEL_CAPACITY`], sized
-/// larger because a pointing device emits far more events than a keyboard —
-/// a drag produces a motion record per hardware report, hundreds per second —
-/// so the ring must absorb a realistic burst between the compositor's
-/// per-frame drains. Overflow still drops the *oldest* record: a stale
-/// motion is worthless once a fresher one exists, and the producer never
-/// blocks and never grows kernel memory.
+/// larger because a drag produces a motion record per hardware report,
+/// hundreds per second. A full channel folds new motion and scrolling into the
+/// newest record when it is of the same kind, so displacement is never lost
+/// while intermediate samples are, and keeps a slot for every owed button
+/// release, as the keyboard channel does.
 pub const POINTER_CHANNEL_CAPACITY: usize = 256;
 
 /// Capacity, in [`TouchFrame`]s, of the desktop touch channel's ring.
@@ -89,53 +88,193 @@ pub const POINTER_CHANNEL_CAPACITY: usize = 256;
 /// never a stuck contact.
 pub const TOUCH_CHANNEL_CAPACITY: usize = 64;
 
-/// A bounded, lock-protected channel of fixed-width input records the seat
-/// routes to the desktop while it is held, drained one record at a time by
-/// the seat owner (`keyboard_read` / `pointer_read`).
+/// A ring of fixed-width records that blanks every slot it vacates.
 ///
-/// Behind both desktop input channels; only the capacity and record width
-/// differ. The queue is a [`SecretRing`] because a key event can carry a typed
-/// character — a password keystroke transits the keyboard channel between the
-/// driver and the desktop — so every slot it vacates is blanked as the record
-/// leaves and the buffer retains no copy once the consumer has taken it. That
-/// also covers a destroyed seat: an undrained record is gone before the memory
-/// is freed.
-struct InputChannel<const CAP: usize, const REC: usize> {
-    ring: SpinLock<SecretRing<[u8; REC], CAP>>,
+/// A key event can carry a typed character — a password keystroke transits
+/// the keyboard channel between the driver and the desktop — so the ring
+/// retains no copy once the consumer has taken it, and an undrained record is
+/// gone before a destroyed seat's memory is freed.
+type Ring<const REC: usize, const CAP: usize> = SecretRing<[u8; REC], CAP>;
+
+/// One desktop channel's queue as the drain sees it: its records in order.
+trait Records {
+    /// The oldest record.
+    fn oldest(&self) -> Option<&[u8]>;
+    /// Take the oldest record, blanking its slot.
+    fn take_oldest(&mut self);
+    /// Whether no record is queued.
+    fn is_drained(&self) -> bool;
+    /// Discard every record and all the queue keeps about them, blanking the
+    /// whole store.
+    fn wipe(&mut self);
 }
 
-/// The desktop keyboard channel: [`KeyInput`] records, drained by
-/// `keyboard_read`.
-type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { InputKind::Key.wire_len() }>;
+impl<const REC: usize, const CAP: usize> Records for Ring<REC, CAP> {
+    fn oldest(&self) -> Option<&[u8]> {
+        self.front().map(<[u8; REC]>::as_slice)
+    }
 
-/// The desktop pointer channel: [`TimedPointer`] records, drained by
-/// `pointer_read`.
-type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { InputKind::Pointer.wire_len() }>;
+    fn take_oldest(&mut self) {
+        self.discard_front(1);
+    }
 
-/// The desktop touch channel: [`TouchFrame`]s, drained by `touch_read`.
-type TouchChannel = InputChannel<TOUCH_CHANNEL_CAPACITY, { InputKind::Touch.wire_len() }>;
+    fn is_drained(&self) -> bool {
+        self.is_empty()
+    }
 
-impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
+    fn wipe(&mut self) {
+        self.purge();
+    }
+}
+
+/// A queue of key or button edges, with the other records of its kind, that
+/// never loses the release of a press it queued.
+///
+/// A slot is held for the release of every press queued, so the ring's
+/// records and those releases together never exceed its capacity: a press
+/// that would leave no room for its own release is refused, and so is the
+/// release of any press the queue did not take. The keys or buttons are named
+/// by their wire codes.
+struct EdgeQueue<const REC: usize, const CAP: usize> {
+    ring: Ring<REC, CAP>,
+    /// The keys or buttons whose press was queued and whose release has not
+    /// been.
+    owed: BitSet256,
+}
+
+impl<const REC: usize, const CAP: usize> EdgeQueue<REC, CAP> {
     const fn new() -> Self {
         Self {
-            ring: SpinLock::new(SecretRing::new([0u8; REC])),
+            ring: SecretRing::new([0u8; REC]),
+            owed: BitSet256::EMPTY,
         }
     }
 
-    /// Enqueue one record, dropping the oldest if the ring is full (the
-    /// producer never blocks).
-    fn push(&self, record: &[u8; REC]) {
-        let mut ring = self.ring.lock();
-        if ring.is_full() {
-            // Drop the oldest record to make room — a stale record is
-            // preferable to unbounded growth or refusing the live one. It is
-            // discarded rather than handed back, so no copy of it reaches a
-            // caller's stack.
-            ring.discard_front(1);
+    /// Whether `records` more fit beside a slot for every owed release.
+    fn has_room(&self, records: usize) -> bool {
+        self.ring.len() + self.owed.len() as usize + records <= CAP
+    }
+
+    /// Queue `record`, the press (`pressed`) or release of `id`. A press of
+    /// one already down tells the reader nothing and is dropped too.
+    fn push_edge(&mut self, id: u16, pressed: bool, record: &[u8; REC]) {
+        if pressed {
+            if self.owed.contains(id) || !self.has_room(2) {
+                return;
+            }
+            self.owed.insert(id);
+        } else {
+            if !self.owed.contains(id) {
+                return;
+            }
+            self.owed.remove(id);
         }
-        // Room was just made, so the push cannot be refused; a refusal is
-        // dropped rather than asserted so no path here can panic.
-        let _ = ring.try_push_back(*record);
+        // The held slot guarantees room; were the invariant ever broken, the
+        // record is dropped rather than displacing another.
+        let _ = self.ring.try_push_back(*record);
+    }
+
+    /// Queue `record`, no edge, if it fits beside the owed releases; else hand
+    /// the newest record to `fold`, which absorbs it or drops it.
+    fn push_or_fold(&mut self, record: &[u8; REC], fold: impl FnOnce(&mut [u8; REC])) {
+        if self.has_room(1) {
+            let _ = self.ring.try_push_back(*record);
+        } else if let Some(newest) = self.ring.back_mut() {
+            fold(newest);
+        }
+    }
+}
+
+impl<const REC: usize, const CAP: usize> Records for EdgeQueue<REC, CAP> {
+    fn oldest(&self) -> Option<&[u8]> {
+        self.ring.oldest()
+    }
+
+    fn take_oldest(&mut self) {
+        self.ring.take_oldest();
+    }
+
+    fn is_drained(&self) -> bool {
+        self.ring.is_drained()
+    }
+
+    fn wipe(&mut self) {
+        self.ring.wipe();
+        self.owed = BitSet256::EMPTY;
+    }
+}
+
+/// The desktop keyboard channel's queue: [`KeyInput`] records, drained by
+/// `keyboard_read`.
+type KeyQueue = EdgeQueue<{ InputKind::Key.wire_len() }, KEYBOARD_CHANNEL_CAPACITY>;
+
+/// The desktop pointer channel's queue: [`TimedPointer`] records, drained by
+/// `pointer_read`.
+type PointerQueue = EdgeQueue<{ InputKind::Pointer.wire_len() }, POINTER_CHANNEL_CAPACITY>;
+
+/// The desktop touch channel's queue: [`TouchFrame`]s, drained by
+/// `touch_read`.
+type TouchQueue = Ring<{ InputKind::Touch.wire_len() }, TOUCH_CHANNEL_CAPACITY>;
+
+impl KeyQueue {
+    fn push(&mut self, record: &KeyInput, bytes: &[u8; KeyInput::WIRE_LEN]) {
+        self.push_edge(record.physical().usage(), record.is_press(), bytes);
+    }
+}
+
+impl PointerQueue {
+    fn push(&mut self, record: TimedPointer) {
+        let bytes = record.to_le_bytes();
+        match record.input {
+            PointerInput::Pressed(button) => self.push_edge(button.code(), true, &bytes),
+            PointerInput::Released(button) => self.push_edge(button.code(), false, &bytes),
+            PointerInput::MovedBy { .. } | PointerInput::Scrolled { .. } => {
+                self.push_or_fold(&bytes, |newest| fold_pointer(newest, record));
+            }
+        }
+    }
+}
+
+/// Fold `record`, motion or scrolling, into the encoded `newest` when that is
+/// of the same kind — their displacements add and the fold is stamped with
+/// the later time — and drop it otherwise.
+fn fold_pointer(newest: &mut [u8; TimedPointer::WIRE_LEN], record: TimedPointer) {
+    let Ok(prior) = TimedPointer::from_bytes(newest) else {
+        return;
+    };
+    let input = match (prior.input, record.input) {
+        (PointerInput::MovedBy { dx, dy }, PointerInput::MovedBy { dx: x, dy: y }) => {
+            PointerInput::MovedBy {
+                dx: dx.saturating_add(x),
+                dy: dy.saturating_add(y),
+            }
+        }
+        (PointerInput::Scrolled { dx, dy }, PointerInput::Scrolled { dx: x, dy: y }) => {
+            PointerInput::Scrolled {
+                dx: dx.saturating_add(x),
+                dy: dy.saturating_add(y),
+            }
+        }
+        _ => return,
+    };
+    *newest = TimedPointer {
+        input,
+        at_ns: record.at_ns,
+    }
+    .to_le_bytes();
+}
+
+/// A desktop input channel: its queue behind its own lock, which the
+/// injector and the drain take, nothing else.
+struct InputChannel<Q> {
+    queue: SpinLock<Q>,
+}
+
+impl<Q> InputChannel<Q> {
+    const fn new(queue: Q) -> Self {
+        Self {
+            queue: SpinLock::new(queue),
+        }
     }
 }
 
@@ -162,24 +301,24 @@ trait InputQueue {
     fn purge(&self);
 }
 
-impl<const CAP: usize, const REC: usize> InputQueue for InputChannel<CAP, REC> {
+impl<Q: Records> InputQueue for InputChannel<Q> {
     fn deliver_one(&self, deliver: &mut dyn FnMut(&[u8]) -> bool) -> bool {
-        let mut ring = self.ring.lock();
-        let Some(record) = ring.front() else {
+        let mut queue = self.queue.lock();
+        let Some(record) = queue.oldest() else {
             return false;
         };
         if deliver(record) {
-            ring.discard_front(1);
+            queue.take_oldest();
         }
         true
     }
 
     fn pending(&self) -> bool {
-        !self.ring.lock().is_empty()
+        !self.queue.lock().is_drained()
     }
 
     fn purge(&self) {
-        self.ring.lock().purge();
+        self.queue.lock().wipe();
     }
 }
 
@@ -215,12 +354,16 @@ struct SeatSlot {
     /// A seat with no attached text console (a hotplugged display) uses
     /// [`NULL_CONSOLE_INPUT`], which fails closed.
     text_sink: &'static (dyn ConsoleInput + 'static),
+    /// Every keyboard on the seat as their edges have left it: the keys down,
+    /// the modifiers and the locks they share. Held while an edge is read and
+    /// delivered, so two keyboards' records reach a sink in the order read.
+    keyboard: SpinLock<KeyboardState>,
     /// The desktop keyboard channel — the seat's desktop keyboard sink.
-    keys: KeyboardChannel,
+    keys: InputChannel<KeyQueue>,
     /// The desktop pointer channel — the seat's desktop pointer sink.
-    pointer: PointerChannel,
+    pointer: InputChannel<PointerQueue>,
     /// The desktop touch channel — the seat's desktop touch sink.
-    touch: TouchChannel,
+    touch: InputChannel<TouchQueue>,
     /// The seat's pointer-button chatter filter. The seat is the one funnel
     /// every pointer injector passes through, so the window is applied here
     /// rather than in each driver — and a driver holds no configuration
@@ -236,9 +379,10 @@ impl SeatSlot {
         Self {
             state: SpinLock::new(SeatState::new(ConsoleIndex(0))),
             text_sink,
-            keys: KeyboardChannel::new(),
-            pointer: PointerChannel::new(),
-            touch: TouchChannel::new(),
+            keyboard: SpinLock::new(KeyboardState::new()),
+            keys: InputChannel::new(KeyQueue::new()),
+            pointer: InputChannel::new(PointerQueue::new()),
+            touch: InputChannel::new(SecretRing::new([0u8; TouchFrame::WIRE_LEN])),
             debounce: SpinLock::new(DeviceDebounce::new()),
             handover: AtomicBool::new(false),
         }
@@ -263,20 +407,16 @@ impl SeatSlot {
         }
     }
 
-    /// Queue `record` on `channel` while the seat is held, answering whether
-    /// it was. The route is decided and the record delivered under one hold
-    /// of the state: input routed to the outgoing owner must never land after
-    /// the next owner acquired, the one way it could cross principals despite
-    /// the purge.
-    fn queue_if_held<const CAP: usize, const REC: usize>(
-        &self,
-        channel: &InputChannel<CAP, REC>,
-        record: &[u8; REC],
-    ) -> bool {
+    /// Run `push` on `channel`'s queue while the seat is held, answering
+    /// whether it was. The route is decided and the record delivered under
+    /// one hold of the state: input routed to the outgoing owner must never
+    /// land after the next owner acquired, the one way it could cross
+    /// principals despite the purge.
+    fn queue_if_held<Q>(&self, channel: &InputChannel<Q>, push: impl FnOnce(&mut Q)) -> bool {
         let state = self.state.lock();
         let held = matches!(state.route(), Route::Desktop(_));
         if held {
-            channel.push(record);
+            push(&mut channel.queue.lock());
         }
         drop(state);
         if held {
@@ -704,43 +844,43 @@ impl SeatRegistry {
         released
     }
 
-    /// Route one decoded key edge to seat `seat_id`'s current foreground
-    /// sink, returning the number of bytes consumed from the record
-    /// ([`KeyInput::WIRE_LEN`]).
+    /// Read one key edge on seat `seat_id` and route the record it makes to
+    /// the seat's foreground sink, returning the bytes consumed from the edge
+    /// ([`KeyEdge::WIRE_LEN`]).
     ///
-    /// A **held** seat routes the whole record to its keyboard channel. An
-    /// **unowned** seat encodes a key *press* to console bytes and enqueues
-    /// them on its text sink — a release, a modifier, or a key with no
-    /// terminal encoding produces no bytes (`Ok(0)` from the encoder) and
-    /// nothing is enqueued. A short push to a bounded sink is best-effort
-    /// and does not change the consumed count, but a text sink that accepts
-    /// *no* injected input (a console with no keyboard, or a hotplugged
-    /// display seat with no text console) fails closed and the error is
-    /// surfaced to the driver.
+    /// Every keyboard on the seat is read through its one [`KeyboardState`],
+    /// so they share their modifiers and locks; a press of a key already down
+    /// and a release of one not down are no edge and are consumed unread. A
+    /// **held** seat queues the record on its keyboard channel. An **unowned**
+    /// seat types a *press* into its text sink; a release, a modifier or a
+    /// key with no terminal encoding types nothing. A short push to the
+    /// bounded sink is best-effort, but a sink that accepts *no* injected
+    /// input (a console with no keyboard, or a hotplugged display seat with no
+    /// text console) fails closed and the error is surfaced to the driver.
     ///
     /// # Errors
     ///
     /// - [`Errno::NotFound`] — no live seat has that id.
     /// - The text sink's [`Errno`] (for example [`Errno::NotImplemented`]
     ///   for a console with no injectable input queue) when a press would
-    ///   be enqueued there but the sink refuses it.
-    pub fn inject(&self, seat_id: u64, record: KeyInput) -> Result<usize, Errno> {
+    ///   be typed there but the sink refuses it.
+    pub fn inject(&self, seat_id: u64, edge: KeyEdge) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        // A key edge can carry a typed character, so each staged copy of it
+        let mut keyboard = slot.keyboard.lock();
+        let Some(record) = key_record(&mut keyboard, edge.key, edge.pressed) else {
+            return Ok(KeyEdge::WIRE_LEN);
+        };
+        // A key record can carry a typed character, so each staged copy of it
         // is wiped once delivered.
         let mut bytes = record.to_le_bytes();
-        let queued = slot.queue_if_held(&slot.keys, &bytes);
+        let queued = slot.queue_if_held(&slot.keys, |queue| queue.push(&record, &bytes));
         bytes.zeroize();
         if queued {
-            return Ok(KeyInput::WIRE_LEN);
+            return Ok(KeyEdge::WIRE_LEN);
         }
-        // The text sink is a console input queue an interrupt handler also
-        // pushes to, so only that queue's own lock is taken.
         let mut typed = [0u8; MAX_KEY_BYTES];
         // The shared map cannot overrun a `MAX_KEY_BYTES` buffer, so its
-        // refusal is a map bug, surfaced rather than hidden. A short push to
-        // the bounded type-ahead queue is best-effort; a sink that accepts no
-        // input fails closed.
+        // refusal is a map bug, surfaced rather than hidden.
         let pushed = match encode_key_input(&record, &mut typed) {
             Ok(0) => Ok(()),
             Ok(n) => typed
@@ -751,7 +891,7 @@ impl SeatRegistry {
             Err(_) => Err(Errno::BufferTooSmall),
         };
         typed.zeroize();
-        pushed.map(|()| KeyInput::WIRE_LEN)
+        pushed.map(|()| KeyEdge::WIRE_LEN)
     }
 
     /// Route one decoded pointer event, which the process `injector`'s device
@@ -795,12 +935,11 @@ impl SeatRegistry {
         {
             return Ok(PointerInput::WIRE_LEN);
         }
-        let bytes = TimedPointer {
+        let timed = TimedPointer {
             input: record,
             at_ns: at_ns.unwrap_or(now_ns),
-        }
-        .to_le_bytes();
-        slot.queue_if_held(&slot.pointer, &bytes);
+        };
+        slot.queue_if_held(&slot.pointer, |queue| queue.push(timed));
         Ok(PointerInput::WIRE_LEN)
     }
 
@@ -818,7 +957,14 @@ impl SeatRegistry {
         let slot = self.resolve(seat_id)?;
         // Contacts can spell what was typed on an on-screen keyboard.
         let mut bytes = frame.to_le_bytes();
-        slot.queue_if_held(&slot.touch, &bytes);
+        slot.queue_if_held(&slot.touch, |queue| {
+            // A frame is the whole set of contacts down, so the newest
+            // supersedes the oldest.
+            if queue.is_full() {
+                queue.discard_front(1);
+            }
+            let _ = queue.try_push_back(bytes);
+        });
         bytes.zeroize();
         Ok(TouchFrame::WIRE_LEN)
     }
@@ -1556,12 +1702,57 @@ mod tests {
         assert_eq!(lease.epoch(), evicted);
     }
 
-    fn press_char(c: char) -> KeyInput {
-        KeyInput::Pressed {
-            key: KeyValue::Char(c),
-            modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+    /// The key that types the lower-case letter `c`.
+    fn letter(c: char) -> PhysicalKey {
+        let offset = u16::try_from(u32::from(c) - u32::from('a')).expect("a letter");
+        PhysicalKey::from_usage(0x04 + offset).expect("a key")
+    }
+
+    fn press(c: char) -> KeyEdge {
+        KeyEdge {
+            key: letter(c),
+            pressed: true,
         }
+    }
+
+    fn release(c: char) -> KeyEdge {
+        KeyEdge {
+            key: letter(c),
+            pressed: false,
+        }
+    }
+
+    /// What pressing the letter `c` alone reads as.
+    fn typed(c: char) -> KeyInput {
+        KeyInput::Pressed {
+            key: Some(KeyValue::Char(c)),
+            modifiers: Modifiers::default(),
+            physical: letter(c),
+        }
+    }
+
+    /// The `i`-th of the keys `0x04..=0x27` (the letters and digits), none of
+    /// them a modifier or a lock, so a run of them fills a channel.
+    fn plain_key(i: usize) -> PhysicalKey {
+        let usage = 0x04 + u16::try_from(i).expect("small");
+        assert!(usage <= 0x27, "a letter or a digit");
+        PhysicalKey::from_usage(usage).expect("a key")
+    }
+
+    /// What the `pressed` edge of `key`, a key that is no modifier, reads as
+    /// with nothing else held.
+    fn read_alone(key: PhysicalKey, pressed: bool) -> KeyInput {
+        let mut keyboard = KeyboardState::new();
+        let down = key_record(&mut keyboard, key, true).expect("a plain key reads");
+        if pressed {
+            down
+        } else {
+            key_record(&mut keyboard, key, false).expect("and comes up")
+        }
+    }
+
+    fn edge(key: PhysicalKey, pressed: bool) -> KeyEdge {
+        KeyEdge { key, pressed }
     }
 
     /// A touchscreen frame with one finger at `(x, 0)`, stamped as the
@@ -1795,7 +1986,7 @@ mod tests {
         for end_lease in ends {
             let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
             seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
-            seat.inject(SEAT_PRIMARY, press_char('s')).expect("keyed");
+            seat.inject(SEAT_PRIMARY, press('s')).expect("keyed");
             seat.inject_pointer(
                 SEAT_PRIMARY,
                 PointerInput::MovedBy { dx: 3, dy: 4 },
@@ -1890,10 +2081,7 @@ mod tests {
         // Held, both channels empty: the owner parks.
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
         // A key record queues: ready until drained.
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('k')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('k')), Ok(KeyEdge::WIRE_LEN));
         assert!(seat.input_ready(SEAT_PRIMARY, WM));
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         assert_eq!(
@@ -1960,69 +2148,102 @@ mod tests {
         // A leaked queue stands in for the video console's input queue.
         let queue = text_queue();
         let seat = SeatRegistry::new(queue);
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('a')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('a')), Ok(KeyEdge::WIRE_LEN));
         let mut buf = [0u8; 8];
         let n = queue.read(&mut buf).expect("queue read");
         assert_eq!(&buf[..n], b"a");
     }
 
+    /// An unowned seat types a press into its text sink and nothing for a
+    /// release or a modifier, and refuses none of them.
     #[test]
-    fn an_unowned_seat_drops_releases_and_modifiers() {
+    fn an_unowned_seat_types_presses_alone() {
         let queue = text_queue();
         let seat = SeatRegistry::new(queue);
-        let release = KeyInput::Released {
-            key: KeyValue::Char('a'),
-            modifiers: Modifiers::default(),
-            physical: PhysicalKey::A,
-        };
-        assert_eq!(seat.inject(SEAT_PRIMARY, release), Ok(KeyInput::WIRE_LEN));
         let mut buf = [0u8; 8];
-        // A release produces no tty bytes, so nothing reached the text sink.
-        assert_eq!(queue.read(&mut buf).expect("queue read"), 0);
+        for (edge, types) in [
+            (edge(PhysicalKey::LEFT_SHIFT, true), &b""[..]),
+            (press('a'), b"A"),
+            (release('a'), b""),
+            (edge(PhysicalKey::LEFT_SHIFT, false), b""),
+            (press('a'), b"a"),
+        ] {
+            assert_eq!(seat.inject(SEAT_PRIMARY, edge), Ok(KeyEdge::WIRE_LEN));
+            let n = queue.read(&mut buf).expect("queue read");
+            assert_eq!(&buf[..n], types, "{edge:?}");
+        }
     }
 
+    /// A held seat relays every edge, a modifier's too, each carrying the
+    /// modifiers it left held: the desktop needs no other modifier record.
     #[test]
-    fn a_modifier_change_types_nothing_in_text_focus() {
-        // A modifier names no key, so the text console must receive no bytes
-        // for it — and the record must not be refused either: the arbiter
-        // consumes it and the seat's sink stays untouched.
-        let queue = text_queue();
-        let seat = SeatRegistry::new(queue);
-        let record = KeyInput::ModifiersChanged {
-            modifiers: Modifiers {
-                shift: true,
-                ..Modifiers::default()
-            },
-        };
-        assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
-        let mut buf = [0u8; 8];
-        assert_eq!(queue.read(&mut buf).expect("queue read"), 0);
-    }
-
-    #[test]
-    fn a_held_seat_relays_a_modifier_change_to_the_owner() {
-        // The desktop is the consumer that needs it: it holds the seat's
-        // modifier state and cannot reconstruct it from keys alone.
+    fn a_held_seat_relays_every_edge_with_the_modifiers_it_left() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        let record = KeyInput::ModifiersChanged {
-            modifiers: Modifiers {
-                shift: true,
-                meta: true,
-                ..Modifiers::default()
-            },
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
         };
-        assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
-        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        for edge in [
+            edge(PhysicalKey::LEFT_SHIFT, true),
+            press('a'),
+            release('a'),
+            edge(PhysicalKey::LEFT_SHIFT, false),
+        ] {
+            assert_eq!(seat.inject(SEAT_PRIMARY, edge), Ok(KeyEdge::WIRE_LEN));
+        }
+        let capital = Some(KeyValue::Char('A'));
         assert_eq!(
-            seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf),
-            Ok(KeyInput::WIRE_LEN)
+            keys_left(&seat, WM),
+            [
+                KeyInput::Pressed {
+                    key: None,
+                    modifiers: shift,
+                    physical: PhysicalKey::LEFT_SHIFT,
+                },
+                KeyInput::Pressed {
+                    key: capital,
+                    modifiers: shift,
+                    physical: letter('a'),
+                },
+                KeyInput::Released {
+                    key: capital,
+                    modifiers: shift,
+                    physical: letter('a'),
+                },
+                KeyInput::Released {
+                    key: None,
+                    modifiers: Modifiers::default(),
+                    physical: PhysicalKey::LEFT_SHIFT,
+                },
+            ]
         );
-        assert_eq!(KeyInput::from_bytes(&buf), Ok(record));
+    }
+
+    /// Every keyboard on a seat is read through one state, so a press of a
+    /// key already down — a keyboard's own repeat, or the same key on a
+    /// second keyboard — and a release of a key not down are no edge.
+    #[test]
+    fn a_seat_reads_a_repeat_and_an_unheld_release_as_nothing() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
+        for edge in [
+            release('q'),
+            press('q'),
+            press('q'),
+            release('q'),
+            release('q'),
+        ] {
+            assert_eq!(seat.inject(SEAT_PRIMARY, edge), Ok(KeyEdge::WIRE_LEN));
+        }
+        assert_eq!(
+            keys_left(&seat, WM),
+            [
+                read_alone(letter('q'), true),
+                read_alone(letter('q'), false)
+            ]
+        );
     }
 
     #[test]
@@ -2031,7 +2252,7 @@ mod tests {
         // enqueued there surfaces `NotImplemented` rather than dropping it.
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('a')),
+            seat.inject(SEAT_PRIMARY, press('a')),
             Err(Errno::NotImplemented)
         );
     }
@@ -2045,21 +2266,24 @@ mod tests {
         assert_eq!(lease.owner, WM);
         assert_eq!(lease.generation, 1);
         assert_eq!(seat.owner(SEAT_PRIMARY), Some(WM));
-        let record = KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Enter),
-            modifiers: Modifiers {
-                ctrl: true,
-                ..Modifiers::default()
-            },
-            physical: PhysicalKey::from_usage(0x28),
-        };
-        assert_eq!(seat.inject(SEAT_PRIMARY, record), Ok(KeyInput::WIRE_LEN));
+        let enter = PhysicalKey::from_usage(0x28).expect("a key");
+        assert_eq!(
+            seat.inject(SEAT_PRIMARY, edge(enter, true)),
+            Ok(KeyEdge::WIRE_LEN)
+        );
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         let n = seat
             .take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
             .expect("owner drains");
         assert_eq!(n, KeyInput::WIRE_LEN);
-        assert_eq!(KeyInput::from_bytes(&buf), Ok(record));
+        assert_eq!(
+            KeyInput::from_bytes(&buf),
+            Ok(KeyInput::Pressed {
+                key: Some(KeyValue::Named(NamedKeyCode::Enter)),
+                modifiers: Modifiers::default(),
+                physical: enter,
+            })
+        );
         // Drained: the channel is now empty.
         assert_eq!(seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf), Ok(0));
     }
@@ -2069,10 +2293,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('s')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('s')), Ok(KeyEdge::WIRE_LEN));
         let mut buf = [0u8; KeyInput::WIRE_LEN];
         // Neither another task nor a reader of an unowned channel may
         // siphon the owner's keystrokes; the record stays queued.
@@ -2125,17 +2346,11 @@ mod tests {
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
         // A press routed to the desktop channel while held.
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('x')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('x')), Ok(KeyEdge::WIRE_LEN));
         assert_eq!(seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text), Ok(()));
         assert_eq!(seat.owner(SEAT_PRIMARY), None);
         // Now the press routes to the text sink instead.
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('y')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('y')), Ok(KeyEdge::WIRE_LEN));
         let mut buf = [0u8; 8];
         let n = queue.read(&mut buf).expect("queue read");
         assert_eq!(&buf[..n], b"y");
@@ -2263,40 +2478,103 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pointer_channel_drops_the_oldest_record_on_overflow() {
-        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        seat.acquire(SEAT_PRIMARY, WM)
-            .expect("fresh seat is acquirable");
-        // Fill the ring plus one: the first record is dropped.
-        for i in 0..=POINTER_CHANNEL_CAPACITY {
-            let record = PointerInput::MovedBy {
-                dx: i32::try_from(i).unwrap(),
-                dy: 0,
-            };
+    /// Inject `records` onto the boot seat, each at `TEST_NOW_NS` plus its
+    /// index, so a fold's stamp is observable.
+    fn inject_pointers(seat: &SeatRegistry, records: impl IntoIterator<Item = PointerInput>) {
+        for (at, record) in (TEST_NOW_NS..).zip(records) {
             assert_eq!(
                 seat.inject_pointer(
                     SEAT_PRIMARY,
                     record,
                     TEST_INJECTOR,
-                    Some(TEST_NOW_NS),
-                    TEST_WINDOW_NS,
+                    Some(at),
+                    0,
                     TEST_NOW_NS
                 ),
                 Ok(PointerInput::WIRE_LEN)
             );
         }
-        // The very first record (dx == 0) was evicted, so the oldest
-        // surviving record is the second pushed (dx == 1).
+    }
+
+    /// Every timed pointer record `owner` can take off the boot seat.
+    fn timed_left(seat: &SeatRegistry, owner: SeatOwner) -> alloc::vec::Vec<TimedPointer> {
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
+        let mut left = alloc::vec::Vec::new();
+        while seat.take(InputKind::Pointer, SEAT_PRIMARY, owner, &mut buf)
+            == Ok(TimedPointer::WIRE_LEN)
+        {
+            left.push(TimedPointer::from_bytes(&buf).expect("decodes"));
+        }
+        left
+    }
+
+    /// A full pointer channel folds motion, and scrolling, into its newest
+    /// record of the same kind, stamped with the later time: no displacement
+    /// is lost, only the samples between.
+    #[test]
+    fn a_full_pointer_channel_folds_motion_into_its_newest_record() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let step = PointerInput::MovedBy { dx: 1, dy: -2 };
+        let extra = 10;
+        inject_pointers(&seat, (0..POINTER_CHANNEL_CAPACITY + extra).map(|_| step));
+        let left = timed_left(&seat, WM);
+        assert_eq!(left.len(), POINTER_CHANNEL_CAPACITY);
+        assert!(left[..POINTER_CHANNEL_CAPACITY - 1]
+            .iter()
+            .all(|timed| timed.input == step));
+        let folded = i32::try_from(extra + 1).expect("small");
         assert_eq!(
-            seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
-            Ok(TimedPointer::WIRE_LEN)
+            left.last().copied(),
+            Some(TimedPointer {
+                input: PointerInput::MovedBy {
+                    dx: folded,
+                    dy: -2 * folded,
+                },
+                at_ns: TEST_NOW_NS
+                    + u64::try_from(POINTER_CHANNEL_CAPACITY + extra - 1).expect("small"),
+            })
         );
+
+        let scroll = PointerInput::Scrolled { dx: 0, dy: 120 };
+        inject_pointers(&seat, (0..=POINTER_CHANNEL_CAPACITY).map(|_| scroll));
+        let left = timed_left(&seat, WM);
+        assert_eq!(left.len(), POINTER_CHANNEL_CAPACITY);
         assert_eq!(
-            TimedPointer::from_bytes(&buf).map(|timed| timed.input),
-            Ok(PointerInput::MovedBy { dx: 1, dy: 0 })
+            left.last().map(|timed| timed.input),
+            Some(PointerInput::Scrolled { dx: 0, dy: 240 })
         );
+    }
+
+    /// A full pointer channel keeps the slot of every button release it owes,
+    /// refuses a press it could not also take the release of, and drops the
+    /// motion it cannot fold into a button edge.
+    #[test]
+    fn a_full_pointer_channel_keeps_its_owed_button_releases() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let step = PointerInput::MovedBy { dx: 1, dy: 0 };
+        let secondary = PointerButtonCode::Secondary;
+        inject_pointers(&seat, (0..POINTER_CHANNEL_CAPACITY - 2).map(|_| step));
+        inject_pointers(
+            &seat,
+            [
+                PRESS,
+                step,
+                PointerInput::Pressed(secondary),
+                RELEASE,
+                PointerInput::Released(secondary),
+            ],
+        );
+        let left: alloc::vec::Vec<_> = timed_left(&seat, WM)
+            .into_iter()
+            .map(|timed| timed.input)
+            .collect();
+        let mut queued = alloc::vec![step; POINTER_CHANNEL_CAPACITY - 2];
+        queued.extend([PRESS, RELEASE]);
+        assert_eq!(left, queued);
     }
 
     #[test]
@@ -2307,10 +2585,7 @@ mod tests {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('k')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('k')), Ok(KeyEdge::WIRE_LEN));
         let mut buf = [0u8; TimedPointer::WIRE_LEN];
         assert_eq!(
             seat.take(InputKind::Pointer, SEAT_PRIMARY, WM, &mut buf),
@@ -2390,28 +2665,79 @@ mod tests {
         );
     }
 
+    /// A full keyboard channel refuses a new press, and then its release,
+    /// rather than displacing a record the desktop has yet to read.
     #[test]
-    fn channel_drops_the_oldest_record_on_overflow() {
+    fn a_full_keyboard_channel_refuses_a_press_and_its_release() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM)
             .expect("fresh seat is acquirable");
-        // Fill the ring plus one: the first record is dropped.
-        for i in 0..=KEYBOARD_CHANNEL_CAPACITY {
-            let c = char::from(b'a' + u8::try_from(i % 26).unwrap());
+        let taps = KEYBOARD_CHANNEL_CAPACITY / 2;
+        for i in 0..=taps {
+            for pressed in [true, false] {
+                assert_eq!(
+                    seat.inject(SEAT_PRIMARY, edge(plain_key(i), pressed)),
+                    Ok(KeyEdge::WIRE_LEN)
+                );
+            }
+        }
+        let queued: alloc::vec::Vec<_> = (0..taps)
+            .flat_map(|i| {
+                [
+                    read_alone(plain_key(i), true),
+                    read_alone(plain_key(i), false),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            keys_left(&seat, WM),
+            queued,
+            "the last tap is refused whole"
+        );
+    }
+
+    /// A full keyboard channel still takes the release of every press it
+    /// queued, so no key the desktop saw go down stays down.
+    #[test]
+    fn a_full_keyboard_channel_takes_every_owed_release() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        let held = KEYBOARD_CHANNEL_CAPACITY / 2;
+        for i in 0..=held {
             assert_eq!(
-                seat.inject(SEAT_PRIMARY, press_char(c)),
-                Ok(KeyInput::WIRE_LEN)
+                seat.inject(SEAT_PRIMARY, edge(plain_key(i), true)),
+                Ok(KeyEdge::WIRE_LEN)
             );
         }
-        // The channel holds exactly CAPACITY records; the very first ('a')
-        // was evicted, so the oldest surviving record is the second pushed.
-        let mut buf = [0u8; KeyInput::WIRE_LEN];
-        let n = seat
-            .take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
-            .expect("owner drains");
-        assert_eq!(n, KeyInput::WIRE_LEN);
-        let first = KeyInput::from_bytes(&buf).expect("valid record");
-        assert_eq!(first, press_char('b'));
+        for i in 0..=held {
+            assert_eq!(
+                seat.inject(SEAT_PRIMARY, edge(plain_key(i), false)),
+                Ok(KeyEdge::WIRE_LEN)
+            );
+        }
+        let presses = (0..held).map(|i| read_alone(plain_key(i), true));
+        let releases = (0..held).map(|i| read_alone(plain_key(i), false));
+        assert_eq!(
+            keys_left(&seat, WM),
+            presses.chain(releases).collect::<alloc::vec::Vec<_>>(),
+            "the press with no room, and its release, are refused"
+        );
+    }
+
+    /// A key that went down while the text console had the seat comes up
+    /// unseen by the desktop that took the seat meanwhile.
+    #[test]
+    fn a_release_whose_press_went_elsewhere_is_not_queued() {
+        let queue = text_queue();
+        let seat = SeatRegistry::new(queue);
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('h')), Ok(KeyEdge::WIRE_LEN));
+        seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
+        assert_eq!(
+            seat.inject(SEAT_PRIMARY, release('h')),
+            Ok(KeyEdge::WIRE_LEN)
+        );
+        assert_eq!(keys_left(&seat, WM), []);
     }
 
     /// Every key record `owner` can take off the boot seat, oldest first.
@@ -2433,18 +2759,30 @@ mod tests {
     fn a_record_its_reader_refuses_stays_first() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
-        let typed = |i: usize| press_char(char::from(b'a' + u8::try_from(i % 26).unwrap()));
-        for i in 0..KEYBOARD_CHANNEL_CAPACITY - 1 {
-            assert!(seat.inject(SEAT_PRIMARY, typed(i)).is_ok());
+        let taps = KEYBOARD_CHANNEL_CAPACITY / 2;
+        let tap = |i: usize| {
+            for pressed in [true, false] {
+                assert!(seat
+                    .inject(SEAT_PRIMARY, edge(plain_key(i), pressed))
+                    .is_ok());
+            }
+        };
+        for i in 0..taps - 1 {
+            tap(i);
         }
         assert_eq!(
             seat.read_with(SEAT_PRIMARY, WM, InputKind::Key, &mut |_| false),
             Ok(true)
         );
-        assert!(seat
-            .inject(SEAT_PRIMARY, typed(KEYBOARD_CHANNEL_CAPACITY - 1))
-            .is_ok());
-        let all: alloc::vec::Vec<_> = (0..KEYBOARD_CHANNEL_CAPACITY).map(typed).collect();
+        tap(taps - 1);
+        let all: alloc::vec::Vec<_> = (0..taps)
+            .flat_map(|i| {
+                [
+                    read_alone(plain_key(i), true),
+                    read_alone(plain_key(i), false),
+                ]
+            })
+            .collect();
         assert_eq!(keys_left(&seat, WM), all);
     }
 
@@ -2454,7 +2792,7 @@ mod tests {
     fn a_record_left_by_a_refused_read_goes_with_its_lease() {
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, WM).expect("acquired");
-        assert!(seat.inject(SEAT_PRIMARY, press_char('s')).is_ok());
+        assert!(seat.inject(SEAT_PRIMARY, press('s')).is_ok());
         assert_eq!(
             seat.read_with(SEAT_PRIMARY, WM, InputKind::Key, &mut |_| false),
             Ok(true)
@@ -2462,8 +2800,8 @@ mod tests {
         seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Text)
             .expect("released");
         seat.acquire(SEAT_PRIMARY, WM).expect("acquired again");
-        assert!(seat.inject(SEAT_PRIMARY, press_char('t')).is_ok());
-        assert_eq!(keys_left(&seat, WM), [press_char('t')]);
+        assert!(seat.inject(SEAT_PRIMARY, press('t')).is_ok());
+        assert_eq!(keys_left(&seat, WM), [typed('t')]);
     }
 
     #[test]
@@ -2482,10 +2820,7 @@ mod tests {
             Err(Errno::SeatRevoked)
         );
         // Input routes to the text foreground, never a stale desktop channel.
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('z')),
-            Ok(KeyInput::WIRE_LEN)
-        );
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('z')), Ok(KeyEdge::WIRE_LEN));
         let mut text = [0u8; 8];
         let n = queue.read(&mut text).expect("queue read");
         assert_eq!(&text[..n], b"z");
@@ -2627,7 +2962,7 @@ mod tests {
             seat.release(42, WM, ReleaseSurface::Text),
             Err(Errno::NotFound)
         );
-        assert_eq!(seat.inject(42, press_char('a')), Err(Errno::NotFound));
+        assert_eq!(seat.inject(42, press('a')), Err(Errno::NotFound));
         assert_eq!(
             seat.take(InputKind::Key, 42, WM, &mut buf),
             Err(Errno::NotFound)
@@ -2689,11 +3024,8 @@ mod tests {
         seat.acquire(second, INTRUDER)
             .expect("hotplug seat is acquirable by another owner");
         // Each seat's records land on its own channel…
-        assert_eq!(
-            seat.inject(SEAT_PRIMARY, press_char('a')),
-            Ok(KeyInput::WIRE_LEN)
-        );
-        assert_eq!(seat.inject(second, press_char('b')), Ok(KeyInput::WIRE_LEN));
+        assert_eq!(seat.inject(SEAT_PRIMARY, press('a')), Ok(KeyEdge::WIRE_LEN));
+        assert_eq!(seat.inject(second, press('b')), Ok(KeyEdge::WIRE_LEN));
         // …and only that seat's owner drains it: one seat's owner is a
         // plain non-owner on the other, so no cross-seat siphoning.
         let mut buf = [0u8; KeyInput::WIRE_LEN];
@@ -2707,10 +3039,10 @@ mod tests {
         );
         seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf)
             .expect("boot-seat owner drains");
-        assert_eq!(KeyInput::from_bytes(&buf), Ok(press_char('a')));
+        assert_eq!(KeyInput::from_bytes(&buf), Ok(typed('a')));
         seat.take(InputKind::Key, second, INTRUDER, &mut buf)
             .expect("hotplug-seat owner drains");
-        assert_eq!(KeyInput::from_bytes(&buf), Ok(press_char('b')));
+        assert_eq!(KeyInput::from_bytes(&buf), Ok(typed('b')));
         // Each drain emptied only its own seat's channel.
         assert_eq!(seat.take(InputKind::Key, SEAT_PRIMARY, WM, &mut buf), Ok(0));
         assert_eq!(seat.take(InputKind::Key, second, INTRUDER, &mut buf), Ok(0));

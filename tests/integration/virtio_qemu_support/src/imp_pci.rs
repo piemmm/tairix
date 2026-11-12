@@ -44,13 +44,13 @@ pub use tairix_log::{
     Event as HarnessEvent, EventId as HarnessEventId, Level as HarnessLevel, Sink as HarnessSink,
 };
 
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::FreeListAllocator;
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by the module-private `HEAP` static, shared by
 /// every x86_64 virtio QEMU test that links this crate.

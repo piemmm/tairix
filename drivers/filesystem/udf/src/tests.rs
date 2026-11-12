@@ -13,7 +13,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::fs::SeekRegion;
 use tairix_abi::time::Time64;
-use tairix_abi::{CapabilityId, DriverError};
+use tairix_abi::{CapabilityId, DriverError, StampChange, TimesChange, TimesKept};
 
 use tairix_writeback::TestVolumeHost;
 
@@ -960,6 +960,56 @@ fn a_name_for_a_node_of_no_kind_is_left_alone() {
     );
     assert_eq!(free(&mut fs), before);
     assert_eq!(fs.write_refusal(), None);
+}
+
+/// Either time of an entry — a File Entry and an Extended File Entry alike —
+/// takes any instant to the microsecond in years 1 to 9999, before 1970 and
+/// past 2038, and keeps it across a remount; one finer than a microsecond is
+/// refused unless the nearest is asked.
+#[test]
+fn set_times_keeps_any_microsecond_of_its_years() {
+    for revision in [0x0150, 0x0201] {
+        let mut fs = formatted(512, revision);
+        let root = fs.root();
+        let file = fs
+            .create(root, b"f", NodeKind::RegularFile, &FILE)
+            .expect("create");
+        let in_1600 = Time64::new(-11_676_096_000, 123_456_000).expect("canonical");
+        let in_9000 = Time64::new(221_845_392_000, 999_999_000).expect("canonical");
+        let change = |accessed, modified, nearest| TimesChange {
+            accessed: StampChange::At(accessed),
+            modified: StampChange::At(modified),
+            nearest,
+        };
+        assert_eq!(
+            fs.set_times(file, change(in_1600, in_9000, false)),
+            Ok(TimesKept::Exactly),
+            "{revision:#x}"
+        );
+        let between_ticks = Time64::new(0, 1).expect("canonical");
+        assert_eq!(
+            fs.set_times(file, change(between_ticks, in_9000, false)),
+            Err(DriverError::OutOfRange)
+        );
+        let mut fs = remount(fs);
+        let file = fs.lookup(fs.root(), b"f").expect("found");
+        let times = fs.node_info(file).expect("info").times;
+        assert_eq!(
+            (times.accessed, times.modified),
+            (in_1600, in_9000),
+            "{revision:#x}"
+        );
+        assert_eq!(
+            fs.set_times(file, change(between_ticks, in_9000, true)),
+            Ok(TimesKept::Nearest)
+        );
+        let times = fs.node_info(file).expect("info").times;
+        assert_eq!(
+            times.accessed,
+            Time64::UNIX_EPOCH,
+            "the nearest microsecond"
+        );
+    }
 }
 
 /// `fs` given a host whose clock lets a change wait for its write-back

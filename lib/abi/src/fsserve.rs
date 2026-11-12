@@ -20,8 +20,8 @@ use crate::driver::filesystem::{
     WriteRefusal, MAX_ACL_ENTRIES,
 };
 use crate::fs::{
-    is_component, SeekRegion, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_NAME_MAX,
-    FS_SYMLINK_MAX,
+    is_component, SeekRegion, TimesChange, TimesKept, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, FS_NAME_MAX, FS_SYMLINK_MAX,
 };
 use crate::le::{
     exact_len, put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64, Reader,
@@ -249,6 +249,8 @@ pub enum Op {
     Label = 29,
     /// [`Request::SetLabel`].
     SetLabel = 30,
+    /// [`Request::SetTimes`].
+    SetTimes = 31,
 }
 
 impl Op {
@@ -284,6 +286,7 @@ impl Op {
             28 => Self::Release,
             29 => Self::Label,
             30 => Self::SetLabel,
+            31 => Self::SetTimes,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -550,6 +553,13 @@ pub enum Request<'a> {
         /// The title stored.
         title: VolumeTitle,
     },
+    /// `FilesystemWrite::set_times`.
+    SetTimes {
+        /// The node.
+        node: NodeId,
+        /// What changes.
+        change: TimesChange,
+    },
 }
 
 impl Request<'_> {
@@ -587,6 +597,7 @@ impl Request<'_> {
             Self::Release { .. } => Op::Release,
             Self::Label => Op::Label,
             Self::SetLabel { .. } => Op::SetLabel,
+            Self::SetTimes { .. } => Op::SetTimes,
         }
     }
 
@@ -710,6 +721,10 @@ pub fn encode_request(
         Request::ReleasePins | Request::Flush | Request::Stats | Request::Label => {}
         Request::Release { span } => put_span(&mut w, span)?,
         Request::SetLabel { title } => put_title(&mut w, &title)?,
+        Request::SetTimes { node, change } => {
+            put_node(&mut w, node)?;
+            w.bytes(&change.to_le_bytes())?;
+        }
         Request::SetSecurity { node, security } => {
             put_node(&mut w, node)?;
             put_security(&mut w, &security)?;
@@ -894,6 +909,10 @@ pub fn decode_request(bytes: &[u8]) -> Result<(AllocationClass, Request<'_>), Er
         Op::SetLabel => Request::SetLabel {
             title: title(&mut r)?,
         },
+        Op::SetTimes => Request::SetTimes {
+            node: node(&mut r)?,
+            change: times_change(&mut r)?,
+        },
     };
     if !r.exhausted() {
         return Err(Errno::LengthOutOfRange);
@@ -964,6 +983,8 @@ pub enum Answer<'a> {
     Attr(Option<&'a [u8]>),
     /// The volume's title.
     Label(VolumeTitle),
+    /// How exactly a node's times were kept.
+    Kept(TimesKept),
 }
 
 /// How a listing batch ended.
@@ -1099,6 +1120,7 @@ pub fn encode_reply(
             put_attr(&mut w, key.map(check_key).transpose()?)?;
         }
         (Op::Label, Answer::Label(title)) => put_title(&mut w, &title)?,
+        (Op::SetTimes, Answer::Kept(kept)) => w.u8(u8::from(kept == TimesKept::Nearest))?,
         (
             Op::ReleasePins
             | Op::Link
@@ -1267,6 +1289,11 @@ pub fn decode_reply<'a>(bytes: &'a [u8], request: &Request<'_>) -> Result<Reply<
         Request::GetAttr { cap, .. } => Answer::Attr(attr(&mut r, cap, false)?),
         Request::ListAttr { cap, .. } => Answer::Attr(attr(&mut r, cap, true)?),
         Request::Label => Answer::Label(title(&mut r)?),
+        Request::SetTimes { .. } => Answer::Kept(if flag(&mut r)? {
+            TimesKept::Nearest
+        } else {
+            TimesKept::Exactly
+        }),
         Request::ReleasePins
         | Request::Link { .. }
         | Request::Truncate { .. }
@@ -1553,6 +1580,14 @@ fn check_cap(cap: u32, max: usize) -> Result<u32, Errno> {
     Ok(cap)
 }
 
+fn times_change(r: &mut Reader<'_>) -> Result<TimesChange, Errno> {
+    let raw: &[u8; TimesChange::WIRE_LEN] = r
+        .take(TimesChange::WIRE_LEN)?
+        .try_into()
+        .map_err(|_| Errno::LengthOutOfRange)?;
+    TimesChange::from_le_bytes(raw)
+}
+
 fn flag(r: &mut Reader<'_>) -> Result<bool, Errno> {
     match r.u8()? {
         0 => Ok(false),
@@ -1804,14 +1839,10 @@ fn stats(r: &mut Reader<'_>) -> Result<VolumeStats, Errno> {
     Ok(stats)
 }
 
-/// Space accounting that adds up: a power-of-two block size, and never more
-/// free than total or more available than free.
+/// Space accounting a served volume reports: a power-of-two block size, and
+/// counts that are [consistent](VolumeStats::is_consistent).
 fn check_stats(stats: &VolumeStats) -> Result<(), Errno> {
-    if !stats.block_size.is_power_of_two()
-        || stats.free_blocks > stats.total_blocks
-        || stats.avail_blocks > stats.free_blocks
-        || stats.files_free > stats.files
-    {
+    if !stats.block_size.is_power_of_two() || !stats.is_consistent() {
         return Err(Errno::OutOfRange);
     }
     Ok(())

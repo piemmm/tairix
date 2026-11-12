@@ -290,7 +290,7 @@ moves the file's `i_mtime`/`i_ctime`; a remove moves the directory's and,
 for a node that keeps another name, its `i_ctime`; a rename moves the
 node's `i_ctime` and both directories' `i_mtime`/`i_ctime`. A directory's
 link-count change and its stamps share one inode write. A read moves no
-stamp: the driver keeps no access time, so `i_atime` is the birth instant.
+stamp, so `i_atime` is the birth instant until `fs_set_times` sets it.
 
 An enlarged record (`i_extra_isize` covering the `_extra` fields) holds a
 stamp to the nanosecond from 1901-12-13 to 2446-05-10, each of the two epoch
@@ -302,6 +302,11 @@ written as the all-zero fields, which read back as `Time64::UNIX_EPOCH`, the
 "no stamp" value: never a wrapped or clamped one. A freed inode's `i_dtime`
 records when it went where the unsigned field holds that and cannot be read
 as an orphan-list inode number, and a fixed non-zero marker otherwise.
+`fs_set_times` sets `i_atime` and `i_mtime` to an instant the inode's own
+record holds — each to the nanosecond where it has an `_extra` field, to the
+second where it has not — refusing any other unless the nearest is asked,
+and stamps `i_ctime`. An append-only inode takes only both times stamped now,
+and an immutable one no change, as `utimensat(2)` documents.
 
 ### Checksums and wide descriptors
 

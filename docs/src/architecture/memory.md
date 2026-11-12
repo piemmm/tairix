@@ -1227,6 +1227,41 @@ mutate the caller's **process address space**, the single live-space
 mutation path (§7e) rather than a second parallel address-space model
 (`AGENTS.md` §2.2).
 
+## 7c-i. Installed code (`code_install`)
+
+`code_install` (`docs/src/architecture/syscalls.md`) moves pages a compiler
+sandbox wrote into another sandbox read-execute; no page is ever writable and
+executable at once. Its memory half is three `LiveUserSpace` operations, each
+under one hold of one space, never two at once:
+
+- **`detach_anonymous`** takes resident anonymous pages out of the compiler's
+  space with what they hold: placed or caller-placed, cut out of the window or
+  the extent record as an unmap cuts them, each frame handed over only once no
+  CPU and no snapshot can reach it (a `Retiring` that keeps rather than
+  scrubs). Room for the frames is made in the caller's vector first, and a
+  refusal part-way — only a page-table defect makes one — scrubs and frees
+  what had left, so nothing is handed over unless everything is.
+- **`reserve_code`** places the pages in the target's **code window**, a
+  RAM-sized window of its own (§7f) that no anonymous, file or caller-placed
+  call reaches, so the installer can refuse a full window before anything
+  leaves the compiler.
+- **`map_code`** maps the frames over exactly that empty placement with
+  `CODE_FLAGS` (`R|X|USER`). Every frame is cleaned to the point of
+  unification through the direct map (`PhysMap::sync_instruction_cache`) and
+  every CPU's instruction fetch fenced past them once
+  (`PhysMap::fence_instruction_fetch`: `fence.i` and the SBI remote `fence.i`
+  on riscv64, the line-or-whole I-cache invalidation each aarch64 core's cache
+  type calls for in the sync, nothing on x86_64) *before* any page is mapped,
+  and the new mappings are published to the other CPUs on a port that may
+  cache an absent entry. A refused fence, or a page-table refusal, scrubs and
+  frees the frames and gives the placement back.
+
+`release_code` tears installed code down page by page as an unmap does,
+scrubbing each frame, and answers how many pages held code so `mem_unmap`
+credits exactly what was charged; teardown of the space scrubs and frees what
+remains. The loader uses the same sync-then-fence pair for every executable
+segment it writes, and refuses an image no fence covered.
+
 ## 7d. Userland heap allocator (`tairix-rt`)
 
 The `mem_map` / `mem_unmap` pair is a page-granularity primitive; ordinary
@@ -1458,12 +1493,14 @@ allocator over one configured heap window, driven against a borrowed live
   device, DMA, and shared-memory windows) and splits the address space above
   it through `user_windows::user_windows(total_frames, base, USER_VA_TOP)` —
   the heap window tracks physical RAM (the true upper bound on backable
-  pages), clamped to a quarter of the addressable user VA above the base and
+  pages), clamped to a sixth of the addressable user VA above the base and
   floored at `ANON_WINDOW_MIN_PAGES` (16 MiB) for a tiny machine; the **heap
   region** the runtime's heap grows in sits directly above it at the same
-  size, outside every window, and is named in the startup vector; and the
-  demand-paged **file-mapping window** (§7o) takes every remaining page up
-  to the per-port user-VA ceiling. One split per spawn
+  size, outside every window, and is named in the startup vector; the
+  **code window** installed code lands in (§7c-i) sits above that at the same
+  size; and the demand-paged **file-mapping window** (§7o) takes every
+  remaining page up to the per-port user-VA ceiling, at least half of it. One
+  split per spawn
   (`spawn_layout::dynamic_windows`) feeds both the live space and the
   startup vector, so the two cannot disagree. A 1 GiB machine gets the same 1 GiB heap
   window the former fixed constant gave; a large server scales up instead of

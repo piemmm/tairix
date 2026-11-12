@@ -22,7 +22,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
 use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -36,7 +36,7 @@ include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

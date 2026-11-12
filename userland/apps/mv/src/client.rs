@@ -20,8 +20,9 @@ use tairix_abi::fs::FileKind;
 use tairix_abi::{Errno, FileId, FileStat, NodeExpect, RenameFlags, UnlinkFlags};
 use tairix_fscopy::tree::{walk, Entry, Step, Visitor};
 use tairix_fscopy::{
-    copy_attributes, landing, lands_inside, AttrError, Attributes, Created, DataCopy, DataError,
-    Descent, DirModes, Landing, Omissions, Ownership, Sparse, CHUNK_LEN, OWNER_RW, OWNER_RWX,
+    copy_attributes, copy_times, landing, lands_inside, AttrError, Attributes, Created, DataCopy,
+    DataError, Descent, DirModes, Landing, Omissions, Ownership, Sparse, CHUNK_LEN, OWNER_RW,
+    OWNER_RWX,
 };
 use tairix_hash::BuildSipHash13;
 use tairix_help::{own_short_help, HelpSource};
@@ -159,10 +160,12 @@ pub fn run<R: Roots>(
             let outcome = mover.move_all(&sources, &dest);
             if let Some(report) = mover.omissions.report(OWN_WORD) {
                 seams.out.info(&report.record);
-                // The warning is advisory: a stream refusing it changes nothing.
-                let _ = seams
-                    .diagnostics
-                    .write_all(format!("{OWN_WORD}: warning: {}\n", report.summary).as_bytes());
+                if let Some(summary) = report.summary {
+                    // The warning is advisory: a stream refusing it changes nothing.
+                    let _ = seams
+                        .diagnostics
+                        .write_all(format!("{OWN_WORD}: warning: {summary}\n").as_bytes());
+                }
             }
             outcome
         }
@@ -610,6 +613,7 @@ impl<R: Roots> Mover<'_, R> {
         walked?;
         let entries = sorted(copied);
         self.carry_attributes((source, m.source), made, m.target)?;
+        self.carry_times(m.found, made, m.target)?;
         carry_owner(m.found, made_stat, made, m.target)?;
         Ok(Copied {
             name: concatenated(&[m.source_name]).ok_or(MvError::MemoryExhausted)?,
@@ -648,9 +652,24 @@ impl<R: Roots> Mover<'_, R> {
                 DataError::Write(errno) => write_error(target, errno),
             })?;
         self.carry_attributes((&source, path), staged, target)?;
+        self.carry_times(&stat, staged, target)?;
         let made = staged.stat().map_err(|errno| stat_error(target, errno))?;
         carry_owner(&stat, &made, staged, target)?;
         Ok(NodeExpect::of(&stat))
+    }
+
+    /// Give the held `at` the times `source` describes, before any change of
+    /// owner could take the change from the mover, noting how exactly its
+    /// volume kept them.
+    fn carry_times<T: Node + ?Sized>(
+        &mut self,
+        source: &FileStat,
+        at: &T,
+        target: &str,
+    ) -> Result<(), MvError> {
+        let kept = copy_times(&source.times, at).map_err(|errno| write_error(target, errno))?;
+        self.omissions.note_times(kept);
+        Ok(())
     }
 
     /// Carry the extended attributes of the held `from`, known as `source`, to
@@ -960,6 +979,7 @@ impl<R: Roots> Visitor<R::Dir> for Fill<'_, '_, R> {
         };
         let target = self.target_of(path);
         self.mover.carry_attributes((held, path), &made, &target)?;
+        self.mover.carry_times(&source, &made, &target)?;
         carry_owner(&source, &born, &made, &target)?;
         self.record(Copied {
             name: concatenated(&[&entry.name]).ok_or(MvError::MemoryExhausted)?,

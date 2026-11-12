@@ -56,6 +56,10 @@ impl Node for Held {
         Err(Errno::NotSupported)
     }
 
+    fn set_times(&self, _: &tairix_abi::TimesChange) -> Result<tairix_abi::TimesKept, Errno> {
+        Err(Errno::NotSupported)
+    }
+
     fn attr_keys(&self) -> Result<Vec<String>, Errno> {
         if let Some(err) = self.listing {
             return Err(err);
@@ -92,6 +96,10 @@ impl Node for Held {
 
     fn sync(&self) -> Result<(), Errno> {
         Ok(())
+    }
+
+    fn volume_stats(&self) -> Result<tairix_abi::driver::filesystem::VolumeStats, Errno> {
+        Err(Errno::NotSupported)
     }
 }
 
@@ -213,9 +221,11 @@ fn a_run_of_copies_reports_what_it_left_once() {
     omissions.note(&[(String::from("mac.type"), Refusal::Unsupported)]);
     let report = omissions.report("cp").expect("a report");
     assert_eq!(
-        report.summary,
-        "extended attributes not kept on 4 files (the destination cannot store them): \
-         acorn.filetype, mac.type"
+        report.summary.as_deref(),
+        Some(
+            "extended attributes not kept on 4 files (the destination cannot store them): \
+             acorn.filetype, mac.type"
+        )
     );
     let record = core::str::from_utf8(&report.record)
         .expect("json")
@@ -236,7 +246,10 @@ fn a_report_names_a_bounded_set_of_keys() {
     for index in 0..(REPORT_KEYS + 3) {
         omissions.note(&[(alloc::format!("user.k{index:02}"), Refusal::NoRoom)]);
     }
-    let warning = omissions.report("mv").expect("a report").summary;
+    let warning = omissions
+        .report("mv")
+        .and_then(|report| report.summary)
+        .expect("a warning");
     assert!(warning.ends_with(", and others"), "{warning}");
     assert_eq!(warning.matches("user.k").count(), REPORT_KEYS);
 }
@@ -253,7 +266,10 @@ fn runs_merged_report_as_one_and_keep_the_key_bound() {
     whole.merge(&first);
     whole.merge(&second);
     whole.merge(&Omissions::default());
-    let warning = whole.report("fstree").expect("a report").summary;
+    let warning = whole
+        .report("fstree")
+        .and_then(|report| report.summary)
+        .expect("a warning");
     assert!(
         warning.contains(&alloc::format!("on {} files", REPORT_KEYS + 1)),
         "{warning}"
@@ -289,12 +305,12 @@ fn a_key_carrying_control_bytes_is_never_shown_as_them() {
         Refusal::Unsupported,
     )]);
     let report = omissions.report("cp").expect("a report");
+    let summary = report.summary.as_deref().expect("a warning");
     assert!(
-        report.summary.ends_with("'user.'$'\\033'']0;owned'$'\\a'"),
-        "{}",
-        report.summary
+        summary.ends_with("'user.'$'\\033'']0;owned'$'\\a'"),
+        "{summary}"
     );
-    assert!(!report.summary.chars().any(char::is_control));
+    assert!(!summary.chars().any(char::is_control));
     let record = core::str::from_utf8(&report.record).expect("json");
     assert!(
         record.contains(r"'user.'$'\\033'']0;owned'$'\\a'."),
@@ -312,12 +328,42 @@ fn a_key_holding_a_comma_cannot_pass_for_two() {
         (String::from("user.c,"), Refusal::Unsupported),
         (String::from("user.d"), Refusal::Unsupported),
     ]);
-    let report = omissions.report("cp").expect("a report");
+    let summary = omissions
+        .report("cp")
+        .and_then(|report| report.summary)
+        .expect("a warning");
     assert!(
-        report
-            .summary
-            .ends_with(": 'user.a, user.b', 'user.c,', user.d"),
-        "{}",
-        report.summary
+        summary.ends_with(": 'user.a, user.b', 'user.c,', user.d"),
+        "{summary}"
     );
+}
+
+/// Copies whose times were kept only to the nearest are counted in a record
+/// of their own, warned of by no clause; an exact one is not counted.
+#[test]
+fn times_kept_to_the_nearest_are_recorded_and_not_warned_of() {
+    let mut omissions = Omissions::default();
+    omissions.note_times(tairix_abi::TimesKept::Exactly);
+    assert!(omissions.is_empty());
+    assert_eq!(omissions.report("cp"), None);
+    omissions.note_times(tairix_abi::TimesKept::Nearest);
+    omissions.note_times(tairix_abi::TimesKept::Nearest);
+    let times = omissions.report("cp").expect("a report");
+    assert_eq!(times.summary, None);
+    let record = core::str::from_utf8(&times.record).expect("text");
+    assert!(
+        record.contains("\"code\":\"fs.times_not_exact\""),
+        "{record}"
+    );
+    assert!(record.contains("\"files\":2"), "{record}");
+    assert_eq!(record.matches('\n').count(), 1, "one record");
+    omissions.note(&[(String::from("user.k"), Refusal::Unsupported)]);
+    let both = omissions.report("cp").expect("a report");
+    assert_eq!(
+        both.summary.as_deref(),
+        Some("extended attributes not kept on 1 file (the destination cannot store them): user.k")
+    );
+    let record = core::str::from_utf8(&both.record).expect("text");
+    assert!(record.contains("fs.attributes_not_kept") && record.contains("fs.times_not_exact"));
+    assert_eq!(record.matches('\n').count(), 2, "a record each");
 }

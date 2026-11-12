@@ -24,6 +24,9 @@ by — and the time every pointer report carries to the application.
 | PO12 | The DesignWare I2C controller with Intel LPSS, on x86_64's published PCI functions (`plans/I2C.md` I5–I6; `plans/FINISH-x86_64.md` S6) | planned |
 | PO13 | HID over I2C from ACPI: the namespace bus driver, `PNP0C50` with its `_DSM` and `_CRS`, and the PCH GPIO controller (`plans/ACPI.md` A1–A4; `plans/GPIO.md` G3; `plans/I2C.md` I7) | planned |
 | PO14 | Report times: a pointer record is timed by its device from the driver to the application (`pointer_inject`'s stated time, `TimedPointer`, the session's `Timed` drain, `WindowEvent::Pointer`'s `at_ns`), and clicks, double-clicks, rename waits and strokes are judged by it | done |
+| PO15 | Pointer lock: `LockPointer`, the device's own displacement as `WindowEvent::PointerMotion`, `WindowEvent::PointerLock`, the session-owned release, the hidden pointer (`CursorShape::None`, `CursorHint`, the compositor's blank) | done |
+| PO16 | Every button of a client gesture: the client grab holds a set of buttons, the secondary release reaches the window, a second button joins the first | done |
+| PO17 | The seat's channels never lose a release: a full pointer channel keeps a slot for every owed button release and folds motion into its newest record | done |
 
 ## The scroll unit
 
@@ -194,6 +197,35 @@ a gesture by when it got round to the record.
   where the pointer was at each instant (`plans/PAINT.md`). A key, a scroll and
   a pinch carry no time and are fed at their arrival.
 
+## Pointer lock
+
+A window whose content reads the mouse itself — a guest machine, a game — asks
+for the pointer with `LockPointer` (PO15).
+
+- **Granted narrowly.** Only to the window holding the keyboard, while the
+  pointer is over its content, no gesture holds the pointer and no surface of
+  the desktop's holds the seat; otherwise `PermissionDenied`.
+- **What the window receives.** Motion as the device's own displacement,
+  unscaled by the user's speed and unbounded by the screen
+  (`WindowEvent::PointerMotion`, summed across a batch and in the hold-back);
+  every button and the wheel at the place the pointer was locked at. The
+  pointer stays there, drawn nowhere.
+- **Released by the desktop.** A lone tap of Meta, the window losing the
+  keyboard or closing, and every drain of a holder of the desktop's own end
+  it. Every start and end reaches the window as `WindowEvent::PointerLock`, in
+  order; an ended lock is asked for again, never resumed, and the buttons it
+  held are the window's to let go of.
+- **No notice of the desktop's own.** The release is documented once for the
+  whole desktop; an application that locks the pointer says how to get it back
+  in its own window, as a guest machine's status line does.
+
+The client grab (PO16) holds every button of its gesture: a primary or
+secondary press on content takes it, a second button pressed meanwhile joins
+it wherever the pointer is, and each release comes back to the window. The
+seat's pointer channel (PO17) keeps a slot for every button release it owes
+and folds motion and scrolling into its newest record when full, so a wedged
+desktop loses intermediate samples, never displacement or a release.
+
 ## Invariants
 
 - One scroll unit at every layer; no layer converts it to or from whole
@@ -210,3 +242,7 @@ a gesture by when it got round to the record.
 - A pointer report is judged by when its device reported it, at every layer
   that pairs, waits on or paces by pointer input; no layer substitutes the
   instant it handled the report.
+- A press a window was told of always ends: no layer between the device and
+  the application sheds a release.
+- A locked pointer's release is the desktop's, never the application's to
+  withhold.

@@ -81,7 +81,7 @@ mod kernel {
     use tairix_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_arch_x86_64::syscall_entry;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -95,7 +95,7 @@ mod kernel {
     // own over the shared `kalloc` heap.
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

@@ -621,6 +621,14 @@ fn atari_datetime_fails_closed() {
         atari::datetime_to_time64(0, 0),
         Err(MetadataError::NotRepresentable)
     );
+    // A day its month lacks names no date, never the day it would run on to:
+    // 2023-02-30 is not 2023-03-02.
+    let (year, month, day) = (2023 - 1980, 2, 30);
+    let february_30 = (year << 9) | (month << 5) | day;
+    assert_eq!(
+        atari::datetime_to_time64(february_30, 0),
+        Err(MetadataError::NotRepresentable)
+    );
 }
 
 // --- preset: mac ---------------------------------------------------------

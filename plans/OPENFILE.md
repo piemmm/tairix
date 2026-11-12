@@ -13,6 +13,9 @@
 | OF9 | The command tools walk by descriptor — `cp`, `mv`, `rm`, `chmod`, `chown`, `getcap`, `setcap` — as `replace_file` stages, so no entry can be swapped for a link between reading and changing it, and every tree copy gives what it makes its source's mode (D1365, D1367, D1378, D1422, D1425, D1485) | done |
 | OF10 | `fstree` and the file manager walk by descriptor too, through the shared resumable copy, move and removal engine, which holds the walk as a cursor between a paused or time-sliced operation's units | done |
 | OF11 | `fd_grant` conveys a pipe end: its reference counted while in flight, released as a close is, a grantor's ends in flight bounded by its `open-files` | done |
+| OF12 | Directory capabilities: a directory granted confined beneath itself (`GRANT_SUBTREE`), the path calls made through it authorised by the descriptor rather than `CAP_FS_ACCESS`, absolute paths, a `..` at the floor and an absolute link refused | done |
+| OF13 | Setting a node's times (`fs_set_times`): `utimensat`'s rules, each format's range and precision declared, a time no format field can hold refused unless the caller asks for the nearest | done |
+| OF14 | A volume's space through a descriptor (`fs_volume_stats`, `fstatvfs`): a directory capability's holder learns its folder's room with no path to name | done |
 
 ## The model
 
@@ -87,7 +90,9 @@ so no principal gains anything. The owner exemption is what POSIX requires of
 `open(O_CREAT, 0444)` then `write`, and removes nothing: an owner may restore
 any bit. A grant never has it, so an owner's chmod still revokes a grant.
 Metadata changes run as the caller, so a child handed a system-owned
-descriptor cannot chmod it with the opener's rights; an attribute is read as
+descriptor cannot chmod it with the opener's rights; a time change through a
+writing grant is the exception, acting as the grant's identity, since a holder
+trusted to rewrite the node is trusted with what its times say of it; an attribute is read as
 the bytes are, so a holder of a delegated document can read what type it is. Removing search permission on a
 parent no longer cuts off descriptors below it; that is POSIX behaviour.
 
@@ -101,7 +106,8 @@ lock and one cached security lookup, against a whole-path walk.
 One resolver. Steps are names and `..`, each tagged with who supplied it;
 `.` is dropped and `..` is never collapsed as text. A walk starts at the view
 root (absolute), the working directory, or a directory descriptor's node; an
-absolute path ignores the descriptor. Within a projection the walk climbs with
+absolute path ignores the descriptor, unless the descriptor is a directory
+capability, which refuses one. Within a projection the walk climbs with
 `parent()`. At a projection's floor a typed `..` continues at the parent
 projection's root and a child projection's name continues at its floor; a
 `..` or absolute target a link supplies clamps to the link's own projection.
@@ -163,7 +169,8 @@ finds nothing at its path.
   authority and the smaller ceiling. `fd_grant_location` tells the
   `opened_as` label, which a rename can make stale. Spawn wiring shares the
   description and gives the child's descriptor the same pin, frozen to the
-  parent's identity at the spawn. Directories are refused both ways.
+  parent's identity at the spawn. Spawn refuses a directory; `fd_grant` hands
+  one on only as a directory capability (below).
 - `fd_grant` conveys a pipe end as itself: the pending delegation holds another
   counted reference to the end, so one in flight holds its side open, and one
   let go unredeemed, with either process, is released as a close is, outside
@@ -186,6 +193,34 @@ finds nothing at its path.
 - `fs_sync(fd)` flushes the descriptor's own volume; a catalog descriptor has
   nothing to flush.
 
+## Directory capabilities
+
+A directory is granted only confined beneath itself: `fd_grant` with
+`GRANT_SUBTREE` (OF12), the trusted picker's way to hand an application a folder
+it may work in without `CAP_FS_ACCESS`, as Capsicum's capability mode and
+`openat2`'s `RESOLVE_BENEATH` do.
+
+- The redeemed `NodeHandle` carries a `Floor`: the granted directory, pinned,
+  and its projection. Every descriptor opened through one carries the same
+  floor and the same frozen authority, so a relay hands on no more; a relayed
+  directory is floored at itself, never above where it was opened.
+- A path resolved from a floored start may not leave it: an absolute or
+  root-named path, a `..` at the floor — the caller's or a link's — and an
+  absolute link target are `PermissionDenied`. Crossings beneath the floor stand
+  as they would anywhere; climbing back meets the floor.
+- Such a path is authorised by the descriptor: the frozen identity acts, its
+  capability set narrowed at the grant to `CAP_FS_ACCESS` alone, so a
+  capability gate on a node beneath stays shut. A call naming no floored start
+  needs the caller's own `CAP_FS_ACCESS`, checked in the handler before any
+  state; a two-path call acts as one authority or is refused.
+- The ceiling decides writing: zero grants no change beneath; anything else
+  allows creating, removing, renaming and writing, each file bounded by the
+  ceiling as a file grant is. Mode and owner never change through a grant, a
+  link is never made through one (it could redirect its owner's own walks),
+  no path is spelled out through one (the spelling names what lies above the
+  floor), and the working directory never becomes floored. A floored
+  directory lists as the frozen identity.
+
 ## Create modes, umask, setgid, sticky
 
 A node is born with its whole security record: the requested mode less the
@@ -205,6 +240,31 @@ In a sticky directory only the entry's owner or the directory's owner removes,
 renames away or replaces it, the occupant's gate still applying; no capability
 overrides it — a `CAP_FS_CHOWN` holder takes ownership explicitly, and that is
 audited.
+
+## Times
+
+`fs_set_times` (no. 173) is `utimensat(2)`: a node named from a directory
+descriptor, or the descriptor's own under `EMPTY_PATH`, and a `TimesChange` —
+the access and modification times each kept, stamped now or set to an instant,
+and `nearest`. It answers `TimesKept`.
+
+- A change that sets nothing is answered wherever the path reaches, unchecked.
+  Stamping both now needs ownership or write access, any other change
+  ownership, which no capability overrides; a node whose format records no
+  owner asks write access instead. A gated node asks its gate. A change moves
+  the change time where the format keeps one.
+- Through a grant the frozen identity acts, and only where the grant writes;
+  a holder's descriptor acts as the caller.
+- Each format declares every time it keeps as a `StampField` — the ticks of a
+  counter from an epoch that its field holds — and `fit` is the one narrowing:
+  an instant held exactly, else `TimestampOutOfRange`, else under `nearest`
+  the nearest held instant (a tie to the later, clamped to the first or last),
+  answered `Nearest`. A time a format does not keep is refused, or under
+  `nearest` dropped. A clock stamp is `floor`ed, never rounded forward.
+- `lib/fscopy::copy_times` is the one copy of a node's times, asking the
+  nearest: `cp -p`, `mv` across volumes and the operation engine keep times
+  through it, a directory's once its entries are in, and the copies kept
+  inexactly are counted in one `fs.times_not_exact` record, not a warning.
 
 ## Bounds
 
@@ -246,14 +306,19 @@ the kernel writes only through pinned ids.
 ## Calls
 
 Descriptor-relative throughout: open, mkdir, unlink, symlink, readlink,
-realpath, chdir, set_mode, set_owner and access resolve a relative path from a
-directory descriptor (`FD_CWD` for the working directory), and rename and link
-take two `PathAt` records; an absolute path ignores the descriptor. No handler
-spells a path against the working directory. Chdir, set_mode, set_owner and
+realpath, chdir, set_mode, set_owner, set_times and access resolve a relative
+path from a directory descriptor (`FD_CWD` for the working directory), and
+rename and link take two `PathAt` records; an absolute path ignores the
+descriptor, or is refused through a directory capability. No handler spells a
+path against the working directory. Chdir, set_mode, set_owner, set_times and
 access take `AtFlags`: `NO_FOLLOW` names a final link itself (chdir refuses
 it) and `EMPTY_PATH` the node the descriptor holds. Open and mkdir take a mode.
 Attribute calls are by descriptor only. Metadata through a descriptor runs as
-the caller. `fs_access` (no. 154) answers as the caller, or with `EMPTY_PATH`
+the caller, but a time change through a grant (Times). `fs_volume_stats`
+(no. 174) answers the `VolumeStats` of the volume a descriptor's node lies on,
+authorised as `fs_stat` is, through `with_live` to the driver's own figures;
+the same record is the mount listing's usage, one encoding for both. `fs_access` (no. 154) answers as the caller (a directory
+capability's identity for a path named through one), or with `EMPTY_PATH`
 under the descriptor's own authority: the node's verdict for each `Access`
 bit, then the projection's flags. Unlink and rename take an optional
 `NodeExpect` (`EXPECT_NODE`, `EXPECT_UNCHANGED`), copied only when a flag asks
@@ -262,7 +327,8 @@ for one and checked under the volume lock, a mismatch answering `Stale`;
 closing the race between mkdir and open. `fs_getcwd` answers the working directory's `canonical_of`. `fs_umask`
 sets and queries the mask. No new error codes.
 
-A containment flag (`RESOLVE_BENEATH`-style) lands with its first consumer.
+Containment is the directory capability's: a walk is confined by the
+descriptor it starts from, never by a flag its caller could leave off.
 
 ## Walking a tree
 

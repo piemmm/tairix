@@ -1,0 +1,27 @@
+[package]
+name = "tairix-test-pcemu-qemu-aarch64"
+description = "plans/PCEMU.md PC21 QEMU vertical: boot the production aarch64 tairix-kernel pipeline against the root image carrying the pcemucheck fixture, and pass once the scripted shell has run it: the emulator's reference digest under this target's compiler, and DOS booted in the machine's sandboxed worker with translated code installed by code_install and run natively."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-pcemu-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+tairix-test-pcemu = { path = "../pcemu_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

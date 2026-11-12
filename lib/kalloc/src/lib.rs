@@ -135,36 +135,38 @@ pub const HEAP_BYTES: usize = 64 * 1024 * 1024;
 /// so this caps that port at about 200 cores (`plans/OPEN-DEFECTS.md` D974).
 pub const BOOT_HEAP_BYTES: usize = 16 * 1024 * 1024;
 
-/// `N` bytes of 4 KiB-aligned heap storage handed out by [`FreeListAllocator`].
+/// `N` bytes of page-aligned storage a binary declares as a plain `static`:
+/// the arena it hands a [`FreeListAllocator`], or the frames, stacks and
+/// buffers a test kernel hands out by address. Its bytes are reached only
+/// through [`as_mut_ptr`](Self::as_mut_ptr), so nothing needs a `static mut`
+/// to write them.
 ///
-/// Aligned to a page so a page-aligned request is never wasted satisfying
-/// it out of a half-aligned tail. A binary declares it as a plain `static`:
-/// its bytes are reached only through [`as_mut_ptr`](Self::as_mut_ptr), so
-/// nothing needs a `static mut` to write them.
+/// Aligned to a page so a page-aligned request is never wasted satisfying it
+/// out of a half-aligned tail, and so each page of it is a whole frame.
 #[repr(C, align(4096))]
-pub struct Heap<const N: usize = HEAP_BYTES>(UnsafeCell<[u8; N]>);
+pub struct Arena<const N: usize>(UnsafeCell<[u8; N]>);
 
 // SAFETY: no safe method reads or writes the bytes. The only access is the
 // raw pointer `as_mut_ptr` returns, and dereferencing it is the caller's own
 // `unsafe` obligation — for `FreeListAllocator`, exclusive ownership of the
-// region under its lock — so sharing a `Heap` shares nothing a reference
-// could alias.
-unsafe impl<const N: usize> Sync for Heap<N> {}
+// region under its lock; for a frame pool, the frame allocator's — so
+// sharing an `Arena` shares nothing a reference could alias.
+unsafe impl<const N: usize> Sync for Arena<N> {}
 
 // The alignment attribute needs a literal, so this pins it to the granule
 // `FreeListAllocator::new` requires its arena to carry.
-const _: () = assert!(align_of::<Heap>() == PAGE_SIZE);
+const _: () = assert!(align_of::<Arena<PAGE_SIZE>>() == PAGE_SIZE);
 
-impl<const N: usize> Heap<N> {
-    /// Zero-initialised heap. `const` so the binary's arena is constructed
-    /// in `.bss`, never on the stack (clippy's `large_stack_arrays` and
-    /// `declare_interior_mutable_const` are false positives: no `Heap` value
-    /// ever materialises as a local, and every consumer assigns `Heap::ZERO`
-    /// directly to a `static`, whose one copy is the arena it wants).
+impl<const N: usize> Arena<N> {
+    /// Zeroed storage. `const` so the binary's arena is constructed in
+    /// `.bss`, never on the stack (clippy's `large_stack_arrays` and
+    /// `declare_interior_mutable_const` are false positives: no `Arena` value
+    /// ever materialises as a local, and every consumer assigns `Arena::ZERO`
+    /// directly to a `static`, whose one copy is the storage it wants).
     #[allow(clippy::large_stack_arrays, clippy::declare_interior_mutable_const)]
     pub const ZERO: Self = Self(UnsafeCell::new([0; N]));
 
-    /// The arena's first byte, which [`FreeListAllocator::new`] takes.
+    /// The storage's first byte.
     #[must_use]
     pub const fn as_mut_ptr(&self) -> *mut u8 {
         self.0.get().cast()
@@ -763,10 +765,9 @@ impl Inner {
 /// A coalescing, segregated-fit kernel heap allocator with O(1) allocate,
 /// free, and region reclaim.
 ///
-/// Implements [`GlobalAlloc`]. Pair with a `static HEAP: Heap`
-/// (`#[repr(C, align(4096))]`) in the bin crate and register via
-/// `#[global_allocator]`. The `heap_base` pointer must stay valid for the
-/// life of the binary.
+/// Implements [`GlobalAlloc`]. Pair with a `static HEAP: Arena<N>` in the
+/// bin crate and register via `#[global_allocator]`. The `heap_base` pointer
+/// must stay valid for the life of the binary.
 pub struct FreeListAllocator {
     heap_base: *mut u8,
     heap_len: usize,

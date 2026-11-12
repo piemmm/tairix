@@ -66,6 +66,12 @@ const FILE_WRITE_HELD: u8 = 14;
 const FILE_SYNC: u8 = 15;
 const FILE_RESIZE: u8 = 16;
 const FILE_ACK: u8 = 17;
+const FILE_TIMES: u8 = 18;
+const FILE_RETIME: u8 = 19;
+
+/// The bytes a time a change may leave alone takes: whether it is set, its
+/// seconds and its nanoseconds.
+const STAMP_LEN: usize = 1 + 8 + 4;
 
 const REPORT_SEND: u8 = 1;
 const REPORT_NEGOTIATED: u8 = 2;
@@ -245,6 +251,15 @@ pub enum FileOp<'a> {
         /// The new length.
         size: u64,
     },
+    /// Set a node's access and write times, each left alone where `None`.
+    Times {
+        /// The node.
+        path: &'a str,
+        /// The new access time.
+        accessed: Option<Time64>,
+        /// The new write time.
+        written: Option<Time64>,
+    },
     /// The share's space.
     Space,
     /// Open the node at `path` as `handle` and keep it open, asking a lease
@@ -297,6 +312,16 @@ pub enum FileOp<'a> {
         handle: u32,
         /// The new length.
         size: u64,
+    },
+    /// Set the access and write times of the file `handle` holds, each left
+    /// alone where `None`.
+    Retime {
+        /// The open.
+        handle: u32,
+        /// The new access time.
+        accessed: Option<Time64>,
+        /// The new write time.
+        written: Option<Time64>,
     },
     /// Acknowledge the break of the lease `key`, keeping `state`'s caching.
     Ack {
@@ -736,6 +761,24 @@ fn read_dialect(r: &mut Reader<'_>) -> Result<Dialect, FrameError> {
     }
 }
 
+/// A time a change may leave alone: whether it is set, then the time — the
+/// epoch where it is not.
+fn put_stamp(w: &mut Out<'_>, time: Option<Time64>) {
+    w.u8(u8::from(time.is_some()));
+    put_time(w, time.unwrap_or(Time64::UNIX_EPOCH));
+}
+
+/// [`put_stamp`]'s time, an unset one with any time but the epoch refused.
+fn read_stamp(r: &mut Reader<'_>) -> Result<Option<Time64>, FrameError> {
+    let set = read_flag(r)?;
+    let time = read_time(r)?;
+    match (set, time) {
+        (true, time) => Ok(Some(time)),
+        (false, Time64::UNIX_EPOCH) => Ok(None),
+        (false, _) => Err(FrameError::Malformed),
+    }
+}
+
 fn read_flag(r: &mut Reader<'_>) -> Result<bool, FrameError> {
     match r.u8()? {
         0 => Ok(false),
@@ -829,22 +872,23 @@ impl FileOp<'_> {
             }
         };
         let io = |len: u32| {
-            if len == 0 || len as usize > IO_MAX {
-                Err(FrameError::Malformed)
-            } else {
+            if transfers(len) {
                 Ok(4 + 8 + 4)
+            } else {
+                Err(FrameError::Malformed)
             }
         };
         let len = match self {
             Self::Stat { path } => sized(path)?,
             Self::Remove { path, lease } => sized(path)? + key_len(*lease),
             Self::Read { path, len, .. } | Self::Write { path, len, .. } => {
-                if *len == 0 || *len as usize > IO_MAX {
+                if !transfers(*len) {
                     return Err(FrameError::Malformed);
                 }
                 sized(path)? + 8 + 4
             }
             Self::Truncate { path, .. } => sized(path)? + 8,
+            Self::Times { path, .. } => sized(path)? + 2 * STAMP_LEN,
             Self::Open { path, .. } => sized(path)? + 4,
             Self::Page { .. } | Self::Close { .. } | Self::Sync { .. } => 4,
             Self::Create { path, .. } => sized(path)? + 1,
@@ -858,6 +902,7 @@ impl FileOp<'_> {
             Self::ReadHeld { len, .. } => io(*len)?,
             Self::WriteHeld { len, .. } => io(*len)? + 1,
             Self::Resize { .. } => 4 + 8,
+            Self::Retime { .. } => 4 + 2 * STAMP_LEN,
             Self::Ack { state, .. } => {
                 if state & !LEASE_BITS != 0 {
                     return Err(FrameError::Malformed);
@@ -926,6 +971,16 @@ impl FileOp<'_> {
                 w.bytes(path.as_bytes());
                 w.u64(*size);
             }
+            Self::Times {
+                path,
+                accessed,
+                written,
+            } => {
+                w.u8(FILE_TIMES);
+                w.bytes(path.as_bytes());
+                put_stamp(w, *accessed);
+                put_stamp(w, *written);
+            }
             Self::Space => w.u8(FILE_SPACE),
             held => held.encode_held(w),
         }
@@ -980,6 +1035,16 @@ impl FileOp<'_> {
                 w.u32(*handle);
                 w.u64(*size);
             }
+            Self::Retime {
+                handle,
+                accessed,
+                written,
+            } => {
+                w.u8(FILE_RETIME);
+                w.u32(*handle);
+                put_stamp(w, *accessed);
+                put_stamp(w, *written);
+            }
             Self::Ack { key, state } => {
                 w.u8(FILE_ACK);
                 w.raw(key);
@@ -1024,6 +1089,21 @@ fn read_lease(r: &mut Reader<'_>) -> Result<u8, FrameError> {
     Ok(bits)
 }
 
+/// Whether one transfer may move `len` bytes: at least one, at most
+/// [`IO_MAX`].
+const fn transfers(len: u32) -> bool {
+    len != 0 && len as usize <= IO_MAX
+}
+
+fn read_io_len(r: &mut Reader<'_>) -> Result<u32, FrameError> {
+    let len = r.u32()?;
+    if transfers(len) {
+        Ok(len)
+    } else {
+        Err(FrameError::Malformed)
+    }
+}
+
 fn read_file_op<'a>(r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
     let tag = r.u8()?;
     let op = match tag {
@@ -1033,10 +1113,7 @@ fn read_file_op<'a>(r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
         FILE_READ | FILE_WRITE => {
             let path = read_path(r)?;
             let offset = r.u64()?;
-            let len = r.u32()?;
-            if len == 0 || len as usize > IO_MAX {
-                return Err(FrameError::Malformed);
-            }
+            let len = read_io_len(r)?;
             if tag == FILE_READ {
                 FileOp::Read { path, offset, len }
             } else {
@@ -1067,7 +1144,21 @@ fn read_file_op<'a>(r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
             path: read_path(r)?,
             size: r.u64()?,
         },
+        FILE_TIMES => FileOp::Times {
+            path: read_path(r)?,
+            accessed: read_stamp(r)?,
+            written: read_stamp(r)?,
+        },
         FILE_SPACE => FileOp::Space,
+        _ => read_held_op(tag, r)?,
+    };
+    Ok(op)
+}
+
+/// An operation on a file held open, named by its handle, or a lease's
+/// acknowledgement.
+fn read_held_op<'a>(tag: u8, r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
+    let op = match tag {
         FILE_HOLD => {
             let path = read_path(r)?;
             let handle = r.u32()?;
@@ -1088,10 +1179,7 @@ fn read_file_op<'a>(r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
         FILE_READ_HELD | FILE_WRITE_HELD => {
             let handle = r.u32()?;
             let offset = r.u64()?;
-            let len = r.u32()?;
-            if len == 0 || len as usize > IO_MAX {
-                return Err(FrameError::Malformed);
-            }
+            let len = read_io_len(r)?;
             if tag == FILE_READ_HELD {
                 FileOp::ReadHeld {
                     handle,
@@ -1111,6 +1199,11 @@ fn read_file_op<'a>(r: &mut Reader<'a>) -> Result<FileOp<'a>, FrameError> {
         FILE_RESIZE => FileOp::Resize {
             handle: r.u32()?,
             size: r.u64()?,
+        },
+        FILE_RETIME => FileOp::Retime {
+            handle: r.u32()?,
+            accessed: read_stamp(r)?,
+            written: read_stamp(r)?,
         },
         FILE_ACK => FileOp::Ack {
             key: read_array(r)?,

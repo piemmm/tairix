@@ -570,6 +570,7 @@ impl TaskbarInput {
             // Taken by `cancel_press` before anything else is consulted.
             InputEvent::PointerCancelled
             | InputEvent::PointerMoved { .. }
+            | InputEvent::PointerMotion { .. }
             | InputEvent::PointerReleased { .. }
             | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }

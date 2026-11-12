@@ -72,7 +72,7 @@ mod kernel {
         handle_panic_via_serial, qemu_exit, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel_core::spawn_kthread;
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use tairix_log::{log, Event, EventId, Level};
@@ -113,7 +113,7 @@ mod kernel {
     /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
     /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

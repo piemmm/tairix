@@ -2315,7 +2315,7 @@ only `lib/*` crates — the copy itself is the shared engine
 ### Grammar
 
 ```
-cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
+cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST]
    [-t dir] [--] source... dest
 ```
 
@@ -2330,6 +2330,12 @@ cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST]
 | `-P`, `--no-dereference`  | reproduce a link as a link, verbatim (the default under `-r`) |
 | `-L`, `--dereference`     | follow every link, operand or met in a tree        |
 | `-H`                      | follow a link named as an operand only             |
+| `-a`, `--archive`         | `-dR --preserve=all`                               |
+| `-p`, `--preserve`        | `--preserve=mode,ownership,timestamps`             |
+| `--preserve=mode`         | each copy's exact mode, set-ID and sticky bits included |
+| `--preserve=ownership`    | each copy's owner and group, as far as the copier may |
+| `--preserve=timestamps`   | each copy's access and modification times, as nearly as the destination holds them |
+| `--preserve=all`          | mode, ownership, times and links, and every attribute the destination keeps |
 | `--preserve=links`        | keep two sources' shared node shared               |
 | `--preserve=xattr`        | fail a copy whose destination cannot keep an extended attribute |
 | `--no-preserve=xattr`     | copy no extended attributes                        |
@@ -2358,13 +2364,16 @@ through its own create and needs none. As GNU 9.4 judges them, a second name
 the destination already is (`cp -l a a`, or onto another of its names) is
 already made and reported by nothing, while a symbolic link put on the node it
 would name (`cp -s a a`, `cp -sf a h` with `h` another name of `a`, `cp -P sl
-sl`) is refused as the same file. `-a`/`--archive` and the
-other `--preserve` members are **refused**: `-a` is `-dR --preserve=all`,
-`--preserve=all` includes timestamps, and no syscall sets a timestamp, so
-honouring it would report a preservation that did not happen. `-dR` is the
-rest of `-a`. `--no-preserve` accepts `links`, `xattr`, `mode`, `all`, and —
-as no-ops, since they are never preserved — `ownership`, `timestamps` and
-`context`.
+sl`) is refused as the same file. A kept time is set with `fs_set_times`
+holding the nearest instant the destination keeps, before any change of owner
+could take the change from the copier, and a directory's once its entries are
+in; times kept inexactly are said in one `fs.times_not_exact` omission record,
+not in a warning, since the nearest is what keeping times asks of a coarser
+volume. The owner goes through `tairix_fscopy::carry_owner`,
+so one the copier may not give stays the copier's, without a warning, as
+GNU's. Only `--preserve=context` is refused: this system keeps no security
+context. `--no-preserve` accepts `links`, `xattr`, `mode`, `ownership`,
+`timestamps`, `all`, and — a no-op, since none is kept — `context`.
 
 A new file is born with its source's permission bits, the set-ID and sticky
 bits dropped, less the umask the kernel applies — so a `0600` file's copy is
@@ -2650,11 +2659,11 @@ neither the old destination nor a whole new one; here:
    given those bits outright where the umask withheld any — and held open,
    so a private tree is never readable under its staging name.
 3. It is filled through its descriptors: a regular file through the shared
-   copy engine with its holes and extended attributes, then its mode and
-   owner; a symbolic link recreated with the target it stores (never
+   copy engine with its holes, extended attributes and times, then its mode
+   and owner; a symbolic link recreated with the target it stores (never
    followed), then its owner; a directory subtree through the shared walk,
    descending each source directory it opened, each directory taking its
-   mode only after its entries are in. Every entry copied is recorded with
+   times and mode only after its entries are in. Every entry copied is recorded with
    what it was when it was copied.
 4. The copy is committed to the disk, renamed onto the destination in one
    step — only while the staging name still holds it, the destination
@@ -2680,7 +2689,10 @@ system clears a file's set-ID bits as its owner changes, so a file given
 back to another owner arrives without them. One the mover may not give back
 becomes the mover's, in the source's group where the mover may keep it,
 without the set-user-ID bit, and without the set-group-ID bit unless its
-group was kept. Timestamps are not carried: no call sets a node's times.
+group was kept. Each node keeps its access and modification times as nearly
+as the destination holds them, set before its owner can change, a
+directory's once its entries are in; a move whose times were not all kept
+exactly says so once.
 Attributes the destination cannot keep are left and reported once, as `cp`
 reports them.
 

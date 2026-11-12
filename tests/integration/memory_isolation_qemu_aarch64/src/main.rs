@@ -46,6 +46,7 @@ mod kernel {
     use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_itest_finisher::fail_point;
+    use tairix_kalloc::Arena;
     use tairix_log::{log, Event, EventId, Level};
 
     /// Virtual address the victim space maps and the attacker does not: a
@@ -74,11 +75,9 @@ mod kernel {
     /// the victim's own read failing, not isolation.
     static ATTACKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-    /// A 4 KiB page the victim space maps at [`VICTIM_VA`]. The attacker never
-    /// maps it.
-    #[repr(C, align(4096))]
-    struct VictimPage([u8; PAGE_SIZE]);
-    static mut VICTIM_PAGE: VictimPage = VictimPage([VICTIM_BYTE; PAGE_SIZE]);
+    /// A 4 KiB page the victim space maps at [`VICTIM_VA`], filled with
+    /// [`VICTIM_BYTE`] before it is mapped. The attacker never maps it.
+    static VICTIM_PAGE: Arena<PAGE_SIZE> = Arena::ZERO;
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// exactly [`VICTIM_VA`] under the attacker's root, then report PASS.
@@ -132,7 +131,10 @@ mod kernel {
             },
         );
 
-        let victim_pa = paging::image_phys(core::ptr::addr_of!(VICTIM_PAGE) as u64);
+        // SAFETY: nothing maps or reads the page yet, and the fill stays
+        // within its `PAGE_SIZE` bytes.
+        unsafe { VICTIM_PAGE.as_mut_ptr().write_bytes(VICTIM_BYTE, PAGE_SIZE) };
+        let victim_pa = paging::image_phys(VICTIM_PAGE.as_mut_ptr() as u64);
 
         // Victim space: the one VICTIM_VA mapping.
         let mut victim = AddressSpace::new_user(&POOL).unwrap_or_else(|| fail("victim root"));

@@ -12,7 +12,7 @@ use tairix_arch_riscv64::{
     SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -24,7 +24,7 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -74,13 +74,10 @@ const FAIL_WRONG_CODE: NonZeroU16 = fail_point!(5);
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
-/// `align(4096)` so each `FRAME_SIZE` slice is a valid page frame; identity-
+/// Page-aligned, so each `FRAME_SIZE` slice is a valid page frame; identity-
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builder reaches it through [`DirectPhysMap::identity`].
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
@@ -150,7 +147,7 @@ fn frame_source() -> impl FnMut() -> Option<Frame> {
         next += 1;
         // The pool is identity-mapped, so its kernel virtual address is also
         // its physical address.
-        let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+        let base = FRAME_POOL.as_mut_ptr() as u64 + offset as u64;
         Some(Frame::containing(PhysAddr::new(base)))
     }
 }

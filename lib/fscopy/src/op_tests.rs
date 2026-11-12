@@ -508,7 +508,8 @@ fn what_a_destination_cannot_keep_is_noted_and_the_copy_goes_on() {
     let mut op = copying(&tree, "/src/f", "/dst/f", Taken::Ask);
     assert_eq!(run(&mut op), Progress::Done);
     let report = op.omissions().report("test").expect("something was left");
-    assert!(report.summary.contains("mac.type"), "{}", report.summary);
+    let summary = report.summary.expect("a warning");
+    assert!(summary.contains("mac.type"), "{summary}");
     assert_eq!(tree.bytes("/dst/f").as_deref(), Some(&b"f"[..]));
 }
 
@@ -1260,4 +1261,39 @@ fn a_cancel_while_a_move_removes_its_source_stops_there_with_the_copy_whole() {
     assert_eq!(tree.bytes("/vol/src/a").as_deref(), Some(&b"a"[..]));
     assert_eq!(tree.bytes("/vol/src/b").as_deref(), Some(&b"b"[..]));
     assert!(tree.exists("/src/a") && tree.exists("/src/b"));
+}
+
+/// A copy and a move keep each file's and each made directory's times, a
+/// directory's set once its entries are in; a volume keeping only whole
+/// seconds keeps them as nearly as it can, which the omissions report.
+#[test]
+fn a_copy_and_a_move_keep_their_sources_times() {
+    use tairix_abi::time::Time64;
+    let at = |secs, nanos| Time64::new(secs, nanos).expect("canonical");
+    let (file_time, dir_time) = (at(-86_400, 250_000_000), at(1_000, 0));
+    let tree = Tree::new()
+        .file("/src/sub/f", b"bytes")
+        .stamped("/src/sub/f", file_time, file_time)
+        .stamped("/src/sub", dir_time, dir_time)
+        .dir("/dst")
+        .whole_second_volume("/coarse");
+    let mut op = copying(&tree, "/src/sub", "/dst/sub", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Done);
+    assert_eq!(tree.times("/dst/sub/f"), Some((file_time, file_time)));
+    assert_eq!(
+        tree.times("/dst/sub"),
+        Some((dir_time, dir_time)),
+        "the directory's own, though an entry was made in it after"
+    );
+    assert!(op.omissions().is_empty());
+
+    let mut op = moving(&tree, "/src/sub", "/coarse/sub", Taken::Ask);
+    assert_eq!(run(&mut op), Progress::Done);
+    let second = at(-86_400, 0);
+    assert_eq!(tree.times("/coarse/sub/f"), Some((second, second)));
+    assert_eq!(tree.times("/coarse/sub"), Some((dir_time, dir_time)));
+    let report = op.omissions().report("fstree").expect("a report");
+    assert_eq!(report.summary, None, "no warning, only the record");
+    let record = core::str::from_utf8(&report.record).expect("text");
+    assert!(record.contains("\"fs.times_not_exact\""), "{record}");
 }

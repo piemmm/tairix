@@ -504,6 +504,40 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn code_install(
+        &self,
+        _c: &CallerContext<'_>,
+        _compiler: i64,
+        _target: i64,
+        _base: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_set_times(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _times: u64,
+        _times_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_volume_stats(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn call_peer_holds(
         &self,
         _c: &CallerContext<'_>,
@@ -1495,7 +1529,7 @@ fn path_form_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS])
     let at_flags_slot = match spec.number {
         SyscallNumber::FS_CHDIR => Some(3),
         SyscallNumber::FS_SET_MODE | SyscallNumber::FS_ACCESS => Some(4),
-        SyscallNumber::FS_SET_OWNER => Some(5),
+        SyscallNumber::FS_SET_OWNER | SyscallNumber::FS_SET_TIMES => Some(5),
         _ => None,
     };
     if let Some(slot) = at_flags_slot {
@@ -1970,6 +2004,11 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
             }
             if spec.number == SyscallNumber::CONSOLE_ADOPT {
                 args[3] = 64;
+            }
+            // `fs_set_times` names its node by an empty path on the start
+            // descriptor, so its record pointer is the one under test.
+            if spec.number == SyscallNumber::FS_SET_TIMES {
+                args[5] = u64::from(AtFlags::EMPTY_PATH.bits());
             }
             // The attribute calls bound their key length (arg 2) to
             // `1..=FS_ATTR_KEY_MAX` at dispatch; seed the zeroed slot with

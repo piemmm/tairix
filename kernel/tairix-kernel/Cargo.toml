@@ -400,6 +400,9 @@ tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 
 [dev-dependencies]
 tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
+# The FAT on-disk layout, for the tests that change a FAT32 volume's
+# `FSInfo` as a foreign mount would.
+tairix-fat = { path = "../../lib/fat", version = "=0.0.0" }
 # The metered allocator the host tests refuse an exhausted heap's requests by.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The in-memory page table and simulated RAM the floor's DMA host is tested

@@ -7,9 +7,10 @@
 //! garbage — so every opcode the tables name carries its precise operand
 //! sizing, a legal instruction is capped at 15 bytes, and an undecodable
 //! byte renders as a `(bad)` single byte so the stream resynchronises
-//! exactly as binutils does. Three-byte maps (`0F 38` / `0F 3A`) and
-//! VEX/EVEX are rendered as `(bad)` for now; extending the maps is staged
-//! in `plans/APPS.md`.
+//! exactly as binutils does. Of the VEX encodings, the BMI1 and BMI2
+//! instructions over the general registers are decoded; the legacy
+//! three-byte maps (`0F 38` / `0F 3A`), the rest of VEX and EVEX render as
+//! `(bad)`, and extending the maps is staged in `plans/APPS.md`.
 //!
 //! Rendering is Intel syntax as binutils prints it (`mov rax,QWORD PTR
 //! [rbp-0x8]`), with two documented simplifications: RIP-relative operands
@@ -376,6 +377,9 @@ fn opcode(
     window: &[u8],
 ) -> Option<Insn> {
     let op = reader.u8()?;
+    if matches!(op, 0xc4 | 0xc5) {
+        return vex(reader, prefixes, (address, window), op);
+    }
     let wide = prefixes.operand_width();
     let rexed = prefixes.rex.is_some();
 
@@ -1031,6 +1035,113 @@ fn two_byte(
         }
         _ => None,
     }
+}
+
+/// A VEX prefix's `pp` field: the legacy prefix it stands for.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Implied {
+    None,
+    Operand16,
+    Rep,
+    Repne,
+}
+
+/// The VEX-encoded instruction whose first byte, `C4` or `C5`, was `first`:
+/// a BMI1 or BMI2 instruction over the general registers, or none (Intel SDM
+/// Vol. 2A, 2.3 and the instructions' own pages). A VEX prefix after a REX,
+/// `66`, `F2`, `F3` or `LOCK` prefix faults, so is refused too.
+fn vex(
+    reader: &mut Reader<'_>,
+    prefixes: &Prefixes,
+    (address, window): (u64, &[u8]),
+    first: u8,
+) -> Option<Insn> {
+    if prefixes.rex.is_some() || prefixes.operand16 || prefixes.rep.is_some() || prefixes.lock {
+        return None;
+    }
+    let (extension, map, last) = if first == 0xc5 {
+        let byte = reader.u8()?;
+        // The two-byte form implies X and B clear, the `0F` map and W0.
+        (!byte >> 5 & 0b100, 1, byte & 0x7f)
+    } else {
+        let byte = reader.u8()?;
+        let last = reader.u8()?;
+        (!byte >> 5 & 0b111, byte & 0x1f, last)
+    };
+    let wide = last & 0x80 != 0;
+    let vvvv = u32::from(!last >> 3 & 0xf);
+    let implied = match last & 3 {
+        0 => Implied::None,
+        1 => Implied::Operand16,
+        2 => Implied::Rep,
+        _ => Implied::Repne,
+    };
+    if last & 4 != 0 {
+        // VEX.L: every instruction decoded here is LZ.
+        return None;
+    }
+    // ModRM reads the extension bits as a REX prefix carries them.
+    let rex = Prefixes {
+        rex: Some(0x40 | u8::from(wide) << 3 | extension),
+        address32: prefixes.address32,
+        segment: prefixes.segment,
+        ..Prefixes::default()
+    };
+    let op = reader.u8()?;
+    let width = if wide { Width::Qword } else { Width::Dword };
+    let name = |number| reg_name(width, number, true);
+    let (mnemonic, operands) = match (map, op, implied) {
+        (2, 0xf3, Implied::None) => {
+            let (group, rm) = modrm(reader, &rex)?;
+            let mnemonic = match group & 7 {
+                1 => "blsr",
+                2 => "blsmsk",
+                3 => "blsi",
+                _ => return None,
+            };
+            (
+                mnemonic,
+                format!("{},{}", name(vvvv), rm_text(&rm, width, &rex)),
+            )
+        }
+        (3, 0xf0, Implied::Repne) => {
+            if vvvv != 0 {
+                return None;
+            }
+            let (reg, rm) = modrm(reader, &rex)?;
+            let count = reader.u8()?;
+            let operands = format!("{},{},{count:#x}", name(reg), rm_text(&rm, width, &rex));
+            ("rorx", operands)
+        }
+        (2, _, _) => {
+            // Each names its source register by VEX.vvvv: as the second
+            // operand, or after the r/m operand.
+            let (mnemonic, vvvv_second) = match (op, implied) {
+                (0xf2, Implied::None) => ("andn", true),
+                (0xf5, Implied::None) => ("bzhi", false),
+                (0xf5, Implied::Rep) => ("pext", true),
+                (0xf5, Implied::Repne) => ("pdep", true),
+                (0xf6, Implied::Repne) => ("mulx", true),
+                (0xf7, Implied::None) => ("bextr", false),
+                (0xf7, Implied::Operand16) => ("shlx", false),
+                (0xf7, Implied::Rep) => ("sarx", false),
+                (0xf7, Implied::Repne) => ("shrx", false),
+                _ => return None,
+            };
+            let (reg, rm) = modrm(reader, &rex)?;
+            let rm = rm_text(&rm, width, &rex);
+            let operands = if vvvv_second {
+                format!("{},{},{rm}", name(reg), name(vvvv))
+            } else {
+                format!("{},{rm},{}", name(reg), name(vvvv))
+            };
+            (mnemonic, operands)
+        }
+        _ => return None,
+    };
+    Some(finish(
+        reader, &rex, address, window, mnemonic, operands, None,
+    ))
 }
 
 #[cfg(test)]

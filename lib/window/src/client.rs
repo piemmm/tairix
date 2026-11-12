@@ -22,7 +22,6 @@ use tairix_display::winframe::damage_in;
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
 use tairix_abi::fs::FileId;
-use tairix_abi::input::PointerButtonCode;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::window_ipc::{
@@ -33,21 +32,22 @@ use tairix_abi::window_ipc::{
     decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
     decode_screensaver_reply, decode_terrain_reply, decode_wallpapers_reply, AlertSeverity,
     AlertSpec, AppBar, AppMenu, AppMenuItemId, BundleRunPath, ClipboardKind, CursorShape,
-    DocumentName, DragItems, DropOperation, HandOverOutcome, HandOverTarget, LandingStep,
-    LayerDepth, NameList, ObjectIds, OpenTarget, PickPurpose, PointerAction, PreviewSubject,
-    ScreensaverEntry, SystemTask, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, CLIPBOARD_MAX_BYTES, DESKTOP_LAYER_MAX_PLATES,
-    DROP_LANDING_MAX_WIRE_LEN, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX, WINDOW_CLIPBOARD_REPLY_LEN,
-    WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX,
-    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HANDLE_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OFFERED_FILE_REPLY_MAX,
-    WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX,
-    WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
-    WINDOW_WALLPAPERS_REPLY_MAX,
+    DocumentName, DragItems, DropOperation, HandOverOutcome, HandOverTarget, KeyboardMode,
+    LandingStep, LayerDepth, NameList, ObjectIds, OpenTarget, PickPurpose, PointerAction,
+    PreviewSubject, ScreensaverEntry, SystemTask, TerrainPlate, TooltipText, WallpaperPage,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, CLIPBOARD_MAX_BYTES,
+    DESKTOP_LAYER_MAX_PLATES, DROP_LANDING_MAX_WIRE_LEN, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HANDLE_REPLY_LEN,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+    WINDOW_OFFERED_FILE_REPLY_MAX, WINDOW_OFFERED_ITEMS_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_SCREENSAVER_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
-use tairix_input::{InputEvent, PinchPhase, PointerButton};
+use tairix_input::wire::pointer_button_from_abi;
+use tairix_input::{InputEvent, PinchPhase};
 
 use crate::clipboard::{self, Landing};
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, WindowSizeState, WindowSizing};
@@ -485,13 +485,13 @@ pub fn pointer_input_events(
         PointerAction::Pressed(button) => (
             true,
             Some(InputEvent::PointerPressed {
-                button: pointer_button(button),
+                button: pointer_button_from_abi(button),
             }),
         ),
         PointerAction::Released(button) => (
             true,
             Some(InputEvent::PointerReleased {
-                button: pointer_button(button),
+                button: pointer_button_from_abi(button),
             }),
         ),
         // No move first: a drag the desktop took stays where it was left.
@@ -534,15 +534,6 @@ pub fn pinch_input_events(
         },
     ]
     .into_iter()
-}
-
-/// The control-facing button one wire button code names.
-const fn pointer_button(code: PointerButtonCode) -> PointerButton {
-    match code {
-        PointerButtonCode::Primary => PointerButton::Primary,
-        PointerButtonCode::Secondary => PointerButton::Secondary,
-        PointerButtonCode::Middle => PointerButton::Middle,
-    }
 }
 
 /// Bounded slot count every window-channel app binds its event mailbox
@@ -661,6 +652,10 @@ pub enum PostedRequest {
     Resize,
     /// [`WindowClient::set_cursor`].
     Cursor,
+    /// [`WindowClient::set_keyboard_mode`].
+    KeyboardMode,
+    /// [`WindowClient::lock_pointer`].
+    PointerLock,
     /// [`WindowClient::set_tooltip`].
     Tooltip,
     /// [`WindowClient::drag_verdict`].
@@ -754,6 +749,8 @@ impl PostedRequest {
             self,
             Self::Resize
                 | Self::Cursor
+                | Self::KeyboardMode
+                | Self::PointerLock
                 | Self::Tooltip
                 | Self::DragVerdict
                 | Self::SaveOfferAnswer
@@ -789,6 +786,8 @@ impl PostedRequest {
         match self {
             Self::Resize => "a resize",
             Self::Cursor => "a pointer shape",
+            Self::KeyboardMode => "a way of reading the keyboard",
+            Self::PointerLock => "locking the pointer",
             Self::Tooltip => "a tooltip",
             Self::DragVerdict => "a drop answer",
             Self::SaveOfferAnswer => "a save answer",
@@ -1011,6 +1010,8 @@ impl fmt::Display for Refused {
 #[derive(Copy, Clone, Debug)]
 enum Asked {
     Cursor(CursorShape),
+    KeyboardMode(KeyboardMode),
+    PointerLock(bool),
     Tooltip(WindowRegion, TooltipText),
     DragVerdict(u32, Option<DropOperation>),
     SaveOfferAnswer(u32, bool),
@@ -1037,6 +1038,8 @@ impl Asked {
     const fn kind(&self) -> PostedRequest {
         match self {
             Self::Cursor(_) => PostedRequest::Cursor,
+            Self::KeyboardMode(_) => PostedRequest::KeyboardMode,
+            Self::PointerLock(_) => PostedRequest::PointerLock,
             Self::Tooltip(..) => PostedRequest::Tooltip,
             Self::DragVerdict(..) => PostedRequest::DragVerdict,
             Self::SaveOfferAnswer(..) => PostedRequest::SaveOfferAnswer,
@@ -1061,6 +1064,8 @@ impl Asked {
     const fn request(self, window_id: u64) -> WindowRequest {
         match self {
             Self::Cursor(shape) => WindowRequest::SetCursor { window_id, shape },
+            Self::KeyboardMode(mode) => WindowRequest::SetKeyboardMode { window_id, mode },
+            Self::PointerLock(locked) => WindowRequest::LockPointer { window_id, locked },
             Self::Tooltip(region, text) => WindowRequest::SetTooltip {
                 window_id,
                 region,
@@ -2001,16 +2006,19 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6).
     ///
     /// The pick concludes asynchronously with a [`WindowEvent::FilePicked`]
-    /// (carrying the one-shot `fd_redeem` handle) or a
-    /// [`WindowEvent::PickCancelled`] on the app's event endpoint. The
-    /// session refuses [`Errno::AlreadyExists`] while a pick is already
-    /// pending on the window.
+    /// (carrying the one-shot `fd_redeem` handle), a
+    /// [`WindowEvent::FolderPicked`] or [`WindowEvent::SubtreePicked`] for the
+    /// folder purposes, or a [`WindowEvent::PickCancelled`] on the app's event
+    /// endpoint. The session refuses [`Errno::AlreadyExists`] while a pick is
+    /// already pending on the window.
     ///
     /// # Errors
     ///
     /// A transport failure.
     ///
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
+    /// [`WindowEvent::FolderPicked`]: tairix_abi::window_ipc::WindowEvent::FolderPicked
+    /// [`WindowEvent::SubtreePicked`]: tairix_abi::window_ipc::WindowEvent::SubtreePicked
     /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
     pub fn pick_file(&mut self, window_id: u64, purpose: PickPurpose) -> Result<(), Errno> {
         self.post_own(
@@ -2248,8 +2256,9 @@ impl<T: WindowTransport> WindowClient<T> {
         )
     }
 
-    /// Ask for the name of the file window `window_id`'s last pick chose,
-    /// once its [`WindowEvent::FilePicked`] has arrived, landing as
+    /// Ask for the name of the file or folder window `window_id`'s last pick
+    /// chose, once its [`WindowEvent::FilePicked`] or
+    /// [`WindowEvent::SubtreePicked`] has arrived, landing as
     /// [`Answer::PickedName`]. One-shot.
     ///
     /// # Errors
@@ -2257,6 +2266,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// A transport failure.
     ///
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
+    /// [`WindowEvent::SubtreePicked`]: tairix_abi::window_ipc::WindowEvent::SubtreePicked
     pub fn ask_picked_name(&mut self, window_id: u64) -> Result<(), Errno> {
         self.post_own(
             window_id,
@@ -2778,6 +2788,27 @@ impl<T: WindowTransport> WindowClient<T> {
     /// A transport failure.
     pub fn set_cursor(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         self.post_or_hold(window_id, Asked::Cursor(shape), Carried::Nothing)
+    }
+
+    /// Read the keyboard as `mode` while this client's own window `window_id`
+    /// holds it, until asked for another.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure.
+    pub fn set_keyboard_mode(&mut self, window_id: u64, mode: KeyboardMode) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::KeyboardMode(mode), Carried::Nothing)
+    }
+
+    /// Lock the pointer to this client's own window `window_id` (`locked`),
+    /// or let it go. A granted lock, and every end of one, arrives as
+    /// [`WindowEvent::PointerLock`]; a refusal as the request's.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure.
+    pub fn lock_pointer(&mut self, window_id: u64, locked: bool) -> Result<(), Errno> {
+        self.post_or_hold(window_id, Asked::PointerLock(locked), Carried::Nothing)
     }
 
     /// Raise this client's own window `window_id` and give it the keyboard,

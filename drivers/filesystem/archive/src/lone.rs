@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::{NameMatching, NodeTimes};
+use tairix_abi::driver::filesystem::{NameMatching, NodeTimes, StampField};
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{ArchiveName, FormatName};
 use tairix_abi::DriverError;
@@ -17,7 +17,7 @@ use crate::format::{Content, Format, Placed, Read};
 use crate::name::{servable, Charset};
 use crate::region::Regions;
 use crate::stream::{Compression, Packing, Stream, Writer};
-use crate::tree::{Body, Meta, Tree, ROOT};
+use crate::tree::{Body, Meta, Recorded, Tree, ROOT};
 use crate::zip::directory_meta;
 
 /// The endings gzip gives what it compresses, each with what it stands in
@@ -62,6 +62,19 @@ impl Lone {
         match self.packing.compression() {
             Compression::Gzip => FormatName::Gzip,
             Compression::Bzip2 => FormatName::Bzip2,
+        }
+    }
+
+    /// What the stream keeps of its file's modification time: a gzip header's
+    /// unsigned seconds, the zero meaning none, and nothing of bzip2's.
+    pub(crate) const fn modified_field(&self) -> Option<StampField> {
+        match self.packing {
+            Packing::Gzip { .. } => Some(StampField::new(
+                Time64::UNIX_EPOCH,
+                1_000_000_000,
+                1..1 << 32,
+            )),
+            Packing::Bzip2 { .. } => None,
         }
     }
 
@@ -180,6 +193,7 @@ pub(crate) fn read<A: VolumeAccess>(
             changed: Time64::UNIX_EPOCH,
         },
         acorn: None,
+        recorded: Recorded::default(),
     };
     let mut tree = Tree::new(NameMatching::Exact, directory_meta());
     let name = match name {

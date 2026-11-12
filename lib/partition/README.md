@@ -17,11 +17,18 @@ validated fail-closed against an untrusted, possibly-hostile disk
 
 - A scheme-neutral model in *device logical blocks* (64-bit LBAs, large
   enough for GPT): `Partition`, `PartitionType` (`FatBoot`,
-  `ARXFSRoot`, `Other`), and an inline `PartitionTable`.
+  `ARXFSSystem`, `ARXFSRoot`, `Other`), and an inline `PartitionTable`.
 - `parse_partition_table(dev)` — detect MBR vs GPT and parse, returning
   the neutral table.
-- `mbr` — the classic MBR scheme: `encode` (image author) + `parse`
-  (boot reader), sharing one extent validator.
+- `mbr` — the classic MBR scheme, writing and reading through one extent
+  validator: `encode` (the image author, by role), `encode_entries` (a DOS
+  disk's author: each entry's type byte and active flag, and the CHS
+  addresses an INT 13h `Geometry` gives its extent, or the "use LBA" form for
+  a disk with none; a CHS address's limits are `MAX_CYLINDER` and
+  `MAX_SECTORS`), `fat_type` (the type byte DOS gives a FAT partition of a
+  kind and extent: by whether it ends within the 65,536 sectors early DOS
+  numbers, and whether CHS reaches its end), and `parse` (the boot
+  reader). The FAT kinds are `lib/fat`'s.
 - `gpt` — the GUID Partition Table read path: a fail-closed,
   CRC32-validated header + entry-array parser (the write path lands with
   the UEFI image builder), checked through the shared IEEE CRC-32

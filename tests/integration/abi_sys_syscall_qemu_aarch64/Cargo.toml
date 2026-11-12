@@ -40,6 +40,8 @@ name = "tairix-test-abi-sys-syscall-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+# The user stack's static storage.
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-abi-sys = { path = "../../../lib/abi-sys", version = "=0.0.0" }
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }

@@ -29,22 +29,16 @@ See `docs/src/drivers/input.md` for the full description and test surface.
   no contact stays held.
 - `VIRTIO_INPUT_DEVICE_ID` — the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from (the single source of truth, §2.2).
-- `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:
-  `feed` names each decoded `evdev`-keycode `Key` `InputEvent` edge's physical
-  key through one table (the key's HID usage), resolves it through the shared
-  `tairix_input::KeyboardState` (the modifiers, caps/num lock and US layout the
-  `lib/hid` console producer runs too, §2.2), and builds the
-  `tairix_abi::input::KeyInput` record a driver injects through `key_inject`
-  with the shared `tairix_keymap::key_record`, carrying the physical key. A
-  modifier edge that changes the *observable* held set emits a
-  `KeyInput::ModifiersChanged` record — the desktop needs it to qualify a
-  gesture that is not a key — while a repeat, or letting go of one shift key
-  while the other is held, emits nothing. Allocation-free and fail-closed
-  (`AGENTS.md` §2.9).
+- `key_edge` — the keyboard producer half: names each decoded
+  `evdev`-keycode `Key` `InputEvent` edge's physical key through one table (the
+  key's HID usage) and answers the `tairix_abi::input::KeyEdge` a driver
+  injects through `key_inject`; the seat reads what it types. An unknown
+  keycode, a key's own repeat and a non-key event are no edge. Allocation-free
+  and fail-closed (`AGENTS.md` §2.9).
 
 ## Dependencies
 
-`lib/abi`, `lib/virtio`, `lib/input`, `lib/keymap` — all `lib/*` (§17.4). Names
+`lib/abi`, `lib/virtio` — both `lib/*` (§17.4). Names
 no board, PCI, or SoC detail (`AGENTS.md` §2.20); the bus-agnostic `Transport`
 abstracts the transport, so the same source binds a virtio-input device however
 it is attached.

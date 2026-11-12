@@ -18,7 +18,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::{CpuId, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_log::{log, Event, EventId, Level};
@@ -60,7 +60,7 @@ const MAX_STEPS: u64 = 1_000_000;
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

@@ -1,7 +1,8 @@
 # Disk images
 
 A user opens a disk-image file — an `.iso`, an Acorn or Amiga `.adf`, an
-`.adl`/`.adm`/`.ads`, an `.hdf` — and the volume it holds appears at
+`.adl`/`.adm`/`.ads`, a PC's `.ima`/`.vfd`/`.flp`, an `.img` or an `.hdf` —
+and the volume it holds appears at
 `/Storage/<name>`, private to them, until the file manager's last window onto
 it closes while nothing else uses it (as the user's settings choose by
 default), or until they eject it or their login session ends. The staged design is `plans/DISK-IMAGES.md`; the volume is
@@ -192,8 +193,8 @@ whole ([System Information API](../abi/sysinfo.md)).
 ## Surfaces
 
 - **Opening an image.** `lib/browse` types `.iso` as
-  `application/x-cd-image`, `.adf`/`.adl`/`.adm`/`.ads` as
-  `application/x-raw-floppy-disk-image` and `.hdf` as
+  `application/x-cd-image`, `.adf`/`.adl`/`.adm`/`.ads`/`.ima`/`.vfd`/`.flp`
+  as `application/x-raw-floppy-disk-image` and `.hdf`/`.img` as
   `application/x-raw-disk-image`, the parent of both; activating any is
   `Activation::MountImage`. `files.app` carries it out on a worker of its own
   (`tairix_browse::mount::MountWorker`), since an attach waits for a driver,

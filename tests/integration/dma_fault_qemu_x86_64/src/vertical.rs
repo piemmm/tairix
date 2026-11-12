@@ -41,7 +41,7 @@ mod kernel {
     use tairix_itest_witness::{field_str, field_u64, sector0_byte};
     use tairix_kernel::floor_dma::Confinement;
     use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::x86_64::floor::{bring_up_virtio_pci, FloorDevice, FloorHost};
     use tairix_kernel::x86_64::init_spawn::X86_64InitSpawn;
     use tairix_kernel::x86_64::spawn_producer::SPAWN_TABLE_PHYSMAP;
@@ -62,7 +62,7 @@ mod kernel {
     };
 
     /// The boot heap, in `.bss`.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

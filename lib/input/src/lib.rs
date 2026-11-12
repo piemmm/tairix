@@ -35,9 +35,8 @@
 //! `tairix_abi`'s `KeyInput`, the same producer/consumer split as the pointer
 //! ([`PointerButton`] vs `tairix_abi`'s `PointerButtonCode`).
 //!
-//! [`keyboard`](mod@keyboard) is what every keyboard producer shares once it
-//! has named a key edge's physical key: the held modifiers, the locks and the
-//! US layout.
+//! [`keyboard`](mod@keyboard) is how a seat reads its keyboards' physical key
+//! edges: the keys down, the held modifiers, the locks and the US layout.
 //!
 //! # Gestures composed from those events
 //!
@@ -61,7 +60,7 @@ pub mod wheel;
 pub mod wire;
 
 pub use click::{past_drag_slop, ClickKind, ClickRun, DoubleClickTracker, DRAG_SLOP};
-pub use keyboard::{KeyEdge, KeyboardState};
+pub use keyboard::{KeyRead, KeyboardState};
 pub use tairix_abi::touch::PinchPhase;
 
 use tairix_geometry::Point;
@@ -273,6 +272,14 @@ pub enum InputEvent {
     PointerMoved {
         /// New pointer position, in screen coordinates.
         to: Point,
+    },
+    /// The pointer moved while locked to a window: the device's own counts,
+    /// unscaled and unbounded by the screen, moving no on-screen pointer.
+    PointerMotion {
+        /// Rightward displacement.
+        dx: i32,
+        /// Downward displacement.
+        dy: i32,
     },
     /// A pointer button was pressed at the current pointer position.
     PointerPressed {

@@ -1445,6 +1445,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-codegen"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-codegen",
+ "tairix-disasm",
+ "tairix-fuzzseed",
+]
+
+[[package]]
 name = "tairix-collections"
 version = "0.0.0"
 dependencies = [
@@ -1575,6 +1585,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-cp437"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-cpuops"
 version = "0.0.0"
 dependencies = [
@@ -1597,6 +1611,18 @@ dependencies = [
  "tairix-abi",
  "tairix-cpuops",
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-crt"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-geometry",
+ "tairix-mix",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-theme",
 ]
 
 [[package]]
@@ -2297,6 +2323,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-compress",
+ "tairix-cp437",
  "tairix-crc16",
  "tairix-crc32",
  "tairix-crypto",
@@ -2364,6 +2391,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
+ "tairix-fat",
  "tairix-fsprobe",
  "tairix-fsserve",
  "tairix-rt",
@@ -2615,6 +2643,7 @@ dependencies = [
  "tairix-bytedev",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-fat",
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
@@ -2670,6 +2699,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-drvrt",
+ "tairix-fat",
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
@@ -2788,6 +2818,14 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
+]
+
+[[package]]
+name = "tairix-fat"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -2919,6 +2957,7 @@ name = "tairix-fsmeta"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fat",
  "tairix-fuzzseed",
  "tairix-inline",
  "tairix-visible",
@@ -2933,6 +2972,7 @@ dependencies = [
  "tairix-compress",
  "tairix-crc32",
  "tairix-crypto",
+ "tairix-fat",
  "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-path",
@@ -3151,8 +3191,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
- "tairix-input",
- "tairix-keymap",
+ "tairix-inline",
 ]
 
 [[package]]
@@ -3254,6 +3293,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-geometry",
+ "tairix-inline",
 ]
 
 [[package]]
@@ -3379,6 +3419,7 @@ dependencies = [
  "tairix-drv-storage-virtio-blk",
  "tairix-drvhost",
  "tairix-enrolment",
+ "tairix-fat",
  "tairix-fbcon",
  "tairix-fdt",
  "tairix-fsprobe",
@@ -3443,6 +3484,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-input",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -4156,6 +4198,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-crc32",
+ "tairix-fat",
  "tairix-fuzzseed",
 ]
 
@@ -4201,6 +4244,49 @@ dependencies = [
  "tairix-rng",
  "tairix-rt",
  "tairix-theme",
+ "tairix-util",
+ "tairix-window",
+]
+
+[[package]]
+name = "tairix-pcemu"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appdata",
+ "tairix-audio",
+ "tairix-browse",
+ "tairix-buildcfg",
+ "tairix-codegen",
+ "tairix-collections",
+ "tairix-compress",
+ "tairix-controls",
+ "tairix-cp437",
+ "tairix-crc32",
+ "tairix-crt",
+ "tairix-fat",
+ "tairix-font",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-geometry",
+ "tairix-hash",
+ "tairix-help",
+ "tairix-icon",
+ "tairix-image",
+ "tairix-inline",
+ "tairix-input",
+ "tairix-log",
+ "tairix-mix",
+ "tairix-parallel",
+ "tairix-partition",
+ "tairix-pcemu",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-unicode",
  "tairix-util",
  "tairix-window",
 ]
@@ -5227,6 +5313,7 @@ dependencies = [
  "tairix-clear",
  "tairix-colour",
  "tairix-controls",
+ "tairix-crt",
  "tairix-display",
  "tairix-font",
  "tairix-geometry",
@@ -5280,6 +5367,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-log",
 ]
 
@@ -5293,6 +5381,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-log",
 ]
 
@@ -5338,6 +5427,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-kalloc",
 ]
 
 [[package]]
@@ -5709,6 +5799,87 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-code-install"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-test-code-install-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-caps",
+ "tairix-fdt",
+ "tairix-itest-finisher",
+ "tairix-itest-gic",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-test-code-install-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-caps",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-test-code-install-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-x86_64",
+ "tairix-caps",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-test-cross-cpu-tlb-shootdown-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6021,6 +6192,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-drv-fs-fat32",
+ "tairix-fat",
 ]
 
 [[package]]
@@ -6823,6 +6995,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-kalloc",
 ]
 
 [[package]]
@@ -6833,6 +7006,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-log",
 ]
 
@@ -6844,6 +7018,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-log",
 ]
 
@@ -7247,6 +7422,59 @@ dependencies = [
  "tairix-kernel",
  "tairix-log",
  "tairix-test-optical",
+]
+
+[[package]]
+name = "tairix-test-pcemu"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-codegen",
+ "tairix-fat",
+ "tairix-hash",
+ "tairix-pcemu",
+ "tairix-procinfo",
+ "tairix-rt",
+ "tairix-sandbox",
+]
+
+[[package]]
+name = "tairix-test-pcemu-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-pcemu",
+]
+
+[[package]]
+name = "tairix-test-pcemu-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-pcemu",
+]
+
+[[package]]
+name = "tairix-test-pcemu-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-pcemu",
 ]
 
 [[package]]
@@ -9640,8 +9868,10 @@ dependencies = [
  "tairix-browse",
  "tairix-cinder",
  "tairix-colour",
+ "tairix-compress",
  "tairix-controls",
  "tairix-cpuops",
+ "tairix-crc32",
  "tairix-crypto",
  "tairix-cursor",
  "tairix-desktop-session",
@@ -9722,6 +9952,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-netmap",
  "tairix-parallel",
+ "tairix-pcemu",
  "tairix-procinfo",
  "tairix-proglib",
  "tairix-qemu",
@@ -9764,6 +9995,7 @@ dependencies = [
  "tairix-test-netmap-qemu-aarch64",
  "tairix-test-netstack-wire",
  "tairix-test-optical",
+ "tairix-test-pcemu",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
  "tairix-test-screensaver-qemu-aarch64",

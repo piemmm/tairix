@@ -505,6 +505,24 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-pcemu",
+        description: "the entry into translated code: the frame copied in and out whole beside \
+                      the environment its refresh helper reaches through the one pointer the \
+                      code hands back, the page map's words and the helper table it is entered \
+                      with, and each block's code given back exactly once",
+        features: &[],
+        scope: Scope::LibModules {
+            modules: &["cpu::jit::native::tests::"],
+            reason: "the crate denies `unsafe` outside the native executor, whose tests drive \
+                     its entry and its helpers through stand-in blocks entered as generated code \
+                     is; the executor's `address_tests` make code of an integer address, which \
+                     the interpreter refuses under strict provenance, and the rest of the \
+                     library is a machine emulated in safe code, hours interpreted for no path \
+                     these do not already take",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-kalloc",
         description: "the kernel heap's in-band boundary tags: the physical back-link a \
                       coalesce dereferences, the block a split carves off, the descriptor an \

@@ -35,7 +35,7 @@ mod kernel {
 
     use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, BOOT_HEAP_BYTES};
     use tairix_log::{Event, EventId, Sink};
     use tairix_test_kheap_growth as kheap_growth;
     use tairix_test_riscv64_boot::boot;
@@ -43,7 +43,7 @@ mod kernel {
     /// The production bin's bootstrap arena, in its NOLOAD `.heap` section,
     /// so this boot proves the pipeline fits it before the heap can grow.
     #[link_section = ".heap"]
-    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

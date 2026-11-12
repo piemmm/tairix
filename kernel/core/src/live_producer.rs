@@ -51,6 +51,8 @@ pub fn anon_errno(err: AnonError) -> Errno {
         AnonError::OutOfMemory => Errno::OutOfMemory,
         AnonError::NotMapped => Errno::NotFound,
         AnonError::Overlap => Errno::AlreadyExists,
+        // The platform refused to fence every CPU's instruction fetch.
+        AnonError::InstructionFence => Errno::DeviceFault,
         // `PhysUnmapped`, `Map(_)`, and any future (`#[non_exhaustive]`)
         // variant fold to the generic bad-address error, failing closed
         // rather than being silently dropped.

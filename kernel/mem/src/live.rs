@@ -34,6 +34,7 @@
 //! direct map, the frame allocator, and the device-window allocator.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::ops::{Range, RangeInclusive};
 
 use tairix_collections::{OrderedSet, RangeSet};
@@ -42,7 +43,9 @@ use tairix_log::Sink;
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
 
-use crate::anon::{map_anonymous, page_at, unmap_anonymous, AnonError};
+use crate::anon::{
+    detach_anonymous, map_anonymous, map_errno, page_at, unmap_anonymous, zero_frame, AnonError,
+};
 use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{CarveDevice, DmaCustodian, DmaError, DmaWindowMap};
@@ -60,6 +63,9 @@ use crate::retire::{Retire, Retiring, SpaceTlb, TlbContext, Unpublished};
 use crate::vmm::{
     AddressSpace, FrozenAddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr,
 };
+
+/// What an installed code page is mapped with: read and execute, never write.
+pub const CODE_FLAGS: MapFlags = MapFlags::READ.union(MapFlags::EXEC).union(MapFlags::USER);
 
 /// Why a [`LiveUserSpace`] operation failed.
 ///
@@ -490,6 +496,70 @@ pub trait LiveUserSpace: Send {
     /// page-table error.
     fn unmap_shared(&mut self, base_va: u64, len: usize) -> Result<(), LiveSpaceError>;
 
+    /// Take the `page_count` pages from `base_va`, anonymous memory of this
+    /// space every page of which is resident, out of it with what they hold:
+    /// each frame is appended to `into`, for the space it moves to, once no
+    /// CPU and no `retire` view can reach it here.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] for a range that
+    /// is not wholly this space's resident anonymous memory, and
+    /// [`AnonError::OutOfMemory`] when `into` cannot be given the room, taking
+    /// nothing; the page table's refusal part-way, the frames already taken
+    /// zeroed and freed. `into` is as it was after every refusal.
+    fn detach_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+        into: &mut Vec<Frame>,
+    ) -> Result<(), LiveSpaceError>;
+
+    /// Place `page_count` pages in this space's code window, mapping nothing,
+    /// and answer the base [`Self::map_code`] installs code another space
+    /// wrote at.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::ZeroLength`] for no pages, or
+    /// [`AnonError::OutOfMemory`] when the code window (absent on a
+    /// degenerate configuration) has no room.
+    fn reserve_code(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
+
+    /// Map `frames`, code another space wrote, with [`CODE_FLAGS`] over the
+    /// whole of the empty placement [`Self::reserve_code`] answered `base`
+    /// for.
+    ///
+    /// Every CPU's instruction fetch is made to see the frames before any is
+    /// mapped, and the mapping reaches every CPU the space runs on before
+    /// this returns. The frames are this space's from the call on: a refusal
+    /// zeroes and frees them and gives the placement back.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] when `base` and
+    /// the frames do not name exactly such a placement,
+    /// [`AnonError::OutOfMemory`] when the page tables are exhausted,
+    /// [`AnonError::InstructionFence`] when not every CPU's instruction fetch
+    /// could be fenced past the code, or the precise map error otherwise.
+    fn map_code(&mut self, base: u64, frames: &[Frame]) -> Result<(), LiveSpaceError>;
+
+    /// Release the `page_count` pages of the code window from `base_va`, each
+    /// installed frame zeroed and freed once no CPU and no `retire` view can
+    /// reach it, and answer how many were installed.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::NotMapped`] for a range that
+    /// is not wholly placed in the code window, releasing nothing.
+    fn release_code(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<u64, LiveSpaceError>;
+
     /// Snapshot this space's current live mappings into a `Send + Sync`
     /// [`FrozenAddressSpace`], the form the kernel-wide address-space
     /// registry holds for the user-memory copy path.
@@ -509,6 +579,13 @@ pub trait LiveUserSpace: Send {
     ///
     /// [`AllocError::OutOfMemory`] when the snapshot cannot be allocated.
     fn freeze(&self) -> Result<FrozenAddressSpace, AllocError>;
+
+    /// Whether the page holding `va` is mapped to allow a user read, or a
+    /// `write`, discarding this CPU's cached view of it when it is: a fault on
+    /// such a page was taken by a CPU that cached the page's absence before
+    /// another CPU mapped it, as a port may, and the access only needs to
+    /// retry.
+    fn settle_spurious(&mut self, va: u64, write: bool) -> bool;
 
     /// Translate a single `page` to the `(frame, flags)` the backend
     /// resolves it to, or `None` when it is not mapped.
@@ -665,6 +742,9 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     dma_custodian: Option<DmaCustodian>,
     shared: MmioWindowMap,
     file: Option<AnonWindowMap>,
+    /// Where code installed from another space is placed; none on a
+    /// configuration with no address space for it.
+    code: Option<AnonWindowMap>,
     space_id: u64,
     scanner: ColdPageScanner,
     /// Frames this space has committed for demand-paged anonymous memory
@@ -691,10 +771,73 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     fixed: RangeSet<u64>,
 }
 
+/// Where the anonymous range a release names is held.
+enum Held {
+    /// Placed in the heap window.
+    Placed,
+    /// Within caller-placed reservations: the range's extent.
+    Fixed(Range<u64>),
+}
+
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
-    /// [`LiveUserSpace::unmap_anonymous`], purging `tier`'s compressed copies
-    /// of the released pages: one left behind would be restored into
-    /// whatever is mapped there next, and its charge would stand until exit.
+    /// Check that the `page_count` pages from `base_va` are anonymous memory
+    /// of this space, making the room their release's bookkeeping needs so
+    /// that nothing after a page has gone can be refused.
+    ///
+    /// Pages rather than a whole placement, because the anonymous ABI
+    /// releases what the caller names: a program that grew a region over
+    /// several calls hands back the part of it that came free. A range in the
+    /// file or code window is the wrong call, and outside the heap window only
+    /// caller-placed reservations count, so nothing another kind of mapping
+    /// owns is reached.
+    fn prepare_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<Held, LiveSpaceError> {
+        if self.file.as_ref().is_some_and(|file| file.owns(base_va))
+            || self.code.as_ref().is_some_and(|code| code.owns(base_va))
+        {
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
+        let extent = fixed_extent(base_va, page_count)?;
+        if self.anon.owns(base_va) {
+            self.anon.prepare_release_pages(base_va, page_count)?;
+            return Ok(Held::Placed);
+        }
+        if self.fixed.first_gap(extent.clone()).is_some() {
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
+        self.fixed
+            .try_reserve(1)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        Ok(Held::Fixed(extent))
+    }
+
+    /// Forget the range [`Self::prepare_anonymous`] admitted, now that its
+    /// pages are gone, with `tier`'s compressed copies of them: one left
+    /// behind would be restored into whatever is mapped there next, and its
+    /// charge would stand until exit.
+    fn forget_anonymous(
+        &mut self,
+        held: Held,
+        base_va: u64,
+        page_count: u64,
+        tier: Option<&SpinLock<Ramzip>>,
+    ) {
+        match held {
+            Held::Placed => {
+                let released = self.anon.release_pages(base_va, page_count);
+                debug_assert!(released.is_ok(), "a prepared release was refused");
+            }
+            Held::Fixed(extent) => {
+                let removed = self.fixed.remove(extent);
+                debug_assert!(removed.is_ok(), "a reserved split was refused");
+            }
+        }
+        if let Some(tier) = tier {
+            tier.lock()
+                .purge_range(self.space_id, base_va / PAGE_SIZE as u64, page_count);
+        }
+    }
+
+    /// [`LiveUserSpace::unmap_anonymous`] against `tier`.
     fn release_anonymous(
         &mut self,
         base_va: u64,
@@ -702,36 +845,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         retire: &mut dyn Retire,
         tier: Option<&SpinLock<Ramzip>>,
     ) -> Result<(), LiveSpaceError> {
-        // A file-mapped region is released only through
-        // `release_file_region` (its residency is sparse and its
-        // bookkeeping lives in the file window): an anonymous unmap naming
-        // an address in the file window is the wrong call and fails closed
-        // before any teardown.
-        if self.file.as_ref().is_some_and(|file| file.owns(base_va)) {
-            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
-        }
-        // A base inside the heap window is a non-`FIXED` placement: every
-        // page of the range must be live in the window before any teardown,
-        // so a bad (base, len) for an in-window address fails closed without
-        // unmapping a neighbour's pages. Pages rather than a whole placement,
-        // because the anonymous ABI releases what the caller names — a
-        // program that grew a region over several calls hands back the part
-        // of it that came free. A `FIXED` base (outside the window) has no
-        // placement record and is torn down by extent.
-        let placed = self.anon.owns(base_va);
-        let extent = fixed_extent(base_va, page_count)?;
-        if placed {
-            self.anon.prepare_release_pages(base_va, page_count)?;
-        } else {
-            // Elsewhere only a caller-placed reservation held whole is
-            // released, so nothing another kind of mapping owns is reached.
-            if self.fixed.first_gap(extent.clone()).is_some() {
-                return Err(LiveSpaceError::Anon(AnonError::NotMapped));
-            }
-            self.fixed
-                .try_reserve(1)
-                .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
-        }
+        let held = self.prepare_anonymous(base_va, page_count)?;
         let frames = self.frames;
         // Count the frames actually reclaimed: a demand-paged region is
         // sparsely resident, so the resident count tells us how many of its
@@ -769,19 +883,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             self.frames.uncommit(unbacked);
             self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
         }
-        if placed {
-            // Prepared above, so the release is not refused.
-            let released = self.anon.release_pages(base_va, page_count);
-            debug_assert!(released.is_ok(), "a prepared release was refused");
-        } else {
-            // Room for the split was made above.
-            let removed = self.fixed.remove(extent);
-            debug_assert!(removed.is_ok(), "a reserved split was refused");
-        }
-        if let Some(tier) = tier {
-            tier.lock()
-                .purge_range(self.space_id, base_va / PAGE_SIZE as u64, page_count);
-        }
+        self.forget_anonymous(held, base_va, page_count, tier);
         Ok(())
     }
 
@@ -794,6 +896,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             Some(self.dma.span()),
             Some(self.shared.span()),
             self.file.as_ref().map(AnonWindowMap::span),
+            self.code.as_ref().map(AnonWindowMap::span),
         ];
         if windows
             .into_iter()
@@ -857,6 +960,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         shared_window_pages: usize,
         file_window_base: VirtAddr,
         file_window_pages: usize,
+        code_window_base: VirtAddr,
+        code_window_pages: usize,
     ) -> Result<Self, MmioError> {
         // Every window is checked before the space is retained, each refusal
         // the one configuration fault the spawn producer handles. The
@@ -875,8 +980,13 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             } else {
                 AnonWindowMap::new(file_window_base, file_window_pages).map(Some)
             },
+            if code_window_pages == 0 {
+                Ok(None)
+            } else {
+                AnonWindowMap::new(code_window_base, code_window_pages).map(Some)
+            },
         );
-        let (Ok(mmio), Ok(anon), Ok(dma), Ok(shared), Ok(file)) = windows else {
+        let (Ok(mmio), Ok(anon), Ok(dma), Ok(shared), Ok(file), Ok(code)) = windows else {
             // SAFETY: the space was handed over by value and nothing retains
             // it, so nothing can make it active again or reach into its
             // tables; every entry is flushed here before its frame goes, and a
@@ -899,6 +1009,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             dma_custodian: None,
             shared,
             file,
+            code,
             scanner: ColdPageScanner::new(),
             committed_unbacked: 0,
             growable: OrderedSet::new(),
@@ -918,6 +1029,75 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     #[must_use]
     pub fn space(&self) -> &AddressSpace<P> {
         &self.space
+    }
+
+    /// Whether `frames` fit exactly the empty code-window placement at `base`.
+    fn is_empty_placement(&self, base: u64, frames: &[Frame]) -> bool {
+        let Ok(pages) = u64::try_from(frames.len()) else {
+            return false;
+        };
+        let placed = self
+            .code
+            .as_ref()
+            .is_some_and(|code| code.validate(base, pages).is_ok());
+        let (Ok(first), Ok(last)) = (page_at(base, 0), page_at(base, pages.saturating_sub(1)))
+        else {
+            return false;
+        };
+        placed && self.space.next_live(first, last).is_none()
+    }
+
+    /// Clean `frames` from the data caches and fence every CPU's instruction
+    /// fetch past them.
+    fn fence_code(&self, frames: &[Frame]) -> Result<(), LiveSpaceError> {
+        for &frame in frames {
+            self.physmap
+                .sync_instruction_cache(frame.start(), PAGE_SIZE);
+        }
+        if self.physmap.fence_instruction_fetch() {
+            Ok(())
+        } else {
+            Err(LiveSpaceError::Anon(AnonError::InstructionFence))
+        }
+    }
+
+    /// Undo a [`LiveUserSpace::map_code`] of `frames` at `base` that mapped
+    /// only the first `mapped`: those leave as an unmap takes them, reaching
+    /// every CPU that may have seen them, the rest are discarded, and the
+    /// placement goes back to the window.
+    fn unwind_code(&mut self, base: u64, mapped: u64, frames: &[Frame]) {
+        if mapped > 0 {
+            let pool = self.frames;
+            let _ = unmap_anonymous(
+                &mut self.space,
+                &self.physmap,
+                base,
+                mapped,
+                &mut Unpublished,
+                &mut |frame| {
+                    let _ = pool.free(frame);
+                },
+            );
+        }
+        let rest = usize::try_from(mapped)
+            .ok()
+            .and_then(|mapped| frames.get(mapped..))
+            .unwrap_or_default();
+        self.discard(rest);
+        if let Some(code) = self.code.as_mut() {
+            let released = code.release(base, frames.len() as u64);
+            debug_assert!(released.is_ok(), "a placement was refused its release");
+        }
+    }
+
+    /// Zero and free `frames`, none of which any CPU can reach: one the
+    /// direct map cannot reach is kept rather than released unscrubbed.
+    fn discard(&self, frames: &[Frame]) {
+        for &frame in frames {
+            if zero_frame(&self.physmap, frame).is_ok() {
+                let _ = self.frames.free(frame);
+            }
+        }
     }
 
     /// Settle a fault's map of `page_count` pages from `base_va`: when another
@@ -1281,10 +1461,122 @@ where
             .map_err(LiveSpaceError::from)
     }
 
+    fn detach_anonymous(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+        into: &mut Vec<Frame>,
+    ) -> Result<(), LiveSpaceError> {
+        let room = usize::try_from(page_count).map_err(|_| AnonError::Overflow)?;
+        into.try_reserve(room)
+            .map_err(|_| LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        let held = self.prepare_anonymous(base_va, page_count)?;
+        let start = into.len();
+        let detached = detach_anonymous(
+            &mut self.space,
+            &self.physmap,
+            base_va,
+            page_count,
+            retire,
+            &mut |frame| into.push(frame),
+        );
+        if let Err(err) = detached {
+            self.discard(into.get(start..).unwrap_or_default());
+            into.truncate(start);
+            return Err(err.into());
+        }
+        self.forget_anonymous(held, base_va, page_count, crate::ramzip::global());
+        Ok(())
+    }
+
+    fn reserve_code(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+        let code = self
+            .code
+            .as_mut()
+            .ok_or(LiveSpaceError::Anon(AnonError::OutOfMemory))?;
+        Ok(code.allocate(page_count)?)
+    }
+
+    fn map_code(&mut self, base: u64, frames: &[Frame]) -> Result<(), LiveSpaceError> {
+        if !self.is_empty_placement(base, frames) {
+            self.discard(frames);
+            return Err(LiveSpaceError::Anon(AnonError::NotMapped));
+        }
+        let prepared = self
+            .space
+            .reserve_records(frames.len())
+            .map_err(|err| LiveSpaceError::Anon(map_errno(err)))
+            .and_then(|()| self.fence_code(frames));
+        if let Err(err) = prepared {
+            self.unwind_code(base, 0, frames);
+            return Err(err);
+        }
+        for (index, &frame) in (0u64..).zip(frames) {
+            let mapped = page_at(base, index)
+                .and_then(|page| self.space.map(page, frame, CODE_FLAGS).map_err(map_errno));
+            if let Err(err) = mapped {
+                self.unwind_code(base, index, frames);
+                return Err(LiveSpaceError::Anon(err));
+            }
+        }
+        self.space.publish_remote(base, frames.len() as u64);
+        Ok(())
+    }
+
+    fn release_code(
+        &mut self,
+        base_va: u64,
+        page_count: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<u64, LiveSpaceError> {
+        let code = self
+            .code
+            .as_mut()
+            .filter(|code| code.owns(base_va))
+            .ok_or(LiveSpaceError::Anon(AnonError::NotMapped))?;
+        code.prepare_release_pages(base_va, page_count)?;
+        let pool = self.frames;
+        let mut installed = 0u64;
+        unmap_anonymous(
+            &mut self.space,
+            &self.physmap,
+            base_va,
+            page_count,
+            retire,
+            &mut |frame| {
+                installed += 1;
+                let _ = pool.free(frame);
+            },
+        )?;
+        let released = code.release_pages(base_va, page_count);
+        debug_assert!(released.is_ok(), "a prepared release was refused");
+        Ok(installed)
+    }
+
     fn freeze(&self) -> Result<FrozenAddressSpace, AllocError> {
         // One freeze definition lives on `AddressSpace`; this only erases the
         // backend `P` for the registry.
         self.space.freeze()
+    }
+
+    fn settle_spurious(&mut self, va: u64, write: bool) -> bool {
+        let Ok(page) = Page::from_addr(VirtAddr::new(va & !(PAGE_SIZE as u64 - 1))) else {
+            return false;
+        };
+        let access = if write {
+            MapFlags::WRITE
+        } else {
+            MapFlags::READ
+        };
+        let allowed = self
+            .space
+            .translate(page)
+            .is_some_and(|(_, flags)| flags.contains(access | MapFlags::USER));
+        if allowed {
+            self.space.discard_stale(page);
+        }
+        allowed
     }
 
     fn translate_page(&self, page: Page) -> Option<(Frame, MapFlags)> {
@@ -1666,6 +1958,10 @@ mod tests {
         fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
             self.0.sync_instruction_cache(phys, len);
         }
+
+        fn fence_instruction_fetch(&self) -> bool {
+            self.0.fence_instruction_fetch()
+        }
     }
 
     /// The user virtual window device mappings land in — far above the
@@ -1694,6 +1990,10 @@ mod tests {
     const FILE_WINDOW_BASE: u64 = 0x3_0000_0000;
     const FILE_WINDOW_PAGES: usize = 64;
 
+    /// The user virtual window code from another space is installed in.
+    const CODE_WINDOW_BASE: u64 = 0x4_0000_0000;
+    const CODE_WINDOW_PAGES: usize = 64;
+
     macro_rules! live_space {
         () => {{
             let (frames, _simmap) = backing!();
@@ -1712,6 +2012,8 @@ mod tests {
                 SHARED_WINDOW_PAGES,
                 VirtAddr::new(FILE_WINDOW_BASE),
                 FILE_WINDOW_PAGES,
+                VirtAddr::new(0),
+                0,
             )
             .expect("a page-aligned, non-zero window is valid")
         }};
@@ -2217,6 +2519,10 @@ mod tests {
             fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
                 self.inner.sync_instruction_cache(phys, len);
             }
+
+            fn fence_instruction_fetch(&self) -> bool {
+                self.inner.fence_instruction_fetch()
+            }
         }
 
         static RECORDED: Once<Recorded> = Once::new();
@@ -2246,6 +2552,8 @@ mod tests {
             SHARED_WINDOW_PAGES,
             VirtAddr::new(FILE_WINDOW_BASE),
             FILE_WINDOW_PAGES,
+            VirtAddr::new(0),
+            0,
         )
         .expect("windows are valid");
 
@@ -2323,7 +2631,10 @@ mod tests {
         ($frames:expr, $simmap:expr, $tlb:expr) => {
             shared_live_space!(map: SharedSim($simmap), $frames, $tlb)
         };
-        (map: $map:expr, $frames:expr, $tlb:expr) => {{
+        (map: $map:expr, $frames:expr, $tlb:expr) => {
+            shared_live_space!(map: $map, $frames, $tlb, code: CODE_WINDOW_PAGES)
+        };
+        (map: $map:expr, $frames:expr, $tlb:expr, code: $code_pages:expr) => {{
             LiveSpace::new(
                 AddressSpace::new(HostPageTable::new()),
                 $tlb,
@@ -2339,6 +2650,8 @@ mod tests {
                 SHARED_WINDOW_PAGES,
                 VirtAddr::new(FILE_WINDOW_BASE),
                 FILE_WINDOW_PAGES,
+                VirtAddr::new(CODE_WINDOW_BASE),
+                $code_pages,
             )
             .expect("windows are valid")
         }};
@@ -2609,6 +2922,8 @@ mod tests {
                 SHARED_WINDOW_PAGES,
                 VirtAddr::new(FILE_WINDOW_BASE),
                 FILE_WINDOW_PAGES,
+                VirtAddr::new(0),
+                0,
             )
             .expect("windows are valid");
 
@@ -2718,6 +3033,8 @@ mod tests {
             SHARED_WINDOW_PAGES,
             VirtAddr::new(FILE_WINDOW_BASE),
             FILE_WINDOW_PAGES,
+            VirtAddr::new(0),
+            0,
         );
         assert!(matches!(
             refused,
@@ -2754,6 +3071,8 @@ mod tests {
             SHARED_WINDOW_PAGES,
             VirtAddr::new(FILE_WINDOW_BASE),
             FILE_WINDOW_PAGES,
+            VirtAddr::new(0),
+            0,
         )
         .expect("windows are valid");
 
@@ -2847,6 +3166,10 @@ mod tests {
 
         fn sync_instruction_cache(&self, phys: crate::frame::PhysAddr, len: usize) {
             self.sim.sync_instruction_cache(phys, len);
+        }
+
+        fn fence_instruction_fetch(&self) -> bool {
+            self.sim.fence_instruction_fetch()
         }
     }
 
@@ -3056,24 +3379,7 @@ mod tests {
         frames: &'static FrameAllocator,
         simmap: &'static SimPhysMap,
     ) -> (LiveSpace<HostPageTable, SharedSim>, &'static SimPhysMap) {
-        let live = LiveSpace::new(
-            AddressSpace::new(HostPageTable::new()),
-            host_tlb(),
-            SharedSim(simmap),
-            frames,
-            VirtAddr::new(MMIO_WINDOW_BASE),
-            MMIO_WINDOW_PAGES,
-            VirtAddr::new(ANON_WINDOW_BASE),
-            ANON_WINDOW_PAGES,
-            VirtAddr::new(DMA_WINDOW_BASE),
-            DMA_WINDOW_PAGES,
-            VirtAddr::new(SHARED_WINDOW_BASE),
-            SHARED_WINDOW_PAGES,
-            VirtAddr::new(FILE_WINDOW_BASE),
-            FILE_WINDOW_PAGES,
-        )
-        .expect("windows are valid");
-        (live, simmap)
+        (shared_live_space!(frames, simmap), simmap)
     }
 
     /// The live space must be `Send`: `kernel/core` moves it into the
@@ -3083,6 +3389,390 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<LiveSpace<HostPageTable, SimPhysMap>>();
         assert_send::<Box<dyn LiveUserSpace + Send>>();
+    }
+
+    /// Memory moved out of one space and code installed in another.
+    mod code {
+        use super::{fill_phys, host_tlb, phys_is_zero, SharedSim};
+        use super::{
+            ANON_WINDOW_BASE, ANON_WINDOW_PAGES, CODE_WINDOW_BASE, CODE_WINDOW_PAGES,
+            DMA_WINDOW_BASE, DMA_WINDOW_PAGES, FILE_WINDOW_BASE, FILE_WINDOW_PAGES,
+            MMIO_WINDOW_BASE, MMIO_WINDOW_PAGES, SHARED_WINDOW_BASE, SHARED_WINDOW_PAGES, SIM_BASE,
+            SIM_PAGES,
+        };
+        use crate::anon::{page_at, AnonError};
+        use crate::frame::{Frame, FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
+        use crate::live::{LiveSpace, LiveSpaceError, LiveUserSpace, CODE_FLAGS};
+        use crate::phys::{PhysMap, SimPhysMap};
+        use crate::retire::Unpublished;
+        use crate::test_fixture::frame_backing;
+        use crate::uaccess::{copy_in, copy_out, UaccessError};
+        use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use tairix_sync::SpinLock;
+
+        extern crate std;
+        use std::vec;
+        use std::vec::Vec;
+
+        /// What the direct map was asked to do for code, in order.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Step {
+            Synced(PhysAddr),
+            Fenced,
+        }
+
+        /// A direct map over shared simulated RAM that records each
+        /// instruction-cache sync and fence, a fence succeeding while
+        /// `fences` holds.
+        struct CodeSim {
+            sim: &'static SimPhysMap,
+            fences: AtomicBool,
+            steps: SpinLock<Vec<Step>>,
+        }
+
+        impl CodeSim {
+            fn new(sim: &'static SimPhysMap, fences: bool) -> Self {
+                Self {
+                    sim,
+                    fences: AtomicBool::new(fences),
+                    steps: SpinLock::new(Vec::new()),
+                }
+            }
+
+            fn steps(&self) -> Vec<Step> {
+                core::mem::take(&mut *self.steps.lock())
+            }
+        }
+
+        impl PhysMap for CodeSim {
+            fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+                self.sim.translate(phys, len)
+            }
+
+            fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+                self.sim.clean_invalidate(phys, len);
+            }
+
+            fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+                assert_eq!(len, PAGE_SIZE, "a whole page at a time");
+                self.steps.lock().push(Step::Synced(phys));
+            }
+
+            fn fence_instruction_fetch(&self) -> bool {
+                self.steps.lock().push(Step::Fenced);
+                self.fences.load(Ordering::Relaxed)
+            }
+        }
+
+        /// A frame holding `byte` throughout, as a compiler leaves one.
+        fn written(frames: &FrameAllocator, simmap: &SimPhysMap, byte: u8) -> Frame {
+            let frame = frames
+                .alloc(MemoryClass::UserAnon)
+                .expect("a frame is free");
+            fill_phys(simmap, frame.start(), PAGE_SIZE, byte);
+            frame
+        }
+
+        fn scrubbed(simmap: &SimPhysMap, frames: &[Frame]) -> bool {
+            frames
+                .iter()
+                .all(|frame| phys_is_zero(simmap, frame.start(), PAGE_SIZE))
+        }
+
+        /// Place `frames` in `live`'s code window and install them there.
+        fn install(live: &mut dyn LiveUserSpace, frames: &[Frame]) -> Result<u64, LiveSpaceError> {
+            let base = live.reserve_code(frames.len() as u64)?;
+            live.map_code(base, frames).map(|()| base)
+        }
+
+        #[test]
+        fn code_maps_read_execute_at_its_window_once_cleaned_and_fenced() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            let code = [written(frames, simmap, 0xC3), written(frames, simmap, 0x90)];
+
+            let base = live.reserve_code(2).expect("places");
+            assert_eq!(base, CODE_WINDOW_BASE);
+            assert!(
+                live.physmap.steps().is_empty(),
+                "placing does no cache work"
+            );
+            assert_eq!(live.space().mapped_pages(), 0, "nor maps a page");
+            live.map_code(base, &code).expect("installs");
+            for (index, &frame) in (0u64..).zip(&code) {
+                let page = page_at(base, index).expect("in range");
+                assert_eq!(live.translate_page(page), Some((frame, CODE_FLAGS)));
+            }
+            assert_eq!(
+                live.physmap.steps(),
+                [
+                    Step::Synced(code[0].start()),
+                    Step::Synced(code[1].start()),
+                    Step::Fenced
+                ],
+                "every page cleaned, then one fence"
+            );
+
+            let mut bytes = vec![0; 2 * PAGE_SIZE];
+            copy_in(live.space(), simmap, VirtAddr::new(base), &mut bytes).expect("readable");
+            assert!(bytes[..PAGE_SIZE].iter().all(|&byte| byte == 0xC3));
+            assert!(bytes[PAGE_SIZE..].iter().all(|&byte| byte == 0x90));
+            assert_eq!(
+                copy_out(live.space(), simmap, VirtAddr::new(base), &[0]),
+                Err(UaccessError::NotWritable)
+            );
+        }
+
+        #[test]
+        fn a_refused_fence_maps_nothing_scrubs_every_frame_and_gives_the_placement_back() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, false), frames, host_tlb());
+            let code = [written(frames, simmap, 0xC3), written(frames, simmap, 0xC3)];
+            let free = frames.free_frames();
+
+            assert_eq!(
+                install(&mut live, &code),
+                Err(LiveSpaceError::Anon(AnonError::InstructionFence))
+            );
+            assert_eq!(live.space().mapped_pages(), 0);
+            assert_eq!(frames.free_frames(), free + 2);
+            assert!(scrubbed(simmap, &code));
+            assert_eq!(live.reserve_code(1), Ok(CODE_WINDOW_BASE));
+        }
+
+        #[test]
+        fn code_with_nowhere_to_go_is_refused_its_placement() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let map = CodeSim::new(simmap, true);
+            let mut absent = shared_live_space!(map: map, frames, host_tlb(), code: 0);
+            assert_eq!(
+                absent.reserve_code(1),
+                Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+            );
+
+            let map = CodeSim::new(simmap, true);
+            let mut full = shared_live_space!(map: map, frames, host_tlb(), code: 1);
+            assert_eq!(
+                full.reserve_code(2),
+                Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+            );
+            assert_eq!(
+                full.reserve_code(0),
+                Err(LiveSpaceError::Anon(AnonError::ZeroLength))
+            );
+            assert_eq!(full.reserve_code(1), Ok(CODE_WINDOW_BASE));
+        }
+
+        #[test]
+        fn code_maps_only_over_the_whole_of_an_empty_placement() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            let base = live.reserve_code(2).expect("places");
+            let refused = Err(LiveSpaceError::Anon(AnonError::NotMapped));
+
+            for (at, count) in [
+                (base, 1),
+                (base, 3),
+                (base + PAGE_SIZE as u64, 1),
+                (0x7000_0000, 2),
+            ] {
+                let code: Vec<Frame> = (0..count).map(|_| written(frames, simmap, 0xC3)).collect();
+                let free = frames.free_frames();
+                assert_eq!(live.map_code(at, &code), refused, "{count} at {at:#x}");
+                assert_eq!(
+                    frames.free_frames(),
+                    free + code.len(),
+                    "the frames went back"
+                );
+                assert!(scrubbed(simmap, &code));
+            }
+            assert!(
+                live.physmap.steps().is_empty(),
+                "no cache work for a refusal"
+            );
+
+            let code = [written(frames, simmap, 0xC3), written(frames, simmap, 0xC3)];
+            live.map_code(base, &code)
+                .expect("installs over the placement");
+            let again = [written(frames, simmap, 0x90), written(frames, simmap, 0x90)];
+            assert_eq!(
+                live.map_code(base, &again),
+                refused,
+                "never over installed code"
+            );
+            assert!(scrubbed(simmap, &again));
+            assert!(!scrubbed(simmap, &code), "the installed code is untouched");
+        }
+
+        #[test]
+        fn released_code_is_scrubbed_and_freed_page_by_page_and_only_once() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            let code = [written(frames, simmap, 0xC3), written(frames, simmap, 0x90)];
+            let base = install(&mut live, &code).expect("installs");
+            let free = frames.free_frames();
+
+            assert_eq!(
+                live.release_code(base, 3, &mut Unpublished),
+                Err(LiveSpaceError::Anon(AnonError::NotMapped)),
+                "a range past the code releases none of it"
+            );
+            assert_eq!(live.space().mapped_pages(), 2);
+
+            let second = base + PAGE_SIZE as u64;
+            assert_eq!(live.release_code(second, 1, &mut Unpublished), Ok(1));
+            assert_eq!(frames.free_frames(), free + 1);
+            assert!(scrubbed(simmap, &code[1..]));
+            assert!(
+                !scrubbed(simmap, &code[..1]),
+                "the other page is code still"
+            );
+            assert_eq!(
+                live.release_code(second, 1, &mut Unpublished),
+                Err(LiveSpaceError::Anon(AnonError::NotMapped))
+            );
+
+            assert_eq!(live.release_code(base, 1, &mut Unpublished), Ok(1));
+            assert_eq!(live.space().mapped_pages(), 0);
+            assert_eq!(frames.free_frames(), free + 2);
+
+            let empty = live.reserve_code(2).expect("places");
+            assert_eq!(
+                live.release_code(empty, 2, &mut Unpublished),
+                Ok(0),
+                "a placement nothing was installed at goes back holding nothing"
+            );
+            assert_eq!(live.reserve_code(2), Ok(empty));
+        }
+
+        #[test]
+        fn anonymous_memory_and_installed_code_are_released_only_as_themselves() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            let base = install(&mut live, &[written(frames, simmap, 0xC3)]).expect("installs");
+            let refused = Err(LiveSpaceError::Anon(AnonError::NotMapped));
+            assert_eq!(live.unmap_anonymous(base, 1, &mut Unpublished), refused);
+            let mut moved = Vec::new();
+            assert_eq!(
+                live.detach_anonymous(base, 1, &mut Unpublished, &mut moved),
+                refused
+            );
+            assert!(moved.is_empty(), "installed code never moves on");
+            assert_eq!(
+                live.reserve_anonymous_at(base, 1),
+                Err(LiveSpaceError::Anon(AnonError::Overlap))
+            );
+            assert_eq!(live.space().mapped_pages(), 1);
+
+            let anon = live.map_anonymous_placed(1).expect("places");
+            assert_eq!(
+                live.release_code(anon, 1, &mut Unpublished).map(drop),
+                refused
+            );
+            assert_eq!(live.space().mapped_pages(), 2);
+        }
+
+        #[test]
+        fn dropping_the_space_scrubs_and_frees_its_code() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let free = frames.free_frames();
+            let code = [written(frames, simmap, 0xC3), written(frames, simmap, 0x90)];
+            let mut live = shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            install(&mut live, &code).expect("installs");
+            drop(live);
+            assert_eq!(frames.free_frames(), free);
+            assert!(scrubbed(simmap, &code));
+        }
+
+        #[test]
+        fn detached_memory_leaves_with_its_bytes_and_installs_in_another_space() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut compiler = shared_live_space!(frames, simmap);
+            let base = compiler.reserve_anonymous(3).expect("places");
+            compiler.map_anonymous(base, 3).expect("backs");
+            let pattern: Vec<u8> = (0..=u8::MAX).cycle().take(2 * PAGE_SIZE).collect();
+            copy_out(compiler.space(), simmap, VirtAddr::new(base), &pattern).expect("writable");
+            let free = frames.free_frames();
+
+            let mut moved = Vec::new();
+            compiler
+                .detach_anonymous(base, 2, &mut Unpublished, &mut moved)
+                .expect("detaches");
+            assert_eq!(moved.len(), 2);
+            assert_eq!(compiler.space().mapped_pages(), 1, "the third page stays");
+            assert_eq!(frames.free_frames(), free, "no frame was freed");
+            assert_eq!(frames.committed_frames(), 0);
+            assert_eq!(
+                compiler.detach_anonymous(base, 1, &mut Unpublished, &mut moved),
+                Err(LiveSpaceError::Anon(AnonError::NotMapped))
+            );
+            assert_eq!(moved.len(), 2, "a refusal adds nothing");
+            compiler
+                .unmap_anonymous(base + 2 * PAGE_SIZE as u64, 1, &mut Unpublished)
+                .expect("the page left behind still unmaps");
+
+            let mut target =
+                shared_live_space!(map: CodeSim::new(simmap, true), frames, host_tlb());
+            let at = install(&mut target, &moved).expect("installs");
+            let mut bytes = vec![0; 2 * PAGE_SIZE];
+            copy_in(target.space(), simmap, VirtAddr::new(at), &mut bytes).expect("readable");
+            assert_eq!(bytes, pattern);
+        }
+
+        #[test]
+        fn a_range_not_wholly_resident_anonymous_memory_detaches_nothing() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap);
+            let refused = Err(LiveSpaceError::Anon(AnonError::NotMapped));
+            let mut never = Vec::new();
+
+            let sparse = live.reserve_anonymous(2).expect("places");
+            live.map_anonymous(sparse, 1).expect("backs the first page");
+            assert_eq!(
+                live.detach_anonymous(sparse, 2, &mut Unpublished, &mut never),
+                refused
+            );
+            assert_eq!(live.space().mapped_pages(), 1);
+
+            let file = live.reserve_file_region(1).expect("reserves");
+            live.map_file_page_at(file, &[1]).expect("backs");
+            assert_eq!(
+                live.detach_anonymous(file, 1, &mut Unpublished, &mut never),
+                refused
+            );
+            assert_eq!(
+                live.detach_anonymous(0x7000_0000, 1, &mut Unpublished, &mut never),
+                refused,
+                "no reservation holds it"
+            );
+            assert!(never.is_empty(), "nothing moved");
+        }
+
+        #[test]
+        fn a_caller_placed_range_detaches_and_gives_its_extent_back() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap);
+            let base = 0x7000_0000;
+            live.reserve_anonymous_at(base, 2).expect("reserves");
+            live.map_anonymous(base, 2).expect("backs");
+
+            let mut moved = Vec::new();
+            live.detach_anonymous(base, 2, &mut Unpublished, &mut moved)
+                .expect("detaches");
+            assert_eq!(moved.len(), 2);
+            assert_eq!(live.space().mapped_pages(), 0);
+            assert_eq!(
+                live.reserve_anonymous_at(base, 2),
+                Ok(base),
+                "the extent is free again"
+            );
+            for frame in moved {
+                frames
+                    .free(frame)
+                    .expect("the frames are the caller's to free");
+            }
+        }
     }
 
     mod ramzip {
@@ -3165,6 +3855,8 @@ mod tests {
                 64,
                 VirtAddr::new(0x3_0000_0000),
                 64,
+                VirtAddr::new(0),
+                0,
             )
             .expect("windows valid");
             (live, frames, pressure, simmap)
@@ -3646,16 +4338,17 @@ mod tests {
     mod views {
         use super::{custodian, fill_phys, phys_is_zero, SharedSim};
         use super::{
-            ANON_WINDOW_BASE, ANON_WINDOW_PAGES, DMA_WINDOW_BASE, DMA_WINDOW_PAGES,
-            FILE_WINDOW_BASE, FILE_WINDOW_PAGES, MMIO_WINDOW_BASE, MMIO_WINDOW_PAGES,
-            SHARED_WINDOW_BASE, SHARED_WINDOW_PAGES, SIM_BASE, SIM_PAGES,
+            ANON_WINDOW_BASE, ANON_WINDOW_PAGES, CODE_WINDOW_BASE, CODE_WINDOW_PAGES,
+            DMA_WINDOW_BASE, DMA_WINDOW_PAGES, FILE_WINDOW_BASE, FILE_WINDOW_PAGES,
+            MMIO_WINDOW_BASE, MMIO_WINDOW_PAGES, SHARED_WINDOW_BASE, SHARED_WINDOW_PAGES, SIM_BASE,
+            SIM_PAGES,
         };
-        use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
+        use crate::frame::{Frame, FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
-        use crate::retire::{RecordedRemote, Retire, SpaceTlb, TlbContext};
+        use crate::retire::{RecordedRemote, Retire, SpaceTlb, TlbContext, Unpublished};
         use crate::test_fixture::{custody, frame_backing};
-        use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, VirtAddr};
+        use crate::vmm::{AddressSpace, HostPageTable, MapFlags, Page, PageTable, VirtAddr};
         use tairix_arch_api::mmu::{
             AccessTracking, AddressSpace as HalAddressSpace, MapError, PageFlags,
         };
@@ -3663,6 +4356,7 @@ mod tests {
 
         extern crate std;
         use std::cell::{Cell, RefCell};
+        use std::vec;
         use std::vec::Vec;
 
         /// What reached a view, in order.
@@ -3806,6 +4500,83 @@ mod tests {
         }
 
         #[test]
+        fn a_detached_frame_moves_on_only_after_every_view_lets_go() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let base = live.map_anonymous_placed(2).expect("places");
+            fill_phys(simmap, PhysAddr::new(SIM_BASE), SIM_PAGES * PAGE_SIZE, 0x5A);
+            let _ = events();
+
+            let mut moved = Vec::new();
+            let mut snapshot = Snapshot {
+                frames,
+                free_before: frames.free_frames(),
+                still_held: &|| true,
+            };
+            live.detach_anonymous(base, 2, &mut snapshot, &mut moved)
+                .expect("detaches");
+            assert_eq!(events(), [Event::Remote(base, 2), Event::Retired(base, 2)]);
+            assert_eq!(moved.len(), 2);
+            assert!(
+                moved
+                    .iter()
+                    .all(|frame| !phys_is_zero(simmap, frame.start(), PAGE_SIZE)),
+                "each frame moves on with its bytes"
+            );
+        }
+
+        /// A frame holding code, as a compiler leaves one.
+        fn code_frame(frames: &FrameAllocator, simmap: &SimPhysMap) -> Frame {
+            let frame = frames
+                .alloc(MemoryClass::UserAnon)
+                .expect("a frame is free");
+            fill_phys(simmap, frame.start(), PAGE_SIZE, 0xC3);
+            frame
+        }
+
+        #[test]
+        fn released_code_is_scrubbed_and_freed_only_after_every_view_lets_go() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = shared_live_space!(frames, simmap, shared_reach());
+            let frame = code_frame(frames, simmap);
+            let base = live.reserve_code(1).expect("places");
+            live.map_code(base, &[frame]).expect("installs");
+            let _ = events();
+
+            let dirty = || !phys_is_zero(simmap, frame.start(), PAGE_SIZE);
+            let mut snapshot = Snapshot {
+                frames,
+                free_before: frames.free_frames(),
+                still_held: &dirty,
+            };
+            live.release_code(base, 1, &mut snapshot).expect("releases");
+            assert_eq!(events(), [Event::Remote(base, 1), Event::Retired(base, 1)]);
+            assert!(!dirty(), "scrubbed on the way out");
+        }
+
+        #[test]
+        fn installed_code_is_published_to_the_other_cpus_of_a_port_that_caches_an_absence() {
+            static CACHING: RecordedRemote<true> = RecordedRemote(record_remote);
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let cpus = TlbContext::new(2).expect("one word allocates");
+            cpus.enter(OTHER_CPU);
+            let mut caching =
+                shared_live_space!(frames, simmap, SpaceTlb::new(cpus, Some(&CACHING)));
+            let base = caching.reserve_code(1).expect("places");
+            caching
+                .map_code(base, &[code_frame(frames, simmap)])
+                .expect("installs");
+            assert_eq!(events(), [Event::Remote(base, 1)]);
+
+            let mut plain = shared_live_space!(frames, simmap, shared_reach());
+            let base = plain.reserve_code(1).expect("places");
+            plain
+                .map_code(base, &[code_frame(frames, simmap)])
+                .expect("installs");
+            assert!(events().is_empty(), "an absence is never cached there");
+        }
+
+        #[test]
         fn a_map_undone_part_way_reaches_the_other_cpu_before_its_frames_go_back() {
             // Fewer frames than the map asks for: it maps some, then unwinds.
             let (frames, simmap) = frame_backing!(SIM_BASE, 8);
@@ -3853,14 +4624,16 @@ mod tests {
             }
         }
 
-        fn counting_space(
+        /// A live space over `table`, `file_pages` of file window long.
+        fn space_over<T: PageTable>(
+            table: T,
             frames: &'static FrameAllocator,
             simmap: &'static SimPhysMap,
             tlb: SpaceTlb,
             file_pages: usize,
-        ) -> LiveSpace<CountingTable, SharedSim> {
+        ) -> LiveSpace<T, SharedSim> {
             LiveSpace::new(
-                AddressSpace::new(CountingTable(HostPageTable::new())),
+                AddressSpace::new(table),
                 tlb,
                 SharedSim(simmap),
                 frames,
@@ -3874,8 +4647,125 @@ mod tests {
                 SHARED_WINDOW_PAGES,
                 VirtAddr::new(FILE_WINDOW_BASE),
                 file_pages,
+                VirtAddr::new(CODE_WINDOW_BASE),
+                CODE_WINDOW_PAGES,
             )
             .expect("windows are valid")
+        }
+
+        fn counting_space(
+            frames: &'static FrameAllocator,
+            simmap: &'static SimPhysMap,
+            tlb: SpaceTlb,
+            file_pages: usize,
+        ) -> LiveSpace<CountingTable, SharedSim> {
+            space_over(
+                CountingTable(HostPageTable::new()),
+                frames,
+                simmap,
+                tlb,
+                file_pages,
+            )
+        }
+
+        /// A page table that refuses to unmap the page at `refused`, as only
+        /// a defective backend would.
+        struct RefusingTable {
+            table: HostPageTable,
+            refused: u64,
+        }
+
+        impl HalAddressSpace for RefusingTable {
+            fn map_page(
+                &mut self,
+                vaddr: u64,
+                paddr: u64,
+                flags: PageFlags,
+            ) -> Result<(), MapError> {
+                self.table.map_page(vaddr, paddr, flags)
+            }
+            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
+                self.table.translate(vaddr)
+            }
+            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
+                if vaddr == self.refused {
+                    return Err(MapError::Unsupported);
+                }
+                self.table.unmap(vaddr)
+            }
+            fn root_phys(&self) -> u64 {
+                self.table.root_phys()
+            }
+            fn access_tracking(&self) -> AccessTracking {
+                self.table.access_tracking()
+            }
+            unsafe fn activate(&self) {}
+        }
+
+        impl TlbShootdown for RefusingTable {
+            fn flush_page(&mut self, vaddr: u64) {
+                self.table.flush_page(vaddr);
+            }
+        }
+
+        #[test]
+        fn a_detach_refused_part_way_scrubs_and_frees_what_it_took_and_hands_over_nothing() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let base = ANON_WINDOW_BASE;
+            let table = RefusingTable {
+                table: HostPageTable::new(),
+                refused: base + PAGE_SIZE as u64,
+            };
+            let mut live = space_over(table, frames, simmap, shared_reach(), FILE_WINDOW_PAGES);
+            assert_eq!(live.map_anonymous_placed(2), Ok(base));
+            fill_phys(simmap, PhysAddr::new(SIM_BASE), SIM_PAGES * PAGE_SIZE, 0x5A);
+            let first = live
+                .translate_page(Page::from_addr(VirtAddr::new(base)).expect("aligned"))
+                .expect("mapped")
+                .0;
+            let free = frames.free_frames();
+
+            let mut moved = vec![Frame(0)];
+            assert!(live
+                .detach_anonymous(base, 2, &mut Unpublished, &mut moved)
+                .is_err());
+            assert_eq!(moved, [Frame(0)], "what the caller held is all it holds");
+            assert_eq!(
+                frames.free_frames(),
+                free + 1,
+                "the page that left went back"
+            );
+            assert!(phys_is_zero(simmap, first.start(), PAGE_SIZE), "scrubbed");
+        }
+
+        #[test]
+        fn a_fault_on_a_page_mapped_to_allow_it_is_spurious_and_discards_this_cpus_view() {
+            let (frames, simmap) = frame_backing!(SIM_BASE, SIM_PAGES);
+            let mut live = counting_space(frames, simmap, shared_reach(), FILE_WINDOW_PAGES);
+            let data = live.map_anonymous_placed(1).expect("places");
+            let code = live.reserve_code(1).expect("places");
+            live.map_code(code, &[code_frame(frames, simmap)])
+                .expect("installs");
+            let flushes = LOCAL_FLUSHES.with(Cell::get);
+
+            assert!(live.settle_spurious(data + 8, false), "a read of data");
+            assert!(live.settle_spurious(data + 8, true), "a write to data");
+            assert!(live.settle_spurious(code, false), "a read of code");
+            assert_eq!(
+                LOCAL_FLUSHES.with(Cell::get),
+                flushes + 3,
+                "this CPU's view is discarded each time"
+            );
+
+            assert!(
+                !live.settle_spurious(code, true),
+                "a write to code is no slip"
+            );
+            assert!(
+                !live.settle_spurious(data + PAGE_SIZE as u64, false),
+                "nor an access nothing is mapped for"
+            );
+            assert_eq!(LOCAL_FLUSHES.with(Cell::get), flushes + 3);
         }
 
         #[test]

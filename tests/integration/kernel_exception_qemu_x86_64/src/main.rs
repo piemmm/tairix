@@ -47,7 +47,7 @@ mod kernel {
 
     use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_x86_64::{fault, qemu_exit};
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -72,7 +72,7 @@ mod kernel {
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

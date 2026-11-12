@@ -67,9 +67,10 @@ mod program {
     use tairix_window::app::WindowPane;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
-        scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, PostedRequest, Refused, WindowClient, WindowEvents,
+        damage_in, held_modifiers, key_input_event, pinch_input_events, pointer_input_events,
+        pointer_point, scroll_input_events, Answer as Landed, DeclaredTip, Desktop, EventDrain,
+        EventError, EventMailbox, EventSource, Parked, PostedRequest, Refused, WindowClient,
+        WindowEvents,
     };
 
     /// The name this program states its refusals under.
@@ -748,7 +749,7 @@ mod program {
                     modifiers,
                     ..
                 } => {
-                    let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
+                    let held = held_modifiers(modifiers);
                     let mut request = None;
                     for input in core::iter::once(held)
                         .chain(pointer_input_events(action, pointer_point(x, y)))
@@ -986,7 +987,7 @@ mod program {
         /// event that carries no input.
         fn route_input(&mut self, event: &WindowEvent, now_ns: u64) -> Option<bool> {
             let scale = self.desktop.scale();
-            let held = |modifiers| key_input_event(KeyInput::ModifiersChanged { modifiers });
+            let held = |modifiers| held_modifiers(modifiers);
             let mut asked = None;
             let view = &mut self.view;
             let mut route = |inputs: &mut dyn Iterator<Item = InputEvent>| {
@@ -1085,12 +1086,15 @@ mod program {
                 | WindowEvent::AlertClosed { .. }
                 | WindowEvent::Authorised { .. }
                 | WindowEvent::LayerPointer { .. }
+                | WindowEvent::PointerMotion { .. }
+                | WindowEvent::PointerLock { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }
+                | WindowEvent::SubtreePicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }

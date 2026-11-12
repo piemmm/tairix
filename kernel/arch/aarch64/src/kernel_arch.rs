@@ -874,13 +874,15 @@ pub fn clean_invalidate_dcache_ranges(_starts: impl IntoIterator<Item = usize>, 
 ///
 /// The sequence: clean each data-cache line in range to the point of
 /// unification (`dc cvau`), a `dsb ish` so those cleans complete, invalidate
-/// each instruction-cache line to the `PoU` (`ic ivau`), a second `dsb ish`, and
-/// an `isb` so the PE re-fetches. `ic ivau` acts on the physical line the VA
-/// resolves to (ARMv8 IC-by-VA is PoU/PA-effective), so cleaning through the
-/// kernel direct-map alias correctly covers the code the process will fetch at
-/// its own user VA. Stepping is by each cache's own minimum line
-/// ([`crate::paging::dcache_line_bytes`] / [`crate::paging::icache_line_bytes`]),
-/// since they can differ. A zero-length range is a no-op.
+/// the instruction cache to the `PoU`, a second `dsb ish`, and an `isb` so the
+/// PE re-fetches. A physically indexed instruction cache is invalidated line by
+/// line through the direct-map alias (`ic ivau`); a virtually indexed one may
+/// hold the user mapping's alias at an index the direct-map address does not
+/// name, so it is invalidated whole on every CPU (`ic ialluis`,
+/// [`crate::paging::icache_is_pipt`]). Stepping is by each cache's own minimum
+/// line ([`crate::paging::dcache_line_bytes`] /
+/// [`crate::paging::icache_line_bytes`]), since they can differ. A zero-length
+/// range is a no-op.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn sync_instruction_cache_range(start: usize, len: usize) {
     if len == 0 {
@@ -912,16 +914,24 @@ pub fn sync_instruction_cache_range(start: usize, len: usize) {
     unsafe {
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
     }
-    // Invalidate the (possibly stale) instruction-cache lines to the PoU so
-    // the PE re-fetches the freshly-cleaned bytes.
-    let mut addr = start & !(iline - 1);
-    while addr < end {
-        // SAFETY: `ic ivau` invalidates the instruction-cache line for the PA
-        // that `addr` resolves to, to the PoU; it changes no memory contents.
-        unsafe {
-            core::arch::asm!("ic ivau, {0}", in(reg) addr, options(nostack, preserves_flags));
+    if crate::paging::icache_is_pipt(ctr) {
+        let mut addr = start & !(iline - 1);
+        while addr < end {
+            // SAFETY: `ic ivau` invalidates the instruction-cache line for the
+            // PA that `addr` resolves to, to the PoU; it changes no memory
+            // contents.
+            unsafe {
+                core::arch::asm!("ic ivau, {0}", in(reg) addr, options(nostack, preserves_flags));
+            }
+            addr += iline;
         }
-        addr += iline;
+    } else {
+        // SAFETY: `ic ialluis` invalidates every instruction-cache line of
+        // every PE in the Inner Shareable domain to the PoU; it changes no
+        // memory contents.
+        unsafe {
+            core::arch::asm!("ic ialluis", options(nostack, preserves_flags));
+        }
     }
     // SAFETY: barrier + context-synchronisation so the invalidations complete
     // and the PE discards any prefetched stale instructions before fetching

@@ -73,6 +73,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # admin tests include to plant a foreign volume on a candidate member.
 [dev-dependencies]
 tairix-test-iso9660-image = { path = "../../../tests/integration/iso9660_image", version = "=0.0.0" }
+# The FAT volumes `lib/fsprobe`'s shared test images are built through.
+tairix-fat = { path = "../../../lib/fat", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

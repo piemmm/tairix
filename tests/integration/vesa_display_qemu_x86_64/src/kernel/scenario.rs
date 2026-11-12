@@ -25,6 +25,7 @@ use tairix_drvhost::{
     DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
 use tairix_fwcfg::{FwCfg, RamfbConfig, DRM_FORMAT_XRGB8888};
+use tairix_kernel::kalloc::Arena;
 use tairix_kernel::SERIAL_SINK;
 use tairix_kernel_mem::{AddressSpace, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
@@ -112,17 +113,13 @@ const TASK: ProcessId = ProcessId(0x5E5A);
 /// Milestone breadcrumb event id.
 const MILESTONE_ID: EventId = EventId(9210);
 
-// --- Static scan-out surface -----------------------------------------
-
-/// Page-aligned wrapper so the surface meets the mapper's word-access
-/// alignment contract and starts on a frame boundary.
-#[repr(C, align(4096))]
-struct Surface([u8; FB_BYTES]);
-
 /// The `ramfb` scan-out surface, in guest RAM. QEMU maps it read-only
 /// and scans out from it for the life of the guest, so it must outlive
 /// the scenario — hence a `static` rather than a stack/heap buffer.
-static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
+///
+/// Page-aligned, so it meets the mapper's word-access alignment contract and
+/// starts on a frame boundary.
+static FRAMEBUFFER: Arena<FB_BYTES> = Arena::ZERO;
 
 /// Physical base address of [`FRAMEBUFFER`].
 ///
@@ -132,7 +129,7 @@ static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
 /// MMIO mapper translates through the direct map — is its virtual address
 /// minus the higher-half base.
 fn framebuffer_phys() -> u64 {
-    (ptr::addr_of!(FRAMEBUFFER) as u64) - tairix_arch_x86_64::paging::KERNEL_VMA_BASE
+    (FRAMEBUFFER.as_mut_ptr() as u64) - tairix_arch_x86_64::paging::KERNEL_VMA_BASE
 }
 
 // --- Logging / failure -----------------------------------------------

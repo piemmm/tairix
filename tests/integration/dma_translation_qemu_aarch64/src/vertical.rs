@@ -15,12 +15,12 @@ use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL
 use tairix_itest_translation_witness::{first_input_node, Faults, TranslationWitness, Verdict};
 use tairix_kernel::aarch64::boot as boot_aarch64;
 use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::FreeListAllocator;
 use tairix_log::{Event, Sink};
 
 /// The boot heap, in `.bss`.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

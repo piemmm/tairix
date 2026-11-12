@@ -68,13 +68,9 @@ impl Controls {
     /// produces one on the press and nothing on the release, so holding
     /// it does not repeat.
     pub fn apply_key(&mut self, input: &KeyInput) -> Option<Command> {
-        let (down, key) = match *input {
-            KeyInput::Pressed { key, .. } => (true, key),
-            KeyInput::Released { key, .. } => (false, key),
-            // A modifier alone moves nothing and commands nothing, but the
-            // seat still reports it so a consumer knows what is held.
-            KeyInput::ModifiersChanged { .. } => return None,
-        };
+        // A modifier or a lock alone moves nothing and commands nothing.
+        let key = input.key()?;
+        let down = input.is_press();
         if let Some(axis) = movement(key) {
             self.hold(axis, down);
             return None;

@@ -109,6 +109,17 @@ its phase by interpolating between the two nearest rows, which is the
 fractional-delay case. The code has one path; the exact case simply never
 engages the interpolation.
 
+**A drifting ratio is retuned, not restarted.** `Resampler::retune` carries a
+stream onto a bank of a new ratio keeping the input frames it holds and the
+output's place between them, so a linked domain's correction goes on without
+the restart a new resampler would make audible. A bank of more taps reads the
+frames the history no longer holds as silence until they pass.
+
+**One windowed sinc.** `Lowpass` is the Kaiser-windowed sinc every bank is cut
+from; band-limited synthesis that draws a level's changes, as an emulated
+DAC's are, builds its steps from the same kernel rather than designing a
+second.
+
 **The figures are measured, not asserted.**
 
 | | |

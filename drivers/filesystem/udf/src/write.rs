@@ -8,9 +8,9 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost, WriteRefusal,
+    FilesystemWrite, NodeId, NodeKind, NodeSecurity, StampField, VolumeHost, WriteRefusal,
 };
-use tairix_abi::fs::FS_SYMLINK_MAX;
+use tairix_abi::fs::{StampChange, TimesChange, TimesKept, FS_SYMLINK_MAX};
 use tairix_abi::time::Time64;
 use tairix_abi::{DriverError, DriverHandle};
 use tairix_fsmeta::preset::mac::FinderInfo;
@@ -81,6 +81,14 @@ struct Layout {
 
 /// Bytes of a short allocation descriptor.
 const SHORT_AD: usize = 8;
+
+/// What a timestamp holds: the microsecond, from the first instant of year 1
+/// to the last of 9999.
+const STAMPS: StampField = StampField::new(
+    Time64::from_secs(-62_135_596_800),
+    1_000,
+    0..315_537_897_600_000_000,
+);
 
 /// A file's allocation descriptors laid out to be written: its extents, how
 /// many its entry keeps, each continuation block with how many it keeps, and
@@ -496,6 +504,33 @@ impl<B: Block> Udf<B> {
         written?;
         node.entry = entry::Entry::parse(&node.block, node.addr.block)?;
         Ok(())
+    }
+
+    /// Set a resolved entry's access and modification times as `accessed`
+    /// and `modified` ask — each instant one [`STAMPS`] holds — and stamp its
+    /// attribute time; a now while the clock is unset changes nothing, as a
+    /// write's stamp does not.
+    fn set_entry_times(
+        &mut self,
+        node: NodeId,
+        accessed: StampChange,
+        modified: StampChange,
+    ) -> Result<(), DriverError> {
+        let mut resolved = self.rewritable(node)?;
+        let layout = Layout::of(resolved.entry.extended);
+        let now = self.now().and_then(encode_timestamp);
+        for (at, change) in [(layout.accessed, accessed), (layout.modified, modified)] {
+            let stamp = match change {
+                StampChange::Keep => None,
+                StampChange::Now => now,
+                StampChange::At(at) => Some(encode_timestamp(at).ok_or(DriverError::OutOfRange)?),
+            };
+            if let Some(stamp) = stamp {
+                resolved.block[at..at + 12].copy_from_slice(&stamp);
+            }
+        }
+        self.touch(&mut resolved, false);
+        self.store_entry(&mut resolved)
     }
 
     /// Stamp a resolved entry's modification and attribute times.
@@ -2215,6 +2250,15 @@ impl<B: Block> FilesystemWrite for Udf<B> {
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         self.change(|fs| fs.truncate_file(file, size))
+    }
+
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let (accessed, a) = STAMPS.fit_change(change.accessed, change.nearest)?;
+        let (modified, m) = STAMPS.fit_change(change.modified, change.nearest)?;
+        if !change.is_empty() {
+            self.change(|fs| fs.set_entry_times(node, accessed, modified))?;
+        }
+        Ok(a.and(m))
     }
 
     fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {

@@ -13,7 +13,7 @@
 //!
 //! Unlike riscv64 (which runs the full boot pipeline so the boot info
 //! publishes a usable memory map), this vertical owns its DMA frames in a
-//! static pool: a `#[repr(align(4096))]` `.bss` static, exclusively ours and
+//! static pool: a page-aligned `.bss` `Arena`, exclusively ours and
 //! reached at its physical address through the kernel's direct map.
 
 extern crate alloc;
@@ -29,7 +29,7 @@ use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::aarch64::boot::DeviceWindows;
 use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
@@ -69,7 +69,7 @@ pub use tairix_arch_aarch64::{
 const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -89,15 +89,12 @@ const DMA_POOL_PAGES: usize = 512;
 /// Page-aligned `.bss` backing store for the DMA frame pool, exclusively
 /// ours — the aarch64 stand-in for riscv64's carved-from-the-boot-map DMA
 /// region.
-#[repr(C, align(4096))]
-struct DmaFrames([u8; PAGE_SIZE * DMA_POOL_PAGES]);
-
-static mut DMA_FRAMES: DmaFrames = DmaFrames([0; PAGE_SIZE * DMA_POOL_PAGES]);
+static DMA_FRAMES: Arena<{ PAGE_SIZE * DMA_POOL_PAGES }> = Arena::ZERO;
 
 /// Build a single-region [`BootMemoryMap`] over the static [`DMA_FRAMES`]
 /// pool for the per-device [`FrameAllocator`].
 fn static_dma_map() -> BootMemoryMap {
-    let base = paging::image_phys(core::ptr::addr_of!(DMA_FRAMES) as u64);
+    let base = paging::image_phys(DMA_FRAMES.as_mut_ptr() as u64);
     let mut m = BootMemoryMap::new();
     m.push(MemoryRegion {
         kind: RegionKind::Usable,

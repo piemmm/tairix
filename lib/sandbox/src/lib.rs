@@ -31,6 +31,10 @@
 //!   ([`session::EVENT_SESSION_FAILED`]). The worker side
 //!   ([`session::serve_session`]) stays a pure reactor, which is what the
 //!   kernel's sandbox allow-list already forces it to be.
+//! * [`link`] — the worker's end of a session for a worker with work of its
+//!   own between its parent's frames: [`link::WorkerLink`] reads the parent's
+//!   frames whole across bounded waits ([`link::TimedChannel`]), so such a
+//!   worker waits on its pipe no longer than its next piece of work allows.
 //! * [`supervise`] — the duplex seam for a worker whose state its owner can
 //!   re-establish, such as a decoder of a stream of untrusted input:
 //!   [`supervise::SupervisedSession`] replaces a failed worker, after a
@@ -112,6 +116,7 @@ pub mod host;
 pub mod imageedit;
 pub mod imageinspect;
 pub mod imagerender;
+pub mod link;
 pub mod listing;
 pub mod loopback;
 pub mod memory;
@@ -137,6 +142,7 @@ pub mod wire;
 pub mod worker;
 
 pub use host::{Launcher, ParserSandbox, SandboxError, Unbelieved, WorkerEnd};
+pub use link::{TimedChannel, Waited, WorkerLink};
 pub use memory::WorkerMemory;
 pub use proto::{Channel, ProtoError, MAX_FRAME};
 pub use session::{

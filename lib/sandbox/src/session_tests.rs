@@ -7,12 +7,11 @@
 //! without processes.
 
 use super::{
-    head_declared, serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors,
-    SessionError, SessionService, SessionStep, SessionTransport, EVENT_SESSION_FAILED,
-    MIN_QUEUE_BYTES,
+    serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,
+    SessionService, SessionStep, SessionTransport, EVENT_SESSION_FAILED, MIN_QUEUE_BYTES,
 };
 use crate::loopback::LoopbackSession;
-use crate::proto::{Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
+use crate::proto::{head_declared, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
 use crate::testing::NullSink;
 use crate::worker::ServeEnd;
 use alloc::rc::Rc;

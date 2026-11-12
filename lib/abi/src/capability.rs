@@ -825,6 +825,25 @@ impl CapabilityId {
     /// volume's blocks or answers for what is on them.
     pub const FS_SERVE: Self = Self(53);
 
+    /// Make code executable that no signed image carried: move a region a
+    /// compiler sandbox filled into another sandbox read-execute
+    /// (`code_install`).
+    ///
+    /// It guards the one way a process runs instructions it did not load
+    /// from a verified bundle, which every just-in-time compiler needs. It is
+    /// bounded structurally: no mapping is ever writable and executable at
+    /// once, the region leaves the compiler as it arrives in the target, and
+    /// both must be the caller's own capability-empty sandboxed children, a
+    /// compiler serving one target for its life. So its holder gains no way
+    /// to run generated code in itself or in any process that holds
+    /// authority, and a compromised compiler reaches only the sandbox it
+    /// already serves.
+    ///
+    /// Not covered by an existing capability: `CAP_SANDBOX_SPAWN` starts a
+    /// sandbox but makes nothing executable, and no other capability maps a
+    /// page executable at all.
+    pub const JIT_MAP_EXEC: Self = Self(54);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -888,6 +907,7 @@ impl CapabilityId {
         (Self::SETTINGS_WRITE, "CAP_SETTINGS_WRITE"),
         (Self::GPIO, "CAP_GPIO"),
         (Self::FS_SERVE, "CAP_FS_SERVE"),
+        (Self::JIT_MAP_EXEC, "CAP_JIT_MAP_EXEC"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -1037,6 +1057,7 @@ mod tests {
         assert_eq!(CapabilityId::SETTINGS_WRITE.as_u16(), 51);
         assert_eq!(CapabilityId::GPIO.as_u16(), 52);
         assert_eq!(CapabilityId::FS_SERVE.as_u16(), 53);
+        assert_eq!(CapabilityId::JIT_MAP_EXEC.as_u16(), 54);
     }
 
     #[test]
@@ -1090,6 +1111,7 @@ mod tests {
         );
         assert_eq!(CapabilityId::GPIO.name(), Some("CAP_GPIO"));
         assert_eq!(CapabilityId::FS_SERVE.name(), Some("CAP_FS_SERVE"));
+        assert_eq!(CapabilityId::JIT_MAP_EXEC.name(), Some("CAP_JIT_MAP_EXEC"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1100,15 +1122,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=53 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=54 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=53 {
+        for raw in 1..=54 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(54).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(55).expect("in range").name(), None);
     }
 
     #[test]

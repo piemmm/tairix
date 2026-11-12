@@ -57,6 +57,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   place, so taking one never allocates and an event loop is never left
   holding a frame it has no memory to take. `plans/SSH.md` §1.1 is the
   first consumer; the seam is protocol-agnostic.
+- **The worker's timed end** (`link`): for a session worker with work of its
+  own between its parent's frames. `WorkerLink` reads the parent's frames
+  whole across bounded waits over a `TimedChannel`, into the same committed
+  accumulator the owner's side uses, so a read that gives up mid-frame loses
+  nothing; what it sends goes in one write at each flush.
 - **The supervised session** (`supervise`): the duplex seam for a worker
   that serves a *service* rather than one connection, so a failed one is
   replaced. `SupervisedSession` starts each worker through a

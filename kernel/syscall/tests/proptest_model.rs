@@ -544,6 +544,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn code_install(
+        &self,
+        _c: &CallerContext<'_>,
+        _compiler: i64,
+        _target: i64,
+        _base: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn call_peer_holds(
         &self,
         _c: &CallerContext<'_>,
@@ -1074,6 +1085,29 @@ impl SyscallHandlers for CountingHandlers {
         _path_len: usize,
         _mode: u32,
         _flags: AtFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_set_times(
+        &self,
+        _c: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _times: u64,
+        _times_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_volume_stats(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

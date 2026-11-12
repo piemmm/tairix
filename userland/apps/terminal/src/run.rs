@@ -82,12 +82,12 @@ mod program {
         AppMenuItemId, DialogModality, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, Signal, WaitSetOp, WaitSourceKind};
+    use tairix_crt::{frame_due, frame_interval_ns};
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
-    use tairix_parallel::{JobRunner, Pool};
+
     use tairix_terminal::appbar::{self, BarCommand};
-    use tairix_terminal::effects::{frame_due, frame_interval_ns};
     use tairix_terminal::layout::{grid_dims, grid_size, snap_to_cells, window_size};
     use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
@@ -485,26 +485,10 @@ mod program {
 
     /// How a window's screen currently looks, its passes spread across the
     /// process's one pool.
+    /// The worker pool the screen effects spread across: none until a pass
+    /// first draws.
+    type EffectPool = app::LazyPool;
     type Look = tairix_terminal::Look<&'static EffectPool>;
-
-    /// The worker pool the screen effects spread across, started the first
-    /// time a pass draws, so a terminal with the effects off holds no worker
-    /// threads.
-    ///
-    /// The CPU count is asked once at start-up rather than here, because the
-    /// question is a call to another service and this is reached from the
-    /// loop that owes the windows their frames.
-    struct EffectPool {
-        online: usize,
-        pool: core::cell::OnceCell<Pool>,
-    }
-
-    impl EffectPool {
-        fn runner(&self) -> &dyn JobRunner {
-            self.pool
-                .get_or_init(|| app::pool_across(OWN_WORD, self.online, "drawing screen effects"))
-        }
-    }
 
     /// One terminal window: its hosted shell, its screen, and everything
     /// drawn for it.
@@ -967,7 +951,7 @@ mod program {
             return Err(Errno::LengthOutOfRange);
         }
         let damage = screen.paint(terminal.grid(), &look.painted, look.font);
-        let (_, passes) = look.effects.passes(look.scale.percent());
+        let (_, passes) = look.effects.tube.passes(look.scale.percent());
         if passes == 0 {
             if look.pipeline.retire() {
                 return pane.present(client, screen.surface(), DamageRect::full(&mode));
@@ -987,7 +971,7 @@ mod program {
         let Some(frame) = look.pipeline.render(
             screen.surface(),
             damage,
-            look.effects,
+            look.effects.tube,
             look.scale.percent(),
             look.phase,
             look.pool.runner(),
@@ -1045,10 +1029,11 @@ mod program {
         let _publisher_guard = tairix_rt::work::WorkerGuard::new(&publisher);
 
         let pool: &'static EffectPool =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(EffectPool {
-                online: tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport),
-                pool: core::cell::OnceCell::new(),
-            }));
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(EffectPool::new(
+                OWN_WORD,
+                tairix_procinfo::online_cpus(&tairix_procinfo::IpcTransport),
+                "drawing screen effects",
+            )));
 
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
@@ -1178,7 +1163,7 @@ mod program {
             let animated = windows.iter().any(|open| {
                 open.look
                     .pipeline
-                    .animated(open.look.effects, open.look.scale.percent())
+                    .animated(open.look.effects.tube, open.look.scale.percent())
             });
             next_frame_ns = frame_due(animated, next_frame_ns, now, desktop.refresh());
             let held = settings
@@ -2373,6 +2358,8 @@ mod program {
                 | WindowEvent::AlertClosed { .. }
                 | WindowEvent::Authorised { .. }
                 | WindowEvent::LayerPointer { .. }
+                | WindowEvent::PointerMotion { .. }
+                | WindowEvent::PointerLock { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
@@ -2380,6 +2367,7 @@ mod program {
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }
+                | WindowEvent::SubtreePicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }
@@ -2475,11 +2463,14 @@ mod program {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
+            | WindowEvent::SubtreePicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }

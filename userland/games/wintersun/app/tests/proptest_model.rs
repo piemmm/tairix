@@ -177,15 +177,15 @@ impl Session {
                 let key = KEYS[usize::from(code) % KEYS.len()];
                 let input = if down {
                     KeyInput::Pressed {
-                        key,
+                        key: Some(key),
                         modifiers: Modifiers::default(),
-                        physical: PhysicalKey::UNKNOWN,
+                        physical: PhysicalKey::A,
                     }
                 } else {
                     KeyInput::Released {
-                        key,
+                        key: Some(key),
                         modifiers: Modifiers::default(),
-                        physical: PhysicalKey::UNKNOWN,
+                        physical: PhysicalKey::A,
                     }
                 };
                 self.controls.apply_key(&input);

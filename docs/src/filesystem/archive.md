@@ -112,6 +112,15 @@ changes) and extra fields, but those carrying times once its times change; a
 tar member's pax records the driver does not read, and its owner's names
 while the owner is unchanged.
 
+`fs_set_times` keeps what a member's record holds and no more
+(`Format::member_times`): a zip member's modification time to the second in
+its extended timestamp, a tar member's both times to the nanosecond in pax
+records (the access time recorded from then on), a gzip stream's unsigned
+seconds, a Spark or ArcFS member's typed RISC OS stamp — a Spark one's
+MS-DOS stamp where it is untyped. A time the record does not keep is refused
+unless the nearest is asked. A member's clock stamps are held the same way, so
+what a stat reports is what the committed archive reads back.
+
 A member this driver cannot read — an encrypted zip member, one coded by a
 method it does not decode — is kept as it is through every commit, under its
 own record's method, flags, stamp and version needed, its name flagged UTF-8;

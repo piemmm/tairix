@@ -112,8 +112,8 @@ never judged as anyone else. The capability gate still comes first.
 Resolving a path requires **search (execute) permission on every directory
 descended through**, mirroring POSIX — including the directory each `..`
 leaves, and the working directory or directory descriptor a relative path
-starts at, asked as the caller on every call. A directory is never granted,
-so a directory descriptor's authority is always its holder's. `stat`-style
+starts at, asked on every call as the caller, or as a directory capability's
+frozen identity for a path named through one. `stat`-style
 `metadata` therefore needs search permission along the path but no permission
 on the target itself; `read` additionally needs read permission on the file;
 `mkdir`, `create_file`, `symlink`, and `remove` need write permission on the
@@ -125,6 +125,23 @@ component or a link's target supplied it, so following a link can never
 reach a directory the caller could not have walked itself. Reading a link's
 own target (`readlink`) needs search permission on the way to it and none
 on the link, mirroring POSIX.
+
+## Directory capabilities
+
+A directory handed on by `fd_grant` under `GRANT_SUBTREE` is a capability to
+what lies beneath it, in the manner of Capsicum's directory descriptors and
+`openat2`'s `RESOLVE_BENEATH`. Its holder needs no filesystem capability of its
+own: a path it names through the capability is judged, layer by layer as above,
+as the grantor's identity frozen at the grant, holding no capability but
+`CAP_FS_ACCESS`. The walk stays beneath the directory — an absolute path, a
+`..` at the directory and a link whose target is absolute are refused — and
+what it opens is held under the same capability, so a directory opened beneath
+is itself a capability floored at the same place. The grant's ceiling decides
+change: zero changes nothing beneath, and any other lets the holder create,
+remove, rename and write there, each file bounded by the ceiling. A relayed
+capability is floored at the directory relayed and keeps the lesser ceiling.
+Creating a link, spelling a path out, changing the working directory, and a
+mode or owner change by path never act through a capability.
 
 ## Descriptors
 
@@ -155,9 +172,10 @@ what it changed.
 ## Asking about access
 
 `fs_access` answers whether the caller may have a node as it asks — read,
-write, run, or with nothing asked whether the node exists — as the caller:
-the node's mode, ACL and capability gate under the caller's own identity,
-then the projection's flags, so a write where nothing may be written is
+write, run, or with nothing asked whether the node exists — as the caller, or
+as a directory capability's frozen identity for a path named through one:
+the node's mode, ACL and capability gate under that identity, then the
+projection's flags, so a write where nothing may be written is
 `ReadOnly` and running a regular file on a `noexec` projection is
 `PermissionDenied`. It changes nothing, and a later operation is judged
 afresh.

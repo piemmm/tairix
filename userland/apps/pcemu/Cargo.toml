@@ -1,0 +1,133 @@
+[package]
+name = "tairix-pcemu"
+description = "TAIRiX PCEmulator.app: the IBM PC/XT-class machine up to the 80186 — CPU models, board, video, storage, sound, the BIOS and TAIRiX DOS — as a host-tested engine (plans/PCEMU.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }
+
+[features]
+# The hardware-captured CPU conformance vectors' record codec, for the
+# `cargo xtask pcemu-vectors` importer. The crate's own tests always have it.
+vectors = []
+# The in-memory folder a share is served from in tests, and the translator
+# held to the interpreter through the code generator's machine models, for the
+# fuzz harnesses; never part of a production build.
+test-util = ["tairix-codegen/test-util"]
+
+[dependencies]
+# The one civil calendar, which the clock card's date is set from and read as.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one code generator, whose IR the translator lowers hot guest code to.
+tairix-codegen = { path = "../../../lib/codegen", version = "=0.0.0" }
+# The one resampler, which carries the mix to the audio stream's rate, and the
+# windowed sinc its band-limited steps are drawn with.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The `no_std` transcendental maths the sound chips' tables are computed with.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one integer finaliser, which turns the moment a key is asked for into
+# the expanded memory manager's access key.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
+# The one FAT12/16/32 format, which TAIRiX DOS reads and writes volumes
+# through.
+tairix-fat = { path = "../../../lib/fat", version = "=0.0.0" }
+# The partition-table format the DOS block driver finds a fixed disk's
+# volumes through.
+tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
+# The sandbox seam the machine runs behind: the duplex session, the worker's
+# timed end of it, the shared region and the payload codec.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The keyed hash the worker's sector cache is indexed under, its key drawn by
+# the front-end, so no guest chooses which of its sectors collide.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# The one reclaimable cache the worker keeps its fetched sectors in, and the
+# pressure band it gives them back by.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The sink the cache's refusals and the session's containment are logged to.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The committed byte queue the worker keeps commands in while a disk waits.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+# The frame scaler a machine's screen is enlarged to its window through, and
+# the surface it is drawn on.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The checksum the machine library's record is closed with.
+tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
+# Code page 437, which a text screen is copied out of and pasted text typed
+# in.
+tairix-cp437 = { path = "../../../lib/cp437", version = "=0.0.0" }
+# The canonical decomposition pasted text keeps a letter's base through, and
+# the characters it passes over unseen.
+tairix-unicode = { path = "../../../lib/unicode", version = "=0.0.0" }
+# The picture tube a machine's monitor is drawn through, and the runner its
+# stages spread across.
+tairix-crt = { path = "../../../lib/crt", version = "=0.0.0" }
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
+# The codec a machine's last screen is kept in, and the committed conformance
+# vectors' zlib.
+tairix-compress = { path = "../../../lib/compress", version = "=0.0.0" }
+# The shared controls the library window and the dialogs compose, the theme
+# they are drawn in, the geometry they are laid out in, the input vocabulary
+# they take, and the glyph a card falls back on.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The glyph cache the windows' text is drawn from, trimmed under pressure:
+# the debugger draws its listing, registers and memory in its monospace face.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The bounded set a breakpoint list is held and crosses the session in, and
+# the bounded string a coprocessor register's value is written in.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+
+# The package is both the host-tested engine and the `Run` entry-point binary
+# of the on-disk `PCEmulator.app` bundle: a freestanding pure-Rust program on
+# the native Tier-1 targets and an inert host stub elsewhere (`src/run.rs`,
+# `build.rs`).
+[[bin]]
+name = "tairix-pcemu-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+# The pure-Rust userland runtime: `_start`, the allocator, the syscalls, the
+# threads and the worker desk the disks and the audio open run on.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The app half of the window channel and the shared windowed-app shell.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The bundle's own `Help/` tree, for the short `-h` surface.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The sandbox's session launcher and the worker-role side the machine runs
+# behind.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The application's own store, which holds a machine's disks.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The audio service's live stream the machine's sound plays through.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+# The one hole-keeping file copy a duplicated machine's disks are made by.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
+# The content-type registry a file offered to a machine window is judged by.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The PNG a screenshot is kept as.
+tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
+# The CPUs the picture tube's pool is sized by.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+# This crate's own fuzz harnesses, with the in-memory folder they share.
+tairix-pcemu = { path = ".", features = ["test-util"] }
+# The machine models the unit tests run translated blocks on.
+tairix-codegen = { path = "../../../lib/codegen", version = "=0.0.0", features = ["test-util"] }
+# The views' tests set text through the shared solid test transport rather
+# than a running `fontd`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The fuzz harnesses' seeded stream and budget.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

@@ -10,6 +10,7 @@
 //! load/exec words (`acorn.loadaddr` / `acorn.execaddr`), so a copy back to
 //! ADFS reproduces the native fields byte-for-byte.
 
+use tairix_abi::driver::filesystem::StampField;
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
 
@@ -27,6 +28,14 @@ const NANOS_PER_CENTI: u32 = 10_000_000;
 
 /// The RISC OS timestamp is a 40-bit (5-byte) centisecond count.
 const CENTIS_LIMIT: u64 = 1 << 40;
+
+/// What a RISC OS stamp holds: every centisecond its 40-bit count reaches
+/// from 1900 but the zero, which RISC OS reads as a clock never set.
+pub const STAMP_FIELD: StampField = StampField::new(
+    Time64::from_secs(-RISC_OS_EPOCH_TO_UNIX_SECS),
+    NANOS_PER_CENTI as u64,
+    1..CENTIS_LIMIT as u128,
+);
 
 /// High 12 bits of a load address that mark a filetyped object.
 const TYPED_MARKER: u32 = 0xFFF;

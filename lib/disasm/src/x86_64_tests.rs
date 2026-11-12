@@ -380,3 +380,80 @@ fn walk_stays_in_step_across_variable_lengths() {
     assert_eq!(names, ["push", "mov", "sub", "ret"]);
     assert_eq!(offset, stream.len());
 }
+
+/// BMI1 and BMI2, each as LLVM's assembler encodes the instruction.
+#[test]
+fn bmi_decodes_as_its_assembler_encodes_it() {
+    let cases: [(&[u8], &str, &str); 17] = [
+        (&[0xc4, 0xe2, 0x71, 0xf7, 0xc3], "shlx", "eax,ebx,ecx"),
+        (
+            &[0xc4, 0xe2, 0xb1, 0xf7, 0x43, 0x08],
+            "shlx",
+            "rax,QWORD PTR [rbx+0x8],r9",
+        ),
+        (&[0xc4, 0x42, 0x1a, 0xf7, 0xd3], "sarx", "r10d,r11d,r12d"),
+        (&[0xc4, 0xe2, 0xeb, 0xf7, 0xc1], "shrx", "rax,rcx,rdx"),
+        (&[0xc4, 0xe3, 0x7b, 0xf0, 0xc3, 0x05], "rorx", "eax,ebx,0x5"),
+        (
+            &[0xc4, 0x63, 0xfb, 0xf0, 0x3c, 0x24, 0x3f],
+            "rorx",
+            "r15,QWORD PTR [rsp],0x3f",
+        ),
+        (&[0xc4, 0xe2, 0x60, 0xf2, 0xc1], "andn", "eax,ebx,ecx"),
+        (
+            &[0xc4, 0x42, 0xb0, 0xf2, 0x02],
+            "andn",
+            "r8,r9,QWORD PTR [r10]",
+        ),
+        (&[0xc4, 0xe2, 0x78, 0xf3, 0xcb], "blsr", "eax,ebx"),
+        (&[0xc4, 0xc2, 0xb8, 0xf3, 0xd1], "blsmsk", "r8,r9"),
+        (
+            &[0xc4, 0xe2, 0x78, 0xf3, 0x18],
+            "blsi",
+            "eax,DWORD PTR [rax]",
+        ),
+        (&[0xc4, 0xe2, 0x70, 0xf5, 0xc3], "bzhi", "eax,ebx,ecx"),
+        (&[0xc4, 0xe2, 0xe2, 0xf5, 0xc1], "pext", "rax,rbx,rcx"),
+        (&[0xc4, 0xe2, 0x63, 0xf5, 0xc1], "pdep", "eax,ebx,ecx"),
+        (&[0xc4, 0x42, 0xb3, 0xf6, 0xc2], "mulx", "r8,r9,r10"),
+        (&[0xc4, 0xe2, 0x70, 0xf7, 0xc3], "bextr", "eax,ebx,ecx"),
+        (&[0xc4, 0x42, 0x81, 0xf7, 0xee], "shlx", "r13,r14,r15"),
+    ];
+    for (bytes, mnemonic, operands) in cases {
+        let insn = decode(bytes, 0).unwrap();
+        assert_eq!(
+            (insn.mnemonic.as_str(), insn.operands.as_str(), insn.length),
+            (mnemonic, operands, bytes.len()),
+            "{bytes:02x?}"
+        );
+    }
+}
+
+/// A VEX encoding past the BMI group, after a prefix VEX refuses, or with a
+/// field its instruction requires otherwise is one byte of `(bad)`.
+#[test]
+fn what_the_bmi_group_does_not_define_is_bad() {
+    for bytes in [
+        // REX, then `shlx eax,ebx,ecx`.
+        &[0x41, 0xc4, 0xe2, 0x71, 0xf7, 0xc3][..],
+        // `66`, then the same.
+        &[0x66, 0xc4, 0xe2, 0x71, 0xf7, 0xc3],
+        // VEX.L set.
+        &[0xc4, 0xe2, 0x75, 0xf7, 0xc3],
+        // `rorx` naming a VEX.vvvv register.
+        &[0xc4, 0xe3, 0x73, 0xf0, 0xc3, 0x05],
+        // Group 17 with no instruction in its `reg` field.
+        &[0xc4, 0xe2, 0x78, 0xf3, 0xc3],
+        // An AVX instruction: `vpxor xmm0,xmm0,xmm0`.
+        &[0xc5, 0xf9, 0xef, 0xc0],
+        // Cut short.
+        &[0xc4, 0xe2],
+    ] {
+        let insn = decode(bytes, 0).unwrap();
+        assert_eq!(
+            (insn.mnemonic.as_str(), insn.length),
+            (BAD_MNEMONIC, 1),
+            "{bytes:02x?}"
+        );
+    }
+}

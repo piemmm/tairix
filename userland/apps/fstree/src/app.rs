@@ -2554,8 +2554,10 @@ fn run_op(model: &mut Model, fs: &mut dyn Fs, mut op: FileOp, refresh: Vec<Strin
 /// the message line after `outcome`, and queued for the information stream.
 fn conclude(model: &mut Model, mut outcome: String, omissions: &Omissions) {
     if let Some(report) = omissions.report(OWN_WORD) {
-        outcome.push_str(" — ");
-        outcome.push_str(&report.summary);
+        if let Some(summary) = &report.summary {
+            outcome.push_str(" — ");
+            outcome.push_str(summary);
+        }
         model.advisories.push(report.record);
     }
     model.message = Some(outcome);

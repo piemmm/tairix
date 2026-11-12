@@ -378,6 +378,7 @@ impl Descriptor {
             caps: CapabilitySet::empty(),
             grant: Some(Grant {
                 write_ceiling: None,
+                subtree: None,
             }),
         });
         Self {
@@ -1829,6 +1830,15 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     retitle_scenarios::run(window_ptr, facility);
 }
 
+/// Where the FAT32 volume `image` keeps its `FSInfo` free-cluster hint,
+/// which a foreign mount rewrites.
+fn fsinfo_free_hint(image: &[u8]) -> core::ops::Range<usize> {
+    let bpb = tairix_fsprobe::fat32_bpb(image).expect("a FAT32 volume");
+    let sector = usize::from(bpb.fsinfo_sector) * usize::from(bpb.bytes_per_sector);
+    let at = sector + tairix_fat::fsinfo::at::FREE;
+    at..at + 4
+}
+
 #[path = "image_volume_scenarios.rs"]
 mod image_scenarios;
 
@@ -2089,7 +2099,8 @@ fn a_conflicted_volume_its_driver_refuses_is_kept_scenario(
         },
     );
     let mut mutated = round.at_yank;
-    mutated[512 + 488..512 + 492].copy_from_slice(&4321u32.to_le_bytes());
+    let hint = fsinfo_free_hint(&mutated);
+    mutated[hint].copy_from_slice(&4321u32.to_le_bytes());
     let inserted = insert_unserved(
         window_ptr,
         facility,
@@ -3354,10 +3365,11 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
             unflushed: Unflushed::DeviceWrite,
         },
     );
-    // A foreign mount updated the FSInfo free-cluster hint (sector 1,
-    // offset 488) — inside the evidence window, outside the identity.
+    // A foreign mount updated the FSInfo free-cluster hint — inside the
+    // evidence window, outside the identity.
     let mut mutated = round.at_yank;
-    mutated[512 + 488..512 + 492].copy_from_slice(&1234u32.to_le_bytes());
+    let hint = fsinfo_free_hint(&mutated);
+    mutated[hint].copy_from_slice(&1234u32.to_le_bytes());
     let inserted = insert(
         window_ptr,
         facility,

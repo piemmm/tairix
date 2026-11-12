@@ -22,6 +22,9 @@ tairix-bytedev = { path = "../bytedev", version = "=0.0.0" }
 tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
 # The gzip member header the probe and the archive driver both read.
 tairix-compress = { path = "../compress", version = "=0.0.0" }
+# The one FAT on-disk format, whose boot sector and label entry the probe
+# reads through it.
+tairix-fat = { path = "../fat", version = "=0.0.0" }
 # The identity fingerprint a content-derived identity is taken from for a
 # format that records no unique identifier.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }

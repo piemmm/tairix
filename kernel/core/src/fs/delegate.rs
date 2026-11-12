@@ -32,8 +32,8 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
-    mode_after_owner_change, NodeExpect, RenameFlags, SeekRegion, FS_OWNER_UNCHANGED,
-    FS_SETGID_BIT, FS_SYMLINK_MAX,
+    mode_after_owner_change, NodeExpect, RenameFlags, SeekRegion, TimesChange, TimesKept,
+    FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SYMLINK_MAX,
 };
 use tairix_abi::{CapabilityId, FileId, OpenFlags};
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
@@ -501,6 +501,22 @@ pub(super) struct Edge<'e> {
     pub(super) beneath: &'e dyn Fn(&str) -> Option<Arc<Projection>>,
     /// The bind covering a directory of the projection, if one does.
     pub(super) covered: &'e dyn Fn(NodeId) -> Option<Arc<Projection>>,
+    /// Where a directory capability confines the walk: on this projection,
+    /// the floor no `..` climbs from.
+    pub(super) confine: Confine,
+}
+
+/// How a directory capability confines a walk on one projection.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Confine {
+    /// The walk may go anywhere its permissions allow.
+    No,
+    /// The walk stands beneath a capability's floor on another projection: no
+    /// absolute link is followed.
+    Beneath,
+    /// The capability's floor is this projection's node: no `..` leaves it,
+    /// and no absolute link is followed.
+    Floor(NodeId),
 }
 
 /// Where one projection's walk stopped.
@@ -911,6 +927,9 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                         stack.pop();
                         continue;
                     }
+                    if edge.confine == Confine::Floor(here) {
+                        return Err(VfsError::PermissionDenied);
+                    }
                     if self.at_floor(cred, here, &mut floor)? {
                         // A link's `..` never leaves its projection, and `/..`
                         // is `/`.
@@ -963,28 +982,7 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
                     if walked.info.kind == NodeKind::Symlink
                         && !(is_final && road.final_link == FinalLink::Keep)
                     {
-                        if road.links == Links::Refuse {
-                            return Err(VfsError::LinkLoop);
-                        }
-                        road.hop()?;
-                        let target = self.read_link_target(child, walked.info.size)?;
-                        let parsed = parse_link_target(&target)?;
-                        // A relative target continues from the link's own
-                        // directory, where the stack already stands, and one
-                        // naming another root is its caller's to resolve.
-                        match parsed.anchor() {
-                            Anchor::Elsewhere => return Err(VfsError::CrossVolume),
-                            Anchor::Floor => {
-                                let floor_node = self.floor_node(cred, &mut floor)?;
-                                let floor_walked = self.walked(floor_node, None)?;
-                                stack.clear();
-                                stack.push(floor_walked);
-                                floor.bottom = Some(true);
-                                road.stand_at(edge.path)?;
-                            }
-                            Anchor::Here => {}
-                        }
-                        road.splice(parsed.into_steps())?;
+                        self.follow_link(cred, &walked, road, edge, &mut floor, &mut stack)?;
                         continue;
                     }
                     stack.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
@@ -994,6 +992,44 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'_, R> {
         }
         self.land(cred, stack, road, &mut floor)
             .map(Descent::Landed)
+    }
+
+    /// Splice the target of `link`, a symbolic link the walk reached, into
+    /// `road`'s steps: a relative one continues from the link's own
+    /// directory, where `stack` already stands, and an absolute one from the
+    /// projection's floor, unless the walk is confined. One naming another
+    /// root is its caller's to resolve.
+    fn follow_link(
+        &mut self,
+        cred: &Credentials<'_>,
+        link: &Walked,
+        road: &mut Road,
+        edge: &Edge<'_>,
+        floor: &mut FloorAt,
+        stack: &mut Vec<Walked>,
+    ) -> Result<(), VfsError> {
+        if road.links == Links::Refuse {
+            return Err(VfsError::LinkLoop);
+        }
+        road.hop()?;
+        let target = self.read_link_target(link.node, link.info.size)?;
+        let parsed = parse_link_target(&target)?;
+        match parsed.anchor() {
+            Anchor::Elsewhere => return Err(VfsError::CrossVolume),
+            Anchor::Floor if edge.confine != Confine::No => {
+                return Err(VfsError::PermissionDenied);
+            }
+            Anchor::Floor => {
+                let floor_node = self.floor_node(cred, floor)?;
+                let floor_walked = self.walked(floor_node, None)?;
+                stack.clear();
+                stack.push(floor_walked);
+                floor.bottom = Some(true);
+                road.stand_at(edge.path)?;
+            }
+            Anchor::Here => {}
+        }
+        road.splice(parsed.into_steps())
     }
 
     /// The node a segment starts from — its projection's floor or a held node —
@@ -2099,6 +2135,56 @@ impl<'fs, R: FilesystemRead + ?Sized> HeldNode<'fs, R> {
             Some(cap) if !cred.caps.holds(cap) => Err(VfsError::PermissionDenied),
             _ => Ok(()),
         }
+    }
+}
+
+impl<R: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized> HeldNode<'_, R> {
+    /// Change the node's access and modification times as `change` asks, by
+    /// `utimensat(2)`'s rule: a change that sets nothing touches nothing and
+    /// is not checked, stamping both now needs ownership or write access, and
+    /// any other change ownership, which no capability overrides. A node whose
+    /// format records no owner — every owner it shows stands in for one — has
+    /// no ownership to ask, so any change there needs write access.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::ReadOnly`] on a read-only projection,
+    /// [`VfsError::PermissionDenied`], [`VfsError::TimestampOutOfRange`] for
+    /// an instant the volume cannot keep and was not asked to hold to the
+    /// nearest, or the driver's other refusals.
+    pub fn set_times(
+        &mut self,
+        cred: &Credentials<'_>,
+        change: TimesChange,
+    ) -> Result<TimesKept, VfsError> {
+        if change.is_empty() {
+            return Ok(TimesKept::Exactly);
+        }
+        if self.read_only {
+            return Err(VfsError::ReadOnly);
+        }
+        if self
+            .meta
+            .required_cap
+            .is_some_and(|cap| !cred.caps.holds(cap))
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        if cred.uid != self.meta.owner {
+            let owned = self
+                .fs
+                .records_ownership(self.node)
+                .map_err(map_driver_error)?;
+            if owned && !change.is_touch() {
+                return Err(VfsError::PermissionDenied);
+            }
+            self.meta.authorize(cred, Access::Write)?;
+        }
+        let node = self.node;
+        with_class(self.fs, self.class, |fs| fs.set_times(node, change)).map_err(|err| match err {
+            DriverError::OutOfRange => VfsError::TimestampOutOfRange,
+            other => map_driver_error(other),
+        })
     }
 }
 

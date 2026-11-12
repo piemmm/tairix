@@ -1154,6 +1154,20 @@ impl<'r> Walk<'r> {
         }
     }
 
+    /// A channel run until an interrupt answers the wait posted on it, so
+    /// the walk reaches that path whatever its seed.
+    fn prologue(&mut self) {
+        let channel = self.rig.running(&mut self.endpoint);
+        self.opened.push(channel);
+        let wait = DmaEngineRequest::Wait { channel, after: 0 };
+        let (_, reply) = self.rig.call(&mut self.endpoint, PLAYER, &wait);
+        assert!(reply.is_none(), "held until a boundary passes");
+        self.rig.model.advance(usize::from(channel), PERIOD);
+        let answered = self.rig.kernel.answered();
+        self.endpoint.interrupt(1 << channel);
+        self.served_boundaries += self.rig.kernel.answered() - answered;
+    }
+
     fn step(&mut self) {
         let (holder, dreq) = *self.rng.pick(&self.holders);
         let caller = if self.rng.below(16) == 0 {
@@ -1280,6 +1294,7 @@ fn a_random_walk_never_reaches_outside_a_buffer_or_leaks_one() {
             tairix_fuzzseed::FUZZ_SEED_ENV,
         ),
     );
+    walk.prologue();
     for _ in 0..WALK_STEPS {
         walk.step();
     }

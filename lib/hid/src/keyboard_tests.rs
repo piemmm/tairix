@@ -3,7 +3,7 @@ extern crate std;
 use alloc::vec::Vec;
 use std::vec;
 
-use tairix_abi::input::{KeyInput, KeyValue, PhysicalKey};
+use tairix_abi::input::{KeyEdge, PhysicalKey};
 
 use super::KeyboardDecoder;
 use crate::descriptor::{CollectionIndex, ReportDescriptor};
@@ -25,51 +25,59 @@ fn feed(
     (outcome, sink)
 }
 
-fn pressed_chars(sink: &Recorder) -> Vec<char> {
+/// The keys pressed, in order.
+fn pressed(sink: &Recorder) -> Vec<PhysicalKey> {
     sink.keys
         .iter()
-        .filter_map(|record| match record {
-            KeyInput::Pressed {
-                key: KeyValue::Char(c),
-                ..
-            } => Some(*c),
-            _ => None,
-        })
+        .filter(|edge| edge.pressed)
+        .map(|edge| edge.key)
         .collect()
 }
 
+fn down(key: PhysicalKey) -> KeyEdge {
+    KeyEdge { key, pressed: true }
+}
+
+fn up(key: PhysicalKey) -> KeyEdge {
+    KeyEdge {
+        key,
+        pressed: false,
+    }
+}
+
 #[test]
-fn a_shifted_key_resolves_under_the_shift_typed_with_it() {
+fn a_shifted_key_goes_down_after_its_shift_and_comes_up_before_it() {
+    // The seat reads a key under the modifiers held when it arrives, so a
+    // shifted key must arrive inside its shift.
     let model = boot::keyboard().expect("boot layout");
     let mut keyboard = decoder(&model);
     let (outcome, sink) = feed(&mut keyboard, &model, &[0x02, 0, 0x04, 0, 0, 0, 0, 0]);
     assert_eq!(outcome, Decoded::Applied);
-    assert!(matches!(sink.keys[0], KeyInput::ModifiersChanged { modifiers } if modifiers.shift));
-    assert_eq!(pressed_chars(&sink), ['A']);
+    assert_eq!(
+        sink.keys,
+        [down(PhysicalKey::LEFT_SHIFT), down(PhysicalKey::A)]
+    );
     let (_, sink) = feed(&mut keyboard, &model, &[0; 8]);
-    assert!(matches!(
-        sink.keys[0],
-        KeyInput::Released {
-            key: KeyValue::Char('A'),
-            ..
-        }
-    ));
-    assert!(matches!(sink.keys[1], KeyInput::ModifiersChanged { modifiers } if !modifiers.shift));
+    assert_eq!(sink.keys, [up(PhysicalKey::A), up(PhysicalKey::LEFT_SHIFT)]);
 }
 
 #[test]
-fn a_boot_report_types_a_chords_symbol_on_the_key_it_was_typed_on() {
-    // Meta and Shift held with the 3 key: the layout types `#`, and the key is
-    // still the 3 key, down and up.
+fn a_boot_report_names_every_modifier_and_the_key_of_a_chord() {
+    // Meta and Shift held with the 3 key: every key named, the modifiers
+    // first.
     let model = boot::keyboard().expect("boot layout");
     let mut keyboard = decoder(&model);
     let (_, sink) = feed(&mut keyboard, &model, &[0x0A, 0, 0x20, 0, 0, 0, 0, 0]);
-    let pressed = sink.keys.last().expect("the key edge");
-    assert_eq!(pressed.key(), Some(KeyValue::Char('#')));
-    assert_eq!(pressed.physical(), Some(PhysicalKey::DIGIT_3));
-    assert!(pressed.modifiers().meta && pressed.modifiers().shift);
+    assert_eq!(
+        sink.keys,
+        [
+            down(PhysicalKey::LEFT_SHIFT),
+            down(PhysicalKey::LEFT_GUI),
+            down(PhysicalKey::DIGIT_3)
+        ]
+    );
     let (_, sink) = feed(&mut keyboard, &model, &[0; 8]);
-    assert_eq!(sink.keys[0].physical(), Some(PhysicalKey::DIGIT_3));
+    assert_eq!(sink.keys[0], up(PhysicalKey::DIGIT_3));
 }
 
 #[test]
@@ -77,7 +85,7 @@ fn a_key_named_twice_in_one_report_presses_once() {
     let model = boot::keyboard().expect("boot layout");
     let mut keyboard = decoder(&model);
     let (_, sink) = feed(&mut keyboard, &model, &[0, 0, 0x04, 0x04, 0, 0, 0, 0]);
-    assert_eq!(pressed_chars(&sink), ['a']);
+    assert_eq!(pressed(&sink), [PhysicalKey::A]);
     let (_, sink) = feed(&mut keyboard, &model, &[0, 0, 0x04, 0, 0, 0, 0, 0]);
     assert!(sink.keys.is_empty(), "still held, nothing changed");
 }
@@ -97,7 +105,7 @@ fn a_modifier_in_the_key_array_leaves_the_bitmap_in_charge() {
     let model = boot::keyboard().expect("boot layout");
     let mut keyboard = decoder(&model);
     let (_, sink) = feed(&mut keyboard, &model, &[0, 0, 0xE1, 0x04, 0, 0, 0, 0]);
-    assert_eq!(pressed_chars(&sink), ['a'], "no shift from the array");
+    assert_eq!(pressed(&sink), [PhysicalKey::A], "no shift from the array");
 }
 
 #[test]
@@ -106,10 +114,13 @@ fn a_clipped_report_carries_the_keys_that_arrived_but_must_carry_its_modifiers()
     let mut keyboard = decoder(&model);
     let (outcome, sink) = feed(&mut keyboard, &model, &[0x02, 0]);
     assert_eq!(outcome, Decoded::Applied);
-    assert!(matches!(sink.keys[..], [KeyInput::ModifiersChanged { modifiers }] if modifiers.shift));
+    assert_eq!(sink.keys, [down(PhysicalKey::LEFT_SHIFT)]);
     let (outcome, sink) = feed(&mut keyboard, &model, &[0x02, 0, 0x05]);
     assert_eq!(outcome, Decoded::Applied);
-    assert_eq!(pressed_chars(&sink), ['B']);
+    assert_eq!(
+        pressed(&sink),
+        [PhysicalKey::from_usage(0x05).expect("a key")]
+    );
     let (outcome, sink) = feed(&mut keyboard, &model, &[]);
     assert_eq!(outcome, Decoded::Malformed);
     assert!(sink.keys.is_empty());
@@ -144,7 +155,13 @@ fn a_bitmap_keyboard_holds_every_key_its_bits_name() {
     let mut report = vec![0u8; 14];
     report[1] = 1 << 4 | 1 << 5;
     let (_, sink) = feed(&mut keyboard, &model, &report);
-    assert_eq!(pressed_chars(&sink), ['a', 'b']);
+    assert_eq!(
+        pressed(&sink),
+        [
+            PhysicalKey::A,
+            PhysicalKey::from_usage(0x05).expect("a key")
+        ]
+    );
 }
 
 #[test]
@@ -157,8 +174,7 @@ fn a_bitmap_report_names_each_key_by_its_usage() {
     report[1] = 1 << 4;
     report[6] = 1 << 4;
     let (_, sink) = feed(&mut keyboard, &model, &report);
-    let physical: Vec<_> = sink.keys.iter().filter_map(KeyInput::physical).collect();
-    assert_eq!(physical, [PhysicalKey::A, PhysicalKey::SPACE]);
+    assert_eq!(pressed(&sink), [PhysicalKey::A, PhysicalKey::SPACE]);
 }
 
 /// A keyboard reporting under ID 6 beside a vendor collection under ID 1: the
@@ -209,7 +225,7 @@ fn a_keyboard_reads_only_its_own_report_id() {
     assert!(sink.keys.is_empty(), "a vendor report is no keystroke");
     let (outcome, sink) = feed(&mut keyboard, &model, &[6, 0, 0x04, 0, 0, 0, 0, 0]);
     assert_eq!(outcome, Decoded::Applied);
-    assert_eq!(pressed_chars(&sink), ['a']);
+    assert_eq!(pressed(&sink), [PhysicalKey::A]);
 }
 
 #[test]
@@ -219,14 +235,14 @@ fn letting_go_releases_every_key_held() {
     let _ = feed(&mut keyboard, &model, &[0x01, 0, 0x04, 0x05, 0, 0, 0, 0]);
     let mut sink = Recorder::default();
     keyboard.release(&mut sink).expect("released");
-    let released = sink
-        .keys
-        .iter()
-        .filter(|record| matches!(record, KeyInput::Released { .. }))
-        .count();
-    assert_eq!(released, 2);
-    assert!(
-        matches!(sink.keys.last(), Some(KeyInput::ModifiersChanged { modifiers }) if !modifiers.ctrl)
+    assert_eq!(
+        sink.keys,
+        [
+            up(PhysicalKey::A),
+            up(PhysicalKey::from_usage(0x05).expect("a key")),
+            up(PhysicalKey::LEFT_CTRL)
+        ],
+        "the keys, then the modifier"
     );
 }
 

@@ -27,10 +27,11 @@ use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats,
     FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes, Unpinned, VolumeHost, VolumeStats, VolumeTitle,
+    NodeTimes, StampField, Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
-use tairix_abi::SeekRegion;
+use tairix_abi::time::Time64;
+use tairix_abi::{SeekRegion, TimesChange, TimesKept};
 use tairix_collections::{OrderedMap, OrderedSet, RadixTree};
 use tairix_fsmeta::{AttrFlags, AttrSet};
 
@@ -130,8 +131,13 @@ pub struct RwMockFs {
     /// Each file's holes, parallel to `nodes`, so a seek reports real holes
     /// and a wrapper that answers "all data" itself is caught.
     holes: Vec<Holes>,
-    /// The stamps every node reports.
+    /// The stamps every node reports until [`FilesystemWrite::set_times`]
+    /// gives it its own.
     times: NodeTimes,
+    /// The stamps `set_times` gave each node, by index.
+    stamped: RadixTree<NodeTimes>,
+    /// What the access and modification times hold.
+    stamp_field: StampField,
     /// What every byte read answers instead of reading, so a test can stand
     /// in for a faulting device.
     read_refusal: Option<DriverError>,
@@ -268,6 +274,8 @@ impl RwMockFs {
             unrecorded: OrderedSet::new(),
             holes: alloc::vec![Holes::new()],
             times: NodeTimes::default(),
+            stamped: RadixTree::new(),
+            stamp_field: Self::NANOSECOND_STAMPS,
             read_refusal: None,
             listed_as: None,
             stuck_cursor: false,
@@ -387,6 +395,14 @@ impl RwMockFs {
         self
     }
 
+    /// Hold the access and modification times as `field` does.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_stamp_field(mut self, field: StampField) -> Self {
+        self.stamp_field = field;
+        self
+    }
+
     /// Answer every byte read with `refusal`.
     #[cfg(test)]
     #[must_use]
@@ -432,6 +448,16 @@ impl RwMockFs {
     fn mutable(&self) -> Result<(), DriverError> {
         self.mutation_refusal.map_or(Ok(()), Err)
     }
+
+    /// The tree's own clock, which a now stamps: no host is asked.
+    pub(crate) const NOW: Time64 = Time64::from_secs(1_700_000_000);
+
+    /// Every nanosecond of the signed 32-bit seconds' span.
+    const NANOSECOND_STAMPS: StampField = StampField::new(
+        Time64::from_secs(-(1 << 31)),
+        1,
+        0..(1 << 32) * 1_000_000_000,
+    );
 
     /// Refuse a link operation on a format that keeps none.
     fn linkable(&self) -> Result<(), DriverError> {
@@ -784,10 +810,9 @@ impl RwMockFs {
         let idx = self.live(node)?;
         let names = self.nlink.get(idx).copied().ok_or(DriverError::NotFound)?;
         let ino = node.raw().saturating_add(self.ino_bias);
-        // The in-RAM tree keeps no per-node stamps: every node reports the
-        // one set it was given, by default the epoch, the documented "no
-        // stamp" value, never a fabricated wall time.
-        let times = self.times;
+        // A node reports the one set every node was given, by default the
+        // epoch, the documented "no stamp" value, until it is given its own.
+        let times = self.stamped.get(idx as u64).copied().unwrap_or(self.times);
         match self.nodes.get(idx).ok_or(DriverError::NotFound)? {
             RwNode::Dir(_) => Ok(NodeInfo {
                 kind: NodeKind::Directory,
@@ -1268,6 +1293,28 @@ impl FilesystemWrite for RwMockFs {
             self.renumber(src_idx)?;
         }
         Ok(())
+    }
+
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let (accessed, a) = self
+            .stamp_field
+            .fit_change(change.accessed, change.nearest)?;
+        let (modified, m) = self
+            .stamp_field
+            .fit_change(change.modified, change.nearest)?;
+        let idx = self.live(node)?;
+        if change.is_empty() {
+            return Ok(TimesKept::Exactly);
+        }
+        self.mutable()?;
+        let mut times = self.stamped.get(idx as u64).copied().unwrap_or(self.times);
+        times.accessed = accessed.applied(times.accessed, Self::NOW);
+        times.modified = modified.applied(times.modified, Self::NOW);
+        times.changed = Self::NOW;
+        self.stamped
+            .try_insert(idx as u64, times)
+            .map_err(|_| DriverError::OutOfMemory)?;
+        Ok(a.and(m))
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {

@@ -69,7 +69,8 @@ over by the next operation on the volume, the close that dropped it, or a
 sync, which hands them over before it flushes; never by the kernel's
 write-back flusher, which serves every volume and so never waits on a
 driver. Every reply says whether the driver holds unpublished
-writes.
+writes. A time change is one `SetTimes` call, the driver fitting each
+instant to what its format holds and answering whether it kept them exactly.
 
 ## Retitling
 

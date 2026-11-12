@@ -186,9 +186,9 @@ Every account that may start an interactive session is granted at least
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
 `CAP_CONSOLE_WRITE`, `CAP_NET` (ordinary transport traffic through the
 socket surface; the coarser `CAP_NET_ADMIN` and `CAP_NET_RAW` are not
-baseline), `CAP_LOG_EMIT`, and the graphical-session class —
-`CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, and `CAP_DESKTOP_LAYER`, so a
-graphical login is an ordinary session, not an administrative act; real
+baseline), `CAP_LOG_EMIT`, `CAP_JIT_MAP_EXEC`, and the graphical-session
+class — `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, and `CAP_DESKTOP_LAYER`,
+so a graphical login is an ordinary session, not an administrative act; real
 reach stays per-inode, per-descriptor, and per-lease (the kernel
 owner-gates every seat acquire, input drain, and present against the live
 lease, and every shared-memory region against its owner).
@@ -214,6 +214,22 @@ its highest depth, and is hidden with both feeds stopped whenever a
 trusted surface is up. Every open, refusal and retirement is on the audit
 log, naming that the holder receives pointer position. See
 `plans/CINDER.md`.
+
+`CAP_JIT_MAP_EXEC` makes memory executable that no signed image carried:
+`code_install` moves a page-aligned region a compiler sandbox wrote out of
+its address space and maps it read-execute into another sandbox, at an
+address the target's code window chooses (`plans/BROWSER.md` BR26). It is
+baseline because an emulator or a browser with a just-in-time compiler is
+an ordinary thing to run, and, as with `CAP_DESKTOP_LAYER`, the signed
+manifest is what bounds it. The containment is structural: both processes
+must be the caller's own capability-empty sandboxed children, and distinct;
+a compiler's first install pairs it with that target for the compiler's
+life, so a compromised compiler reaches only the sandbox it already serves;
+the pages leave the compiler as they arrive in the target, every CPU's
+instruction fetch made to see them first; and no mapping anywhere is
+writable and executable at once. Its holder can therefore run generated
+code neither in itself nor in any process that holds authority. Every
+install is audited.
 
 `CAP_LOG_EMIT` is baseline because a session legitimately reports its own
 operational state, and a program built to log that structurally cannot is

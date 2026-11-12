@@ -1387,6 +1387,71 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Move the `len`-byte region at `base` of the live child `compiler` into
+    /// the live child `target`, read-execute at a kernel-chosen address, and
+    /// return that address.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::JIT_MAP_EXEC`]; the
+    /// implementation authorises both pids as distinct, sandboxed, live
+    /// children of the caller's process before it reads anything else, and
+    /// holds a compiler to the target it first installed into.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn code_install(
+        &self,
+        _caller: &CallerContext<'_>,
+        _compiler: i64,
+        _target: i64,
+        _base: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Change the access and modification times of the node at `path`
+    /// (`path_len` bytes, relative to `dirfd` as [`Self::fs_open`] resolves
+    /// it), or under [`AtFlags::EMPTY_PATH`] of the node `dirfd` holds, as
+    /// the `times_len`-byte [`tairix_abi::TimesChange`] at `times` asks (the
+    /// `utimensat(2)` shape), answering the [`tairix_abi::TimesKept`] word.
+    ///
+    /// The dispatcher has already checked that `path` is null and `path_len`
+    /// `0` exactly under `EMPTY_PATH`. The implementation checks
+    /// [`CapabilityId::FS_ACCESS`] of the identity the change acts as before
+    /// any state; the owner-or-write rule is the secured VFS's.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    #[allow(clippy::too_many_arguments)] // The six ABI arguments, decoded.
+    fn fs_set_times(
+        &self,
+        _caller: &CallerContext<'_>,
+        _dirfd: u32,
+        _path: u64,
+        _path_len: usize,
+        _times: u64,
+        _times_len: usize,
+        _flags: AtFlags,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write the [`tairix_abi::driver::filesystem::VolumeStats`] of the volume
+    /// open handle `fd` lies on to the user buffer `out`, returning the number
+    /// of bytes written (the `fstatvfs(2)` shape).
+    ///
+    /// The implementation applies the descriptor's backing-specific authority,
+    /// as [`Self::fs_stat`] does.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_volume_stats(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Answer `Ok(0)` when the task that posted the in-service call `ticket`
     /// on `endpoint` holds a grant covering the resource record at
     /// `resource`, and [`Errno::PermissionDenied`] when it holds none.
@@ -2646,11 +2711,13 @@ pub trait SyscallHandlers {
     /// absolute one ignores `dirfd`. `mode` is the permission bits a create
     /// asks for.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`,
-    /// and refused a `mode` past [`FS_MODE_MASK`] or a non-zero one on an
-    /// open without [`OpenFlags::CREATE`]. Every per-inode and mount-flag
-    /// check stays kernel-side; any failure fails closed.
+    /// The dispatcher has already checked that `path` is a non-null
+    /// `UserPtr`, and refused a `mode` past [`FS_MODE_MASK`] or a non-zero one
+    /// on an open without [`OpenFlags::CREATE`]. The implementation checks
+    /// [`CapabilityId::FS_ACCESS`] of the caller, or of the directory
+    /// capability the path is named through, before any state. Every
+    /// per-inode and mount-flag check stays kernel-side; any failure fails
+    /// closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a kernel build with no filesystem service
@@ -2716,6 +2783,9 @@ pub trait SyscallHandlers {
     /// `buf`, from where the open description's listing stands (or its
     /// start, for `from` = [`tairix_abi::ReaddirFrom::Start`]), returning the
     /// bytes written as a packed [`tairix_abi::DirEntry`] stream.
+    ///
+    /// The implementation checks [`CapabilityId::FS_ACCESS`] of the caller,
+    /// or of the directory capability `fd` holds, before any state.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_readdir(
@@ -2810,9 +2880,11 @@ pub trait SyscallHandlers {
     /// `dirfd` as [`Self::fs_open`] resolves it), asking the permission bits
     /// `mode`.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that `path` is a non-null `UserPtr`,
-    /// and refused a `mode` past [`FS_MODE_MASK`].
+    /// The dispatcher has already checked that `path` is a non-null
+    /// `UserPtr`, and refused a `mode` past [`FS_MODE_MASK`].
+    /// The implementation checks [`CapabilityId::FS_ACCESS`] of the caller,
+    /// or of the directory capability a path is named through, before any
+    /// state.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_mkdir(
@@ -2841,9 +2913,8 @@ pub trait SyscallHandlers {
     /// Remove the file or empty directory at `path` (`path_len` bytes,
     /// relative to `dirfd` as [`Self::fs_open`] resolves it).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that `path` is a non-null `UserPtr`,
-    /// rejected any reserved [`UnlinkFlags`] bit, and refused an `expect`
+    /// The dispatcher has already checked that `path` is a non-null
+    /// `UserPtr`, rejected any reserved [`UnlinkFlags`] bit, and refused an `expect`
     /// that is zero under an expectation bit or non-zero without one. With
     /// [`UnlinkFlags::DIRECTORY`] the removal succeeds only when the name is
     /// an (empty) directory — the atomic `rmdir` posture, decided by the
@@ -2866,11 +2937,12 @@ pub trait SyscallHandlers {
     /// Move the file or directory the [`tairix_abi::PathAt`] at `from` names
     /// to the name the one at `to` names.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that both `from` and `to` are non-null
-    /// `UserPtr`s, rejected any reserved [`RenameFlags`] bit, and refused an
-    /// `expect` that is zero under [`RenameFlags::EXPECT_NODE`] or non-zero
-    /// without it.
+    /// The dispatcher has already checked that both `from` and `to` are
+    /// non-null `UserPtr`s, rejected any reserved [`RenameFlags`] bit, and
+    /// refused an `expect` that is zero under [`RenameFlags::EXPECT_NODE`] or
+    /// non-zero without it. The implementation checks
+    /// [`CapabilityId::FS_ACCESS`] of the caller, or of the one directory
+    /// capability both paths are named through, before any state.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_rename(
@@ -2912,10 +2984,12 @@ pub trait SyscallHandlers {
     /// caller's buffer at `out` (`out_len` bytes), returning the target's
     /// length.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that both pointers are non-null
+    /// The dispatcher has already checked that both pointers are non-null
     /// `UserPtr`s. The final component is never followed; a path whose
     /// final component is not a link fails closed.
+    /// The implementation checks [`CapabilityId::FS_ACCESS`] of the caller,
+    /// or of the directory capability a path is named through, before any
+    /// state.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_readlink(
@@ -2933,9 +3007,10 @@ pub trait SyscallHandlers {
     /// Add the name the [`tairix_abi::PathAt`] at `new` names as a second
     /// name for the node the one at `existing` already names — a hard link.
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], that both pointers are non-null
-    /// `UserPtr`s, and rejected any reserved `flags` bit. An empty `flags`
+    /// The dispatcher has already checked that both pointers are non-null
+    /// `UserPtr`s and rejected any reserved `flags` bit; the implementation
+    /// checks [`CapabilityId::FS_ACCESS`] of the caller, or of the one
+    /// directory capability both names are named through, before any state. An empty `flags`
     /// follows neither final component, so the node that gains a name is the
     /// one the caller spelled; [`LinkFlags::FOLLOW`] resolves the existing
     /// name's final link instead. The new name is authorised as a create in
@@ -3096,10 +3171,12 @@ pub trait SyscallHandlers {
     /// [`Self::fs_open`] resolves it), or under [`AtFlags::EMPTY_PATH`] of
     /// the node `dirfd` holds (the `faccessat(2)` shape).
     ///
-    /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`], and that `path` is null and `path_len` `0`
-    /// exactly under `EMPTY_PATH`. The node's mode, ACL and gate answer first,
-    /// then the projection's flags.
+    /// The dispatcher has already checked that `path` is null and `path_len`
+    /// `0` exactly under `EMPTY_PATH`. The node's mode, ACL and gate answer
+    /// first, then the projection's flags.
+    /// The implementation checks [`CapabilityId::FS_ACCESS`] of the caller,
+    /// or of the directory capability a path is named through, before any
+    /// state.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_access(
@@ -5152,6 +5229,36 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_cap = decode_len(args.0[2])?;
                 self.handlers.child_origin(caller, pid, args.0[1], out_cap)
             }
+            SyscallNumber::CODE_INSTALL => {
+                let compiler = i64_from_register(args.0[0]);
+                let target = i64_from_register(args.0[1]);
+                let len = decode_len(args.0[3])?;
+                self.handlers
+                    .code_install(caller, compiler, target, args.0[2], len)
+            }
+            SyscallNumber::FS_SET_TIMES => {
+                // args[0] is the start directory; args[1]/args[2] the path,
+                // null and 0 exactly under `EMPTY_PATH`; args[3]/args[4] the
+                // `TimesChange` record; args[5] the `AtFlags` bits.
+                let path_len = decode_len(args.0[2])?;
+                let times_len = decode_len(args.0[4])?;
+                let flags = AtFlags::from_bits(decode_u32(args.0[5]))?;
+                check_at_path(flags, args.0[1], path_len)?;
+                self.handlers.fs_set_times(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    path_len,
+                    args.0[3],
+                    times_len,
+                    flags,
+                )
+            }
+            SyscallNumber::FS_VOLUME_STATS => {
+                let out_len = decode_len(args.0[2])?;
+                self.handlers
+                    .fs_volume_stats(caller, decode_u32(args.0[0]), args.0[1], out_len)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -5508,6 +5615,8 @@ mod tests {
     struct MockHandlers {
         calls: RefCell<Vec<&'static str>>,
         force_err: Option<Errno>,
+        /// The arguments `code_install` was last handed, as decoded.
+        installed: RefCell<Option<(i64, i64, u64, usize)>>,
     }
     impl MockHandlers {
         fn record(&self, name: &'static str) {
@@ -6054,6 +6163,44 @@ mod tests {
         ) -> SyscallResult {
             self.record("shm_grant_to");
             self.force_err.map_or(Ok(region), Err)
+        }
+
+        fn code_install(
+            &self,
+            _c: &CallerContext<'_>,
+            compiler: i64,
+            target: i64,
+            base: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("code_install");
+            *self.installed.borrow_mut() = Some((compiler, target, base, len));
+            self.force_err.map_or(Ok(0x4_0000_0000), Err)
+        }
+
+        fn fs_set_times(
+            &self,
+            _c: &CallerContext<'_>,
+            _dirfd: u32,
+            _path: u64,
+            _path_len: usize,
+            _times: u64,
+            times_len: usize,
+            flags: AtFlags,
+        ) -> SyscallResult {
+            self.record("fs_set_times");
+            Ok(u64::from(flags.bits()) | (times_len as u64) << 32)
+        }
+
+        fn fs_volume_stats(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _out: u64,
+            _out_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_volume_stats");
+            Ok(tairix_abi::driver::filesystem::VolumeStats::WIRE_LEN as u64)
         }
 
         fn call_peer_holds(
@@ -7398,6 +7545,7 @@ mod tests {
                 CapabilityId::IPC_ENDPOINT,
                 CapabilityId::CPUFREQ,
                 CapabilityId::FS_SERVE,
+                CapabilityId::JIT_MAP_EXEC,
             ],
             &sink,
         );
@@ -8771,12 +8919,17 @@ mod tests {
             (SyscallNumber::FS_SET_MODE, 4),
             (SyscallNumber::FS_SET_OWNER, 5),
             (SyscallNumber::FS_ACCESS, 4),
+            (SyscallNumber::FS_SET_TIMES, 5),
         ] {
             let call = |path: u64, path_len: u64, flags: u64| {
                 let mut args = RawArgs::ZERO;
                 args.0[0] = 4; // a directory descriptor
                 args.0[1] = path;
                 args.0[2] = path_len;
+                if number == SyscallNumber::FS_SET_TIMES {
+                    args.0[3] = 0x2000;
+                    args.0[4] = tairix_abi::TimesChange::WIRE_LEN as u64;
+                }
                 args.0[flags_slot] = flags;
                 d.dispatch(&ctx, u64::from(number.as_u16()), args)
             };
@@ -9068,6 +9221,59 @@ mod tests {
                 AuditEvent::SyscallInvoked.id().0,
                 AuditEvent::SyscallHandlerRejected.id().0,
                 AuditEvent::SyscallBadArguments.id().0,
+            ]
+        );
+    }
+
+    #[test]
+    fn code_install_is_gated_audited_and_decodes_each_argument() {
+        let sink = RecordingSink::new();
+        let bare = build_caps(&[], &sink);
+        let caps = build_caps(&[CapabilityId::JIT_MAP_EXEC], &sink);
+        let number = u64::from(SyscallNumber::CODE_INSTALL.as_u16());
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 12;
+        args.0[1] = u64::MAX;
+        args.0[2] = 0xC000_0000;
+        args.0[3] = 3 * 4096;
+
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let unprivileged = CallerContext {
+            task_id: TaskId(7),
+            caps: &bare,
+        };
+        assert_eq!(
+            d.dispatch(&unprivileged, number, args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None, "the handler must never be reached");
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        assert_eq!(d.dispatch(&ctx, number, args), Ok(0x4_0000_0000));
+        assert_eq!(
+            *h.installed.borrow(),
+            Some((12, -1, 0xC000_0000, 3 * 4096)),
+            "a pid is the whole register, and the region an address as given"
+        );
+
+        let refusing = MockHandlers {
+            force_err: Some(Errno::PermissionDenied),
+            ..MockHandlers::default()
+        };
+        let d2 = Dispatcher::new(&refusing, &sink);
+        assert_eq!(
+            d2.dispatch(&ctx, number, args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.ids(),
+            [
+                AuditEvent::SyscallPermissionDenied.id().0,
+                AuditEvent::SyscallInvoked.id().0,
+                AuditEvent::SyscallHandlerRejected.id().0,
             ]
         );
     }

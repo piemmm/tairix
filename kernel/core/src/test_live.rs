@@ -261,6 +261,52 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
+    // Code installation is exercised against the real `LiveSpace` in
+    // `kernel/mem` and the syscall handler's host tests; this double only
+    // satisfies the trait, refusing as a space with no code window would.
+    fn detach_anonymous(
+        &mut self,
+        _base_va: u64,
+        _page_count: u64,
+        _retire: &mut dyn Retire,
+        _into: &mut Vec<tairix_kernel_mem::Frame>,
+    ) -> Result<(), LiveSpaceError> {
+        Err(LiveSpaceError::Anon(
+            tairix_kernel_mem::AnonError::NotMapped,
+        ))
+    }
+
+    fn settle_spurious(&mut self, _va: u64, _write: bool) -> bool {
+        false
+    }
+
+    fn reserve_code(&mut self, _page_count: u64) -> Result<u64, LiveSpaceError> {
+        Err(LiveSpaceError::Anon(
+            tairix_kernel_mem::AnonError::OutOfMemory,
+        ))
+    }
+
+    fn map_code(
+        &mut self,
+        _base: u64,
+        _frames: &[tairix_kernel_mem::Frame],
+    ) -> Result<(), LiveSpaceError> {
+        Err(LiveSpaceError::Anon(
+            tairix_kernel_mem::AnonError::NotMapped,
+        ))
+    }
+
+    fn release_code(
+        &mut self,
+        _base_va: u64,
+        _page_count: u64,
+        _retire: &mut dyn Retire,
+    ) -> Result<u64, LiveSpaceError> {
+        Err(LiveSpaceError::Anon(
+            tairix_kernel_mem::AnonError::NotMapped,
+        ))
+    }
+
     fn freeze(&self) -> Result<FrozenAddressSpace, tairix_kernel_mem::AllocError> {
         // The producer-routing tests never inspect the snapshot; an empty
         // frozen space satisfies the trait. The re-freeze behaviour is

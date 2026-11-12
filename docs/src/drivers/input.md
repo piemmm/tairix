@@ -93,7 +93,7 @@ validates against the PIT.
 
 `tairix-drv-input-virtio-input` is the §8 driver identity — the `register`
 entry and the §18.3 `BIND_KEYS` bind table. The reusable open/poll/decode
-device logic and the keyboard console producer described below live in the
+device logic and the keyboard producer described below live in the
 [`tairix-virtio-input`](../lib/virtio_input.md) library (`lib/virtio_input`),
 shared by the in-kernel `-M virt` verticals and the user-space input-driver
 process (`tairix-drv-input-virtio-kbd`, below) without a
@@ -181,18 +181,18 @@ the two taps — the program library's button, then the terminal's row — have
 launched the terminal, with the kernel's witness that a touch frame was
 delivered (`plans/POINTING.md` PO9).
 
-#### Console-input producer
+#### Keyboard producer
 
-`lib/virtio_input`'s `VirtioKeyboardConsole` is the keyboard producer half: it
-turns the `Key` `InputEvent` edges `poll` decodes (whose `code` is the raw
-`evdev` keycode) into the `tairix_abi::input::KeyInput` records a driver injects
-through the `key_inject` syscall. Its one table names each keycode's physical
-key — the HID usage a USB keyboard reports for the same key — and the edge is
-resolved by `tairix_input::KeyboardState`, the modifiers, locks and US layout
-the `lib/hid` USB console producer runs too, then built through the shared
-`tairix_keymap::key_record` carrying that physical key (`AGENTS.md` §2.2).
-Everything is allocation-free and fail-closed — an unknown keycode or a
-non-key event produces no record rather than guessing (`AGENTS.md` §2.9).
+`lib/virtio_input`'s `key_edge` is the keyboard producer half: it turns the
+`Key` `InputEvent` edges `poll` decodes (whose `code` is the raw `evdev`
+keycode) into the `tairix_abi::input::KeyEdge` a driver injects through the
+`key_inject` syscall. Its one table names each keycode's physical key — the
+HID usage a USB keyboard reports for the same key. What the key types is the
+seat's to read: the kernel seat reads every keyboard on it through one
+`tairix_input::KeyboardState`, so a USB and a virtio keyboard on one seat share
+their modifiers, locks and layout (`AGENTS.md` §2.2). Everything is
+allocation-free and fail-closed — an unknown keycode, a key's own repeat or a
+non-key event is no edge rather than a guess (`AGENTS.md` §2.9).
 
 #### The autoloaded driver binary (`tairix-drv-input-virtio-kbd`)
 
@@ -213,7 +213,7 @@ frames go to `touch_inject`, and each other event is offered to the shared
 pointer mapping first (`PointerInput::from_device_event` — axis deltas, `BTN_*`
 edges, and scroll ticks → `pointer_inject`, stating no device time: the
 virtqueue carries none, and a virtio device's buttons do not bounce) and then
-to `VirtioKeyboardConsole::feed` → `key_inject`. One driver instance is spawned
+to `key_edge` → `key_inject`. One driver instance is spawned
 per discovered virtio-input node (keyboard, mouse and touchscreen alike — the
 bind table cannot tell them apart), and each instance's device decides which
 producer ever yields a record. A touch device that faults is told to the seat

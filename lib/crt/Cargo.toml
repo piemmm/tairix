@@ -1,0 +1,31 @@
+[package]
+name = "tairix-crt"
+description = "TAIRiX picture tube: scan lines, phosphor afterglow, faceplate glow, an analogue noise floor and a travelling wobble as strengths, the ordered passes they resolve to, the clock the moving ones run on, and the retained pipeline that draws them over a picture, redrawing only what changed. Shared by the terminal and the PC emulator. no_std + alloc, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The display's refresh rate an animated frame is paced to.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# Whole display frames, the one pacing rule the desktop's motion follows.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The rectangles and regions a render is scoped to.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The noise floor's reproducible per-row jitter.
+tairix-mix = { path = "../mix", version = "=0.0.0" }
+# The runner the stages spread their rows across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0" }
+# The surfaces the stages are and the box blur the glow spreads by.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+
+[dev-dependencies]
+# A runner that serves bands in reverse, so the tests show no band depends on
+# another's order.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", features = ["test-util"] }

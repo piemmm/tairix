@@ -283,6 +283,14 @@ impl<'a> Rgba8Image<'a> {
             height: self.height,
         }
     }
+
+    /// Row `y` as whole pixels, or `None` past the last row.
+    pub(crate) fn row(&self, y: u32) -> Option<&'a [[u8; CHANNELS]]> {
+        let start = pixel_offset(0, y, self.width)?;
+        let len = pixel_bytes(self.width, 1)?;
+        let bytes = self.pixels.get(start..start.checked_add(len)?)?;
+        Some(bytes.as_chunks::<CHANNELS>().0)
+    }
 }
 
 /// A rectangle of an image, in that image's own pixels.
@@ -463,10 +471,7 @@ impl Rows for Rgba8Image<'_> {
     }
 
     fn row(&self, y: u32) -> Option<&[[u8; CHANNELS]]> {
-        let start = pixel_offset(0, y, self.width)?;
-        let len = pixel_bytes(self.width, 1)?;
-        let bytes = self.pixels.get(start..start.checked_add(len)?)?;
-        Some(bytes.as_chunks::<CHANNELS>().0)
+        Rgba8Image::row(self, y)
     }
 }
 

@@ -516,3 +516,90 @@ fn a_change_whose_commit_fails_stands_and_every_flush_after_says_so() {
     assert_eq!(attachment.asked().commits, 0);
     assert_eq!(attachment.archive(), original);
 }
+
+/// What `attachment`'s archive holds once it is opened again.
+fn reopened(attachment: &MemoryAttachment) -> crate::fs::ArchiveFs<tairix_fsserve::MemoryAccess> {
+    open(&MemoryAttachment::new(
+        &attachment.archive(),
+        false,
+        b"archive",
+    ))
+}
+
+/// A zip member keeps a modification time to the second and no access time;
+/// a tar member keeps both to the nanosecond, its access time recorded from
+/// the change on; and what each keeps is what reads back once committed.
+#[test]
+fn a_member_keeps_the_times_its_record_holds_and_no_others() {
+    use tairix_abi::time::Time64;
+    use tairix_abi::{StampChange, TimesChange, TimesKept};
+    let change = |accessed, modified, nearest| TimesChange {
+        accessed,
+        modified,
+        nearest,
+    };
+    let in_1950 = Time64::from_secs(-631_152_000);
+    let between_seconds = Time64::new(-631_152_000, 7).expect("canonical");
+
+    let attachment = MemoryAttachment::new(&empty_zip(), true, b"archive");
+    let mut fs = open(&attachment);
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile, &file_record())
+        .unwrap();
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::Keep, StampChange::At(between_seconds), false)
+        ),
+        Err(DriverError::OutOfRange),
+        "a zip keeps whole seconds"
+    );
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::At(in_1950), StampChange::At(in_1950), false)
+        ),
+        Err(DriverError::OutOfRange),
+        "a zip keeps no access time"
+    );
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(StampChange::At(in_1950), StampChange::At(in_1950), true)
+        ),
+        Ok(TimesKept::Nearest)
+    );
+    fs.flush().unwrap();
+    let mut zip = reopened(&attachment);
+    let file = walk(&mut zip, &[b"f"]);
+    let times = zip.node_info(file).unwrap().times;
+    assert_eq!(
+        (times.modified, times.accessed),
+        (in_1950, Time64::UNIX_EPOCH)
+    );
+
+    let attachment = MemoryAttachment::new(&tar(&[(b"t", b"body")]), true, b"archive");
+    let mut fs = open(&attachment);
+    let file = walk(&mut fs, &[b"t"]);
+    assert_eq!(
+        fs.set_times(
+            file,
+            change(
+                StampChange::At(between_seconds),
+                StampChange::At(between_seconds),
+                false
+            )
+        ),
+        Ok(TimesKept::Exactly)
+    );
+    fs.flush().unwrap();
+    let mut tar = reopened(&attachment);
+    let file = walk(&mut tar, &[b"t"]);
+    let times = tar.node_info(file).unwrap().times;
+    assert_eq!(
+        (times.modified, times.accessed),
+        (between_seconds, between_seconds)
+    );
+    assert_eq!(contents(&mut tar, file), b"body");
+}

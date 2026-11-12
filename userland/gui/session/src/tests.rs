@@ -1998,6 +1998,7 @@ fn a_held_button_keeps_the_gesture_where_it_started() {
         SessionInputResponse::WindowManager(InputResponse::ClientPointerReleased {
             window,
             local: Point::new(0, 299),
+            button: tairix_wm::PointerButton::Primary,
         }),
         "the release was claimed by the bar the pointer had reached"
     );
@@ -2057,6 +2058,7 @@ fn a_chord_keeps_the_grab_until_the_last_button_is_up() {
         SessionInputResponse::WindowManager(InputResponse::ClientPointerReleased {
             window,
             local: Point::new(0, 299),
+            button: tairix_wm::PointerButton::Primary,
         })
     );
     // The last button is still down, so the pointer is still the window's: the
@@ -2279,6 +2281,8 @@ pub(crate) struct MemoryInput {
     events: Vec<(InputEvent, Option<u64>)>,
     next: usize,
     fault: Option<Errno>,
+    /// Whether the shell last asked for motion read as a locked pointer's.
+    pub(crate) locked: bool,
 }
 
 impl MemoryInput {
@@ -2287,6 +2291,7 @@ impl MemoryInput {
             events: events.iter().map(|&event| (event, None)).collect(),
             next: 0,
             fault: None,
+            locked: false,
         }
     }
 
@@ -2306,6 +2311,7 @@ impl MemoryInput {
                 .collect(),
             next: 0,
             fault: None,
+            locked: false,
         }
     }
 
@@ -2361,6 +2367,10 @@ impl InputSource for MemoryInput {
             Some(errno) => Err(errno),
             None => Ok(None),
         }
+    }
+
+    fn set_pointer_locked(&mut self, locked: bool) {
+        self.locked = locked;
     }
 }
 
@@ -3165,6 +3175,7 @@ fn pump_stops_at_each_edge_and_leaves_the_rest_queued() {
                     ShellOutcome::WindowManager(InputResponse::ClientPointerReleased {
                         window,
                         local: Point::new(52, 52),
+                        button: tairix_wm::PointerButton::Primary,
                     }),
                 ],
                 Stopped::AtEdge,
@@ -3292,6 +3303,7 @@ fn pump_motion_run_interrupted_by_different_outcome_does_not_collapse_across_int
         ShellOutcome::WindowManager(InputResponse::ClientPointerReleased {
             window,
             local: Point::new(51, 51),
+            button: tairix_wm::PointerButton::Primary,
         })
     );
     assert_eq!(
@@ -3831,7 +3843,7 @@ fn the_pointer_shape_follows_the_window_under_it() {
     let mut shell = shell();
     let mut comp = compositor();
     let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
-    assert!(comp.set_window_cursor(window, CursorKind::Text));
+    assert!(comp.set_window_cursor(window, tairix_wm::CursorHint::Shape(CursorKind::Text)));
 
     shell.handle(moved(250, 250), &mut comp, 0);
     assert_eq!(
@@ -4729,9 +4741,9 @@ pub(crate) fn headless_desktop() -> (DesktopShell, Compositor) {
 
 fn pressed(key: KeyValue) -> KeyInput {
     KeyInput::Pressed {
-        key,
+        key: Some(key),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 
@@ -4891,6 +4903,20 @@ fn asked(step: Option<PickStep>) -> (u64, String, PickAccess) {
         }) => (serial, path, access),
         other => panic!("expected an open to be asked for, got {other:?}"),
     }
+}
+
+/// The title the taskbar lists window `wm` under.
+fn task_title(shell: &DesktopShell, wm: WindowId) -> String {
+    let task = shell.tasks().task_for(wm).expect("a task");
+    shell
+        .session()
+        .taskbar()
+        .tasks()
+        .entries()
+        .iter()
+        .find(|entry| entry.id == task)
+        .map(|entry| entry.title.clone())
+        .expect("listed")
 }
 
 /// Picks of different windows are up at once, each a picker of its own in
@@ -5392,18 +5418,9 @@ fn a_folder_pick_chooses_the_folder_shown() {
     let (pick, wm) = picker
         .begin(&ask(7, &PickPurpose::Folder), &mut shell, &mut comp)
         .expect("accepted");
-    let task = shell.tasks().task_for(wm).expect("the picker is a task");
-    let title = shell
-        .session()
-        .taskbar()
-        .tasks()
-        .entries()
-        .iter()
-        .find(|entry| entry.id == task)
-        .map(|entry| entry.title.clone())
-        .expect("the picker's entry");
     assert_eq!(
-        title, "view \u{2014} Choose a folder: /",
+        task_title(&shell, wm),
+        "view \u{2014} Choose a folder: /",
         "the title names who asks, and says what is being chosen"
     );
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
@@ -5476,6 +5493,62 @@ fn a_refused_folder_keeps_the_picker_up_and_a_file_row_chooses_nothing() {
             for_window: 7,
         })
     );
+}
+
+/// A subtree pick is titled for handing a folder over, never hands over the
+/// top level, asks for the folder shown once inside one, and stays up to say
+/// why a folder could not be shared.
+#[test]
+fn a_subtree_pick_shares_the_folder_shown_but_never_the_top_level() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let (pick, wm) = picker
+        .begin(&ask(7, &PickPurpose::Subtree), &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(task_title(&shell, wm), "view \u{2014} Share a folder: /");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        key(&mut picker, pick, &enter, &mut shell, &mut comp),
+        None,
+        "the top level is not handed over"
+    );
+    assert!(picker.window_of(pick).is_some(), "and the picker stays up");
+    key(&mut picker, pick, &down, &mut shell, &mut comp);
+    key(&mut picker, pick, &enter, &mut shell, &mut comp);
+    key(&mut picker, pick, &down, &mut shell, &mut comp);
+    let (serial, path, access) = asked(key(&mut picker, pick, &enter, &mut shell, &mut comp));
+    assert_eq!((path.as_str(), access), ("/Docs", PickAccess::Subtree));
+    assert_eq!(
+        picker.opened(
+            pick,
+            serial,
+            (Err(Errno::PermissionDenied), None),
+            &mut shell,
+            &mut comp
+        ),
+        None
+    );
+    assert!(picker.window_of(pick).is_some(), "it stays up to say why");
+    let (serial, _, _) = asked(key(&mut picker, pick, &enter, &mut shell, &mut comp));
+    assert_eq!(
+        picker.opened(pick, serial, (Ok(()), None), &mut shell, &mut comp),
+        Some(PickEnd::Chosen {
+            pick,
+            for_window: 7,
+            name: String::from("Docs"),
+        })
+    );
+    assert_eq!(picker.window_of(pick), None);
+}
+
+/// A folder handed over is writable only for a requester that edits
+/// documents, and none is opened as a save is.
+#[test]
+fn a_subtree_is_handed_over_to_change_only_to_an_editor() {
+    assert!(PickAccess::Subtree.opens_to_edit(true));
+    assert!(!PickAccess::Subtree.opens_to_edit(false));
+    assert_eq!(PickAccess::Subtree.save_flags(), None);
 }
 
 /// A folder hands over its regular files of the requester's kinds, in the
@@ -5727,18 +5800,7 @@ fn picker_title_carries_the_location_and_follows_a_navigation() {
     let (pick, wm) = picker
         .begin(&ask(7, &OPEN), &mut shell, &mut comp)
         .expect("accepted");
-    let task = shell.tasks().task_for(wm).expect("the picker is a task");
-    let labelled = |shell: &DesktopShell| {
-        shell
-            .session()
-            .taskbar()
-            .tasks()
-            .entries()
-            .iter()
-            .find(|entry| entry.id == task)
-            .map(|entry| entry.title.clone())
-            .expect("the picker's entry")
-    };
+    let labelled = |shell: &DesktopShell| task_title(shell, wm);
 
     assert_eq!(labelled(&shell), "view \u{2014} Choose a file: /");
 
@@ -6759,12 +6821,12 @@ fn the_keyboard_reaches_every_save_control() {
         .expect("accepted");
     let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
     let back_tab = KeyInput::Pressed {
-        key: KeyValue::Named(NamedKeyCode::Tab),
+        key: Some(KeyValue::Named(NamedKeyCode::Tab)),
         modifiers: Modifiers {
             shift: true,
             ..Modifiers::default()
         },
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     };
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
@@ -7571,16 +7633,7 @@ fn a_save_names_folders_files_and_nonsense_in_place() {
         None,
         "a folder is gone into"
     );
-    let task = shell.tasks().task_for(wm).expect("a task");
-    let title = shell
-        .session()
-        .taskbar()
-        .tasks()
-        .entries()
-        .iter()
-        .find(|entry| entry.id == task)
-        .map(|entry| entry.title.clone());
-    assert_eq!(title.as_deref(), Some("view \u{2014} Save as: /Docs"));
+    assert_eq!(task_title(&shell, wm), "view \u{2014} Save as: /Docs");
 
     // The only row in `Docs/` is `notes.txt`: a click offers its name, which
     // then names a file to replace.
@@ -7917,18 +7970,7 @@ fn nothing_crosses_between_picks() {
 fn each_pickers_title_names_its_requester() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    let title = |shell: &DesktopShell, wm: WindowId| {
-        let task = shell.tasks().task_for(wm).expect("a task");
-        shell
-            .session()
-            .taskbar()
-            .tasks()
-            .entries()
-            .iter()
-            .find(|entry| entry.id == task)
-            .map(|entry| entry.title.clone())
-            .expect("listed")
-    };
+    let title = task_title;
     let save = save_as("notes.txt");
     let asks = [
         PickAsk {
@@ -17657,17 +17699,21 @@ fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
         "a motion sample is no new act"
     );
 
-    // A release or a modifier change reaching another window is no act of
-    // the user's in it: a window that opened under a held key sees its
+    // A release, or a key that typed nothing, reaching another window is no
+    // act of the user's in it: a window that opened under a held key sees its
     // release.
     let modifiers = tairix_abi::input::Modifiers::default();
     for key in [
         tairix_abi::input::KeyInput::Released {
-            key: tairix_abi::input::KeyValue::Char('a'),
+            key: Some(tairix_abi::input::KeyValue::Char('a')),
             modifiers,
-            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+            physical: tairix_abi::input::PhysicalKey::A,
         },
-        tairix_abi::input::KeyInput::ModifiersChanged { modifiers },
+        tairix_abi::input::KeyInput::Released {
+            key: None,
+            modifiers,
+            physical: tairix_abi::input::PhysicalKey::LEFT_SHIFT,
+        },
     ] {
         windows.note_delivered(&WindowEvent::Key {
             window_id: other,
@@ -17683,9 +17729,9 @@ fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
     windows.note_delivered(&WindowEvent::Key {
         window_id: other,
         key: tairix_abi::input::KeyInput::Pressed {
-            key: tairix_abi::input::KeyValue::Char('a'),
+            key: Some(tairix_abi::input::KeyValue::Char('a')),
             modifiers,
-            physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+            physical: tairix_abi::input::PhysicalKey::A,
         },
     });
     assert_eq!(
@@ -17789,7 +17835,7 @@ fn a_set_cursor_request_reaches_the_window_it_names() {
     });
     assert_eq!(
         comp.window_cursor(parent),
-        Some(tairix_theme::CursorKind::Text)
+        Some(tairix_wm::CursorHint::Shape(tairix_theme::CursorKind::Text))
     );
 }
 
@@ -20207,4 +20253,104 @@ fn an_idle_prompt_ignores_every_event() {
         u64::MAX,
         "and arms nothing"
     );
+}
+
+/// A keyboard-mode request marks the window it names raw, and a window the
+/// session does not know is refused.
+#[test]
+fn a_keyboard_mode_request_reaches_the_window_it_names() {
+    use tairix_abi::window_ipc::KeyboardMode;
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    let raw = |comp: &Compositor| comp.window(parent).is_some_and(Window::takes_raw_keys);
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.keyboard_mode_set(1, KeyboardMode::Raw), Ok(()));
+        assert_eq!(
+            host.keyboard_mode_set(99, KeyboardMode::Raw),
+            Err(Errno::NotFound)
+        );
+    });
+    assert!(raw(&comp));
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.keyboard_mode_set(1, KeyboardMode::Text), Ok(()));
+    });
+    assert!(!raw(&comp));
+}
+
+/// A served window locks the pointer only while it holds the keyboard with
+/// the pointer over it and no surface of the desktop's holds the seat; the
+/// lock ends with the window, and every start and end is told.
+#[test]
+fn a_pointer_lock_request_is_honoured_only_where_the_seat_allows_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.pointer_lock_set(1, true),
+            Err(Errno::PermissionDenied),
+            "it holds neither the keyboard nor the pointer"
+        );
+        assert_eq!(host.pointer_lock_set(99, true), Err(Errno::NotFound));
+    });
+    let client = comp.window_client_rect(parent).expect("a client");
+    let at = Point::new(client.right() - 20, client.bottom() - 20);
+    for event in [moved(at.x, at.y), PRIMARY_PRESS, PRIMARY_RELEASE] {
+        let _ = shell.handle(event, &mut comp, 0);
+    }
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        host.seat_held = true;
+        assert_eq!(host.pointer_lock_set(1, true), Err(Errno::PermissionDenied));
+        host.seat_held = false;
+        assert_eq!(host.pointer_lock_set(1, true), Ok(()));
+        assert_eq!(
+            host.pointer_lock_set(1, true),
+            Ok(()),
+            "asked again, nothing changes"
+        );
+    });
+    assert_eq!(shell.pointer_lock(), Some(parent));
+    assert_eq!(shell.take_lock_news(&mut comp), Some((parent, true)));
+    assert_eq!(shell.take_lock_news(&mut comp), None);
+    assert_eq!(
+        tairix_wm::desired_cursor(shell.router().pointer(), shell.router().wm(), &comp),
+        tairix_wm::CursorHint::Hidden,
+        "the locked pointer is drawn nowhere"
+    );
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        host.window_closed(1);
+    });
+    assert_eq!(shell.pointer_lock(), None);
+    assert_eq!(shell.take_lock_news(&mut comp), Some((parent, false)));
+}
+
+/// Letting the pointer go is the window's own to ask, and asking with no lock
+/// held changes nothing.
+#[test]
+fn a_window_lets_its_own_lock_go() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.pointer_lock_set(1, false), Ok(()));
+    });
+    assert_eq!(shell.take_lock_news(&mut comp), None);
+    let client = comp.window_client_rect(parent).expect("a client");
+    let at = Point::new(client.right() - 20, client.bottom() - 20);
+    for event in [moved(at.x, at.y), PRIMARY_PRESS, PRIMARY_RELEASE] {
+        let _ = shell.handle(event, &mut comp, 0);
+    }
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.pointer_lock_set(1, true), Ok(()));
+        assert_eq!(host.pointer_lock_set(1, false), Ok(()));
+    });
+    assert_eq!(shell.take_lock_news(&mut comp), Some((parent, true)));
+    assert_eq!(shell.take_lock_news(&mut comp), Some((parent, false)));
 }

@@ -57,12 +57,12 @@
 //! * The poll/feed/inject loop: each decoded `InputEvent` is offered to the
 //!   shared pointer mapping first (`PointerInput::from_device_event` — axis
 //!   deltas, the `BTN_*` button edges, and scroll ticks) and injected
-//!   through `pointer_inject`; every other event is resolved into a `KeyInput`
-//!   record by `VirtioKeyboardConsole` and injected through `key_inject`.
-//!   Both syscalls route by who holds the seat; the driver never chooses
-//!   the encoding or the destination, and it never learns the screen —
-//!   pointer records carry relative displacements the seat owner
-//!   accumulates (`lib/abi` `input`).
+//!   through `pointer_inject`; every other event names its physical key
+//!   through `key_edge` and the edge is injected through `key_inject`. Both
+//!   syscalls route by who holds the seat; the driver never learns what a key
+//!   types (the seat reads that, under the modifiers and layout every keyboard
+//!   on it shares), where a record goes, or the screen — pointer records carry
+//!   relative displacements the seat owner accumulates (`lib/abi` `input`).
 //!
 //! After bring-up `main` pumps the device forever, **parking on the granted
 //! device interrupt** between events: `VirtioInput::poll` waits through the
@@ -97,7 +97,7 @@ mod program {
     use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_virtio::{MmioTransport, PciTransport, Transport};
-    use tairix_virtio_input::{Report, VirtioInput, VirtioKeyboardConsole};
+    use tairix_virtio_input::{key_edge, Report, VirtioInput};
 
     /// Reports drained from the device per poll. A batch size, not a
     /// capacity: what is not drained stays queued and is read next time.
@@ -199,7 +199,6 @@ mod program {
         // lifting every contact a touch surface had down so none stays
         // pressed.
         let seat = tairix_abi::seat::SEAT_PRIMARY;
-        let mut console = VirtioKeyboardConsole::new();
         let mut reports = [REPORT_ZERO; REPORT_BATCH];
         loop {
             let Ok(drained) = input.poll_reports(&mut reports) else {
@@ -222,8 +221,8 @@ mod program {
                             // virtio device's buttons are not switches that
                             // bounce.
                             let _ = tairix_rt::pointer_inject(seat, &record, None);
-                        } else if let Some(record) = console.feed(*event) {
-                            let _ = tairix_rt::key_inject(seat, &record);
+                        } else if let Some(edge) = key_edge(*event) {
+                            let _ = tairix_rt::key_inject(seat, &edge);
                         }
                     }
                 }

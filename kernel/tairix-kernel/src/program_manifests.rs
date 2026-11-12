@@ -1362,6 +1362,16 @@ mod tests {
         CapabilityId::SHM,
     ];
 
+    // PCEmulator (`plans/PCEMU.md`): a sandboxed document app that also
+    // installs the code its compiler sandbox translates.
+    const PCEMULATOR_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::JIT_MAP_EXEC,
+        CapabilityId::LOG_EMIT,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::SHM,
+    ];
+
     // The Date & Time dialog `datetime` (plans/TIMEZONES.md TZ6): console
     // write for its fail-loud diagnostics, `CAP_SHM` to create and grant the
     // zero-copy window frame region the desktop session maps, `CAP_TIME_SET`
@@ -1676,6 +1686,7 @@ mod tests {
             SANDBOXED_DOCUMENT_APP_REQUEST,
         ),
         ("Life", ProgramKind::Screensaver, &[]),
+        ("PCEmulator", ProgramKind::Application, PCEMULATOR_REQUEST),
         (
             "Paint",
             ProgramKind::Application,

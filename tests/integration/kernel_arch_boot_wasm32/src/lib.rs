@@ -48,7 +48,7 @@ mod kernel {
     use tairix_arch_wasm32::console::write_line;
     use tairix_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
     use tairix_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
 
     const WORKER_CPU: CpuId = 1;
@@ -62,7 +62,7 @@ mod kernel {
     const WORKER_TASKS: u64 = 4;
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

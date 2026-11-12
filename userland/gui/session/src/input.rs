@@ -232,6 +232,45 @@ impl SessionInputRouter {
         self.wm.focused()
     }
 
+    /// The window reading the keyboard raw while it holds it: none while a
+    /// modal surface of the bar's takes the keys.
+    #[must_use]
+    pub fn raw_keyboard(&self, compositor: &Compositor, taskbar: &Taskbar) -> Option<WindowId> {
+        if modal(taskbar) {
+            return None;
+        }
+        self.wm.raw_key_window(compositor)
+    }
+
+    /// The window the pointer is locked to, if any.
+    #[must_use]
+    pub const fn pointer_lock(&self) -> Option<WindowId> {
+        self.wm.pointer_lock()
+    }
+
+    /// Lock the pointer to `window`, answering whether it was
+    /// ([`InputRouter::lock_pointer`]): never while a modal surface of the
+    /// bar's is up.
+    pub fn lock_pointer(
+        &mut self,
+        window: WindowId,
+        compositor: &Compositor,
+        taskbar: &Taskbar,
+    ) -> bool {
+        !modal(taskbar) && self.grab.is_none() && self.wm.lock_pointer(window, compositor)
+    }
+
+    /// End the pointer lock, naming the window it was of.
+    pub fn unlock_pointer(&mut self) -> Option<WindowId> {
+        self.wm.unlock_pointer()
+    }
+
+    /// The window whose lock the window manager ended itself since this was
+    /// last asked.
+    pub fn take_lock_ended(&mut self) -> Option<WindowId> {
+        self.wm.take_lock_ended()
+    }
+
     /// The window manager's input router.
     ///
     /// The desktop's pointer-cursor controller reads its interaction state —
@@ -370,7 +409,14 @@ impl SessionInputRouter {
         // event: it is seat state, so it always reaches the window manager,
         // which holds the one copy the desktop stamps onto what it routes.
         if matches!(event, InputEvent::ModifiersChanged { .. }) {
-            return wm_response(self.wm.handle(event, compositor, now_ns));
+            let response = wm_response(self.wm.handle(event, compositor, now_ns));
+            // A modal surface of the bar's has the keys, a raw window's among
+            // them.
+            return if modal(taskbar) {
+                SessionInputResponse::Ignored
+            } else {
+                response
+            };
         }
         // The keyboard has a focus of its own, and the pointer does not decide
         // it: a pointer resting on the bar must never divert a keystroke from
@@ -383,6 +429,10 @@ impl SessionInputRouter {
             if modal(taskbar) {
                 return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
             }
+            return wm_response(self.wm.handle(event, compositor, now_ns));
+        }
+        // A locked pointer is its window's: no surface is resolved under it.
+        if self.wm.pointer_lock().is_some() {
             return wm_response(self.wm.handle(event, compositor, now_ns));
         }
         // The device moved the pointer: the seat owns that position, and every

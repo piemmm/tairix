@@ -55,6 +55,8 @@ use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
+#[cfg(itest_x86_64)]
+use tairix_kalloc::Arena;
 
 /// Virtual address only the *victim* address space maps: a process root
 /// maps nothing in the user half until told to, so the *attacker* space is
@@ -69,14 +71,10 @@ const SECRET_BYTE: u8 = 0xC0;
 #[cfg(itest_x86_64)]
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-/// 4 KiB frame the victim space maps at the secret VA. Aligned via
-/// `#[repr(align(4096))]` so its physical address is a valid page frame.
 #[cfg(itest_x86_64)]
-#[repr(C, align(4096))]
-struct SecretFrame([u8; 4096]);
-
-#[cfg(itest_x86_64)]
-static mut SECRET_FRAME: SecretFrame = SecretFrame([0; 4096]);
+/// 4 KiB frame the victim space maps at the secret VA. Page-aligned, so
+/// its physical address is a valid page frame.
+static SECRET_FRAME: Arena<4096> = Arena::ZERO;
 
 /// `true` once the attacker context has been entered. Used by the page-
 /// fault handler to distinguish an *expected* fault (attacker reading a
@@ -112,14 +110,14 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // at `KERNEL_VMA_BASE + phys`, see `kernel/arch/x86_64/linker.ld`), so
     // its physical frame address — what a page-table entry must hold — is
     // its virtual address minus the higher-half base.
-    let secret_paddr = (core::ptr::addr_of!(SECRET_FRAME) as u64) - paging::KERNEL_VMA_BASE;
+    let secret_paddr = (SECRET_FRAME.as_mut_ptr() as u64) - paging::KERNEL_VMA_BASE;
     SECRET_PHYS.store(secret_paddr, Ordering::SeqCst);
     // SAFETY: SECRET_FRAME is a static mut owned exclusively by this
     // boot-time setup code; no other CPU exists yet (Stage-2 is single-
     // CPU) and the read in `page_fault_handler` happens after the store
     // completes. Use the raw pointer to avoid a `&mut` to the static.
     unsafe {
-        let p = core::ptr::addr_of_mut!(SECRET_FRAME).cast::<u8>();
+        let p = SECRET_FRAME.as_mut_ptr();
         p.write_volatile(SECRET_BYTE);
     }
 

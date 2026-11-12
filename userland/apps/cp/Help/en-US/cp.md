@@ -4,7 +4,7 @@ cp — copy files and directories
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -39,11 +39,14 @@ read-only source directory, or a umask that withholds the owner's write,
 still copies whole. A symbolic link met inside a destination tree is
 never written through.
 
-GNU's `-a`/`--archive` and the `--preserve` set other than
-`--preserve=links,xattr` are **refused**, not narrowed. `-a` is
-`-dR --preserve=all`, and `--preserve=all` includes a node's timestamps,
-which no call on this system can set — so honouring `-a` would report a
-preservation that did not happen. Use `-dR` for the rest of it.
+`-p` keeps each copy's mode, owner and times, and `-a` is `-dR` keeping
+all of it. A copy's times are its source's as nearly as the destination
+holds them — a FAT volume keeps a modification time to two seconds —
+and a run whose times could not all be kept exactly says so in one
+`omission` record on the standard information stream, not in a warning.
+A directory takes its times once its entries are in. An owner the copier
+may not give a copy is left as the copier's, as GNU's leaves it, without
+a warning.
 
 Each copy carries the source's extended attributes — a RISC OS filetype,
 a Mac type and creator — wherever the destination keeps them, and keeps a
@@ -84,14 +87,26 @@ it.
   reproduces every link, its operands' included, and any other copy
   follows its operands' links, as GNU's does; `-l` links what a followed
   link names.
+- `-a, --archive` — `-dR --preserve=all`: copy the tree, reproduce its
+  links, and keep everything the copy can.
+- `-p` — `--preserve=mode,ownership,timestamps`; a bare `--preserve` is
+  the same.
+- `--preserve=mode` — give each copy its source's exact mode, the set-ID
+  and sticky bits and those the umask withholds included.
+- `--preserve=ownership` — give each copy its source's owner and group,
+  as far as the copier may.
+- `--preserve=timestamps` — give each copy its source's access and
+  modification times, as nearly as the destination holds them.
+- `--preserve=all` — keep the mode, owner, times and shared nodes, and
+  carry every extended attribute the destination keeps.
 - `--preserve=links` — two sources naming one node get two names at the
   destination rather than two copies, so the copy does not silently
   double the storage.
 - `--preserve=xattr` — every extended attribute must be carried: a copy
   whose destination cannot keep one fails, naming it.
   `--preserve=links,xattr` asks for both.
-- `--no-preserve=xattr` — copy no extended attributes. `ownership` and
-  `timestamps` are accepted too, and are already not preserved.
+- `--no-preserve=xattr` — copy no extended attributes. `ownership`,
+  `timestamps` and `links` undo what `-p` or `-a` keeps of each.
 - `--no-preserve=mode` — make each new file and directory in the mode
   a new one takes when nothing names one, less the umask, rather than
   its source's. `--no-preserve=all` does this too.

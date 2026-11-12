@@ -172,6 +172,25 @@ fn a_set_that_cannot_be_written_is_refused_before_it_is_sent() {
         Err(SmbError::TimeOutOfRange),
         "FILETIME zero reads as unchanged"
     );
+    // Regression: an instant spelling either of the two highest FILETIMEs
+    // went to the server, which reads them as stopping or resuming its own
+    // updates of the time, never as the time.
+    for filetime in [u64::MAX, u64::MAX - 1] {
+        let sentinel = BasicUpdate {
+            written: Some(crate::wire::time_of_filetime(filetime).expect("an instant")),
+            ..BasicUpdate::default()
+        };
+        assert_eq!(
+            SetInfoRequest::new(Class::Basic, [2; 16], |enc| sentinel.encode(enc)),
+            Err(SmbError::TimeOutOfRange),
+            "{filetime:#x}"
+        );
+    }
+    let last = BasicUpdate {
+        written: Some(crate::wire::time_of_filetime(u64::MAX - 2).expect("an instant")),
+        ..BasicUpdate::default()
+    };
+    assert!(SetInfoRequest::new(Class::Basic, [2; 16], |enc| last.encode(enc)).is_ok());
 }
 
 #[test]

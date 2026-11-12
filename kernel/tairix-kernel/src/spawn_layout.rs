@@ -712,6 +712,8 @@ where
         SHARED_WINDOW_PAGES,
         VirtAddr::new(dynamic.file_base),
         dynamic.file_pages,
+        VirtAddr::new(dynamic.code_base),
+        dynamic.code_pages,
     )
     .ok()?;
     // Dropped on a refusal, the live space returns the image's frames.

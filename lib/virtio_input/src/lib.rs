@@ -53,10 +53,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-pub mod console;
+mod keys;
 mod touch;
 
-pub use console::VirtioKeyboardConsole;
+pub use keys::key_edge;
 
 use tairix_abi::driver::input::{
     Input, InputEvent, InputEventKind, AXIS_X, AXIS_Y, SCROLL_UNITS_PER_DETENT,

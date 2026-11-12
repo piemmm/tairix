@@ -77,9 +77,9 @@ fn ask_shown(
 
 fn pressed(key: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Named(key),
+        key: Some(KeyValue::Named(key)),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        physical: PhysicalKey::A,
     }
 }
 

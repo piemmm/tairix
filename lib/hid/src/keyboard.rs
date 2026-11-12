@@ -3,61 +3,19 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::input::InputEvent;
+use tairix_abi::input::{KeyEdge, PhysicalKey};
 use tairix_abi::DriverError;
+use tairix_inline::BitSet256;
 
-use crate::console::KeyboardConsole;
 use crate::descriptor::{CollectionIndex, Field, ReportDescriptor, ReportId, ReportKind};
-use crate::usages::{KEY_ERROR_ROLL_OVER, MODIFIER_FIRST, MODIFIER_LAST, PAGE_KEYBOARD};
+use crate::usages::{KEY_ERROR_ROLL_OVER, PAGE_KEYBOARD};
 use crate::{in_application, try_push, Decoded, Reading, SeatSink};
-
-/// Keyboard usages held, one bit per usage `0..=255`; the page defines none
-/// above `0xE7`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct KeySet([u64; 4]);
-
-impl KeySet {
-    fn insert(&mut self, usage: u16) {
-        if let Some(word) = self.0.get_mut(usize::from(usage / 64)) {
-            *word |= 1 << (usage % 64);
-        }
-    }
-
-    fn union(self, other: Self) -> Self {
-        let mut words = self.0;
-        for (word, other) in words.iter_mut().zip(other.0) {
-            *word |= other;
-        }
-        Self(words)
-    }
-
-    fn minus(self, other: Self) -> Self {
-        let mut words = self.0;
-        for (word, other) in words.iter_mut().zip(other.0) {
-            *word &= !other;
-        }
-        Self(words)
-    }
-
-    /// The usages held, ascending.
-    fn usages(self) -> impl Iterator<Item = u16> {
-        self.0.into_iter().zip(0u16..).flat_map(|(mut word, base)| {
-            core::iter::from_fn(move || {
-                let bit = u16::try_from(word.trailing_zeros())
-                    .ok()
-                    .filter(|&bit| bit < 64)?;
-                word &= word - 1;
-                Some(base * 64 + bit)
-            })
-        })
-    }
-}
 
 /// The keys the last of one report held.
 #[derive(Clone, Copy, Debug)]
 struct Held {
     report: ReportId,
-    keys: KeySet,
+    keys: BitSet256,
 }
 
 /// One keyboard application.
@@ -68,11 +26,10 @@ pub struct KeyboardDecoder {
     /// The modifiers are a bitmap of their own, so a modifier usage in the
     /// key array is not a second word on them.
     modifier_bitmap: bool,
-    console: KeyboardConsole,
 }
 
-const fn is_modifier(usage: u16) -> bool {
-    usage >= MODIFIER_FIRST && usage <= MODIFIER_LAST
+fn is_modifier(usage: u16) -> bool {
+    PhysicalKey::from_usage(usage).is_some_and(PhysicalKey::is_modifier)
 }
 
 impl KeyboardDecoder {
@@ -100,7 +57,7 @@ impl KeyboardDecoder {
                     &mut held,
                     Held {
                         report: field.report,
-                        keys: KeySet::default(),
+                        keys: BitSet256::EMPTY,
                     },
                 )?;
             }
@@ -121,7 +78,6 @@ impl KeyboardDecoder {
             fields,
             held,
             modifier_bitmap,
-            console: KeyboardConsole::new(),
         })
     }
 
@@ -161,7 +117,7 @@ impl KeyboardDecoder {
             return Reading::NotMine;
         };
         let id = self.held[slot].report;
-        let mut keys = KeySet::default();
+        let mut keys = BitSet256::EMPTY;
         for &index in &self.fields {
             let field = &model.fields()[index];
             if field.report != id {
@@ -183,8 +139,8 @@ impl KeyboardDecoder {
         let before = self.held_keys();
         self.held[slot].keys = keys;
         let after = self.held_keys();
-        self.emit(before.minus(after), false, sink)?;
-        self.emit(after.minus(before), true, sink)
+        emit(before.difference(&after), false, sink)?;
+        emit(after.difference(&before), true, sink)
     }
 
     /// Release every key held.
@@ -195,36 +151,32 @@ impl KeyboardDecoder {
     pub fn release(&mut self, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
         let held = self.held_keys();
         for held in &mut self.held {
-            held.keys = KeySet::default();
+            held.keys = BitSet256::EMPTY;
         }
-        self.emit(held, false, sink)
+        emit(held, false, sink)
     }
 
-    fn held_keys(&self) -> KeySet {
+    fn held_keys(&self) -> BitSet256 {
         self.held
             .iter()
-            .fold(KeySet::default(), |keys, held| keys.union(held.keys))
+            .fold(BitSet256::EMPTY, |keys, held| keys.union(&held.keys))
     }
+}
 
-    /// One edge per usage in `keys`: a press puts its modifiers down before
-    /// its other keys, and a release lets the other keys go before the
-    /// modifiers, so a shifted key resolves under the shift it was typed with.
-    fn emit(
-        &mut self,
-        keys: KeySet,
-        pressed: bool,
-        sink: &mut dyn SeatSink,
-    ) -> Result<(), DriverError> {
-        let modifiers_first = pressed;
-        for pass in [modifiers_first, !modifiers_first] {
-            for usage in keys.usages().filter(|&usage| is_modifier(usage) == pass) {
-                if let Some(record) = self.console.feed(InputEvent::key(usage, pressed)) {
-                    sink.key(&record)?;
-                }
+/// One edge per key in `keys`: a press puts its modifiers down before its
+/// other keys, and a release lets the other keys go before the modifiers, so
+/// the seat reads a shifted key under the shift it was typed with. A usage the
+/// page names no key is no edge.
+fn emit(keys: BitSet256, pressed: bool, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+    let modifiers_first = pressed;
+    for pass in [modifiers_first, !modifiers_first] {
+        for usage in keys.iter().filter(|&usage| is_modifier(usage) == pass) {
+            if let Some(key) = PhysicalKey::from_usage(usage) {
+                sink.key(&KeyEdge { key, pressed })?;
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 enum Read {
@@ -240,7 +192,7 @@ enum KeyRead {
     Phantom,
     Keys {
         slot: usize,
-        keys: KeySet,
+        keys: BitSet256,
     },
 }
 
@@ -252,7 +204,7 @@ fn read_keys(
     field: &Field,
     report: &[u8],
     modifier_bitmap: bool,
-    keys: &mut KeySet,
+    keys: &mut BitSet256,
 ) -> Read {
     for element in 0..field.count {
         let usage = if field.flags.is_variable() {

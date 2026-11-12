@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::stdinfo::{Human, JsonStr, Severity, StdInfoKind, StdInfoRecord};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, TimesKept};
 use tairix_util::quote::{Quoted, Style};
 
 use crate::tree::Node;
@@ -137,6 +137,8 @@ const REPORT_KEYS: usize = 8;
 /// line a file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Omissions {
+    /// Copies whose times their volume kept only to the nearest it holds.
+    retimed: u64,
     files: u64,
     keys: BTreeSet<String>,
     /// More distinct keys were left than the report names.
@@ -157,8 +159,16 @@ impl Omissions {
         }
     }
 
+    /// Note how exactly one copy's times were kept ([`crate::copy_times`]).
+    pub fn note_times(&mut self, kept: TimesKept) {
+        if kept == TimesKept::Nearest {
+            self.retimed += 1;
+        }
+    }
+
     /// Gather `other`'s omissions into these: a run made of runs.
     pub fn merge(&mut self, other: &Self) {
+        self.retimed += other.retimed;
         self.files += other.files;
         self.more |= other.more;
         self.refusals.extend(other.refusals.iter().copied());
@@ -178,17 +188,66 @@ impl Omissions {
         }
     }
 
-    /// Whether every copy kept every attribute.
+    /// Whether every copy kept every attribute and its times exactly.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.files == 0
+        self.files == 0 && self.retimed == 0
     }
 
     /// The report of the omissions `producer` makes, `None` when nothing was
-    /// left.
+    /// left: a warning and a record for the attributes left, and a record
+    /// alone for times kept only as nearly as their volume holds them, which is
+    /// what keeping times asks of a coarser volume.
     #[must_use]
     pub fn report(&self, producer: &str) -> Option<Report> {
-        if self.is_empty() {
+        let times = self.times_record(producer);
+        let Some((summary, mut record)) = self.attributes_report(producer) else {
+            return times.map(|record| Report {
+                summary: None,
+                record,
+            });
+        };
+        if let Some(times) = times {
+            record.extend_from_slice(&times);
+        }
+        Some(Report {
+            summary: Some(summary),
+            record,
+        })
+    }
+
+    /// The times record: how many copies' times were kept only as nearly as
+    /// their volume holds them.
+    fn times_record(&self, producer: &str) -> Option<Vec<u8>> {
+        if self.retimed == 0 {
+            return None;
+        }
+        let files = if self.retimed == 1 {
+            String::from("1 file")
+        } else {
+            format!("{} files", self.retimed)
+        };
+        let message =
+            format!("Times kept only as nearly as the destination holds them on {files}.");
+        let ai = format!(
+            "{{\"subject\":\"copy\",\"omission\":{{\"reasons\":[\"destination_precision\"],\
+             \"files\":{}}}}}",
+            self.retimed
+        );
+        let record = StdInfoRecord::new(
+            producer,
+            StdInfoKind::Omission,
+            "fs.times_not_exact",
+            Severity::Info,
+            Human::message(&message),
+        )
+        .with_ai(&ai);
+        Some(tairix_util::output::framed(&record))
+    }
+
+    /// The attributes clause and its record.
+    fn attributes_report(&self, producer: &str) -> Option<(String, Vec<u8>)> {
+        if self.files == 0 {
             return None;
         }
         let files = if self.files == 1 {
@@ -239,21 +298,22 @@ impl Omissions {
             Human::message(&message),
         )
         .with_ai(&ai);
-        Some(Report {
-            summary: format!("extended attributes not kept on {files} ({reasons}): {keys}"),
-            record: tairix_util::output::framed(&record),
-        })
+        Some((
+            format!("extended attributes not kept on {files} ({reasons}): {keys}"),
+            tairix_util::output::framed(&record),
+        ))
     }
 }
 
 /// What a run of copies tells its user it left.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Report {
-    /// What was left, and why, as one clause the producer frames: a
-    /// diagnostic's warning, a status line, an alert's detail.
-    pub summary: String,
-    /// The advisory `omission` record for the information stream: one framed
-    /// JSONL line.
+    /// The attributes left, and why, as one clause the producer frames: a
+    /// diagnostic's warning, a status line, an alert's detail. `None` where
+    /// only times were kept inexactly, which the record alone states.
+    pub summary: Option<String>,
+    /// The advisory `omission` records for the information stream: one
+    /// framed JSONL line for attributes, one for times.
     pub record: Vec<u8>,
 }
 

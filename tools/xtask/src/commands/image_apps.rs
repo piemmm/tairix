@@ -443,6 +443,30 @@ pub fn memsoak_store_files(
     )
 }
 
+/// The composed store files the PC emulator's verticals' disk plants: the
+/// shared [`app_store_files`] set plus the test-only `pcemucheck` fixture
+/// bundle (`plans/PCEMU.md` PC21), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn pcemu_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/pcemu_program",
+        tairix_test_pcemu::COMMAND,
+        &FILES,
+    )
+}
+
 /// The composed store files the USB optical vertical's disk plants: the
 /// shared [`app_store_files`] set plus the test-only `optical` fixture bundle
 /// (`plans/DEVICES.md`), memoised per arch.

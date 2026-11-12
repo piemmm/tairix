@@ -88,6 +88,17 @@ pub trait PhysMap {
     /// non-coherent port would ship the stale-code wedge.
     fn sync_instruction_cache(&self, phys: PhysAddr, len: usize);
 
+    /// Make what [`Self::sync_instruction_cache`] cleaned visible to the
+    /// instruction fetch of **every** CPU, answering whether it is: once
+    /// after a run of syncs, before anything may execute the code.
+    ///
+    /// A port whose clean already reaches every CPU (aarch64's
+    /// inner-shareable invalidate) or whose instruction fetch is coherent with
+    /// data writes (x86_64) answers `true` and does nothing; riscv64's
+    /// `fence.i` reaches only the hart that runs it, so the others are fenced
+    /// too. Deliberately no default, for the reason the sync has none.
+    fn fence_instruction_fetch(&self) -> bool;
+
     /// Recover the [`PhysAddr`] a direct-map virtual address `virt` names,
     /// or [`None`] when this map cannot invert the translation.
     ///
@@ -282,6 +293,12 @@ impl PhysMap for DirectPhysMap {
         // clean-to-PoU + I-cache-invalidate instead — the aarch64
         // `ConfiguredPhysMap`.
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        // Deliberately nothing, for the configurations the sync above serves;
+        // a port whose fetch needs a fence wraps this map with one.
+        true
+    }
 }
 
 /// Host-test stand-in for physical RAM.
@@ -374,6 +391,11 @@ impl PhysMap for SimPhysMap {
         // Deliberate no-op: the simulator's "physical RAM" is ordinary host
         // memory that is never fetched as instructions, so there is no
         // instruction-cache alias to synchronise.
+    }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        // Never fetched as instructions, as above.
+        true
     }
 }
 

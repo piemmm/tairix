@@ -384,6 +384,14 @@ impl<P: PageTable> AddressSpace<P> {
         }
     }
 
+    /// Make `pages` pages newly mapped from `base` reachable from the other
+    /// CPUs the space runs on ([`SpaceTlb::publish_remote`]).
+    pub(crate) fn publish_remote(&self, base: u64, pages: u64) {
+        if let Some(tlb) = &self.tlb {
+            tlb.publish_remote(base, pages);
+        }
+    }
+
     /// Map `page` → `frame`, recording the mapping and flushing the
     /// page's stale TLB entry on the calling CPU.
     ///

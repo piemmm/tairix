@@ -13,7 +13,7 @@ use tairix_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, syscall_entry, userentry::UserMode, SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use tairix_kernel_core::{spawn_and_enter, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{AddressSpace, Frame, PhysAddr, UserStack};
@@ -27,7 +27,7 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -80,12 +80,9 @@ const FAIL_WRONG_CAP: NonZeroU16 = fail_point!(6);
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
-/// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; the builder
+/// Page-aligned, so each `PAGE_SIZE` slice is a valid page frame; the builder
 /// reaches it at its physical address through the direct map.
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
@@ -158,7 +155,7 @@ extern "C" fn dispatch_and_finish(number: u64, args_ptr: *const [u64; SYSCALL_MA
 
 /// Hand out the next physical frame of [`FRAME_POOL`].
 fn frame_source() -> impl FnMut() -> Option<Frame> {
-    let pool = paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64);
+    let pool = paging::image_phys(FRAME_POOL.as_mut_ptr() as u64);
     let mut next = 0usize;
     move || {
         if next >= FRAME_COUNT {

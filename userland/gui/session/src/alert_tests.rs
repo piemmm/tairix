@@ -61,9 +61,10 @@ fn owner(shell: &mut DesktopShell, comp: &mut Compositor) -> WindowId {
 
 fn pressed(key: NamedKeyCode) -> KeyInput {
     KeyInput::Pressed {
-        key: KeyValue::Named(key),
+        key: Some(KeyValue::Named(key)),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::UNKNOWN,
+        // Which key typed it is not what an alert reads.
+        physical: PhysicalKey::A,
     }
 }
 

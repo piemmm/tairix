@@ -4,7 +4,7 @@ cp — copiar ficheiros e diretórios
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -41,12 +41,14 @@ mesmo que o diretório de origem seja só de leitura ou que a umask retire
 a escrita ao proprietário. Nunca se escreve através de uma ligação
 simbólica encontrada dentro de uma árvore de destino.
 
-O `-a`/`--archive` do GNU e qualquer `--preserve` além de
-`--preserve=links,xattr` são **recusados**, não restringidos. `-a` é
-`-dR --preserve=all`, e `--preserve=all` inclui as marcas temporais de
-um nó, que nenhuma chamada deste sistema consegue definir — pelo que
-honrar `-a` reportaria uma preservação que não aconteceu. Use `-dR` para
-o resto.
+`-p` mantém o modo, o dono e as datas de cada cópia, e `-a` é `-dR`
+mantendo tudo isso. As datas de uma cópia são as da sua origem, tão exatas
+quanto o destino as guarda — um volume FAT guarda a data de modificação a
+dois segundos —, e uma execução cujas datas não puderam ser todas mantidas
+exatamente di-lo num único registo `omission` no fluxo de informação
+padrão, não num aviso. Um diretório recebe as suas datas quando as suas
+entradas já lá estão. Um dono que quem copia não pode dar a uma cópia fica
+o seu, como no GNU, sem aviso.
 
 Cada cópia leva os atributos estendidos da origem — um tipo de ficheiro
 RISC OS, o tipo e o criador de um Mac — onde quer que o destino os possa
@@ -90,15 +92,26 @@ a cópia onde o percurso o encontra.
   operandos, e qualquer outra cópia segue as ligações dos seus
   operandos, como a do GNU; `-l` liga aquilo para que aponta uma ligação
   seguida.
+- `-a, --archive` — `-dR --preserve=all`: copiar a árvore, reproduzir as
+  suas ligações e manter tudo o que a cópia puder.
+- `-p` — `--preserve=mode,ownership,timestamps`; um `--preserve` sozinho
+  é o mesmo.
+- `--preserve=mode` — dar a cada cópia o modo exato da sua origem,
+  incluindo os bits set-ID e sticky e os que a umask retém.
+- `--preserve=ownership` — dar a cada cópia o dono e o grupo da sua
+  origem, tanto quanto quem copia puder.
+- `--preserve=timestamps` — dar a cada cópia as datas de acesso e de
+  modificação da sua origem, tão exatas quanto o destino as guarda.
+- `--preserve=all` — manter o modo, o dono, as datas e os nós partilhados,
+  e levar cada atributo estendido que o destino guarda.
 - `--preserve=links` — duas origens que nomeiam um só nó obtêm dois
   nomes no destino em vez de duas cópias, pelo que a cópia não duplica o
   armazenamento em silêncio.
 - `--preserve=xattr` — todos os atributos estendidos têm de ser levados:
   uma cópia cujo destino não possa guardar um falha, indicando-o.
   `--preserve=links,xattr` pede ambos.
-- `--no-preserve=xattr` — não copiar nenhum atributo estendido.
-  `ownership` e `timestamps` também são aceites, e já não são
-  preservados.
+- `--no-preserve=xattr` — não copiar atributos estendidos. `ownership`,
+  `timestamps` e `links` desfazem o que `-p` ou `-a` mantém de cada um.
 - `--no-preserve=mode` — criar cada ficheiro e diretório novo no modo
   que um novo recebe quando nada o indica, descontada a umask, em vez do
   modo da origem. `--no-preserve=all` também faz isto.

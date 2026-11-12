@@ -67,12 +67,14 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::{kept_as_stamp, unkept_stamp};
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemLabel, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
     NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned,
     VolumeHost, VolumeStats, VolumeTitle, WriteRefusal,
 };
+use tairix_abi::fs::{StampChange, TimesChange, TimesKept};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_bytedev::ByteDevice;
@@ -342,6 +344,34 @@ fn restamped(object: &Object, now: Option<Time64>) -> Result<Object, DriverError
         acorn::LoadExec::Typed { filetype, .. } => typed_at(object, filetype, now),
         acorn::LoadExec::Untyped { .. } => Ok(*object),
     }
+}
+
+/// How `object` takes `change`. A typed object's one stamp is its
+/// modification time and stands for each of its others, so an access time is
+/// kept only as the stamp the change leaves; an untyped object keeps no time.
+/// Answers the object to store, if it changes.
+fn times_changed(
+    object: &Object,
+    change: TimesChange,
+    now: Option<Time64>,
+) -> Result<(Option<Object>, TimesKept), DriverError> {
+    let acorn::LoadExec::Typed { filetype, .. } = acorn::decode_load_exec(object.load, object.exec)
+    else {
+        let accessed = unkept_stamp(change.accessed, change.nearest)?;
+        return Ok((
+            None,
+            accessed.and(unkept_stamp(change.modified, change.nearest)?),
+        ));
+    };
+    let (modified, m) = acorn::STAMP_FIELD.fit_change(change.modified, change.nearest)?;
+    let stored = match modified {
+        StampChange::Keep => None,
+        StampChange::Now => Some(typed_at(object, filetype, now)?),
+        StampChange::At(at) => Some(typed_at(object, filetype, Some(at))?),
+    };
+    let stamp = object_stamp(stored.as_ref().unwrap_or(object));
+    let a = kept_as_stamp(change.accessed, stamp, change.nearest)?;
+    Ok((stored, a.and(m)))
 }
 
 /// The four [`NodeTimes`] of a typed object. ADFS stores exactly one
@@ -2195,6 +2225,24 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             self.store(&target, &updated)?;
         }
         Ok(data.len())
+    }
+
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        let target = if node == self.root_node() {
+            Target::Root
+        } else {
+            self.write_target(node)?
+        };
+        let Some((_, object)) = target.object() else {
+            let accessed = unkept_stamp(change.accessed, change.nearest)?;
+            return Ok(accessed.and(unkept_stamp(change.modified, change.nearest)?));
+        };
+        let (stored, kept) = times_changed(&object, change, self.now())?;
+        if let Some(updated) = stored.filter(|updated| *updated != object) {
+            self.may_write()?;
+            self.store(&target, &updated)?;
+        }
+        Ok(kept)
     }
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {

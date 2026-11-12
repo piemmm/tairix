@@ -58,7 +58,7 @@ mod kernel {
     use tairix_arch_aarch64::paging;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, HeapSource};
+    use tairix_kalloc::{Arena, FreeListAllocator, HeapSource};
     use tairix_kernel::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
     use tairix_kernel_mem::{
         BootMemoryMap, FrameAllocator, FramePages, MemoryRegion, PhysAddr, RegionKind,
@@ -76,7 +76,7 @@ mod kernel {
     const HEAP_BYTES: usize = 2 * 1024 * 1024;
 
     /// The global allocator's arena.
-    static HEAP: Heap<HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// The allocator under test, registered exactly as a real image does.
     ///
@@ -91,14 +91,11 @@ mod kernel {
     const POOL_PAGES: usize = 256;
 
     /// Page-aligned pool the frame allocator is built over.
-    #[repr(C, align(4096))]
-    struct FramePool([u8; PAGE_SIZE * POOL_PAGES]);
-
-    static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * POOL_PAGES]);
+    static FRAME_POOL: Arena<{ PAGE_SIZE * POOL_PAGES }> = Arena::ZERO;
 
     /// Where [`FRAME_POOL`] lies in physical memory.
     fn pool_phys() -> u64 {
-        paging::image_phys(core::ptr::addr_of!(FRAME_POOL) as u64)
+        paging::image_phys(FRAME_POOL.as_mut_ptr() as u64)
     }
 
     /// A heap source that supplies **pages only** — the shape a port with a

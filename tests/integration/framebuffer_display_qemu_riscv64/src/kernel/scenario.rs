@@ -35,6 +35,7 @@ use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 
 use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 use tairix_itest_finisher::fail_point;
+use tairix_kalloc::Arena;
 
 // --- Framebuffer geometry --------------------------------------------
 
@@ -68,21 +69,17 @@ const TASK: ProcessId = ProcessId(0xFB0);
 /// Milestone breadcrumb event id.
 const MILESTONE_ID: EventId = EventId(9200);
 
-// --- Static scan-out surface -----------------------------------------
-
-/// Page-aligned wrapper so the surface meets the mapper's word-access
-/// alignment contract and starts on a frame boundary.
-#[repr(C, align(4096))]
-struct Surface([u8; FB_BYTES]);
-
 /// The `ramfb` scan-out surface, in guest RAM. QEMU maps it read-only
 /// and scans out from it for the life of the guest, so it must outlive
 /// the scenario — hence a `static` rather than a stack/heap buffer.
-static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
+///
+/// Page-aligned, so it meets the mapper's word-access alignment contract and
+/// starts on a frame boundary.
+static FRAMEBUFFER: Arena<FB_BYTES> = Arena::ZERO;
 
 /// Physical (identity) base address of [`FRAMEBUFFER`].
 fn framebuffer_phys() -> u64 {
-    ptr::addr_of!(FRAMEBUFFER) as u64
+    FRAMEBUFFER.as_mut_ptr() as u64
 }
 
 // --- Logging / failure -----------------------------------------------

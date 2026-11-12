@@ -376,3 +376,27 @@ fn a_datestamp_set_is_the_members_time_through_a_commit() {
     assert_eq!(&value[..len], b"3a1b2c3d4e");
     assert_eq!(reopened.node_info(notes).unwrap().times.modified, dated);
 }
+
+/// A write to a typed member is stamped to the centisecond the member's
+/// words hold, whatever finer reading the clock gives.
+///
+/// Regression: the clock's reading went to the words as it was, and any
+/// nanoseconds past a centisecond made every such write fail.
+#[test]
+fn a_typed_member_written_under_a_fine_clock_is_stamped_to_its_centisecond() {
+    let attachment = MemoryAttachment::new(&sample(), true, b"sample.spk");
+    let mut fs = open(&attachment);
+    let clock = tairix_abi::time::Time64::new(1_700_000_000, 123_456_789).expect("canonical");
+    fs.set_volume_host(
+        tairix_abi::driver::filesystem::clock::TestClock::volume(),
+        tairix_abi::driver::filesystem::clock::TestClock::at(Some(clock)),
+    );
+    let notes = walk(&mut fs, &["Notes\u{a0}One".as_bytes()]);
+    fs.set_attr(notes, b"acorn.filetype", b"ffd").unwrap();
+    fs.write_at(notes, 0, b"typed")
+        .expect("a typed member takes the write");
+    assert_eq!(
+        fs.node_info(notes).unwrap().times.modified,
+        tairix_abi::time::Time64::new(1_700_000_000, 120_000_000).expect("canonical")
+    );
+}

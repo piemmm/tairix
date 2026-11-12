@@ -29,7 +29,7 @@ use crate::data::{Archived, Check, Coding, Cursors, Data, Heap, Lead};
 use crate::format::{leaves_out, Content, Format, Placed, Read};
 use crate::name::{as_is, spelled, Charset, Spelled};
 use crate::region::{Regions, Sink};
-use crate::tree::{Body, Meta, Node, Tree, MAX_MEMBERS};
+use crate::tree::{Body, Meta, Node, Recorded, Tree, MAX_MEMBERS};
 use crate::wire::{le16, le32, le64, Out};
 
 /// A local file header's signature.
@@ -499,6 +499,7 @@ impl Record {
                 changed: Time64::UNIX_EPOCH,
             },
             acorn: self.acorn,
+            recorded: Recorded::default(),
         }
     }
 }
@@ -630,6 +631,7 @@ pub(crate) fn directory_meta() -> Meta {
             changed: Time64::UNIX_EPOCH,
         },
         acorn: None,
+        recorded: Recorded::default(),
     }
 }
 

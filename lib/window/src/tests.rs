@@ -24,11 +24,12 @@ use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuRowView,
     AppMenuSymbol, AuthorisedOutcome, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
-    HandOverDocument, HandOverOutcome, HandOverTarget, LayerDepth, MenuOutcome, MenuRefusal,
-    PaneName, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveFormats, SystemTask,
-    TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
-    APP_MENU_MAX_TOTAL_ROWS, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
-    TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    HandOverDocument, HandOverOutcome, HandOverTarget, KeyboardMode, LayerDepth, MenuOutcome,
+    MenuRefusal, PaneName, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveFormats,
+    SystemTask, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    APP_MENU_ENTRY_MAX, APP_MENU_MAX_TOTAL_ROWS, DESKTOP_LAYER_MAX_PER_CLIENT,
+    HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -508,6 +509,8 @@ struct RecordingHost {
     tooltips: Vec<(u64, WindowRegion, String)>,
     refuse_tooltip: Option<Errno>,
     cursors: Vec<(u64, CursorShape)>,
+    keyboard_modes: Vec<(u64, KeyboardMode)>,
+    pointer_locks: Vec<(u64, bool)>,
     /// Every window the engine asked the host to raise, and the window the
     /// host reports holding the keyboard.
     raised: Vec<u64>,
@@ -635,6 +638,8 @@ impl Default for RecordingHost {
             tooltips: Vec::new(),
             refuse_tooltip: None,
             cursors: Vec::new(),
+            keyboard_modes: Vec::new(),
+            pointer_locks: Vec::new(),
             raised: Vec::new(),
             focused: None,
             raises_refused: Vec::new(),
@@ -1076,6 +1081,16 @@ impl WindowHost for RecordingHost {
 
     fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         self.cursors.push((window_id, shape));
+        Ok(())
+    }
+
+    fn keyboard_mode_set(&mut self, window_id: u64, mode: KeyboardMode) -> Result<(), Errno> {
+        self.keyboard_modes.push((window_id, mode));
+        Ok(())
+    }
+
+    fn pointer_lock_set(&mut self, window_id: u64, locked: bool) -> Result<(), Errno> {
+        self.pointer_locks.push((window_id, locked));
         Ok(())
     }
 
@@ -3481,9 +3496,9 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     let b = create_id(&mut b_client, 7, EVENTS_B, 1, "b").expect("b");
 
     let key = KeyInput::Pressed {
-        key: KeyValue::Char('x'),
+        key: Some(KeyValue::Char('x')),
         modifiers: Modifiers::default(),
-        physical: PhysicalKey::from_usage(0x1B),
+        physical: PhysicalKey::from_usage(0x1B).expect("a key"),
     };
     let events = [
         WindowEvent::Focus {
@@ -5851,6 +5866,63 @@ fn the_chosen_name_is_the_owners_to_take_once() {
     assert_eq!(picked_name(&mut client, window), Err(Errno::NotFound));
 }
 
+#[test]
+fn a_subtree_pick_concludes_with_the_folder_handed_over_and_its_name() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut sink = QueueSink::default();
+
+    client
+        .pick_file(window, PickPurpose::Subtree)
+        .expect("pick accepted");
+    assert_eq!(
+        loopback.borrow().host.picks,
+        alloc::vec![(window, PickPurpose::Subtree)]
+    );
+    assert_eq!(
+        loopback.borrow_mut().server.conclude_folder_pick(
+            &mut sink,
+            window,
+            folder(&[(4, "a.txt")]),
+            0
+        ),
+        Err(Errno::OutOfRange),
+        "a folder handed over is not its files"
+    );
+    conclude(&loopback, &mut sink, window, Some((12, "Shared", true))).expect("concluded");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(endpoint, event)| (*endpoint, WindowEvent::from_bytes(event))),
+        Some((
+            EVENTS_A,
+            Ok(WindowEvent::SubtreePicked {
+                window_id: window,
+                handle: 12,
+                writable: true,
+            })
+        ))
+    );
+    assert_eq!(picked_name(&mut client, window), Ok(String::from("Shared")));
+    assert_eq!(
+        conclude(&loopback, &mut sink, window, None),
+        Err(Errno::OutOfRange),
+        "exactly one conclusion"
+    );
+
+    client
+        .pick_file(window, PickPurpose::Subtree)
+        .expect("asked again");
+    conclude(&loopback, &mut sink, window, None).expect("cancelled");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(_, event)| WindowEvent::from_bytes(event)),
+        Some(Ok(WindowEvent::PickCancelled { window_id: window }))
+    );
+}
+
 /// The files a folder pick delegated, each named and handled.
 fn folder(files: &[(u64, &str)]) -> VecDeque<tairix_abi::window_ipc::PickedFile> {
     files
@@ -8202,9 +8274,9 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
     };
     assert_eq!(
         key_input_event(KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Tab),
+            key: Some(KeyValue::Named(NamedKeyCode::Tab)),
             modifiers: held,
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::from_usage(0x2B).expect("a key"),
         }),
         InputEvent::KeyPressed {
             key: Key::Named(NamedKey::Tab),
@@ -8219,9 +8291,9 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
     // A release stays a release, and a character key carries its scalar.
     assert_eq!(
         key_input_event(KeyInput::Released {
-            key: KeyValue::Char('q'),
+            key: Some(KeyValue::Char('q')),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::from_usage(0x14).expect("a key"),
         }),
         InputEvent::KeyReleased {
             key: Key::Char('q'),
@@ -8231,9 +8303,9 @@ fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
     // The function keys keep their number rather than collapsing together.
     assert_eq!(
         key_input_event(KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::F7),
+            key: Some(KeyValue::Named(NamedKeyCode::F7)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::from_usage(0x40).expect("a key"),
         }),
         InputEvent::KeyPressed {
             key: Key::Named(NamedKey::Function { number: 7 }),
@@ -10840,5 +10912,36 @@ fn a_reveal_is_answered_after_its_window_has_closed() {
             [Answer::Revealed { token, shown: Err(Errno::NotFound) }] if *token == asked
         ),
         "the refusal is still the user's to read"
+    );
+}
+
+/// A window's keyboard mode and pointer lock reach the host as asked, and only
+/// for the caller's own window: another client naming it is refused.
+#[test]
+fn the_keyboard_mode_and_pointer_lock_reach_the_host_for_the_callers_own_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let a = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client
+        .set_keyboard_mode(a, KeyboardMode::Raw)
+        .expect("posted");
+    client.lock_pointer(a, true).expect("posted");
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    {
+        let inner = loopback.borrow();
+        assert_eq!(inner.host.keyboard_modes, [(a, KeyboardMode::Raw)]);
+        assert_eq!(inner.host.pointer_locks, [(a, true)]);
+    }
+
+    let mut b_client = connected_as(&loopback, TICKET_B);
+    loopback.borrow_mut().ticket = TICKET_B;
+    b_client.lock_pointer(a, false).expect("posted");
+    loopback.borrow_mut().serve_posted();
+    b_client.reap_posted();
+    assert_eq!(
+        loopback.borrow().host.pointer_locks,
+        [(a, true)],
+        "another client's request never reaches the host"
     );
 }

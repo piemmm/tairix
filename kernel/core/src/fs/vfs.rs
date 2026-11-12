@@ -31,12 +31,12 @@ use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::delegate::{
-    Begin, DelegatedFs, DelegatedRef, Descent, Edge, Expect, FinalLink, Links, MissingSteps, Road,
-    Walk,
+    Begin, Confine, DelegatedFs, DelegatedRef, Descent, Edge, Expect, FinalLink, Links,
+    MissingSteps, Road, Walk,
 };
 use super::listing::{DirPosition, ListEnd};
 use super::mount::{Cover, MountTable, Projection};
-use super::node::{At, NodeHandle, NodeRef, Start};
+use super::node::{At, Floor, NodeHandle, NodeRef, Start};
 use super::path::{
     owned_name, parse_caller_path, spell, CallerPath, Path, Step, TargetStep, MAX_PATH_COMPONENTS,
 };
@@ -169,6 +169,9 @@ pub(super) struct Resolution<'s> {
     road: Road,
     /// Whether the start's search permission is yet to be checked.
     check_start: bool,
+    /// The floor of the directory capability the path was named through,
+    /// which the resolution never climbs above.
+    confine: Option<&'s Floor>,
 }
 
 /// What a resolution asks for next.
@@ -256,6 +259,13 @@ impl<'s> Resolution<'s> {
             };
             Ok::<_, VfsError>((Stand::Floor(projection), spelled))
         };
+        let confine = match start {
+            Start::Dir(handle) => handle.subtree(),
+            Start::Root | Start::Catalog(_) => None,
+        };
+        if path.absolute && confine.is_some() {
+            return Err(VfsError::PermissionDenied);
+        }
         let ((stand, spelled), check_start) = if path.absolute {
             (floor(vfs.root_projection()?, spelling)?, false)
         } else {
@@ -289,6 +299,7 @@ impl<'s> Resolution<'s> {
             stand,
             road,
             check_start,
+            confine,
         })
     }
 
@@ -405,11 +416,19 @@ impl<'s> Resolution<'s> {
                 .and_then(|covers| covers.covering(&projection, node))
                 .cloned()
         };
+        let confine = match self.confine {
+            None => Confine::No,
+            Some(floor) if Arc::ptr_eq(&floor.projection, &projection) => {
+                Confine::Floor(floor.node.pinned())
+            }
+            Some(_) => Confine::Beneath,
+        };
         let edge = Edge {
             path: projection.path(),
             has_parent: !projection.path().is_root(),
             beneath: &beneath,
             covered: &covered,
+            confine,
         };
         let descent =
             DelegatedFs::bind(fs, &projection).walk_segment(cred, begin, &mut self.road, &edge)?;

@@ -25,6 +25,9 @@ required-features = ["program"]
 # through, and its bind key.
 tairix-fsserve = { path = "../../../lib/fsserve", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The FAT on-disk format: parameter block, table, entries, names, stamps,
+# and the layout a new volume gets.
+tairix-fat = { path = "../../../lib/fat", version = "=0.0.0" }
 # The shared filesystem-signature definitions (the FAT32 identity
 # derivation), so this driver and the volume manager's probe can never
 # disagree about what identifies a volume.

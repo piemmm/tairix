@@ -1,0 +1,26 @@
+[package]
+name = "tairix-test-code-install"
+description = "PC17 / BR26 fixture: a separately-linked pure-Rust user-mode program built once and run in two argv-selected roles, so the consuming verticals prove code installation end to end. `parent`, holding CAP_JIT_MAP_EXEC, starts sandboxed `worker`s as a compiler and two targets, and one worker that is not sandboxed; it has the compiler write functions returning chosen values, installs them into a target with code_install and has the target call them, and checks that the compiler's pages left it, that the compiler serves only its first target, that no unsandboxed child takes part, and that the target releases its code with mem_unmap. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-code-install"
+path = "src/main.rs"
+
+# A pure-Rust TAIRiX program: the pure-Rust userland runtime on the native
+# Tier-1 targets (`target_os = "none"`), an inert stub on the host so the
+# workspace build and clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -58,7 +58,7 @@ mod kernel {
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_itest_desktop_witness::{window_shown, ShownWindows};
     use tairix_itest_witness::{field_str, names_bundle};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel_core::memstats::MEM_STATS;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -74,7 +74,7 @@ mod kernel {
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

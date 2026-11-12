@@ -37,7 +37,9 @@ use tairix_abi::driver::filesystem::{
     FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity,
     Unpinned, VolumeHost, VolumeStats, VolumeTitle,
 };
-use tairix_abi::fs::{SeekRegion, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_SYMLINK_MAX};
+use tairix_abi::fs::{
+    SeekRegion, TimesChange, TimesKept, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_SYMLINK_MAX,
+};
 use tairix_abi::fsserve::{
     decode_reply, encode_request, Answer, DirEnd, Lanes, Op, Request, ServeOffer, ServerState,
     Span, FSSERVE_REPLY_MAX, FSSERVE_REQUEST_MAX, SERVED_IDLE_NS,
@@ -1024,6 +1026,16 @@ impl FilesystemWrite for ServedFs {
 
     fn truncate(&mut self, file: NodeId, size: u64) -> Result<(), DriverError> {
         self.ask(&Request::Truncate { file, size }, |_, answer| done(answer))
+    }
+
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        self.ask(
+            &Request::SetTimes { node, change },
+            |_, answer| match answer {
+                Answer::Kept(kept) => Ok(kept),
+                _ => Err(DriverError::DeviceFault),
+            },
+        )
     }
 
     fn punch(&mut self, file: NodeId, offset: u64, len: u64) -> Result<(), DriverError> {

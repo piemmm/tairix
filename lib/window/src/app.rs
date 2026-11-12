@@ -204,6 +204,40 @@ pub fn pool_across(name: &str, online: usize, doing: &str) -> tairix_parallel::P
     pool
 }
 
+/// A pool across the machine's CPUs ([`pool_across`]), started the first time
+/// work is spread across it, so a program that never needs one holds no
+/// worker threads.
+///
+/// The CPU count is asked once, when the program starts, because the
+/// question is a call to another service and the pool is reached from the
+/// loop that owes the windows their frames.
+pub struct LazyPool {
+    name: &'static str,
+    doing: &'static str,
+    online: usize,
+    pool: core::cell::OnceCell<tairix_parallel::Pool>,
+}
+
+impl LazyPool {
+    /// The pool application `name` spreads work described as `doing`
+    /// across, over `online` CPUs.
+    #[must_use]
+    pub const fn new(name: &'static str, online: usize, doing: &'static str) -> Self {
+        Self {
+            name,
+            doing,
+            online,
+            pool: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// The pool, started now if it has not been.
+    pub fn runner(&self) -> &dyn tairix_parallel::JobRunner {
+        self.pool
+            .get_or_init(|| pool_across(self.name, self.online, self.doing))
+    }
+}
+
 /// State the abnormal-exit `reason` under `name` and hand `code` back.
 pub fn fail(name: &str, code: i32, reason: impl fmt::Display) -> i32 {
     report(name, reason);

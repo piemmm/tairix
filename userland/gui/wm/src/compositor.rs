@@ -44,7 +44,7 @@ use tairix_reclaim::{
     screenful_ui_budget, stacked_ui_budget, CacheAccounting, PressureBand, PressureGauge,
     ReclaimCache, Served,
 };
-use tairix_theme::{CursorKind, MotionInteraction, Theme};
+use tairix_theme::{MotionInteraction, Theme};
 use tairix_util::fallible;
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
@@ -60,8 +60,8 @@ use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
-    OpaqueRun, Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow,
-    WindowShape,
+    CursorHint, OpaqueRun, Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId,
+    WindowRow, WindowShape,
 };
 
 #[path = "layers.rs"]
@@ -2957,26 +2957,37 @@ impl Compositor {
     }
 
     /// Set the pointer-cursor hint for the window named by `id` — the
-    /// [`CursorKind`] shown while the pointer rests over the window
+    /// [`CursorKind`](tairix_theme::CursorKind) shown while the pointer rests
+    /// over the window, or none
     /// (`crate::select`). Returns `false` for an unknown id.
     ///
     /// The hint is window state, not pixels: changing it does not redraw
     /// the window (the cursor is the separate top overlay), so no damage
     /// is marked. The displayed pointer updates when the selection policy
     /// next runs over this window.
-    pub fn set_window_cursor(&mut self, id: WindowId, kind: CursorKind) -> bool {
+    pub fn set_window_cursor(&mut self, id: WindowId, hint: CursorHint) -> bool {
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
         };
-        window.set_cursor_hint(kind);
+        window.set_cursor_hint(hint);
         true
     }
 
     /// The pointer-cursor hint of the window named by `id`, or `None` for
     /// an unknown id.
     #[must_use]
-    pub fn window_cursor(&self, id: WindowId) -> Option<CursorKind> {
+    pub fn window_cursor(&self, id: WindowId) -> Option<CursorHint> {
         self.window(id).map(Window::cursor_hint)
+    }
+
+    /// Have the window named by `id` read the keyboard raw (`raw`) or as
+    /// text. Returns `false` for an unknown id.
+    pub fn set_window_raw_keys(&mut self, id: WindowId, raw: bool) -> bool {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
+            return false;
+        };
+        window.set_raw_keys(raw);
+        true
     }
 
     /// Give the window named by `id` a root viewport, so the window manager
@@ -3499,6 +3510,15 @@ impl Compositor {
     /// derived.
     pub fn set_cursor_hidden(&mut self, hidden: bool) -> bool {
         self.pointer.set_hidden(hidden)
+    }
+
+    /// Draw no cursor image (`blank`) or draw it again, answering whether
+    /// that changed anything: what content that wants no pointer, and a
+    /// pointer lock, ask for. Unlike [`set_cursor_hidden`](Self::set_cursor_hidden)
+    /// it leaves the aids drawn, so a pointer the user asks to be shown is
+    /// shown where it is.
+    pub fn set_cursor_blank(&mut self, blank: bool) -> bool {
+        self.pointer.set_blank(blank)
     }
 
     /// Whether the pointer cursor is withheld from the screen.

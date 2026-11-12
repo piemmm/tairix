@@ -799,23 +799,30 @@ impl DosTime {
     /// the years 1980 to 2107 the fields hold — never a clamped date.
     #[must_use]
     pub fn from_time64(time: Time64) -> Option<Self> {
-        let civil = CivilTime::from_time64(time);
+        Self::of_civil(&CivilTime::from_time64(time))
+    }
+
+    /// The words recording `civil`, its odd second dropped, or `None` for a
+    /// field they cannot hold: a year outside 1980 to 2107, or a value wider
+    /// than its bits. Whether the date is a real one is not checked.
+    #[must_use]
+    pub fn of_civil(civil: &CivilTime) -> Option<Self> {
         let year = u16::try_from(civil.year.checked_sub(1980)?)
             .ok()
             .filter(|&year| year <= 127)?;
-        let field = |value: u32| u16::try_from(value).ok();
+        let field = |value: u32, bits: u32| u16::try_from(value).ok().filter(|&v| v >> bits == 0);
         Some(Self {
-            date: (year << 9) | (field(civil.month)? << 5) | field(civil.day)?,
-            time: (field(civil.hour)? << 11)
-                | (field(civil.minute)? << 5)
-                | (field(civil.second)? / 2),
+            date: (year << 9) | (field(civil.month, 4)? << 5) | field(civil.day, 5)?,
+            time: (field(civil.hour, 5)? << 11)
+                | (field(civil.minute, 6)? << 5)
+                | (field(civil.second, 6)? / 2),
         })
     }
 
-    /// The instant the fields name, or `None` for fields that name no real
-    /// date and time.
+    /// The fields the words hold, as they hold them: unchecked, the seconds
+    /// to two.
     #[must_use]
-    pub fn to_time64(self) -> Option<Time64> {
+    pub fn civil(self) -> CivilTime {
         CivilTime {
             year: i64::from(self.date >> 9) + 1980,
             month: u32::from(self.date >> 5 & 0x0F),
@@ -824,7 +831,13 @@ impl DosTime {
             minute: u32::from(self.time >> 5 & 0x3F),
             second: u32::from(self.time & 0x1F) * 2,
         }
-        .to_time64()
+    }
+
+    /// The instant the fields name, or `None` for fields that name no real
+    /// date and time.
+    #[must_use]
+    pub fn to_time64(self) -> Option<Time64> {
+        self.civil().to_time64()
     }
 }
 
@@ -891,6 +904,44 @@ mod tests {
             dos((1981, 1, 1), (24, 0, 0)),
         ] {
             assert_eq!(stamp.to_time64(), None, "{stamp:?}");
+        }
+    }
+
+    #[test]
+    fn a_dos_stamp_packs_and_unpacks_its_fields_and_refuses_what_overflows_them() {
+        let civil = |year, month, day, hour, minute, second| CivilTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        };
+        let stamp = DosTime::of_civil(&civil(2026, 11, 10, 15, 45, 31)).unwrap();
+        assert_eq!(
+            stamp.civil(),
+            civil(2026, 11, 10, 15, 45, 30),
+            "to two seconds"
+        );
+        assert_eq!(
+            DosTime {
+                date: 0xFFFF,
+                time: 0xFFFF
+            }
+            .civil(),
+            civil(2107, 15, 31, 31, 63, 62),
+            "unchecked, as the words hold them"
+        );
+        for wide in [
+            civil(1979, 1, 1, 0, 0, 0),
+            civil(2108, 1, 1, 0, 0, 0),
+            civil(1990, 16, 1, 0, 0, 0),
+            civil(1990, 1, 32, 0, 0, 0),
+            civil(1990, 1, 1, 32, 0, 0),
+            civil(1990, 1, 1, 0, 64, 0),
+            civil(1990, 1, 1, 0, 0, 64),
+        ] {
+            assert_eq!(DosTime::of_civil(&wide), None, "{wide:?}");
         }
     }
 

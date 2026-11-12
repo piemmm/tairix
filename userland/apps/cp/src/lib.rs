@@ -27,11 +27,12 @@
 //! meets rather than one entry per node on the volume. `-d` is exactly that
 //! pair, spelled as the pair so its halves cannot drift.
 //!
-//! `-a` and the `--preserve` set other than `--preserve=links` are refused
-//! ([`CpError::Unsupported`]): `-a` is `-dR --preserve=all`, and
-//! `--preserve=all` includes timestamps no call can set here, so honouring
-//! it would report a preservation that did not happen. `-dR` is the rest of
-//! it and is available.
+//! `-p` keeps each copy's exact mode, its owner as far as the copier may give
+//! it, and its times as nearly as the destination holds them, a directory's
+//! once its entries are in; `-a` is `-dR --preserve=all`. A run whose times
+//! were not all kept exactly says so once, as attributes left behind are.
+//! Only `--preserve=context` is refused ([`CpError::Unsupported`]): this
+//! system keeps no security context.
 //!
 //! # What this crate is
 //!

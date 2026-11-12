@@ -15,14 +15,14 @@ use tairix_arch_riscv64::imsic::{HartFile, Imsic, InterruptFile};
 use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
 use tairix_fdt::pci::{each_pci_host, PciSpace};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel_iommu_api::{Clock, IommuUnit, Notice, Signalling};
 use tairix_kernel_iommu_riscv::RiscvUnit;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_pci::{Aperture, Apertures, EcamRegion, PciResources, Windows};
 
 /// The boot heap, in `.bss`.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

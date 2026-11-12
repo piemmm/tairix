@@ -11,7 +11,7 @@ use core::ops::ControlFlow;
 use tairix_abi::fs::{DirEntries, SeekRegion, FD_CWD};
 use tairix_abi::{
     Access, AtFlags, DirEntry, Errno, FileStat, LinkFlags, NodeExpect, OpenFlags, RenameFlags,
-    UnlinkFlags, READDIR_BATCH_MAX,
+    TimesChange, TimesKept, UnlinkFlags, READDIR_BATCH_MAX,
 };
 use tairix_fscopy::tree::{self, entry_name, Entry, Kind, Roots};
 use tairix_fscopy::{Source, Target};
@@ -29,6 +29,10 @@ impl tree::Node for File {
 
     fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
         File::set_owner(self, uid, gid).map_err(Errno::from_syscall)
+    }
+
+    fn set_times(&self, change: &TimesChange) -> Result<TimesKept, Errno> {
+        File::set_times(self, change).map_err(Errno::from_syscall)
     }
 
     fn attr_keys(&self) -> Result<Vec<String>, Errno> {
@@ -50,6 +54,10 @@ impl tree::Node for File {
     fn sync(&self) -> Result<(), Errno> {
         File::sync(self).map_err(Errno::from_syscall)
     }
+
+    fn volume_stats(&self) -> Result<tairix_abi::driver::filesystem::VolumeStats, Errno> {
+        File::volume_stats(self).map_err(Errno::from_syscall)
+    }
 }
 
 impl tree::Node for Dir {
@@ -63,6 +71,10 @@ impl tree::Node for Dir {
 
     fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
         tree::Node::set_owner(self.as_file(), uid, gid)
+    }
+
+    fn set_times(&self, change: &TimesChange) -> Result<TimesKept, Errno> {
+        tree::Node::set_times(self.as_file(), change)
     }
 
     fn attr_keys(&self) -> Result<Vec<String>, Errno> {
@@ -83,6 +95,10 @@ impl tree::Node for Dir {
 
     fn sync(&self) -> Result<(), Errno> {
         tree::Node::sync(self.as_file())
+    }
+
+    fn volume_stats(&self) -> Result<tairix_abi::driver::filesystem::VolumeStats, Errno> {
+        tree::Node::volume_stats(self.as_file())
     }
 }
 

@@ -10,7 +10,7 @@ use tairix_abi::IrqHandle;
 use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID};
 use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, paging, qemu_exit, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_log::{log, Event, EventId, Level};
@@ -19,7 +19,7 @@ use tairix_log::{log, Event, EventId, Level};
 const HEAP_SIZE: usize = 256 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
+static HEAP: Arena<HEAP_SIZE> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

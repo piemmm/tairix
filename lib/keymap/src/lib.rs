@@ -40,7 +40,7 @@
 
 use tairix_abi::input::{KeyInput, KeyValue, PhysicalKey};
 use tairix_input::wire::{key_from_abi, modifiers_from_abi, modifiers_to_abi, named_key_to_abi};
-use tairix_input::{Key, KeyEdge, KeyboardState, Modifiers, NamedKey};
+use tairix_input::{Key, KeyboardState, Modifiers, NamedKey};
 use tairix_vt::control;
 use tairix_vt::key::Key as VtKey;
 
@@ -279,11 +279,11 @@ fn named_to_vt(named: NamedKey) -> Option<VtKey> {
 ///
 /// This is [`encode_key`] reached from the wire vocabulary: it reads the
 /// record's [`KeyValue`] and modifiers as the `lib/input` [`Key`] and
-/// [`Modifiers`] (`tairix_input::wire`) and encodes them, so the arbiter never owns a second copy of
-/// the layout-to-tty mapping. Only a key **press** produces
-/// bytes — a terminal sends nothing on key release — so a
-/// [`KeyInput::Released`] — and a [`KeyInput::ModifiersChanged`], which names
-/// no key at all — writes nothing and returns `Ok(0)`.
+/// [`Modifiers`] (`tairix_input::wire`) and encodes them, so the arbiter never
+/// owns a second copy of the layout-to-tty mapping. Only a **press** of a key
+/// that typed something produces bytes — a terminal sends nothing on a key's
+/// release, a modifier or a lock — so every other record writes nothing and
+/// returns `Ok(0)`.
 ///
 /// # Errors
 ///
@@ -295,19 +295,21 @@ fn named_to_vt(named: NamedKey) -> Option<VtKey> {
 /// None.
 pub fn encode_key_input(record: &KeyInput, out: &mut [u8]) -> Result<usize, KeymapError> {
     match *record {
-        KeyInput::Pressed { key, modifiers, .. } => {
-            encode_key(key_from_abi(key), modifiers_from_abi(modifiers), out)
-        }
-        KeyInput::Released { .. } | KeyInput::ModifiersChanged { .. } => Ok(0),
+        KeyInput::Pressed {
+            key: Some(key),
+            modifiers,
+            ..
+        } => encode_key(key_from_abi(key), modifiers_from_abi(modifiers), out),
+        KeyInput::Pressed { key: None, .. } | KeyInput::Released { .. } => Ok(0),
     }
 }
 
-/// The [`KeyInput`] record a keyboard producer emits for `physical` going down
-/// (`pressed`) or coming up, resolved through `keyboard`: a change of the held
-/// modifiers, the key the layout made of it, or nothing — a lock key, a
-/// modifier edge that changes nothing a consumer sees, or a key the layout
-/// leaves unnamed. Every keyboard producer emits through this one definition,
-/// leaving the encoding and routing to the kernel arbiter (`plans/PI.md` P11).
+/// The [`KeyInput`] record a seat reads `physical` going down (`pressed`) or
+/// coming up as, through `keyboard`: what it typed, if anything, and the
+/// modifiers held after it. `None` only where the edge is no edge at all — a
+/// key's own repeat, a release never pressed, or a key the page names none
+/// (`KeyboardState::edge`). The kernel seat reads every keyboard's edges
+/// through this one definition (`plans/PI.md` P11).
 ///
 /// # Capabilities
 ///
@@ -318,58 +320,37 @@ pub fn key_record(
     physical: PhysicalKey,
     pressed: bool,
 ) -> Option<KeyInput> {
-    match keyboard.edge(physical, pressed)? {
-        KeyEdge::Modifiers(held) => Some(modifier_change(held)),
-        // `key_input` refuses only a function number past F12, which the
-        // layout never produces.
-        KeyEdge::Key(key) => key_input(key, keyboard.modifiers(), physical, pressed),
-    }
+    let read = keyboard.edge(physical, pressed)?;
+    Some(key_input(read.key, read.modifiers, physical, pressed))
 }
 
-/// Build a wire [`KeyInput`] record from a decoded [`Key`] edge.
-///
-/// `physical` is the key the edge happened on, carried unchanged, and
-/// `pressed` selects [`KeyInput::Pressed`] versus [`KeyInput::Released`].
-/// Returns `None` for a [`Key`] with no wire representation (a function number
-/// outside `F1..=F12`) — fail closed, never guess.
-///
-/// # Capabilities
-///
-/// None.
+/// The wire [`KeyInput`] of a key edge that typed `key`, if anything, leaving
+/// `modifiers` held: a key with no wire value, a function number outside
+/// `F1..=F12`, types nothing on the wire rather than a guessed value.
 #[must_use]
 fn key_input(
-    key: Key,
+    key: Option<Key>,
     modifiers: Modifiers,
     physical: PhysicalKey,
     pressed: bool,
-) -> Option<KeyInput> {
-    let value = match key {
-        Key::Char(c) => KeyValue::Char(c),
-        Key::Named(named) => KeyValue::Named(named_key_to_abi(named)?),
-    };
+) -> KeyInput {
+    let key = key.and_then(|key| match key {
+        Key::Char(c) => Some(KeyValue::Char(c)),
+        Key::Named(named) => named_key_to_abi(named).map(KeyValue::Named),
+    });
     let modifiers = modifiers_to_abi(modifiers);
-    Some(if pressed {
+    if pressed {
         KeyInput::Pressed {
-            key: value,
+            key,
             modifiers,
             physical,
         }
     } else {
         KeyInput::Released {
-            key: value,
+            key,
             modifiers,
             physical,
         }
-    })
-}
-
-/// Build a wire [`KeyInput::ModifiersChanged`] record from the `lib/input`
-/// [`Modifiers`] a keyboard now holds — the modifier-edge counterpart of
-/// [`key_input`], so the one `lib/input`→wire modifier mapping serves both.
-#[must_use]
-const fn modifier_change(modifiers: Modifiers) -> KeyInput {
-    KeyInput::ModifiersChanged {
-        modifiers: modifiers_to_abi(modifiers),
     }
 }
 
@@ -556,26 +537,31 @@ mod tests {
     fn encode_key_input_press_matches_encode_key() {
         // A pressed record encodes exactly as the equivalent `encode_key`.
         let record = key_input(
-            Key::Char('c'),
+            Some(Key::Char('c')),
             Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
-            PhysicalKey::UNKNOWN,
+            PhysicalKey::from_usage(0x06).expect("a key"),
             true,
-        )
-        .expect("char has a wire form");
+        );
         let mut a = [0u8; MAX_KEY_BYTES];
         let na = encode_key_input(&record, &mut a).expect("fits");
         assert_eq!(&a[..na], &[0x03]); // Ctrl-C
     }
 
     #[test]
-    fn encode_key_input_release_writes_nothing() {
-        let record = key_input(Key::Char('a'), Modifiers::default(), PhysicalKey::A, false)
-            .expect("char has a wire form");
+    fn encode_key_input_release_and_a_key_that_typed_nothing_write_nothing() {
         let mut buf = [0u8; MAX_KEY_BYTES];
-        assert_eq!(encode_key_input(&record, &mut buf), Ok(0));
+        let release = key_input(
+            Some(Key::Char('a')),
+            Modifiers::default(),
+            PhysicalKey::A,
+            false,
+        );
+        assert_eq!(encode_key_input(&release, &mut buf), Ok(0));
+        let shift = key_input(None, Modifiers::default(), PhysicalKey::LEFT_SHIFT, true);
+        assert_eq!(encode_key_input(&shift, &mut buf), Ok(0));
     }
 
     #[test]
@@ -588,25 +574,22 @@ mod tests {
             Key::Named(NamedKey::Left),
             Key::Named(NamedKey::Function { number: 7 }),
         ] {
-            let record = key_input(key, Modifiers::default(), PhysicalKey::UNKNOWN, true)
-                .expect("wire form");
-            assert_eq!(key_from_abi(record.key().expect("a key edge")), key);
+            let record = key_input(Some(key), Modifiers::default(), PhysicalKey::A, true);
+            assert_eq!(key_from_abi(record.key().expect("a key that typed")), key);
         }
     }
 
     #[test]
-    fn key_input_rejects_an_out_of_range_function_key() {
-        // No wire `NamedKeyCode` exists past F12, so the edge has no record
-        // (fail closed) rather than a guessed encoding.
-        assert_eq!(
-            key_input(
-                Key::Named(NamedKey::Function { number: 13 }),
-                Modifiers::default(),
-                PhysicalKey::UNKNOWN,
-                true,
-            ),
-            None
+    fn a_key_with_no_wire_value_types_nothing_rather_than_a_guess() {
+        // No wire `NamedKeyCode` exists past F12: the edge is still read.
+        let record = key_input(
+            Some(Key::Named(NamedKey::Function { number: 13 })),
+            Modifiers::default(),
+            PhysicalKey::from_usage(0x68).expect("a key"),
+            true,
         );
+        assert_eq!(record.key(), None);
+        assert!(record.is_press());
     }
 
     #[test]
@@ -616,9 +599,25 @@ mod tests {
             ..Modifiers::default()
         };
         for pressed in [true, false] {
-            let record = key_input(Key::Char('#'), shift, PhysicalKey::DIGIT_3, pressed)
-                .expect("char has a wire form");
-            assert_eq!(record.physical(), Some(PhysicalKey::DIGIT_3));
+            let record = key_input(Some(Key::Char('#')), shift, PhysicalKey::DIGIT_3, pressed);
+            assert_eq!(record.physical(), PhysicalKey::DIGIT_3);
         }
+    }
+
+    #[test]
+    fn a_seat_reads_every_edge_of_every_key_once() {
+        let mut keyboard = KeyboardState::new();
+        let shift = key_record(&mut keyboard, PhysicalKey::LEFT_SHIFT, true).expect("read");
+        assert_eq!((shift.key(), shift.modifiers().shift), (None, true));
+        let a = key_record(&mut keyboard, PhysicalKey::A, true).expect("read");
+        assert_eq!(a.key(), Some(KeyValue::Char('A')));
+        assert_eq!(
+            key_record(&mut keyboard, PhysicalKey::A, true),
+            None,
+            "its own repeat"
+        );
+        assert!(key_record(&mut keyboard, PhysicalKey::A, false).is_some());
+        let up = key_record(&mut keyboard, PhysicalKey::LEFT_SHIFT, false).expect("read");
+        assert!(!up.is_press() && !up.modifiers().shift);
     }
 }

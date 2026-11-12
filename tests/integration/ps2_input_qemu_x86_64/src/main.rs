@@ -65,7 +65,7 @@ mod kernel {
     use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
     use tairix_kernel::x86_64::ioapic_controller::published_typed;
     use tairix_kernel::x86_64::msi::published_composite;
@@ -79,7 +79,7 @@ mod kernel {
     use crate::fixture::{PS2_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`]. The pointer to `HEAP`
     /// outlives the binary, and the allocator is the only consumer

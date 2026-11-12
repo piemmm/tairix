@@ -34,7 +34,7 @@ mod kernel {
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_itest_witness::{field_str, names_bundle};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel_core::seat::InputKind;
     use tairix_kernel_core::AuditEvent;
@@ -46,7 +46,7 @@ mod kernel {
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// Static boot heap, as the production aarch64 kernel binary's is.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

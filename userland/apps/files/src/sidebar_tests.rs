@@ -112,9 +112,10 @@ fn key(key: KeyValue) -> WindowEvent {
     WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Pressed {
-            key,
+            key: Some(key),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            // Which key typed it is not what the rail reads.
+            physical: PhysicalKey::A,
         },
     }
 }
@@ -129,9 +130,9 @@ fn chord(key: KeyValue, modifiers: Modifiers) -> WindowEvent {
     WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Pressed {
-            key,
+            key: Some(key),
             modifiers,
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::A,
         },
     }
 }
@@ -378,9 +379,9 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
     let release = WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Released {
-            key: KeyValue::Named(NamedKeyCode::Down),
+            key: Some(KeyValue::Named(NamedKeyCode::Down)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::from_usage(0x51).expect("the down arrow"),
         },
     };
     assert!(route(&mut browser, &mut places, &release).is_none());
@@ -388,12 +389,12 @@ fn the_rail_takes_only_the_keys_it_owns_and_only_while_it_is_focused() {
     let ctrl_tab = WindowEvent::Key {
         window_id: WINDOW_ID,
         key: KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Tab),
+            key: Some(KeyValue::Named(NamedKeyCode::Tab)),
             modifiers: Modifiers {
                 ctrl: true,
                 ..Modifiers::default()
             },
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::from_usage(0x2B).expect("the tab key"),
         },
     };
     assert_eq!(

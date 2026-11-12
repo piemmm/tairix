@@ -11,7 +11,7 @@
 //! does not duplicate it.
 
 use super::{DriverError, DriverHandle};
-use crate::fs::SeekRegion;
+use crate::fs::{SeekRegion, StampChange, TimesChange, TimesKept};
 use crate::time::Time64;
 use crate::CapabilityId;
 
@@ -297,8 +297,8 @@ pub struct NodeInfo {
     /// The node's four timestamps, read from the format in the *same*
     /// structural read as `kind`/`size` — so a caller never pays a second
     /// inode read (nor a second on-disk walk) to learn a node's times. A
-    /// stamp the format does not keep is [`Time64::UNIX_EPOCH`] (ARXFS, for
-    /// instance, tracks no access time), never a fabricated wall time.
+    /// stamp the format does not keep is [`Time64::UNIX_EPOCH`] (FAT, for
+    /// instance, keeps no change time), never a fabricated wall time.
     pub times: NodeTimes,
     /// The node's content generation: a value the volume assigns to each
     /// version of the node's data and never hands out twice — not after a
@@ -1094,6 +1094,29 @@ pub trait FilesystemWrite {
         dst_name: &[u8],
     ) -> Result<(), DriverError>;
 
+    /// Change `node`'s access and modification times as `change` asks,
+    /// stamping its metadata-change time now where the format keeps one and
+    /// leaving its creation time alone: `utimensat(2)`'s effect, decided and
+    /// authorised by the VFS before it reaches here.
+    ///
+    /// [`StampChange::Now`] stamps a time exactly as a write stamps a file's
+    /// modification time, the format's own "no stamp" spelling while the
+    /// clock is unset. [`StampChange::At`] holds its instant exactly, or under
+    /// [`TimesChange::nearest`] as the nearest the field holds, through the
+    /// field's [`StampField::fit`]. Of a time the format does not keep, a now
+    /// changes nothing, and an instant is refused, or under `nearest` dropped.
+    /// A change that sets nothing touches nothing and answers
+    /// [`TimesKept::Exactly`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] for an instant the format cannot keep,
+    ///   without `nearest` — refused before any state is touched.
+    /// * [`DriverError::ReadOnly`] if the volume takes no writes.
+    /// * [`DriverError::NotFound`] if `node` names no live node.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError>;
+
     /// Make every write the filesystem has accepted durable on stable
     /// media, returning only once the backing device confirms it.
     ///
@@ -1349,6 +1372,184 @@ pub trait FilesystemSecurity {
     }
 }
 
+/// The instants one timestamp field of a format holds: the ticks of a
+/// counter, `resolution_ns` apart from its `epoch`, whose values the field
+/// holds — a FAT modification time's two seconds from 1980, an ADFS stamp's
+/// centiseconds from 1900 but for the zero that means none, ext4's
+/// nanoseconds.
+///
+/// What a format declares of each field it keeps, so [`Self::fit`] is the one
+/// rule every driver narrows a [`Time64`] by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StampField {
+    epoch: Time64,
+    resolution_ns: u64,
+    first: u128,
+    end: u128,
+}
+
+impl StampField {
+    const NANOS: i128 = 1_000_000_000;
+
+    /// The field holding the ticks `held` of a counter `resolution_ns` (at
+    /// least one) apart from `epoch`.
+    #[must_use]
+    pub const fn new(epoch: Time64, resolution_ns: u64, held: core::ops::Range<u128>) -> Self {
+        Self {
+            epoch,
+            resolution_ns: if resolution_ns == 0 { 1 } else { resolution_ns },
+            first: held.start,
+            end: held.end,
+        }
+    }
+
+    /// `at` as this field holds it: itself when the field holds it exactly,
+    /// else — under `nearest` — the nearest instant it holds, its first or
+    /// last for one beyond them, answered with how exactly that keeps `at`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an instant the field does not hold
+    /// exactly, without `nearest`, and for a field holding no instant.
+    pub fn fit(&self, at: Time64, nearest: bool) -> Result<(Time64, TimesKept), DriverError> {
+        let nanos = |t: Time64| i128::from(t.secs()) * Self::NANOS + i128::from(t.subsec_nanos());
+        let step = i128::from(self.resolution_ns);
+        let first = i128::try_from(self.first).map_err(|_| DriverError::OutOfRange)?;
+        let last = self
+            .end
+            .checked_sub(1)
+            .filter(|&last| last >= self.first)
+            .and_then(|last| i128::try_from(last).ok())
+            .ok_or(DriverError::OutOfRange)?;
+        let offset = nanos(at) - nanos(self.epoch);
+        if offset.rem_euclid(step) == 0 && (first..=last).contains(&offset.div_euclid(step)) {
+            return Ok((at, TimesKept::Exactly));
+        }
+        if !nearest {
+            return Err(DriverError::OutOfRange);
+        }
+        let index = (offset + step / 2).div_euclid(step).clamp(first, last);
+        let held = index
+            .checked_mul(step)
+            .and_then(|span| span.checked_add(nanos(self.epoch)))
+            .ok_or(DriverError::OutOfRange)?;
+        let secs =
+            i64::try_from(held.div_euclid(Self::NANOS)).map_err(|_| DriverError::OutOfRange)?;
+        let subsec =
+            u32::try_from(held.rem_euclid(Self::NANOS)).map_err(|_| DriverError::OutOfRange)?;
+        let held = Time64::new(secs, subsec).map_err(|_| DriverError::OutOfRange)?;
+        Ok((held, TimesKept::Nearest))
+    }
+
+    /// The last instant this field holds at or before `at`: what a stamp
+    /// taken when a clock reads `at` records, a reading never rounded
+    /// forward. `None` before the field's first instant or past its last.
+    #[must_use]
+    pub fn floor(&self, at: Time64) -> Option<Time64> {
+        let nanos = |t: Time64| i128::from(t.secs()) * Self::NANOS + i128::from(t.subsec_nanos());
+        let step = i128::from(self.resolution_ns);
+        let index = (nanos(at) - nanos(self.epoch)).div_euclid(step);
+        let held = u128::try_from(index)
+            .ok()
+            .filter(|index| (self.first..self.end).contains(index))?;
+        let held = i128::try_from(held)
+            .ok()?
+            .checked_mul(step)?
+            .checked_add(nanos(self.epoch))?;
+        let secs = i64::try_from(held.div_euclid(Self::NANOS)).ok()?;
+        Time64::new(secs, u32::try_from(held.rem_euclid(Self::NANOS)).ok()?).ok()
+    }
+
+    /// `change` with its instant, if it carries one, as [`Self::fit`] holds
+    /// it: what a driver's [`FilesystemWrite::set_times`] stores in this
+    /// field, decided before it touches anything.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fit`].
+    pub fn fit_change(
+        &self,
+        change: StampChange,
+        nearest: bool,
+    ) -> Result<(StampChange, TimesKept), DriverError> {
+        match change {
+            StampChange::At(at) => {
+                let (held, kept) = self.fit(at, nearest)?;
+                Ok((StampChange::At(held), kept))
+            }
+            StampChange::Keep | StampChange::Now => Ok((change, TimesKept::Exactly)),
+        }
+    }
+}
+
+/// What a field keeping any [`Time64`] holds: every nanosecond of it.
+pub const EVERY_INSTANT: StampField =
+    StampField::new(Time64::from_secs(i64::MIN), 1, 0..(1 << 64) * 1_000_000_000);
+
+/// What a DOS date and time — FAT's, zip's, ARC's — holds: two seconds,
+/// from [`DosTime::EARLIEST`](crate::time::DosTime::EARLIEST) to
+/// [`DosTime::LATEST`](crate::time::DosTime::LATEST).
+pub const DOS_TIME: StampField = StampField::new(
+    crate::time::DosTime::EARLIEST,
+    2_000_000_000,
+    0..(crate::time::DosTime::LATEST.secs() - crate::time::DosTime::EARLIEST.secs()).unsigned_abs()
+        as u128
+        / 2
+        + 1,
+);
+
+/// `change` as a format keeping that time in `field` takes it — fitted by
+/// [`StampField::fit_change`] — and, where it keeps none, left as it is and
+/// answered as [`unkept_stamp`] answers.
+///
+/// # Errors
+///
+/// As [`StampField::fit`], and as [`unkept_stamp`].
+pub fn fit_kept(
+    field: Option<StampField>,
+    change: StampChange,
+    nearest: bool,
+) -> Result<(StampChange, TimesKept), DriverError> {
+    match field {
+        Some(field) => field.fit_change(change, nearest),
+        None => Ok((StampChange::Keep, unkept_stamp(change, nearest)?)),
+    }
+}
+
+/// How a format keeping one stamp for each of a node's times keeps the access
+/// time `accessed`, `stamp` being the one a change leaves: a keep or a now as
+/// it is, and an instant only where it is that stamp — refused otherwise, or
+/// under `nearest` dropped.
+///
+/// # Errors
+///
+/// [`DriverError::OutOfRange`] for an instant apart from `stamp`, without
+/// `nearest`.
+pub fn kept_as_stamp(
+    accessed: StampChange,
+    stamp: Time64,
+    nearest: bool,
+) -> Result<TimesKept, DriverError> {
+    match accessed {
+        StampChange::At(at) if at != stamp => unkept_stamp(accessed, nearest),
+        StampChange::Keep | StampChange::Now | StampChange::At(_) => Ok(TimesKept::Exactly),
+    }
+}
+
+/// How a format keeps `change` to a time it does not keep at all: a now or a
+/// keep changes nothing, and an instant is refused or, under `nearest`, dropped.
+///
+/// # Errors
+///
+/// [`DriverError::OutOfRange`] for an instant, without `nearest`.
+pub fn unkept_stamp(change: StampChange, nearest: bool) -> Result<TimesKept, DriverError> {
+    match change {
+        StampChange::Keep | StampChange::Now => Ok(TimesKept::Exactly),
+        StampChange::At(_) if nearest => Ok(TimesKept::Nearest),
+        StampChange::At(_) => Err(DriverError::OutOfRange),
+    }
+}
+
 /// The four timestamps stored for a filesystem node.
 ///
 /// Every field is a 64-bit-native [`Time64`]: absolute
@@ -1562,6 +1763,63 @@ pub struct VolumeStats {
     pub files: u64,
     /// Free inodes, or `0` when the format tracks no fixed table.
     pub files_free: u64,
+}
+
+impl VolumeStats {
+    /// Bytes it takes on the wire: the block size, the reserve flag and three
+    /// zero bytes, then the five counts.
+    pub const WIRE_LEN: usize = 48;
+
+    /// Whether its counts can all hold at once: no more blocks available
+    /// than free, no more free than there are, and no more inodes free than
+    /// there are.
+    #[must_use]
+    pub const fn is_consistent(&self) -> bool {
+        self.avail_blocks <= self.free_blocks
+            && self.free_blocks <= self.total_blocks
+            && self.files_free <= self.files
+    }
+
+    /// Encode it little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        crate::le::put_u32(&mut out, 0, self.block_size);
+        out[4] = u8::from(self.in_reserve);
+        crate::le::put_u64(&mut out, 8, self.total_blocks);
+        crate::le::put_u64(&mut out, 16, self.free_blocks);
+        crate::le::put_u64(&mut out, 24, self.avail_blocks);
+        crate::le::put_u64(&mut out, 32, self.files);
+        crate::le::put_u64(&mut out, 40, self.files_free);
+        out
+    }
+
+    /// Decode what [`Self::to_le_bytes`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`](crate::Errno::OutOfRange) for a reserve flag that
+    /// is not `0` or `1`, padding that is not zero, or counts that are not
+    /// [consistent](Self::is_consistent).
+    pub fn from_le_bytes(bytes: &[u8; Self::WIRE_LEN]) -> Result<Self, crate::Errno> {
+        if bytes[5..8].iter().any(|&byte| byte != 0) {
+            return Err(crate::Errno::OutOfRange);
+        }
+        let stats = Self {
+            block_size: crate::le::read_u32(bytes, 0),
+            in_reserve: crate::le::decode_bool(bytes[4])?,
+            total_blocks: crate::le::read_u64(bytes, 8),
+            free_blocks: crate::le::read_u64(bytes, 16),
+            avail_blocks: crate::le::read_u64(bytes, 24),
+            files: crate::le::read_u64(bytes, 32),
+            files_free: crate::le::read_u64(bytes, 40),
+        };
+        if stats.is_consistent() {
+            Ok(stats)
+        } else {
+            Err(crate::Errno::OutOfRange)
+        }
+    }
 }
 
 /// Whole-volume space statistics for a mounted filesystem.
@@ -2131,6 +2389,10 @@ mod tests {
             Err(DriverError::Unsupported)
         }
 
+        fn set_times(&mut self, _: NodeId, _: TimesChange) -> Result<TimesKept, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
         fn flush(&mut self) -> Result<(), DriverError> {
             Ok(())
         }
@@ -2324,9 +2586,182 @@ mod tests {
             self.store_name(dst_name)
         }
 
+        fn set_times(&mut self, _: NodeId, _: TimesChange) -> Result<TimesKept, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
         fn flush(&mut self) -> Result<(), DriverError> {
             Ok(())
         }
+    }
+
+    /// A FAT modification time's field: two seconds, 1980 to 2107.
+    const TWO_SECONDS: StampField = StampField::new(
+        Time64::from_secs(315_532_800),
+        2_000_000_000,
+        0..2_019_643_200,
+    );
+
+    /// Every nanosecond from 1901 to the end of the second 2^34 begins.
+    const NANOSECOND: StampField = StampField::new(
+        Time64::from_secs(-(1 << 31)),
+        1,
+        0..((1 << 34) + (1 << 31) + 1) * 1_000_000_000,
+    );
+
+    fn at(secs: i64, nanos: u32) -> Time64 {
+        Time64::new(secs, nanos).expect("canonical")
+    }
+
+    #[test]
+    fn a_field_holds_its_multiples_in_range_exactly_and_nothing_else() {
+        let even = at(1_000_000_000, 0);
+        assert_eq!(TWO_SECONDS.fit(even, false), Ok((even, TimesKept::Exactly)));
+        for refused in [at(1_000_000_001, 0), at(1_000_000_000, 1), at(0, 0)] {
+            assert_eq!(
+                TWO_SECONDS.fit(refused, false),
+                Err(DriverError::OutOfRange)
+            );
+        }
+        for held in [at(-1, 999_999_999), at(-(1 << 31), 0), at(1 << 34, 0)] {
+            assert_eq!(NANOSECOND.fit(held, false), Ok((held, TimesKept::Exactly)));
+        }
+        let last = at(1 << 34, 999_999_999);
+        assert_eq!(
+            NANOSECOND.fit(last, false),
+            Ok((last, TimesKept::Exactly)),
+            "the whole of the last second"
+        );
+        assert_eq!(
+            NANOSECOND.fit(at((1 << 34) + 1, 0), false),
+            Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn the_nearest_rounds_to_the_resolution_and_stops_at_the_range() {
+        let nearest = |field: &StampField, t| field.fit(t, true);
+        assert_eq!(
+            nearest(&TWO_SECONDS, at(1_000_000_001, 0)),
+            Ok((at(1_000_000_002, 0), TimesKept::Nearest)),
+            "a tie rounds up"
+        );
+        assert_eq!(
+            nearest(&TWO_SECONDS, at(1_000_000_000, 999_999_999)),
+            Ok((at(1_000_000_000, 0), TimesKept::Nearest))
+        );
+        assert_eq!(
+            nearest(&TWO_SECONDS, at(-5, 0)),
+            Ok((at(315_532_800, 0), TimesKept::Nearest)),
+            "before the range is its start"
+        );
+        assert_eq!(
+            nearest(&TWO_SECONDS, at(i64::MAX, 999_999_999)),
+            Ok((at(4_354_819_198, 0), TimesKept::Nearest)),
+            "beyond it its end"
+        );
+        let second = StampField::new(at(-100, 0), 1_000_000_000, 0..201);
+        assert_eq!(
+            nearest(&second, at(-2, 400_000_000)),
+            Ok((at(-2, 0), TimesKept::Nearest)),
+            "before the epoch the nearest is still the nearest"
+        );
+        assert_eq!(
+            nearest(&second, at(-2, 600_000_000)),
+            Ok((at(-1, 0), TimesKept::Nearest))
+        );
+    }
+
+    #[test]
+    fn a_field_holds_its_counters_ticks_and_none_when_it_holds_none() {
+        let centis = StampField::new(at(1, 5), 10_000_000, 1..3);
+        assert_eq!(
+            centis.fit(at(1, 20_000_005), false),
+            Ok((at(1, 20_000_005), TimesKept::Exactly))
+        );
+        assert_eq!(
+            centis.fit(at(1, 30_000_005), true),
+            Ok((at(1, 20_000_005), TimesKept::Nearest)),
+            "a counter ends at its last tick, whatever second it falls in"
+        );
+        assert_eq!(
+            centis.fit(at(1, 5), true),
+            Ok((at(1, 10_000_005), TimesKept::Nearest)),
+            "a tick the field does not hold, its epoch's, is not kept"
+        );
+        let none = StampField::new(at(1, 0), 1_000_000_000, 3..3);
+        assert_eq!(none.fit(at(1, 0), true), Err(DriverError::OutOfRange));
+    }
+
+    #[test]
+    fn fitting_a_change_fits_only_an_instant() {
+        for unchanged in [StampChange::Keep, StampChange::Now] {
+            assert_eq!(
+                TWO_SECONDS.fit_change(unchanged, false),
+                Ok((unchanged, TimesKept::Exactly))
+            );
+        }
+        assert_eq!(
+            TWO_SECONDS.fit_change(StampChange::At(at(1_000_000_001, 0)), true),
+            Ok((StampChange::At(at(1_000_000_002, 0)), TimesKept::Nearest))
+        );
+        assert_eq!(
+            unkept_stamp(StampChange::At(at(1, 0)), false),
+            Err(DriverError::OutOfRange)
+        );
+        assert_eq!(
+            unkept_stamp(StampChange::At(at(1, 0)), true),
+            Ok(TimesKept::Nearest)
+        );
+        assert_eq!(
+            unkept_stamp(StampChange::Now, false),
+            Ok(TimesKept::Exactly)
+        );
+        let stamp = at(7, 0);
+        assert_eq!(
+            kept_as_stamp(StampChange::At(stamp), stamp, false),
+            Ok(TimesKept::Exactly)
+        );
+        assert_eq!(
+            kept_as_stamp(StampChange::At(at(8, 0)), stamp, false),
+            Err(DriverError::OutOfRange)
+        );
+        assert_eq!(
+            kept_as_stamp(StampChange::At(at(8, 0)), stamp, true),
+            Ok(TimesKept::Nearest)
+        );
+        assert_eq!(
+            kept_as_stamp(StampChange::Now, stamp, false),
+            Ok(TimesKept::Exactly)
+        );
+    }
+
+    #[test]
+    fn a_clock_reading_is_stamped_as_the_last_instant_at_or_before_it() {
+        assert_eq!(
+            TWO_SECONDS.floor(at(1_000_000_001, 999_999_999)),
+            Some(at(1_000_000_000, 0))
+        );
+        assert_eq!(
+            TWO_SECONDS.floor(at(1_000_000_000, 0)),
+            Some(at(1_000_000_000, 0))
+        );
+        assert_eq!(TWO_SECONDS.floor(at(315_532_799, 0)), None, "before 1980");
+        assert_eq!(TWO_SECONDS.floor(at(4_354_819_200, 0)), None, "past 2107");
+        let held = at(i64::MAX, 999_999_999);
+        assert_eq!(
+            EVERY_INSTANT.fit(held, false),
+            Ok((held, TimesKept::Exactly))
+        );
+        let first = Time64::from_secs(i64::MIN);
+        assert_eq!(
+            EVERY_INSTANT.fit(first, false),
+            Ok((first, TimesKept::Exactly))
+        );
+        assert_eq!(
+            DOS_TIME.fit(crate::time::DosTime::LATEST, false),
+            Ok((crate::time::DosTime::LATEST, TimesKept::Exactly))
+        );
     }
 
     #[test]
@@ -2659,9 +3094,58 @@ mod tests {
         assert_eq!(reported, stats);
         // The contract: available never exceeds free, free never exceeds
         // total, and the dynamic-inode answer is the zero pair.
-        assert!(reported.avail_blocks <= reported.free_blocks);
-        assert!(reported.free_blocks <= reported.total_blocks);
+        assert!(reported.is_consistent());
         assert_eq!((reported.files, reported.files_free), (0, 0));
+    }
+
+    #[test]
+    fn volume_stats_cross_the_wire_whole_and_inconsistent_counts_do_not() {
+        let stats = VolumeStats {
+            block_size: 4096,
+            in_reserve: true,
+            total_blocks: u64::MAX,
+            free_blocks: 1 << 40,
+            avail_blocks: 1 << 39,
+            files: 9,
+            files_free: 9,
+        };
+        let bytes = stats.to_le_bytes();
+        assert_eq!(VolumeStats::from_le_bytes(&bytes), Ok(stats));
+        assert_eq!(
+            VolumeStats::from_le_bytes(&VolumeStats::default().to_le_bytes()),
+            Ok(VolumeStats::default()),
+            "no capacity known"
+        );
+        for (at, byte) in [(4, 2), (5, 1), (7, 1)] {
+            let mut bad = bytes;
+            bad[at] = byte;
+            assert_eq!(
+                VolumeStats::from_le_bytes(&bad),
+                Err(crate::Errno::OutOfRange)
+            );
+        }
+        for inconsistent in [
+            VolumeStats {
+                avail_blocks: stats.free_blocks + 1,
+                ..stats
+            },
+            VolumeStats {
+                free_blocks: 1,
+                avail_blocks: 0,
+                total_blocks: 0,
+                ..stats
+            },
+            VolumeStats {
+                files_free: 10,
+                ..stats
+            },
+        ] {
+            assert!(!inconsistent.is_consistent());
+            assert_eq!(
+                VolumeStats::from_le_bytes(&inconsistent.to_le_bytes()),
+                Err(crate::Errno::OutOfRange)
+            );
+        }
     }
 
     /// Keeps no title: both methods left to their defaults.

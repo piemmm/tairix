@@ -55,7 +55,6 @@ extern crate alloc;
 mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
-    use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
     use alloc::sync::Arc;
@@ -68,7 +67,7 @@ mod kernel {
         RiscvArchStorage, SERIAL_SINK,
     };
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use tairix_log::{log, Event, EventId, Level};
 
@@ -114,7 +113,7 @@ mod kernel {
     /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
     /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -139,52 +138,50 @@ mod kernel {
     /// Set `true` the first time the IPI software-interrupt callback runs.
     static IPI_DROVE_SCHED: AtomicBool = AtomicBool::new(false);
 
-    /// Outbound context of the boot path; `switch` records the boot path's
-    /// suspended `sp` here so the inbound task can `switch` back to it.
-    static mut MAIN_CTX: TaskCtx = TaskCtx::new();
+    /// The round-trip's two contexts, which the boot path owns on its stack
+    /// and hands the inbound task the address of as its argument.
+    struct Contexts {
+        /// The boot path's: `switch` records its suspended `sp` here so the
+        /// inbound task can `switch` back to it.
+        main: TaskCtx,
+        /// The inbound task's, seeded by [`TaskCtx::prepare`].
+        worker: TaskCtx,
+    }
 
-    /// Inbound task's context, seeded by [`TaskCtx::prepare`].
-    static mut WORKER_CTX: TaskCtx = TaskCtx::new();
+    /// Bytes of [`WORKER_STACK`].
+    const WORKER_STACK_BYTES: usize = 16 * 1024;
 
-    /// Private kernel stack for the inbound task of the round-trip.
-    /// 16-byte aligned per the RISC-V ABI; sized well above the synthesised
-    /// frame plus the trivial body's needs.
-    #[repr(C, align(16))]
-    struct WorkerStack([u8; 16 * 1024]);
-
-    static mut WORKER_STACK: WorkerStack = WorkerStack([0; 16 * 1024]);
+    /// Private kernel stack for the inbound task of the round-trip, sized
+    /// well above the synthesised frame plus the trivial body's needs.
+    static WORKER_STACK: Arena<WORKER_STACK_BYTES> = Arena::ZERO;
 
     use core::ptr::NonNull;
     use tairix_arch_api::KernelStackRegion;
 
     /// [`WORKER_STACK`] as the region [`TaskCtx::prepare`] seeds a frame
-    /// in. The `align(16)` struct keeps the top 16-byte aligned, which is
-    /// what `prepare` requires of it.
+    /// in. The arena is page-aligned, so its top is 16-byte aligned, as the
+    /// RISC-V ABI and `prepare` require.
     fn worker_stack_region() -> KernelStackRegion {
-        let base = addr_of_mut!(WORKER_STACK).cast::<u8>();
+        let base = WORKER_STACK.as_mut_ptr();
         // SAFETY: the static is this image's own, is never reached from
         // anywhere but the one worker task below, and lives for the whole
         // run; the pointer carries provenance for all of it.
-        unsafe {
-            KernelStackRegion::new(
-                NonNull::new_unchecked(base),
-                core::mem::size_of::<WorkerStack>(),
-            )
-        }
+        unsafe { KernelStackRegion::new(NonNull::new_unchecked(base), WORKER_STACK_BYTES) }
     }
 
     /// Inbound task of the [`context::switch`] round-trip. Records that it
     /// ran, then switches straight back to the boot path. It never returns
     /// to its caller (the boot path never switches back into it), so the
     /// tail parks the hart to satisfy the `-> !` contract.
-    unsafe extern "C" fn worker_entry(_arg: usize) -> ! {
+    unsafe extern "C" fn worker_entry(contexts: usize) -> ! {
         CTX_SWITCH_RAN.store(true, Ordering::SeqCst);
-        // SAFETY: `WORKER_CTX` is the running task's context (exclusive to
-        // this hart for the call) and `MAIN_CTX` holds the boot path's
-        // suspended `sp`, written by the outbound `switch`. Both are
-        // non-null, aligned `*mut TaskCtx`s the kernel owns.
+        let contexts = core::ptr::with_exposed_provenance_mut::<Contexts>(contexts);
+        // SAFETY: `contexts` is the boot path's pair, alive on its suspended
+        // stack: `worker` is the running task's context (exclusive to this
+        // hart for the call) and `main` holds the boot path's suspended
+        // `sp`, written by the outbound `switch`.
         unsafe {
-            context::switch(addr_of_mut!(WORKER_CTX), addr_of_mut!(MAIN_CTX));
+            context::switch(&raw mut (*contexts).worker, &raw mut (*contexts).main);
         }
         halt_current_hart()
     }
@@ -277,19 +274,30 @@ mod kernel {
 
         // 1. Real bidirectional context switch, before interrupts are
         //    enabled (no trap can fire mid-switch onto the inbound stack).
-        if let Err(_e) = (unsafe { &mut *addr_of_mut!(WORKER_CTX) }).prepare(
-            worker_stack_region(),
-            worker_entry,
-            0xC0FF_EE00,
-        ) {
+        let mut contexts = Contexts {
+            main: TaskCtx::new(),
+            worker: TaskCtx::new(),
+        };
+        let contexts = &raw mut contexts;
+        // SAFETY: `contexts` points at the pair above, which this path never
+        // returns from; only the inbound task reaches it otherwise, and only
+        // once this path has switched to it.
+        let prepared = unsafe {
+            (*contexts).worker.prepare(
+                worker_stack_region(),
+                worker_entry,
+                contexts.expose_provenance(),
+            )
+        };
+        if prepared.is_err() {
             qemu_exit::exit_failure(FAIL_CTX_SWITCH);
         }
-        // SAFETY: `MAIN_CTX`/`WORKER_CTX` are non-null, aligned `*mut
-        // TaskCtx`s the kernel owns; `WORKER_CTX.sp` was just seeded by
-        // `prepare` over `WORKER_STACK`, which is mapped and exclusive to
-        // this hart. Control returns here once `worker_entry` switches back.
+        // SAFETY: both contexts are the live pair above; `worker.sp` was just
+        // seeded by `prepare` over `WORKER_STACK`, which is mapped and
+        // exclusive to this hart. Control returns here once `worker_entry`
+        // switches back.
         unsafe {
-            context::switch(addr_of_mut!(MAIN_CTX), addr_of_mut!(WORKER_CTX));
+            context::switch(&raw mut (*contexts).main, &raw mut (*contexts).worker);
         }
         if !CTX_SWITCH_RAN.load(Ordering::SeqCst) {
             qemu_exit::exit_failure(FAIL_CTX_SWITCH);

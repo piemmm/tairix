@@ -66,7 +66,7 @@ mod kernel {
     use tairix_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 
     use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -88,7 +88,7 @@ mod kernel {
     // --- Per-instance boot heap --------------------------------------
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -98,21 +98,17 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    // --- Static scan-out surface -------------------------------------
-
-    /// Page-aligned wrapper so the surface meets the window's ≥ 4-byte
-    /// word-access alignment contract and starts on a frame boundary.
-    #[repr(C, align(4096))]
-    struct Surface([u8; FB_BYTES]);
-
     /// The display surface, in this instance's WASM linear memory. It
     /// must outlive every window mapped over it, so it is a `static`
     /// rather than a stack/heap buffer.
-    static mut FRAMEBUFFER: Surface = Surface([0u8; FB_BYTES]);
+    ///
+    /// Page-aligned, so it meets the window's ≥ 4-byte word-access alignment
+    /// contract and starts on a frame boundary.
+    static FRAMEBUFFER: Arena<FB_BYTES> = Arena::ZERO;
 
     /// Base pointer of [`FRAMEBUFFER`].
     fn framebuffer_ptr() -> *mut u8 {
-        core::ptr::addr_of_mut!(FRAMEBUFFER).cast::<u8>()
+        FRAMEBUFFER.as_mut_ptr()
     }
 
     /// "Physical" base address of [`FRAMEBUFFER`] — in the WASM model

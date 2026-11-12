@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::input::{KeyEdge, PointerInput};
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::DriverError;
 
@@ -96,13 +96,13 @@ pub(crate) mod items {
 /// Every record a decoder delivered, in order.
 #[derive(Debug, Default)]
 pub(crate) struct Recorder {
-    pub(crate) keys: Vec<KeyInput>,
+    pub(crate) keys: Vec<KeyEdge>,
     pub(crate) pointer: Vec<PointerInput>,
     pub(crate) touch: Vec<TouchFrame>,
 }
 
 impl SeatSink for Recorder {
-    fn key(&mut self, record: &KeyInput) -> Result<(), DriverError> {
+    fn key(&mut self, record: &KeyEdge) -> Result<(), DriverError> {
         self.keys.push(*record);
         Ok(())
     }

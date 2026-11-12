@@ -1751,6 +1751,8 @@ mod program {
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::Key { .. }
@@ -1761,6 +1763,7 @@ mod program {
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
+            | WindowEvent::SubtreePicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }

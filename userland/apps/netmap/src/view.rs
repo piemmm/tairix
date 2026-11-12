@@ -505,7 +505,9 @@ impl MapView {
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             } => return Reaction::Menu(self.context_menu(scale, now_ns)),
-            InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => false,
+            InputEvent::PointerPressed { .. }
+            | InputEvent::PointerReleased { .. }
+            | InputEvent::PointerMotion { .. } => false,
             InputEvent::PointerCancelled => self.press.take().is_some(),
             InputEvent::PointerScrolled { dx, dy } => {
                 if self.ctrl {

@@ -47,6 +47,7 @@ mod miri;
 mod model_check;
 mod netpeer;
 pub(crate) mod parallel;
+mod pcemu_vectors;
 mod pie_build;
 mod proptest;
 mod qemu_tests;
@@ -60,6 +61,7 @@ mod source_text;
 mod source_tree;
 mod spec_review;
 mod spirv;
+mod static_mut;
 mod supply_chain;
 mod target_clippy;
 mod unicode;
@@ -86,6 +88,7 @@ pub enum Command {
     Unicode,
     Spirv,
     Shaders,
+    PcemuVectors,
     DepsCheck,
     CfgCheck,
     BoardCheck,
@@ -104,6 +107,7 @@ pub enum Command {
     ModelCheck,
     SpecReview,
     IgnoreCheck,
+    StaticMutCheck,
     SourceText,
     CharterCite,
     Bench,
@@ -134,6 +138,7 @@ impl Command {
         Command::Unicode,
         Command::Spirv,
         Command::Shaders,
+        Command::PcemuVectors,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::BoardCheck,
@@ -152,6 +157,7 @@ impl Command {
         Command::ModelCheck,
         Command::SpecReview,
         Command::IgnoreCheck,
+        Command::StaticMutCheck,
         Command::SourceText,
         Command::CharterCite,
         Command::Bench,
@@ -181,6 +187,7 @@ impl Command {
             "unicode" => Command::Unicode,
             "spirv" => Command::Spirv,
             "shaders" => Command::Shaders,
+            "pcemu-vectors" => Command::PcemuVectors,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "board-check" => Command::BoardCheck,
@@ -199,6 +206,7 @@ impl Command {
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
             "ignore-check" => Command::IgnoreCheck,
+            "static-mut-check" => Command::StaticMutCheck,
             "source-text" => Command::SourceText,
             "charter-cite" => Command::CharterCite,
             "bench" => Command::Bench,
@@ -230,6 +238,7 @@ impl Command {
             Command::Unicode => "unicode",
             Command::Spirv => "spirv",
             Command::Shaders => "shaders",
+            Command::PcemuVectors => "pcemu-vectors",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::BoardCheck => "board-check",
@@ -248,6 +257,7 @@ impl Command {
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
             Command::IgnoreCheck => "ignore-check",
+            Command::StaticMutCheck => "static-mut-check",
             Command::SourceText => "source-text",
             Command::CharterCite => "charter-cite",
             Command::Bench => "bench",
@@ -258,6 +268,7 @@ impl Command {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // One arm per subcommand, read as the help text.
     pub fn summary(self) -> &'static str {
         match self {
             Command::Build => "Compile every workspace crate for the host target.",
@@ -306,6 +317,9 @@ impl Command {
                 "Verify the pinned shader set against the sources that build it \
                  (`--write` to regenerate)."
             }
+            Command::PcemuVectors => {
+                "Import PCEmulator's SingleStepTests CPU vectors (`--import <dir>`; developer-run)."
+            }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::BoardCheck => "Reject a board, SoC or board part named in generic code.",
@@ -340,6 +354,7 @@ impl Command {
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
             Command::IgnoreCheck => "Reject an ignored test: the gate runs every test it builds.",
+            Command::StaticMutCheck => "Reject a `static mut`: state with no owner and no synchronisation.",
             Command::SourceText => "Reject control bytes in source text.",
             Command::CharterCite => {
                 "Reject a comment or description citing a charter section, not the reason (§2.11)."
@@ -378,6 +393,7 @@ impl Command {
             Command::Unicode => unicode::run(ctx, args),
             Command::Spirv => spirv::run(ctx, args),
             Command::Shaders => shaders::run(ctx, args),
+            Command::PcemuVectors => pcemu_vectors::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::BoardCheck => run_board_check(ctx),
@@ -396,6 +412,7 @@ impl Command {
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
             Command::IgnoreCheck => run_ignore_check(ctx),
+            Command::StaticMutCheck => run_static_mut_check(ctx),
             Command::SourceText => run_source_text(ctx),
             Command::CharterCite => run_charter_cite(ctx),
             Command::Bench => run_bench(args),
@@ -1447,6 +1464,11 @@ fn run_ignore_check(ctx: &Context) -> Result<(), String> {
     ignore_check::run(&ctx.workspace_root, &ctx.children)
 }
 
+fn run_static_mut_check(ctx: &Context) -> Result<(), String> {
+    noteln!("xtask: [static-mut-check] {}", ctx.workspace_root.display());
+    static_mut::run(&ctx.workspace_root, &ctx.children)
+}
+
 fn run_source_text(ctx: &Context) -> Result<(), String> {
     noteln!("xtask: [source-text] {}", ctx.workspace_root.display());
     source_text::run(&ctx.workspace_root, &ctx.children)
@@ -1624,6 +1646,8 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     ("spec-review", run_spec_review),
     // No test the gate builds is ignored, so every one of them runs.
     ("ignore-check", run_ignore_check),
+    // No `static mut`: state with no owner and no synchronisation.
+    ("static-mut-check", run_static_mut_check),
     // No comment cites a charter section number in place of the reason.
     ("charter-cite", run_charter_cite),
     // No control byte in source text, which tools then misread as binary.

@@ -405,6 +405,7 @@ mod program {
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }
+                | WindowEvent::SubtreePicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }
@@ -417,6 +418,8 @@ mod program {
                 | WindowEvent::OpenRequested
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::LayerPointer { .. }
+                | WindowEvent::PointerMotion { .. }
+                | WindowEvent::PointerLock { .. }
                 | WindowEvent::ToolMoved { .. } => {}
             }
             concluded

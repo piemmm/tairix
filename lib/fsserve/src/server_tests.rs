@@ -424,7 +424,7 @@ fn attributes_cross_the_protocol_and_a_volume_without_them_refuses() {
 }
 
 #[test]
-fn security_space_and_regions_cross_the_protocol() {
+fn security_times_space_and_regions_cross_the_protocol() {
     let host = ServedHost::new(Fixed);
     let mut server = Server::new(TestFs::new(), &host).unwrap();
     let node = create(&mut server, b"f", NodeKind::RegularFile);
@@ -452,6 +452,25 @@ fn security_space_and_regions_cross_the_protocol() {
     let owned = Request::RecordsOwnership { node };
     let answered = answer_of(&mut server, &owned);
     assert_eq!(result(&answered, &owned), Ok(Answer::Owned(true)));
+    // New times reach the driver, and the stat that follows reports them.
+    let modified = tairix_abi::time::Time64::from_secs(-7);
+    let times = Request::SetTimes {
+        node,
+        change: tairix_abi::TimesChange {
+            modified: tairix_abi::StampChange::At(modified),
+            ..tairix_abi::TimesChange::default()
+        },
+    };
+    let answered = answer_of(&mut server, &times);
+    assert_eq!(
+        result(&answered, &times),
+        Ok(Answer::Kept(tairix_abi::TimesKept::Exactly))
+    );
+    let info = Request::NodeInfo { node };
+    let answered = answer_of(&mut server, &info);
+    assert!(
+        matches!(result(&answered, &info), Ok(Answer::Info(i)) if i.times.modified == modified)
+    );
 }
 
 #[test]

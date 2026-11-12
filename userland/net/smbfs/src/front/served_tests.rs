@@ -327,6 +327,54 @@ fn a_file_is_made_written_read_found_renamed_and_removed_over_the_share() {
 }
 
 #[test]
+fn a_node_keeps_the_times_it_is_given_to_a_filetime() {
+    let (mut bench, offer) = mounted(false);
+    let file = create(&mut bench, offer, b"stamped.txt", NodeKind::RegularFile);
+    let in_1950 = tairix_abi::time::Time64::new(-631_152_000, 1_234_500).expect("canonical");
+    let retimed = Request::SetTimes {
+        node: file,
+        change: tairix_abi::TimesChange {
+            accessed: tairix_abi::StampChange::At(in_1950),
+            modified: tairix_abi::StampChange::At(in_1950),
+            nearest: false,
+        },
+    };
+    ask(&mut bench, offer, &retimed, |result| {
+        assert_eq!(result, Ok(Answer::Kept(tairix_abi::TimesKept::Exactly)));
+    });
+    let times = ask(
+        &mut bench,
+        offer,
+        &Request::NodeInfo { node: file },
+        |result| match result {
+            Ok(Answer::Info(info)) => info.times,
+            other => panic!("not info: {other:?}"),
+        },
+    );
+    assert_eq!(
+        (times.accessed, times.modified),
+        (in_1950, in_1950),
+        "the server keeps both"
+    );
+    let finer = Request::SetTimes {
+        node: file,
+        change: tairix_abi::TimesChange {
+            modified: tairix_abi::StampChange::At(
+                tairix_abi::time::Time64::new(0, 1).expect("canonical"),
+            ),
+            ..tairix_abi::TimesChange::default()
+        },
+    };
+    ask(&mut bench, offer, &finer, |result| {
+        assert_eq!(
+            result,
+            Err(DriverError::OutOfRange),
+            "finer than a FILETIME"
+        );
+    });
+}
+
+#[test]
 fn a_volume_answers_what_needs_no_server_itself() {
     let (mut bench, offer) = mounted(false);
     ask(
@@ -416,6 +464,13 @@ fn a_read_only_mount_refuses_every_change_before_the_server_sees_it() {
         Request::Truncate {
             file: ROOT,
             size: 0,
+        },
+        Request::SetTimes {
+            node: ROOT,
+            change: tairix_abi::TimesChange {
+                modified: tairix_abi::StampChange::At(tairix_abi::time::Time64::from_secs(9)),
+                ..tairix_abi::TimesChange::default()
+            },
         },
     ] {
         ask(&mut bench, offer, &request, |result| {

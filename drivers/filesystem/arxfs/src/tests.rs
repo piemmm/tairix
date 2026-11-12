@@ -936,8 +936,7 @@ fn timestamps_round_trip_extreme_values() {
     let node = fs.lookup(root, b"t").unwrap();
     let times = fs.node_info(node).unwrap().times;
     assert_eq!(times.created, old);
-    // ARXFS does not track access time: it is always the epoch.
-    assert_eq!(times.accessed, Time64::UNIX_EPOCH);
+    assert_eq!(times.accessed, old, "a node is accessed when it is made");
 
     // A far-future value survives a remount.
     let mut sec = Security::new(0o600, 1, 2);
@@ -949,10 +948,62 @@ fn timestamps_round_trip_extreme_values() {
     let node = fs.lookup(fs.root(), b"t").unwrap();
     assert_eq!(fs.security(node).unwrap(), sec);
     // `changed` was stamped by `set_security` under the future clock, and the
-    // access time stays the epoch across the remount.
+    // access time stays as it was made across the remount.
     let times = fs.node_info(node).unwrap().times;
     assert_eq!(times.changed, future);
-    assert_eq!(times.accessed, Time64::UNIX_EPOCH);
+    assert_eq!(times.accessed, old);
+}
+
+/// Either time takes any instant to the nanosecond, before 1970 and past
+/// 2038 alike, and keeps it across a remount; a now stamps the clock, a keep
+/// leaves the time, the change time moves with any change, and a read moves
+/// nothing.
+#[test]
+fn set_times_keeps_any_instant_exactly_and_a_read_moves_nothing() {
+    let made = Time64::from_secs(1_000);
+    let clock = Time64::from_secs(2_000);
+    let mut fs = ARXFS::format(
+        MemBlock::new(512, 256),
+        32,
+        TEST_KEYING,
+        &mut TestEntropy::new(),
+    )
+    .expect("format")
+    .at(Some(made));
+    let root = fs.root();
+    let node = fs
+        .create(root, b"t", NodeKind::RegularFile, &FILE_RECORD)
+        .expect("create");
+    fs.write_at(node, 0, b"data").expect("write");
+    fs = fs.at(Some(clock));
+    let before_epoch = Time64::new(-2_000_000_000, 123_456_789).expect("canonical");
+    let past_2038 = Time64::new(1 << 40, 1).expect("canonical");
+    let change = TimesChange {
+        accessed: StampChange::At(before_epoch),
+        modified: StampChange::At(past_2038),
+        nearest: false,
+    };
+    assert_eq!(fs.set_times(node, change), Ok(TimesKept::Exactly));
+    let mut out = [0u8; 4];
+    fs.read_at(node, 0, &mut out).expect("read");
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING)
+        .expect("reopen")
+        .at(Some(Time64::from_secs(3_000)));
+    let node = fs.lookup(fs.root(), b"t").unwrap();
+    let times = fs.node_info(node).unwrap().times;
+    assert_eq!(
+        (times.accessed, times.modified, times.changed, times.created),
+        (before_epoch, past_2038, clock, made)
+    );
+    let now = TimesChange {
+        accessed: StampChange::Now,
+        ..TimesChange::default()
+    };
+    assert_eq!(fs.set_times(node, now), Ok(TimesKept::Exactly));
+    let times = fs.node_info(node).unwrap().times;
+    assert_eq!(times.accessed, Time64::from_secs(3_000));
+    assert_eq!(times.modified, past_2038, "a keep leaves the time");
 }
 
 #[test]

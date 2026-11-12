@@ -199,6 +199,9 @@ pub(crate) struct PointerOverlay {
     pointer: Point,
     /// Whether the whole overlay is withheld from the screen.
     hidden: bool,
+    /// Whether the cursor image, and the trail drawn from it, is left out
+    /// while the aids are still drawn.
+    blank: bool,
     trail: ArrayVec<Ghost, MAX_GHOSTS>,
     halo: Halo,
     /// The halo as drawn, centred on the pointer: a square twice the widest
@@ -221,6 +224,7 @@ impl PointerOverlay {
             cursor: None,
             pointer: Point::ORIGIN,
             hidden: false,
+            blank: false,
             trail: ArrayVec::new(),
             halo: Halo::new(),
             art: None,
@@ -329,6 +333,22 @@ impl PointerOverlay {
         self.hidden
     }
 
+    /// Leave the cursor image out or draw it again, answering whether that
+    /// changed anything.
+    pub(crate) fn set_blank(&mut self, blank: bool) -> bool {
+        let changed = self.blank != blank;
+        self.blank = blank;
+        if changed {
+            self.shape = self.shape.wrapping_add(1);
+        }
+        changed
+    }
+
+    /// The cursor as drawn: none while it is blank.
+    fn drawn_cursor(&self) -> Option<&PlacedCursor> {
+        self.cursor.as_ref().filter(|_| !self.blank)
+    }
+
     pub(crate) const fn has_cursor(&self) -> bool {
         self.cursor.is_some()
     }
@@ -339,7 +359,7 @@ impl PointerOverlay {
     }
 
     fn shown_cursor(&self) -> Option<&PlacedCursor> {
-        self.cursor.as_ref().filter(|_| !self.hidden)
+        self.drawn_cursor().filter(|_| !self.hidden)
     }
 
     /// Draw `ghosts` as the trail, oldest first, answering whether that
@@ -417,7 +437,7 @@ impl PointerOverlay {
         if self.hidden {
             return sprites;
         }
-        if let Some(cursor) = &self.cursor {
+        if let Some(cursor) = self.drawn_cursor() {
             for ghost in &self.trail {
                 let _ = sprites.try_push(Sprite {
                     surface: cursor.image().surface(),
@@ -433,7 +453,7 @@ impl PointerOverlay {
                 opacity: u8::MAX,
             });
         }
-        if let Some(cursor) = self.cursor.as_ref().filter(|_| with_cursor) {
+        if let Some(cursor) = self.drawn_cursor().filter(|_| with_cursor) {
             let _ = sprites.try_push(Sprite {
                 surface: cursor.image().surface(),
                 bounds: cursor.bounds(),
@@ -471,7 +491,7 @@ impl PointerOverlay {
         if self.hidden || self.route == PointerRoute::Layer {
             return now;
         }
-        if let Some(cursor) = &self.cursor {
+        if let Some(cursor) = self.drawn_cursor() {
             if self.route == PointerRoute::Frame {
                 now.cursor = Some(cursor.bounds());
             }

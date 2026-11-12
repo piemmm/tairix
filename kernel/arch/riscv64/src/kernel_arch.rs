@@ -569,6 +569,34 @@ pub fn halt_current_hart() -> ! {
     park()
 }
 
+/// Make every store before it visible to the instruction fetch of every hart,
+/// answering whether it is: `fence.i` here, which reaches only this hart, then
+/// the firmware's `fence.i` on every hart.
+///
+/// Firmware without the RFENCE extension never had a secondary hart started
+/// (`start_secondary` refuses without it), so the local fence is the whole of
+/// it there. Any other refusal is `false`: no hart is assumed to fetch what it
+/// may not see.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[must_use]
+pub fn fence_instruction_fetch() -> bool {
+    // SAFETY: `fence.i` orders this hart's instruction fetches after its
+    // earlier stores; it reads and writes no memory.
+    unsafe {
+        core::arch::asm!("fence.i", options(nostack, preserves_flags));
+    }
+    let remote = crate::sbi::remote_fence_i(0, crate::sbi::ALL_HARTS);
+    remote.is_success() || remote.error == crate::sbi::SbiRet::NOT_SUPPORTED
+}
+
+/// Host-test twin of [`fence_instruction_fetch`]: the host has no second hart
+/// and fetches nothing the kernel wrote.
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+#[must_use]
+pub fn fence_instruction_fetch() -> bool {
+    true
+}
+
 #[cfg(test)]
 #[path = "kernel_arch_tests.rs"]
 mod tests;

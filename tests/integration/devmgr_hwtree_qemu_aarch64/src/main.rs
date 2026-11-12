@@ -101,7 +101,7 @@ mod kernel {
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT, HW_NODE_ROOT_ID};
     use tairix_abi::Errno;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_kernel::hwtree_store::{HW_TREE, HW_TREE_SOURCE};
     use tairix_kernel_core::waitq::HW_TREE_WAITQ;
@@ -113,7 +113,7 @@ mod kernel {
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

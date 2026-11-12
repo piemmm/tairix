@@ -1221,14 +1221,14 @@ platform floor).
   *created*, and a create never replaces a name, an occupied destination
   needs `-f` first; the byte copy still truncates through its own create.
 
-  **`-a`/`--archive` and the rest of `--preserve` are refused, not
-  narrowed**: `-a` is `-dR --preserve=all`, `--preserve=all` includes a
-  node's timestamps, and **no syscall can set a timestamp** (`fs_set_mode`
-  and `fs_set_owner` exist; no `fs_set_times` does), so honouring `-a`
-  would report a preservation that did not happen. `-dR` is the rest of it.
-  Lifting the refusal means adding that call — an ABI + VFS + per-driver
-  change, its own entry (`plans/OPEN-DEFECTS.md` D1264), not a corner of
-  this stage; `mv`'s cross-volume move waits on the same call to keep times.
+  `-p` is `--preserve=mode,ownership,timestamps` and `-a` is
+  `-dR --preserve=all`: the exact mode, the owner through `carry_owner` (one
+  the copier may not give left the copier's, silently, as GNU's), and the
+  times through `fs_set_times` with the nearest the destination holds,
+  before any owner change and, for a directory, once its entries are in.
+  Inexact times are one omission record (`fs.times_not_exact`), not a
+  warning. Only
+  `--preserve=context` is refused.
 
   `cp`, `mv`'s cross-volume copy, `fstree` and the file manager's paste copy
   through one engine (`lib/fscopy`): a file's bytes with its holes kept over

@@ -19,7 +19,6 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
-use tairix_abi::time::CivilTime;
 use tairix_abi::DriverKind;
 
 // What a test's creations ask for, which FAT has nowhere to keep.
@@ -67,8 +66,13 @@ fn set_le32(img: &mut [u8], offset: usize, value: u32) {
     img[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn set_fat(img: &mut [u8], cluster: usize, value: u32) {
-    set_le32(img, SECTOR_SIZE + cluster * 4, value);
+fn set_fat(img: &mut [u8], cluster: u32, value: u32) {
+    assert!(table::set(
+        KIND,
+        &mut img[SECTOR_SIZE..2 * SECTOR_SIZE],
+        cluster,
+        value
+    ));
 }
 
 /// Build an 11-byte 8.3 short name from base and extension fields.
@@ -85,116 +89,88 @@ fn cluster_offset(cluster: u32) -> usize {
     (cluster as usize) * SECTOR_SIZE
 }
 
-fn write_entry(img: &mut [u8], offset: usize, name: &[u8; 11], attr: u8, cluster: u32, size: u32) {
-    img[offset..offset + 11].copy_from_slice(name);
-    img[offset + 11] = attr;
-    let cluster_bytes = cluster.to_le_bytes();
-    img[offset + 20..offset + 22].copy_from_slice(&cluster_bytes[2..4]);
-    img[offset + 26..offset + 28].copy_from_slice(&cluster_bytes[0..2]);
-    set_le32(img, offset + 28, size);
+fn write_entry(
+    img: &mut [u8],
+    offset: usize,
+    name: &[u8; 11],
+    attributes: u8,
+    cluster: u32,
+    size: u32,
+) {
+    let entry = ShortEntry {
+        name: *name,
+        attributes,
+        cluster,
+        size,
+        ..ShortEntry::default()
+    };
+    img[offset..offset + ENTRY].copy_from_slice(&entry.encode());
 }
 
 fn deep_byte(index: usize) -> u8 {
     u8::try_from(index % 256).expect("index % 256 fits in u8")
 }
 
-/// Write one 32-byte long-name directory entry.
-fn write_lfn_entry(
-    img: &mut [u8],
-    offset: usize,
-    order: u8,
-    checksum: u8,
-    slots: &[u16; LFN_UNITS_PER_ENTRY],
-) {
-    img[offset] = order;
-    img[offset + 11] = ATTR_LONG_NAME;
-    img[offset + 12] = 0;
-    img[offset + 13] = checksum;
-    for (k, &char_offset) in LFN_CHAR_OFFSETS.iter().enumerate() {
-        set_le16(img, offset + char_offset, slots[k]);
-    }
-}
-
-/// Write a complete long-name set (physical entries in descending
-/// sequence, the first flagged [`LFN_LAST_FLAG`]) followed by its 8.3
-/// short entry, returning the number of directory bytes consumed.
-///
-/// `checksum` is written into every fragment; passing a value other
-/// than the short-name checksum models a corrupt set so the fall-back
-/// to the 8.3 name can be tested.
-#[allow(clippy::too_many_arguments)]
+/// Write a long-name set bound by `checksum` — the short name's, or another
+/// to model a corrupt set — followed by its 8.3 short entry; the directory
+/// bytes consumed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a fixture writing every field of the entry it is given"
+)]
 fn write_long_named_entry(
     img: &mut [u8],
     offset: usize,
     units: &[u16],
     short: &[u8; 11],
     checksum: u8,
-    attr: u8,
+    attributes: u8,
     cluster: u32,
     size: u32,
 ) -> usize {
-    let frag_count = units.len().div_ceil(LFN_UNITS_PER_ENTRY);
-    for phys in 0..frag_count {
-        let seq = frag_count - phys;
-        let mut order = u8::try_from(seq).expect("sequence fits in u8");
-        if phys == 0 {
-            order |= LFN_LAST_FLAG;
-        }
-        let base = (seq - 1) * LFN_UNITS_PER_ENTRY;
-        let mut slots = [0xFFFFu16; LFN_UNITS_PER_ENTRY];
-        for (k, slot) in slots.iter_mut().enumerate() {
-            let idx = base + k;
-            *slot = match idx.cmp(&units.len()) {
-                core::cmp::Ordering::Less => units[idx],
-                core::cmp::Ordering::Equal => 0x0000,
-                core::cmp::Ordering::Greater => 0xFFFF,
-            };
-        }
-        write_lfn_entry(img, offset + phys * DIR_ENTRY_LEN, order, checksum, &slots);
+    let mut at = offset;
+    for raw in dir::long_entries(units, checksum) {
+        img[at..at + ENTRY].copy_from_slice(&raw);
+        at += ENTRY;
     }
-    write_entry(
-        img,
-        offset + frag_count * DIR_ENTRY_LEN,
-        short,
-        attr,
-        cluster,
-        size,
-    );
-    (frag_count + 1) * DIR_ENTRY_LEN
+    write_entry(img, at, short, attributes, cluster, size);
+    at + ENTRY - offset
 }
 
 /// Byte offset of the long-named file's first directory entry in `SUB/`
 /// (after `.`, `..`, and `DEEP.BIN`).
 fn long_entry_offset() -> usize {
-    cluster_offset(CLUSTER_SUB) + 3 * DIR_ENTRY_LEN
+    cluster_offset(CLUSTER_SUB) + 3 * ENTRY
+}
+
+/// Lay an empty FAT32 volume of `total_sectors` into `img`: one-sector
+/// clusters, one reserved sector, one FAT of one sector — so cluster `n`
+/// lies at sector `n` — and the root in cluster 2. A FAT32 parameter block
+/// has no fixed root and no 16-bit FAT size.
+fn lay_volume(img: &mut [u8], total_sectors: u32) {
+    set_le16(img, at::BYTES_PER_SECTOR, 512);
+    img[at::SECTORS_PER_CLUSTER] = 1;
+    set_le16(img, at::RESERVED_SECTORS, 1);
+    img[at::FATS] = 1;
+    set_le32(img, at::TOTAL_SECTORS_32, total_sectors);
+    set_le32(img, at::FAT_SECTORS_32, 1);
+    set_le32(img, at::ROOT_CLUSTER, CLUSTER_ROOT);
+    img[at::SIGNATURE..at::SIGNATURE + 2].copy_from_slice(&tairix_fat::boot::SIGNATURE);
+    let [media, end] = table::head(KIND, tairix_fat::format::FIXED_MEDIA);
+    set_fat(img, 0, media);
+    set_fat(img, 1, end);
+    set_fat(img, CLUSTER_ROOT, table::end(KIND));
 }
 
 /// Construct the in-memory FAT32 image described in the module docs.
 fn build_image() -> [u8; IMG_LEN] {
     let mut img = [0u8; IMG_LEN];
-
-    // BIOS parameter block (boot sector).
-    set_le16(&mut img, 11, 512); // bytes per sector
-    img[13] = 1; // sectors per cluster
-    set_le16(&mut img, 14, 1); // reserved sectors
-    img[16] = 1; // number of FATs
-    set_le16(&mut img, 17, 0); // root entry count (0 for FAT32)
-    set_le16(&mut img, 22, 0); // 16-bit FAT size (0 for FAT32)
-    set_le32(&mut img, 32, SECTOR_COUNT); // total sectors (32-bit)
-    set_le32(&mut img, 36, 1); // 32-bit FAT size (sectors)
-    set_le32(&mut img, 44, CLUSTER_ROOT); // root cluster
-    img[510] = 0x55;
-    img[511] = 0xAA;
-
-    // File allocation table (single FAT in sector 1).
-    let eoc = 0x0FFF_FFFF;
-    set_fat(&mut img, 0, 0x0FFF_FFF8); // media descriptor
-    set_fat(&mut img, 1, eoc);
-    set_fat(&mut img, CLUSTER_ROOT as usize, eoc);
-    set_fat(&mut img, CLUSTER_HELLO as usize, eoc);
-    set_fat(&mut img, CLUSTER_SUB as usize, eoc);
-    set_fat(&mut img, CLUSTER_DEEP_FIRST as usize, CLUSTER_DEEP_SECOND);
-    set_fat(&mut img, CLUSTER_DEEP_SECOND as usize, eoc);
+    lay_volume(&mut img, SECTOR_COUNT);
+    let eoc = table::end(KIND);
+    set_fat(&mut img, CLUSTER_HELLO, eoc);
+    set_fat(&mut img, CLUSTER_SUB, eoc);
+    set_fat(&mut img, CLUSTER_DEEP_FIRST, CLUSTER_DEEP_SECOND);
+    set_fat(&mut img, CLUSTER_DEEP_SECOND, eoc);
 
     // Root directory (cluster 2).
     let root = cluster_offset(CLUSTER_ROOT);
@@ -209,9 +185,9 @@ fn build_image() -> [u8; IMG_LEN] {
     );
     write_entry(
         &mut img,
-        root + DIR_ENTRY_LEN,
+        root + ENTRY,
         &short_name(b"SUB", b""),
-        ATTR_DIRECTORY,
+        attr::DIRECTORY,
         CLUSTER_SUB,
         0,
     );
@@ -226,22 +202,22 @@ fn build_image() -> [u8; IMG_LEN] {
         &mut img,
         sub,
         &short_name(b".", b""),
-        ATTR_DIRECTORY,
+        attr::DIRECTORY,
         CLUSTER_SUB,
         0,
     );
     write_entry(
         &mut img,
-        sub + DIR_ENTRY_LEN,
+        sub + ENTRY,
         &short_name(b"..", b""),
-        ATTR_DIRECTORY,
+        attr::DIRECTORY,
         0,
         0,
     );
     let deep_size = u32::try_from(DEEP_LEN).expect("deep fits in u32");
     write_entry(
         &mut img,
-        sub + 2 * DIR_ENTRY_LEN,
+        sub + 2 * ENTRY,
         &short_name(b"DEEP", b"BIN"),
         0x20,
         CLUSTER_DEEP_FIRST,
@@ -253,15 +229,15 @@ fn build_image() -> [u8; IMG_LEN] {
     let long_size = u32::try_from(LONG_BODY.len()).expect("body fits in u32");
     write_long_named_entry(
         &mut img,
-        sub + 3 * DIR_ENTRY_LEN,
+        sub + 3 * ENTRY,
         &LONG_NAME_UNITS,
         &long_short,
-        short_name_checksum(&long_short),
+        dir::checksum(&long_short),
         0x20,
         CLUSTER_LONG,
         long_size,
     );
-    set_fat(&mut img, CLUSTER_LONG as usize, eoc);
+    set_fat(&mut img, CLUSTER_LONG, eoc);
     let long_body = cluster_offset(CLUSTER_LONG);
     img[long_body..long_body + LONG_BODY.len()].copy_from_slice(LONG_BODY);
 
@@ -415,8 +391,8 @@ fn a_cursor_never_reaches_outside_its_directory() {
 /// so a walk finds no end-of-directory mark inside it.
 fn fill_with_deleted(img: &mut [u8], cluster: u32, used: usize) {
     let base = cluster_offset(cluster);
-    for slot in used..SECTOR_SIZE / DIR_ENTRY_LEN {
-        img[base + slot * DIR_ENTRY_LEN] = DELETED_ENTRY;
+    for slot in used..SECTOR_SIZE / ENTRY {
+        img[base + slot * ENTRY] = DELETED;
     }
 }
 
@@ -427,7 +403,7 @@ fn fill_with_deleted(img: &mut [u8], cluster: u32, used: usize) {
 fn a_corrupt_directory_chain_fails_its_listing_closed() {
     let mut img = build_image();
     fill_with_deleted(&mut img, CLUSTER_SUB, 6);
-    set_fat(&mut img, CLUSTER_SUB as usize, CLUSTER_SUB);
+    set_fat(&mut img, CLUSTER_SUB, CLUSTER_SUB);
     let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
     let root = fs.root();
     let sub = fs.lookup(root, b"sub").expect("subdir");
@@ -436,7 +412,7 @@ fn a_corrupt_directory_chain_fails_its_listing_closed() {
 
     let mut img = build_image();
     fill_with_deleted(&mut img, CLUSTER_SUB, 6);
-    set_fat(&mut img, CLUSTER_SUB as usize, 16);
+    set_fat(&mut img, CLUSTER_SUB, 16);
     let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
     let sub = fs.lookup(fs.root(), b"sub").expect("subdir");
     assert_eq!(listed(&mut fs, sub, 0, &[]), Err(DriverError::DeviceFault));
@@ -447,7 +423,7 @@ fn a_corrupt_directory_chain_fails_its_listing_closed() {
 #[test]
 fn a_files_allocation_comes_from_its_size() {
     let mut img = build_image();
-    set_fat(&mut img, CLUSTER_HELLO as usize, CLUSTER_HELLO);
+    set_fat(&mut img, CLUSTER_HELLO, CLUSTER_HELLO);
     let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
     let root = fs.root();
     let entries = listed(&mut fs, root, 0, &[]).expect("lists");
@@ -547,7 +523,7 @@ fn aliases<B: Block>(fs: &mut Fat32<B>, cluster: u32) -> Vec<[u8; 11]> {
     let mut walk = DirCursor::at(cluster);
     let mut out = Vec::new();
     while let Some(entry) = fs.next_entry(&mut walk).expect("walks") {
-        let mut raw = [0u8; DIR_ENTRY_LEN];
+        let mut raw = [0u8; ENTRY];
         fs.dev.read(entry.short_offset, &mut raw).expect("reads");
         out.push(raw[..11].try_into().expect("eleven bytes"));
     }
@@ -622,7 +598,7 @@ fn removing_an_entry_across_clusters_deletes_every_slot() {
     for _ in 0..17 {
         let (at, raw) = fs.next_slot(&mut walk).expect("walks").expect("a slot");
         if at.slot >= 14 {
-            assert_eq!(raw[0], DELETED_ENTRY, "slot {} survived", at.slot);
+            assert_eq!(raw[0], DELETED, "slot {} survived", at.slot);
         }
     }
 }
@@ -632,7 +608,7 @@ fn removing_an_entry_across_clusters_deletes_every_slot() {
 #[test]
 fn a_create_that_cannot_move_the_end_mark_writes_nothing() {
     let mut img = build_image();
-    set_fat(&mut img, CLUSTER_ROOT as usize, 0x0FFF_FFF7);
+    set_fat(&mut img, CLUSTER_ROOT, 0x0FFF_FFF7);
     let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
     let root = fs.root();
     // Thirteen long-name fragments and a short entry fill slots 2 to 15, so
@@ -650,7 +626,7 @@ fn a_create_that_cannot_move_the_end_mark_writes_nothing() {
 /// fails closed instead of walking forever.
 #[test]
 fn a_broken_parent_chain_fails_a_directory_move_closed() {
-    let dotdot = |dir: NodeId| cluster_offset(first_cluster(dir)) + DIR_ENTRY_LEN;
+    let dotdot = |dir: NodeId| cluster_offset(first_cluster(dir)) + ENTRY;
     let small = |dir: NodeId| u16::try_from(first_cluster(dir)).expect("a small cluster");
 
     let mut fs = mount();
@@ -661,8 +637,9 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
     let b = fs
         .create(root, b"B", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
-    set_le16(&mut fs.dev.device_mut().data, dotdot(a) + 26, small(b));
-    set_le16(&mut fs.dev.device_mut().data, dotdot(b) + 26, small(a));
+    let low = dir::at::CLUSTER_LOW;
+    set_le16(&mut fs.dev.device_mut().data, dotdot(a) + low, small(b));
+    set_le16(&mut fs.dev.device_mut().data, dotdot(b) + low, small(a));
     assert_eq!(
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
@@ -674,7 +651,11 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
     let a = fs
         .create(root, b"A", NodeKind::Directory, &DIR_RECORD)
         .expect("mkdir");
-    set_le16(&mut fs.dev.device_mut().data, dotdot(a) + 26, 0xFFFF);
+    set_le16(
+        &mut fs.dev.device_mut().data,
+        dotdot(a) + dir::at::CLUSTER_LOW,
+        0xFFFF,
+    );
     assert_eq!(
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
@@ -691,6 +672,31 @@ fn a_broken_parent_chain_fails_a_directory_move_closed() {
         fs.rename(root, b"SUB", a, b"SUB"),
         Err(DriverError::DeviceFault)
     );
+}
+
+/// A directory whose `..` is damaged is refused a move to another parent
+/// before anything is written: repointing it would overwrite whatever its
+/// second slot holds.
+#[test]
+fn a_directory_with_a_damaged_parent_link_is_refused_a_move_and_nothing_written() {
+    let mut fs = mount();
+    let root = fs.root();
+    let a = fs
+        .create(root, b"A", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let b = fs
+        .create(root, b"B", NodeKind::Directory, &DIR_RECORD)
+        .expect("mkdir");
+    let link = cluster_offset(first_cluster(a)) + ENTRY;
+    fs.dev.device_mut().data[link..link + 11].copy_from_slice(&short_name(b"OTHER", b"TXT"));
+    let before = fs.dev.device().data;
+    assert_eq!(
+        fs.rename(root, b"A", b, b"A"),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(fs.dev.device().data, before);
+    fs.rename(root, b"A", root, b"Renamed")
+        .expect("a move within its parent repoints nothing");
 }
 
 #[test]
@@ -790,7 +796,7 @@ fn every_nodes_number_is_its_id() {
 fn a_files_id_is_its_short_entrys_place() {
     let mut fs = mount();
     let sub = fs.lookup(fs.root(), b"SUB").expect("subdir");
-    let short = long_entry_offset() + 2 * DIR_ENTRY_LEN;
+    let short = long_entry_offset() + 2 * ENTRY;
     let id = file_node(short as u64);
     assert_eq!(fs.lookup(sub, LONG_NAME_UTF8), Ok(id));
     assert_eq!(fs.node_info(id).expect("info").size, LONG_BODY.len() as u64);
@@ -806,10 +812,10 @@ fn a_file_id_naming_anything_but_a_files_short_entry_names_nothing() {
     let sub = cluster_offset(CLUSTER_SUB);
     for (what, forged) in [
         ("the boot sector", at(0)),
-        ("a directory's entry", at(root + DIR_ENTRY_LEN)),
+        ("a directory's entry", at(root + ENTRY)),
         ("a `.` entry", at(sub)),
         ("a long-name fragment", at(long_entry_offset())),
-        ("the end of a directory", at(sub + 6 * DIR_ENTRY_LEN)),
+        ("the end of a directory", at(sub + 6 * ENTRY)),
         ("past the volume", at(IMG_LEN)),
         ("no slot at all", NodeId::from_raw(u64::MAX)),
     ] {
@@ -994,7 +1000,7 @@ fn corrupt_long_name_checksum_falls_back_to_short_name() {
     // fragments with a value that cannot match the short name.
     let first = long_entry_offset();
     data[first + 13] ^= 0xFF;
-    data[first + DIR_ENTRY_LEN + 13] ^= 0xFF;
+    data[first + ENTRY + 13] ^= 0xFF;
 
     let mut fs = Fat32::open(MockBlock { data }).expect("valid volume");
     let root = fs.root();
@@ -1004,49 +1010,6 @@ fn corrupt_long_name_checksum_falls_back_to_short_name() {
     assert_eq!(entries[1].1, b"GREETI~1.TXT");
 
     assert_eq!(fs.lookup(sub, LONG_NAME_UTF8), Err(DriverError::NotFound));
-}
-
-#[test]
-fn short_name_checksum_matches_the_specification() {
-    // The reference checksum of the 11-byte field "GREETI~1TXT".
-    let short = short_name(b"GREETI~1", b"TXT");
-    let mut expected = 0u8;
-    for &byte in &short {
-        expected = expected.rotate_right(1).wrapping_add(byte);
-    }
-    assert_eq!(short_name_checksum(&short), expected);
-}
-
-#[test]
-fn decode_utf16le_handles_a_surrogate_pair() {
-    // U+1F600 GRINNING FACE encodes as the surrogate pair D83D DE00.
-    let units = [0xD83Du16, 0xDE00];
-    let mut out = [0u8; 8];
-    let len = decode_utf16le(&units, &mut out).expect("decoded");
-    assert_eq!(&out[..len], b"\xF0\x9F\x98\x80");
-}
-
-#[test]
-fn decode_utf16le_stops_at_the_terminator() {
-    let units = [0x0041u16, 0x0042, 0x0000, 0xFFFF, 0x0043];
-    let mut out = [0u8; 8];
-    let len = decode_utf16le(&units, &mut out).expect("decoded");
-    assert_eq!(&out[..len], b"AB");
-}
-
-#[test]
-fn decode_utf16le_rejects_unpaired_surrogates() {
-    let mut out = [0u8; 8];
-    assert_eq!(decode_utf16le(&[0xD83Du16], &mut out), None);
-    assert_eq!(decode_utf16le(&[0xD83Du16, 0x0041], &mut out), None);
-    assert_eq!(decode_utf16le(&[0xDC00u16], &mut out), None);
-}
-
-#[test]
-fn decode_utf16le_rejects_an_overflowing_output() {
-    let units = [0x0041u16, 0x0042, 0x0043];
-    let mut out = [0u8; 2];
-    assert_eq!(decode_utf16le(&units, &mut out), None);
 }
 
 // ---------------------------------------------------------------------
@@ -1792,6 +1755,150 @@ mod format {
         );
     }
 
+    /// A device that notes, after each write, whether its first sector holds
+    /// a boot sector.
+    struct Signing {
+        inner: VecBlock,
+        signed: Vec<bool>,
+    }
+
+    impl Block for Signing {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            self.inner.geometry()
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            self.inner.read_blocks(lba, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            self.inner.write_blocks(lba, buf)?;
+            let signature = &self.inner.store[at::SIGNATURE..at::SIGNATURE + 2];
+            self.signed
+                .push(signature == tairix_fat::boot::SIGNATURE.as_slice());
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// A format over an old volume clears the old boot sector first and
+    /// writes its own last, so a format cut short leaves no boot sector for
+    /// a reader to mount half a volume by.
+    #[test]
+    fn a_format_writes_its_boot_sector_last() {
+        let old = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL)
+            .expect("format")
+            .into_block();
+        let device = Signing {
+            inner: old,
+            signed: Vec::new(),
+        };
+        let signed = Fat32::format(device, TEST_SERIAL + 1)
+            .expect("reformat")
+            .into_block()
+            .signed;
+        let (last, before) = signed.split_last().expect("writes");
+        assert!(*last, "the boot sector is the last write");
+        assert_eq!(
+            before.iter().position(|&signed| signed),
+            None,
+            "a boot sector stood before the last write"
+        );
+    }
+
+    /// A volume of `total_sectors` with a one-sector table, on a device of
+    /// `device_sectors`.
+    fn small_volume(device_sectors: u64, total_sectors: u32) -> VecBlock {
+        let mut image = VecBlock::new(device_sectors);
+        lay_volume(&mut image.store, total_sectors);
+        image
+    }
+
+    /// Write one file until the volume has no cluster left.
+    fn fill(fs: &mut Fat32<VecBlock>) {
+        let root = fs.root();
+        let file = fs
+            .create(root, b"FILL.BIN", NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        let chunk = [0xA5u8; SECTOR_SIZE];
+        let mut offset = 0u64;
+        loop {
+            match fs.write_at(file, offset, &chunk) {
+                Ok(_) => offset += SECTOR_SIZE as u64,
+                Err(DriverError::NoSpace) => break,
+                Err(other) => panic!("filling: {other:?}"),
+            }
+        }
+        assert_eq!(fs.stats().expect("stats").free_blocks, 0);
+    }
+
+    /// A volume is used no further than its sectors and its table reach,
+    /// whatever the device beneath it holds: nothing is allocated past
+    /// either, so the table never grows into the data and no write lands
+    /// past the volume.
+    #[test]
+    fn a_volume_is_used_no_further_than_its_sectors_and_table_reach() {
+        // One table sector describes 126 clusters; 300 sectors hold 298.
+        let mut fs = Fat32::open(small_volume(300, 300)).expect("mounts");
+        assert_eq!(fs.stats().expect("stats").total_blocks, 126);
+        fill(&mut fs);
+        let root = fs.root();
+        let names: Vec<Vec<u8>> = listed(&mut fs, root, 0, &[])
+            .expect("the root is intact")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(names, [b"FILL.BIN".to_vec()]);
+
+        // 100 sectors on a 300-sector device hold 98 clusters.
+        let mut fs = Fat32::open(small_volume(300, 100)).expect("mounts");
+        assert_eq!(fs.stats().expect("stats").total_blocks, 98);
+        fill(&mut fs);
+        let image = fs.into_block();
+        assert!(
+            image.store[100 * SECTOR_SIZE..]
+                .iter()
+                .all(|&byte| byte == 0),
+            "a write landed past the volume"
+        );
+    }
+
+    /// A file whose entry points past the volume, at sectors its device holds
+    /// but the volume does not, is refused every access rather than followed
+    /// out of the volume.
+    #[test]
+    fn a_file_pointing_past_the_volume_is_refused_and_nothing_outside_read_or_written() {
+        let mut fs = Fat32::open(small_volume(300, 100)).expect("mounts");
+        let root = fs.root();
+        let file = fs
+            .create(root, b"OUT.BIN", NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        fs.write_at(file, 0, b"inside").expect("write");
+        let entry = fs
+            .find_child(first_cluster(root), b"OUT.BIN")
+            .expect("read")
+            .expect("found");
+        // Cluster 200 lies at the device's sector 200, past the volume's 100.
+        fs.set_entry_meta(entry.short_offset, 200, 7, Stamp::NONE)
+            .expect("patch");
+        let outside = 200 * SECTOR_SIZE;
+        fs.dev.device_mut().store[outside..outside + 7].copy_from_slice(b"OUTSIDE");
+        let before = fs.dev.device().store.clone();
+        let mut buf = [0u8; 16];
+        assert_eq!(fs.read_at(file, 0, &mut buf), Err(DriverError::DeviceFault));
+        assert_eq!(fs.write_at(file, 0, b"x"), Err(DriverError::DeviceFault));
+        assert_eq!(fs.truncate(file, 1024), Err(DriverError::DeviceFault));
+        assert_eq!(fs.dev.device().store, before);
+        assert_eq!(
+            fs.node_info(file).expect("still listed").allocated,
+            0,
+            "no chain to account"
+        );
+    }
+
     #[test]
     fn format_then_reopen_round_trips_files_and_directories() {
         let dev = {
@@ -1997,19 +2104,17 @@ mod format {
             .expect("mkdir");
         let mut pos = SlotPos {
             cluster: first_cluster(dir),
-            intra: 2 * DIR_ENTRY_LEN as u64,
+            intra: 2 * ENTRY as u64,
             slot: 2,
         };
         let name = |slot: u64| short_name(std::format!("F{slot:07X}").as_bytes(), b"BIN");
-        while pos.slot < u64::from(MAX_DIR_SLOTS) {
-            let entry = Fat32::<VecBlock>::build_short_entry(
-                &name(pos.slot),
-                0x20,
-                0,
-                0,
-                EntryStamps::NONE,
-            );
-            fs.put_slot(&mut pos, &entry).expect("fill");
+        while pos.slot < u64::from(MAX_ENTRIES) {
+            let entry = ShortEntry {
+                name: name(pos.slot),
+                attributes: attr::ARCHIVE,
+                ..ShortEntry::default()
+            };
+            fs.put_slot(&mut pos, &entry.encode()).expect("fill");
         }
         assert_eq!(
             fs.create(dir, b"one.txt", NodeKind::RegularFile, &FILE_RECORD),
@@ -2107,8 +2212,21 @@ mod format {
         // 2024-03-15 10:20:30 created, accessed 2024-03-16, written 2025-01-02 03:04:06.
         let created = [0x64, 0x8F, 0x52, 0x6F, 0x58, 0x70, 0x58];
         let written = [0x83, 0x18, 0x22, 0x5A];
-        fs.dev.write(entry.short_offset + 13, &created).unwrap();
-        fs.dev.write(entry.short_offset + 22, &written).unwrap();
+        fs.dev
+            .write(
+                entry.short_offset + dir::at::CREATED_CENTIS as u64,
+                &created,
+            )
+            .unwrap();
+        fs.dev
+            .write(entry.short_offset + dir::at::WRITTEN_TIME as u64, &written)
+            .unwrap();
+        let stamps = fs
+            .find_child(first_cluster(root), b"old.txt")
+            .unwrap()
+            .unwrap()
+            .stamps;
+        assert_ne!(stamps, Stamps::NONE);
 
         fs.rename(root, b"old.txt", root, b"new.txt")
             .expect("rename");
@@ -2116,16 +2234,14 @@ mod format {
             .find_child(first_cluster(root), b"new.txt")
             .unwrap()
             .unwrap();
-        assert_eq!(moved.stamps.created, created);
-        assert_eq!(moved.stamps.written, written);
+        assert_eq!(moved.stamps, stamps);
         fs.rename(root, b"new.txt", sub, b"New.TXT").expect("move");
         let moved = fs
             .find_child(first_cluster(sub), b"New.TXT")
             .unwrap()
             .unwrap();
-        assert_eq!(moved.stamps.created, created);
-        assert_eq!(moved.stamps.written, written);
-        assert_ne!(moved.times.modified, Time64::UNIX_EPOCH);
+        assert_eq!(moved.stamps, stamps);
+        assert_ne!(node_times(&moved.stamps).modified, Time64::UNIX_EPOCH);
     }
 
     #[test]
@@ -2333,11 +2449,12 @@ mod format {
         let file = fs
             .create(root, b"f.txt", NodeKind::RegularFile, &FILE_RECORD)
             .expect("create");
-        let made = fs
-            .find_child(first_cluster(root), b"f.txt")
-            .expect("read")
-            .expect("found")
-            .times;
+        let made = node_times(
+            &fs.find_child(first_cluster(root), b"f.txt")
+                .expect("read")
+                .expect("found")
+                .stamps,
+        );
         assert_eq!(
             made.created,
             Time64::new(1_792_067_697, 120_000_000).expect("canonical")
@@ -2355,8 +2472,8 @@ mod format {
             .find_child(first_cluster(root), b"f.txt")
             .expect("read")
             .expect("found");
-        assert_eq!(written.times.modified, later);
-        assert_eq!(written.times.created, made.created);
+        assert_eq!(node_times(&written.stamps).modified, later);
+        assert_eq!(node_times(&written.stamps).created, made.created);
         assert_eq!(written.size, 4, "the stamp's write carried the size too");
 
         let dir = fs
@@ -2371,10 +2488,84 @@ mod format {
             .read(fs.cluster_byte(first_cluster(dir)), &mut raw)
             .expect("read");
         assert_eq!(
-            crate::EntryStamps::of(&raw),
+            ShortEntry::decode(&raw).stamps,
             dot.stamps,
             "a new directory's `.` is stamped as its entry is"
         );
+    }
+
+    /// A file's and a directory's last-write stamp and last-read date take an
+    /// instant the fields hold exactly, the nearest one where asked, and
+    /// refuse any other; the root, which no entry names, keeps no time.
+    #[test]
+    fn set_times_writes_the_entrys_fields_exactly_or_to_the_nearest_asked() {
+        let mut fs = at(
+            Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format"),
+            Some(stamp_instant()),
+        );
+        let root = fs.root();
+        let file = fs
+            .create(root, b"f.txt", NodeKind::RegularFile, &FILE_RECORD)
+            .expect("create");
+        let dir = fs
+            .create(root, b"sub", NodeKind::Directory, &DIR_RECORD)
+            .expect("mkdir");
+        let day = Time64::from_secs(1_000_080_000);
+        let even = Time64::from_secs(1_000_000_000);
+        let change = |accessed, modified, nearest| TimesChange {
+            accessed,
+            modified,
+            nearest,
+        };
+        for node in [file, dir] {
+            let created = fs.node_info(node).expect("info").times.created;
+            assert_eq!(
+                fs.set_times(
+                    node,
+                    change(StampChange::At(day), StampChange::At(even), false)
+                ),
+                Ok(TimesKept::Exactly)
+            );
+            let times = fs.node_info(node).expect("info").times;
+            assert_eq!((times.accessed, times.modified), (day, even));
+            assert_eq!(times.created, created, "the creation stamp stays");
+        }
+        let odd = Time64::from_secs(1_000_000_001);
+        assert_eq!(
+            fs.set_times(file, change(StampChange::Keep, StampChange::At(odd), false)),
+            Err(DriverError::OutOfRange)
+        );
+        assert_eq!(fs.node_info(file).expect("info").times.modified, even);
+        assert_eq!(
+            fs.set_times(
+                file,
+                change(
+                    StampChange::Keep,
+                    StampChange::At(Time64::from_secs(-1)),
+                    true
+                )
+            ),
+            Ok(TimesKept::Nearest)
+        );
+        assert_eq!(
+            fs.node_info(file).expect("info").times.modified,
+            Time64::from_secs(315_532_800),
+            "before 1980 is 1980's first instant"
+        );
+        assert_eq!(
+            fs.set_times(root, change(StampChange::Now, StampChange::Now, false)),
+            Ok(TimesKept::Exactly)
+        );
+        assert_eq!(
+            fs.set_times(root, change(StampChange::At(day), StampChange::Keep, false)),
+            Err(DriverError::OutOfRange)
+        );
+        let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+        let listed_file = entries
+            .iter()
+            .find(|(entry, _)| entry.node == file)
+            .expect("listed");
+        assert_eq!(listed_file.0.info, fs.node_info(file).expect("info"));
     }
 
     /// A file's stamps live in its entry, which its id reaches: a stat by
@@ -2472,13 +2663,10 @@ mod format {
             .find_child(first_cluster(root), b"f.txt")
             .expect("read")
             .expect("found");
-        assert_eq!(entry.stamps, crate::EntryStamps::NONE);
+        assert_eq!(entry.stamps, Stamps::NONE);
+        let times = node_times(&entry.stamps);
         assert_eq!(
-            (
-                entry.times.created,
-                entry.times.modified,
-                entry.times.accessed
-            ),
+            (times.created, times.modified, times.accessed),
             (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
         );
     }
@@ -2502,15 +2690,11 @@ mod format {
 
     /// The root directory's first cluster in `image`, as entries.
     fn root_entries(image: &VecBlock) -> Vec<RawEntry> {
-        let sector: &[u8; 512] = image.store[..512].try_into().expect("a sector");
-        let bpb = Fat32Bpb::parse(sector).expect("a parameter block");
-        let start = bpb.cluster_byte(bpb.root_cluster).expect("a root");
+        let bpb = fat32_bpb(&image.store).expect("a parameter block");
+        let start = bpb.cluster_start(bpb.root_cluster).expect("a root");
         let at = usize::try_from(start).expect("fits");
         let len = usize::try_from(bpb.cluster_bytes()).expect("fits");
-        image.store[at..at + len]
-            .as_chunks::<DIR_ENTRY_LEN>()
-            .0
-            .to_vec()
+        image.store[at..at + len].as_chunks::<ENTRY>().0.to_vec()
     }
 
     /// A label is kept in the root directory's label entry and in both boot
@@ -2530,7 +2714,7 @@ mod format {
         assert_eq!(&image.store[backup + 71..backup + 82], b"BACKUP 2025");
         let labels: Vec<RawEntry> = root_entries(&image)
             .into_iter()
-            .filter(|raw| raw[0] != DELETED_ENTRY && raw[11] == ATTR_VOLUME_ID)
+            .filter(|raw| raw[0] != DELETED && raw[dir::at::ATTRIBUTES] == attr::VOLUME_ID)
             .collect();
         assert_eq!(labels.len(), 1);
         assert_eq!(&labels[0][..11], b"BACKUP 2025");
@@ -2555,9 +2739,9 @@ mod format {
         let mut image = fs.into_block();
         let entries = root_entries(&image);
         assert_eq!(&entries[0][..11], b"TWO        ");
-        assert_eq!(entries[0][11], ATTR_VOLUME_ID);
-        let live = entries.iter().filter(|raw| raw[0] != DELETED_ENTRY);
-        assert_eq!(live.filter(|raw| is_label(raw)).count(), 1);
+        assert_eq!(entries[0][dir::at::ATTRIBUTES], attr::VOLUME_ID);
+        let labels = entries.iter().filter(|raw| dir::slot(raw) == Slot::Label);
+        assert_eq!(labels.count(), 1);
         assert_eq!(probed(&mut image).label(), b"TWO");
     }
 
@@ -2606,30 +2790,26 @@ mod format {
         let mut image = fs.into_block();
         assert_eq!(&image.store[71..82], b"NO NAME    ");
         let entries = root_entries(&image);
-        let labelled = entries
-            .iter()
-            .any(|raw| raw[0] != DELETED_ENTRY && is_label(raw));
+        let labelled = entries.iter().any(|raw| dir::slot(raw) == Slot::Label);
         assert!(!labelled);
         assert!(probed(&mut image).label().is_empty());
     }
 
     /// The root slots the volume probe reads a label from: sixteen, in a
     /// 64 MiB volume's one-sector clusters.
-    const LABEL_WINDOW_SLOTS: u64 = (SECTOR_SIZE / DIR_ENTRY_LEN) as u64;
+    const LABEL_WINDOW_SLOTS: u64 = (SECTOR_SIZE / ENTRY) as u64;
 
     /// Fill the root of `fs` with files from its first slot up to `slots`.
     fn fill_root(fs: &mut Fat32<VecBlock>, slots: u64) {
         let mut pos = SlotPos::at(first_cluster(fs.root()));
         let name = |slot: u64| short_name(std::format!("F{slot:07X}").as_bytes(), b"BIN");
         while pos.slot < slots {
-            let entry = Fat32::<VecBlock>::build_short_entry(
-                &name(pos.slot),
-                0x20,
-                0,
-                0,
-                EntryStamps::NONE,
-            );
-            fs.put_slot(&mut pos, &entry).expect("fill");
+            let entry = ShortEntry {
+                name: name(pos.slot),
+                attributes: attr::ARCHIVE,
+                ..ShortEntry::default()
+            };
+            fs.put_slot(&mut pos, &entry.encode()).expect("fill");
         }
     }
 
@@ -2641,8 +2821,11 @@ mod format {
         let mut image = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL)
             .expect("format")
             .into_block();
-        for sector in [0, usize::from(BACKUP_BOOT_SECTOR)] {
-            image.store[sector * SECTOR_SIZE + EXT_BOOT_SIG_AT] = 0;
+        let backup = fat32_bpb(&image.store)
+            .expect("a parameter block")
+            .backup_boot_sector;
+        for sector in [0, usize::from(backup)] {
+            image.store[sector * SECTOR_SIZE + at::EXTENDED_32] = 0;
         }
         let mut fs = Fat32::open(image).expect("mounts");
         fill_root(&mut fs, LABEL_WINDOW_SLOTS - 1);
@@ -2760,128 +2943,9 @@ mod format {
     }
 }
 
-/// Pack a DOS date word from its calendar fields.
-fn dos_date(year: u16, month: u16, day: u16) -> u16 {
-    ((year - 1980) << 9) | (month << 5) | day
-}
-
-/// Pack a DOS time word from its clock fields.
-fn dos_time(hour: u16, minute: u16, second: u16) -> u16 {
-    (hour << 11) | (minute << 5) | (second / 2)
-}
-
-#[test]
-fn dos_datetime_start_of_epoch_decodes() {
-    // 1980-01-01 00:00:00 UTC, the earliest FAT timestamp.
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos_date(1980, 1, 1), dos_time(0, 0, 0)),
-        Time64::from_secs(315_532_800)
-    );
-}
-
-#[test]
-fn dos_datetime_leap_day_decodes() {
-    // 2020-02-29 00:00:00 UTC — a valid leap day.
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos_date(2020, 2, 29), dos_time(0, 0, 0)),
-        Time64::from_secs(1_582_934_400)
-    );
-}
-
-#[test]
-fn dos_datetime_end_of_range_decodes_past_2038() {
-    // 2107-12-31 23:59:58 UTC, the last representable FAT instant — far
-    // beyond the 32-bit 2038 boundary, so the wide decode must not wrap.
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos_date(2107, 12, 31), dos_time(23, 59, 58)),
-        Time64::from_secs(4_354_819_198)
-    );
-}
-
-#[test]
-fn dos_datetime_undecodable_fields_report_no_stamp() {
-    let ok_time = dos_time(12, 0, 0);
-    let ok_date = dos_date(2024, 6, 15);
-    // Month 0 and 13, day 0, a non-leap February 29th, and hour 24 are not
-    // calendar instants; each reports the "no stamp" epoch, never a guess.
-    assert_eq!(
-        crate::dos_datetime_to_time64((44 << 9) | 15, ok_time),
-        Time64::UNIX_EPOCH
-    );
-    assert_eq!(
-        crate::dos_datetime_to_time64((44 << 9) | (13 << 5) | 15, ok_time),
-        Time64::UNIX_EPOCH
-    );
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos_date(2024, 6, 0), ok_time),
-        Time64::UNIX_EPOCH
-    );
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos_date(2023, 2, 29), ok_time),
-        Time64::UNIX_EPOCH
-    );
-    assert_eq!(
-        crate::dos_datetime_to_time64(ok_date, 24 << 11),
-        Time64::UNIX_EPOCH
-    );
-}
-
 /// 2026-10-15T12:34:57.123456789Z.
 fn stamp_instant() -> Time64 {
     Time64::new(1_792_067_697, 123_456_789).expect("canonical")
-}
-
-#[test]
-fn a_dos_stamp_holds_the_creation_to_the_hundredth_and_the_write_to_two_seconds() {
-    let dos = crate::DosStamp::of(stamp_instant()).expect("in range");
-    assert_eq!(dos.date, dos_date(2026, 10, 15));
-    assert_eq!(dos.time, dos_time(12, 34, 56));
-    assert_eq!(dos.centis, 112);
-    assert_eq!(
-        crate::dos_creation_to_time64(dos.date, dos.time, dos.centis),
-        Time64::new(1_792_067_697, 120_000_000).expect("canonical")
-    );
-    assert_eq!(
-        crate::dos_datetime_to_time64(dos.date, dos.time),
-        Time64::from_secs(1_792_067_696)
-    );
-}
-
-#[test]
-fn a_dos_stamp_covers_1980_to_2107_and_nothing_either_side() {
-    let at = |year, month, day, hour, minute, second| {
-        CivilTime {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-        }
-        .to_time64()
-        .expect("a calendar instant")
-    };
-    assert_eq!(crate::DosStamp::of(at(1979, 12, 31, 23, 59, 59)), None);
-    assert!(crate::DosStamp::of(at(1980, 1, 1, 0, 0, 0)).is_some());
-    assert!(crate::DosStamp::of(at(2107, 12, 31, 23, 59, 59)).is_some());
-    assert_eq!(crate::DosStamp::of(at(2108, 1, 1, 0, 0, 0)), None);
-}
-
-#[test]
-fn creation_hundredths_past_two_seconds_are_no_stamp() {
-    let (date, time) = (dos_date(2024, 6, 15), dos_time(12, 0, 0));
-    assert_eq!(
-        crate::dos_creation_to_time64(date, time, 199),
-        Time64::new(
-            crate::dos_datetime_to_time64(date, time).secs() + 1,
-            990_000_000
-        )
-        .expect("canonical")
-    );
-    assert_eq!(
-        crate::dos_creation_to_time64(date, time, 200),
-        Time64::UNIX_EPOCH
-    );
 }
 
 #[test]

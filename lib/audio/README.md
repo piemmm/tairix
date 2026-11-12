@@ -19,7 +19,7 @@ from `lib/net`: a driver process must not link the mixer.
 |---|---|
 | `convert` | The saturating map between every encoding and the `f32` pivot, and where dither belongs. |
 | `channel` | Which source channel reaches which sink channel, and at what coefficient. |
-| `resample` | The one rate conversion in the system. |
+| `resample` | The one rate conversion in the system: its banks, retuning a stream to a drifting ratio, and the windowed sinc they are cut from. |
 | `mix` | How live streams sum into one period of device frames. |
 | `clock` | What a device's rate actually is, and the map between its frames and the wall clock. |
 | `route` | Which sink a stream lands on, and what the seat's room does with it. |

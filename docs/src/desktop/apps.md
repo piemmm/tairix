@@ -829,9 +829,10 @@ identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
 - a **regular file** returns `OpenFile { path }`, naming the file for the
   caller to open in the associated viewer — unless it is a **disk image**
   (`MediaType::holds_a_volume`: `.iso`, `.adf`, `.adl`, `.adm`, `.ads`,
-  `.hdf`), which returns `MountImage { path }` for the caller to mount on its
-  mount worker and show ([disk images](../filesystem/images.md)), whatever
-  application claims the type;
+  `.ima`, `.vfd`, `.flp`, `.img`, `.hdf`), which returns `MountImage { path }`
+  for the caller to mount on its mount worker and show
+  ([disk images](../filesystem/images.md)), whatever application claims the
+  type;
 - at the network, an **endpoint** that can be reached returns
   `MountEndpoint`, naming it as it was displayed for the caller to mount
   (`plans/ZEROCONF.md` §6.3); one with no known address is `Unreachable`,
@@ -2100,7 +2101,8 @@ entry acted on or one chunk of a file's bytes — so a large copy holds no
 unbounded buffer, never spins and stays cancellable between units. Every entry
 is reached by name from a folder the operation holds, never by a joined path,
 so a folder swapped for a link mid-paste leads it nowhere. A file is copied with
-its holes, then its extended attributes. What a paste makes takes its source's
+its holes, then its extended attributes and its times, as nearly as the
+destination holds them; a folder takes its times once its entries are in. What a paste makes takes its source's
 mode as `cp` gives it — a file its permission bits, a folder its permission and
 sticky bits, each less the umask — and a folder is filled holding its owner's
 read, write and search, then given its own mode, through the handle the
@@ -2368,8 +2370,9 @@ copy whose originals the same operation removes once the copy is whole and on
 the medium, and a copy streams, a file or a directory (or sealed `.app` bundle)
 alike, through one reused buffer of at most a chunk, so a copy of any size holds
 no unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). Every file and
-directory the paste makes carries its source's extended attributes; those a
-destination cannot keep are gathered across the paste and, once it ends,
+directory the paste makes carries its source's extended attributes, and its
+times as nearly as the destination holds them; attributes a destination cannot
+keep are gathered across the paste and, once it ends,
 stated in one warning alert over the folder window ("Not every attribute was
 kept") and on `stderr`, the paste itself still complete. It is bounded and
 fail closed: the first refused operation stops the paste, states the reason in
@@ -3117,7 +3120,8 @@ pointer. A *Restore defaults* asked for behind an outstanding write waits for
 it rather than being displaced, and a refused write says why on `stderr` and
 puts the settings it carried back to what the store holds.
 
-The screen effects are an ordered, typed pipeline (`effects::Pass`) rather
+The screen effects are an ordered, typed pipeline (`tairix_crt::Pass`, the
+picture tube the PC emulator shares, [`lib/crt`](../lib/crt.md)) rather
 than code inlined into the renderer. Translucency is not a pass at all: the default background is filled at the profile's alpha, so the
 compositor's own premultiplied blend shows the desktop through while a glyph
 stays opaque. Backdrop blur is the compositor's (`set_backdrop_blur`), since
@@ -3151,7 +3155,7 @@ retained, and a terminal beneath that recomputes only what each frame needs of
 its frost (`docs/src/desktop/wm.md`, *Retention is rationed, front to back; a
 blur never is*).
 
-The passes run in three retained stages (`pipeline::Pipeline`): the displaced
+The passes run in three retained stages (`tairix_crt::Pipeline`): the displaced
 and dimmed picture (wobble, phosphor, scan lines), its glow, and its fuzz. A
 frame redraws only what changed — the cells the text diff reports, widened by
 the glow's reach, and what a moving pass moves — and presents exactly that, so

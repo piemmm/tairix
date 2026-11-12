@@ -7,6 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::StampField;
 use tairix_abi::time::Time64;
 
 use crate::SmbError;
@@ -320,6 +321,15 @@ const FILETIME_EPOCH_OFFSET: i64 = 11_644_473_600;
 
 /// FILETIME's 100-nanosecond intervals in a second.
 const FILETIME_TICKS: u64 = 10_000_000;
+
+/// The FILETIMEs that set a time rather than say something else: zero, which
+/// leaves a time as it is, and the two highest, which stop and resume a
+/// server's own updating of it, name no instant.
+pub const SETTABLE_FILETIME: StampField = StampField::new(
+    Time64::from_secs(-FILETIME_EPOCH_OFFSET),
+    100,
+    1..u64::MAX as u128 - 1,
+);
 
 /// `time` as a FILETIME — 100-nanosecond intervals since 1601-01-01 UTC —
 /// rounded down to that unit, for a timestamp whose finer precision the

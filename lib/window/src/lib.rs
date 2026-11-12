@@ -98,7 +98,7 @@ pub use server::{
     WINDOW_REPLY_MAX,
 };
 pub use tairix_display::winframe::damage_in;
-pub use tairix_input::wire::key_input_event;
+pub use tairix_input::wire::{held_modifiers, key_input_event};
 
 #[cfg(test)]
 mod tests;

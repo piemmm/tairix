@@ -36,7 +36,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, BOOT_HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -53,7 +53,7 @@ mod kernel {
 
     /// The production bin's bootstrap arena, so this boot proves the
     /// pipeline fits it before the heap can grow.
-    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
+    static HEAP: Arena<BOOT_HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

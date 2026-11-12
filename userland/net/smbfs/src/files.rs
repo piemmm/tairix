@@ -10,6 +10,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use tairix_abi::time::Time64;
 use tairix_inline::ArrayVec;
 use tairix_smb::client::{Client, Request};
 use tairix_smb::connection::{Message, Ticket};
@@ -18,8 +19,8 @@ use tairix_smb::file::create::{
 };
 use tairix_smb::file::dir::{ListingFlags, QueryDirectoryRequest, QueryDirectoryResponse};
 use tairix_smb::file::info::{
-    Class, DispositionInfo, EndOfFileInfo, FsFullSize, QueryInfoRequest, QueryInfoResponse,
-    RenameInfo, SetInfoRequest,
+    BasicUpdate, Class, DispositionInfo, EndOfFileInfo, FsFullSize, QueryInfoRequest,
+    QueryInfoResponse, RenameInfo, SetInfoRequest,
 };
 use tairix_smb::file::io::{
     CloseRequest, FlushRequest, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
@@ -71,6 +72,8 @@ enum Planned {
     Remove(SharePath, Option<LeaseKey>),
     Rename(SharePath, SharePath, bool, Option<LeaseKey>),
     Truncate(SharePath, u64),
+    /// Set a node's access and write times.
+    Times(SharePath, BasicUpdate),
     Space,
     /// Open a node and keep it open: its path, handle and lease key,
     /// whether it is a directory and is written, and whether the open is to
@@ -81,6 +84,8 @@ enum Planned {
     WriteHeld(u32, u64, Vec<u8>, bool),
     Sync(u32),
     Resize(u32, u64),
+    /// Set the access and write times of a held open's node.
+    Retime(u32, BasicUpdate),
     Ack(LeaseKey, LeaseState),
     /// Close an open a compound's own close left open.
     Shut(FileId),
@@ -154,6 +159,15 @@ pub struct Files {
 impl Default for Files {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The update setting the access and write times given, and nothing else.
+fn times_update(accessed: Option<Time64>, written: Option<Time64>) -> BasicUpdate {
+    BasicUpdate {
+        accessed,
+        written,
+        ..BasicUpdate::default()
     }
 }
 
@@ -418,6 +432,11 @@ impl Files {
                 Planned::Rename(owned_path(from)?, to, replace, lease)
             }
             FileOp::Truncate { path, size } => Planned::Truncate(owned_path(path)?, size),
+            FileOp::Times {
+                path,
+                accessed,
+                written,
+            } => Planned::Times(owned_path(path)?, times_update(accessed, written)),
             FileOp::Space => Planned::Space,
             FileOp::Hold {
                 path,
@@ -444,6 +463,11 @@ impl Files {
             } => Planned::WriteHeld(handle, offset, self.staged_for(request, len)?, replay),
             FileOp::Sync { handle } => Planned::Sync(handle),
             FileOp::Resize { handle, size } => Planned::Resize(handle, size),
+            FileOp::Retime {
+                handle,
+                accessed,
+                written,
+            } => Planned::Retime(handle, times_update(accessed, written)),
             FileOp::Ack { key, state } => {
                 Planned::Ack(key, LeaseState::from_bits(u32::from(state)))
             }
@@ -621,13 +645,15 @@ impl Files {
             Planned::Create(..)
             | Planned::Remove(..)
             | Planned::Rename(..)
-            | Planned::Truncate(..) => launch_change(client, tree, planned),
+            | Planned::Truncate(..)
+            | Planned::Times(..) => launch_change(client, tree, planned),
             Planned::Space => Ok((Kind::Space, space(client, tree)?)),
             Planned::Hold(..)
             | Planned::ReadHeld(..)
             | Planned::WriteHeld(..)
             | Planned::Sync(_)
             | Planned::Resize(..)
+            | Planned::Retime(..)
             | Planned::Ack(..) => self.launch_held(client, tree, planned),
             Planned::Shut(file_id) => Ok((Kind::Shut, close(client, tree, *file_id)?)),
         }
@@ -703,6 +729,15 @@ impl Files {
                     EndOfFileInfo { end_of_file: *size }.encode(enc);
                 })?;
                 let body = |enc: &mut Encoder| length.encode(enc);
+                Ok((
+                    Kind::Acted,
+                    client.send(tree, &[alone(Command::SetInfo, &body, 1)])?,
+                ))
+            }
+            Planned::Retime(handle, update) => {
+                let (tree, file_id) = self.held(*handle)?;
+                let set = SetInfoRequest::new(Class::Basic, file_id, |enc| update.encode(enc))?;
+                let body = |enc: &mut Encoder| set.encode(enc);
                 Ok((
                     Kind::Acted,
                     client.send(tree, &[alone(Command::SetInfo, &body, 1)])?,
@@ -1194,6 +1229,18 @@ fn launch_change(
                 .encode(enc);
             })?;
             let body = |enc: &mut Encoder| rename.encode(enc);
+            let middle: Middle<'_> = (Command::SetInfo, &body, 1);
+            Ok((Kind::Done, opened(client, tree, &open, Some(middle), true)?))
+        }
+        Planned::Times(path, update) => {
+            let open = opening(
+                path.clone(),
+                Access::WRITE_ATTRIBUTES,
+                Disposition::Open,
+                CreateOptions::NONE,
+            );
+            let set = SetInfoRequest::new(Class::Basic, NO_FILE, |enc| update.encode(enc))?;
+            let body = |enc: &mut Encoder| set.encode(enc);
             let middle: Middle<'_> = (Command::SetInfo, &body, 1);
             Ok((Kind::Done, opened(client, tree, &open, Some(middle), true)?))
         }

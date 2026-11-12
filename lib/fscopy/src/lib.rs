@@ -1,9 +1,10 @@
 //! The one file copy every copying tool runs (`plans/ARXFS-METADATA.md`
 //! §6): a file's bytes with its holes ([`DataCopy`]), its extended
 //! attributes as far as the destination can keep them
-//! ([`copy_attributes`]), one report of what could not be carried
-//! ([`Omissions`]), the modes what a copy makes is given ([`file_mode`],
-//! [`DirModes`]) and the mode and owner a move carries ([`carry_owner`]),
+//! ([`copy_attributes`]), its times ([`copy_times`]), one report of what
+//! could not be carried ([`Omissions`]), the modes what a copy makes is given
+//! ([`file_mode`], [`DirModes`]) and the mode and owner a move carries
+//! ([`carry_owner`]),
 //! and the one resumable copy, move and removal of a tree built from them
 //! ([`op`]). It reaches the filesystem only through held nodes: the
 //! shared tree seam ([`tree`]) a tool walks a tree through, and
@@ -34,7 +35,9 @@ pub mod fixture;
 pub use attrs::{copy_attributes, AttrError, Attributes, Omissions, Refusal, Report};
 pub use created::Created;
 pub use data::{DataCopy, DataError, Source, Sparse, Step, Target, ZERO_UNIT};
-pub use mode::{carry_owner, file_mode, DirModes, Ownership, Settle, OWNER_RW, OWNER_RWX};
+pub use mode::{
+    carry_owner, copy_times, file_mode, DirModes, Ownership, Settle, OWNER_RW, OWNER_RWX,
+};
 pub use within::{landing, lands_inside, Descent, Landing, Unresolved};
 
 /// Bytes a copy moves through one buffer at a time: as much as one read or

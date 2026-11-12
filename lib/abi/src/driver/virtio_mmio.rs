@@ -107,16 +107,27 @@ mod tests {
     /// Length the fake bus maps for the slot.
     const SLOT_LEN: usize = 0x200;
 
-    /// 4-byte-aligned (by element type) backing store so a window's
-    /// base satisfies `RegisterWindow::from_mapping`'s ≥ 4-byte
-    /// alignment contract; 64 × `u32` is 256 bytes.
-    static mut BACKING: [u32; 64] = [0u32; 64];
+    /// Bytes of a [`FakeMapper`]'s backing store, the most a window spans.
+    const BACKING_BYTES: usize = 256;
 
-    /// Mapper that hands out a window over the shared static backing
-    /// store, recording the last `(phys, len)` it was asked for.
+    /// Mapper that hands out windows over its own backing store, recording
+    /// the last `(phys, len)` it was asked for.
     struct FakeMapper {
+        /// Words, so a window's base satisfies `RegisterWindow::from_mapping`'s
+        /// 4-byte alignment contract.
+        backing: core::cell::UnsafeCell<[u32; BACKING_BYTES / 4]>,
         last: core::cell::Cell<Option<(u64, usize)>>,
         grant: bool,
+    }
+
+    impl FakeMapper {
+        fn new(grant: bool) -> Self {
+            Self {
+                backing: core::cell::UnsafeCell::new([0; BACKING_BYTES / 4]),
+                last: core::cell::Cell::new(None),
+                grant,
+            }
+        }
     }
 
     impl MmioMapper for FakeMapper {
@@ -125,12 +136,10 @@ mod tests {
                 return Err(MmioMapError::CapabilityMissing);
             }
             self.last.set(Some((phys_base, len)));
-            // SAFETY: single-threaded test; the static lives for the
-            // whole process and the returned window only performs
-            // volatile accesses within `len <= 256` bytes.
-            let base = NonNull::new(core::ptr::addr_of_mut!(BACKING).cast::<u8>())
-                .expect("static is non-null");
-            Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(256)) })
+            let base = NonNull::new(self.backing.get().cast::<u8>()).expect("a field is non-null");
+            // SAFETY: every test drops its window before the mapper whose
+            // backing it covers, and the window reaches only that backing.
+            Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(BACKING_BYTES)) })
         }
     }
 
@@ -179,24 +188,18 @@ mod tests {
     #[test]
     fn trait_object_provisions_the_slot_window() {
         let bus: &dyn VirtioMmioBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: true,
-        };
+        let mapper = FakeMapper::new(true);
         let window = bus
             .map_slot_window(SLOT_BASE, &mapper)
             .expect("slot window");
-        assert_eq!(window.len(), SLOT_LEN.min(256));
+        assert_eq!(window.len(), SLOT_LEN.min(BACKING_BYTES));
         assert_eq!(mapper.last.get(), Some((SLOT_BASE, SLOT_LEN)));
     }
 
     #[test]
     fn unknown_base_is_not_found() {
         let bus: &dyn VirtioMmioBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: true,
-        };
+        let mapper = FakeMapper::new(true);
         assert!(matches!(
             bus.map_slot_window(SLOT_BASE + 0x1000, &mapper),
             Err(DriverError::NotFound)
@@ -207,10 +210,7 @@ mod tests {
     #[test]
     fn missing_capability_propagates_as_permission_denied() {
         let bus: &dyn VirtioMmioBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: false,
-        };
+        let mapper = FakeMapper::new(false);
         assert!(matches!(
             bus.map_slot_window(SLOT_BASE, &mapper),
             Err(DriverError::PermissionDenied)

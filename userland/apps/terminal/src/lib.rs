@@ -35,9 +35,9 @@
 //!   the compositor places and rounds. It **keeps** that surface between
 //!   frames and repaints only the cells that changed, returning them as the
 //!   damage rectangle to present, so a keystroke costs two cells rather than
-//!   a window. The screen [`Effects`] are drawn by a [`Pipeline`] that
-//!   keeps its own stages and redraws them only where the screen changed,
-//!   never into the retained picture.
+//!   a window. The screen [`Effects`]' tube is drawn by `lib/crt`'s
+//!   `Pipeline`, which keeps its own stages and redraws them only where the
+//!   screen changed, never into the retained picture.
 //!
 //! # The user's profile
 //!
@@ -83,9 +83,8 @@
 //! * [`layout`] — the screen grid, the text size that fits it, and the window.
 //! * [`look`] — the [`Look`] each window is drawn with, and what a profile or
 //!   desktop change makes of it.
-//! * [`effects`] — the screen-effect strengths and the passes they resolve to.
-//! * [`pipeline`] — the [`Pipeline`] that draws the passes, retained and
-//!   brought up to date over what changed.
+//! * [`effects`] — the screen-effect strengths: translucency, blur and the
+//!   tube, and the slider each is set by.
 //! * [`render`](mod@render) — the retained [`Screen`] the grid is painted
 //!   into, and the cell diff that decides what a frame redraws.
 //! * [`menu`] — the window menu's rows and its keyboard shortcuts.
@@ -114,7 +113,6 @@ pub mod layout;
 pub mod look;
 pub mod menu;
 pub mod parser;
-pub mod pipeline;
 pub mod profile;
 pub mod render;
 pub mod scheme;
@@ -126,13 +124,12 @@ pub mod swatch;
 pub mod terminal;
 
 pub use appbar::BarCommand;
-pub use effects::{EffectKey, Effects, Phase};
+pub use effects::{EffectKey, Effects};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};
 pub use look::Look;
 pub use menu::Command;
 pub use parser::Parser;
-pub use pipeline::Pipeline;
 pub use profile::{Invalidation, Profile};
 pub use render::Screen;
 pub use scheme::{ColorScheme, Painted, Scheme};

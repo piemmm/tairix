@@ -778,6 +778,10 @@ fn every_mutation_is_refused_as_read_only() {
     assert_eq!(fs.write_at(node, 0, b"b"), Err(DriverError::ReadOnly));
     assert_eq!(fs.truncate(node, 0), Err(DriverError::ReadOnly));
     assert_eq!(fs.punch(node, 0, 1), Err(DriverError::ReadOnly));
+    assert_eq!(
+        fs.set_times(node, tairix_abi::TimesChange::default()),
+        Err(DriverError::ReadOnly)
+    );
     assert_eq!(fs.remove(root, b"A.TXT"), Err(DriverError::ReadOnly));
     assert_eq!(
         fs.rename(root, b"A.TXT", root, b"B.TXT"),

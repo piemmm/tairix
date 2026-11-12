@@ -8,12 +8,13 @@
 //! the desktop's `lib/input` [`InputEvent`] vocabulary the window manager
 //! delivers to the focused window.
 //!
-//! It is also the one place a held key repeats. A USB keyboard reports a held
-//! key once and a PS/2 one repeats it itself; the source drops a device's own
-//! repeats and repeats a held key under the user's policy, so every keyboard
-//! behaves alike and no surface above it repeats anything. And it is the one
-//! place a lone press of Ctrl or Meta is recognised ([`ModifierTap`]), since
-//! every record passes it in the order it was typed.
+//! It is also the one place a held key repeats. The seat reads every key down
+//! once, whatever its keyboard does, and the source repeats a held key that
+//! typed under the user's policy, so every keyboard behaves alike and no
+//! surface above it repeats anything — and a window reading the keyboard raw
+//! is repeated nothing. And it is the one place a lone press of Ctrl or Meta
+//! is recognised ([`ModifierTap`]), since every record passes it in the order
+//! it was typed.
 //!
 //! The raw bytes arrive through an injected [`KeyInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
@@ -28,7 +29,7 @@
 //! [`InputEvent`]: tairix_wm::InputEvent
 //! [`DeviceInputSource`]: crate::DeviceInputSource
 
-use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PhysicalKey};
+use tairix_abi::input::{KeyInput, Modifiers, PhysicalKey};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_input::wire::key_input_event;
@@ -124,29 +125,12 @@ fn alone(held: Modifiers) -> Option<TapKey> {
     }
 }
 
-/// What tells one key from another: where it sits, when its producer names
-/// that, else what it typed. Two keys typing one character — the keypad's `1`
-/// and the main row's — are two keys.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KeyIdentity {
-    Physical(PhysicalKey),
-    Typed(KeyValue),
-}
-
-impl KeyIdentity {
-    fn of(key: KeyValue, physical: PhysicalKey) -> Self {
-        if physical == PhysicalKey::UNKNOWN {
-            Self::Typed(key)
-        } else {
-            Self::Physical(physical)
-        }
-    }
-}
-
 /// The key held down, and when it next repeats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Held {
-    key: KeyIdentity,
+    /// Where it sits: two keys typing one character — the keypad's `1` and
+    /// the main row's — are two keys.
+    key: PhysicalKey,
     event: InputEvent,
     record: KeyInput,
     /// Monotonic nanoseconds of the next repeat, or `None` when it will not.
@@ -198,8 +182,9 @@ impl<C> KeyboardInputSource<C> {
         self.tapped.take()
     }
 
-    /// Follow the modifiers to `now` at `now_ns`: a lone Ctrl or Meta let go in
-    /// time is a tap, and anything else going with it spoils one.
+    /// Follow the modifiers to `now`, which a modifier key's edge left, at
+    /// `now_ns`: a lone Ctrl or Meta let go in time is a tap, and anything
+    /// else going with it spoils one.
     fn follow_modifiers(&mut self, now: Modifiers, now_ns: u64) {
         let none = now == Modifiers::default();
         self.tapping = match self.tapping {
@@ -296,11 +281,13 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
     ///
     /// Once the channel is empty a repeat of the held key that has come due
     /// is answered, one per drain: a loop that was late repeats once rather
-    /// than catching up in a burst. A press of the key already held is the
-    /// device's own repeat and is dropped. A key held while the keyboard
-    /// moves to another window, `focus`, stops repeating: what it was pressed
-    /// for was not that window, as a prompt opened under a held `Enter` is
-    /// not.
+    /// than catching up in a burst. Only a key that typed repeats, and only
+    /// when it went down while the keyboard was held by a surface that
+    /// `repeats` — a window reading it raw repeats its keys itself. A key held
+    /// while the keyboard moves to another window, `focus`, stops repeating:
+    /// what it was pressed for was not that window, as a prompt opened under a
+    /// held `Enter` is not; so does one held while another key goes down or a
+    /// modifier changes.
     ///
     /// Crate-private: drains go through [`DesktopShell::poll_key`](crate::DesktopShell::poll_key).
     ///
@@ -311,46 +298,44 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
         &mut self,
         now_ns: u64,
         focus: Option<WindowId>,
+        repeats: bool,
     ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
-        while let Some(bytes) = self.channel.next_record()? {
-            let record = KeyInput::from_bytes(&bytes)?;
-            let event = key_input_event(record);
-            if let KeyInput::ModifiersChanged { modifiers } = record {
-                self.follow_modifiers(modifiers, now_ns);
-            } else if self.tapping != Tapping::Idle {
+        let Some(bytes) = self.channel.next_record()? else {
+            return Ok(self.take_due(now_ns, focus));
+        };
+        let record = KeyInput::from_bytes(&bytes)?;
+        let event = key_input_event(record);
+        let physical = record.physical();
+        if physical.is_modifier() {
+            self.follow_modifiers(record.modifiers(), now_ns);
+            // The same key under new modifiers is a different key, and the
+            // record that would say which cannot be re-read.
+            self.held = None;
+        } else {
+            if self.tapping != Tapping::Idle {
                 self.tapping = Tapping::Spoiled;
             }
             match record {
-                KeyInput::Pressed { key, physical, .. } => {
-                    let key = KeyIdentity::of(key, physical);
-                    if self.held.is_some_and(|held| held.key == key) {
-                        continue;
-                    }
+                KeyInput::Pressed { key, .. } => {
+                    let interval = self.repeat.interval.filter(|_| repeats && key.is_some());
                     self.held = Some(Held {
-                        key,
+                        key: physical,
                         event,
                         record,
-                        next_ns: self.repeat.interval.map(|_| {
+                        next_ns: interval.map(|_| {
                             now_ns.saturating_add(self.repeat.delay.saturating_total_nanos())
                         }),
                         focus,
                     });
                 }
-                KeyInput::Released { key, physical, .. } => {
-                    if self
-                        .held
-                        .is_some_and(|held| held.key == KeyIdentity::of(key, physical))
-                    {
+                KeyInput::Released { .. } => {
+                    if self.held.is_some_and(|held| held.key == physical) {
                         self.held = None;
                     }
                 }
-                // The same key under new modifiers is a different key, and the
-                // record that would say which cannot be re-read.
-                KeyInput::ModifiersChanged { .. } => self.held = None,
             }
-            return Ok(Some((event, record)));
         }
-        Ok(self.take_due(now_ns, focus))
+        Ok(Some((event, record)))
     }
 
     /// The held key's repeat, if it is due at `now_ns`, scheduling the next.
@@ -390,7 +375,7 @@ mod tests {
     fn poll<C: KeyInputChannel>(
         source: &mut KeyboardInputSource<C>,
     ) -> Result<Option<InputEvent>, Errno> {
-        Ok(source.poll_record(0, None)?.map(|(event, _)| event))
+        Ok(source.poll_record(0, None, true)?.map(|(event, _)| event))
     }
 
     /// An in-memory channel that yields queued records, optionally faulting.
@@ -425,24 +410,77 @@ mod tests {
         }
     }
 
-    /// The modifiers `ctrl` and `shift` spell, as a record.
-    fn modifiers(ctrl: bool, shift: bool) -> KeyInput {
-        KeyInput::ModifiersChanged {
-            modifiers: AbiModifiers {
-                ctrl,
-                shift,
-                ..AbiModifiers::default()
-            },
+    /// The edge of the modifier key `physical` going down (`pressed`) or up,
+    /// leaving `held` held.
+    fn modifier(physical: PhysicalKey, pressed: bool, held: AbiModifiers) -> KeyInput {
+        if pressed {
+            KeyInput::Pressed {
+                key: None,
+                modifiers: held,
+                physical,
+            }
+        } else {
+            KeyInput::Released {
+                key: None,
+                modifiers: held,
+                physical,
+            }
         }
     }
 
-    /// The record of Meta alone held, or of nothing held.
-    fn meta(held: bool) -> KeyInput {
-        KeyInput::ModifiersChanged {
-            modifiers: AbiModifiers {
-                meta: held,
-                ..AbiModifiers::default()
-            },
+    /// The left Ctrl key's edge, `shift` held besides when asked.
+    fn ctrl(pressed: bool, shift: bool) -> KeyInput {
+        let held = AbiModifiers {
+            ctrl: pressed,
+            shift,
+            ..AbiModifiers::default()
+        };
+        modifier(PhysicalKey::LEFT_CTRL, pressed, held)
+    }
+
+    /// The left Shift key's edge, `ctrl` held besides when asked.
+    fn shift(pressed: bool, ctrl: bool) -> KeyInput {
+        let held = AbiModifiers {
+            shift: pressed,
+            ctrl,
+            ..AbiModifiers::default()
+        };
+        modifier(PhysicalKey::LEFT_SHIFT, pressed, held)
+    }
+
+    /// The left Meta key's edge, alone.
+    fn meta(pressed: bool) -> KeyInput {
+        let held = AbiModifiers {
+            meta: pressed,
+            ..AbiModifiers::default()
+        };
+        modifier(PhysicalKey::LEFT_GUI, pressed, held)
+    }
+
+    /// The key that types the lower-case letter `c`.
+    fn letter(c: char) -> PhysicalKey {
+        let offset = u16::try_from(u32::from(c) - u32::from('a')).expect("a letter");
+        PhysicalKey::from_usage(0x04 + offset).expect("a key")
+    }
+
+    /// The letter `c` typed under `modifiers`.
+    fn typed_under(c: char, modifiers: AbiModifiers) -> KeyInput {
+        KeyInput::Pressed {
+            key: Some(KeyValue::Char(c)),
+            modifiers,
+            physical: letter(c),
+        }
+    }
+
+    fn press(c: char) -> KeyInput {
+        typed_under(c, AbiModifiers::default())
+    }
+
+    fn release(c: char) -> KeyInput {
+        KeyInput::Released {
+            key: Some(KeyValue::Char(c)),
+            modifiers: AbiModifiers::default(),
+            physical: letter(c),
         }
     }
 
@@ -453,7 +491,11 @@ mod tests {
         for (index, record) in records.iter().enumerate() {
             source.channel_mut().records.push_back(record.to_le_bytes());
             let at = u64::try_from(index).expect("small") * 1_000_000;
-            while source.poll_record(at, None).expect("well-formed").is_some() {}
+            while source
+                .poll_record(at, None, true)
+                .expect("well-formed")
+                .is_some()
+            {}
         }
         source.take_tap()
     }
@@ -461,10 +503,14 @@ mod tests {
     #[test]
     fn a_lone_press_of_ctrl_is_a_tap_taken_once() {
         let mut source = KeyboardInputSource::new(
-            QueueChannel::new(&[modifiers(true, false), modifiers(false, false)]),
+            QueueChannel::new(&[ctrl(true, false), ctrl(false, false)]),
             REPEAT,
         );
-        while source.poll_record(5, None).expect("well-formed").is_some() {}
+        while source
+            .poll_record(5, None, true)
+            .expect("well-formed")
+            .is_some()
+        {}
         assert_eq!(
             source.take_tap(),
             Some(super::ModifierTap {
@@ -480,53 +526,73 @@ mod tests {
         let tap = tapped(&[meta(true), meta(false)]).expect("a tap");
         assert_eq!(tap.key, super::TapKey::Meta);
         // Meta joined by Ctrl is a chord, whichever went down first.
-        let both = KeyInput::ModifiersChanged {
-            modifiers: AbiModifiers {
-                meta: true,
-                ctrl: true,
-                ..AbiModifiers::default()
-            },
+        let both = AbiModifiers {
+            meta: true,
+            ctrl: true,
+            ..AbiModifiers::default()
         };
-        assert_eq!(tapped(&[meta(true), both, meta(false)]), None);
+        let meta_held = AbiModifiers {
+            meta: true,
+            ..AbiModifiers::default()
+        };
+        let ctrl_then_meta = modifier(PhysicalKey::LEFT_GUI, true, both);
         assert_eq!(
-            tapped(&[modifiers(true, false), both, meta(true), meta(false)]),
+            tapped(&[
+                meta(true),
+                modifier(PhysicalKey::LEFT_CTRL, true, both),
+                modifier(PhysicalKey::LEFT_CTRL, false, meta_held),
+                meta(false),
+            ]),
+            None
+        );
+        assert_eq!(
+            tapped(&[
+                ctrl(true, false),
+                ctrl_then_meta,
+                modifier(PhysicalKey::LEFT_CTRL, false, meta_held),
+                meta(false),
+            ]),
             None
         );
         // A key typed under Meta is a shortcut, not a tap.
-        let key = KeyInput::Pressed {
-            key: KeyValue::Char('e'),
-            modifiers: AbiModifiers {
-                meta: true,
-                ..AbiModifiers::default()
-            },
-            physical: PhysicalKey::UNKNOWN,
-        };
-        assert_eq!(tapped(&[meta(true), key, meta(false)]), None);
+        assert_eq!(
+            tapped(&[meta(true), typed_under('e', meta_held), meta(false)]),
+            None
+        );
     }
 
     #[test]
-    fn a_key_or_another_modifier_between_spoils_the_tap() {
-        let key = KeyInput::Pressed {
-            key: KeyValue::Char('c'),
-            modifiers: AbiModifiers {
-                ctrl: true,
-                ..AbiModifiers::default()
-            },
-            physical: PhysicalKey::UNKNOWN,
+    fn a_key_another_modifier_or_a_lock_between_spoils_the_tap() {
+        let ctrl_held = AbiModifiers {
+            ctrl: true,
+            ..AbiModifiers::default()
         };
-        let spoiled: [&[KeyInput]; 3] = [
-            &[modifiers(true, false), key, modifiers(false, false)],
+        let caps_lock = |pressed| modifier(PhysicalKey::CAPS_LOCK, pressed, ctrl_held);
+        let spoiled: [&[KeyInput]; 4] = [
             &[
-                modifiers(true, false),
-                modifiers(true, true),
-                modifiers(false, false),
+                ctrl(true, false),
+                typed_under('c', ctrl_held),
+                ctrl(false, false),
+            ],
+            &[
+                ctrl(true, false),
+                shift(true, true),
+                shift(false, true),
+                ctrl(false, false),
             ],
             // Ctrl joining a modifier already down is a chord, not a tap.
             &[
-                modifiers(false, true),
-                modifiers(true, true),
-                modifiers(true, false),
-                modifiers(false, false),
+                shift(true, false),
+                ctrl(true, true),
+                shift(false, true),
+                ctrl(false, false),
+            ],
+            // A lock types nothing and is still a key between.
+            &[
+                ctrl(true, false),
+                caps_lock(true),
+                caps_lock(false),
+                ctrl(false, false),
             ],
         ];
         for records in spoiled {
@@ -536,35 +602,34 @@ mod tests {
 
     #[test]
     fn a_tap_after_a_spoiled_one_still_counts() {
-        let key = KeyInput::Pressed {
-            key: KeyValue::Char('v'),
-            modifiers: AbiModifiers {
-                ctrl: true,
-                ..AbiModifiers::default()
-            },
-            physical: PhysicalKey::UNKNOWN,
+        let ctrl_held = AbiModifiers {
+            ctrl: true,
+            ..AbiModifiers::default()
         };
         assert!(tapped(&[
-            modifiers(true, false),
-            key,
-            modifiers(false, false),
-            modifiers(true, false),
-            modifiers(false, false),
+            ctrl(true, false),
+            typed_under('v', ctrl_held),
+            ctrl(false, false),
+            ctrl(true, false),
+            ctrl(false, false),
         ])
         .is_some());
     }
 
     #[test]
     fn ctrl_held_too_long_is_no_tap() {
-        let mut source =
-            KeyboardInputSource::new(QueueChannel::new(&[modifiers(true, false)]), REPEAT);
-        while source.poll_record(0, None).expect("well-formed").is_some() {}
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[ctrl(true, false)]), REPEAT);
+        while source
+            .poll_record(0, None, true)
+            .expect("well-formed")
+            .is_some()
+        {}
         source
             .channel_mut()
             .records
-            .push_back(modifiers(false, false).to_le_bytes());
+            .push_back(ctrl(false, false).to_le_bytes());
         while source
-            .poll_record(super::TAP_HOLD_MAX_NS + 1, None)
+            .poll_record(super::TAP_HOLD_MAX_NS + 1, None, true)
             .expect("well-formed")
             .is_some()
         {}
@@ -573,17 +638,12 @@ mod tests {
 
     #[test]
     fn decodes_char_press_with_modifiers() {
-        let mut source = KeyboardInputSource::new(
-            QueueChannel::new(&[KeyInput::Pressed {
-                key: KeyValue::Char('z'),
-                modifiers: AbiModifiers {
-                    ctrl: true,
-                    ..AbiModifiers::default()
-                },
-                physical: PhysicalKey::UNKNOWN,
-            }]),
-            REPEAT,
-        );
+        let ctrl_held = AbiModifiers {
+            ctrl: true,
+            ..AbiModifiers::default()
+        };
+        let mut source =
+            KeyboardInputSource::new(QueueChannel::new(&[typed_under('z', ctrl_held)]), REPEAT);
         assert_eq!(
             poll(&mut source),
             Ok(Some(InputEvent::KeyPressed {
@@ -601,14 +661,14 @@ mod tests {
     fn decodes_named_release_and_folds_function_keys() {
         let events = [
             KeyInput::Released {
-                key: KeyValue::Named(NamedKeyCode::Escape),
+                key: Some(KeyValue::Named(NamedKeyCode::Escape)),
                 modifiers: AbiModifiers::default(),
-                physical: PhysicalKey::UNKNOWN,
+                physical: PhysicalKey::ESCAPE,
             },
             KeyInput::Pressed {
-                key: KeyValue::Named(NamedKeyCode::F5),
+                key: Some(KeyValue::Named(NamedKeyCode::F5)),
                 modifiers: AbiModifiers::default(),
-                physical: PhysicalKey::UNKNOWN,
+                physical: PhysicalKey::from_usage(0x3E).expect("F5"),
             },
         ];
         let mut source = KeyboardInputSource::new(QueueChannel::new(&events), REPEAT);
@@ -630,6 +690,20 @@ mod tests {
     }
 
     #[test]
+    fn a_key_that_types_nothing_reads_as_the_modifiers_it_left() {
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[shift(true, false)]), REPEAT);
+        assert_eq!(
+            poll(&mut source),
+            Ok(Some(InputEvent::ModifiersChanged {
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            }))
+        );
+    }
+
+    #[test]
     fn malformed_record_surfaces_bad_magic() {
         let mut channel = QueueChannel::new(&[]);
         channel.push_raw([0u8; KeyInput::WIRE_LEN]);
@@ -641,11 +715,7 @@ mod tests {
 
     #[test]
     fn channel_fault_propagates() {
-        let mut channel = QueueChannel::new(&[KeyInput::Pressed {
-            key: KeyValue::Char('a'),
-            modifiers: AbiModifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
-        }]);
+        let mut channel = QueueChannel::new(&[press('a')]);
         channel.fault_with(Errno::NotFound);
         let mut source = KeyboardInputSource::new(channel, REPEAT);
         assert_eq!(poll(&mut source), Err(Errno::NotFound));
@@ -661,14 +731,7 @@ mod tests {
 
     #[test]
     fn into_channel_returns_the_wrapped_channel() {
-        let source = KeyboardInputSource::new(
-            QueueChannel::new(&[KeyInput::Pressed {
-                key: KeyValue::Char('a'),
-                modifiers: AbiModifiers::default(),
-                physical: PhysicalKey::UNKNOWN,
-            }]),
-            REPEAT,
-        );
+        let source = KeyboardInputSource::new(QueueChannel::new(&[press('a')]), REPEAT);
         let channel = source.into_channel();
         assert_eq!(channel.records.len(), 1);
     }
@@ -676,7 +739,7 @@ mod tests {
     #[test]
     fn the_desktop_reads_each_records_physical_key_beside_its_event() {
         let chord = KeyInput::Pressed {
-            key: KeyValue::Char('#'),
+            key: Some(KeyValue::Char('#')),
             modifiers: AbiModifiers {
                 meta: true,
                 shift: true,
@@ -685,29 +748,13 @@ mod tests {
             physical: PhysicalKey::DIGIT_3,
         };
         let mut source = KeyboardInputSource::new(QueueChannel::new(&[chord]), REPEAT);
-        let polled = source.poll_record(0, None).expect("well-formed");
+        let polled = source.poll_record(0, None, true).expect("well-formed");
         let (_, record) = polled.expect("a record");
-        assert_eq!(record.physical(), Some(PhysicalKey::DIGIT_3));
-    }
-
-    fn press(c: char) -> KeyInput {
-        KeyInput::Pressed {
-            key: KeyValue::Char(c),
-            modifiers: AbiModifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
-        }
-    }
-
-    fn release(c: char) -> KeyInput {
-        KeyInput::Released {
-            key: KeyValue::Char(c),
-            modifiers: AbiModifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
-        }
+        assert_eq!(record.physical(), PhysicalKey::DIGIT_3);
     }
 
     fn typed<C: KeyInputChannel>(source: &mut KeyboardInputSource<C>, now_ns: u64) -> Option<char> {
-        match source.poll_record(now_ns, None) {
+        match source.poll_record(now_ns, None, true) {
             Ok(Some((
                 InputEvent::KeyPressed {
                     key: Key::Char(c), ..
@@ -729,6 +776,32 @@ mod tests {
         assert_eq!(typed(&mut source, 550 * MS), Some('a'));
     }
 
+    /// A window reading the keyboard raw repeats what it holds itself, so a
+    /// key pressed while it has the keyboard arms no repeat, and no wake.
+    #[test]
+    fn a_key_pressed_for_a_raw_window_repeats_nothing() {
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[press('a')]), REPEAT);
+        assert!(matches!(source.poll_record(0, None, false), Ok(Some(_))));
+        assert_eq!(source.poll_record(10_000 * MS, None, false), Ok(None));
+        assert_eq!(source.park_deadline_ns(0, u64::MAX), u64::MAX);
+    }
+
+    /// A key that typed nothing — Print Screen — repeats nothing, and going
+    /// down it stops the key held before it.
+    #[test]
+    fn a_key_that_typed_nothing_repeats_nothing_and_stops_the_held_one() {
+        let print_screen = KeyInput::Pressed {
+            key: None,
+            modifiers: AbiModifiers::default(),
+            physical: PhysicalKey::from_usage(0x46).expect("Print Screen"),
+        };
+        let mut source =
+            KeyboardInputSource::new(QueueChannel::new(&[press('a'), print_screen]), REPEAT);
+        assert_eq!(typed(&mut source, 0), Some('a'));
+        assert!(matches!(source.poll_record(MS, None, true), Ok(Some(_))));
+        assert!(!source.repeat_due(10_000 * MS));
+    }
+
     /// A prompt opened under a held `Enter` must not be answered by its
     /// repeats: the key was pressed for the window before it.
     #[test]
@@ -743,17 +816,23 @@ mod tests {
             tairix_wm::Surface::new(8, 8).expect("a surface"),
         );
         let mut source = KeyboardInputSource::new(QueueChannel::new(&[press('a')]), REPEAT);
-        assert!(matches!(source.poll_record(0, Some(before)), Ok(Some(_))));
         assert!(matches!(
-            source.poll_record(500 * MS, Some(before)),
+            source.poll_record(0, Some(before), true),
+            Ok(Some(_))
+        ));
+        assert!(matches!(
+            source.poll_record(500 * MS, Some(before), true),
             Ok(Some(_))
         ));
         assert_eq!(
-            source.poll_record(550 * MS, Some(prompt)),
+            source.poll_record(550 * MS, Some(prompt), true),
             Ok(None),
             "no repeat reaches the window that gained the keyboard"
         );
-        assert_eq!(source.poll_record(10_000 * MS, Some(before)), Ok(None));
+        assert_eq!(
+            source.poll_record(10_000 * MS, Some(before), true),
+            Ok(None)
+        );
         assert_eq!(
             source.park_deadline_ns(0, u64::MAX),
             u64::MAX,
@@ -775,8 +854,8 @@ mod tests {
 
     /// An edge of the key at `usage`, typing `1`.
     fn typed_one(pressed: bool, usage: u16) -> KeyInput {
-        let (key, modifiers) = (KeyValue::Char('1'), AbiModifiers::default());
-        let physical = PhysicalKey::from_usage(usage);
+        let (key, modifiers) = (Some(KeyValue::Char('1')), AbiModifiers::default());
+        let physical = PhysicalKey::from_usage(usage).expect("a key");
         if pressed {
             KeyInput::Pressed {
                 key,
@@ -792,10 +871,8 @@ mod tests {
         }
     }
 
-    /// Two keys typing one character are two keys: the main row's `1`
-    /// pressed while the keypad's is held is typed, not dropped as the
-    /// keypad's repeat, and letting the keypad's go leaves the main row's
-    /// repeating.
+    /// Two keys typing one character are two keys: the keypad's `1` let go
+    /// while the main row's is held leaves the main row's repeating.
     #[test]
     fn a_second_key_typing_the_held_keys_character_is_its_own() {
         const KEYPAD_1: u16 = 0x59;
@@ -811,34 +888,12 @@ mod tests {
         assert_eq!(typed(&mut source, 0), Some('1'));
         assert_eq!(typed(&mut source, 0), Some('1'), "the main row's own press");
         assert!(
-            matches!(source.poll_record(0, None), Ok(Some(_))),
+            matches!(source.poll_record(0, None, true), Ok(Some(_))),
             "the release"
         );
         assert!(
             source.repeat_due(500 * MS),
             "the main row's key still repeats"
-        );
-    }
-
-    /// A device that repeats a held key itself is not repeated twice: its
-    /// own repeats are dropped and the source's policy is the only one.
-    #[test]
-    fn a_devices_own_repeat_of_the_held_key_is_dropped() {
-        let mut source = KeyboardInputSource::new(
-            QueueChannel::new(&[press('a'), press('a'), press('a'), release('a'), press('a')]),
-            REPEAT,
-        );
-        assert_eq!(typed(&mut source, 0), Some('a'));
-        // The two device repeats are consumed without surfacing; the release
-        // is the next record the source answers.
-        assert!(matches!(
-            source.poll_record(MS, None),
-            Ok(Some((InputEvent::KeyReleased { .. }, _)))
-        ));
-        assert_eq!(
-            typed(&mut source, 2 * MS),
-            Some('a'),
-            "a new press after a release"
         );
     }
 
@@ -849,41 +904,30 @@ mod tests {
             REPEAT,
         );
         assert_eq!(typed(&mut source, 0), Some('a'));
-        let _ = source.poll_record(MS, None);
+        let _ = source.poll_record(MS, None, true);
         assert!(
             source.repeat_due(600 * MS),
             "releasing another key leaves the held one repeating"
         );
-        let _ = source.poll_record(MS, None);
+        let _ = source.poll_record(MS, None, true);
         assert!(!source.repeat_due(600 * MS), "its own release stops it");
 
-        let mut shifted = KeyboardInputSource::new(
-            QueueChannel::new(&[
-                press('a'),
-                KeyInput::ModifiersChanged {
-                    modifiers: AbiModifiers {
-                        shift: true,
-                        ..AbiModifiers::default()
-                    },
-                },
-            ]),
-            REPEAT,
-        );
+        let mut shifted =
+            KeyboardInputSource::new(QueueChannel::new(&[press('a'), shift(true, false)]), REPEAT);
         assert_eq!(typed(&mut shifted, 0), Some('a'));
-        let _ = shifted.poll_record(MS, None);
+        let _ = shifted.poll_record(MS, None, true);
         assert!(!shifted.repeat_due(600 * MS));
     }
 
     #[test]
-    fn repeat_off_repeats_nothing_and_still_drops_a_devices_repeats() {
+    fn repeat_off_repeats_nothing() {
         let off = KeyRepeat {
             interval: None,
             ..REPEAT
         };
-        let mut source =
-            KeyboardInputSource::new(QueueChannel::new(&[press('a'), press('a')]), off);
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[press('a')]), off);
         assert_eq!(typed(&mut source, 0), Some('a'));
-        assert_eq!(source.poll_record(10_000 * MS, None), Ok(None));
+        assert_eq!(source.poll_record(10_000 * MS, None, true), Ok(None));
         assert_eq!(source.park_deadline_ns(0, u64::MAX), u64::MAX);
     }
 

@@ -218,6 +218,12 @@ fn decompressed_len_is_bounded_by_what_the_frame_can_expand_to() {
     inflated[4..8].copy_from_slice(&claim.to_le_bytes());
     assert_eq!(decompressed_len(&inflated), Err(Error::Corrupt));
     assert_eq!(decompressed_len(&packed[..3]), Err(Error::Corrupt));
+    packed[0] ^= 1;
+    assert_eq!(
+        decompressed_len(&packed[..n]),
+        Err(Error::Corrupt),
+        "another magic"
+    );
 }
 
 #[test]

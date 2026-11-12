@@ -1611,24 +1611,30 @@ conclusion is *accepted*.
   that only left every offer held since the last drop, so items carried back
   and forth over a window that has stopped reading cost it one end. A drop
   takes every offer before it but the one it is of, numbered as it is, which
-  the window may answer as late as it reads it and reads the drop by.
+  the window may answer as late as it reads it and reads the drop by. A locked
+  pointer's motion sums, as a wheel run does, and a pointer lock's start or
+  end takes the one held before it, joining the back so it follows the motion
+  of the lock it ends: a window that toggles its lock without draining owes one.
   Everything else — keys, buttons, the pick conclusion — is owed in full.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
   hold memory on its behalf: a security bound, not a capacity to scale
   (`AGENTS.md` §24.4). Overflow evicts the oldest *input* event, never the
-  end of the press a window holds (its primary release, or the cancel that
-  took it): a held press is shed together with its end, so an app learns of
-  neither rather than holding a press for ever. That is total rather than a
-  preference — folding leaves at most six state edges, one pick conclusion (a
-  window has one pick at a time), one authorisation's, one tool-window move's
-  end, one end of a press already delivered (a window holds one press at a
-  time), and of a save offer's ends and an items offer's each one that only
-  left, a later one superseding it, and one drop's with the one offer it is
-  of, never shed ahead of it, which only a later drop takes, since a window
-  has every event held before a drag's offer by the time it can answer it —
-  so an evictable input event — a drag's report and an offer among them —
-  always exists.
+  end of a press a window holds (a key's or a button's release, or the cancel
+  that took the pointer's): a held press is shed together with its own
+  release, so an app learns of neither rather than holding a press for ever,
+  and alone where a cancel follows it, since the cancel also ends every press
+  the window was told of before. Folding leaves at most six state edges, one
+  pick conclusion (a window has one pick at a time), one authorisation's, one
+  tool-window move's end, one pointer lock's start or end, the ends of presses
+  already delivered, and of a save offer's ends and an items offer's each one
+  that only left, a later one superseding it, and one drop's with the one
+  offer it is of, never shed ahead of it, which only a later drop takes, since
+  a window has every event held before a drag's offer by the time it can
+  answer it. A key or a button is down at most once, so those ends are at most
+  one per key and button: where they alone fill a queue, each further one is
+  held beyond the bound rather than leave a key down, and the keys and buttons
+  a seat has bound that in turn.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same. Any other refusal no wait
@@ -2078,6 +2084,22 @@ reached or a file refused. The requester takes them one at a time
 ones and refuses a further pick on that window, and another folder pick of
 that application, until they are taken, since a delegation cannot be
 withdrawn. A folder that cannot be read keeps the picker up stating why.
+
+### A subtree pick
+
+A `PickPurpose::Subtree` pick hands a folder over whole. It is titled
+`SUBTREE_TITLE` and carries the folder band, its committing answer *Share*,
+choosing as a folder pick does but never the top level, which the band says is
+not a folder to share. The session's reader opens the folder shown to be
+listed, never through a final link, and finds it writable where the
+requester's signed manifest edits documents and the user may write it
+(`fs_access`); the serve loop then grants it with `fd_grant` under
+`GRANT_SUBTREE` — a ceiling of the session's own reach where writable, none
+otherwise — and concludes with `SubtreePicked`, the application redeeming a
+directory capability (`tairix_rt::Dir::from_delegation`) whose every path stays
+beneath the folder and acts as the user. Its name is the application's to take
+(`TakePickedName`). A folder that cannot be opened keeps the picker up stating
+why; a refused grant concludes `PickCancelled`.
 
 ### And the trusted picker's own witness
 
@@ -2715,6 +2737,34 @@ it: chrome reacts only to input the user actually directed at chrome. It is the
 same reason the lock screen is safe here — its window is not one the presenter
 placed, so while it is up the bar cannot be reached by the pointer at all.
 
+
+### Locking the pointer to a window
+
+An application whose content reads the mouse itself — a guest machine, a game
+— asks for the pointer with `LockPointer` (`WindowClient::lock_pointer`). The
+session grants it only to the window holding the keyboard, while the pointer
+is over its content, no gesture holds the pointer, and no surface of the
+desktop's holds the seat (the screen lock, a system prompt, a picker with the
+keyboard, a menu chain); anything else is `PermissionDenied`.
+`DesktopShell::lock_pointer` records the lock in the window manager's router,
+and every pump reads the device the way the lock asks
+(`InputSource::set_pointer_locked`): while it holds, `DeviceInputSource` turns
+motion into the device's own displacement — unscaled by the user's speed and
+unbounded by the screen — a touchscreen places no pointer, and the pointer
+stays where it was locked, drawn nowhere. The window receives
+`WindowEvent::PointerMotion`, summed across a batch and in the hold-back, and
+its buttons and wheel at the place the pointer was locked at, every button the
+mouse has among them.
+
+The release is the session's, not the application's to withhold. A lone tap of
+Meta ends the lock before it opens the program library, and so does the window
+losing the keyboard, the window closing, and every drain of a holder of its
+own — the screen lock, the authorisation prompt the secure attention key brings
+up, a menu chain, the capture, the screensaver, a carried drag — which take the
+pointer back through the same step that yields it. Every start and end reaches
+the window as `WindowEvent::PointerLock`, in order; a lock the session ended is
+asked for again, never resumed, and the buttons it held are the window's to let
+go of when it is told.
 ## What an application's presented frame costs
 
 An application repaints its whole composition and presents whole-window
@@ -3332,15 +3382,19 @@ and the held `Modifiers`. The `SessionInputRouter` routes a key to the window
 manager, which delivers it to the focused window; the taskbar takes no keyboard
 input.
 
-It is also the one place a held key repeats. A USB keyboard reports a held key
-once and a PS/2 one repeats it itself, so the source drops a press of the key
-already held — the same physical key, so the keypad's `1` and the main row's
-are two keys — and repeats that key under the user's policy: after the repeat
-delay, then at the repeat rate, one repeat per drain so a late loop never
-catches up in a burst. A release of that key or a change of modifiers stops
-it, and the repeat's next deadline is folded into the park only while a key is
-repeating. A key held across the edge into a lock or into another user's
-session stops repeating there. As with the pointer the crate holds no input capability of its own, and
+It is also the one place a held key repeats. The kernel seat reads every key
+down once, whatever its keyboard does, and the source repeats the key held
+last — the same physical key, so the keypad's `1` and the main row's are two
+keys — under the user's policy: after the repeat delay, then at the repeat
+rate, one repeat per drain so a late loop never catches up in a burst. Only a
+key that typed repeats, and none pressed while a window reading the keyboard
+raw holds it, which repeats what it holds itself. A release of that key,
+another key going down or a change of modifiers stops it, and the repeat's
+next deadline is folded into the park only while a key is repeating. A key
+held across the edge into a lock or into another user's session stops
+repeating there. A lone tap of Ctrl or Meta is recognised from the modifier
+keys' own records: any other key, a lock included, between the press and the
+release spoils it. As with the pointer the crate holds no input capability of its own, and
 a malformed record fails closed with its `Errno` rather than being
 misinterpreted (`AGENTS.md` §5.4 / §2.9). The ABI record is documented in
 [Input events](../abi/input.md).

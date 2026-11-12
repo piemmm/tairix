@@ -4,7 +4,7 @@ cp — Dateien und Verzeichnisse kopieren
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -45,12 +45,15 @@ wird, ebenso unter einer umask, die dem Eigentümer das Schreibrecht
 vorenthält. Eine innerhalb eines Zielbaums angetroffene symbolische
 Verknüpfung wird beim Schreiben nie verfolgt.
 
-GNUs `-a`/`--archive` und `--preserve` mit einer anderen Menge als
-`--preserve=links,xattr` werden **abgelehnt**, nicht eingeschränkt. `-a`
-ist `-dR --preserve=all`, und `--preserve=all` umfasst die Zeitstempel
-eines Knotens, die kein Aufruf dieses Systems setzen kann — `-a` zu
-befolgen würde also eine Bewahrung melden, die nicht stattgefunden hat.
-Den Rest davon deckt `-dR` ab.
+`-p` behält Modus, Eigentümer und Zeiten jeder Kopie, und `-a` ist `-dR`
+und behält all das. Die Zeiten einer Kopie sind die ihrer Quelle, so genau
+das Ziel sie hält — ein FAT-Datenträger hält eine Änderungszeit auf zwei
+Sekunden —, und ein Lauf, dessen Zeiten nicht alle genau erhalten blieben,
+sagt das in einem einzigen `omission`-Datensatz auf dem
+Standard-Informationsstrom, nicht in einer Warnung. Ein Verzeichnis erhält
+seine Zeiten, sobald seine Einträge darin sind. Einen Eigentümer, den der
+Kopierende einer Kopie nicht geben darf, behält die Kopie als seine, wie
+bei GNU, ohne Warnung.
 
 Jede Kopie überträgt die erweiterten Attribute der Quelle — einen
 RISC-OS-Dateityp, Typ und Ersteller eines Mac — überall dort, wo das
@@ -98,6 +101,18 @@ es antrifft.
   die ihrer Operanden, und jede andere Kopie folgt den Verknüpfungen
   ihrer Operanden, wie bei GNU; `-l` verknüpft, worauf eine verfolgte
   Verknüpfung zeigt.
+- `-a, --archive` — `-dR --preserve=all`: den Baum kopieren, seine
+  Verknüpfungen nachbilden und alles behalten, was die Kopie kann.
+- `-p` — `--preserve=mode,ownership,timestamps`; ein bloßes `--preserve`
+  ist dasselbe.
+- `--preserve=mode` — jeder Kopie den genauen Modus ihrer Quelle geben,
+  samt Set-ID- und Sticky-Bits und denen, die die umask zurückhält.
+- `--preserve=ownership` — jeder Kopie Eigentümer und Gruppe ihrer Quelle
+  geben, soweit der Kopierende darf.
+- `--preserve=timestamps` — jeder Kopie die Zugriffs- und Änderungszeit
+  ihrer Quelle geben, so genau das Ziel sie hält.
+- `--preserve=all` — Modus, Eigentümer, Zeiten und gemeinsame Knoten
+  behalten und jedes erweiterte Attribut übertragen, das das Ziel hält.
 - `--preserve=links` — zwei Quellen, die einen Knoten benennen, erhalten
   am Ziel zwei Namen statt zweier Kopien, sodass die Kopie den Speicher
   nicht stillschweigend verdoppelt.
@@ -105,8 +120,8 @@ es antrifft.
   eine Kopie, deren Ziel eines davon nicht speichern kann, schlägt fehl
   und nennt es. `--preserve=links,xattr` verlangt beides.
 - `--no-preserve=xattr` — keine erweiterten Attribute kopieren.
-  `ownership` und `timestamps` werden ebenfalls angenommen und ohnehin
-  nicht bewahrt.
+  `ownership`, `timestamps` und `links` heben auf, was `-p` oder `-a`
+  davon behält.
 - `--no-preserve=mode` — jede neue Datei und jedes neue Verzeichnis mit
   dem Modus anlegen, den ein neues erhält, wenn nichts einen nennt,
   abzüglich der umask, statt mit dem ihrer Quelle. `--no-preserve=all`

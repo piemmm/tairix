@@ -65,6 +65,9 @@ pub const SBI_FID_HART_START: usize = 0;
 /// SBI v0.2 Remote Fence (RFENCE) extension id (ASCII `"RFNC"`).
 pub const SBI_EXT_RFENCE: usize = 0x5246_4E43;
 
+/// `remote_fence_i` function id within the RFENCE extension.
+pub const SBI_FID_REMOTE_FENCE_I: usize = 0;
+
 /// `remote_sfence_vma` function id within the RFENCE extension.
 pub const SBI_FID_REMOTE_SFENCE_VMA: usize = 1;
 
@@ -101,6 +104,10 @@ pub struct SbiRet {
 impl SbiRet {
     /// The `error` value denoting success (`SBI_SUCCESS`).
     pub const SUCCESS: isize = 0;
+
+    /// The `error` value of a call the firmware does not implement
+    /// (`SBI_ERR_NOT_SUPPORTED`).
+    pub const NOT_SUPPORTED: isize = -2;
 
     /// `true` iff the call succeeded (`error == 0`).
     #[must_use]
@@ -313,6 +320,24 @@ pub fn remote_sfence_vma(
     )
 }
 
+/// Instruct every hart selected by `(hart_mask, hart_mask_base)` to execute
+/// a `fence.i`, via the SBI v0.2 RFENCE extension: the remote half of making
+/// stores visible to instruction fetch, which `fence.i` does only for the
+/// hart that executes it.
+///
+/// The firmware returns only once those harts have fenced. Build the masks
+/// with [`hart_windows`], or pass [`ALL_HARTS`] as the base for every hart.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+#[must_use]
+pub fn remote_fence_i(hart_mask: usize, hart_mask_base: usize) -> SbiRet {
+    sbi_call2(
+        SBI_EXT_RFENCE,
+        SBI_FID_REMOTE_FENCE_I,
+        hart_mask,
+        hart_mask_base,
+    )
+}
+
 /// Request a whole-platform reset via the SBI v0.2 System Reset (SRST)
 /// extension: `reset_type` selects [`SBI_SRST_TYPE_SHUTDOWN`] (power off)
 /// or [`SBI_SRST_TYPE_COLD_REBOOT`] (restart), and `reset_reason` is
@@ -455,9 +480,11 @@ mod tests {
         assert_eq!(SBI_FID_PROBE_EXTENSION, 3);
         assert_eq!(SBI_FID_SEND_IPI, 0);
         assert_eq!(SBI_FID_HART_START, 0);
-        // `remote_sfence_vma` is function id 1 in the RFENCE extension
-        // (function id 0 is `remote_fence_i`).
+        // `remote_fence_i` and `remote_sfence_vma` are function ids 0 and 1
+        // in the RFENCE extension, and an unimplemented call answers -2.
+        assert_eq!(SBI_FID_REMOTE_FENCE_I, 0);
         assert_eq!(SBI_FID_REMOTE_SFENCE_VMA, 1);
+        assert_eq!(SbiRet::NOT_SUPPORTED, -2);
         // The System-Reset extension id is the ASCII bytes of "SRST",
         // `system_reset` is its function id 0, and the two reset types the
         // Supervisor drives are shutdown (0) and cold reboot (1).

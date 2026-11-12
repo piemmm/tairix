@@ -15,8 +15,8 @@ use tairix_abi::{Errno, FileId, FileStat, NodeExpect, UnlinkFlags};
 use tairix_collections::{HashMap, HashSet};
 use tairix_fscopy::tree::{entry_name, unlink_node, walk, Entry, Step, Visitor};
 use tairix_fscopy::{
-    copy_attributes, file_mode, landing, AttrError, Created, DataCopy, DataError, Descent,
-    DirModes, Landing, Omissions, Settle, CHUNK_LEN,
+    carry_owner, copy_attributes, copy_times, file_mode, landing, AttrError, Created, DataCopy,
+    DataError, Descent, DirModes, Landing, Omissions, Ownership, Settle, CHUNK_LEN,
 };
 use tairix_hash::BuildSipHash13;
 use tairix_help::{own_short_help, HelpSource};
@@ -72,9 +72,8 @@ Extended attributes (a RISC OS filetype, a Mac type and creator) are copied
 wherever the destination keeps them; the ones it cannot keep are reported in
 one warning at the end.
 
--a/--archive and the other --preserve members are refused: --preserve=all
-includes timestamps, which no call can set yet, so they are not honoured in
-part. Use -dR for the rest of -a.
+-p keeps each copy's mode, owner and times, -a is -dR keeping all of it, and
+a run whose times could not all be kept exactly says so once.
 ";
 
 /// `cp`'s own command word: the short-help switches render its own Help
@@ -152,10 +151,12 @@ pub fn run<F: FileSystem>(
             let outcome = copier.copy_all(&sources, &dest);
             if let Some(report) = copier.omissions.report(OWN_WORD) {
                 seams.out.info(&report.record);
-                // The warning is advisory: a stream refusing it changes nothing.
-                let _ = seams
-                    .diagnostics
-                    .write_all(format!("{OWN_WORD}: warning: {}\n", report.summary).as_bytes());
+                if let Some(summary) = report.summary {
+                    // The warning is advisory: a stream refusing it changes nothing.
+                    let _ = seams
+                        .diagnostics
+                        .write_all(format!("{OWN_WORD}: warning: {summary}\n").as_bytes());
+                }
             }
             outcome
         }
@@ -624,6 +625,7 @@ impl<F: FileSystem> Copier<'_, F> {
                 };
                 self.make_symlink(spot, &stored, replace)
                     .map_err(|errno| create_error(target, errno))?;
+                self.keep_link_metadata(origin, spot, source, target)?;
                 self.report(source, target)?;
                 Ok(true)
             }
@@ -680,7 +682,7 @@ impl<F: FileSystem> Copier<'_, F> {
         let mut copy = TreeCopy {
             copier: &mut *self,
             root: &into,
-            base: Level::new(None, target, stat.id, true, None),
+            base: Level::new(None, target, (stat.id, None), true, None),
             levels: Vec::new(),
         };
         let walked = walk(held, source, &mut copy);
@@ -698,7 +700,8 @@ impl<F: FileSystem> Copier<'_, F> {
             None => Ok(()),
         };
         walked?;
-        settled
+        settled?;
+        self.keep_metadata(&stat, &into, target)
     }
 
     /// Make the directory at `spot` for the source directory `stat`
@@ -936,8 +939,73 @@ impl<F: FileSystem> Copier<'_, F> {
                 DataError::Write(errno) => write_error(target, errno),
             })?;
         self.carry_attributes((&from, source), &to, target)?;
+        self.keep_metadata(&stat, &to, target)?;
         self.report(source, target)?;
         Ok(true)
+    }
+
+    /// Give `at`, the copy of the node `source` describes, what the run keeps
+    /// of it: its times first, while the copy is still the copier's to
+    /// change, then its exact mode and its owner as far as the copier may give
+    /// them — an owner it may not give is kept as GNU's keeps it, silently.
+    fn keep_metadata<T: Node + ?Sized>(
+        &mut self,
+        source: &FileStat,
+        at: &T,
+        target: &str,
+    ) -> Result<(), CpError> {
+        let keep = self.options.keep;
+        if keep.timestamps {
+            let kept = copy_times(&source.times, at).map_err(|errno| write_error(target, errno))?;
+            self.omissions.note_times(kept);
+        }
+        if !(keep.mode || keep.ownership) {
+            return Ok(());
+        }
+        let current = at.stat().map_err(|errno| stat_error(target, errno))?;
+        let wanted = Ownership {
+            mode: if keep.mode { source.mode } else { current.mode },
+            uid: if keep.ownership {
+                source.uid
+            } else {
+                current.uid
+            },
+            gid: if keep.ownership {
+                source.gid
+            } else {
+                current.gid
+            },
+            ..Ownership::of(&current)
+        };
+        carry_owner(wanted, Ownership::of(&current), at).map_err(|errno| write_error(target, errno))
+    }
+
+    /// [`Self::keep_metadata`] for the symbolic link just made at `spot` as
+    /// the copy of the one `origin` names: its own times and owner, a link
+    /// having no bits of its own.
+    fn keep_link_metadata(
+        &mut self,
+        origin: Origin<'_, F::Dir>,
+        spot: Spot<'_, F::Dir>,
+        source: &str,
+        target: &str,
+    ) -> Result<(), CpError> {
+        let keep = self.options.keep;
+        if !(keep.timestamps || keep.ownership) {
+            return Ok(());
+        }
+        let stat = match origin {
+            Origin::Operand(path) => self.fs.open_node(path, false),
+            Origin::Held(dir, name) | Origin::Followed(dir, name) => dir.open_node(name),
+        }
+        .and_then(|link| link.stat())
+        .map_err(|errno| read_error(source, errno))?;
+        let made = match spot {
+            Spot::Operand(path) => self.fs.open_node(path, false),
+            Spot::Held(dir, name) => dir.open_node(name),
+        }
+        .map_err(|errno| stat_error(target, errno))?;
+        self.keep_metadata(&stat, &made, target)
     }
 
     /// The file at `spot` a byte copy writes, empty: the one already there,
@@ -1240,7 +1308,7 @@ impl<F: FileSystem> Copier<'_, F> {
         Ok(Some(Level::new(
             Some(made),
             &target,
-            probe.id,
+            (probe.id, Some(node)),
             false,
             settle,
         )))
@@ -1270,13 +1338,16 @@ struct Level<D> {
     checked: bool,
     swapped: bool,
     settle: Option<Settle>,
+    /// The source directory as it was entered, what the run keeps of which
+    /// its copy is given once full; `None` for the operand's own.
+    stat: Option<FileStat>,
 }
 
 impl<D> Level<D> {
     fn new(
         made: Option<D>,
         target: &str,
-        source: FileId,
+        (source, stat): (FileId, Option<FileStat>),
         checked: bool,
         settle: Option<Settle>,
     ) -> Self {
@@ -1287,6 +1358,7 @@ impl<D> Level<D> {
             checked,
             swapped: false,
             settle,
+            stat,
         }
     }
 }
@@ -1333,14 +1405,20 @@ impl<F: FileSystem> TreeCopy<'_, '_, F> {
     }
 
     /// Leave a level the walk is done with: the directory the copy made for
-    /// it given its mode.
+    /// it given its mode, then what the run keeps of its source.
     fn close(&mut self, level: Level<F::Dir>) -> Result<(), CpError> {
         self.copier.descent.leave();
-        match (level.made, level.settle) {
-            (Some(made), Some(settle)) => settle
+        let Some(made) = level.made else {
+            return Ok(());
+        };
+        if let Some(settle) = level.settle {
+            settle
                 .finish(&made)
-                .map_err(|errno| write_error(&level.target, errno)),
-            _ => Ok(()),
+                .map_err(|errno| write_error(&level.target, errno))?;
+        }
+        match &level.stat {
+            Some(stat) => self.copier.keep_metadata(stat, &made, &level.target),
+            None => Ok(()),
         }
     }
 }
@@ -1449,7 +1527,7 @@ mod tests {
         create_error, place, read_error, run as engine_run, stat_error, target_error, write_error,
         Seams, USAGE,
     };
-    use crate::command::{Clobber, Command, Contents, Dereference, Options, TargetMode};
+    use crate::command::{Clobber, Command, Contents, Dereference, Keep, Options, TargetMode};
     use crate::error::CpError;
     use crate::io::{Dir, FileSystem, Kind, Node, Output, Prompt, Roots};
     use alloc::boxed::Box;
@@ -1696,6 +1774,13 @@ mod tests {
             self.tree.attr_of(path, key)
         }
 
+        fn times(
+            &self,
+            path: &str,
+        ) -> Option<(tairix_abi::time::Time64, tairix_abi::time::Time64)> {
+            self.tree.times(path)
+        }
+
         fn written_to(&self, path: &str) -> usize {
             self.tree.written(path)
         }
@@ -1915,6 +2000,75 @@ mod tests {
             Some(&b"feb"[..])
         );
         assert_eq!(diagnostics.text(), "", "nothing was left behind");
+    }
+
+    /// `-p` gives each copy its source's times and exact mode, a directory's
+    /// once its entries are in; `--preserve=timestamps` alone keeps times,
+    /// and onto a volume keeping whole seconds they are kept to the second,
+    /// which the run reports once.
+    ///
+    /// Regression: no call could set a time, so `-p` and `-a` were refused
+    /// and every copy was stamped when it was made.
+    #[test]
+    fn preserve_keeps_times_and_modes_as_nearly_as_the_destination_holds_them() {
+        use tairix_abi::time::Time64;
+        let at = |secs, nanos| Time64::new(secs, nanos).expect("canonical");
+        let (file, dir) = (at(-7, 5), at(9, 0));
+        let fs = MemFs::new().dir("/d").file("/d/f", b"body").with(|tree| {
+            tree.with_mode("/d/f", 0o4751)
+                .stamped("/d/f", file, file)
+                .stamped("/d", dir, dir)
+                .whole_second_volume("/coarse")
+        });
+        let preserve = |keep, recursive| {
+            copy_with(
+                Options {
+                    recursive,
+                    keep,
+                    ..Options::DEFAULT
+                },
+                &["/d"],
+                "/kept",
+            )
+        };
+        let (result, _, diagnostics) = run_apart(preserve(Keep::ALL, true), &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs.times("/kept/f"), Some((file, file)));
+        assert_eq!(fs.times("/kept"), Some((dir, dir)));
+        assert_eq!(
+            fs.mode_of("/kept/f"),
+            0o4751,
+            "the exact mode, set-ID bit too"
+        );
+        assert_eq!(diagnostics.text(), "");
+
+        let timestamps = Keep {
+            timestamps: true,
+            ..Keep::default()
+        };
+        let onto = |dest| {
+            copy_with(
+                Options {
+                    keep: timestamps,
+                    ..Options::DEFAULT
+                },
+                &["/d/f"],
+                dest,
+            )
+        };
+        let (result, out, diagnostics) = run_apart(onto("/coarse/f"), &fs);
+        assert_eq!(result, Ok(()));
+        assert_eq!(fs.times("/coarse/f"), Some((at(-7, 0), at(-7, 0))));
+        assert_eq!(
+            diagnostics.text(),
+            "",
+            "the nearest a volume holds is what keeping times asks of it"
+        );
+        assert!(
+            out.records().contains("\"fs.times_not_exact\""),
+            "{}",
+            out.records()
+        );
     }
 
     #[test]

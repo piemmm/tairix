@@ -323,7 +323,10 @@ impl CaptureBar {
     /// Take `key`: Enter takes the capture, and Left and Right choose the
     /// mode beside the one chosen, as along a segmented control.
     pub(super) fn key(&mut self, key: &KeyInput) -> Option<BarAction> {
-        let KeyInput::Pressed { key: value, .. } = key else {
+        let KeyInput::Pressed {
+            key: Some(value), ..
+        } = key
+        else {
             return None;
         };
         let beside = match value {

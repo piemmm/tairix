@@ -1486,6 +1486,7 @@ mod tests {
         "Clock",
         "Draw",
         "Life",
+        "PCEmulator",
         "Paint",
         "Raytrace",
         "RetroGames",

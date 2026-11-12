@@ -106,6 +106,10 @@ mod tests {
         fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
             self.0.sync_instruction_cache(phys, len);
         }
+
+        fn fence_instruction_fetch(&self) -> bool {
+            self.0.fence_instruction_fetch()
+        }
     }
 
     /// The cells a supply borrows beyond the shared frame backing.

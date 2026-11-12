@@ -15,7 +15,11 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscLayout};
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
-use tairix_fsprobe::{adfs, affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, FAT_DIR_ENTRY_LEN};
+use tairix_fat::boot::{Bpb, Kind};
+use tairix_fat::dir::{ShortEntry, ENTRY};
+use tairix_fat::format;
+use tairix_fat::stamp::Stamps;
+use tairix_fsprobe::{adfs, affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC};
 
 /// An in-memory device over a byte image, counting the transfers it serves.
 pub struct Image {
@@ -77,22 +81,36 @@ pub fn device(
 /// Bytes of the head the probe reads.
 pub const HEAD: usize = 2048;
 
-/// A structurally valid FAT32 boot sector with the given label bytes (11,
-/// space-padded) and serial.
+/// The sectors `fat32_boot`'s volume says it has: room past its FATs for
+/// the clusters the tests move its root to, and for a FAT twice the size.
+pub const FAT32_SECTORS: u32 = 32 + 2 * 2048 + 8 * 64;
+
+/// A FAT32 boot sector with the given label bytes (11, space-padded) and
+/// serial, written by the format's own encoder: eight-sector clusters, 32
+/// reserved sectors and two 1024-sector FATs, and no `FSInfo`.
 pub fn fat32_boot(serial: [u8; 4], label11: &[u8; 11]) -> Vec<u8> {
+    let bpb = Bpb {
+        kind: Kind::Fat32,
+        bytes_per_sector: 512,
+        sectors_per_cluster: 8,
+        reserved_sectors: 32,
+        fats: 2,
+        root_entries: 0,
+        total_sectors: FAT32_SECTORS,
+        media: 0xF8,
+        fat_sectors: 1024,
+        sectors_per_track: 0,
+        heads: 0,
+        hidden_sectors: 0,
+        root_cluster: 2,
+        fsinfo_sector: 0,
+        backup_boot_sector: 0,
+        drive: 0x80,
+        serial: Some(u32::from_le_bytes(serial)),
+        label: Some(*label11),
+    };
     let mut head = vec![0u8; HEAD];
-    head[11..13].copy_from_slice(&512u16.to_le_bytes());
-    head[13] = 8; // sectors per cluster
-    head[14..16].copy_from_slice(&32u16.to_le_bytes());
-    head[16] = 2; // FAT count
-    head[36..40].copy_from_slice(&1024u32.to_le_bytes());
-    head[44..48].copy_from_slice(&2u32.to_le_bytes());
-    head[66] = 0x29;
-    head[67..71].copy_from_slice(&serial);
-    head[71..82].copy_from_slice(label11);
-    head[82..90].copy_from_slice(b"FAT32   ");
-    head[510] = 0x55;
-    head[511] = 0xAA;
+    head[..512].copy_from_slice(&format::boot_sector(&bpb, b"MSWIN4.1", &[]));
     head
 }
 
@@ -101,23 +119,24 @@ pub fn fat32_boot(serial: [u8; 4], label11: &[u8; 11]) -> Vec<u8> {
 pub const FAT32_ROOT: usize = (32 + 2 * 1024) * 512;
 
 /// One 32-byte FAT directory entry named `name` with `attributes`.
-pub fn dir_entry(name: &[u8; 11], attributes: u8) -> [u8; FAT_DIR_ENTRY_LEN] {
-    let mut entry = [0u8; FAT_DIR_ENTRY_LEN];
-    entry[..11].copy_from_slice(name);
-    entry[11] = attributes;
-    entry
+pub fn dir_entry(name: &[u8; 11], attributes: u8) -> [u8; ENTRY] {
+    ShortEntry {
+        name: *name,
+        attributes,
+        case: 0,
+        stamps: Stamps::NONE,
+        cluster: 0,
+        size: 0,
+    }
+    .encode()
 }
 
 /// `fat32_boot` with `entries` at the head of the directory at `root`.
-pub fn fat32_with_root(
-    label11: &[u8; 11],
-    root: usize,
-    entries: &[[u8; FAT_DIR_ENTRY_LEN]],
-) -> Vec<u8> {
+pub fn fat32_with_root(label11: &[u8; 11], root: usize, entries: &[[u8; ENTRY]]) -> Vec<u8> {
     let mut image = fat32_boot(*b"SRLN", label11);
     image.resize(root + 4096, 0);
     for (slot, entry) in image[root..]
-        .as_chunks_mut::<FAT_DIR_ENTRY_LEN>()
+        .as_chunks_mut::<ENTRY>()
         .0
         .iter_mut()
         .zip(entries)

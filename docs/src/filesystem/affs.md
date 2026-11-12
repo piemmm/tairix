@@ -112,7 +112,9 @@ The protection bits' low byte and the comment are `amiga.protection` and
 `amiga.comment`, through `tairix_fsmeta`'s Amiga preset
 ([metadata registry](./metadata-registry.md)). An object's one date stamp —
 days since 1978, minutes, ticks — is all four of its times, read and written
-as UTC, as FAT's are. AmigaDOS records no owner, mode or ACL: the VFS
+as UTC, as FAT's are. `fs_set_times` sets it as the modification time, to
+the tick, from 1978 but for the zero stamp (`amiga::STAMP_FIELD`), an access
+time kept only as that stamp. AmigaDOS records no owner, mode or ACL: the VFS
 presents the volume and makes every permission decision.
 
 ## Tests

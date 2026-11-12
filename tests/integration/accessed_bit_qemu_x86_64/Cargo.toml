@@ -32,6 +32,8 @@ name = "tairix-test-accessed-bit-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+# The probe frame's static storage.
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0" }
 # The Arch HAL MMU surface: the test drives the
 # referenced bit through `tairix_arch_api::mmu::AddressSpace`

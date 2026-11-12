@@ -93,6 +93,11 @@ pub enum CpuFeature {
     /// so a fill routine is only worth selecting over the baseline when this
     /// bit is present.
     Erms = 26,
+    /// x86_64 BMI2 (`SHLX`/`SHRX`/`SARX` by any register, `RORX`, `BZHI`,
+    /// `PDEP`/`PEXT`, `MULX`), CPUID.7.0:EBX.8. Its instructions are
+    /// VEX-encoded but touch only general registers, so no operating-system
+    /// state enables them.
+    Bmi2 = 27,
 
     // --- riscv64 ---
     /// riscv64 `Zbb` basic bit-manipulation extension.
@@ -118,7 +123,7 @@ impl CpuFeature {
     /// [`CpuFeatureSet`] — a `/proc/cpuinfo`-style flag list, the
     /// `info:cpu/features` value — so no consumer keeps its own private
     /// list that could drift from the enum.
-    pub const ALL: [CpuFeature; 25] = [
+    pub const ALL: [CpuFeature; 26] = [
         CpuFeature::Crc32,
         CpuFeature::Aes,
         CpuFeature::Pmull,
@@ -140,6 +145,7 @@ impl CpuFeature {
         CpuFeature::Rdrand,
         CpuFeature::Rdseed,
         CpuFeature::Erms,
+        CpuFeature::Bmi2,
         CpuFeature::Zbb,
         CpuFeature::Zbc,
         CpuFeature::Zbkc,
@@ -186,6 +192,7 @@ impl CpuFeature {
             CpuFeature::Rdrand => "rdrand",
             CpuFeature::Rdseed => "rdseed",
             CpuFeature::Erms => "erms",
+            CpuFeature::Bmi2 => "bmi2",
             CpuFeature::Zbb => "zbb",
             CpuFeature::Zbc => "zbc",
             CpuFeature::Zbkc => "zbkc",

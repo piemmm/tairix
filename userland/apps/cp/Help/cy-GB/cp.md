@@ -4,7 +4,7 @@ cp — copïo ffeiliau a chyfeiriaduron
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -41,12 +41,14 @@ gopïo'n gyfan serch hynny, ac felly hefyd o dan umask sy'n atal y
 perchennog rhag ysgrifennu. Ni chaiff dim ei ysgrifennu byth drwy ddolen
 symbolaidd a geir y tu mewn i goeden gyrchfan.
 
-Caiff `-a`/`--archive` GNU a'r setiau `--preserve` heblaw
-`--preserve=links,xattr` eu **gwrthod**, nid eu culhau. Mae `-a` yn
-golygu `-dR --preserve=all`, ac mae `--preserve=all` yn cynnwys stampiau
-amser nod, na all unrhyw alwad ar y system hon eu gosod — felly byddai
-parchu `-a` yn adrodd cadwraeth na ddigwyddodd. Defnyddiwch `-dR` ar
-gyfer y gweddill.
+Mae `-p` yn cadw modd, perchennog ac amserau pob copi, ac mae `-a` yn
+`-dR` sy'n cadw'r cyfan. Amserau copi yw rhai ei ffynhonnell, mor fanwl
+ag y mae'r cyrchfan yn eu dal — mae cyfrol FAT yn dal amser addasu i ddwy
+eiliad —, ac mae rhediad na chadwodd ei holl amserau'n fanwl yn dweud
+hynny mewn un cofnod `omission` ar y ffrwd wybodaeth safonol, nid mewn
+rhybudd. Mae cyfeiriadur yn cael ei amserau unwaith mae ei gofnodion
+ynddo. Mae perchennog na chaiff y copïwr ei roi i gopi yn aros yn eiddo
+i'r copïwr, fel yn GNU, heb rybudd.
 
 Mae pob copi'n cario priodoleddau estynedig y ffynhonnell — math ffeil
 RISC OS, math a chrëwr Mac — lle bynnag y gall y cyrchfan eu cadw, ac
@@ -88,15 +90,27 @@ atal y copi lle mae'r daith yn ei gyfarfod.
   ailadroddus yn atgynhyrchu pob dolen, gan gynnwys rhai ei operandau,
   ac mae unrhyw gopi arall yn dilyn dolenni ei operandau, fel un GNU;
   mae `-l` yn cysylltu'r hyn y mae dolen a ddilynwyd yn ei enwi.
+- `-a, --archive` — `-dR --preserve=all`: copïo'r goeden, atgynhyrchu ei
+  dolenni a chadw popeth y gall y copi.
+- `-p` — `--preserve=mode,ownership,timestamps`; mae `--preserve` ar ei
+  ben ei hun yr un fath.
+- `--preserve=mode` — rhoi i bob copi union fodd ei ffynhonnell, gan
+  gynnwys y didau set-ID a gludiog a'r rhai y mae'r umask yn eu dal yn ôl.
+- `--preserve=ownership` — rhoi i bob copi berchennog a grŵp ei
+  ffynhonnell, cyn belled ag y caiff y copïwr.
+- `--preserve=timestamps` — rhoi i bob copi amserau cyrchu ac addasu ei
+  ffynhonnell, mor fanwl ag y mae'r cyrchfan yn eu dal.
+- `--preserve=all` — cadw'r modd, y perchennog, yr amserau a'r nodau a
+  rennir, a chario pob priodwedd estynedig y mae'r cyrchfan yn ei chadw.
 - `--preserve=links` — mae dwy ffynhonnell sy'n enwi un nod yn cael dau
   enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r
   storfa'n ddistaw.
 - `--preserve=xattr` — rhaid cario pob priodoledd estynedig: mae copi na
   all ei gyrchfan gadw un yn methu, gan ei enwi. Mae
   `--preserve=links,xattr` yn gofyn am y ddau.
-- `--no-preserve=xattr` — peidio â chopïo unrhyw briodoledd estynedig.
-  Derbynnir `ownership` a `timestamps` hefyd, ac nid ydynt yn cael eu
-  cadw beth bynnag.
+- `--no-preserve=xattr` — peidio â chopïo priodweddau estynedig. Mae
+  `ownership`, `timestamps` a `links` yn dadwneud yr hyn y mae `-p` neu
+  `-a` yn ei gadw o bob un.
 - `--no-preserve=mode` — gwneud pob ffeil a chyfeiriadur newydd yn y
   modd a gaiff un newydd pan nad oes dim yn enwi un, llai'r umask, yn
   hytrach na modd ei ffynhonnell. Mae `--no-preserve=all` yn gwneud hyn

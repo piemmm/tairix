@@ -16,10 +16,14 @@
 //!   or a [`tairix_partition::PartitionError`]. The run
 //!   aborting *is* the failure.
 //!
+//! Beside it, any table [`tairix_partition::mbr::encode_entries`] writes,
+//! for any entries and geometry, reads back as the extents it was given.
+//!
 //! TAIRiX pulls in no external fuzz runner: a
-//! per-run-seeded `Prng` mutates valid seed images (a real MBR from
-//! [`tairix_partition::mbr::encode`] and a CRC-correct GPT) and feeds pure
-//! noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;
+//! per-run-seeded `Prng` mutates valid seed images (real MBRs from
+//! [`tairix_partition::mbr::encode`] and, with CHS addresses and an active
+//! partition, [`tairix_partition::mbr::encode_entries`], and a CRC-correct
+//! GPT) and feeds pure noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;
 //! `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
@@ -106,6 +110,60 @@ fn mbr_image() -> Vec<u8> {
     img
 }
 
+/// A DOS disk's MBR, its one active FAT16 partition addressed by CHS, as a
+/// seed.
+fn dos_image() -> Vec<u8> {
+    let geometry = mbr::Geometry::new(4, 26);
+    let entry = mbr::Entry {
+        type_byte: mbr::PART_TYPE_FAT16_SMALL,
+        active: true,
+        start_lba: 26,
+        sectors: 63_934,
+    };
+    let sector = mbr::encode_entries(&[entry], geometry).expect("seed MBR encodes");
+    let mut img = vec![0u8; 512 * 64];
+    img[..512].copy_from_slice(&sector);
+    img
+}
+
+/// Entries the writer may or may not take, for any geometry: what it writes
+/// reads back as those extents, classified by their type bytes. Whether it
+/// wrote a table.
+fn written_tables_read_back(rng: &mut Prng) -> bool {
+    let geometry = mbr::Geometry::new(rng.next_u8(), rng.next_u8() & 0x3f);
+    let count = 1 + rng.below(mbr::MAX_PRIMARY_PARTITIONS);
+    let mut entries = Vec::with_capacity(count);
+    for slot in 0..count {
+        let start_lba = if rng.below(4) == 0 {
+            rng.next_u32()
+        } else {
+            1 + u32::try_from(slot).expect("four") * 0x4000_0000 + rng.next_u32() % 0x1000_0000
+        };
+        let sectors = if rng.below(4) == 0 {
+            rng.next_u32()
+        } else {
+            1 + rng.next_u32() % 0x1000_0000
+        };
+        entries.push(mbr::Entry {
+            type_byte: rng.next_u8(),
+            active: rng.below(3) == 0,
+            start_lba,
+            sectors,
+        });
+    }
+    let Ok(sector) = mbr::encode_entries(&entries, geometry) else {
+        return false;
+    };
+    let table = mbr::parse(&sector).expect("a written table reads back");
+    assert_eq!(table.partitions().len(), entries.len());
+    for (part, entry) in table.partitions().iter().zip(&entries) {
+        assert_eq!(part.start_lba, u64::from(entry.start_lba));
+        assert_eq!(part.block_count, u64::from(entry.sectors));
+        assert_eq!(part.ty, mbr::classify(entry.type_byte));
+    }
+    true
+}
+
 /// A CRC-correct GPT disk image as a seed (protective MBR + header +
 /// entry array, one `ARXFS` root entry). Kept small so the mutation loop
 /// clones it cheaply.
@@ -168,7 +226,21 @@ fn exercise_never_panics(bytes: &[u8]) {
     // The raw MBR sector parser, fed the first 512 bytes directly; and any
     // table it accepts, grown to a medium of any size, stays one it accepts.
     if bytes.len() >= mbr::MBR_SECTOR_LEN {
-        let _ = mbr::parse(&bytes[..mbr::MBR_SECTOR_LEN]);
+        let head = &bytes[..mbr::MBR_SECTOR_LEN];
+        let parsed = mbr::parse(head);
+        let entries = mbr::entries(head);
+        assert_eq!(
+            parsed.as_ref().map(|table| table.partitions().len()).ok(),
+            entries
+                .as_ref()
+                .map(|entries| entries.as_slice().len())
+                .ok(),
+            "the entries are the table's"
+        );
+        if let Ok(record) = mbr::ebr(head) {
+            assert_ne!(record.next, Some(0));
+            assert!(record.logical.is_none_or(|entry| entry.sectors > 0));
+        }
         let mut sector = [0u8; mbr::MBR_SECTOR_LEN];
         sector.copy_from_slice(&bytes[..mbr::MBR_SECTOR_LEN]);
         let medium = u64::from_le_bytes(sector[440..448].try_into().expect("eight bytes"));
@@ -182,7 +254,7 @@ fn exercise_never_panics(bytes: &[u8]) {
 #[test]
 fn parsing_any_partition_table_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let corpus = [mbr_image(), gpt_image()];
+    let corpus = [mbr_image(), dos_image(), gpt_image()];
 
     let mut rng = Prng::new(tairix_fuzzseed::start(
         "parsing_any_partition_table_never_panics",
@@ -190,6 +262,7 @@ fn parsing_any_partition_table_never_panics() {
     ));
 
     let mut iteration: u64 = 0;
+    let mut written: u64 = 0;
     loop {
         // 1. A real disk image with a handful of bytes flipped at random,
         //    hammering the signature, type bytes, LBAs, header, and CRCs.
@@ -215,9 +288,17 @@ fn parsing_any_partition_table_never_panics() {
         rng.fill(&mut noise);
         exercise_never_panics(&noise);
 
+        // 4. A table written from arbitrary entries.
+        written += u64::from(written_tables_read_back(&mut rng));
+
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
         }
     }
+    // About a quarter of the drawn entry sets are tables.
+    assert!(
+        written * 10 >= iteration,
+        "{written} of {iteration} entry sets written"
+    );
 }

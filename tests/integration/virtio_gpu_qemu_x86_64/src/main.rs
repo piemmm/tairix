@@ -24,7 +24,7 @@ mod kernel {
 
     use tairix_arch_x86_64::qemu_exit;
     use tairix_itest_witness::GreeterFrame;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink};
     use tairix_log::{Event, Sink};
 
@@ -52,7 +52,7 @@ mod kernel {
     static AUDIT_SINK: GreeterSink = GreeterSink(GreeterFrame::new());
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///

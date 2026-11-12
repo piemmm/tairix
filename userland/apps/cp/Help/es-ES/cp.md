@@ -4,7 +4,7 @@ cp — copiar archivos y directorios
 
 ## SYNOPSIS
 
-`cp [-dfHilLnPrRsvT] [--sparse=WHEN] [--preserve=LIST] [--no-preserve=LIST] [-t dir] [--] source... dest`
+`cp [-adfHilLnpPrRsvT] [--sparse=WHEN] [--preserve[=LIST]] [--no-preserve=LIST] [-t dir] [--] source... dest`
 
 ## DESCRIPTION
 
@@ -41,12 +41,15 @@ de solo lectura se copia entero de todos modos, igual que bajo una umask
 que niega la escritura al propietario. Nunca se escribe a través de un
 enlace simbólico encontrado dentro de un árbol de destino.
 
-El `-a`/`--archive` de GNU y los conjuntos de `--preserve` distintos de
-`--preserve=links,xattr` se **rechazan**, no se restringen. `-a`
-equivale a `-dR --preserve=all`, y `--preserve=all` incluye las marcas
-de tiempo de un nodo, que ninguna llamada de este sistema puede
-establecer — así que atender `-a` notificaría una conservación que no ha
-ocurrido. Use `-dR` para el resto.
+`-p` conserva el modo, el propietario y las fechas de cada copia, y `-a`
+es `-dR` conservándolo todo. Las fechas de una copia son las de su origen,
+tan exactas como el destino las guarda —un volumen FAT guarda la fecha de
+modificación con dos segundos de precisión—, y una ejecución cuyas fechas
+no pudieron conservarse todas con exactitud lo dice en un único registro
+`omission` en el flujo de información estándar, no en un aviso. Un
+directorio recibe sus fechas cuando sus entradas ya están dentro. Un
+propietario que quien copia no puede dar a una copia queda como el suyo,
+como en GNU, sin aviso.
 
 Cada copia lleva los atributos extendidos del origen —un tipo de archivo
 de RISC OS, el tipo y el creador de un Mac— allí donde el destino puede
@@ -91,14 +94,26 @@ donde el recorrido lo encuentra.
   `-P`, una copia recursiva reproduce cada enlace, también los de sus
   operandos, y cualquier otra copia sigue los enlaces de sus operandos,
   como la de GNU; `-l` enlaza aquello a lo que apunta un enlace seguido.
+- `-a, --archive` — `-dR --preserve=all`: copiar el árbol, reproducir sus
+  enlaces y conservar todo lo que la copia pueda.
+- `-p` — `--preserve=mode,ownership,timestamps`; un `--preserve` solo es
+  lo mismo.
+- `--preserve=mode` — dar a cada copia el modo exacto de su origen,
+  incluidos los bits set-ID y sticky y los que retiene la umask.
+- `--preserve=ownership` — dar a cada copia el propietario y el grupo de su
+  origen, en la medida en que quien copia pueda.
+- `--preserve=timestamps` — dar a cada copia las fechas de acceso y de
+  modificación de su origen, tan exactas como el destino las guarda.
+- `--preserve=all` — conservar el modo, el propietario, las fechas y los
+  nodos compartidos, y llevar cada atributo extendido que guarda el destino.
 - `--preserve=links` — dos fuentes que nombran un mismo nodo obtienen
   dos nombres en el destino en lugar de dos copias, de modo que la copia
   no duplica el almacenamiento en silencio.
 - `--preserve=xattr` — todos los atributos extendidos deben copiarse:
   una copia cuyo destino no pueda guardar uno falla y lo nombra.
   `--preserve=links,xattr` pide ambas cosas.
-- `--no-preserve=xattr` — no copiar ningún atributo extendido. También
-  se aceptan `ownership` y `timestamps`, que de por sí no se conservan.
+- `--no-preserve=xattr` — no copiar atributos extendidos. `ownership`,
+  `timestamps` y `links` deshacen lo que `-p` o `-a` conserva de cada uno.
 - `--no-preserve=mode` — crear cada archivo y cada directorio nuevos con
   el modo que toma uno nuevo cuando nada lo indica, menos la umask, en
   lugar del de su origen. `--no-preserve=all` también lo hace.

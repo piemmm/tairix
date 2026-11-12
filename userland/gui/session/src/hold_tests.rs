@@ -77,18 +77,18 @@ fn a_held_window_still_hears_a_release_and_nothing_that_starts_anything() {
     let up = WindowEvent::Key {
         window_id: 4,
         key: KeyInput::Released {
-            key: KeyValue::Named(NamedKeyCode::Enter),
+            key: Some(KeyValue::Named(NamedKeyCode::Enter)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::A,
         },
     };
     assert!(reaches_held_window(&up));
     let down = WindowEvent::Key {
         window_id: 4,
         key: KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Enter),
+            key: Some(KeyValue::Named(NamedKeyCode::Enter)),
             modifiers: Modifiers::default(),
-            physical: PhysicalKey::UNKNOWN,
+            physical: PhysicalKey::A,
         },
     };
     assert!(!reaches_held_window(&down));
@@ -113,12 +113,12 @@ fn only_a_button_or_a_key_going_down_is_a_press() {
     assert!(!is_press(&pointer(PointerAction::Moved)));
     let key = |key| WindowEvent::Key { window_id: 4, key };
     assert!(is_press(&key(KeyInput::Pressed {
-        key: KeyValue::Char(' '),
+        key: Some(KeyValue::Char(' ')),
         modifiers: Modifiers::default(),
         physical: PhysicalKey::SPACE,
     })));
     assert!(!is_press(&key(KeyInput::Released {
-        key: KeyValue::Char(' '),
+        key: Some(KeyValue::Char(' ')),
         modifiers: Modifiers::default(),
         physical: PhysicalKey::SPACE,
     })));

@@ -223,7 +223,7 @@ mod program {
         ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser, ArtworkResolver, BundleVersion,
         InlineArtwork, Resolved,
     };
-    use tairix_input::wire::modifiers_to_abi;
+    use tairix_input::wire::{modifiers_to_abi, pointer_button_to_abi};
     use tairix_log::{
         log, Event as LogEvent, EventId, Field as LogField, FieldValue as LogFieldValue,
         Level as LogLevel,
@@ -4882,7 +4882,7 @@ mod program {
                             identity: &identity,
                             programs: &programs,
                         },
-                        &listings,
+                        (&listings, &mut desktop),
                         &mut server,
                         &mut sink,
                         &mut shell,
@@ -5360,56 +5360,9 @@ mod program {
                 // it was asked.
                 while let Some(answer) = listings.collect() {
                     match answer {
-                        FileAnswer::Pick {
-                            pick,
-                            serial,
-                            opened,
-                            created,
-                            made,
-                        } => {
-                            // Made by the session, the file shows in a desktop
-                            // folder holding it even where no watch says so.
-                            let created_here = created.clone().filter(|_| opened.is_ok());
-                            let made_here = opened.is_ok().then(|| made.clone());
-                            let discard = settle_pick(
-                                (pick, serial),
-                                (opened, created, made),
-                                &mut server,
-                                &mut sink,
-                                &mut shell,
-                                &mut compositor,
-                                &mut windows,
-                                &mut picker,
-                                &mut apps,
-                                &mut menu,
-                            );
-                            let kept = made_here.filter(|_| discard.is_none());
-                            if let Some(job) = discard {
-                                let _ = listings.submit(job);
-                            } else if let Some(path) = created_here {
-                                show_unreported(
-                                    Some(path.as_str()),
-                                    &mut desktop,
-                                    &mut shell,
-                                    &mut compositor,
-                                );
-                            }
-                            // A save dropped on the bare desktop stands where
-                            // it was let go, under the name its open made.
-                            land_saved(
-                                &mut desktop,
-                                (pick.get(), serial),
-                                kept.as_deref(),
-                                (&mut shell, &mut compositor),
-                            );
-                        }
-                        FileAnswer::Folder {
-                            pick,
-                            serial,
-                            opened,
-                        } => settle_folder_pick(
-                            (pick, serial),
-                            opened,
+                        FileAnswer::Picked(answer) => settle_picked(
+                            answer,
+                            (&listings, &mut desktop),
                             &mut server,
                             &mut sink,
                             &mut shell,
@@ -5419,23 +5372,6 @@ mod program {
                             &mut apps,
                             &mut menu,
                         ),
-                        FileAnswer::NewFolder {
-                            pick,
-                            serial,
-                            made,
-                            path,
-                        } => {
-                            let shown = made.is_ok();
-                            picker.folder_made(pick, serial, made, &mut shell, &mut compositor);
-                            if shown {
-                                show_unreported(
-                                    Some(path.as_str()),
-                                    &mut desktop,
-                                    &mut shell,
-                                    &mut compositor,
-                                );
-                            }
-                        }
                         FileAnswer::Discarded => {}
                         FileAnswer::Desktop(done) => {
                             settle_desktop_call(
@@ -6293,6 +6229,21 @@ mod program {
                 if pointer.quiet_since(tap.pressed_ns) && !switch.is_background() {
                     match tap.key {
                         TapKey::Ctrl => shell.locate_pointer(now_ns),
+                        // The way out of a pointer lock comes before the
+                        // program library, and is told at once.
+                        TapKey::Meta if shell.pointer_lock().is_some() => {
+                            let _ = shell.unlock_pointer(&mut compositor);
+                            tell_pointer_locks(
+                                &mut server,
+                                &mut sink,
+                                &mut shell,
+                                &mut compositor,
+                                &mut windows,
+                                &mut picker,
+                                &mut apps.service,
+                                &mut menu,
+                            );
+                        }
                         TapKey::Meta => {
                             let modal = tairix_desktop_session::seat_modal(
                                 &lock,
@@ -8581,6 +8532,14 @@ mod program {
             path: alloc::string::String,
             kinds: Vec<alloc::string::String>,
         },
+        /// Open the folder the subtree pick `pick` hands over, for its attempt
+        /// `serial`, for a requester that `edits` documents or does not.
+        Subtree {
+            pick: PickId,
+            serial: u64,
+            path: alloc::string::String,
+            edits: bool,
+        },
         /// Make the folder pick `pick`'s save asked for, for its attempt
         /// `serial`.
         NewFolder {
@@ -8627,6 +8586,13 @@ mod program {
     /// A file opened for the user, which closes when it is dropped.
     type Opened = Result<tairix_browse::document::Opened, Errno>;
 
+    /// A folder a subtree pick hands over: the session's own handle on it, and
+    /// whether what lies beneath it may be changed through the grant.
+    struct HandedFolder {
+        folder: tairix_rt::File,
+        writable: bool,
+    }
+
     /// The files of a chosen folder its requester opens, opened in the order
     /// the picker lists them, and how many more were not.
     struct FolderFiles {
@@ -8637,6 +8603,16 @@ mod program {
     /// What a [`FileJob`] came to, in the shape its own kind of call yields,
     /// so an open never answers with nothing opened.
     enum FileAnswer {
+        /// A pick's call.
+        Picked(PickAnswer),
+        /// A desktop gesture's call.
+        Desktop(DesktopAnswer),
+        /// A file taken back, or left where it no longer names what was made.
+        Discarded,
+    }
+
+    /// What a pick's file call came to.
+    enum PickAnswer {
         /// What pick `pick` chose, opened for its attempt `serial`, the path
         /// the open made where it made a new file, and the path it is at, a
         /// save's name finished.
@@ -8654,6 +8630,13 @@ mod program {
             serial: u64,
             opened: Result<FolderFiles, Errno>,
         },
+        /// The folder the subtree pick `pick` hands over, opened for its
+        /// attempt `serial`.
+        Subtree {
+            pick: PickId,
+            serial: u64,
+            opened: Result<HandedFolder, Errno>,
+        },
         /// The folder pick `pick`'s save asked for at `path`, made for its
         /// attempt `serial`.
         NewFolder {
@@ -8662,10 +8645,6 @@ mod program {
             made: Result<(), Errno>,
             path: alloc::string::String,
         },
-        /// A desktop gesture's call.
-        Desktop(DesktopAnswer),
-        /// A file taken back, or left where it no longer names what was made.
-        Discarded,
     }
 
     /// A syscall's return as a status: negative is the kernel's refusal.
@@ -8761,6 +8740,7 @@ mod program {
             match self {
                 Self::Pick { path, .. }
                 | Self::Folder { path, .. }
+                | Self::Subtree { path, .. }
                 | Self::NewFolder { path, .. }
                 | Self::Discard { path, .. }
                 | Self::Desktop(
@@ -8807,13 +8787,13 @@ mod program {
                             path,
                         ),
                     };
-                    FileAnswer::Pick {
+                    FileAnswer::Picked(PickAnswer::Pick {
                         pick,
                         serial,
                         opened,
                         created,
                         made,
-                    }
+                    })
                 }
                 Self::Discard { file, path } => {
                     discard(&file, &path);
@@ -8824,20 +8804,32 @@ mod program {
                     serial,
                     path,
                     kinds,
-                } => FileAnswer::Folder {
+                } => FileAnswer::Picked(PickAnswer::Folder {
                     pick,
                     serial,
                     opened: open_folder(&path, &kinds),
-                },
-                Self::NewFolder { pick, serial, path } => FileAnswer::NewFolder {
+                }),
+                Self::Subtree {
                     pick,
                     serial,
-                    made: status(tairix_rt::fs_mkdir(
-                        path.as_bytes(),
-                        tairix_abi::fs::FS_NEW_DIR_MODE,
-                    )),
                     path,
-                },
+                    edits,
+                } => FileAnswer::Picked(PickAnswer::Subtree {
+                    pick,
+                    serial,
+                    opened: open_subtree(&path, edits),
+                }),
+                Self::NewFolder { pick, serial, path } => {
+                    FileAnswer::Picked(PickAnswer::NewFolder {
+                        pick,
+                        serial,
+                        made: status(tairix_rt::fs_mkdir(
+                            path.as_bytes(),
+                            tairix_abi::fs::FS_NEW_DIR_MODE,
+                        )),
+                        path,
+                    })
+                }
                 Self::Desktop(call) => FileAnswer::Desktop(call.run()),
             }
         }
@@ -8847,25 +8839,32 @@ mod program {
             match self {
                 Self::Pick {
                     pick, serial, path, ..
-                } => FileAnswer::Pick {
+                } => FileAnswer::Picked(PickAnswer::Pick {
                     pick,
                     serial,
                     opened: Err(err),
                     created: None,
                     made: path,
-                },
+                }),
                 Self::Discard { .. } => FileAnswer::Discarded,
-                Self::Folder { pick, serial, .. } => FileAnswer::Folder {
+                Self::Folder { pick, serial, .. } => FileAnswer::Picked(PickAnswer::Folder {
                     pick,
                     serial,
                     opened: Err(err),
-                },
-                Self::NewFolder { pick, serial, path } => FileAnswer::NewFolder {
+                }),
+                Self::Subtree { pick, serial, .. } => FileAnswer::Picked(PickAnswer::Subtree {
                     pick,
                     serial,
-                    made: Err(err),
-                    path,
-                },
+                    opened: Err(err),
+                }),
+                Self::NewFolder { pick, serial, path } => {
+                    FileAnswer::Picked(PickAnswer::NewFolder {
+                        pick,
+                        serial,
+                        made: Err(err),
+                        path,
+                    })
+                }
                 Self::Desktop(DesktopCall::Document {
                     run_path,
                     label,
@@ -9043,6 +9042,19 @@ mod program {
             }
         }
         Ok(found)
+    }
+
+    /// Open the folder at `path` that a subtree pick hands over: to be listed,
+    /// never through a final link, so a name turned into a link since the
+    /// listing hands over nothing; writable for a requester that `edits`
+    /// where the user may write the folder.
+    fn open_subtree(path: &str, edits: bool) -> Result<HandedFolder, Errno> {
+        let flags = tairix_abi::fs::OpenFlags::READ
+            .union(tairix_abi::fs::OpenFlags::DIRECTORY)
+            .union(tairix_abi::fs::OpenFlags::NO_FOLLOW);
+        let folder = tairix_rt::File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+        let writable = edits && folder.access(tairix_abi::Access::WRITE).is_ok();
+        Ok(HandedFolder { folder, writable })
     }
 
     /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a
@@ -11063,7 +11075,7 @@ mod program {
                     identity: self.identity,
                     programs: self.programs,
                 },
-                self.files,
+                (self.files, &mut *self.desktop),
                 self.server,
                 self.sink,
                 seat.shell,
@@ -12019,7 +12031,7 @@ mod program {
                         step_pick(
                             step,
                             &Openers { identity, programs },
-                            files,
+                            (files, &mut *desktop),
                             server,
                             sink,
                             shell,
@@ -12037,7 +12049,7 @@ mod program {
                         step_pick(
                             step,
                             &Openers { identity, programs },
-                            files,
+                            (files, &mut *desktop),
                             server,
                             sink,
                             shell,
@@ -12163,7 +12175,7 @@ mod program {
                             step_pick(
                                 step,
                                 &Openers { identity, programs },
-                                files,
+                                (files, &mut *desktop),
                                 server,
                                 sink,
                                 shell,
@@ -12181,7 +12193,7 @@ mod program {
                             step_pick(
                                 step,
                                 &Openers { identity, programs },
-                                files,
+                                (files, &mut *desktop),
                                 server,
                                 sink,
                                 shell,
@@ -12335,7 +12347,7 @@ mod program {
                         step_pick(
                             step,
                             &Openers { identity, programs },
-                            files,
+                            (files, &mut *desktop),
                             server,
                             sink,
                             shell,
@@ -12450,14 +12462,19 @@ mod program {
                         );
                     }
                 }
-                // A primary release that ended a client pointer grab: forward
-                // it so an in-content click or drag completes (a tab or combo
-                // selection, a released scrollbar thumb).
-                InputResponse::ClientPointerReleased { window, local } => {
-                    let released = tairix_wm::InputEvent::PointerReleased {
-                        button: tairix_wm::PointerButton::Primary,
-                    };
-                    if let Some(pick) = picker.shown_in(window) {
+                // A release ending a button's part in a client pointer grab:
+                // forward it so an in-content click or drag completes (a tab
+                // or combo selection, a released scrollbar thumb, a right-drag).
+                // The desktop's own windows answer the primary button alone.
+                InputResponse::ClientPointerReleased {
+                    window,
+                    local,
+                    button,
+                } => {
+                    let released = tairix_wm::InputEvent::PointerReleased { button };
+                    let own = picker.shown_in(window).is_some() || windows.alerts.owns(window);
+                    if own && button != tairix_wm::PointerButton::Primary {
+                    } else if let Some(pick) = picker.shown_in(window) {
                         picker.handle_pointer(pick, local, &released, shell, compositor);
                     } else if windows.alerts.owns(window) {
                         let answer = windows.alerts.pointer(
@@ -12501,11 +12518,120 @@ mod program {
                                 window_id: id,
                                 x,
                                 y,
-                                action: PointerAction::Released(
-                                    tairix_abi::input::PointerButtonCode::Primary,
-                                ),
+                                action: PointerAction::Released(pointer_button_to_abi(button)),
                                 modifiers: pointer_modifiers(shell),
                                 at_ns,
+                            },
+                        );
+                    }
+                }
+                // A button joining a press an application's window holds, and
+                // what reaches the window the pointer is locked to: its
+                // window's alone, wherever the pointer is.
+                InputResponse::ClientPointerPressed {
+                    window,
+                    local,
+                    button,
+                }
+                | InputResponse::LockedButton {
+                    window,
+                    local,
+                    button,
+                    pressed: true,
+                } => {
+                    if let (Some(id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Pressed(pointer_button_to_abi(button)),
+                                modifiers: pointer_modifiers(shell),
+                                at_ns,
+                            },
+                        );
+                    }
+                }
+                InputResponse::LockedButton {
+                    window,
+                    local,
+                    button,
+                    pressed: false,
+                } => {
+                    if let (Some(id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::Pointer {
+                                window_id: id,
+                                x,
+                                y,
+                                action: PointerAction::Released(pointer_button_to_abi(button)),
+                                modifiers: pointer_modifiers(shell),
+                                at_ns,
+                            },
+                        );
+                    }
+                }
+                InputResponse::LockedMotion { window, dx, dy } => {
+                    if let Some(id) = windows.ipc_id(window) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::PointerMotion {
+                                window_id: id,
+                                dx,
+                                dy,
+                                modifiers: pointer_modifiers(shell),
+                                at_ns,
+                            },
+                        );
+                    }
+                }
+                // A key that typed nothing, which a window reading the
+                // keyboard raw is owed as a key like any other.
+                InputResponse::RawKey { window } => {
+                    if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::Key {
+                                window_id: id,
+                                key: record,
                             },
                         );
                     }
@@ -15715,7 +15841,7 @@ mod program {
     fn step_pick<S: DirectorySource, F: PickSources<S>>(
         step: Option<PickStep>,
         openers: &Openers<'_>,
-        files: &Listings,
+        (files, desktop): (&Listings, &mut Desktop<S>),
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -15779,14 +15905,51 @@ mod program {
         };
         // Answered at once: carried out here for want of a reader, or
         // refused because too many calls are waiting.
-        match answered {
-            Some(FileAnswer::Pick {
+        if let Some(FileAnswer::Picked(answer)) = answered {
+            settle_picked(
+                answer,
+                (files, desktop),
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                menu,
+            );
+        }
+    }
+
+    /// Settle `answer`, what a pick's file call came to, whether a reader
+    /// carried it out or it was answered at once: the pick concluded, a file
+    /// the session made shown on the desktop it was made in, and a save
+    /// dropped there standing where it was let go.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_picked<S: DirectorySource, F: PickSources<S>>(
+        answer: PickAnswer,
+        (files, desktop): (&Listings, &mut Desktop<S>),
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        match answer {
+            PickAnswer::Pick {
                 pick,
                 serial,
                 opened,
                 created,
                 made,
-            }) => {
+            } => {
+                // Made by the session, the file shows in a desktop folder
+                // holding it even where no watch says so.
+                let created_here = created.clone().filter(|_| opened.is_ok());
+                let made_here = opened.is_ok().then(|| made.clone());
                 let discard = settle_pick(
                     (pick, serial),
                     (opened, created, made),
@@ -15799,34 +15962,73 @@ mod program {
                     apps,
                     menu,
                 );
+                let kept = made_here.filter(|_| discard.is_none());
                 if let Some(job) = discard {
                     let _ = files.submit(job);
+                } else if let Some(path) = created_here {
+                    show_unreported(Some(path.as_str()), desktop, shell, compositor);
                 }
+                // A save dropped on the bare desktop stands where it was let
+                // go, under the name its open made.
+                land_saved(
+                    desktop,
+                    (pick.get(), serial),
+                    kept.as_deref(),
+                    (shell, compositor),
+                );
             }
-            Some(FileAnswer::Folder {
+            PickAnswer::Folder {
                 pick,
                 serial,
                 opened,
-            }) => {
-                let asked = (pick, serial);
-                settle_folder_pick(
-                    asked, opened, server, sink, shell, compositor, windows, picker, apps, menu,
-                );
-            }
-            Some(FileAnswer::NewFolder {
-                pick, serial, made, ..
-            }) => {
+            } => settle_folder_pick(
+                (pick, serial),
+                opened,
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                menu,
+            ),
+            PickAnswer::Subtree {
+                pick,
+                serial,
+                opened,
+            } => settle_subtree_pick(
+                (pick, serial),
+                opened,
+                server,
+                sink,
+                shell,
+                compositor,
+                windows,
+                picker,
+                apps,
+                menu,
+            ),
+            PickAnswer::NewFolder {
+                pick,
+                serial,
+                made,
+                path,
+            } => {
+                let shown = made.is_ok();
                 picker.folder_made(pick, serial, made, shell, compositor);
+                if shown {
+                    show_unreported(Some(path.as_str()), desktop, shell, compositor);
+                }
             }
-            Some(FileAnswer::Desktop(_) | FileAnswer::Discarded) | None => {}
         }
     }
 
     /// What a reader carries out for pick `pick`'s attempt `serial` to open
     /// `path` for the window's attested `owner`: a folder pick opens the
-    /// folder's files of the kinds the owner opens, an import the file
-    /// read-only, any other the file, for writing where the owner edits
-    /// documents.
+    /// folder's files of the kinds the owner opens, a subtree pick the folder
+    /// itself, an import the file read-only, any other the file, for writing
+    /// where the owner edits documents.
     fn open_job(
         (pick, serial): (PickId, u64),
         path: alloc::string::String,
@@ -15834,21 +16036,33 @@ mod program {
         owner: Option<tairix_abi::ProcId>,
         openers: &Openers<'_>,
     ) -> FileJob {
-        if access == PickAccess::Folder {
-            let kinds = owner.map(|owner| openers.kinds(owner)).unwrap_or_default();
-            return FileJob::Folder {
-                pick,
-                serial,
-                path,
-                kinds,
-            };
+        let edits = access.opens_to_edit(owner.is_some_and(|owner| openers.edits(owner)));
+        match access {
+            PickAccess::Folder => {
+                let kinds = owner.map(|owner| openers.kinds(owner)).unwrap_or_default();
+                return FileJob::Folder {
+                    pick,
+                    serial,
+                    path,
+                    kinds,
+                };
+            }
+            PickAccess::Subtree => {
+                return FileJob::Subtree {
+                    pick,
+                    serial,
+                    path,
+                    edits,
+                };
+            }
+            PickAccess::Read | PickAccess::Import | PickAccess::Create | PickAccess::Replace => {}
         }
         FileJob::Pick {
             pick,
             serial,
             path,
             access,
-            edits: access.opens_to_edit(owner.is_some_and(|owner| openers.edits(owner))),
+            edits,
             typing,
         }
     }
@@ -15911,6 +16125,70 @@ mod program {
                 menu,
             );
         }
+    }
+
+    /// Settle the folder a reader opened for subtree pick `pick`'s attempt
+    /// `serial`: hand it whole, as a directory capability, to the attested
+    /// owner of the window that asked and deliver `SubtreePicked`, or — where
+    /// the grant is refused — `PickCancelled`. A folder that could not be
+    /// opened leaves the picker up to say why; an answer the pick no longer
+    /// waits for is dropped, and the folder closes with it.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_subtree_pick<S: DirectorySource, F: PickSources<S>>(
+        (pick, serial): (PickId, u64),
+        result: Result<HandedFolder, Errno>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let status = result.as_ref().map(|_| ()).map_err(|err| *err);
+        let Some(PickEnd::Chosen {
+            for_window, name, ..
+        }) = picker.opened(pick, serial, (status, None), shell, compositor)
+        else {
+            return;
+        };
+        let Ok(handed) = result else {
+            return;
+        };
+        let granted = DocumentName::new(&name).ok().zip(
+            server
+                .owner_of(for_window)
+                .map(|owner| {
+                    tairix_rt::fd_grant(
+                        handed.folder.fd(),
+                        tairix_browse::document::grant_ceiling(handed.writable),
+                        owner,
+                        tairix_abi::GRANT_SUBTREE,
+                    )
+                })
+                .and_then(|handle| u64::try_from(handle).ok())
+                .filter(|&handle| handle != 0),
+        );
+        if granted.is_none() {
+            io::write_stderr_line("desktop: picker delegation refused");
+        }
+        conclude(
+            (pick, for_window),
+            granted.as_ref().map(|(name, handle)| PickedFile {
+                handle: *handle,
+                name,
+                writable: handed.writable,
+            }),
+            server,
+            sink,
+            shell,
+            compositor,
+            windows,
+            picker,
+            apps,
+            menu,
+        );
     }
 
     /// Settle the open a reader carried out for pick `pick`'s attempt
@@ -16231,6 +16509,30 @@ mod program {
             deliver(
                 server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );
+        }
+        tell_pointer_locks(server, sink, shell, compositor, windows, picker, apps, menu);
+    }
+
+    /// Tell each window whose pointer lock began or ended that it did, in the
+    /// order it happened.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn tell_pointer_locks<S: DirectorySource, F: PickSources<S>>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        while let Some((wm, locked)) = shell.take_lock_news(compositor) {
+            if let Some(window_id) = windows.ipc_id(wm) {
+                let event = WindowEvent::PointerLock { window_id, locked };
+                deliver(
+                    server, sink, shell, compositor, windows, picker, apps, menu, &event,
+                );
+            }
         }
     }
 

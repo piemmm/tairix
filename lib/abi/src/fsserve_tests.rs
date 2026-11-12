@@ -226,7 +226,22 @@ fn other_requests() -> Vec<Request<'static>> {
         Request::SetLabel {
             title: title("Workbench 3.1"),
         },
+        Request::SetTimes {
+            node: FILE,
+            change: times_change(),
+        },
     ]
+}
+
+/// A change away from every default: an instant, a now, and the nearest.
+fn times_change() -> crate::fs::TimesChange {
+    crate::fs::TimesChange {
+        accessed: crate::fs::StampChange::At(
+            crate::time::Time64::new(-86_401, 999_999_999).expect("canonical"),
+        ),
+        modified: crate::fs::StampChange::Now,
+        nearest: true,
+    }
 }
 
 /// `text` as a volume title.
@@ -305,7 +320,7 @@ fn a_request_frame_out_of_shape_is_refused() {
     let mut op = good.clone();
     op[2] = 0;
     assert_eq!(decode_request(&op), Err(Errno::OutOfRange));
-    op[2] = Op::SetLabel as u8 + 1;
+    op[2] = Op::SetTimes as u8 + 1;
     assert_eq!(decode_request(&op), Err(Errno::OutOfRange));
     let mut flags = good.clone();
     flags[3] = 2;
@@ -619,6 +634,20 @@ fn other_answers() -> Vec<Case> {
                 title: title("Ünïcode"),
             },
             Answer::Done,
+        ),
+        (
+            Request::SetTimes {
+                node: FILE,
+                change: times_change(),
+            },
+            Answer::Kept(crate::fs::TimesKept::Nearest),
+        ),
+        (
+            Request::SetTimes {
+                node: FILE,
+                change: crate::fs::TimesChange::default(),
+            },
+            Answer::Kept(crate::fs::TimesKept::Exactly),
         ),
     ]
 }

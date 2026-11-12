@@ -106,7 +106,7 @@ pub use shadow::shadow_footprint;
 pub use stats::FrameStats;
 pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
-pub use window::{Placement, PointerCatch, ResizeBounds, Window, WindowId};
+pub use window::{CursorHint, Placement, PointerCatch, ResizeBounds, Window, WindowId};
 
 pub use tairix_controls::{
     ResizeEdge, ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,

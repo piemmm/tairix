@@ -114,7 +114,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
-use tairix_abi::SeekRegion;
+use tairix_abi::{SeekRegion, TimesChange, TimesKept};
 use tairix_collections::{OrderedMap, OrderedSet};
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_log::Sink;
@@ -1585,6 +1585,19 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_written(file.raw());
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.changed(file);
+        }
+        result
+    }
+
+    /// New times move the node's stat and every listing entry embedding it,
+    /// dropped on success and failure alike as a security change's are.
+    fn set_times(&mut self, node: NodeId, change: TimesChange) -> Result<TimesKept, DriverError> {
+        self.enforce_pressure();
+        let result = self.inner.set_times(node, change);
+        self.invalidate_stat(node.raw());
+        self.invalidate_dirents_embedding(node.raw());
+        if let (Some(changes), Ok(_)) = (self.changes.as_mut(), result.as_ref()) {
+            changes.changed(node);
         }
         result
     }

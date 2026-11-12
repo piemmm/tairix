@@ -49,11 +49,12 @@ use tairix_controls::{
     SliderAction, Tab, Tabs, TabsAction,
 };
 
-use crate::effects::{EffectKey, FULL};
+use crate::effects::EffectKey;
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MAX_SCROLLBACK_LINES, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
 use crate::swatch;
 use tairix_controls::{SwatchAction, SwatchGrid, SwatchMark};
+use tairix_crt::FULL;
 
 /// The tab that edits the colour scheme and text size.
 const APPEARANCE_TAB: usize = 0;

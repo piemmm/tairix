@@ -22,7 +22,7 @@ use tairix_arch_riscv64::{
 };
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
 use tairix_kernel_core::{spawn_image, MemMap, SpawnMode, SpawnRequest};
 use tairix_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, DirectPhysMap, Frame, PhysAddr,
@@ -77,7 +77,7 @@ static UNMAP_OK: AtomicBool = AtomicBool::new(false);
 /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
 /// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -91,13 +91,10 @@ static ALLOCATOR: FreeListAllocator =
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builder and the anonymous map draw
-/// user pages from. `align(4096)` so each `PAGE_SIZE` slice is a valid page
+/// user pages from. Page-aligned, so each `PAGE_SIZE` slice is a valid page
 /// frame; identity-mapped (its physical address equals its kernel virtual
 /// address), so the builders reach it through [`DirectPhysMap::identity`].
-#[repr(C, align(4096))]
-struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; paging::PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ paging::PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Monotonic index of the next free [`FRAME_POOL`] frame.
 static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
@@ -110,7 +107,7 @@ fn next_frame() -> Option<Frame> {
         return None;
     }
     let offset = idx * paging::PAGE_SIZE;
-    let base = core::ptr::addr_of!(FRAME_POOL) as u64 + offset as u64;
+    let base = FRAME_POOL.as_mut_ptr() as u64 + offset as u64;
     Some(Frame::containing(PhysAddr::new(base)))
 }
 

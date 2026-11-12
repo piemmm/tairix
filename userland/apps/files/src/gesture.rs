@@ -254,7 +254,7 @@ impl PressInput {
             WindowEvent::Key {
                 key:
                     KeyInput::Pressed {
-                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        key: Some(KeyValue::Named(NamedKeyCode::Escape)),
                         ..
                     },
                 ..
@@ -768,9 +768,10 @@ mod tests {
         WindowEvent::Key {
             window_id: 1,
             key: KeyInput::Pressed {
-                key,
+                key: Some(key),
                 modifiers: Modifiers::default(),
-                physical: tairix_abi::input::PhysicalKey::UNKNOWN,
+                // Which key typed it is not what a gesture reads.
+                physical: tairix_abi::input::PhysicalKey::A,
             },
         }
     }

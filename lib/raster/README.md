@@ -514,6 +514,14 @@ This crate owns:
   bytes (the interchange form a decoder produces); the third takes and returns
   `Surface`s in the premultiplied space they already store, so scaling a
   surface costs no conversion round trip. See "The resampler" below.
+- `SharpScaler` / `SharpError` — the frame scaler: an opaque picture that
+  changes every frame, an emulated screen, enlarged into a rectangle with its
+  pixels kept square, each source pixel a block of whole output pixels and only
+  the output pixel at a block's edge blended; a shrink is plain bilinear. Taps
+  are kept per pair of sizes, `draw` takes the target rows to draw, and
+  `rows_reached` the rows a change to some source rows redraws. It is not the
+  resampler: that is exact and per asset, this is a copy almost everywhere and
+  per frame.
 - `Surface`'s `tairix_reclaim::CachedBytes` impl — the one measurement of a
   surface's retained heap size (its pixel buffer) and the one wipe that
   clears it to fully transparent black before release. The window manager's
@@ -837,8 +845,8 @@ baseline beside them.
 
 It reports **ns per pixel** and **ns per frame** for `Surface::blit` (opaque
 and translucent sources), `fill_round_rect`, `box_blur` and `frost_region`
-over several radii, `resample`, the scan-out channel encode, and the window
-manager's whole-frame composite. The blur family also sweeps *aspect ratio at
+over several radii, `resample`, the frame scaler (`sharp`), the scan-out
+channel encode, and the window manager's whole-frame composite. The blur family also sweeps *aspect ratio at
 constant area*, at two areas either side of L2, because the vertical pass
 strides by `width` and that is what separates its memory traffic from its
 per-pixel arithmetic — it measures flat, so the pass is not width-sensitive

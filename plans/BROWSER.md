@@ -47,7 +47,7 @@ compiler), `plans/RUST.md` R5 (one capability ceiling per bundle),
 | BR23 | Network breadth: WebSockets, server-sent events, HTTP/3 over QUIC | planned |
 | BR24 | Accessibility: the page's accessibility tree exposed to the desktop | blocked: the desktop has no accessibility interface |
 | BR25 | Developer tools: the inspector, the console, the network log, and a debugger on the interpreter | planned |
-| BR26 | Code installation: the kernel primitive that publishes a compiler-filled region read-execute into exactly one renderer by an atomic flip, its `CAP_JIT_MAP_EXEC` gate, and the compiler sandbox | planned |
+| BR26 | Code installation: the kernel primitive that publishes a compiler-filled region read-execute into exactly one renderer by an atomic flip, its `CAP_JIT_MAP_EXEC` gate, and the compiler sandbox | done |
 | BR27 | WebAssembly: `plans/UNIVERSAL.md` U2's validator and compiler run in the compiler sandbox at load time, the JavaScript API, and Wasm GC objects in the engine heap | blocked: `plans/UNIVERSAL.md` U2 |
 | BR28 | The baseline JIT: one machine-code template per bytecode, no speculation, frames identical to the interpreter's, backends for x86_64, aarch64 and riscv64 | planned |
 | BR29 | An optimising tier | blocked: a measured case that BR28 is not enough, and an approved machine-checked verification method |
@@ -173,8 +173,8 @@ on it starts.
      serves.
    - Compiled code is never written to disk.
    - BR26 is the primitive `plans/UNIVERSAL.md` U2 needs too, and one code
-     generator — encoders, register allocator, lowering — serves U2's compiler,
-     BR27 and BR28. Its backend is chosen by the discovered architecture, never
+     generator, `lib/codegen` — encoders, register allocator, lowering —
+     serves U2's compiler, BR27 and BR28. Its backend is chosen by the discovered architecture, never
      by a `cfg` (§17.2).
 
 7. **Time and side channels.** Script-visible clocks are coarsened to the web

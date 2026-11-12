@@ -132,6 +132,10 @@ impl PhysMap for RecordingPhysMap<'_> {
     fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {
         // No-op: host test double, no instruction-cache alias to synchronise.
     }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        true
+    }
 }
 
 #[test]
@@ -1497,6 +1501,10 @@ impl PhysMap for MissingBlock<'_> {
 
     fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
         self.inner.sync_instruction_cache(phys, len);
+    }
+
+    fn fence_instruction_fetch(&self) -> bool {
+        self.inner.fence_instruction_fetch()
     }
 }
 

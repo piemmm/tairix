@@ -491,6 +491,81 @@ pub const TARGETS: &[Target] = &[
             "the PDF reader over untrusted documents: structure, repair, filters, encryption, content, images",
     },
     Target {
+        package: "tairix-fat",
+        test: "fuzz_fat",
+        description: "the FAT format's boot sector, directory and table decoders over hostile volumes",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_cpu",
+        description: "PC emulator CPU: hostile guest code on every model, decoder bounds and cycle limits",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_imd",
+        description: "PC emulator ImageDisk parser: hostile floppy archives, track and sector queries",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_disks",
+        description: "PC emulator disk controllers: hostile port traffic, DMA programming and media changes",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_sound_devices",
+        description: "PC emulator sound: hostile DSP commands over DMA, YM3812 registers and parallel DACs",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_ports",
+        description: "PC emulator ports: hostile UART, printer, game port and clock card traffic, mouse motion",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_ems",
+        description: "PC emulator EMS manager: hostile INT 67h calls and structures, page accounting",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_dos",
+        description: "TAIRiX DOS: hostile INT 21h, 25h and 26h calls and EXEC images on a booted system",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_mouse",
+        description: "MOUSE.COM: hostile INT 33h calls under mouse motion, buttons and mode changes",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_bios",
+        description: "PC emulator BIOS: hostile service calls over a written-over data area, on every adapter",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_shell",
+        description: "COMMAND.COM: hostile command lines and batch files typed at a booted system",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_link",
+        description: "PC emulator session: hostile worker events into the host, hostile commands and answers into the worker",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_machine_snapshot",
+        description: "PC emulator snapshots: real snapshots changed in place, restored, and the machine run on",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_fpu",
+        description: "PC emulator 8087: hostile numeric instruction streams over hostile state and memory, snapshots, IEEE agreement",
+    },
+    Target {
+        package: "tairix-pcemu",
+        test: "fuzz_translator",
+        description: "PC emulator translator: hostile blocks run by the IR interpreter and every backend's model, held to the CPU interpreter",
+    },
+    Target {
         package: "tairix-drawing",
         test: "fuzz_drawing",
         description:
@@ -775,6 +850,11 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-disasm",
         test: "fuzz_wasm_isa",
         description: "lib/disasm wasm code-body decoder (untrusted executable-file bytes: never panics, always makes forward progress)",
+    },
+    Target {
+        package: "tairix-codegen",
+        test: "fuzz_codegen",
+        description: "lib/codegen generator (every backend's code on its machine model against the IR interpreter; any built function refused by the verifier or compiled, never a panic)",
     },
     Target {
         package: "tairix-disasm",

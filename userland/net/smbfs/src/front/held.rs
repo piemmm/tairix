@@ -26,7 +26,7 @@ use tairix_reclaim::{
 };
 use tairix_writeback::WritebackBound;
 
-use super::served::{driver_error, Through};
+use super::served::{driver_error, Retimed, Through};
 use super::written::{Written, BLOCK, BLOCK_PINNED};
 use super::{record, Front, Lie, CALL_DEADLINE_NS};
 use crate::events::WRITE_BACK_LOST;
@@ -205,6 +205,7 @@ pub(super) enum HeldOp {
     Read { offset: u64, span: Span },
     Write { offset: u64, span: Span },
     Truncate(u64),
+    Retime(Retimed),
 }
 
 /// What a held call the server answered did to its file.
@@ -216,6 +217,8 @@ pub(super) enum Effect {
     Wrote { offset: u64, count: u64 },
     /// The file's length set.
     Resized(u64),
+    /// The file's times set.
+    Retimed(Retimed),
 }
 
 /// A file the kernel holds open, and the front's open on it.
@@ -1007,6 +1010,16 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                 }
                 self.through(now, offer, node, ticket, Through::Resize(size))
             }
+            HeldOp::Retime(times) => {
+                if self
+                    .held(offer, node)
+                    .is_some_and(|held| held.is_open() && !held.written.is_empty())
+                {
+                    self.send_wave(offer, node);
+                    return Ran::Again;
+                }
+                self.through(now, offer, node, ticket, Through::Retime(times))
+            }
         }
     }
 
@@ -1283,6 +1296,12 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                 held.size = size;
                 held.unsynced = true;
                 held.generation = held.generation.wrapping_add(1);
+            }
+            Effect::Retimed(times) => {
+                if let Some(stat) = held.stat.as_mut() {
+                    stat.accessed = times.accessed.unwrap_or(stat.accessed);
+                    stat.modified = times.written.unwrap_or(stat.modified);
+                }
             }
         }
         if effect != Effect::Nothing {

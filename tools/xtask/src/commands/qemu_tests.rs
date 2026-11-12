@@ -484,6 +484,12 @@ enum FsDisk {
     /// disk ever carries it; no production image ships it.
     StalltraceRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** additionally carries the test-only `pcemucheck` fixture
+    /// bundle ([`super::image_apps::pcemu_store_files`]) — the PC emulator's
+    /// verticals' backing (`plans/PCEMU.md` PC21). Only this disk carries the
+    /// fixture; no production image ships it.
+    PcemuRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** carries the standard store with the `netstack` service
     /// bundle **replaced** by the test-only watchdog fixture
     /// ([`super::image_apps::watchdog_store_files`]) — the liveness-watchdog
@@ -1397,6 +1403,17 @@ const OPTICAL_COMMAND_LINE: &str = "optical\n";
 /// `exit` that completes its PASS chain: the `optical` fixture's pass, read
 /// from its own definition so the script and the program cannot drift.
 const OPTICAL_PASS_PREFIX: &str = tairix_test_optical::PASS_MARKER;
+
+/// The PC emulator's verticals' script: unlock, log in, run the
+/// `pcemucheck` fixture, and exit only once it has printed its pass. The
+/// command line is pinned to the fixture's own `COMMAND` by a unit test below.
+const PCEMU_SERIAL: &[(&str, Duration, &str)] = &[
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+    ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+    ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+    ("root@tairix ~% ", Duration::ZERO, "pcemucheck\n"),
+    (tairix_test_pcemu::PASS_MARKER, Duration::ZERO, "exit\n"),
+];
 
 /// The bare command word the twin-volume vertical types at the shell, with its
 /// newline. Pinned to the fixture's own `COMMAND` by a unit test below.
@@ -5843,6 +5860,85 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // The PC17 / BR26 code-installation vertical (aarch64): the parent of the
+    // `code_install_program` fixture, holding `CAP_JIT_MAP_EXEC` over the
+    // production `KernelDispatchHook`, has a sandboxed compiler write
+    // functions, installs each into a sandboxed target with `code_install`,
+    // and has the target call it; checks the compiler keeps none of the pages
+    // it handed over, a compiler serves one target, an unsandboxed child takes
+    // no part, and the target releases its code with `mem_unmap`. PASS once
+    // the chassis reaps a parent exit of 0. Single CPU and a 60-second budget
+    // match the sibling boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "tairix-test-code-install-qemu-aarch64",
+        binary: "tairix-test-code-install-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // The riscv64 twin of the code-installation vertical above: each install
+    // fences instruction fetch through the SBI remote `fence.i`.
+    QemuTest {
+        package: "tairix-test-code-install-qemu-riscv64",
+        binary: "tairix-test-code-install-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // The x86_64 twin of the code-installation verticals above, driven
+    // through the shared production board bring-up.
+    QemuTest {
+        package: "tairix-test-code-install-qemu-x86_64",
+        binary: "tairix-test-code-install-qemu-x86_64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
     // `plans/APPS.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`
@@ -7546,6 +7642,105 @@ static TESTS: &[QemuTest] = &[
             ("root@tairix ~% ", Duration::ZERO, "memsoak\n"),
             (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
+        expect: Expect::Pass,
+    },
+    // `plans/PCEMU.md` PC21: the PC emulator on aarch64. The production
+    // pipeline boots against `FsDisk::PcemuRootDisk`, the encrypted root
+    // whose `/System` store carries the test-only `pcemucheck` fixture, and
+    // the scripted root shell runs it: the emulator's reference run must
+    // give the digest every target asserts, then the default machine boots
+    // DOS in its sandboxed worker and runs a summing loop from a diskette,
+    // its blocks compiled in a compiler sandbox, installed with
+    // `code_install` and run natively, until its sum is on the screen. The
+    // guest sink passes on the shell's exit after the fixture's, typed only
+    // once `PCEMU PASS` appeared; a failing fixture parks with its reason. The
+    // budget covers boot, unlock and the interpreted reference run on TCG.
+    QemuTest {
+        package: "tairix-test-pcemu-qemu-aarch64",
+        binary: "tairix-test-pcemu-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(600),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::PcemuRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: PCEMU_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/PCEMU.md` PC21: the PC emulator on riscv64. The production
+    // pipeline boots against `FsDisk::PcemuRootDisk`, the encrypted root
+    // whose `/System` store carries the test-only `pcemucheck` fixture, and
+    // the scripted root shell runs it: the emulator's reference run must
+    // give the digest every target asserts, then the default machine boots
+    // DOS in its sandboxed worker and runs a summing loop from a diskette,
+    // its blocks compiled in a compiler sandbox, installed with
+    // `code_install` and run natively, until its sum is on the screen. The
+    // guest sink passes on the shell's exit after the fixture's, typed only
+    // once `PCEMU PASS` appeared; a failing fixture parks with its reason. The
+    // budget covers boot, unlock and the interpreted reference run on TCG.
+    QemuTest {
+        package: "tairix-test-pcemu-qemu-riscv64",
+        binary: "tairix-test-pcemu-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(600),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::PcemuRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: PCEMU_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/PCEMU.md` PC21: the PC emulator on x86_64. The production
+    // pipeline boots against `FsDisk::PcemuRootDisk`, the encrypted root
+    // whose `/System` store carries the test-only `pcemucheck` fixture, and
+    // the scripted root shell runs it: the emulator's reference run must
+    // give the digest every target asserts, then the default machine boots
+    // DOS in its sandboxed worker and runs a summing loop from a diskette,
+    // its blocks compiled in a compiler sandbox, installed with
+    // `code_install` and run natively, until its sum is on the screen. The
+    // guest sink passes on the shell's exit after the fixture's, typed only
+    // once `PCEMU PASS` appeared; a failing fixture parks with its reason. The
+    // budget covers boot, unlock and the interpreted reference run on TCG.
+    QemuTest {
+        package: "tairix-test-pcemu-qemu-x86-64",
+        binary: "tairix-test-pcemu-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(600),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::None,
+        crypto: false,
+        fs_disk: FsDisk::PcemuRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: PCEMU_SERIAL,
         expect: Expect::Pass,
     },
     // `plans/FIX-STALLTRACE.md`: the stall-trace vertical.
@@ -13282,6 +13477,9 @@ pub(crate) struct StoreSet {
     /// plants.
     apps_with_memsoak: &'static [AppStoreFile],
     apps_with_stalltrace: &'static [AppStoreFile],
+    /// The PC emulator's verticals' set: the shared set plus the test-only
+    /// `pcemucheck` fixture bundle.
+    apps_with_pcemu: &'static [AppStoreFile],
     /// The application/service bundles the liveness-watchdog vertical
     /// plants: the shared set with its `netstack` bundle replaced by the
     /// test-only watchdog fixture.
@@ -13370,6 +13568,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     let FixtureStores {
         memsoak: apps_with_memsoak,
         stalltrace: apps_with_stalltrace,
+        pcemu: apps_with_pcemu,
         watchdog: apps_with_watchdog,
         framestats: apps_with_framestats,
         svgtext: apps_with_svgtext,
@@ -13416,6 +13615,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps,
         apps_with_memsoak,
         apps_with_stalltrace,
+        apps_with_pcemu,
         apps_with_watchdog,
         apps_with_framestats,
         apps_with_svgtext,
@@ -13461,6 +13661,8 @@ struct FixtureStores {
     memsoak: &'static [AppStoreFile],
     /// The stall-trace vertical's set.
     stalltrace: &'static [AppStoreFile],
+    /// The PC emulator's verticals' set.
+    pcemu: &'static [AppStoreFile],
     /// The liveness-watchdog vertical's set — a *substitution*, not an
     /// addition: its fixture stands in for the `netstack` service bundle.
     watchdog: &'static [AppStoreFile],
@@ -13487,6 +13689,10 @@ fn fixture_stores(
             FsDisk::StalltraceRootDisk => {
                 super::image_apps::stalltrace_store_files(ctx, arch, profile)?
             }
+            _ => EMPTY,
+        },
+        pcemu: match t.fs_disk {
+            FsDisk::PcemuRootDisk => super::image_apps::pcemu_store_files(ctx, arch, profile)?,
             _ => EMPTY,
         },
         watchdog: match t.fs_disk {
@@ -20163,6 +20369,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         apps,
         apps_with_memsoak,
         apps_with_stalltrace,
+        apps_with_pcemu,
         apps_with_watchdog,
         ..
     } = stores;
@@ -20223,6 +20430,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
             apps_with_stalltrace,
             "stalltrace-root.img",
         )?),
+        FsDisk::PcemuRootDisk => Some(plain_root_image(t, apps_with_pcemu, "pcemu-root.img")?),
         FsDisk::WatchdogRootDisk => Some(plain_root_image(
             t,
             apps_with_watchdog,
@@ -21765,10 +21973,11 @@ mod tests {
                     NamedKey::Enter => NamedKeyCode::Enter,
                     NamedKey::CaptureScreen | NamedKey::CaptureBar => return None,
                 };
+                // Which key typed it is not what the controls read.
                 Controls::new().apply_key(&KeyInput::Pressed {
-                    key: KeyValue::Named(key),
+                    key: Some(KeyValue::Named(key)),
                     modifiers: Modifiers::default(),
-                    physical: PhysicalKey::UNKNOWN,
+                    physical: PhysicalKey::A,
                 })
             })
             .collect();
@@ -23140,6 +23349,21 @@ mod tests {
         let pass = tairix_test_optical::pass_line();
         assert!(pass.starts_with(OPTICAL_PASS_PREFIX), "{pass}");
         assert!(!tairix_test_optical::swap_line().contains(OPTICAL_PASS_PREFIX));
+    }
+
+    /// The PC emulator's verticals type the fixture's own command word and
+    /// wait for the pass line it prints.
+    #[test]
+    fn pcemu_script_matches_the_fixture_vocabulary() {
+        let typed = super::PCEMU_SERIAL
+            .iter()
+            .find(|(prompt, _, _)| *prompt == "root@tairix ~% ")
+            .map(|(_, _, line)| *line);
+        assert_eq!(typed, Some("pcemucheck\n"));
+        assert_eq!(
+            typed.map(|line| line.trim_end_matches('\n')),
+            Some(tairix_test_pcemu::COMMAND)
+        );
     }
 
     /// The twin-volume vertical types the fixture's own command word, waits

@@ -155,6 +155,11 @@ fn file_ops() -> Vec<FileOp<'static>> {
             path: "a",
             size: u64::MAX,
         },
+        FileOp::Times {
+            path: "a",
+            accessed: Some(tairix_abi::time::Time64::new(-1, 999_999_900).expect("canonical")),
+            written: None,
+        },
         FileOp::Space,
     ];
     ops.extend(held_ops());
@@ -225,6 +230,11 @@ fn held_ops() -> Vec<FileOp<'static>> {
         FileOp::Resize {
             handle: 9,
             size: u64::MAX,
+        },
+        FileOp::Retime {
+            handle: 9,
+            accessed: None,
+            written: Some(tairix_abi::time::Time64::from_secs(i64::MAX)),
         },
         FileOp::Ack {
             key: [0x77; 16],

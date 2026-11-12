@@ -73,6 +73,7 @@ mod kernel {
     const SECRET_BYTE: u8 = 0xC0;
 
     use tairix_arch_riscv64::paging::KERNEL_IDENTITY_GIGAPAGES;
+    use tairix_kalloc::Arena;
 
     /// Stable audit-event ids for the QEMU transcript.
     const TEST_START: EventId = EventId(4210);
@@ -92,12 +93,9 @@ mod kernel {
     /// Page-table pool backing both address spaces (lives in `.bss`).
     static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
 
-    /// 4 KiB frame the victim maps at [`SECRET_VADDR`]. `align(4096)` so
+    /// 4 KiB frame the victim maps at [`SECRET_VADDR`]. Page-aligned, so
     /// its physical address is a valid page frame.
-    #[repr(C, align(4096))]
-    struct SecretFrame([u8; paging::PAGE_SIZE]);
-
-    static mut SECRET_FRAME: SecretFrame = SecretFrame([0; paging::PAGE_SIZE]);
+    static SECRET_FRAME: Arena<{ paging::PAGE_SIZE }> = Arena::ZERO;
 
     /// `true` once the attacker space is active — lets [`on_fault`] tell
     /// an *expected* fault from a kernel bug that faults earlier.
@@ -172,13 +170,14 @@ mod kernel {
         // Stash the secret byte into its frame while paging is still off
         // (the boot slice runs with `satp` unset), recording its physical
         // address for the fault handler's victim-intact check.
-        let secret_phys = core::ptr::addr_of!(SECRET_FRAME) as u64;
+        let secret_phys = SECRET_FRAME.as_mut_ptr() as u64;
         SECRET_PHYS.store(secret_phys, Ordering::SeqCst);
         // SAFETY: `SECRET_FRAME` is owned exclusively by this single-hart
         // boot-time set-up; the matching read in `on_fault` happens after
         // this store. The raw pointer avoids a `&mut` to the static.
         unsafe {
-            core::ptr::addr_of_mut!(SECRET_FRAME)
+            SECRET_FRAME
+                .as_mut_ptr()
                 .cast::<u8>()
                 .write_volatile(SECRET_BYTE);
         }

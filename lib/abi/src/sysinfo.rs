@@ -3590,7 +3590,7 @@ impl MountRecord {
     /// eight-byte-aligned usage block begins.
     const MEDIUM_OFFSET: usize = 8;
     const USAGE_OFFSET: usize = Self::MEDIUM_OFFSET + BLK_MEDIUM_LEN;
-    const VOLUME_ID_OFFSET: usize = Self::USAGE_OFFSET + 48;
+    const VOLUME_ID_OFFSET: usize = Self::USAGE_OFFSET + VolumeStats::WIRE_LEN;
     const IDENTITY_OFFSET: usize = Self::VOLUME_ID_OFFSET + VOLUME_ID_LEN;
     const OWNER_OFFSET: usize = Self::IDENTITY_OFFSET + VOLUME_ID_LEN;
     const SOURCE_OFFSET: usize = Self::OWNER_OFFSET + 8;
@@ -3640,7 +3640,7 @@ impl MountRecord {
             source
         };
         let usage = state.usage;
-        if usage.avail_blocks > usage.free_blocks || usage.free_blocks > usage.total_blocks {
+        if !usage.is_consistent() {
             return Err(Errno::OutOfRange);
         }
         let source_len = u8::try_from(source.len()).map_err(|_| Errno::LengthOutOfRange)?;
@@ -3880,13 +3880,7 @@ impl MountRecord {
         out[6] = self.fstype_len;
         out[7] = self.availability.as_u8();
         out[Self::MEDIUM_OFFSET..Self::USAGE_OFFSET].copy_from_slice(&self.medium);
-        put_u32(&mut out, Self::USAGE_OFFSET, self.usage.block_size);
-        out[Self::USAGE_OFFSET + 4] = u8::from(self.usage.in_reserve);
-        put_u64(&mut out, Self::USAGE_OFFSET + 8, self.usage.total_blocks);
-        put_u64(&mut out, Self::USAGE_OFFSET + 16, self.usage.free_blocks);
-        put_u64(&mut out, Self::USAGE_OFFSET + 24, self.usage.avail_blocks);
-        put_u64(&mut out, Self::USAGE_OFFSET + 32, self.usage.files);
-        put_u64(&mut out, Self::USAGE_OFFSET + 40, self.usage.files_free);
+        out[Self::USAGE_OFFSET..Self::VOLUME_ID_OFFSET].copy_from_slice(&self.usage.to_le_bytes());
         out[Self::VOLUME_ID_OFFSET..Self::IDENTITY_OFFSET].copy_from_slice(&self.volume_id);
         out[Self::IDENTITY_OFFSET..Self::OWNER_OFFSET].copy_from_slice(&self.identity);
         put_u32(&mut out, Self::OWNER_OFFSET, self.owner);
@@ -3929,13 +3923,6 @@ impl MountRecord {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        if bytes[Self::USAGE_OFFSET + 5..Self::USAGE_OFFSET + 8]
-            .iter()
-            .any(|byte| *byte != 0)
-        {
-            return Err(Errno::OutOfRange);
-        }
-        let in_reserve = decode_bool(bytes[Self::USAGE_OFFSET + 4])?;
         // Normalised on the way in, so a record the ABI does not define is
         // held, and re-emitted, as undeclared rather than relayed onward.
         let mut record = [0u8; BLK_MEDIUM_LEN];
@@ -3952,18 +3939,9 @@ impl MountRecord {
         {
             return Err(Errno::LengthOutOfRange);
         }
-        let usage = VolumeStats {
-            block_size: read_u32(bytes, Self::USAGE_OFFSET),
-            in_reserve,
-            total_blocks: read_u64(bytes, Self::USAGE_OFFSET + 8),
-            free_blocks: read_u64(bytes, Self::USAGE_OFFSET + 16),
-            avail_blocks: read_u64(bytes, Self::USAGE_OFFSET + 24),
-            files: read_u64(bytes, Self::USAGE_OFFSET + 32),
-            files_free: read_u64(bytes, Self::USAGE_OFFSET + 40),
-        };
-        if usage.avail_blocks > usage.free_blocks || usage.free_blocks > usage.total_blocks {
-            return Err(Errno::OutOfRange);
-        }
+        let mut usage = [0u8; VolumeStats::WIRE_LEN];
+        usage.copy_from_slice(&bytes[Self::USAGE_OFFSET..Self::VOLUME_ID_OFFSET]);
+        let usage = VolumeStats::from_le_bytes(&usage)?;
         let class = VolumeClass::from_u8(bytes[Self::OWNER_OFFSET + 4])?;
         let private = decode_bool(bytes[Self::OWNER_OFFSET + 5])?;
         let withheld = decode_bool(bytes[Self::OWNER_OFFSET + 6])?;

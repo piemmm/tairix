@@ -45,6 +45,16 @@ pub(crate) struct Meta {
     pub(crate) times: NodeTimes,
     /// Its RISC OS load, exec and attribute words.
     pub(crate) acorn: Option<acorn::Object>,
+    /// Which of the times a format may keep or not its record keeps.
+    pub(crate) recorded: Recorded,
+}
+
+/// Which of a member's access and metadata-change times its record keeps:
+/// only a tar's, in pax records. A time not kept reads as none.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Recorded {
+    pub(crate) accessed: bool,
+    pub(crate) changed: bool,
 }
 
 /// Where a member nothing has changed since it was read lies in the archive:

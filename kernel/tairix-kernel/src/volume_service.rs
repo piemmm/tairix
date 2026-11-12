@@ -624,6 +624,14 @@ impl FilesystemWrite for UnavailableFs {
         Err(DriverError::DeviceFault)
     }
 
+    fn set_times(
+        &mut self,
+        _node: NodeId,
+        _change: tairix_abi::TimesChange,
+    ) -> Result<tairix_abi::TimesKept, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
     fn punch(&mut self, _file: NodeId, _offset: u64, _len: u64) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }

@@ -1,0 +1,53 @@
+[package]
+name = "tairix-test-code-install-qemu-riscv64"
+description = "PC17 / BR26 QEMU integration test (riscv64 twin of code_install_qemu_aarch64 / _x86_64): prove code installation end to end on the riscv64 virt board. The parent role of the tests/integration/code_install_program fixture, holding CAP_JIT_MAP_EXEC, has a sandboxed compiler worker write functions, installs them into a sandboxed target worker with the production code_install syscall over the production dispatch hook, and has the target call them; the install's instruction-fetch fence is the SBI remote fence.i. PASS only on a parent exit of 0."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the riscv64 code-installation vertical, composed from the
+# production `KernelDispatchHook` + `KernelSyscallHandlers` path rather than a
+# bespoke dispatch shim.
+#
+# The `test-hooks` feature is on by default. Release builds that enable it
+# are rejected by the `compile_error!` guard in `src/main.rs` (no hacks; fail
+# closed), mirroring the aarch64 twin.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "tairix-test-code-install-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[build-dependencies]
+# The shared harness: the target cfg emitter and the ELF→rxe converter.
+# Host-only build glue.
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+# The build script stamps the kernel's compiled-in syscall CFI tag into the
+# converted `rxe` so the production loader admits it.
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

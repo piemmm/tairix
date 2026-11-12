@@ -49,7 +49,7 @@ use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::KERNEL_VMA_BASE;
 use tairix_arch_x86_64::qemu_exit;
 use tairix_caps::CapabilitySet;
-use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
 use tairix_kernel::spawn_layout::CHILD_USER_BIAS;
 use tairix_kernel::x86_64::boot::{bring_up_bsp, BspBringUp};
 use tairix_kernel::x86_64::serial_sink::COM1_CONSOLES;
@@ -163,7 +163,7 @@ const TEST_PASS: EventId = EventId(4500);
 const TEST_FAIL: EventId = EventId(4501);
 
 /// The global allocator's arena.
-static HEAP: Heap = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -174,14 +174,11 @@ static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Physical-frame backing store the live [`FrameAllocator`] serves the
-/// spawn producer and the stack-growth fault path from. `align(4096)` so
+/// spawn producer and the stack-growth fault path from. Page-aligned, so
 /// each `PAGE_SIZE` slice is a valid page frame. A static of the kernel
 /// image, so its physical address is its virtual address minus
 /// [`KERNEL_VMA_BASE`].
-#[repr(C, align(4096))]
-struct FramePool([u8; PAGE_SIZE * FRAME_COUNT]);
-
-static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * FRAME_COUNT]);
+static FRAME_POOL: Arena<{ PAGE_SIZE * FRAME_COUNT }> = Arena::ZERO;
 
 /// Per-CPU storage backing the scheduler's arch handle.
 static SCHED_ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
@@ -351,7 +348,7 @@ fn leak_subsystems(board: &BspBringUp) -> Subsystems {
     memory_map.push(MemoryRegion {
         // The pool is a static of the kernel image; its physical address is
         // its virtual address minus the image window's base.
-        start: PhysAddr::new(core::ptr::addr_of!(FRAME_POOL) as u64 - KERNEL_VMA_BASE),
+        start: PhysAddr::new(FRAME_POOL.as_mut_ptr() as u64 - KERNEL_VMA_BASE),
         length: (PAGE_SIZE * FRAME_COUNT) as u64,
         kind: RegionKind::Usable,
     });

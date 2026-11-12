@@ -18,6 +18,7 @@ shipped one (`AGENTS.md` §2.4 / §9).
 | Operation             | FAT32 mechanism                                   |
 | --------------------- | ------------------------------------------------- |
 | `open`                | Validate the boot sector (BPB) and compute layout.|
+| `format`              | Lay a new, empty FAT32 volume over the whole device. |
 | `root`                | The root directory at the BPB's root cluster.     |
 | `lookup`              | Scan a directory's entries for a name.            |
 | `node_info`           | Read a file's short entry; walk a directory's chain. |
@@ -61,9 +62,13 @@ so an entry present throughout a listing is listed exactly once. A walk
 reads each device block once, holding the block its last slot came from.
 
 A corrupt chain fails closed rather than looping: a link past the volume's
-last cluster is a bad chain, a chain walk stops at the volume's cluster
-count, a directory walk at the format's 65,536 entries, and a move's walk up
-`..` links at a link that comes round again or names no parent.
+last cluster, or to a free one, is a bad chain, a chain walk stops at the
+volume's cluster count, a directory walk at the format's 65,536 entries, and a
+move's walk up `..` links at a link that comes round again or names no parent.
+Every table access is checked against the volume's clusters, and a file whose
+entry records a first cluster outside them is refused every read, write and
+truncation (`DeviceFault`), so a damaged entry is never followed out of the
+volume.
 
 A listed entry's `allocated` is the clusters its size needs; only a
 directory, whose entry records no size, has its chain
@@ -116,15 +121,34 @@ lost chain for the format's own checker to reclaim.
 
 ## FAT type detection
 
-The driver identifies FAT32 by the boot-sector shape — a zero 16-bit
-FAT size and a zero root-entry count — rather than by re-deriving the
-cluster-count threshold. A FAT12/FAT16 volume has non-zero values in
-those fields and is rejected with `DriverError::BadMagic`, so the
+Every on-disk structure — the parameter block, the table, directory entries,
+long names, aliases, labels, stamps and a new volume's layout — is read and
+written through [`tairix-fat`](../lib/fat.md), which the volume probe shares.
+The driver identifies FAT32 by the boot-sector shape
+— a zero 16-bit FAT size and a zero root-entry count — rather than by
+re-deriving the cluster-count threshold. A FAT12/FAT16 volume has non-zero
+values in those fields and is rejected with `DriverError::BadMagic`, so the
 distinction is exact for the volumes this driver accepts.
+
+The volume's clusters are those its sectors hold, its table describes and the
+device reaches: a table smaller than the volume, a volume smaller than its
+device, or a device smaller than the volume bounds them, so nothing is
+allocated, read or written past any of the three.
 
 The device logical-block size and the FAT bytes-per-sector are
 decoupled: the driver addresses the volume in bytes through
 [`tairix-bytedev`](../lib/bytedev.md), so the two sizes need not match.
+
+## Formatting
+
+`Fat32::format` lays a FAT32 volume over the whole device as `tairix-fat`
+plans one: the cluster size `mkfs.fat`'s thresholds give, two FATs sized to
+map every cluster, `FSInfo` and the backup boot sector in the customary
+sectors, and the root directory empty in cluster 2. It zeroes the whole system
+area, writes the sectors that hold more than zeros, and writes the boot sector
+last, so a format cut short leaves no boot sector for a reader to mount half a
+volume by. The caller mints the serial; zero, the value that records none, is
+refused.
 
 ## Writing
 
@@ -141,7 +165,10 @@ refused as out of space; and every FAT
 mutation is mirrored across all FAT copies. Sub-block writes are
 read-modified-written so neighbouring bytes are preserved. A rename writes the
 entry afresh under its new name and alias, carrying its attribute byte and its
-stored stamps verbatim, then frees the old slots.
+stored stamps verbatim, then frees the old slots. A directory moved to another
+parent has its `..` repointed; one whose `..` slot holds no well-formed `..`
+is refused (`DeviceFault`) before anything is written, since the repoint would
+overwrite whatever that slot holds.
 
 ## Timestamps
 
@@ -164,6 +191,12 @@ hundredth. A time outside that range, or no time while the clock is unset,
 is written as the zero date FAT reads as none, which reads back as
 `Time64::UNIX_EPOCH`. FAT keeps no metadata-change stamp, so `changed` is
 always that.
+
+`fs_set_times` sets a file's or directory's last-write stamp
+(`tairix_abi::driver::filesystem::DOS_TIME`) and its last-read date
+(`tairix_fat::stamp::ACCESSED`, whole days) in place, refusing an instant
+neither holds unless the nearest is asked; FAT keeps no change time, and the
+root keeps no stamps at all. A now records as a write's stamp does.
 
 A listing carries every entry's stamps, and a stat by node reports the
 same: a file's from the entry its id locates, a directory's from its entry
@@ -262,5 +295,4 @@ the cross-filesystem preservation contract, an exact-preservation copy of a
 file carrying such attributes onto FAT32 reports `MetadataNotRepresentable`; a
 best-effort copy drops them only under an explicit, documented lossy policy.
 Its own timestamp range, precision and zone are those [Timestamps](#timestamps)
-gives; no interface reports a format's timestamp limits to a caller
-(`plans/OPEN-DEFECTS.md` D1048).
+gives, declared as the fields `fs_set_times` holds each instant to.

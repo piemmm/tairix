@@ -82,7 +82,7 @@ mod kernel {
     use tairix_abi::IrqHandle;
     use tairix_arch_x86_64::irq as arch_irq;
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
     use tairix_kernel::x86_64::ioapic_controller::published_typed;
     use tairix_kernel::x86_64::msi::published_composite;
@@ -96,7 +96,7 @@ mod kernel {
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
 
     /// The global allocator's arena.
-    static HEAP: Heap = Heap::ZERO;
+    static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
     /// Global allocator backed by the module-private `HEAP` static.
     ///

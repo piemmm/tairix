@@ -398,9 +398,9 @@ keeps the freestanding binary's decisions testable; `apply_primary_press` /
 `apply_secondary_press` are then thin routers, and the tracker is reset on any
 tool/chrome press so a click through the chrome and back never mis-pairs. The
 shift modifier arrives on the pointer event itself (`WindowEvent::Pointer`'s
-`modifiers`, stamped by the seat from the `KeyInput::ModifiersChanged` edges the
-keyboard drivers now report) — a modifier key reaches no surface as a key, so
-an app could not otherwise know one is held. FM1–FM11
+`modifiers`, stamped by the seat from the modifiers every key record carries) —
+a modifier key reaches no surface as a key, so an app could not otherwise know
+one is held. FM1–FM11
 remain landed. Their click-throughs left the `autoload_input` vertical with
 `plans/OPEN-DEFECTS.md` D19/D20, so FM10b's and FM11c's QEMU witnesses are
 withdrawn and that application logic is proven by host tests. **FM11b lands the app-side Empty Trash

@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::percpu;
 use tairix_arch_x86_64::{qemu_exit, serial};
-use tairix_kalloc::{FreeListAllocator, Heap};
+use tairix_kalloc::{Arena, FreeListAllocator};
 use tairix_kernel_core::spawn_kthread;
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 
@@ -40,7 +40,7 @@ static RUNS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 const HEAP_BYTES: usize = 8 * 1024 * 1024;
 
 /// The global allocator's arena.
-static HEAP: Heap<HEAP_BYTES> = Heap::ZERO;
+static HEAP: Arena<HEAP_BYTES> = Arena::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///

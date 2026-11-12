@@ -154,11 +154,12 @@ tairix-tty = { path = "../../lib/tty", version = "=0.0.0" }
 # (the closed cache-switch vocabulary) so the kernel's live cache-admission
 # control and the `configure`/`system.conf` store can never diverge.
 tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
-# The single terminal key map: the seat registry's text
-# sink (`src/seat.rs`) encodes a decoded `KeyInput` record to the console
-# (tty) bytes a terminal sends through `tairix_keymap::encode_key_input`
-# rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
+# The single terminal key map: the seat registry reads each injected key edge
+# into its `KeyInput` record and types a press into its text sink through it,
+# rather than a second copy of the layout or the layout-to-tty mapping.
 tairix-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
+# The keyboard state each seat reads its keyboards' edges through.
+tairix-input = { path = "../../lib/input", version = "=0.0.0" }
 # The one seat owner/lease/routing state machine (`plans/DISPLAY.md`): the
 # kernel seat registry (`src/seat.rs`) hosts
 # `tairix_seat::SeatState` for the owner-checked `display_acquire` /

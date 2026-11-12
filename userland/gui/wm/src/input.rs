@@ -284,16 +284,57 @@ pub enum InputResponse {
         /// Motion position in the window's client-viewport coordinates.
         local: Point,
     },
-    /// A primary release that ended a client pointer grab, delivered to the
-    /// grabbed window so an in-content click or drag completes (a tab or
-    /// combo selection, a released scrollbar thumb). `local` is the release
-    /// position in the window's client-viewport coordinates, clamped into
-    /// the client.
+    /// A button that went down while another was held in a client pointer
+    /// grab, delivered to the grabbed window: the buttons of one gesture all
+    /// go to the window it began in. `local` is in the window's
+    /// client-viewport coordinates, clamped into the client.
+    ClientPointerPressed {
+        /// The window holding the grab.
+        window: WindowId,
+        /// Press position in the window's client-viewport coordinates.
+        local: Point,
+        /// The button that went down.
+        button: PointerButton,
+    },
+    /// The release of a button held in a client pointer grab, delivered to
+    /// the grabbed window so an in-content click or drag completes (a tab or
+    /// combo selection, a released scrollbar thumb, a right-drag). `local` is
+    /// the release position in the window's client-viewport coordinates,
+    /// clamped into the client.
     ClientPointerReleased {
         /// The window whose client received the release.
         window: WindowId,
         /// Release position in the window's client-viewport coordinates.
         local: Point,
+        /// The button that came up.
+        button: PointerButton,
+    },
+    /// A key that typed nothing — a modifier, a lock — went down or came up
+    /// while `window`, which reads the keyboard raw, holds it.
+    RawKey {
+        /// The window holding the keyboard.
+        window: WindowId,
+    },
+    /// The pointer locked to `window` moved by the device's own counts.
+    LockedMotion {
+        /// The window the pointer is locked to.
+        window: WindowId,
+        /// Rightward displacement.
+        dx: i32,
+        /// Downward displacement.
+        dy: i32,
+    },
+    /// A button went down or came up while the pointer is locked to
+    /// `window`, delivered at the place the pointer was locked at.
+    LockedButton {
+        /// The window the pointer is locked to.
+        window: WindowId,
+        /// The locked pointer, in the window's client-viewport coordinates.
+        local: Point,
+        /// The button.
+        button: PointerButton,
+        /// `true` for a press, `false` for a release.
+        pressed: bool,
     },
 }
 
@@ -316,6 +357,37 @@ pub struct Abandoned {
     /// tool window's owner is owed word that the move is over, let go over
     /// nothing.
     pub moved: Option<WindowId>,
+}
+
+/// The implicit pointer grab a press on a window's client content holds:
+/// every motion, press and release goes to that window until the last of its
+/// buttons comes up.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ClientGrab {
+    window: WindowId,
+    /// One bit for each [`PointerButton`] held.
+    buttons: u8,
+}
+
+impl ClientGrab {
+    const fn of(window: WindowId, button: PointerButton) -> Self {
+        Self {
+            window,
+            buttons: button_bit(button),
+        }
+    }
+
+    const fn holds(self, button: PointerButton) -> bool {
+        self.buttons & button_bit(button) != 0
+    }
+}
+
+const fn button_bit(button: PointerButton) -> u8 {
+    match button {
+        PointerButton::Primary => 1,
+        PointerButton::Secondary => 2,
+        PointerButton::Middle => 4,
+    }
 }
 
 /// An in-flight interactive move: the grabbed window and the offset
@@ -425,13 +497,20 @@ pub struct InputRouter {
     /// The window the pinch in progress began over: every step of it is that
     /// window's, and a second surface's pinch joins it rather than taking it.
     pinch_grab: Option<WindowId>,
-    /// The client window holding the implicit pointer grab a primary press on
-    /// its content started, so the motion and the release complete on that
-    /// same window — an in-content drag (a scrollbar thumb) or click (a tab, a
-    /// combo item) never leaks to a window the pointer later crosses. Cleared
-    /// on the release, and on any press that starts a furniture, move, or
-    /// desktop interaction instead.
-    client_grab: Option<WindowId>,
+    /// The client window holding the implicit pointer grab a press on its
+    /// content started, and the buttons held in it, so the motion, the other
+    /// buttons and the releases complete on that same window — an in-content
+    /// drag (a scrollbar thumb) or click (a tab, a combo item) never leaks to
+    /// a window the pointer later crosses. Cleared once its last button comes
+    /// up, and on any press that starts a furniture, move, or desktop
+    /// interaction instead.
+    client_grab: Option<ClientGrab>,
+    /// The window the pointer is locked to: every pointer event is that
+    /// window's, and the pointer stays where it was locked.
+    lock: Option<WindowId>,
+    /// A lock this router ended itself, the keyboard having left its window
+    /// or the window having gone, which the embedder is to tell.
+    lock_ended: Option<WindowId>,
     /// The decorated window whose furniture last received a hover sample, so
     /// the pointer leaving it can be told to drop the highlight. Only the
     /// window manager sees a pointer over its own decorations, so nothing
@@ -477,11 +556,73 @@ impl InputRouter {
         self.focused
     }
 
-    /// The client window a primary press on its content is still held in,
-    /// if one is.
+    /// The client window a press on its content is still held in, if one
+    /// is.
     #[must_use]
     pub const fn client_grab(&self) -> Option<WindowId> {
-        self.client_grab
+        match self.client_grab {
+            Some(grab) => Some(grab.window),
+            None => None,
+        }
+    }
+
+    /// The window holding the keyboard when it reads it raw, its own content
+    /// rather than its frame's controls taking the keys.
+    #[must_use]
+    pub fn raw_key_window(&self, compositor: &Compositor) -> Option<WindowId> {
+        self.focused.filter(|&window| {
+            !self.furniture_key_focus
+                && compositor
+                    .window(window)
+                    .is_some_and(Window::takes_raw_keys)
+        })
+    }
+
+    /// The window the pointer is locked to, if any.
+    #[must_use]
+    pub const fn pointer_lock(&self) -> Option<WindowId> {
+        self.lock
+    }
+
+    /// Lock the pointer to `window`, answering whether it was: only while
+    /// `window` holds the keyboard, the pointer is over its client content
+    /// and no gesture holds the pointer.
+    ///
+    /// While locked every pointer event is `window`'s, at the place the
+    /// pointer was locked at, and a motion is its displacement alone
+    /// ([`InputEvent::PointerMotion`]). The lock ends with
+    /// [`unlock_pointer`](Self::unlock_pointer), or when the keyboard leaves
+    /// the window or the window goes ([`take_lock_ended`](Self::take_lock_ended)).
+    pub fn lock_pointer(&mut self, window: WindowId, compositor: &Compositor) -> bool {
+        let granted = self.focused == Some(window)
+            && !self.furniture_key_focus
+            && !self.holds_pointer()
+            && self.pinch_grab.is_none()
+            && compositor.window(window).is_some_and(Window::is_visible)
+            && client_under(self.pointer, compositor).is_some_and(|(under, _)| under == window);
+        if granted {
+            self.lock = Some(window);
+        }
+        granted
+    }
+
+    /// End the pointer lock, naming the window it was of.
+    pub fn unlock_pointer(&mut self) -> Option<WindowId> {
+        self.lock.take()
+    }
+
+    /// The window whose lock this router ended itself since this was last
+    /// asked: the keyboard left it, or it went.
+    pub fn take_lock_ended(&mut self) -> Option<WindowId> {
+        self.lock_ended.take()
+    }
+
+    /// Give the keyboard to `focus`; a lock of the window it leaves ends.
+    fn set_focus(&mut self, focus: Option<WindowId>) {
+        if self.lock.is_some() && self.lock != focus {
+            self.lock_ended = self.lock.take();
+        }
+        self.focused = focus;
     }
 
     /// The modifiers the seat currently holds.
@@ -565,7 +706,7 @@ impl InputRouter {
         if !compositor.is_focusable(window) {
             return false;
         }
-        self.focused = Some(window);
+        self.set_focus(Some(window));
         true
     }
 
@@ -574,7 +715,7 @@ impl InputRouter {
     /// The session glue calls this when the focused window is minimised from
     /// the taskbar: the window is hidden, so nothing should hold the keyboard.
     pub fn unfocus(&mut self) {
-        self.focused = None;
+        self.set_focus(None);
     }
 
     /// Take the seat's answer to "does the pointer rest on one of the windows
@@ -642,9 +783,9 @@ impl InputRouter {
     /// owes is answered: the client whose press is over, and the window a
     /// resize settled.
     pub fn abandon_gesture(&mut self, compositor: &mut Compositor) -> Abandoned {
-        let client = self.client_grab.take().and_then(|window| {
-            let rect = compositor.window_client_rect(window)?;
-            Some((window, client_local(self.pointer, rect)))
+        let client = self.client_grab.take().and_then(|grab| {
+            let rect = compositor.window_client_rect(grab.window)?;
+            Some((grab.window, client_local(self.pointer, rect)))
         });
         let resized = self.resize_grab.take().map(|grab| grab.window);
         if let Some(window) = self.control_grab.take() {
@@ -695,6 +836,15 @@ impl InputRouter {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> InputResponse {
+        if let Some(window) = self.lock {
+            if compositor.window(window).is_some_and(Window::is_visible) {
+                if let Some(response) = self.locked_pointer(window, event, compositor) {
+                    return response;
+                }
+            } else {
+                self.lock_ended = self.lock.take();
+            }
+        }
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
@@ -723,12 +873,14 @@ impl InputRouter {
             } => self.press_secondary(compositor),
             InputEvent::PointerReleased {
                 button: PointerButton::Secondary,
-            } => self.release_secondary(),
+            } => self.release_secondary(compositor),
             // The seat never reports a cancel: it is what the embedder hands a
-            // client whose press it took, through `abandon_gesture`.
+            // client whose press it took, through `abandon_gesture`. Relative
+            // motion moves no pointer: only a lock has a use for it.
             InputEvent::PointerPressed { .. }
             | InputEvent::PointerReleased { .. }
-            | InputEvent::PointerCancelled => InputResponse::Ignored,
+            | InputEvent::PointerCancelled
+            | InputEvent::PointerMotion { .. } => InputResponse::Ignored,
             InputEvent::KeyPressed { key, modifiers } => {
                 self.modifiers = modifiers;
                 self.deliver_key(key, modifiers, true, compositor)
@@ -737,14 +889,115 @@ impl InputRouter {
                 self.modifiers = modifiers;
                 self.deliver_key(key, modifiers, false, compositor)
             }
-            // A modifier edge changes no window and reaches no surface as a
-            // key; it only updates the state the desktop stamps onto what it
-            // routes.
+            // A key that typed nothing changes no window and reaches no
+            // surface as a key but one reading the keyboard raw; it updates
+            // the state the desktop stamps onto what it routes.
             InputEvent::ModifiersChanged { modifiers } => {
                 self.modifiers = modifiers;
-                InputResponse::Ignored
+                self.raw_key_window(compositor)
+                    .map_or(InputResponse::Ignored, |window| InputResponse::RawKey {
+                        window,
+                    })
             }
         }
+    }
+
+    /// Route `event` to `window`, which the pointer is locked to, or `None`
+    /// for an event the lock does not take: a key goes where the keyboard is.
+    fn locked_pointer(
+        &mut self,
+        window: WindowId,
+        event: InputEvent,
+        compositor: &Compositor,
+    ) -> Option<InputResponse> {
+        let local = || {
+            compositor
+                .window_client_rect(window)
+                .map_or(Point::ORIGIN, |client| client_local(self.pointer, client))
+        };
+        Some(match event {
+            InputEvent::PointerMotion { dx, dy } => InputResponse::LockedMotion { window, dx, dy },
+            InputEvent::PointerPressed { button } | InputEvent::PointerReleased { button } => {
+                InputResponse::LockedButton {
+                    window,
+                    local: local(),
+                    button,
+                    pressed: matches!(event, InputEvent::PointerPressed { .. }),
+                }
+            }
+            InputEvent::PointerScrolled { dx, dy } => InputResponse::AppScroll {
+                window,
+                local: local(),
+                dx,
+                dy,
+                modifiers: self.modifiers,
+            },
+            InputEvent::Pinch { phase, scale, .. } => InputResponse::AppPinch {
+                window,
+                local: local(),
+                phase,
+                scale,
+                modifiers: self.modifiers,
+            },
+            // The pointer stays where it was locked.
+            InputEvent::PointerMoved { .. } | InputEvent::PointerCancelled => {
+                InputResponse::Ignored
+            }
+            InputEvent::KeyPressed { .. }
+            | InputEvent::KeyReleased { .. }
+            | InputEvent::ModifiersChanged { .. } => return None,
+        })
+    }
+
+    /// Let `button`, pressed while a client grab holds another, join that
+    /// grab: the buttons of one gesture all go to the window it began in.
+    /// `None` when no grab is held, when it already holds `button` — a press
+    /// whose release never came, which a fresh press supersedes — or when its
+    /// window has gone.
+    fn join_client_grab(
+        &mut self,
+        button: PointerButton,
+        compositor: &Compositor,
+    ) -> Option<InputResponse> {
+        let grab = self.client_grab.as_mut()?;
+        let client = compositor
+            .window_client_rect(grab.window)
+            .filter(|_| !grab.holds(button));
+        let Some(client) = client else {
+            self.client_grab = None;
+            return None;
+        };
+        grab.buttons |= button_bit(button);
+        Some(InputResponse::ClientPointerPressed {
+            window: grab.window,
+            local: client_local(self.pointer, client),
+            button,
+        })
+    }
+
+    /// End `button`'s part in the client grab, delivering its release to the
+    /// grabbed window; the grab ends with the last button. `None` when the
+    /// grab holds no such button.
+    fn release_client(
+        &mut self,
+        button: PointerButton,
+        compositor: &mut Compositor,
+    ) -> Option<InputResponse> {
+        let mut grab = self.client_grab.filter(|grab| grab.holds(button))?;
+        grab.buttons &= !button_bit(button);
+        self.client_grab = (grab.buttons != 0).then_some(grab);
+        if self.client_grab.is_none() {
+            let under = client_under(self.pointer, compositor);
+            self.hover_client(under);
+        }
+        let Some(client) = compositor.window_client_rect(grab.window) else {
+            return Some(InputResponse::Ignored);
+        };
+        Some(InputResponse::ClientPointerReleased {
+            window: grab.window,
+            local: client_local(self.pointer, client),
+            button,
+        })
     }
 
     /// Deliver a key event to the focused window, naming it as the recipient.
@@ -784,7 +1037,7 @@ impl InputRouter {
             return desktop_key;
         };
         if compositor.window(window).is_none() {
-            self.focused = None;
+            self.set_focus(None);
             self.furniture_key_focus = false;
             return desktop_key;
         }
@@ -865,7 +1118,10 @@ impl InputRouter {
         offset: Point,
         compositor: &mut Compositor,
     ) -> bool {
-        if self.client_grab != Some(parent) || self.grab.is_some() {
+        let holds_primary = self
+            .client_grab
+            .is_some_and(|grab| grab.window == parent && grab.holds(PointerButton::Primary));
+        if !holds_primary || self.grab.is_some() {
             return false;
         }
         let Some(origin) = compositor.window(window).map(Window::origin) else {
@@ -916,7 +1172,10 @@ impl InputRouter {
         if self.grab.is_some() {
             return InputResponse::Ignored;
         }
-        // A fresh press supersedes any prior client grab; it is re-armed below
+        if let Some(joined) = self.join_client_grab(PointerButton::Primary, compositor) {
+            return joined;
+        }
+        // A press no grab took supersedes any prior one; it is re-armed below
         // only when this press lands on client content.
         self.client_grab = None;
         // Only a press on a title bar can pair into a double-click, so every
@@ -933,11 +1192,11 @@ impl InputRouter {
             Some(PointerTarget::Window(window)) => window,
             Some(PointerTarget::ResizeBand(window, edge)) => {
                 compositor.raise(window);
-                self.focused = Some(window);
+                self.set_focus(Some(window));
                 return self.begin_resize_grab(window, edge, compositor);
             }
             None => {
-                self.focused = None;
+                self.set_focus(None);
                 return InputResponse::DesktopPressed;
             }
         };
@@ -947,7 +1206,7 @@ impl InputRouter {
         // still reaches its owner below, so it stays pressable.
         if compositor.is_focusable(window) {
             compositor.raise(window);
-            self.focused = Some(window);
+            self.set_focus(Some(window));
         }
 
         // A press on the outer decoration frame is the window manager's, kept
@@ -1006,7 +1265,7 @@ impl InputRouter {
         // The client content holds the implicit pointer grab until release, so
         // its motion and the release complete on this window (an in-content
         // drag/click) rather than leaking to a window the pointer crosses.
-        self.client_grab = Some(window);
+        self.client_grab = Some(ClientGrab::of(window, PointerButton::Primary));
         let client = compositor
             .window_client_rect(window)
             .map_or(Point::ORIGIN, |rect| rect.origin);
@@ -1028,7 +1287,7 @@ impl InputRouter {
     /// motion over furniture still reaches that furniture, so a decoration
     /// highlights under the pointer like any other control.
     fn client_pointer_moved(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
-        if let Some(window) = self.client_grab {
+        if let Some(ClientGrab { window, .. }) = self.client_grab {
             let Some(client) = compositor.window_client_rect(window) else {
                 self.client_grab = None;
                 return InputResponse::Ignored;
@@ -1104,6 +1363,9 @@ impl InputRouter {
     /// gesture's own button has not come up, and the client holding a press
     /// would otherwise lose it without ever being told it ended.
     fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        if let Some(joined) = self.join_client_grab(PointerButton::Secondary, compositor) {
+            return joined;
+        }
         if self.holds_pointer() {
             return InputResponse::Ignored;
         }
@@ -1118,12 +1380,12 @@ impl InputRouter {
             Some(FurniturePart::TitleBar)
         ) {
             self.client_grab = None;
-            self.focused = Some(window);
+            self.set_focus(Some(window));
             self.begin_move_with(PointerButton::Secondary, compositor);
             return InputResponse::FurniturePressed { window };
         }
         compositor.raise(window);
-        self.focused = Some(window);
+        self.set_focus(Some(window));
         // Route the press through the frame furniture, which owns the one
         // definition of which control lies under a point. A synthetic move
         // first, so the control knows the pointer is over it.
@@ -1150,11 +1412,13 @@ impl InputRouter {
                 return InputResponse::FurniturePressed { window };
             }
         }
-        // A client right-press returns the keyboard to the client and is
-        // delivered in content-local coordinates, exactly as the primary
-        // client press is, so the client's context-menu hit-test sees the
-        // same coordinate space its listing does.
+        // A client right-press returns the keyboard to the client, takes the
+        // client grab and is delivered in content-local coordinates, exactly
+        // as the primary client press is, so the client's context-menu
+        // hit-test sees the same coordinate space its listing does and its
+        // release comes back to it.
         self.furniture_key_focus = false;
+        self.client_grab = Some(ClientGrab::of(window, PointerButton::Secondary));
         let client = compositor
             .window_client_rect(window)
             .map_or(Point::ORIGIN, |rect| rect.origin);
@@ -1549,16 +1813,8 @@ impl InputRouter {
             }
             return InputResponse::FurniturePressed { window };
         }
-        if let Some(window) = self.client_grab.take() {
-            let under = client_under(self.pointer, compositor);
-            self.hover_client(under);
-            let Some(client) = compositor.window_client_rect(window) else {
-                return InputResponse::Ignored;
-            };
-            return InputResponse::ClientPointerReleased {
-                window,
-                local: client_local(self.pointer, client),
-            };
+        if let Some(released) = self.release_client(PointerButton::Primary, compositor) {
+            return released;
         }
         match self.end_move(PointerButton::Primary) {
             Some(window) => InputResponse::MoveEnded { window },
@@ -1566,10 +1822,13 @@ impl InputRouter {
         }
     }
 
-    /// Handle a secondary-button release: end a move-grab a secondary press
-    /// on a title bar started. A secondary press begins no other grab, so
-    /// there is nothing else for this release to conclude.
-    fn release_secondary(&mut self) -> InputResponse {
+    /// Handle a secondary-button release: deliver it to the client grab
+    /// holding it, or end a move-grab a secondary press on a title bar
+    /// started.
+    fn release_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
+        if let Some(released) = self.release_client(PointerButton::Secondary, compositor) {
+            return released;
+        }
         match self.end_move(PointerButton::Secondary) {
             Some(window) => InputResponse::MoveEnded { window },
             None => InputResponse::Ignored,

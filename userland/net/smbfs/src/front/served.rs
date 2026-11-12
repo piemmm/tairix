@@ -17,20 +17,21 @@ use core::fmt::Write as _;
 use tairix_abi::driver::filesystem::{
     DirEntry, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, Unpinned, VolumeStats,
 };
-use tairix_abi::fs::{SeekRegion, FS_PATH_MAX};
+use tairix_abi::fs::{SeekRegion, StampChange, TimesChange, TimesKept, FS_PATH_MAX};
 use tairix_abi::fsserve::{
     decode_request, encode_reply, request_op, Answer, DirEnd, DirReply, Op, Request, ServerState,
     Span, SERVED_IDLE_NS,
 };
 use tairix_abi::netattach::OfferId;
 use tairix_abi::netshare_ipc::MountState;
-use tairix_abi::time::NANOS_PER_SEC;
+use tairix_abi::time::{Time64, NANOS_PER_SEC};
 use tairix_abi::DriverError;
 
 use tairix_inline::{ArrayString, ArrayVec};
 use tairix_log::Sink;
 use tairix_smb::file::name::SharePath;
 use tairix_smb::status::NtStatus;
+use tairix_smb::wire::SETTABLE_FILETIME;
 use tairix_smb::SmbError;
 
 use super::held::{Effect, Held, HeldOp, Holding};
@@ -86,6 +87,16 @@ pub(super) enum Through {
     Read(u64, Span),
     Write(u64, Span),
     Resize(u64),
+    Retime(Retimed),
+}
+
+/// The times a change sets — each left alone where `None` — and how exactly
+/// they keep what was asked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) struct Retimed {
+    pub(super) accessed: Option<Time64>,
+    pub(super) written: Option<Time64>,
+    pub(super) kept: TimesKept,
 }
 
 /// Where a read, a write or a resize reaches its file: by path, or on the
@@ -121,6 +132,7 @@ enum Work {
     /// serves on until its last hold goes.
     Unlink(SharePath, SharePath, [u8; 16]),
     Truncate(NodeId, Via, u64),
+    Times(NodeId, Via, Retimed),
     /// A call on a held file, waiting its turn in the file's work.
     Held(NodeId, HeldOp),
     /// A flush, waiting on its held files' syncs.
@@ -214,6 +226,18 @@ impl Work {
                 to: to.as_str(),
                 replace: *replace,
                 lease: *lease,
+            },
+            Self::Times(_, at, times) => match at {
+                Via::Held(handle) => FileOp::Retime {
+                    handle: *handle,
+                    accessed: times.accessed,
+                    written: times.written,
+                },
+                Via::Path(path) => FileOp::Times {
+                    path: path.as_str(),
+                    accessed: times.accessed,
+                    written: times.written,
+                },
             },
             Self::Truncate(_, at, size) => match at {
                 Via::Held(handle) => FileOp::Resize {
@@ -385,6 +409,7 @@ impl Volume {
             HeldOp::Read { .. } => Op::ReadAt,
             HeldOp::Write { .. } => Op::WriteAt,
             HeldOp::Truncate(_) => Op::Truncate,
+            HeldOp::Retime(_) => Op::SetTimes,
         };
         self.calls.push(Served {
             held: Some(node),
@@ -536,6 +561,36 @@ fn dir_of(volume: &mut Volume, id: NodeId) -> Result<Node, DriverError> {
 }
 
 /// The file `id` names.
+/// The times `change` sets as a FILETIME holds them, a now read from
+/// `clock` — one left alone while the clock is unset — or `None` for a
+/// change that sets nothing.
+fn retimed(
+    volume: &Volume,
+    change: TimesChange,
+    clock: Time64,
+) -> Result<Option<Retimed>, DriverError> {
+    let (accessed, a) = SETTABLE_FILETIME.fit_change(change.accessed, change.nearest)?;
+    let (written, w) = SETTABLE_FILETIME.fit_change(change.modified, change.nearest)?;
+    let now = (clock != Time64::UNIX_EPOCH)
+        .then(|| SETTABLE_FILETIME.floor(clock))
+        .flatten();
+    let time = |change| match change {
+        StampChange::Keep => None,
+        StampChange::Now => now,
+        StampChange::At(at) => Some(at),
+    };
+    let (accessed, written) = (time(accessed), time(written));
+    if accessed.is_none() && written.is_none() {
+        return Ok(None);
+    }
+    writable(volume)?;
+    Ok(Some(Retimed {
+        accessed,
+        written,
+        kept: a.and(w),
+    }))
+}
+
 fn file_of(volume: &mut Volume, id: NodeId) -> Result<Node, DriverError> {
     let node = known(volume, id)?;
     if node.directory {
@@ -708,6 +763,7 @@ fn rename(
 enum Local {
     Node(NodeId),
     Done,
+    Kept(TimesKept),
     Unpinned(Unpinned),
     Security(NodeSecurity),
     Owned(bool),
@@ -720,6 +776,7 @@ impl Local {
         match *self {
             Self::Node(node) => Answer::Node(node),
             Self::Done => Answer::Done,
+            Self::Kept(kept) => Answer::Kept(kept),
             Self::Unpinned(left) => Answer::Unpinned(left),
             Self::Security(security) => Answer::Security(security),
             Self::Owned(owned) => Answer::Owned(owned),
@@ -767,6 +824,7 @@ enum Owned {
     Info(NodeInfo),
     Count(u32),
     Done,
+    Kept(TimesKept),
     Region(Option<u64>),
     Stats(VolumeStats),
 }
@@ -778,6 +836,7 @@ impl Owned {
             Self::Info(info) => Answer::Info(info),
             Self::Count(count) => Answer::Count(count),
             Self::Done => Answer::Done,
+            Self::Kept(kept) => Answer::Kept(kept),
             Self::Region(region) => Answer::Region(region),
             Self::Stats(stats) => Answer::Stats(stats),
         }
@@ -866,6 +925,10 @@ fn settle<'w>(
         (Work::Truncate(node, ..), Report::Done { file_id, .. }) => {
             let node = *node;
             Settled::Answer(checked(volume, node, *file_id).map(|()| Owned::Done))
+        }
+        (Work::Times(node, _, times), Report::Done { file_id, .. }) => {
+            let (node, kept) = (*node, times.kept);
+            Settled::Answer(checked(volume, node, *file_id).map(|()| Owned::Kept(kept)))
         }
         (Work::Remove(path, _), Report::Done { .. }) => {
             let path = path.clone();
@@ -1078,6 +1141,13 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                 writable(volume)?;
                 Work::Truncate(file, Via::Path(file_of(volume, file)?.path), size)
             }
+            Request::SetTimes { node, change } => {
+                let path = known(volume, node)?.path;
+                match retimed(volume, change, self.host.wall_time())? {
+                    Some(times) => Work::Times(node, Via::Path(path), times),
+                    None => return Ok(Some(Local::Kept(TimesKept::Exactly))),
+                }
+            }
             Request::Remove { dir, name } => {
                 writable(volume)?;
                 let path = child(volume, dir, name)?;
@@ -1141,6 +1211,15 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                     return Some(Err(error));
                 }
                 (file, HeldOp::Truncate(size))
+            }
+            Request::SetTimes { node, change } => {
+                volume.held.files.get(&node.raw())?;
+                let times = match retimed(volume, change, self.host.wall_time()) {
+                    Ok(Some(times)) => times,
+                    Ok(None) => return Some(Ok(Some(Local::Kept(TimesKept::Exactly)))),
+                    Err(error) => return Some(Err(error)),
+                };
+                (node, HeldOp::Retime(times))
             }
             Request::NodeInfo { node } => {
                 let stat = volume.held.files.get(&node.raw())?.known()?;
@@ -1224,7 +1303,7 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                 self.stale_path(offer, from);
                 self.stale_path(offer, to);
             }
-            (Work::Write(node, ..) | Work::Truncate(node, ..), _, _) => {
+            (Work::Write(node, ..) | Work::Truncate(node, ..) | Work::Times(node, ..), _, _) => {
                 self.stale_node(offer, *node);
             }
             _ => {}
@@ -1268,6 +1347,7 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
             },
             Through::Write(offset, span) => Work::Write(node, at, offset, span),
             Through::Resize(size) => Work::Truncate(node, at, size),
+            Through::Retime(times) => Work::Times(node, at, times),
         };
         let volume = self
             .volumes
@@ -1576,6 +1656,7 @@ impl<H: Host, S: Sink + Clone> Front<H, S> {
                         count: u64::from(*count),
                     },
                     (Work::Truncate(_, _, size), Ok(_)) => Effect::Resized(*size),
+                    (Work::Times(_, _, times), Ok(_)) => Effect::Retimed(*times),
                     _ => Effect::Nothing,
                 };
                 let answer = result

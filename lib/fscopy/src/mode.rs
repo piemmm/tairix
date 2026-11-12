@@ -4,8 +4,8 @@
 //! and the mode and owner a move carries onto what it made of its source.
 
 use tairix_abi::{
-    Errno, FileKind, FileStat, FS_MODE_MASK, FS_OWNER_UNCHANGED, FS_PERMISSION_BITS, FS_SETGID_BIT,
-    FS_SETUID_BIT, FS_STICKY_BIT,
+    Errno, FileKind, FileStat, NodeTimes, StampChange, TimesChange, TimesKept, FS_MODE_MASK,
+    FS_OWNER_UNCHANGED, FS_PERMISSION_BITS, FS_SETGID_BIT, FS_SETUID_BIT, FS_STICKY_BIT,
 };
 
 use crate::tree::{Dir, Node};
@@ -108,6 +108,23 @@ impl Ownership {
             gid: stat.gid,
         }
     }
+}
+
+/// Give `copy` the access and modification times `source` holds, as nearly as
+/// its volume keeps them, answering how exactly it did: what a copy keeping
+/// its source's times runs once its bytes and attributes are written, since
+/// writing them moves its times, and before any change of owner, which could
+/// take the change from the copier.
+///
+/// # Errors
+///
+/// The volume's refusal to change the copy's times.
+pub fn copy_times<T: Node + ?Sized>(source: &NodeTimes, copy: &T) -> Result<TimesKept, Errno> {
+    copy.set_times(&TimesChange {
+        accessed: StampChange::At(source.accessed),
+        modified: StampChange::At(source.modified),
+        nearest: true,
+    })
 }
 
 /// Give the held `at`, read as `current`, the owner and permission bits

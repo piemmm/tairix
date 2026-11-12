@@ -18,9 +18,11 @@
 #include <stdint.h>
 
 #define TAIRIX_POINTER_INPUT_MAGIC 0x314e4950u
+#define TAIRIX_KEY_EDGE_MAGIC 0x3144454bu
 #define TAIRIX_KEY_INPUT_MAGIC 0x314e494bu
 #define TAIRIX_POINTER_INPUT_WIRE_LEN 20u
 #define TAIRIX_TIMED_POINTER_WIRE_LEN 28u
+#define TAIRIX_KEY_EDGE_WIRE_LEN 12u
 #define TAIRIX_KEY_INPUT_WIRE_LEN 20u
 #define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t)120)
 #define TAIRIX_POINTER_EDGE_UNTIMED ((uint64_t)18446744073709551615u)
@@ -39,22 +41,22 @@
 #define TAIRIX_TOUCH_CONTACT_TOUCHING ((uint8_t)1u)
 #define TAIRIX_TOUCH_CONTACT_PALM ((uint8_t)2u)
 
-/* Record `kind` codes: pointer moves/clicks/scroll, key down/up, modifier change (uint16_t). */
+/* Record `kind` codes: pointer moves/clicks/scroll, key down/up (uint16_t). */
 #define TAIRIX_INPUT_KIND_MOVED_BY ((uint16_t)0u)
 #define TAIRIX_INPUT_KIND_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_RELEASED ((uint16_t)2u)
 #define TAIRIX_INPUT_KIND_SCROLLED ((uint16_t)3u)
 #define TAIRIX_INPUT_KIND_KEY_PRESSED ((uint16_t)1u)
 #define TAIRIX_INPUT_KIND_KEY_RELEASED ((uint16_t)2u)
-#define TAIRIX_INPUT_KIND_MODIFIERS_CHANGED ((uint16_t)3u)
 
-/* `button` (motion=none, else a button) and keyboard `key_class` codes (uint16_t). */
+/* `button` (motion=none, else a button) and keyboard `key_class` (none=typed nothing) codes (uint16_t). */
 #define TAIRIX_INPUT_BUTTON_NONE ((uint16_t)0u)
 #define TAIRIX_POINTER_BUTTON_PRIMARY ((uint16_t)1u)
 #define TAIRIX_POINTER_BUTTON_SECONDARY ((uint16_t)2u)
 #define TAIRIX_POINTER_BUTTON_MIDDLE ((uint16_t)3u)
-#define TAIRIX_KEY_CLASS_CHAR ((uint16_t)0u)
-#define TAIRIX_KEY_CLASS_NAMED ((uint16_t)1u)
+#define TAIRIX_KEY_CLASS_NONE ((uint16_t)0u)
+#define TAIRIX_KEY_CLASS_CHAR ((uint16_t)1u)
+#define TAIRIX_KEY_CLASS_NAMED ((uint16_t)2u)
 
 /* Modifier bits held while a key event was produced (uint16_t). */
 #define TAIRIX_MOD_SHIFT ((uint16_t)0x1u)
@@ -91,8 +93,7 @@
 #define TAIRIX_KEY_F11 ((uint16_t)25u)
 #define TAIRIX_KEY_F12 ((uint16_t)26u)
 
-/* Physical keys: a key record's `physical` field (bytes 18..20) is its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t). */
-#define TAIRIX_PHYSICAL_KEY_UNKNOWN ((uint16_t)0x0u)
+/* Physical keys: a key edge's `usage` field (bytes 8..10) and a key record's `physical` field (bytes 18..20) are its HID Keyboard/Keypad-page usage; these are the ones the ABI names (uint16_t). */
 #define TAIRIX_PHYSICAL_KEY_A ((uint16_t)0x4u)
 #define TAIRIX_PHYSICAL_KEY_DIGIT_3 ((uint16_t)0x20u)
 #define TAIRIX_PHYSICAL_KEY_DIGIT_4 ((uint16_t)0x21u)

@@ -1,0 +1,13 @@
+# Signed-AppInfo manifest source for the `pcemucheck` fixture of the
+# PCEmulator QEMU verticals (plans/PCEMU.md PC21). Composed and planted only on
+# those verticals' disk image by tools/xtask: the crate lives outside the
+# userland discovery walk, so no production image ships it. What PCEmulator.app
+# itself holds to run a machine: CAP_CONSOLE_WRITE for its report, CAP_SHM for
+# the machine's screen share, CAP_SANDBOX_SPAWN for the machine's worker and its
+# compiler, and CAP_JIT_MAP_EXEC to install compiled code in the worker; each is
+# intersected with the launching user's grants.
+id = "os.tairix.test.pcemucheck"
+name = "pcemucheck"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_JIT_MAP_EXEC"]

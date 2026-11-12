@@ -41,6 +41,9 @@ use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_crypto::Fingerprint;
+use tairix_fat::boot::{at, Bpb, Kind, BOOT_SECTOR, LABEL_WINDOW};
+use tairix_fat::dir::{slot, Slot, ENTRY};
+use tairix_fat::name::NO_LABEL;
 
 /// Bytes of an extent's head that hold every signature opening an extent:
 /// the FAT32 boot sector (512), the `ARXFS` metadata header (128), and the
@@ -62,37 +65,6 @@ pub const LABEL_MAX: usize = VOLUME_TITLE_MAX;
 /// Characters of the full identity fingerprint: 16 identity bytes = 128
 /// bits, at five bits per base32 character, rounded up.
 pub const FINGERPRINT_CHARS: usize = 26;
-
-/// Bytes of one FAT directory entry, fixed by the format.
-pub const FAT_DIR_ENTRY_LEN: usize = 32;
-/// FAT attribute bit: the entry is the volume label, not a file.
-pub const FAT_ATTR_VOLUME_ID: u8 = 0x08;
-/// FAT attribute value of a long-file-name fragment.
-pub const FAT_ATTR_LONG_NAME: u8 = 0x0F;
-/// FAT first name byte: the directory ends here.
-pub const FAT_END_OF_DIR: u8 = 0x00;
-/// FAT first name byte: the entry was deleted.
-pub const FAT_DELETED_ENTRY: u8 = 0xE5;
-
-/// What FAT formatters write for a volume given no label: a placeholder, not
-/// a label.
-pub const FAT_NO_LABEL: &[u8] = b"NO NAME";
-
-/// FAT32 boot-sector offset of the extended boot signature, which declares
-/// the volume serial and label fields after it (`BS_BootSig`).
-pub const FAT32_EXT_BOOT_SIG_AT: usize = 66;
-/// The extended boot signature.
-pub const FAT32_EXT_BOOT_SIG: u8 = 0x29;
-/// FAT32 boot-sector offset of the volume serial (`BS_VolID`).
-pub const FAT32_SERIAL_AT: usize = 67;
-/// FAT32 boot-sector offset of the volume label's copy there (`BS_VolLab`).
-pub const FAT32_BOOT_LABEL_AT: usize = 71;
-/// Bytes of a FAT volume label: a short name's eleven, space padded.
-pub const FAT_LABEL_LEN: usize = 11;
-
-/// How much of a FAT32 root directory is read for its label entry, which
-/// formatters write first: a bound on the read, not on the format.
-const FAT32_LABEL_SCAN_LEN: usize = 4096;
 
 /// Bytes at the start of an ISO 9660 or UDF volume their structures leave
 /// alone: the system area, where a hybrid image keeps its partition table and
@@ -426,16 +398,16 @@ pub(crate) fn session_bytes<B: Block>(
 }
 
 /// The label a FAT32 volume's root directory records, read from the window
-/// its boot sector `head` places ([`Fat32Bpb::label_window`]); `None` when the
+/// its boot sector `head` places ([`Bpb::label_window`]); `None` when the
 /// window lies beyond the extent or records none.
 fn directory_label<B: Block>(
     dev: &mut ByteDevice<B>,
     head: &[u8],
 ) -> Result<Option<([u8; LABEL_MAX], u8)>, DriverError> {
-    let Some((root, window)) = fat32_label_window(head) else {
+    let Some((root, window)) = fat32_bpb(head).and_then(|bpb| bpb.label_window()) else {
         return Ok(None);
     };
-    let (entries, read) = read_upto::<_, FAT32_LABEL_SCAN_LEN>(dev, root)?;
+    let (entries, read) = read_upto::<_, LABEL_WINDOW>(dev, root)?;
     let take = read.min(window);
     if take == 0 {
         return Ok(None);
@@ -443,165 +415,46 @@ fn directory_label<B: Block>(
     Ok(fat32_directory_label(&entries[..take]))
 }
 
-/// The fields of a FAT32 BIOS parameter block that place the volume's
-/// regions, validated as the format bounds them, and the serial that names
-/// it: the one reading the probe and the FAT32 driver share, so they cannot
-/// disagree about where a volume's data lies or which identity it carries.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Fat32Bpb {
-    /// Bytes per sector: a power of two in `512..=4096`.
-    pub bytes_per_sector: u32,
-    /// Sectors per cluster: a power of two in `1..=128`.
-    pub sectors_per_cluster: u32,
-    /// Sectors before the first FAT, never zero.
-    pub reserved_sectors: u64,
-    /// Copies of the FAT: one or two.
-    pub fat_count: u64,
-    /// Sectors of one FAT, never zero.
-    pub fat_sectors: u64,
-    /// The root directory's first cluster, at least 2.
-    pub root_cluster: u32,
-    /// The volume serial (`BS_VolID`), where the extended boot signature
-    /// declares one.
-    pub serial: Option<[u8; 4]>,
+/// The FAT32 volume boot sector `head` opens, if it opens one.
+#[must_use]
+pub fn fat32_bpb(head: &[u8]) -> Option<Bpb> {
+    let boot: &[u8; BOOT_SECTOR] = head.get(..BOOT_SECTOR)?.try_into().ok()?;
+    Bpb::parse(boot).filter(|bpb| bpb.kind == Kind::Fat32)
 }
 
-impl Fat32Bpb {
-    /// The parameter block `boot` records, or `None` for a boot sector no
-    /// FAT32 volume carries: no `0x55AA` signature, a sector or cluster size
-    /// outside the format, no reserved sectors, a FAT count other than one or
-    /// two, the FAT12/16 root-entry or FAT-size fields set, an empty FAT, or
-    /// a root below cluster 2.
-    #[must_use]
-    pub fn parse(boot: &[u8; 512]) -> Option<Self> {
-        if boot[510] != 0x55 || boot[511] != 0xAA {
-            return None;
-        }
-        let bytes_per_sector = u32::from(le_u16(boot, 11)?);
-        let sectors_per_cluster = u32::from(boot[13]);
-        let reserved_sectors = u64::from(le_u16(boot, 14)?);
-        let fat_count = u64::from(boot[16]);
-        let root_entries = le_u16(boot, 17)?;
-        let fat_sectors_16 = le_u16(boot, 22)?;
-        let fat_sectors = u64::from(le_u32(boot, 36)?);
-        let root_cluster = le_u32(boot, 44)?;
-        let valid = bytes_per_sector.is_power_of_two()
-            && (512..=4096).contains(&bytes_per_sector)
-            && sectors_per_cluster.is_power_of_two()
-            && reserved_sectors != 0
-            && (1..=2).contains(&fat_count)
-            && root_entries == 0
-            && fat_sectors_16 == 0
-            && fat_sectors != 0
-            && root_cluster >= 2;
-        let serial: Option<[u8; 4]> = boot[FAT32_SERIAL_AT..FAT32_BOOT_LABEL_AT]
-            .try_into()
-            .ok()
-            .filter(|_| boot[FAT32_EXT_BOOT_SIG_AT] == FAT32_EXT_BOOT_SIG);
-        valid.then_some(Self {
-            bytes_per_sector,
-            sectors_per_cluster,
-            reserved_sectors,
-            fat_count,
-            fat_sectors,
-            root_cluster,
-            serial,
-        })
-    }
-
-    /// Bytes of one cluster.
-    #[must_use]
-    pub const fn cluster_bytes(&self) -> u64 {
-        self.sectors_per_cluster as u64 * self.bytes_per_sector as u64
-    }
-
-    /// The byte offset of the first FAT.
-    #[must_use]
-    pub const fn fat_start_byte(&self) -> u64 {
-        self.reserved_sectors * self.bytes_per_sector as u64
-    }
-
-    /// The byte offset of the data region, where cluster 2 begins, or `None`
-    /// when it overflows.
-    #[must_use]
-    pub fn data_start_byte(&self) -> Option<u64> {
-        self.fat_count
-            .checked_mul(self.fat_sectors)?
-            .checked_add(self.reserved_sectors)?
-            .checked_mul(u64::from(self.bytes_per_sector))
-    }
-
-    /// The byte offset of data cluster `cluster`, or `None` for a number
-    /// below 2 or an offset that overflows.
-    #[must_use]
-    pub fn cluster_byte(&self, cluster: u32) -> Option<u64> {
-        u64::from(cluster.checked_sub(2)?)
-            .checked_mul(self.cluster_bytes())?
-            .checked_add(self.data_start_byte()?)
-    }
-
-    /// Where the volume's label entry is read from, as the device byte it
-    /// starts at and its length: the head of the root directory's first
-    /// cluster, where formatters write the label entry, at most 4 KiB of it. A
-    /// writer places a label entry nowhere else, so the probe reads back what
-    /// it wrote. `None` when the root lies past any byte address.
-    #[must_use]
-    pub fn label_window(&self) -> Option<(u64, usize)> {
-        let start = self.cluster_byte(self.root_cluster)?;
-        let cluster = usize::try_from(self.cluster_bytes()).unwrap_or(FAT32_LABEL_SCAN_LEN);
-        Some((start, cluster.min(FAT32_LABEL_SCAN_LEN)))
-    }
-
-    /// The volume's stable identity: a digest of its serial, where the
-    /// extended boot signature declares one, and of the geometry formatting
-    /// fixes. Neither a write nor a relabel changes any of them — a relabel
-    /// rewrites `BS_VolLab` beside the serial — so two volumes formatted alike
-    /// under one serial share it. FAT32 has no UUID;
-    /// `docs/src/filesystem/drives.md` §8 sanctions a content-derived identity
-    /// for formats without one.
-    #[must_use]
-    pub fn identity(&self) -> [u8; 16] {
-        let serial: &[u8] = match &self.serial {
-            Some(serial) => serial,
-            None => &[],
-        };
-        content_identity(
-            b"tairix.fat32",
-            &[
-                serial,
-                &self.bytes_per_sector.to_le_bytes(),
-                &self.sectors_per_cluster.to_le_bytes(),
-                &self.reserved_sectors.to_le_bytes(),
-                &self.fat_count.to_le_bytes(),
-                &self.fat_sectors.to_le_bytes(),
-                &self.root_cluster.to_le_bytes(),
-            ],
-        )
-    }
-}
-
-/// Where a FAT32 volume's label entry is read from, by its boot sector `head`
-/// ([`Fat32Bpb::label_window`]).
-fn fat32_label_window(head: &[u8]) -> Option<(u64, usize)> {
-    let boot: &[u8; 512] = head.get(..512)?.try_into().ok()?;
-    Fat32Bpb::parse(boot)?.label_window()
+/// A FAT32 volume's stable identity: a digest of its serial, where the
+/// extended boot signature declares one, and of the geometry formatting
+/// fixes. Neither a write nor a relabel changes any of them — a relabel
+/// rewrites `BS_VolLab` beside the serial — so two volumes formatted alike
+/// under one serial share it. FAT32 has no UUID;
+/// `docs/src/filesystem/drives.md` §8 sanctions a content-derived identity
+/// for formats without one.
+#[must_use]
+pub fn fat32_identity(bpb: &Bpb) -> [u8; 16] {
+    let serial = bpb.serial.map(u32::to_le_bytes);
+    content_identity(
+        b"tairix.fat32",
+        &[
+            serial.as_ref().map_or(&[][..], |serial| &serial[..]),
+            &u32::from(bpb.bytes_per_sector).to_le_bytes(),
+            &u32::from(bpb.sectors_per_cluster).to_le_bytes(),
+            &u64::from(bpb.reserved_sectors).to_le_bytes(),
+            &u64::from(bpb.fats).to_le_bytes(),
+            &u64::from(bpb.fat_sectors).to_le_bytes(),
+            &bpb.root_cluster.to_le_bytes(),
+        ],
+    )
 }
 
 /// The label a FAT directory's `entries` record: the first live volume-label
 /// entry before the directory's end, trimmed of padding, or `None` when there
 /// is none or it holds the "no label" placeholder.
 fn fat32_directory_label(entries: &[u8]) -> Option<([u8; LABEL_MAX], u8)> {
-    for entry in entries.as_chunks::<FAT_DIR_ENTRY_LEN>().0 {
-        match entry[0] {
-            FAT_END_OF_DIR => return None,
-            FAT_DELETED_ENTRY => continue,
-            _ => {}
-        }
-        let attributes = entry[11];
-        if attributes & FAT_ATTR_LONG_NAME != FAT_ATTR_LONG_NAME
-            && attributes & FAT_ATTR_VOLUME_ID != 0
-        {
-            return fat_label(&entry[..11]);
+    for entry in entries.as_chunks::<ENTRY>().0 {
+        match slot(entry) {
+            Slot::End => return None,
+            Slot::Label => return fat_label(&entry[..11]),
+            Slot::Deleted | Slot::Long | Slot::Short => {}
         }
     }
     None
@@ -611,7 +464,7 @@ fn fat32_directory_label(entries: &[u8]) -> Option<([u8; LABEL_MAX], u8)> {
 fn fat_label(field: &[u8]) -> Option<([u8; LABEL_MAX], u8)> {
     let (label, len) = take_label(field);
     let text = &label[..usize::from(len)];
-    (!text.is_empty() && text != FAT_NO_LABEL).then_some((label, len))
+    (!text.is_empty() && text != NO_LABEL).then_some((label, len))
 }
 
 /// Render `identity` as its full display fingerprint: lowercase Crockford
@@ -883,24 +736,19 @@ fn probe_ext4(head: &[u8]) -> Option<ProbedVolume> {
 /// fields, so the reserved sectors through it are the mutation evidence:
 /// honestly weaker than the other formats', and the strongest FAT offers.
 fn probe_fat32(head: &[u8]) -> Option<ProbedVolume> {
-    let boot: &[u8; 512] = head.get(..512)?.try_into().ok()?;
-    if &boot[82..90] != b"FAT32   " {
+    let tag = head.get(at::TYPE_32..at::TYPE_32 + 8)?;
+    if tag != Kind::Fat32.type_name() {
         return None;
     }
-    let bpb = Fat32Bpb::parse(boot)?;
-    let identity = bpb.identity();
-    // The label field exists only under the 0x29 extended boot signature.
-    let label = if boot[FAT32_EXT_BOOT_SIG_AT] == FAT32_EXT_BOOT_SIG {
-        fat_label(&boot[FAT32_BOOT_LABEL_AT..FAT32_BOOT_LABEL_AT + FAT_LABEL_LEN])
-    } else {
-        None
-    };
+    let bpb = fat32_bpb(head)?;
+    let identity = fat32_identity(&bpb);
+    let label = bpb.label.and_then(|field| fat_label(&field));
     let (label, label_len) = label.unwrap_or(([0u8; LABEL_MAX], 0));
     // FSInfo lives in the reserved region; a boot sector that points
     // elsewhere is lying.
-    let fsinfo = u64::from(le_u16(boot, 48)?);
-    let evidence = (fsinfo != 0 && fsinfo < bpb.reserved_sectors)
-        .then(|| (fsinfo + 1) * u64::from(bpb.bytes_per_sector))
+    let fsinfo = u64::from(bpb.fsinfo_sector);
+    let evidence = (fsinfo != 0 && fsinfo < u64::from(bpb.reserved_sectors))
+        .then(|| (fsinfo + 1) * bpb.sector_bytes())
         .filter(|&len| len <= EVIDENCE_MAX)
         .map(|len| Evidence { offset: 0, len });
     Some(ProbedVolume {

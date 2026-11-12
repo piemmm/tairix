@@ -31,7 +31,7 @@ use core::mem;
 use core::ops::ControlFlow;
 
 use tairix_abi::driver::display::DisplayMode;
-use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
+use tairix_abi::input::Modifiers as AbiModifiers;
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
@@ -67,8 +67,8 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::document::{Access, DocumentFile, PickFor, SaveJob, SaveStep, SavedDocument, UNTITLED};
-use crate::key_input_event;
 use crate::mailbox::EventMailbox;
+use crate::{held_modifiers, key_input_event};
 use tairix_util::utf8::refusal_headline;
 
 /// The descriptor a document is read from and saved through, whether it was
@@ -2409,7 +2409,7 @@ impl<A: DocumentApp> Host<A> {
         if window.loading() {
             return;
         }
-        let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
+        let held = held_modifiers(modifiers);
         self.feed(index, fed, core::iter::once(held).chain(inputs), at_ns);
     }
 
@@ -2494,7 +2494,9 @@ impl<A: DocumentApp> Host<A> {
                 self.act_app(index, event);
             } else if let Some(owned) = id.and_then(|id| self.owned_of(id)) {
                 self.act_owned(owned, event);
-            } else if let WindowEvent::FilePicked { handle, .. } = event {
+            } else if let WindowEvent::FilePicked { handle, .. }
+            | WindowEvent::SubtreePicked { handle, .. } = event
+            {
                 // A file chosen for a window since closed is let go at once,
                 // not left held for the life of the process.
                 release(*handle);
@@ -2561,6 +2563,10 @@ impl<A: DocumentApp> Host<A> {
             WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
                 let _ = window.file.end_pick();
             }
+            WindowEvent::SubtreePicked { handle, .. } => {
+                release(*handle);
+                let _ = window.file.end_pick();
+            }
             WindowEvent::MenuClosed {
                 open_id, outcome, ..
             } => self.menu_closed(index, *open_id, *outcome),
@@ -2570,53 +2576,10 @@ impl<A: DocumentApp> Host<A> {
                     self.feed(index, Fed::Window, key, tairix_rt::clock_get());
                 }
             }
-            WindowEvent::Pointer {
-                x,
-                y,
-                action,
-                modifiers,
-                at_ns,
-                ..
-            } => {
-                let at = pointer_point(*x, *y);
-                self.point(
-                    (index, None),
-                    at,
-                    *modifiers,
-                    pointer_input_events(*action, at),
-                    *at_ns,
-                );
-            }
-            // A scrolled strip puts another tool under the pointer, which is
-            // why a turn is owed a hover check as a move is.
-            WindowEvent::Scrolled {
-                x,
-                y,
-                dx,
-                dy,
-                modifiers,
-                ..
-            } => {
-                let at = pointer_point(*x, *y);
-                self.point(
-                    (index, None),
-                    at,
-                    *modifiers,
-                    scroll_input_events(at, *dx, *dy),
-                    tairix_rt::clock_get(),
-                );
-            }
-            WindowEvent::Pinch {
-                x,
-                y,
-                phase,
-                scale,
-                modifiers,
-                ..
-            } => {
-                let at = pointer_point(*x, *y);
-                let pinch = pinch_input_events(at, *phase, *scale);
-                self.point((index, None), at, *modifiers, pinch, tairix_rt::clock_get());
+            WindowEvent::Pointer { .. }
+            | WindowEvent::Scrolled { .. }
+            | WindowEvent::Pinch { .. } => {
+                self.pointed(index, event);
             }
             WindowEvent::Minimized { .. }
             | WindowEvent::ToolMoved { .. }
@@ -2628,12 +2591,60 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::PreviewRendered { .. } => {}
+        }
+    }
+
+    /// Route a pointer's press or motion, a scroll or a pinch to window
+    /// `index`.
+    fn pointed(&mut self, index: usize, event: &WindowEvent) {
+        match *event {
+            WindowEvent::Pointer {
+                x,
+                y,
+                action,
+                modifiers,
+                at_ns,
+                ..
+            } => {
+                let at = pointer_point(x, y);
+                let events = pointer_input_events(action, at);
+                self.point((index, None), at, modifiers, events, at_ns);
+            }
+            // A scrolled strip puts another tool under the pointer, which is
+            // why a turn is owed a hover check as a move is.
+            WindowEvent::Scrolled {
+                x,
+                y,
+                dx,
+                dy,
+                modifiers,
+                ..
+            } => {
+                let at = pointer_point(x, y);
+                let events = scroll_input_events(at, dx, dy);
+                self.point((index, None), at, modifiers, events, tairix_rt::clock_get());
+            }
+            WindowEvent::Pinch {
+                x,
+                y,
+                phase,
+                scale,
+                modifiers,
+                ..
+            } => {
+                let at = pointer_point(x, y);
+                let pinch = pinch_input_events(at, phase, scale);
+                self.point((index, None), at, modifiers, pinch, tairix_rt::clock_get());
+            }
+            _ => {}
         }
     }
 
@@ -2663,7 +2674,9 @@ impl<A: DocumentApp> Host<A> {
                 window.owe_reported();
             }
             // It asks for no file; one handed to it anyway is let go.
-            WindowEvent::FilePicked { handle, .. } => release(*handle),
+            WindowEvent::FilePicked { handle, .. } | WindowEvent::SubtreePicked { handle, .. } => {
+                release(*handle);
+            }
             WindowEvent::Key { key, .. } => {
                 let key = core::iter::once(key_input_event(*key));
                 self.feed_app(index, key, tairix_rt::clock_get());
@@ -2717,6 +2730,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
@@ -2792,7 +2807,9 @@ impl<A: DocumentApp> Host<A> {
                 ..
             } => self.owned_resized((index, owned), (*width_px, *height_px), event),
             // It asks for no file; one handed to it anyway is let go.
-            WindowEvent::FilePicked { handle, .. } => release(*handle),
+            WindowEvent::FilePicked { handle, .. } | WindowEvent::SubtreePicked { handle, .. } => {
+                release(*handle);
+            }
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
                     let key = core::iter::once(key_input_event(*key));
@@ -2860,6 +2877,8 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AlertClosed { .. }
             | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::PointerMotion { .. }
+            | WindowEvent::PointerLock { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }
@@ -3114,7 +3133,7 @@ impl<A: DocumentApp> Host<A> {
         let window = &mut self.app_windows[index];
         window.chrome.pointing.at = Some(at);
         window.chrome.pointing.owed = true;
-        let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
+        let held = held_modifiers(modifiers);
         self.feed_app(index, core::iter::once(held).chain(inputs), at_ns);
     }
 

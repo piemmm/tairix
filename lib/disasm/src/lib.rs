@@ -5,8 +5,8 @@
 //! ISAs. That decoding is identical wherever it happens, so it lives here
 //! once, one module per ISA:
 //!
-//! * [`riscv64`] — RV64GC, including the C (compressed) extension; the
-//!   16/32-bit length discipline is the core correctness property.
+//! * [`riscv64`] — RV64GC, including the C (compressed) extension, and
+//!   Zbb; the 16/32-bit length discipline is the core correctness property.
 //! * [`aarch64`] — fixed 32-bit A64 decode of the major encoding groups;
 //!   an unknown encoding renders as `.inst 0x…`, never skipped or guessed.
 //! * [`wasm`] — the structured opcode stream of a code-section body, with
@@ -14,8 +14,9 @@
 //!   immediates (an overlong encoding fails closed).
 //! * [`x86_64`] — the variable-length decoder: legacy prefixes, REX,
 //!   ModRM/SIB, displacement/immediate sizing over the one- and two-byte
-//!   opcode maps; an undecodable byte is a `(bad)` single byte, so the
-//!   stream resynchronises exactly as binutils does.
+//!   opcode maps, and the VEX-encoded BMI1 and BMI2 instructions; an
+//!   undecodable byte is a `(bad)` single byte, so the stream resynchronises
+//!   exactly as binutils does.
 //!
 //! Every decoder is a **pure function of a byte slice and a start
 //! address**: no state, no I/O, no allocation beyond the returned text. It

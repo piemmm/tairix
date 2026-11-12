@@ -44,7 +44,6 @@ mod program {
 
     use tairix_abi::audio::AudioGain;
     use tairix_abi::driver::audio::StreamDirection;
-    use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
@@ -86,9 +85,9 @@ mod program {
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::notices::{Notices, Raised};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
-        Answer, EventDrain, EventError, EventMailbox, EventSource, Parked, PostedRequest, Refused,
-        Repaint, Target, WindowClient, WindowEvents, WindowSizing,
+        held_modifiers, key_input_event, pointer_input_events, pointer_point, present_damage,
+        scroll_input_events, Answer, EventDrain, EventError, EventMailbox, EventSource, Parked,
+        PostedRequest, Refused, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
     };
 
     /// The name this program states its refusals under.
@@ -1260,9 +1259,7 @@ mod program {
                     at_ns,
                     ..
                 } => {
-                    let held = key_input_event(KeyInput::ModifiersChanged {
-                        modifiers: *modifiers,
-                    });
+                    let held = held_modifiers(*modifiers);
                     let inputs: Vec<InputEvent> = core::iter::once(held)
                         .chain(pointer_input_events(*action, pointer_point(*x, *y)))
                         .collect();

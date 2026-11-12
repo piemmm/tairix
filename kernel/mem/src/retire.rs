@@ -172,6 +172,19 @@ impl SpaceTlb {
         &self.context
     }
 
+    /// Make `pages` pages newly installed from `base` reachable from every
+    /// other CPU on a port whose CPUs may cache an absent entry: a shootdown
+    /// of them, as [`Self::shoot_remote`]. Elsewhere an absence is never
+    /// cached and nothing is owed.
+    pub(crate) fn publish_remote(&self, base: u64, pages: u64) {
+        if self
+            .remote
+            .is_some_and(CrossCpuTlbShootdown::publish_needs_remote)
+        {
+            self.shoot_remote(base, pages);
+        }
+    }
+
     /// Discard `pages` pages from `base` on every other CPU that may cache
     /// them, returning once none running the space can, and advancing the
     /// space's generation so every CPU that left it discards them before it
@@ -203,12 +216,17 @@ impl SpaceTlb {
 /// for to its recorder as `(base, pages)`, `'static` as a port's handle is.
 ///
 /// A user range reaches the recorder only when the mask names a CPU, as it
-/// reaches a port's other CPUs only then.
+/// reaches a port's other CPUs only then. `CACHES_ABSENCE` is the port's
+/// [`CrossCpuTlbShootdown::publish_needs_remote`].
 #[cfg(any(test, feature = "host-tests"))]
-pub struct RecordedRemote(pub fn(u64, usize));
+pub struct RecordedRemote<const CACHES_ABSENCE: bool = false>(pub fn(u64, usize));
 
 #[cfg(any(test, feature = "host-tests"))]
-impl CrossCpuTlbShootdown for RecordedRemote {
+impl<const CACHES_ABSENCE: bool> CrossCpuTlbShootdown for RecordedRemote<CACHES_ABSENCE> {
+    fn publish_needs_remote(&self) -> bool {
+        CACHES_ABSENCE
+    }
+
     fn shootdown_page(&self, vaddr: u64) {
         (self.0)(vaddr, 1);
     }
@@ -278,6 +296,9 @@ pub(crate) struct Retiring<'a> {
     held: [(u64, Frame); RETIRE_BATCH],
     count: usize,
     unscrubbed: bool,
+    /// Whether a frame is zeroed before it goes: not one that moves to
+    /// another space with what it holds.
+    scrub: bool,
 }
 
 impl<'a> Retiring<'a> {
@@ -298,7 +319,21 @@ impl<'a> Retiring<'a> {
             held: [(0, Frame(0)); RETIRE_BATCH],
             count: 0,
             unscrubbed: false,
+            scrub: true,
         }
+    }
+
+    /// Hold frames for `keep` with their contents, once `tlb`'s CPUs and
+    /// `retire` are shut: frames that leave the space for another.
+    pub(crate) fn keeping(
+        tlb: Option<SpaceTlb>,
+        retire: &'a mut dyn Retire,
+        physmap: &'a dyn PhysMap,
+        keep: &'a mut dyn FnMut(Frame),
+    ) -> Self {
+        let mut retiring = Self::new(tlb, retire, physmap, keep);
+        retiring.scrub = false;
+        retiring
     }
 
     /// Hold `frame`, whose entry at `va` has just been cleared and flushed on
@@ -330,7 +365,7 @@ impl<'a> Retiring<'a> {
             .map(|run| (run[0].0, run.len() as u64));
         self.retire.retire_runs(&mut runs);
         for &(_, frame) in &self.held[..count] {
-            if zero_frame(self.physmap, frame).is_ok() {
+            if !self.scrub || zero_frame(self.physmap, frame).is_ok() {
                 (self.release)(frame);
             } else {
                 self.unscrubbed = true;
@@ -437,6 +472,19 @@ mod tests {
         REMOTE.with(|log| core::mem::take(&mut *log.borrow_mut()))
     }
 
+    #[test]
+    fn a_new_mapping_reaches_other_cpus_only_on_a_port_that_caches_an_absence() {
+        static CACHING_LOG: RecordedRemote<true> = RecordedRemote(record_remote);
+        reach(&[1]).publish_remote(page_va(0), 2);
+        assert!(remote_events().is_empty(), "an absence is never cached");
+
+        let cpus = TlbContext::new(4).expect("a small set allocates");
+        cpus.enter(1);
+        let caching = SpaceTlb::new(cpus, Some(&CACHING_LOG));
+        caching.publish_remote(page_va(0), 2);
+        assert_eq!(remote_events(), [Event::Remote(page_va(0), 2)]);
+    }
+
     fn page_va(n: u64) -> u64 {
         0x4000_0000 + n * PAGE_SIZE as u64
     }
@@ -491,6 +539,35 @@ mod tests {
         retiring.hold(page_va(0), frame);
         drop(retiring);
         assert_eq!(log.take().last(), Some(&Event::Released(frame)));
+    }
+
+    #[test]
+    fn a_kept_frame_goes_with_its_bytes_only_after_both_views_are_shut() {
+        let log = Log::default();
+        let physmap = sim();
+        let frame = Frame(SIM_BASE_FRAME + 3);
+        let ptr = physmap
+            .translate(frame.start(), PAGE_SIZE)
+            .expect("the frame is in the window");
+        // SAFETY: the simulated window is the test's own buffer and the frame
+        // lies inside it, as the translation just proved.
+        unsafe { core::ptr::write_bytes(ptr.as_ptr(), 0x5A, PAGE_SIZE) };
+        let mut retire = Recorder(&log);
+        let mut keep = |kept: Frame| {
+            // SAFETY: as above; the frame is unreachable from anywhere else.
+            let page = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), PAGE_SIZE) };
+            assert!(page.iter().all(|&byte| byte == 0x5A), "kept scrubbed");
+            log.push(Event::Released(kept));
+        };
+        let mut retiring = Retiring::keeping(Some(reach(&[1])), &mut retire, &physmap, &mut keep);
+        retiring.hold(page_va(0), frame);
+        assert_eq!(retiring.finish(), Ok(()));
+        assert_eq!(remote_events(), [Event::Remote(page_va(0), 1)]);
+        assert_eq!(
+            log.take(),
+            [Event::Retired(page_va(0), 1), Event::Released(frame)],
+            "the snapshot lets go before the frame does"
+        );
     }
 
     #[test]

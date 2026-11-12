@@ -98,8 +98,9 @@ what is built.
   volume by renaming what it holds — so only a taken file or link is asked
   about. A file is copied by the shared engine
   ([`tairix-fscopy`](../lib/fscopy.md)) through a buffer sized to the file
-  and at most 1 MiB, keeping its holes, then its extended attributes — a
-  directory the copy creates takes its source's too. What a copy makes
+  and at most 1 MiB, keeping its holes, then its extended attributes and
+  its times — a directory the copy creates takes its source's too, its times
+  once its entries are in. What a copy makes
   takes its source's mode as `cp` gives it: a file its permission bits
   less the umask, its set-id bits dropped; a directory its permission and
   sticky bits less the umask, and a setgid bit the directory it is made in

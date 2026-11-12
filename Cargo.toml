@@ -57,6 +57,7 @@ members = [
     "lib/clock",
     "lib/cmdres",
     "lib/codec",
+    "lib/codegen",
     "lib/collections",
     "lib/colour",
     "lib/complete",
@@ -64,10 +65,12 @@ members = [
     "lib/conout",
     "lib/controls",
     "lib/countryside",
+    "lib/cp437",
     "lib/cpuops",
     "lib/crc16",
     "lib/crc32",
     "lib/crc32c",
+    "lib/crt",
     "lib/crt0",
     "lib/crypto",
     "lib/curses",
@@ -85,6 +88,7 @@ members = [
     "lib/edid",
     "lib/encoder",
     "lib/enrolment",
+    "lib/fat",
     "lib/fbcon",
     "lib/fdt",
     "lib/font",
@@ -321,6 +325,7 @@ members = [
     "userland/apps/netmap",
     "userland/apps/paint",
     "userland/apps/passwd",
+    "userland/apps/pcemu",
     "userland/apps/ping",
     "userland/apps/play",
     "userland/apps/audioctl",
@@ -523,6 +528,10 @@ members = [
     "tests/integration/threads_qemu_aarch64",
     "tests/integration/threads_qemu_riscv64",
     "tests/integration/threads_qemu_x86_64",
+    "tests/integration/code_install_program",
+    "tests/integration/code_install_qemu_aarch64",
+    "tests/integration/code_install_qemu_riscv64",
+    "tests/integration/code_install_qemu_x86_64",
     "tests/integration/stack_grow_program",
     "tests/integration/stack_grow_qemu_aarch64",
     "tests/integration/stack_grow_qemu_riscv64",
@@ -546,6 +555,10 @@ members = [
     "tests/integration/twins_qemu_aarch64",
     "tests/integration/images_program",
     "tests/integration/images_qemu_aarch64",
+    "tests/integration/pcemu_program",
+    "tests/integration/pcemu_qemu_aarch64",
+    "tests/integration/pcemu_qemu_riscv64",
+    "tests/integration/pcemu_qemu_x86_64",
     "tests/integration/stalltrace_program",
     "tests/integration/stalltrace_qemu_aarch64",
     "tests/integration/watchdog_service_program",
@@ -761,6 +774,11 @@ panic = "abort"
 opt-level = 3
 
 [profile.dev.package.tairix-raster]
+opt-level = 3
+
+# The emulator interprets a processor: a debug or QEMU image's `Run` built
+# without optimisation runs its guest at a fraction of real time.
+[profile.dev.package.tairix-pcemu]
 opt-level = 3
 
 [profile.dev.package.tairix-svg]

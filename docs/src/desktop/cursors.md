@@ -346,16 +346,25 @@ coded per window action. The window manager's `select` module
   outermost pixels exactly as far as a press on them does — the pointer never
   changes shape somewhere a press would not start a resize, and an undecorated
   window has no resize edges to point at.
-- Each window carries a `cursor_hint` (default `Arrow`). An application sets
-  its own window's with the `SetCursor { window_id, shape }` window-channel
-  request (`WindowClient::set_cursor`), naming one of the content shapes
-  `CursorShape` allows — `Arrow`, `Text`, `Pointer`, `Busy`, `Crosshair`;
-  the resize and move shapes are the frame's and cannot be asked for. The session checks the
-  window is the caller's, sets the hint through
+- Each window carries a `cursor_hint` (`CursorHint`, default the `Arrow`
+  shape). An application sets its own window's with the
+  `SetCursor { window_id, shape }` window-channel request
+  (`WindowClient::set_cursor`), naming one of the content shapes `CursorShape`
+  allows — `Arrow`, `Text`, `Pointer`, `Busy`, `Crosshair` — or `None`, for
+  content that draws its own pointer or wants none (a guest machine's screen);
+  the resize and move shapes are the frame's and cannot be asked for. The
+  session checks the window is the caller's, sets the hint through
   `Compositor::set_window_cursor`, and refreshes the pointer at once. One
   shape per window: content with regions of different kinds restates it as the
   pointer crosses them. A hint is window state, not pixels, so it marks no
   damage.
+- A pointer locked to a window (`LockPointer`) is drawn nowhere, whatever is
+  under it. Where the policy answers no pointer, `CursorController::refresh`
+  blanks the installed image (`Compositor::set_cursor_blank`) rather than
+  removing it, so the pointer reappears in its shape the moment the policy
+  draws one again. Blanking is distinct from the screensaver's
+  `set_cursor_hidden`: it leaves the halo a lone tap of Ctrl asks for, so a
+  hidden pointer can still be found.
 - `CursorController` ties the policy to the artwork. It owns the active
   `CursorRegistry` and remembers the kind on screen and the density it was
   rasterised at, but it does **not** own the scale: the desktop density belongs

@@ -14,10 +14,13 @@ use tairix_abi::driver::block::DiscLayout;
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
+use tairix_fat::dir::attr::{
+    ARCHIVE, LONG_NAME as FAT_ATTR_LONG_NAME, VOLUME_ID as FAT_ATTR_VOLUME_ID,
+};
+use tairix_fat::dir::{DELETED as FAT_DELETED_ENTRY, ENTRY as FAT_DIR_ENTRY_LEN};
 use tairix_fsprobe::{
     adfs, affs, fingerprint, iso9660, recognise, twin_identity, udf, Evidence, ProbedVolume,
-    Recognised, ARXFS_RING_BLOCKS, FAT_ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID, FAT_DELETED_ENTRY,
-    FAT_DIR_ENTRY_LEN,
+    Recognised, ARXFS_RING_BLOCKS,
 };
 use tairix_test_amiga_image::rdb_disk;
 
@@ -113,8 +116,8 @@ fn the_root_directory_label_outranks_the_boot_sector_copy() {
         &[
             deleted,
             images::dir_entry(b"LONGNAMEPRT", FAT_ATTR_LONG_NAME),
-            images::dir_entry(b"README  TXT", 0x20),
-            images::dir_entry(b"HOLIDAYS   ", FAT_ATTR_VOLUME_ID | 0x20),
+            images::dir_entry(b"README  TXT", ARCHIVE),
+            images::dir_entry(b"HOLIDAYS   ", FAT_ATTR_VOLUME_ID | ARCHIVE),
         ],
     );
     let probed = recognised(&image).expect("matches");
@@ -132,7 +135,7 @@ fn a_directory_without_a_label_entry_keeps_the_boot_label() {
         b"MYDISK     ",
         images::FAT32_ROOT,
         &[
-            images::dir_entry(b"README  TXT", 0x20),
+            images::dir_entry(b"README  TXT", ARCHIVE),
             [0u8; FAT_DIR_ENTRY_LEN],
             images::dir_entry(b"STALE      ", FAT_ATTR_VOLUME_ID),
         ],

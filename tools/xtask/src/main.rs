@@ -72,6 +72,9 @@
 //!   `lib/spirv/assets/` (`--write` to regenerate)
 //! - `shaders`      — verifies the pinned shader set in `lib/shaders/spv/`
 //!   against the Rust sources that build it (`--write` to regenerate)
+//! - `pcemu-vectors` — imports a vetted subset of the upstream CPU
+//!   conformance suites into `userland/apps/pcemu/assets/cpu-vectors/`
+//!   (`--import <dir>`; developer-run, never in `ci`)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
@@ -126,10 +129,13 @@
 //!   reached the tree
 //! - `ignore-check` — reject an ignored test in any spelling, since libtest
 //!   reports one as skipped under a green gate
+//! - `static-mut-check` — reject a `static mut`, state with no owner and no
+//!   synchronisation
 //! - `bench`        — host microbenchmarks for the per-pixel desktop paths:
 //!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`/
 //!   `frost_halved_from`,
-//!   `resample`, the scan-out channel encode, and the window manager's
+//!   `resample`, the emulated screen's per-frame `SharpScaler`, the scan-out
+//!   channel encode, and the window manager's
 //!   whole-frame composite over a representative window stack. Reports ns/px
 //!   and ns/frame for a `--iters N` / `--rounds N` budget, one family at a
 //!   time with `--filter <substring>`. Wall-clock timings are load-dependent,

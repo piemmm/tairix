@@ -2243,6 +2243,7 @@ fn client_press_captures_the_pointer_until_release() {
         InputResponse::ClientPointerReleased {
             window: win,
             local: Point::new(19, 19),
+            button: PointerButton::Primary,
         }
     );
     assert_eq!(
@@ -2654,6 +2655,7 @@ fn hiding_the_pointer_takes_its_trail_and_halo_with_it() {
 // ---- cursor selection from interaction state -------------------------
 
 use crate::select::{desired_cursor, CursorController, ENLARGED_SIDE_PX, FULLY_ENLARGED};
+use crate::window::CursorHint;
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Scale;
 use tairix_theme::{CursorKind, CursorSetId};
@@ -2664,14 +2666,20 @@ fn window_cursor_hint_round_trips_and_unknown_id_fails_closed() {
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
 
     // Default hint is the plain arrow.
-    assert_eq!(c.window_cursor(win), Some(CursorKind::Arrow));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
-    assert_eq!(c.window_cursor(win), Some(CursorKind::Text));
+    assert_eq!(
+        c.window_cursor(win),
+        Some(CursorHint::Shape(CursorKind::Arrow))
+    );
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
+    assert_eq!(
+        c.window_cursor(win),
+        Some(CursorHint::Shape(CursorKind::Text))
+    );
 
     // An unknown window changes nothing.
     let ghost = c.add_window(Point::ORIGIN, opaque(1, 1, RED));
     assert!(c.remove(ghost));
-    assert!(!c.set_window_cursor(ghost, CursorKind::Pointer));
+    assert!(!c.set_window_cursor(ghost, CursorHint::Shape(CursorKind::Pointer)));
     assert_eq!(c.window_cursor(ghost), None);
 }
 
@@ -2685,28 +2693,28 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
     router.handle(moved(50, 50), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Arrow
+        CursorHint::Shape(CursorKind::Arrow)
     );
 
     // Over a default window: still the arrow.
     router.handle(moved(15, 15), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Arrow
+        CursorHint::Shape(CursorKind::Arrow)
     );
 
     // The window advertises a text cursor over its content.
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Text
+        CursorHint::Shape(CursorKind::Text)
     );
 
     // Moving back to the background returns to the arrow.
     router.handle(moved(50, 50), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Arrow
+        CursorHint::Shape(CursorKind::Arrow)
     );
 }
 
@@ -2723,7 +2731,7 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
     router.handle(moved(bounds.left() - 1, mid_y), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::ResizeHorizontal,
+        CursorHint::Shape(CursorKind::ResizeHorizontal),
         "the band beside the edge shows the axis it moves along"
     );
     assert_eq!(
@@ -2753,7 +2761,7 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
     router.handle(moved(widened.left() - 64, mid_y), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Arrow
+        CursorHint::Shape(CursorKind::Arrow)
     );
     assert_eq!(
         router.handle(press_primary(), &mut c, T0),
@@ -2847,7 +2855,7 @@ fn move_grab_outranks_the_window_hint() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
 
     router.handle(moved(15, 15), &mut c, T0);
     router.handle(press_primary(), &mut c, T0);
@@ -2857,32 +2865,32 @@ fn move_grab_outranks_the_window_hint() {
     assert!(router.is_moving());
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Move
+        CursorHint::Shape(CursorKind::Move)
     );
 
     router.handle(release_primary(), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Text
+        CursorHint::Shape(CursorKind::Text)
     );
 }
 
 #[test]
 fn a_window_s_hint_shows_over_its_content_and_never_over_its_frame() {
     let (mut c, id) = decorated_compositor();
-    assert!(c.set_window_cursor(id, CursorKind::Text));
+    assert!(c.set_window_cursor(id, CursorHint::Shape(CursorKind::Text)));
     let client = c.window_client_rect(id).expect("decorated");
     let router = InputRouter::new();
     assert_eq!(
         desired_cursor(centre(client), &router, &c),
-        CursorKind::Text
+        CursorHint::Shape(CursorKind::Text)
     );
     let bounds = c.window(id).expect("the window").bounds();
     let title = Point::new(centre(client).x, i32::midpoint(bounds.top(), client.top()));
     assert_eq!(c.frame_hit(id, title), Some(FurniturePart::TitleBar));
     assert_eq!(
         desired_cursor(title, &router, &c),
-        CursorKind::Arrow,
+        CursorHint::Shape(CursorKind::Arrow),
         "the title bar keeps the arrow"
     );
 }
@@ -2890,7 +2898,7 @@ fn a_window_s_hint_shows_over_its_content_and_never_over_its_frame() {
 #[test]
 fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
     let (mut c, id) = decorated_compositor();
-    assert!(c.set_window_cursor(id, CursorKind::Text));
+    assert!(c.set_window_cursor(id, CursorHint::Shape(CursorKind::Text)));
     let client = c.window_client_rect(id).expect("decorated");
     let bounds = c.window(id).expect("the window").bounds();
     let mut router = InputRouter::new();
@@ -2937,7 +2945,7 @@ fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
         router.handle(moved(point.x, point.y), &mut c, T0);
         assert_eq!(
             desired_cursor(router.pointer(), &router, &c),
-            expected,
+            CursorHint::Shape(expected),
             "at {point:?}, classified {:?}",
             c.frame_hit(id, point)
         );
@@ -2950,21 +2958,21 @@ fn an_undecorated_window_has_no_resize_edges_to_point_at() {
     // right up to its own border rather than inventing a grabbable rim.
     let mut c = new_compositor(mode(120, 120), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(40, 40, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let bounds = c.window(win).unwrap().bounds();
     let mut router = InputRouter::new();
 
     router.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Text
+        CursorHint::Shape(CursorKind::Text)
     );
 }
 
 #[test]
 fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     let (mut c, id) = decorated_compositor();
-    assert!(c.set_window_cursor(id, CursorKind::Text));
+    assert!(c.set_window_cursor(id, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let bounds = c.window(id).unwrap().bounds();
     let corner = Point::new(bounds.right() - 1, bounds.bottom() - 1);
@@ -2978,7 +2986,7 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     );
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::ResizeDiagonalFalling
+        CursorHint::Shape(CursorKind::ResizeDiagonalFalling)
     );
 
     // Mid-drag the pointer is deep inside the window it is stretching, but the
@@ -2986,7 +2994,7 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     router.handle(moved(bounds.left() + 5, bounds.top() + 5), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
-        CursorKind::ResizeDiagonalFalling
+        CursorHint::Shape(CursorKind::ResizeDiagonalFalling)
     );
 
     router.handle(release_primary(), &mut c, T0);
@@ -2998,7 +3006,7 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     );
     assert_eq!(
         desired_cursor(at, &router, &c),
-        CursorKind::Arrow,
+        CursorHint::Shape(CursorKind::Arrow),
         "the gesture gave the shape back, and the frame keeps the arrow"
     );
 }
@@ -3007,7 +3015,7 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
 fn controller_installs_and_switches_the_cursor_shape() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -3032,7 +3040,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
 fn controller_keeps_a_hidden_cursor_hidden_and_current() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
     router.handle(moved(70, 70), &mut c, T0);
@@ -3058,7 +3066,7 @@ fn controller_keeps_a_hidden_cursor_hidden_and_current() {
 fn controller_reuses_a_cached_kind_when_it_recurs() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -5083,6 +5091,14 @@ fn a_secondary_press_off_the_title_bar_still_raises() {
     router.handle(press_secondary(), &mut c, T0);
     assert!(!router.is_moving());
     assert_eq!(c.window_at(centre(client)), Some(upper));
+    assert!(matches!(
+        router.handle(release_secondary(), &mut c, T0),
+        InputResponse::ClientPointerReleased {
+            window,
+            button: PointerButton::Secondary,
+            ..
+        } if window == upper
+    ));
 
     let drag = scan_title(&c, lower, |p| matches!(p, FurniturePart::TitleBar)).expect("drag");
     router.handle(moved(drag.x, drag.y), &mut c, T0);
@@ -6680,8 +6696,11 @@ fn an_abandoned_client_press_names_the_client_and_where_the_pointer_was() {
     );
 }
 
+/// A second button pressed while a client holds a press joins that client's
+/// gesture wherever the pointer is: it starts nothing under the pointer, and
+/// both releases come back to the client, the grab ending with the last.
 #[test]
-fn a_secondary_press_never_takes_the_press_a_client_holds() {
+fn a_second_button_joins_the_press_a_client_holds() {
     let (mut c, id) = decorated_compositor();
     let other = c.add_window(Point::new(40, 190), opaque(240, 40, GREEN));
     assert!(c.set_window_frame(other, WindowFrame::new(decorated())));
@@ -6694,16 +6713,38 @@ fn a_secondary_press_never_takes_the_press_a_client_holds() {
 
     let bar = title_point(&c, other);
     router.handle(moved(bar.x, bar.y), &mut c, T0);
-    assert_eq!(
+    assert!(matches!(
         router.handle(press_secondary(), &mut c, T0),
-        InputResponse::Ignored
-    );
+        InputResponse::ClientPointerPressed {
+            window,
+            button: PointerButton::Secondary,
+            ..
+        } if window == id
+    ));
     assert!(!router.is_moving(), "no drag starts under the held press");
     assert_eq!(router.client_grab(), Some(id));
     assert!(matches!(
         router.handle(release_primary(), &mut c, T0),
-        InputResponse::ClientPointerReleased { window, .. } if window == id
+        InputResponse::ClientPointerReleased {
+            window,
+            button: PointerButton::Primary,
+            ..
+        } if window == id
     ));
+    assert_eq!(
+        router.client_grab(),
+        Some(id),
+        "the right button still holds it"
+    );
+    assert!(matches!(
+        router.handle(release_secondary(), &mut c, T0),
+        InputResponse::ClientPointerReleased {
+            window,
+            button: PointerButton::Secondary,
+            ..
+        } if window == id
+    ));
+    assert_eq!(router.client_grab(), None);
 }
 
 #[test]
@@ -7335,7 +7376,7 @@ fn screenful_frost_cache(
 fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
@@ -7524,7 +7565,7 @@ fn an_enlarged_pointer_grows_from_its_hotspot_and_returns_to_its_crisp_self() {
 fn an_enlarged_pointer_stays_enlarged_across_a_change_of_shape() {
     let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
     let win = c.add_window(Point::new(200, 200), opaque(100, 100, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
     router.handle(moved(50, 50), &mut c, T0);
@@ -7599,7 +7640,7 @@ fn no_band_drops_the_cursor_cache_below_its_reserve() {
 
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
-    assert!(c.set_window_cursor(win, CursorKind::Text));
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(cursor_cache(
         TEST_SEAT,
@@ -12598,4 +12639,191 @@ fn a_hidden_window_takes_its_new_level_without_an_ease() {
     c.composite();
     let resting = shadow_under(&c, right);
     assert!(resting < shadow_under(&c, left), "it is already resting");
+}
+
+fn modifiers_changed() -> InputEvent {
+    InputEvent::ModifiersChanged {
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    }
+}
+
+fn motion(dx: i32, dy: i32) -> InputEvent {
+    InputEvent::PointerMotion { dx, dy }
+}
+
+/// A focused compositor window under the pointer at `(5, 5)`, and the
+/// router that focused it.
+fn focused_under_pointer() -> (Compositor, WindowId, InputRouter) {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(0, 0), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+    router.handle(moved(5, 5), &mut c, T0);
+    assert!(router.focus(win, &c));
+    (c, win, router)
+}
+
+/// A key that typed nothing reaches no window that reads text, and every
+/// window that reads the keyboard raw while it holds it.
+#[test]
+fn a_raw_window_is_handed_the_keys_that_type_nothing() {
+    let (mut c, win, mut router) = focused_under_pointer();
+    assert_eq!(
+        router.handle(modifiers_changed(), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert!(c.set_window_raw_keys(win, true));
+    assert_eq!(
+        router.handle(modifiers_changed(), &mut c, T0),
+        InputResponse::RawKey { window: win }
+    );
+    assert!(router.modifiers().shift, "the seat's copy still follows");
+    router.unfocus();
+    assert_eq!(
+        router.handle(modifiers_changed(), &mut c, T0),
+        InputResponse::Ignored,
+        "a raw window without the keyboard is handed nothing"
+    );
+    assert!(!c.set_window_raw_keys(WindowId(999), true));
+}
+
+/// The pointer locks only to the window holding the keyboard, while it is
+/// over that window's content and no gesture holds it.
+#[test]
+fn the_pointer_locks_only_to_the_focused_window_it_is_over() {
+    let (mut c, win, mut router) = focused_under_pointer();
+    let other = c.add_window(Point::new(25, 25), opaque(10, 10, GREEN));
+    assert!(
+        !router.lock_pointer(other, &c),
+        "not the window with the keyboard"
+    );
+    router.handle(press_primary(), &mut c, T0);
+    assert!(!router.lock_pointer(win, &c), "a press holds the pointer");
+    router.handle(release_primary(), &mut c, T0);
+    router.handle(moved(30, 30), &mut c, T0);
+    assert!(router.focus(win, &c));
+    assert!(!router.lock_pointer(win, &c), "the pointer is not over it");
+    router.handle(moved(5, 5), &mut c, T0);
+    assert!(router.lock_pointer(win, &c));
+    assert_eq!(router.pointer_lock(), Some(win));
+    assert_eq!(router.unlock_pointer(), Some(win));
+    assert_eq!(router.pointer_lock(), None);
+}
+
+/// While locked, every pointer event is the locked window's, at the place the
+/// pointer was locked at, and the pointer stays where it was.
+#[test]
+fn a_locked_pointer_routes_every_event_to_its_window() {
+    let (mut c, win, mut router) = focused_under_pointer();
+    assert!(router.lock_pointer(win, &c));
+    assert_eq!(
+        router.handle(motion(-7, 300), &mut c, T0),
+        InputResponse::LockedMotion {
+            window: win,
+            dx: -7,
+            dy: 300
+        }
+    );
+    assert_eq!(
+        router.handle(moved(39, 39), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert_eq!(router.pointer(), Point::new(5, 5), "the pointer stays put");
+    for (event, pressed) in [(press_secondary(), true), (release_secondary(), false)] {
+        assert_eq!(
+            router.handle(event, &mut c, T0),
+            InputResponse::LockedButton {
+                window: win,
+                local: Point::new(5, 5),
+                button: PointerButton::Secondary,
+                pressed,
+            }
+        );
+    }
+    assert!(matches!(
+        router.handle(scrolled(0, 120), &mut c, T0),
+        InputResponse::AppScroll { window, dy: 120, .. } if window == win
+    ));
+    assert_eq!(
+        router.handle(key_pressed(Key::Char('a')), &mut c, T0),
+        InputResponse::Key {
+            window: win,
+            key: Key::Char('a'),
+            modifiers: Modifiers::default(),
+            pressed: true,
+        },
+        "a key still goes where the keyboard is"
+    );
+}
+
+/// A lock ends with the keyboard leaving its window, or the window going, and
+/// the router says so once; motion unlocked moves nothing.
+#[test]
+fn the_keyboard_leaving_or_the_window_going_ends_the_lock() {
+    let (mut c, win, mut router) = focused_under_pointer();
+    let other = c.add_window(Point::new(25, 25), opaque(10, 10, GREEN));
+    assert!(router.lock_pointer(win, &c));
+    assert!(router.focus(other, &c));
+    assert_eq!(router.pointer_lock(), None);
+    assert_eq!(router.take_lock_ended(), Some(win));
+    assert_eq!(router.take_lock_ended(), None, "said once");
+    assert_eq!(
+        router.handle(motion(3, 3), &mut c, T0),
+        InputResponse::Ignored
+    );
+
+    assert!(router.focus(win, &c));
+    assert!(router.lock_pointer(win, &c));
+    assert!(c.remove(win));
+    assert_eq!(
+        router.handle(motion(3, 3), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert_eq!(router.take_lock_ended(), Some(win));
+}
+
+/// The pointer is drawn nowhere over content that asks for none, and nowhere
+/// at all while it is locked; elsewhere it keeps its shapes.
+#[test]
+fn the_pointer_is_hidden_over_content_that_draws_none_and_while_locked() {
+    let (mut c, win, mut router) = focused_under_pointer();
+    assert!(c.set_window_cursor(win, CursorHint::Hidden));
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorHint::Hidden
+    );
+    assert_eq!(
+        desired_cursor(Point::new(30, 30), &router, &c),
+        CursorHint::Shape(CursorKind::Arrow),
+        "the desktop beside it keeps the arrow"
+    );
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Text)));
+    assert!(router.lock_pointer(win, &c));
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorHint::Hidden
+    );
+}
+
+/// A hidden hint blanks the installed cursor and a shape draws it again; the
+/// screensaver's hide is a separate thing that neither touches.
+#[test]
+fn a_hidden_hint_blanks_the_cursor_and_a_shape_draws_it_again() {
+    let (mut c, win, router) = focused_under_pointer();
+    let mut controller = CursorController::new(test_cursor_cache());
+    assert!(controller.refresh(router.pointer(), &router, &mut c));
+    assert!(c.cursor_bounds().is_some(), "the arrow is drawn");
+    assert!(c.set_window_cursor(win, CursorHint::Hidden));
+    assert!(controller.refresh(router.pointer(), &router, &mut c));
+    assert_eq!(c.cursor_bounds(), None, "blank");
+    assert!(!c.cursor_hidden(), "and not the saver's hide");
+    assert!(
+        !controller.refresh(router.pointer(), &router, &mut c),
+        "settled"
+    );
+    assert!(c.set_window_cursor(win, CursorHint::Shape(CursorKind::Arrow)));
+    assert!(controller.refresh(router.pointer(), &router, &mut c));
+    assert!(c.cursor_bounds().is_some(), "drawn again");
 }
