@@ -19,7 +19,7 @@ use crate::snapshot::{check, In, Out, State, Torn};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use steps::{Steps, FRACTION, MAX_PENDING};
-use tairix_audio::{FilterBank, Ratio, Resampler};
+use tairix_audio::{AcCoupling, FilterBank, Ratio, Resampler};
 
 /// Bus-oscillator ticks a mix sample lasts.
 pub const TICKS_PER_SAMPLE: u64 = FRACTION as u64;
@@ -64,7 +64,7 @@ pub enum MixError {
 pub struct Mixer {
     steps: Steps,
     gains: [f32; 4],
-    coupled: (f32, f32),
+    coupled: AcCoupling,
     scratch: Vec<f32>,
     stream: u32,
     steering: i64,
@@ -122,7 +122,7 @@ impl Mixer {
         Ok(Self {
             steps: Steps::new(0).map_err(|_| MixError::OutOfMemory)?,
             gains: [0.25, 1.0, 1.0, 1.0],
-            coupled: (0.0, 0.0),
+            coupled: AcCoupling::new(COUPLING),
             scratch: Vec::new(),
             stream,
             steering: 0,
@@ -191,12 +191,8 @@ impl Mixer {
             return;
         }
         let (scratch, coupled) = (&mut self.scratch, &mut self.coupled);
-        self.steps.take(until, &mut |x| {
-            let (last_in, last_out) = *coupled;
-            let y = x - last_in + COUPLING * last_out;
-            *coupled = (x, y);
-            scratch.push(y);
-        });
+        self.steps
+            .take(until, &mut |x| scratch.push(coupled.step(x)));
         let mut at = 0;
         let mut frames = [0.0f32; 512];
         while at < self.scratch.len() {
@@ -338,18 +334,16 @@ impl State for Mixer {
         } = self;
         steps.save(out);
         gains.save(out);
-        coupled.save(out);
+        coupled.state().save(out);
     }
 
     fn restore(&mut self, input: &mut In<'_>) -> Result<(), Torn> {
         self.steps.restore(input)?;
         self.gains.restore(input)?;
-        self.coupled.restore(input)?;
-        check(
-            self.gains.iter().all(|gain| gain.is_finite())
-                && self.coupled.0.is_finite()
-                && self.coupled.1.is_finite(),
-        )
+        let mut state = (0.0, 0.0);
+        state.restore(input)?;
+        self.coupled = self.coupled.with_state(state).ok_or(Torn::Malformed)?;
+        check(self.gains.iter().all(|gain| gain.is_finite()))
     }
 }
 

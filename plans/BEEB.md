@@ -25,17 +25,22 @@ grants), `plans/NEW-MENUS.md`, `plans/ICONS.md`, `plans/SHADER.md` §0 item 5
 | BB5 | Discs: the 8271, two double-sided drives, and the SSD and DSD images, written back | done |
 | BB6 | Tape: the cassette interface, UEF and CSW images, recording, and the motor relay | done |
 | BB7 | Machine snapshots: the versioned container and every device's state | done |
-| BB8 | The 6502 builder, `cargo xtask beeb --write-roms`, the committed images and their drift gate | in progress |
-| BB9 | The clean-room MOS | in progress |
-| BB10 | The clean-room BASIC | planned |
-| BB11 | The clean-room DFS | planned |
-| BB12 | The reference harness and the recorded observation corpus | planned |
-| BB13 | The machine worker and its protocol | planned |
-| BB14 | The front end: window, scaling, input mapping, audio pacing and accelerated tape loading, media, menus, settings, status | planned |
-| BB15 | The OS facilities the front end needs: lock and ISO keys, menu symbols, disc and tape content types, gzip members in `lib/compress` | in progress |
-| BB16 | The bundle: manifest, icon, help in every required locale, docs page, inventory pins | planned |
-| BB17 | Fuzz harnesses over every untrusted decoder, and the QEMU vertical | in progress |
-| BB18 | Software acceptance over a recorded corpus | planned |
+| BB8 | The 6502 builder, `cargo xtask beeb --write-roms`, the committed images and their drift gate | done |
+| BB9 | The clean-room MOS | done |
+| BB10a | BASIC: workspace, entry and BREAK, the prompt, tokeniser and LIST, line editing, NEW/OLD/RUN/END/STOP, errors with ON ERROR, REPORT, ERR and ERL | done |
+| BB10b | BASIC: values and variables — integers, reals and strings, the catalogue and heap, indirection, arrays and DIM, the operators and their coercions, assignment, the string functions | done |
+| BB10c | BASIC: control — IF/ELSE, FOR/NEXT, REPEAT/UNTIL, GOTO, GOSUB, ON, PROC/FN/LOCAL with array parameters, READ/DATA/RESTORE | done |
+| BB10d | BASIC: numbers — the five-byte arithmetic, conversions, PRINT and `@%`, VAL and STR$, the transcendental functions to BASIC II's accuracy, RND | done |
+| BB10e | BASIC: I/O and the machine — PRINT and INPUT forms, files, the MOS statements, CALL and USR, AUTO, DELETE, RENUMBER, LISTO, TRACE, WIDTH, CHAIN, LOAD and SAVE | done |
+| BB10f | BASIC: the inline assembler | done |
+| BB11 | The clean-room DFS | done |
+| BB12 | The reference harness and the recorded observation corpus | done |
+| BB13 | The machine worker and its protocol | done |
+| BB14 | The front end: window, scaling, input mapping, audio pacing and accelerated tape loading, media, menus, settings, status | done |
+| BB15 | The OS facilities the front end needs: lock and ISO keys, menu symbols, disc and tape content types, gzip members in `lib/compress` | done |
+| BB16 | The bundle: manifest, icon, help in every required locale, docs page, inventory pins | done |
+| BB17 | Fuzz harnesses over every untrusted decoder, and the QEMU vertical | done |
+| BB18 | Software acceptance over a recorded corpus | blocked: needs a corpus of real software images a developer holds outside the tree |
 
 Items are built in ledger order; each lands complete with its tests.
 
@@ -54,9 +59,9 @@ Items are built in ledger order; each lands complete with its tests.
    message, and survives a worker that crashes, stalls or lies.
 3. **The ROMs are authored in Rust.** Each ROM is Rust code driving the
    crate's 6502 builder; `cargo xtask beeb --write-roms` emits the 16 KiB
-   images into the bundle's `Resources/`, they are committed, and a static
-   gate and a crate test rebuild them and compare bytes. No 6502 assembly
-   text, Python or other tooling enters the tree.
+   images into the crate's `firmware/`, they are committed and compiled into
+   `Run`, and a static gate and a crate test rebuild them and compare bytes.
+   No 6502 assembly text, Python or other tooling enters the tree.
 4. **Compatibility is with the documented machine.** Each ROM implements its
    original's documented interface, keeps its documented workspace at the
    documented addresses, and places internal state where software is known
@@ -105,7 +110,8 @@ sandbox role, the machine worker.
 - `rom` — host-only (`cfg(not(freestanding))`): the builder and the three ROM
   sources. The freestanding binary never compiles it; xtask and the crate's
   tests drive it.
-- `proto` — the worker protocol, encoded and validated on both sides.
+- `worker` — the protocol, encoded and validated on both sides; the
+  worker's `MachineService`; the owner's `MachineClient`.
 - `front` — the host-tested front end: key mapping, the presentation scaler,
   pacing, menus, settings, media handling.
 
@@ -186,9 +192,19 @@ snapshot never names a file.
 **Builder.** `rom::asm::Asm` emits one image from its origin: typed operands
 (`Zp`, `Abs`, `.x()`, `.y()`, `.ind_y()`, `imm`), labels with forward
 fixups, branch-range checks, fixed-address placement that refuses overlap,
-data directives, and a symbol map. Encoding comes from `cpu::isa`; only
+code run on into a label only where the label is checked to lie next, data
+directives, and a symbol map. Encoding comes from `cpu::isa`; only
 documented opcodes are encodable. Hardware addresses come from `machine`, so
 a register address is defined once for both the emulation and the firmware.
+
+**Shipped images.** `firmware` carries each image `Run` ships, committed in
+the crate's `firmware/` and compiled in with `include_bytes!`: an app reads
+its own bundle only with `CAP_FS_ACCESS` (`plans/APPS.md` §16), which the
+window does not hold. `rom::SHIPPED` pairs each name with its builder. `cargo
+xtask beeb --write-roms` rebuilds them; the `beeb-roms` static gate and the
+crate's `firmware` test refuse a committed image the tree does not build, the
+test also that the carried bytes are the committed ones, and the gate refuses
+an image file the crate does not ship.
 
 **MOS.** The whole MOS 1.20 interface: reset in its three forms, the
 vectors and extended vectors, sideways ROM services, OSBYTE 0–255, OSWORD
@@ -243,29 +259,52 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   REPORT before any error prints it; a hard reset keeps the RTI at &D00.
 - The cassette's OSARGS and OSFIND keep X and Y. OPENOUT's prompt ends its
   line, a written file's first block shows straight under it, its last ends
-  with the bell and a new line, and its addresses are &FFFFFFFF. A silent
-  sound channel leaves REMV alone until a note is queued on it.
+  with the bell and a new line, and its addresses are &FFFFFFFF. OPENOUT
+  while a file is open to write abandons that file unwritten and reopens
+  the one channel, so a `*SPOOL` holding it carries on into the new file.
+- A silent sound channel leaves REMV alone until a note is queued on it.
+  Each channel counts twentieths of its own: a note that breaks silence, or
+  ends a release past its duration, has a first twentieth a centisecond
+  short, and a note queued behind another starts as it ends. An envelope
+  steps from its note's start, the start's pitch written first; a step moves
+  on one pitch section at most, and repeating sections start again from the
+  note's pitch. Levels run 0–127; attack and decay end once the level is past
+  their targets from the side it moves, a level that does not move counting
+  as falling, the level then one above the target. A note's level carries on
+  from the last while the channel sounds and is nothing once it is silent; an
+  amplitude's is the top of its volume's eight. A held note's release steps
+  on the tick it takes over.
+- While copy editing, output lands at the input position, the cursor's cell
+  followed through each exchange of the two cursors.
+- *FX118 returns X 1, Y &7F and C clear; OSBYTE &79 and &7A leave Y &7F
+  after a key's test and &EE after a scan; a negative INKEY's C says whether
+  the key is down; OSBYTE &80 reading the fire buttons leaves C set.
+- CAPS LOCK makes letters capitals with SHIFT or without. CAPS LOCK turns
+  itself over and SHIFT LOCK off; with SHIFT it turns itself on with SHIFT
+  reversing the locks (status bit 7), so SHIFT types lower case; SHIFT LOCK
+  turns itself over and CAPS LOCK off, shifting every key that has a shifted
+  form, function keys included. CTRL takes the code shifting gives. The lock
+  keys act as they go down and never repeat, and each scan of the keyboard
+  records SHIFT and CTRL in status bits 3 and 6. An input zone set to zero
+  ignores its codes.
+- OSCLI calls FSCV with A=8 before each command; *HELP offers the ROMs the
+  call before showing its version; *EXEC of a file the filing system cannot
+  open is File not found.
 
 Deliberate divergences: the character set is this ROM's own design, so a
 glyph's pixels differ from MOS 1.20's; and &31A, the VDU driver's scratch for
 the last addressed pixel's line, is not reproduced for a line clipped at its
 start or the extra plot of an open line, which MOS 1.20 takes from other
-points of its own drawing order.
-
-BB9 remains: the keyboard workspace as MOS 1.20 leaves it once keys are used
-(&2CA–&2CE, &2EA–&2FF); sound and envelopes checked against recorded chip
-writes, including the final silence MOS 1.20 writes three times; cursor
-editing, the remaining OSBYTE results, and the cassette's one output channel
-when `*SPOOL` holds it and OPENOUT asks for another, checked by comparison; and
-speed
-where it still falls short of MOS 1.20 — the line routine's minor step, which
-costs a diagonal about a tenth more; the keyboard scan while a key is held,
-which takes 11% of the machine where MOS 1.20 takes 7.5%, as sensing columns
-through CA2 would cure; the text cursor's address, worked out afresh at each
-character; a window's scroll and clear, moved a byte at a time; fills and VDU
-5, which address each pixel afresh; and the glyph loop, which tests the mode
-for every row. These need room the full image does not have, so each lands
-with the space a rework frees.
+points of its own drawing order. The 16 KiB image has no room for the rest:
+MOS 1.20 writes a silenced channel's attenuation twice more and steps a
+finished release's pitch twice while silent, which nothing hears; the
+two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
+1.20 keeps for rollover, auto-repeat and sound (&2CA–&2CE, the sound
+buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
+ROM's own; and, against MOS 1.20's speed, text output is within a tenth and
+a window's clear is faster, but a whole-screen clear takes twice as long,
+VDU 5 half as long again, lines a tenth longer, and the scan while a key is
+held 11% of the machine to its 7.5%.
 
 **BASIC.** The whole BBC BASIC II language: every keyword, the tokenised
 program format, the line editor and its commands, the five-byte floating
@@ -276,65 +315,237 @@ page &00–&6F, the resident integers at &0400, the variable catalogue from
 &0480, the control stacks of page &05, the string buffer at &0600 and the
 input buffer at &0700.
 
+BASIC is written afresh in `rom::basic`, laid out as BASIC II is. Workspace
+facts, taken from the published guides and confirmed by observing BASIC II
+run:
+
+- Zero page: LOMEM &00, the top of the variables &02, the BASIC stack &04,
+  HIMEM &06, ERL &08, the text pointer's offset &0A and base &0B, the RND
+  seed &0D–&11, TOP &12, the print field and hex flags &14–&15, the ON ERROR
+  pointer &16, PAGE's high byte &18, the second text pointer &19, the DATA
+  pointer &1C, COUNT &1E, LISTO &1F, TRACE &20 with its
+  limit &21, WIDTH less one &23, the REPEAT, GOSUB and FOR depths &24–&26,
+  the last expression's type &27 (&00 string, &40 integer, &FF real), OPT
+  &28, the integer accumulator &2A–&2D and the real one from &2E; &37–&6F are
+  the interpreter's own scratch, &70–&8F the user's.
+- Page 4: `@%` and A%–Z% at &400 + 4n; the catalogue at &480 + 2 × (the
+  initial's code − &40), FN's list at &4F6 and PROC's at &4F8. An entry is
+  a link, the name's later characters, a zero, then the value: a real's five
+  bytes, an integer's four, a string's descriptor (address, the room it
+  holds, its length) with its text following a new one, or an array's
+  dimension byte 2n + 1, n element counts and its elements. A string given
+  room, made, moved or grown in place, gets its length below 8 characters
+  and 8 more from 8, at most 255.
+- Reals are five bytes: an exponent offset by &80, then the mantissa most
+  significant first, its top bit the sign; zero is all zeros.
+
+The modules: `ws` (the workspace map), `tokens` (the keyword table),
+`crunch` (tokenising), `list` (detokenising, LISTO and line numbers),
+`editor` (the prompt, lines, AUTO, DELETE, RENUMBER, LIST, SAVE, LOAD and
+CHAIN), `exec` (the statement loop and assignment), `control` (IF, the loops,
+GOTO, GOSUB, ON and TRACE), `procs` (PROC, FN and LOCAL), `expr` (the
+operators), `func` (the functions), `vars` (variables, arrays, the heap and
+the BASIC stack), `io` (PRINT, INPUT and READ), `files` (the channels),
+`system` (the MOS statements, CALL and the pseudo-variables), `float` (the
+five-byte arithmetic), `decimal` (reading and writing decimal), `trans` (the
+transcendental functions and RND), `assembler` and `errors`. Each part is
+tested on the emulated machine with the clean-room MOS, typing programs and
+comparing the screen and workspace with what BASIC II produced, recorded
+beside the tests in `rom::basic::tests`.
+
+Behaviour pinned by observation, each with its test:
+
+- Reals: every operation rounds, a tie to the odd neighbour; division keeps
+  38 quotient bits; the multiplicand is the operand loaded second; an
+  accumulator exponent of 0 is a value and only one below 0 underflows; a
+  stored real is zero only when all five bytes are. Each function's
+  algorithm and constants give BASIC II's bits, recorded in `trans`.
+- A name is copied whole when tokenised, so no keyword is found inside it,
+  and a conditional keyword followed by a name's character is a name.
+- RENUMBER refuses a number past 32767 before it changes anything and
+  reports each missing target as Failed at its line's new number; DELETE
+  deletes the first line it finds from its first number.
+- LOCAL clears a number to 0 and a string, at an address or not, by a 0 in
+  its descriptor's length byte, and restores both; a byte is neither kept
+  nor restored.
+- READ starts again from the program's first DATA at each line typed at the
+  prompt and at each clearing of the variables, CLEAR's included.
+- The assembler lists the address, three bytes a line and the statement
+  from column 14; `[` starts at OPT 3; with OPT's errors off a name no
+  variable has is P%, inside an FN the operand calls too, until that FN
+  assembles; an FN called from OPT assembles its own code, the macro form.
+- Entering BASIC with the RND seed all zero, as at power-on, sets it to
+  `41 52 57 00 00`; any other seed survives BREAK. The execution address
+  SAVE gives a program, &8023, is the cold start the language entry makes.
+
+Where it differs on purpose: its copyright message is its own, as long as
+BASIC II's; an instruction whose operand calls an FN that assembles code is
+placed after that code, where BASIC II's bytes go astray; a byte formal is
+neither kept nor restored, where BASIC II's damages the program; and, in 16
+KiB, against BASIC II's speed integer loops take from 8% to 29% longer and
+the functions up to a tenth longer, while TAN and small whole powers are
+faster.
+
 **DFS.** The Acorn DFS 1.20 interface over the 8271: the catalogue format,
 every `*` command, OSFILE, OSFIND, OSGBPB, OSARGS, OSBGET and OSBPUT on up to
 five open files, OSWORD &7D–&7F, `!BOOT` and `*OPT 4`, and auto-boot on
 SHIFT-BREAK. It claims the pages the original claims, so PAGE is &1900.
 
+The DFS is written afresh in `rom::dfs`: the catalogue of the drive last read
+at &0E00–&0FFF, the operation in hand and the settings software reads in page
+&10 (*OPT 1 at &10C6, *ENABLE at &10C7, the directories and drives from
+&10C9), five channel blocks and their sector buffers from &1100, and the NMI
+routine at &0D00. The modules: `ws`, `disc` (the 8271's transfers and OSWORD
+&7D–&7F), `nmi`, `catalogue` (names, the catalogue, *CAT, *INFO and
+allocation), `files` (OSFILE), `channels` (OSFIND, the byte calls, OSARGS and
+OSGBPB), `commands` (the command table and the settings), `copy` (*BACKUP,
+*COPY, *COMPACT and *DESTROY), `utils` (*BUILD, *DUMP, *LIST and *TYPE),
+`service`, `text` and `errors`. Its scenarios in `rom::dfs::tests` type at a
+machine running the three clean-room ROMs and compare the screen, and the
+SHA-256 of each disc written, with what DFS 1.20 produced for the same steps.
+
+Behaviour pinned by observation, each with its scenario:
+
+- The catalogue is read once and kept until the drive reports its disc
+  changed; a save writes the catalogue before the data.
+- A file opened for output is given 64 sectors. One that outgrows its room
+  grows to the next multiple of 256 sectors, or to the next file's start or
+  the disc's end if nearer, the catalogue written at each step; with no room
+  left it is Can't extend, its buffer left unwritten.
+- *COMPACT writes the catalogue only if a file moved.
+- A question takes only the keys pressed after it.
+- OSFILE reads a locked file's attributes as &08; written attributes with
+  &02 or &08 set lock it.
+- *RUN of a file to be entered in &8000–&BFFF, as a program BASIC saves is,
+  loads it and returns, where DFS 1.20 enters its own code paged there.
+- Loads take as long as DFS 1.20's to within two centiseconds.
+
+Where it differs on purpose: its banner and copyright are its own; V, the C
+flags the manuals leave undefined and the registers a program is *RUN with
+are not DFS 1.20's; the rest of a file's last sector is zero, where DFS 1.20
+writes whatever its buffer last held, of that file or another; a buffer is
+written back only to its file's disc, where DFS 1.20 writes it to whatever
+disc is in the drive; a channel follows its file when *COMPACT moves it; and
+a save takes up to a revolution less than DFS 1.20's.
+
 ## 4. The worker and its protocol
 
 The worker is the `Run` binary in its `--sandbox-session-worker` role over a
-`SupervisedSession`, with one share holding the frame slot. The owner sends
-requests; the worker answers each with one reply; nothing is unsolicited.
+`SupervisedSession`, serving `worker::MachineService`, with one share holding
+the canvas, a byte a pixel, row after row. The owner, through
+`worker::MachineClient`, asks one request at a time; the worker answers each
+with one reply; nothing is unsolicited.
 
-- **Requests:** configure (ROM images per slot, sideways RAM, keyboard
-  links); insert or eject a disc or tape; key and joystick changes stamped in
-  cycles from the slice start; run *n* cycles; reset or BREAK; take or
-  restore a snapshot; collect the discs written since last collected.
-- **Replies:** cycles run; whether a new frame is in the slot and which rows
-  changed since the last frame reported; the slice's 48 kHz samples;
-  keyboard and drive LEDs, motor and head activity; refusals with a reason.
+- **Requests:** configure (the OS image, each slot's ROM image or sideways
+  RAM, and the keyboard links), which builds the machine at power-on, the
+  media kept; insert or eject a disc or tape, rewind the tape, press or
+  release RECORD; run a slice of up to a second, its key, BREAK, analogue and
+  fire-button changes stamped in cycles from the slice's start; power off and
+  on, the media kept; take or restore a snapshot; collect the discs of the
+  drives marked that were written since last collected, which stay in.
+- **Replies:** the cycles run; a map of the canvas rows the slice rewrote in
+  the share, every row after a build or a restore; the slice's sound when
+  asked, signed 16-bit at 48 kHz, AC-coupled with a 10 Hz corner as the
+  machine's output is; the CAPS LOCK and SHIFT LOCK lights, the cassette motor
+  and each drive's head; what the drives and deck hold and whether RECORD is
+  down; the media a request took out; refusals with a reason.
+- **Media.** The worker holds the only copy of what a guest writes until the
+  owner has it, so every request that takes media out — an eject, an insert
+  over what is in, a restore over the drives and deck — answers with what it
+  took: each disc written since last collected, in its own format with the
+  first side and track its image cannot record, and the tape, as a UEF image,
+  if it was recorded on since it went in. A tape knows it was recorded on,
+  across power-on and snapshots, as a disc knows its written tracks. A
+  recorded tape too large to carry is refused out and stays in. The bound on
+  a message is the largest one exactly: both drives and the deck taken out
+  whole.
+- **Time.** Slices tile one timeline: a slice ends on the first instruction
+  boundary at or past its end, and the next ends where it was asked to, so
+  the overrun never accumulates.
 
-Every message is length-bounded and validated on decode; a malformed reply
-condemns the worker. A crashed worker is replaced by the supervisor and the
-machine restarts from power-on, and the user is told why.
+Every message is decoded whole against fixed bounds — a ROM of 16 KiB, a disc
+of both sides of 84 tracks, a tape or snapshot of 4 MiB, 256 input changes a
+slice — and is the one encoding of what it decodes to. The client believes a
+reply only when it answers what was asked within what that could produce: a
+slice of the cycles asked, with no sound unless asked and no more samples
+than those cycles make. A reply that does not condemns the worker. A crashed
+worker is replaced by the supervisor and the machine restarts from power-on,
+and the user is told why.
 
 ## 5. The front end
 
-- **Window.** Resizable, opening at the canvas's 4:3 picture; the picture is
-  letterboxed at its aspect. Scaling is *sharp* (integer prescale, then a
-  bilinear remainder) or *smooth*; optional scan lines. Only rows the worker
-  reported changed are expanded, scaled and presented.
-- **Keyboard.** *Logical* mapping types the character the host key produces,
-  pressing or lifting the BBC SHIFT as the BBC layout needs; *physical*
-  mapping places the BBC keyboard on the host keys by position, for games.
-  Held keys are released when focus is lost. Paste types text through the
-  matrix at a rate the keyboard scan accepts.
-- **Pacing.** The audio ring is kept between one and two device periods
-  ahead; each `SpaceAvailable` asks for the cycles that refill it. Without
-  audio, a deadline per 20 ms of machine time.
-- **Media.** Discs and tapes arrive by the picker, at launch, by a drop on
-  the window or its icon-bar icon, or through Open With. Reads and write-backs
-  run on a worker thread, never the event loop.
-- **Menus.** The window's menu (right click, or the icon-bar menu): Insert
-  Disc into drive 0 or 1, Eject, Insert Tape, Rewind, BREAK, Reset, Pause,
-  Speed, Fullscreen, Scaling, Keyboard mapping, Save and Restore Snapshot,
-  Settings.
-- **Settings.** In `lib/appdata`: ROM slots, sideways RAM, keyboard links,
-  scaling, scan lines, keyboard mapping, volume, accelerated tape loading.
-  User ROM images are app-data blobs. Writes leave the loop on a worker.
-- **Status.** A strip beneath the picture shows the three keyboard LEDs and
-  each drive's and the cassette motor's activity.
+The host-tested model is `front`; `src/run.rs` joins it to the window, the
+session, the audio stream and the store.
+
+- **Window.** Resizable, opening at an `OPEN_PICTURE` 4:3 picture above the
+  status strip; the picture is the largest 4:3 the window holds, centred.
+  Scaling is *sharp* or *smooth*, optionally with scan lines, through
+  `tairix_crt::screen::Picture` (shared with `PCEmulator.app`). Only the rows
+  a slice reported changed are expanded through the slot palette, scaled and
+  presented, and one paint presents only what it drew.
+- **Keyboard.** Read raw. *Logical*: a symbol presses the BBC key and SHIFT
+  `Key::typing` gives it, a letter its own key, its case the machine's CAPS
+  LOCK and the host's Shift; *physical*: each key the BBC key in its place, the
+  keys the PC's main block lacks on its editing keys. A key is held at least
+  two keyboard scans; every key is let go when the window loses the focus; two
+  host keys on one BBC key let it go with the last. Paste types the
+  clipboard's text a key at a time, SHIFT from its case and the machine's
+  CAPS LOCK.
+- **Pacing.** While the sound plays the audio ring is kept at the latency the
+  stream was granted: whenever it falls below, the slice that refills it is
+  asked for, so the machine and the device cannot drift. Without a stream, or
+  at double speed, a slice is due each 20 ms of the clock, a long stall given
+  up rather than raced; at the fastest speed, or while fast tape loading has
+  the motor running, slices of 100 ms run back to back, silent.
+- **Media.** Discs and tapes arrive by the picker, a drop on the window or its
+  icon-bar icon, or Open With; reads and write-backs run on the file worker,
+  never the loop. `front::media::Shelf` keeps each one's record and decides
+  what becomes of what the machine hands over. A disc whose file may be
+  written is written back as the machine writes (collected when its drive's
+  head unloads, and only such discs are collected); one whose may not is
+  write-protected. A disc or tape on its way in takes its drive only once
+  what it replaces is handled. A tape recorded on is saved as it is taken out:
+  back to a writable UEF, else offered to be saved as one. A snapshot's discs
+  and tape are its own, held only by the machine: a written one is offered to
+  be saved as it is taken out, a disc in its own format. Quitting takes every
+  medium out first. One picker is open at a time: offers to save wait their
+  turn, and an Open while one is up is refused with a message.
+- **Menus.** One set of rows, on the window's right click and the icon bar
+  (`front::menu::bar`, Info first and Quit last): Drive 0 and Drive 1 (Insert
+  Disc, Eject, Save Disc As), Tape (Insert, Rewind, Record, Eject), BREAK,
+  Reset, Pause, Speed, Full Screen, Display (Sharp, Smooth, Scan Lines),
+  Keyboard (By Character, By Position), Paste, Save and Restore Snapshot,
+  Settings. Eject follows what the machine reports in its drives; Save Disc As
+  needs the disc's image held.
+- **Settings.** In `lib/appdata`, the `front::settings::Preferences` registry,
+  edited in the shared settings window (`front::sheet`: ROMs, Startup,
+  Display, Keyboard and sound) and written off the loop by the publish worker.
+  A socket holds a shipped ROM, sideways RAM, or a user's ROM image installed
+  as an app-data blob `rom.<name>`. Changes to the ROMs or the links take
+  effect at the next Reset, which builds the machine again only when they
+  changed.
+- **Status.** A strip beneath the picture shows the CAPS LOCK, SHIFT LOCK and
+  cassette-motor lamps, each drive's, and the latest message.
+- **Diagnostics.** `front::events` in the `BEEB` range of `lib/log`: the
+  machine's first second run after a build, and a worker replaced.
 
 ## 6. OS facilities this plan adds
 
-- **Lock and ISO keys.** The input path delivers Caps Lock's press and
-  release with its physical usage, and the two ISO keys (`#~`, `\|`) as
-  physical keys, alongside the lock state it already keeps.
-- **Menu symbols.** `Reset`, `Eject` and `Fullscreen` join the symbol
-  vocabulary with their glyphs.
-- **Content types.** Acorn DFS disc images (`.ssd`, `.dsd`) and UEF and CSW
-  tape images enter the registry, so Files opens them with `beeb.app`.
+- **Lock and ISO keys.** A window reading the keyboard raw
+  (`SetKeyboardMode`, `plans/DISPLAY.md` D13) is handed every edge with its
+  physical key, Caps Lock's press and release among them, alongside the lock
+  state the seat keeps. The ISO keys are their HID usages: `\|` beside the
+  left Shift is `0x64`, and `#~` beside Return is `0x32` from a USB or I2C
+  keyboard and `0x31` through the evdev table, which gives the two positions
+  one code; the physical mapping takes both for that key.
+- **Menu symbols.** The vocabulary already holds a picture for each of the
+  machine's rows, as `PCEmulator.app` draws them: `Restart` for Reset,
+  `Drive` for Eject and `ZoomFit` for Full Screen; nothing joins it.
+- **Content types.** Acorn DFS disc images (`.ssd`, `.dsd`,
+  `application/x-acorn-dfs-disc`) and UEF and CSW tape images
+  (`application/x-uef-tape`, `application/x-csw-tape`) are in the `lib/browse`
+  registry, archives that hold no volume, so Files opens them with
+  `beeb.app`.
 - **gzip members.** A bounded gzip member decoder joins `lib/compress`; the
   archive driver and the tape decoder share it.
 
@@ -350,14 +561,28 @@ machine restarts from power-on, and the user is told why.
 - **ROMs.** Each ROM is tested on the emulated machine: typed input, captured
   VDU output and documented workspace, against expectations from the manuals
   and from the recorded corpus.
-- **Reference harness.** `cargo xtask beeb --reference <dir>` runs the
-  corpus scenarios against genuine ROMs a developer holds, outside the tree,
-  and records their observations as fixtures; ci replays the fixtures against
-  the clean-room ROMs. The harness refuses to write a fixture containing ROM
-  bytes.
-- **Fuzzing.** Every decoder of untrusted bytes — disc, tape, snapshot, the
-  protocol in both directions — has a registered harness.
-- **QEMU.** A desktop vertical launches `beeb.app`, boots the clean-room ROMs
-  to the BASIC prompt, runs a program and screendumps the window.
+- **Reference harness.** The corpus is `tests/corpus/`: each group a
+  `.scenarios` file, scenarios of discs and scripted keys in the format
+  `tairix_beeb::scenario` reads, and a `.fixtures` file of what each left —
+  its screen's rows and the SHA-256 of each disc it checks. The build lists
+  every scenario as a test of `tests/corpus.rs`, which replays it against
+  the clean-room ROMs. `cargo xtask beeb --reference <dir>` runs the corpus
+  against the original ROMs a developer holds in `<dir>`, outside the tree,
+  and rewrites the fixtures from them, the clean-room ROMs' own names put in;
+  a scenario marked `ours` keeps the fixture that states this machine's own
+  behaviour. It refuses to write anything when an observation's text, or the
+  bytes its rows write in hexadecimal, carries twelve bytes in a row of an
+  original ROM that no clean-room ROM holds and the clean-room ROMs do not
+  show for the same scenario.
+- **Fuzzing.** Every decoder of untrusted bytes has a registered harness:
+  `fuzz_media` the disc and tape images, `fuzz_snapshot` snapshots and
+  hostile guest code, `fuzz_worker` the protocol in both directions, the
+  worker's service and the owner's client.
+- **QEMU.** `tests/integration/beeb_qemu_aarch64`: the desktop launches
+  `beeb.app` from the program library; once the machine records its first
+  second run, the window is dumped and must show the BASIC prompt's white
+  text on black; Quit from its icon-bar menu ends it cleanly. Typing at BASIC
+  is the recorded corpus's, through the same machine, and the key mapping the
+  front end's host tests'.
 - **Acceptance.** A recorded corpus of real software, named with its media
   hash, outcome and the ROM set it ran on.

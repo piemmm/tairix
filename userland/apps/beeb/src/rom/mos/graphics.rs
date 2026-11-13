@@ -78,9 +78,6 @@ const FONT_DEFAULT_FLAGS: u8 = 0x0F;
 /// The zones OSBYTE 20 moves into RAM, in the order it takes them.
 const EXPLODABLE: u8 = 6;
 const EXPLOSION: [u8; EXPLODABLE as usize] = [5, 6, 7, 1, 2, 3];
-/// Service call 17: the font is about to implode or explode.
-const SERVICE_FONT: u8 = 0x11;
-
 pub fn emit(a: &mut Asm) {
     origin_and_window(a);
     plot(a);
@@ -228,19 +225,24 @@ fn external_to_internal(a: &mut Asm) {
     a.rol(abs(PX + 1));
     a.dey();
     a.bne("internal_x_shift");
-    for _ in 0..2 {
-        a.asl(abs(PY));
-        a.rol(abs(PY + 1));
-    }
-    for (point, origin) in [(PX, vdu::ORIGIN), (PY, vdu::ORIGIN + 2)] {
-        a.sec();
-        a.lda(abs(point));
-        a.sbc(abs(origin));
-        a.sta(abs(point));
-        a.lda(abs(point + 1));
-        a.sbc(abs(origin + 1));
-        a.sta(abs(point + 1));
-    }
+    a.ldy(imm(2));
+    let y_shift = a.here_local();
+    a.asl(abs(PY));
+    a.rol(abs(PY + 1));
+    a.dey();
+    a.bne(y_shift);
+    a.ldx(imm(2));
+    let origin = a.here_local();
+    a.sec();
+    a.lda(abs(PX).x());
+    a.sbc(abs(vdu::ORIGIN).x());
+    a.sta(abs(PX).x());
+    a.lda(abs(PX + 1).x());
+    a.sbc(abs(vdu::ORIGIN + 1).x());
+    a.sta(abs(PX + 1).x());
+    a.dex();
+    a.dex();
+    a.bpl(origin);
     a.rts();
 }
 
@@ -263,16 +265,18 @@ fn plot(a: &mut Asm) {
     // Relative coordinates add to the cursor's.
     a.and(imm(4));
     a.bne("plot_absolute");
+    a.ldx(imm(2));
+    let relative = a.here_local();
     a.clc();
-    for offset in [0u16, 2] {
-        a.lda(abs(QUEUE_LAST - 3 + offset));
-        a.adc(abs(vdu::GRAPHICS_CURSOR + offset));
-        a.sta(abs(QUEUE_LAST - 3 + offset));
-        a.lda(abs(QUEUE_LAST - 2 + offset));
-        a.adc(abs(vdu::GRAPHICS_CURSOR + 1 + offset));
-        a.sta(abs(QUEUE_LAST - 2 + offset));
-        a.clc();
-    }
+    a.lda(abs(QUEUE_LAST - 3).x());
+    a.adc(abs(vdu::GRAPHICS_CURSOR).x());
+    a.sta(abs(QUEUE_LAST - 3).x());
+    a.lda(abs(QUEUE_LAST - 2).x());
+    a.adc(abs(vdu::GRAPHICS_CURSOR + 1).x());
+    a.sta(abs(QUEUE_LAST - 2).x());
+    a.dex();
+    a.dex();
+    a.bpl(relative);
     // The cursor takes the target's external coordinates as given.
     a.here("plot_absolute");
     copy(a, &[(QUEUE_LAST - 3, &[vdu::GRAPHICS_CURSOR])], 4);
@@ -478,9 +482,11 @@ fn point(a: &mut Asm) {
     a.pla();
     a.and(imm(7));
     a.sta(abs(vdu::PIXEL_LINE));
-    a.jsr("screen_pointer_add");
-    a.lda(abs(vdu::SCREEN_START));
-    a.jsr("screen_pointer_add_high");
+    // The screen's start moves a row at a time, so its low byte holds no
+    // line within a cell.
+    a.ora(abs(vdu::SCREEN_START));
+    a.ldx(abs(vdu::SCREEN_START + 1));
+    a.jsr("pointer_add");
     a.lda(zp(vdu_zp::TEMP));
     a.sta(zp(vdu_zp::GRAPHICS_CELL));
     a.lda(zp(vdu_zp::TEMP + 1));
@@ -494,7 +500,7 @@ fn point(a: &mut Asm) {
     a.dex();
     a.bmi("pixel_mask_done");
     a.lsr(Acc);
-    a.jmp("pixel_mask_move");
+    a.bne("pixel_mask_move");
     a.here("pixel_mask_done");
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.rts();
@@ -772,7 +778,7 @@ fn cell_step_x(a: &mut Asm) {
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.lda(imm(8));
     a.ldy(imm(0));
-    a.jmp("cell_add");
+    a.beq("cell_add");
     a.here("cell_step_left");
     a.cmp(abs(vdu::LEFT_MASK));
     a.beq("cell_step_left_byte");
@@ -784,7 +790,7 @@ fn cell_step_x(a: &mut Asm) {
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.lda(imm(0xF8));
     a.ldy(imm(0xFF));
-    a.jmp("cell_add");
+    a.bne("cell_add");
 
     // The pixel's address one step along axis Y, x 0 or y 2, by X, 1 or -1.
     a.here("cell_step");
@@ -1188,10 +1194,7 @@ fn edge_step(a: &mut Asm) {
 /// A horizontal span, from X1 to PX, on line PY.
 fn spans(a: &mut Asm) {
     a.here("span_fill");
-    a.lda(abs(PX));
-    a.cmp(abs(X1));
-    a.lda(abs(PX + 1));
-    a.sbc(abs(X1 + 1));
+    a.jsr("span_ends");
     a.bvc("span_compared");
     a.eor(imm(0x80));
     a.here("span_compared");
@@ -1241,11 +1244,15 @@ fn spans(a: &mut Asm) {
     a.sta(abs(PX + 1));
     a.here("span_right_in");
     // Nothing left when left > right.
+    a.jsr("span_ends");
+    a.bpl("span_some");
+    a.rts();
+    // PX less X1, in the flags.
+    a.here("span_ends");
     a.lda(abs(PX));
     a.cmp(abs(X1));
     a.lda(abs(PX + 1));
     a.sbc(abs(X1 + 1));
-    a.bpl("span_some");
     a.rts();
     a.here("span_some");
     span_masks(a);
@@ -1555,7 +1562,7 @@ fn vdu5_step(a: &mut Asm) {
     a.ldx(imm(8));
     a.here("vdu5_step_line");
     a.ldy(imm(2));
-    a.jmp("vdu5_step");
+    a.bne("vdu5_step");
 }
 
 /// VDU 23: a character's definition, or 6845 registers and the cursor; the
@@ -1640,7 +1647,7 @@ fn font_explode(a: &mut Asm) {
     a.here("font_explode");
     a.txa();
     a.pha();
-    a.lda(imm(SERVICE_FONT));
+    a.lda(imm(crate::rom::os::service::FONT));
     a.jsr("service_call");
     a.jsr("font_implode");
     a.lda(abs(var::PRIMARY_OSHWM));

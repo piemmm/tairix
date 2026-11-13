@@ -49,7 +49,7 @@ pub fn emit(a: &mut Asm) {
     a.stx(abs(var::ADC_CHANNEL));
     a.lda(imm(0));
     a.sta(abs(page2::ADC_LAST));
-    a.jmp("adc_start");
+    a.beq("adc_start");
 
     // End of conversion: the result kept, the event, and the next channel
     // down, the highest again after channel 1. Writing port B clears CB1's

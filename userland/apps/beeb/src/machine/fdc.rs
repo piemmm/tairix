@@ -50,6 +50,11 @@ const FORMAT_FILL: u8 = 0xE5;
 pub mod status {
     /// A command is executing.
     pub const BUSY: u8 = 0x80;
+    /// The command register has not yet taken its byte; this model takes it
+    /// at once, so the bit reads clear.
+    pub const COMMAND_FULL: u8 = 0x40;
+    /// The parameter register has not yet taken its byte; clear here too.
+    pub const PARAMETER_FULL: u8 = 0x20;
     /// The result register holds a result.
     pub const RESULT_FULL: u8 = 0x10;
     /// INT is asserted.
@@ -160,7 +165,12 @@ pub enum PhysicalDrive {
 }
 
 impl PhysicalDrive {
-    const fn index(self) -> usize {
+    /// Both drives, in their order.
+    pub const ALL: [Self; 2] = [Self::Zero, Self::One];
+
+    /// Its place in [`ALL`](Self::ALL).
+    #[must_use]
+    pub const fn index(self) -> usize {
         match self {
             Self::Zero => 0,
             Self::One => 1,
@@ -423,8 +433,9 @@ impl Fdc {
     }
 
     /// Put a disc in `drive`, or take it out, at `cycle`, returning the disc
-    /// that was there. Taking one out leaves the drive latched not ready and
-    /// ends a command using it.
+    /// that was there. Taking one out, or putting another in its place,
+    /// which takes it out first, leaves the drive latched not ready and ends
+    /// a command using it.
     pub fn set_disc(
         &mut self,
         cycle: u64,
@@ -434,9 +445,8 @@ impl Fdc {
         self.advance(cycle);
         let drive = drive.index();
         let slot = &mut self.drives[drive];
-        let removed = disc.is_none();
         let old = core::mem::replace(&mut slot.disc, disc);
-        if removed && old.is_some() {
+        if old.is_some() {
             self.not_ready |= ready_bit(drive);
             if self.operation.as_ref().is_some_and(|op| op.drive == drive) {
                 self.end(cycle, result::NOT_READY);

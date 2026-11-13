@@ -102,8 +102,182 @@ fn each_function_is_correctly_rounded_at_known_points() {
     );
 }
 
+/// The true values, as double-doubles summed by their series: the same on
+/// every host, where a platform libm's doubles are not.
+mod exact {
+    /// The unevaluated sum of two doubles, about 106 bits.
+    #[derive(Clone, Copy)]
+    struct Dd(f64, f64);
+
+    impl Dd {
+        const fn of(x: f64) -> Self {
+            Self(x, 0.0)
+        }
+
+        fn quick(a: f64, b: f64) -> Self {
+            let sum = a + b;
+            Self(sum, b - (sum - a))
+        }
+
+        fn add(self, other: Self) -> Self {
+            let sum = self.0 + other.0;
+            let part = sum - self.0;
+            let error = (self.0 - (sum - part)) + (other.0 - part);
+            Self::quick(sum, error + self.1 + other.1)
+        }
+
+        fn sub(self, other: Self) -> Self {
+            self.add(Self(-other.0, -other.1))
+        }
+
+        fn mul(self, other: Self) -> Self {
+            let product = self.0 * other.0;
+            let error = self.0.mul_add(other.0, -product) + (self.0 * other.1 + self.1 * other.0);
+            Self::quick(product, error)
+        }
+
+        fn div(self, other: Self) -> Self {
+            let first = self.0 / other.0;
+            let rest = self.sub(other.mul(Self::of(first)));
+            let second = rest.0 / other.0;
+            let rest = rest.sub(other.mul(Self::of(second)));
+            Self::quick(first, second).add(Self::of(rest.0 / other.0))
+        }
+
+        fn double(self) -> f64 {
+            self.0 + self.1
+        }
+    }
+
+    /// The sum of a series from `first`, each term made from the last and its
+    /// index, until a term no longer reaches the sum's last bit.
+    fn series(first: Dd, mut next: impl FnMut(Dd, u32) -> Dd) -> Dd {
+        let (mut sum, mut term) = (first, first);
+        for n in 1..400 {
+            term = next(term, n);
+            sum = sum.add(term);
+            if term.0.abs() <= sum.0.abs() * 1e-33 {
+                break;
+            }
+        }
+        sum
+    }
+
+    fn sin(x: Dd) -> Dd {
+        let square = x.mul(x);
+        series(x, |term, n| {
+            term.mul(square)
+                .div(Dd::of(-f64::from((2 * n) * (2 * n + 1))))
+        })
+    }
+
+    fn cos(x: Dd) -> Dd {
+        let square = x.mul(x);
+        series(Dd::of(1.0), |term, n| {
+            term.mul(square)
+                .div(Dd::of(-f64::from((2 * n - 1) * (2 * n))))
+        })
+    }
+
+    /// The sum of x^(2k+1)/(2k+1), alternating in sign if `alternating`:
+    /// atanh or atan.
+    fn odd_powers(x: Dd, alternating: bool) -> Dd {
+        let square = x.mul(x);
+        let square = if alternating {
+            Dd(-square.0, -square.1)
+        } else {
+            square
+        };
+        let mut power = x;
+        series(x, |_, n| {
+            power = power.mul(square);
+            power.div(Dd::of(f64::from(2 * n + 1)))
+        })
+    }
+
+    fn ln2() -> Dd {
+        let half = odd_powers(Dd::of(1.0).div(Dd::of(3.0)), false);
+        half.add(half)
+    }
+
+    /// e^x - 1.
+    fn expm1(x: Dd) -> Dd {
+        series(x, |term, n| term.mul(x).div(Dd::of(f64::from(n + 1))))
+    }
+
+    /// ln x for a positive normal `x`, as e·ln 2 + ln m with m within √2 of 1.
+    fn ln(x: f64) -> Dd {
+        let bits = x.to_bits();
+        let mut exponent = i32::try_from((bits >> 52) & 0x7FF).expect("eleven bits") - 1023;
+        let mut m = f64::from_bits((bits & ((1 << 52) - 1)) | (1023 << 52));
+        if m > core::f64::consts::SQRT_2 {
+            m /= 2.0;
+            exponent += 1;
+        }
+        let half = odd_powers(Dd::of(m - 1.0).div(Dd::of(m + 1.0)), false);
+        ln2().mul(Dd::of(f64::from(exponent))).add(half.add(half))
+    }
+
+    fn quarter_pi() -> Dd {
+        let fifth = odd_powers(Dd::of(1.0).div(Dd::of(5.0)), true);
+        let four = fifth.add(fifth).add(fifth.add(fifth));
+        four.sub(odd_powers(Dd::of(1.0).div(Dd::of(239.0)), true))
+    }
+
+    /// atan t for t in [0, 1]: near 1 as π/4 + atan((t - 1)/(t + 1)).
+    fn atan(t: Dd) -> Dd {
+        if t.double() <= 0.4 {
+            odd_powers(t, true)
+        } else {
+            let one = Dd::of(1.0);
+            quarter_pi().add(odd_powers(t.sub(one).div(t.add(one)), true))
+        }
+    }
+
+    pub fn tan(x: f64) -> f64 {
+        sin(Dd::of(x)).div(cos(Dd::of(x))).double()
+    }
+
+    /// atan2(y, x) for 0 < y < x.
+    pub fn atan2(y: f64, x: f64) -> f64 {
+        atan(Dd::of(y).div(Dd::of(x))).double()
+    }
+
+    pub fn exp2m1(x: f64) -> f64 {
+        expm1(Dd::of(x).mul(ln2())).double()
+    }
+
+    pub fn log2(x: f64) -> f64 {
+        ln(x).div(ln2()).double()
+    }
+
+    /// log2(1 + x), as 2·atanh(x / (2 + x)) / ln 2.
+    pub fn log2_1p(x: f64) -> f64 {
+        let half = odd_powers(Dd::of(x).div(Dd::of(2.0).add(Dd::of(x))), false);
+        half.add(half).div(ln2()).double()
+    }
+}
+
 #[test]
-fn inside_the_8087s_ranges_they_agree_with_the_hosts_doubles() {
+fn the_exact_values_are_the_correctly_rounded_ones_at_known_points() {
+    for (exact, rounded) in [
+        (
+            exact::tan(7.031_503_549_713_639e-1),
+            0.847_688_099_932_854_f64,
+        ),
+        (exact::atan2(1.0, 1.0), core::f64::consts::FRAC_PI_4),
+        (exact::exp2m1(0.5), 0.414_213_562_373_095_03),
+        (exact::log2(3.0), 1.584_962_500_721_156),
+        (exact::log2_1p(0.25), 0.321_928_094_887_362_35),
+    ] {
+        assert_eq!(exact.to_bits(), rounded.to_bits(), "{exact:e}");
+    }
+}
+
+/// The regression: these were checked against the host's doubles, and a
+/// libm a few ulps out, as macOS's tangent is, failed them.
+#[test]
+fn inside_the_8087s_ranges_they_agree_with_the_true_values() {
     let mut rng = Prng::new(0x8087_7A11);
     let mut fraction = || {
         // A double in [0, 1) of 53 random bits.
@@ -112,32 +286,37 @@ fn inside_the_8087s_ranges_they_agree_with_the_hosts_doubles() {
     for _ in 0..2_000 {
         let x = fraction() * core::f64::consts::FRAC_PI_4;
         if x != 0.0 {
-            assert!(near(double(tan(parts(x))), x.tan(), 1), "tan {x:e}");
+            assert!(near(double(tan(parts(x))), exact::tan(x), 1), "tan {x:e}");
         }
         let (y, x) = (fraction(), fraction());
         if y < x && y != 0.0 {
             assert!(
-                near(double(atan2(parts(y), parts(x))), y.atan2(x), 1),
+                near(double(atan2(parts(y), parts(x))), exact::atan2(y, x), 1),
                 "atan {y:e}/{x:e}"
             );
         }
         let x = fraction() * 0.5;
         if x != 0.0 {
-            let expected = (x * core::f64::consts::LN_2).exp_m1();
-            assert!(near(double(exp2m1(parts(x))), expected, 2), "2^{x:e} - 1");
+            assert!(
+                near(double(exp2m1(parts(x))), exact::exp2m1(x), 2),
+                "2^{x:e} - 1"
+            );
         }
         let x = fraction() * 4.0;
         if x > 0.0 && x.to_bits() != 1.0f64.to_bits() {
             assert!(
-                near(double(y_log2_x(parts(1.0), parts(x))), x.log2(), 2),
+                near(double(y_log2_x(parts(1.0), parts(x))), exact::log2(x), 2),
                 "log2 {x:e}"
             );
         }
         let x = (fraction() - 0.5) * 0.58;
         if x != 0.0 {
-            let expected = x.ln_1p() / core::f64::consts::LN_2;
             assert!(
-                near(double(y_log2_1p_x(parts(1.0), parts(x))), expected, 2),
+                near(
+                    double(y_log2_1p_x(parts(1.0), parts(x))),
+                    exact::log2_1p(x),
+                    2
+                ),
                 "log2(1+{x:e})"
             );
         }

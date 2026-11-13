@@ -254,6 +254,16 @@ pub enum MediaType {
     /// the disk rather than its sectors in order, so it is served as no
     /// volume.
     ImageDisk,
+    /// An Acorn DFS disc's image, one side's sectors or both sides' tracks
+    /// in turn (`application/x-acorn-dfs-disc`): a BBC Micro's disc, served
+    /// as no volume.
+    AcornDfsDisc,
+    /// A cassette tape in the Unified Emulator Format, its blocks and tones
+    /// (`application/x-uef-tape`).
+    TapeUef,
+    /// A cassette tape as the compressed square wave it plays
+    /// (`application/x-csw-tape`).
+    TapeCsw,
     /// An MPEG audio file of any layer — MP3, MP2 or MP1 (`audio/mpeg`).
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
@@ -387,6 +397,9 @@ impl MediaType {
             Self::CdImage => "Disc image",
             Self::RawFloppyDiskImage => "Floppy disk image",
             Self::ImageDisk => "ImageDisk floppy archive",
+            Self::AcornDfsDisc => "Acorn DFS disc image",
+            Self::TapeUef => "UEF tape image",
+            Self::TapeCsw => "CSW tape image",
             Self::AudioMpeg => "MPEG audio",
             Self::AudioFlac => "FLAC audio",
             Self::AudioOgg => "Ogg audio",
@@ -499,6 +512,9 @@ impl MediaType {
             Self::CdImage => "application/x-cd-image",
             Self::RawFloppyDiskImage => "application/x-raw-floppy-disk-image",
             Self::ImageDisk => "application/x-imagedisk",
+            Self::AcornDfsDisc => "application/x-acorn-dfs-disc",
+            Self::TapeUef => "application/x-uef-tape",
+            Self::TapeCsw => "application/x-csw-tape",
             Self::AudioMpeg => "audio/mpeg",
             Self::AudioFlac => "audio/flac",
             Self::AudioOgg => "audio/ogg",
@@ -645,6 +661,9 @@ impl MediaType {
             | Self::RiscOsData
             | Self::RawDiskImage
             | Self::ImageDisk
+            | Self::AcornDfsDisc
+            | Self::TapeUef
+            | Self::TapeCsw
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -771,10 +790,10 @@ impl MediaType {
             Self::RiscOsSquash => IconKind::RiscOsSquash,
             Self::ArcFs => IconKind::ArchiveArcFs,
             Self::ArchiveSpark => IconKind::ArchiveSpark,
-            Self::RiscOsArchive => IconKind::Archive,
+            Self::RiscOsArchive | Self::TapeUef | Self::TapeCsw => IconKind::Archive,
             Self::RawDiskImage => IconKind::DiskHard,
             Self::CdImage => IconKind::DiskOptical,
-            Self::RawFloppyDiskImage | Self::ImageDisk => IconKind::DiskFloppy,
+            Self::RawFloppyDiskImage | Self::ImageDisk | Self::AcornDfsDisc => IconKind::DiskFloppy,
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -876,6 +895,9 @@ impl MediaType {
             | Self::CdImage
             | Self::RawFloppyDiskImage
             | Self::ImageDisk
+            | Self::AcornDfsDisc
+            | Self::TapeUef
+            | Self::TapeCsw
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -1061,7 +1083,10 @@ impl MediaType {
             | Self::RawDiskImage
             | Self::CdImage
             | Self::RawFloppyDiskImage
-            | Self::ImageDisk => Some(Family::Archive),
+            | Self::ImageDisk
+            | Self::AcornDfsDisc
+            | Self::TapeUef
+            | Self::TapeCsw => Some(Family::Archive),
             Self::TairixApp
             | Self::TairixService
             | Self::TairixScreensaver
@@ -1277,6 +1302,9 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::CdImage,
     MediaType::RawFloppyDiskImage,
     MediaType::ImageDisk,
+    MediaType::AcornDfsDisc,
+    MediaType::TapeUef,
+    MediaType::TapeCsw,
     MediaType::AudioMpeg,
     MediaType::AudioFlac,
     MediaType::AudioOgg,
@@ -1376,6 +1404,9 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
         &["adf", "adl", "adm", "ads", "ima", "vfd", "flp"],
     ),
     (MediaType::ImageDisk, &["imd"]),
+    (MediaType::AcornDfsDisc, &["ssd", "dsd"]),
+    (MediaType::TapeUef, &["uef"]),
+    (MediaType::TapeCsw, &["csw"]),
     (MediaType::AudioMpeg, &["mp3", "mp2", "mp1", "mpa"]),
     (MediaType::AudioFlac, &["flac"]),
     (MediaType::AudioOgg, &["ogg", "oga"]),

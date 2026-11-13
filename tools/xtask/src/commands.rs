@@ -1671,6 +1671,8 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     ("artsheet", |c| run_artsheet(c, &[])),
     // The file-type icon masters, each redrawn and compared byte for byte.
     ("icons", |c| icons::run(c, &[])),
+    // The clean-room BBC Micro ROMs, each rebuilt and compared byte for byte.
+    ("beeb-roms", beeb::check_roms),
     // Exhaustively model-check the capability + IPC state machine.
     ("model-check", |_| run_model_check(&[])),
 ];

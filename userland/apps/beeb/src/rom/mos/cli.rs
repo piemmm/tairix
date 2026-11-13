@@ -8,6 +8,7 @@
 use super::ws::{os, page2, var, vector};
 use super::{copy, DELETE};
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
+use crate::rom::os::{fsc, service};
 
 /// The commands, each with its routine, in the order abbreviations match.
 const COMMANDS: [(&str, &str); 17] = [
@@ -31,12 +32,7 @@ const COMMANDS: [(&str, &str); 17] = [
 ];
 
 /// Service calls: an unrecognised command, and *HELP.
-const SERVICE_COMMAND: u8 = 4;
-const SERVICE_HELP: u8 = 9;
 /// FSCV's reasons.
-const FSC_RUN: u8 = 2;
-const FSC_COMMAND: u8 = 3;
-const FSC_CAT: u8 = 5;
 /// OSFILE's block, as *LOAD and *SAVE build it.
 const BLOCK: u16 = page2::OSFILE_BLOCK;
 /// GSREAD's flags at &E4: the string is quoted; a space ends it.
@@ -53,9 +49,13 @@ pub fn emit(a: &mut Asm) {
 }
 
 fn oscli(a: &mut Asm) {
+    // The filing system hears of every line first, comments included, as
+    // MOS 1.20 tells it; the DFS's *ENABLE counts lines by it.
     a.here("oscli_default");
     a.stx(zp(os::TEXT));
     a.sty(zp(os::TEXT + 1));
+    a.lda(imm(fsc::COMMAND_LINE));
+    a.jsr("fsc_call");
     a.ldy(imm(0));
     a.here("oscli_skip");
     a.lda(zp(os::TEXT).ind_y());
@@ -130,12 +130,12 @@ fn oscli(a: &mut Asm) {
     a.bne("oscli_command");
     // None of the MOS's: the ROMs', then the filing system's.
     a.ldy(zp(os::GS_QUOTE));
-    a.lda(imm(SERVICE_COMMAND));
+    a.lda(imm(service::COMMAND));
     a.jsr("service_call");
     a.beq(RTS);
     a.ldy(zp(os::GS_QUOTE));
     a.jsr("text_address");
-    a.lda(imm(FSC_COMMAND));
+    a.lda(imm(fsc::COMMAND));
     a.jmp(abs(vector::FSC).ind());
 
     // X and Y = the address of the text at (&F2),Y.
@@ -153,12 +153,12 @@ fn oscli(a: &mut Asm) {
 fn commands(a: &mut Asm) {
     a.here("star_cat");
     a.jsr("text_address");
-    a.lda(imm(FSC_CAT));
+    a.lda(imm(fsc::CAT));
     a.jmp(abs(vector::FSC).ind());
 
     a.here("star_run");
     a.jsr("text_address");
-    a.lda(imm(FSC_RUN));
+    a.lda(imm(fsc::SLASH));
     a.jmp(abs(vector::FSC).ind());
 
     a.here("star_code");
@@ -196,16 +196,14 @@ fn commands(a: &mut Asm) {
     a.jmp("osbyte");
 
     // The ROMs are told of the topic, Y at it past the word and its spaces.
+    // The ROMs answer first, then the MOS names itself, as MOS 1.20 does.
     a.here("star_help");
-    a.tya();
-    a.pha();
+    a.lda(imm(service::HELP));
+    a.jsr("service_call");
     a.jsr("print_inline");
     a.text("\r\nOS 1.20\r\n");
     a.byte(0);
-    a.pla();
-    a.tay();
-    a.lda(imm(SERVICE_HELP));
-    a.jmp("service_call");
+    a.rts();
 
     // X, Y = up to two numbers, zero where absent: the first after any
     // spaces, the second after a comma or spaces, and only spaces after it.
@@ -288,7 +286,7 @@ fn files(a: &mut Asm) {
     a.sta(abs(BLOCK + 6));
     a.here("star_load_go");
     a.lda(imm(0xFF));
-    a.jmp("osfile_block");
+    a.bne("osfile_block");
 
     // *SAVE name start end|+length [exec [reload]].
     a.here("star_save");
@@ -375,7 +373,10 @@ fn star_spool(a: &mut Asm) {
     a.lda(imm(0x40));
     a.jsr("osfind");
     a.sta(abs(var::EXEC_HANDLE));
-    a.rts();
+    // A file not opened is an error, as MOS 1.20 makes it.
+    a.tay();
+    a.bne(RTS);
+    a.jmp("file_not_found");
 
     a.here("close_spool_exec");
     a.jsr("close_exec");
@@ -478,7 +479,7 @@ fn gs(a: &mut Asm) {
     a.bne("gsread_not_top_bit");
     a.lda(imm(0x80));
     a.sta(zp(os::GS_CHAR));
-    a.jmp("gsread_next");
+    a.bmi("gsread_next");
     a.here("gsread_not_top_bit");
     a.cmp(imm(b'?'));
     a.bne("gsread_not_delete");

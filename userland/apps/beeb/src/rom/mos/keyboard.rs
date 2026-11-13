@@ -13,9 +13,10 @@
 
 use super::ws::{buffer, os, page2, var, vdu, vdu_zp};
 use super::{latch, svia, DELETE};
+use crate::machine::keyboard::Key;
 use crate::machine::latch as machine_latch;
 use crate::machine::via::{irq, reg};
-use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
+use crate::rom::asm::{abs, imm, sym, zp, Acc, Asm, RTS};
 
 /// Port B values that drive the latch's keyboard enable bit.
 const CPU_SCAN: u8 = latch(machine_latch::KEYBOARD_AUTOSCAN, false);
@@ -25,9 +26,18 @@ const AUTOSCAN: u8 = latch(machine_latch::KEYBOARD_AUTOSCAN, true);
 pub const KEY_DOWN: u8 = 0x80;
 // The tick walks the two key slots as a pair.
 const _: () = assert!(os::KEY_FIRST == os::KEY_LAST + 1);
-/// Keyboard status bits.
+/// Keyboard status bits: SHIFT and CTRL as the last scan found them, the
+/// locks, and SHIFT reversing the locks, which SHIFT with CAPS LOCK sets.
+const SHIFT_HELD: u8 = 0x08;
 const CAPS_OFF: u8 = 0x10;
 const SHIFT_LOCK_OFF: u8 = 0x20;
+const CTRL_HELD: u8 = 0x40;
+const SHIFT_REVERSES: u8 = 0x80;
+/// The locks that shift a letter.
+const LETTER_LOCKS: u8 = SHIFT_LOCK_OFF | CAPS_OFF;
+/// The lock keys, which act as they go down and never repeat.
+const CAPS_LOCK_DOWN: u8 = Key::CAPS_LOCK.number() | KEY_DOWN;
+const SHIFT_LOCK_DOWN: u8 = Key::SHIFT_LOCK.number() | KEY_DOWN;
 /// Translation markers for keys that are not characters.
 const MARK_CAPS: u8 = 0x01;
 const MARK_SHIFT_LOCK: u8 = 0x02;
@@ -57,10 +67,13 @@ const OLD: u16 = 0xA9;
 const START: u16 = 0xAA;
 const LINE: u16 = 0xAB;
 
-/// The unshifted code of each key, row by row, ten columns a row.
+/// The matrix's columns, and the first key a scan takes: row 1's, past
+/// SHIFT, CTRL and the start-up links.
+const COLUMNS: u8 = 10;
+const FIRST_SCANNED: u8 = 0x10;
+/// The unshifted code of each key from the first scanned, row by row.
 #[rustfmt::skip]
-const TRANSLATION: [u8; 80] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+const TRANSLATION: [u8; 70] = [
     b'Q', b'3', b'4', b'5', 0x84, b'8', 0x87, b'-', b'^', 0x8C,
     0x80, b'W', b'E', b'T', b'7', b'I', b'9', b'0', b'_', 0x8E,
     b'1', b'2', b'D', b'R', b'6', b'U', b'O', b'P', b'[', 0x8F,
@@ -116,7 +129,7 @@ fn matrix(a: &mut Asm) {
     a.here("key_scan_next");
     a.txa();
     a.and(imm(0x0F));
-    a.cmp(imm(10));
+    a.cmp(imm(COLUMNS));
     a.bcc("key_scan_test");
     // Past the tenth column, C set: the next row's first key.
     a.txa();
@@ -195,6 +208,20 @@ fn tick(a: &mut Asm) {
     a.rts();
 
     a.here("keyboard_tick");
+    a.jsr("keyboard_modifiers");
+    a.php();
+    a.lda(abs(var::KEYBOARD_STATUS));
+    a.and(imm(!(SHIFT_HELD | CTRL_HELD)));
+    a.plp();
+    let no_ctrl = a.local();
+    a.bpl(no_ctrl);
+    a.ora(imm(CTRL_HELD));
+    a.bind(no_ctrl);
+    let no_shift = a.local();
+    a.bvc(no_shift);
+    a.ora(imm(SHIFT_HELD));
+    a.bind(no_shift);
+    a.sta(abs(var::KEYBOARD_STATUS));
     // A key let go is forgotten, from either slot.
     a.ldy(imm(1));
     a.here("tick_forget");
@@ -210,7 +237,7 @@ fn tick(a: &mut Asm) {
     a.dey();
     a.bpl("tick_forget");
     // A key down that neither slot holds is the new one.
-    a.ldx(imm(0x10));
+    a.ldx(imm(FIRST_SCANNED));
     a.here("tick_scan");
     a.jsr("key_scan_from");
     a.txa();
@@ -245,6 +272,10 @@ fn tick(a: &mut Asm) {
     a.lda(abs(var::REPEAT_PERIOD));
     a.sta(zp(os::REPEAT_COUNT));
     a.lda(zp(os::KEY_LAST));
+    a.cmp(imm(CAPS_LOCK_DOWN));
+    a.beq(RTS);
+    a.cmp(imm(SHIFT_LOCK_DOWN));
+    a.beq(RTS);
     a.jmp("key_pressed");
     a.here("tick_new_key");
     a.ldx(zp(os::KEY_LAST));
@@ -252,11 +283,11 @@ fn tick(a: &mut Asm) {
     a.sta(zp(os::KEY_LAST));
     a.ldx(abs(var::REPEAT_DELAY));
     a.stx(zp(os::REPEAT_COUNT));
-    a.jmp("key_pressed");
+    a.fall_into("key_pressed");
 }
 
-/// A key's code: CAPS and SHIFT LOCK toggle, the rest go to the keyboard
-/// buffer shifted, controlled and cased.
+/// A key's code: the lock keys set the locks, the rest go to the keyboard
+/// buffer shifted, cased and controlled, as MOS 1.20 does.
 fn translate(a: &mut Asm) {
     a.here("key_pressed");
     a.and(imm(!KEY_DOWN));
@@ -276,19 +307,8 @@ fn translate(a: &mut Asm) {
     a.clc();
     a.adc(zp(os::SCRATCH));
     a.tax();
-    a.lda(abs("key_translation").x());
-    a.cmp(imm(MARK_CAPS));
-    a.bne("key_not_caps");
-    a.lda(imm(CAPS_OFF));
-    a.bne("key_toggle_lock");
-    a.here("key_not_caps");
-    a.cmp(imm(MARK_SHIFT_LOCK));
-    a.bne("key_not_shift_lock");
-    a.lda(imm(SHIFT_LOCK_OFF));
-    a.here("key_toggle_lock");
-    a.eor(abs(var::KEYBOARD_STATUS));
-    a.sta(abs(var::KEYBOARD_STATUS));
-    a.jmp("keyboard_leds");
+    a.lda(abs(sym("key_translation") + -i32::from((FIRST_SCANNED >> 4) * COLUMNS)).x());
+    locks(a);
     a.here("key_not_shift_lock");
     a.cmp(imm(MARK_TAB));
     a.bne("key_not_tab");
@@ -303,88 +323,127 @@ fn translate(a: &mut Asm) {
     a.sta(zp(os::SCRATCH));
     a.jsr("keyboard_modifiers");
     a.php();
-    a.lda(zp(os::SCRATCH));
-    a.bmi("key_function");
-    // Letters: upper case under CAPS LOCK, inverted by SHIFT; SHIFT LOCK
-    // makes every key shifted.
-    a.cmp(imm(b'A'));
-    a.bcc("key_symbol");
-    a.cmp(imm(b'Z' + 1));
-    a.bcs("key_symbol");
-    a.plp();
-    a.php();
-    a.bmi("key_control");
-    a.lda(abs(var::KEYBOARD_STATUS));
-    a.and(imm(CAPS_OFF | SHIFT_LOCK_OFF));
-    a.cmp(imm(CAPS_OFF | SHIFT_LOCK_OFF));
-    a.lda(zp(os::SCRATCH));
-    a.bcc("key_letter_upper");
-    a.ora(imm(0x20));
-    a.here("key_letter_upper");
-    a.plp();
-    a.bvc("key_insert");
-    a.eor(imm(0x20));
-    a.jmp("key_insert");
-    key_symbol(a);
+    shifting(a);
+    shifted(a);
 }
 
-/// Symbols shift by their ASCII pairs; 0 and @ do not shift, _ shifts
-/// to the pound sign.
-fn key_symbol(a: &mut Asm) {
-    a.here("key_symbol");
-    a.plp();
-    a.php();
-    a.bmi("key_control");
-    a.plp();
-    a.bvs("key_shifted");
+/// CAPS LOCK turns SHIFT LOCK off and, with SHIFT, CAPS LOCK on with SHIFT
+/// reversing it, or without, CAPS LOCK over; SHIFT LOCK turns CAPS LOCK off
+/// and itself over. Either ends SHIFT reversing them but as CAPS LOCK sets
+/// it.
+fn locks(a: &mut Asm) {
+    a.cmp(imm(MARK_CAPS));
+    let not_caps = a.local();
+    a.bne(not_caps);
+    a.jsr("keyboard_modifiers");
     a.lda(abs(var::KEYBOARD_STATUS));
-    a.and(imm(SHIFT_LOCK_OFF));
-    a.bne("key_unshifted");
-    a.here("key_shifted");
+    let plain = a.local();
+    a.bvc(plain);
+    a.and(imm(!CAPS_OFF));
+    a.ora(imm(SHIFT_REVERSES | SHIFT_LOCK_OFF));
+    a.bne("key_locks_set");
+    a.bind(plain);
+    a.eor(imm(CAPS_OFF));
+    a.and(imm(!SHIFT_REVERSES));
+    a.ora(imm(SHIFT_LOCK_OFF));
+    a.bne("key_locks_set");
+    a.bind(not_caps);
+    a.cmp(imm(MARK_SHIFT_LOCK));
+    a.bne("key_not_shift_lock");
+    a.lda(abs(var::KEYBOARD_STATUS));
+    a.eor(imm(SHIFT_LOCK_OFF));
+    a.and(imm(!SHIFT_REVERSES));
+    a.ora(imm(CAPS_OFF));
+    a.here("key_locks_set");
+    a.sta(abs(var::KEYBOARD_STATUS));
+    a.jmp("keyboard_leds");
+}
+
+/// Whether the key's code at SCRATCH is shifted, C clear if it is, with
+/// CTRL and SHIFT on the stack: the locks that shift it, SHIFT LOCK and for
+/// a letter CAPS LOCK, shift it, and SHIFT shifts it too or, while SHIFT
+/// reverses the locks, turns that over.
+fn shifting(a: &mut Asm) {
+    a.ldx(imm(SHIFT_LOCK_OFF));
     a.lda(zp(os::SCRATCH));
+    let locks = a.local();
+    a.cmp(imm(b'A'));
+    a.bcc(locks);
+    a.cmp(imm(b'Z' + 1));
+    a.bcs(locks);
+    a.ldx(imm(LETTER_LOCKS));
+    a.bind(locks);
+    a.stx(zp(os::SCRATCH + 1));
+    a.lda(abs(var::KEYBOARD_STATUS));
+    a.and(zp(os::SCRATCH + 1));
+    // C set if every lock that shifts it is off; V is still SHIFT.
+    a.cmp(zp(os::SCRATCH + 1));
+    let decided = a.local();
+    a.bvc(decided);
+    a.bit(abs(var::KEYBOARD_STATUS));
+    let shifts = a.local();
+    a.bpl(shifts);
+    let was_shifted = a.local();
+    a.bcc(was_shifted);
+    a.bind(shifts);
+    a.clc();
+    a.bcc(decided);
+    a.bind(was_shifted);
+    a.sec();
+    a.bind(decided);
+}
+
+/// The code with C clear shifted: a letter upper case, else lower; a symbol
+/// by its ASCII pair, but 0 and @, and _ to the pound sign; a function key
+/// &10 on. Then CTRL takes &40–&7F to &00–&1F, or a function key &20 on.
+fn shifted(a: &mut Asm) {
+    a.lda(zp(os::SCRATCH));
+    a.bmi("key_function");
+    let unshifted = a.local();
+    a.bcs(unshifted);
     a.cmp(imm(b'_'));
-    a.bne("key_shift_pairs");
+    let pairs = a.local();
+    a.bne(pairs);
     a.lda(imm(0x60));
-    a.jmp("key_insert");
-    a.here("key_shift_pairs");
+    a.bne("key_control");
+    a.bind(pairs);
     a.cmp(imm(0x2C));
-    a.bcc("key_unshifted");
+    a.bcc("key_control");
     a.cmp(imm(b'0'));
-    a.beq("key_unshifted");
+    a.beq("key_control");
     a.cmp(imm(0x40));
-    a.bcs("key_shift_brackets");
+    let brackets = a.local();
+    a.bcs(brackets);
     a.eor(imm(0x10));
-    a.jmp("key_insert");
-    a.here("key_shift_brackets");
+    a.bcc("key_control");
+    a.bind(brackets);
     a.cmp(imm(0x5B));
-    a.bcc("key_unshifted");
+    a.bcc("key_control");
     a.cmp(imm(0x5F));
-    a.bcs("key_unshifted");
+    a.bcs("key_control");
     a.eor(imm(0x20));
-    a.jmp("key_insert");
-    a.here("key_unshifted");
-    a.lda(zp(os::SCRATCH));
-    a.jmp("key_insert");
-    // CTRL takes &40–&7F to &00–&1F.
+    a.bne("key_control");
+    a.bind(unshifted);
+    a.ldx(zp(os::SCRATCH + 1));
+    a.cpx(imm(LETTER_LOCKS));
+    a.bne("key_control");
+    a.ora(imm(0x20));
     a.here("key_control");
     a.plp();
-    a.lda(zp(os::SCRATCH));
+    a.bpl("key_insert");
     a.cmp(imm(0x40));
     a.bcc("key_insert");
     a.and(imm(0x1F));
     a.jmp("key_insert");
-    // Function, cursor and COPY keys: SHIFT adds &10 and CTRL &20.
+
     a.here("key_function");
-    a.plp();
-    a.php();
-    a.bvc("key_function_unshifted");
-    a.clc();
+    let unshifted = a.local();
+    a.bcs(unshifted);
     a.adc(imm(0x10));
-    a.here("key_function_unshifted");
+    a.bind(unshifted);
     a.plp();
     a.bpl("key_insert");
-    a.clc();
-    a.adc(imm(0x20));
+    a.ora(imm(0x20));
 
     // Into the keyboard buffer, unless it is the ESCAPE character and ESCAPE
     // is live, which sets the Escape condition instead.
@@ -501,8 +560,8 @@ fn rdch(a: &mut Asm) {
     a.lsr(Acc);
     a.lsr(Acc);
     a.tax();
-    a.lda(abs(var::KEY_ZONES - 8).x());
     a.cpx(imm(0x0C));
+    a.lda(abs(var::KEY_ZONES - 8).x());
     a.bcc("rdch_zone_value");
     a.lda(abs(var::INPUT_ZONES - 12).x());
     a.here("rdch_zone_value");

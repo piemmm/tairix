@@ -16,6 +16,8 @@ const MARKED: u16 = vdu::SCRATCH + 8;
 const PATTERN: u16 = vdu::SCRATCH;
 /// The first character a cell is matched against.
 const FIRST_CHARACTER: u8 = b' ';
+// The two cursors are exchanged an axis at a time, y after x.
+const _: () = assert!(vdu::CURSOR_Y == vdu::CURSOR_X + 1 && vdu::EDIT_Y == vdu::EDIT_X + 1);
 
 pub fn emit(a: &mut Asm) {
     output(a);
@@ -43,8 +45,7 @@ fn output(a: &mut Asm) {
     a.and(imm(status::EDITING));
     a.beq(RTS);
     a.jsr("edit_exchange");
-    a.jsr("edit_mark");
-    a.jmp("vdu_cursor_update");
+    a.jmp("edit_mark");
 
     // Editing begins at the cursor, which the copy cursor then leaves.
     a.here("edit_begin");
@@ -57,7 +58,7 @@ fn output(a: &mut Asm) {
     a.lda(zp(vdu_zp::STATUS));
     a.ora(imm(status::EDITING));
     a.sta(zp(vdu_zp::STATUS));
-    a.jmp("edit_mark");
+    a.bne("edit_mark");
 
     // Editing ends with the cursor back at the input position.
     a.here("edit_end");
@@ -67,17 +68,19 @@ fn output(a: &mut Asm) {
     a.eor(zp(vdu_zp::STATUS));
     a.sta(zp(vdu_zp::STATUS));
     a.jsr("edit_mark");
-    a.jsr("edit_exchange");
-    a.jmp("vdu_cursor_update");
 
+    // The cursor's cell follows it, since output draws there.
     a.here("edit_exchange");
-    for (cursor, other) in [(vdu::CURSOR_X, vdu::EDIT_X), (vdu::CURSOR_Y, vdu::EDIT_Y)] {
-        a.ldx(abs(cursor));
-        a.lda(abs(other));
-        a.sta(abs(cursor));
-        a.stx(abs(other));
-    }
-    a.rts();
+    a.ldx(imm(1));
+    let axis = a.here_local();
+    a.ldy(abs(vdu::CURSOR_X).x());
+    a.lda(abs(vdu::EDIT_X).x());
+    a.sta(abs(vdu::CURSOR_X).x());
+    a.tya();
+    a.sta(abs(vdu::EDIT_X).x());
+    a.dex();
+    a.bpl(axis);
+    a.jmp("vdu_cursor_update");
 }
 
 /// The input position's mark, toggled: mode 7's character exchanged with

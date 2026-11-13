@@ -1,0 +1,240 @@
+# Recorded by `cargo xtask beeb --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario five_files_may_be_open_at_once
+row         17        18        19        20
+row         21
+row >F%=OPENOUT"F6"
+row Too many open
+row >P.ERR
+row        192
+row >G%=OPENIN"F1"
+row Open
+row >P.ERR,G%
+row        194         0
+row >H%=OPENOUT"F1"
+row Open
+row >P.ERR
+row        194
+row >CLOSE_0
+row >CLOSE_99
+row Channel
+row >P.ERR
+row        222
+row >
+
+scenario bytes_are_read_and_written_through_the_pointer
+row        512       512
+row >A%=OPENIN"G":P.EXT_A%,BGET_A%,BGET_A%,P
+row TR_A%:PTR_A%=511:P.BGET_A%,EOF_A%:P.BGET
+row _A%
+row        512         1         2         2
+row          0        -1
+row        254
+row >P.ERR
+row          0
+row >P.BGET_A%
+row EOF
+row >P.ERR
+row        223
+row >*INFO G
+row $.G           000000 000000 000200 008
+row >
+disc 0 9a76a7c49d28094b145609227109c0c4f322742a6d13ef8464143d28bc00c90d
+
+scenario openup_extends_a_file_as_the_pointer_passes_its_end
+row        256
+row Can't extend
+row >*INFO A
+row $.A           001900 001900 000100 002
+row >A%=OPENIN"A":PTR_A%=&300:P.PTR_A%,EOF_A
+row %
+row Open
+row >P.ERR
+row        194
+row >A%=OPENIN"A":BPUT_A%,1
+row Open
+row >P.ERR
+row        194
+row >
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario a_locked_file_opens_only_for_input
+row >A%=OPENUP"A"
+row >P.ERR
+row          0
+row >A%=OPENOUT"A"
+row Locked
+row >P.ERR
+row        195
+row >A%=OPENIN"A":P.A%
+row Open
+row >A%=OPENIN"NONE":P.A%
+row          0
+row >A%=OPENUP"NONE":P.A%
+row          0
+row >
+
+scenario openout_makes_an_empty_file_and_ptr_extends_it
+row $.E           000000 000000 000000 008
+row >A%=OPENOUT"E2":PTR_A%=1000:P.EXT_A%:CLO
+row SE_A%:*INFO E2
+row       1000
+row $.E2          000000 000000 0003E8 008
+row >*INFO *.*
+row $.E2          000000 000000 0003E8 008
+row $.E           000000 000000 000000 008
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 67a2f946dd50be365c2657835acd2d07829e24e3fb8c5b9775518d115ed23616
+
+scenario files_opened_for_output_share_the_free_space
+row $.Y           000000 000000 004000 048
+row $.X           000000 000000 004000 008
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >P.ERR
+row          0
+row >CLOSE_0:*INFO *.*
+row $.Y           000000 000000 000000 048
+row $.X           000000 000000 000000 008
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 b57cb84c9b7b075f62a00bf7f7fe31edb677a03103046751c82c5fbf973ab715
+
+scenario a_file_that_cannot_grow_is_refused
+row Can't extend
+row >P.ERR
+row        191
+row >CLOSE_0
+row >A%=OPENOUT"X":B%=OPENOUT"Y"
+row >FOR I%=1 TO 16385:BPUT_A%,1:NEXT
+disc 0 b9be624b864ba4d4f0087ca13422f6f5922c89077c524c35b668389bf5ed0870
+
+scenario an_open_file_grows_into_the_space_after_it
+row Disk full
+row >P.ERR
+row        198
+row >*INFO *.*
+row $.FILLER      001900 001900 030A00 002
+row >FOR I%=1 TO 6000:BPUT_A%,I%:NEXT
+row Channel
+row >P.ERR,PTR_A%
+row        222         0
+row >CLOSE_A%
+row >*INFO *.*
+row $.FILLER      001900 001900 030A00 002
+row >
+disc 0 4c39528c0b1370a0a139536ea2166b34460f8831c274b3be762e12ccb6cc6c0b
+
+scenario an_updated_file_grows_to_the_next_64k
+row >A%=OPENUP"G":PTR_A%=EXT_A%:FOR I%=1 TO
+row 19968:BPUT_A%,I%:NEXT:P.EXT_A%
+row      20224
+row >P.ERR
+row          0
+row >CLOSE_A%:*INFO *.*
+row $.G           001900 001900 004F00 002
+row >
+disc 0 fd2d96bdfcee7cb29f232385428aee86a53022a6ecfc0d99ada5c8485945ba75
+
+scenario eof_and_writing_at_the_end
+row         -1
+row Can't extend
+row >P.ERR
+row        191
+row >*INFO A
+row $.A           001900 001900 000100 002
+row >
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario a_channel_refuses_what_its_file_does_not_allow
+row Read only
+row >P.ERR
+row        193
+row >CLOSE_0:*ACCESS A L
+row >A%=OPENUP"A":BPUT_A%,1
+row Locked
+row >P.ERR
+row        195
+row >CLOSE_0
+row >A%=OPENIN"A":*DELETE A
+row Locked
+row >P.ERR
+row        195
+row >CLOSE_0
+row >
+
+scenario a_disc_changed_under_an_open_file_is_not_written
+row >CLOSE_A%
+row Disk changed
+row >P.ERR
+row        200
+row >
+disc 0 c91458407399f4343d92de4b67082bf851adc139f29e3f21b9a160593baad13b
+
+scenario compact_leaves_an_open_file_readable
+row >*COMPACT
+row Compacting :0
+row $.A           001900 001900 000100 002
+row B.FILE        003000 003010 000100 003
+row $.LONGNAM     FF1900 FF8023 000345 004
+row 318 free sectors
+row >P.ERR
+row          0
+row >P.BGET_A%
+row         13
+row >P.ERR
+row          0
+row >
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario a_growing_file_takes_the_gap_before_the_next_file
+row          1         0        64         0
+row >
+disc 0 f2ff316080b54b34f8a67a086dc24076ab9d2870635917eae76742ca58bf7a02
+
+scenario a_growing_file_takes_no_more_than_the_next_64k
+row          1         0         0        10
+row >
+disc 0 f777cc964667452352836ea2e21875b1bdc0c83bd43640aae304a6a95de4bad1
+
+scenario a_file_past_64k_grows_to_the_next_64k
+row          1         0         0        20
+row >
+disc 0 4222106aefe61a5464e1a6624d0be771ba858440970c6b21521eb4e8f0baef48
+
+scenario a_file_past_64k_grows_no_further_than_the_next_file
+row          1         0        F2        10
+row >
+disc 0 370b3c8a56e52cb6da22876c97a631d9cc06f3a03a833ae099a6da1800747dda
+
+scenario a_file_with_no_room_after_it_cannot_extend
+row          1         0         2         0
+row >
+disc 0 01accee343c82b1013c6ca5faf4a30a04e26c5c9a668b73251aa67ecc54239b5
+
+scenario a_far_pointer_grows_a_file_a_64k_step_at_a_time
+row          3         0         0        20
+row >
+disc 0 8ca9667f2926bc391789c13d460699221448ab5eea594314ae1490511f33d59f
+
+scenario the_rest_of_a_files_last_sector_is_zero
+row >?&900=0:!&901=&A00:?&905=3:?&906=&53:?&
+row 907=0:?&908=3:?&909=&21:A%=&7F:X%=0:Y%=9
+row :CALL&FFF1:P.~?&A2B,~?&A2C,~?&A2D,~?&AFE
+row         2C         0         0         0
+row >
+
+scenario a_buffer_is_written_back_only_to_its_files_disc
+row >FOR I%=1 TO 300:BPUT_A%,I%:NEXT
+row Disk changed
+row >P.ERR
+row        200
+row >
+disc 0 c91458407399f4343d92de4b67082bf851adc139f29e3f21b9a160593baad13b

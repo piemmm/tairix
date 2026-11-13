@@ -133,6 +133,98 @@ impl Key {
     pub const fn row(self) -> u8 {
         self.0 >> 4
     }
+
+    /// The key that types `ch`, and whether SHIFT is held with it, with CAPS
+    /// LOCK on as the MOS starts: printable ASCII, `£` as its code `` ` ``,
+    /// and carriage return. CAPS LOCK makes every letter a capital, SHIFT or
+    /// not, so no key types a lower-case one.
+    #[must_use]
+    pub const fn typing(ch: char) -> Option<(Self, bool)> {
+        let unshifted = match ch {
+            'A'..='Z' => return Some((Self::letter(ch), false)),
+            '0' => Self::DIGIT_0,
+            '1' | '!' => Self::DIGIT_1,
+            '2' | '"' => Self::DIGIT_2,
+            '3' | '#' => Self::DIGIT_3,
+            '4' | '$' => Self::DIGIT_4,
+            '5' | '%' => Self::DIGIT_5,
+            '6' | '&' => Self::DIGIT_6,
+            '7' | '\'' => Self::DIGIT_7,
+            '8' | '(' => Self::DIGIT_8,
+            '9' | ')' => Self::DIGIT_9,
+            '-' | '=' => Self::MINUS,
+            '^' | '~' => Self::CARET,
+            '\\' | '|' => Self::BACKSLASH,
+            '@' => Self::AT,
+            '[' | '{' => Self::LEFT_BRACKET,
+            '_' | '`' => Self::UNDERSCORE,
+            ';' | '+' => Self::SEMICOLON,
+            ':' | '*' => Self::COLON,
+            ']' | '}' => Self::RIGHT_BRACKET,
+            ',' | '<' => Self::COMMA,
+            '.' | '>' => Self::FULL_STOP,
+            '/' | '?' => Self::SLASH,
+            ' ' => Self::SPACE,
+            '\r' => Self::RETURN,
+            _ => return None,
+        };
+        let shifted = matches!(
+            ch,
+            '!' | '"'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '='
+                | '~'
+                | '|'
+                | '{'
+                | '`'
+                | '+'
+                | '*'
+                | '}'
+                | '<'
+                | '>'
+                | '?'
+        );
+        Some((unshifted, shifted))
+    }
+
+    /// Capital `upper`'s key.
+    const fn letter(upper: char) -> Self {
+        const LETTERS: [Key; 26] = [
+            Key::A,
+            Key::B,
+            Key::C,
+            Key::D,
+            Key::E,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::I,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::M,
+            Key::N,
+            Key::O,
+            Key::P,
+            Key::Q,
+            Key::R,
+            Key::S,
+            Key::T,
+            Key::U,
+            Key::V,
+            Key::W,
+            Key::X,
+            Key::Y,
+            Key::Z,
+        ];
+        LETTERS[(upper as u8 - b'A') as usize]
+    }
 }
 
 /// Columns the scan counter steps through: the counter is four bits wide and
@@ -241,6 +333,21 @@ mod tests {
         assert_eq!(Key::from_number(0x49), Some(Key::RETURN));
         assert_eq!(Key::from_number(0x0F), None);
         assert_eq!(Key::RIGHT.label(), "cursor right");
+    }
+
+    #[test]
+    fn every_printable_character_but_lower_case_has_its_key_and_shift() {
+        assert!((' '..='~').all(|ch| Key::typing(ch).is_some() != ch.is_ascii_lowercase()));
+        assert_eq!(Key::typing('A'), Some((Key::A, false)));
+        assert_eq!(Key::typing('z'), None, "CAPS LOCK makes it a capital");
+        assert_eq!(Key::typing('7'), Some((Key::DIGIT_7, false)));
+        assert_eq!(Key::typing('\''), Some((Key::DIGIT_7, true)));
+        assert_eq!(Key::typing('='), Some((Key::MINUS, true)));
+        assert_eq!(Key::typing('`'), Some((Key::UNDERSCORE, true)), "£");
+        assert_eq!(Key::typing('?'), Some((Key::SLASH, true)));
+        assert_eq!(Key::typing('\r'), Some((Key::RETURN, false)));
+        assert_eq!(Key::typing('\u{7F}'), None);
+        assert_eq!(Key::typing('é'), None);
     }
 
     #[test]

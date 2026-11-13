@@ -595,6 +595,12 @@ pub const TARGETS: &[Target] = &[
             "BBC Micro snapshot restore (untrusted container, sections, every device's fields and times) + hostile guest code driving every device",
     },
     Target {
+        package: "tairix-beeb",
+        test: "fuzz_worker",
+        description:
+            "BBC Micro machine worker protocol (untrusted requests into the sandboxed worker's service, untrusted replies into the owner's client) + canonical encodings",
+    },
+    Target {
         package: "tairix-image",
         test: "fuzz_image",
         description:
@@ -1219,7 +1225,7 @@ mod tests {
 
     #[test]
     fn beeb_harnesses_are_registered() {
-        for target in ["fuzz_media", "fuzz_snapshot"] {
+        for target in ["fuzz_media", "fuzz_snapshot", "fuzz_worker"] {
             let opts = parse(&argv(&["--target", target])).expect("flag parses");
             let chosen = selected(&opts).expect("known target");
             assert_eq!(chosen.len(), 1);

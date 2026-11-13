@@ -1499,6 +1499,7 @@ mod tests {
         "audioctl",
         "audiod",
         "basename",
+        "beeb",
         "blendcheck",
         "cat",
         "chmod",

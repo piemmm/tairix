@@ -87,6 +87,14 @@ thirty-two word outside the twenty-four bits it claims to carry at that
 encoding's full scale rather than at up to two hundred and fifty-six times it.
 One tenant's numbers never bound another's.
 
+## AC coupling
+
+`AcCoupling` is the one-pole high-pass a line output's capacitor makes,
+`y = x - x₋₁ + pole · y₋₁`: a source that drives a level rather than a
+waveform, as an emulated sound chip does, passes through it to lose its DC
+before it is resampled. Its state is the last input and output, so a
+snapshot keeps it and takes it back only when both are finite.
+
 ## The one resampler
 
 A polyphase Kaiser-windowed-sinc interpolator. There is exactly one in TAIRiX:

@@ -283,6 +283,12 @@ impl Cassette {
         self.resume(now);
     }
 
+    /// Whether a tape is in the deck.
+    #[must_use]
+    pub const fn holds_tape(&self) -> bool {
+        self.tape.is_some()
+    }
+
     /// Whether record is down.
     #[must_use]
     pub fn recording(&self) -> bool {

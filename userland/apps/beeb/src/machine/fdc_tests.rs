@@ -242,6 +242,22 @@ fn a_disc_taken_out_leaves_the_drive_not_ready_until_its_status_is_read_twice() 
 }
 
 #[test]
+fn a_disc_put_in_another_s_place_leaves_the_drive_not_ready_once() {
+    let mut host = Host::with_disc();
+    let disc = host.fdc.set_disc(host.now, PhysicalDrive::Zero, None);
+    host.fdc
+        .set_disc(host.now, PhysicalDrive::Zero, disc.clone());
+    host.immediate(0x6C, &[]);
+    // A swap with no moment empty in between still passed through one.
+    host.fdc.set_disc(host.now, PhysicalDrive::Zero, disc);
+    assert_eq!(host.immediate(0x6C, &[]).unwrap() & input::READY_0, 0);
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & input::READY_0,
+        input::READY_0
+    );
+}
+
+#[test]
 fn a_seek_steps_at_the_programmed_rate_settles_and_interrupts() {
     let mut host = Host::with_disc();
     host.immediate(0x3A, &[register::DRIVE_OUTPUT, 0x48]);

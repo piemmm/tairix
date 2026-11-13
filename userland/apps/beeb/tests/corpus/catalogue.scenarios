@@ -1,0 +1,112 @@
+# The catalogue: *CAT and *INFO, the options and title, directories and drives, names, the errors, and the limits of a disc.
+
+scenario cat_shows_the_title_cycle_drive_option_and_files
+discs testdisc
+script type:CLS:*.\n;wait:1;type:*CAT 0\n;wait:1
+
+scenario cat_of_an_empty_drive_or_a_missing_side_fails
+discs testdisc
+script type:CLS:*CAT 1\n;wait:3;type:P.ERR\n;wait:1;type:*CAT 2\n;wait:3;type:P.ERR\n;wait:1;type:*CAT 4\n;wait:1;type:P.ERR\n;wait:1
+
+scenario escape_abandons_waiting_for_a_drive
+discs testdisc
+script type:CLS:*CAT 1\n;wait:2;press:ESCAPE;wait:1;type:P.ERR\n;wait:1
+
+scenario info_shows_addresses_length_and_start_sector
+discs testdisc
+script type:CLS:*INFO *.*\n;wait:1
+
+scenario info_matches_wildcards_and_directories
+discs testdisc
+script type:CLS:*INFO A\n;wait:1;type:*INFO B.*\n;wait:1;type:*INFO #.FILE\n;wait:1;type:*INFO $.*\n;wait:1;type:*INFO L*\n;wait:1
+
+scenario access_locks_a_file_against_deletion
+discs testdisc
+check 0
+script type:CLS:*ACCESS A L\n;wait:1;type:*CAT\n;wait:1;type:*INFO A\n;wait:1;type:*DELETE A\n;wait:1;type:P.ERR\n;wait:1
+
+scenario opt_4_writes_the_boot_option
+discs testdisc
+check 0
+script type:CLS:*OPT 4,1\n;wait:1;type:*CAT\n;wait:1;type:*OPT 4,2\n;wait:1;type:*OPT 4,3\n;wait:1;type:*CAT\n;wait:1;type:*OPT 4,4\n;wait:1;type:P.ERR\n;wait:1
+
+scenario title_is_written_to_the_catalogue
+discs testdisc
+check 0
+script type:CLS:*TITLE "HELLO WORLD!"\n;wait:1;type:*CAT\n;wait:1;type:*TITLE ABCDEFGHIJKLMNOP\n;wait:1;type:*CAT\n;wait:1
+
+scenario a_short_title_is_padded
+discs testdisc
+check 0
+script type:CLS:*TITLE AB\n;wait:1;type:*CAT\n;wait:1
+
+scenario the_cycle_number_counts_catalogue_writes_in_bcd
+discs blank80
+check 0
+script type:CLS:FOR I%=1 TO 11:OSCLI "TITLE T"+STR$I%:NEXT\n;wait:12;type:*CAT\n;wait:1
+
+scenario dir_and_lib_set_the_current_and_library_directories
+discs testdisc
+script type:CLS:*DIR B\n;wait:1;type:*CAT\n;wait:1;type:*LIB :1.Q\n;wait:1;type:*CAT\n;wait:1;type:*DIR AB\n;wait:1;type:P.ERR\n;wait:1
+
+scenario dir_and_lib_default_to_the_root_and_drive_0
+discs testdisc
+script type:CLS:*RENAME A :1.B\n;wait:1;type:P.ERR\n;wait:0.3;type:*DIR B\n;wait:0.3;type:*DIR\n;wait:0.3;type:*LIB Q\n;wait:0.3;type:*LIB\n;wait:0.3;type:*CAT\n;wait:1;type:*DRIVE :1\n;wait:0.3;type:P.ERR\n;wait:0.3
+
+scenario drive_selects_the_current_drive
+discs testdisc
+script type:CLS:*DRIVE 1\n;wait:1;type:*DRIVE 4\n;wait:1;type:P.ERR\n;wait:1;type:*DRIVE\n;wait:1;type:P.ERR\n;wait:1;type:*DRIVE 0\n;wait:1;type:*CAT\n;wait:1
+
+scenario errors_name_what_went_wrong
+discs testdisc
+script type:CLS:*DELETE NOTHERE\n;wait:1;type:P.ERR\n;wait:1;type:*LOAD NOTHERE\n;wait:1;type:P.ERR\n;wait:1;type:*SAVE ABCDEFGH 1900 1A00\n;wait:1;type:P.ERR\n;wait:1;type:*ACCESS A X\n;wait:1;type:P.ERR\n;wait:1;type:*RENAME A B.FILE\n;wait:1;type:P.ERR\n;wait:1
+
+scenario bad_names_are_refused
+discs testdisc
+script type:CLS:*SAVE "A B" 1900 +1\n;wait:1;type:P.ERR\n;wait:0.5;type:*SAVE A.B.C 1900 +1\n;wait:1;type:P.ERR\n;wait:0.5;type:*SAVE A* 1900 +1\n;wait:1;type:P.ERR\n;wait:0.5;type:*SAVE :.X 1900 +1\n;wait:1;type:P.ERR\n;wait:0.5;type:*DELETE *\n;wait:1;type:P.ERR\n;wait:0.5;type:*INFO\n;wait:1;type:P.ERR\n;wait:0.5
+
+scenario names_hold_any_printable_character
+discs testdisc
+check 0
+script type:CLS:*SAVE "A B" 1900 +1\n;wait:1;type:*SAVE A.B.C 1900 +1\n;wait:1;type:*SAVE A* 1900 +1\n;wait:1;type:*SAVE #X 1900 +1\n;wait:1;type:*SAVE !$%& 1900 +1\n;wait:1;type:*INFO *.*\n;wait:2
+
+scenario names_match_without_regard_to_case
+discs testdisc
+check 0
+script type:CLS:OSCLI "INFO "+CHR$97\n;wait:1;type:OSCLI "SAVE "+CHR$98+"Q 1900 +1"\n;wait:1;type:*INFO BQ\n;wait:1;type:OSCLI "INFO "+CHR$98+CHR$113\n;wait:1;type:OSCLI "INFO "+CHR$98+".FILE"\n;wait:1;type:*INFO A#\n;wait:1;type:*INFO #\n;wait:1;type:*INFO *A\n;wait:1;type:*INFO L*M\n;wait:1;type:*INFO ##\n;wait:1
+
+scenario names_take_a_drive_and_directory
+discs testdisc
+check 0
+script type:CLS:*SAVE :0.X.NEW 1900 +1\n;wait:1;type:*INFO X.*\n;wait:1;type:*INFO :0.$.A\n;wait:1;type:*INFO :1.A\n;wait:3;type:P.ERR\n;wait:0.5
+
+scenario unknown_commands_and_missing_files
+discs testdisc
+script type:CLS:*RUN NOPE\n;wait:1;type:P.ERR\n;wait:0.5;type:*NOPE\n;wait:1;type:P.ERR\n;wait:0.5;type:*DI.\n;wait:1;type:*ACCESS A L\n;wait:1;type:*OPT 1,1\n;wait:0.5;type:*DELETE LONGNAM\n;wait:1
+
+scenario a_write_protected_disc_refuses_writes
+discs testdisc
+protected
+script type:CLS:*SAVE Q 1900 +10\n;wait:2;type:P.ERR\n;wait:0.5;type:*ACCESS A L\n;wait:2;type:P.ERR\n;wait:0.5;type:A%=OPENOUT"Q"\n;wait:2;type:P.ERR\n;wait:0.5
+
+scenario a_sector_beyond_the_disc_is_a_disc_fault
+discs fault40
+script type:CLS:*LOAD BIG\n;wait:6;type:P.ERR\n;wait:0.5
+
+scenario the_catalogue_holds_31_files
+discs full80
+check 0
+script type:CLS:FOR I%=1 TO 32:OSCLI "SAVE F"+STR$I%+" 1900 +1":NEXT\n;wait:40;type:P.ERR,I%\n;wait:0.5
+
+scenario a_save_too_big_for_the_space_is_refused
+discs near80
+check 0
+script type:CLS:*SAVE A 3000 +1500\n;wait:3;type:P.ERR\n;wait:0.5;type:*SAVE B 3000 +1400\n;wait:4;type:*SAVE C 3000 +1\n;wait:3;type:P.ERR\n;wait:0.5;type:*INFO *.*\n;wait:3
+
+scenario run_of_a_basic_program_loads_it_and_returns
+discs blank80
+script type:10 PRINT "HELLO"\n20 PRINT "THERE"\n;wait:0.3;type:SAVE "P"\n;wait:2;type:NEW\n;wait:0.3;type:CLS:*RUN P\n;wait:1;type:P.~TOP\n;wait:0.5;type:LIST\n;wait:0.5
+
+scenario run_enters_a_program_with_its_tail_for_osargs
+discs blank80
+script type:P%=&2000:[OPT 0:LDA #1:LDX #&70:LDY #0:JSR &FFDA:LDA &70:STA &80:LDA &71:STA &81:RTS:]\n;wait:0.5;type:*SAVE R 2000 +20\n;wait:2;type:CLS:*RUN R   HELLO\n;wait:1;type:P.$(?&80+256*?&81)\n;wait:0.5;type:*R THERE\n;wait:1;type:P.$(?&80+256*?&81)\n;wait:0.5

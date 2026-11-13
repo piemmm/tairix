@@ -11,7 +11,6 @@ use crate::machine::via::reg;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 
 /// Service call for an unrecognised OSBYTE.
-const SERVICE_OSBYTE: u8 = 7;
 /// The version OSBYTE 0 returns in X, with Y zero, when X is non-zero.
 const VERSION: u8 = 1;
 
@@ -39,10 +38,10 @@ const LOW: [&str; LOW_CALLS as usize] = [
     "osbyte_enable_event",
     "osbyte_flush_input",
     "osbyte_16",
-    "osbyte_adc_start",
+    "adc_force",
     "osbyte_reset_keys",
     "osbyte_wait_vsync",
-    "osbyte_font",
+    "font_explode",
     "osbyte_flush",
 ];
 
@@ -50,7 +49,7 @@ const LOW: [&str; LOW_CALLS as usize] = [
 const HIGH: [&str; (var::FIRST - HIGH_FIRST) as usize] = [
     "osbyte_vdu_status",
     "keyboard_leds_call",
-    "osbyte_close_files",
+    "close_spool_exec",
     "osbyte_keys_pressed",
     "osbyte_keyboard_scan",
     "osbyte_keyboard_scan_16",
@@ -68,11 +67,11 @@ const HIGH: [&str; (var::FIRST - HIGH_FIRST) as usize] = [
     "osbyte_cursor_position",
     "osbyte_read_character",
     "osbyte_code",
-    "osbyte_motor",
+    "cassette_motor",
     "osbyte_insert",
     "osbyte_opt",
-    "osbyte_tape",
-    "osbyte_rom",
+    "select_tape",
+    "select_rom",
     "osbyte_language",
     "osbyte_service",
     "osbyte_tv",
@@ -149,7 +148,7 @@ fn dispatch(a: &mut Asm) {
     a.here("osbyte_unrecognised");
     a.ldx(zp(os::CALL_X));
     a.ldy(zp(os::CALL_Y));
-    a.lda(imm(SERVICE_OSBYTE));
+    a.lda(imm(crate::rom::os::service::OSBYTE));
     a.jsr("service_call");
     a.tax();
     a.beq("osbyte_claimed");
@@ -205,7 +204,7 @@ fn simple(a: &mut Asm) {
     ] {
         a.here(call);
         a.lda(imm(variable));
-        a.jmp("osbyte_write_variable");
+        a.bne("osbyte_write_variable");
     }
 
     // *FX12,0 restores both auto-repeat settings; otherwise the period.
@@ -217,7 +216,7 @@ fn simple(a: &mut Asm) {
     a.ldx(imm(0x08));
     a.here("osbyte_12_period");
     a.lda(imm(0xC5));
-    a.jmp("osbyte_write_variable");
+    a.bne("osbyte_write_variable");
 
     // OSBYTE 0: with X zero an error naming the MOS, otherwise its version.
     a.here("osbyte_identify");
@@ -236,8 +235,13 @@ fn simple(a: &mut Asm) {
     a.ldx(zp(super::ws::vdu_zp::STATUS));
     a.rts();
 
+    // *FX118 leaves X 1, Y &7F and C clear, as MOS 1.20 does.
     a.here("keyboard_leds_call");
-    a.jmp("keyboard_leds");
+    a.jsr("keyboard_leds");
+    a.ldx(imm(1));
+    a.ldy(imm(0x7F));
+    a.clc();
+    a.rts();
 
     // &78: X into &ED, Y into &EC.
     a.here("osbyte_keys_pressed");
@@ -248,10 +252,15 @@ fn simple(a: &mut Asm) {
     a.here("osbyte_keyboard_scan_16");
     a.ldx(imm(0x10));
     a.here("osbyte_keyboard_scan");
+    // Y as MOS 1.20 leaves it: &7F once a key is tested, &EE once scanned.
+    let scanning = a.local();
+    a.ldy(imm(0xEE));
+    a.txa();
+    a.bpl(scanning);
+    a.ldy(imm(0x7F));
+    a.bind(scanning);
     a.sec();
     a.clv();
-    a.jsr("keyv_call");
-    a.jmp("osbyte_return_x");
     a.here("keyv_call");
     a.jmp(abs(vector::KEY).ind());
 
@@ -318,10 +327,6 @@ fn osbyte_cursor_position(a: &mut Asm) {
     a.sty(abs(page2::TV_INTERLACE));
     a.tay();
     a.rts();
-
-    a.here("osbyte_return_x");
-    a.ldy(zp(os::CALL_Y));
-    a.rts();
 }
 
 /// Streams, buffers and the Escape condition.
@@ -382,9 +387,6 @@ fn streams(a: &mut Asm) {
     a.bcs(RTS);
     a.jmp("buffer_flush");
 
-    a.here("osbyte_close_files");
-    a.jmp("close_spool_exec");
-
     a.here("osbyte_clear_escape");
     a.lsr(zp(os::ESCAPE));
     a.rts();
@@ -441,7 +443,7 @@ fn osbyte_insert(a: &mut Asm) {
 
     a.here("osbyte_eof");
     a.lda(imm(1));
-    a.jmp("fsc_call");
+    a.fall_into("fsc_call");
     a.here("fsc_call");
     a.jmp(abs(vector::FSC).ind());
 
@@ -471,9 +473,6 @@ fn timing(a: &mut Asm) {
     a.tax();
     a.rts();
 
-    a.here("osbyte_adc_start");
-    a.jmp("adc_force");
-
     // &80: X 0 the fire buttons and the last channel; 1–4 a channel's value;
     // &F7–&FF a buffer's count.
     a.here("osbyte_adc_or_buffer");
@@ -489,6 +488,8 @@ fn timing(a: &mut Asm) {
     a.and(imm(3));
     a.tax();
     a.ldy(abs(page2::ADC_LAST));
+    // C set, as MOS 1.20 leaves it.
+    a.sec();
     a.rts();
     a.here("osbyte_adc_channel");
     a.cpx(imm(5));
@@ -506,9 +507,6 @@ fn timing(a: &mut Asm) {
     // for.
     a.cpx(imm(2));
     a.jmp("buffer_count");
-
-    a.here("osbyte_font");
-    a.jmp("font_explode");
 
     a.here("osbyte_receive_baud");
     a.lda(imm(0xC7));
@@ -535,13 +533,16 @@ fn input(a: &mut Asm) {
     a.tax();
     a.jsr("key_down");
     a.bpl("osbyte_inkey_up");
+    // C, as X and Y, says whether the key is down.
     a.here("osbyte_inkey_down");
     a.ldx(imm(0xFF));
     a.ldy(imm(0xFF));
+    a.sec();
     a.rts();
     a.here("osbyte_inkey_up");
     a.ldx(imm(0));
     a.ldy(imm(0));
+    a.clc();
     a.rts();
     a.here("osbyte_inkey_timed");
     a.stx(abs(page2::INKEY_COUNT));
@@ -621,22 +622,13 @@ fn machine(a: &mut Asm) {
 
     a.here("osbyte_code");
     a.lda(imm(0));
-    a.jmp("user_vector");
+    a.fall_into("user_vector");
     a.here("user_vector");
     a.jmp(abs(vector::USER).ind());
-
-    a.here("osbyte_motor");
-    a.jmp("cassette_motor");
 
     a.here("osbyte_opt");
     a.lda(imm(0));
     a.jmp("fsc_call");
-
-    a.here("osbyte_tape");
-    a.jmp("select_tape");
-
-    a.here("osbyte_rom");
-    a.jmp("select_rom");
 }
 
 fn tables(a: &mut Asm) {

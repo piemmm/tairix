@@ -22,6 +22,7 @@ use crate::machine::acia::{control, status};
 use crate::machine::serial;
 use crate::machine::sheila;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
+use crate::rom::os::{filing_system, fsc, service};
 
 /// &E2's bits.
 mod state {
@@ -70,6 +71,8 @@ const DUMMY: u8 = 0xAA;
 
 /// Tones, in VSYNCs.
 const LEADER: u8 = 255;
+// Loading it branches as nonzero.
+const _: () = assert!(LEADER != 0);
 const BETWEEN_BLOCKS: u8 = 45;
 const TRAILER: [u8; 2] = [255, 9];
 const PAUSED_LEADER: u8 = 55;
@@ -88,15 +91,10 @@ const SPEED_1200: u8 = 0x05;
 const SPEED_300: u8 = 0x06;
 const _: () = assert!(SPEED_300 > SPEED_1200, "OSARGS tells them apart by order");
 
-/// FSCV's reasons the filing system calls itself with.
-mod fsc {
-    pub const RUN: u8 = 4;
-    pub const SHUT_DOWN: u8 = 6;
-}
-
-/// FSCV's routine for each reason, 0 to 7: *OPT, EOF, */, an unknown
-/// command, *RUN, *CAT, shutting down, and the handles used.
-const FSC_REASONS: u8 = 8;
+/// FSCV's routine for each reason below the command line's, which the
+/// cassette ignores: *OPT, EOF, */, an unknown command, *RUN, *CAT, shutting
+/// down, and the handles used.
+const FSC_REASONS: u8 = fsc::COMMAND_LINE;
 const FSC_ROUTINES: [&str; FSC_REASONS as usize] = [
     "cfs_opt",
     "cfs_eof",
@@ -108,14 +106,6 @@ const FSC_ROUTINES: [&str; FSC_REASONS as usize] = [
     "cfs_handles",
 ];
 
-const SERVICE_RFS_START: u8 = 0x0D;
-const SERVICE_RFS_BYTE: u8 = 0x0E;
-const SERVICE_VECTORS: u8 = 0x0F;
-
-/// The filing systems OSARGS 0 names.
-const FS_CFS_1200: u8 = 1;
-const FS_CFS_300: u8 = 2;
-const FS_RFS: u8 = 3;
 /// &247 for the ROM filing system; zero is the cassette.
 const RFS: u8 = 2;
 /// The ROMs the filing system reads, as &F5 counts them.
@@ -203,6 +193,7 @@ pub fn emit(a: &mut Asm) {
     vectors(a);
     file(a);
     sequential(a);
+    block_word(a);
     names(a);
     blocks(a);
     transfers(a);
@@ -249,12 +240,12 @@ fn vectors(a: &mut Asm) {
     a.lda(zp(fs::BAUD));
     // C set at 300 baud, the higher of the two settings.
     a.cmp(imm(SPEED_300));
-    a.lda(imm(FS_CFS_1200));
+    a.lda(imm(filing_system::CFS_1200));
     a.bcc(RTS);
-    a.lda(imm(FS_CFS_300));
+    a.lda(imm(filing_system::CFS_300));
     a.rts();
     a.here("cfs_args_rfs");
-    a.lda(imm(FS_RFS));
+    a.lda(imm(filing_system::RFS));
     a.rts();
 
     a.here("cfs_fsc");
@@ -331,7 +322,7 @@ fn select_tape(a: &mut Asm) {
     a.sta(abs(var::CFS_OR_RFS));
     a.lda(imm(0));
     a.sta(zp(os::CFS_STATUS));
-    a.lda(imm(SERVICE_VECTORS));
+    a.lda(imm(service::VECTORS_CLAIMED));
     a.jmp("service_call");
 
     // FSCV 0: *OPT X,Y. X zero restores both nibbles; 1 sets the messages,
@@ -390,14 +381,8 @@ fn file(a: &mut Asm) {
     a.lda(zp(z::BLOCK).ind_y());
     a.bne("cfs_load_file_own");
     a.ldy(imm(2));
-    a.ldx(imm(0));
-    let next = a.here_local();
-    a.lda(zp(z::BLOCK).ind_y());
-    a.sta(zp(z::ADDRESS).x());
-    a.iny();
-    a.inx();
-    a.cpx(imm(4));
-    a.bne(next);
+    a.ldx(imm(lo(z::ADDRESS)));
+    a.jsr("cfs_block_word");
     a.lda(imm(mode::GIVEN_ADDRESS));
     a.sta(zp(z::MODE));
     a.here("cfs_load_file_own");
@@ -511,14 +496,8 @@ fn cfs_save_file(a: &mut Asm) {
     a.cpx(imm(8));
     a.bne("cfs_save_file_addresses");
     for slot in [z::ADDRESS, z::END] {
-        a.ldx(imm(0));
-        let next = a.here_local();
-        a.lda(zp(z::BLOCK).ind_y());
-        a.sta(zp(slot).x());
-        a.iny();
-        a.inx();
-        a.cpx(imm(4));
-        a.bne(next);
+        a.ldx(imm(lo(slot)));
+        a.jsr("cfs_block_word");
     }
     a.jsr("cfs_options_file");
     a.jsr("cfs_record");
@@ -668,8 +647,9 @@ fn sequential(a: &mut Asm) {
     a.asl(Acc);
     a.bmi("cfs_open_read");
     // To write: the header named, at load and execution addresses
-    // &FFFFFFFF as MOS 1.20 gives them, the buffer empty, the tape ready.
-    a.jsr("cfs_close_output");
+    // &FFFFFFFF as MOS 1.20 gives them, the buffer empty, the tape ready. A
+    // file already open to write is abandoned unwritten, its channel this
+    // one, so a *SPOOL holding it carries on into the new file.
     a.jsr("cfs_output_name");
     a.lda(imm(0xFF));
     a.ldx(imm(lo(header::BLOCK - header::LOAD - 1)));
@@ -900,6 +880,22 @@ fn cfs_bput_flush(a: &mut Asm) {
     a.lda(abs(cfs::LAST_FLAGS));
     a.bpl(RTS);
     a.dex();
+    a.rts();
+}
+
+/// `cfs_block_word`: the OSFILE block's four bytes from Y into the zero
+/// page from X, Y past them.
+fn block_word(a: &mut Asm) {
+    a.here("cfs_block_word");
+    a.lda(imm(4));
+    a.sta(zp(z::COUNT));
+    let next = a.here_local();
+    a.lda(zp(z::BLOCK).ind_y());
+    a.sta(zp(0).x());
+    a.iny();
+    a.inx();
+    a.dec(zp(z::COUNT));
+    a.bne(next);
     a.rts();
 }
 
@@ -1366,7 +1362,7 @@ fn devices(a: &mut Asm) {
     a.ldy(zp(os::RFS_ROM));
     a.cpy(imm(ROMS));
     a.bcs("rfs_exhausted");
-    a.lda(imm(SERVICE_RFS_BYTE));
+    a.lda(imm(service::RFS_BYTE));
     a.jsr("service_call");
     a.bne("rfs_byte_next_rom");
     a.sty(zp(z::COMPARE));
@@ -1384,9 +1380,9 @@ fn devices(a: &mut Asm) {
     a.here("rfs_exhausted");
     a.lda(zp(os::CFS_STATUS));
     a.and(imm(state::CATALOGUE));
-    a.beq("rfs_not_found");
+    a.beq("file_not_found");
     a.jmp("cfs_catalogue_end");
-    a.here("rfs_not_found");
+    a.here("file_not_found");
     a.brk();
     a.byte(error::NOT_FOUND);
     a.text("File not found");
@@ -1398,7 +1394,7 @@ fn devices(a: &mut Asm) {
     a.ldy(zp(os::RFS_ROM));
     a.cpy(imm(ROMS));
     a.bcs(RTS);
-    a.lda(imm(SERVICE_RFS_START));
+    a.lda(imm(service::RFS_START));
     a.jsr("service_call");
     a.beq(RTS);
     a.inc(zp(os::RFS_ROM));
@@ -1411,7 +1407,7 @@ fn devices(a: &mut Asm) {
     a.beq("cassette_read_on");
     a.lda(imm(0));
     a.sta(zp(os::RFS_ROM));
-    a.jmp("rfs_start_rom");
+    a.beq("rfs_start_rom");
     a.here("cassette_read_on");
     a.jsr("cassette_take");
     a.lda(imm(READING));
@@ -1448,12 +1444,10 @@ fn cassette_take(a: &mut Asm) {
     a.bpl(RTS);
     a.lda(imm(control::MASTER_RESET));
     a.sta(abs(sheila::ACIA_CONTROL));
-    a.lda(abs(var::SERIAL_ULA));
-    a.sta(abs(sheila::SERIAL_ULA));
     // The 6850 stays reset until its control is written back.
     a.lda(imm(0));
     a.sta(zp(os::CFS_CRITICAL));
-    a.jmp("acia_control");
+    a.jmp("serial_restore");
 
     // A VSYNCs of tone.
     a.here("cfs_wait");
@@ -1470,7 +1464,7 @@ fn cassette_take(a: &mut Asm) {
     a.here("cfs_leader");
     a.jsr("cfs_write_on");
     a.lda(imm(LEADER));
-    a.jmp("cfs_wait");
+    a.bne("cfs_wait");
 
     // A written file's trailer tone, then its end reported.
     a.here("cfs_trailer");

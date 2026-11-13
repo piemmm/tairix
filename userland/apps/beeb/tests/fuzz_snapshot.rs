@@ -105,7 +105,7 @@ fn running(rng: &mut Prng, os: &[u8]) -> Machine {
     let mut machine = fitted(os);
     let len = rng.at_most(40 * TRACK_BYTES);
     if let Ok(disc) = Disc::decode(&rng.noise(len), ImageFormat::Dsd, rng.below(2) == 0) {
-        machine.insert_disc(*rng.pick(&[PhysicalDrive::Zero, PhysicalDrive::One]), disc);
+        machine.insert_disc(*rng.pick(&PhysicalDrive::ALL), disc);
     }
     machine.insert_tape(uef(rng));
     machine.set_tape_record(rng.below(2) == 0);

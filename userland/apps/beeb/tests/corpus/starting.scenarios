@@ -1,0 +1,48 @@
+# Starting: the banner, *HELP, PAGE, BREAK and the boot options, and choosing a filing system.
+
+scenario the_dfs_announces_itself_at_power_on
+script wait:0.5
+
+scenario help_names_the_dfs_and_its_topics
+script type:CLS:*HELP\n;wait:0.5
+
+scenario help_dfs_lists_its_commands
+script type:CLS:*HELP DFS\n;wait:0.5
+
+scenario help_utils_lists_the_utilities
+script type:CLS:*HELP UTILS\n;wait:0.5
+
+scenario page_is_raised_above_the_dfs_workspace
+script type:CLS:P.~PAGE\n;wait:0.5
+
+scenario shift_break_loads_the_boot_file
+discs testdisc
+script type:?&3000=99:*SAVE !BOOT 3000 +1\n;wait:1;type:?&3000=0:*OPT 4,1\n;wait:1;shiftbreak;wait:2;type:P.?&3000\n;wait:0.5
+
+scenario shift_break_runs_the_boot_file
+discs testdisc
+script type:P%=&2000:[OPT 0:LDA #ASC"R":JSR &FFEE:RTS:]\n;wait:0.5;type:*SAVE !BOOT 2000 +10\n;wait:1;type:*OPT 4,2\n;wait:1;shiftbreak;wait:2
+
+scenario shift_break_execs_the_boot_file
+discs testdisc
+script type:A%=OPENOUT"!BOOT":S$="PRINT 123"+CHR$13:FOR I%=1 TO LEN S$:BPUT#A%,ASC MID$(S$,I%,1):NEXT:CLOSE#A%\n;wait:2;type:*OPT 4,3\n;wait:1;shiftbreak;wait:2
+
+scenario a_missing_boot_file_is_reported
+discs testdisc
+script type:*OPT 4,3\n;wait:1;shiftbreak;wait:2;type:P.ERR\n;wait:0.5
+
+scenario shift_break_boots_from_drive_0_and_the_root
+discs testdisc
+script type:A%=OPENOUT"!BOOT":S$="PRINT 456"+CHR$13:FOR I%=1 TO LEN S$:BPUT#A%,ASC MID$(S$,I%,1):NEXT:CLOSE#A%\n;wait:2;type:*OPT 4,3\n;wait:1;type:*DIR X\n;wait:0.5;type:*DRIVE 1\n;wait:0.5;shiftbreak;wait:2;type:*CAT\n;wait:2
+
+scenario break_resets_the_drive_directories_and_messages
+discs testdisc
+script type:*DRIVE 0\n;wait:0.5;type:*DIR X\n;wait:0.5;type:*LIB Y\n;wait:0.5;type:*OPT 1,1\n;wait:0.5;break;type:CLS:*CAT\n;wait:1;type:*LOAD A\n;wait:1
+
+scenario break_keeps_page_above_the_workspace
+discs testdisc
+script break;wait:0.5;type:P.~PAGE\n;wait:0.5
+
+scenario tape_and_disc_select_a_filing_system
+discs testdisc
+script type:CLS:*TAPE\n;wait:0.5;type:*ACCESS A\n;wait:0.5;type:P.ERR\n;wait:0.5;type:*DUMP A\n;wait:2;type:P.ERR\n;wait:0.5;type:*DISK\n;wait:0.5;type:*DUMP A\n;wait:2

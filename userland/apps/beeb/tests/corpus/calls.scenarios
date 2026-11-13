@@ -1,0 +1,83 @@
+# The calls a program makes: OSFILE, OSARGS, OSGBPB, and OSWORD &7D to &7F.
+
+scenario osfile_reads_a_files_catalogue_entry
+discs testdisc
+script type:CLS:$&A00="LONGNAM":!&900=&A00:FOR I%=2 TO 17:I%?&900=&EE:NEXT:A%=5:X%=0:Y%=9:P.~(USR&FFDD AND &FFFFFF):S$="":FOR I%=0 TO 17:S$=S$+STR$~(I%?&900)+" ":NEXT:P.S$\n;wait:1;type:$&A00="NOPE":!&900=&A00:A%=5:X%=0:Y%=9:P.~(USR&FFDD AND &FFFFFF)\n;wait:1;type:$&A00="NOPE":!&900=&A00:A%=6:X%=0:Y%=9:P.~(USR&FFDD AND &FFFFFF)\n;wait:1;type:$&A00="A":!&900=&A00:A%=6:X%=0:Y%=9:P.~(USR&FFDD AND &FFFFFF):*INFO A\n;wait:1
+
+scenario osfile_reads_a_locked_file_as_not_deletable
+discs testdisc
+script type:CLS:*ACCESS A L\n;wait:1;type:$&A00="A":!&900=&A00:FOR I%=2 TO 17:I%?&900=&EE:NEXT:A%=5:X%=0:Y%=9:CALL&FFDD:S$="":FOR I%=10 TO 17:S$=S$+STR$~(I%?&900)+" ":NEXT:P.S$\n;wait:1
+
+scenario osfile_loads_to_the_files_own_address
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:FOR I%=2 TO 17:I%?&900=&EE:NEXT:?&906=0:!&902=&3000:A%=&FF:X%=0:Y%=9:P.~(USR&FFDD AND &FFFFFF):S$="":FOR I%=0 TO 17:S$=S$+STR$~(I%?&900)+" ":NEXT:P.S$\n;wait:2
+
+scenario osfile_writes_addresses_and_attributes
+discs testdisc
+check 0
+script type:CLS:*SAVE H 1900 +10 21900 11900\n;wait:1;type:*INFO H\n;wait:1;type:*ACCESS A L\n;wait:1;type:$&A00="A":!&900=&A00:!&902=&2000:A%=2:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1;type:P.ERR\n;wait:0.3;type:?&90E=0:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_01_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&01:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_02_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&02:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_04_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&04:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_08_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&08:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_10_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&10:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osfile_attributes_80_set_the_lock_as_dfs_does
+discs testdisc
+script type:CLS:$&A00="A":!&900=&A00:!&902=&1900:!&906=&1900:!&90A=&100:!&90E=&80:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO A\n;wait:1
+
+scenario osargs_reads_the_filing_system_and_a_files_pointer
+discs testdisc
+script type:CLS:A%=0:Y%=0:X%=&70:P.~(USR&FFDA AND &FFFFFF)\n;wait:0.5;type:A%=1:Y%=0:X%=&70:!&70=0:P.~(USR&FFDA AND &FFFFFF),~!&70\n;wait:0.5;type:A%=&FF:Y%=0:P.~(USR&FFDA AND &FFFFFF)\n;wait:1;type:F%=OPENIN"A":A%=2:Y%=F%:X%=&70:R%=USR&FFDA:P.~(R% AND &FFFFFF),~!&70:A%=0:R%=USR&FFDA:P.~(R% AND &FFFFFF),~!&70\n;wait:1
+
+scenario osgbpb_reads_the_title_directories_and_names
+discs testdisc
+script type:10 DEF PROCG(N%,C%,P%)\n20 ?&900=0:!&901=&A00:!&905=C%:!&909=P%:FOR I%=0 TO 40:I%?&A00=&EE:NEXT:A%=N%:X%=0:Y%=9:R%=USR&FFD1\n30 S$="":FOR I%=0 TO 24:S$=S$+STR$~(I%?&A00)+" ":NEXT:P.N%,~R%:P.S$:S$="":FOR I%=0 TO 12:S$=S$+STR$~(I%?&900)+" ":NEXT:P.S$:ENDPROC\n;wait:0.5;type:CLS:PROCG(5,3,0)\n;wait:1;type:PROCG(6,3,0)\n;wait:1;type:PROCG(7,3,0)\n;wait:1;type:PROCG(8,2,0)\n;wait:1;type:PROCG(8,2,2)\n;wait:1;type:PROCG(8,1,9)\n;wait:1
+
+scenario osgbpb_reads_a_file_by_the_pointer_and_from_an_offset
+discs testdisc
+script type:10 DEF PROCG(N%,C%,P%)\n20 ?&900=F%:!&901=&A00:!&905=C%:!&909=P%:FOR I%=0 TO 40:I%?&A00=&EE:NEXT:A%=N%:X%=0:Y%=9:R%=USR&FFD1\n30 S$="":FOR I%=0 TO 20:S$=S$+STR$~(I%?&A00)+" ":NEXT:P.N%,~R%:P.S$:S$="":FOR I%=0 TO 12:S$=S$+STR$~(I%?&900)+" ":NEXT:P.S$:ENDPROC\n;wait:0.5;type:CLS:F%=0:PROCG(5,3,0)\n;wait:1;type:F%=OPENIN"LONGNAM":PROCG(4,5,0)\n;wait:1;type:PROCG(3,4,&10)\n;wait:1;type:P.PTR#F%\n;wait:0.5;type:PROCG(4,&400,0)\n;wait:2;type:P.PTR#F%\n;wait:0.5
+
+scenario osgbpb_writes_a_file_by_the_pointer_and_at_an_offset
+discs testdisc
+check 0
+script type:10 DEF PROCG(N%,C%,P%)\n20 ?&900=F%:!&901=&A00:!&905=C%:!&909=P%:A%=N%:X%=0:Y%=9:R%=USR&FFD1\n30 S$="":FOR I%=0 TO 12:S$=S$+STR$~(I%?&900)+" ":NEXT:P.N%,~R%:P.S$:ENDPROC\n;wait:0.5;type:CLS:$&A00="ABCDEFGH":F%=OPENOUT"W":PROCG(2,8,0)\n;wait:1;type:PROCG(1,3,&20)\n;wait:1;type:P.PTR#F%,EXT#F%:CLOSE#F%:*INFO W\n;wait:2
+
+scenario osgbpb_5_reads_the_title_after_a_disc_change
+discs testdisc
+script type:*OPT 4,3\n;wait:1;type:CLS:?&900=0:!&901=&A00:!&905=1:FOR I%=0 TO 20:I%?&A00=&EE:NEXT:A%=5:X%=0:Y%=9:CALL&FFD1:FOR I%=0 TO 16:P.~I%?&A00,:NEXT\n;wait:2
+
+scenario osword_7d_7e_and_7f_read_the_catalogue_and_sectors
+discs testdisc
+script type:CLS:?&900=0:A%=&7D:X%=0:Y%=9:CALL&FFF1:P.~?&900\n;wait:1;type:!&900=0:A%=&7E:X%=0:Y%=9:CALL&FFF1:P.~!&900\n;wait:1;type:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=0:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&90A,$&A00\n;wait:2
+
+scenario osword_7f_reads_into_io_memory_by_sector
+discs testdisc
+script type:CLS:?&900=0:!&901=&FFFF0A00:?&905=3:?&906=&53:?&907=0:?&908=0:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&90A\n;wait:2;type:S$="":FOR I%=0 TO 15:S$=S$+STR$~(I%?&A00)+" ":NEXT:P.S$\n;wait:1;type:?&900=0:!&901=&00000B00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&90A\n;wait:2;type:S$="":FOR I%=0 TO 15:S$=S$+STR$~(I%?&B00)+" ":NEXT:P.S$\n;wait:1
+
+scenario osword_7f_returns_its_result_when_the_command_ends
+discs testdisc
+script type:CLS:?&90A=&EE:?&A00=&EE:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=0:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&90A,~?&A00:FOR I%=1 TO 2000:NEXT:P.~?&90A,~?&A00\n;wait:3
+
+scenario osword_7f_reports_a_fault_in_its_result
+discs testdisc
+script type:CLS:?&90A=&EE:?&A00=&EE:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=1:?&908=0:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&90A,~?&A00:FOR I%=1 TO 2000:NEXT:P.~?&90A,~?&A00\n;wait:3
+
+scenario osword_7f_reads_a_special_register
+discs testdisc
+script type:*CAT\n;wait:1;type:CLS:?&900=0:!&901=&A00:?&905=1:?&906=&3D:?&907=&17:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&908\n;wait:1

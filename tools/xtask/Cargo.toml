@@ -493,6 +493,7 @@ tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_q
 # row it clicks and the process the guest attributes the exit to are one
 # definition.
 tairix-test-netmap-qemu-aarch64 = { path = "../../tests/integration/netmap_qemu_aarch64", version = "=0.0.0" }
+tairix-test-beeb-qemu-aarch64 = { path = "../../tests/integration/beeb_qemu_aarch64", version = "=0.0.0" }
 # The WinterSun client vertical's shared contract: the line typed at the shell
 # and the bundles its guest latches, so the script and the PASS gate read one
 # definition.

@@ -9,22 +9,33 @@
 //! - `--write-sample` additionally rewrites the committed sample the crate's
 //!   own tests replay in `ci`: evenly spaced cases of every opcode, and more of
 //!   the opcodes decimal mode changes.
+//! - `cargo xtask beeb --write-roms` rebuilds every clean-room ROM image
+//!   `Run` carries into the crate's `firmware/`; the `beeb-roms` static gate
+//!   ([`check_roms`]) refuses a committed image the tree does not build.
+//! - `cargo xtask beeb --reference <dir>` records the corpus's fixtures from
+//!   the original ROMs a developer holds in `<dir>` ([`mod@reference`]).
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tairix_beeb::cpu::isa::{Mnemonic, OPCODES};
 use tairix_beeb::cpu::vectors::{self, Cycle, Runner, Snapshot, Vector};
 use tairix_beeb::cpu::{flag, Registers};
+use tairix_beeb::rom::SHIPPED;
 
 use super::json::{self, Json};
 use crate::Context;
+
+mod reference;
 
 /// The suite revision the committed sample was drawn from.
 pub const SUITE_COMMIT: &str = "2f6980a2d95757486c7bee24355c360e40e2a224";
 
 /// Where the committed sample lives.
 const SAMPLE: &str = "userland/apps/beeb/tests/vectors/sst6502.bin";
+
+/// The crate whose `firmware/` holds the shipped ROM images.
+const BUNDLE: &str = "userland/apps/beeb";
 
 /// Evenly spaced cases kept of every opcode.
 const PER_OPCODE: usize = 16;
@@ -36,7 +47,8 @@ const DECIMAL_EXTRA: usize = 48;
 const REPORTED: usize = 24;
 
 fn usage() -> String {
-    "beeb: usage: cargo xtask beeb --vectors <dir> [--write-sample]".to_string()
+    "beeb: usage: cargo xtask beeb --vectors <dir> [--write-sample] | --write-roms | --reference <dir>"
+        .to_string()
 }
 
 pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
@@ -47,7 +59,92 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     match args.as_slice() {
         ["--vectors", dir] => vectors(ctx, Path::new(dir), false),
         ["--vectors", dir, "--write-sample"] => vectors(ctx, Path::new(dir), true),
+        ["--write-roms"] => write_roms(ctx),
+        ["--reference", dir] => reference::run(ctx, Path::new(dir)),
         _ => Err(usage()),
+    }
+}
+
+/// The crate's `firmware/`.
+fn firmware(ctx: &Context) -> PathBuf {
+    ctx.workspace_root
+        .join(BUNDLE)
+        .join(tairix_beeb::firmware::DIR)
+}
+
+/// Every shipped image as this tree builds it.
+fn built_roms() -> Result<Vec<(&'static str, Vec<u8>)>, String> {
+    SHIPPED
+        .iter()
+        .map(|&(name, build)| {
+            build()
+                .map(|image| (name, image.bytes))
+                .map_err(|e| format!("beeb: {name} does not assemble: {e:?}"))
+        })
+        .collect()
+}
+
+fn write_roms(ctx: &Context) -> Result<(), String> {
+    let dir = firmware(ctx);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("beeb: cannot create {}: {e}", dir.display()))?;
+    let roms = built_roms()?;
+    for (name, bytes) in &roms {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes)
+            .map_err(|e| format!("beeb: cannot write {}: {e}", path.display()))?;
+    }
+    noteln!(
+        "xtask: [beeb --write-roms] {} image(s) to {BUNDLE}/{}",
+        roms.len(),
+        tairix_beeb::firmware::DIR
+    );
+    Ok(())
+}
+
+/// The `beeb-roms` static gate: each committed image is exactly the one this
+/// tree builds, and nothing named as an image is committed that the bundle
+/// does not ship.
+pub fn check_roms(ctx: &Context) -> Result<(), String> {
+    let dir = firmware(ctx);
+    noteln!("xtask: [beeb-roms] {}", dir.display());
+    let mut faults = Vec::new();
+    let roms = built_roms()?;
+    for (name, bytes) in &roms {
+        match std::fs::read(dir.join(name)) {
+            Ok(committed) if committed == *bytes => {}
+            Ok(_) => faults.push(format!("{name} is not the image the tree builds")),
+            Err(e) => faults.push(format!("{name}: {e}")),
+        }
+    }
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("beeb-roms: cannot list {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("beeb-roms: cannot list {}: {e}", dir.display()))?
+            .path();
+        let shipped = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| roms.iter().any(|(rom, _)| *rom == name));
+        let image = path.extension().is_some_and(|extension| {
+            roms.iter()
+                .any(|(rom, _)| Path::new(rom).extension() == Some(extension))
+        });
+        if image && !shipped {
+            faults.push(format!(
+                "{} is not an image the bundle ships",
+                path.display()
+            ));
+        }
+    }
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "beeb-roms: {}; run `cargo xtask beeb --write-roms`",
+            faults.join("; ")
+        ))
     }
 }
 
@@ -210,7 +307,51 @@ fn number<T: TryFrom<u64>>(value: &Json) -> Result<T, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick, Registers, Snapshot, Vector, PER_OPCODE};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::{check_roms, firmware, pick, write_roms, Registers, Snapshot, Vector, PER_OPCODE};
+    use crate::children::Children;
+    use crate::Context;
+
+    fn rooted_at(root: PathBuf) -> Context {
+        Context {
+            workspace_root: root,
+            cargo: OsString::from("true"),
+            children: Arc::new(Children::new(None)),
+        }
+    }
+
+    #[test]
+    fn the_committed_images_are_the_ones_the_tree_builds() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the workspace root");
+        assert_eq!(check_roms(&rooted_at(root.to_path_buf())), Ok(()));
+    }
+
+    #[test]
+    fn the_gate_refuses_a_drifted_image_and_one_the_bundle_does_not_ship() {
+        let scratch =
+            tairix_fuzzseed::scratch::Scratch::under(&std::env::temp_dir(), "tairix-beeb-roms");
+        let ctx = rooted_at(scratch.path().to_path_buf());
+        write_roms(&ctx).expect("written");
+        assert_eq!(check_roms(&ctx), Ok(()));
+        let dir = firmware(&ctx);
+        std::fs::write(dir.join(tairix_beeb::firmware::MOS), [0; 16]).expect("drifted");
+        std::fs::write(dir.join("old.rom"), [0; 16]).expect("left behind");
+        let refused = check_roms(&ctx).expect_err("refused");
+        assert!(
+            refused.contains("mos.rom is not the image the tree builds"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("old.rom is not an image the bundle ships"),
+            "{refused}"
+        );
+    }
 
     fn case(pc: u16) -> Vector {
         let state = Snapshot {

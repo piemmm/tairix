@@ -5,10 +5,13 @@
 //! envelope in bits 3–7 (amplitude `a` as `(a − 1) & 31`, envelope `e` as
 //! `e − 1`, so bit 7 marks an amplitude), H in bit 2 and S in bits 0–1, then
 //! the pitch and the duration in twentieths of a second, 255 lasting until
-//! flushed. Durations count on one twentieth-second clock for every channel.
-//! An envelope steps every T centiseconds through its three pitch sections,
-//! repeating them unless T's top bit is set, and through attack, decay,
-//! sustain and, once the duration is over, release. A note waiting when the
+//! flushed. Each channel counts twentieths of its own, from the note that
+//! breaks its silence, whose first twentieth is a centisecond short. An
+//! envelope steps every T centiseconds from the note's start through its
+//! three pitch sections, a section a step at most and repeating them unless
+//! T's top bit is set, and through attack, decay, sustain and, once the
+//! duration is over, release; attack and decay end once the level passes
+//! their targets. A note waiting when the
 //! duration ends starts at once; one with H set leaves the release running
 //! for its own duration instead. A note with S set waits at the head of its
 //! queue until S other channels have one with the same S, and all start
@@ -30,7 +33,7 @@ mod field {
     }
 
     pub const PHASE: u16 = at(0);
-    /// The amplitude, 0 to 126; an eighth of it is the volume.
+    /// The amplitude, 0 to 127; an eighth of it is the volume.
     pub const LEVEL: u16 = at(1);
     /// The envelope's offset from the first, or &FF for an amplitude.
     pub const ENVELOPE: u16 = at(2);
@@ -46,8 +49,12 @@ mod field {
     pub const CHIP_PITCH: u16 = at(9);
     /// The S of the note waiting at the head of the queue, or 0.
     pub const WAITING: u16 = at(10);
-    /// The fields reset clears.
-    pub const COUNT: u16 = 11;
+    /// Centiseconds left in the current twentieth of a second.
+    pub const TICKS: u16 = at(11);
+    /// The note's own pitch, which repeating pitch sections start again from.
+    pub const BASE: u16 = at(12);
+    /// The fields there are.
+    pub const COUNT: u16 = 13;
 }
 
 /// The tick's own workspace, after the channels'.
@@ -58,25 +65,26 @@ mod tick {
         buffer::SOUND_WORKSPACE + 4 * field::COUNT + n
     }
 
-    /// Centiseconds left in this twentieth of a second.
-    pub const DIVIDER: u16 = at(0);
-    /// Set on the tick that ends a twentieth.
-    pub const UNIT: u16 = at(1);
     /// The channel being worked on, kept across buffer calls.
-    pub const CHANNEL: u16 = at(2);
+    pub const CHANNEL: u16 = at(0);
     /// A note being taken from its queue, and the period being built.
-    pub const CONTROL: u16 = at(3);
-    pub const NOTE_PITCH: u16 = at(4);
-    pub const NOTE_DURATION: u16 = at(5);
-    pub const PERIOD_LOW: u16 = at(6);
-    pub const PERIOD_HIGH: u16 = at(7);
-    pub const OCTAVE: u16 = at(8);
-    pub const QUARTERS: u16 = at(9);
-    /// A loop's count.
-    pub const COUNT: u16 = at(10);
+    pub const CONTROL: u16 = at(1);
+    pub const NOTE_PITCH: u16 = at(2);
+    pub const NOTE_DURATION: u16 = at(3);
+    pub const PERIOD_LOW: u16 = at(4);
+    pub const PERIOD_HIGH: u16 = at(5);
+    pub const OCTAVE: u16 = at(6);
+    pub const QUARTERS: u16 = at(7);
+    /// A loop's count, or an envelope step's amplitude change.
+    pub const COUNT: u16 = at(8);
     /// The synchronising pass's channel.
-    pub const SYNCHRONISING: u16 = at(11);
+    pub const SYNCHRONISING: u16 = at(9);
+    /// The last byte.
+    pub const END: u16 = SYNCHRONISING;
 }
+
+// The sound workspace is &800–&83F.
+const _: () = assert!(tick::END < buffer::SOUND);
 
 mod phase {
     pub const IDLE: u8 = 0;
@@ -86,9 +94,11 @@ mod phase {
     pub const RELEASE: u8 = 4;
 }
 
-// A phase advances by one, and indexes the envelope's bytes for it.
+// A phase advances by one, and indexes the envelope's bytes for it; idle is
+// also a silent channel's level.
 const _: () = assert!(
-    phase::DECAY == phase::ATTACK + 1
+    phase::IDLE == 0
+        && phase::DECAY == phase::ATTACK + 1
         && phase::SUSTAIN == phase::DECAY + 1
         && phase::RELEASE == phase::SUSTAIN + 1
 );
@@ -117,7 +127,7 @@ mod envelope {
     pub const NO_REPEAT: u8 = 0x80;
 }
 
-const HIGHEST_LEVEL: u8 = 126;
+const HIGHEST_LEVEL: u8 = 127;
 const SILENT: u8 = 15;
 /// Centiseconds in a twentieth of a second.
 const TWENTIETH: u8 = 5;
@@ -163,6 +173,7 @@ const WRITE_ENABLE_HIGH: u8 = latch(machine_latch::SOUND_WE, true);
 pub fn emit(a: &mut Asm) {
     commands(a);
     tick_routine(a);
+    synchronising(a);
     starting(a);
     stepping(a);
     output(a);
@@ -289,6 +300,7 @@ fn bell(a: &mut Asm) {
     a.tax();
     a.lda(imm(phase::IDLE));
     a.sta(abs(field::PHASE).x());
+    a.sta(abs(field::LEVEL).x());
     a.sta(abs(field::WAITING).x());
     a.pla();
     a.tax();
@@ -297,7 +309,7 @@ fn bell(a: &mut Asm) {
     // Every channel idle and silent, its period pitch 0's, the noise's
     // control 0.
     a.here("sound_init");
-    a.ldx(imm(lo(tick::UNIT - buffer::SOUND_WORKSPACE)));
+    a.ldx(imm(lo(4 * field::COUNT - 1)));
     a.lda(imm(0));
     a.here("sound_init_clear");
     a.sta(abs(buffer::SOUND_WORKSPACE).x());
@@ -317,14 +329,6 @@ fn bell(a: &mut Asm) {
 /// The centisecond tick, from the 100 Hz interrupt.
 fn tick_routine(a: &mut Asm) {
     a.here("sound_tick");
-    a.lda(imm(0));
-    a.sta(abs(tick::UNIT));
-    a.dec(abs(tick::DIVIDER));
-    a.bpl("sound_tick_channels");
-    a.lda(imm(TWENTIETH - 1));
-    a.sta(abs(tick::DIVIDER));
-    a.inc(abs(tick::UNIT));
-    a.here("sound_tick_channels");
     a.ldx(imm(3));
     a.here("sound_tick_next");
     a.jsr("sound_channel");
@@ -345,8 +349,10 @@ fn tick_routine(a: &mut Asm) {
     a.jsr("sound_next");
     a.jmp("sound_output");
     a.here("sound_channel_playing");
-    a.lda(abs(tick::UNIT));
-    a.beq("sound_channel_running");
+    a.dec(abs(field::TICKS).x());
+    a.bne("sound_channel_running");
+    a.lda(imm(TWENTIETH));
+    a.sta(abs(field::TICKS).x());
     a.lda(abs(field::DURATION).x());
     a.beq("sound_channel_over");
     a.cmp(imm(FOREVER));
@@ -356,11 +362,20 @@ fn tick_routine(a: &mut Asm) {
     // The duration is over: the next note, or the release.
     a.here("sound_channel_over");
     a.jsr("sound_next");
-    a.bcc("sound_output_jump");
+    a.bcs("sound_channel_ended");
+    // A held note carries the release on, which steps this tick as ever.
+    a.here("sound_channel_started");
+    a.lda(abs(field::PHASE).x());
+    a.cmp(imm(phase::RELEASE));
+    a.beq("sound_channel_steps");
+    a.bne("sound_output_jump");
+    a.here("sound_channel_ended");
     a.lda(abs(field::ENVELOPE).x());
     a.bpl("sound_channel_release");
+    // Silent, a channel's level is nothing.
     a.lda(imm(phase::IDLE));
     a.sta(abs(field::PHASE).x());
+    a.sta(abs(field::LEVEL).x());
     a.here("sound_output_jump");
     a.jmp("sound_output");
     a.here("sound_channel_release");
@@ -374,8 +389,11 @@ fn tick_routine(a: &mut Asm) {
     a.bne("sound_channel_steps");
     a.lda(abs(field::DURATION).x());
     a.bne("sound_channel_steps");
+    // As after silence, its first twentieth is a centisecond short.
+    a.lda(imm(TWENTIETH - 1));
+    a.sta(abs(field::TICKS).x());
     a.jsr("sound_next");
-    a.bcc("sound_output_jump");
+    a.bcc("sound_channel_started");
     a.here("sound_channel_steps");
     a.lda(abs(field::ENVELOPE).x());
     a.bmi("sound_output_jump");
@@ -383,7 +401,9 @@ fn tick_routine(a: &mut Asm) {
     a.bne("sound_output_jump");
     a.jsr("envelope_step");
     a.jmp("sound_output");
+}
 
+fn synchronising(a: &mut Asm) {
     // Notes waiting to synchronise start once enough channels wait with
     // the same S.
     a.here("sound_synchronise");
@@ -459,6 +479,13 @@ fn starting(a: &mut Asm) {
     }
     a.lda(abs(tick::NOTE_DURATION));
     a.sta(abs(field::DURATION).x());
+    // From silence the first twentieth is a centisecond short.
+    let playing = a.local();
+    a.lda(abs(field::PHASE).x());
+    a.bne(playing);
+    a.lda(imm(TWENTIETH - 1));
+    a.sta(abs(field::TICKS).x());
+    a.bind(playing);
     a.lda(abs(tick::CONTROL));
     a.and(imm(note::HOLD));
     a.beq("sound_start_fresh");
@@ -480,11 +507,13 @@ fn starting(a: &mut Asm) {
     a.here("sound_start_fresh");
     a.lda(abs(tick::NOTE_PITCH));
     a.sta(abs(field::PITCH).x());
+    a.sta(abs(field::BASE).x());
     a.lda(abs(tick::CONTROL));
     a.bpl("sound_start_envelope");
-    // An amplitude: its level held for the duration.
+    // An amplitude: its level held for the duration, at the top of its
+    // volume's eight.
     a.and(imm(note::LEVEL));
-    a.eor(imm(note::LEVEL));
+    a.eor(imm(note::LEVEL | 7));
     a.sta(abs(field::LEVEL).x());
     a.here("sound_start_amplitude_set");
     a.lda(imm(0xFF));
@@ -499,15 +528,16 @@ fn starting(a: &mut Asm) {
     a.and(imm(0xF0));
     a.sta(abs(field::ENVELOPE).x());
     a.tay();
+    // The attack starts from the level the channel has.
     a.lda(imm(0));
-    a.sta(abs(field::LEVEL).x());
     a.sta(abs(field::SECTION).x());
     a.lda(abs(envelope::PITCH_STEPS).y());
     a.sta(abs(field::SECTION_STEPS).x());
-    a.lda(imm(1));
-    a.sta(abs(field::STEP).x());
     a.lda(imm(phase::ATTACK));
     a.sta(abs(field::PHASE).x());
+    // The start's pitch, then the first step, both at once.
+    a.jsr("sound_output_pitch");
+    a.jsr("envelope_step");
     a.clc();
     a.rts();
 }
@@ -523,9 +553,9 @@ fn stepping(a: &mut Asm) {
     a.here("envelope_step_length");
     a.sta(abs(field::STEP).x());
 
-    // The pitch: the section's change while it has steps, the next section
-    // once it has none, a section without steps passed over.
-    a.lda(imm(3));
+    // The pitch: the section's change while it has steps, the next section's
+    // once it has none; a step moves on one section at most.
+    a.lda(imm(1));
     a.sta(abs(tick::COUNT));
     a.here("envelope_pitch");
     a.lda(abs(field::SECTION).x());
@@ -553,8 +583,11 @@ fn stepping(a: &mut Asm) {
     a.bcc("envelope_pitch_load");
     a.lda(abs(envelope::STEP).y());
     a.bmi("envelope_pitch_done");
+    // Repeating, the sections start again from the note's own pitch.
     a.lda(imm(0));
     a.sta(abs(field::SECTION).x());
+    a.lda(abs(field::BASE).x());
+    a.sta(abs(field::PITCH).x());
     a.here("envelope_pitch_load");
     a.tya();
     a.clc();
@@ -566,8 +599,9 @@ fn stepping(a: &mut Asm) {
     a.jmp("envelope_pitch");
     a.here("envelope_pitch_done");
 
-    // The amplitude: the phase's change, clamped to 0–126; attack and decay
-    // end on reaching their targets, release on reaching nothing.
+    // The amplitude: the phase's change, clamped to 0–127. Attack and decay
+    // end once the level is past their targets, from the side it moves, the
+    // level then one above the target; release ends on reaching nothing.
     a.tya();
     a.clc();
     a.adc(abs(field::PHASE).x());
@@ -578,10 +612,9 @@ fn stepping(a: &mut Asm) {
     a.adc(abs(field::LEVEL).x());
     a.bit(abs(tick::COUNT));
     a.bmi("envelope_level_falling");
-    a.bcs("envelope_level_top");
+    // Rising, the sum cannot carry.
     a.cmp(imm(HIGHEST_LEVEL + 1));
     a.bcc("envelope_level_set");
-    a.here("envelope_level_top");
     a.lda(imm(HIGHEST_LEVEL));
     a.bne("envelope_level_set");
     a.here("envelope_level_falling");
@@ -593,19 +626,18 @@ fn stepping(a: &mut Asm) {
     a.cmp(imm(phase::SUSTAIN));
     a.beq(RTS);
     a.bcs("envelope_releasing");
-    // Attack or decay: is the target reached, from the side it moves?
+    // A level that does not move counts as falling.
+    a.dec(abs(tick::COUNT));
     a.lda(abs(envelope::TARGET).y());
-    a.bit(abs(tick::COUNT));
-    a.bmi("envelope_target_falling");
     a.cmp(abs(field::LEVEL).x());
-    a.beq("envelope_target");
-    a.bcs(RTS);
-    a.bcc("envelope_target");
-    a.here("envelope_target_falling");
-    a.cmp(abs(field::LEVEL).x());
-    a.bcc(RTS);
-    a.here("envelope_target");
+    a.beq(RTS);
+    // Bit 7: the target above the level, inverted for a falling one.
+    a.ror(Acc);
+    a.eor(abs(tick::COUNT));
+    a.bmi(RTS);
+    a.lda(abs(envelope::TARGET).y());
     a.sta(abs(field::LEVEL).x());
+    a.inc(abs(field::LEVEL).x());
     a.inc(abs(field::PHASE).x());
     a.rts();
     a.here("envelope_releasing");

@@ -60,16 +60,7 @@ pub mod os {
     pub const KEY_LAST: u16 = 0xEC;
     /// The first key pressed, by internal number.
     pub const KEY_FIRST: u16 = 0xED;
-    /// A, X and Y of the last OSBYTE or OSWORD.
-    pub const CALL_A: u16 = 0xEF;
-    /// X of the last OSBYTE or OSWORD.
-    pub const CALL_X: u16 = 0xF0;
-    /// Y of the last OSBYTE or OSWORD.
-    pub const CALL_Y: u16 = 0xF1;
-    /// The text pointer GSINIT and *commands read.
-    pub const TEXT: u16 = 0xF2;
-    /// The ROM paged in.
-    pub const ROM: u16 = 0xF4;
+    pub use crate::rom::os::zp::{CALL_A, CALL_X, CALL_Y, ROM, TEXT};
     /// The ROM filing system's ROM.
     pub const RFS_ROM: u16 = 0xF5;
     /// The ROM filing system's pointer, and OSRDRM's address.
@@ -79,62 +70,13 @@ pub mod os {
     /// A on entry to the IRQ handler.
     pub const IRQ_A: u16 = 0xFC;
     /// The last error's text, after its BRK.
-    pub const ERROR: u16 = 0xFD;
+    pub const ERROR: u16 = crate::rom::os::ERROR_POINTER;
     /// Bit 7 set while an Escape is pending.
-    pub const ESCAPE: u16 = 0xFF;
+    pub const ESCAPE: u16 = crate::rom::os::ESCAPE_FLAG;
 }
 
-/// The vectors, `&0200–&0235`.
-pub mod vector {
-    /// USERV: *CODE and *LINE.
-    pub const USER: u16 = 0x0200;
-    /// BRKV: errors.
-    pub const BRK: u16 = 0x0202;
-    /// IRQ1V: every interrupt.
-    pub const IRQ1: u16 = 0x0204;
-    /// IRQ2V: interrupts the MOS does not handle.
-    pub const IRQ2: u16 = 0x0206;
-    /// CLIV: OSCLI.
-    pub const CLI: u16 = 0x0208;
-    /// BYTEV: OSBYTE.
-    pub const BYTE: u16 = 0x020A;
-    /// WORDV: OSWORD.
-    pub const WORD: u16 = 0x020C;
-    /// WRCHV: OSWRCH.
-    pub const WRCH: u16 = 0x020E;
-    /// RDCHV: OSRDCH.
-    pub const RDCH: u16 = 0x0210;
-    /// FILEV: OSFILE.
-    pub const FILE: u16 = 0x0212;
-    /// ARGSV: OSARGS.
-    pub const ARGS: u16 = 0x0214;
-    /// BGETV: OSBGET.
-    pub const BGET: u16 = 0x0216;
-    /// BPUTV: OSBPUT.
-    pub const BPUT: u16 = 0x0218;
-    /// GBPBV: OSGBPB.
-    pub const GBPB: u16 = 0x021A;
-    /// FINDV: OSFIND.
-    pub const FIND: u16 = 0x021C;
-    /// FSCV: filing system control.
-    pub const FSC: u16 = 0x021E;
-    /// EVNTV: events.
-    pub const EVENT: u16 = 0x0220;
-    /// UPTV: the user print routine.
-    pub const UPT: u16 = 0x0222;
-    /// VDUV: unrecognised PLOT and VDU 23.
-    pub const VDU: u16 = 0x0226;
-    /// KEYV: the keyboard.
-    pub const KEY: u16 = 0x0228;
-    /// INSV: insert into a buffer.
-    pub const INS: u16 = 0x022A;
-    /// REMV: remove from a buffer.
-    pub const REM: u16 = 0x022C;
-    /// CNPV: count or purge a buffer.
-    pub const CNP: u16 = 0x022E;
-    /// The vectors there are.
-    pub const COUNT: u8 = 27;
-}
+/// The vectors, shared with every ROM.
+pub use crate::rom::os::vector;
 
 /// The OSBYTE variables: the one OSBYTE `n` reads lives at `BASE + n`.
 pub mod var {
@@ -439,9 +381,5 @@ pub mod buffer {
 }
 
 /// Page &0D.
-pub mod page_d {
-    /// The NMI handler's home.
-    pub const NMI: u16 = 0x0D00;
-    /// The extended vectors: address and ROM, three bytes each.
-    pub const EXTENDED_VECTORS: u16 = 0x0D9F;
-}
+/// Page &D, shared with every ROM.
+pub use crate::rom::os::page_d;

@@ -12,6 +12,7 @@ use super::{svia, VECTOR_DEFAULTS};
 use crate::machine::via::reg;
 use crate::machine::{sheila, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Addr, Asm};
+use crate::rom::os::service;
 
 /// Where a sideways ROM's header fields are.
 mod header {
@@ -27,14 +28,6 @@ mod header {
 /// A ROM type byte's bits.
 pub(super) mod rom_type {
     pub const LANGUAGE: u8 = 0x40;
-}
-
-/// Service call numbers.
-pub mod service {
-    pub const ABSOLUTE_WORKSPACE: u8 = 1;
-    pub const PRIVATE_WORKSPACE: u8 = 2;
-    pub const AUTO_BOOT: u8 = 3;
-    pub const BRK: u8 = 6;
 }
 
 /// The page the OS's high-water mark starts from.
@@ -324,7 +317,7 @@ fn boot_and_enter(a: &mut Asm) {
     a.stx(abs(var::LANGUAGE));
     a.here("enter_kept_language");
     a.ldx(abs(var::LANGUAGE));
-    a.jmp("enter_language");
+    a.fall_into("enter_language");
 }
 
 /// OSBYTE 142's work: page in language ROM X, print its title, and enter it

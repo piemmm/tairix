@@ -9,8 +9,12 @@
 //! The moving passes run on a [`Phase`], advanced on a one-shot deadline only
 //! while something moves ([`frame_due`]).
 //!
-//! The terminal draws its text through it and the PC emulator its machines'
-//! monitors, so the two tubes look alike and are written once.
+//! A machine's monitor in a window is a [`screen::Picture`]: its frame, the
+//! largest 4:3 picture the window holds, enlarged sharp or smooth, redrawn
+//! only where the frame changed, with the tube over it.
+//!
+//! The terminal draws its text through it and the emulators their machines'
+//! monitors, so the tubes look alike and are written once.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -18,7 +22,13 @@
 
 extern crate alloc;
 
+// The unit tests refuse the heap at chosen requests.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 pub mod pipeline;
+pub mod screen;
 pub mod tube;
 
 pub use pipeline::{Frame, Pipeline};

@@ -31,9 +31,6 @@ const LAST_LINK: u8 = 0x09;
 /// Events.
 const EVENT_VSYNC: u8 = 4;
 const EVENT_INTERVAL: u8 = 5;
-/// Service call for an unrecognised interrupt.
-const SERVICE_INTERRUPT: u8 = 5;
-
 pub fn emit(a: &mut Asm) {
     entry(a);
     handler(a);
@@ -134,7 +131,7 @@ fn handler(a: &mut Asm) {
     a.pha();
     a.tya();
     a.pha();
-    a.lda(imm(SERVICE_INTERRUPT));
+    a.lda(imm(crate::rom::os::service::INTERRUPT));
     a.jsr("service_call");
     a.jmp("irq_done");
 }

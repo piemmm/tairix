@@ -37,7 +37,7 @@ const CONTROLS: [(&str, u8); 32] = [
     ("vdu_4", 0),
     ("vdu_5", 0),
     ("vdu_6", 0),
-    ("vdu_7", 0),
+    ("bell", 0),
     ("vdu_8", 0),
     ("vdu_9", 0),
     ("vdu_10", 0),
@@ -73,6 +73,7 @@ pub fn emit(a: &mut Asm) {
     printing(a);
     cursor(a);
     scrolling(a);
+    runs(a);
     clearing(a);
     colours(a);
     windows(a);
@@ -211,9 +212,6 @@ fn simple_controls(a: &mut Asm) {
     a.ora(zp(vdu_zp::STATUS));
     a.sta(zp(vdu_zp::STATUS));
     a.rts();
-
-    a.here("vdu_7");
-    a.jmp("bell");
 }
 
 /// Printing a character: its glyph drawn in the text colours at the cursor,
@@ -288,88 +286,92 @@ fn printing(a: &mut Asm) {
     vdu_delete(a);
 }
 
-/// Draw the glyph at (&DE) into the cell at (&D8): each of the cell's
-/// columns of bytes takes the glyph's top bits, expanded to its pixels,
-/// in the text colours. A glyph's copy at &330 is shifted as it goes.
+/// Draw the glyph at (&DE) into the cell at (&D8) in the text colours. A
+/// cell is aligned to its size, so none crosses a page. In two colours a
+/// row is a byte; in four each row's nibbles fill the cell's two columns;
+/// in sixteen each column takes the top two bits of every row of a copy at
+/// &330, shifted on as it goes.
 fn vdu_draw_glyph(a: &mut Asm) {
+    const GLYPH: u16 = vdu_zp::TEMP + 4;
     a.here("vdu_draw_glyph");
     a.ldy(imm(7));
-    a.here("draw_copy");
-    a.lda(zp(vdu_zp::TEMP + 4).ind_y());
-    a.sta(abs(vdu::SCRATCH).y());
+    a.lda(abs(vdu::COLOURS));
+    a.cmp(imm(3));
+    a.beq("draw_4");
+    a.bcs("draw_16");
+    a.here("draw_2");
+    a.lda(zp(GLYPH).ind_y());
+    a.and(zp(vdu_zp::TEXT_OR));
+    a.eor(zp(vdu_zp::TEXT_EOR));
+    a.sta(zp(vdu_zp::CURSOR_LINE).ind_y());
     a.dey();
-    a.bpl("draw_copy");
+    a.bpl("draw_2");
+    a.rts();
+
+    a.here("draw_4");
     a.lda(zp(vdu_zp::CURSOR_LINE));
+    a.ora(imm(8));
     a.sta(zp(vdu_zp::TEMP));
     a.lda(zp(vdu_zp::CURSOR_LINE + 1));
     a.sta(zp(vdu_zp::TEMP + 1));
-    a.lda(abs(vdu::BYTES_PER_CHARACTER));
-    for _ in 0..3 {
+    a.here("draw_4_row");
+    a.lda(zp(GLYPH).ind_y());
+    a.pha();
+    for _ in 0..4 {
         a.lsr(Acc);
     }
-    a.sta(zp(vdu_zp::TEMP + 2));
-    a.here("draw_column");
-    a.ldy(imm(7));
-    a.here("draw_row");
-    a.ldx(abs(vdu::PIXELS_PER_BYTE));
-    a.lda(abs(vdu::SCRATCH).y());
-    a.cpx(imm(7));
-    a.beq("draw_pixels_ready");
-    a.jsr("draw_take_bits");
-    a.here("draw_pixels_ready");
+    a.tax();
+    a.lda(abs("expand_4").x());
+    a.and(zp(vdu_zp::TEXT_OR));
+    a.eor(zp(vdu_zp::TEXT_EOR));
+    a.sta(zp(vdu_zp::CURSOR_LINE).ind_y());
+    a.pla();
+    a.and(imm(0x0F));
+    a.tax();
+    a.lda(abs("expand_4").x());
     a.and(zp(vdu_zp::TEXT_OR));
     a.eor(zp(vdu_zp::TEXT_EOR));
     a.sta(zp(vdu_zp::TEMP).ind_y());
     a.dey();
-    a.bpl("draw_row");
-    a.dec(zp(vdu_zp::TEMP + 2));
-    a.beq(RTS);
-    a.lda(imm(8));
-    a.jsr("screen_pointer_add");
-    a.jmp("draw_column");
-
-    // A = the scratch row Y's top bits expanded for this mode, the row
-    // shifted on past them.
-    a.here("draw_take_bits");
-    a.cpx(imm(3));
-    a.bne("draw_two_bits");
-    a.lsr(Acc);
-    a.lsr(Acc);
-    a.lsr(Acc);
-    a.lsr(Acc);
-    a.tax();
-    a.lda(abs(vdu::SCRATCH).y());
-    for _ in 0..4 {
-        a.asl(Acc);
-    }
-    a.sta(abs(vdu::SCRATCH).y());
-    a.lda(abs("expand_4").x());
+    a.bpl("draw_4_row");
     a.rts();
-    a.here("draw_two_bits");
-    a.lsr(Acc);
-    for _ in 0..5 {
-        a.lsr(Acc);
+
+    a.here("draw_16");
+    a.lda(zp(GLYPH).ind_y());
+    a.sta(abs(vdu::SCRATCH).y());
+    a.dey();
+    a.bpl("draw_16");
+    a.lda(zp(vdu_zp::CURSOR_LINE));
+    a.sta(zp(vdu_zp::TEMP));
+    a.lda(zp(vdu_zp::CURSOR_LINE + 1));
+    a.sta(zp(vdu_zp::TEMP + 1));
+    a.here("draw_16_column");
+    a.ldy(imm(7));
+    a.here("draw_16_row");
+    a.lda(abs(vdu::SCRATCH).y());
+    // The row's top two bits, whatever the carry rotates in below them.
+    for _ in 0..3 {
+        a.rol(Acc);
     }
+    a.and(imm(3));
     a.tax();
     a.lda(abs(vdu::SCRATCH).y());
     a.asl(Acc);
     a.asl(Acc);
     a.sta(abs(vdu::SCRATCH).y());
     a.lda(abs("expand_2").x());
-    a.rts();
-
-    // (&DA) += A, wrapped back into the screen past &8000.
-    a.here("screen_pointer_add");
+    a.and(zp(vdu_zp::TEXT_OR));
+    a.eor(zp(vdu_zp::TEXT_EOR));
+    a.sta(zp(vdu_zp::TEMP).ind_y());
+    a.dey();
+    a.bpl("draw_16_row");
+    // Four columns of eight bytes each, the cell aligned to its 32.
+    a.lda(zp(vdu_zp::TEMP));
     a.clc();
-    a.adc(zp(vdu_zp::TEMP));
+    a.adc(imm(8));
     a.sta(zp(vdu_zp::TEMP));
-    a.bcc(RTS);
-    a.inc(zp(vdu_zp::TEMP + 1));
-    a.bpl(RTS);
-    a.lda(zp(vdu_zp::TEMP + 1));
-    a.sec();
-    a.sbc(abs(vdu::SCREEN_SIZE));
-    a.sta(zp(vdu_zp::TEMP + 1));
+    a.and(imm(0x18));
+    a.bne("draw_16_column");
     a.rts();
 }
 
@@ -397,18 +399,6 @@ fn vdu_delete(a: &mut Asm) {
 /// The cursor: moving it, and following it with its address and the
 /// 6845's cursor.
 fn cursor(a: &mut Asm) {
-    // Forward one: off the right edge to the next line's start.
-    a.here("vdu_9");
-    a.ldx(abs(vdu::CURSOR_X));
-    a.cpx(abs(vdu::TEXT_RIGHT));
-    a.bcs("vdu_9_wrap");
-    a.inc(abs(vdu::CURSOR_X));
-    a.jmp("vdu_cursor_update");
-    a.here("vdu_9_wrap");
-    a.lda(abs(vdu::TEXT_LEFT));
-    a.sta(abs(vdu::CURSOR_X));
-    a.jmp("vdu_10");
-
     // Back one: off the left edge to the previous line's end.
     a.here("vdu_8");
     a.ldx(abs(vdu::CURSOR_X));
@@ -422,13 +412,38 @@ fn cursor(a: &mut Asm) {
     a.sta(abs(vdu::CURSOR_X));
     a.jmp("vdu_11");
 
+    // Forward one, a cell on; off the right edge to the next line's start.
+    a.here("vdu_9");
+    a.ldx(abs(vdu::CURSOR_X));
+    a.cpx(abs(vdu::TEXT_RIGHT));
+    a.bcs("vdu_9_wrap");
+    a.inc(abs(vdu::CURSOR_X));
+    a.lda(abs(vdu::BYTES_PER_CHARACTER));
+    a.ldx(imm(0));
+    a.beq("cursor_forward");
+    a.here("vdu_9_wrap");
+    a.lda(abs(vdu::TEXT_LEFT));
+    a.sta(abs(vdu::CURSOR_X));
+    a.jsr("vdu_cursor_update");
+
+    // Down one, a row on; off the bottom the window scrolls.
     a.here("vdu_10");
     a.jsr("vdu_paging");
     a.ldx(abs(vdu::CURSOR_Y));
     a.cpx(abs(vdu::TEXT_BOTTOM));
     a.bcs("vdu_10_scroll");
     a.inc(abs(vdu::CURSOR_Y));
-    a.jmp("vdu_cursor_update");
+    a.lda(abs(vdu::BYTES_PER_ROW));
+    a.ldx(abs(vdu::BYTES_PER_ROW + 1));
+    a.here("cursor_forward");
+    a.pha();
+    a.lda(zp(vdu_zp::CURSOR_LINE));
+    a.sta(zp(vdu_zp::TEMP));
+    a.lda(zp(vdu_zp::CURSOR_LINE + 1));
+    a.sta(zp(vdu_zp::TEMP + 1));
+    a.pla();
+    a.jsr("pointer_add");
+    a.jmp("cursor_set");
     a.here("vdu_10_scroll");
     a.jsr("vdu_scroll_up");
     a.jmp("vdu_cursor_update");
@@ -487,6 +502,7 @@ fn vdu_cursor_update(a: &mut Asm) {
     a.ldx(abs(vdu::CURSOR_X));
     a.ldy(abs(vdu::CURSOR_Y));
     a.jsr("cell_address");
+    a.here("cursor_set");
     a.lda(zp(vdu_zp::TEMP));
     a.sta(zp(vdu_zp::CURSOR_LINE));
     a.sta(abs(vdu::CURSOR_ADDRESS));
@@ -494,7 +510,7 @@ fn vdu_cursor_update(a: &mut Asm) {
     a.sta(zp(vdu_zp::CURSOR_LINE + 1));
     a.sta(abs(vdu::CURSOR_ADDRESS + 1));
     a.lda(imm(14));
-    a.jmp("crtc_address");
+    a.bne("crtc_address");
 
     // (&DA) = the address of row Y's window, &DE its width in bytes.
     a.here("row_window");
@@ -517,7 +533,8 @@ fn vdu_cursor_update(a: &mut Asm) {
     a.beq("cell_shifted");
     a.asl(zp(vdu_zp::TEMP));
     a.rol(zp(vdu_zp::TEMP + 1));
-    a.jmp("cell_shift");
+    // No column's offset reaches &8000, so the carry is clear.
+    a.bcc("cell_shift");
     a.here("cell_shifted");
     a.tya();
     a.asl(Acc);
@@ -531,19 +548,19 @@ fn vdu_cursor_update(a: &mut Asm) {
     a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
     a.sta(zp(vdu_zp::TEMP + 1));
     a.lda(abs(vdu::SCREEN_START));
-    a.jmp("screen_pointer_add_high");
+    a.ldx(abs(vdu::SCREEN_START + 1));
 
-    // (&DA) += A + 256 × &351, wrapped.
-    a.here("screen_pointer_add_high");
+    // (&DA) += A + 256 × X, wrapped back into the screen past &8000.
+    a.here("pointer_add");
     a.clc();
     a.adc(zp(vdu_zp::TEMP));
     a.sta(zp(vdu_zp::TEMP));
-    a.lda(zp(vdu_zp::TEMP + 1));
-    a.adc(abs(vdu::SCREEN_START + 1));
-    a.sta(zp(vdu_zp::TEMP + 1));
-    a.bpl(RTS);
+    a.txa();
+    a.adc(zp(vdu_zp::TEMP + 1));
+    a.bpl("pointer_add_in");
     a.sec();
     a.sbc(abs(vdu::SCREEN_SIZE));
+    a.here("pointer_add_in");
     a.sta(zp(vdu_zp::TEMP + 1));
     a.rts();
 
@@ -682,7 +699,7 @@ fn scrolling(a: &mut Asm) {
     a.ldy(abs(vdu::TEXT_TOP));
     a.here("scroll_window_up_row");
     a.cpy(abs(vdu::TEXT_BOTTOM));
-    a.bcs("scroll_window_up_done");
+    a.bcs("clear_row");
     a.tya();
     a.pha();
     a.iny();
@@ -691,15 +708,13 @@ fn scrolling(a: &mut Asm) {
     a.tay();
     a.iny();
     a.bne("scroll_window_up_row");
-    a.here("scroll_window_up_done");
-    a.jmp("clear_row");
 
     a.here("scroll_window_down");
     a.ldy(abs(vdu::TEXT_BOTTOM));
     a.here("scroll_window_down_row");
     a.cpy(abs(vdu::TEXT_TOP));
-    a.beq("scroll_window_down_done");
-    a.bcc("scroll_window_down_done");
+    a.beq("clear_row");
+    a.bcc("clear_row");
     a.tya();
     a.pha();
     a.dey();
@@ -707,14 +722,29 @@ fn scrolling(a: &mut Asm) {
     a.pla();
     a.tay();
     a.dey();
-    a.jmp("scroll_window_down_row");
-    a.here("scroll_window_down_done");
-    a.jmp("clear_row");
+    // Y is still a row below the top.
+    a.bpl("scroll_window_down_row");
     copy_row_from(a);
+
+    // Fill row Y's window bytes with the text background.
+    a.here("clear_row");
+    a.jsr("row_window");
+    a.jsr("background_byte");
+    a.jmp("run_fill");
+
+    // The byte a cleared cell holds: a space in mode 7.
+    a.here("background_byte");
+    a.lda(abs(vdu::COLOURS));
+    a.beq("background_teletext");
+    a.lda(abs(vdu::TEXT_BACKGROUND));
+    a.rts();
+    a.here("background_teletext");
+    a.lda(imm(b' '));
+    a.rts();
 }
 
 /// Copy row Y's window bytes into the row pushed on the stack before the
-/// caller changed Y: (&DC) source, (&DA) destination.
+/// caller changed Y.
 fn copy_row_from(a: &mut Asm) {
     a.here("copy_row_from");
     a.ldx(abs(vdu::TEXT_LEFT));
@@ -726,70 +756,114 @@ fn copy_row_from(a: &mut Asm) {
     a.tsx();
     a.ldy(abs(0x0103).x());
     a.jsr("row_window");
-    a.ldy(imm(0));
-    a.here("copy_row_byte");
-    a.lda(zp(vdu_zp::TEMP + 2).ind_y());
-    a.sta(zp(vdu_zp::TEMP).ind_y());
-    a.jsr("row_pointers_step");
-    a.bne("copy_row_byte");
-    a.rts();
+    a.jmp("run_copy");
+}
 
-    // Step (&DA) and (&DC) a byte, each wrapped, and count the bytes at
-    // (&DE) down; Z once they are done.
-    a.here("row_pointers_step");
-    a.inc(zp(vdu_zp::TEMP + 2));
-    a.bne("row_step_destination");
-    a.inc(zp(vdu_zp::TEMP + 3));
-    a.bpl("row_step_destination");
-    a.lda(zp(vdu_zp::TEMP + 3));
+/// A run of &DE/&DF screen bytes from (&DA): filled with A, or copied from
+/// (&DC). Each pointer wraps past the screen's end, so the run goes a
+/// segment at a time, none crossing a 128-byte boundary of either pointer;
+/// &DE/&DF counts what is left less one.
+fn runs(a: &mut Asm) {
+    const FILL: u16 = vdu::SCRATCH;
+    const FILLING: u16 = vdu::SCRATCH + 1;
+    const LAST: u16 = vdu::SCRATCH + 2;
+    const DESTINATION: u16 = vdu_zp::TEMP;
+    const SOURCE: u16 = DESTINATION + 2;
+    const LEFT: u16 = vdu_zp::TEMP + 4;
+
+    a.here("run_fill");
+    a.sta(abs(FILL));
+    // The source follows the destination, so the segments stay its own.
+    a.ldx(imm(1));
+    let follow = a.here_local();
+    a.lda(zp(DESTINATION).x());
+    a.sta(zp(SOURCE).x());
+    a.dex();
+    a.bpl(follow);
     a.sec();
-    a.sbc(abs(vdu::SCREEN_SIZE));
-    a.sta(zp(vdu_zp::TEMP + 3));
-    a.here("row_step_destination");
-    a.inc(zp(vdu_zp::TEMP));
-    a.bne("row_step_count");
-    a.inc(zp(vdu_zp::TEMP + 1));
-    a.bpl("row_step_count");
-    a.lda(zp(vdu_zp::TEMP + 1));
+    a.bcs("run_start");
+    a.here("run_copy");
+    a.clc();
+    a.here("run_start");
+    a.ror(abs(FILLING));
+    a.lda(zp(LEFT));
+    a.bne("run_count");
+    a.dec(zp(LEFT + 1));
+    a.here("run_count");
+    a.dec(zp(LEFT));
+
+    a.here("run_segment");
+    // Y = the segment's last offset: up to the boundary the further-on
+    // pointer reaches first, or to the run's end.
+    a.lda(zp(DESTINATION));
+    a.cmp(zp(SOURCE));
+    let further = a.local();
+    a.bcs(further);
+    a.lda(zp(SOURCE));
+    a.bind(further);
+    a.eor(imm(0xFF));
+    a.and(imm(0x7F));
+    let sized = a.local();
+    a.ldx(zp(LEFT + 1));
+    a.bne(sized);
+    a.cmp(zp(LEFT));
+    a.bcc(sized);
+    a.lda(zp(LEFT));
+    a.bind(sized);
+    a.tay();
+    a.sta(abs(LAST));
+    // What is left less one, less the segment: the borrow out of it ends
+    // the run.
+    a.eor(imm(0xFF));
+    a.clc();
+    a.adc(zp(LEFT));
+    a.sta(zp(LEFT));
+    let kept = a.local();
+    a.bcs(kept);
+    a.dec(zp(LEFT + 1));
+    a.bind(kept);
+    a.bit(abs(FILLING));
+    a.bmi("run_fill_bytes");
+    a.here("run_copy_bytes");
+    a.lda(zp(SOURCE).ind_y());
+    a.sta(zp(DESTINATION).ind_y());
+    a.dey();
+    a.bpl("run_copy_bytes");
+    a.bmi("run_advance");
+    a.here("run_fill_bytes");
+    a.lda(abs(FILL));
+    let fill = a.here_local();
+    a.sta(zp(DESTINATION).ind_y());
+    a.dey();
+    a.bpl(fill);
+
+    // Both pointers past the segment, each wrapped: X 2, the source, then 0.
+    a.here("run_advance");
+    a.ldx(imm(2));
+    let advance = a.here_local();
+    a.lda(abs(LAST));
     a.sec();
+    a.adc(zp(DESTINATION).x());
+    a.sta(zp(DESTINATION).x());
+    let next = a.local();
+    a.bcc(next);
+    a.inc(zp(DESTINATION + 1).x());
+    a.bpl(next);
+    a.lda(zp(DESTINATION + 1).x());
+    // The carry is the add's.
     a.sbc(abs(vdu::SCREEN_SIZE));
-    a.sta(zp(vdu_zp::TEMP + 1));
-    a.here("row_step_count");
-    a.lda(zp(vdu_zp::TEMP + 4));
-    a.bne("row_step_low");
-    a.dec(zp(vdu_zp::TEMP + 5));
-    a.here("row_step_low");
-    a.dec(zp(vdu_zp::TEMP + 4));
-    a.lda(zp(vdu_zp::TEMP + 4));
-    a.ora(zp(vdu_zp::TEMP + 5));
+    a.sta(zp(DESTINATION + 1).x());
+    a.bind(next);
+    a.dex();
+    a.dex();
+    a.bpl(advance);
+    a.bit(zp(LEFT + 1));
+    a.bpl("run_segment");
     a.rts();
 }
 
-/// Clearing: a row's window bytes, the window, or the whole screen.
+/// Clearing the window or the whole screen.
 fn clearing(a: &mut Asm) {
-    // Fill row Y's window bytes with the text background.
-    a.here("clear_row");
-    a.jsr("row_window");
-    a.jsr("background_byte");
-    a.sta(abs(vdu::SCRATCH));
-    a.ldy(imm(0));
-    a.here("clear_row_byte");
-    a.lda(abs(vdu::SCRATCH));
-    a.sta(zp(vdu_zp::TEMP).ind_y());
-    a.jsr("row_pointers_step");
-    a.bne("clear_row_byte");
-    a.rts();
-
-    // The byte a cleared cell holds: a space in mode 7.
-    a.here("background_byte");
-    a.lda(abs(vdu::COLOURS));
-    a.beq("background_teletext");
-    a.lda(abs(vdu::TEXT_BACKGROUND));
-    a.rts();
-    a.here("background_teletext");
-    a.lda(imm(b' '));
-    a.rts();
-
     // CLS: a window row by row; the whole screen with the 6845 back at its
     // start, every byte cleared.
     a.here("vdu_12");

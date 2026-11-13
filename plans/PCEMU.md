@@ -359,7 +359,8 @@ of items is finished.
 - One mix at the YM3812's rate (the bus oscillator over 288). A source that
   holds a level hands the mixer its changes and their instants, drawn
   band-limited with `lib/audio`'s `Lowpass`; the YM3812 hands it samples. The
-  mix is AC-coupled and carried to the stream's rate by `lib/audio`'s
+  mix is AC-coupled by `lib/audio`'s `AcCoupling` and carried to the stream's
+  rate by `lib/audio`'s
   resampler, whose ratio is steered by at most ±0.5 % to hold the
   front-end's ring at its target (`Resampler::retune` keeps the filter's
   history across a step). The board renders every 10 ms with every source

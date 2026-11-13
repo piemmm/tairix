@@ -1,11 +1,219 @@
 use alloc::vec::Vec;
 
-use tairix_crt::frame_interval_ns;
 use tairix_fuzzseed::meter::{refusing_above, refusing_past};
 use tairix_parallel::SERIAL;
 
 use super::*;
-use crate::link::layout::PIXEL;
+use crate::frame_interval_ns;
+
+#[test]
+fn the_picture_is_the_largest_four_by_three_the_window_holds_centred() {
+    let at = |x, y, width, height| {
+        Some(Target {
+            x,
+            y,
+            width,
+            height,
+        })
+    };
+    assert_eq!(fit(1280, 960), at(0, 0, 1280, 960));
+    assert_eq!(
+        fit(1920, 1080),
+        at(240, 0, 1440, 1080),
+        "pillars beside a wide screen"
+    );
+    assert_eq!(
+        fit(800, 900),
+        at(0, 150, 800, 600),
+        "bands above and below a tall one"
+    );
+    assert_eq!(fit(1, 1), None, "too small for a picture");
+    assert_eq!(fit(0, 600), None);
+}
+
+fn levels(width: u32, height: u32, level: impl Fn(u32) -> u8) -> Vec<u8> {
+    (0..height)
+        .flat_map(|y| {
+            let l = level(y);
+            (0..width).flat_map(move |_| [l, l, l, 255])
+        })
+        .collect()
+}
+
+const SMALL_TARGET: Target = Target {
+    x: 2,
+    y: 1,
+    width: 16,
+    height: 8,
+};
+
+#[test]
+fn a_draw_redraws_only_the_rows_a_change_reaches_in_a_target_it_drew() {
+    let mut screen = Screen::new();
+    let mut surface = Surface::new(20, 10).unwrap();
+    let target = SMALL_TARGET;
+    assert_eq!(screen.draw(&mut surface, target), Ok(0..0), "no frame yet");
+    assert!(screen.take(2, 2, &levels(2, 2, |y| [40, 200][y as usize])));
+    assert_eq!(
+        screen.draw(&mut surface, target),
+        Ok(0..8),
+        "a new target, whole"
+    );
+    assert_eq!(surface.get(2, 1).unwrap().r, 40);
+    assert_eq!(surface.get(17, 8).unwrap().r, 200);
+    assert_eq!(
+        surface.get(1, 1).unwrap().a,
+        0,
+        "outside the target untouched"
+    );
+    assert!(
+        !screen.take(2, 2, &levels(2, 2, |y| [40, 200][y as usize])),
+        "the same frame"
+    );
+    assert_eq!(screen.draw(&mut surface, target), Ok(0..0), "nothing owed");
+    assert!(screen.take(2, 2, &levels(2, 2, |y| [40, 90][y as usize])));
+    assert_eq!(
+        screen.draw(&mut surface, target),
+        Ok(4..8),
+        "the lower row's block"
+    );
+    assert_eq!(surface.get(17, 8).unwrap().r, 90);
+    assert!(screen.take(2, 2, &levels(2, 2, |y| [41, 90][y as usize])));
+    assert!(screen.take(2, 2, &levels(2, 2, |y| [41, 91][y as usize])));
+    assert_eq!(
+        screen.draw(&mut surface, target),
+        Ok(0..8),
+        "two frames' changes together"
+    );
+    let wider = Target {
+        width: 18,
+        ..target
+    };
+    assert!(!screen.take(2, 2, &levels(2, 2, |y| [41, 91][y as usize])));
+    assert_eq!(
+        screen.draw(&mut surface, wider),
+        Ok(0..8),
+        "a resized target, whole"
+    );
+    screen.invalidate();
+    assert_eq!(
+        screen.draw(&mut surface, wider),
+        Ok(0..8),
+        "and after its surface was lost"
+    );
+    assert!(screen.take(4, 2, &levels(4, 2, |_| 5)));
+    assert_eq!(
+        screen.draw(&mut surface, wider),
+        Ok(0..8),
+        "a frame of a new size, whole"
+    );
+}
+
+#[test]
+fn a_frame_that_is_not_its_size_changes_nothing() {
+    let mut screen = Screen::new();
+    assert!(!screen.take(4, 6, &[0; 4 * 6 * 4 - 1]));
+    assert!(!screen.take(0, 6, &[]));
+    assert!(!screen.take(u32::MAX, u32::MAX, &[]));
+    assert_eq!(screen.size(), (0, 0), "and kept from the screen");
+}
+
+#[test]
+fn a_frame_written_by_rows_draws_only_the_rows_written() {
+    let mut screen = Screen::new();
+    let mut surface = Surface::new(20, 10).unwrap();
+    assert!(screen.reshape(2, 2));
+    assert!(!screen.reshape(u32::MAX, u32::MAX), "too large to hold");
+    assert_eq!(screen.size(), (2, 2));
+    assert_eq!(
+        screen.draw(&mut surface, SMALL_TARGET),
+        Ok(0..8),
+        "a new frame, whole"
+    );
+    assert_eq!(surface.get(2, 1).unwrap().r, 0, "black until written");
+    screen
+        .row_mut(1)
+        .unwrap()
+        .copy_from_slice(&[70, 70, 70, 255, 70, 70, 70, 255]);
+    assert!(screen.row_mut(2).is_none(), "no third row");
+    assert_eq!(screen.draw(&mut surface, SMALL_TARGET), Ok(4..8));
+    assert_eq!(surface.get(17, 8).unwrap().r, 70);
+    assert_eq!(surface.get(2, 1).unwrap().r, 0, "the first row as it was");
+    assert!(screen.reshape(2, 2), "the same size");
+    assert_eq!(
+        screen.draw(&mut surface, SMALL_TARGET),
+        Ok(0..0),
+        "kept, and nothing owed"
+    );
+}
+
+#[test]
+fn a_smooth_screen_blends_and_redraws_what_a_change_reaches() {
+    let mut screen = Screen::new();
+    screen.set_scaling(Scaling::Smooth);
+    let target = Target {
+        x: 0,
+        y: 0,
+        width: 8,
+        height: 32,
+    };
+    let mut surface = Surface::new(8, 32).unwrap();
+    assert!(screen.take(2, 8, &levels(2, 8, |y| if y < 4 { 0 } else { 240 })));
+    assert_eq!(screen.draw(&mut surface, target), Ok(0..32));
+    let between = surface.get(3, 16).unwrap().r;
+    assert!(
+        0 < between && between < 240,
+        "blended across the edge: {between}"
+    );
+    assert_eq!(surface.get(3, 0).unwrap().r, 0);
+    assert_eq!(surface.get(3, 31).unwrap().r, 240);
+    assert!(screen.take(
+        2,
+        8,
+        &levels(2, 8, |y| match y {
+            0..4 => 0,
+            7 => 100,
+            _ => 240,
+        })
+    ));
+    let rows = screen.draw(&mut surface, target).unwrap();
+    assert!(rows.start > 16 && rows.end == 32, "{rows:?}");
+    assert!(surface.get(3, 31).unwrap().r < 240, "the change drawn");
+    let mut whole = Surface::new(8, 32).unwrap();
+    let mut fresh = Screen::new();
+    fresh.set_scaling(Scaling::Smooth);
+    assert!(fresh.take(2, 8, screen.pixels()));
+    fresh.draw(&mut whole, target).unwrap();
+    assert_eq!(surface, whole, "as if drawn whole");
+}
+
+#[test]
+fn changing_the_scaling_draws_whole() {
+    let mut screen = Screen::new();
+    let mut surface = Surface::new(20, 10).unwrap();
+    assert!(screen.take(2, 2, &levels(2, 2, |y| [10, 20][y as usize])));
+    screen.draw(&mut surface, SMALL_TARGET).unwrap();
+    screen.set_scaling(Scaling::Sharp);
+    assert_eq!(
+        screen.draw(&mut surface, SMALL_TARGET),
+        Ok(0..0),
+        "the same scaling"
+    );
+    screen.set_scaling(Scaling::Smooth);
+    assert_eq!(screen.scaling(), Scaling::Smooth);
+    assert_eq!(screen.draw(&mut surface, SMALL_TARGET), Ok(0..8));
+}
+
+#[test]
+fn a_change_reaches_its_neighbours_footprint_and_no_further() {
+    assert_eq!(smoothed_rows(0..0, 600, 900), 0..0);
+    let reached = smoothed_rows(300..301, 600, 900);
+    assert!(reached.start <= 450 && reached.end > 451, "{reached:?}");
+    assert!(reached.end - reached.start < 12, "{reached:?}");
+    assert_eq!(smoothed_rows(599..600, 600, 900).end, 900);
+    let shrunk = smoothed_rows(100..101, 600, 300);
+    assert!(shrunk.start <= 50 && shrunk.end > 50, "{shrunk:?}");
+}
 
 const W: u32 = 40;
 const H: u32 = 30;
@@ -43,9 +251,9 @@ fn frame(seed: u8) -> Vec<u8> {
 
 /// `pixels` with rows 10 and 11 inverted.
 fn changed(mut pixels: Vec<u8>) -> Vec<u8> {
-    let stride = usize::try_from(W).unwrap() * PIXEL;
-    for dot in pixels[10 * stride..12 * stride].as_chunks_mut::<PIXEL>().0 {
-        for channel in &mut dot[..PIXEL - 1] {
+    let stride = usize::try_from(W).unwrap() * DOT;
+    for dot in pixels[10 * stride..12 * stride].as_chunks_mut::<DOT>().0 {
+        for channel in &mut dot[..DOT - 1] {
             *channel = !*channel;
         }
     }
@@ -256,4 +464,20 @@ fn an_invalidated_picture_draws_whole_again() {
         assert_eq!(again.bounds(), whole(), "{tube:?}");
         assert_eq!(window, drawn(tube, &frame(0)), "{tube:?}");
     }
+}
+
+#[test]
+fn a_refused_smooth_draw_is_drawn_whole_next() {
+    let mut screen = Screen::new();
+    screen.set_scaling(Scaling::Smooth);
+    let mut window = window();
+    assert!(screen.take(W, H, &frame(0)));
+    let refused = refusing_above(SMALL, || screen.draw(&mut window, TARGET));
+    assert_eq!(refused, Err(DrawError::Smooth(ResampleError::OutOfMemory)));
+    assert!(screen.take(W, H, &changed(frame(0))));
+    assert_eq!(
+        screen.draw(&mut window, TARGET),
+        Ok(0..TARGET.height),
+        "whole"
+    );
 }

@@ -144,7 +144,8 @@ fn a_branch_reaches_a_signed_byte_and_no_further() {
         Err(AsmError::BranchRange {
             at: ORIGIN,
             target: ORIGIN + 130,
-            name: ""
+            name: "",
+            after: ""
         })
     );
     let back = |gap: usize| {
@@ -250,6 +251,38 @@ fn a_label_is_bound_once_named_once_and_always_bound_when_used() {
         asm.finish(),
         Err(AsmError::Unbound { name: "never" }),
         "a named label must be bound"
+    );
+}
+
+#[test]
+fn code_falls_into_a_label_only_where_the_label_is_next() {
+    let image = finished(|asm| {
+        asm.lda(imm(1));
+        asm.fall_into("next");
+        asm.here("next");
+        asm.rts();
+    })
+    .unwrap();
+    assert_eq!(&image[..3], &[0xA9, 0x01, 0x60], "nothing is emitted");
+    assert_eq!(
+        finished(|asm| {
+            asm.lda(imm(1));
+            asm.fall_into("later");
+            asm.nop();
+            asm.here("later");
+        }),
+        Err(AsmError::NotNext {
+            at: ORIGIN + 2,
+            name: "later"
+        })
+    );
+    assert_eq!(
+        finished(|asm| {
+            let local = asm.local();
+            asm.fall_into(local);
+        }),
+        Err(AsmError::Unbound { name: "" }),
+        "the label must be bound"
     );
 }
 

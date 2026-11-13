@@ -139,6 +139,10 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
         IconKind::DiskFloppy,
     ),
     ("Original.imd", MediaType::ImageDisk, IconKind::DiskFloppy),
+    ("Elite.ssd", MediaType::AcornDfsDisc, IconKind::DiskFloppy),
+    ("Welcome.dsd", MediaType::AcornDfsDisc, IconKind::DiskFloppy),
+    ("Repton.uef", MediaType::TapeUef, IconKind::Archive),
+    ("Recorded.csw", MediaType::TapeCsw, IconKind::Archive),
     ("song.mp3", MediaType::AudioMpeg, IconKind::Audio),
     ("broadcast.mp2", MediaType::AudioMpeg, IconKind::Audio),
     ("tape.mp1", MediaType::AudioMpeg, IconKind::Audio),
@@ -1587,4 +1591,23 @@ fn an_imagedisk_archive_is_a_floppy_record_but_no_volume() {
         Some(MediaType::ImageDisk),
         "an extension in any case"
     );
+}
+
+#[test]
+fn bbc_micro_discs_and_tapes_are_their_own_types_and_no_volumes() {
+    for (media, spelling) in [
+        (MediaType::AcornDfsDisc, "application/x-acorn-dfs-disc"),
+        (MediaType::TapeUef, "application/x-uef-tape"),
+        (MediaType::TapeCsw, "application/x-csw-tape"),
+    ] {
+        assert_eq!(
+            media.parent(),
+            Some(MediaType::ApplicationOctetStream),
+            "{spelling}"
+        );
+        assert!(!media.holds_a_volume(), "{spelling}");
+        assert_eq!(MediaType::from_media_str(spelling), Some(media));
+        assert_eq!(media.family(), Some(Family::Archive), "{spelling}");
+    }
+    assert_eq!(media_for_name("GAMES.SSD"), Some(MediaType::AcornDfsDisc));
 }

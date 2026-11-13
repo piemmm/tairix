@@ -630,6 +630,7 @@ members = [
     "tests/integration/netstack_synflood_qemu_aarch64",
     "tests/integration/netstack_icmp_qemu_aarch64",
     "tests/integration/netmap_qemu_aarch64",
+    "tests/integration/beeb_qemu_aarch64",
     "tests/integration/netstack_telnet_qemu_aarch64",
     "tests/integration/discovery_qemu_aarch64",
     "tests/integration/netstack_static_qemu_aarch64",

@@ -1231,11 +1231,30 @@ dependencies = [
 name = "tairix-beeb"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
+ "tairix-audio",
+ "tairix-browse",
  "tairix-buildcfg",
  "tairix-compress",
+ "tairix-controls",
  "tairix-crc32",
+ "tairix-crt",
  "tairix-crypto",
+ "tairix-font",
  "tairix-fuzzseed",
+ "tairix-geometry",
+ "tairix-help",
+ "tairix-icon",
+ "tairix-log",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
 ]
 
 [[package]]
@@ -1618,6 +1637,7 @@ name = "tairix-crt"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-mix",
  "tairix-parallel",
@@ -5588,6 +5608,23 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kernel",
  "tairix-kernel-core",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-beeb-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-syscall",
  "tairix-log",
 ]
 
@@ -9978,6 +10015,7 @@ dependencies = [
  "tairix-test-arxfs-image",
  "tairix-test-audio-wire",
  "tairix-test-autoload-input-qemu-aarch64",
+ "tairix-test-beeb-qemu-aarch64",
  "tairix-test-cinder-qemu-aarch64",
  "tairix-test-datetime-elevate-qemu-aarch64",
  "tairix-test-desktop-hover-qemu-aarch64",

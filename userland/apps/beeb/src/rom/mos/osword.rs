@@ -13,8 +13,8 @@ const CALLS: [&str; CALL_COUNT as usize] = [
     "osword_write_interval",
     "osword_read_memory",
     "osword_write_memory",
-    "osword_sound",
-    "osword_envelope",
+    "sound_command",
+    "envelope_command",
     "osword_read_pixel",
     "osword_read_character",
     "osword_read_palette",
@@ -23,7 +23,6 @@ const CALLS: [&str; CALL_COUNT as usize] = [
 ];
 
 /// Service call for an unrecognised OSWORD.
-const SERVICE_OSWORD: u8 = 8;
 /// The first call passed to USERV.
 const USER_FIRST: u8 = 0xE0;
 
@@ -43,7 +42,7 @@ pub fn emit(a: &mut Asm) {
     a.here("osword_unrecognised");
     a.cmp(imm(USER_FIRST));
     a.bcs("osword_user");
-    a.lda(imm(SERVICE_OSWORD));
+    a.lda(imm(crate::rom::os::service::OSWORD));
     a.jsr("service_call");
     a.tax();
     a.beq("osword_return");
@@ -167,12 +166,6 @@ fn memory(a: &mut Asm) {
     a.sta(zp(os::SCRATCH + 1));
     a.ldy(imm(0));
     a.rts();
-
-    a.here("osword_sound");
-    a.jmp("sound_command");
-
-    a.here("osword_envelope");
-    a.jmp("envelope_command");
 }
 
 /// POINT, character definitions, the palette and the graphics cursors.

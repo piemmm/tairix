@@ -1,0 +1,107 @@
+# Files open on channels: OPENIN, OPENOUT and OPENUP, the pointer and extent, space found as files grow, and a disc changed under them.
+
+scenario five_files_may_be_open_at_once
+discs testdisc
+script type:CLS:A%=OPENOUT"F1":B%=OPENOUT"F2":C%=OPENOUT"F3":D%=OPENOUT"F4":E%=OPENOUT"F5":P.A%,B%,C%,D%,E%\n;wait:3;type:F%=OPENOUT"F6"\n;wait:2;type:P.ERR\n;wait:0.5;type:G%=OPENIN"F1"\n;wait:1;type:P.ERR,G%\n;wait:0.5;type:H%=OPENOUT"F1"\n;wait:1;type:P.ERR\n;wait:0.5;type:CLOSE#0\n;wait:2;type:CLOSE#99\n;wait:0.5;type:P.ERR\n;wait:0.5
+
+scenario bytes_are_read_and_written_through_the_pointer
+discs testdisc
+check 0
+script type:CLS:A%=OPENOUT"G":FOR I%=1 TO 512:BPUT#A%,I%:NEXT:P.PTR#A%,EXT#A%:CLOSE#A%\n;wait:4;type:A%=OPENIN"G":P.EXT#A%,BGET#A%,BGET#A%,PTR#A%:PTR#A%=511:P.BGET#A%,EOF#A%:P.BGET#A%\n;wait:2;type:P.ERR\n;wait:0.5;type:P.BGET#A%\n;wait:1;type:P.ERR\n;wait:0.5;type:*INFO G\n;wait:1
+
+scenario openup_extends_a_file_as_the_pointer_passes_its_end
+discs testdisc
+check 0
+script type:CLS:A%=OPENUP"A":P.EXT#A%:PTR#A%=&180:P.EXT#A%,PTR#A%:BPUT#A%,65:P.EXT#A%,PTR#A%:CLOSE#A%\n;wait:3;type:*INFO A\n;wait:1;type:A%=OPENIN"A":PTR#A%=&300:P.PTR#A%,EOF#A%\n;wait:1;type:P.ERR\n;wait:0.5;type:A%=OPENIN"A":BPUT#A%,1\n;wait:1;type:P.ERR\n;wait:0.5
+
+scenario a_locked_file_opens_only_for_input
+discs testdisc
+script type:CLS:*ACCESS A L\n;wait:1;type:A%=OPENUP"A"\n;wait:1;type:P.ERR\n;wait:0.5;type:A%=OPENOUT"A"\n;wait:1;type:P.ERR\n;wait:0.5;type:A%=OPENIN"A":P.A%\n;wait:1;type:A%=OPENIN"NONE":P.A%\n;wait:1;type:A%=OPENUP"NONE":P.A%\n;wait:1
+
+scenario openout_makes_an_empty_file_and_ptr_extends_it
+discs testdisc
+check 0
+script type:CLS:A%=OPENOUT"E":CLOSE#A%:*INFO E\n;wait:2;type:A%=OPENOUT"E2":PTR#A%=1000:P.EXT#A%:CLOSE#A%:*INFO E2\n;wait:2;type:*INFO *.*\n;wait:1
+
+scenario files_opened_for_output_share_the_free_space
+discs testdisc
+check 0
+script type:CLS:A%=OPENOUT"X":B%=OPENOUT"Y":*INFO *.*\n;wait:3;type:P.ERR\n;wait:0.5;type:CLOSE#0:*INFO *.*\n;wait:2
+
+scenario a_file_that_cannot_grow_is_refused
+discs testdisc
+check 0
+script type:CLS:A%=OPENUP"A":PTR#A%=&180\n;wait:2;type:P.ERR\n;wait:0.5;type:CLOSE#0\n;wait:1;type:A%=OPENOUT"X":B%=OPENOUT"Y"\n;wait:2;type:FOR I%=1 TO 16385:BPUT#A%,1:NEXT\n;wait:20;type:P.ERR,PTR#A%\n;wait:0.5;type:CLOSE#0:*INFO *.*\n;wait:2
+
+scenario an_open_file_grows_into_the_space_after_it
+discs near80
+check 0
+script type:CLS:A%=OPENOUT"X"\n;wait:2;type:P.ERR\n;wait:0.3;type:*INFO *.*\n;wait:1;type:FOR I%=1 TO 6000:BPUT#A%,I%:NEXT\n;wait:15;type:P.ERR,PTR#A%\n;wait:0.5;type:CLOSE#A%\n;wait:2;type:*INFO *.*\n;wait:1
+
+scenario an_updated_file_grows_to_the_next_64k
+discs blank80
+check 0
+script type:CLS:*SAVE G 1900 +100\n;wait:2;type:A%=OPENUP"G":PTR#A%=EXT#A%:FOR I%=1 TO 19968:BPUT#A%,I%:NEXT:P.EXT#A%\n;wait:40;type:P.ERR\n;wait:0.3;type:CLOSE#A%:*INFO *.*\n;wait:2
+
+scenario eof_and_writing_at_the_end
+discs testdisc
+check 0
+script type:CLS:A%=OPENUP"A":PTR#A%=256:P.EOF#A%:BPUT#A%,7:P.EXT#A%,PTR#A%:CLOSE#A%\n;wait:2;type:P.ERR\n;wait:0.5;type:*INFO A\n;wait:1
+
+scenario a_channel_refuses_what_its_file_does_not_allow
+discs testdisc
+script type:CLS:A%=OPENIN"A":BPUT#A%,1\n;wait:1;type:P.ERR\n;wait:0.3;type:CLOSE#0:*ACCESS A L\n;wait:1;type:A%=OPENUP"A":BPUT#A%,1\n;wait:1;type:P.ERR\n;wait:0.3;type:CLOSE#0\n;wait:1;type:A%=OPENIN"A":*DELETE A\n;wait:1;type:P.ERR\n;wait:0.3;type:CLOSE#0\n;wait:1
+
+scenario a_disc_changed_under_an_open_file_is_not_written
+discs testdisc
+check 0
+script type:CLS:A%=OPENOUT"NEW":BPUT#A%,1\n;wait:2;swap:other80;wait:1;type:CLOSE#A%\n;wait:3;type:P.ERR\n;wait:0.5
+
+scenario compact_leaves_an_open_file_readable
+discs testdisc
+check 0
+script type:CLS:A%=OPENIN"A"\n;wait:1;type:*COMPACT\n;wait:3;type:P.ERR\n;wait:0.3;type:P.BGET#A%\n;wait:1;type:P.ERR\n;wait:0.3
+
+scenario a_growing_file_takes_the_gap_before_the_next_file
+discs gap100
+check 0
+script type:H%=OPENUP"A":PTR#H%=EXT#H%:FOR I%=1 TO 256:BPUT#H%,I%:NEXT\n;wait:4;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A14,~?&A15,~?&A16\n;wait:1
+
+scenario a_growing_file_takes_no_more_than_the_next_64k
+discs gap300
+check 0
+script type:H%=OPENUP"A":PTR#H%=EXT#H%:FOR I%=1 TO 256:BPUT#H%,I%:NEXT\n;wait:4;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A14,~?&A15,~?&A16\n;wait:1
+
+scenario a_file_past_64k_grows_to_the_next_64k
+discs big
+check 0
+script type:H%=OPENUP"A":PTR#H%=EXT#H%:FOR I%=1 TO 256:BPUT#H%,I%:NEXT\n;wait:4;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A0C,~?&A0D,~?&A0E\n;wait:1
+
+scenario a_file_past_64k_grows_no_further_than_the_next_file
+discs bigcapped
+check 0
+script type:H%=OPENUP"A":PTR#H%=EXT#H%:FOR I%=1 TO 256:BPUT#H%,I%:NEXT\n;wait:4;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A14,~?&A15,~?&A16\n;wait:1
+
+scenario a_file_with_no_room_after_it_cannot_extend
+discs nogap
+check 0
+script type:H%=OPENUP"A":PTR#H%=EXT#H%:FOR I%=1 TO 512:BPUT#H%,I%:NEXT\n;wait:4;type:P.ERR,PTR#H%\n;wait:0.5;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A14,~?&A15,~?&A16\n;wait:1
+
+scenario a_far_pointer_grows_a_file_a_64k_step_at_a_time
+discs blank80
+check 0
+script type:H%=OPENOUT"N"\n;wait:2;type:PTR#H%=&11000:BPUT#H%,1\n;wait:120;type:P.ERR,EXT#H%\n;wait:0.5;type:CLS:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A04,~?&A0C,~?&A0D,~?&A0E\n;wait:1
+
+# Unlike DFS 1.20, which writes there whatever its buffer last held, of
+# this file or another.
+scenario the_rest_of_a_files_last_sector_is_zero
+discs blank80
+ours
+script type:CLS:A%=OPENOUT"X":FOR I%=1 TO 300:BPUT#A%,I%:NEXT:CLOSE#A%\n;wait:4;type:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=0:?&908=3:?&909=&21:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&A2B,~?&A2C,~?&A2D,~?&AFE\n;wait:1
+
+# Unlike DFS 1.20, which writes it to whatever disc is in the drive.
+scenario a_buffer_is_written_back_only_to_its_files_disc
+discs testdisc
+check 0
+ours
+script type:CLS:A%=OPENOUT"NEW":FOR I%=1 TO 100:BPUT#A%,I%:NEXT\n;wait:3;swap:other80;wait:1;type:FOR I%=1 TO 300:BPUT#A%,I%:NEXT\n;wait:4;type:P.ERR\n;wait:0.5

@@ -1169,6 +1169,12 @@ impl Machine {
         tape
     }
 
+    /// Whether a tape is in the deck.
+    #[must_use]
+    pub const fn holds_tape(&self) -> bool {
+        self.board.cassette.holds_tape()
+    }
+
     /// The tape in the deck, with what has been recorded on it so far.
     pub fn tape(&mut self) -> Option<&Tape> {
         let now = self.board.now;

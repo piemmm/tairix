@@ -273,6 +273,8 @@ pub enum AsmError {
         target: u16,
         /// The target's label, or `""` for a local one or an address.
         name: &'static str,
+        /// The last named label at or before the branch.
+        after: &'static str,
     },
     /// A zero-page operand's address lies outside page zero.
     NotZeroPage {
@@ -323,6 +325,13 @@ pub enum AsmError {
     ReturnOutsideBranch {
         /// Where it is used.
         at: u16,
+    },
+    /// Code meant to run on into a label placed elsewhere.
+    NotNext {
+        /// Where the code ends.
+        at: u16,
+        /// The label's name, or `""` for a local one.
+        name: &'static str,
     },
 }
 
@@ -383,6 +392,8 @@ pub struct Asm {
     fixups: Vec<Fixup>,
     /// Where each `RTS` instruction is.
     returns: Vec<u16>,
+    /// Where code runs on into a label, and the label.
+    falls: Vec<(u16, Addr)>,
     error: Option<AsmError>,
 }
 
@@ -431,6 +442,7 @@ impl Asm {
             names: BTreeMap::new(),
             fixups: Vec::new(),
             returns: Vec::new(),
+            falls: Vec::new(),
             error: None,
         };
         if !fits {
@@ -504,6 +516,14 @@ impl Asm {
         let label = self.local();
         self.bind(label);
         label
+    }
+
+    /// Run on into `target`, which must be the next thing placed. Nothing
+    /// is emitted; [`Asm::finish`] refuses the image if `target` lies
+    /// anywhere else.
+    pub fn fall_into(&mut self, target: impl Into<Addr>) {
+        let at = self.pc();
+        self.falls.push((at, target.into()));
     }
 
     /// Place what follows at `address`.
@@ -777,10 +797,22 @@ impl Asm {
                     };
                     let from = i32::from(at) + 2;
                     let name = self.name_of(address);
-                    let displacement = i8::try_from(i32::from(target) - from)
-                        .map_err(|_| AsmError::BranchRange { at, target, name })?;
+                    let displacement = i8::try_from(i32::from(target) - from).map_err(|_| {
+                        AsmError::BranchRange {
+                            at,
+                            target,
+                            name,
+                            after: self.label_before(at),
+                        }
+                    })?;
                     self.image[fixup.offset] = displacement.cast_unsigned();
                 }
+            }
+        }
+        for &(at, target) in &self.falls {
+            if self.resolve(target, at)? != at {
+                let name = self.name_of(target);
+                return Err(AsmError::NotNext { at, name });
             }
         }
         let mut symbols: Vec<(&'static str, u16)> = self

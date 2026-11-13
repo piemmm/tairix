@@ -3,7 +3,6 @@
 //! entry points, and each test reads the machine's memory back.
 
 use alloc::collections::BTreeSet;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::build;
@@ -12,6 +11,14 @@ use crate::machine::keyboard::Key;
 use crate::machine::Machine;
 use crate::media::tape::Tape;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
+use crate::rom::os::entry::{
+    GSINIT, GSREAD, OSARGS, OSBPUT, OSBYTE, OSCLI, OSFIND, OSRDCH, OSWORD, OSWRCH,
+};
+use crate::rom::os::{vector::BRK as BRKV, ERROR_POINTER};
+use crate::scenario::{mode7_text, wait};
+
+mod commands;
+mod keyboard;
 
 /// Where the language marks that it has run to its end, keeps the command
 /// it is on, and records each command's error number, 0 for none.
@@ -19,24 +26,11 @@ const DONE: u16 = 0x0070;
 const DONE_MARK: u8 = 0x5A;
 const INDEX: u16 = 0x0071;
 const ERRORS: u16 = 0x0080;
-/// The documented entry points, the addresses programs call the MOS at.
-const GSINIT: u16 = 0xFFC2;
-const GSREAD: u16 = 0xFFC5;
-const OSFIND: u16 = 0xFFCE;
-const OSBPUT: u16 = 0xFFD4;
-const OSARGS: u16 = 0xFFDA;
-const OSRDCH: u16 = 0xFFE0;
-const OSWRCH: u16 = 0xFFEE;
-const OSWORD: u16 = 0xFFF1;
-const OSBYTE: u16 = 0xFFF4;
-const OSCLI: u16 = 0xFFF7;
 /// The flags a test reads back.
 const CARRY: u8 = 0x01;
 const INTERRUPTS_OFF: u8 = 0x04;
 const OVERFLOW: u8 = 0x40;
 const NEGATIVE: u8 = 0x80;
-const BRKV: u16 = 0x0202;
-const ERROR_POINTER: u16 = 0x00FD;
 /// How long the machine may take to boot and run a language, in cycles.
 const BUDGET: u64 = 20_000_000;
 const BAD_COMMAND: u8 = 0xFE;
@@ -185,23 +179,6 @@ fn command_errors(commands: &[&str]) -> Vec<u8> {
     (ERRORS..)
         .take(commands.len())
         .map(|address| machine.peek(address))
-        .collect()
-}
-
-/// Run `machine` on by `centiseconds`.
-fn wait(machine: &mut Machine, centiseconds: u64) {
-    machine.run_until(machine.cycles() + centiseconds * 20_000);
-}
-
-/// Mode 7's text, a line a row, from an unscrolled screen.
-fn mode7_text(machine: &Machine) -> Vec<String> {
-    (0..25u16)
-        .map(|row| {
-            (0..40)
-                .map(|column| char::from(machine.peek(0x7C00 + row * 40 + column) & 0x7F))
-                .collect::<String>()
-        })
-        .map(|line| String::from(line.trim_end()))
         .collect()
 }
 
@@ -922,6 +899,43 @@ fn osword_0_returns_the_length_read_and_whether_escape_ended_it() {
     assert_eq!(read, b"ABY\r", "the second line over the first");
 }
 
+/// The regression: while copy editing, a typed character was drawn at the
+/// copy cursor, its cell not followed to the input position.
+#[test]
+fn a_character_typed_while_copy_editing_lands_at_the_input_position() {
+    const BLOCK: u16 = 0x0074;
+    const LINE: u16 = 0x0900;
+    const CURSOR_UP: u8 = 0x8F;
+    const TELETEXT: u16 = 0x7C00;
+    let [line_low, line_high] = LINE.to_le_bytes();
+    let [block_low, block_high] = BLOCK.to_le_bytes();
+    let rom = program(None, |a| {
+        for byte in [22, 7, 31, 0, 5, b'A', b'B'] {
+            a.lda(imm(byte));
+            a.jsr(OSWRCH);
+        }
+        for byte in [CURSOR_UP, b'X', b'\r'] {
+            a.lda(imm(138));
+            a.ldx(imm(0));
+            a.ldy(imm(byte));
+            a.jsr(OSBYTE);
+        }
+        for (offset, byte) in (0..).zip([line_low, line_high, 30, b' ', b'~']) {
+            a.lda(imm(byte));
+            a.sta(zp(BLOCK + offset));
+        }
+        a.lda(imm(0));
+        a.ldx(imm(block_low));
+        a.ldy(imm(block_high));
+        a.jsr(OSWORD);
+    });
+    let machine = run_rom(&rom);
+    let cell = |row: u16, column: u16| machine.peek(TELETEXT + 40 * row + column);
+    assert_eq!(cell(5, 2), b'X', "at the input position");
+    assert_eq!(cell(4, 2), b' ', "not at the copy cursor above it");
+    assert_eq!(machine.peek(LINE), b'X', "and read as the line");
+}
+
 /// The regression: OSWORD 5 and 6 turned interrupts off and left them off.
 #[test]
 fn osword_5_and_6_reach_memory_and_leave_interrupts_on() {
@@ -1066,6 +1080,45 @@ fn osbyte_identifies_mos_1_20_and_resetting_the_keys_returns_zeroes() {
     assert_eq!(returned(RECORDS), (0xFF, 0xFF), "INKEY(-256)");
     assert_eq!(returned(RECORDS + 4), (1, 0), "OSBYTE 0");
     assert_eq!(returned(RECORDS + 8), (0, 0), "OSBYTE 18");
+}
+
+/// The regressions: *FX118 handed back the caller's X and Y with C set;
+/// OSBYTE &79 and &7A the caller's Y; a negative INKEY's C was set for a key
+/// up; and OSBYTE &80 with X 0 left C clear. MOS 1.20 returns X 1, Y &7F and
+/// C clear from *FX118, Y &7F from a key's test and &EE from a scan, C as
+/// the key is from INKEY, and C set from the fire buttons' read.
+#[test]
+fn keyboard_osbytes_return_what_mos_1_20_does() {
+    const RECORDS: u16 = 0x0900;
+    const CALLS: [(u8, u8, u8); 6] = [
+        (0x76, 5, 9),
+        (0x79, 0x80, 3),
+        (0x79, 0x10, 3),
+        (0x7A, 0, 3),
+        (0x81, 0xFF, 0xFF),
+        (0x80, 0, 3),
+    ];
+    let rom = program(None, |a| {
+        for (record_at, (call, x, y)) in (RECORDS..).step_by(4).zip(CALLS) {
+            a.lda(imm(call));
+            a.ldx(imm(x));
+            a.ldy(imm(y));
+            a.jsr(OSBYTE);
+            record(a, record_at);
+        }
+    });
+    let machine = run_rom(&rom);
+    let returned = |call: u16| {
+        let [_, x, y, flags] = recorded(&machine, RECORDS + 4 * call);
+        (x, y, flags & CARRY != 0)
+    };
+    assert_eq!(returned(0), (1, 0x7F, false), "*FX118");
+    assert_eq!(returned(1), (0, 0x7F, true), "SHIFT tested, up");
+    assert_eq!(returned(2), (0xFF, 0xEE, true), "a scan finding nothing");
+    assert_eq!(returned(3), (0xFF, 0xEE, true), "a scan from 16");
+    assert_eq!(returned(4), (0, 0, false), "INKEY(-1), SHIFT up");
+    let (buttons, _, carry) = returned(5);
+    assert_eq!((buttons, carry), (0, true), "the fire buttons");
 }
 
 /// The regression: INSV returned the buffer's new end in A, not the
@@ -1429,4 +1482,237 @@ fn a_file_written_a_byte_at_a_time_shows_as_mos_1_20_shows_it() {
         (0, u8::try_from(prompt + 2).expect("a row")),
         "the file's line ended"
     );
+}
+
+/// The regression: OPENOUT on the cassette while *SPOOL held its channel
+/// wrote the spooled file out, then failed with Channel. MOS 1.20 abandons
+/// that file unwritten and opens the new one on the same channel, so the
+/// spool carries on into it: here the new file's prompt and the byte put.
+#[test]
+fn openout_while_spooling_takes_over_the_cassette_channel() {
+    const WRITE_BUDGET: u64 = 120_000_000;
+    const HANDLE: u16 = 0x0072;
+    let rom = program(None, |a| {
+        oscli(a, "OPT1,2");
+        oscli(a, "SPOOL S");
+        a.lda(imm(0x80));
+        a.ldx(imm(lo("name")));
+        a.ldy(imm(hi("name")));
+        a.jsr(OSFIND);
+        a.sta(zp(HANDLE));
+        a.tay();
+        a.lda(imm(b'A'));
+        a.jsr(OSBPUT);
+        oscli(a, "SPOOL");
+        a.jmp("written");
+        a.here("name");
+        a.text("G");
+        a.byte(b'\r');
+        a.here("written");
+    });
+    let os = build().expect("the MOS assembles");
+    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
+    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    machine.insert_tape(Tape::default());
+    machine.set_tape_record(true);
+    machine.set_key(Key::RETURN, true);
+    finish(&mut machine, WRITE_BUDGET);
+    assert_eq!(machine.peek(HANDLE), 2, "the cassette's one output channel");
+    let text = mode7_text(&machine);
+    // "RECORD then RETURN", its new line and the A.
+    assert!(
+        text.iter()
+            .any(|line| line == "G          00 0015    FFFFFFFF FFFFFFFF"),
+        "G written: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.starts_with("S ")),
+        "S abandoned: {text:?}"
+    );
+}
+
+/// The SN76489's writes once `body` queues notes, after a second for the
+/// boot to fall quiet: each as centiseconds from the first and the byte, a
+/// write that repeats a channel's attenuation left out.
+fn chip_writes(body: impl FnOnce(&mut Asm), centiseconds: u64) -> Vec<(u64, u8)> {
+    use crate::machine::sheila::SYSTEM_VIA;
+    use crate::machine::via::reg;
+    const READY: u16 = 0x0072;
+    const FRAMES: u16 = 0x0073;
+    const CENTISECOND: u64 = 20_000;
+    let rom = program(None, |a| {
+        a.lda(imm(50));
+        a.sta(zp(FRAMES));
+        let frame = a.here_local();
+        a.lda(imm(19));
+        a.jsr(OSBYTE);
+        a.dec(zp(FRAMES));
+        a.bne(frame);
+        a.lda(imm(1));
+        a.sta(zp(READY));
+        body(a);
+    });
+    let os = build().expect("the MOS assembles");
+    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
+    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    while machine.peek(READY) != 1 {
+        assert!(machine.cycles() < BUDGET, "the boot falls quiet");
+        machine.run_until(machine.cycles() + 1_000);
+    }
+    machine.monitor_io(true);
+    let mut accesses = Vec::new();
+    for _ in 0..centiseconds {
+        machine.run_until(machine.cycles() + CENTISECOND);
+        accesses.extend(machine.take_io_trace());
+    }
+    let (mut data, mut writes, mut attenuations) = (None, Vec::new(), [None; 4]);
+    for access in accesses.iter().filter(|access| access.write) {
+        let Ok(register) = u8::try_from(access.addr.wrapping_sub(SYSTEM_VIA)) else {
+            continue;
+        };
+        match register {
+            reg::ORA | reg::ORA_NH => data = Some(access.value),
+            reg::ORB if access.value == 0 => {
+                let Some(byte) = data else { continue };
+                if byte & 0x90 == 0x90 {
+                    let channel = usize::from((byte >> 5) & 3);
+                    if attenuations[channel] == Some(byte) {
+                        continue;
+                    }
+                    attenuations[channel] = Some(byte);
+                }
+                writes.push((access.cycle, byte));
+            }
+            _ => {}
+        }
+    }
+    let first = writes.first().map_or(0, |&(cycle, _)| cycle);
+    writes
+        .into_iter()
+        .map(|(cycle, byte)| ((cycle - first + CENTISECOND / 2) / CENTISECOND, byte))
+        .collect()
+}
+
+/// `centiseconds:byte` pairs, as the reference observations were recorded.
+fn recorded_writes(text: &str) -> Vec<(u64, u8)> {
+    text.split_whitespace()
+        .map(|pair| {
+            let (time, byte) = pair.split_once(':').expect("time:byte");
+            (
+                time.parse().expect("centiseconds"),
+                u8::from_str_radix(byte, 16).expect("a hex byte"),
+            )
+        })
+        .collect()
+}
+
+/// OSWORD `call` on a parameter block of `bytes` at &74.
+fn osword_with(a: &mut Asm, call: u8, bytes: &[u8]) {
+    const BLOCK: u16 = 0x0074;
+    let [low, high] = BLOCK.to_le_bytes();
+    for (offset, &byte) in (0..).zip(bytes) {
+        a.lda(imm(byte));
+        a.sta(zp(BLOCK + offset));
+    }
+    a.lda(imm(call));
+    a.ldx(imm(low));
+    a.ldy(imm(high));
+    a.jsr(OSWORD);
+}
+
+/// SOUND channel, amplitude, pitch, duration through OSWORD 7.
+fn sound(a: &mut Asm, channel: u16, amplitude: i16, pitch: u8, duration: u8) {
+    let [channel_low, channel_high] = channel.to_le_bytes();
+    let [amplitude_low, amplitude_high] = amplitude.to_le_bytes();
+    osword_with(
+        a,
+        7,
+        &[
+            channel_low,
+            channel_high,
+            amplitude_low,
+            amplitude_high,
+            pitch,
+            0,
+            duration,
+            0,
+        ],
+    );
+}
+
+/// ENVELOPE's fourteen parameters through OSWORD 8.
+fn envelope(a: &mut Asm, parameters: [i8; 14]) {
+    osword_with(a, 8, &parameters.map(i8::cast_unsigned));
+}
+
+/// The regressions: durations counted on one clock for every channel, so a
+/// note's length hung on when it started; an envelope's first step a
+/// centisecond late; attack and decay ending on their targets, not once past
+/// them; pitch sections passed over within a step and repeated from where
+/// they ended; an envelope's attack starting from silence however the
+/// channel sounded; and a held note's release missing a step as it took
+/// over. Each scene's writes are MOS 1.20's, as recorded.
+#[test]
+fn notes_and_envelopes_drive_the_chip_as_mos_1_20_does() {
+    type Scene = (fn(&mut Asm), &'static str);
+    let scenes: [Scene; 6] = [
+        (
+            |a| {
+                sound(a, 1, -15, 100, 1);
+                sound(a, 1, -10, 120, 1);
+                sound(a, 1, -5, 140, 1);
+            },
+            "0:D0 0:CD 0:0E 4:D5 4:C2 4:0B 9:DA 9:C5 9:08 14:DF",
+        ),
+        (
+            |a| {
+                envelope(a, [1, 2, 4, -4, 0, 3, 3, 0, 126, -20, 0, -30, 126, 0]);
+                sound(a, 1, 1, 100, 3);
+            },
+            "0:CD 0:0E 0:D0 0:C0 0:0E 2:C3 2:0D 4:D2 4:C8 4:0C 6:D5 6:C3 6:0D \
+             8:D7 8:C0 8:0E 10:DA 10:CD 10:0E 12:DC 14:DF 14:C0 14:0E",
+        ),
+        (
+            |a| {
+                envelope(a, [1, 1, 0, 0, 0, 0, 0, 0, 30, -7, 0, 0, 100, 50]);
+                sound(a, 1, 1, 100, 3);
+            },
+            "0:CD 0:0E 0:DC 1:D8 2:D4 3:D3 4:D4 5:D5 7:D6 8:D7 9:D8 10:D9",
+        ),
+        (
+            |a| {
+                envelope(a, [1, 2, 1, 0, 0, 2, 0, 0, 0, 10, -5, -5, 126, 60]);
+                sound(a, 1, 1, 100, 4);
+            },
+            "0:CD 0:0E 0:D0 0:CA 0:0E 2:D8 2:C7 2:0E 6:D9 8:DA 8:CA 8:0E 10:C7 \
+             10:0E 12:DB 14:DC 16:CA 16:0E 18:DD 18:C7 18:0E 22:DE 24:DF 24:CA \
+             24:0E 26:C7 26:0E",
+        ),
+        (
+            |a| {
+                envelope(a, [1, 1, 0, 0, 0, 0, 0, 0, 126, -5, -5, -5, 126, 100]);
+                sound(a, 1, 1, 100, 1);
+                sound(a, 0x1001, 1, 120, 4);
+                sound(a, 1, -10, 140, 1);
+            },
+            "0:CD 0:0E 0:D0 3:D1 5:D2 6:D3 8:D4 9:D5 11:D6 13:D7 14:D8 16:D9 \
+             17:DA 19:DB 21:DC 22:DD 24:D5 24:C5 24:08 29:DF",
+        ),
+        (
+            |a| {
+                envelope(a, [1, 4, 0, 0, 0, 0, 0, 0, 63, -21, 0, -9, 126, 60]);
+                sound(a, 1, 1, 100, 6);
+                sound(a, 1, 1, 120, 6);
+            },
+            "0:CD 0:0E 0:D8 4:D0 12:D2 16:D5 20:D7 24:D8 29:C2 29:0B 29:D0 \
+             37:D2 41:D5 45:D7 49:D8 61:D9 65:DA 69:DB 73:DC 77:DD 81:DF",
+        ),
+    ];
+    for (index, (body, recorded)) in scenes.into_iter().enumerate() {
+        assert_eq!(
+            chip_writes(body, 150),
+            recorded_writes(recorded),
+            "scene {index}"
+        );
+    }
 }

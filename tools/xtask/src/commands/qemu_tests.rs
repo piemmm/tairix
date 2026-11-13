@@ -1144,6 +1144,12 @@ const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MES
 /// event definitions.
 const NETMAP_PROBE_FINISHED_MARKER: &str = tairix_netmap::events::PROBE_FINISHED_MESSAGE;
 
+/// The BBC Micro emulator's record of its machine's first second run.
+const BEEB_RUNNING_MARKER: &str = tairix_beeb::front::events::MACHINE_RUNNING_MESSAGE;
+
+/// The beeb vertical's dump of its window at the BASIC prompt.
+const BEEB_PROMPT_DUMP: &str = "beeb-prompt";
+
 /// Serial marker a size-state dump or keystroke waits on: the session's
 /// announcement that a served window is on screen at the size state it was
 /// just given, in a frame its client drew at that state's extent. Imported
@@ -10950,6 +10956,48 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/BEEB.md` BB17: the BBC Micro emulator's desktop vertical. The
+    // emulator is launched from the program library; its window is dumped once
+    // it records its machine's first second run, and must show the BASIC
+    // prompt's white text on black. PASS needs the guest's witnesses in order:
+    // an `APP_LOADED` naming the bundle, its window shown, and its own clean
+    // exit at the Quit the runner sends from its icon-bar menu after the dump.
+    // A machine that never runs records nothing, so no dump is taken and no
+    // Quit sent, and the run fails.
+    QemuTest {
+        package: "tairix-test-beeb-qemu-aarch64",
+        binary: "tairix-test-beeb-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: Display::Ramfb,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[ScreendumpPlan {
+            marker: BEEB_RUNNING_MARKER,
+            occurrences: 1,
+            suffix: BEEB_PROMPT_DUMP,
+            assert: assert_beeb_screendump,
+        }],
+        pointer_script: Some(beeb_pointer_script),
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/WINTERSUN.md` WS23: the WinterSun **client** vertical. The game
     // is launched the way a user launches it, by name at a terminal's shell,
     // on its reference scene, and its window is read back as it opened and in
@@ -19277,6 +19325,120 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// rasterised, and a line is drawn in the hue of the node it leads to — rather
 /// than looking for a node at a reconstructed point. Either is drawn only when
 /// a node of that tier is on the map.
+/// The beeb vertical's script: the library opened, the emulator launched,
+/// and, once its machine has run, Quit chosen from its icon-bar menu.
+fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_abi::window_ipc::AppBarClick;
+    use tairix_beeb::front::menu::{bar, Shown};
+    use tairix_input::PointerButton;
+    use tairix_qemu::MouseButton;
+    use tairix_taskbar::{AppSlot, TaskbarInput, TaskbarResponse};
+    use tairix_test_beeb_qemu_aarch64::BEEB_APP_NAME;
+
+    let scale = RECONSTRUCTION_SCALE;
+    let mut shell = reconstructed_shell(&[])?;
+    let layout = shell.session().taskbar().layout(scale);
+    let library_button = rect_centre(layout.library, "Library button")?;
+    let mut router = TaskbarInput::new();
+    bar_press(
+        &mut shell,
+        &mut router,
+        library_button,
+        PointerButton::Primary,
+    );
+    let entry = LibraryClicks::to(
+        shell.session().taskbar(),
+        scale,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, BEEB_APP_NAME),
+        "beeb script",
+    )?;
+    entry.press(&mut shell, &mut router);
+
+    let menu = bar(&Shown::default())
+        .map_err(|err| format!("beeb script: the emulator's icon-bar menu is invalid: {err:?}"))?;
+    let mut seated = (0..APPBAR_LAUNCHED_SLOT)
+        .map(|slot| {
+            AppSlot::new(
+                modelled_owner(slot),
+                tairix_desktop_session::FILES_LABEL,
+                tairix_icon::IconKind::AppBundle,
+            )
+        })
+        .collect::<Vec<_>>();
+    seated.push(
+        AppSlot::new(
+            modelled_owner(APPBAR_LAUNCHED_SLOT),
+            BEEB_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )
+        .with_declaration(menu, AppBarClick::Raise),
+    );
+    shell.session_mut().taskbar_mut().set_apps(seated, scale);
+    let slot = rect_centre(
+        appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
+        "slot",
+    )?;
+    let request = match bar_press(&mut shell, &mut router, slot, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => {
+            return Err(format!(
+                "beeb script: the slot asked for no menu: {other:?}"
+            ))
+        }
+    };
+    let (_, row) = chain_plate_and_row(
+        request.model,
+        request.placement,
+        tairix_window::QUIT_LABEL,
+        "beeb script",
+    )?;
+    let quit_row = rect_centre(row, "Quit row")?;
+
+    let mut pen = PointerPen::pinned_at_origin(AUTOLOAD_DESKTOP_REVEALED_MARKER, ramfb_screen());
+    pen.open_library_beside_manager(library_button)?;
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
+    pen.aim(LIBRARY_SHOWN_MARKER, 1, pointer_rest());
+    pen.click(BEEB_RUNNING_MARKER, 1, MouseButton::Secondary, slot);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, quit_row);
+    Ok(pen.steps())
+}
+
+/// The least of the picture that is the BASIC prompt's black, and the least
+/// count of its text's white pixels.
+const BEEB_LEAST_BLACK_PERMILLE: usize = 400;
+const BEEB_LEAST_TEXT_PIXELS: usize = 200;
+
+/// The emulator's window at its BASIC prompt: covered, mostly the screen's
+/// black, with the MOS's and BASIC's white text on it.
+fn assert_beeb_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
+    let image = read_screendump(t, path)?;
+    let (width, picture) = tairix_beeb::front::OPEN_PICTURE;
+    let strip = tairix_controls::StatusBand::new(&theme, tairix_geometry::Scale::ONE).height();
+    let layout = served_window_layout(0, width, picture + strip, true, &theme);
+    assert_window_region_covered(t, path, &image, layout.outer, "BBC Micro")?;
+    let rows = region_pixels(t, path, &image, layout.client, "BBC Micro picture")?;
+    let pixels: Vec<Rgb> = rows.into_iter().flatten().collect();
+    let black = pixels
+        .iter()
+        .filter(|p| p.0 < 40 && p.1 < 40 && p.2 < 40)
+        .count();
+    let white = pixels
+        .iter()
+        .filter(|p| p.0 > 200 && p.1 > 200 && p.2 > 200)
+        .count();
+    if black * 1000 < pixels.len() * BEEB_LEAST_BLACK_PERMILLE || white < BEEB_LEAST_TEXT_PIXELS {
+        return Err(format!(
+            "test --qemu ({}): screendump {}: the window shows no BASIC prompt \
+             ({black} black and {white} white of {} pixels)",
+            t.package,
+            path.display(),
+            pixels.len(),
+        ));
+    }
+    Ok(())
+}
+
 fn assert_netmap_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     let theme = booted_theme();
     let image = read_screendump(t, path)?;
@@ -21799,6 +21961,7 @@ mod tests {
             ("settings", settings_pointer_script()),
             ("screensaver", screensaver_pointer_script()),
             ("network map", netmap_pointer_script()),
+            ("BBC Micro", super::beeb_pointer_script()),
             ("wintersun client", super::wintersun_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
@@ -23209,6 +23372,7 @@ mod tests {
             ("filepick", filepick_pointer_script()),
             ("filepicks", super::filepicks_pointer_script()),
             ("netmap", netmap_pointer_script()),
+            ("beeb", super::beeb_pointer_script()),
             ("appbar", appbar_pointer_script()),
         ];
         for (name, steps) in scripts {

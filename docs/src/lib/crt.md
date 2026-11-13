@@ -1,8 +1,9 @@
 # `tairix-crt`
 
-The picture tube: what makes a picture read as a cathode-ray tube's. The
-terminal draws its text through it and the PC emulator its machines'
-monitors, so the two look alike and the effects are written once.
+The picture tube: what makes a picture read as a cathode-ray tube's, and a
+machine's monitor in a window. The terminal draws its text through it and the
+PC and BBC Micro emulators their machines' monitors, so they look alike and
+the effects are written once.
 
 | Item | What it is |
 |---|---|
@@ -12,6 +13,9 @@ monitors, so the two look alike and the effects are written once.
 | `Phase` | The animation step the moving passes are a pure function of. |
 | `frame_due`, `frame_interval_ns` | When the next animation frame is due: whole display frames, never faster than `FASTEST_MHZ` (twenty a second), armed only while something moves. |
 | `scaled(strength, full)` | A strength's share of a full-scale physical value, rounded to nearest. |
+| `screen::fit` | The largest 4:3 picture an area holds, centred on whole pixels. |
+| `screen::Screen` | A machine's frame as straight RGBA8, taken whole (only the rows that differ count as changed) or written row by row by a producer that knows which rows it wrote, enlarged `Sharp` (whole-pixel blocks, blended where they meet) or `Smooth` (bilinear); a draw redraws only the target rows a change reaches in a target it drew before, and draws whole after a refused draw. |
+| `screen::Picture` | A `Screen` seen through a `Tube`: drawn plain into a surface of the target's size, the tube over it, and only what changed copied into the window; a tube the heap cannot hold shows the plain picture, whole, until it can. |
 
 ## The stages
 

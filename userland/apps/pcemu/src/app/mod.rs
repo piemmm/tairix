@@ -16,7 +16,6 @@ pub mod keeping;
 pub mod library;
 pub mod media;
 pub mod menu;
-pub mod picture;
 pub mod screen;
 pub mod settings;
 pub mod shelf;

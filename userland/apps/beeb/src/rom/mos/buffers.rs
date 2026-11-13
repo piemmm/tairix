@@ -41,6 +41,8 @@ pub mod event {
     pub const INPUT_FULL: u8 = 1;
     pub const CHARACTER: u8 = 2;
     pub const ESCAPE: u8 = 6;
+    // Loading either branches as nonzero.
+    const _: () = assert!(INPUT_FULL != 0 && CHARACTER != 0);
 }
 
 pub fn emit(a: &mut Asm) {
@@ -252,17 +254,17 @@ fn input(a: &mut Asm) {
     a.pla();
     a.bcs("input_full");
     a.ldy(imm(event::CHARACTER));
-    a.jmp("oseven");
+    a.bne("oseven");
     a.here("input_full");
     a.ldy(imm(event::INPUT_FULL));
-    a.jmp("oseven");
+    a.bne("oseven");
 
     // The Escape condition: flagged, and its event.
     a.here("escape_set");
     a.lda(imm(0x80));
     a.sta(zp(os::ESCAPE));
     a.ldy(imm(event::ESCAPE));
-    a.jmp("oseven");
+    a.fall_into("oseven");
 }
 
 /// OSEVEN: event Y, if enabled, through EVNTV with A the event and Y the

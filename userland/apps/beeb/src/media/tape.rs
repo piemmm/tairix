@@ -161,6 +161,8 @@ pub struct Tape {
     markers: Vec<Marker>,
     /// Where the base frequency changes from the default, in order.
     bases: Vec<Base>,
+    /// Recorded over since it was decoded: it holds what no image does.
+    dirty: bool,
 }
 
 /// Why an image was refused.
@@ -213,6 +215,12 @@ impl Tape {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
+    }
+
+    /// Whether it has been recorded over since it was decoded.
+    #[must_use]
+    pub const fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     /// The tone at `at` cycles into the tape: silence past its end.
@@ -276,6 +284,7 @@ impl Tape {
                 millihertz: BASE_MILLIHERTZ,
             });
         }
+        self.dirty = true;
         Ok(())
     }
 
@@ -892,6 +901,7 @@ fn decode_uef(bytes: &[u8]) -> Result<Tape, TapeError> {
         spans: uef.builder.spans,
         markers: uef.markers,
         bases: uef.bases,
+        dirty: false,
     })
 }
 
@@ -999,6 +1009,7 @@ fn decode_csw(bytes: &[u8]) -> Result<Tape, TapeError> {
         spans: builder.spans,
         markers: Vec::new(),
         bases: Vec::new(),
+        dirty: false,
     })
 }
 
@@ -1030,6 +1041,7 @@ impl crate::snapshot::Save for Tape {
         }
         w.put(&self.markers);
         w.put(&self.bases);
+        w.put(&self.dirty);
     }
 }
 
@@ -1076,6 +1088,7 @@ impl crate::snapshot::Load for Tape {
             spans,
             markers,
             bases,
+            dirty: r.get()?,
         })
     }
 }

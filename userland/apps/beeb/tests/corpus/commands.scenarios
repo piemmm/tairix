@@ -1,0 +1,108 @@
+# The commands that change discs, the utilities, and *OPT 1's messages.
+
+scenario delete_save_and_rename
+discs testdisc
+check 0
+script type:CLS:*DELETE B.FILE\n;wait:1;type:*SAVE Z 1900 +80\n;wait:1;type:*INFO *.*\n;wait:1;type:*RENAME Z Q.ZZ\n;wait:1;type:*INFO *.*\n;wait:1;type:*CAT\n;wait:1
+
+scenario delete_removes_the_catalogue_entry
+discs testdisc
+check 0
+script type:*DELETE B.FILE\n;wait:1
+
+scenario wipe_asks_before_deleting_each_file
+discs testdisc
+check 0
+script type:CLS:*WIPE *.*\n;wait:1;type:Y;wait:1;type:N;wait:1;type:Y;wait:2;type:*INFO *.*\n;wait:1
+
+scenario destroy_needs_enable_and_asks_once
+discs testdisc
+check 0
+script type:CLS:*DESTROY *.*\n;wait:1;type:P.ERR\n;wait:0.5;type:*ENABLE\n;wait:0.5;type:*DESTROY $.*\n;wait:1;type:Y\n;wait:3;type:*INFO *.*\n;wait:1
+
+scenario destroy_refused_deletes_nothing
+discs testdisc
+script type:CLS:*ENABLE\n;wait:0.5;type:*DESTROY $.*\n;wait:1;type:N;wait:1;type:*INFO *.*\n;wait:1;type:*ENABLE\n;wait:0.5;type:*CAT\n;wait:1;type:*DESTROY *.*\n;wait:1;type:P.ERR\n;wait:0.5
+
+scenario destroy_deletes_every_match
+discs testdisc
+check 0
+script type:CLS:*DESTROY *.*\n;wait:1;type:Y;wait:1;type:Y;wait:3
+
+scenario compact_closes_up_the_free_space
+discs testdisc
+check 0
+script type:CLS:*DELETE B.FILE\n;wait:1;type:*COMPACT\n;wait:5;type:*INFO *.*\n;wait:1
+
+scenario copy_in_one_drive_asks_for_each_disc
+discs testdisc
+check 0
+script type:CLS:*COPY 0 0 A\n;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2
+
+scenario copy_takes_wildcards
+discs testdisc
+check 0
+script type:CLS:*COPY 0 0 #.*\n;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2;press:SPACE;wait:2
+
+scenario copy_refuses_a_bad_drive
+discs testdisc
+script type:CLS:*COPY 0 2 *.*\n;wait:5;type:P.ERR\n;wait:0.5;type:*COPY 0\n;wait:1;type:P.ERR\n;wait:0.5
+
+scenario a_prompt_takes_only_keys_pressed_after_it
+discs testdisc
+check 0
+script type:CLS:*COPY 0 0 LONGNAM\n;wait:0.3;press:SPACE;wait:0.05;press:A;wait:3;press:SPACE;wait:3;press:SPACE;wait:3
+
+scenario wipe_takes_only_answers_typed_after_its_question
+discs testdisc
+check 0
+script type:CLS:*WIPE *.*\n;press:N;wait:2;press:Y;wait:1;press:N;wait:1;press:N;wait:1
+
+scenario backup_needs_enable_and_two_good_drives
+discs testdisc
+check 0
+script type:CLS:*BACKUP 0 2\n;wait:1;type:P.ERR\n;wait:0.5;type:*ENABLE\n;wait:0.5;type:*BACKUP 0 0\n;wait:2;type:Y;wait:15;type:*CAT\n;wait:1
+
+scenario backup_in_one_drive_asks_for_each_disc
+discs testdisc
+check 0
+script type:*ENABLE\n;wait:0.5;type:CLS:*BACKUP 0 0\n;wait:2;press:SPACE;wait:3;press:SPACE;wait:3;press:SPACE;wait:3
+
+scenario copy_to_a_second_drive
+discs testdisc blank80
+check 0
+check 1
+script type:*ENABLE\n;wait:0.5;type:CLS:*COPY 0 1 *.*\n;wait:25
+
+scenario backup_to_a_second_drive
+discs testdisc other80
+check 0
+check 1
+script type:*ENABLE\n;wait:0.5;type:CLS:*BACKUP 0 1\n;wait:25
+
+scenario backup_to_a_smaller_disc_is_refused
+discs testdisc blank40
+check 1
+script type:*ENABLE\n;wait:0.5;type:CLS:*BACKUP 0 1\n;wait:10;type:P.ERR\n;wait:0.5
+
+scenario build_type_list_and_dump
+discs testdisc
+check 0
+script type:CLS:*BUILD TEXT\n;wait:1;type:HELLO THERE\n;wait:0.5;type:SECOND LINE\n;wait:0.5;press:ESCAPE;wait:1;type:*TYPE TEXT\n;wait:1;type:*LIST TEXT\n;wait:1;type:*DUMP TEXT\n;wait:1
+
+scenario dump_shows_offsets_bytes_and_characters
+discs testdisc
+script type:FOR I%=0 TO 255:I%?&3000=I%:NEXT\n;wait:1;type:*SAVE BIN 3000 +2A\n;wait:2;type:CLS:*DUMP BIN\n;wait:2
+
+scenario opt_1_shows_each_file_as_it_is_used
+discs testdisc
+check 0
+script type:CLS:*OPT 1,2\n;wait:0.5;type:*LOAD A\n;wait:1;type:*SAVE C 1900 +10\n;wait:1;type:*RUN A\n;wait:1;type:*OPT 1,0\n;wait:0.5;type:*LOAD A\n;wait:1;type:*OPT 1,1\n;wait:0.5;type:*LOAD A\n;wait:1
+
+scenario opt_1_messages_and_bad_options
+discs testdisc
+script type:CLS:*OPT 1,1\n;wait:0.5;type:A%=OPENIN"A":CLOSE#A%\n;wait:1;type:LOAD"LONGNAM"\n;wait:1;type:*INFO A\n;wait:1;type:*OPT 2,1\n;wait:0.5;type:P.ERR\n;wait:0.5;type:*OPT 9\n;wait:0.5;type:P.ERR\n;wait:0.5
+
+scenario exec_and_spool_report_missing_files_and_drives
+discs testdisc
+script type:CLS:*EXEC NOPE\n;wait:1;type:P.ERR\n;wait:0.5;type:*SPOOL :1.X\n;wait:3;type:P.ERR\n;wait:0.5

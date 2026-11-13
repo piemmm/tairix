@@ -59,6 +59,7 @@ mod program {
     use tairix_audio::live::{LiveStream, RtAudio};
     use tairix_browse::media::save_format;
     use tairix_browse::MediaType;
+    use tairix_crt::screen::{fit, Drawing, Picture, Screen};
     use tairix_crt::Tube;
     use tairix_fscopy::{DataCopy, Sparse};
     use tairix_geometry::{Rect, Region, Scale};
@@ -77,8 +78,7 @@ mod program {
     use tairix_pcemu::app::menu::{
         self as machine_menu, CardCommand, Clipboard, Command, Followed, Shown, Windows,
     };
-    use tairix_pcemu::app::picture::{Drawing, Picture};
-    use tairix_pcemu::app::screen::{fit, opening_extent, screenshot, thumbnail, Screen};
+    use tairix_pcemu::app::screen::{last_screen, opening_extent, screenshot, thumbnail};
     use tairix_pcemu::app::settings::{self, Settings};
     use tairix_pcemu::app::shelf::{Request, Shelf, Standing};
     use tairix_pcemu::app::sound::{Sound, Stream, StreamError};
@@ -2439,7 +2439,7 @@ mod program {
                 Moment::Ready => match *self.life {
                     Life::Opening(Opening::Resuming) => {
                         *self.life = Life::SettingAside;
-                        Some(match self.screen.last() {
+                        Some(match last_screen(self.screen) {
                             Some(screen) => Leave::SetAside(screen),
                             None => {
                                 Leave::Ended(String::from("there is no memory to keep its screen"))
@@ -4006,7 +4006,7 @@ mod program {
                 opened.close();
             }
             let _ = self.disks.submit(DiskJob::Forget { id, medium: None });
-            let screen = window.picture.screen().last();
+            let screen = last_screen(window.picture.screen());
             Some(Retired {
                 id,
                 name,
@@ -4958,7 +4958,7 @@ mod program {
             if machine.window.picture.screen().size().0 == 0 {
                 return Some(String::from("nothing is on its screen yet"));
             }
-            let Some(screen) = machine.window.picture.screen().last() else {
+            let Some(screen) = last_screen(machine.window.picture.screen()) else {
                 return Some(String::from("there is not enough memory"));
             };
             let named = format!("{} screen.png", machine.name);

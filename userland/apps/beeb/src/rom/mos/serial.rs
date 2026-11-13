@@ -42,6 +42,8 @@ pub mod upt {
     pub const VDU_2: u8 = 2;
     pub const VDU_3: u8 = 3;
     pub const TYPE: u8 = 5;
+    // Loading it branches as nonzero.
+    const _: () = assert!(WAKE != 0);
 }
 
 /// The rates OSBYTE 7 and 8 select, X = 0 to 8.
@@ -202,7 +204,7 @@ fn printers(a: &mut Asm) {
     a.cmp(imm(printer::PARALLEL));
     a.beq("printer_parallel_wake");
     a.lda(imm(upt::WAKE));
-    a.jmp("printer_user");
+    a.bne("printer_user");
 
     a.here("printer_parallel_wake");
     a.lda(imm(irq::ANY | irq::CA1));
@@ -474,6 +476,8 @@ fn setup(a: &mut Asm) {
     a.here("serial_init");
     a.lda(imm(control::MASTER_RESET));
     a.sta(abs(sheila::ACIA_CONTROL));
+    // The serial ULA as set, then the 6850's control, which ends its reset.
+    a.here("serial_restore");
     a.lda(abs(var::SERIAL_ULA));
     a.sta(abs(sheila::SERIAL_ULA));
     a.jmp("acia_control");

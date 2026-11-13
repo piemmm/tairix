@@ -1,0 +1,338 @@
+# Recorded by `cargo xtask beeb --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario cat_shows_the_title_cycle_drive_option_and_files
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >*CAT 0
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >
+
+scenario cat_of_an_empty_drive_or_a_missing_side_fails
+
+scenario escape_abandons_waiting_for_a_drive
+row Escape
+row >P.ERR
+row         17
+row >
+
+scenario info_shows_addresses_length_and_start_sector
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+
+scenario info_matches_wildcards_and_directories
+row $.A           001900 001900 000100 002
+row >*INFO B.*
+row B.FILE        003000 003010 000100 003
+row >*INFO _.FILE
+row B.FILE        003000 003010 000100 003
+row >*INFO $.*
+row $.LONGNAM     FF1900 FF8023 000345 004
+row $.A           001900 001900 000100 002
+row >*INFO L*
+row $.LONGNAM     FF1900 FF8023 000345 004
+row >
+
+scenario access_locks_a_file_against_deletion
+row >*CAT
+row TESTDISC (04)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A        L          LONGNAM
+row   B.FILE
+row >*INFO A
+row $.A        L  001900 001900 000100 002
+row >*DELETE A
+row Locked
+row >P.ERR
+row        195
+row >
+disc 0 9ba6810caf9f515c0f000000cb6db464fd1037657c2fe56e789155e285a6a14e
+
+scenario opt_4_writes_the_boot_option
+row >*CAT
+row TESTDISC (04)
+row Drive 0             Option 1 (LOAD)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >*OPT 4,2
+row >*OPT 4,3
+row >*CAT
+row TESTDISC (06)
+row Drive 0             Option 3 (EXEC)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >*OPT 4,4
+row >P.ERR
+row          0
+row >
+disc 0 e0b1234a5bc023984e61895ffaab8b3333d255d514fe1eeaccab137a8272228f
+
+scenario title_is_written_to_the_catalogue
+row >*CAT
+row HELLO WORLD! (04)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >*TITLE ABCDEFGHIJKLMNOP
+row >*CAT
+row ABCDEFGHIJKL (05)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >
+disc 0 3a8fdf8c8451433d66b2c2b3754ed2814d3ce25ccf302b325fe03f0c5e35bb55
+
+scenario a_short_title_is_padded
+row >*CAT
+row AB           (04)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >
+disc 0 64e5e13380f50559b8319ff3622d8dc86ba53a1378739ac881bbd6c6419d9002
+
+scenario the_cycle_number_counts_catalogue_writes_in_bcd
+row >*CAT
+row T11          (11)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row >
+disc 0 64386f3b57d09090a4882cca6af355ee8441198375bcf0ba3fba44e7737a98c4
+
+scenario dir_and_lib_set_the_current_and_library_directories
+row >*CAT
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.B           Lib. :0.$
+row     FILE
+row   $.A                 $.LONGNAM
+row >*LIB :1.Q
+row >*CAT
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.B           Lib. :1.Q
+row     FILE
+row   $.A                 $.LONGNAM
+row >*DIR AB
+row Bad dir
+row >P.ERR
+row        206
+row >
+
+scenario dir_and_lib_default_to_the_root_and_drive_0
+row Bad drive
+row >P.ERR
+row        205
+row >*DIR B
+row >*DIR
+row >*LIB Q
+row >*LIB
+row >*CAT
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.B           Lib. :0.B
+row     FILE
+row   $.A                 $.LONGNAM
+row >*DRIVE :1
+row >P.ERR
+row        205
+row >
+
+scenario drive_selects_the_current_drive
+row >*DRIVE 4
+row Bad drive
+row >P.ERR
+row        205
+row >*DRIVE
+row Syntax: DRIVE <drive>
+row >P.ERR
+row        220
+row >*DRIVE 0
+row >*CAT
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >
+
+scenario errors_name_what_went_wrong
+row Not found
+row >P.ERR
+row        214
+row >*LOAD NOTHERE
+row Not found
+row >P.ERR
+row        214
+row >*SAVE ABCDEFGH 1900 1A00
+row Bad name
+row >P.ERR
+row        204
+row >*ACCESS A X
+row Bad attribute
+row >P.ERR
+row        207
+row >*RENAME A B.FILE
+row Exists
+row >P.ERR
+row        196
+row >
+
+scenario bad_names_are_refused
+row >P.ERR
+row          0
+row >*SAVE A.B.C 1900 +1
+row >P.ERR
+row          0
+row >*SAVE A* 1900 +1
+row >P.ERR
+row          0
+row >*SAVE :.X 1900 +1
+row Bad drive
+row >P.ERR
+row        205
+row >*DELETE *
+row Not found
+row >P.ERR
+row        214
+row >*INFO
+row Syntax: INFO <afsp>
+row >P.ERR
+row        220
+row >
+
+scenario names_hold_any_printable_character
+row >*SAVE A.B.C 1900 +1
+row >*SAVE A* 1900 +1
+row >*SAVE _X 1900 +1
+row >*SAVE !$%& 1900 +1
+row >*INFO *.*
+row $.!$%&        001900 001900 000001 00C
+row $._X          001900 001900 000001 00B
+row $.A*          001900 001900 000001 00A
+row B.C           001900 001900 000001 009
+row $.A B         001900 001900 000001 008
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 7f4cffb268d0cd5134bc7391b475ca46c70152bdd1f4f963eadeb99d036e55e9
+
+scenario names_match_without_regard_to_case
+row $.A           001900 001900 000100 002
+row >OSCLI "SAVE "+CHR$98+"Q 1900 +1"
+row >*INFO BQ
+row $.bQ          001900 001900 000001 008
+row >OSCLI "INFO "+CHR$98+CHR$113
+row $.bQ          001900 001900 000001 008
+row >OSCLI "INFO "+CHR$98+".FILE"
+row B.FILE        003000 003010 000100 003
+row >*INFO A_
+row $.A           001900 001900 000100 002
+row >*INFO _
+row $.A           001900 001900 000100 002
+row >*INFO *A
+row $.A           001900 001900 000100 002
+row >*INFO L*M
+row $.LONGNAM     FF1900 FF8023 000345 004
+row >*INFO __
+row $.bQ          001900 001900 000001 008
+row $.A           001900 001900 000100 002
+row >
+disc 0 6e413b7698cc414ab671df7498aef7763568bdc87aa7f5959660d26cce295cc7
+
+scenario names_take_a_drive_and_directory
+row >*INFO X.*
+row X.NEW         001900 001900 000001 008
+row >*INFO :0.$.A
+row $.A           001900 001900 000100 002
+row >*INFO :1.A
+disc 0 4b930769a4877195ad27b76ab8b179af7c64e18e57679740723f472d05672f55
+
+scenario unknown_commands_and_missing_files
+row Bad command
+row >P.ERR
+row        254
+row >*NOPE
+row Bad command
+row >P.ERR
+row        254
+row >*DI.
+row >*ACCESS A L
+row >*OPT 1,1
+row >*DELETE LONGNAM
+row $.LONGNAM     FF1900 FF8023 000345 004
+row >
+
+scenario a_write_protected_disc_refuses_writes
+row Disk read only
+row >P.ERR
+row        201
+row >*ACCESS A L
+row Disk read only
+row >P.ERR
+row        201
+row >A%=OPENOUT"Q"
+row Disk read only
+row >P.ERR
+row        201
+row >
+
+scenario a_sector_beyond_the_disc_is_a_disc_fault
+row Disk fault 18 at 32/00
+row >P.ERR
+row        199
+row >
+
+scenario the_catalogue_holds_31_files
+row Cat full
+row >P.ERR,I%
+row        190        32
+row >
+disc 0 aef0fe30c6eba8aa0c3c0dfb503990a82005e9198fc556fced0a4e038220d870
+
+scenario a_save_too_big_for_the_space_is_refused
+row Disk full
+row >P.ERR
+row        198
+row >*SAVE B 3000 +1400
+row >*SAVE C 3000 +1
+row Disk full
+row >P.ERR
+row        198
+row >*INFO *.*
+row $.B           003000 003000 001400 30C
+row $.FILLER      001900 001900 030A00 002
+row >
+disc 0 2d8690593517239879858b68f7f719f74b9d400b58351b6c9ea5ed9cbe87c65a
+
+scenario run_of_a_basic_program_loads_it_and_returns
+row >P.~TOP
+row       1902
+row >LIST
+row    10 PRINT "HELLO"
+row    20 PRINT "THERE"
+row >
+
+scenario run_enters_a_program_with_its_tail_for_osargs
+row >P.$(?&80+256*?&81)
+row *?&81)
+row >*R THERE
+row >P.$(?&80+256*?&81)
+row ?&80+256*?&81)
+row >

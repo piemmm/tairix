@@ -365,6 +365,7 @@ fn a_tape_survives_a_snapshot_and_a_damaged_one_is_refused() {
                 .collect::<Vec<_>>(),
         );
         w.put(&0u32);
+        w.put(&false);
         crate::snapshot::open(&w.finish().unwrap()).unwrap()
     };
     let good = saved(&[(5, 0), (7, 1)], &[(12, "end")]);
@@ -390,6 +391,28 @@ fn a_tape_survives_a_snapshot_and_a_damaged_one_is_refused() {
             "{why}"
         );
     }
+}
+
+/// The regression: a tape recorded on said nothing of it, so whoever took
+/// it out could not tell one holding what no image does from one to drop.
+#[test]
+fn a_tape_recorded_over_is_dirty_through_a_snapshot_and_clean_decoded_afresh() {
+    use crate::snapshot::{Reader, Writer};
+    let mut tape = Tape::decode(&uef(&[(0x0110, &4800u16.to_le_bytes())])).unwrap();
+    assert!(!tape.is_dirty());
+    let mut too_long = Tape::default();
+    too_long.push(Tone::High, MAX_CYCLES - 1).unwrap();
+    assert_eq!(tape.record_over(CLOCK, &too_long), Err(TapeError::TooLong));
+    assert!(!tape.is_dirty(), "a refused recording changes nothing");
+    let mut recorded = Tape::default();
+    recorded.push(Tone::Low, BIT).unwrap();
+    tape.record_over(CLOCK, &recorded).unwrap();
+    assert!(tape.is_dirty());
+    let mut w = Writer::new();
+    w.put(&tape);
+    let body = crate::snapshot::open(&w.finish().unwrap()).unwrap();
+    assert_eq!(Reader::new(&body).get::<Tape>(), Ok(tape.clone()));
+    assert!(!Tape::decode(&tape.encode_uef()).unwrap().is_dirty());
 }
 
 /// The regression: markers had no bound, so an image of empty marker chunks

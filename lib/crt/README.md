@@ -12,9 +12,12 @@ an analogue noise floor and a travelling wobble, drawn over a picture.
 - `Phase`, `frame_due` — the clock the wobble, the noise and an unsettled
   afterglow move on: whole display frames, never faster than twenty a second,
   armed only while something moves.
+- `screen` — a machine's monitor in a window: its frame, the largest 4:3
+  picture the window holds, enlarged sharp or smooth and redrawn only where
+  the frame changed, with the tube over it.
 
-The terminal (`userland/apps/terminal`) and the PC emulator
-(`userland/apps/pcemu`) draw through it. Its design is
+The terminal (`userland/apps/terminal`) and the PC and BBC Micro emulators
+(`userland/apps/pcemu`, `userland/apps/beeb`) draw through it. Its design is
 `docs/src/lib/crt.md`.
 
 ## Stability

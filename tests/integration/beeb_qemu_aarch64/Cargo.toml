@@ -1,0 +1,41 @@
+[package]
+name = "tairix-test-beeb-qemu-aarch64"
+description = "plans/BEEB.md BB17 QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch `beeb` from the program library, hold the run to the machine reaching its BASIC prompt on screen, and quit it from the icon bar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared contract (src/lib.rs), read by both the freestanding
+# PASS gate and the host runner's script. `no_std` consts only.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-beeb-qemu-aarch64"
+path = "src/main.rs"
+
+# The exit syscall's audited name and the application store's spelling.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# The production aarch64 boot, its audit and diagnostic sinks swapped for
+# observers that latch the PASS witnesses.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-itest-desktop-witness = { path = "../desktop_witness", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

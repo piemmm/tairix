@@ -5,13 +5,14 @@
 use super::ws::{os, page_d, vector};
 use crate::machine::sheila;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm};
+use crate::rom::os::{entry, EXTENDED_ENTRIES};
 
-/// Where vector `n`'s extended entry point is: `JSR` to the dispatcher.
-pub const EXTENDED_ENTRIES: u16 = 0xFF00;
 /// The default vector table's length, then its address.
 pub const DEFAULTS_DESCRIPTOR: u16 = 0xFFB6;
 /// The first OS entry point.
 pub const ENTRY_POINTS: u16 = 0xFFB9;
+// GSINIT and GSREAD are the fourth and fifth of the jumps placed from there.
+const _: () = assert!(ENTRY_POINTS + 9 == entry::GSINIT && ENTRY_POINTS + 12 == entry::GSREAD);
 
 /// A vector's extended entry: the dispatcher learns which from where it was
 /// called from.
@@ -101,48 +102,41 @@ fn entry_points(a: &mut Asm) {
         ("nvrdch_entry", "nvrdch"),
         ("nvwrch_entry", "nvwrch"),
     ];
-    for (at, (entry, routine)) in (ENTRY_POINTS..).step_by(3).zip(routines) {
+    for (at, (placed, routine)) in (ENTRY_POINTS..).step_by(3).zip(routines) {
         a.org(at);
-        a.here(entry);
+        a.here(placed);
         a.jmp(routine);
     }
-    let vectored = [
-        ("osfind", vector::FIND),
-        ("osgbpb", vector::GBPB),
-        ("osbput", vector::BPUT),
-        ("osbget", vector::BGET),
-        ("osargs", vector::ARGS),
-        ("osfile", vector::FILE),
-        ("osrdch", vector::RDCH),
-    ];
-    for (at, (name, vector)) in (0xFFCE..).step_by(3).zip(vectored) {
+    for (at, name, vector) in [
+        (entry::OSFIND, "osfind", vector::FIND),
+        (entry::OSGBPB, "osgbpb", vector::GBPB),
+        (entry::OSBPUT, "osbput", vector::BPUT),
+        (entry::OSBGET, "osbget", vector::BGET),
+        (entry::OSARGS, "osargs", vector::ARGS),
+        (entry::OSFILE, "osfile", vector::FILE),
+        (entry::OSRDCH, "osrdch", vector::RDCH),
+        (entry::OSWORD, "osword", vector::WORD),
+        (entry::OSBYTE, "osbyte", vector::BYTE),
+        (entry::OSCLI, "oscli", vector::CLI),
+    ] {
         a.org(at);
         a.here(name);
         a.jmp(abs(vector).ind());
     }
     // OSASCI, OSNEWL, OSWRCR and OSWRCH fall into one another.
-    a.org(0xFFE3);
+    a.org(entry::OSASCI);
     a.here("osasci");
     a.cmp(imm(0x0D));
     a.bne(sym("oswrch"));
-    a.org(0xFFE7);
+    a.org(entry::OSNEWL);
     a.here("osnewl");
     a.lda(imm(0x0A));
     a.jsr("oswrch");
-    a.org(0xFFEC);
+    a.org(entry::OSWRCR);
     a.lda(imm(0x0D));
-    a.org(0xFFEE);
+    a.org(entry::OSWRCH);
     a.here("oswrch");
     a.jmp(abs(vector::WRCH).ind());
-    for (at, (name, vector)) in (0xFFF1..).step_by(3).zip([
-        ("osword", vector::WORD),
-        ("osbyte", vector::BYTE),
-        ("oscli", vector::CLI),
-    ]) {
-        a.org(at);
-        a.here(name);
-        a.jmp(abs(vector).ind());
-    }
     a.org(0xFFFA);
     a.word(page_d::NMI);
     a.word("reset");

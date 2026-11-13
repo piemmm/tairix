@@ -20,6 +20,7 @@
 //! | [`convert`] | The saturating map between every encoding and the `f32` pivot, and where dither belongs. |
 //! | [`channel`] | Which source channel reaches which sink channel, and at what coefficient. |
 //! | [`resample`] | The one rate conversion in the system. |
+//! | [`coupling`] | The AC coupling a line output's capacitor makes. |
 //! | [`mix`] | How live streams sum into one period of device frames. |
 //! | [`clock`] | What a device's rate actually is, and the map between its frames and the wall clock. |
 //! | [`route`] | Which sink a stream lands on, and what a seat switch does to it. |
@@ -62,6 +63,7 @@ extern crate alloc;
 pub mod channel;
 pub mod clock;
 pub mod convert;
+pub mod coupling;
 #[cfg(feature = "rt")]
 pub mod live;
 pub mod mix;
@@ -74,6 +76,7 @@ pub mod volume;
 pub use channel::ChannelMatrix;
 pub use clock::ClockModel;
 pub use convert::{Dither, DitherSource};
+pub use coupling::AcCoupling;
 pub use mix::{Mixer, SinkFormat, StreamMix};
 pub use resample::{FilterBank, Lowpass, Ratio, Resampler};
 pub use route::{Principal, Routing, SinkState, StreamRequest};

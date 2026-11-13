@@ -217,7 +217,7 @@ pub enum ImageFormat {
 }
 
 impl ImageFormat {
-    const fn sides(self) -> usize {
+    pub(crate) const fn sides(self) -> usize {
         match self {
             Self::Ssd => 1,
             Self::Dsd => 2,
@@ -225,7 +225,7 @@ impl ImageFormat {
     }
 
     /// The largest image of the format: every side of every track.
-    const fn max_bytes(self) -> usize {
+    pub(crate) const fn max_bytes(self) -> usize {
         self.sides() * MAX_TRACKS * TRACK_BYTES
     }
 }
@@ -338,6 +338,16 @@ impl Disc {
     #[must_use]
     pub fn sides(&self) -> usize {
         self.sides.len()
+    }
+
+    /// The format [`encode`](Self::encode) gives.
+    #[must_use]
+    pub fn format(&self) -> ImageFormat {
+        if self.sides() == ImageFormat::Dsd.sides() {
+            ImageFormat::Dsd
+        } else {
+            ImageFormat::Ssd
+        }
     }
 
     /// How many tracks each side has.
@@ -514,18 +524,13 @@ impl crate::snapshot::Load for Disc {
             Reader::check(side.len() == tracks)?;
             dirty.push(side);
         }
-        let format = if count == 1 {
-            ImageFormat::Ssd
-        } else {
-            ImageFormat::Dsd
-        };
         let disc = Self {
             sides,
             write_protected: r.get()?,
             dirty,
             image_len: r.get()?,
         };
-        Reader::check((1..=format.max_bytes()).contains(&disc.image_len))?;
+        Reader::check((1..=disc.format().max_bytes()).contains(&disc.image_len))?;
         Ok(disc)
     }
 }
@@ -573,6 +578,7 @@ mod tests {
             last.data[..],
             image[3 * TRACK_BYTES + 9 * SECTOR_BYTES..4 * TRACK_BYTES]
         );
+        assert_eq!(disc.format(), ImageFormat::Ssd);
         assert_eq!(disc.encode(), Encoded { image, lost: None });
     }
 
@@ -587,6 +593,7 @@ mod tests {
             side_1.sectors[0].data[..],
             image[(5 * 2 + 1) * TRACK_BYTES..][..SECTOR_BYTES]
         );
+        assert_eq!(disc.format(), ImageFormat::Dsd);
         assert_eq!(disc.encode(), Encoded { image, lost: None });
     }
 
