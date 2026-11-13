@@ -13,14 +13,15 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_pcemu::cpu::decode::{decode, SliceFetch, LONGEST};
-use tairix_pcemu::cpu::{gpr, Bus, Cpu, CpuModel, Seg, Stop};
+use tairix_pcemu::cpu::{flag, gpr, Bus, Cpu, CpuModel, Seg, Stop};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 600;
 
-/// The longest any single unit can take: an `ENTER` with 31 levels or a
-/// divide entering its interrupt, on the slowest model, with margin.
-const LONGEST_UNIT: u64 = 2_000;
+/// The longest any single unit can take: a V-series `ADD4S` or `SUB4S` of
+/// 255 digits, 128 bytes at 22 cycles after 12 of setup, entered from an
+/// interrupt and ending in a single-step trap, with margin.
+const LONGEST_UNIT: u64 = 4_000;
 
 /// A random megabyte whose ports answer random bytes and whose interrupt
 /// pins toggle at random.
@@ -120,6 +121,35 @@ fn exercise_machine(rng: &mut Prng) {
             cpu.cycles() <= limit + LONGEST_UNIT,
             "{model:?} overran its limit"
         );
+    }
+}
+
+/// The regression: the bound left out the V-series' packed-BCD strings, each
+/// one indivisible unit, so a run that ended on a long one overran it.
+#[test]
+fn the_longest_unit_holds_a_bcd_string_of_every_digit_on_every_model() {
+    for model in CpuModel::ALL {
+        for op in [0x20, 0x22, 0x26] {
+            let mut ram = vec![0u8; 1 << 20];
+            ram[0x100..0x102].copy_from_slice(&[0x0F, op]);
+            let mut bus = HostileBus {
+                ram,
+                rng: Prng::new(0),
+            };
+            let mut cpu = Cpu::new(model);
+            let regs = cpu.regs_mut();
+            regs.set_sreg(Seg::Cs, 0);
+            regs.ip = 0x100;
+            regs.gpr[gpr::CX] = 0x00FF;
+            regs.flags |= flag::TF;
+            let before = cpu.cycles();
+            let _ = cpu.step(&mut bus, u64::MAX);
+            let took = cpu.cycles() - before;
+            assert!(
+                took <= LONGEST_UNIT,
+                "0F {op:02X} on {model:?} took {took} cycles"
+            );
+        }
     }
 }
 
