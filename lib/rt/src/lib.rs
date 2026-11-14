@@ -12205,16 +12205,10 @@ mod tests {
         let other = Dir {
             file: File { fd: 6 },
         };
-        let expect = NodeExpect {
-            id: tairix_abi::FileId {
-                volume: [3; 16],
-                node: 7,
-            },
-            content_gen: 0,
-            size: 0,
-            modified: Time64::UNIX_EPOCH,
-            changed: Time64::UNIX_EPOCH,
-        };
+        let expect = NodeExpect::of_node(tairix_abi::FileId {
+            volume: [3; 16],
+            node: 7,
+        });
 
         let (number, args) = capture(0, || {
             assert_eq!(

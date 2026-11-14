@@ -69,18 +69,18 @@ use tairix_abi::{
     APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
     BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
     BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CALL_TICKET_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
-    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, FS_UMASK_BITS,
-    FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, GRANT_FILE_ONLY, GRANT_SUBTREE, HOSTNAME_MAX,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
-    KEY_CLASS_NONE, KEY_EDGE_MAGIC, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
-    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
-    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DOCUMENTS_FOLDER_MAX,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, FS_UMASK_BITS, FS_UMASK_QUERY, GRANT_EXTENT_INHERIT, GRANT_FILE_ONLY,
+    GRANT_SUBTREE, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_CLASS_NONE, KEY_EDGE_MAGIC, KEY_INPUT_MAGIC,
+    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED,
+    LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS,
+    LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
+    LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
     MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
     NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_EDGE_UNTIMED,
@@ -1373,6 +1373,86 @@ fn emit_program_kinds(out: &mut String) {
     out.push('\n');
 }
 
+/// Each bound the `AppInfo` manifest is held to, as the header names it: what
+/// it bounds, its name after `TAIRIX_`, and its value.
+const APPINFO_LIMITS: [(&str, &str, &dyn core::fmt::Display); 15] = [
+    (
+        "Maximum number of capability identifiers a manifest may request.",
+        "APPINFO_MAX_CAPABILITIES",
+        &APPINFO_MAX_CAPABILITIES,
+    ),
+    (
+        "Maximum number of MIME / file-type associations a bundle may declare.",
+        "APPINFO_MAX_MIME",
+        &APPINFO_MAX_MIME,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle identifier.",
+        "BUNDLE_ID_MAX",
+        &BUNDLE_ID_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle's program name (its command word).",
+        "BUNDLE_NAME_MAX",
+        &BUNDLE_NAME_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle's human-readable title.",
+        "BUNDLE_TITLE_MAX",
+        &BUNDLE_TITLE_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle version string.",
+        "BUNDLE_VERSION_MAX",
+        &BUNDLE_VERSION_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of one declared MIME-type string.",
+        "MIME_TYPE_MAX",
+        &MIME_TYPE_MAX,
+    ),
+    (
+        "Encoded length of one MIME-type body entry (length byte + buffer).",
+        "MIME_ENTRY_LEN",
+        &MIME_ENTRY_LEN,
+    ),
+    (
+        "Maximum number of service types a bundle may declare it browses for.",
+        "APPINFO_MAX_BROWSE",
+        &APPINFO_MAX_BROWSE,
+    ),
+    (
+        "Encoded length of one browsed service type (transport, length, name buffer).",
+        "BROWSE_ENTRY_LEN",
+        &BROWSE_ENTRY_LEN,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle's library icon asset name.",
+        "LIBRARY_ICON_MAX",
+        &LIBRARY_ICON_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle's one-line purpose.",
+        "BUNDLE_PURPOSE_MAX",
+        &BUNDLE_PURPOSE_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of a bundle's author attribution.",
+        "BUNDLE_AUTHOR_MAX",
+        &BUNDLE_AUTHOR_MAX,
+    ),
+    (
+        "Maximum length, in bytes, of an application's documents folder name.",
+        "DOCUMENTS_FOLDER_MAX",
+        &DOCUMENTS_FOLDER_MAX,
+    ),
+    (
+        "Packed little-endian wire size of an AppInfo header, in bytes.",
+        "APPINFO_HEADER_WIRE_LEN",
+        &AppInfoHeader::WIRE_LEN,
+    ),
+];
+
 fn generate_appinfo() -> String {
     use std::fmt::Write as _;
     let mut out = banner("Application-bundle manifest ABI (AGENTS.md sec.16.5, sec.16.4).");
@@ -1385,54 +1465,9 @@ fn generate_appinfo() -> String {
         "/* Magic word identifying an abi-v1 AppInfo manifest (\"RAI1\" little-endian). */\n",
     );
     let _ = writeln!(out, "#define TAIRIX_APPINFO_MAGIC {APPINFO_MAGIC:#x}u");
-    out.push_str("/* Maximum number of capability identifiers a manifest may request. */\n");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_APPINFO_MAX_CAPABILITIES {APPINFO_MAX_CAPABILITIES}u"
-    );
-    out.push_str("/* Maximum number of MIME / file-type associations a bundle may declare. */\n");
-    let _ = writeln!(out, "#define TAIRIX_APPINFO_MAX_MIME {APPINFO_MAX_MIME}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle identifier. */\n");
-    let _ = writeln!(out, "#define TAIRIX_BUNDLE_ID_MAX {BUNDLE_ID_MAX}u");
-    out.push_str(
-        "/* Maximum length, in bytes, of a bundle's program name (its command word). */\n",
-    );
-    let _ = writeln!(out, "#define TAIRIX_BUNDLE_NAME_MAX {BUNDLE_NAME_MAX}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle's human-readable title. */\n");
-    let _ = writeln!(out, "#define TAIRIX_BUNDLE_TITLE_MAX {BUNDLE_TITLE_MAX}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle version string. */\n");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_BUNDLE_VERSION_MAX {BUNDLE_VERSION_MAX}u"
-    );
-    out.push_str("/* Maximum length, in bytes, of one declared MIME-type string. */\n");
-    let _ = writeln!(out, "#define TAIRIX_MIME_TYPE_MAX {MIME_TYPE_MAX}u");
-    out.push_str("/* Encoded length of one MIME-type body entry (length byte + buffer). */\n");
-    let _ = writeln!(out, "#define TAIRIX_MIME_ENTRY_LEN {MIME_ENTRY_LEN}u");
-    out.push_str("/* Maximum number of service types a bundle may declare it browses for. */\n");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_APPINFO_MAX_BROWSE {APPINFO_MAX_BROWSE}u"
-    );
-    out.push_str(
-        "/* Encoded length of one browsed service type (transport, length, name buffer). */\n",
-    );
-    let _ = writeln!(out, "#define TAIRIX_BROWSE_ENTRY_LEN {BROWSE_ENTRY_LEN}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle's library icon asset name. */\n");
-    let _ = writeln!(out, "#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u");
-    out.push_str("/* Maximum length, in bytes, of a bundle's one-line purpose. */\n");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_BUNDLE_PURPOSE_MAX {BUNDLE_PURPOSE_MAX}u"
-    );
-    out.push_str("/* Maximum length, in bytes, of a bundle's author attribution. */\n");
-    let _ = writeln!(out, "#define TAIRIX_BUNDLE_AUTHOR_MAX {BUNDLE_AUTHOR_MAX}u");
-    out.push_str("/* Packed little-endian wire size of an AppInfo header, in bytes. */\n");
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_APPINFO_HEADER_WIRE_LEN {}u",
-        AppInfoHeader::WIRE_LEN
-    );
+    for (what, name, value) in APPINFO_LIMITS {
+        let _ = writeln!(out, "/* {what} */\n#define TAIRIX_{name} {value}u");
+    }
     out.push('\n');
 
     out.push_str("/* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */\n");
@@ -1512,6 +1547,8 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
     ("uint8_t purpose_len", 1),
     ("uint8_t author_len", 1),
     ("uint8_t title_len", 1),
+    ("uint8_t documents_folder_len", 1),
+    ("uint8_t padding[3]", 3),
     ("uint8_t id[TAIRIX_BUNDLE_ID_MAX]", BUNDLE_ID_MAX),
     ("uint8_t name[TAIRIX_BUNDLE_NAME_MAX]", BUNDLE_NAME_MAX),
     (
@@ -1531,6 +1568,10 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
         BUNDLE_AUTHOR_MAX,
     ),
     ("uint8_t title[TAIRIX_BUNDLE_TITLE_MAX]", BUNDLE_TITLE_MAX),
+    (
+        "uint8_t documents_folder[TAIRIX_DOCUMENTS_FOLDER_MAX]",
+        DOCUMENTS_FOLDER_MAX,
+    ),
     (
         "uint8_t syscall_table_hash[TAIRIX_SYSCALL_TABLE_HASH_LEN]",
         SYSCALL_TABLE_HASH_LEN,
@@ -5866,8 +5907,9 @@ mod tests {
         use tairix_abi::{
             AppInfoHeader, BundleEntry, LibraryCategory, LibraryScope, APPINFO_MAGIC,
             APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
-            BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-            MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_LIBRARIES_DIR,
+            BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
+            DOCUMENTS_FOLDER_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+            SYSTEM_LIBRARIES_DIR,
         };
         let h = body("tairix_appinfo.h");
         assert!(h.contains("#ifndef TAIRIX_APPINFO_H"), "guard present");
@@ -5890,6 +5932,7 @@ mod tests {
             format!("#define TAIRIX_APPINFO_MAX_BROWSE {APPINFO_MAX_BROWSE}u"),
             format!("#define TAIRIX_BROWSE_ENTRY_LEN {BROWSE_ENTRY_LEN}u"),
             format!("#define TAIRIX_LIBRARY_ICON_MAX {LIBRARY_ICON_MAX}u"),
+            format!("#define TAIRIX_DOCUMENTS_FOLDER_MAX {DOCUMENTS_FOLDER_MAX}u"),
             format!(
                 "#define TAIRIX_APPINFO_HEADER_WIRE_LEN {}u",
                 AppInfoHeader::WIRE_LEN
@@ -6882,7 +6925,7 @@ mod tests {
             ("tairix_ipc.h", "} tairix_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
             ("tairix_ipc.h", "} tairix_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
-            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 732, align_of::<AppInfoHeader>(), 4),
+            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 800, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 56, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),

@@ -66,6 +66,10 @@ pub const BUNDLE_NAME_MAX: usize = 64;
 /// label rather than by the narrower grammar a command word obeys.
 pub const BUNDLE_TITLE_MAX: usize = 64;
 
+/// Maximum length, in bytes, of the name of an application's own documents
+/// folder: one visible folder name beneath the user's `Home/Documents/`.
+pub const DOCUMENTS_FOLDER_MAX: usize = 64;
+
 /// Maximum length, in bytes, of a bundle version string.
 pub const BUNDLE_VERSION_MAX: usize = 32;
 
@@ -1131,6 +1135,12 @@ pub struct AppInfoHeader {
     /// Valid byte count of the inline `title` buffer
     /// (`<= BUNDLE_TITLE_MAX`); zero when the bundle declares none.
     pub title_len: u8,
+    /// Valid byte count of the inline `documents_folder` buffer
+    /// (`<= DOCUMENTS_FOLDER_MAX`); zero when the bundle asks for none.
+    pub documents_folder_len: u8,
+    /// Zero: brings the length bytes to the arrays' four-byte boundary, so
+    /// the in-memory and wire images stay one length.
+    pub padding: [u8; 3],
     /// Bundle identifier bytes; the valid prefix is `id_len` long.
     pub id: [u8; BUNDLE_ID_MAX],
     /// Program-name bytes; the valid prefix is `name_len` long.
@@ -1159,6 +1169,10 @@ pub struct AppInfoHeader {
     /// zero when the bundle declares none, and the program name is then what
     /// a surface shows.
     pub title: [u8; BUNDLE_TITLE_MAX],
+    /// The name of the application's own documents folder, granted it
+    /// beneath the user's `Home/Documents/` without a picker; the valid
+    /// prefix is `documents_folder_len` long, all zero when it asks for none.
+    pub documents_folder: [u8; DOCUMENTS_FOLDER_MAX],
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Digest binding the signature to the bundle's contents
@@ -1195,14 +1209,17 @@ impl AppInfoHeader {
     const OFF_PURPOSE_LEN: usize = 25;
     const OFF_AUTHOR_LEN: usize = 26;
     const OFF_TITLE_LEN: usize = 27;
-    const OFF_ID: usize = 28;
+    const OFF_DOCUMENTS_FOLDER_LEN: usize = 28;
+    const OFF_PADDING: usize = 29;
+    const OFF_ID: usize = 32;
     const OFF_NAME: usize = Self::OFF_ID + BUNDLE_ID_MAX;
     const OFF_VERSION: usize = Self::OFF_NAME + BUNDLE_NAME_MAX;
     const OFF_LIBRARY_ICON: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
     const OFF_PURPOSE: usize = Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX;
     const OFF_AUTHOR: usize = Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX;
     const OFF_TITLE: usize = Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX;
-    const OFF_SYSCALL_HASH: usize = Self::OFF_TITLE + BUNDLE_TITLE_MAX;
+    const OFF_DOCUMENTS_FOLDER: usize = Self::OFF_TITLE + BUNDLE_TITLE_MAX;
+    const OFF_SYSCALL_HASH: usize = Self::OFF_DOCUMENTS_FOLDER + DOCUMENTS_FOLDER_MAX;
     const OFF_CONTENT_HASH: usize = Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN;
     const OFF_SIGNER: usize = Self::OFF_CONTENT_HASH + 32;
     const OFF_PUBLISHER: usize = Self::OFF_SIGNER + 32;
@@ -1247,6 +1264,8 @@ impl AppInfoHeader {
         out[Self::OFF_PURPOSE_LEN] = self.purpose_len;
         out[Self::OFF_AUTHOR_LEN] = self.author_len;
         out[Self::OFF_TITLE_LEN] = self.title_len;
+        out[Self::OFF_DOCUMENTS_FOLDER_LEN] = self.documents_folder_len;
+        out[Self::OFF_PADDING..Self::OFF_ID].copy_from_slice(&self.padding);
         out[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX].copy_from_slice(&self.id);
         out[Self::OFF_NAME..Self::OFF_NAME + BUNDLE_NAME_MAX].copy_from_slice(&self.name);
         out[Self::OFF_VERSION..Self::OFF_VERSION + BUNDLE_VERSION_MAX]
@@ -1257,6 +1276,8 @@ impl AppInfoHeader {
             .copy_from_slice(&self.purpose);
         out[Self::OFF_AUTHOR..Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX].copy_from_slice(&self.author);
         out[Self::OFF_TITLE..Self::OFF_TITLE + BUNDLE_TITLE_MAX].copy_from_slice(&self.title);
+        out[Self::OFF_DOCUMENTS_FOLDER..Self::OFF_DOCUMENTS_FOLDER + DOCUMENTS_FOLDER_MAX]
+            .copy_from_slice(&self.documents_folder);
         out[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN]
             .copy_from_slice(&self.syscall_table_hash);
         out[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]
@@ -1339,6 +1360,11 @@ impl AppInfoHeader {
         let purpose_len = bytes[Self::OFF_PURPOSE_LEN];
         let author_len = bytes[Self::OFF_AUTHOR_LEN];
         let title_len = bytes[Self::OFF_TITLE_LEN];
+        let documents_folder_len = bytes[Self::OFF_DOCUMENTS_FOLDER_LEN];
+        let padding: [u8; 3] = inline_field(bytes, Self::OFF_PADDING);
+        if padding != [0; 3] {
+            return Err(Errno::BadMagic);
+        }
         LibraryCategory::from_wire(library)?;
         let requests = [capability_count, mime_count, browse_count];
         if !saver_shape_holds(program, flags, requests, option_count, library) {
@@ -1362,6 +1388,8 @@ impl AppInfoHeader {
             purpose_len,
             author_len,
             title_len,
+            documents_folder_len,
+            padding,
             id: inline_field(bytes, Self::OFF_ID),
             name: inline_field(bytes, Self::OFF_NAME),
             version: inline_field(bytes, Self::OFF_VERSION),
@@ -1369,6 +1397,7 @@ impl AppInfoHeader {
             purpose: inline_field(bytes, Self::OFF_PURPOSE),
             author: inline_field(bytes, Self::OFF_AUTHOR),
             title: inline_field(bytes, Self::OFF_TITLE),
+            documents_folder: inline_field(bytes, Self::OFF_DOCUMENTS_FOLDER),
             syscall_table_hash: inline_field(bytes, Self::OFF_SYSCALL_HASH),
             content_hash: inline_field(bytes, Self::OFF_CONTENT_HASH),
             signer_pubkey: inline_field(bytes, Self::OFF_SIGNER),
@@ -1376,19 +1405,26 @@ impl AppInfoHeader {
             publisher_cert: inline_field(bytes, Self::OFF_PUBLISHER_CERT),
             signature: inline_field(bytes, Self::OFF_SIGNATURE),
         };
-        validate_identity(header.id_len, BUNDLE_ID_MAX, &header.id)?;
-        validate_bundle_id(header.bundle_id())?;
-        validate_identity(header.name_len, BUNDLE_NAME_MAX, &header.name)?;
-        validate_identity(header.version_len, BUNDLE_VERSION_MAX, &header.version)?;
-        validate_optional_text(
-            header.library_icon_len,
-            LIBRARY_ICON_MAX,
-            &header.library_icon,
-        )?;
-        validate_optional_text(header.purpose_len, BUNDLE_PURPOSE_MAX, &header.purpose)?;
-        validate_optional_text(header.author_len, BUNDLE_AUTHOR_MAX, &header.author)?;
-        validate_optional_text(header.title_len, BUNDLE_TITLE_MAX, &header.title)?;
+        header.validate_texts()?;
         Ok(header)
+    }
+
+    /// Each inline string within its bound and its grammar: the identity
+    /// strings present and the bundle id well formed, the rest optional.
+    fn validate_texts(&self) -> Result<(), Errno> {
+        validate_identity(self.id_len, BUNDLE_ID_MAX, &self.id)?;
+        validate_bundle_id(self.bundle_id())?;
+        validate_identity(self.name_len, BUNDLE_NAME_MAX, &self.name)?;
+        validate_identity(self.version_len, BUNDLE_VERSION_MAX, &self.version)?;
+        validate_optional_text(self.library_icon_len, LIBRARY_ICON_MAX, &self.library_icon)?;
+        validate_optional_text(self.purpose_len, BUNDLE_PURPOSE_MAX, &self.purpose)?;
+        validate_optional_text(self.author_len, BUNDLE_AUTHOR_MAX, &self.author)?;
+        validate_optional_text(self.title_len, BUNDLE_TITLE_MAX, &self.title)?;
+        validate_optional_text(
+            self.documents_folder_len,
+            DOCUMENTS_FOLDER_MAX,
+            &self.documents_folder,
+        )
     }
 
     /// The bundle identifier as text, or `""` if the inline bytes are not
@@ -1420,6 +1456,15 @@ impl AppInfoHeader {
             return self.bundle_name();
         }
         inline_str(&self.title, self.title_len)
+    }
+
+    /// The name of the documents folder the application asks for, if it asks
+    /// for one. Its bytes are only bounded and UTF-8 here: the session judges
+    /// the name as one visible folder name before it opens anything.
+    #[must_use]
+    pub fn documents_folder(&self) -> Option<&str> {
+        (self.documents_folder_len != 0)
+            .then(|| inline_str(&self.documents_folder, self.documents_folder_len))
     }
 
     /// The bundle version as text.
@@ -1984,6 +2029,8 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
         library_icon_len: 0,
         library: LibraryCategory::to_wire(None),
         title_len: 0,
+        documents_folder_len: 0,
+        padding: [0; 3],
         id,
         name,
         version,
@@ -1991,6 +2038,7 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
         purpose: [0; BUNDLE_PURPOSE_MAX],
         author: [0; BUNDLE_AUTHOR_MAX],
         title: [0; BUNDLE_TITLE_MAX],
+        documents_folder: [0; DOCUMENTS_FOLDER_MAX],
         syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
@@ -2041,6 +2089,7 @@ mod tests {
         let (purpose, purpose_len) = inline("Edit text files");
         let (author, author_len) = inline("Example Software");
         let (title, title_len) = inline("Example Editor");
+        let (documents_folder, documents_folder_len) = inline("Example Documents");
         AppInfoHeader {
             magic: APPINFO_MAGIC,
             abi_version: ABI_VERSION_CURRENT,
@@ -2058,6 +2107,8 @@ mod tests {
             library_icon_len,
             library: LibraryCategory::to_wire(Some(LibraryCategory::Office)),
             title_len,
+            documents_folder_len,
+            padding: [0; 3],
             id,
             name,
             version,
@@ -2065,6 +2116,7 @@ mod tests {
             purpose,
             author,
             title,
+            documents_folder,
             syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
             content_hash: [0xCD; 32],
             signer_pubkey: [0xEF; 32],
@@ -2580,7 +2632,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 732);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 800);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -2743,6 +2795,39 @@ mod tests {
         let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("valid");
         assert_eq!(decoded.bundle_name(), "editor");
         assert_eq!(decoded.bundle_title(), "editor");
+    }
+
+    #[test]
+    fn a_documents_folder_is_read_back_and_none_is_none() {
+        let decoded = AppInfoHeader::from_bytes(&sample().to_le_bytes()).expect("valid");
+        assert_eq!(decoded.documents_folder(), Some("Example Documents"));
+        let mut h = sample();
+        h.documents_folder = [0; super::DOCUMENTS_FOLDER_MAX];
+        h.documents_folder_len = 0;
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("valid");
+        assert_eq!(decoded.documents_folder(), None);
+    }
+
+    #[test]
+    fn header_rejects_a_long_or_malformed_documents_folder_and_dirty_padding() {
+        let mut h = sample();
+        h.documents_folder_len = u8::try_from(super::DOCUMENTS_FOLDER_MAX + 1).expect("fits u8");
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut h = sample();
+        h.documents_folder[0] = 0xFF;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        let mut h = sample();
+        h.padding[2] = 1;
+        assert_eq!(
+            AppInfoHeader::from_bytes(&h.to_le_bytes()),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]
@@ -3126,6 +3211,8 @@ mod tests {
             purpose_len => AppInfoHeader::OFF_PURPOSE_LEN,
             author_len => AppInfoHeader::OFF_AUTHOR_LEN,
             title_len => AppInfoHeader::OFF_TITLE_LEN,
+            documents_folder_len => AppInfoHeader::OFF_DOCUMENTS_FOLDER_LEN,
+            padding => AppInfoHeader::OFF_PADDING,
             id => AppInfoHeader::OFF_ID,
             name => AppInfoHeader::OFF_NAME,
             version => AppInfoHeader::OFF_VERSION,
@@ -3133,6 +3220,7 @@ mod tests {
             purpose => AppInfoHeader::OFF_PURPOSE,
             author => AppInfoHeader::OFF_AUTHOR,
             title => AppInfoHeader::OFF_TITLE,
+            documents_folder => AppInfoHeader::OFF_DOCUMENTS_FOLDER,
             syscall_table_hash => AppInfoHeader::OFF_SYSCALL_HASH,
             content_hash => AppInfoHeader::OFF_CONTENT_HASH,
             signer_pubkey => AppInfoHeader::OFF_SIGNER,

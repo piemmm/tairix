@@ -5427,7 +5427,6 @@ mod resolve {
     use super::*;
     use crate::fs::{Acting, At, Metadata, Start};
     use tairix_abi::fs::{Access as Wanted, NodeExpect};
-    use tairix_abi::time::Time64;
 
     /// `path` from where `cwd` stands.
     fn from<'a>(cwd: &'a Cwd, path: &'a str) -> At<'a> {
@@ -5522,17 +5521,6 @@ mod resolve {
                 .expect("attached beneath the catalog");
         }
         vfs
-    }
-
-    /// An expectation of the node `node` alone.
-    fn node_alone(id: tairix_abi::FileId) -> NodeExpect {
-        NodeExpect {
-            id,
-            content_gen: 0,
-            size: 0,
-            modified: Time64::UNIX_EPOCH,
-            changed: Time64::UNIX_EPOCH,
-        }
     }
 
     /// The directory `at` names, held as a directory capability floored at
@@ -5862,13 +5850,13 @@ mod resolve {
         let stat = svc
             .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Keep)
             .expect("stat");
-        let wrong = node_alone(tairix_abi::FileId {
+        let wrong = NodeExpect::of_node(tairix_abi::FileId {
             node: stat.id.node + 1,
             ..stat.id
         });
         // The node's number on another volume, as a volume swapped in under
         // the same name would number one of its own.
-        let elsewhere = node_alone(tairix_abi::FileId {
+        let elsewhere = NodeExpect::of_node(tairix_abi::FileId {
             volume: [0x5A; 16],
             ..stat.id
         });
@@ -5903,13 +5891,7 @@ mod resolve {
             ),
             Err(Errno::Stale)
         );
-        let unchanged = NodeExpect {
-            id: stat.id,
-            content_gen: stat.content_gen,
-            size: stat.size,
-            modified: stat.times.modified,
-            changed: stat.times.changed,
-        };
+        let unchanged = NodeExpect::of(&stat);
         write_path(&svc, TEST_UID, &caps, &path("f"), 3, false, b"two").expect("grow");
         assert_eq!(
             svc.unlink(
@@ -5939,7 +5921,7 @@ mod resolve {
             Some(Errno::NotFound)
         );
 
-        let its_own = node_alone(stat.id);
+        let its_own = NodeExpect::of_node(stat.id);
         svc.rename(
             TEST_UID,
             &caps,
@@ -5970,7 +5952,7 @@ mod resolve {
             .stat(TEST_UID, &caps, at(&path("f")), FinalLink::Keep)
             .expect("stat")
             .id;
-        let alone = node_alone(id);
+        let alone = NodeExpect::of_node(id);
         let padded = NodeExpect { size: 1, ..alone };
         let unlink = |flags, expect| svc.unlink(TEST_UID, &caps, at(&path("f")), flags, expect);
         assert_eq!(

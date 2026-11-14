@@ -2,7 +2,7 @@
 
 The picture tube: what makes a picture read as a cathode-ray tube's, and a
 machine's monitor in a window. The terminal draws its text through it and the
-PC and BBC Micro emulators their machines' monitors, so they look alike and
+PC and Open Micro emulators their machines' monitors, so they look alike and
 the effects are written once.
 
 | Item | What it is |

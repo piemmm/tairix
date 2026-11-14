@@ -481,3 +481,93 @@ fn a_refused_smooth_draw_is_drawn_whole_next() {
         "whole"
     );
 }
+
+#[test]
+fn a_window_point_is_the_frames_dot_under_it() {
+    let target = Target {
+        x: 100,
+        y: 50,
+        width: 1280,
+        height: 960,
+    };
+    let frame = (640, 200);
+    assert_eq!(frame_point(target, frame, (100, 50)), (0, 0));
+    assert_eq!(
+        frame_point(target, frame, (100 + 1279, 50 + 959)),
+        (639, 199)
+    );
+    assert_eq!(
+        frame_point(target, frame, (100 + 640, 50 + 480)),
+        (320, 100)
+    );
+    assert_eq!(
+        frame_point(target, frame, (-5_000, i32::MAX)),
+        (0, 199),
+        "outside, its nearest edge"
+    );
+}
+
+#[test]
+fn a_thumbnail_is_the_frame_at_the_monitors_shape_on_black() {
+    // A white 640x200 frame on a card wider than it is 4:3.
+    let white = alloc::vec![0xFF; 640 * 200 * DOT];
+    let size = (200, 120);
+    let picture = thumbnail(640, 200, &white, size).unwrap();
+    assert_eq!(picture.len(), 200 * 120 * DOT);
+    let at = |x: usize, y: usize| &picture[(y * 200 + x) * DOT..][..DOT];
+    assert_eq!(
+        at(0, 60),
+        [0, 0, 0, 0xFF],
+        "black beside the 160x120 picture"
+    );
+    assert_eq!(at(19, 60), [0, 0, 0, 0xFF]);
+    assert_eq!(at(20, 0), [0xFF; 4], "the frame stretched to 4:3");
+    assert_eq!(at(179, 119), [0xFF; 4]);
+    assert_eq!(at(180, 60), [0, 0, 0, 0xFF]);
+    assert_eq!(
+        thumbnail(640, 200, &white[1..], size),
+        None,
+        "pixels not the frame's"
+    );
+    assert_eq!(
+        thumbnail(640, 200, &white, (1, 1)),
+        None,
+        "too small for the shape"
+    );
+}
+
+#[test]
+fn a_screenshot_is_the_monitors_shape_at_least_as_wide_as_asked_in_whole_dots() {
+    let mut frame = alloc::vec![0u8; 320 * 200 * DOT];
+    for pixel in frame.as_chunks_mut::<DOT>().0.iter_mut().take(320) {
+        *pixel = [0xFF, 0x80, 0x00, 0xFF];
+    }
+    let (w, h, shot) = screenshot(320, 200, &frame, 640).unwrap();
+    assert_eq!((w, h), (640, 480), "two pixels a dot across, 4:3");
+    assert_eq!(shot.len(), 640 * 480 * DOT);
+    assert_eq!(
+        &shot[..DOT],
+        &[0xFF, 0x80, 0x00, 0xFF],
+        "the top row kept its colour"
+    );
+    let last = shot.len() - DOT;
+    assert_eq!(
+        &shot[last..],
+        &[0, 0, 0, 0xFF],
+        "and the rest is the black it was"
+    );
+    assert_eq!(
+        screenshot(720, 350, &alloc::vec![0; 720 * 350 * DOT], 640).map(|(w, h, _)| (w, h)),
+        Some((720, 540))
+    );
+    assert_eq!(
+        screenshot(896, 600, &alloc::vec![0; 896 * 600 * DOT], 0).map(|(w, h, _)| (w, h)),
+        Some((896, 672)),
+        "a frame already wider than asked is kept a pixel a dot"
+    );
+    assert_eq!(
+        screenshot(320, 200, &frame[1..], 640),
+        None,
+        "pixels not the frame's"
+    );
+}

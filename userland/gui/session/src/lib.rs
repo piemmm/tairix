@@ -190,6 +190,7 @@ pub mod confirm;
 pub mod depart;
 pub mod desktop;
 pub mod device;
+pub mod documents;
 pub mod drag;
 pub mod drain;
 pub mod effects;

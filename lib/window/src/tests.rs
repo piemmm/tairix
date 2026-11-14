@@ -35,7 +35,9 @@ use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
-use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep, DROP_LANDINGS_MAX};
+use tairix_abi::window_ipc::{
+    DocumentsRefusal, LandingName, LandingOutcome, LandingStep, DROP_LANDINGS_MAX,
+};
 
 use crate::client::{
     pointer_point, present_damage, present_damage_list, presented_damage, retained_damage, Answer,
@@ -593,6 +595,10 @@ struct RecordingHost {
     locks: usize,
     /// Every process the zone store was delegated to.
     zone_grants: Vec<ProcId>,
+    /// Every documents folder asked for: its window, owner and application;
+    /// and every request refused while one was owed.
+    documents: Vec<(u64, ProcId, Option<AppIdentity>)>,
+    documents_refused: Vec<(ProcId, u64)>,
     /// Every screensaver preview document this host was handed.
     previews: Vec<String>,
     /// Every authorisation the engine passed on, and the refusal this host
@@ -632,6 +638,8 @@ impl Default for RecordingHost {
             asked_by: Vec::new(),
             locks: 0,
             zone_grants: Vec::new(),
+            documents: Vec::new(),
+            documents_refused: Vec::new(),
             previews: Vec::new(),
             authorisations: Vec::new(),
             refuse_authorise: None,
@@ -876,6 +884,28 @@ impl WindowHost for RecordingHost {
 
     fn pick_refused(&mut self, caller: ProcId, window_id: u64, _reason: &'static str) {
         self.picks_refused.push((caller, window_id));
+    }
+
+    fn documents_folder_requested(
+        &mut self,
+        window_id: u64,
+        owner: ProcId,
+        app: Option<&AppIdentity>,
+    ) -> Result<(), Errno> {
+        self.documents.push((window_id, owner, app.copied()));
+        if app.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    fn documents_folder_refused(
+        &mut self,
+        caller: ProcId,
+        _app: Option<&AppIdentity>,
+        window_id: u64,
+    ) {
+        self.documents_refused.push((caller, window_id));
     }
 
     fn drag_requested(&mut self, window_id: u64, items: &DragItems) -> Result<(), Errno> {
@@ -5935,6 +5965,153 @@ fn a_subtree_pick_concludes_with_the_folder_handed_over_and_its_name() {
             .map(|(_, event)| WindowEvent::from_bytes(event)),
         Some(Ok(WindowEvent::PickCancelled { window_id: window }))
     );
+}
+
+/// An application's documents folder is asked for by its window's owner,
+/// owed once across its windows, and answered exactly once with the handle
+/// or the reason; a caller running no verified bundle is refused by the host.
+#[test]
+fn a_documents_folder_is_owed_once_and_answered_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let micro = AppIdentity::new("os.tairix.openmicro", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, micro)];
+    let mut client = connected(&loopback);
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    let mut sink = QueueSink::default();
+    let conclude = |sink: &mut QueueSink, answer, window| {
+        loopback.borrow_mut().server.conclude_documents_folder(
+            sink,
+            (proc_id(0xA1), window),
+            answer,
+        )
+    };
+    assert_eq!(
+        conclude(&mut sink, Ok(5), first),
+        Err(Errno::OutOfRange),
+        "nothing owed"
+    );
+
+    client.request_documents_folder(first).expect("asked");
+    assert_eq!(
+        loopback.borrow().host.documents,
+        alloc::vec![(first, proc_id(0xA1), Some(micro))]
+    );
+    assert_eq!(
+        loopback.borrow().server.documents_folder_owed(first),
+        Some(proc_id(0xA1))
+    );
+    client.request_documents_folder(second).expect("posted");
+    assert_eq!(
+        loopback.borrow().host.documents_refused,
+        alloc::vec![(proc_id(0xA1), second)],
+        "one owed across its windows"
+    );
+    assert_eq!(loopback.borrow().host.documents.len(), 1);
+    assert_eq!(
+        conclude(&mut sink, Ok(0), first),
+        Err(Errno::OutOfRange),
+        "no zero handle"
+    );
+    conclude(&mut sink, Ok(12), first).expect("answered");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(endpoint, event)| (*endpoint, WindowEvent::from_bytes(event))),
+        Some((
+            EVENTS_A,
+            Ok(WindowEvent::DocumentsFolder {
+                window_id: first,
+                handle: 12,
+            })
+        ))
+    );
+    assert_eq!(
+        conclude(&mut sink, Ok(12), first),
+        Err(Errno::OutOfRange),
+        "answered once"
+    );
+
+    client
+        .request_documents_folder(second)
+        .expect("asked again");
+    conclude(&mut sink, Err(DocumentsRefusal::NotTheirs), second).expect("refused");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(_, event)| WindowEvent::from_bytes(event)),
+        Some(Ok(WindowEvent::DocumentsFolderRefused {
+            window_id: second,
+            refusal: DocumentsRefusal::NotTheirs,
+        }))
+    );
+    assert_eq!(loopback.borrow().server.documents_folder_owed(second), None);
+}
+
+/// A request whose window closes keeps its place until the host concludes
+/// it, telling nobody, and an exited application's requests go with it.
+#[test]
+fn a_documents_folder_owed_past_its_window_holds_its_place() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let micro = AppIdentity::new("os.tairix.openmicro", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, micro)];
+    let mut client = connected(&loopback);
+    let first = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let second = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    client.request_documents_folder(first).expect("asked");
+    client.close(first).expect("closed");
+    assert_eq!(loopback.borrow().server.documents_folder_owed(first), None);
+    client.request_documents_folder(second).expect("posted");
+    assert_eq!(
+        loopback.borrow().host.documents_refused,
+        alloc::vec![(proc_id(0xA1), second)],
+        "the closed window's request still counts"
+    );
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_documents_folder(
+            &mut sink,
+            (proc_id(0xA1), first),
+            Err(DocumentsRefusal::Unavailable),
+        )
+        .expect("concluded");
+    assert!(sink.delivered.is_empty(), "nobody to tell");
+    client.request_documents_folder(second).expect("asked");
+    assert_eq!(
+        loopback.borrow().server.documents_folder_owed(second),
+        Some(proc_id(0xA1))
+    );
+
+    let inner = &mut *loopback.borrow_mut();
+    inner.server.client_exited(&mut inner.host, proc_id(0xA1));
+    assert_eq!(
+        inner.server.conclude_documents_folder(
+            &mut sink,
+            (proc_id(0xA1), second),
+            Err(DocumentsRefusal::Unavailable),
+        ),
+        Err(Errno::OutOfRange),
+        "gone with its application"
+    );
+}
+
+/// A caller running no verified bundle has no manifest to name a folder, and
+/// the host's refusal leaves nothing owed.
+#[test]
+fn a_documents_folder_refused_by_the_host_leaves_nothing_owed() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client.request_documents_folder(window).expect("posted");
+    assert_eq!(
+        loopback.borrow().host.documents,
+        alloc::vec![(window, proc_id(0xA1), None)]
+    );
+    assert_eq!(loopback.borrow().server.documents_folder_owed(window), None);
 }
 
 /// The files a folder pick delegated, each named and handled.

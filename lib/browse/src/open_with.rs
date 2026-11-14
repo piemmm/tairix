@@ -60,6 +60,7 @@ pub struct AppAssociation {
     bundle_path: String,
     mime_types: Vec<String>,
     writes_documents: bool,
+    documents_folder: Option<String>,
 }
 
 impl AppAssociation {
@@ -76,6 +77,7 @@ impl AppAssociation {
             bundle_path: bundle_path.into(),
             mime_types,
             writes_documents: false,
+            documents_folder: None,
         }
     }
 
@@ -92,6 +94,13 @@ impl AppAssociation {
     #[must_use]
     pub const fn writes_documents(&self) -> bool {
         self.writes_documents
+    }
+
+    /// The folder beneath the user's `Home/Documents/` the bundle's signed
+    /// manifest asks to be granted, as the manifest spells it.
+    #[must_use]
+    pub fn documents_folder(&self) -> Option<&str> {
+        self.documents_folder.as_deref()
     }
 
     /// The bundle's human-readable name — the "Open With…" menu label.
@@ -153,7 +162,8 @@ pub fn association_from_manifest(
     for index in 0..usize::from(header.mime_count) {
         mimes.push(mime_type_at(body, caps, index).ok()?.to_string());
     }
-    let association = AppAssociation::new(header.bundle_title(), bundle_path, mimes);
+    let mut association = AppAssociation::new(header.bundle_title(), bundle_path, mimes);
+    association.documents_folder = header.documents_folder().map(String::from);
     Some(if header.writes_documents() {
         association.writing_documents()
     } else {

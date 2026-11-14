@@ -35,6 +35,8 @@ tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The keyed hash a shared guest target directory is named with.
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# The one rule a documents folder's name is judged by: a visible leaf name.
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The QEMU runner's own per-arch defaults, so the `virt` tree a build script
 # dumps describes the same machine the runner starts (one definition of the
 # default guest RAM, not a copy in each).

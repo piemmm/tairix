@@ -426,10 +426,14 @@ tairix-raster = { path = "../../lib/raster", version = "=0.0.0" }
 # The pinned shader set, each module built from its Rust source and held to
 # the bytes committed beside it.
 tairix-shaders = { path = "../../lib/shaders", version = "=0.0.0" }
-# The BBC Micro emulator: its CPU is held to the external conformance suite
+# The Open Micro Emulator: its CPU is held to the external conformance suite
 # through the crate's own vector runner, so the sample its tests replay and
 # the full suite are judged by one definition.
-tairix-beeb = { path = "../../userland/apps/beeb", version = "=0.0.0" }
+tairix-openmicro = { path = "../../userland/apps/openmicro", version = "=0.0.0" }
+# The emulators' machine library: the Open Micro vertical aims at a card and
+# its menu, and declares the icon-bar menu, through the library's own layout
+# and rows.
+tairix-machines = { path = "../../lib/machines", version = "=0.0.0" }
 # The desktop's own SVG decoder. A shipped vector master is validated through
 # exactly the decoder the desktop will draw it with, and the icon gate reads
 # the authored design box from it: the decoder letter-boxes a rectangular
@@ -493,7 +497,7 @@ tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_q
 # row it clicks and the process the guest attributes the exit to are one
 # definition.
 tairix-test-netmap-qemu-aarch64 = { path = "../../tests/integration/netmap_qemu_aarch64", version = "=0.0.0" }
-tairix-test-beeb-qemu-aarch64 = { path = "../../tests/integration/beeb_qemu_aarch64", version = "=0.0.0" }
+tairix-test-openmicro-qemu-aarch64 = { path = "../../tests/integration/openmicro_qemu_aarch64", version = "=0.0.0" }
 # The WinterSun client vertical's shared contract: the line typed at the shell
 # and the bundles its guest latches, so the script and the PASS gate read one
 # definition.

@@ -2102,6 +2102,39 @@ beneath the folder and acts as the user. Its name is the application's to take
 (`TakePickedName`). A folder that cannot be opened keeps the picker up stating
 why; a refused grant concludes `PickCancelled`.
 
+### An application's documents folder
+
+`RequestDocumentsFolder` hands an application the one folder its signed
+manifest names (`documents-folder`) beneath the user's `Home/Documents/`,
+without a picker — the one place outside its own store an application reaches
+without the user choosing it. The window host reads the name from the
+installed manifest of the bundle the kernel attests the caller runs, never from
+the request, and refuses with `PermissionDenied` a caller running no verified
+bundle, a manifest naming none, or a name that is not one visible folder name.
+The window engine keeps at most `DOCUMENTS_FOLDER_MAX_OPEN` requests owed an
+application, one whose window has closed counting until it is concluded, so the
+file work an application sets off without the user is bounded.
+
+The file worker follows the path to `Home/Documents/` as the user laid it out,
+making each folder that is missing, then opens the application's folder
+without following a link. A missing one is made exclusively and marked with
+the application's publisher and bundle id in the `tairix.documents-owner`
+attribute (`OWNER_MARK`), which takes `CAP_FS_ACCESS` to set; one that cannot
+be marked is taken away again. Only a folder carrying the requester's own mark
+is granted: the user's own folder or another application's is refused
+`NotTheirs`, a file or a link at the name `NotAFolder`, and documents out of
+reach, a folder that cannot be made, or a desktop with too many filesystem
+calls waiting `Unavailable`. The serve loop grants the folder with `fd_grant`
+under `GRANT_SUBTREE` and the session's own reach to the window's owner and
+concludes with `DocumentsFolder`; the application redeems a directory
+capability (`tairix_rt::Dir::from_delegation`) confined beneath the folder.
+
+Each decision is on the audit trail, naming the application by bundle id and
+never the folder: `DOCUMENTS_FOLDER_GRANTED` (20044), or
+`DOCUMENTS_FOLDER_REFUSED` (20045) with why — a refusal before any folder is
+looked at, a refused folder, or a grant that could not be minted. A request
+whose window closed concludes telling nobody, and its folder closes.
+
 ### And the trusted picker's own witness
 
 `PICKER_SHOWN` ("file picker on screen") is the same announcement for the one

@@ -128,7 +128,7 @@ for filesystems, the feature section below.
 | Program library launcher (search by name, purpose and folder; favourites and frequent use kept per account; fully keyboard-driven; animated, still under reduced motion) | ✓ | ✓ | ✓ | ▢ |
 | Desktop music player (`music.app`: playlist, gapless, album art and tags read in the sandbox, no filesystem capability) | ✓ | ✓ | ✓ | ▢ |
 | PC emulator (`PCEmulator.app`: an 8088–80186 PC/XT-class machine and its 8087 in a capability-empty worker, TAIRiX DOS on its 30 MB disk, the screen scaled sharp, raw keyboard, the mouse followed or captured, sound, a debugger) | ◐ | ◐ | ◐ | ▢ |
-| BBC Micro emulator (`beeb.app`: a cycle-exact Model B in a capability-empty worker, clean-room MOS, BBC BASIC and DFS, discs and tapes read and written back, the picture sharp or smooth, sound paced by the device, snapshots) | ◐ | ◐ | ◐ | ▢ |
+| Open Micro Emulator (`OpenMicro.app`: a library of cycle-exact BBC Micro Model B and Acorn Electron machines, the Electron's Plus 1 among them, each in a capability-empty worker; clean-room MOS, Electron OS, BBC BASIC, DFS and Plus 1 ROMs; discs and tapes read and written back and made in each machine's folder in Documents; suspend and resume, snapshots, the picture sharp or smooth, sound paced by the device) | ◐ | ◐ | ◐ | ▢ |
 | Audio follows the seat (held on its frame outside the room, resumed there; recording published as a notice) | ✓ | ✓ | ✓ | ▢ |
 | Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |
 | Desktop sound: icon-bar volume panel and recording indicator, Settings Sound pane, Switchboard Audio pane; the user's controls remembered and restored per session | ✓ | ✓ | ✓ | ▢ |

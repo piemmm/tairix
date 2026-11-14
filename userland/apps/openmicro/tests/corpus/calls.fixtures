@@ -1,0 +1,209 @@
+# Recorded by `cargo xtask openmicro --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario osfile_reads_a_files_catalogue_entry
+row      90001
+row 0 A 0 19 FF FF 23 80 FF FF 45 3 0 0 0 0
+row 0 0
+row >$&A00="NOPE":!&900=&A00:A%=5:X%=0:Y%=9:
+row P.~(USR&FFDD AND &FFFFFF)
+row      90000
+row >$&A00="NOPE":!&900=&A00:A%=6:X%=0:Y%=9:
+row P.~(USR&FFDD AND &FFFFFF)
+row      90000
+row >$&A00="A":!&900=&A00:A%=6:X%=0:Y%=9:P.~
+row (USR&FFDD AND &FFFFFF):*INFO A
+row      90001
+row Not found
+row >
+
+scenario osfile_reads_a_locked_file_as_not_deletable
+row >$&A00="A":!&900=&A00:FOR I%=2 TO 17:I%?
+row &900=&EE:NEXT:A%=5:X%=0:Y%=9:CALL&FFDD:S
+row $="":FOR I%=10 TO 17:S$=S$+STR$~(I%?&900
+row )+" ":NEXT:P.S$
+row 0 1 0 0 8 0 0 0
+row >
+
+scenario osfile_loads_to_the_files_own_address
+row      90001
+row 0 A 0 19 0 0 0 19 0 0 0 1 0 0 0 0 0 0
+row >
+
+scenario osfile_writes_addresses_and_attributes
+row >*INFO H
+row $.H           011900 021900 000010 008
+row >*ACCESS A L
+row >$&A00="A":!&900=&A00:!&902=&2000:A%=2:X
+row %=0:Y%=9:CALL&FFDD:*INFO A
+row $.A        L  002000 001900 000100 002
+row >P.ERR
+row          0
+row >?&90E=0:A%=4:X%=0:Y%=9:CALL&FFDD:*INFO
+row A
+row $.A           002000 001900 000100 002
+row >
+disc 0 74094ee3d3cea69d47576825b00c5fae3b4d9de61c4dcb4fb5144d9f184b37cb
+
+scenario osfile_attributes_01_set_the_lock_as_dfs_does
+row $.A           001900 001900 000100 002
+row >
+
+scenario osfile_attributes_02_set_the_lock_as_dfs_does
+row $.A        L  001900 001900 000100 002
+row >
+
+scenario osfile_attributes_04_set_the_lock_as_dfs_does
+row $.A           001900 001900 000100 002
+row >
+
+scenario osfile_attributes_08_set_the_lock_as_dfs_does
+row $.A        L  001900 001900 000100 002
+row >
+
+scenario osfile_attributes_10_set_the_lock_as_dfs_does
+row $.A           001900 001900 000100 002
+row >
+
+scenario osfile_attributes_80_set_the_lock_as_dfs_does
+row $.A           001900 001900 000100 002
+row >
+
+scenario osargs_reads_the_filing_system_and_a_files_pointer
+row       7004
+row >A%=1:Y%=0:X%=&70:!&70=0:P.~(USR&FFDA AN
+row D &FFFFFF),~!&70
+row       7000  FFFF0000
+row >A%=&FF:Y%=0:P.~(USR&FFDA AND &FFFFFF)
+row       7000
+row >F%=OPENIN"A":A%=2:Y%=F%:X%=&70:R%=USR&F
+row FDA:P.~(R% AND &FFFFFF),~!&70:A%=0:R%=US
+row R&FFDA:P.~(R% AND &FFFFFF),~!&70
+row     117000       100
+row     117000         0
+row >
+
+scenario osgbpb_reads_the_title_directories_and_names
+row          6  32090000
+row 1 30 1 24 EE EE EE EE EE EE EE EE EE EE
+row EE EE EE EE EE EE EE EE EE EE EE
+row 0 0 A 0 0 3 0 0 0 0 0 0 0
+row >PROCG(7,3,0)
+row          7  32090000
+row 1 30 1 24 EE EE EE EE EE EE EE EE EE EE
+row EE EE EE EE EE EE EE EE EE EE EE
+row 0 0 A 0 0 3 0 0 0 0 0 0 0
+row >PROCG(8,2,0)
+row          8  32090000
+row 7 4C 4F 4E 47 4E 41 4D 7 41 20 20 20 20
+row 20 20 EE EE EE EE EE EE EE EE EE
+row 3 10 A 0 0 0 0 0 0 18 0 0 0
+row >PROCG(8,2,2)
+row          8  33090000
+row EE EE EE EE EE EE EE EE EE EE EE EE EE E
+row E EE EE EE EE EE EE EE EE EE EE EE
+row 3 0 A 0 0 2 0 0 0 1A 0 0 0
+row >PROCG(8,1,9)
+row          8  33090000
+row EE EE EE EE EE EE EE EE EE EE EE EE EE E
+row E EE EE EE EE EE EE EE EE EE EE EE
+row 3 0 A 0 0 1 0 0 0 19 0 0 0
+row >
+
+scenario osgbpb_reads_a_file_by_the_pointer_and_from_an_offset
+row          5  32090000
+row C 54 45 53 54 44 49 53 43 0 0 0 0 0 0 EE
+row  EE EE EE EE EE
+row 0 0 A 0 0 3 0 0 0 0 0 0 0
+row >F%=OPENIN"LONGNAM":PROCG(4,5,0)
+row          4  32090000
+row 0 0 0 0 0 EE EE EE EE EE EE EE EE EE EE
+row EE EE EE EE EE EE
+row 11 5 A 0 0 0 0 0 0 5 0 0 0
+row >PROCG(3,4,&10)
+row          3  32090000
+row 0 0 0 0 EE EE EE EE EE EE EE EE EE EE EE
+row  EE EE EE EE EE EE
+row 11 4 A 0 0 0 0 0 0 14 0 0 0
+row >P.PTR_F%
+row         20
+row >PROCG(4,&400,0)
+row          4  33090000
+row 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+row 0
+row 11 31 D 0 0 CF 0 0 0 45 3 0 0
+row >P.PTR_F%
+row        837
+row >
+
+scenario osgbpb_writes_a_file_by_the_pointer_and_at_an_offset
+row          2  32090000
+row 11 8 A 0 0 0 0 0 0 8 0 0 0
+row >PROCG(1,3,&20)
+row          1  32090000
+row 11 3 A 0 0 0 0 0 0 23 0 0 0
+row >P.PTR_F%,EXT_F%:CLOSE_F%:*INFO W
+row         35        35
+row $.W           000000 000000 000023 008
+row >
+disc 0 015591e844819241da0fa2e6c9723c2c5e51e7597f23dff62e443940c6eb1d8d
+
+scenario osgbpb_5_reads_the_title_after_a_disc_change
+row          C
+row         54
+row         45
+row         53
+row         54
+row         44
+row         49
+row         53
+row         43
+row          0
+row          0
+row          0
+row          0
+row          3
+row          0
+row         EE
+row         EE
+row >
+
+scenario osword_7d_7e_and_7f_read_the_catalogue_and_sectors
+row          3
+row >!&900=0:A%=&7E:X%=0:Y%=9:CALL&FFF1:P.~!
+row &900
+row      32000
+row >?&900=0:!&901=&A00:?&905=3:?&906=&53:?&
+row 907=0:?&908=0:?&909=&21:A%=&7F:X%=0:Y%=9
+row :CALL&FFF1:P.~?&90A,$&A00
+row          0
+row >
+
+scenario osword_7f_reads_into_io_memory_by_sector
+row          0
+row >S$="":FOR I%=0 TO 15:S$=S$+STR$~(I%?&A0
+row 0)+" ":NEXT:P.S$
+row 54 45 53 54 44 49 53 43 4C 4F 4E 47 4E 4
+row 1 4D 24
+row >?&900=0:!&901=&00000B00:?&905=3:?&906=&
+row 53:?&907=0:?&908=1:?&909=&21:A%=&7F:X%=0
+row :Y%=9:CALL&FFF1:P.~?&90A
+row          0
+row >S$="":FOR I%=0 TO 15:S$=S$+STR$~(I%?&B0
+row 0)+" ":NEXT:P.S$
+row 0 0 0 0 3 18 3 20 0 19 23 80 45 3 CC 4
+row >
+
+scenario osword_7f_returns_its_result_when_the_command_ends
+row          0        54
+row          0        54
+row >
+
+scenario osword_7f_reports_a_fault_in_its_result
+row          0         0
+row          0         0
+row >
+
+scenario osword_7f_reads_a_special_register
+row         C1
+row >

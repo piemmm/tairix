@@ -156,7 +156,7 @@ pub const MAX_SNAPSHOT: usize = 20 << 20;
 /// Most bytes of a snapshot as it crosses and is kept: [`MAX_SNAPSHOT`]
 /// compressed however badly.
 #[must_use]
-pub fn most_kept() -> usize {
+pub const fn most_kept() -> usize {
     tairix_compress::max_compressed_len(MAX_SNAPSHOT)
 }
 

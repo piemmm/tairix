@@ -698,6 +698,7 @@ tairix/
 │   ├── land/            # Land generator: relief, courses, channels, snow, crops, levels.
 │   ├── linkclient/      # Supplier-link clients: DMA channels, clocks.
 │   ├── log/             # Structured logging.
+│   ├── machines/        # The emulators' machine library: records, states, library window.
 │   ├── memguard/        # Guard-region poison: the shared sentinel + canary window.
 │   ├── mix/             # Integer finalisers: SplitMix64, lowbias32, stream keys.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
@@ -1752,7 +1753,7 @@ You are not exempt from any rule above. In addition:
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
     | The temporary work list from the Raspberry Pi 4 investigation: the USB host controller's serve loop never waiting (D1125), mass-storage medium detection, spin-up and deadlines, attached-volume names, removable-media ownership, DESK-21, owned dialog windows replacing in-window panels, and content-sized alerts | `plans/TEMPORARY.md` |
     | Screen capture: the desktop as the only capturer, the compositor's capture tap, the capture chords and bar, stills, the recorder component, VP8/WebM and Opus, desktop-sound monitor streams, and playing recordings back | `plans/CAPTURE.md` |
-    | The BBC Micro emulator (`beeb.app`): the cycle-exact 6502 and Model B devices, the sandboxed machine worker and its protocol, the clean-room MOS, BASIC and DFS ROMs and the Rust 6502 builder that emits them, the reference harness and its clean-room boundary, disc and tape media, snapshots, and the front end's pacing, key mapping and presentation | `plans/BEEB.md` |
+    | The Open Micro emulator (`OpenMicro.app`): the cycle-exact 6502, the BBC Micro Model B and Acorn Electron devices and the Plus 1, the sandboxed machine worker and its protocol, the clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs and the Rust 6502 builder that emits them, the reference harness and its clean-room boundary, disc and tape media, snapshots, the machine library both emulators keep (`lib/machines`), an application's own documents folder, and the front end's pacing, key mapping and presentation | `plans/BEEB.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a
@@ -2177,7 +2178,11 @@ directly: it lives under `Settings/Apps/<bundle-id>/` and
 rather than the display name, and is reachable only through the app-data
 service, which derives the store from the caller's kernel-attested app
 identity. All other writes require a user-mediated capability (e.g. a file
-picker handing the app a one-shot file capability).
+picker handing the app a one-shot file capability), with one exception: the
+one folder beneath the user's `Home/Documents/` an application's signed
+manifest names, which the desktop session grants it writable and confined
+beneath itself without a picker, and only while the folder carries that
+application's own mark (`plans/BEEB.md` §6).
 
 **Command help is authored in the bundle, never hardcoded into the program
 or the image builder.** A command's help — the structured-Markdown documents

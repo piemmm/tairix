@@ -234,6 +234,8 @@ const SOURCES: &[&str] = &[
     "NXP",
     "Maxim",
     "Broadcom",
+    // Acorn's machine manuals: the User Guides and Advanced User Guides.
+    "User Guide",
     // Wire and file formats.
     "DHCP",
     "DNS",
@@ -814,6 +816,7 @@ mod tests {
             "/// The Logical Screen Descriptor's fixed length (`GIF89a` §18).",
             "/// NDR 2.0 (C706 §14).",
             "//! and the structured control-flow rules (SPIR-V 1.6 §2.11).",
+            "//! the fire buttons (Electron Advanced User Guide §15.5–15.6).",
         ] {
             assert!(
                 reasons(body).is_empty(),

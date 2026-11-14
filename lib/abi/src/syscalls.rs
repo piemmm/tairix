@@ -2339,7 +2339,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // reissued, so it names one process for all time.
             AbiType::UserPtr,
             AbiType::Len,
-            // The flags: `GRANT_FILE_ONLY`, or none; any other bit is refused.
+            // The flags: `GRANT_FILE_ONLY`, `GRANT_SUBTREE`, or none; any
+            // other bit is refused.
             AbiType::U64,
             AbiType::Unit,
         ],

@@ -119,6 +119,7 @@ members = [
     "lib/land",
     "lib/linkclient",
     "lib/log",
+    "lib/machines",
     "lib/memguard",
     "lib/mix",
     "lib/multiboot2",
@@ -338,7 +339,7 @@ members = [
     "userland/apps/rmdir",
     "userland/apps/patience",
     "userland/apps/sapper",
-    "userland/apps/beeb",
+    "userland/apps/openmicro",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/settings",
@@ -630,7 +631,7 @@ members = [
     "tests/integration/netstack_synflood_qemu_aarch64",
     "tests/integration/netstack_icmp_qemu_aarch64",
     "tests/integration/netmap_qemu_aarch64",
-    "tests/integration/beeb_qemu_aarch64",
+    "tests/integration/openmicro_qemu_aarch64",
     "tests/integration/netstack_telnet_qemu_aarch64",
     "tests/integration/discovery_qemu_aarch64",
     "tests/integration/netstack_static_qemu_aarch64",
@@ -838,7 +839,7 @@ opt-level = 3
 # The emulated BBC Micro runs two million bus cycles a second, each one
 # sampling interrupts and advancing the devices it reaches, so at
 # `opt-level = 1` a debug image would measure the profile, not the machine.
-[profile.dev.package.tairix-beeb]
+[profile.dev.package.tairix-openmicro]
 opt-level = 3
 
 # The patience solver searches tens of thousands of positions after every

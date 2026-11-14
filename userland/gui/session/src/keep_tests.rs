@@ -12,8 +12,8 @@ use tairix_raster::{Pixel, Surface};
 use tairix_tz::CivilClock;
 
 use super::{
-    claim_scratch, keep_picture, keep_png, kept_at, kept_name, place_kept, scratch_path, Found,
-    Keeping, KeptFiles, Picture, Unkept, PNG_ENDING, SCRATCH,
+    claim_scratch, keep_picture, keep_png, kept_at, kept_name, make_folders, place_kept,
+    scratch_path, Found, Keeping, KeptFiles, Picture, Unkept, PNG_ENDING, SCRATCH,
 };
 
 /// A filesystem of folders and files held in memory.
@@ -31,10 +31,17 @@ pub(crate) struct Table {
     pub(crate) refuse_place: Option<Errno>,
     /// How many times a scratch file was written.
     pub(crate) scratch_writes: usize,
+    /// How many times a folder was asked to be made.
+    pub(crate) folders_made: usize,
 }
 
 impl KeptFiles for Table {
+    fn has_folder(&mut self, path: &str) -> bool {
+        self.folders.iter().any(|folder| folder == path)
+    }
+
     fn make_folder(&mut self, path: &str) -> Result<(), Errno> {
+        self.folders_made += 1;
         if let Some((refused, errno)) = &self.refuse_folder {
             if refused == path {
                 return Err(*errno);
@@ -645,4 +652,26 @@ fn a_scratch_file_is_claimed_past_those_taken() {
         claim_scratch(folder, "webm", |_| Err::<(), _>(Errno::AlreadyExists)),
         Err(Unkept::Crowded(String::from(folder)))
     );
+}
+
+#[test]
+fn folders_already_there_are_looked_for_and_only_the_missing_one_made() {
+    let mut files = Table {
+        folders: alloc::vec![
+            String::from("/Users/u/Home"),
+            String::from("/Users/u/Home/Documents")
+        ],
+        ..Table::default()
+    };
+    let made = make_folders(&mut files, "/Users/u", &["Home", "Documents", "Open Micro"]);
+    assert_eq!(made, Ok(String::from("/Users/u/Home/Documents/Open Micro")));
+    assert_eq!(
+        files.folders_made, 1,
+        "a make refused for a folder there is audited"
+    );
+    assert_eq!(
+        make_folders(&mut files, "/Users/u", &["Home", "Documents", "Open Micro"]),
+        made
+    );
+    assert_eq!(files.folders_made, 1, "nothing is made twice");
 }

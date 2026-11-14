@@ -112,6 +112,7 @@
   - [`tairix-land`](./lib/land.md)
   - [`tairix-linkclient`](./lib/linkclient.md)
   - [`tairix-log`](./lib/log.md)
+  - [`tairix-machines`](./lib/machines.md)
   - [`tairix-mix`](./lib/mix.md)
   - [`tairix-multiboot2`](./lib/multiboot2.md)
   - [`tairix-net`](./lib/net.md)
@@ -273,7 +274,7 @@
 - [Sapper](./desktop/sapper.md)
 - [Patience](./desktop/patience.md)
 - [Cinder](./desktop/cinder.md)
-- [BBC Micro](./desktop/beeb.md)
+- [Open Micro Emulator](./desktop/openmicro.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 
 # ABI

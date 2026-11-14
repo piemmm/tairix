@@ -2411,19 +2411,21 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Delegate one of the caller's own open descriptors — a filesystem file
-    /// or a pipe end — to another live task as a one-shot grant, a file's
-    /// bounded above by `write_ceiling` bytes, returning the minted grant
-    /// handle (`plans/CAPABILITY_USE.md` CU6 — the file picker's
-    /// user-mediated hand-off; `plans/APPDATA.md` §3.8 — the app-data
-    /// service's blob descriptor).
+    /// Delegate one of the caller's own open descriptors — a filesystem file,
+    /// a directory as a capability to what lies beneath it, or a pipe end —
+    /// to another live task as a one-shot grant, a file's bounded above by
+    /// `write_ceiling` bytes, returning the minted grant handle
+    /// (`plans/CAPABILITY_USE.md` CU6 — the file picker's user-mediated
+    /// hand-off; `plans/APPDATA.md` §3.8 — the app-data service's blob
+    /// descriptor).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`], whatever the descriptor proves to be, and
     /// audited the call. The implementation resolves `fd` against the
     /// **caller's own** open table (a foreign or unopened descriptor fails
-    /// closed with [`Errno::NotFound`]), refuses a pty end, resource, or
-    /// directory with [`Errno::OutOfRange`], captures the caller's uid and
+    /// closed with [`Errno::NotFound`]), refuses a pty end, a resource, and a
+    /// directory without [`GRANT_SUBTREE`](tairix_abi::GRANT_SUBTREE) with
+    /// [`Errno::OutOfRange`], captures the caller's uid and
     /// effective capability set beside a plain file's path — or passes a
     /// delegation the caller was itself given on with its first grantor's
     /// captured authority unchanged, so a relay can never widen it and no
@@ -2454,7 +2456,10 @@ pub trait SyscallHandlers {
     /// can only narrow it.
     ///
     /// `flags` holds [`GRANT_FILE_ONLY`](tairix_abi::GRANT_FILE_ONLY) to
-    /// delegate only a regular file; any other bit is refused.
+    /// delegate only a regular file, or
+    /// [`GRANT_SUBTREE`](tairix_abi::GRANT_SUBTREE) to delegate a directory —
+    /// read-only under a zero ceiling, else writable with each file bounded by
+    /// it — and nothing but a directory; any other bit is refused.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in

@@ -343,6 +343,9 @@ pub enum PathError {
     /// A single leaf name contained a `/`: it names a path, not one file or
     /// directory. Only reported by [`validate_file_name`].
     SeparatorInName,
+    /// A leaf name that must be seen began with a dot, a hidden item's name.
+    /// Only reported by [`validate_visible_name`].
+    HiddenName,
     /// A `..` component tried to climb above a view, alias, or volume-id
     /// root.
     EscapesRoot,
@@ -380,6 +383,7 @@ impl fmt::Display for PathError {
             PathError::ColonInComponent => "path component contains a `:` (a reserved delimiter)",
             PathError::ReservedName => "`.` and `..` are not valid file or directory names",
             PathError::SeparatorInName => "a file or directory name may not contain `/`",
+            PathError::HiddenName => "a name that must be seen may not begin with `.`",
             PathError::EscapesRoot => "path climbs above its root",
             PathError::AliasEmpty => "alias name is empty",
             PathError::AliasTooLong => "alias name exceeds the maximum length",
@@ -747,6 +751,22 @@ pub fn validate_file_name(name: &str) -> Result<(), PathError> {
         return Err(PathError::SeparatorInName);
     }
     validate_component(name)
+}
+
+/// Validate a leaf name that must be seen: a [`validate_file_name`] name that
+/// is not a hidden item's ([`is_hidden_name`]), so what it names appears in
+/// every listing.
+///
+/// # Errors
+///
+/// As [`validate_file_name`], and [`HiddenName`](PathError::HiddenName) for a
+/// name beginning with a dot.
+pub fn validate_visible_name(name: &str) -> Result<(), PathError> {
+    validate_file_name(name)?;
+    if is_hidden_name(name) {
+        return Err(PathError::HiddenName);
+    }
+    Ok(())
 }
 
 /// Whether the grammar reads `input` as a path relative to the working
@@ -1389,6 +1409,7 @@ mod tests {
             PathError::ColonInComponent,
             PathError::ReservedName,
             PathError::SeparatorInName,
+            PathError::HiddenName,
             PathError::EscapesRoot,
             PathError::AliasEmpty,
             PathError::AliasTooLong,
@@ -1441,6 +1462,19 @@ mod tests {
             validate_file_name(&"a".repeat(MAX_COMPONENT_LEN + 1)),
             Err(PathError::ComponentTooLong)
         );
+    }
+
+    #[test]
+    fn a_visible_name_is_a_file_name_without_a_leading_dot() {
+        assert_eq!(validate_visible_name("Open Micro"), Ok(()));
+        assert_eq!(validate_visible_name("a.b"), Ok(()));
+        assert_eq!(validate_visible_name(".config"), Err(PathError::HiddenName));
+        assert_eq!(validate_visible_name(".."), Err(PathError::ReservedName));
+        assert_eq!(
+            validate_visible_name("a/b"),
+            Err(PathError::SeparatorInName)
+        );
+        assert_eq!(validate_visible_name(""), Err(PathError::EmptyComponent));
     }
 
     #[test]

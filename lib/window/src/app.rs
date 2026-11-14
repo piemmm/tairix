@@ -157,6 +157,18 @@ pub fn report_line(line: &str) {
     tairix_rt::io::write_stderr_line(Shown(line.strip_suffix('\n').unwrap_or(line)));
 }
 
+/// Let go of the delegation `event` hands over — a file or subtree picked, or
+/// a documents folder — for a window the application no longer serves, so it
+/// is not held for the life of the process.
+pub fn release_carried(event: &WindowEvent) {
+    if let WindowEvent::FilePicked { handle, .. }
+    | WindowEvent::SubtreePicked { handle, .. }
+    | WindowEvent::DocumentsFolder { handle, .. } = *event
+    {
+        drop(tairix_rt::File::from_delegation(handle));
+    }
+}
+
 /// State on `stderr` under `name`, and in an error alert holding window
 /// `owner` when it is some, that what `headline` names was not done because
 /// of `detail`: the user acted, and is owed the answer where they can see it.

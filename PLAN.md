@@ -192,7 +192,7 @@ plan's ledger. A `blocked` row names its blocker.
 | DRAW | `Draw.app`, the desktop vector editor, the `lib/bezier` geometry kernel and the `lib/drawing` editable drawing and its formats (`plans/DRAW.md`) | in progress |
 | PDF | The `lib/pdf` reader and opening PDFs in Draw and View.app (`plans/PDF.md`) | in progress |
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
-| BEEB | The BBC Micro Model B emulator `beeb.app` and its clean-room MOS, BASIC and DFS (`plans/BEEB.md`) | in progress |
+| BEEB | The Open Micro emulator `OpenMicro.app` — the BBC Micro Model B and the Acorn Electron with its Plus 1 — and their clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs (`plans/BEEB.md`) | blocked: BB18 needs a corpus of real software images a developer holds outside the tree |
 | PCEMU | `PCEmulator.app`, the PC/XT-class emulator up to the 80186, TAIRiX DOS, and the BR26 code installation its translator needs (`plans/PCEMU.md`) | in progress |
 
 ### Desktop
@@ -284,6 +284,9 @@ members, ext4's group descriptors and LAME's stream tag carry),
 `lib/crt` (the one picture tube — scan lines, phosphor afterglow, faceplate
 glow, noise and wobble, and the retained pipeline that draws them — which the
 terminal and the PC emulator draw through, `plans/PCEMU.md` PC16.4),
+`lib/machines` (the one machine library both emulators keep — the record of
+their machines, each machine's last screen and snapshot, the library window,
+the new-machine assistant and a card's menu, `plans/BEEB.md` §6),
 `lib/fat` (the one FAT12/16/32 on-disk format, which the FAT32 driver, the
 volume probe, the MBR writer's FAT types and the Atari metadata preset share,
 `plans/PCEMU.md` PC9),
@@ -1032,6 +1035,11 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-11-13 — §16.5: an application's own documents folder.** An emulator's
+  discs and tapes are the user's files, so they belong in `Home/Documents/`
+  where the user sees them, yet a picker for every disc it makes would ask the
+  user to choose what the signed manifest already declares.
 
 - **2026-11-08 — §25: a pinned process's heap holds what it has mapped.**
   PID 1's heap gave its free pages back at critical pressure, so its next

@@ -108,8 +108,8 @@ mod program {
     use tairix_abi::window_ipc::LandingStep;
     use tairix_abi::window_ipc::{
         event_endpoint_for, AlertSeverity, AlertSpec, AuthorisedOutcome, BundleRunPath,
-        DocumentName, DragItems, DropTarget, MenuOutcome, PointerAction, PreviewOutcome,
-        WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+        DocumentName, DocumentsRefusal, DragItems, DropTarget, MenuOutcome, PointerAction,
+        PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
         CapabilityId, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags, WaitSetOp,
@@ -139,6 +139,10 @@ mod program {
         StopReason,
     };
     use tairix_desktop_session::desktop::{LandingOffer, LandingWork};
+    use tairix_desktop_session::documents::{
+        self, before, open_documents_folder, DocumentsAsk, DocumentsFolders, DocumentsFs,
+        NoDocuments, DOCUMENTS, OWNER_MARK,
+    };
     use tairix_desktop_session::drag::PlaceRefused;
     use tairix_desktop_session::effects::{
         load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk, MAX_HELD_CALLS,
@@ -146,7 +150,9 @@ mod program {
     use tairix_desktop_session::held::{
         HeldDone, HeldJob, HeldQuestions, HeldSystem, HeldWord, HELD_JOBS,
     };
-    use tairix_desktop_session::keep::{keep_picture, kept_at, Found, KeptFiles, Picture, Unkept};
+    use tairix_desktop_session::keep::{
+        home_of, keep_picture, kept_at, make_folders, Found, KeptFiles, Picture, Unkept,
+    };
     use tairix_desktop_session::launcher::{
         elevated_launch, launched_entries, load_personal, running_bundles, store_personal,
         LauncherMemory, LoadedPersonal,
@@ -3306,6 +3312,7 @@ mod program {
             .set_font_families(tairix_font::families());
         let mut clipboard =
             tairix_desktop_session::clipboard::SessionClipboard::new(RtPayloadRegions);
+        let mut documents_asks: Vec<DocumentsAsk> = Vec::new();
 
         // Every way out of this function stops every worker. The guard is
         // declared after the handles, so it runs first: the desks stop, then the
@@ -4813,6 +4820,10 @@ mod program {
                                 prompt: &mut elevate,
                                 elevator: &mut elevator,
                             }),
+                            documents: &mut DocumentsDesk {
+                                programs: &programs,
+                                asks: &mut documents_asks,
+                            },
                         };
                         server.serve(
                             &mut bridge,
@@ -4823,6 +4834,20 @@ mod program {
                             &mut reply,
                         )
                     };
+                    for ask in documents_asks.drain(..) {
+                        ask_documents_folder(
+                            ask,
+                            &listings,
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps,
+                            &mut menu,
+                        );
+                    }
                     // A window opened by this pass wears the icon of the
                     // application the kernel says owns it. It runs here, not
                     // in the bridge, because the attested-caller table is
@@ -5214,6 +5239,7 @@ mod program {
                             cursor_sets: &cursor_set_names,
                             clipboard: &mut clipboard,
                             authorise: None,
+                            documents: &mut NoDocuments,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -5399,6 +5425,18 @@ mod program {
                             &mut menu,
                         ),
                         FileAnswer::Discarded => {}
+                        FileAnswer::Documents { ask, opened } => settle_documents_folder(
+                            &ask,
+                            opened,
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps,
+                            &mut menu,
+                        ),
                         FileAnswer::Desktop(done) => {
                             settle_desktop_call(
                                 done,
@@ -5665,6 +5703,7 @@ mod program {
                                 cursor_sets: &cursor_set_names,
                                 clipboard: &mut clipboard,
                                 authorise: None,
+                                documents: &mut NoDocuments,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -6467,6 +6506,35 @@ mod program {
                 .iter()
                 .find(|association| association.bundle_path() == bundle)
         }
+
+        /// What the one installed bundle the kernel attests `app` runs
+        /// declares, when there is exactly one.
+        fn of_app(&self, app: &tairix_abi::AppIdentity) -> Option<&AppAssociation> {
+            self.bundles
+                .path_of(app)
+                .and_then(|bundle| self.association(bundle))
+        }
+    }
+
+    /// The serve loop's side of the documents folder: the folder each
+    /// installed manifest names, and the requests accepted while serving,
+    /// for the file worker.
+    struct DocumentsDesk<'a> {
+        programs: &'a Programs,
+        asks: &'a mut Vec<DocumentsAsk>,
+    }
+
+    impl DocumentsFolders for DocumentsDesk<'_> {
+        fn named(&self, app: &tairix_abi::AppIdentity) -> Option<alloc::string::String> {
+            self.programs
+                .of_app(app)?
+                .documents_folder()
+                .map(alloc::string::String::from)
+        }
+
+        fn ask(&mut self, ask: DocumentsAsk) {
+            self.asks.push(ask);
+        }
     }
 
     /// What each application does with the documents it is handed, by the
@@ -6495,8 +6563,7 @@ mod program {
         fn association(&self, owner: ProcId) -> Option<&AppAssociation> {
             self.identity
                 .app_of(owner)
-                .and_then(|app| self.programs.bundles.path_of(&app))
-                .and_then(|bundle| self.programs.association(bundle))
+                .and_then(|app| self.programs.of_app(&app))
         }
     }
 
@@ -8582,6 +8649,12 @@ mod program {
         },
         /// A call for the user's own gesture on the desktop.
         Desktop(DesktopCall),
+        /// Find, or make and mark, the documents folder `ask` names beneath
+        /// the user's documents in `home`.
+        Documents {
+            ask: DocumentsAsk,
+            home: alloc::string::String,
+        },
     }
 
     /// A filesystem call a desktop gesture asks for.
@@ -8636,6 +8709,12 @@ mod program {
         Desktop(DesktopAnswer),
         /// A file taken back, or left where it no longer names what was made.
         Discarded,
+        /// The documents folder `ask` names, or why it is refused and the
+        /// reason recorded.
+        Documents {
+            ask: DocumentsAsk,
+            opened: Result<tairix_rt::File, (DocumentsRefusal, &'static str)>,
+        },
     }
 
     /// What a pick's file call came to.
@@ -8779,6 +8858,7 @@ mod program {
                 Self::Desktop(DesktopCall::Place(placed)) => routes.lane_of_path(&placed.path),
                 Self::Desktop(DesktopCall::Mounts) => Lane::Services,
                 Self::Desktop(DesktopCall::Volume(act)) => routes.lane_of_act(act),
+                Self::Documents { home, .. } => routes.lane_of_path(home),
             }
         }
 
@@ -8858,6 +8938,15 @@ mod program {
                     })
                 }
                 Self::Desktop(call) => FileAnswer::Desktop(call.run()),
+                Self::Documents { ask, home } => {
+                    let opened = open_documents_folder(
+                        &mut RtDocumentsFs { home: &home },
+                        &ask.name,
+                        &ask.app,
+                    )
+                    .map_err(|refusal| (refusal, documents::reason(refusal)));
+                    FileAnswer::Documents { ask, opened }
+                }
             }
         }
 
@@ -8923,6 +9012,77 @@ mod program {
                     path,
                     made: Err(err),
                 }),
+                Self::Documents { ask, .. } => FileAnswer::Documents {
+                    ask,
+                    opened: Err((DocumentsRefusal::Unavailable, before::BUSY)),
+                },
+            }
+        }
+    }
+
+    /// The user's documents as the file worker reaches them: the folders on
+    /// the way under `home` followed as the user laid them out and made where
+    /// they are missing, and each application's folder neither followed nor
+    /// granted unless it carries that application's mark.
+    struct RtDocumentsFs<'a> {
+        home: &'a str,
+    }
+
+    impl DocumentsFs for RtDocumentsFs<'_> {
+        type Documents = tairix_rt::Dir;
+        type Folder = tairix_rt::File;
+
+        fn documents(&mut self) -> Result<tairix_rt::Dir, Errno> {
+            let path = make_folders(&mut RtKeptFiles, self.home, &DOCUMENTS)
+                .map_err(|(_, errno)| errno)?;
+            tairix_rt::Dir::open(path.as_bytes()).map_err(Errno::from_syscall)
+        }
+
+        fn open(
+            &mut self,
+            documents: &tairix_rt::Dir,
+            name: &str,
+        ) -> Result<tairix_rt::File, Errno> {
+            let flags = tairix_abi::fs::OpenFlags::READ
+                .union(tairix_abi::fs::OpenFlags::DIRECTORY)
+                .union(tairix_abi::fs::OpenFlags::NO_FOLLOW);
+            documents
+                .open_file(name.as_bytes(), flags)
+                .map_err(Errno::from_syscall)
+        }
+
+        fn make(
+            &mut self,
+            documents: &tairix_rt::Dir,
+            name: &str,
+            mark: &[u8],
+        ) -> Result<(), Errno> {
+            let folder = documents
+                .make_dir(name.as_bytes(), tairix_abi::fs::FS_NEW_DIR_MODE)
+                .map_err(Errno::from_syscall)?;
+            let Err(refused) = folder.as_file().attr_set(OWNER_MARK, mark) else {
+                return Ok(());
+            };
+            // Unmarked, the folder would read as the user's own and never be
+            // granted, so it goes again while it is still the one made.
+            if let Ok(stat) = folder.as_file().stat() {
+                let _ = documents.unlink(
+                    name.as_bytes(),
+                    tairix_abi::fs::UnlinkFlags::DIRECTORY
+                        .union(tairix_abi::fs::UnlinkFlags::EXPECT_NODE),
+                    Some(&tairix_abi::fs::NodeExpect::of_node(stat.id)),
+                );
+            }
+            Err(Errno::from_syscall(refused))
+        }
+
+        fn mark(&mut self, folder: &tairix_rt::File) -> Result<Option<Vec<u8>>, Errno> {
+            match folder.attr_value(OWNER_MARK) {
+                Ok(mark) => Ok(Some(mark)),
+                Err(refused) => match Errno::from_syscall(refused) {
+                    Errno::NoData => Ok(None),
+                    errno => Err(errno),
+                },
             }
         }
     }
@@ -8937,27 +9097,13 @@ mod program {
         let (Ok(stat), Ok(dir)) = (file.stat(), tairix_rt::Dir::open(folder.as_bytes())) else {
             return;
         };
-        let expect = tairix_abi::fs::NodeExpect {
-            id: stat.id,
-            content_gen: 0,
-            size: 0,
-            modified: tairix_abi::time::Time64::UNIX_EPOCH,
-            changed: tairix_abi::time::Time64::UNIX_EPOCH,
-        };
         let _ = dir.unlink(
             name.as_bytes(),
             tairix_abi::fs::UnlinkFlags::EXPECT_NODE,
-            Some(&expect),
+            Some(&tairix_abi::fs::NodeExpect::of_node(stat.id)),
         );
     }
 
-    /// Why the name at `path` an exclusive create refused is taken:
-    /// [`Errno::AlreadyExists`] for a file a save may replace once asked,
-    /// [`Errno::IsADirectory`] for a folder and [`Errno::LinkLoop`] for a
-    /// link, which no save replaces.
-    ///
-    /// The node is resolved without following a link and opened for neither
-    /// read nor write, so this reads only its kind.
     /// Make, or open to replace, the file a save chose at `path`, with
     /// `flags`: its name finished as `typing` says for the volume its folder
     /// is on, and its file type recorded where that volume records one, before
@@ -9025,6 +9171,12 @@ mod program {
         )
     }
 
+    /// Why the name at `path` an exclusive create refused is taken:
+    /// [`Errno::AlreadyExists`] for a file a save may replace once asked,
+    /// [`Errno::IsADirectory`] for a folder and [`Errno::LinkLoop`] for a
+    /// link, which no save replaces. The node is resolved without following a
+    /// link and opened for neither read nor write, so this reads only its
+    /// kind.
     fn occupant_of(path: &str) -> Errno {
         let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::NO_FOLLOW)
             .ok()
@@ -9600,6 +9752,10 @@ mod program {
     struct RtKeptFiles;
 
     impl KeptFiles for RtKeptFiles {
+        fn has_folder(&mut self, path: &str) -> bool {
+            tairix_rt::Dir::open(path.as_bytes()).is_ok()
+        }
+
         fn make_folder(&mut self, path: &str) -> Result<(), Errno> {
             match tairix_rt::fs_mkdir(path.as_bytes(), tairix_abi::fs::FS_NEW_DIR_MODE) {
                 0.. => Ok(()),
@@ -14005,6 +14161,7 @@ mod program {
                 cursor_sets: &[],
                 clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut NoDocuments,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -16302,6 +16459,95 @@ mod program {
         );
     }
 
+    /// Hand `ask` to the file worker, or conclude it at once: refused for a
+    /// session with no home, or answered as the worker could not take it.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn ask_documents_folder<S: DirectorySource, F: PickSources<S>>(
+        ask: DocumentsAsk,
+        files: &Listings,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let home = home_dir();
+        let answered = match home_of(home.as_deref()) {
+            Some(home) => files.submit(FileJob::Documents {
+                ask,
+                home: alloc::string::String::from(home),
+            }),
+            None => Some(FileAnswer::Documents {
+                ask,
+                opened: Err((
+                    DocumentsRefusal::Unavailable,
+                    documents::reason(DocumentsRefusal::Unavailable),
+                )),
+            }),
+        };
+        if let Some(FileAnswer::Documents { ask, opened }) = answered {
+            settle_documents_folder(
+                &ask, opened, server, sink, shell, compositor, windows, picker, apps, menu,
+            );
+        }
+    }
+
+    /// Conclude `ask` with what the file worker found or made: the folder
+    /// delegated writable and confined beneath itself to the owner of the
+    /// window that asked, or why not, the decision recorded either way. A
+    /// window closed since concludes telling nobody, and the folder closes.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_documents_folder<S: DirectorySource, F: PickSources<S>>(
+        ask: &DocumentsAsk,
+        opened: Result<tairix_rt::File, (DocumentsRefusal, &'static str)>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let owner = server.documents_folder_owed(ask.window_id);
+        let answer = owner.map_or(Err(DocumentsRefusal::Unavailable), |owner| {
+            let granted = opened.and_then(|folder| {
+                let handle = tairix_rt::fd_grant(
+                    folder.fd(),
+                    tairix_browse::document::grant_ceiling(true),
+                    owner,
+                    tairix_abi::GRANT_SUBTREE,
+                );
+                u64::try_from(handle)
+                    .ok()
+                    .filter(|&handle| handle != 0)
+                    .ok_or((DocumentsRefusal::Unavailable, before::UNDELEGATED))
+            });
+            documents::note(
+                shell.audit(),
+                Some(&ask.app),
+                granted.as_ref().map(|_| ()).map_err(|&(_, why)| why),
+            );
+            granted.map_err(|(refusal, _)| refusal)
+        });
+        let concluded = server.conclude_documents_folder(sink, (ask.owner, ask.window_id), answer);
+        if let (Some(owner), Err(Errno::NotFound)) = (owner, concluded) {
+            drop_departed(
+                owner,
+                server,
+                shell,
+                compositor,
+                windows,
+                picker,
+                &mut apps.service,
+                menu,
+            );
+        }
+    }
+
     /// Settle the open a reader carried out for pick `pick`'s attempt
     /// `serial`: delegate the file one-shot to the attested owner of the
     /// window that asked and deliver `FilePicked`, or — when the open or the
@@ -16988,6 +17234,7 @@ mod program {
             cursor_sets: &[],
             clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut NoDocuments,
         };
         server.client_exited(&mut bridge, owner);
     }

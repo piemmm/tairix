@@ -1,13 +1,14 @@
 use super::*;
-use crate::app::library::Library;
 use crate::board::Board;
 use crate::cpu::CpuModel;
 use crate::machine::Template;
 use tairix_controls::FieldLayout;
-use tairix_input::{Modifiers, PointerButton};
+use tairix_geometry::Point;
+use tairix_input::{Key, Modifiers, NamedKey, PointerButton};
+use tairix_machines::Library;
 
 fn machine(template: Template) -> Machine {
-    let mut library = Library::new();
+    let mut library = Library::<Machine>::new();
     let id = library.mint().unwrap();
     library
         .add(Machine {
@@ -94,14 +95,15 @@ fn every_choice_of_every_setting_is_one_the_board_takes() {
 
 /// Where the control of `group`'s `row` is drawn.
 fn control_at(settings: &Settings, (group, row): (usize, usize), theme: &Theme) -> Point {
-    let (_, place) = settings.place(Scale::ONE, theme);
+    let (_, place) = settings.form.place(Scale::ONE, theme);
     let layout = settings
-        .column
+        .form
+        .column()
         .layouts(place)
         .into_iter()
         .find_map(|(at, layout)| (at == group).then_some(layout))
         .expect("the group is laid out");
-    let seated = &settings.column.groups()[group];
+    let seated = &settings.form.column().groups()[group];
     let bounds = seated
         .row_rect(row, layout, Scale::ONE, theme)
         .expect("the row is drawn");
@@ -113,15 +115,16 @@ fn control_at(settings: &Settings, (group, row): (usize, usize), theme: &Theme) 
 
 /// Where the open choice list of `group` shows its choice `index`.
 fn choice_at(settings: &Settings, group: usize, index: usize, theme: &Theme) -> Point {
-    let (_, place) = settings.place(Scale::ONE, theme);
+    let (_, place) = settings.form.place(Scale::ONE, theme);
     let popup = settings
-        .column
+        .form
+        .column()
         .layouts(place)
         .into_iter()
         .find_map(|(at, layout)| (at == group).then_some(layout.popup))
         .expect("the group is laid out");
     assert!(!popup.is_empty(), "the open list is placed");
-    let combo = settings.column.groups()[group]
+    let combo = settings.form.column().groups()[group]
         .rows()
         .iter()
         .find_map(|row| match row.control() {
@@ -156,7 +159,7 @@ fn click(settings: &mut Settings, at: Point, theme: &Theme) -> Option<Answer> {
 }
 
 fn switch_on(settings: &Settings, (group, row): (usize, usize)) -> bool {
-    match settings.column.groups()[group].rows()[row].control() {
+    match settings.form.column().groups()[group].rows()[row].control() {
         FieldControl::Toggle(toggle) => toggle.is_on(),
         other => panic!("not a switch: {other:?}"),
     }
@@ -170,15 +173,18 @@ fn a_choice_list_stays_open_under_the_pointer_and_takes_the_choice_clicked() {
     let mut settings = Settings::new(&machine, Standing::Off);
     let field = control_at(&settings, (at::MACHINE, at::PROCESSOR), &theme);
     click(&mut settings, field, &theme);
-    assert!(settings.column.is_listing(), "a click opens the list");
+    assert!(
+        settings.form.column().is_listing(),
+        "a click opens the list"
+    );
     let v20 = choice_at(&settings, at::MACHINE, 2, &theme);
     pointer(&mut settings, InputEvent::PointerMoved { to: v20 }, &theme);
     assert!(
-        settings.column.is_listing(),
+        settings.form.column().is_listing(),
         "the pointer moving onto the list leaves it open"
     );
     assert_eq!(click(&mut settings, v20, &theme), None);
-    assert!(!settings.column.is_listing(), "choosing closes it");
+    assert!(!settings.form.column().is_listing(), "choosing closes it");
     assert_eq!(
         settings.choices().configured(&machine.config).cpu,
         CpuModel::V20
@@ -193,15 +199,19 @@ fn a_press_that_takes_a_list_away_presses_nothing_beneath_it() {
     let mut settings = Settings::new(&machine, Standing::Off);
     let field = control_at(&settings, (at::PARTS, at::DRIVE_B), &theme);
     click(&mut settings, field, &theme);
-    assert!(settings.column.is_listing());
-    let (bounds, _) = settings.place(Scale::ONE, &theme);
-    let cancel = settings.dialog.action_rects(bounds, Scale::ONE, &theme)[0].center();
+    assert!(settings.form.column().is_listing());
+    let (bounds, _) = settings.form.place(Scale::ONE, &theme);
+    let cancel = settings
+        .form
+        .dialog()
+        .action_rects(bounds, Scale::ONE, &theme)[0]
+        .center();
     assert_eq!(
         click(&mut settings, cancel, &theme),
         None,
         "only the list closes"
     );
-    assert!(!settings.column.is_listing());
+    assert!(!settings.form.column().is_listing());
     assert_eq!(click(&mut settings, cancel, &theme), Some(Answer::Cancel));
 }
 
@@ -264,7 +274,10 @@ fn a_running_or_suspended_machines_settings_change_nothing() {
         let mut settings = Settings::new(&machine, standing);
         let field = control_at(&settings, (at::MACHINE, at::PROCESSOR), &theme);
         click(&mut settings, field, &theme);
-        assert!(!settings.column.is_listing(), "{standing:?}: no list opens");
+        assert!(
+            !settings.form.column().is_listing(),
+            "{standing:?}: no list opens"
+        );
         let switch = control_at(&settings, (at::MACHINE, at::COPROCESSOR), &theme);
         click(&mut settings, switch, &theme);
         assert_eq!(

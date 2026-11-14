@@ -733,6 +733,7 @@ pub(crate) fn composed_bundle_published_by(
         icon_bar: true,
         multi_instance: false,
         writes_documents: false,
+        documents_folder: None,
         saver: tairix_itest_harness::app_image::SaverDeclaration::default(),
     };
     let composed = compose_signed_appinfo(
@@ -804,6 +805,7 @@ pub(crate) fn composed_saver(
         icon_bar: true,
         multi_instance: false,
         writes_documents: false,
+        documents_folder: None,
         saver: tairix_itest_harness::app_image::SaverDeclaration {
             feeds,
             ..Default::default()

@@ -44,6 +44,7 @@ use tairix_window::{
     OpenEntry, PlacedFile, PreviewSize, ToolSpec, WallpaperName, WindowHost,
 };
 
+use crate::documents::{self, before, DocumentsAsk, DocumentsFolders};
 use crate::launch::{
     open_entry, resolve_launch, DocumentAuthority, DocumentRelay, Launch, LaunchHost, LaunchTarget,
 };
@@ -1493,6 +1494,11 @@ pub struct ShellWindowHost<'a> {
     /// bridge that serves requests; `None` for one that only tears windows
     /// down, which asks nothing.
     pub authorise: Option<AuthoriseDesk<'a>>,
+    /// Which documents folder each application's manifest names, and where
+    /// an accepted request goes to be carried out off the loop
+    /// ([`NoDocuments`](crate::documents::NoDocuments) for a bridge that only
+    /// tears windows down).
+    pub documents: &'a mut dyn DocumentsFolders,
 }
 
 /// The [`LaunchHost`] a hand-over resolves through: the engine's own routes,
@@ -3095,6 +3101,43 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.relay.relay(DocumentAuthority::Held { fd }, false, to)
     }
 
+    fn documents_folder_requested(
+        &mut self,
+        window_id: u64,
+        owner: ProcId,
+        app: Option<&AttestedApp>,
+    ) -> Result<(), Errno> {
+        let named = app.ok_or(before::NO_APPLICATION).and_then(|app| {
+            let name = self.documents.named(app).ok_or(before::NOT_DECLARED)?;
+            tairix_path::validate_visible_name(&name).map_err(|_| before::NOT_A_NAME)?;
+            Ok((app, name))
+        });
+        match named {
+            Ok((app, name)) => {
+                self.documents.ask(DocumentsAsk {
+                    window_id,
+                    owner,
+                    app: *app,
+                    name,
+                });
+                Ok(())
+            }
+            Err(why) => {
+                documents::note(self.shell.audit(), app, Err(why));
+                Err(Errno::PermissionDenied)
+            }
+        }
+    }
+
+    fn documents_folder_refused(
+        &mut self,
+        _caller: ProcId,
+        app: Option<&AttestedApp>,
+        _window_id: u64,
+    ) {
+        documents::note(self.shell.audit(), app, Err(before::OWED));
+    }
+
     fn authorise_requested(
         &mut self,
         caller: Option<&AttestedApp>,
@@ -3622,6 +3665,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut bench.clipboard,
             authorise: prompt.map(|(prompt, elevator)| AuthoriseDesk { prompt, elevator }),
+            documents: &mut crate::documents::NoDocuments,
         };
         host.authorise_requested(caller, AuthoriseFor::Window(12), task)
     }
@@ -3673,6 +3717,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut bench.clipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let mut out = [0u8; WINDOW_SCREENSAVER_REPLY_MAX];
             let len = host.screensaver_entry(caller, index, &mut out);
@@ -3906,6 +3951,7 @@ mod tests {
                     prompt: &mut prompt,
                     elevator: &mut elevator,
                 }),
+                documents: &mut crate::documents::NoDocuments,
             };
             for request in [
                 WindowRequest::SetAppBar(crate::tests::app_bar(AppBarClick::Open)),
@@ -3950,6 +3996,7 @@ mod tests {
         seat_held: bool,
         gallery: RecordingGallery,
         clipboard: crate::clipboard::NoClipboard,
+        documents: crate::documents::NoDocuments,
     }
 
     impl HandOverBench {
@@ -3973,6 +4020,7 @@ mod tests {
                 seat_held: false,
                 gallery: RecordingGallery::default(),
                 clipboard: crate::clipboard::NoClipboard,
+                documents: crate::documents::NoDocuments,
             }
         }
 
@@ -4001,6 +4049,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut self.clipboard,
                 authorise: None,
+                documents: &mut self.documents,
             }
         }
 
@@ -4021,6 +4070,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut self.clipboard,
                 authorise: None,
+                documents: &mut self.documents,
             };
             host.hand_over_requested(&mut self.desk, caller(), &run_path, target)
         }
@@ -4322,6 +4372,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(
                 window_owner(1),
@@ -4385,6 +4436,7 @@ mod tests {
                     cursor_sets: &[],
                     clipboard: &mut crate::clipboard::NoClipboard,
                     authorise: None,
+                    documents: &mut crate::documents::NoDocuments,
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -4456,6 +4508,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -4492,6 +4545,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -4615,6 +4669,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let mut ranges = alloc::collections::BTreeMap::new();
             for (process, shm_handle) in [(1, 7), (1, 8), (2, 9)] {
@@ -4699,6 +4754,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let connected = served(
                 &mut server,
@@ -4775,6 +4831,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
         };
@@ -4798,6 +4855,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -4831,6 +4889,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -4855,6 +4914,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
@@ -4884,6 +4944,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents again");
@@ -4911,6 +4972,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("re-attached and presents");
@@ -4947,6 +5009,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -4972,6 +5035,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
@@ -5004,6 +5068,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             act(&mut host);
         };
@@ -5058,6 +5123,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut self.clipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.reveal_requested(&mut self.desk, caller(), window, 41)
         }
@@ -5203,6 +5269,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut bench.clipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let picture = |subject| PreviewSize {
             subject,
@@ -5372,6 +5439,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -5463,6 +5531,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         act(&mut host)
     }
@@ -5671,6 +5740,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -5737,6 +5807,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -5775,6 +5846,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -5823,6 +5895,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -5847,6 +5920,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(1, &m, &frame, &full)
                 .expect("the repeat present is accepted");
@@ -5883,6 +5957,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -5910,6 +5985,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(1, &m, &frame, &full)
                 .expect("the second present lands");
@@ -5950,6 +6026,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -5994,6 +6071,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -6028,6 +6106,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         for id in [1, 2] {
@@ -6069,6 +6148,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         if host.windows.wm_id(1).is_none() {
             let owner = mode(400, 300, DisplayFormat::Rgba8888);
@@ -6274,6 +6354,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         for (owner, id, title) in [(1, 1, "paint"), (2, 2, "files")] {
@@ -6357,6 +6438,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         for (owner, id, title) in [(1, 1, "paint"), (2, 2, "files")] {
@@ -6412,6 +6494,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(owner), id, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -6453,6 +6536,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -6491,6 +6575,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "paint", WindowSizing::default())
@@ -6823,6 +6908,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(
                 window_owner(1),
@@ -6873,6 +6959,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -6925,6 +7012,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
 
@@ -6982,6 +7070,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let wm = open_one_sized(&mut host, 3, WindowSizing::Fixed);
         let before = host.compositor.window(wm).expect("live").bounds();
@@ -7021,6 +7110,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
@@ -7242,6 +7332,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             // A client wide and tall enough that even the first cascade slot
             // overhangs the 640x480 work area.
@@ -7255,52 +7346,11 @@ mod tests {
             "an opened window sits wholly inside the work area"
         );
         // Every band the frame offers starts its own resize-grab *and drags*,
-        // which is what the placement is for: the corners resize both axes at
-        // once and are the furthest thing on the frame from the title bar. The
-        // points are the bands' inward half, because a window flush against
-        // the work area has its outward half over the taskbar or off the
-        // screen, where nothing can reach it. Asserting the drag and not only
+        // which is what the placement is for. Asserting the drag and not only
         // the latch is deliberate: a grab that arms and then refuses every
         // motion is what shipped, and a test that stopped at the latch could
         // not see it.
-        for (at, edge, delta) in [
-            (
-                Point::new(bounds.right() - 1, bounds.bottom() - 1),
-                ResizeEdge::BottomRight,
-                Point::new(-24, -18),
-            ),
-            (
-                Point::new(bounds.left(), bounds.bottom() - 1),
-                ResizeEdge::BottomLeft,
-                Point::new(24, -18),
-            ),
-            (
-                Point::new(bounds.right() - 1, bounds.bottom() - 32),
-                ResizeEdge::Right,
-                Point::new(-24, 0),
-            ),
-            (
-                Point::new(bounds.left() + 96, bounds.bottom() - 1),
-                ResizeEdge::Bottom,
-                Point::new(0, -18),
-            ),
-            // The top bands' inward half is the rim above the title bar.
-            (
-                Point::new(bounds.left() + 96, bounds.top()),
-                ResizeEdge::Top,
-                Point::new(0, 18),
-            ),
-            (
-                Point::new(bounds.left(), bounds.top()),
-                ResizeEdge::TopLeft,
-                Point::new(24, 18),
-            ),
-            (
-                Point::new(bounds.right() - 1, bounds.top()),
-                ResizeEdge::TopRight,
-                Point::new(-24, 18),
-            ),
-        ] {
+        for (at, edge, delta) in frame_bands(bounds) {
             let before = compositor.window(wm).expect("live").bounds();
             shell.handle(InputEvent::PointerMoved { to: at }, &mut compositor, 0);
             shell.handle(
@@ -7338,6 +7388,54 @@ mod tests {
             // the drag just made is undone before the next one is aimed.
             assert!(compositor.resize_window(wm, bounds));
         }
+    }
+
+    /// Where a press grabs each band of a frame at `bounds`, and a drag that
+    /// moves that edge: on the band's inward half, since a window flush against
+    /// the work area has its outward half over the taskbar or off the screen.
+    /// The corners resize both axes at once and are the furthest thing on the
+    /// frame from the title bar; the top bands' inward half is the rim above
+    /// the title bar.
+    fn frame_bands(bounds: Rect) -> [(Point, ResizeEdge, Point); 7] {
+        let (left, top) = (bounds.left(), bounds.top());
+        let (right, bottom) = (bounds.right() - 1, bounds.bottom() - 1);
+        [
+            (
+                Point::new(right, bottom),
+                ResizeEdge::BottomRight,
+                Point::new(-24, -18),
+            ),
+            (
+                Point::new(left, bottom),
+                ResizeEdge::BottomLeft,
+                Point::new(24, -18),
+            ),
+            (
+                Point::new(right, bounds.bottom() - 32),
+                ResizeEdge::Right,
+                Point::new(-24, 0),
+            ),
+            (
+                Point::new(left + 96, bottom),
+                ResizeEdge::Bottom,
+                Point::new(0, -18),
+            ),
+            (
+                Point::new(left + 96, top),
+                ResizeEdge::Top,
+                Point::new(0, 18),
+            ),
+            (
+                Point::new(left, top),
+                ResizeEdge::TopLeft,
+                Point::new(24, 18),
+            ),
+            (
+                Point::new(right, top),
+                ResizeEdge::TopRight,
+                Point::new(-24, 18),
+            ),
+        ]
     }
 
     /// [`placed_outer`] pins an axis the window is too big for, so a window
@@ -7385,6 +7483,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             (
                 open_one_full(&mut host, 7, 200, 120, RESIZABLE),
@@ -7425,6 +7524,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             (
                 open_one_sized(
@@ -7489,6 +7589,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
         assert_eq!(
@@ -7554,6 +7655,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -7609,6 +7711,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one(&mut host, 7)
         };
@@ -7676,6 +7779,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -7735,6 +7839,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one(&mut host, 7)
         };
@@ -7778,6 +7883,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         open_one(&mut host, 7);
         let minimised = open_one(&mut host, 8);
@@ -7845,6 +7951,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -7893,6 +8000,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one(&mut host, 7)
         };
@@ -7975,6 +8083,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one(&mut host, 7)
         };
@@ -8088,6 +8197,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -8128,6 +8238,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -8169,6 +8280,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
                 .expect("accepted");
@@ -8202,6 +8314,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
                 .expect("resizes");
@@ -8245,6 +8358,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let wm = open_one_full(&mut host, 7, 200, 120, RESIZABLE);
             host.windows.take_owed_events();
@@ -8315,6 +8429,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -8338,6 +8453,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.windows.take_owed_events();
             assert_eq!(host.window_sizing_changed(7, height_ceiling(60)), Ok(()));
@@ -8398,6 +8514,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let wm = open_one_full(&mut host, 7, 200, 120, RESIZABLE);
             assert_eq!(host.window_sizing_changed(7, height_ceiling(120)), Ok(()));
@@ -8424,6 +8541,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.windows.take_owed_events();
             assert_eq!(host.window_sizing_changed(7, height_ceiling(200)), Ok(()));
@@ -8525,6 +8643,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -8588,6 +8707,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         host.window_opened(window_owner(1), 1, &m, "opened", WindowSizing::default())
             .expect("opens");
@@ -8656,6 +8776,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -8696,6 +8817,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         assert_eq!(host.wallpaper_catalog().len(), 1);
         assert_eq!(host.wallpaper_catalog()[0].file, "a.jpg");
@@ -8731,6 +8853,7 @@ mod tests {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         assert!(host.wallpaper_catalog().is_empty());
         let request = PreviewSize {
@@ -8782,6 +8905,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -8879,6 +9003,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -8913,6 +9038,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -8955,6 +9081,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -9016,6 +9143,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
                 authorise: None,
+                documents: &mut crate::documents::NoDocuments,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

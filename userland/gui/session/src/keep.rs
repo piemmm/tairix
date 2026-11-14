@@ -79,6 +79,10 @@ pub struct Picture {
 
 /// What kept files are written through.
 pub trait KeptFiles {
+    /// Whether the folder `path` is there, looked for without changing
+    /// anything.
+    fn has_folder(&mut self, path: &str) -> bool;
+
     /// Make the folder `path`; one already there is no failure.
     ///
     /// # Errors
@@ -157,7 +161,8 @@ impl fmt::Display for Unkept {
 /// The absolute home `home` names, without a trailing slash, or `None`:
 /// anything else is a malformed environment, refused rather than written
 /// relative to wherever the session runs.
-pub(crate) fn home_of(home: Option<&str>) -> Option<&str> {
+#[must_use]
+pub fn home_of(home: Option<&str>) -> Option<&str> {
     home.filter(|home| home.starts_with('/'))
         .map(|home| home.trim_end_matches('/'))
         .filter(|home| !home.is_empty())
@@ -193,13 +198,32 @@ pub fn kept_folder(
     if !named {
         return Err(Unkept::Unnamed);
     }
+    make_folders(files, home, keeping.folders)
+        .map_err(|(folder, errno)| Unkept::Folder(folder, errno))
+}
+
+/// The folder `folders` names under `home`, each folder on the way made where
+/// it is missing. One already there is looked for rather than made, as a
+/// refused make is audited as a denied mutation.
+///
+/// # Errors
+///
+/// The first folder that could not be made, and why.
+pub fn make_folders(
+    files: &mut dyn KeptFiles,
+    home: &str,
+    folders: &[&str],
+) -> Result<String, (String, Errno)> {
     let mut folder = String::from(home);
-    for name in keeping.folders {
+    for name in folders {
         folder.push('/');
         folder.push_str(name);
-        files
-            .make_folder(&folder)
-            .map_err(|errno| Unkept::Folder(folder.clone(), errno))?;
+        if files.has_folder(&folder) {
+            continue;
+        }
+        if let Err(errno) = files.make_folder(&folder) {
+            return Err((folder, errno));
+        }
     }
     Ok(folder)
 }

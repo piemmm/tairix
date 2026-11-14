@@ -9418,6 +9418,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -9443,6 +9444,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
             authorise: None,
+            documents: &mut crate::documents::NoDocuments,
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -10471,6 +10473,107 @@ fn the_zone_store_is_delegated_to_settings_alone() {
     assert_eq!(
         shell.zone_store_descriptor(None),
         Err(Errno::PermissionDenied)
+    );
+}
+
+/// The documents folders installed manifests name, by bundle id, and the
+/// requests handed on for the file worker.
+#[derive(Default)]
+struct Manifests {
+    named: Vec<(&'static str, &'static str)>,
+    asks: Vec<crate::documents::DocumentsAsk>,
+}
+
+impl crate::documents::DocumentsFolders for Manifests {
+    fn named(&self, app: &tairix_abi::AppIdentity) -> Option<String> {
+        self.named
+            .iter()
+            .find(|(bundle, _)| *bundle == app.bundle_id())
+            .map(|(_, folder)| String::from(*folder))
+    }
+
+    fn ask(&mut self, ask: crate::documents::DocumentsAsk) {
+        self.asks.push(ask);
+    }
+}
+
+/// Counts the documents folders refused it is handed.
+struct DocumentsRefusals(core::sync::atomic::AtomicUsize);
+
+impl tairix_log::Sink for DocumentsRefusals {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
+        if event.id == crate::documents::DOCUMENTS_FOLDER_REFUSED {
+            self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// A request for the documents folder an installed manifest names is handed
+/// on with its window, owner and application; one from a caller running no
+/// verified bundle, or whose manifest names none or no one visible folder,
+/// is refused before any folder is looked at, and recorded.
+#[test]
+fn the_window_host_hands_on_only_a_documents_folder_its_manifest_names() {
+    static REFUSED: DocumentsRefusals = DocumentsRefusals(core::sync::atomic::AtomicUsize::new(0));
+    let mut shell = shell_audited(TaskbarConfig::bottom_bar(640, 480), &REFUSED);
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut apps = AppBarService::new();
+    let mut manifests = Manifests {
+        named: vec![
+            ("os.tairix.openmicro", "Open Micro"),
+            ("com.example.hidden", ".Open Micro"),
+            ("com.example.nested", "Open/Micro"),
+        ],
+        asks: Vec::new(),
+    };
+    let app = |bundle| {
+        tairix_abi::AppIdentity::new(bundle, tairix_abi::PublisherId::from_raw([7; 32]))
+            .expect("an identity")
+    };
+    let owner = window_owner(1);
+    let mut host = ShellWindowHost {
+        shell: &mut shell,
+        compositor: &mut comp,
+        windows: &mut windows,
+        picker: &mut picker,
+        apps: &mut apps,
+        menu: &mut MenuChain::new(),
+        seat_held: false,
+        screensaver: None,
+        relay: &mut RefusingRelay,
+        wallpapers: &mut NoGallery,
+        cursor_sets: &[],
+        clipboard: &mut crate::clipboard::NoClipboard,
+        authorise: None,
+        documents: &mut manifests,
+    };
+    let mut ask = |app: Option<&tairix_abi::AppIdentity>| {
+        tairix_window::WindowHost::documents_folder_requested(&mut host, 5, owner, app)
+    };
+    assert_eq!(ask(Some(&app("os.tairix.openmicro"))), Ok(()));
+    for refused in [
+        None,
+        Some(app("com.example.undeclared")),
+        Some(app("com.example.hidden")),
+        Some(app("com.example.nested")),
+    ] {
+        assert_eq!(
+            ask(refused.as_ref()),
+            Err(Errno::PermissionDenied),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(REFUSED.0.load(core::sync::atomic::Ordering::Relaxed), 4);
+    assert_eq!(
+        manifests.asks,
+        vec![crate::documents::DocumentsAsk {
+            window_id: 5,
+            owner,
+            app: app("os.tairix.openmicro"),
+            name: String::from("Open Micro"),
+        }]
     );
 }
 
@@ -17235,6 +17338,7 @@ fn desktop_info_reports_compositor_state() {
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
         authorise: None,
+        documents: &mut crate::documents::NoDocuments,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -17296,6 +17400,7 @@ fn with_window_host<R>(
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
         authorise: None,
+        documents: &mut crate::documents::NoDocuments,
     };
     body(&mut host)
 }
@@ -17636,6 +17741,7 @@ fn no_tool_window_opens_while_the_seat_is_held() {
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
         authorise: None,
+        documents: &mut crate::documents::NoDocuments,
     };
     assert_eq!(host.tool_opened(3, &spec), Err(Errno::SeatBusy));
     assert_eq!(host.windows.wm_id(3), None);
@@ -17810,6 +17916,7 @@ fn no_application_menu_opens_under_a_carried_drag() {
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
         authorise: None,
+        documents: &mut crate::documents::NoDocuments,
     };
     let anchor = WindowRegion::new(0, 0, 10, 10).expect("an anchor");
     assert_eq!(host.menu_open_requested(1, 5, anchor, &rows), Ok(()));

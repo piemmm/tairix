@@ -1144,11 +1144,27 @@ const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MES
 /// event definitions.
 const NETMAP_PROBE_FINISHED_MARKER: &str = tairix_netmap::events::PROBE_FINISHED_MESSAGE;
 
-/// The BBC Micro emulator's record of its machine's first second run.
-const BEEB_RUNNING_MARKER: &str = tairix_beeb::front::events::MACHINE_RUNNING_MESSAGE;
+/// The Open Micro Emulator's record of a machine's first second run.
+const OPENMICRO_RUNNING_MARKER: &str = tairix_openmicro::front::events::MACHINE_RUNNING_MESSAGE;
 
-/// The beeb vertical's dump of its window at the BASIC prompt.
-const BEEB_PROMPT_DUMP: &str = "beeb-prompt";
+/// The Open Micro Emulator's record of its library read, the first run's
+/// machine made in it.
+const OPENMICRO_LIBRARY_MARKER: &str = tairix_openmicro::front::events::LIBRARY_READ_MESSAGE;
+
+/// The Open Micro Emulator's record of a machine's suspended state kept and
+/// its window gone.
+const OPENMICRO_SUSPENDED_MARKER: &str = tairix_openmicro::front::events::MACHINE_SUSPENDED_MESSAGE;
+
+/// The Open Micro Emulator's record of a resumed machine's state restored.
+const OPENMICRO_RESUMED_MARKER: &str = tairix_openmicro::front::events::MACHINE_RESUMED_MESSAGE;
+
+/// The cascade slots the Open Micro vertical's windows take: the library
+/// first, then the machine started from it.
+const OPENMICRO_LIBRARY_SLOT: u64 = 0;
+const OPENMICRO_MACHINE_SLOT: u64 = 1;
+
+/// The Open Micro vertical's dump of its machine's window at the BASIC prompt.
+const OPENMICRO_PROMPT_DUMP: &str = "openmicro-prompt";
 
 /// Serial marker a size-state dump or keystroke waits on: the session's
 /// announcement that a served window is on screen at the size state it was
@@ -10956,17 +10972,21 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
-    // `plans/BEEB.md` BB17: the BBC Micro emulator's desktop vertical. The
-    // emulator is launched from the program library; its window is dumped once
-    // it records its machine's first second run, and must show the BASIC
-    // prompt's white text on black. PASS needs the guest's witnesses in order:
-    // an `APP_LOADED` naming the bundle, its window shown, and its own clean
-    // exit at the Quit the runner sends from its icon-bar menu after the dump.
-    // A machine that never runs records nothing, so no dump is taken and no
-    // Quit sent, and the run fails.
+    // `plans/BEEB.md` BB30: the Open Micro Emulator's desktop vertical. The
+    // emulator is launched from the program library, and the Model B its first
+    // run makes is started from its card's menu in the library window; the
+    // machine's window is dumped once it records its first second run, and
+    // must show the BASIC prompt's white text on black. Its window is then
+    // closed, which suspends it, and once that is kept it is resumed from its
+    // card's menu. PASS needs the guest's witnesses in order: an `APP_LOADED`
+    // naming the bundle, a window shown, and its own clean exit at the Quit the
+    // runner sends from its icon-bar menu once the resumed machine's state is
+    // restored, which suspends it first. A machine that never runs, or whose
+    // state is not restored, records nothing the script waits on, so no Quit
+    // is sent and the run fails.
     QemuTest {
-        package: "tairix-test-beeb-qemu-aarch64",
-        binary: "tairix-test-beeb-qemu-aarch64",
+        package: "tairix-test-openmicro-qemu-aarch64",
+        binary: "tairix-test-openmicro-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(300),
@@ -10987,12 +11007,12 @@ static TESTS: &[QemuTest] = &[
             TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[ScreendumpPlan {
-            marker: BEEB_RUNNING_MARKER,
+            marker: OPENMICRO_RUNNING_MARKER,
             occurrences: 1,
-            suffix: BEEB_PROMPT_DUMP,
-            assert: assert_beeb_screendump,
+            suffix: OPENMICRO_PROMPT_DUMP,
+            assert: assert_openmicro_screendump,
         }],
-        pointer_script: Some(beeb_pointer_script),
+        pointer_script: Some(openmicro_pointer_script),
         bounded_pointer_script: false,
         cpu: None,
         serial: &[],
@@ -19325,15 +19345,106 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// rasterised, and a line is drawn in the hue of the node it leads to — rather
 /// than looking for a node at a reconstructed point. Either is drawn only when
 /// a node of that tier is on the map.
-/// The beeb vertical's script: the library opened, the emulator launched,
-/// and, once its machine has run, Quit chosen from its icon-bar menu.
-fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
-    use tairix_abi::window_ipc::AppBarClick;
-    use tairix_beeb::front::menu::{bar, Shown};
+/// Where the first card of the Open Micro library window is on the screen, and
+/// the row labelled `label` of the menu a secondary press there opens for a
+/// machine standing as `standing`.
+///
+/// The card is laid out by the library's own shelf at the window's opening
+/// size, which places cards by the theme's metrics alone, and the menu is the
+/// library's own card menu, so nothing here restates a position.
+fn openmicro_card_row(
+    standing: tairix_machines::Standing,
+    label: &str,
+) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
+    use tairix_abi::window_ipc::AppMenu;
+    use tairix_machines::menu::card_menu;
+    use tairix_machines::shelf::{Entry, Shelf};
+
+    let what = "OpenMicro script";
+    let theme = booted_theme();
+    let (window, (client_w, client_h)) = openmicro_library_window(&theme)?;
+    let looks = (RECONSTRUCTION_SCALE, &theme);
+    let mut shelf = Shelf::new();
+    shelf.set_size((client_w, client_h), looks);
+    let first = Entry {
+        id: 1,
+        name: String::from(tairix_openmicro::machine::Model::ModelB.title()),
+        about: String::new(),
+        standing,
+    };
+    shelf.show([first], looks, &mut tairix_geometry::Region::new());
+    let card = shelf
+        .card_bounds(1)
+        .ok_or_else(|| format!("{what}: the first card is not seen"))?
+        .center();
+    let press =
+        tairix_geometry::Point::new(window.client.left() + card.x, window.client.top() + card.y);
+    let menu = card_menu(
+        standing,
+        None::<fn(&mut AppMenu) -> Result<(), tairix_abi::Errno>>,
+    )
+    .map_err(|err| format!("{what}: the card's menu is invalid: {err:?}"))?;
+    let model = tairix_controls::ChainModel::from_app_menu(menu.title(), &menu, None);
+    let (_, row) = chain_plate_and_row(
+        model,
+        tairix_desktop_session::windows::window_menu_placement(tairix_geometry::Rect::new(
+            press.x, press.y, 0, 0,
+        )),
+        label,
+        what,
+    )?;
+    Ok((press, rect_centre(row, "card menu row")?))
+}
+
+/// The desktop the Open Micro vertical's windows are sized on.
+fn openmicro_desktop() -> Result<tairix_window::Desktop, String> {
+    use tairix_abi::desktop::{Appearance, DesktopInfo};
+
+    let (width, height) = ramfb_screen();
+    DesktopInfo::new(width, height, 100, Appearance::default())
+        .and_then(tairix_window::Desktop::new)
+        .map_err(|err| format!("OpenMicro script: desktop: {err:?}"))
+}
+
+/// The window of the machine the Open Micro vertical starts, as the session
+/// places it: the emulator's opening picture and its status strip, through
+/// the desktop's own sizing.
+fn openmicro_machine_window(
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_controls::FrameLayout, String> {
+    let (width, picture) = tairix_openmicro::front::OPEN_PICTURE;
+    let (width, picture) = openmicro_desktop()?.window_size(width, picture);
+    let strip = tairix_controls::StatusBand::new(theme, tairix_geometry::Scale::ONE).height();
+    Ok(served_window_layout(
+        OPENMICRO_MACHINE_SLOT,
+        width,
+        picture + strip,
+        true,
+        theme,
+    ))
+}
+
+/// The Open Micro library window as the session places it, and its client's
+/// size: the library's own opening size through the desktop's own sizing.
+fn openmicro_library_window(
+    theme: &tairix_theme::Theme,
+) -> Result<(tairix_controls::FrameLayout, (u32, u32)), String> {
+    let look = tairix_machines::shelf::LibraryLook::titled("");
+    let client = openmicro_desktop()?.window_size(look.size.0, look.size.1);
+    let window = served_window_layout(OPENMICRO_LIBRARY_SLOT, client.0, client.1, true, theme);
+    Ok((window, client))
+}
+
+/// The Open Micro vertical's script: the emulator launched from the program
+/// library; the first run's machine started from its card's menu once the
+/// library is read; once it has run, its window closed, which suspends it;
+/// once that is kept, the machine resumed from its card's menu; and once its
+/// state is restored, Quit chosen from the icon-bar menu.
+fn openmicro_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_input::PointerButton;
     use tairix_qemu::MouseButton;
     use tairix_taskbar::{AppSlot, TaskbarInput, TaskbarResponse};
-    use tairix_test_beeb_qemu_aarch64::BEEB_APP_NAME;
+    use tairix_test_openmicro_qemu_aarch64::OPENMICRO_APP_NAME;
 
     let scale = RECONSTRUCTION_SCALE;
     let mut shell = reconstructed_shell(&[])?;
@@ -19349,13 +19460,16 @@ fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let entry = LibraryClicks::to(
         shell.session().taskbar(),
         scale,
-        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, BEEB_APP_NAME),
-        "beeb script",
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, OPENMICRO_APP_NAME),
+        "OpenMicro script",
     )?;
     entry.press(&mut shell, &mut router);
 
-    let menu = bar(&Shown::default())
-        .map_err(|err| format!("beeb script: the emulator's icon-bar menu is invalid: {err:?}"))?;
+    let declared = tairix_machines::menu::bar_rows()
+        .and_then(|rows| tairix_window::declaration(0, tairix_machines::menu::BAR_CLICK, &rows))
+        .map_err(|err| {
+            format!("OpenMicro script: the emulator's icon-bar menu is invalid: {err:?}")
+        })?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
         .map(|slot| {
             AppSlot::new(
@@ -19368,10 +19482,10 @@ fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     seated.push(
         AppSlot::new(
             modelled_owner(APPBAR_LAUNCHED_SLOT),
-            BEEB_APP_NAME,
+            OPENMICRO_APP_NAME,
             tairix_icon::IconKind::AppBundle,
         )
-        .with_declaration(menu, AppBarClick::Raise),
+        .with_declaration(declared.menu, declared.click),
     );
     shell.session_mut().taskbar_mut().set_apps(seated, scale);
     let slot = rect_centre(
@@ -19382,7 +19496,7 @@ fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         TaskbarResponse::OpenMenu(request) => request,
         other => {
             return Err(format!(
-                "beeb script: the slot asked for no menu: {other:?}"
+                "OpenMicro script: the slot asked for no menu: {other:?}"
             ))
         }
     };
@@ -19390,34 +19504,55 @@ fn beeb_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         request.model,
         request.placement,
         tairix_window::QUIT_LABEL,
-        "beeb script",
+        "OpenMicro script",
     )?;
     let quit_row = rect_centre(row, "Quit row")?;
+    let (card, start_row) = openmicro_card_row(tairix_machines::Standing::Off, "Start")?;
+    let (_, resume_row) = openmicro_card_row(tairix_machines::Standing::Suspended, "Resume")?;
+    let theme = booted_theme();
+    let close = title_bar_control(
+        &window_frame(true),
+        &openmicro_machine_window(&theme)?,
+        tairix_controls::WindowControlKind::Close,
+        &theme,
+    )?;
 
     let mut pen = PointerPen::pinned_at_origin(AUTOLOAD_DESKTOP_REVEALED_MARKER, ramfb_screen());
     pen.open_library_beside_manager(library_button)?;
     entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
     pen.aim(LIBRARY_SHOWN_MARKER, 1, pointer_rest());
-    pen.click(BEEB_RUNNING_MARKER, 1, MouseButton::Secondary, slot);
-    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, quit_row);
+    // The card is pressed once the library window's first frame is on screen
+    // and the library is read, its first machine on the card.
+    pen.aim(WINDOW_SHOWN_MARKER, 1, card);
+    pen.click(OPENMICRO_LIBRARY_MARKER, 1, MouseButton::Secondary, card);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, start_row);
+    pen.click(OPENMICRO_RUNNING_MARKER, 1, MouseButton::Primary, close);
+    pen.click(OPENMICRO_SUSPENDED_MARKER, 1, MouseButton::Secondary, card);
+    pen.click(MENU_SHOWN_MARKER, 2, MouseButton::Primary, resume_row);
+    pen.click(OPENMICRO_RESUMED_MARKER, 1, MouseButton::Secondary, slot);
+    pen.click(MENU_SHOWN_MARKER, 3, MouseButton::Primary, quit_row);
     Ok(pen.steps())
 }
 
 /// The least of the picture that is the BASIC prompt's black, and the least
 /// count of its text's white pixels.
-const BEEB_LEAST_BLACK_PERMILLE: usize = 400;
-const BEEB_LEAST_TEXT_PIXELS: usize = 200;
+const OPENMICRO_LEAST_BLACK_PERMILLE: usize = 400;
+const OPENMICRO_LEAST_TEXT_PIXELS: usize = 200;
 
 /// The emulator's window at its BASIC prompt: covered, mostly the screen's
 /// black, with the MOS's and BASIC's white text on it.
-fn assert_beeb_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+fn assert_openmicro_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     let theme = booted_theme();
     let image = read_screendump(t, path)?;
-    let (width, picture) = tairix_beeb::front::OPEN_PICTURE;
-    let strip = tairix_controls::StatusBand::new(&theme, tairix_geometry::Scale::ONE).height();
-    let layout = served_window_layout(0, width, picture + strip, true, &theme);
-    assert_window_region_covered(t, path, &image, layout.outer, "BBC Micro")?;
-    let rows = region_pixels(t, path, &image, layout.client, "BBC Micro picture")?;
+    let layout = openmicro_machine_window(&theme)?;
+    assert_window_region_covered(t, path, &image, layout.outer, "Open Micro machine")?;
+    let rows = region_pixels(
+        t,
+        path,
+        &image,
+        layout.client,
+        "Open Micro machine's picture",
+    )?;
     let pixels: Vec<Rgb> = rows.into_iter().flatten().collect();
     let black = pixels
         .iter()
@@ -19427,7 +19562,9 @@ fn assert_beeb_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<()
         .iter()
         .filter(|p| p.0 > 200 && p.1 > 200 && p.2 > 200)
         .count();
-    if black * 1000 < pixels.len() * BEEB_LEAST_BLACK_PERMILLE || white < BEEB_LEAST_TEXT_PIXELS {
+    if black * 1000 < pixels.len() * OPENMICRO_LEAST_BLACK_PERMILLE
+        || white < OPENMICRO_LEAST_TEXT_PIXELS
+    {
         return Err(format!(
             "test --qemu ({}): screendump {}: the window shows no BASIC prompt \
              ({black} black and {white} white of {} pixels)",
@@ -21961,7 +22098,7 @@ mod tests {
             ("settings", settings_pointer_script()),
             ("screensaver", screensaver_pointer_script()),
             ("network map", netmap_pointer_script()),
-            ("BBC Micro", super::beeb_pointer_script()),
+            ("Open Micro", super::openmicro_pointer_script()),
             ("wintersun client", super::wintersun_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
@@ -23366,13 +23503,77 @@ mod tests {
     /// the strip seats applications as they arrive, and a guest bringing the
     /// manager up late gave a hover run the fixture's slot at index zero.
     #[test]
+    fn the_open_micro_script_starts_suspends_and_resumes_its_machine_and_then_quits() {
+        use tairix_qemu::{MouseButton, PointerAction};
+
+        let steps = super::openmicro_pointer_script().expect("the script builds");
+        let clicks: Vec<(PointerAction, &str, u32)> = steps
+            .iter()
+            .filter(|step| matches!(step.action, PointerAction::Click(_)))
+            .map(|step| {
+                (
+                    step.action,
+                    step.ready_marker.as_str(),
+                    step.ready_occurrences,
+                )
+            })
+            .collect();
+        let (primary, secondary) = (
+            PointerAction::Click(MouseButton::Primary),
+            PointerAction::Click(MouseButton::Secondary),
+        );
+        let tail = &clicks[clicks.len().saturating_sub(7)..];
+        assert_eq!(
+            tail,
+            [
+                (secondary, super::OPENMICRO_LIBRARY_MARKER, 1),
+                (primary, super::MENU_SHOWN_MARKER, 1),
+                (primary, super::OPENMICRO_RUNNING_MARKER, 1),
+                (secondary, super::OPENMICRO_SUSPENDED_MARKER, 1),
+                (primary, super::MENU_SHOWN_MARKER, 2),
+                (secondary, super::OPENMICRO_RESUMED_MARKER, 1),
+                (primary, super::MENU_SHOWN_MARKER, 3),
+            ],
+            "start from the card, close, resume from the card, then quit from the icon bar"
+        );
+        let theme = super::booted_theme();
+        let (card, start) =
+            super::openmicro_card_row(tairix_machines::Standing::Off, "Start").expect("laid out");
+        let (again, resume) =
+            super::openmicro_card_row(tairix_machines::Standing::Suspended, "Resume")
+                .expect("laid out");
+        let (library, _) = super::openmicro_library_window(&theme).expect("placed");
+        assert!(
+            library.client.contains(card),
+            "{card:?} in {:?}",
+            library.client
+        );
+        assert_eq!(card, again, "the same card is pressed both times");
+        assert_ne!(card, start, "the row is on the menu's plate, not the card");
+        assert_eq!(start, resume, "a card menu's first row starts or resumes");
+        let machine = super::openmicro_machine_window(&theme).expect("placed");
+        let close = super::title_bar_control(
+            &super::window_frame(true),
+            &machine,
+            tairix_controls::WindowControlKind::Close,
+            &theme,
+        )
+        .expect("seated");
+        assert!(
+            machine.title_bar.contains(close),
+            "{close:?} in {:?}",
+            machine.title_bar
+        );
+    }
+
+    #[test]
     fn a_launch_whose_slot_is_named_by_index_waits_for_the_managers_slot() {
         let scripts = [
             ("desktop-hover", desktop_hover_pointer_script()),
             ("filepick", filepick_pointer_script()),
             ("filepicks", super::filepicks_pointer_script()),
             ("netmap", netmap_pointer_script()),
-            ("beeb", super::beeb_pointer_script()),
+            ("openmicro", super::openmicro_pointer_script()),
             ("appbar", appbar_pointer_script()),
         ];
         for (name, steps) in scripts {

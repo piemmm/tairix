@@ -2055,6 +2055,8 @@ mod program {
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::FileOffered { .. }
+            | WindowEvent::DocumentsFolder { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }
     }

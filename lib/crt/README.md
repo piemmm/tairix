@@ -16,8 +16,8 @@ an analogue noise floor and a travelling wobble, drawn over a picture.
   picture the window holds, enlarged sharp or smooth and redrawn only where
   the frame changed, with the tube over it.
 
-The terminal (`userland/apps/terminal`) and the PC and BBC Micro emulators
-(`userland/apps/pcemu`, `userland/apps/beeb`) draw through it. Its design is
+The terminal (`userland/apps/terminal`) and the PC and Open Micro emulators
+(`userland/apps/pcemu`, `userland/apps/openmicro`) draw through it. Its design is
 `docs/src/lib/crt.md`.
 
 ## Stability

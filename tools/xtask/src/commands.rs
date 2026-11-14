@@ -16,7 +16,6 @@ use crate::{elapsed_line, output_or_reason, Context, LONG_BUILD_COMMAND_TIMEOUT}
 
 mod abi_check;
 mod artsheet;
-mod beeb;
 mod bench;
 mod board_check;
 mod c_header;
@@ -46,6 +45,7 @@ mod loom;
 mod miri;
 mod model_check;
 mod netpeer;
+mod openmicro;
 pub(crate) mod parallel;
 mod pcemu_vectors;
 mod pie_build;
@@ -84,7 +84,7 @@ pub enum Command {
     Artsheet,
     Icons,
     Devids,
-    Beeb,
+    OpenMicro,
     Unicode,
     Spirv,
     Shaders,
@@ -134,7 +134,7 @@ impl Command {
         Command::Artsheet,
         Command::Icons,
         Command::Devids,
-        Command::Beeb,
+        Command::OpenMicro,
         Command::Unicode,
         Command::Spirv,
         Command::Shaders,
@@ -183,7 +183,7 @@ impl Command {
             "artsheet" => Command::Artsheet,
             "icons" => Command::Icons,
             "devids" => Command::Devids,
-            "beeb" => Command::Beeb,
+            "openmicro" => Command::OpenMicro,
             "unicode" => Command::Unicode,
             "spirv" => Command::Spirv,
             "shaders" => Command::Shaders,
@@ -234,7 +234,7 @@ impl Command {
             Command::Artsheet => "artsheet",
             Command::Icons => "icons",
             Command::Devids => "devids",
-            Command::Beeb => "beeb",
+            Command::OpenMicro => "openmicro",
             Command::Unicode => "unicode",
             Command::Spirv => "spirv",
             Command::Shaders => "shaders",
@@ -300,8 +300,8 @@ impl Command {
                 "Verify the vetted PCI/USB ID-database tables (`--write` to regenerate, \
                  `--fetch` to import upstream; developer-run only)."
             }
-            Command::Beeb => {
-                "Hold the BBC Micro emulator's CPU to the SingleStepTests suite \
+            Command::OpenMicro => {
+                "Hold the Open Micro emulator's 6502 to the SingleStepTests suite \
                  (`--vectors <dir>`, `--write-sample` to refresh the committed sample; \
                  developer-run only)."
             }
@@ -389,7 +389,7 @@ impl Command {
             Command::Artsheet => run_artsheet(ctx, args),
             Command::Icons => icons::run(ctx, args),
             Command::Devids => devids::run(ctx, args),
-            Command::Beeb => beeb::run(ctx, args),
+            Command::OpenMicro => openmicro::run(ctx, args),
             Command::Unicode => unicode::run(ctx, args),
             Command::Spirv => spirv::run(ctx, args),
             Command::Shaders => shaders::run(ctx, args),
@@ -1671,8 +1671,9 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     ("artsheet", |c| run_artsheet(c, &[])),
     // The file-type icon masters, each redrawn and compared byte for byte.
     ("icons", |c| icons::run(c, &[])),
-    // The clean-room BBC Micro ROMs, each rebuilt and compared byte for byte.
-    ("beeb-roms", beeb::check_roms),
+    // The Open Micro emulator's clean-room ROMs, each rebuilt and compared
+    // byte for byte.
+    ("openmicro-roms", openmicro::check_roms),
     // Exhaustively model-check the capability + IPC state machine.
     ("model-check", |_| run_model_check(&[])),
 ];

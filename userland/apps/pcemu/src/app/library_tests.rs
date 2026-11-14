@@ -1,7 +1,10 @@
+use alloc::vec::Vec;
+
 use super::*;
 use crate::dos::setup::default_disk;
 use crate::machine::Template;
 use crate::storage::hdc::Recording;
+use tairix_machines::{Found, Library, LibraryError};
 
 fn disk() -> StoredDisk {
     let made = default_disk(Recording::Rll, 7).unwrap();
@@ -18,12 +21,12 @@ fn machine(id: u32, name: &str, config: BoardConfig, disks: [Option<StoredDisk>;
         config,
         disks,
         clock_offset: 0,
-        display: tairix_crt::Tube::default(),
+        display: Tube::default(),
     }
 }
 
 fn add(
-    library: &mut Library,
+    library: &mut Library<Machine>,
     name: &str,
     template: Template,
     disks: [Option<StoredDisk>; 2],
@@ -35,7 +38,7 @@ fn add(
     id
 }
 
-fn two_machines() -> Library {
+fn two_machines() -> Library<Machine> {
     let mut library = Library::new();
     add(&mut library, "XT", Template::IbmXt, [Some(disk()), None]);
     add(
@@ -47,253 +50,76 @@ fn two_machines() -> Library {
     library
 }
 
-/// The record as it stands, said written.
-fn commit(library: &mut Library) -> Record {
-    let record = library.record().unwrap();
-    library.written(record.generation);
-    record
-}
-
-fn listing(names: &[&str]) -> Vec<(String, u64)> {
-    names
-        .iter()
-        .map(|name| (String::from(*name), 512))
-        .collect()
-}
-
 #[test]
-fn a_record_reads_back_as_written() {
+fn a_machine_reads_back_as_written_every_part_with_it() {
     let mut library = two_machines();
     let mut changed = library.machine(1).unwrap().clone();
     changed.clock_offset = -3_600;
-    changed.display = tairix_crt::Tube {
+    changed.display = Tube {
         scanlines: 450,
         phosphor: 1000,
-        ..tairix_crt::Tube::default()
+        ..Tube::default()
     };
     library.replace(changed).unwrap();
-    let record = commit(&mut library);
-    assert_eq!(record.blob, RECORD_BLOBS[1], "the first generation is odd");
-    assert_eq!(Library::decode(&record.bytes), Ok(library.clone()));
-    assert_eq!(
-        commit(&mut library).blob,
-        RECORD_BLOBS[0],
-        "and the copies alternate"
-    );
+    let record = library.record().unwrap();
+    library.written(record.generation);
+    assert_eq!(Library::<Machine>::decode(&record.bytes), Ok(library));
 }
 
 #[test]
-fn a_record_not_said_written_is_written_again_over_the_same_blob() {
-    let mut library = two_machines();
-    let whole = commit(&mut library);
-    let failed = library.record().unwrap();
-    assert_ne!(failed.blob, whole.blob);
-    library.remove(2);
-    let again = library.record().unwrap();
-    assert_eq!(again.blob, failed.blob, "never over the copy still whole");
-    assert_eq!(again.generation, failed.generation);
-}
-
-#[test]
-fn the_newer_whole_copy_is_read_and_a_torn_one_passed_over() {
-    let mut library = two_machines();
-    let older = commit(&mut library);
-    library.remove(2);
-    let newer = commit(&mut library);
-    let mut copies: [Option<&[u8]>; 2] = [None, None];
-    copies[slot_of(older.generation)] = Some(&older.bytes);
-    copies[slot_of(newer.generation)] = Some(&newer.bytes);
-    let (read, any) = Library::newest(copies);
-    assert!(any);
-    assert_eq!(read.machines().len(), 1, "the newer copy");
-    let torn = &newer.bytes[..newer.bytes.len() / 2];
-    copies[slot_of(newer.generation)] = Some(torn);
-    let (read, _) = Library::newest(copies);
-    assert_eq!(
-        read.machines().len(),
-        2,
-        "a torn write leaves the older copy"
-    );
-    copies[slot_of(older.generation)] = None;
-    assert_eq!(
-        Library::newest(copies),
-        (Library::new(), false),
-        "neither checks out"
-    );
-}
-
-#[test]
-fn a_copy_read_from_the_other_blob_is_not_a_copy() {
-    let mut library = two_machines();
-    let record = commit(&mut library);
-    let mut copies: [Option<&[u8]>; 2] = [None, None];
-    copies[1 - slot_of(record.generation)] = Some(&record.bytes);
-    assert!(!Library::newest(copies).1);
-}
-
-#[test]
-fn every_flipped_bit_is_caught() {
-    let library = two_machines();
-    let bytes = library.record().unwrap().bytes;
-    for at in 0..bytes.len() * 8 {
-        let mut flipped = bytes.clone();
-        flipped[at / 8] ^= 1 << (at % 8);
-        assert_eq!(
-            Library::decode(&flipped),
-            Err(LibraryError::Malformed),
-            "bit {at}"
-        );
-    }
-}
-
-#[test]
-fn names_numbers_and_room_are_held_to_their_bounds() {
+fn a_disk_needs_a_controller_and_a_tube_no_effect_past_full() {
     let mut library = Library::new();
-    let config = Template::IbmPc.config();
     let id = library.mint().unwrap();
-    for bad in ["", &"x".repeat(MAX_NAME + 1), "a\u{7}b"] {
-        assert_eq!(
-            library.add(machine(id, bad, config, [None, None])),
-            Err(LibraryError::Name)
-        );
-    }
+    let config = Template::IbmPc.config();
     assert_eq!(
         library.add(machine(id, "PC", config, [Some(disk()), None])),
-        Err(LibraryError::NoController),
+        Err(LibraryError::Invalid(Invalid::NoController)),
         "a PC has no fixed disk controller"
     );
+    let mut glaring = machine(id, "PC", config, [None, None]);
+    glaring.display.glow = tairix_crt::FULL + 1;
     assert_eq!(
-        library.add(machine(id + 1, "PC", config, [None, None])),
-        Err(LibraryError::NoMachine),
-        "not minted"
+        library.add(glaring),
+        Err(LibraryError::Invalid(Invalid::Display))
     );
     library
-        .add(machine(id, &"é".repeat(MAX_NAME / 2), config, [None, None]))
+        .add(machine(id, "PC", config, [None, None]))
         .unwrap();
-    assert_eq!(
-        library.add(machine(id, "PC", config, [None, None])),
-        Err(LibraryError::NoMachine),
-        "held"
-    );
-    library.remove(id);
-    let second = library.mint().unwrap();
-    assert!(second > id, "a number is never used again");
-    while library.machines().len() < MAX_MACHINES {
-        add(&mut library, "PC", Template::IbmPc, [None, None]);
-    }
-    assert_eq!(library.mint(), Err(LibraryError::Full));
-    assert_eq!(
-        library.add(machine(second, "PC", config, [None, None])),
-        Err(LibraryError::Full)
-    );
-    let mut nameless = library.machines()[0].clone();
-    nameless.name.clear();
-    assert_eq!(library.replace(nameless), Err(LibraryError::Name));
-    let mut stranger = library.machines()[0].clone();
-    stranger.id = 999;
-    assert_eq!(library.replace(stranger), Err(LibraryError::NoMachine));
-    let mut glaring = library.machines()[0].clone();
-    glaring.display.glow = tairix_crt::FULL + 1;
-    assert_eq!(library.replace(glaring), Err(LibraryError::Display));
 }
 
 #[test]
-fn a_record_with_numbers_out_of_order_is_refused() {
-    let mut library = two_machines();
-    library.next_id = 2;
-    assert_eq!(
-        Library::decode(&library.record().unwrap().bytes),
-        Err(LibraryError::Malformed),
-        "a machine numbered at or past the next number"
-    );
-    let mut twice = two_machines();
-    twice.machines[1].id = 1;
-    assert_eq!(
-        Library::decode(&twice.record().unwrap().bytes),
-        Err(LibraryError::Malformed),
-        "a number held twice"
-    );
+fn the_store_holds_every_machine_with_both_disks_and_its_state() {
+    assert_eq!(Machine::MAX_MACHINES, 20);
+    let blobs = 2 + Machine::MAX_MACHINES * 3;
+    assert!(blobs <= tairix_abi::appdata_ipc::APPDATA_BLOB_MAX_COUNT);
 }
 
 #[test]
-fn the_blobs_are_named_by_machine_and_only_those_names_are_owned() {
-    assert_eq!(disk_blob(1, 0), "disk-1-0");
-    assert_eq!(state_blob(12), "state-12");
-    assert_eq!(owner("disk-12-1"), Some((12, Part::Disk(1))));
-    assert_eq!(owner("state-3"), Some((3, Part::State)));
-    for stranger in [
-        "disk-1-2",
-        "disk-01-0",
-        "disk-+1-0",
-        "state-",
-        "state-1x",
-        "library-a",
-        "disk-1",
-    ] {
-        assert_eq!(owner(stranger), None, "{stranger}");
-    }
-}
-
-#[test]
-fn a_first_run_finds_nothing_and_sweeps_what_a_cut_short_creation_left() {
-    let loaded = Library::load(&listing(&["disk-1-0"]), [None, None]);
-    assert_eq!(loaded.found, Found::Fresh);
-    assert!(loaded.library.machines().is_empty());
-    assert_eq!(loaded.orphans, ["disk-1-0"]);
-}
-
-#[test]
-fn a_read_library_sweeps_only_blobs_no_machine_owns() {
-    let mut library = two_machines();
-    let record = commit(&mut library);
+fn a_disk_blob_is_owned_only_while_its_machine_has_that_disk() {
+    let library = two_machines();
+    let record = library.record().unwrap();
     let mut copies: [Option<&[u8]>; 2] = [None, None];
-    copies[slot_of(record.generation)] = Some(&record.bytes);
-    let names = listing(&[
+    let slot = usize::from(record.generation % 2 == 1);
+    copies[slot] = Some(&record.bytes);
+    let names: Vec<(String, u64)> = [
         record.blob,
         "disk-1-0",
-        "state-1",
         "disk-1-1",
-        "state-2",
+        "disk-1-2",
         "disk-2-0",
-        "disk-9-0",
-        "notes",
-    ]);
-    let loaded = Library::load(&names, copies);
+        "state-2",
+    ]
+    .iter()
+    .map(|name| (String::from(*name), 512))
+    .collect();
+    let loaded = Library::<Machine>::load(&names, copies);
     assert_eq!(loaded.found, Found::Read);
-    assert_eq!(loaded.library, library);
+    assert_eq!(disk_blob(1, 0), "disk-1-0");
     assert_eq!(
         loaded.orphans,
-        ["disk-1-1", "disk-2-0", "disk-9-0"],
-        "a disk the machine does not have, and a machine the record does not hold"
+        ["disk-1-1", "disk-2-0"],
+        "a drive the machine has no disk in; a third drive is no blob of the library's"
     );
-}
-
-#[test]
-fn an_unreadable_library_sweeps_nothing_and_never_mints_their_numbers() {
-    let names = listing(&["library-a", "disk-7-0", "state-12"]);
-    let mut loaded = Library::load(&names, [Some(b"torn"), None]);
-    assert_eq!(loaded.found, Found::Unreadable);
-    assert!(loaded.orphans.is_empty(), "nothing is deleted on a guess");
-    assert_eq!(loaded.library.mint(), Ok(13));
-}
-
-#[test]
-fn a_new_machine_is_named_apart_from_the_rest_and_a_copy_says_so() {
-    let mut library = Library::new();
-    assert_eq!(library.fresh_name("Turbo XT"), "Turbo XT");
-    add(&mut library, "Turbo XT", Template::TurboXt, [None, None]);
-    assert_eq!(library.fresh_name("Turbo XT"), "Turbo XT 2");
-    assert_eq!(library.copy_name("Turbo XT"), "Turbo XT copy");
-    add(
-        &mut library,
-        "Turbo XT copy",
-        Template::TurboXt,
-        [None, None],
-    );
-    assert_eq!(library.copy_name("Turbo XT"), "Turbo XT copy 2");
-    let long = "é".repeat(MAX_NAME / 2);
-    let copy = library.copy_name(&long);
-    assert!(copy.len() <= MAX_NAME && copy.ends_with(" copy"), "{copy}");
 }
 
 #[test]
@@ -331,5 +157,27 @@ fn the_clock_offset_is_what_the_guest_set_against_the_host() {
     assert_eq!(
         machine.clock_at(host + 60),
         CivilTime::from_unix_secs(host - 86_400 + 60)
+    );
+}
+
+#[test]
+fn a_machine_is_described_by_its_parts() {
+    let library = two_machines();
+    assert_eq!(
+        describe(&library.machines()[0]),
+        "8088 at 4.77 MHz \u{b7} 640 KB \u{b7} CGA \u{b7} 1 hard disk \u{b7} AdLib"
+    );
+    let mut machine = library.machines()[1].clone();
+    machine.disks = [None, None];
+    assert!(
+        !describe(&machine).contains("hard disk"),
+        "{}",
+        describe(&machine)
+    );
+    machine.config.coprocessor = true;
+    assert!(
+        describe(&machine).contains("MHz + 8087 \u{b7}"),
+        "{}",
+        describe(&machine)
     );
 }

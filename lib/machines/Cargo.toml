@@ -1,0 +1,53 @@
+[package]
+name = "tairix-machines"
+description = "TAIRiX machine library (plans/BEEB.md §6): the emulators' record of their machines in two alternate blobs, each machine's last screen and snapshot, the library window of machine cards, how a machine stands, the suspends holding a window open until kept, the new-machine assistant and a card's menu. no_std + alloc, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Menu rows, a window title's bound and the double-click interval.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The wire codec the record is written in.
+tairix-sandbox = { path = "../sandbox", version = "=0.0.0" }
+# The checksum that closes a record and each part of a state.
+tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
+# The codec a last screen is compressed with.
+tairix-compress = { path = "../compress", version = "=0.0.0" }
+# The screen a last screen is taken from.
+tairix-crt = { path = "../crt", version = "=0.0.0" }
+# The window's controls: the cards, the commands, the scrollbar, the band, the
+# assistant's form.
+tairix-controls = { path = "../controls", version = "=0.0.0" }
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+tairix-icon = { path = "../icon", version = "=0.0.0" }
+tairix-input = { path = "../input", version = "=0.0.0" }
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+
+# The runtime halves (`rt`): the app's own store the library's blobs are kept
+# in, the descriptors they are read through, the one hole-keeping copy a
+# machine's state is duplicated by, and the window channel's app shell the
+# library window and its dialogs are served over.
+tairix-appdata = { path = "../appdata", version = "=0.0.0", features = ["rt"], optional = true }
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+tairix-fscopy = { path = "../fscopy", version = "=0.0.0", optional = true }
+tairix-window = { path = "../window", version = "=0.0.0", optional = true }
+
+[features]
+rt = ["dep:tairix-appdata", "dep:tairix-rt", "dep:tairix-fscopy", "dep:tairix-window"]
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }
+
+[dev-dependencies]
+# The glyph transport the window's text is measured through in tests.
+tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The fuzz harness draws its inputs through the shared seed and budget seam.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

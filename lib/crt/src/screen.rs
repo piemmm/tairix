@@ -13,7 +13,7 @@ use core::ops::Range;
 use tairix_abi::driver::display::RefreshRate;
 use tairix_geometry::{Rect, Region};
 use tairix_parallel::JobRunner;
-use tairix_raster::resample::{resample_window, Region as Target, ResampleError};
+use tairix_raster::resample::{resample, resample_window, Region as Target, ResampleError};
 use tairix_raster::{Pixel, Rgba8Image, SharpError, SharpScaler, Surface};
 
 use crate::{frame_due, Phase, Pipeline, Tube};
@@ -505,6 +505,93 @@ fn placed(target: Target, rows: Range<u32>) -> Option<Rect> {
         target.width,
         rows.end.checked_sub(rows.start)?,
     ))
+}
+
+/// The frame's dot and line under window point `(x, y)`, for a frame of
+/// `frame` dots and lines drawn into `target`; a point outside the picture is
+/// its nearest edge.
+#[must_use]
+pub fn frame_point(target: Target, frame: (u32, u32), (x, y): (i32, i32)) -> (u16, u16) {
+    let along = |at: i32, from: u32, extent: u32, dots: u32| {
+        let inside = i64::from(at) - i64::from(from);
+        let clamped = inside.clamp(0, i64::from(extent.max(1)) - 1);
+        let dot = clamped * i64::from(dots) / i64::from(extent.max(1));
+        u16::try_from(dot).unwrap_or(u16::MAX)
+    };
+    (
+        along(x, target.x, target.width, frame.0),
+        along(y, target.y, target.height, frame.1),
+    )
+}
+
+/// A `size` picture of a `width`×`height` frame of `pixels` as its monitor
+/// shows it: the monitor's shape fitted and centred on black, the frame
+/// resampled into it. None for pixels not the frame's, a size too small for
+/// the shape, or a picture the heap will not hold.
+#[must_use]
+pub fn thumbnail(width: u32, height: u32, pixels: &[u8], size: (u32, u32)) -> Option<Vec<u8>> {
+    let frame = Rgba8Image::new(width, height, pixels).ok()?;
+    let at = fit(size.0, size.1)?;
+    let whole = Target {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let picture = resample(&frame, whole, at.width, at.height).ok()?;
+    let dots = |n: u32| usize::try_from(n).ok();
+    let stride = dots(size.0)?.checked_mul(DOT)?;
+    let len = stride.checked_mul(dots(size.1)?)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).ok()?;
+    out.resize(len, 0);
+    for pixel in out.as_chunks_mut::<DOT>().0 {
+        pixel[DOT - 1] = 0xFF;
+    }
+    let row = dots(at.width)? * DOT;
+    let left = dots(at.x)? * DOT;
+    for (line, n) in picture.chunks_exact(row).zip(dots(at.y)?..) {
+        let start = n * stride + left;
+        out[start..start + row].copy_from_slice(line);
+    }
+    Some(out)
+}
+
+/// A `width`×`height` frame of `pixels` as its monitor showed it, for keeping
+/// as a picture: four units wide for every three high, each of its dots a
+/// block of whole pixels, at least `least` pixels wide. Its size, and its
+/// straight RGBA; none for pixels not the frame's or a picture the heap will
+/// not hold.
+#[must_use]
+pub fn screenshot(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    least: u32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let frame = Rgba8Image::new(width, height, pixels).ok()?;
+    let wide = width.checked_mul(least.div_ceil(width.max(1)).max(1))?;
+    let (across, down) = ASPECT;
+    let high = wide.checked_mul(down)? / across;
+    let mut surface = Surface::new(wide, high)?;
+    let target = Target {
+        x: 0,
+        y: 0,
+        width: wide,
+        height: high,
+    };
+    SharpScaler::new()
+        .draw(&frame, &mut surface, target, 0..high)
+        .ok()?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(surface.pixels().len().checked_mul(DOT)?)
+        .ok()?;
+    // Every pixel is opaque, so its premultiplied channels are its straight
+    // ones.
+    for pixel in surface.pixels() {
+        out.extend_from_slice(&[pixel.r, pixel.g, pixel.b, 0xFF]);
+    }
+    Some((wide, high, out))
 }
 
 #[cfg(test)]

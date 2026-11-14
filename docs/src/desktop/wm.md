@@ -2460,6 +2460,17 @@ session-owned window, several up at once, driving the same shared
 `lib/browse` engine as the files app; the requesting app receives only the
 redeemable handle, never a path or any browsing authority of its own.
 
+The channel also carries an application's **documents folder**
+(`WindowRequest::RequestDocumentsFolder`, `plans/BEEB.md` §6): the folder
+beneath the user's `Home/Documents/` its signed manifest names, delegated
+without a picker. The engine keys the request to the attested window owner,
+keeps at most `DOCUMENTS_FOLDER_MAX_OPEN` owed an application — one whose
+window has closed holding its place until the host concludes it — and requires
+exactly one conclusion per accepted request: `WindowEvent::DocumentsFolder`,
+carrying the directory's one-shot `fd_grant` handle, or
+`WindowEvent::DocumentsFolderRefused` with its `DocumentsRefusal`. How the
+session finds, makes and vouches for the folder is in the session page.
+
 A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
 signed manifest edits documents and the user may write the file, read-only

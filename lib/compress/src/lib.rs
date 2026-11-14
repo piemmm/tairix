@@ -170,7 +170,7 @@ pub enum Error {
 /// frame header, every input byte verbatim, and the literal-length tokens
 /// and 0xFF continuations that frame them.
 #[must_use]
-pub fn max_compressed_len(input_len: usize) -> usize {
+pub const fn max_compressed_len(input_len: usize) -> usize {
     // One token per 255 literals, plus a continuation byte per 255 literals,
     // plus the always-present first token. Saturating throughout: an absurd
     // `input_len` yields `usize::MAX`, never a wrapped small bound.

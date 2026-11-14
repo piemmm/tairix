@@ -41,48 +41,49 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::Cell;
     use core::num::NonZeroUsize;
-    use core::ops::Range;
 
     use tairix_abi::appdata_ipc::BlobMode;
     use tairix_abi::audio::{OpenParams, StreamRole, Tenancy};
     use tairix_abi::driver::audio::{ChannelMap, Frames, Rate, SampleFormat, StreamDirection};
-    use tairix_abi::time::WallTimeState;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::window_ipc::{
-        AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBarClick, AppMenu,
-        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol, ClipboardKind,
-        CursorShape, DialogModality, DocumentName, KeyboardMode, MenuOutcome, PickPurpose,
-        PointerAction, SaveFormats, WindowEvent, WindowRegion, WindowSizeState, MENU_OPEN_REVISION,
+        AlertOutcome, AlertSeverity, AlertSpec, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel,
+        AppMenuRow, AppMenuSymbol, ClipboardKind, CursorShape, DialogModality, DocumentName,
+        KeyboardMode, MenuOutcome, PickPurpose, PointerAction, SaveFormats, WindowEvent,
+        WindowRegion, WindowSizeState,
     };
     use tairix_abi::{Errno, SPAWN_SELF};
-    use tairix_appdata::RtHost;
+    use tairix_appdata::open_blob;
     use tairix_audio::live::{LiveStream, RtAudio};
     use tairix_browse::media::save_format;
     use tairix_browse::MediaType;
-    use tairix_crt::screen::{fit, Drawing, Picture, Screen};
+    use tairix_crt::screen::{fit, screenshot, thumbnail, Drawing, Picture, Screen};
     use tairix_crt::Tube;
-    use tairix_fscopy::{DataCopy, Sparse};
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::InputEvent;
-    use tairix_pcemu::app::assistant::{self, Assistant};
+    use tairix_machines::assistant::{self as assistance, Assistant};
+    use tairix_machines::keeping::{Ended, Suspends};
+    use tairix_machines::menu::{card_command, card_menu, CardCommand, Followed};
+    use tairix_machines::record::Kept;
+    use tairix_machines::shelf::{Entry, LibraryLook, Pictures, Request, Shelf};
+    use tairix_machines::state::{LastScreen, Suspended};
+    use tairix_machines::store::{self as kept, Resumable, Shelved};
+    use tairix_machines::window::{
+        self as library_window, event_time, inputs, present, repaint, whole, BarAsk, LibraryEvent,
+        LibraryWindow, SheetEvent, SheetWindow,
+    };
+    use tairix_machines::{Found, Library, Record, Standing, Writes};
+    use tairix_pcemu::app::assistant;
     use tairix_pcemu::app::bar::{MachineBar, Menu, MenuRequest, Shared as ShareShown};
     use tairix_pcemu::app::debugger::{self as debugging, Added, Adding, Ask, Debugger};
     use tairix_pcemu::app::disk::{self, Medium};
     use tairix_pcemu::app::input::{ctrl_alt_delete, held_title, Asks, Input, Over};
-    use tairix_pcemu::app::keeping::{Ended, Suspends};
-    use tairix_pcemu::app::library::{
-        self, Found, Library, Loaded, Machine, Record, StoredDisk, MAX_MACHINES, MAX_RECORD,
-        RECORD_BLOBS,
-    };
+    use tairix_pcemu::app::library::{self, Machine, StoredDisk, STATE_BOUNDS};
     use tairix_pcemu::app::media::{self, Unfit};
-    use tairix_pcemu::app::menu::{
-        self as machine_menu, CardCommand, Clipboard, Command, Followed, Shown, Windows,
-    };
-    use tairix_pcemu::app::screen::{last_screen, opening_extent, screenshot, thumbnail};
+    use tairix_pcemu::app::menu::{self as machine_menu, Clipboard, Command, Shown, Windows};
+    use tairix_pcemu::app::screen::{opening_extent, VGA_SCREEN};
     use tairix_pcemu::app::settings::{self, Settings};
-    use tairix_pcemu::app::shelf::{Request, Shelf, Standing};
     use tairix_pcemu::app::sound::{Sound, Stream, StreamError};
-    use tairix_pcemu::app::state::{self, LastScreen, Suspended};
     use tairix_pcemu::app::text;
     use tairix_pcemu::cpu::jit::cache::Key;
     use tairix_pcemu::cpu::jit::compiler::Compile;
@@ -115,9 +116,9 @@ mod program {
     use tairix_util::defer::JobQueue;
     use tairix_window::app::{self, Fitted, LazyPool, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, scroll_input_events,
-        Answer as Landed, Desktop, EventDrain, EventError, EventMailbox, EventSource, Owed, Parked,
-        Repaint, WindowClient, WindowEvents, WindowSizing, EVENT_MAILBOX_CAPACITY,
+        pointer_input_events, pointer_point, Answer as Landed, Desktop, EventDrain, EventError,
+        EventMailbox, EventSource, Owed, Parked, Repaint, WindowClient, WindowEvents, WindowSizing,
+        EVENT_MAILBOX_CAPACITY,
     };
 
     /// The name this program states its own refusals under: its manifest's.
@@ -125,9 +126,6 @@ mod program {
 
     /// The library window's title.
     const APP_TITLE: &str = "PC Emulator";
-
-    /// The icon-bar row that brings the library window back.
-    const LIBRARY_ROW: u16 = 2;
 
     /// A diskette drive's menu rows, and a shared folder's.
     const INSERT_ROW: u16 = 1;
@@ -144,14 +142,11 @@ mod program {
     const TOKENS_PER_MACHINE: u64 = 3;
 
     // Every token's wake is a bit of one 64-bit word.
-    const _: () = assert!(3 + TOKENS_PER_MACHINE * MAX_MACHINES as u64 <= 64);
+    const _: () = assert!(3 + TOKENS_PER_MACHINE * Machine::MAX_MACHINES as u64 <= 64);
 
-    /// The library window's opening and least sizes, and the least a machine
-    /// window is made, in logical pixels: the monitor's shape at half a VGA
-    /// screen. A machine window opens at its picture's own size
-    /// ([`opening_extent`]).
-    const LIBRARY_SIZE: (u32, u32) = (960, 640);
-    const LIBRARY_LEAST: (u32, u32) = (480, 360);
+    /// The least a machine window is made, in logical pixels: the monitor's
+    /// shape at half a VGA screen. A machine window opens at its picture's own
+    /// size ([`opening_extent`]).
     const LEAST_SIZE: (u32, u32) = (320, 240);
     /// The debugger window's size as it opens, and the least it is made.
     const DEBUGGER_SIZE: (u32, u32) = (1100, 760);
@@ -159,12 +154,9 @@ mod program {
 
     /// Jobs each worker holds unanswered: every machine's few at once, and for
     /// the compile worker every machine's window of blocks and its end.
-    const STORE_JOBS: usize = 4 * MAX_MACHINES;
-    const DISK_JOBS: usize = 2 * MAX_MACHINES + 4;
-    const COMPILE_JOBS: usize = (COMPILE_WINDOW + 1) * MAX_MACHINES;
-
-    /// Bytes a disk is copied through at a time.
-    const COPY_CHUNK: usize = 64 * 1024;
+    const STORE_JOBS: usize = 4 * Machine::MAX_MACHINES;
+    const DISK_JOBS: usize = 2 * Machine::MAX_MACHINES + 4;
+    const COMPILE_JOBS: usize = (COMPILE_WINDOW + 1) * Machine::MAX_MACHINES;
 
     /// How long the program waits, once its windows are gone, for the store
     /// to take what it was last asked to keep.
@@ -325,72 +317,6 @@ mod program {
         }
     }
 
-    /// Blob `name` of the application's store, opened as `mode` says.
-    fn open_blob(name: &str, mode: BlobMode) -> Result<File, String> {
-        let handle = tairix_appdata::blobs::open(&mut RtHost, name, mode)
-            .map_err(|err| format!("the store refused {name} ({err})"))?;
-        File::from_delegation(handle).map_err(|err| {
-            format!(
-                "the grant of {name} could not be taken ({})",
-                Errno::from_syscall(err)
-            )
-        })
-    }
-
-    /// The whole of blob `name`, refused past `most` bytes.
-    fn read_blob(name: &str, most: usize) -> Result<Vec<u8>, String> {
-        let file = open_blob(name, BlobMode::Read)?;
-        let len = file
-            .regular_len()
-            .ok()
-            .flatten()
-            .and_then(|len| usize::try_from(len).ok())
-            .ok_or_else(|| format!("{name} could not be measured"))?;
-        if len > most {
-            return Err(format!("{name} is larger than it can be"));
-        }
-        read_span(&file, name, 0..len)
-    }
-
-    /// The bytes `span` of `file`, blob `name`, or as many of them as it
-    /// holds.
-    fn read_span(file: &File, name: &str, span: Range<usize>) -> Result<Vec<u8>, String> {
-        let len = span.len();
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| format!("there is no memory to read {name}"))?;
-        bytes.resize(len, 0);
-        let mut done = 0;
-        while done < len {
-            match file.read_at((span.start + done) as u64, &mut bytes[done..]) {
-                Ok(0) => break,
-                Ok(n) => done += n,
-                Err(err) => {
-                    return Err(format!(
-                        "{name} could not be read ({})",
-                        Errno::from_syscall(err)
-                    ))
-                }
-            }
-        }
-        bytes.truncate(done);
-        Ok(bytes)
-    }
-
-    /// Blob `name` made to hold exactly `bytes`, on the store before this
-    /// answers.
-    fn write_blob(name: &str, bytes: &[u8]) -> Result<(), String> {
-        let file = open_blob(name, BlobMode::ReadWrite)?;
-        let failed =
-            |err: i64| format!("{name} could not be written ({})", Errno::from_syscall(err));
-        file.truncate(0).map_err(failed)?;
-        if file.write_at(0, bytes).map_err(failed)? != bytes.len() {
-            return Err(format!("{name} could not be written whole"));
-        }
-        file.sync().map_err(failed)
-    }
-
     /// An image the front-end reads and writes through its descriptor.
     struct FileMedium(File);
 
@@ -440,26 +366,6 @@ mod program {
         session: RtSessionChannel,
         sound: Option<Opened>,
         resume: Resumable,
-    }
-
-    /// What a machine asked to resume has to resume from.
-    enum Resumable {
-        /// It was not suspended.
-        Nothing,
-        /// Its last screen and its snapshot.
-        Kept(Box<(LastScreen, Suspended)>),
-        /// Its saved state does not check out: it starts afresh.
-        Damaged,
-    }
-
-    /// The library and every machine's last screen at a card's size, which
-    /// machines are suspended, and how many blobs no machine owns could not
-    /// be swept.
-    struct Shelved {
-        loaded: Loaded,
-        pictures: Vec<(u32, Vec<u8>)>,
-        suspended: Vec<u32>,
-        unswept: usize,
     }
 
     /// Why a machine's state is kept.
@@ -523,7 +429,7 @@ mod program {
 
     /// What the library worker answers.
     enum Done {
-        Loaded(Result<Shelved, String>),
+        Loaded(Result<Shelved<Machine>, String>),
         Recorded(Result<u64, String>),
         Made {
             id: u32,
@@ -554,10 +460,8 @@ mod program {
 
     fn serve_store(_: &mut (), job: &mut Job) -> Done {
         match job {
-            Job::Load { picture } => Done::Loaded(load(*picture)),
-            Job::Record(record) => {
-                Done::Recorded(write_blob(record.blob, &record.bytes).map(|()| record.generation))
-            }
+            Job::Load { picture } => Done::Loaded(kept::load::<Machine>(*picture, &STATE_BOUNDS)),
+            Job::Record(record) => Done::Recorded(kept::write_record(record)),
             Job::Make {
                 id,
                 recording,
@@ -571,7 +475,7 @@ mod program {
                 to: *to,
                 result: copy(*from, *to, *drives),
             },
-            Job::Remove { id } => Done::Removed(remove(*id)),
+            Job::Remove { id } => Done::Removed(kept::remove::<Machine>(*id)),
             Job::Keep {
                 id,
                 screen,
@@ -583,15 +487,11 @@ mod program {
                 picture: picture
                     .and_then(|size| thumbnail(screen.width, screen.height, &screen.pixels, size)),
                 why: *why,
-                result: state::encode(screen, suspended.as_ref())
-                    .map_err(|err| format!("its state could not be kept ({err:?})"))
-                    .and_then(|bytes| write_blob(&library::state_blob(*id), &bytes)),
+                result: kept::keep(*id, screen, suspended.as_ref(), &STATE_BOUNDS),
             },
-            Job::Pictures { ids, picture } => Done::Pictured(
-                ids.iter()
-                    .filter_map(|id| Some((*id, card_state(*id, Some(*picture))?.0?)))
-                    .collect(),
-            ),
+            Job::Pictures { ids, picture } => {
+                Done::Pictured(kept::pictures(ids, *picture, &STATE_BOUNDS))
+            }
             Job::Shoot { screen, grant } => Done::Shot(shoot(screen, *grant)),
             Job::Start {
                 id,
@@ -607,54 +507,14 @@ mod program {
         }
     }
 
-    /// The library the store holds, what no machine owns swept away.
-    fn load(picture: Option<(u32, u32)>) -> Result<Shelved, String> {
-        let listing = tairix_appdata::blobs::list(&mut RtHost)
-            .map_err(|err| format!("the store could not be listed ({err})"))?;
-        let listed = |name: &str| listing.iter().any(|(held, _)| held == name);
-        let copies = RECORD_BLOBS.map(|name| {
-            listed(name)
-                .then(|| read_blob(name, MAX_RECORD).ok())
-                .flatten()
-        });
-        let loaded = Library::load(&listing, [copies[0].as_deref(), copies[1].as_deref()]);
-        let unswept = loaded
-            .orphans
-            .iter()
-            .filter(|name| tairix_appdata::blobs::remove(&mut RtHost, name).is_err())
-            .count();
-        let (mut pictures, mut suspended) = (Vec::new(), Vec::new());
-        for machine in loaded.library.machines() {
-            if !listed(&library::state_blob(machine.id)) {
-                continue;
-            }
-            let Some((drawn, asleep)) = card_state(machine.id, picture) else {
-                continue;
-            };
-            if asleep && suspended.try_reserve(1).is_ok() {
-                suspended.push(machine.id);
-            }
-            if let Some(drawn) = drawn {
-                if pictures.try_reserve(1).is_ok() {
-                    pictures.push((machine.id, drawn));
-                }
-            }
-        }
-        Ok(Shelved {
-            loaded,
-            pictures,
-            suspended,
-            unswept,
-        })
-    }
-
     /// `screen` kept as a PNG, the size its monitor showed it at, in the file
     /// `grant` hands over: written from the start and cut to what was written.
     fn shoot(screen: &LastScreen, grant: u64) -> Result<(), String> {
         let file = File::from_delegation(grant)
             .map_err(|err| format!("the file could not be taken ({})", Errno::from_syscall(err)))?;
-        let (width, height, rgba) = screenshot(screen.width, screen.height, &screen.pixels)
-            .ok_or_else(|| String::from("there is not enough memory to draw it"))?;
+        let (width, height, rgba) =
+            screenshot(screen.width, screen.height, &screen.pixels, VGA_SCREEN.0)
+                .ok_or_else(|| String::from("there is not enough memory to draw it"))?;
         let picture = tairix_image::Picture::rgba(width, height, rgba)
             .map_err(|why| format!("it could not be made a picture ({why:?})"))?;
         let png = tairix_image::encode_png(&picture)
@@ -665,35 +525,6 @@ mod program {
         }
         file.truncate(png.len() as u64).map_err(failed)?;
         file.sync().map_err(failed)
-    }
-
-    /// What machine `id`'s card shows of its state, if it has one that
-    /// reads: its last screen drawn at `size`, where a size is given, and
-    /// whether it is suspended. Only the header and the screen are read.
-    fn card_state(id: u32, size: Option<(u32, u32)>) -> Option<(Option<Vec<u8>>, bool)> {
-        let name = library::state_blob(id);
-        let file = open_blob(&name, BlobMode::Read).ok()?;
-        let head = state::head(&read_span(&file, &name, 0..state::HEAD).ok()?).ok()?;
-        let drawn = size.and_then(|size| {
-            let section = read_span(&file, &name, head.screen_span()).ok()?;
-            let screen = state::screen(&head, &section).ok()?;
-            thumbnail(screen.width, screen.height, &screen.pixels, size)
-        });
-        Some((drawn, head.suspended()))
-    }
-
-    /// What machine `id`, which is suspended, resumes from: why not, where
-    /// its state could not be read.
-    fn resumable(id: u32) -> Result<Resumable, String> {
-        let bytes = read_blob(&library::state_blob(id), state::most_bytes())?;
-        Ok(match state::decode(&bytes) {
-            Ok((screen, Some(suspended))) => Resumable::Kept(Box::new((screen, suspended))),
-            Ok((_, None)) => Resumable::Nothing,
-            Err(state::StateError::Malformed) => Resumable::Damaged,
-            Err(state::StateError::OutOfMemory) => {
-                return Err(String::from("there is no memory to read its saved state"))
-            }
-        })
     }
 
     /// Machine `id`'s default disk, laid into its first drive's blob.
@@ -714,56 +545,12 @@ mod program {
     /// copied to machine `to`.
     fn copy(from: u32, to: u32, drives: [bool; 2]) -> Result<(), String> {
         for (drive, _) in drives.iter().enumerate().filter(|(_, held)| **held) {
-            copy_blob(
+            kept::copy_blob(
                 &library::disk_blob(from, drive),
                 &library::disk_blob(to, drive),
             )?;
         }
-        let screen = library::state_blob(from);
-        let held = tairix_appdata::blobs::list(&mut RtHost)
-            .map_err(|err| format!("the store could not be listed ({err})"))?
-            .iter()
-            .any(|(name, _)| *name == screen);
-        if held {
-            copy_blob(&screen, &library::state_blob(to))?;
-        }
-        Ok(())
-    }
-
-    /// Blob `from` copied to blob `to`, its holes kept and its runs of zeros
-    /// left unwritten.
-    fn copy_blob(from: &str, to: &str) -> Result<(), String> {
-        let mut source = open_blob(from, BlobMode::Read)?;
-        let len = source
-            .regular_len()
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("{from} could not be measured"))?;
-        let mut target = open_blob(to, BlobMode::ReadWrite)?;
-        let failed = |err: i64| format!("{to} could not be written ({})", Errno::from_syscall(err));
-        target.truncate(0).map_err(failed)?;
-        let mut chunk = Vec::new();
-        chunk
-            .try_reserve_exact(COPY_CHUNK)
-            .map_err(|_| String::from("there is no memory to copy a disk through"))?;
-        chunk.resize(COPY_CHUNK, 0);
-        DataCopy::new(len, Sparse::Always)
-            .run(&mut source, &mut target, &mut chunk)
-            .map_err(|err| format!("{from} could not be copied ({err:?})"))?;
-        target.sync().map_err(failed)
-    }
-
-    /// Every blob of machine `id` removed: one it never had is no error.
-    fn remove(id: u32) -> Result<(), String> {
-        for name in [
-            library::disk_blob(id, 0),
-            library::disk_blob(id, 1),
-            library::state_blob(id),
-        ] {
-            tairix_appdata::blobs::remove(&mut RtHost, &name)
-                .map_err(|err| format!("{name} could not be removed ({err})"))?;
-        }
-        Ok(())
+        kept::copy_state(from, to)
     }
 
     /// Machine `id`'s fixed disk `drive`, which must be `sectors` long.
@@ -785,7 +572,7 @@ mod program {
         suspended: bool,
     ) -> Result<Launched, String> {
         let resume = if suspended {
-            resumable(id)?
+            kept::resumable(id, &STATE_BOUNDS)?
         } else {
             Resumable::Nothing
         };
@@ -1488,111 +1275,6 @@ mod program {
         }
     }
 
-    /// Paint `damage` of a window through `render`, each rectangle under its
-    /// own clip, and owe it.
-    fn repaint(
-        pane: &WindowPane,
-        surface: &mut Surface,
-        owed: &mut Owed,
-        damage: &Region,
-        mut render: impl FnMut(&mut Surface),
-    ) {
-        for rect in damage.rects() {
-            if let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) {
-                surface.with_clip(x, y, rect.width, rect.height, &mut render);
-            }
-        }
-        let mode = *pane.mode();
-        owed.owe(&mode, Repaint::Reported, damage);
-    }
-
-    /// The whole of a window, as damage.
-    fn whole(pane: &WindowPane) -> Region {
-        let mode = pane.mode();
-        let mut damage = Region::new();
-        damage.add(Rect::new(0, 0, mode.width_px, mode.height_px));
-        damage
-    }
-
-    /// Present what a window owes, once a turn.
-    fn present(
-        pane: &mut WindowPane,
-        surface: &Surface,
-        owed: &mut Owed,
-        client: &mut Client,
-    ) -> Result<(), Errno> {
-        let mode = *pane.mode();
-        let Some(parts) = owed.take(&mode) else {
-            return Ok(());
-        };
-        pane.present_list(client, surface, &parts)
-    }
-
-    /// Hand `each` the shared input events a delivered window event means.
-    fn inputs(event: &WindowEvent, mut each: impl FnMut(&InputEvent)) {
-        match *event {
-            WindowEvent::Pointer { x, y, action, .. } => {
-                pointer_input_events(action, pointer_point(x, y)).for_each(|input| each(&input));
-            }
-            WindowEvent::Scrolled { x, y, dx, dy, .. } => {
-                scroll_input_events(pointer_point(x, y), dx, dy).for_each(|input| each(&input));
-            }
-            WindowEvent::Key { key, .. } => each(&key_input_event(key)),
-            _ => {}
-        }
-    }
-
-    /// When a delivered event was made: a pointer's own time, else now.
-    fn event_time(event: &WindowEvent) -> u64 {
-        match *event {
-            WindowEvent::Pointer { at_ns, .. } => at_ns,
-            _ => tairix_rt::clock_get(),
-        }
-    }
-
-    /// The library window.
-    struct ShelfWindow {
-        pane: WindowPane,
-        surface: Surface,
-        owed: Owed,
-        shelf: Shelf,
-    }
-
-    /// The machine pictures the cards are drawn with, at the size they draw.
-    #[derive(Default)]
-    struct Pictures {
-        size: Option<(u32, u32)>,
-        held: Vec<(u32, Surface)>,
-    }
-
-    impl Pictures {
-        fn get(&self, id: u32) -> Option<&Surface> {
-            self.held
-                .iter()
-                .find(|(held, _)| *held == id)
-                .map(|(_, picture)| picture)
-        }
-
-        /// Hold machine `id`'s picture, if it is drawn at the size the cards
-        /// draw.
-        fn put(&mut self, id: u32, rgba: &[u8]) {
-            let Some((width, height)) = self.size else {
-                return;
-            };
-            let Some(picture) = Surface::from_rgba8(width, height, rgba) else {
-                return;
-            };
-            self.forget(id);
-            if self.held.try_reserve(1).is_ok() {
-                self.held.push((id, picture));
-            }
-        }
-
-        fn forget(&mut self, id: u32) {
-            self.held.retain(|(held, _)| *held != id);
-        }
-    }
-
     /// What a dialog over the library window holds.
     enum Sheet {
         New(Box<Assistant>),
@@ -1601,11 +1283,13 @@ mod program {
 
     /// What a dialog answered.
     enum SheetAnswer {
-        New(assistant::Answer),
+        New(assistance::Answer),
         Settings(u32, settings::Answer),
     }
 
-    impl Sheet {
+    impl library_window::Sheet for Sheet {
+        type Answer = SheetAnswer;
+
         fn extent(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
             match self {
                 Self::New(assistant) => assistant.extent(scale, theme),
@@ -1636,14 +1320,6 @@ mod program {
                     .map(|answer| SheetAnswer::Settings(*id, answer)),
             }
         }
-    }
-
-    /// A dialog window over the library window.
-    struct SheetWindow {
-        pane: WindowPane,
-        surface: Surface,
-        owed: Owed,
-        sheet: Sheet,
     }
 
     /// A machine's window: its pane, what it shows and what it owes.
@@ -1851,16 +1527,6 @@ mod program {
                 );
                 None
             }
-        }
-    }
-
-    /// Show `rows` in the menu `open` up over window `window_id`.
-    fn restate(client: &mut Client, window_id: u64, open: u64, rows: &AppMenu) {
-        if let Err(err) = client.restate_menu(window_id, open, MENU_OPEN_REVISION, rows) {
-            app::report(
-                APP_NAME,
-                format_args!("the menu could not be updated ({err})"),
-            );
         }
     }
 
@@ -2251,7 +1917,7 @@ mod program {
         config.sound.stream_rate = rate;
         let mut seed = [0u8; tairix_hash::HashSeed::LEN];
         tairix_rt::random_fill(&mut seed).ok()?;
-        let clock = host_secs().map(|secs| machine.clock_at(secs));
+        let clock = kept::calendar_secs().map(|secs| machine.clock_at(secs));
         let mut fixed = [None, None];
         for (drive, slot) in fixed.iter_mut().enumerate() {
             let (Some(disk), Some(sectors)) = (&machine.disks[drive], sectors[drive]) else {
@@ -2275,14 +1941,6 @@ mod program {
             clock,
             resume: None,
         })
-    }
-
-    /// The host's clock, in seconds since the epoch, once it is set.
-    fn host_secs() -> Option<i64> {
-        tairix_rt::wall_time()
-            .ok()
-            .filter(|reading| reading.state() != WallTimeState::Unset)
-            .map(|reading| reading.time().secs())
     }
 
     /// The session's name for fixed disk `drive`.
@@ -2439,7 +2097,7 @@ mod program {
                 Moment::Ready => match *self.life {
                     Life::Opening(Opening::Resuming) => {
                         *self.life = Life::SettingAside;
-                        Some(match last_screen(self.screen) {
+                        Some(match LastScreen::of(self.screen) {
                             Some(screen) => Leave::SetAside(screen),
                             None => {
                                 Leave::Ended(String::from("there is no memory to keep its screen"))
@@ -2511,7 +2169,7 @@ mod program {
         diskettes: (&'a mut [Option<Diskette>; 4], &'a mut [Option<Diskette>; 4]),
         bar: &'a mut MachineBar,
         disks: &'a DiskWorker,
-        library: &'a mut Library,
+        library: &'a mut Library<Machine>,
         notes: &'a mut Vec<(String, String)>,
         damage: &'a mut Region,
     }
@@ -2532,7 +2190,7 @@ mod program {
         match event {
             HostEvent::ClockSet(time) => {
                 settled.changed = remember(library, id, |held| {
-                    held.clock_offset = library::clock_offset(&time, host_secs()?)?;
+                    held.clock_offset = library::clock_offset(&time, kept::calendar_secs()?)?;
                     Some(())
                 });
                 if let Some(held) = library.machine(id).filter(|_| settled.changed) {
@@ -2688,36 +2346,6 @@ mod program {
         }
     }
 
-    /// The question asked before machine `name` is deleted.
-    fn delete_question(name: &str) -> Option<AlertSpec> {
-        let buttons = [
-            AlertButton::new("Delete", AlertButtonRole::Destructive).ok()?,
-            AlertButton::new("Keep", AlertButtonRole::Cancel).ok()?,
-        ];
-        AlertSpec::fitted(
-            AlertSeverity::Question,
-            &format!("Delete \u{201c}{name}\u{201d}?"),
-            "Its hard disks and everything on them are deleted for good.",
-            &buttons,
-        )
-        .ok()
-    }
-
-    /// Declare the icon-bar presence: the library row between the
-    /// convention's ends.
-    fn declare_bar(client: &mut Client, endpoint: u64) {
-        let row = AppMenuItemId::new(LIBRARY_ROW)
-            .and_then(|id| Ok((id, AppMenuLabel::new("Machine Library")?)))
-            .map(|(id, label)| {
-                AppMenuRow::Item(AppMenuItem::new(id, label, AppMenuSymbol::Application))
-            });
-        let declared = row
-            .and_then(|row| tairix_window::declaration(endpoint, AppBarClick::RaiseOrOpen, &[row]));
-        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            app::report(APP_NAME, format_args!("{refused}"));
-        }
-    }
-
     /// The alert's headline when a machine could not start.
     const NOT_STARTED: &str = "The machine could not start";
 
@@ -2754,24 +2382,16 @@ mod program {
         /// so no other process can take its number, until the compile worker
         /// has forgotten the machine.
         retiring: Vec<(u64, Host<RtSessionChannel, LogSink>)>,
-        library: Library,
+        library: Library<Machine>,
         /// Whether the library has been read: until it is, nothing is made
         /// or written that could land on what it holds.
         shelving: Shelving,
         /// Machines minted whose disks are being made or copied.
         pending: Vec<Machine>,
-        /// A record write under way, and the machines whose blobs go once it
-        /// is on the store.
-        recording: Option<Vec<u32>>,
-        /// The library changed while a record was being written.
-        dirty: bool,
-        /// The last record write failed and the user was told.
-        unsaved: bool,
-        /// Machines out of the library whose blobs go once a record without
-        /// them is on the store.
-        doomed: Vec<u32>,
-        shelf: Option<ShelfWindow>,
-        sheet: Option<SheetWindow>,
+        /// The library's record writes, one at a time.
+        writes: Writes,
+        shelf: Option<LibraryWindow>,
+        sheet: Option<SheetWindow<Sheet>>,
         /// The menu up over a card of the library, its machine, and the rows
         /// it was last given.
         card_menu: Option<Followed<u32>>,
@@ -2800,7 +2420,7 @@ mod program {
     impl App {
         /// The window an alert about the library is held over.
         fn owner(&self) -> Option<u64> {
-            self.shelf.as_ref().map(|shelf| shelf.pane.id())
+            self.shelf.as_ref().map(LibraryWindow::id)
         }
 
         /// Tell the user `headline` was not done, and why, over `owner`.
@@ -2846,46 +2466,36 @@ mod program {
         /// The library changed: write it, or again once the write under way
         /// lands.
         fn save(&mut self) {
-            if self.shelving != Shelving::Read {
+            if self.shelving != Shelving::Read || !self.writes.begin() {
                 return;
             }
-            if self.recording.is_some() {
-                self.dirty = true;
-                return;
-            }
-            let record = match self.library.record() {
-                Ok(record) => record,
-                Err(err) => {
-                    self.recorded(Err(format!("its record could not be made ({err:?})")));
-                    return;
+            match self.library.record() {
+                Ok(record) => {
+                    if !self.ask(Job::Record(record)) {
+                        self.recorded(Err(String::from("the store is too busy")));
+                    }
                 }
-            };
-            self.recording = Some(core::mem::take(&mut self.doomed));
-            if !self.ask(Job::Record(record)) {
-                self.recorded(Err(String::from("the store is too busy")));
+                Err(err) => self.recorded(Err(format!("its record could not be made ({err:?})"))),
             }
         }
 
         /// A record write landed: what waited on it goes, or waits for the
         /// next.
         fn recorded(&mut self, result: Result<u64, String>) {
-            let removals = self.recording.take().unwrap_or_default();
+            let landed = self.writes.landed(result.is_ok());
             match result {
                 Ok(generation) => {
                     self.library.written(generation);
-                    self.unsaved = false;
-                    for id in removals {
+                    for id in landed.removals {
                         self.ask(Job::Remove { id });
                     }
                 }
-                Err(why) => {
-                    self.doomed.extend(removals);
-                    if !core::mem::replace(&mut self.unsaved, true) {
-                        self.refuse("The machine library could not be saved", &why);
-                    }
+                Err(why) if landed.newly_failed => {
+                    self.refuse("The machine library could not be saved", &why);
                 }
+                Err(_) => {}
             }
-            if core::mem::take(&mut self.dirty) {
+            if landed.again {
                 self.save();
             }
         }
@@ -2997,7 +2607,7 @@ mod program {
         }
 
         /// The library was read: show it, or make the first machine.
-        fn shelved(&mut self, shelved: Result<Shelved, String>) {
+        fn shelved(&mut self, shelved: Result<Shelved<Machine>, String>) {
             let Shelved {
                 loaded,
                 pictures,
@@ -3067,12 +2677,7 @@ mod program {
                     if self.suspended.contains(&from) && self.suspended.try_reserve(1).is_ok() {
                         self.suspended.push(to);
                     }
-                    if let Some(picture) = self.pictures.get(from).and_then(Surface::try_clone) {
-                        self.pictures.forget(to);
-                        if self.pictures.held.try_reserve(1).is_ok() {
-                            self.pictures.held.push((to, picture));
-                        }
-                    }
+                    self.pictures.copy(from, to);
                     self.adopt_new(machine);
                 }
                 Err(why) => {
@@ -3155,46 +2760,18 @@ mod program {
         /// Open the library window, or raise the one open.
         fn open_shelf(&mut self) {
             if let Some(shelf) = &self.shelf {
-                let _ = self.client.activate_window(shelf.pane.id());
+                let _ = self.client.activate_window(shelf.id());
                 return;
             }
-            let (width, height) = self.desktop.window_size(LIBRARY_SIZE.0, LIBRARY_SIZE.1);
-            let least = self.desktop.window_size(LIBRARY_LEAST.0, LIBRARY_LEAST.1);
-            let mode = app::mode_for(width, height);
-            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                app::report(APP_NAME, "there is not enough memory to draw the library");
-                return;
-            };
-            let sizing = WindowSizing::Resizable {
-                min_width_px: least.0,
-                min_height_px: least.1,
-                max_width_px: 0,
-                max_height_px: 0,
-            };
-            match WindowPane::open(
-                &mut self.client,
-                self.event_endpoint,
-                &mode,
-                APP_TITLE,
-                sizing,
-            ) {
-                Ok(pane) => {
-                    let mut view = Shelf::new();
-                    let looks = (self.desktop.scale(), self.themes.active());
-                    view.set_size((mode.width_px, mode.height_px), looks);
-                    self.shelf = Some(ShelfWindow {
-                        pane,
-                        surface,
-                        owed: Owed::new(),
-                        shelf: view,
-                    });
+            let look = LibraryLook::titled(APP_TITLE);
+            let looks = (&self.desktop, self.themes.active());
+            match LibraryWindow::open(&mut self.client, self.event_endpoint, looks, look) {
+                Ok(win) => {
+                    self.shelf = Some(win);
                     self.show();
                     self.paint_whole_shelf();
                 }
-                Err(err) => app::report(
-                    APP_NAME,
-                    format_args!("the desktop would not open the library ({err})"),
-                ),
+                Err(why) => app::report(APP_NAME, why),
             }
         }
 
@@ -3209,124 +2786,54 @@ mod program {
                 &self.keeping,
                 self.suspended.as_slice(),
             );
-            let mut damage = Region::new();
-            win.shelf.show(
-                self.library.machines(),
-                |id| standing_of(held, id),
-                (scale, theme),
-                &mut damage,
-            );
-            paint_shelf(win, &damage, &self.pictures, (scale, theme));
+            let entries = self.library.machines().iter().map(|machine| Entry {
+                id: machine.id,
+                name: machine.name.clone(),
+                about: library::describe(machine),
+                standing: standing_of(held, machine.id),
+            });
+            win.show(entries, (scale, theme), &self.pictures);
         }
 
         /// Repaint the whole library window: its size or its look changed.
         fn paint_whole_shelf(&mut self) {
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
+            let looks = (self.desktop.scale(), self.themes.active());
             if let Some(win) = &mut self.shelf {
-                let damage = whole(&win.pane);
-                paint_shelf(win, &damage, &self.pictures, (scale, theme));
+                win.paint_whole(looks, &self.pictures);
             }
         }
 
         /// Machine `id`'s picture was drawn anew: repaint its card.
         fn picture_drawn(&mut self, id: u32) {
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
-            let Some(win) = &mut self.shelf else {
-                return;
-            };
-            if let Some(card) = win.shelf.card_bounds(id) {
-                let mut damage = Region::new();
-                damage.add(card);
-                paint_shelf(win, &damage, &self.pictures, (scale, theme));
+            let looks = (self.desktop.scale(), self.themes.active());
+            if let Some(win) = &mut self.shelf {
+                win.picture_drawn(id, looks, &self.pictures);
             }
         }
 
         fn shelf_event(&mut self, event: &WindowEvent) {
-            match *event {
-                WindowEvent::CloseRequested { .. } => {
-                    self.close_shelf();
-                    return;
-                }
-                WindowEvent::MenuClosed {
-                    open_id, outcome, ..
-                } => {
-                    let item = match outcome {
-                        MenuOutcome::Chosen(item) => Some(item),
-                        _ => None,
-                    };
-                    self.card_answered(open_id, item, false);
-                    return;
-                }
-                WindowEvent::MenuChosen { open_id, item, .. } => {
-                    self.card_answered(open_id, Some(item), true);
-                    return;
-                }
-                _ => {}
-            }
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
+            let looks = (self.desktop.scale(), self.themes.active());
             let interval = self.desktop.info().double_click();
             let Some(win) = &mut self.shelf else {
                 return;
             };
-            match *event {
-                WindowEvent::Resized {
-                    width_px,
-                    height_px,
-                    ..
-                } => {
-                    let mode = app::mode_for(width_px, height_px);
-                    if win
-                        .pane
-                        .resize_with(&mut self.client, &mode, &mut win.surface)
-                        == Fitted::Adopted
-                    {
-                        win.shelf
-                            .set_size((mode.width_px, mode.height_px), (scale, theme));
-                        self.paint_whole_shelf();
-                    }
-                    return;
-                }
-                WindowEvent::ContentReleased { .. } => {
-                    win.pane.release_frames();
-                    win.owed.owe_whole();
-                    return;
-                }
-                WindowEvent::RedrawRequested { .. } => {
-                    win.owed.owe_whole();
-                    return;
-                }
-                _ => {}
-            }
-            let at_ns = event_time(event);
-            let mut damage = Region::new();
-            let mut asked = None;
-            inputs(event, |input| {
-                asked = asked.or(win.shelf.on_input(
-                    input,
-                    (at_ns, interval),
-                    (scale, theme),
-                    &mut damage,
-                ));
-            });
-            if !damage.is_empty() {
-                paint_shelf(win, &damage, &self.pictures, (scale, theme));
-            }
-            if let Some(request) = asked {
-                self.request(request);
+            match win.event(&mut self.client, event, (looks, interval), &self.pictures) {
+                LibraryEvent::Nothing => {}
+                LibraryEvent::Closed => self.close_shelf(),
+                LibraryEvent::Menu {
+                    open_id,
+                    item,
+                    kept,
+                } => self.card_answered(open_id, item, kept),
+                LibraryEvent::Request(request) => self.request(request),
             }
         }
 
         /// Step the library's held scrollbar press, once it is due.
         fn step_shelf(&mut self) {
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
-            let Some(win) = &mut self.shelf else {
-                return;
-            };
-            let mut damage = Region::new();
-            win.shelf
-                .step(tairix_rt::clock_get(), (scale, theme), &mut damage);
-            if !damage.is_empty() {
-                paint_shelf(win, &damage, &self.pictures, (scale, theme));
+            let looks = (self.desktop.scale(), self.themes.active());
+            if let Some(win) = &mut self.shelf {
+                win.step(tairix_rt::clock_get(), looks, &self.pictures);
             }
         }
 
@@ -3335,7 +2842,7 @@ mod program {
             self.close_sheet();
             self.card_menu = None;
             if let Some(win) = self.shelf.take() {
-                let _ = win.pane.close(&mut self.client);
+                win.close(&mut self.client);
             }
             self.end_once_left();
         }
@@ -3375,21 +2882,18 @@ mod program {
                 .map(|n| &self.machines[n])
                 .filter(|machine| machine.life == Life::Running)
                 .map(MachineWindow::shown);
-            machine_menu::card_menu(self.standing(id), running.as_ref()).ok()
+            let rows = running
+                .as_ref()
+                .map(|shown| move |menu: &mut AppMenu| machine_menu::push_machine(menu, shown));
+            card_menu(self.standing(id), rows).ok()
         }
 
         /// Open machine `id`'s card menu at `at` in the library window.
         fn open_card_menu(&mut self, id: u32, at: tairix_geometry::Point) {
-            let (Some(rows), Some(window_id)) = (
-                self.card_rows(id),
-                self.shelf.as_ref().map(|win| win.pane.id()),
-            ) else {
+            let (Some(rows), Some(win)) = (self.card_rows(id), &self.shelf) else {
                 return;
             };
-            let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
-                return;
-            };
-            match self.client.open_menu(window_id, anchor, &rows) {
+            match win.open_menu(&mut self.client, at, &rows) {
                 Ok(open) => self.card_menu = Some(Followed::new(open, id, rows)),
                 Err(err) => app::report(
                     APP_NAME,
@@ -3412,14 +2916,15 @@ mod program {
             if !kept {
                 self.card_menu = None;
             }
-            match item.and_then(machine_menu::card_command) {
+            match item.map(card_command) {
                 None => {}
                 Some(CardCommand::Start) => self.request(Request::Start(id)),
                 Some(CardCommand::Settings) => self.request(Request::Settings(id)),
                 Some(CardCommand::Duplicate) => self.request(Request::Duplicate(id)),
                 Some(CardCommand::Delete) => self.request(Request::Delete(id)),
-                Some(CardCommand::Machine(command)) => {
-                    if let Some(n) = self.machine_index(id) {
+                Some(CardCommand::Machine(item)) => {
+                    let command = machine_menu::command(item);
+                    if let (Some(n), Some(command)) = (self.machine_index(id), command) {
                         self.machine_command(n, command);
                     }
                 }
@@ -3441,10 +2946,15 @@ mod program {
                 };
                 let open = up.open();
                 if let Some(rows) = up.follow(rows) {
-                    restate(&mut self.client, machine.window.pane.id(), open, rows);
+                    library_window::restate(
+                        &mut self.client,
+                        (APP_NAME, machine.window.pane.id()),
+                        open,
+                        rows,
+                    );
                 }
             }
-            let Some(window_id) = self.shelf.as_ref().map(|win| win.pane.id()) else {
+            let Some(window_id) = self.shelf.as_ref().map(LibraryWindow::id) else {
                 self.card_menu = None;
                 return;
             };
@@ -3455,16 +2965,19 @@ mod program {
             if let (Some(card), Some(rows)) = (self.card_menu.as_mut(), rows) {
                 let open = card.open();
                 if let Some(rows) = card.follow(rows) {
-                    restate(&mut self.client, window_id, open, rows);
+                    library_window::restate(&mut self.client, (APP_NAME, window_id), open, rows);
                 }
             }
         }
 
         fn open_assistant(&mut self) {
-            let names = assistant::TEMPLATES.map(|(_, name)| self.library.fresh_name(name));
+            let names = assistant::TEMPLATES
+                .iter()
+                .map(|(_, name)| self.library.fresh_name(name))
+                .collect();
             self.open_sheet(
-                Sheet::New(Box::new(Assistant::new(names))),
-                assistant::TITLE,
+                Sheet::New(Box::new(assistant::assistant(names))),
+                assistance::TITLE,
             );
         }
 
@@ -3484,90 +2997,46 @@ mod program {
             if self.sheet.is_some() {
                 return;
             }
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
-            let (width, height) = sheet.extent(scale, theme);
-            let mode = app::mode_for(width, height);
-            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                app::report(APP_NAME, "there is not enough memory to draw the dialog");
-                return;
-            };
-            match WindowPane::open_dialog(
-                &mut self.client,
-                owner,
-                self.event_endpoint,
-                &mode,
-                DialogModality::OwnerModal,
-                title,
-            ) {
-                Ok(pane) => {
-                    let mut win = SheetWindow {
-                        pane,
-                        surface,
-                        owed: Owed::new(),
-                        sheet,
-                    };
-                    let damage = whole(&win.pane);
-                    paint_sheet(&mut win, &damage, (scale, theme));
-                    self.sheet = Some(win);
-                }
-                Err(err) => {
-                    let why = format!("{err}");
-                    self.refuse(&format!("{title} could not be opened"), &why);
-                }
+            let looks = (self.desktop.scale(), self.themes.active());
+            let at = (owner, self.event_endpoint);
+            match SheetWindow::open(&mut self.client, at, looks, sheet, title) {
+                Ok(win) => self.sheet = Some(win),
+                Err(why) => self.refuse(&format!("{title} could not be opened"), &why),
             }
         }
 
         fn close_sheet(&mut self) {
             if let Some(win) = self.sheet.take() {
-                let _ = win.pane.close(&mut self.client);
+                win.close(&mut self.client);
             }
         }
 
         fn sheet_event(&mut self, event: &WindowEvent) {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                self.close_sheet();
-                return;
-            }
-            let (scale, theme) = (self.desktop.scale(), self.themes.active());
+            let looks = (self.desktop.scale(), self.themes.active());
             let Some(win) = &mut self.sheet else {
                 return;
             };
-            let mut answer = None;
-            let mut damage = Region::new();
-            match *event {
-                WindowEvent::ContentReleased { .. } => {
-                    win.pane.release_frames();
-                    win.owed.owe_whole();
+            match win.event(event, looks) {
+                SheetEvent::Nothing => {}
+                SheetEvent::Closed => self.close_sheet(),
+                SheetEvent::Answered(answer) => {
+                    self.close_sheet();
+                    self.answered(answer);
                 }
-                WindowEvent::RedrawRequested { .. } => win.owed.owe_whole(),
-                _ => {
-                    let at_ns = event_time(event);
-                    inputs(event, |input| {
-                        answer = answer.take().or(win.sheet.on_input(
-                            input,
-                            at_ns,
-                            (scale, theme),
-                            &mut damage,
-                        ));
-                    });
-                }
-            }
-            if !damage.is_empty() {
-                paint_sheet(win, &damage, (scale, theme));
-            }
-            if let Some(answer) = answer {
-                self.close_sheet();
-                self.answered(answer);
             }
         }
 
         fn answered(&mut self, answer: SheetAnswer) {
             match answer {
-                SheetAnswer::New(assistant::Answer::Create {
-                    template,
+                SheetAnswer::New(assistance::Answer::Create {
+                    model,
                     name,
-                    disk,
-                }) => self.create(template, &name, disk),
+                    choice,
+                }) => {
+                    if let Some((template, disk)) = assistant::chosen(model, choice) {
+                        self.create(template, &name, disk);
+                    }
+                }
                 SheetAnswer::Settings(id, settings::Answer::Apply(choices)) => {
                     let Some(mut machine) = self.library.machine(id).cloned() else {
                         return;
@@ -3589,7 +3058,7 @@ mod program {
                         ),
                     }
                 }
-                SheetAnswer::New(assistant::Answer::Cancel)
+                SheetAnswer::New(assistance::Answer::Cancel)
                 | SheetAnswer::Settings(_, settings::Answer::Cancel) => {}
             }
         }
@@ -3688,7 +3157,10 @@ mod program {
             let Some(machine) = self.library.machine(id) else {
                 return;
             };
-            let Some(question) = delete_question(&machine.name) else {
+            let Some(question) = library_window::delete_question(
+                &machine.name,
+                "Its hard disks and everything on them are deleted for good.",
+            ) else {
                 return;
             };
             if let Some((alert, _)) = self.asking.take() {
@@ -3715,9 +3187,7 @@ mod program {
             }
             self.pictures.forget(id);
             self.suspended.retain(|&held| held != id);
-            if self.doomed.try_reserve(1).is_ok() {
-                self.doomed.push(id);
-            }
+            self.writes.doom(id);
             self.save();
             self.show();
         }
@@ -3742,7 +3212,7 @@ mod program {
             let share = Layout::of(&machine.config.video).len();
             let bar = MachineBar::new(&machine.config, sectors.map(|disk| disk.is_some()));
             let (tube, speed) = (machine.display, machine.config.clock);
-            let Some(slot) = (0..MAX_MACHINES)
+            let Some(slot) = (0..Machine::MAX_MACHINES)
                 .find(|slot| self.machines.iter().all(|machine| machine.slot != *slot))
             else {
                 self.refuse(NOT_STARTED, "as many machines as can run are running");
@@ -3914,7 +3384,7 @@ mod program {
                     let (screen, suspended) = *held;
                     let away = suspended
                         .at
-                        .zip(host_secs())
+                        .zip(kept::calendar_secs())
                         .and_then(|(then, now)| u64::try_from(now.saturating_sub(then)).ok())
                         .map_or(0, |secs| secs.saturating_mul(NANOS_PER_SECOND));
                     let drawing = drawing(&self.pool, &self.desktop);
@@ -3960,7 +3430,7 @@ mod program {
             };
             let _ = pane.close(&mut self.client);
             if let Some(screen) = screen.filter(|_| ran) {
-                let picture = self.pictures.size;
+                let picture = self.pictures.size();
                 self.ask(Job::Keep {
                     id,
                     screen,
@@ -4006,7 +3476,7 @@ mod program {
                 opened.close();
             }
             let _ = self.disks.submit(DiskJob::Forget { id, medium: None });
-            let screen = last_screen(window.picture.screen());
+            let screen = LastScreen::of(window.picture.screen());
             Some(Retired {
                 id,
                 name,
@@ -4091,7 +3561,7 @@ mod program {
             };
             let suspended = Suspended {
                 kept,
-                at: host_secs(),
+                at: kept::calendar_secs(),
             };
             if !synced || !self.keeping.reserve() {
                 let _ = pane.close(&mut self.client);
@@ -4099,7 +3569,7 @@ mod program {
                     format!("\u{201c}{name}\u{201d} could not be suspended"),
                     String::from("Too much is waiting on the disks, so it was turned off."),
                 ));
-                let picture = self.pictures.size;
+                let picture = self.pictures.size();
                 self.ask(Job::Keep {
                     id,
                     screen,
@@ -4117,7 +3587,7 @@ mod program {
         /// Machine `id`'s images are durable, or why not: its snapshot goes
         /// to be kept, or, where they are not, only its last screen.
         fn synced(&mut self, id: u32, result: Result<(), String>) {
-            let picture = self.pictures.size;
+            let picture = self.pictures.size();
             let Some((name, screen, suspended)) = self.keeping.synced(id, result.is_ok()) else {
                 return;
             };
@@ -4236,7 +3706,7 @@ mod program {
         fn leave(&mut self) {
             self.close_sheet();
             if let Some(win) = self.shelf.take() {
-                let _ = win.pane.close(&mut self.client);
+                win.close(&mut self.client);
             }
             for n in (0..self.machines.len()).rev() {
                 self.close(n);
@@ -4958,7 +4428,7 @@ mod program {
             if machine.window.picture.screen().size().0 == 0 {
                 return Some(String::from("nothing is on its screen yet"));
             }
-            let Some(screen) = last_screen(machine.window.picture.screen()) else {
+            let Some(screen) = LastScreen::of(machine.window.picture.screen()) else {
                 return Some(String::from("there is not enough memory"));
             };
             let named = format!("{} screen.png", machine.name);
@@ -5295,10 +4765,10 @@ mod program {
             self.follow_menus();
             let client = &mut self.client;
             if let Some(win) = &mut self.shelf {
-                present(&mut win.pane, &win.surface, &mut win.owed, client)?;
+                win.present(client)?;
             }
             if let Some(win) = &mut self.sheet {
-                present(&mut win.pane, &win.surface, &mut win.owed, client)?;
+                win.present(client)?;
             }
             for win in self
                 .machines
@@ -5450,11 +4920,11 @@ mod program {
         /// machine; the library's or a dialog's ends the program.
         fn frame_returned(&mut self, window_id: u64) -> Result<(), Errno> {
             let client = &mut self.client;
-            if let Some(win) = self.shelf.as_mut().filter(|win| win.pane.id() == window_id) {
-                return win.pane.present_deferred(client, &win.surface);
+            if let Some(win) = self.shelf.as_mut().filter(|win| win.id() == window_id) {
+                return win.present_deferred(client);
             }
-            if let Some(win) = self.sheet.as_mut().filter(|win| win.pane.id() == window_id) {
-                return win.pane.present_deferred(client, &win.surface);
+            if let Some(win) = self.sheet.as_mut().filter(|win| win.id() == window_id) {
+                return win.present_deferred(client);
             }
             let failed = self
                 .machines
@@ -5499,11 +4969,7 @@ mod program {
                 }
             }
             let size = Shelf::picture_size(self.desktop.scale(), self.themes.active());
-            if size != self.pictures.size {
-                self.pictures = Pictures {
-                    size,
-                    held: Vec::new(),
-                };
+            if self.pictures.resize(size) {
                 if let Some(picture) = size {
                     let ids = self
                         .library
@@ -5514,24 +4980,12 @@ mod program {
                     self.ask(Job::Pictures { ids, picture });
                 }
             }
-            if let Some(win) = &mut self.shelf {
-                let mode = *win.pane.mode();
-                let looks = (self.desktop.scale(), self.themes.active());
-                win.shelf.set_size((mode.width_px, mode.height_px), looks);
-            }
-            self.paint_whole_shelf();
             let (scale, theme) = (self.desktop.scale(), self.themes.active());
+            if let Some(win) = &mut self.shelf {
+                win.relook((scale, theme), &self.pictures);
+            }
             if let Some(win) = &mut self.sheet {
-                let (width, height) = win.sheet.extent(scale, theme);
-                let mode = app::mode_for(width, height);
-                if win
-                    .pane
-                    .resize_with(&mut self.client, &mode, &mut win.surface)
-                    != Fitted::Kept
-                {
-                    let damage = whole(&win.pane);
-                    paint_sheet(win, &damage, (scale, theme));
-                }
+                win.relook(&mut self.client, (scale, theme));
             }
             let drawing = drawing(&self.pool, &self.desktop);
             for machine in &mut self.machines {
@@ -5549,12 +5003,12 @@ mod program {
                 // Leaving, it opens nothing new and is not asked to leave again.
                 WindowEvent::AppBarDefault | WindowEvent::AppBarMenu { .. }
                     if self.leaving.is_some() => {}
-                WindowEvent::AppBarMenu { item, .. } if tairix_window::is_quit(item) => {
-                    self.leave();
-                }
-                WindowEvent::AppBarDefault => self.open_shelf(),
-                WindowEvent::AppBarMenu { item, .. } if item.get() == LIBRARY_ROW => {
-                    self.open_shelf();
+                WindowEvent::AppBarDefault | WindowEvent::AppBarMenu { .. } => {
+                    match library_window::bar_ask(event) {
+                        Some(BarAsk::Quit) => self.leave(),
+                        Some(BarAsk::Library) => self.open_shelf(),
+                        None => {}
+                    }
                 }
                 WindowEvent::OpenRequested => {
                     if let Err(err) = self.client.ask_open_targets() {
@@ -5584,17 +5038,9 @@ mod program {
                 self.app_event(event);
                 return;
             };
-            if self
-                .shelf
-                .as_ref()
-                .is_some_and(|win| win.pane.id() == window_id)
-            {
+            if self.shelf.as_ref().is_some_and(|win| win.id() == window_id) {
                 self.shelf_event(event);
-            } else if self
-                .sheet
-                .as_ref()
-                .is_some_and(|win| win.pane.id() == window_id)
-            {
+            } else if self.sheet.as_ref().is_some_and(|win| win.id() == window_id) {
                 self.sheet_event(event);
             } else if let Some(n) = self
                 .machines
@@ -5620,6 +5066,8 @@ mod program {
                 } else {
                     self.debug_event(n, event);
                 }
+            } else {
+                app::release_carried(event);
             }
         }
 
@@ -5627,7 +5075,7 @@ mod program {
         /// a machine's tube, a suspend's deadline, or the end of leaving.
         fn due(&mut self) -> Option<u64> {
             let now = tairix_rt::clock_get();
-            let scroll = self.shelf.as_mut().and_then(|win| win.shelf.deadline(now));
+            let scroll = self.shelf.as_mut().and_then(|win| win.deadline(now));
             let tubes = self
                 .machines
                 .iter()
@@ -5654,12 +5102,12 @@ mod program {
         fn shutdown(&mut self) {
             self.close_sheet();
             if let Some(win) = self.shelf.take() {
-                let _ = win.pane.close(&mut self.client);
+                win.close(&mut self.client);
             }
             while !self.machines.is_empty() {
                 self.stop(0, None);
             }
-            if self.unsaved && self.recording.is_none() {
+            if self.writes.failed() {
                 self.save();
             }
             let deadline = tairix_rt::clock_get().saturating_add(DRAIN_NS);
@@ -5723,7 +5171,7 @@ mod program {
 
     /// Make `change` to machine `id` of `library`: whether it was made.
     fn remember(
-        library: &mut Library,
+        library: &mut Library<Machine>,
         id: u32,
         change: impl FnOnce(&mut Machine) -> Option<()>,
     ) -> bool {
@@ -5744,39 +5192,6 @@ mod program {
         );
     }
 
-    /// Paint `damage` of the library window.
-    fn paint_shelf(
-        win: &mut ShelfWindow,
-        damage: &Region,
-        pictures: &Pictures,
-        (scale, theme): (Scale, &Theme),
-    ) {
-        let view = &win.shelf;
-        repaint(
-            &win.pane,
-            &mut win.surface,
-            &mut win.owed,
-            damage,
-            |surface| {
-                view.render(surface, (scale, theme), |id| pictures.get(id));
-            },
-        );
-    }
-
-    /// Paint `damage` of a dialog window.
-    fn paint_sheet(win: &mut SheetWindow, damage: &Region, (scale, theme): (Scale, &Theme)) {
-        let sheet = &win.sheet;
-        repaint(
-            &win.pane,
-            &mut win.surface,
-            &mut win.owed,
-            damage,
-            |surface| {
-                sheet.render(surface, scale, theme);
-            },
-        );
-    }
-
     /// Bring up the desktop, the workers and the library window, and read the
     /// library.
     fn bring_up() -> Result<(App, EventMailbox), i32> {
@@ -5793,7 +5208,9 @@ mod program {
         let binding =
             app::bind_event_mailbox().map_err(|err| app::fail(APP_NAME, err.code(), err))?;
         let (event_endpoint, set) = (binding.endpoint(), binding.set());
-        declare_bar(&mut client, event_endpoint);
+        if let Err(why) = library_window::declare_bar(&mut client, event_endpoint) {
+            app::report(APP_NAME, why);
+        }
         let no_room = |_| {
             app::fail(
                 APP_NAME,
@@ -5829,10 +5246,7 @@ mod program {
             library: Library::new(),
             shelving: Shelving::Reading,
             pending: Vec::new(),
-            recording: None,
-            dirty: false,
-            unsaved: false,
-            doomed: Vec::new(),
+            writes: Writes::default(),
             shelf: None,
             sheet: None,
             card_menu: None,
@@ -5845,9 +5259,10 @@ mod program {
             ),
             notes: Vec::new(),
             tickets: 0,
-            pictures: Pictures {
-                size: picture,
-                held: Vec::new(),
+            pictures: {
+                let mut pictures = Pictures::default();
+                pictures.resize(picture);
+                pictures
             },
             suspended: Vec::new(),
             keeping: Suspends::new(),

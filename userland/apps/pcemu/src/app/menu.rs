@@ -2,12 +2,8 @@
 //! or not, its processor's speed, its tube, full screen or not, whether its
 //! screen shows text to copy, whether text is being typed on it, whether
 //! another folder may be shared and whether its debugger is open — and the
-//! command each row is; and the menu of a machine's card in the library,
-//! which carries the same rows while the machine runs.
-//!
-//! A row acting on the machine in place may be chosen with a secondary click
-//! and the menu kept up; one opening a window or a picker, or ending the
-//! machine, may not.
+//! command each row is. A machine's card in the library carries the same
+//! rows while the machine runs.
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRow,
@@ -15,92 +11,12 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_crt::Tube;
+use tairix_machines::menu::{
+    effect_of, item, marked, push_display, submenu, Acts, Effect, CARD_ROWS,
+};
 
 use super::settings::SPEEDS;
-use super::shelf::Standing;
 use crate::time::CpuClock;
-
-/// One of the tube's effects, as a row turns it on at a strength of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect {
-    /// Alternate rows dimmed.
-    ScanLines,
-    /// Lit pixels' light spread into their neighbourhood.
-    Glow,
-    /// What was lit lingering as an afterglow.
-    Phosphor,
-    /// An analogue noise floor.
-    Noise,
-    /// Rows displaced along a travelling wave.
-    Wobble,
-}
-
-impl Effect {
-    /// Every effect, in the order the menu lists them.
-    pub const ALL: [Self; 5] = [
-        Self::ScanLines,
-        Self::Glow,
-        Self::Phosphor,
-        Self::Noise,
-        Self::Wobble,
-    ];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::ScanLines => "Scan Lines",
-            Self::Glow => "Glow",
-            Self::Phosphor => "Phosphor Afterglow",
-            Self::Noise => "Noise",
-            Self::Wobble => "Wobble",
-        }
-    }
-
-    const fn symbol(self) -> AppMenuSymbol {
-        match self {
-            Self::ScanLines => AppMenuSymbol::PixelGrid,
-            Self::Glow => AppMenuSymbol::Brightness,
-            Self::Phosphor => AppMenuSymbol::Visible,
-            Self::Noise => AppMenuSymbol::Noise,
-            Self::Wobble => AppMenuSymbol::Adjust,
-        }
-    }
-
-    /// The strength a row turns the effect on at, in permille: a period
-    /// monitor's, not the most the tube can draw.
-    const fn strength(self) -> u16 {
-        match self {
-            Self::ScanLines => 450,
-            Self::Glow => 350,
-            Self::Phosphor => 550,
-            Self::Noise => 200,
-            Self::Wobble => 250,
-        }
-    }
-
-    fn field(self, tube: &mut Tube) -> &mut u16 {
-        match self {
-            Self::ScanLines => &mut tube.scanlines,
-            Self::Glow => &mut tube.glow,
-            Self::Phosphor => &mut tube.phosphor,
-            Self::Noise => &mut tube.fuzz,
-            Self::Wobble => &mut tube.wobble,
-        }
-    }
-
-    /// Whether the effect is on in `tube`.
-    #[must_use]
-    pub fn is_on(self, mut tube: Tube) -> bool {
-        *self.field(&mut tube) > 0
-    }
-
-    /// `tube` with the effect turned off where it is on, and on where off.
-    #[must_use]
-    pub fn toggled(self, mut tube: Tube) -> Tube {
-        let field = self.field(&mut tube);
-        *field = if *field > 0 { 0 } else { self.strength() };
-        tube
-    }
-}
 
 /// What a row of the menu does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,55 +99,10 @@ const DEBUGGER: u16 = 31;
 const FIRST_SPEED: u16 = 10;
 /// The first effect row's id; each of [`Effect::ALL`] follows in order.
 const FIRST_EFFECT: u16 = 20;
-/// The library card's own rows, past every machine row.
-const START: u16 = 40;
-const SETTINGS: u16 = 41;
-const DUPLICATE: u16 = 42;
-const DELETE: u16 = 43;
 
 const _: () = assert!(FIRST_SPEED as usize + SPEEDS.len() <= FIRST_EFFECT as usize);
 const _: () = assert!(FIRST_EFFECT as usize + Effect::ALL.len() <= SHARE_FOLDER as usize);
-const _: () = assert!(DEBUGGER < START);
-
-/// Whether a row acts on the machine in place, so a secondary click may choose
-/// it with the menu kept up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Acts {
-    InPlace,
-    /// It opens a window or a picker, or ends the machine.
-    Elsewhere,
-}
-
-fn item(
-    id: u16,
-    label: &str,
-    symbol: AppMenuSymbol,
-    (mark, acts): (AppMenuMark, Acts),
-) -> Result<AppMenuRow, Errno> {
-    let item = AppMenuItem::new(AppMenuItemId::new(id)?, AppMenuLabel::new(label)?, symbol)
-        .with_mark(mark);
-    Ok(AppMenuRow::Item(match acts {
-        Acts::InPlace => item.repeatable(),
-        Acts::Elsewhere => item,
-    }))
-}
-
-const fn marked(on: bool, mark: AppMenuMark) -> AppMenuMark {
-    if on {
-        mark
-    } else {
-        AppMenuMark::None
-    }
-}
-
-fn submenu(label: &str, symbol: AppMenuSymbol) -> Result<AppMenuRow, Errno> {
-    Ok(AppMenuRow::Submenu {
-        label: AppMenuLabel::new(label)?,
-        enabled: true,
-        symbol,
-        reason: AppMenuReason::EMPTY,
-    })
-}
+const _: () = assert!(DEBUGGER < CARD_ROWS);
 
 /// The menu of a machine `shown` as it stands.
 ///
@@ -244,90 +115,12 @@ pub fn menu(shown: &Shown) -> Result<AppMenu, Errno> {
     Ok(menu)
 }
 
-/// A machine card's menu in the library, for a machine standing as
-/// `standing`, `running` showing it as it runs where it does: what starts it,
-/// configures it, copies and deletes it, and while it runs the machine's own
-/// rows besides.
+/// Push the machine's own rows, `shown` as it stands.
 ///
 /// # Errors
 ///
 /// The menu builder's refusal, which rows this size never meet.
-pub fn card_menu(standing: Standing, running: Option<&Shown>) -> Result<AppMenu, Errno> {
-    let mut menu = AppMenu::EMPTY;
-    let (start, symbol) = match (standing, running) {
-        (_, Some(_)) => ("Show Window", AppMenuSymbol::SwitchTo),
-        (Standing::Suspended, None) => ("Resume", AppMenuSymbol::Resume),
-        _ => ("Start", AppMenuSymbol::Play),
-    };
-    let start = AppMenuItem::new(
-        AppMenuItemId::new(START)?,
-        AppMenuLabel::new(start)?,
-        symbol,
-    );
-    menu.push(AppMenuRow::Item(if standing.startable() {
-        start
-    } else {
-        start
-            .with_reason(AppMenuReason::new(
-                "The machine is being kept as it suspends",
-            )?)
-            .disabled()
-    }))?;
-    if let Some(shown) = running {
-        menu.push(AppMenuRow::Separator)?;
-        push_machine(&mut menu, shown)?;
-    }
-    menu.push(AppMenuRow::Separator)?;
-    let settings = AppMenuItem::new(
-        AppMenuItemId::new(SETTINGS)?,
-        AppMenuLabel::new("Settings\u{2026}")?,
-        AppMenuSymbol::Settings,
-    );
-    menu.push(AppMenuRow::Item(settings))?;
-    let at_rest = |id: u16, label: &str, symbol: AppMenuSymbol| -> Result<AppMenuRow, Errno> {
-        let row = AppMenuItem::new(AppMenuItemId::new(id)?, AppMenuLabel::new(label)?, symbol);
-        Ok(AppMenuRow::Item(if standing.at_rest() {
-            row
-        } else {
-            row.with_reason(AppMenuReason::new("Shut the machine down first")?)
-                .disabled()
-        }))
-    };
-    menu.push(at_rest(DUPLICATE, "Duplicate", AppMenuSymbol::Copy)?)?;
-    menu.push(at_rest(DELETE, "Delete\u{2026}", AppMenuSymbol::Delete)?)?;
-    Ok(menu)
-}
-
-/// What a row of a machine card's menu does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardCommand {
-    /// Start the machine, or bring its window forward.
-    Start,
-    /// Its settings.
-    Settings,
-    /// A copy of it, its disks with it.
-    Duplicate,
-    /// Delete it, once asked.
-    Delete,
-    /// One of the machine's own rows.
-    Machine(Command),
-}
-
-/// What the row `item` of a machine card's menu does; none for an id it never
-/// carries.
-#[must_use]
-pub fn card_command(item: AppMenuItemId) -> Option<CardCommand> {
-    Some(match item.get() {
-        START => CardCommand::Start,
-        SETTINGS => CardCommand::Settings,
-        DUPLICATE => CardCommand::Duplicate,
-        DELETE => CardCommand::Delete,
-        _ => CardCommand::Machine(command(item)?),
-    })
-}
-
-/// The machine's own rows, `shown` as it stands.
-fn push_machine(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
+pub fn push_machine(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
     menu.push(item(
         PAUSE,
         "Pause",
@@ -389,20 +182,13 @@ fn push_machine(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
             .disabled()
     }))?;
     menu.push(AppMenuRow::Separator)?;
-    let speed = menu.rows().count();
-    menu.push(submenu("Speed", AppMenuSymbol::Clock)?)?;
+    let speed = submenu(menu, "Speed", AppMenuSymbol::Clock)?;
     for ((rate, label), id) in SPEEDS.iter().zip(FIRST_SPEED..) {
         let mark = marked(*rate == shown.speed, AppMenuMark::Radio);
         let row = item(id, label, AppMenuSymbol::Clock, (mark, Acts::InPlace))?;
         menu.push_under(row, speed)?;
     }
-    let display = menu.rows().count();
-    menu.push(submenu("Display", AppMenuSymbol::Display)?)?;
-    for (effect, id) in Effect::ALL.into_iter().zip(FIRST_EFFECT..) {
-        let mark = marked(effect.is_on(shown.tube), AppMenuMark::Check);
-        let row = item(id, effect.label(), effect.symbol(), (mark, Acts::InPlace))?;
-        menu.push_under(row, display)?;
-    }
+    push_display(menu, shown.tube, FIRST_EFFECT)?;
     push_windows(menu, shown.windows)
 }
 
@@ -464,50 +250,9 @@ pub fn command(item: AppMenuItemId) -> Option<Command> {
             if let Some((rate, _)) = nth(FIRST_SPEED).and_then(|n| SPEEDS.get(n)) {
                 return Some(Command::Speed(*rate));
             }
-            Command::Effect(*nth(FIRST_EFFECT).and_then(|n| Effect::ALL.get(n))?)
+            Command::Effect(effect_of(id, FIRST_EFFECT)?)
         }
     })
-}
-
-/// A menu up, which menu it is, and the rows it was last given: restated
-/// only where the rows its subject now builds differ, so the desktop hears of
-/// a change once and of no change at all.
-#[derive(Clone, Debug)]
-pub struct Followed<K> {
-    open: u64,
-    kind: K,
-    rows: AppMenu,
-}
-
-impl<K: Copy> Followed<K> {
-    /// The menu opened as `open`, of `kind`, given `rows`.
-    #[must_use]
-    pub const fn new(open: u64, kind: K, rows: AppMenu) -> Self {
-        Self { open, kind, rows }
-    }
-
-    /// The open the desktop minted for it.
-    #[must_use]
-    pub const fn open(&self) -> u64 {
-        self.open
-    }
-
-    /// Which menu it is.
-    #[must_use]
-    pub const fn kind(&self) -> K {
-        self.kind
-    }
-
-    /// The rows to restate it with where `now`, the rows as its subject now
-    /// stands, are not those it was last given; they are what it was given
-    /// from then on.
-    pub fn follow(&mut self, now: AppMenu) -> Option<&AppMenu> {
-        if now == self.rows {
-            return None;
-        }
-        self.rows = now;
-        Some(&self.rows)
-    }
 }
 
 #[cfg(test)]

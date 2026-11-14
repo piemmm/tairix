@@ -239,7 +239,7 @@ concurrently as the one `static gates` stage:
 | `shaders` | Builds the pinned shader set from its Rust sources and compares each module with its committed file |
 | `artsheet` | Measures the shipped figure art against its bounds and the committed ledger |
 | `icons` | Redraws the file-type icon masters in-process and compares each with its committed file |
-| `beeb-roms` | Rebuilds each clean-room ROM image `beeb.app` carries and compares it with its committed file in the crate's `firmware/`, refusing any other image there |
+| `openmicro-roms` | Rebuilds each clean-room ROM image `OpenMicro.app` carries and compares it with its committed file in the crate's `firmware/`, refusing any other image there |
 | `model-check` | Exhaustively model-checks the capability + IPC state machine and the hand-on of freed room, failing on any invariant counterexample |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `proptest --once` | Runs one iteration of each stateful capability model, fresh logged seed |

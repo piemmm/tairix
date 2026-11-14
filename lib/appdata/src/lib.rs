@@ -97,7 +97,10 @@ pub use publish::{
     Publication, PublishAnswer, PublishDesk, PublishJob, Published, Refusal,
 };
 #[cfg(feature = "rt")]
-pub use rt::{publish_worker, Opening, PublishWorker, RtHost};
+pub use rt::{
+    open_blob, publish_worker, read_blob, read_blob_span, write_blob, BlobError, BlobFault,
+    Opening, PublishWorker, RtHost,
+};
 
 /// Document bytes a first read asks the service for.
 ///

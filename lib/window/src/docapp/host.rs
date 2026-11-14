@@ -2537,12 +2537,8 @@ impl<A: DocumentApp> Host<A> {
                 self.act_app(index, event);
             } else if let Some(owned) = id.and_then(|id| self.owned_of(id)) {
                 self.act_owned(owned, event);
-            } else if let WindowEvent::FilePicked { handle, .. }
-            | WindowEvent::SubtreePicked { handle, .. } = event
-            {
-                // A file chosen for a window since closed is let go at once,
-                // not left held for the life of the process.
-                release(*handle);
+            } else {
+                app::release_carried(event);
             }
             return;
         };
@@ -2610,6 +2606,9 @@ impl<A: DocumentApp> Host<A> {
                 release(*handle);
                 let _ = window.file.end_pick();
             }
+            // It asks for no documents folder; one handed to it anyway is let
+            // go.
+            WindowEvent::DocumentsFolder { handle, .. } => release(*handle),
             WindowEvent::MenuClosed { .. } | WindowEvent::MenuChosen { .. } => {
                 self.menu_event(index, event);
             }
@@ -2642,6 +2641,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::SaveOffered { .. }
             | WindowEvent::SaveOfferEnded { .. }
             | WindowEvent::ItemsOffered { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2718,9 +2718,9 @@ impl<A: DocumentApp> Host<A> {
                 window.owe_reported();
             }
             // It asks for no file; one handed to it anyway is let go.
-            WindowEvent::FilePicked { handle, .. } | WindowEvent::SubtreePicked { handle, .. } => {
-                release(*handle);
-            }
+            WindowEvent::FilePicked { handle, .. }
+            | WindowEvent::SubtreePicked { handle, .. }
+            | WindowEvent::DocumentsFolder { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
                 let key = core::iter::once(key_input_event(*key));
                 self.feed_app(index, key, tairix_rt::clock_get());
@@ -2785,6 +2785,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::FileOffered { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }
@@ -2905,9 +2906,9 @@ impl<A: DocumentApp> Host<A> {
                 ..
             } => self.owned_resized((index, owned), (*width_px, *height_px), event),
             // It asks for no file; one handed to it anyway is let go.
-            WindowEvent::FilePicked { handle, .. } | WindowEvent::SubtreePicked { handle, .. } => {
-                release(*handle);
-            }
+            WindowEvent::FilePicked { handle, .. }
+            | WindowEvent::SubtreePicked { handle, .. }
+            | WindowEvent::DocumentsFolder { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
                     let key = core::iter::once(key_input_event(*key));
@@ -2947,6 +2948,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::ItemsOffered { .. }
             | WindowEvent::ItemsOfferEnded { .. }
             | WindowEvent::FileOffered { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }
     }

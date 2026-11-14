@@ -105,6 +105,14 @@ spill to scratch or evict a cached index must not read two moments.
 few kilobytes, so it asks for that outright rather than negotiating a capacity
 the way a document read must.
 
+With the `rt` feature, `open_blob`, `read_blob`, `read_blob_span` and
+`write_blob` are those calls over the running process's own channel, redeeming
+the delegation and doing the read or write in one: `read_blob` refuses a blob
+past the bound it is given before reading it, and `write_blob` answers only
+once the blob holds exactly what was written and is on the store. Each fails
+with a `BlobError` whose `BlobFault` says which step went wrong — refused,
+not redeemed, too large, out of memory, unread or unwritten.
+
 `temp` is the **scratch** of one run, reached the same way — and it differs from
 `blobs` in who names the file:
 

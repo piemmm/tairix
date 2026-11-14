@@ -5992,6 +5992,20 @@ fn an_editor_s_signed_claim_to_edit_reaches_its_association_and_candidate() {
 }
 
 #[test]
+fn an_association_carries_the_documents_folder_its_manifest_names() {
+    let bytes = build_appinfo("viewer", None, &[]);
+    let plain = association("/System/Applications/viewer.app", &bytes).expect("decodes");
+    assert_eq!(plain.documents_folder(), None);
+    let mut header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("decodes");
+    header.documents_folder_len = 10;
+    header.documents_folder[..10].copy_from_slice(b"Open Micro");
+    let mut bytes = bytes;
+    bytes[..tairix_abi::AppInfoHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+    let micro = association("/System/Applications/OpenMicro.app", &bytes).expect("decodes");
+    assert_eq!(micro.documents_folder(), Some("Open Micro"));
+}
+
+#[test]
 fn a_bundle_that_declares_no_types_is_never_an_open_with_candidate() {
     // A pure command declares no associations: it decodes to an empty MIME
     // set (never an error) and is simply never an "open with" candidate.

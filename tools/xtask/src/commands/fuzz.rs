@@ -583,22 +583,28 @@ pub const TARGETS: &[Target] = &[
             "RISC OS application !Boot scan and sprite names (untrusted Obey text from a browsed volume)",
     },
     Target {
-        package: "tairix-beeb",
+        package: "tairix-openmicro",
         test: "fuzz_media",
         description:
-            "BBC Micro disc and tape image decode (untrusted SSD/DSD images, UEF chunks, CSW pulses stored or zlib-compressed, gzip members) + disc and UEF round trips",
+            "Open Micro disc and tape image decode (untrusted SSD/DSD images, UEF chunks, CSW pulses stored or zlib-compressed, gzip members) + disc and UEF round trips",
     },
     Target {
-        package: "tairix-beeb",
+        package: "tairix-openmicro",
         test: "fuzz_snapshot",
         description:
-            "BBC Micro snapshot restore (untrusted container, sections, every device's fields and times) + hostile guest code driving every device",
+            "Open Micro snapshot restore on the Model B and the Electron (untrusted container, sections, every device's fields and times) + hostile guest code driving every device",
     },
     Target {
-        package: "tairix-beeb",
+        package: "tairix-openmicro",
         test: "fuzz_worker",
         description:
-            "BBC Micro machine worker protocol (untrusted requests into the sandboxed worker's service, untrusted replies into the owner's client) + canonical encodings",
+            "Open Micro machine worker protocol for either model (untrusted requests into the sandboxed worker's service, untrusted replies into the owner's client) + canonical encodings",
+    },
+    Target {
+        package: "tairix-machines",
+        test: "fuzz_library",
+        description:
+            "the emulators' machine library store (damaged records of every machine, loads of any listing, damaged last screens and snapshots) + record and state round trips",
     },
     Target {
         package: "tairix-image",
@@ -1224,12 +1230,20 @@ mod tests {
     }
 
     #[test]
-    fn beeb_harnesses_are_registered() {
+    fn machine_library_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_library"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-machines");
+    }
+
+    #[test]
+    fn openmicro_harnesses_are_registered() {
         for target in ["fuzz_media", "fuzz_snapshot", "fuzz_worker"] {
             let opts = parse(&argv(&["--target", target])).expect("flag parses");
             let chosen = selected(&opts).expect("known target");
             assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "tairix-beeb");
+            assert_eq!(chosen[0].package, "tairix-openmicro");
         }
     }
 

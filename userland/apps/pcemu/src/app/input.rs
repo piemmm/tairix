@@ -7,11 +7,11 @@ use alloc::string::String;
 
 use tairix_abi::input::{KeyInput, PhysicalKey, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WINDOW_TITLE_MAX};
+use tairix_crt::screen::frame_point;
 use tairix_log::Sink;
 use tairix_raster::resample::Region;
 use tairix_sandbox::session::SessionTransport;
 
-use super::screen::frame_point;
 use crate::chips::keyboard::{scan_of, Scan};
 use crate::front::Host;
 use crate::ports::mouse::button;

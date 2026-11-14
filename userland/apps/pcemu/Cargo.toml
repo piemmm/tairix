@@ -58,8 +58,6 @@ tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 # The frame scaler a machine's screen is enlarged to its window through, and
 # the surface it is drawn on.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
-# The checksum the machine library's record is closed with.
-tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
 # Code page 437, which a text screen is copied out of and pasted text typed
 # in.
 tairix-cp437 = { path = "../../../lib/cp437", version = "=0.0.0" }
@@ -81,6 +79,10 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The machine library: its record, each machine's last screen and snapshot,
+# the library window, the suspends, the new-machine assistant and the rows a
+# machine's menus are built from.
+tairix-machines = { path = "../../../lib/machines", version = "=0.0.0" }
 # The glyph cache the windows' text is drawn from, trimmed under pressure:
 # the debugger draws its listing, registers and memory in its monospace face.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
@@ -110,10 +112,10 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
 # The application's own store, which holds a machine's disks.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The machine library's store work and its windows.
+tairix-machines = { path = "../../../lib/machines", version = "=0.0.0", features = ["rt"] }
 # The audio service's live stream the machine's sound plays through.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
-# The one hole-keeping file copy a duplicated machine's disks are made by.
-tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 # The content-type registry a file offered to a machine window is judged by.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 # The PNG a screenshot is kept as.

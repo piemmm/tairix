@@ -11,13 +11,15 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
-use tairix_abi::appdata_ipc::APPDATA_ENDPOINT;
+use tairix_abi::appdata_ipc::{BlobMode, APPDATA_ENDPOINT};
 use tairix_abi::Errno;
 use tairix_appconf::Registry;
 use tairix_cmdres::{bundle_candidates, CommandEnv};
 use tairix_rt::sync::WorkerWake;
 use tairix_rt::work::Worker;
+use tairix_rt::File;
 
 use crate::{publish, AppDataHost, PublishAnswer, PublishDesk, PublishJob, Settings};
 
@@ -102,4 +104,138 @@ impl<R: Registry> PublishDesk<R> for PublishWorker<R> {
     fn wait(&self) -> Option<PublishAnswer<R>> {
         PublishWorker::<R>::wait(self)
     }
+}
+
+/// Why a blob of the application's store could not be used, as its user is
+/// told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobError {
+    name: String,
+    fault: BlobFault,
+}
+
+/// What went wrong with a blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobFault {
+    /// The app-data service refused it.
+    Refused(Errno),
+    /// Its delegation could not be redeemed.
+    Untaken(Errno),
+    /// It holds more than it may.
+    TooLarge,
+    /// The heap would not hold it.
+    OutOfMemory,
+    /// A read of it failed.
+    Unread(Errno),
+    /// A write to it failed.
+    Unwritten(Errno),
+}
+
+impl BlobError {
+    /// What went wrong.
+    #[must_use]
+    pub const fn fault(&self) -> BlobFault {
+        self.fault
+    }
+
+    fn of(name: &str, fault: BlobFault) -> Self {
+        Self {
+            name: String::from(name),
+            fault,
+        }
+    }
+}
+
+impl fmt::Display for BlobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = &self.name;
+        match self.fault {
+            BlobFault::Refused(err) => write!(f, "the store refused {name} ({err})"),
+            BlobFault::Untaken(err) => write!(f, "the grant of {name} could not be taken ({err})"),
+            BlobFault::TooLarge => write!(f, "{name} is larger than it can be"),
+            BlobFault::OutOfMemory => write!(f, "there is no memory to read {name}"),
+            BlobFault::Unread(err) => write!(f, "{name} could not be read ({err})"),
+            BlobFault::Unwritten(err) => write!(f, "{name} could not be written ({err})"),
+        }
+    }
+}
+
+impl From<BlobError> for String {
+    fn from(err: BlobError) -> Self {
+        alloc::format!("{err}")
+    }
+}
+
+/// Blob `name` of the calling application's store, opened as `mode` says,
+/// as a descriptor of its own.
+///
+/// # Errors
+///
+/// [`BlobFault::Refused`] or [`BlobFault::Untaken`].
+pub fn open_blob(name: &str, mode: BlobMode) -> Result<File, BlobError> {
+    let grant = crate::blobs::open(&mut RtHost, name, mode)
+        .map_err(|err| BlobError::of(name, BlobFault::Refused(err)))?;
+    File::from_delegation(grant)
+        .map_err(|err| BlobError::of(name, BlobFault::Untaken(Errno::from_syscall(err))))
+}
+
+/// The whole of blob `name`, refused past `most` bytes.
+///
+/// # Errors
+///
+/// As [`open_blob`], [`BlobFault::TooLarge`], [`BlobFault::OutOfMemory`] or
+/// [`BlobFault::Unread`].
+pub fn read_blob(name: &str, most: usize) -> Result<Vec<u8>, BlobError> {
+    let file = open_blob(name, BlobMode::Read)?;
+    let bytes = tairix_rt::read_fd_to_end(file.fd(), most).map_err(|err| {
+        BlobError::of(
+            name,
+            match Errno::from_syscall(err) {
+                Errno::OutOfMemory => BlobFault::OutOfMemory,
+                err => BlobFault::Unread(err),
+            },
+        )
+    })?;
+    if bytes.len() > most {
+        return Err(BlobError::of(name, BlobFault::TooLarge));
+    }
+    Ok(bytes)
+}
+
+/// The bytes `span` of blob `name`, open as `file`, or as many of them as it
+/// holds.
+///
+/// # Errors
+///
+/// [`BlobFault::OutOfMemory`] or [`BlobFault::Unread`].
+pub fn read_blob_span(
+    file: &File,
+    name: &str,
+    span: core::ops::Range<usize>,
+) -> Result<Vec<u8>, BlobError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(span.len())
+        .map_err(|_| BlobError::of(name, BlobFault::OutOfMemory))?;
+    bytes.resize(span.len(), 0);
+    let read = tairix_rt::fs_read_full(file.fd(), span.start as u64, &mut bytes)
+        .map_err(|err| BlobError::of(name, BlobFault::Unread(err)))?;
+    bytes.truncate(read);
+    Ok(bytes)
+}
+
+/// Blob `name` made to hold exactly `bytes`, on the store before this
+/// answers.
+///
+/// # Errors
+///
+/// As [`open_blob`], or [`BlobFault::Unwritten`].
+pub fn write_blob(name: &str, bytes: &[u8]) -> Result<(), BlobError> {
+    let file = open_blob(name, BlobMode::ReadWrite)?;
+    let unwritten = |err| BlobError::of(name, BlobFault::Unwritten(err));
+    file.truncate(0)
+        .map_err(|err| unwritten(Errno::from_syscall(err)))?;
+    tairix_rt::fs_write_all(file.fd(), 0, bytes).map_err(unwritten)?;
+    file.sync()
+        .map_err(|err| unwritten(Errno::from_syscall(err)))
 }

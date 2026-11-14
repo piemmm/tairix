@@ -693,6 +693,8 @@ pub enum PostedRequest {
     SizeState,
     /// [`WindowClient::pick_file`].
     PickFile,
+    /// [`WindowClient::request_documents_folder`].
+    DocumentsFolder,
     /// [`WindowClient::begin_drag`].
     BeginDrag,
     /// [`WindowClient::place_dropped`].
@@ -808,6 +810,7 @@ impl PostedRequest {
             Self::Close => "a window's closing",
             Self::SizeState => "a window's size",
             Self::PickFile => "a file pick",
+            Self::DocumentsFolder => "the documents folder",
             Self::BeginDrag => "a drag",
             Self::PlaceDropped => "a dropped file",
             Self::SaveInto(_) => "a save",
@@ -2029,6 +2032,30 @@ impl<T: WindowTransport> WindowClient<T> {
             window_id,
             PostedRequest::PickFile,
             &WindowRequest::PickFile { window_id, purpose },
+            Carried::Nothing,
+        )
+    }
+
+    /// Ask for this application's own documents folder, the one its signed
+    /// manifest names, answered to window `window_id` with a
+    /// [`WindowEvent::DocumentsFolder`] carrying the one-shot `fd_redeem`
+    /// handle of the folder, writable and confined beneath itself, or a
+    /// [`WindowEvent::DocumentsFolderRefused`] naming why not. The session's
+    /// refusal to start arrives as an [`EventError::Refused`]:
+    /// [`Errno::PermissionDenied`] for a manifest that names none, and
+    /// [`Errno::LimitExceeded`] while one is still owed.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure.
+    ///
+    /// [`WindowEvent::DocumentsFolder`]: tairix_abi::window_ipc::WindowEvent::DocumentsFolder
+    /// [`WindowEvent::DocumentsFolderRefused`]: tairix_abi::window_ipc::WindowEvent::DocumentsFolderRefused
+    pub fn request_documents_folder(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.post_own(
+            window_id,
+            PostedRequest::DocumentsFolder,
+            &WindowRequest::RequestDocumentsFolder { window_id },
             Carried::Nothing,
         )
     }

@@ -61,9 +61,9 @@
 //!   snapshots in
 //!   `lib/devids/assets/` (`--write` to regenerate; `--fetch` — developer-run
 //!   only, never CI — to import and vet the upstream databases)
-//! - `beeb`         — holds the BBC Micro emulator's CPU to the external
+//! - `openmicro`    — holds the Open Micro emulator's 6502 to the external
 //!   `SingleStepTests` 65x02 suite (`--vectors <dir>`; `--write-sample` to
-//!   refresh the sample `userland/apps/beeb` replays; developer-run only)
+//!   refresh the sample `userland/apps/openmicro` replays; developer-run only)
 //! - `unicode`      — verifies the Unicode property tables in
 //!   `lib/unicode/src/tables.rs` against the pinned UCD snapshot in
 //!   `lib/unicode/assets/` (`--write` to regenerate)

@@ -2381,6 +2381,8 @@ mod program {
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }
                 | WindowEvent::SubtreePicked { .. }
+                | WindowEvent::DocumentsFolder { .. }
+                | WindowEvent::DocumentsFolderRefused { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::SaveOffered { .. }
@@ -2486,6 +2488,8 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::SubtreePicked { .. }
+            | WindowEvent::DocumentsFolder { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::SaveOffered { .. }

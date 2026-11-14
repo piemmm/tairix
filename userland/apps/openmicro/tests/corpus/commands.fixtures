@@ -1,0 +1,263 @@
+# Recorded by `cargo xtask openmicro --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario delete_save_and_rename
+row >*SAVE Z 1900 +80
+row >*INFO *.*
+row $.LONGNAM     FF1900 FF8023 000345 004
+row $.Z           001900 001900 000080 003
+row $.A           001900 001900 000100 002
+row >*RENAME Z Q.ZZ
+row >*INFO *.*
+row $.LONGNAM     FF1900 FF8023 000345 004
+row Q.ZZ          001900 001900 000080 003
+row $.A           001900 001900 000100 002
+row >*CAT
+row TESTDISC (06)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   Q.ZZ
+row >
+disc 0 11ad8b8c2ef9b81c64f11f9be5604c37ccc22572c0703f54b6a7e926f2092346
+
+scenario delete_removes_the_catalogue_entry
+row OpenMOS Micro 32K
+row TAIRiX DFS
+row BASIC
+row >*DELETE B.FILE
+row >
+disc 0 409bd89bece40c08c2e7de35fa8801b46d238b27ebe0c5e616888895d8a2eedc
+
+scenario wipe_asks_before_deleting_each_file
+row $.LONGNAM     : Y
+row B.FILE        : N
+row $.A           : Y
+row >*INFO *.*
+row B.FILE        003000 003010 000100 003
+row >
+disc 0 16bae459be6968316f937e43d87aee3a5e374863ea9f23d0d54f9ceaa94865da
+
+scenario destroy_needs_enable_and_asks_once
+row Go (Y/N) ? N
+row >.ERR
+row Syntax error
+row >*ENABLE
+row >*DESTROY $.*
+row $.LONGNAM
+row $.A
+row Go (Y/N) ? Y
+row Deleted
+row >
+row >*INFO *.*
+row B.FILE        003000 003010 000100 003
+row >
+disc 0 7658bcaf6d693cd79b288e3c4062c658ee57181aea0621028d56832264405db5
+
+scenario destroy_refused_deletes_nothing
+row >*DESTROY $.*
+row $.LONGNAM
+row $.A
+row Go (Y/N) ? N
+row >*INFO *.*
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >*ENABLE
+row >*CAT
+row TESTDISC (03)
+row Drive 0             Option 0 (off)
+row Dir. :0.$           Lib. :0.$
+row     A                   LONGNAM
+row   B.FILE
+row >*DESTROY *.*
+row Go (Y/N) ? N
+row >.ERR
+row Syntax error
+row >
+
+scenario destroy_deletes_every_match
+row Go (Y/N) ? Y
+row $.LONGNAM
+row B.FILE
+row $.A
+row Go (Y/N) ? Y
+row Deleted
+row >
+disc 0 927e33cf5ea05b6aee757b44a75d2031d26b94444d3774732d6cb08ee47c4cf6
+
+scenario compact_closes_up_the_free_space
+row >*COMPACT
+row Compacting :0
+row $.A           001900 001900 000100 002
+row $.LONGNAM     FF1900 FF8023 000345 003
+row 319 free sectors
+row >*INFO *.*
+row $.LONGNAM     FF1900 FF8023 000345 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 2f21092510095b7f75807d06710d818a20a55b7ced6d2b0e622d4163142c7576
+
+scenario copy_in_one_drive_asks_for_each_disc
+row Copying from :0 to :0
+row Insert source disk and hit a key
+row $.A           001900 001900 000100 002
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+row >
+disc 0 e1a34eb6aed22f54da6ce0f68cf2fe38f4ef40b3949192cbc305160d5ea17b89
+
+scenario copy_takes_wildcards
+row Copying from :0 to :0
+row Insert source disk and hit a key
+row $.LONGNAM     FF1900 FF8023 000345 004
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+row B.FILE        003000 003010 000100 003
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+row $.A           001900 001900 000100 002
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+row >
+disc 0 935524c44475c9cc4cf256b7da18c48dee3e8ed42afb67b3df5395d83ec91786
+
+scenario copy_refuses_a_bad_drive
+row Copying from :0 to :2
+row $.LONGNAM     FF1900 FF8023 000345 004
+row Disk fault 18 at 00/00
+row Bad program
+row >P.ERR
+row        199
+row >*COPY 0
+row Syntax: COPY <source> <dest.> <afsp>
+row Bad program
+row >P.ERR
+row        220
+row >
+
+scenario a_prompt_takes_only_keys_pressed_after_it
+row Copying from :0 to :0
+row Insert source disk and hit a key
+row $.LONGNAM     FF1900 FF8023 000345 004
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+row >
+disc 0 e1a34eb6aed22f54da6ce0f68cf2fe38f4ef40b3949192cbc305160d5ea17b89
+
+scenario wipe_takes_only_answers_typed_after_its_question
+row $.LONGNAM     : Y
+row B.FILE        : N
+row $.A           : N
+row >
+disc 0 1ebee20ff2310d4f18dcba67984e6346564604c1d4a860de3aef99c88cd8a47f
+
+scenario backup_needs_enable_and_two_good_drives
+row Copying from :0 to :2
+row Go (Y/N) ? N
+row >.ERR
+row Syntax error
+row >*ENABLE
+row >*BACKUP 0 0
+row Copying from :0 to :0
+row Insert source disk and hit a key
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario backup_in_one_drive_asks_for_each_disc
+row Copying from :0 to :0
+row Insert source disk and hit a key
+row Insert destination disk and hit a key
+row Insert source disk and hit a key
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario copy_to_a_second_drive
+row Copying from :0 to :1
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+disc 1 2c246fa258eba4b64eaa67a4063a4a182e1fe4b7f6437097a3669d6325669e39
+
+scenario backup_to_a_second_drive
+row Copying from :0 to :1
+disc 0 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+disc 1 3105dc8a7ce6acf3ca68b7fb72b1478969da0be444c230e73cbc935180b2d337
+
+scenario backup_to_a_smaller_disc_is_refused
+row Copying from :0 to :1
+row Disk full
+row >P.ERR
+row        198
+row >
+disc 1 c06e775c7d26b711e150e16705ca8f63bfc1059742273c520a5ff2d0c28a3cd0
+
+scenario build_type_list_and_dump
+row 0001 HELLO THERE
+row 0002 SECOND LINE
+row 0003
+row Escape
+row >*TYPE TEXT
+row HELLO THERE
+row SECOND LINE
+row >*LIST TEXT
+row 0001 HELLO THERE
+row 0002 SECOND LINE
+row >*DUMP TEXT
+row 0000 48 45 4C 4C 4F 20 54 48 HELLO TH
+row 0008 45 52 45 0D 53 45 43 4F ERE.SECO
+row 0010 4E 44 20 4C 49 4E 45 0D ND LINE.
+row 0018 ** ** ** ** ** ** ** ** ........
+row >
+disc 0 90a63309320e38c43b1e693743be7169b1744de8faae4584d62aa4b12c94c53d
+
+scenario dump_shows_offsets_bytes_and_characters
+row 0000 00 01 02 03 04 05 06 07 ........
+row 0008 08 09 0A 0B 0C 0D 0E 0F ........
+row 0010 10 11 12 13 14 15 16 17 ........
+row 0018 18 19 1A 1B 1C 1D 1E 1F ........
+row 0020 20 21 22 23 24 25 26 27  !"_$%&'
+row 0028 28 29 ** ** ** ** ** ** ()......
+row >
+
+scenario opt_1_shows_each_file_as_it_is_used
+row >*LOAD A
+row $.A           001900 001900 000100 002
+row >*SAVE C 1900 +10
+row $.C           001900 001900 000010 008
+row >*RUN A
+row $.A           001900 001900 000100 002
+row >*OPT 1,0
+row >*LOAD A
+row >*OPT 1,1
+row >*LOAD A
+row $.A           001900 001900 000100 002
+row >
+disc 0 8221ed50dc62e940ea8e913c18494341238c9ca38327396a91cb0e7a302254bd
+
+scenario opt_1_messages_and_bad_options
+row >A%=OPENIN"A":CLOSE_A%
+row >LOAD"LONGNAM"
+row $.LONGNAM     FF1900 FF8023 000345 004
+row Bad program
+row >*INFO A
+row $.A           001900 001900 000100 002
+row >*OPT 2,1
+row Bad option
+row Bad program
+row >P.ERR
+row        203
+row >*OPT 9
+row Bad option
+row Bad program
+row >P.ERR
+row        203
+row >
+
+scenario exec_and_spool_report_missing_files_and_drives
+row File not found
+row >P.ERR
+row        214
+row >*SPOOL :1.X

@@ -9878,6 +9878,8 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::SubtreePicked { .. }
+            | WindowEvent::DocumentsFolder { .. }
+            | WindowEvent::DocumentsFolderRefused { .. }
             // A drag's reports, and a save's offers, are answered where every
             // window is.
             | WindowEvent::DragOver { .. }

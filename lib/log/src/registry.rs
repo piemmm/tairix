@@ -152,8 +152,8 @@ pub const SETTINGSD: EventRange = EventRange::new(34_000, 35_000);
 pub const SMBFS: EventRange = EventRange::new(35_000, 36_000);
 /// The screen recorder.
 pub const RECORDER: EventRange = EventRange::new(36_000, 37_000);
-/// The BBC Micro emulator.
-pub const BEEB: EventRange = EventRange::new(37_000, 38_000);
+/// The Open Micro emulator.
+pub const OPENMICRO: EventRange = EventRange::new(37_000, 38_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -350,8 +350,8 @@ pub const OWNERS: &[Owner] = &[
         crates: &["userland/apps/netmap"],
     },
     Owner {
-        range: BEEB,
-        crates: &["userland/apps/beeb"],
+        range: OPENMICRO,
+        crates: &["userland/apps/openmicro"],
     },
     Owner {
         range: SETTINGSD,

@@ -46,8 +46,10 @@
 #define TAIRIX_BUNDLE_PURPOSE_MAX 96u
 /* Maximum length, in bytes, of a bundle's author attribution. */
 #define TAIRIX_BUNDLE_AUTHOR_MAX 64u
+/* Maximum length, in bytes, of an application's documents folder name. */
+#define TAIRIX_DOCUMENTS_FOLDER_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 732u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 800u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"
@@ -104,6 +106,8 @@ typedef struct tairix_appinfo_header {
     uint8_t purpose_len;
     uint8_t author_len;
     uint8_t title_len;
+    uint8_t documents_folder_len;
+    uint8_t padding[3];
     uint8_t id[TAIRIX_BUNDLE_ID_MAX];
     uint8_t name[TAIRIX_BUNDLE_NAME_MAX];
     uint8_t version[TAIRIX_BUNDLE_VERSION_MAX];
@@ -111,6 +115,7 @@ typedef struct tairix_appinfo_header {
     uint8_t purpose[TAIRIX_BUNDLE_PURPOSE_MAX];
     uint8_t author[TAIRIX_BUNDLE_AUTHOR_MAX];
     uint8_t title[TAIRIX_BUNDLE_TITLE_MAX];
+    uint8_t documents_folder[TAIRIX_DOCUMENTS_FOLDER_MAX];
     uint8_t syscall_table_hash[TAIRIX_SYSCALL_TABLE_HASH_LEN];
     uint8_t content_hash[32];
     uint8_t signer_pubkey[32];

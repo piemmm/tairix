@@ -125,8 +125,8 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_authorised_output_reply, encode_authorised_output_reply, AuthorisedOutcome, SystemTask,
-    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    decode_authorised_output_reply, encode_authorised_output_reply, AuthorisedOutcome,
+    DocumentsRefusal, SystemTask, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_connect_reply, decode_cursor_sets_reply, decode_drag_spot_reply,
@@ -3864,6 +3864,7 @@ fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::QueryNotifySources,
         WindowRequest::LockScreen,
         WindowRequest::TakeZoneStore,
+        WindowRequest::RequestDocumentsFolder { window_id: 3 },
         WindowRequest::RenderPreview {
             window_id: 3,
             shm_handle: 11,
@@ -4426,6 +4427,16 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
         }
         .to_le_bytes(),
         WindowEvent::PickCancelled { window_id: 3 }.to_le_bytes(),
+        WindowEvent::DocumentsFolder {
+            window_id: 3,
+            handle: 9,
+        }
+        .to_le_bytes(),
+        WindowEvent::DocumentsFolderRefused {
+            window_id: 3,
+            refusal: DocumentsRefusal::NotTheirs,
+        }
+        .to_le_bytes(),
         WindowEvent::ToolMoved {
             window_id: 3,
             over: ToolOver::Parent { x: 10, y: 20 },

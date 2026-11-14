@@ -1345,7 +1345,7 @@ mod tests {
     // A windowed application that parses what it shows — the viewer `view`
     // (plans/VIEW.md), the editor `TextEdit` (plans/TEXTEDIT.md), the painter
     // `Paint` (plans/PAINT.md), the vector editor `Draw` (plans/DRAW.md), the
-    // BBC Micro emulator `beeb` (plans/BEEB.md), whose machine is that parser:
+    // micro emulator `OpenMicro` (plans/BEEB.md), whose machines are that parser:
     // console write for its fail-loud diagnostics,
     // `CAP_SHM` for the zero-copy window frame region and the pipe pair its
     // parser is reached over, and `CAP_SANDBOX_SPAWN` to re-enter its own
@@ -1687,6 +1687,11 @@ mod tests {
             SANDBOXED_DOCUMENT_APP_REQUEST,
         ),
         ("Life", ProgramKind::Screensaver, &[]),
+        (
+            "OpenMicro",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
         ("PCEmulator", ProgramKind::Application, PCEMULATOR_REQUEST),
         (
             "Paint",
@@ -1708,11 +1713,6 @@ mod tests {
         ("audioctl", ProgramKind::Command, AUDIOCTL_TOOL_REQUEST),
         ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
         ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
-        (
-            "beeb",
-            ProgramKind::Application,
-            SANDBOXED_DOCUMENT_APP_REQUEST,
-        ),
         ("blendcheck", ProgramKind::Command, BLENDCHECK_REQUEST),
         ("cat", ProgramKind::Command, CAT_MANIFEST),
         ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),

@@ -35,7 +35,7 @@
 //!   taskbar entry.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -47,7 +47,7 @@ use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
     encode_authorised_output_reply, encode_screensaver_reply, AppMenuItemId, AuthorisedOutcome,
-    SystemTask, APP_MENU_MAX_TOTAL_ROWS, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+    DocumentsRefusal, SystemTask, APP_MENU_MAX_TOTAL_ROWS, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
     WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
@@ -646,6 +646,39 @@ pub trait WindowHost {
     /// host's audit trail.
     fn pick_refused(&mut self, caller: ProcId, window_id: u64, reason: &'static str) {
         let _ = (caller, window_id, reason);
+    }
+
+    /// A validated `RequestDocumentsFolder`: the attested application `app`,
+    /// running as `owner`, asked for its own documents folder on its window
+    /// `window_id`, with none already owed it. The host opens the folder its
+    /// manifest names off its loop and answers through
+    /// [`WindowServer::conclude_documents_folder`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller whose verified manifest names
+    /// no documents folder, or that runs no verified bundle; anything else the
+    /// host cannot start for. Nothing is recorded.
+    fn documents_folder_requested(
+        &mut self,
+        window_id: u64,
+        owner: ProcId,
+        app: Option<&AppIdentity>,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, owner, app);
+        Err(Errno::PermissionDenied)
+    }
+
+    /// The attested application `app`, running as `caller`, asked for its
+    /// documents folder on its window `window_id` while one was still owed
+    /// it, and was refused: a decision for the host's audit trail.
+    fn documents_folder_refused(
+        &mut self,
+        caller: ProcId,
+        app: Option<&AppIdentity>,
+        window_id: u64,
+    ) {
+        let _ = (caller, app, window_id);
     }
 
     /// A validated `BeginDrag`: the attested owner of live window
@@ -2326,6 +2359,11 @@ pub struct WindowServer<M: ShmMapper> {
     activations: BTreeMap<ProcId, Option<u64>>,
     /// The alerts up, each owed exactly one answer.
     alerts: BTreeMap<u64, AlertRecord>,
+    /// The documents-folder requests accepted and not yet concluded, by the
+    /// application that asked and the window it named. A request keeps its
+    /// place after its window closes, until the host concludes it, since the
+    /// host's work on it goes on.
+    documents_owed: BTreeSet<(ProcId, u64)>,
     /// Bytes of window frame one client may hold mapped here at once
     /// ([`client_frame_budget_bytes`]).
     client_frame_max: u64,
@@ -2352,6 +2390,7 @@ impl<M: ShmMapper> WindowServer<M> {
             ranges_held: BTreeMap::new(),
             next_prefix: 1,
             alerts: BTreeMap::new(),
+            documents_owed: BTreeSet::new(),
             app_bars: BTreeMap::new(),
             app_bar_texts: BTreeMap::new(),
             slot_authorisations: BTreeMap::new(),
@@ -2535,6 +2574,12 @@ impl<M: ShmMapper> WindowServer<M> {
                     .caller_app(ticket)
                     .and_then(|app| host.zone_store(caller, app.as_ref()));
                 return handle_reply(reply, granted);
+            }
+            WindowRequest::RequestDocumentsFolder { window_id } => {
+                let accepted = identity.caller_app(ticket).and_then(|app| {
+                    self.request_documents_folder(host, caller, app.as_ref(), window_id)
+                });
+                return status(reply, accepted);
             }
             WindowRequest::Authorise {
                 window_id,
@@ -3132,6 +3177,7 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::PreviewScreensaver { .. }
             | WindowRequest::RenderPreview { .. }
             | WindowRequest::PickFile { .. }
+            | WindowRequest::RequestDocumentsFolder { .. }
             | WindowRequest::BeginDrag { .. }
             | WindowRequest::TakeDropTarget { .. }
             | WindowRequest::DragVerdict { .. }
@@ -3817,6 +3863,79 @@ impl<M: ShmMapper> WindowServer<M> {
             return Some((Errno::LimitExceeded, FOLDER_PICK_OPEN));
         }
         None
+    }
+
+    /// Accept `caller`'s request for its documents folder on its window
+    /// `window_id`: at most [`DOCUMENTS_FOLDER_MAX_OPEN`] owed it, counting
+    /// those whose windows have closed, and the host started before anything
+    /// is recorded.
+    ///
+    /// [`DOCUMENTS_FOLDER_MAX_OPEN`]: tairix_abi::window_ipc::DOCUMENTS_FOLDER_MAX_OPEN
+    fn request_documents_folder(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        app: Option<&AppIdentity>,
+        window_id: u64,
+    ) -> Result<(), Errno> {
+        owned_window_mut(&mut self.windows, caller, window_id)?;
+        let owed = self
+            .documents_owed
+            .range((caller, 0)..=(caller, u64::MAX))
+            .count();
+        if owed >= tairix_abi::window_ipc::DOCUMENTS_FOLDER_MAX_OPEN {
+            host.documents_folder_refused(caller, app, window_id);
+            return Err(Errno::LimitExceeded);
+        }
+        host.documents_folder_requested(window_id, caller, app)?;
+        self.documents_owed.insert((caller, window_id));
+        Ok(())
+    }
+
+    /// The owner of open window `window_id` while its documents folder is
+    /// owed: whom a host mints the folder's delegation to.
+    #[must_use]
+    pub fn documents_folder_owed(&self, window_id: u64) -> Option<ProcId> {
+        let owner = self.windows.get(&window_id)?.owner;
+        self.documents_owed
+            .contains(&(owner, window_id))
+            .then_some(owner)
+    }
+
+    /// Conclude `owner`'s documents-folder request on its window
+    /// `window_id`: the folder's delegation `handle`, or why there is none,
+    /// told to the window while it is open. A request whose window has closed
+    /// is concluded all the same, telling nobody, which frees its place.
+    ///
+    /// The one way a request concludes, so exactly one answer follows each
+    /// accepted request.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — no such request is owed, or a zero handle.
+    /// * Any [`Errno`] the sink surfaces; the answer is still owed.
+    pub fn conclude_documents_folder(
+        &mut self,
+        sink: &mut dyn EventSink,
+        (owner, window_id): (ProcId, u64),
+        answer: Result<u64, DocumentsRefusal>,
+    ) -> Result<(), Errno> {
+        if !self.documents_owed.contains(&(owner, window_id)) || answer == Ok(0) {
+            return Err(Errno::OutOfRange);
+        }
+        if let Some(record) = self
+            .windows
+            .get(&window_id)
+            .filter(|record| record.owner == owner)
+        {
+            let event = match answer {
+                Ok(handle) => WindowEvent::DocumentsFolder { window_id, handle },
+                Err(refusal) => WindowEvent::DocumentsFolderRefused { window_id, refusal },
+            };
+            sink.deliver(record.event_endpoint, &event)?;
+        }
+        self.documents_owed.remove(&(owner, window_id));
+        Ok(())
     }
 
     /// Answer `caller`'s take of what window `window_id`'s last task
@@ -4599,6 +4718,7 @@ impl<M: ShmMapper> WindowServer<M> {
         // nothing; its delegation dies with the process it was minted to.
         self.open_targets.remove(&client);
         self.activations.remove(&client);
+        self.documents_owed.retain(|&(owner, _)| owner != client);
         // Nobody is left to answer: each alert just comes down.
         let alerts: Vec<u64> = self
             .alerts

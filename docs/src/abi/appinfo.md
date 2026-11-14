@@ -34,7 +34,7 @@ documentation entry.
 
 ## `AppInfo` manifest
 
-`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 732), signed prefix of the
+`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 800), signed prefix of the
 manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
 `to_le_bytes`/`from_bytes` and a fail-closed decoder. Its declaration order
 **is** its wire order, so the in-memory image and the wire image are the same
@@ -96,6 +96,15 @@ field. It carries:
     own scope by construction rather than by a check a caller might forget.
     `BundleId` is the validated inline form the kernel attests on an
     `Origin`.
+- `documents_folder` (manifest key `documents-folder`), the optional inline
+  name of the application's own documents folder: one visible folder name of
+  at most `DOCUMENTS_FOLDER_MAX` bytes beneath the user's `Home/Documents/`,
+  which the desktop session grants the application writable without a picker
+  (`docs/src/desktop/session.md`). The decoder bounds it and requires UTF-8;
+  the build refuses, and the session will not open, a name that is not a
+  visible leaf name (`tairix_path::validate_visible_name`). Three zero
+  `padding` bytes after the length bytes keep the in-memory and wire images
+  one length.
 - `capability_count`, `mime_count`, and `browse_count` describing the body.
 - `kind` — the program's `ProgramKind` byte (`command` 1, `application` 2,
   `service` 3, `component` 4, `screensaver` 5; `TAIRIX_PROGRAM_KIND_*` in C),

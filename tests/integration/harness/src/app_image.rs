@@ -38,7 +38,9 @@
 //! of its own, because it already reaches it another way), `instances`
 //! (`"multiple"` for a program one user may run more than once), and
 //! `document-access` (`"read-write"` for a program handed the documents it
-//! opens writable where the user may write them). A `screensaver` also
+//! opens writable where the user may write them), and `documents-folder`
+//! (the visible folder name beneath `Home/Documents/` an application or
+//! component is granted writable, without a picker). A `screensaver` also
 //! declares `feeds` (the privileged feeds it needs: `"machine"`, `"keep"`,
 //! `"slides"`), `threads = "cores"` and `memory = "large"` for its resource
 //! needs, and one `option.<key>` inline table per option: a `label` and an
@@ -65,8 +67,8 @@ use tairix_abi::{
     APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_FLAG_SAVER_LARGE_MEMORY,
     APPINFO_FLAG_SAVER_PARALLEL, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
     APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, DOCUMENTS_FOLDER_MAX,
+    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 use tairix_crypto::Ed25519SecretKey;
@@ -160,6 +162,10 @@ pub struct AppManifestSource {
     /// the user may write them. Absent means `"read-only"`
     /// (`plans/TEXTEDIT.md`).
     pub writes_documents: bool,
+    /// The folder beneath the user's `Home/Documents/` the desktop grants the
+    /// application, writable and without a picker: one visible folder name.
+    /// `None` means it asks for none (`plans/BEEB.md` §6).
+    pub documents_folder: Option<String>,
     /// What a screensaver declares beyond every bundle's fields; nothing for
     /// another kind.
     pub saver: SaverDeclaration,
@@ -261,6 +267,7 @@ impl AppManifestSource {
         let mut icon_bar = None;
         let mut instances = None;
         let mut document_access = None;
+        let mut documents_folder = None;
         let mut saver_keys = SaverKeys::default();
         for (number, entry) in tairix_syshelp::bundles::manifest_entries(text) {
             let at = format!("{ctx} line {number}");
@@ -295,11 +302,17 @@ impl AppManifestSource {
                         parse_document_access(&at, value)?,
                     )?;
                 }
+                "documents-folder" => {
+                    set(&at, key, &mut documents_folder, parse_string(&at, value)?)?;
+                }
                 other => saver_keys.take(&at, other, value)?,
             }
         }
         let declares_saver = saver_keys.any();
-        let desktop_keys = icon_bar.is_some() || instances.is_some() || document_access.is_some();
+        let desktop_keys = icon_bar.is_some()
+            || instances.is_some()
+            || document_access.is_some()
+            || documents_folder.is_some();
         let manifest = Self {
             id: require(id, "id")?,
             name: require(name, "name")?,
@@ -328,6 +341,7 @@ impl AppManifestSource {
             // Absent means read-only: a program is handed nothing it could
             // change unless it says it edits.
             writes_documents: document_access.unwrap_or(false),
+            documents_folder,
             saver: saver_keys.declaration(),
         };
         let saver = manifest.kind == ProgramKind::Screensaver;
@@ -402,6 +416,22 @@ impl AppManifestSource {
         }
         if let Some(title) = &self.title {
             check_len(ctx, "title", title, BUNDLE_TITLE_MAX)?;
+        }
+        if let Some(folder) = &self.documents_folder {
+            check_len(ctx, "documents-folder", folder, DOCUMENTS_FOLDER_MAX)?;
+            tairix_path::validate_visible_name(folder).map_err(|why| {
+                AppImageError::new(ctx, format!("`documents-folder` {folder:?}: {why}"))
+            })?;
+            // The grant answers a window, and only these kinds hold one.
+            if !matches!(self.kind, ProgramKind::Application | ProgramKind::Component) {
+                return Err(AppImageError::new(
+                    ctx,
+                    format!(
+                        "a `{}` cannot declare `documents-folder`",
+                        self.kind.as_str()
+                    ),
+                ));
+            }
         }
         if self.library.is_some() && !self.kind.is_searched() {
             // The library offers programs a user launches; a service opens no
@@ -967,6 +997,22 @@ fn header_flags(manifest: &AppManifestSource) -> u32 {
     flags
 }
 
+/// The publisher's public key, and its secret key where it delegates to the
+/// build's signing key through a certificate signed here.
+fn publisher_identity(
+    publisher: PublisherSource<'_>,
+    signer_pubkey: [u8; 32],
+) -> ([u8; 32], Option<Ed25519SecretKey>) {
+    match publisher {
+        PublisherSource::SelfPublished => (signer_pubkey, None),
+        PublisherSource::Certificate { pubkey, .. } => (pubkey, None),
+        PublisherSource::Delegating(seed) => {
+            let key = Ed25519SecretKey::from_seed(seed);
+            (*key.public_key().as_bytes(), Some(key))
+        }
+    }
+}
+
 /// Compose and Ed25519-sign a bundle's wire `AppInfo` from its manifest
 /// source.
 ///
@@ -1004,17 +1050,7 @@ pub fn compose_signed_appinfo(
 
     let signing_key = Ed25519SecretKey::from_seed(seed);
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
-    let publisher_key = match publisher {
-        PublisherSource::SelfPublished | PublisherSource::Certificate { .. } => None,
-        PublisherSource::Delegating(publisher_seed) => {
-            Some(Ed25519SecretKey::from_seed(publisher_seed))
-        }
-    };
-    let publisher_pubkey: [u8; 32] = match (&publisher_key, publisher) {
-        (Some(key), _) => *key.public_key().as_bytes(),
-        (None, PublisherSource::Certificate { pubkey, .. }) => pubkey,
-        (None, _) => signer_pubkey,
-    };
+    let (publisher_pubkey, publisher_key) = publisher_identity(publisher, signer_pubkey);
 
     let capability_count = u16::try_from(manifest.capabilities.len())
         .map_err(|_| AppImageError::new(ctx, "too many capabilities"))?;
@@ -1036,22 +1072,27 @@ pub fn compose_signed_appinfo(
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
         version_len: inline_len(ctx, "version", &manifest.version, BUNDLE_VERSION_MAX)?,
-        library_icon_len: match &manifest.library_icon {
-            Some(icon) => inline_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?,
-            None => 0,
-        },
-        purpose_len: match &manifest.purpose {
-            Some(purpose) => inline_len(ctx, "purpose", purpose, BUNDLE_PURPOSE_MAX)?,
-            None => 0,
-        },
-        author_len: match &manifest.author {
-            Some(author) => inline_len(ctx, "author", author, BUNDLE_AUTHOR_MAX)?,
-            None => 0,
-        },
-        title_len: match &manifest.title {
-            Some(title) => inline_len(ctx, "title", title, BUNDLE_TITLE_MAX)?,
-            None => 0,
-        },
+        library_icon_len: optional_len(
+            ctx,
+            "library-icon",
+            manifest.library_icon.as_deref(),
+            LIBRARY_ICON_MAX,
+        )?,
+        purpose_len: optional_len(
+            ctx,
+            "purpose",
+            manifest.purpose.as_deref(),
+            BUNDLE_PURPOSE_MAX,
+        )?,
+        author_len: optional_len(ctx, "author", manifest.author.as_deref(), BUNDLE_AUTHOR_MAX)?,
+        title_len: optional_len(ctx, "title", manifest.title.as_deref(), BUNDLE_TITLE_MAX)?,
+        documents_folder_len: optional_len(
+            ctx,
+            "documents-folder",
+            manifest.documents_folder.as_deref(),
+            DOCUMENTS_FOLDER_MAX,
+        )?,
+        padding: [0; 3],
         library: LibraryCategory::to_wire(manifest.library),
         id: inline_buf(&manifest.id),
         name: inline_buf(&manifest.name),
@@ -1060,6 +1101,7 @@ pub fn compose_signed_appinfo(
         purpose: inline_buf(manifest.purpose.as_deref().unwrap_or("")),
         author: inline_buf(manifest.author.as_deref().unwrap_or("")),
         title: inline_buf(manifest.title.as_deref().unwrap_or("")),
+        documents_folder: inline_buf(manifest.documents_folder.as_deref().unwrap_or("")),
         syscall_table_hash,
         content_hash,
         signer_pubkey,
@@ -1144,6 +1186,16 @@ fn append_body(
 fn inline_len(ctx: &str, key: &str, value: &str, max: usize) -> Result<u8, AppImageError> {
     check_len(ctx, key, value, max)?;
     u8::try_from(value.len()).map_err(|_| AppImageError::new(ctx, format!("`{key}` too long")))
+}
+
+/// [`inline_len`] of an optional text, zero for none.
+fn optional_len(
+    ctx: &str,
+    key: &str,
+    value: Option<&str>,
+    max: usize,
+) -> Result<u8, AppImageError> {
+    value.map_or(Ok(0), |value| inline_len(ctx, key, value, max))
 }
 
 /// The fixed inline buffer holding `value`'s bytes as a prefix.
@@ -1293,6 +1345,42 @@ mod tests {
                 "`{bad}` is a packaging defect, not a value to coerce"
             );
         }
+    }
+
+    #[test]
+    fn a_documents_folder_is_declared_and_reaches_the_signed_header() {
+        let application = GOOD.replace("kind = \"command\"", "kind = \"application\"");
+        let compose = |extra: &str| {
+            let composed = compose_signed_appinfo(
+                &[7u8; 32],
+                PublisherSource::SelfPublished,
+                &AppManifestSource::parse(&format!("{application}{extra}")).expect("valid"),
+                [0xAB; 32],
+                &[BundleFileDigest {
+                    path: "Run",
+                    bytes: b"program bytes",
+                }],
+            )
+            .expect("composes");
+            AppInfoHeader::from_bytes(&composed.bytes).expect("decodes")
+        };
+        assert_eq!(compose("").documents_folder(), None, "absent asks for none");
+        assert_eq!(
+            compose("documents-folder = \"Open Micro\"\n").documents_folder(),
+            Some("Open Micro")
+        );
+        let long = "a".repeat(DOCUMENTS_FOLDER_MAX + 1);
+        for bad in [".hidden", "a/b", "a:b", "", "..", long.as_str()] {
+            assert!(
+                AppManifestSource::parse(&format!("{application}documents-folder = \"{bad}\"\n"))
+                    .is_err(),
+                "`{bad}` is no visible folder name"
+            );
+        }
+        assert!(
+            AppManifestSource::parse(&format!("{GOOD}documents-folder = \"Notes\"\n")).is_err(),
+            "a command holds no window to be answered on"
+        );
     }
 
     #[test]
@@ -1486,6 +1574,7 @@ mod tests {
         "Clock",
         "Draw",
         "Life",
+        "OpenMicro",
         "PCEmulator",
         "Paint",
         "Raytrace",
@@ -1499,7 +1588,6 @@ mod tests {
         "audioctl",
         "audiod",
         "basename",
-        "beeb",
         "blendcheck",
         "cat",
         "chmod",

@@ -149,18 +149,29 @@ pub const TOOLTIP_TEXT_MAX: usize = 96;
 /// picks may hand it can be pending to it at once.
 pub const PICK_MAX_OPEN: usize = 4;
 
+/// Most documents-folder requests one application may have unanswered at
+/// once ([`WindowRequest::RequestDocumentsFolder`]): each is answered with one
+/// delegation.
+pub const DOCUMENTS_FOLDER_MAX_OPEN: usize = 1;
+
 /// Most files one folder pick delegates ([`PickPurpose::Folder`]).
 ///
 /// Every file is delegated before the pick concludes, and each of the
-/// application's other picks may be handing it one more, so the bound is what
-/// one grantor may hold pending to one recipient less those: a folder is what a
-/// listener or a viewer opens at once — an album, a set of pictures — and the
-/// files past it are left out with their number stated.
-pub const WINDOW_FOLDER_PICK_MAX: usize = crate::FD_GRANT_PENDING_MAX - PICK_MAX_OPEN;
+/// application's other picks and its documents folder may be handing it one
+/// more, so the bound is what one grantor may hold pending to one recipient
+/// less those: a folder is what a listener or a viewer opens at once — an
+/// album, a set of pictures — and the files past it are left out with their
+/// number stated.
+pub const WINDOW_FOLDER_PICK_MAX: usize =
+    crate::FD_GRANT_PENDING_MAX - PICK_MAX_OPEN - DOCUMENTS_FOLDER_MAX_OPEN;
 
-// A folder pick and every other pick its application may have open fit what
-// the desktop may hold pending to it, so no file a conclusion states is refused.
-const _: () = assert!(WINDOW_FOLDER_PICK_MAX + PICK_MAX_OPEN <= crate::FD_GRANT_PENDING_MAX);
+// A folder pick, every other pick its application may have open and its
+// documents folder fit what the desktop may hold pending to it, so no
+// delegation a conclusion states is refused.
+const _: () = assert!(
+    WINDOW_FOLDER_PICK_MAX + PICK_MAX_OPEN + DOCUMENTS_FOLDER_MAX_OPEN
+        <= crate::FD_GRANT_PENDING_MAX
+);
 
 /// Most open targets one application may have queued for it at once
 /// ([`WindowRequest::TakeOpenTarget`]).
@@ -259,6 +270,38 @@ pub type BundleRunPath = WideText<1, HAND_OVER_RUN_PATH_MAX, false>;
 /// carries the filesystem's component bound. Empty is legitimate: a
 /// hand-over may know the authority without knowing the name.
 pub type DocumentName = BoundedText<0, { crate::FS_NAME_MAX }>;
+
+/// Why an application's documents folder was not granted
+/// ([`WindowEvent::DocumentsFolderRefused`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DocumentsRefusal {
+    /// A folder of that name is there that the desktop did not make for this
+    /// application: the user's own, or another application's.
+    NotTheirs,
+    /// Something other than a folder is at that name, a link among them.
+    NotAFolder,
+    /// The user's documents could not be reached or the folder made there.
+    Unavailable,
+}
+
+impl DocumentsRefusal {
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::NotTheirs => 1,
+            Self::NotAFolder => 2,
+            Self::Unavailable => 3,
+        }
+    }
+
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            1 => Ok(Self::NotTheirs),
+            2 => Ok(Self::NotAFolder),
+            3 => Ok(Self::Unavailable),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
 
 /// What a [`WindowRequest::PickFile`] asks the user to choose.
 // Boxing the suggested name would force an allocation into an ABI decode type
@@ -3414,6 +3457,17 @@ pub enum WindowRequest {
     /// it opened at bring-up, so answering costs no filesystem operation;
     /// `NotFound` when this desktop holds no store.
     TakeZoneStore,
+    /// Ask for the application's own documents folder, the one its signed
+    /// manifest names (`documents_folder`): `Home/Documents/<name>/`, made if
+    /// missing, delegated writable and confined beneath itself, without a
+    /// picker. Refused at once with `PermissionDenied` when the manifest names
+    /// none and `LimitExceeded` past [`DOCUMENTS_FOLDER_MAX_OPEN`]; otherwise
+    /// answered later with [`WindowEvent::DocumentsFolder`] or
+    /// [`WindowEvent::DocumentsFolderRefused`].
+    RequestDocumentsFolder {
+        /// The window the answer is addressed to.
+        window_id: u64,
+    },
     /// Ask the session to show the screensaver `document` describes, now, as
     /// a preview.
     ///
@@ -3958,6 +4012,8 @@ const OP_FILE_OFFER_ANSWER: u16 = 54;
 const OP_SET_KEYBOARD_MODE: u16 = 55;
 /// Wire operation discriminant of [`WindowRequest::LockPointer`].
 const OP_LOCK_POINTER: u16 = 56;
+/// Wire operation discriminant of [`WindowRequest::RequestDocumentsFolder`].
+const OP_REQUEST_DOCUMENTS_FOLDER: u16 = 58;
 /// Wire operation discriminant of [`WindowRequest::TakeAppBarText`].
 const OP_TAKE_APP_BAR_TEXT: u16 = 48;
 /// Wire operation discriminant of [`WindowRequest::DropLanding`].
@@ -4644,6 +4700,7 @@ impl WindowRequest {
             | Self::TakeTerrain { .. }
             | Self::ActivateWindow { .. }
             | Self::CloseAlert { .. }
+            | Self::RequestDocumentsFolder { .. }
             | Self::TakeAuthorisedOutput { .. } => WINDOW_ID_WIRE_LEN,
             Self::OpenAlert { ref alert, .. } => OPEN_ALERT_SPEC_OFFSET + alert::wire_len(alert),
             Self::Authorise { ref task, .. } => AUTHORISE_TASK_OFFSET + task::wire_len(task),
@@ -4826,6 +4883,7 @@ impl WindowRequest {
             Self::QueryScreensaver { .. } => OP_QUERY_SCREENSAVER,
             Self::LockScreen => OP_LOCK_SCREEN,
             Self::TakeZoneStore => OP_TAKE_ZONE_STORE,
+            Self::RequestDocumentsFolder { .. } => OP_REQUEST_DOCUMENTS_FOLDER,
             Self::PreviewScreensaver { .. } => OP_PREVIEW_SCREENSAVER,
             Self::RenderPreview { .. } => OP_RENDER_PREVIEW,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
@@ -4972,6 +5030,7 @@ impl WindowRequest {
             | Self::TakeDropTarget { window_id }
             | Self::TakeTerrain { window_id }
             | Self::ActivateWindow { window_id }
+            | Self::RequestDocumentsFolder { window_id }
             | Self::CloseAlert {
                 alert_id: window_id,
             } => {
@@ -5447,6 +5506,12 @@ impl WindowRequest {
             OP_LOCK_SCREEN => exact_len(bytes, LOCK_SCREEN_WIRE_LEN).map(|()| Self::LockScreen),
             OP_TAKE_ZONE_STORE => {
                 exact_len(bytes, TAKE_ZONE_STORE_WIRE_LEN).map(|()| Self::TakeZoneStore)
+            }
+            OP_REQUEST_DOCUMENTS_FOLDER => {
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+                Ok(Self::RequestDocumentsFolder {
+                    window_id: nonzero_id(read_u64(bytes, 8))?,
+                })
             }
             OP_OPEN_ALERT => read_open_alert(bytes),
             OP_CLOSE_ALERT => {
@@ -9604,6 +9669,10 @@ const EV_POINTER_LOCK: u16 = 34;
 const EV_SUBTREE_PICKED: u16 = 35;
 /// Wire event discriminant of [`WindowEvent::Shown`].
 const EV_SHOWN: u16 = 37;
+/// Wire event discriminant of [`WindowEvent::DocumentsFolder`].
+const EV_DOCUMENTS_FOLDER: u16 = 38;
+/// Wire event discriminant of [`WindowEvent::DocumentsFolderRefused`].
+const EV_DOCUMENTS_FOLDER_REFUSED: u16 = 39;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -9730,6 +9799,23 @@ pub enum WindowEvent {
         handle: u64,
         /// Whether what lies beneath it may be changed.
         writable: bool,
+    },
+    /// The application's documents folder
+    /// ([`WindowRequest::RequestDocumentsFolder`]): `handle` is the one-shot
+    /// `fd_redeem` delegation of the directory, writable and confined beneath
+    /// itself, minted to the window's owner.
+    DocumentsFolder {
+        /// The window the request named.
+        window_id: u64,
+        /// The `fd_redeem` handle; never zero.
+        handle: u64,
+    },
+    /// The application's documents folder could not be granted, and why.
+    DocumentsFolderRefused {
+        /// The window the request named.
+        window_id: u64,
+        /// Why.
+        refusal: DocumentsRefusal,
     },
     /// The user dismissed the session's trusted picker without choosing
     /// ([`WindowRequest::PickFile`]'s other conclusion). No authority was
@@ -10393,6 +10479,8 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::SubtreePicked { window_id, .. }
+            | Self::DocumentsFolder { window_id, .. }
+            | Self::DocumentsFolderRefused { window_id, .. }
             | Self::PickCancelled { window_id }
             | Self::FolderPicked { window_id, .. }
             | Self::DragOver { window_id, .. }
@@ -10458,6 +10546,14 @@ impl WindowEvent {
                 out[24] = u8::from(writable);
             }
             Self::PickCancelled { .. } => put_u16(out, 6, EV_PICK_CANCELLED),
+            Self::DocumentsFolder { handle, .. } => {
+                put_u16(out, 6, EV_DOCUMENTS_FOLDER);
+                put_u64(out, 16, handle);
+            }
+            Self::DocumentsFolderRefused { refusal, .. } => {
+                put_u16(out, 6, EV_DOCUMENTS_FOLDER_REFUSED);
+                out[16] = refusal.to_wire();
+            }
             Self::FolderPicked {
                 files, left_out, ..
             } => {
@@ -10524,6 +10620,8 @@ impl WindowEvent {
             }
             Self::FilePicked { .. }
             | Self::SubtreePicked { .. }
+            | Self::DocumentsFolder { .. }
+            | Self::DocumentsFolderRefused { .. }
             | Self::PickCancelled { .. }
             | Self::FolderPicked { .. } => {
                 self.write_pick(&mut out);
@@ -10686,6 +10784,9 @@ impl WindowEvent {
             EV_FILE_PICKED | EV_SUBTREE_PICKED | EV_FOLDER_PICKED => {
                 read_pick_event(kind, window_id, bytes)
             }
+            EV_DOCUMENTS_FOLDER | EV_DOCUMENTS_FOLDER_REFUSED => {
+                read_documents_event(kind, window_id, bytes)
+            }
             EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
             EV_SCROLLED => read_scrolled_event(window_id, bytes),
             EV_PINCH => read_pinch_event(window_id, bytes),
@@ -10757,6 +10858,24 @@ fn read_resized(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
         height_px,
         state: WindowSizeState::from_wire(bytes[24])?,
     })
+}
+
+/// Decode a documents-folder answer: the folder's delegation, never handle
+/// zero, or why it was refused.
+fn read_documents_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    if kind == EV_DOCUMENTS_FOLDER_REFUSED {
+        event_reserved_zero(bytes, 17)?;
+        return Ok(WindowEvent::DocumentsFolderRefused {
+            window_id,
+            refusal: DocumentsRefusal::from_wire(bytes[16])?,
+        });
+    }
+    event_reserved_zero(bytes, 24)?;
+    let handle = read_u64(bytes, 16);
+    if handle == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(WindowEvent::DocumentsFolder { window_id, handle })
 }
 
 /// Decode a pick's conclusion carrying what was chosen: a file's or a
@@ -11514,6 +11633,7 @@ fn flag_at(bytes: &[u8], at: usize) -> Result<bool, Errno> {
 mod tests {
     extern crate alloc;
 
+    use super::DocumentsRefusal;
     use super::{
         app_bar_wire_len, decode_clipboard_reply, decode_connect_reply, decode_cursor_sets_reply,
         decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
@@ -12409,6 +12529,7 @@ mod tests {
         visit(WindowRequest::QueryScreensaver { index: u16::MAX });
         visit(WindowRequest::LockScreen);
         visit(WindowRequest::TakeZoneStore);
+        visit(WindowRequest::RequestDocumentsFolder { window_id: 9 });
         let words = |args: &[&str]| ElevateWords::new(args).expect("within bounds");
         let wide = [b'w'; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARGS];
         let wide = core::str::from_utf8(&wide).expect("ascii");
@@ -18106,6 +18227,58 @@ mod tests {
         let mut cancelled = WindowEvent::PickCancelled { window_id: 4 }.to_le_bytes();
         cancelled[16] = 1;
         assert_eq!(WindowEvent::from_bytes(&cancelled), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_documents_folder_answer_is_a_handle_or_a_named_refusal() {
+        let refusals = [
+            DocumentsRefusal::NotTheirs,
+            DocumentsRefusal::NotAFolder,
+            DocumentsRefusal::Unavailable,
+        ];
+        let answers = refusals
+            .map(|refusal| WindowEvent::DocumentsFolderRefused {
+                window_id: 4,
+                refusal,
+            })
+            .into_iter()
+            .chain([WindowEvent::DocumentsFolder {
+                window_id: 4,
+                handle: u64::MAX,
+            }]);
+        for event in answers {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+        let granted = WindowEvent::DocumentsFolder {
+            window_id: 4,
+            handle: 7,
+        }
+        .to_le_bytes();
+        let mut unredeemable = granted;
+        unredeemable[16..24].fill(0);
+        assert_eq!(
+            WindowEvent::from_bytes(&unredeemable),
+            Err(Errno::OutOfRange)
+        );
+        let mut dirty = granted;
+        dirty[24] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        let refused = WindowEvent::DocumentsFolderRefused {
+            window_id: 4,
+            refusal: DocumentsRefusal::Unavailable,
+        }
+        .to_le_bytes();
+        for unknown in [0, 4, 0xFF] {
+            let mut unnamed = refused;
+            unnamed[16] = unknown;
+            assert_eq!(WindowEvent::from_bytes(&unnamed), Err(Errno::OutOfRange));
+        }
+        let mut trailing = refused;
+        trailing[17] = 1;
+        assert_eq!(WindowEvent::from_bytes(&trailing), Err(Errno::BadMagic));
+        let mut zero = WindowRequest::RequestDocumentsFolder { window_id: 9 }.frame();
+        zero[8..16].fill(0);
+        assert!(WindowRequest::from_bytes(&zero).is_err(), "no window zero");
     }
 
     #[test]

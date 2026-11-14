@@ -339,6 +339,7 @@ pub mod damage;
 pub mod decision;
 pub mod disclosure;
 pub mod form;
+pub mod form_dialog;
 pub mod menu;
 pub mod metric;
 pub mod nav;
@@ -387,6 +388,7 @@ pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 pub use form::{
     FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
 };
+pub use form_dialog::{FormAction, FormDialog};
 pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
     PlatePlacement, PlateSide, RowIcon, INFO_ROW_LABEL, SEEK_PAUSE_NS,
