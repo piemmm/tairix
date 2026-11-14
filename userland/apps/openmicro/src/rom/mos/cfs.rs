@@ -219,21 +219,8 @@ fn ula_cassette(a: &mut Asm, bits: u8) {
 }
 
 /// FILEV, ARGSV, FSCV, *OPT, the motor, *TAPE and *ROM.
-fn vectors(a: &mut Asm, model: Model) {
-    // Every reset: the cassette at 1200 baud, the default options and gap,
-    // no files open.
-    a.here("cfs_init");
-    a.lda(imm(SPEED_1200));
-    a.sta(zp(fs::BAUD));
-    a.lda(imm(option::DEFAULT));
-    a.sta(zp(os::CFS_OPTIONS));
-    a.lda(imm(DEFAULT_GAP));
-    a.sta(abs(cfs::GAP));
-    a.lda(imm(0));
-    a.sta(zp(os::CFS_STATUS));
-    a.rts();
-
-    // OSFILE: A = &FF loads, 0 saves.
+/// FILEV's tape default: A = &FF loads, 0 saves.
+pub(super) fn cfs_file(a: &mut Asm) {
     a.here("cfs_file");
     a.stx(zp(z::BLOCK));
     a.sty(zp(z::BLOCK + 1));
@@ -242,10 +229,15 @@ fn vectors(a: &mut Asm, model: Model) {
     a.jmp("cfs_load_file");
     a.here("cfs_file_not_load");
     a.cmp(imm(0));
-    a.bne(RTS);
+    a.beq("cfs_file_save");
+    a.rts();
+    a.here("cfs_file_save");
     a.jmp("cfs_save_file");
+}
 
-    // OSARGS: with A and Y zero, the filing system's number; X and Y kept.
+/// ARGSV's tape default: with A and Y zero, the filing system's number; X
+/// and Y kept.
+pub(super) fn cfs_args(a: &mut Asm) {
     a.here("cfs_args");
     a.ora(imm(0));
     a.bne(RTS);
@@ -263,7 +255,10 @@ fn vectors(a: &mut Asm, model: Model) {
     a.here("cfs_args_rfs");
     a.lda(imm(filing_system::RFS));
     a.rts();
+}
 
+/// FSCV's tape default: each reason's routine, X kept.
+pub(super) fn cfs_fsc(a: &mut Asm) {
     a.here("cfs_fsc");
     a.cmp(imm(FSC_REASONS));
     a.bcs(RTS);
@@ -275,14 +270,33 @@ fn vectors(a: &mut Asm, model: Model) {
     a.pha();
     a.ldx(zp(z::COMPARE));
     a.rts();
-    a.here("cfs_fsc_low");
-    for routine in FSC_ROUTINES {
-        a.byte(lo(sym(routine) + -1));
-    }
-    a.here("cfs_fsc_high");
-    for routine in FSC_ROUTINES {
-        a.byte(hi(sym(routine) + -1));
-    }
+}
+
+fn vectors(a: &mut Asm, model: Model) {
+    // Every reset: the cassette at 1200 baud, the default options and gap,
+    // no files open.
+    a.here("cfs_init");
+    a.lda(imm(SPEED_1200));
+    a.sta(zp(fs::BAUD));
+    a.lda(imm(option::DEFAULT));
+    a.sta(zp(os::CFS_OPTIONS));
+    a.lda(imm(DEFAULT_GAP));
+    a.sta(abs(cfs::GAP));
+    a.lda(imm(0));
+    a.sta(zp(os::CFS_STATUS));
+    a.rts();
+    a.later(|a| {
+        a.here("cfs_fsc_low");
+        for routine in FSC_ROUTINES {
+            a.byte(lo(sym(routine) + -1));
+        }
+    });
+    a.later(|a| {
+        a.here("cfs_fsc_high");
+        for routine in FSC_ROUTINES {
+            a.byte(hi(sym(routine) + -1));
+        }
+    });
     a.here("cfs_handles");
     a.ldx(imm(INPUT_HANDLE));
     a.ldy(imm(OUTPUT_HANDLE));
@@ -390,15 +404,16 @@ fn select_tape(a: &mut Asm, model: Model) {
     a.sta(zp(os::CFS_OPTIONS));
     a.rts();
     a.here("cfs_opt_bad");
-    a.brk();
-    a.byte(0xCB);
-    a.text("Bad option");
-    a.byte(0);
+    a.error(0xCB, "Bad option");
     // What *OPT 1 and 2 leave of &E3, and the bits each Y sets.
-    a.here("cfs_opt_keep");
-    a.bytes(&[0xFF, 0x33, 0xCC]);
-    a.here("cfs_opt_values");
-    a.bytes(&[0, 0, 0, 0, 0x00, 0x88, 0xCC, 0, 0x00, 0x22, 0x11]);
+    a.later(|a| {
+        a.here("cfs_opt_keep");
+        a.bytes(&[0xFF, 0x33, 0xCC]);
+    });
+    a.later(|a| {
+        a.here("cfs_opt_values");
+        a.bytes(&[0, 0, 0, 0, 0x00, 0x88, 0xCC, 0, 0x00, 0x22, 0x11]);
+    });
 }
 
 /// LOAD, SAVE, *RUN and *CAT.
@@ -481,10 +496,7 @@ fn cfs_load(a: &mut Asm) {
     a.and(imm(mode::RUN));
     a.bne("cfs_load_unlocked");
     a.jsr("cfs_read_off");
-    a.brk();
-    a.byte(error::LOCKED);
-    a.text("Locked");
-    a.byte(0);
+    a.error(error::LOCKED, "Locked");
     a.here("cfs_load_unlocked");
     a.jsr("cfs_loading");
     a.lda(zp(z::MODE));
@@ -569,8 +581,6 @@ fn cfs_save_file(a: &mut Asm) {
     a.lda(zp(z::COUNT + 1));
     a.sta(abs(cfs::BPUT_HEADER + header::LENGTH + 1));
     a.jsr("cfs_write_block");
-    a.jsr("cfs_show_written");
-    a.lda(abs(cfs::BPUT_HEADER + header::FLAG));
     a.bmi("cfs_save_done");
     a.jsr("cfs_next_output_block");
     a.lda(imm(BETWEEN_BLOCKS));
@@ -738,10 +748,7 @@ fn cfs_bget(a: &mut Asm) {
     a.sec();
     a.rts();
     a.here("cfs_eof_error");
-    a.brk();
-    a.byte(error::EOF);
-    a.text("EOF");
-    a.byte(0);
+    a.error(error::EOF, "EOF");
 
     // Y names the file open to read, or a Channel error.
     a.here("cfs_input_open");
@@ -752,10 +759,7 @@ fn cfs_bget(a: &mut Asm) {
     a.beq("cfs_channel");
     a.rts();
     a.here("cfs_channel");
-    a.brk();
-    a.byte(error::CHANNEL);
-    a.text("Channel");
-    a.byte(0);
+    a.error(error::CHANNEL, "Channel");
 
     // C set if the open file has nothing more to read; otherwise the
     // buffer holds its next byte, the next block read if need be.
@@ -881,8 +885,6 @@ fn cfs_bput_flush(a: &mut Asm) {
     a.lda(imm(PAUSED_LEADER));
     a.jsr("cfs_wait");
     a.jsr("cfs_write_block");
-    a.jsr("cfs_show_written");
-    a.lda(abs(cfs::BPUT_HEADER + header::FLAG));
     a.bmi("cfs_bput_flush_last");
     a.lda(imm(PAUSED_TRAILER));
     a.jsr("cfs_wait");
@@ -962,10 +964,7 @@ fn names(a: &mut Asm) {
     a.sta(abs(cfs::SEARCH_NAME).x());
     a.rts();
     a.here("cfs_name_bad");
-    a.brk();
-    a.byte(0xCC);
-    a.text("Bad filename");
-    a.byte(0);
+    a.error(0xCC, "Bad filename");
 
     // The name searched for as the header of the file being written.
     a.here("cfs_output_name");
@@ -1253,7 +1252,8 @@ fn transfers(a: &mut Asm, model: Model) {
 /// The block at &380: its header, then COUNT bytes of data from ADDRESS,
 /// each with its CRC; then two repeats of the last byte, on the Model B cut
 /// short as the 6850 is held reset and the line idles. The Electron's ULA
-/// sends the carrier again once they have gone.
+/// sends the carrier again once they have gone. The block is then shown,
+/// and A and N are its flag.
 fn cfs_write_block(a: &mut Asm, model: Model) {
     a.here("cfs_write_block");
     match model {
@@ -1308,6 +1308,8 @@ fn cfs_write_block(a: &mut Asm, model: Model) {
         a.lda(imm(control::MASTER_RESET));
         a.sta(abs(sheila::ACIA_CONTROL));
     }
+    a.jsr("cfs_show_written");
+    a.lda(abs(cfs::BPUT_HEADER + header::FLAG));
     a.rts();
 
     a.here("cfs_write_crc_bytes");
@@ -1408,10 +1410,7 @@ fn devices(a: &mut Asm, model: Model) {
     a.rts();
     a.here("cfs_escape");
     a.jsr("cfs_read_off");
-    a.brk();
-    a.byte(error::ESCAPE);
-    a.text("Escape");
-    a.byte(0);
+    a.error(error::ESCAPE, "Escape");
 
     // The current ROM's next byte; a ROM that gives none passes to the next.
     // Past every ROM's, *CAT is done and anything else did not find its
@@ -1444,10 +1443,7 @@ fn devices(a: &mut Asm, model: Model) {
     a.beq("file_not_found");
     a.jmp("cfs_catalogue_end");
     a.here("file_not_found");
-    a.brk();
-    a.byte(error::NOT_FOUND);
-    a.text("File not found");
-    a.byte(0);
+    a.error(error::NOT_FOUND, "File not found");
 
     // From the ROM &F5 counts to, the first that answers service call 13,
     // and so has data.
@@ -1588,9 +1584,7 @@ fn tones(a: &mut Asm, model: Model) {
             a.jsr("ula_control");
         }
     }
-    a.jsr("print_inline");
-    a.text("RECORD then RETURN");
-    a.byte(0);
+    a.call_with_text("print_inline", &["RECORD then RETURN"]);
     a.lda(imm(osbyte::FLUSH_INPUT));
     a.ldx(imm(1));
     a.jsr("osbyte");
@@ -1654,9 +1648,11 @@ fn osrdrm(a: &mut Asm, model: Model) {
     a.lda(imm(hi("brk_default")));
     a.sta(abs(vector::BRK + 1));
     a.jmp("boot_done");
-    a.here("boot_name");
-    a.text("!BOOT");
-    a.byte(0x0D);
+    a.later(|a| {
+        a.here("boot_name");
+        a.text("!BOOT");
+        a.byte(0x0D);
+    });
 }
 
 /// What the filing system tells the user.
@@ -1665,9 +1661,7 @@ fn messages(a: &mut Asm) {
     a.lda(zp(z::OPTIONS));
     a.and(imm(option::MESSAGES));
     a.beq(RTS);
-    a.jsr("print_inline");
-    a.text("Searching");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Searching"]);
     a.jmp("osnewl");
 
     a.here("cfs_loading");
@@ -1675,9 +1669,7 @@ fn messages(a: &mut Asm) {
     a.and(imm(option::MESSAGES));
     a.beq(RTS);
     a.jsr("osnewl");
-    a.jsr("print_inline");
-    a.text("Loading");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Loading"]);
     a.jmp("osnewl");
     cfs_show_read(a);
     cfs_finished(a);
@@ -1752,21 +1744,25 @@ fn cfs_show_read(a: &mut Asm) {
     a.lda(zp(z::OPTIONS));
     a.and(imm(option::LONG));
     a.beq(RTS);
-    for (spaces, field) in [(4u8, header::LOAD), (1, header::EXEC)] {
-        a.ldx(imm(spaces));
-        let space = a.here_local();
-        a.lda(imm(b' '));
-        a.jsr("oswrch");
-        a.dex();
-        a.bne(space);
-        a.ldy(imm(lo(field + 3)));
-        let byte = a.here_local();
-        a.lda(zp(z::SHOWN).ind_y());
-        a.jsr("print_hex");
-        a.dey();
-        a.cpy(imm(lo(field - 1)));
-        a.bne(byte);
-    }
+    a.ldx(imm(4));
+    a.ldy(imm(lo(header::LOAD + 3)));
+    a.jsr("cfs_show_address");
+    a.ldx(imm(1));
+    a.ldy(imm(lo(header::EXEC + 3)));
+    // X spaces, then the address whose high byte is Y bytes in.
+    a.here("cfs_show_address");
+    let space = a.here_local();
+    a.lda(imm(b' '));
+    a.jsr("oswrch");
+    a.dex();
+    a.bne(space);
+    a.ldx(imm(4));
+    let byte = a.here_local();
+    a.lda(zp(z::SHOWN).ind_y());
+    a.jsr("print_hex");
+    a.dey();
+    a.dex();
+    a.bne(byte);
     a.rts();
 }
 
@@ -1849,19 +1845,20 @@ fn errors(a: &mut Asm) {
     a.lda(abs("cfs_error_high").x());
     a.sta(zp(z::SHOWN + 1));
     a.rts();
-    a.here("cfs_error_low");
-    for (record, _, _) in error::BLOCK_ERRORS {
-        a.byte(lo(record));
-    }
-    a.here("cfs_error_high");
-    for (record, _, _) in error::BLOCK_ERRORS {
-        a.byte(hi(record));
-    }
+    a.later(|a| {
+        a.here("cfs_error_low");
+        for (record, _, _) in error::BLOCK_ERRORS {
+            a.byte(lo(record));
+        }
+    });
+    a.later(|a| {
+        a.here("cfs_error_high");
+        for (record, _, _) in error::BLOCK_ERRORS {
+            a.byte(hi(record));
+        }
+    });
     for (record, number, text) in error::BLOCK_ERRORS {
         a.here(record);
-        a.brk();
-        a.byte(number);
-        a.text(text);
-        a.byte(0);
+        a.error(number, text);
     }
 }

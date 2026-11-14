@@ -19,7 +19,8 @@ const LINE_NUMBERS: u8 = 0x40;
 /// past CONDITIONAL so each comes off in turn.
 pub(super) const KEYWORD: u16 = STATE + 1;
 const FLAGS: u16 = KEYWORD + 2;
-/// A line number being read, and its value before the digit's.
+/// A line number being read, or the interpreter's sixteen-bit start on a
+/// number of several digits; and its value before the digit's.
 pub(super) const NUMBER: u16 = FLAGS + 1;
 const BEFORE: u16 = NUMBER + 2;
 /// The text being read.

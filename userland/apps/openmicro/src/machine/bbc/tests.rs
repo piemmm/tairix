@@ -523,3 +523,23 @@ fn what_the_6850_sends_down_rs423_is_handed_out() {
     assert_eq!(machine.take_rs423_output().collect::<Vec<_>>(), b"Z");
     assert_eq!(machine.take_rs423_output().count(), 0, "taken");
 }
+
+/// The regression: the screen sizes of C1 high with C0 low and of both high
+/// were each other's, where the hardware MOS 1.20 sets them for takes C1
+/// high alone as 20K, both high as 10K; an address past &7FFF comes back
+/// by the size.
+#[test]
+fn the_latch_s_screen_size_bits_wrap_addresses_by_the_screen_size() {
+    use super::latch;
+    let c0 = latch::SCREEN_SIZE & latch::SCREEN_SIZE.wrapping_neg();
+    let c1 = latch::SCREEN_SIZE & !c0;
+    for (bits, size) in [(c1, 0x5000), (0, 0x4000), (c0 | c1, 0x2800), (c0, 0x2000)] {
+        let wrap = super::screen_wrap(bits);
+        assert_eq!(0x8000 - wrap, size, "latch {bits:02X}");
+        assert_eq!(
+            super::video::screen_address(0x1000, 0, wrap),
+            0x8000 - size,
+            "the first address past the top is the screen's first"
+        );
+    }
+}

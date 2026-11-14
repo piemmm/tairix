@@ -41,7 +41,8 @@ const QUOTED: u8 = 0x80;
 const SPACE_ENDS: u8 = 0x40;
 
 pub fn emit(a: &mut Asm, model: Model) {
-    oscli(a);
+    // Its branches reach across the whole of it.
+    a.whole(oscli);
     commands(a, model);
     files(a);
     gs(a);
@@ -111,22 +112,18 @@ fn oscli(a: &mut Asm) {
     a.cmp(imm(b'Z' + 1));
     a.bcc("oscli_next_command");
     a.here("oscli_found");
-    // The byte after the name holds the routine's index with the top bit
-    // set.
     a.lda(abs("command_names").x());
-    a.and(imm(0x7F));
-    a.tax();
+    a.pha();
+    a.lda(abs(sym("command_names") + 1).x());
+    a.pha();
     a.jsr("skip_spaces");
-    a.lda(abs("command_high").x());
-    a.pha();
-    a.lda(abs("command_low").x());
-    a.pha();
     a.rts();
     a.here("oscli_next_command");
     a.lda(abs("command_names").x());
     a.inx();
     a.asl(Acc);
     a.bcc("oscli_next_command");
+    a.inx();
     a.lda(abs("command_names").x());
     a.bne("oscli_command");
     // None of the MOS's: the ROMs', then the filing system's.
@@ -202,12 +199,11 @@ fn commands(a: &mut Asm, model: Model) {
     a.here("star_help");
     a.lda(imm(service::HELP));
     a.jsr("service_call");
-    a.jsr("print_inline");
-    match model {
-        Model::ModelB => a.text("\r\nOS 1.20\r\n"),
-        Model::Electron => a.text("\r\nOS 1.00\r\n"),
-    }
-    a.byte(0);
+    let version = match model {
+        Model::ModelB => "\r\nOS 1.20\r\n",
+        Model::Electron => "\r\nOS 1.00\r\n",
+    };
+    a.call_with_text("print_inline", &[version]);
     a.rts();
 
     // X, Y = up to two numbers, zero where absent: the first after any
@@ -274,10 +270,7 @@ fn commands(a: &mut Asm, model: Model) {
 fn files(a: &mut Asm) {
     // Between the commands and the files, so both reach it.
     a.here("bad_command");
-    a.brk();
-    a.byte(0xFE);
-    a.text("Bad command");
-    a.byte(0);
+    a.error(0xFE, "Bad command");
 
     // *LOAD name [address]: to its own address unless one is given.
     a.here("star_load");
@@ -448,10 +441,7 @@ fn gs(a: &mut Asm) {
     a.sec();
     a.rts();
     a.here("gsread_bad");
-    a.brk();
-    a.byte(0xFD);
-    a.text("Bad string");
-    a.byte(0);
+    a.error(0xFD, "Bad string");
     a.here("gsread_not_end");
     a.cmp(imm(b' '));
     a.bne("gsread_not_space");
@@ -613,20 +603,15 @@ fn numbers(a: &mut Asm) {
 }
 
 fn tables(a: &mut Asm) {
-    // Each name, then its routine's index with the top bit set; a zero
-    // ends the table.
-    a.here("command_names");
-    for (index, (name, _)) in (0u8..).zip(COMMANDS) {
-        a.text(name);
-        a.byte(0x80 | index);
-    }
-    a.byte(0);
-    a.here("command_low");
-    for (_, routine) in COMMANDS {
-        a.byte(lo(sym(routine) + -1));
-    }
-    a.here("command_high");
-    for (_, routine) in COMMANDS {
-        a.byte(hi(sym(routine) + -1));
-    }
+    // Each name, then its routine's address less one, high byte first: a
+    // routine in this ROM has the top bit set there. A zero ends the table.
+    a.later(|a| {
+        a.here("command_names");
+        for (name, routine) in COMMANDS {
+            a.text(name);
+            a.byte(hi(sym(routine) + -1));
+            a.byte(lo(sym(routine) + -1));
+        }
+        a.byte(0);
+    });
 }

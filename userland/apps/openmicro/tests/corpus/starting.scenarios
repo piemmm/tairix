@@ -15,6 +15,40 @@ script type:CLS:*HELP UTILS\n;wait:0.5
 scenario page_is_raised_above_the_dfs_workspace
 script type:CLS:P.~PAGE\n;wait:0.5
 
+# The vectors: the default table the descriptor at &FFB6 names, the vectors
+# as BASIC and the DFS leave them, and the filing system's after *TAPE.
+scenario the_default_vector_table_is_the_mos_s
+script type:CLS:T%=!&FFB7 AND &FFFF:S$="":FOR I%=0 TO ?&FFB6-2 STEP 2:S$=S$+STR$~(T%!I% AND &FFFF)+" ":NEXT:P.?&FFB6:P.S$\n;wait:1
+
+scenario the_vectors_hold_basic_s_and_the_dfs_s_entries
+script type:CLS:S$="":FOR I%=&200 TO &234 STEP 2:S$=S$+STR$~(!I% AND &FFFF)+" ":NEXT:P.S$\n;wait:1
+
+scenario tape_takes_the_filing_system_vectors_back
+script type:*TAPE\n;wait:0.5;type:CLS:S$="":FOR I%=&212 TO &21E STEP 2:S$=S$+STR$~(!I% AND &FFFF)+" ":NEXT:P.S$\n;wait:1
+
+# Software sets WRCHV to its default by address, and calls OSWRCH there.
+scenario wrchv_set_to_its_default_s_address_prints
+script type:CLS:?&20E=&A4:?&20F=&E0:PRINT "OK"\n;wait:0.5
+
+scenario oswrch_called_at_its_default_s_address_prints
+script type:CLS:A%=ASC"W":CALL &E0A4:A%=ASC"!":CALL &E0A4\n;wait:0.5
+
+# Software sets BRKV to &B433 within BASIC.
+scenario an_error_through_brkv_at_b433
+script type:CLS:?&202=&33:?&203=&B4\n;wait:0.5;type:PRINT X\n;wait:0.5;type:PRINT 1\n;wait:0.5
+
+scenario an_error_through_brkv_at_b433_with_on_error
+script type:CLS:?&202=&33:?&203=&B4\n;wait:0.5;type:10 ON ERROR PRINT "TRAPPED "+STR$ERR:END\n20 PRINT X\nRUN\n;wait:1;type:PRINT 1\n;wait:0.5
+
+scenario time_runs_on_through_a_break
+script type:CLS:TIME=0\n;wait:3;break;type:P.TIME DIV 100\n;wait:0.5
+
+scenario an_error_through_brkv_at_b433_lets_time_run
+script type:CLS:TIME=0:?&202=&33:?&203=&B4:PRINT X\n;wait:3;break;type:P.TIME DIV 100\n;wait:0.5
+
+scenario an_error_through_brkv_at_b433_ignores_escape
+script type:CLS:?&202=&33:?&203=&B4:PRINT X\n;wait:0.5;press:ESCAPE;wait:0.5;type:PRINT 1\n;wait:0.5
+
 scenario shift_break_loads_the_boot_file
 discs testdisc
 script type:?&3000=99:*SAVE !BOOT 3000 +1\n;wait:1;type:?&3000=0:*OPT 4,1\n;wait:1;shiftbreak;wait:2;type:P.?&3000\n;wait:0.5
@@ -26,6 +60,13 @@ script type:P%=&2000:[OPT 0:LDA #ASC"R":JSR &FFEE:RTS:]\n;wait:0.5;type:*SAVE !B
 scenario shift_break_execs_the_boot_file
 discs testdisc
 script type:A%=OPENOUT"!BOOT":S$="PRINT 123"+CHR$13:FOR I%=1 TO LEN S$:BPUT#A%,ASC MID$(S$,I%,1):NEXT:CLOSE#A%\n;wait:2;type:*OPT 4,3\n;wait:1;shiftbreak;wait:2
+
+# CLOSE#0 closes the *EXEC file too, as the DFS User Guide describes, so the
+# boot file's next line is never read and input is the keyboard's again.
+scenario close_0_in_the_boot_file_closes_the_exec_file
+discs testdisc
+ours
+script type:A%=OPENOUT"!BOOT":S$="CLOSE#0:PRINT 7"+CHR$13+"PRINT 8"+CHR$13:FOR I%=1 TO LEN S$:BPUT#A%,ASC MID$(S$,I%,1):NEXT:CLOSE#A%\n;wait:2;type:*OPT 4,3\n;wait:1;shiftbreak;wait:2;type:P.ERR\n;wait:0.5
 
 scenario a_missing_boot_file_is_reported
 discs testdisc

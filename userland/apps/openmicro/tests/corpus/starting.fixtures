@@ -47,6 +47,59 @@ scenario page_is_raised_above_the_dfs_workspace
 row       1900
 row >
 
+scenario the_default_vector_table_is_the_mos_s
+row         54
+row E310 DC54 DC93 DE89 DF89 E772 E7EB E0A4
+row DEC5 F27D F18E F4C9 F529 FFA6 F3CA F1B1
+row FFA6 FFA6 FFA6 FFA6 EF02 E4B3 E464 E1D1
+row FFA6 FFA6 FFA6
+row >
+
+scenario the_vectors_hold_basic_s_and_the_dfs_s_entries
+row E310 B402 DC93 DE89 DF89 E772 E7EB E0A4
+row DEC5 FF1B FF1E FF21 FF24 FF27 FF2A FF2D
+row FFA6 FFA6 FFA6 FFA6 EF02 E4B3 E464 E1D1
+row FFA6 FFA6 FFA6
+row >
+
+scenario tape_takes_the_filing_system_vectors_back
+row F27D F18E F4C9 F529 FFA6 F3CA F1B1
+row >
+
+scenario wrchv_set_to_its_default_s_address_prints
+row OK
+row >
+
+scenario oswrch_called_at_its_default_s_address_prints
+row W!>
+
+scenario an_error_through_brkv_at_b433
+row >PRINT X
+
+scenario an_error_through_brkv_at_b433_with_on_error
+row >10 ON ERROR PRINT "TRAPPED "+STR$ERR:EN
+row D
+row >20 PRINT X
+row >RUN
+
+scenario time_runs_on_through_a_break
+row OpenMOS Micro
+row TAIRiX DFS
+row BASIC
+row >P.TIME DIV 100
+row          5
+row >
+
+scenario an_error_through_brkv_at_b433_lets_time_run
+row OpenMOS Micro
+row TAIRiX DFS
+row BASIC
+row >P.TIME DIV 100
+row          2
+row >
+
+scenario an_error_through_brkv_at_b433_ignores_escape
+
 scenario shift_break_loads_the_boot_file
 row OpenMOS Micro
 row TAIRiX DFS
@@ -67,6 +120,16 @@ row TAIRiX DFS
 row BASIC
 row >PRINT 123
 row        123
+row >
+
+scenario close_0_in_the_boot_file_closes_the_exec_file
+row OpenMOS Micro
+row TAIRiX DFS
+row BASIC
+row >CLOSE_0:PRINT 7
+row          7
+row >P.ERR
+row          0
 row >
 
 scenario a_missing_boot_file_is_reported

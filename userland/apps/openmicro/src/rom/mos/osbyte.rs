@@ -6,8 +6,8 @@
 //! brings — RS423, the ADC, speech — are offered to the ROMs, and those for
 //! hardware it has none of do nothing.
 
-use super::svia;
 use super::ws::{os, page2, var, vdu, vector};
+use super::{masked_calls, svia};
 use crate::machine::bbc::sheila;
 use crate::machine::bbc::via::reg;
 use crate::machine::Model;
@@ -31,8 +31,10 @@ const fn low_calls(model: Model) -> u8 {
         Model::Electron => 24,
     }
 }
-/// The first call of the second table.
+/// The first call of the second table, and the first after it; those up to
+/// the variables are unknown to the MOS.
 const HIGH_FIRST: u8 = 0x75;
+const HIGH_END: u8 = 0xA1;
 
 /// The calls 0 to 21.
 const LOW: [&str; 22] = [
@@ -60,8 +62,8 @@ const LOW: [&str; 22] = [
     "osbyte_flush",
 ];
 
-/// The calls &75 to &A5.
-const HIGH: [&str; (var::FIRST - HIGH_FIRST) as usize] = [
+/// The calls &75 to &A0.
+const HIGH: [&str; (HIGH_END - HIGH_FIRST) as usize] = [
     "osbyte_vdu_status",
     "keyboard_leds_call",
     "close_spool_exec",
@@ -106,11 +108,6 @@ const HIGH: [&str; (var::FIRST - HIGH_FIRST) as usize] = [
     "return",
     "return",
     "osbyte_vdu_variable",
-    "osbyte_unknown",
-    "osbyte_unknown",
-    "osbyte_unknown",
-    "osbyte_unknown",
-    "osbyte_unknown",
 ];
 
 /// What the Electron takes otherwise: OSBYTE number, and its routine.
@@ -158,12 +155,11 @@ pub fn emit(a: &mut Asm, model: Model) {
 }
 
 fn dispatch(a: &mut Asm, model: Model) {
-    a.here("osbyte_default");
-    a.sta(zp(os::CALL_A));
-    a.stx(zp(os::CALL_X));
-    a.sty(zp(os::CALL_Y));
+    masked_calls(a);
     a.cmp(imm(var::FIRST));
     a.bcs("osbyte_variable");
+    a.cmp(imm(HIGH_END));
+    a.bcs("osbyte_unrecognised");
     a.cmp(imm(low_calls(model)));
     a.bcc("osbyte_low");
     a.cmp(imm(HIGH_FIRST));
@@ -270,13 +266,13 @@ fn simple(a: &mut Asm, model: Model) {
     a.here("osbyte_identify");
     a.txa();
     a.bne("osbyte_version");
-    a.brk();
-    a.byte(0xF7);
-    match model {
-        Model::ModelB => a.text("OS 1.20"),
-        Model::Electron => a.text("OS 1.00"),
-    }
-    a.byte(0);
+    a.error(
+        0xF7,
+        match model {
+            Model::ModelB => "OS 1.20",
+            Model::Electron => "OS 1.00",
+        },
+    );
     a.here("osbyte_version");
     a.ldx(imm(version(model)));
     a.ldy(imm(0));
@@ -404,12 +400,12 @@ fn streams(a: &mut Asm) {
     // OSBYTE 5: the printer's destination, once its driver has gone
     // dormant; UPTV is told the new type in X and the old in Y.
     a.here("osbyte_printer");
-    a.cli();
-    a.here("osbyte_printer_wait");
     a.bit(zp(os::ESCAPE));
     a.bmi("osbyte_printer_set");
     a.lda(abs(super::buffers::PRINTER_BUSY));
-    a.bpl("osbyte_printer_wait");
+    a.bmi("osbyte_printer_set");
+    a.jsr("interrupt_window");
+    a.bpl("osbyte_printer");
     a.here("osbyte_printer_set");
     a.lda(imm(super::serial::upt::TYPE));
     a.ldx(zp(os::CALL_X));
@@ -516,9 +512,9 @@ fn osbyte_insert(a: &mut Asm) {
 fn timing(a: &mut Asm, model: Model) {
     // OSBYTE 19: until the next VSYNC, which moves the cassette's timeout.
     a.here("osbyte_wait_vsync");
-    a.cli();
     a.lda(abs(var::CFS_TIMEOUT));
     a.here("osbyte_wait_vsync_loop");
+    a.jsr("interrupt_window");
     a.cmp(abs(var::CFS_TIMEOUT));
     a.beq("osbyte_wait_vsync_loop");
     a.rts();
@@ -656,7 +652,7 @@ fn input(a: &mut Asm, model: Model) {
     a.here("osbyte_inkey_timed");
     a.stx(abs(page2::INKEY_COUNT));
     a.sty(abs(page2::INKEY_COUNT + 1));
-    a.cli();
+    // The count runs down in the interrupts `rdch_once` lets in.
     a.here("osbyte_inkey_wait");
     a.jsr("rdch_once");
     a.bvc("osbyte_inkey_got");
@@ -683,9 +679,13 @@ fn machine(a: &mut Asm, model: Model) {
         a.stx(abs(sheila::VIDEO_CONTROL));
         a.rts();
 
+        // &9B: X is a logical colour and a physical, which the ULA takes
+        // inverted, as the copy keeps it.
         a.here("osbyte_ula_palette");
-        a.stx(abs(var::ULA_PALETTE));
-        a.stx(abs(sheila::VIDEO_PALETTE));
+        a.txa();
+        a.eor(imm(0x07));
+        a.sta(abs(var::ULA_PALETTE));
+        a.sta(abs(sheila::VIDEO_PALETTE));
         a.rts();
 
         // &9C: the 6850's control register, as its copy, written through.
@@ -726,10 +726,7 @@ fn machine(a: &mut Asm, model: Model) {
     a.beq("osbyte_not_language");
     a.jmp("enter_language");
     a.here("osbyte_not_language");
-    a.brk();
-    a.byte(0xF9);
-    a.text("This is not a language");
-    a.byte(0);
+    a.error(0xF9, "This is not a language");
 
     a.here("osbyte_code");
     a.lda(imm(0));
@@ -743,13 +740,16 @@ fn machine(a: &mut Asm, model: Model) {
 }
 
 fn tables(a: &mut Asm, model: Model) {
-    let routines = routines(model);
-    a.here("osbyte_low_table");
-    for name in &routines {
-        a.byte(lo(crate::rom::asm::sym(name) + -1));
-    }
-    a.here("osbyte_high_table");
-    for name in &routines {
-        a.byte(hi(crate::rom::asm::sym(name) + -1));
-    }
+    a.later(move |a| {
+        a.here("osbyte_low_table");
+        for name in &routines(model) {
+            a.byte(lo(crate::rom::asm::sym(name) + -1));
+        }
+    });
+    a.later(move |a| {
+        a.here("osbyte_high_table");
+        for name in &routines(model) {
+            a.byte(hi(crate::rom::asm::sym(name) + -1));
+        }
+    });
 }

@@ -147,7 +147,11 @@ pub mod page {
     /// Scratch for the commands.
     pub const WORK: u16 = QUALIFIED + 1;
     pub const WORK_LEN: u16 = 0x30;
-    const _: () = assert!(WORK + WORK_LEN <= MESSAGES, "page &10's fields overlap");
+    /// The channels open. With none, nothing in the channels' pages is read:
+    /// software loads over them once its files are closed, as DFS 1.20
+    /// lets it.
+    pub const OPEN_COUNT: u16 = WORK + WORK_LEN;
+    const _: () = assert!(OPEN_COUNT < MESSAGES, "page &10's fields overlap");
 
     /// Messages on: zero for *OPT 1 on, &FF off.
     pub const MESSAGES: u16 = 0x10C6;

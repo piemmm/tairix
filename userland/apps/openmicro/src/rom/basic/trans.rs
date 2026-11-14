@@ -168,12 +168,14 @@ pub fn emit(a: &mut Asm) {
 }
 
 fn constants(a: &mut Asm) {
-    a.here("constants");
-    for group in [&SINGLES[..], &SINE, &LOGARITHM, &EXPONENTIAL, &ARCTANGENT] {
-        for constant in group {
-            a.bytes(constant);
+    a.later(|a| {
+        a.here("constants");
+        for group in [&SINGLES[..], &SINE, &LOGARITHM, &EXPONENTIAL, &ARCTANGENT] {
+            for constant in group {
+                a.bytes(constant);
+            }
         }
-    }
+    });
 
     // FAC2 or FAC = 1, or the constant X bytes into the table.
     a.here("fac2_one");

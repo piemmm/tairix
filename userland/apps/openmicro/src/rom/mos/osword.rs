@@ -29,10 +29,7 @@ const CALLS: [&str; CALL_COUNT as usize] = [
 const USER_FIRST: u8 = 0xE0;
 
 pub fn emit(a: &mut Asm, model: Model) {
-    a.here("osword_default");
-    a.sta(zp(os::CALL_A));
-    a.stx(zp(os::CALL_X));
-    a.sty(zp(os::CALL_Y));
+    a.here("osword_dispatch");
     a.cmp(imm(CALL_COUNT));
     a.bcs("osword_unrecognised");
     a.jsr("osword_call");
@@ -73,14 +70,18 @@ pub fn emit(a: &mut Asm, model: Model) {
     clocks(a);
     memory(a);
     graphics(a, model);
-    a.here("osword_low");
-    for call in CALLS {
-        a.byte(lo(sym(call) + -1));
-    }
-    a.here("osword_high");
-    for call in CALLS {
-        a.byte(hi(sym(call) + -1));
-    }
+    a.later(|a| {
+        a.here("osword_low");
+        for call in CALLS {
+            a.byte(lo(sym(call) + -1));
+        }
+    });
+    a.later(|a| {
+        a.here("osword_high");
+        for call in CALLS {
+            a.byte(hi(sym(call) + -1));
+        }
+    });
 }
 
 /// TIME and the interval timer: kept most significant byte first, read and
@@ -92,21 +93,15 @@ fn clocks(a: &mut Asm) {
     a.here("osword_read_interval");
     a.ldx(imm(15));
     a.here("osword_read_five");
-    a.php();
-    a.sei();
-    a.here("osword_read_byte");
     a.lda(abs(page2::CLOCKS - 1).x());
     a.sta(zp(os::CALL_X).ind_y());
     a.dex();
     a.iny();
     a.cpy(imm(5));
-    a.bne("osword_read_byte");
-    a.plp();
+    a.bne("osword_read_five");
     a.rts();
 
     a.here("osword_write_clock");
-    a.php();
-    a.sei();
     a.ldx(imm(5));
     a.here("osword_write_clock_byte");
     a.lda(zp(os::CALL_X).ind_y());
@@ -116,12 +111,9 @@ fn clocks(a: &mut Asm) {
     a.iny();
     a.cpy(imm(5));
     a.bne("osword_write_clock_byte");
-    a.plp();
     a.rts();
 
     a.here("osword_write_interval");
-    a.php();
-    a.sei();
     a.ldx(imm(15));
     a.here("osword_write_interval_byte");
     a.lda(zp(os::CALL_X).ind_y());
@@ -130,36 +122,30 @@ fn clocks(a: &mut Asm) {
     a.iny();
     a.cpy(imm(5));
     a.bne("osword_write_interval_byte");
-    a.plp();
     a.rts();
 }
 
 /// The I/O processor's memory, and sound.
 fn memory(a: &mut Asm) {
     a.here("osword_read_memory");
-    a.php();
     a.jsr("osword_address");
     a.lda(zp(os::SCRATCH).ind_y());
     a.ldy(imm(4));
     a.sta(zp(os::CALL_X).ind_y());
-    a.plp();
     a.rts();
 
     a.here("osword_write_memory");
-    a.php();
     a.ldy(imm(4));
     a.lda(zp(os::CALL_X).ind_y());
     a.pha();
     a.jsr("osword_address");
     a.pla();
     a.sta(zp(os::SCRATCH).ind_y());
-    a.plp();
     a.rts();
 
-    // (&FA) = the block's address, Y zero, with interrupts off while it is
-    // used, as the interrupt routines use &FA too; the caller restores I.
+    // (&FA) = the block's address, Y zero. The interrupt routines use &FA
+    // too, which the masked dispatch keeps them from while it is used.
     a.here("osword_address");
-    a.sei();
     a.ldy(imm(0));
     a.lda(zp(os::CALL_X).ind_y());
     a.sta(zp(os::SCRATCH));

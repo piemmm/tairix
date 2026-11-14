@@ -212,6 +212,9 @@ fn running(a: &mut Asm) {
     a.beq("statement");
     a.cmp(imm(CR));
     a.beq("end_of_line");
+    // A true IF whose statements are none ends where its ELSE part begins.
+    a.cmp(imm(ELSE));
+    a.beq("skip_line");
     a.cmp(imm(b'*'));
     a.beq("statement_star");
     a.cmp(imm(b'['));

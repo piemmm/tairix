@@ -174,19 +174,19 @@ fn interlaced_sync_starts_the_odd_field_s_vsync_half_a_line_late() {
     let mut interlaced = SMALL;
     interlaced[8] = (reg::MODE, 0x01);
     let mut crtc = programmed(&interlaced);
-    // Find VSYNC's start in two successive fields.
+    // Find VSYNC's start in two successive fields, and whether each said so.
     let mut starts = Vec::new();
     let mut was = false;
     for _ in 0..4 * FRAME_LINES * LINE {
         let hc = crtc.next_character();
         let c = crtc.clock();
         if c.vsync && !was {
-            starts.push(hc);
+            starts.push((hc, crtc.vsync_late()));
         }
         was = c.vsync;
     }
     // Half of the ten-character line on: the pulse first shows at 5.
-    assert_eq!(&starts[..2], [0, 5]);
+    assert_eq!(&starts[..2], [(0, false), (5, true)]);
 }
 
 #[test]

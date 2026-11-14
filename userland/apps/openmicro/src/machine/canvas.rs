@@ -30,6 +30,13 @@ pub const fn encode(foreground: u8, background: u8, coverage: u8) -> u8 {
 /// A completely black slot.
 pub const BLACK: u8 = encode(0, 0, 3);
 
+/// Whether `slot` shows a dot: some coverage of a foreground unlike its
+/// background.
+#[cfg(test)]
+pub(crate) const fn shows_dot(slot: u8) -> bool {
+    slot >> 6 != 0 && slot & 7 != (slot >> 3) & 7
+}
+
 /// Which canvas rows have changed since they were last taken.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirtyRows {

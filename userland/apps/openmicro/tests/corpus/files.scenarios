@@ -105,3 +105,16 @@ discs testdisc
 check 0
 ours
 script type:CLS:A%=OPENOUT"NEW":FOR I%=1 TO 100:BPUT#A%,I%:NEXT\n;wait:3;swap:other80;wait:1;type:FOR I%=1 TO 300:BPUT#A%,I%:NEXT\n;wait:4;type:P.ERR\n;wait:0.5
+
+# CLOSE#0 closes the *SPOOL file too, as the DFS User Guide describes, so
+# what is printed after it goes to the screen alone, without an error.
+scenario close_0_closes_the_spool_file
+discs blank80
+ours
+script type:CLS:*SPOOL S\n;wait:1;type:PRINT 1\n;wait:0.5;type:CLOSE#0\n;wait:1;type:PRINT 2\n;wait:0.5;type:P.ERR\n;wait:0.5;type:*TYPE S\n;wait:1
+
+# Once its files are closed, software may load over the channels' pages, as DFS 1.20 lets it: nothing there is read again until a file opens.
+scenario channels_overwritten_once_closed_are_not_read
+discs testdisc
+check 0
+script type:CLS:A%=OPENOUT"F":BPUT#A%,65:CLOSE#A%\n;wait:2;type:FOR I%=&1100 TO &18FC STEP 4:!I%=-1:NEXT\n;wait:2;type:CLOSE#0:*TAPE\n;wait:1;type:*DISC\n;wait:1;type:A%=OPENIN"F":P.A%,BGET#A%:CLOSE#A%\n;wait:2;type:P.ERR\n;wait:0.5

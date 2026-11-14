@@ -1,0 +1,33 @@
+# Recorded by `cargo xtask openmicro --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario dim_minus_one_takes_no_room_and_names_the_free_space
+row       1902      190A      190A      190A
+row       190B
+row >DIM R -1:DIM S -1:P.~R,~S
+row       1914      191C
+row >DIM Q% -2
+row Bad DIM
+row >DIM A% 65535
+row Bad DIM
+row >DIM D% &10000
+row Bad DIM
+row >DIM E% 20000:P.ERR
+row         10
+row >
+
+scenario numbers_of_several_digits_read_as_their_values
+row         10        99       100      9999
+row >PRINT 0012,65535,65536,99999
+row         12     65535     65536     99999
+row >PRINT 1234567890,10.5,1000.25,12E2
+row 1.23456789E9              10.5   1000.25
+row       1200
+row >PRINT 12E,65535.5,00.5,10E-1
+row         12   65535.5       0.5         1
+row >PRINT 12345 DIV 10,12345 MOD 100,-1000,
+row 2*1000
+row       1234        45     -1000      2000
+row >PRINT 65535+1,&100+10,1000=1E3,100-99.5
+row      65536       266        -1       0.5
+row >

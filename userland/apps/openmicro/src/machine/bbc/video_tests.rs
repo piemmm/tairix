@@ -1,7 +1,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{screen_address, Signal, Video, CANVAS_HEIGHT, CANVAS_WIDTH};
+use super::{reg, screen_address, Signal, Video, CANVAS_HEIGHT, CANVAS_WIDTH};
+use crate::machine::canvas::shows_dot;
 use crate::snapshot::{self, Reader, SnapshotError, Writer};
 
 /// The 6845 registers and ULA control the MOS programs for mode 7.
@@ -13,10 +14,14 @@ const MODE_7_ULA: u8 = 0x4B;
 /// One field at 1 MHz: 312.5 lines of 64 characters, two cycles each.
 const FIELD_CYCLES: u64 = 40_000;
 
+fn set_crtc(video: &mut Video, register: usize, value: u8) {
+    video.write_crtc(false, u8::try_from(register).unwrap_or(0));
+    video.write_crtc(true, value);
+}
+
 fn mode_7(video: &mut Video) {
     for (register, &value) in MODE_7_CRTC.iter().enumerate() {
-        video.write_crtc(false, u8::try_from(register).unwrap_or(0));
-        video.write_crtc(true, value);
+        set_crtc(video, register, value);
     }
     video.write_ula(false, MODE_7_ULA);
 }
@@ -28,10 +33,7 @@ fn lit_rows(video: &Video) -> Vec<usize> {
         .0
         .iter()
         .enumerate()
-        .filter(|(_, row)| {
-            row.iter()
-                .any(|&slot| slot >> 6 != 0 && slot & 7 != (slot >> 3) & 7)
-        })
+        .filter(|(_, row)| row.iter().any(|&slot| shows_dot(slot)))
         .map(|(index, _)| index)
         .collect()
 }
@@ -76,6 +78,37 @@ fn mode_7_text_is_drawn_on_the_rows_it_occupies() {
     assert!(rows.iter().all(|&row| row < CANVAS_HEIGHT));
 }
 
+/// The two fields interleave in the order of the SAA5050's half-lines: the
+/// field of odd raster lines, which round toward the row below, lies below
+/// the other, so an 'A' widens down from its apex as its half-lines do.
+#[test]
+fn mode_7_fields_interleave_in_the_order_of_the_characters_half_lines() {
+    let mut ram = vec![0x20u8; 0x8000];
+    ram[0x7C00 + 40] = b'A';
+    let mut video = Video::new();
+    mode_7(&mut video);
+    video.catch_up(4 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+    let widths: Vec<usize> = video
+        .shown()
+        .as_chunks::<CANVAS_WIDTH>()
+        .0
+        .iter()
+        .map(|row| row.iter().filter(|&&slot| shows_dot(slot)).count())
+        .collect();
+    let apex = widths
+        .iter()
+        .position(|&lit| lit > 0)
+        .expect("the A is drawn");
+    // Its apex dot, then rounded half a dot wider each side, then the two
+    // strokes with the gap between them filled.
+    assert_eq!(
+        widths[apex..apex + 3],
+        [3, 6, 9],
+        "{:?}",
+        &widths[apex..apex + 8]
+    );
+}
+
 #[test]
 fn mode_7_draws_the_first_column_under_its_own_cursor_position() {
     let mut ram = vec![0x20u8; 0x8000];
@@ -88,10 +121,7 @@ fn mode_7_draws_the_first_column_under_its_own_cursor_position() {
         .as_chunks::<CANVAS_WIDTH>()
         .0
         .iter()
-        .filter_map(|row| {
-            row.iter()
-                .position(|&slot| slot >> 6 != 0 && slot & 7 != (slot >> 3) & 7)
-        })
+        .filter_map(|row| row.iter().position(|&slot| shows_dot(slot)))
         .min();
     // Character 0 of a line starts 13 µs after HSYNC, the canvas 8 µs after
     // it, and the SAA5050's dots trail the fetch by three characters: 128.
@@ -291,5 +321,67 @@ fn a_field_touches_only_the_rows_drawn_differently() {
     assert!(
         !dirty.is_empty() && dirty.len() <= 20,
         "one character row: {dirty:?}"
+    );
+}
+
+/// The regression: rows a field's beam never reached kept an earlier
+/// field's picture, so a frame ending above the canvas's foot left a strip
+/// of an old screen below it.
+#[test]
+fn a_field_ending_early_leaves_nothing_below_it() {
+    let ram = vec![b'H'; 0x8000];
+    let mut video = Video::new();
+    mode_7(&mut video);
+    // Every row displayed, in fields of 320 lines, which reach the foot.
+    set_crtc(&mut video, reg::V_DISPLAYED, 31);
+    set_crtc(&mut video, reg::V_ADJUST, 10);
+    video.catch_up(4 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+    // Mode 7's own fields of 312 lines end four lines short of it.
+    let unreached = CANVAS_HEIGHT - 2 * 4;
+    assert!(
+        lit_rows(&video).iter().any(|&row| row >= unreached),
+        "the long fields reach the foot"
+    );
+    set_crtc(&mut video, reg::V_ADJUST, MODE_7_CRTC[reg::V_ADJUST]);
+    video.catch_up(8 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+    let rows = lit_rows(&video);
+    assert!(rows.iter().all(|&row| row < unreached), "{rows:?}");
+    assert!(rows.iter().any(|&row| row >= unreached - 10), "{rows:?}");
+}
+
+/// The regression: the part of a line its sync cut short kept what an
+/// earlier, longer line drew there.
+#[test]
+fn a_line_ending_early_leaves_nothing_beside_it() {
+    let ram = vec![b'H'; 0x8000];
+    let lit_beyond = |video: &Video, column: usize| {
+        video
+            .shown()
+            .as_chunks::<CANVAS_WIDTH>()
+            .0
+            .iter()
+            .any(|row| row[column..].iter().any(|&slot| shows_dot(slot)))
+    };
+    let mut video = Video::new();
+    mode_7(&mut video);
+    // Characters all the way along lines of 64 µs, which reach the right
+    // edge.
+    set_crtc(&mut video, reg::H_DISPLAYED, 64);
+    video.catch_up(4 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+    // Lines of 56 µs end the canvas's last 8 µs, 128 slots, short.
+    let unreached = CANVAS_WIDTH - 128;
+    assert!(
+        lit_beyond(&video, unreached),
+        "the long lines reach the edge"
+    );
+    set_crtc(&mut video, reg::H_TOTAL, 55);
+    video.catch_up(8 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+    assert!(
+        !lit_beyond(&video, unreached),
+        "nothing past the short lines"
+    );
+    assert!(
+        lit_beyond(&video, unreached - 16),
+        "the short lines are drawn"
     );
 }

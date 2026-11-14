@@ -455,3 +455,245 @@ fn vec_of(bytes: &[u8]) -> Vec<u8> {
     image.resize(0x100, ERASED);
     image
 }
+
+#[test]
+fn code_running_on_hops_over_a_pin_with_a_jump() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 0x10, |asm| asm.jmp(abs(0x1234)));
+        for _ in 0..16 {
+            asm.nop();
+        }
+        asm.rts();
+    })
+    .unwrap();
+    // Thirteen NOPs leave room for the hop past the pin.
+    assert!(image[..0x0D].iter().all(|&byte| byte == 0xEA));
+    assert_eq!(image[0x0D..0x10], [0x4C, 0x13, 0xC0], "the hop");
+    assert_eq!(image[0x10..0x13], [0x4C, 0x34, 0x12], "the pin");
+    assert!(image[0x13..0x16].iter().all(|&byte| byte == 0xEA));
+    assert_eq!(image[0x16], 0x60);
+}
+
+#[test]
+fn after_a_jump_or_data_the_flow_resumes_past_a_pin_with_its_labels() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 6, Asm::rts);
+    asm.jmp(abs(0x1234));
+    asm.here("after_jump");
+    asm.lda(imm(1));
+    asm.pin(ORIGIN + 0x0C, Asm::rts);
+    asm.byte(0x55);
+    asm.here("after_data");
+    asm.lda(imm(2));
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("after_jump"), Some(ORIGIN + 7));
+    assert_eq!(image.symbol("after_data"), Some(ORIGIN + 0x0D));
+    assert_eq!(
+        image.bytes[..0x0F],
+        [
+            0x4C, 0x34, 0x12, ERASED, ERASED, ERASED, 0x60, 0xA9, 0x01, 0x55, ERASED, ERASED, 0x60,
+            0xA9, 0x02
+        ]
+    );
+}
+
+#[test]
+fn a_run_of_pins_is_hopped_at_once() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 0x0C, |asm| asm.jmp(abs(0x2222)));
+        asm.pin(ORIGIN + 8, |asm| asm.jmp(abs(0x1111)));
+        for _ in 0..6 {
+            asm.nop();
+        }
+    })
+    .unwrap();
+    assert_eq!(image[5..8], [0x4C, 0x0F, 0xC0], "past both");
+    assert_eq!(image[0x0F], 0xEA);
+}
+
+#[test]
+fn data_an_origin_fixes_meeting_a_pin_or_a_pin_placed_under_running_code_is_refused() {
+    assert_eq!(
+        finished(|asm| {
+            asm.pin(ORIGIN + 2, Asm::rts);
+            asm.fill(4, 0);
+        }),
+        Err(AsmError::Overlap { at: ORIGIN + 2 })
+    );
+    assert_eq!(
+        finished(|asm| {
+            asm.pin(ORIGIN + 0x12, Asm::rts);
+            asm.rts();
+            asm.org(ORIGIN + 0x10);
+            asm.fill(4, 0);
+        }),
+        Err(AsmError::Overlap { at: ORIGIN + 0x12 })
+    );
+    assert_eq!(
+        finished(|asm| {
+            asm.nop();
+            asm.pin(ORIGIN + 2, Asm::rts);
+            asm.nop();
+        }),
+        Err(AsmError::PinBlocked {
+            at: ORIGIN + 1,
+            pin: ORIGIN + 2
+        })
+    );
+}
+
+#[test]
+fn data_meeting_a_pin_moves_past_it_from_its_last_named_label() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 6, Asm::rts);
+    asm.rts();
+    asm.here("first");
+    asm.bytes(&[1; 4]);
+    asm.here("second");
+    asm.word(sym("first"));
+    asm.bytes(&[2; 2]);
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("first"), Some(ORIGIN + 1), "the first stays");
+    assert_eq!(image.symbol("second"), Some(ORIGIN + 7), "the second moves");
+    assert_eq!(image.bytes[1..5], [1; 4]);
+    assert_eq!(image.bytes[5], ERASED);
+    assert_eq!(
+        image.bytes[7..11],
+        [0x01, 0xC0, 2, 2],
+        "its use moved with it"
+    );
+}
+
+#[test]
+fn a_hop_after_a_certain_flag_is_a_branch() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 5, Asm::rts);
+        asm.clc();
+        asm.lda(imm(1));
+    })
+    .unwrap();
+    assert_eq!(
+        image[..3],
+        [0x18, 0x90, 0x03],
+        "C clear, so BCC past the pin"
+    );
+    assert_eq!(image[6..8], [0xA9, 0x01]);
+}
+
+#[test]
+fn a_call_with_its_text_and_an_error_block_are_placed_whole() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 8, Asm::rts);
+        asm.nop();
+        asm.call_with_text(0x1234u16, &["A", "B"]);
+        asm.error(0x11, "E");
+    })
+    .unwrap();
+    assert_eq!(image[..4], [0xEA, 0x4C, 0x09, 0xC0], "a hop over the pin");
+    assert_eq!(
+        image[9..15],
+        [0x20, 0x34, 0x12, b'A', b'B', 0],
+        "the call and its text"
+    );
+    assert_eq!(image[15..19], [0x00, 0x11, b'E', 0], "the block");
+}
+
+#[test]
+fn held_tables_fill_the_room_a_pin_leaves_and_the_rest_follow_where_placed() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 6, Asm::rts);
+    asm.later(|asm| {
+        asm.here("big");
+        asm.bytes(&[9; 20]);
+    });
+    asm.later(|asm| {
+        asm.here("small");
+        asm.bytes(&[1, 2]);
+    });
+    asm.jmp(abs(0x1234));
+    asm.here("next");
+    asm.lda(imm(1));
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(
+        image.symbol("small"),
+        Some(ORIGIN + 3),
+        "in the room before the pin"
+    );
+    assert_eq!(image.symbol("next"), Some(ORIGIN + 7));
+    assert_eq!(
+        image.symbol("big"),
+        Some(ORIGIN + 9),
+        "where held items are placed"
+    );
+    assert_eq!(image.bytes[3..5], [1, 2]);
+}
+
+#[test]
+fn room_up_to_an_address_takes_held_tables_and_leaves_the_flow() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.later(|asm| {
+        asm.here("held");
+        asm.bytes(&[7; 3]);
+    });
+    asm.rts();
+    asm.place_later_before(ORIGIN + 4);
+    asm.here("after");
+    asm.rts();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("held"), Some(ORIGIN + 1));
+    assert_eq!(
+        image.symbol("after"),
+        Some(ORIGIN + 4),
+        "the flow carries on from there"
+    );
+}
+
+#[test]
+fn a_pin_s_room_to_its_own_address_takes_tables_held_after_it() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 0x10, |asm| {
+        asm.rts();
+        asm.room_to(ORIGIN + 0x14);
+        asm.here("fixed");
+        asm.rts();
+    });
+    asm.lda(imm(1));
+    asm.later(|asm| {
+        asm.here("held");
+        asm.bytes(&[7; 3]);
+    });
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("fixed"), Some(ORIGIN + 0x14));
+    assert_eq!(
+        image.symbol("held"),
+        Some(ORIGIN + 0x11),
+        "in the pin's room"
+    );
+    assert_eq!(image.bytes[0x11..0x14], [7; 3]);
+}
+
+#[test]
+fn room_to_an_address_already_passed_is_an_overlap() {
+    assert_eq!(
+        finished(|asm| {
+            asm.bytes(&[1; 4]);
+            asm.room_to(ORIGIN + 2);
+            asm.rts();
+        }),
+        Err(AsmError::Overlap { at: ORIGIN + 2 })
+    );
+}
+
+#[test]
+fn a_hop_where_a_label_lies_is_a_jump_whatever_the_flags() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 5, Asm::rts);
+        asm.clc();
+        asm.here("reached_with_any_carry");
+        asm.lda(imm(1));
+    })
+    .unwrap();
+    assert_eq!(image[..4], [0x18, 0x4C, 0x06, 0xC0], "JMP past the pin");
+}

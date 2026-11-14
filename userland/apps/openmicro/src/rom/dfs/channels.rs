@@ -13,7 +13,7 @@
 use super::far;
 use super::ws::{catalogue as cat, channel as ch, page, zp as z};
 use crate::rom::asm::{abs, imm, lo, zp, Acc, Asm, Operand, RTS};
-use crate::rom::os::{filing_system, zp as os};
+use crate::rom::os::{entry, filing_system, osbyte, zp as os};
 
 /// A channel block's field, by its offset from the block at X.
 fn field(offset: u8) -> Operand {
@@ -61,6 +61,9 @@ pub(super) fn emit(a: &mut Asm) {
 /// For each open channel, X its block: `body` runs with CHANNEL set, and X
 /// is reloaded after it.
 pub(super) fn each_open(a: &mut Asm, body: impl FnOnce(&mut Asm)) {
+    let done = a.local();
+    a.lda(abs(page::OPEN_COUNT));
+    a.beq(done);
     a.ldx(imm(ch::SIZE));
     let next = a.here_local();
     a.lda(field(ch::FLAGS));
@@ -76,6 +79,7 @@ pub(super) fn each_open(a: &mut Asm, body: impl FnOnce(&mut Asm)) {
     a.tax();
     a.cmp(imm(ch::END));
     a.bne(next);
+    a.bind(done);
 }
 
 /// OSFIND: A zero closes handle Y, or every file for Y zero; otherwise the
@@ -98,7 +102,15 @@ fn find(a: &mut Asm) {
     let restore = a.local();
     a.jmp(restore);
     a.bind(all);
-    a.jsr("close_all");
+    // The MOS's *SPOOL and *EXEC files close back through here first, so
+    // this call's own X is kept from them; its A and Y are zero.
+    a.lda(zp(z::SAVE_X));
+    a.pha();
+    a.jsr("close_everything");
+    a.pla();
+    a.sta(zp(z::SAVE_X));
+    a.lda(imm(0));
+    a.sta(zp(z::SAVE_Y));
     a.bind(restore);
     a.lda(zp(z::SAVE_A));
     a.jmp("restore_xy");
@@ -226,6 +238,7 @@ fn opening(a: &mut Asm) {
     a.ora(imm(ch::EXTENDED));
     a.bind(set);
     a.sta(field(ch::FLAGS));
+    a.inc(abs(page::OPEN_COUNT));
     // The handle numbers the block from the first, the buffer page with it.
     a.txa();
     for _ in 0..5 {
@@ -242,8 +255,12 @@ fn opening(a: &mut Asm) {
 
 /// `close_channel` closes the channel at X: its buffer written back, and
 /// its extent recorded as its length if it has changed. `close_all` closes
-/// every open channel.
+/// every open channel; `close_everything` first has the MOS close its
+/// *SPOOL and *EXEC files, so it reads and writes none of them after.
 fn closing(a: &mut Asm) {
+    a.here("close_everything");
+    a.lda(imm(osbyte::CLOSE_SPOOL_EXEC));
+    a.jsr(entry::OSBYTE);
     a.here("close_all");
     each_open(a, |a| a.jsr("close_channel"));
     a.rts();
@@ -267,6 +284,7 @@ fn closing(a: &mut Asm) {
     a.bind(recorded);
     a.lda(imm(0));
     a.sta(field(ch::FLAGS));
+    a.dec(abs(page::OPEN_COUNT));
     a.rts();
 
     // The top two bits of the length of the entry at Y set from A's two.
@@ -290,6 +308,8 @@ fn closing(a: &mut Asm) {
 /// at X's entry in its drive's catalogue.
 fn checks(a: &mut Asm) {
     a.here("channel_check");
+    a.lda(abs(page::OPEN_COUNT));
+    far(a, Asm::bne, "err_channel");
     a.cpy(imm(ch::FIRST_HANDLE));
     far(a, Asm::bcs, "err_channel");
     a.cpy(imm(ch::LAST_HANDLE + 1));
@@ -308,9 +328,11 @@ fn checks(a: &mut Asm) {
 
     a.here("free_channel");
     a.ldx(imm(ch::SIZE));
+    let free = a.local();
+    a.lda(abs(page::OPEN_COUNT));
+    a.beq(free);
     let next = a.here_local();
     a.lda(field(ch::FLAGS));
-    let free = a.local();
     a.bpl(free);
     a.txa();
     a.clc();
@@ -336,6 +358,8 @@ fn open_checks(a: &mut Asm) {
     a.lda(imm(ch::WRITABLE));
     a.bind(scan);
     a.sta(zp(z::T3));
+    a.lda(abs(page::OPEN_COUNT));
+    a.beq(RTS);
     a.ldx(imm(ch::SIZE));
     let channel = a.here_local();
     a.lda(field(ch::FLAGS));

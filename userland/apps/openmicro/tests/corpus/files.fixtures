@@ -238,3 +238,29 @@ row >P.ERR
 row        200
 row >
 disc 0 c91458407399f4343d92de4b67082bf851adc139f29e3f21b9a160593baad13b
+
+scenario close_0_closes_the_spool_file
+row >PRINT 1
+row          1
+row >CLOSE_0
+row >PRINT 2
+row          2
+row >P.ERR
+row          0
+row >*TYPE S
+row >PRINT 1
+row          1
+row >CLOSE_0
+row >
+
+scenario channels_overwritten_once_closed_are_not_read
+row >FOR I%=&1100 TO &18FC STEP 4:!I%=-1:NEX
+row T
+row >CLOSE_0:*TAPE
+row >*DISC
+row >A%=OPENIN"F":P.A%,BGET_A%:CLOSE_A%
+row         17        65
+row >P.ERR
+row          0
+row >
+disc 0 beeef13e10d712e8b7039b96e8b2af78fd8baa245e14f7873aeaf2bf8fef0f13

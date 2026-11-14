@@ -260,6 +260,7 @@ fn boot(a: &mut Asm) {
     a.bind(start);
     // The open files are forgotten, and nothing is written back.
     a.lda(imm(0));
+    a.sta(abs(page::OPEN_COUNT));
     for channel in 1..=(ch::LAST_HANDLE - ch::FIRST_HANDLE + 1) {
         a.sta(abs(ch::CHANNELS + u16::from(channel * ch::SIZE + ch::FLAGS)));
     }
@@ -295,9 +296,7 @@ fn boot(a: &mut Asm) {
     }
     a.bind(no_reset);
     a.jsr("select_dfs");
-    a.jsr("print_inline");
-    a.text(BANNER);
-    a.byte(0);
+    a.call_with_text("print_inline", &[BANNER]);
     a.pla();
     let booted = a.local();
     a.bne(booted);
@@ -357,10 +356,7 @@ fn help(a: &mut Asm) {
     a.jsr("next_word");
     let words = a.local();
     a.bne(words);
-    a.jsr("print_inline");
-    a.text(HELP_TITLE);
-    a.text("  DFS\r  UTILS\r");
-    a.byte(0);
+    a.call_with_text("print_inline", &[HELP_TITLE, "  DFS\r  UTILS\r"]);
     let out = a.local();
     a.jmp(out);
     a.bind(words);
@@ -382,9 +378,7 @@ fn help(a: &mut Asm) {
     a.bne(skip);
     a.bind(known);
     a.sty(zp(z::T6));
-    a.jsr("print_inline");
-    a.text(HELP_TITLE);
-    a.byte(0);
+    a.call_with_text("print_inline", &[HELP_TITLE]);
     // X is the keyword's index: the first and last command it lists.
     a.lda(abs(sym("help_first") + -i32::from(super::commands::HELP_FIRST_INDEX)).x());
     a.sta(zp(z::T4));

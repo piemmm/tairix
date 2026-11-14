@@ -159,8 +159,9 @@ folder; deleting it leaves the folder, which is the user's.
 
 Each ROM is Rust driving `tairix_openmicro::rom::asm::Asm`, which encodes from the
 CPU's own instruction table, checks every branch, placement and run-on into
-a label, and takes
-hardware addresses from the machine, so a register address is defined once
+a label, places entry points at fixed addresses with the code flowing round
+them and the gaps they leave filled with the tables and routines held for
+them, and takes hardware addresses from the machine, so a register address is defined once
 for the emulation and the firmware. The images are committed in the crate's
 `firmware/` and compiled into `Run`, so the window needs no filesystem
 authority to fit them: `cargo xtask openmicro --write-roms` rebuilds them, and the
@@ -172,7 +173,11 @@ interface — the vectors and extended vectors, sideways ROM services, OSBYTE,
 OSWORD, OSCLI and its commands, the VDU drivers in all eight modes, the
 keyboard with soft keys and auto-repeat, buffers and events, sound, the serial
 and printer streams, the ADC, and the cassette and ROM filing systems — with
-its documented workspace at the documented addresses. It is written from the
+its documented workspace at the documented addresses, and its vectors'
+defaults at MOS 1.20's addresses, so software that sets a vector back to its
+original value still reaches the routine. The internals software reads at
+MOS 1.20's addresses lie there too: the default vector table at &D940, the
+row table at &C375, and the MODE routine at &CB1D. It is written from the
 published manuals and from genuine ROMs observed only as opaque programs;
 no original ROM's code is read, and no genuine ROM byte enters the tree.
 
@@ -180,8 +185,10 @@ Its screen memory, sound chip writes and documented results match MOS 1.20's
 for the same input. Where it differs on purpose: its character set is its own
 design; it does not reproduce &31A for a clipped line's start, some private
 keyboard and sound workspace, or redundant writes to a silenced sound
-channel; and, with no room left in 16 KiB, a whole-screen clear, VDU 5 and
-lines are slower than MOS 1.20's, where text output is within a tenth of it.
+channel; and, with no room left in 16 KiB, a whole-screen clear takes twice
+MOS 1.20's time, a horizontal line fill three times, VDU 5 a third longer
+and lines a quarter longer, where text output, scrolling and triangles are
+within a few percent of it.
 The behaviour pinned against MOS 1.20 is listed in the ROMs section of
 `plans/BEEB.md`.
 
@@ -192,7 +199,9 @@ function, `@%` formatting, PROC and FN with LOCAL, the inline assembler, CALL
 and USR, errors with BASIC II's numbers and messages, and SAVE, LOAD, CHAIN
 and the file channels through the MOS — in BASIC II's workspace: zero page
 &00–&6F, the resident integers at &400, the variable catalogue from &480, the
-stacks of page 5, the string buffer at &600 and the input buffer at &700. It
+stacks of page 5, the string buffer at &600 and the input buffer at &700. Its
+error handler is entered at BASIC II's &B402, and &B433, where software
+points BRKV to stop the machine at any error, stops it as BASIC II does. It
 is written from the published guides and from BASIC II observed running, by
 the same rules as the MOS.
 
@@ -202,9 +211,10 @@ BASIC II's room as it grows. Where it differs on purpose: its copyright
 message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
 astray; a byte (`?`) as a PROC or FN parameter is neither kept nor put back,
-where BASIC II's damages the program; and, in 16 KiB, its integer work is
-slower than BASIC II's, loops taking from 8% to 29% longer and the
-functions within a tenth, while TAN and small whole powers are faster.
+where BASIC II's damages the program; and, in 16 KiB, it is slower than
+BASIC II, loops taking from 2% to 11% longer, 29% where an integer FOR adds
+integers, and the functions within a tenth, while TAN and small whole powers
+are faster.
 
 `tairix_openmicro::rom::dfs::build` assembles the DFS: the whole Acorn DFS 1.20
 interface over the 8271 — the catalogue format, every `*` command, OSFILE,

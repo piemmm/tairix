@@ -89,8 +89,9 @@ pub fn emit(a: &mut Asm, model: Model) {
     cursor(a);
     vdu_cursor_update(a, model);
     vdu_cursor_hide(a, model);
-    if model == Model::Electron {
-        electron_cursor(a);
+    match model {
+        Model::ModelB => a.later(crtc_write),
+        Model::Electron => electron_cursor(a),
     }
     scrolling(a, model);
     runs(a);
@@ -166,9 +167,6 @@ fn queue(a: &mut Asm) {
     a.lda(abs("vdu_parameters").x());
     a.beq("vdu_dispatch");
     a.here("vdu_queue_count");
-    a.eor(imm(0xFF));
-    a.clc();
-    a.adc(imm(1));
     a.sta(abs(var::VDU_QUEUE));
     a.rts();
 
@@ -529,6 +527,21 @@ fn cursor(a: &mut Asm) {
     a.sta(abs(vdu::CURSOR_Y));
 }
 
+/// (&DA) += the row table's entry Y bytes in, its high byte first.
+fn row_add(a: &mut Asm) {
+    a.here("row_add");
+    a.iny();
+    a.lda(zp(vdu_zp::TEMP));
+    a.clc();
+    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
+    a.sta(zp(vdu_zp::TEMP));
+    a.dey();
+    a.lda(zp(vdu_zp::TEMP + 1));
+    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
+    a.sta(zp(vdu_zp::TEMP + 1));
+    a.rts();
+}
+
 /// &D8 and &34A follow the cursor, and so does the Model B's 6845's; the
 /// Electron's cursor is drawn there once the drivers are done.
 fn vdu_cursor_update(a: &mut Asm, model: Model) {
@@ -578,16 +591,10 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.tya();
     a.asl(Acc);
     a.tay();
-    a.lda(zp(vdu_zp::TEMP));
-    a.clc();
-    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
-    a.sta(zp(vdu_zp::TEMP));
-    a.iny();
-    a.lda(zp(vdu_zp::TEMP + 1));
-    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
-    a.sta(zp(vdu_zp::TEMP + 1));
+    a.jsr("row_add");
     a.lda(abs(vdu::SCREEN_START));
     a.ldx(abs(vdu::SCREEN_START + 1));
+    a.fall_into("pointer_add");
 
     // (&DA) += A + 256 × X, wrapped back into the screen past &8000.
     a.here("pointer_add");
@@ -602,6 +609,8 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.here("pointer_add_in");
     a.sta(zp(vdu_zp::TEMP + 1));
     a.rts();
+
+    row_add(a);
 
     if model == Model::Electron {
         return;
@@ -641,6 +650,25 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.rts();
 }
 
+/// 6845 register X set to A as MODE and VDU 23,0 set them: R7 moved by
+/// *TV's shift and one more, as MOS 1.20 is seen to, and R10 kept as the
+/// cursor's shape. `crtc_register` writes A as it is.
+fn crtc_write(a: &mut Asm) {
+    a.here("crtc_write");
+    a.cpx(imm(7));
+    a.bne("crtc_not_sync");
+    // The compare leaves C set: the one more.
+    a.adc(abs(super::ws::page2::TV_SHIFT));
+    a.here("crtc_not_sync");
+    a.cpx(imm(10));
+    a.bne("crtc_register");
+    a.sta(abs(vdu::CURSOR_START));
+    a.here("crtc_register");
+    a.stx(abs(CRTC_ADDRESS));
+    a.sta(abs(CRTC_DATA));
+    a.rts();
+}
+
 /// The cursor's shape: off, or the mode's own. The Electron's is turned
 /// off or on, drawn again as the drivers finish.
 fn vdu_cursor_hide(a: &mut Asm, model: Model) {
@@ -653,9 +681,7 @@ fn vdu_cursor_hide(a: &mut Asm, model: Model) {
             a.lda(abs(vdu::CURSOR_START));
             a.here("vdu_cursor_set");
             a.ldx(imm(10));
-            a.stx(abs(CRTC_ADDRESS));
-            a.sta(abs(CRTC_DATA));
-            a.rts();
+            a.jmp("crtc_register");
         }
         Model::Electron => {
             a.lda(abs(vdu::CURSOR_STATE));
@@ -738,32 +764,7 @@ fn scrolling(a: &mut Asm, model: Model) {
     a.ldy(abs(vdu::TEXT_TOP));
     a.jmp("clear_row");
 
-    // &351 = A, wrapped; the 6845 or the ULA told.
-    a.here("screen_start_set");
-    a.bpl("screen_start_in");
-    a.sec();
-    a.sbc(abs(vdu::SCREEN_SIZE));
-    a.here("screen_start_in");
-    a.sta(abs(vdu::SCREEN_START + 1));
-    a.sta(zp(vdu_zp::TEMP + 1));
-    a.lda(abs(vdu::SCREEN_START));
-    a.sta(zp(vdu_zp::TEMP));
-    match model {
-        Model::ModelB => {
-            a.lda(imm(12));
-            a.jmp("crtc_address");
-        }
-        Model::Electron => {
-            // A9–A14 into `&FE03`, A6–A8 into `&FE02`'s top three bits.
-            a.lda(zp(vdu_zp::TEMP + 1));
-            a.lsr(Acc);
-            a.sta(abs(ula::START_HIGH));
-            a.lda(zp(vdu_zp::TEMP));
-            a.ror(Acc);
-            a.sta(abs(ula::START_LOW));
-            a.rts();
-        }
-    }
+    screen_start(a, model);
 
     // A window scrolls by copying each row's window bytes from the row
     // below, or above, then clearing the row that comes in.
@@ -833,6 +834,41 @@ fn copy_row_from(a: &mut Asm) {
     a.ldy(abs(0x0103).x());
     a.jsr("row_window");
     a.jmp("run_copy");
+}
+
+/// The screen's start: `screen_start_reset` its base, as CLS and MODE leave
+/// it, and `screen_start_set` &351 = A, wrapped into the screen's memory;
+/// the 6845 or the ULA told.
+fn screen_start(a: &mut Asm, model: Model) {
+    a.here("screen_start_reset");
+    a.lda(imm(0));
+    a.sta(abs(vdu::SCREEN_START));
+    a.lda(abs(vdu::SCREEN_BOTTOM));
+    a.here("screen_start_set");
+    a.bpl("screen_start_in");
+    a.sec();
+    a.sbc(abs(vdu::SCREEN_SIZE));
+    a.here("screen_start_in");
+    a.sta(abs(vdu::SCREEN_START + 1));
+    a.sta(zp(vdu_zp::TEMP + 1));
+    a.lda(abs(vdu::SCREEN_START));
+    a.sta(zp(vdu_zp::TEMP));
+    match model {
+        Model::ModelB => {
+            a.lda(imm(12));
+            a.jmp("crtc_address");
+        }
+        Model::Electron => {
+            // A9–A14 into `&FE03`, A6–A8 into `&FE02`'s top three bits.
+            a.lda(zp(vdu_zp::TEMP + 1));
+            a.lsr(Acc);
+            a.sta(abs(ula::START_HIGH));
+            a.lda(zp(vdu_zp::TEMP));
+            a.ror(Acc);
+            a.sta(abs(ula::START_LOW));
+            a.rts();
+        }
+    }
 }
 
 /// A run of &DE/&DF screen bytes from (&DA): filled with A, or copied from
@@ -943,8 +979,6 @@ fn clearing(a: &mut Asm) {
     // CLS: a window row by row; the whole screen with the 6845 back at its
     // start, every byte cleared.
     a.here("vdu_12");
-    a.lda(imm(0));
-    a.sta(abs(var::PAGED_LINES));
     a.lda(zp(vdu_zp::STATUS));
     a.and(imm(status::WINDOWED));
     a.beq("cls_screen");
@@ -958,12 +992,11 @@ fn clearing(a: &mut Asm) {
     a.cpy(abs(vdu::TEXT_BOTTOM));
     a.iny();
     a.bcc("cls_window_row");
-    a.jmp("vdu_30");
+    a.bcs("cls_home");
     a.here("cls_screen");
-    a.lda(imm(0));
-    a.sta(abs(vdu::SCREEN_START));
-    a.lda(abs(vdu::SCREEN_BOTTOM));
-    a.jsr("screen_start_set");
+    a.jsr("screen_start_reset");
+    // MODE's clear: the screen's start is already set.
+    a.here("screen_clear");
     a.lda(imm(0));
     a.sta(zp(vdu_zp::TEMP));
     a.lda(abs(vdu::SCREEN_BOTTOM));
@@ -976,6 +1009,9 @@ fn clearing(a: &mut Asm) {
     a.bne("cls_screen_byte");
     a.inc(zp(vdu_zp::TEMP + 1));
     a.bpl("cls_screen_byte");
+    a.here("cls_home");
+    a.lda(imm(0));
+    a.sta(abs(var::PAGED_LINES));
     a.jmp("vdu_30");
 }
 
@@ -1037,7 +1073,9 @@ fn colours(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::BACKGROUND_ACTION));
     a.rts();
 
-    // VDU 19, logical, physical: the palette entry, then the ULA rewritten.
+    // VDU 19, logical, physical: the palette entry, then the ULA's entries
+    // for it, as MOS 1.20 leaves the others; the Electron's registers each
+    // hold several colours, so it writes them all.
     a.here("vdu_19");
     a.lda(abs(QUEUE_LAST - 4));
     a.and(abs(vdu::COLOURS));
@@ -1045,14 +1083,25 @@ fn colours(a: &mut Asm, model: Model) {
     a.lda(abs(QUEUE_LAST - 3));
     a.and(imm(0x0F));
     a.sta(abs(vdu::PALETTE).x());
-    a.fall_into("ula_palette");
+    match model {
+        Model::ModelB => {
+            a.txa();
+            a.fall_into("ula_palette_colour");
+        }
+        Model::Electron => a.fall_into("ula_palette"),
+    }
 }
 
-/// Write every ULA palette entry from the logical palette: each entry is
-/// the colour of the pixel value its index forms.
+/// Write the ULA palette entries of logical colour A, lowest first, from
+/// the logical palette: each entry is the colour of the pixel value its
+/// index forms. `ula_palette` writes every colour's, the highest colour
+/// first, in MOS 1.20's order; &249 keeps the last written, as OSBYTE &B9
+/// reads it.
 fn ula_palette(a: &mut Asm) {
-    a.here("ula_palette");
-    a.ldy(imm(15));
+    let selected = zp(vdu_zp::TEMP + 1);
+    a.here("ula_palette_colour");
+    a.sta(selected);
+    a.ldy(imm(0));
     a.here("ula_palette_entry");
     a.tya();
     a.ldx(abs(vdu::COLOURS));
@@ -1068,6 +1117,8 @@ fn ula_palette(a: &mut Asm) {
     a.lda(abs("palette_index_4").y());
     a.here("ula_palette_logical");
     a.tax();
+    a.cpx(selected);
+    a.bne("ula_palette_next");
     a.lda(abs(vdu::PALETTE).x());
     a.eor(imm(0x07));
     a.sta(zp(vdu_zp::TEMP));
@@ -1077,8 +1128,21 @@ fn ula_palette(a: &mut Asm) {
     }
     a.ora(zp(vdu_zp::TEMP));
     a.sta(abs(sheila::VIDEO_PALETTE));
-    a.dey();
-    a.bpl("ula_palette_entry");
+    a.sta(abs(var::ULA_PALETTE));
+    a.here("ula_palette_next");
+    a.iny();
+    a.cpy(imm(16));
+    a.bne("ula_palette_entry");
+    a.rts();
+    a.here("ula_palette");
+    a.lda(abs(vdu::COLOURS));
+    a.here("ula_palette_all");
+    a.pha();
+    a.jsr("ula_palette_colour");
+    a.pla();
+    a.sec();
+    a.sbc(imm(1));
+    a.bpl("ula_palette_all");
     a.rts();
 }
 
@@ -1292,9 +1356,20 @@ fn windows(a: &mut Asm) {
     a.rts();
 }
 
-/// MODE: the mode's variables, the Model B's 6845, ULA and latch or the
-/// Electron's ULA, then the defaults and a clear screen. The Electron's MODE
-/// 7 is MODE 6.
+/// Where MOS 1.20's MODE routine takes the mode in A, and where it starts to
+/// clear the screen: software calls the first, and runs a copy of the
+/// routine ended there with an RTS to set a mode and keep the screen.
+pub const MODE_ENTRY: u16 = 0xCB1D;
+pub const MODE_CLEAR: u16 = 0xCBF0;
+
+/// The Model B's MODE, at the addresses software reaches it by.
+pub fn pin_mode(a: &mut Asm) {
+    const QUEUE_LOAD: u16 = 3;
+    a.pin(MODE_ENTRY - QUEUE_LOAD, |a| mode(a, Model::ModelB));
+}
+
+/// VDU's own state at reset: no font exploded, the start-up mode, then
+/// MODE's work. The Model B's MODE is pinned by `pin_mode`.
 fn modes(a: &mut Asm, model: Model) {
     a.here("vdu_init");
     a.jsr("font_implode");
@@ -1303,12 +1378,23 @@ fn modes(a: &mut Asm, model: Model) {
     a.sta(abs(QUEUE_LAST));
     a.lda(imm(0));
     a.sta(zp(vdu_zp::STATUS));
-    if model == Model::Electron {
-        a.sta(abs(vdu::CURSOR_STATE));
+    match model {
+        Model::ModelB => a.jmp("vdu_22"),
+        Model::Electron => {
+            a.sta(abs(vdu::CURSOR_STATE));
+            mode(a, model);
+        }
     }
+}
 
+/// MODE: the mode's variables, the Model B's 6845, ULA and latch or the
+/// Electron's ULA, then the defaults and a clear screen. The Electron's MODE
+/// 7 is MODE 6. Up to `mode_clear` it branches only within itself, so a
+/// copy of it runs.
+fn mode(a: &mut Asm, model: Model) {
     a.here("vdu_22");
     a.lda(abs(QUEUE_LAST));
+    a.here("mode_set");
     a.and(imm(7));
     if model == Model::Electron {
         a.cmp(imm(7));
@@ -1326,37 +1412,37 @@ fn modes(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::PIXELS_PER_BYTE));
     a.lda(abs("mode_screen").x());
     a.sta(abs(vdu::SCREEN_BOTTOM));
-    a.lda(abs("mode_size").x());
-    a.sta(abs(vdu::SCREEN_SIZE));
     a.lda(abs("mode_map_type").x());
     a.sta(abs(vdu::MAP_TYPE));
-    a.lda(abs("mode_row_low").x());
+    a.tay();
+    a.lda(abs("map_size").y());
+    a.sta(abs(vdu::SCREEN_SIZE));
+    a.lda(abs("map_row_low").y());
     a.sta(abs(vdu::BYTES_PER_ROW));
-    a.lda(abs("mode_row_high").x());
+    a.lda(abs("map_row_high").y());
     a.sta(abs(vdu::BYTES_PER_ROW + 1));
-    a.lda(abs("mode_rows_table").x());
+    a.lda(abs("map_rows_table").y());
     a.sta(zp(vdu_zp::ROW_TABLE));
-    a.lda(abs("mode_rows_table_high").x());
+    a.lda(abs("map_rows_table_high").y());
     a.sta(zp(vdu_zp::ROW_TABLE + 1));
     match model {
         Model::ModelB => model_b_mode(a),
         Model::Electron => {
             // The mode into `&FE07`, the flashing colours at their first,
-            // the screen from its base, and &35F as the Model B's 6845
-            // cursor is set out, though the Electron draws its own.
+            // and &35F as the Model B's 6845 cursor is set out, though the
+            // Electron draws its own.
             a.lda(abs("mode_ula").x());
             a.ldx(imm(!control::MODE));
             a.jsr("ula_control");
             a.jsr("pixel_masks");
             a.lda(imm(0));
             a.sta(abs(var::ULA_CONTROL));
-            a.sta(abs(vdu::SCREEN_START));
-            a.lda(abs(vdu::SCREEN_BOTTOM));
-            a.sta(abs(vdu::SCREEN_START + 1));
             a.lda(imm(ELECTRON_CURSOR_START));
             a.sta(abs(vdu::CURSOR_START));
         }
     }
+    // The screen's start, before MODE_CLEAR, as a copy ended there leaves it.
+    a.jsr("screen_start_reset");
     if has_teletext(model) {
         a.lda(imm(0x7F));
         a.sta(abs(vdu::TELETEXT_CURSOR));
@@ -1366,11 +1452,18 @@ fn modes(a: &mut Asm, model: Model) {
     a.sta(zp(vdu_zp::STATUS));
     a.jsr("vdu_20");
     a.jsr("vdu_26");
-    a.jmp("vdu_12");
+    a.clv();
+    a.bvc("mode_clear");
     pixel_masks(a);
+    if model == Model::ModelB {
+        a.room_to(MODE_CLEAR);
+    }
+    a.here("mode_clear");
+    a.jmp("screen_clear");
 }
 
-/// The Model B's MODE: the video ULA, the latch's screen size and the 6845.
+/// The Model B's MODE: the video ULA, the latch's screen size and the
+/// 6845's registers from the last down, as MOS 1.20 writes them.
 fn model_b_mode(a: &mut Asm) {
     a.lda(abs("mode_ula").x());
     a.sta(abs(var::ULA_CONTROL));
@@ -1384,40 +1477,28 @@ fn model_b_mode(a: &mut Asm) {
     a.sta(abs(svia(reg::ORB)));
     a.lda(abs(crate::rom::asm::sym("latch_size") + 1).y());
     a.sta(abs(svia(reg::ORB)));
-    a.lda(imm(0));
-    a.sta(abs(vdu::SCREEN_START));
-    a.lda(abs(vdu::SCREEN_BOTTOM));
-    a.sta(abs(vdu::SCREEN_START + 1));
-    // The 6845's registers 0–11, *TV's vertical shift and interlace applied.
-    a.ldx(abs(vdu::MODE));
-    a.ldy(abs("mode_crtc").x());
-    a.ldx(imm(0));
+    // *TV's interlace applies to MODE's R8 alone.
+    a.ldx(abs(vdu::MAP_TYPE));
+    a.ldy(abs("map_crtc").x());
+    a.ldx(imm(super::modes::LAST_CRTC_REGISTER));
     a.here("vdu_22_crtc");
     a.lda(abs("crtc_registers").y());
-    a.cpx(imm(7));
-    a.bne("vdu_22_not_sync");
-    a.clc();
-    a.adc(abs(super::ws::page2::TV_SHIFT));
-    a.here("vdu_22_not_sync");
     a.cpx(imm(8));
-    a.bne("vdu_22_not_interlace");
+    a.bne("vdu_22_register");
     a.pha();
     a.lda(abs(super::ws::page2::TV_INTERLACE));
+    // The teletext mode, with no colours, keeps the interlaced video its
+    // characters need; every other mode's highest colour is odd.
+    a.and(abs(vdu::COLOURS));
     a.lsr(Acc);
     a.pla();
-    a.bcc("vdu_22_not_interlace");
+    a.bcc("vdu_22_register");
     a.and(imm(0xFE));
-    a.here("vdu_22_not_interlace");
-    a.cpx(imm(10));
-    a.bne("vdu_22_register");
-    a.sta(abs(vdu::CURSOR_START));
     a.here("vdu_22_register");
-    a.stx(abs(CRTC_ADDRESS));
-    a.sta(abs(CRTC_DATA));
-    a.iny();
-    a.inx();
-    a.cpx(imm(12));
-    a.bne("vdu_22_crtc");
+    a.jsr("crtc_write");
+    a.dey();
+    a.dex();
+    a.bpl("vdu_22_crtc");
 }
 
 /// The colour masks of the left and right pixels of a byte.
@@ -1449,73 +1530,102 @@ fn pixel_masks(a: &mut Asm) {
 const ELECTRON_CURSOR_START: u8 = 0x67;
 
 fn tables(a: &mut Asm, model: Model) {
-    a.here("vdu_parameters");
-    for (_, parameters) in CONTROLS {
-        a.byte(parameters);
-    }
-    a.here("vdu_handler_low");
-    for (handler, _) in CONTROLS {
-        a.byte(lo(handler));
-    }
-    a.here("vdu_handler_high");
-    for (handler, _) in CONTROLS {
-        a.byte(hi(handler));
-    }
+    // Each code's parameters, as the count &26A starts from: negated.
+    a.later(|a| {
+        a.here("vdu_parameters");
+        for (_, parameters) in CONTROLS {
+            a.byte(parameters.wrapping_neg());
+        }
+    });
+    a.later(|a| {
+        a.here("vdu_handler_low");
+        for (handler, _) in CONTROLS {
+            a.byte(lo(handler));
+        }
+    });
+    a.later(|a| {
+        a.here("vdu_handler_high");
+        for (handler, _) in CONTROLS {
+            a.byte(hi(handler));
+        }
+    });
     // Four bits of a glyph row as four two-bit pixels; two as two four-bit.
-    a.here("expand_4");
-    for nibble in 0u8..16 {
-        let high = (0..4).fold(0u8, |byte, k| byte | (((nibble >> (3 - k)) & 1) << (7 - k)));
-        a.byte(high | (high >> 4));
-    }
-    a.here("expand_2");
-    for pair in 0u8..4 {
-        let left = if pair & 2 != 0 { 0xAA } else { 0 };
-        let right = if pair & 1 != 0 { 0x55 } else { 0 };
-        a.byte(left | right);
-    }
-    a.here("expand_4_colours");
-    a.bytes(&[0x00, 0x0F, 0xF0, 0xFF]);
-    a.here("expand_16_colours");
-    for colour in 0u8..16 {
-        let pixel = (0..4).fold(0u8, |byte, k| {
-            byte | (((colour >> (3 - k)) & 1) << (7 - 2 * k))
-        });
-        a.byte(pixel | (pixel >> 1));
-    }
+    a.later(|a| {
+        a.here("expand_4");
+        for nibble in 0u8..16 {
+            let high = (0..4).fold(0u8, |byte, k| byte | (((nibble >> (3 - k)) & 1) << (7 - k)));
+            a.byte(high | (high >> 4));
+        }
+    });
+    a.later(|a| {
+        a.here("expand_2");
+        for pair in 0u8..4 {
+            let left = if pair & 2 != 0 { 0xAA } else { 0 };
+            let right = if pair & 1 != 0 { 0x55 } else { 0 };
+            a.byte(left | right);
+        }
+    });
+    a.later(|a| {
+        a.here("expand_4_colours");
+        a.bytes(&[0x00, 0x0F, 0xF0, 0xFF]);
+    });
+    a.later(|a| {
+        a.here("expand_16_colours");
+        for colour in 0u8..16 {
+            let pixel = (0..4).fold(0u8, |byte, k| {
+                byte | (((colour >> (3 - k)) & 1) << (7 - 2 * k))
+            });
+            a.byte(pixel | (pixel >> 1));
+        }
+    });
     // The logical colour a ULA palette index is, in the four-colour modes.
-    a.here("palette_index_4");
-    for index in 0u8..16 {
-        a.byte(((index >> 2) & 2) | ((index >> 1) & 1));
-    }
-    a.here("default_palette_2");
-    a.bytes(&[0, 7]);
-    a.here("default_palette_4");
-    a.bytes(&[0, 1, 3, 7]);
+    a.later(|a| {
+        a.here("palette_index_4");
+        for index in 0u8..16 {
+            a.byte(((index >> 2) & 2) | ((index >> 1) & 1));
+        }
+    });
+    a.later(|a| {
+        a.here("default_palette_2");
+        a.bytes(&[0, 7]);
+    });
+    a.later(|a| {
+        a.here("default_palette_4");
+        a.bytes(&[0, 1, 3, 7]);
+    });
     if model == Model::Electron {
         // Entry by entry, a pair's four together: its number, its place in
         // its pair eight times over, and what each colour sets at each place.
-        a.here("palette_entries");
-        for set in SETS {
-            a.bytes(&set);
-        }
-        a.here("palette_places");
-        for _ in SETS {
-            for place in 0..4u8 {
-                a.byte(place * 8);
+        a.later(|a| {
+            a.here("palette_entries");
+            for set in SETS {
+                a.bytes(&set);
             }
-        }
-        a.here("palette_even");
-        for place in 0..4 {
-            for colour in 0..8 {
-                a.byte(register_bits(place, colour).0);
+        });
+        a.later(|a| {
+            a.here("palette_places");
+            for _ in SETS {
+                for place in 0..4u8 {
+                    a.byte(place * 8);
+                }
             }
-        }
-        a.here("palette_odd");
-        for place in 0..4 {
-            for colour in 0..8 {
-                a.byte(register_bits(place, colour).1);
+        });
+        a.later(|a| {
+            a.here("palette_even");
+            for place in 0..4 {
+                for colour in 0..8 {
+                    a.byte(register_bits(place, colour).0);
+                }
             }
-        }
+        });
+        a.later(|a| {
+            a.here("palette_odd");
+            for place in 0..4 {
+                for colour in 0..8 {
+                    a.byte(register_bits(place, colour).1);
+                }
+            }
+        });
     }
 }
 

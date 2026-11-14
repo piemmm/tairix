@@ -20,6 +20,7 @@ use crate::scenario::{mode7_text, wait};
 mod commands;
 mod electron;
 mod keyboard;
+mod system;
 
 /// Where the language marks that it has run to its end, keeps the command
 /// it is on, and records each command's error number, 0 for none.
@@ -66,11 +67,17 @@ fn program(service: Option<&'static str>, body: impl FnOnce(&mut Asm)) -> Vec<u8
     a.finish().expect("the test program assembles").bytes
 }
 
-/// Run `rom`, a [`program`], on the MOS to its end.
-fn run_rom(rom: &[u8]) -> Machine {
+/// A machine with the MOS and `rom` in slot 15, not yet run.
+fn boot_rom(rom: &[u8]) -> Machine {
     let os = model_b().expect("the MOS assembles");
     let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
     machine.insert_rom(15, rom).expect("slot 15 exists");
+    machine
+}
+
+/// Run `rom`, a [`program`], on the MOS to its end.
+fn run_rom(rom: &[u8]) -> Machine {
+    let mut machine = boot_rom(rom);
     finish(&mut machine, BUDGET);
     machine
 }
@@ -149,12 +156,7 @@ fn language(vdu: &[u8], commands: &[&str]) -> Vec<u8> {
 
 /// A machine with the MOS and `language(vdu, commands)`, not yet run.
 fn boot(vdu: &[u8], commands: &[&str]) -> Machine {
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine
-        .insert_rom(15, &language(vdu, commands))
-        .expect("slot 15 exists");
-    machine
+    boot_rom(&language(vdu, commands))
 }
 
 /// Run `machine` until its language marks `DONE`, within `budget` cycles.
@@ -421,6 +423,112 @@ fn a_fill_that_fills_nothing_leaves_the_target_a_line_up_as_the_previous_point()
             "PLOT 77 at {target:?}"
         );
     }
+}
+
+/// A bitmap mode's lit pixels on line `y`, from the bottom, as x from the
+/// left, on an unscrolled screen.
+fn lit_row(machine: &Machine, mode: u8, y: i32) -> BTreeSet<i32> {
+    let (base, width, pixels_per_byte): (u16, i32, i32) = match mode {
+        0 => (0x3000, 640, 8),
+        1 => (0x3000, 320, 4),
+        2 => (0x3000, 160, 2),
+        4 => (0x5800, 320, 8),
+        5 => (0x5800, 160, 4),
+        _ => unreachable!("mode {mode} has no bitmap"),
+    };
+    let left_mask: u8 = match pixels_per_byte {
+        8 => 0x80,
+        4 => 0x88,
+        _ => 0xAA,
+    };
+    let down = 255 - y;
+    let row_bytes = width / pixels_per_byte * 8;
+    (0..width)
+        .filter(|&x| {
+            let offset = (down >> 3) * row_bytes + x / pixels_per_byte * 8 + (down & 7);
+            let byte = machine.peek(base + u16::try_from(offset).expect("on the screen"));
+            byte & (left_mask >> (x % pixels_per_byte)) != 0
+        })
+        .collect()
+}
+
+/// Pixel (x, y)'s external coordinates in a mode `scale` units a pixel
+/// across.
+fn external(scale: i32, x: i32, y: i32) -> (i16, i16) {
+    let at = |value: i32| i16::try_from(value).expect("a coordinate");
+    (at(x * scale), at(y * 4))
+}
+
+/// PLOT `code` at pixel (x, y).
+fn plot_pixel_at(code: u8, scale: i32, x: i32, y: i32) -> Vec<u8> {
+    let (x, y) = external(scale, x, y);
+    plot(code, x, y)
+}
+
+/// A run is found along its line and plotted as a span: exactly the pixels
+/// between the nearest lit ones, or the window's edges, whatever the mode
+/// packs into a byte; filling right over lit pixels stops at the first unlit
+/// one, and from an unlit one fills nothing.
+#[test]
+fn a_fill_lights_the_run_between_lit_pixels_or_the_window_s_edges() {
+    for (mode, width, scale) in [
+        (0u8, 640, 2),
+        (1, 320, 4),
+        (2, 160, 8),
+        (4, 320, 4),
+        (5, 160, 8),
+    ] {
+        let (left, right) = (5, width - 7);
+        let (a, b) = (13, width / 2 + 3);
+        let mut vdu = alloc::vec![22, mode];
+        let ((x0, y0), (x1, y1)) = (external(scale, left, 8), external(scale, right, 247));
+        vdu.extend(window(x0, y0, x1, y1));
+        for (code, x, y) in [
+            (69, a, 100),
+            (69, b, 100),
+            (77, a + 5, 100),
+            (77, b + 9, 100),
+            (77, a + 1, 101),
+            (69, a, 102),
+            (69, b, 102),
+            (77, a + 5, 102),
+            (95, a + 3, 102),
+            (93, a + 5, 103),
+        ] {
+            vdu.extend(plot_pixel_at(code, scale, x, y));
+        }
+        let machine = run(&vdu, &[]);
+        let lines: [(i32, BTreeSet<i32>); 6] = [
+            (99, BTreeSet::new()),
+            (100, (a..=right).collect()),
+            (101, (left..=right).collect()),
+            (102, (a..=a + 2).collect()),
+            (103, BTreeSet::new()),
+            (104, BTreeSet::new()),
+        ];
+        for (y, lit) in lines {
+            assert_eq!(lit_row(&machine, mode, y), lit, "mode {mode}, line {y}");
+        }
+    }
+}
+
+/// The regression: a fill stepped a pixel at a time through its whole
+/// address, near half a million cycles a MODE 4 line where MOS 1.20 takes
+/// some six thousand. Sixty-four lines filled across, against the same
+/// lines' single points, are held to a bound the walk along the line meets.
+#[test]
+fn a_fill_walks_its_line_rather_than_addressing_each_pixel() {
+    let cycles = |code: u8| {
+        let mut vdu = alloc::vec![22, 4];
+        for y in 0..64 {
+            vdu.extend(plot_pixel_at(code, 4, 160, 100 + y));
+        }
+        let mut machine = boot(&vdu, &[]);
+        finish(&mut machine, BUDGET);
+        machine.cycles()
+    };
+    let filling = cycles(77) - cycles(69);
+    assert!(filling < 3_000_000, "64 lines filled in {filling} cycles");
 }
 
 #[test]
@@ -871,9 +979,7 @@ fn osword_0_returns_the_length_read_and_whether_escape_ended_it() {
             a.sta(zp(RESULTS + 2 * u16::from(line) + 1));
         }
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     let mut cycles = 0;
     while machine.peek(WAITING) != 1 {
         assert!(cycles < BUDGET, "the second line is awaited");
@@ -1170,9 +1276,7 @@ fn osargs_and_osfind_keep_x_and_y() {
         a.byte(b'\r');
         a.here("closed");
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     machine.insert_tape(Tape::default());
     machine.set_tape_record(true);
     finish(&mut machine, CLOSE_BUDGET);
@@ -1359,11 +1463,7 @@ const COUNTS: u16 = 0x0900;
 /// the keyboard, armed again, took a second key press from a stale flag.
 #[test]
 fn keyv_hears_a_press_once_and_ticks_only_while_the_keyboard_is_busy() {
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine
-        .insert_rom(15, &counting(vector::KEY))
-        .expect("slot 15 exists");
+    let mut machine = boot_rom(&counting(vector::KEY));
     finish(&mut machine, BUDGET);
     wait(&mut machine, 20);
     let count = |machine: &Machine, flags: u8| machine.peek(COUNTS + u16::from(flags));
@@ -1391,11 +1491,7 @@ fn keyv_hears_a_press_once_and_ticks_only_while_the_keyboard_is_busy() {
 /// through REMV, which MOS 1.20 never calls while nothing is queued.
 #[test]
 fn silent_sound_channels_leave_remv_alone() {
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine
-        .insert_rom(15, &counting(vector::REM))
-        .expect("slot 15 exists");
+    let mut machine = boot_rom(&counting(vector::REM));
     finish(&mut machine, BUDGET);
     // The power-on bell's note is taken through REMV as it plays.
     wait(&mut machine, 50);
@@ -1464,9 +1560,7 @@ fn a_file_written_a_byte_at_a_time_shows_as_mos_1_20_shows_it() {
         a.byte(b'\r');
         a.here("written");
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     machine.insert_tape(Tape::default());
     machine.set_tape_record(true);
     machine.set_key(Key::RETURN, true);
@@ -1511,9 +1605,7 @@ fn openout_while_spooling_takes_over_the_cassette_channel() {
         a.byte(b'\r');
         a.here("written");
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     machine.insert_tape(Tape::default());
     machine.set_tape_record(true);
     machine.set_key(Key::RETURN, true);
@@ -1553,9 +1645,7 @@ fn chip_writes(body: impl FnOnce(&mut Asm), centiseconds: u64) -> Vec<(u64, u8)>
         a.sta(zp(READY));
         body(a);
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     while machine.peek(READY) != 1 {
         assert!(machine.cycles() < BUDGET, "the boot falls quiet");
         machine.run_until(machine.cycles() + 1_000);
@@ -1716,4 +1806,29 @@ fn notes_and_envelopes_drive_the_chip_as_mos_1_20_does() {
             "scene {index}"
         );
     }
+}
+
+/// The regression: starting a synchronised note with an envelope overwrote
+/// the S the pass was starting, so the notes waiting with it on the lower
+/// channels never started, and their queues filled until SOUND waited for
+/// ever.
+#[test]
+fn synchronised_notes_start_together_behind_an_envelope() {
+    let writes = chip_writes(
+        |a| {
+            envelope(a, [1, 1, 0, 0, 0, 0, 0, 0, 126, 0, 0, -126, 126, 126]);
+            sound(a, 0x0201, -15, 100, 2);
+            sound(a, 0x0202, -15, 120, 2);
+            sound(a, 0x0203, 1, 140, 2);
+        },
+        20,
+    );
+    let volume_written = |channel: u8| {
+        let volume = 0x90 | (3 - channel) << 5;
+        writes
+            .iter()
+            .find(|&&(_, byte)| byte & 0xF0 == volume)
+            .map(|&(time, _)| time)
+    };
+    assert_eq!([1, 2, 3].map(volume_written), [Some(0); 3], "{writes:?}");
 }

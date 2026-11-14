@@ -279,7 +279,8 @@ fn dim(a: &mut Asm) -> Label {
 
 fn dim_block(a: &mut Asm, block: Label) {
     // A byte block: the variable holds its address, the block one more than
-    // the size given.
+    // the size given, so -1 takes nothing and reads the free space's start,
+    // as BASIC II allows; a block of 64K or one below nothing is Bad DIM.
     let near_bad = a.local();
     a.bind(near_bad);
     a.jmp("err_bad_dim");
@@ -298,11 +299,16 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.pha();
     a.jsr("expr_integer");
     a.stx(zp(z::OP));
+    let counted = a.local();
+    for byte in 0..3 {
+        a.inc(zp(z::IAC + byte));
+        a.bne(counted);
+    }
+    a.inc(zp(z::IAC + 3));
+    a.bind(counted);
     a.lda(zp(z::IAC + 3));
-    a.bmi(near_bad);
     a.ora(zp(z::IAC + 2));
-    let space = a.local();
-    a.bne(space);
+    a.bne(near_bad);
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pla();
@@ -317,12 +323,6 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.pha();
     a.lda(zp(z::IAC));
     a.ldx(zp(z::IAC + 1));
-    a.clc();
-    a.adc(imm(1));
-    let carried = a.local();
-    a.bcc(carried);
-    a.inx();
-    a.bind(carried);
     a.ldy(imm(0));
     a.sty(zp(NAME_END));
     a.jsr("dim_fits");
@@ -346,8 +346,6 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.here("dim_end");
     a.tax();
     a.jmp("statement_done_x");
-    a.bind(space);
-    a.jmp("err_dim_space");
 }
 
 fn dim_room(a: &mut Asm) {

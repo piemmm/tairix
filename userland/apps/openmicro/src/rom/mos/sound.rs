@@ -93,8 +93,11 @@ mod tick {
     /// register.
     pub const SYNCHRONISING: u16 = at(9);
     pub const NOISE_SEED: u16 = SYNCHRONISING;
+    /// The S whose notes the synchronising pass starts, apart from `COUNT`,
+    /// which starting an envelope's note overwrites.
+    pub const STARTING: u16 = at(10);
     /// The last byte.
-    pub const END: u16 = SYNCHRONISING;
+    pub const END: u16 = STARTING;
 }
 
 // The sound workspace is &800–&83F.
@@ -205,10 +208,14 @@ pub fn emit(a: &mut Asm, model: Model) {
     }
     sound_period(a, model);
     if model == Model::ModelB {
-        tables(a);
-    } else {
-        semitone_tables(a);
+        a.later(|a| {
+            a.here("sound_chip_channel");
+            for n in 0..4 {
+                a.byte(chip::channel(n));
+            }
+        });
     }
+    semitone_tables(a);
 }
 
 fn commands(a: &mut Asm, model: Model) {
@@ -223,6 +230,18 @@ fn commands(a: &mut Asm, model: Model) {
     a.jsr("sound_buffer");
     a.jsr("buffer_flush");
     a.here("sound_no_flush");
+    // Room for the note first: an interrupt routine's own SOUND may run
+    // while this waits.
+    a.bit(zp(os::ESCAPE));
+    a.bmi(RTS);
+    a.jsr("sound_buffer");
+    a.sec();
+    a.jsr("buffer_count");
+    a.cpx(imm(3));
+    a.bcs("sound_command_room");
+    a.jsr("interrupt_window");
+    a.bcc("sound_no_flush");
+    a.here("sound_command_room");
     // The control byte: amplitude or envelope, then H and S.
     a.ldy(imm(2));
     a.lda(zp(os::CALL_X).ind_y());
@@ -257,18 +276,7 @@ fn commands(a: &mut Asm, model: Model) {
     a.lsr(Acc);
     a.ora(zp(os::TEMP));
     a.sta(zp(os::TEMP));
-    a.cli();
-    a.here("sound_command_wait");
-    a.bit(zp(os::ESCAPE));
-    a.bmi(RTS);
     a.jsr("sound_buffer");
-    a.sec();
-    a.jsr("buffer_count");
-    a.cpx(imm(3));
-    a.bcc("sound_command_wait");
-    a.jsr("sound_buffer");
-    a.php();
-    a.sei();
     a.lda(zp(os::TEMP));
     a.jsr("buffer_insert");
     a.ldy(imm(4));
@@ -276,9 +284,7 @@ fn commands(a: &mut Asm, model: Model) {
     a.jsr("buffer_insert");
     a.ldy(imm(6));
     a.lda(zp(os::CALL_X).ind_y());
-    a.jsr("buffer_insert");
-    a.plp();
-    a.rts();
+    a.jmp("buffer_insert");
 
     // X = the queue of the channel the block names.
     a.here("sound_buffer");
@@ -321,18 +327,21 @@ fn bell(a: &mut Asm, model: Model) {
         a.jmp("service_call");
         a.here("bell_own");
     }
+    // Counted and filled at once, so an interrupt routine's SOUND cannot
+    // take the room between.
+    a.php();
+    a.sei();
     a.jsr("bell_buffer");
     a.sec();
     a.jsr("buffer_count");
     a.cpx(imm(3));
-    a.bcc(RTS);
+    a.bcc("bell_done");
     a.jsr("bell_buffer");
-    a.php();
-    a.sei();
     for setting in [var::BELL_AMPLITUDE, var::BELL_PITCH, var::BELL_DURATION] {
         a.lda(abs(setting));
         a.jsr("buffer_insert");
     }
+    a.here("bell_done");
     a.plp();
     a.rts();
     a.here("bell_buffer");
@@ -364,6 +373,8 @@ fn bell(a: &mut Asm, model: Model) {
     a.sta(abs(field::PHASE).x());
     a.sta(abs(field::LEVEL).x());
     a.sta(abs(field::WAITING).x());
+    // A note sounding stops with its queue.
+    a.jsr("sound_output");
     a.pla();
     a.tax();
     a.rts();
@@ -508,12 +519,12 @@ fn synchronising(a: &mut Asm) {
     a.cmp(abs(tick::COUNT));
     a.bcs("sound_synchronise_skip");
     // Enough: every channel waiting with this S starts.
-    a.sta(abs(tick::COUNT));
+    a.sta(abs(tick::STARTING));
     a.stx(abs(tick::SYNCHRONISING));
     a.ldx(imm(3));
     a.here("sound_synchronise_start");
     a.lda(abs(field::WAITING).x());
-    a.cmp(abs(tick::COUNT));
+    a.cmp(abs(tick::STARTING));
     a.bne("sound_synchronise_started");
     a.lda(imm(0));
     a.sta(abs(field::WAITING).x());
@@ -549,6 +560,13 @@ fn starting(a: &mut Asm, model: Model) {
         Model::Electron => a.jmp("sound_start"),
     }
 
+    // A: the next byte of channel X's queue, taken. X is kept.
+    a.here("sound_take");
+    a.jsr("channel_buffer");
+    a.jsr("buffer_remove");
+    a.ldx(abs(tick::CHANNEL));
+    a.rts();
+
     // X: channel X's buffer, the channel kept in the tick's workspace.
     a.here("channel_buffer");
     a.stx(abs(tick::CHANNEL));
@@ -559,10 +577,8 @@ fn starting(a: &mut Asm, model: Model) {
 
     a.here("sound_start");
     for slot in [tick::CONTROL, tick::NOTE_PITCH, tick::NOTE_DURATION] {
-        a.jsr("channel_buffer");
-        a.jsr("buffer_remove");
+        a.jsr("sound_take");
         a.sta(abs(slot));
-        a.ldx(abs(tick::CHANNEL));
     }
     a.lda(abs(tick::NOTE_DURATION));
     a.sta(abs(field::DURATION).x());
@@ -902,10 +918,12 @@ fn sound_period(a: &mut Asm, model: Model) {
     a.ora(imm(chip::LATCH));
     a.jsr("sound_write");
     a.lda(abs(tick::PERIOD_HIGH));
-    for _ in 0..4 {
-        a.asl(abs(tick::PERIOD_LOW));
-        a.rol(Acc);
-    }
+    a.ldy(imm(4));
+    let shift = a.here_local();
+    a.asl(abs(tick::PERIOD_LOW));
+    a.rol(Acc);
+    a.dey();
+    a.bne(shift);
     a.and(imm(chip::HIGH_PERIOD));
 
     // A to the chip: on port A while its write enable is pulsed low long
@@ -928,26 +946,24 @@ fn sound_period(a: &mut Asm, model: Model) {
     a.rts();
 }
 
-fn tables(a: &mut Asm) {
-    a.here("sound_chip_channel");
-    for n in 0..4 {
-        a.byte(chip::channel(n));
-    }
-    semitone_tables(a);
-}
-
 /// The lowest octave's periods, and the quarter semitones' steps.
 fn semitone_tables(a: &mut Asm) {
-    a.here("sound_semitone_low");
-    for (period, _) in SEMITONES {
-        a.byte(period.to_le_bytes()[0]);
-    }
-    a.here("sound_semitone_high");
-    for (period, _) in SEMITONES {
-        a.byte(period.to_le_bytes()[1]);
-    }
-    a.here("sound_quarter");
-    for (_, quarter) in SEMITONES {
-        a.byte(quarter);
-    }
+    a.later(|a| {
+        a.here("sound_semitone_low");
+        for (period, _) in SEMITONES {
+            a.byte(period.to_le_bytes()[0]);
+        }
+    });
+    a.later(|a| {
+        a.here("sound_semitone_high");
+        for (period, _) in SEMITONES {
+            a.byte(period.to_le_bytes()[1]);
+        }
+    });
+    a.later(|a| {
+        a.here("sound_quarter");
+        for (_, quarter) in SEMITONES {
+            a.byte(quarter);
+        }
+    });
 }

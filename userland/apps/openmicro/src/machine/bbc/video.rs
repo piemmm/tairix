@@ -6,6 +6,8 @@
 //! palette in the middle of a line changes it there, and one that writes the
 //! screen just behind the beam is seen to.
 
+use core::ops::Range;
+
 use super::crtc::{reg, Character, Crtc};
 use super::teletext::{self, Saa5050};
 use super::ula::{Ula, SLOTS_PER_CYCLE};
@@ -78,9 +80,10 @@ pub struct Video {
     /// Beam position: slots from the canvas's left edge, lines from its top.
     x: i32,
     y: i32,
-    /// The field being drawn is odd, and its lines interleave with the
-    /// other field's rather than repeating them.
-    odd_field: bool,
+    /// The field being drawn lies half a line below the other: an on-time
+    /// VSYNC began it, where a late one sets its field higher. Its lines are
+    /// the odd raster lines, whose half-lines round toward the row below.
+    lower_field: bool,
     weave: bool,
     /// The field being drawn, and the last one finished.
     canvas: Canvas,
@@ -116,7 +119,7 @@ impl Video {
             display: false,
             x: 0,
             y: 0,
-            odd_field: false,
+            lower_field: false,
             weave: false,
             canvas: Canvas::new(),
             pen: None,
@@ -312,6 +315,7 @@ impl Video {
 
     /// A line's sync: the beam flies back, and the SAA5050 counts the line.
     fn horizontal_sync(&mut self) {
+        self.blank_rest(false);
         self.x = -LEFT_EDGE;
         self.y += 1;
         self.teletext.end_line();
@@ -320,9 +324,10 @@ impl Video {
     /// A field's sync: the beam returns to the top, and the field drawn is
     /// finished.
     fn vertical_sync(&mut self) {
+        self.blank_rest(true);
         self.canvas.finish();
         self.y = -TOP_EDGE;
-        self.odd_field = self.crtc.odd_field();
+        self.lower_field = !self.crtc.vsync_late();
         self.weave = self.crtc.interlaced_video();
     }
 
@@ -371,14 +376,7 @@ impl Video {
         if line >= CANVAS_LINES || first >= CANVAS_WIDTH {
             return;
         }
-        // An interlaced field draws its own rows; otherwise each line fills
-        // both rows of its pair.
-        let (rows, count) = if self.weave {
-            ([2 * line + usize::from(self.odd_field), 0], 1)
-        } else {
-            ([2 * line, 2 * line + 1], 2)
-        };
-        for &row in &rows[..count] {
+        for row in self.rows(line) {
             self.canvas.paint(row, first, &slots);
         }
         let idle = self.pen_rise.is_none() && self.pen_fall.is_none();
@@ -388,6 +386,38 @@ impl Video {
                 .filter(|&offset| offset < SLOTS_PER_CYCLE);
             if row / 2 == line && under.is_some_and(|offset| lit(slots[offset])) {
                 self.pen_rise = Some(self.cycle + PEN_RESPONSE);
+            }
+        }
+    }
+
+    /// The canvas rows `line` is drawn on: an interlaced field's own, or
+    /// both of the line's pair.
+    fn rows(&self, line: usize) -> Range<usize> {
+        if self.weave {
+            let row = 2 * line + usize::from(self.lower_field);
+            row..row + 1
+        } else {
+            2 * line..2 * line + 2
+        }
+    }
+
+    /// Black from the beam to the end of its line and, as a field ends, on
+    /// every line below: what the beam flies back before reaching shows
+    /// nothing, not what an earlier field left there.
+    fn blank_rest(&mut self, field_ended: bool) {
+        const BLANK: [u8; CANVAS_WIDTH] = [BLACK; CANVAS_WIDTH];
+        let column = usize::try_from(self.x).map_or(0, |x| (x * SLOTS_PER_CYCLE).min(CANVAS_WIDTH));
+        let beam = usize::try_from(self.y).ok();
+        if let Some(line) = beam.filter(|&line| line < CANVAS_LINES) {
+            for row in self.rows(line) {
+                self.canvas.paint(row, column, &BLANK[column..]);
+            }
+        }
+        if field_ended {
+            for line in beam.map_or(0, |line| line + 1)..CANVAS_LINES {
+                for row in self.rows(line) {
+                    self.canvas.paint(row, 0, &BLANK);
+                }
             }
         }
     }
@@ -406,7 +436,7 @@ impl crate::snapshot::Save for Video {
         w.put(&self.teletext_out);
         w.put(&self.x);
         w.put(&self.y);
-        w.put(&self.odd_field);
+        w.put(&self.lower_field);
         w.put(&self.weave);
         w.put(&self.canvas);
         w.put(&self.pen);
@@ -438,7 +468,7 @@ impl crate::snapshot::Load for Video {
             display: current.display,
             x: r.get()?,
             y: r.get()?,
-            odd_field: r.get()?,
+            lower_field: r.get()?,
             weave: r.get()?,
             canvas: r.get()?,
             pen: r.get()?,

@@ -358,9 +358,7 @@ fn fsc_entry(a: &mut Asm) {
     a.cmp(imm(fsc::SHUT_DOWN));
     let not_shut = a.local();
     a.bne(not_shut);
-    a.lda(imm(osbyte::CLOSE_SPOOL_EXEC));
-    a.jsr(entry::OSBYTE);
-    a.jmp("close_all");
+    a.jmp("close_everything");
     a.bind(not_shut);
     // The rest read a line at X and Y.
     a.stx(zp(os::TEXT));
@@ -670,9 +668,7 @@ fn wiping(a: &mut Asm) {
     a.bmi(next);
     a.jsr("check_closed");
     a.jsr("print_name_column");
-    a.jsr("print_inline");
-    a.text("   : ");
-    a.byte(0);
+    a.call_with_text("print_inline", &["   : "]);
     a.jsr("yes");
     a.php();
     a.jsr(entry::OSNEWL);
@@ -714,9 +710,7 @@ fn confirm(a: &mut Asm) {
     a.lda(abs(page::ENABLE));
     a.beq(RTS);
     a.here("go");
-    a.jsr("print_inline");
-    a.text("Go (Y/N) ? ");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Go (Y/N) ? "]);
     a.jsr("yes");
     a.php();
     a.jsr(entry::OSNEWL);

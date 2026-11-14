@@ -17,6 +17,10 @@ const HIGH: u16 = sheila::ADC + register::HIGH as u16;
 const LOW: u16 = sheila::ADC + register::LOW as u16;
 
 pub fn emit(a: &mut Asm) {
+    a.whole(conversions);
+}
+
+fn conversions(a: &mut Asm) {
     // From the highest channel OSBYTE 16 selects; none for zero.
     a.here("adc_init");
     a.here("adc_restart");

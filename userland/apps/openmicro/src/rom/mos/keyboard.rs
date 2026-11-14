@@ -43,11 +43,12 @@ const LETTER_LOCKS: u8 = SHIFT_LOCK_OFF | CAPS_OFF;
 /// The lock keys, which act as they go down and never repeat.
 const CAPS_LOCK_DOWN: u8 = Key::CAPS_LOCK.number() | KEY_DOWN;
 const SHIFT_LOCK_DOWN: u8 = Key::SHIFT_LOCK.number() | KEY_DOWN;
-/// Translation markers for keys that are not characters.
+/// The table's codes for keys that are not characters, as MOS 1.20 holds
+/// them.
 const MARK_CAPS: u8 = 0x01;
 const MARK_SHIFT_LOCK: u8 = 0x02;
-const MARK_TAB: u8 = 0x03;
-const MARK_ESCAPE: u8 = 0x04;
+const MARK_TAB: u8 = 0x00;
+const MARK_ESCAPE: u8 = 0x1B;
 /// The codes the cursor keys and COPY make: soft keys 11 to 15.
 const COPY: u8 = 0x8B;
 /// The soft keys as MOS 1.20 keeps them at &B00: each key's text as an
@@ -79,12 +80,12 @@ const FIRST_SCANNED: u8 = 0x10;
 /// The unshifted code of each key from the first scanned, row by row.
 #[rustfmt::skip]
 const TRANSLATION: [u8; 70] = [
-    b'Q', b'3', b'4', b'5', 0x84, b'8', 0x87, b'-', b'^', 0x8C,
-    0x80, b'W', b'E', b'T', b'7', b'I', b'9', b'0', b'_', 0x8E,
-    b'1', b'2', b'D', b'R', b'6', b'U', b'O', b'P', b'[', 0x8F,
-    MARK_CAPS, b'A', b'X', b'F', b'Y', b'J', b'K', b'@', b':', 0x0D,
-    MARK_SHIFT_LOCK, b'S', b'C', b'G', b'H', b'N', b'L', b';', b']', DELETE,
-    MARK_TAB, b'Z', b' ', b'V', b'B', b'M', b',', b'.', b'/', COPY,
+    b'q', b'3', b'4', b'5', 0x84, b'8', 0x87, b'-', b'^', 0x8C,
+    0x80, b'w', b'e', b't', b'7', b'i', b'9', b'0', b'_', 0x8E,
+    b'1', b'2', b'd', b'r', b'6', b'u', b'o', b'p', b'[', 0x8F,
+    MARK_CAPS, b'a', b'x', b'f', b'y', b'j', b'k', b'@', b':', 0x0D,
+    MARK_SHIFT_LOCK, b's', b'c', b'g', b'h', b'n', b'l', b';', b']', DELETE,
+    MARK_TAB, b'z', b' ', b'v', b'b', b'm', b',', b'.', b'/', COPY,
     MARK_ESCAPE, 0x81, 0x82, 0x83, 0x85, 0x86, 0x88, 0x89, b'\\', 0x8D,
 ];
 
@@ -203,10 +204,32 @@ pub fn emit(a: &mut Asm, model: Model) {
     if model == Model::Electron {
         firm_keys(a);
     }
-    line_input(a);
+    // Its branches reach across the whole of it.
+    a.whole(line_input);
     editing(a);
-    a.here("key_translation");
-    a.bytes(&TRANSLATION);
+    // Indexed by key number, as software indexes it from OSBYTE &AC's
+    // address: rows sixteen keys apart, the slots past each row's tenth
+    // left to held tables.
+    a.whole(|a| {
+        a.here("key_translation");
+        let rows = TRANSLATION.chunks(usize::from(COLUMNS));
+        let last = rows.len() - 1;
+        for (row, keys) in rows.enumerate() {
+            a.bytes(keys);
+            if row < last {
+                a.room(usize::from(ROW_STRIDE - COLUMNS));
+            }
+        }
+    });
+}
+
+/// Key numbers' rows lie sixteen apart, a row in a number's high nibble.
+const ROW_STRIDE: u8 = 0x10;
+
+/// The address OSBYTE &AC and &AD give: the table less the first key
+/// number, so adding a key's number reaches its code.
+pub(super) fn key_table() -> crate::rom::asm::Addr {
+    sym("key_translation") + -i32::from(FIRST_SCANNED)
 }
 
 fn matrix(a: &mut Asm) {
@@ -305,10 +328,14 @@ fn electron_matrix(a: &mut Asm) {
     electron_key_down(a, count);
     electron_key_scan(a, count);
     electron_lines(a);
-    a.here("electron_key_numbers");
-    a.bytes(&numbers);
-    a.here("electron_key_places");
-    a.bytes(&places);
+    a.later(move |a| {
+        a.here("electron_key_numbers");
+        a.bytes(&numbers);
+    });
+    a.later(move |a| {
+        a.here("electron_key_places");
+        a.bytes(&places);
+    });
 }
 
 /// A key's top bit, and N, set if key X is down; and the end every scan
@@ -469,10 +496,12 @@ fn electron_lines(a: &mut Asm) {
     a.txa();
     a.rts();
 
-    a.here("key_line_bits");
-    for line in 0..LOW_LINES {
-        a.byte(!(1u8 << line));
-    }
+    a.later(|a| {
+        a.here("key_line_bits");
+        for line in 0..LOW_LINES {
+            a.byte(!(1u8 << line));
+        }
+    });
 }
 
 /// KEYV: C and V choose the call.
@@ -645,7 +674,7 @@ fn tick_keys(a: &mut Asm, model: Model) {
     a.beq(RTS);
     a.cmp(imm(SHIFT_LOCK_DOWN));
     a.beq(RTS);
-    a.jmp("key_pressed");
+    a.bne("key_pressed");
     a.here("tick_new_key");
     a.ldx(zp(os::KEY_LAST));
     a.stx(zp(os::KEY_FIRST));
@@ -679,26 +708,11 @@ fn translate(a: &mut Asm) {
     shifted(a);
 }
 
-/// A = the unshifted code of the key A numbers, its top bit set: the
-/// translation table holds row × 10 + column.
+/// A = the unshifted code of the key A numbers, its top bit set.
 fn key_code(a: &mut Asm) {
     a.and(imm(!KEY_DOWN));
-    a.pha();
-    for _ in 0..4 {
-        a.lsr(Acc);
-    }
-    a.sta(zp(os::SCRATCH));
-    a.asl(Acc);
-    a.asl(Acc);
-    a.adc(zp(os::SCRATCH));
-    a.asl(Acc);
-    a.sta(zp(os::SCRATCH));
-    a.pla();
-    a.and(imm(0x0F));
-    a.clc();
-    a.adc(zp(os::SCRATCH));
     a.tax();
-    a.lda(abs(sym("key_translation") + -i32::from((FIRST_SCANNED >> 4) * COLUMNS)).x());
+    a.lda(abs(key_table()).x());
 }
 
 /// An Electron key's code. FUNC alone types nothing, and with SHIFT turns
@@ -746,11 +760,11 @@ fn electron_translate(a: &mut Asm) {
     a.here("key_func_soft");
     a.jmp("key_insert");
     a.here("key_func_letter");
-    a.cmp(imm(b'A'));
+    a.cmp(imm(b'a'));
     a.bcc("key_func_symbol");
-    a.cmp(imm(b'Z' + 1));
+    a.cmp(imm(b'z' + 1));
     a.bcs("key_func_symbol");
-    a.adc(imm(FIRST_FIRM - b'A'));
+    a.adc(imm(FIRST_FIRM - b'a'));
     a.jmp("key_insert");
     a.here("key_func_symbol");
     a.ldx(imm(byte(FIRM_SYMBOLS.len()) - 1));
@@ -798,9 +812,9 @@ fn electron_character(a: &mut Asm) {
     a.jmp("key_insert");
 
     a.here("key_case");
-    a.cmp(imm(b'A'));
+    a.cmp(imm(b'a'));
     a.bcc("key_symbol");
-    a.cmp(imm(b'Z' + 1));
+    a.cmp(imm(b'z' + 1));
     a.bcs("key_symbol");
     a.tax();
     a.lda(status);
@@ -810,10 +824,10 @@ fn electron_character(a: &mut Asm) {
     a.and(imm(ELECTRON_SHIFT_HELD));
     a.bne("key_capital");
     a.txa();
-    a.ora(imm(0x20));
     a.bne("key_ctrl");
     a.here("key_capital");
     a.txa();
+    a.and(imm(!0x20));
     a.bne("key_ctrl");
     a.here("key_symbol");
     a.tax();
@@ -892,9 +906,9 @@ fn shifting(a: &mut Asm) {
     a.ldx(imm(SHIFT_LOCK_OFF));
     a.lda(zp(os::SCRATCH));
     let locks = a.local();
-    a.cmp(imm(b'A'));
+    a.cmp(imm(b'a'));
     a.bcc(locks);
-    a.cmp(imm(b'Z' + 1));
+    a.cmp(imm(b'z' + 1));
     a.bcs(locks);
     a.ldx(imm(LETTER_LOCKS));
     a.bind(locks);
@@ -918,9 +932,9 @@ fn shifting(a: &mut Asm) {
     a.bind(decided);
 }
 
-/// The code with C clear shifted: a letter upper case, else lower; a symbol
-/// by its ASCII pair, but 0 and @, and _ to the pound sign; a function key
-/// &10 on. Then CTRL takes &40–&7F to &00–&1F, or a function key &20 on.
+/// The code with C clear shifted: a letter, lower case in the table, upper
+/// case; a symbol by its ASCII pair, but 0 and @, and _ to the pound sign; a
+/// function key &10 on. Then CTRL takes &40–&7F to &00–&1F, or a function key &20 on.
 fn shifted(a: &mut Asm) {
     a.lda(zp(os::SCRATCH));
     a.bmi("key_function");
@@ -944,15 +958,11 @@ fn shifted(a: &mut Asm) {
     a.bind(brackets);
     a.cmp(imm(0x5B));
     a.bcc("key_control");
-    a.cmp(imm(0x5F));
+    a.cmp(imm(b'z' + 1));
     a.bcs("key_control");
     a.eor(imm(0x20));
     a.bne("key_control");
     a.bind(unshifted);
-    a.ldx(zp(os::SCRATCH + 1));
-    a.cpx(imm(LETTER_LOCKS));
-    a.bne("key_control");
-    a.ora(imm(0x20));
     a.here("key_control");
     a.plp();
     a.bpl("key_insert");
@@ -1019,10 +1029,8 @@ fn leds(a: &mut Asm, model: Model) {
     a.rts();
 }
 
-/// OSRDCH: a soft key's text or the Electron's firm key's, then an EXEC
-/// file, then the input buffer, codes from &80 interpreted as *FX4 and
-/// *FX221–228 say. Returns C set and A = &1B for an Escape.
-fn rdch(a: &mut Asm, model: Model) {
+/// RDCHV's default: a character, X and Y kept.
+pub(super) fn osrdch_default(a: &mut Asm) {
     a.here("osrdch_default");
     a.here("nvrdch");
     a.txa();
@@ -1039,7 +1047,12 @@ fn rdch(a: &mut Asm, model: Model) {
     a.tax();
     a.lda(zp(os::TEMP));
     a.rts();
+}
 
+/// OSRDCH: a soft key's text or the Electron's firm key's, then an EXEC
+/// file, then the input buffer, codes from &80 interpreted as *FX4 and
+/// *FX221–228 say. Returns C set and A = &1B for an Escape.
+fn rdch(a: &mut Asm, model: Model) {
     // One attempt: V clear with A to return and C set for an Escape; V set
     // to try again.
     a.here("rdch_once");
@@ -1068,11 +1081,11 @@ fn rdch(a: &mut Asm, model: Model) {
     a.here("rdch_input");
     a.bit(zp(os::ESCAPE));
     a.bmi("rdch_escape");
-    a.cli();
+    a.jsr("interrupt_window");
     a.ldx(abs(var::INPUT_SOURCE));
     a.jsr("buffer_remove");
     a.bcc("rdch_interpret");
-    a.jmp("rdch_again");
+    a.bcs("rdch_again");
     a.here("rdch_escape");
     a.lda(imm(ESCAPE));
     a.sec();
@@ -1101,7 +1114,7 @@ fn rdch_codes(a: &mut Asm, model: Model) {
     a.here("rdch_edit");
     a.jsr("edit_key");
     a.bcs("rdch_return");
-    a.jmp("rdch_again");
+    a.bcc("rdch_again");
     // The eight zones of sixteen codes: ignored, a soft key, or a base.
     a.here("rdch_zones");
     a.lsr(Acc);
@@ -1222,17 +1235,25 @@ fn firm_keys(a: &mut Asm) {
     a.pla();
     a.jmp("page_a");
 
-    a.here("firm_keywords");
-    for keyword in FIRM_KEYWORDS {
-        a.byte(byte(keyword.len()));
-        a.text(keyword);
-    }
-    a.here("firm_symbols");
-    a.bytes(&FIRM_SYMBOLS);
-    a.here("cursor_shifted");
-    a.bytes(&CURSOR_SHIFTED);
-    a.here("cursor_controlled");
-    a.bytes(&CURSOR_CONTROLLED);
+    a.later(|a| {
+        a.here("firm_keywords");
+        for keyword in FIRM_KEYWORDS {
+            a.byte(byte(keyword.len()));
+            a.text(keyword);
+        }
+    });
+    a.later(|a| {
+        a.here("firm_symbols");
+        a.bytes(&FIRM_SYMBOLS);
+    });
+    a.later(|a| {
+        a.here("cursor_shifted");
+        a.bytes(&CURSOR_SHIFTED);
+    });
+    a.later(|a| {
+        a.here("cursor_controlled");
+        a.bytes(&CURSOR_CONTROLLED);
+    });
 }
 
 /// The soft keys: starting one, *KEY, and OSBYTE 18.
@@ -1334,15 +1355,9 @@ fn key_gather(a: &mut Asm) {
     a.cpx(imm(KEY_LIMIT));
     a.bne("key_gather");
     a.here("key_bad");
-    a.brk();
-    a.byte(0xFB);
-    a.text("Bad key");
-    a.byte(0);
+    a.error(0xFB, "Bad key");
     a.here("key_in_use");
-    a.brk();
-    a.byte(0xFA);
-    a.text("Key in use");
-    a.byte(0);
+    a.error(0xFA, "Key in use");
     a.here("key_gathered");
     a.ldy(imm(0));
     a.here("key_extend");

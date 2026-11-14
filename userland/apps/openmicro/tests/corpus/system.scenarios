@@ -1,0 +1,43 @@
+# The MOS's calls from programs and from interrupt routines: OSBYTE and OSWORD dispatched with interrupts off, an interrupt routine's SOUND waiting for room, unknown OSBYTEs, the ULA palette and its copy, VDUV, OSWORD &7F waiting for a disc, the cursor's shape VDU 23,0 sets, MODE's paged line count, and the key table OSBYTE &AC names.
+
+scenario osbyte_and_osword_dispatch_with_interrupts_off
+script type:CLS:P%=&900:[OPT 0:PHP:PLA:STA &70:RTS:]:?&200=0:?&201=9\n;wait:0.5;type:A%=&88:CALL &FFF4:B%=?&70 AND 4:A%=&E0:X%=0:Y%=&A:CALL &FFF1:P.B%,?&70 AND 4\n;wait:0.5
+
+# An interval timer event's routine queues a note on a full queue, waiting for room as the interrupts it lets in play the queue out, while the program it interrupted counts on A.
+scenario an_interrupted_a_survives_a_sound_waiting_in_an_event
+script type:10 DIM C% 99:FOR I%=0 TO 2 STEP 2:P%=C%:[OPT I%\n;type:20 .EV CMP #5:BNE NO:PHA:TXA:PHA:TYA:PHA:LDA &71:BEQ SK:DEC &71\n;type:30 LDX #&A0:LDY #&0A:LDA #7:JSR &FFF1:LDX #&A8:LDY #&0A:LDA #4:JSR &FFF1\n;type:40 .SK PLA:TAY:PLA:TAX:PLA:.NO RTS\n;type:50 .GO LDA #&5A:LDX #0:LDY #0\n;type:60 .LP CMP #&5A:BNE BD:DEX:BNE LP:DEY:BNE LP:LDA #1:STA &70:RTS\n;type:70 .BD LDA #2:STA &70:RTS:]:NEXT\n;type:80 !&AA0=&FFF10001:!&AA4=&00020064:!&AA8=-2:?&AAC=255:?&220=EV MOD 256:?&221=EV DIV 256\n;type:90 FOR I%=1 TO 5:SOUND 1,-15,100,2:NEXT:?&71=20:A%=14:X%=5:CALL &FFF4:A%=4:X%=&A8:Y%=&A:CALL &FFF1:CALL GO\n;type:100 A%=13:X%=5:CALL &FFF4:PRINT ?&70,-(?&71<20)\n;type:CLS:RUN\n;wait:20
+
+scenario unknown_osbytes_below_the_variables_are_refused
+script type:CLS:A%=&74:X%=5:Y%=6:P.~USR&FFF4:A%=&A1:P.~USR&FFF4:A%=&A5:P.~USR&FFF4\n;wait:0.5
+
+# OSBYTE &9B takes a logical colour and a physical, and the ULA's copy at &249 keeps the last entry written, VDU 19's and MODE's included.
+scenario osbyte_155_writes_the_palette_inverted_and_keeps_its_copy
+script type:MODE 2:A%=?&249:VDU 19,1,2,0,0,0:B%=?&249:*FX155,133\n;wait:0.5;type:C%=?&249:MODE 7:P.~A%,~B%,~C%\n;wait:0.5
+
+# MODE writes each colour's entries, the highest colour first and each colour's lowest entry first, as VDU 19 does its one colour's.
+scenario mode_and_vdu_19_write_the_palette_a_colour_at_a_time
+script type:MODE 1:A%=?&249:VDU 19,2,4,0,0,0:B%=?&249:MODE 4:C%=?&249:VDU 19,1,3,0,0,0:D%=?&249:MODE 7:P.~A%,~B%,~C%,~D%\n;wait:0.5
+
+# VDUV has VDU 23 with C set and A its first parameter, and a PLOT the MOS does not draw with C clear and A its number: any PLOT in the teletext mode.
+scenario vduv_takes_vdu_23_with_c_set_and_plot_with_c_clear
+script type:CLS:P%=&900:[OPT 0:PHP:STA &71:PLA:STA &70:RTS:]:?&226=0:?&227=9\n;wait:0.5;type:VDU 23,28,1,2,3,4,5,6,7,8:A%=?&70 AND 1:B%=?&71:VDU 25,200,1,0,2,0:C%=?&70 AND 1:D%=?&71:?&71=0:VDU 25,4,1,0,2,0:E%=?&71\n;wait:0.5;type:MODE 4:?&71=0:VDU 25,4,1,0,2,0:F%=?&71:VDU 25,200,1,0,2,0:G%=?&70 AND 1:H%=?&71\n;wait:0.5;type:MODE 7:P.A%,~B%,C%,~D%,~E%,~F%,G%,~H%\n;wait:0.5
+
+# With no disc in the drive OSWORD &7F waits for one, until ESCAPE.
+scenario osword_127_waits_for_a_disc_until_escape
+script type:CLS:?&A00=0:!&A01=&3000:?&A05=3:?&A06=&53:?&A07=0:?&A08=0:?&A09=&21:A%=&7F:X%=0:Y%=&A:CALL &FFF1:P."RETURNED"\n;wait:2;press:ESCAPE;wait:0.5;type:P.ERR\n;wait:0.5
+
+# Software sets a mode by calling MOS 1.20's MODE routine at &CB1D with the mode in A.
+scenario the_mode_routine_at_cb1d_takes_the_mode_in_a
+script type:CLS:A%=1:CALL &CB1D:A%=?&355:B%=?&34F:C%=!&352 AND &FFFF:D%=?&360:E%=?&354:MODE 7:P.A%,B%,~C%,D%,~E%\n;wait:0.5
+
+# VDU 23,0,10 sets the cursor's shape as well as R10, so VDU 23,1 brings back the one set.
+scenario vdu_23_0_10_sets_the_cursor_shape_vdu_23_1_restores
+script type:CLS:A%=?&35F:VDU 23,0,10,32,0,0,0,0,0,0:B%=?&35F:VDU 23,1,0,0,0,0,0,0,0,0:VDU 23,1,1,0,0,0,0,0,0,0:C%=?&35F:VDU 23,0,10,96,0,0,0,0,0,0:D%=?&35F:P.~A%,~B%,~C%,~D%\n;wait:0.5
+
+# MODE starts paged mode's count of lines again.
+scenario mode_resets_the_paged_line_count
+script type:CLS:VDU 14:P."A":P."B":P."C":A%=?&269:MODE 7:B%=?&269:VDU 15:P.A%,B%\n;wait:0.5
+
+# OSBYTE &AC and &AD give the key translation table, indexed by internal key number, ten codes in each sixteen; TAB, ESCAPE and the locks are marked.
+scenario osbyte_172_gives_the_key_table_by_internal_key_number
+script type:CLS:A%=&AC:X%=0:Y%=&FF:R%=USR&FFF4:T%=(R% AND &FFFF00) DIV 256\n;wait:0.3;type:P.?(T%+&10),?(T%+&11),?(T%+&19),?(T%+&20)\n;wait:0.3;type:P.?(T%+&30),?(T%+&40),?(T%+&50),?(T%+&60)\n;wait:0.3;type:P.?(T%+&70),?(T%+&79)\n;wait:0.3

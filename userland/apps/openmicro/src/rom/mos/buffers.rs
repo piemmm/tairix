@@ -44,9 +44,6 @@ pub fn emit(a: &mut Asm, model: Model) {
         a.plp();
         a.rts();
     }
-    insert(a, model);
-    remove(a, model);
-    count_purge(a, model);
     input(a);
     events(a);
     tables(a);
@@ -86,7 +83,7 @@ fn entries(a: &mut Asm) {
 }
 
 /// INSV: A into buffer X, A kept; C set if it was full.
-fn insert(a: &mut Asm, model: Model) {
+pub(super) fn insert(a: &mut Asm, model: Model) {
     a.here("insv_default");
     alias(a, model);
     a.php();
@@ -145,7 +142,7 @@ fn insert(a: &mut Asm, model: Model) {
 
 /// REMV: A and Y = the next character of buffer X, taken unless V is set;
 /// C set if the buffer was empty.
-fn remove(a: &mut Asm, model: Model) {
+pub(super) fn remove(a: &mut Asm, model: Model) {
     a.here("remv_default");
     alias(a, model);
     a.php();
@@ -192,7 +189,7 @@ fn remove(a: &mut Asm, model: Model) {
 
 /// CNPV: with V clear, X and Y = the characters in buffer X, or with C set
 /// the space left; with V set, buffer X emptied.
-fn count_purge(a: &mut Asm, model: Model) {
+pub(super) fn count_purge(a: &mut Asm, model: Model) {
     a.here("cnpv_default");
     alias(a, model);
     a.bvs("cnpv_purge");
@@ -262,7 +259,7 @@ fn input(a: &mut Asm) {
     a.lsr(Acc);
     a.pla();
     a.bcs(RTS);
-    a.jmp("escape_set");
+    a.bcc("escape_set");
     a.here("input_character");
     a.pha();
     a.jsr("buffer_insert");
@@ -311,16 +308,22 @@ fn events(a: &mut Asm) {
 }
 
 fn tables(a: &mut Asm) {
-    a.here("buffer_first");
-    for (_, first) in BUFFERS {
-        a.byte(first);
-    }
-    a.here("buffer_base_low");
-    for (slot, first) in BUFFERS {
-        a.byte((slot - u16::from(first)).to_le_bytes()[0]);
-    }
-    a.here("buffer_base_high");
-    for (slot, first) in BUFFERS {
-        a.byte((slot - u16::from(first)).to_le_bytes()[1]);
-    }
+    a.later(|a| {
+        a.here("buffer_first");
+        for (_, first) in BUFFERS {
+            a.byte(first);
+        }
+    });
+    a.later(|a| {
+        a.here("buffer_base_low");
+        for (slot, first) in BUFFERS {
+            a.byte((slot - u16::from(first)).to_le_bytes()[0]);
+        }
+    });
+    a.later(|a| {
+        a.here("buffer_base_high");
+        for (slot, first) in BUFFERS {
+            a.byte((slot - u16::from(first)).to_le_bytes()[1]);
+        }
+    });
 }

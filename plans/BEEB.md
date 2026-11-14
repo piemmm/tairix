@@ -89,8 +89,13 @@ Items are built in ledger order; each lands complete with its tests.
 4. **Compatibility is with the documented machine.** Each ROM implements its
    original's documented interface, keeps its documented workspace at the
    documented addresses, and places internal state where software is known
-   to read it. Private routine addresses inside a ROM are not reproduced;
-   documented entry points, vectors, tables and workspace are.
+   to read it. Documented entry points, vectors, tables and workspace are
+   reproduced, and so are the addresses the original's vectors hold, which
+   software sets vectors back to: the MOS 1.20 defaults and BASIC II's
+   BRKV, each an entry into this ROM's own routine. An address inside an
+   original ROM that software is found calling is kept the same way, doing
+   what the original's code there is observed to do; other private routine
+   addresses are not reproduced.
 5. **The clean-room boundary.** Implementation inputs are the published
    manuals (the BBC Micro User Guide and Advanced User Guide; the Electron
    User Guide and the Electron Advanced User Guide, Adder 1984), data sheets,
@@ -189,7 +194,11 @@ Model B's display delay and produces 12 half-dots per character with
 character rounding, drawn into 16 slots by coverage. The beam is locked to
 HSYNC and VSYNC, so a program moving sync moves the picture. The canvas is
 896 × 600: 56 µs of each line from 8 µs after the HSYNC edge, and 300 lines
-of each field from 16 lines after the VSYNC edge, fields woven for interlace.
+of each field from 16 lines after the VSYNC edge, fields woven for interlace:
+a late VSYNC begins the upper field, so the odd raster lines, whose
+half-lines round toward the row below, lie below the even ones. What the
+beam flies back before reaching, the rest of a line an early HSYNC ends or
+of a field an early VSYNC ends, is black.
 
 **Frame encoding.** One byte per canvas pixel: foreground colour (bits 0–2),
 background colour (bits 3–5), foreground coverage 0–3 (bits 6–7). A bitmap
@@ -328,7 +337,16 @@ all of it has passed; a snapshot never names a file.
 (`Zp`, `Abs`, `.x()`, `.y()`, `.ind_y()`, `imm`), labels with forward
 fixups, branch-range checks, fixed-address placement that refuses overlap,
 code run on into a label only where the label is checked to lie next, data
-directives, and a symbol map. Encoding comes from `cpu::isa`; only
+directives, and a symbol map. An entry point pinned at a fixed address is
+placed ahead of the code that flows past it, which hops over it: with a
+`JMP`, or a branch where the last instruction leaves its flag certain, when
+the code runs on, otherwise by moving its labels on. A table or routine held
+for later fills the rooms the flow leaves before pins, a pin leaves before
+an address of its own (`room_to`) and a table laid out on a stride leaves
+between its rows (`room`), each taking the held items that fill the most of
+it, or follows the code; data meeting a pin moves past it from its last
+named label; code whose branches must reach across (`whole`), a `BRK` and
+its error block, and a call with the text after it, are placed whole. Encoding comes from `cpu::isa`; only
 documented opcodes are encodable. Hardware addresses come from `machine`, so
 a register address is defined once for both the emulation and the firmware.
 
@@ -352,9 +370,19 @@ ENVELOPE, serial and printer streams, `*SPOOL` and `*EXEC`, the ADC, and the
 cassette and ROM filing systems. Workspace follows the Advanced User Guide:
 the vectors and OSBYTE variables of page &02, the VDU variables of page &03
 as OSBYTE &A0 reads them, the documented zero page from &90, the buffers and
-pages &08–&0D. It announces itself as `OpenMOS Micro`, where the original
-prints its maker's name; the reference harness puts that in the originals'
-observations (§7).
+pages &08–&0D. The default vector table, through the descriptor at &FFB6,
+holds MOS 1.20's addresses, observed with the reference harness: the
+OSWRCH, OSRDCH, BRK, IRQ2 and tape OSFILE, OSARGS and FSC defaults are
+placed whole at theirs, the rest jump from theirs, and the vectors that do
+nothing return at &FFA6; the table itself lies at MOS 1.20's &D940, where
+software copies it to page 2 itself. Other internals software reads at their
+addresses are kept there: the 640-byte row table at &C375, high byte first;
+the MODE routine at &CB1D, the mode in A, whose clear starts at &CBF0, so a
+copy that ends there runs; and the key translation table OSBYTE &AC and &AD
+give, indexed by internal key number, ten codes in each sixteen: letters in
+lower case, TAB 0, ESCAPE &1B and the two locks 1 and 2. It announces itself as `OpenMOS Micro`, where the
+original prints its maker's name; the reference harness puts that in the
+originals' observations (§7).
 
 Behaviour pinned by observation, each with its test in `rom::mos::tests`:
 
@@ -428,6 +456,21 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
 - OSCLI calls FSCV with A=8 before each command; *HELP offers the ROMs the
   call before showing its version; *EXEC of a file the filing system cannot
   open is File not found.
+- OSBYTE and OSWORD run with interrupts disabled and return with the
+  caller's interrupt state; a call that waits (INKEY, *FX19, a full printer
+  or RS423 buffer, SOUND on a full queue, the line input) lets interrupts in
+  between its tests, keeping &FC and the call registers &EF–&F1 across them.
+- OSBYTE &9B writes the physical colour inverted, as the ULA takes it, and
+  keeps it at &249; MODE and VDU 20 write each logical colour's entries, the
+  highest colour first and each colour's lowest entry first, and VDU 19 only
+  its own colour's. Flushing a sound queue silences the note it plays.
+- VDUV takes VDU 23 with C set and A its first parameter, and a PLOT the MOS
+  does not draw, or any PLOT in MODE 7, with C clear and A its code.
+- MODE writes the latch's screen-size bits for each mode, then the 6845's
+  registers from R11 down, then the screen's start once. MODE and VDU 23,0
+  move R7 by *TV's shift and one more, and keep R10 as the cursor's shape at
+  &35F; MODE alone applies *TV's interlace to R8, and MODE 7 keeps the
+  interlaced video teletext needs whatever *TV says.
 
 Deliberate divergences: the character set is this ROM's own design, so a
 glyph's pixels differ from MOS 1.20's; and &31A, the VDU driver's scratch for
@@ -439,10 +482,14 @@ finished release's pitch twice while silent, which nothing hears; the
 two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
 1.20 keeps for rollover, auto-repeat and sound (&2CA–&2CE, the sound
 buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
-ROM's own; and, against MOS 1.20's speed, text output is within a tenth and
-a window's clear is faster, but a whole-screen clear takes twice as long,
-VDU 5 half as long again, lines a tenth longer, and the scan while a key is
-held 11% of the machine to its 7.5%.
+ROM's own; and, against MOS 1.20's speed with BASIC II driving each, text
+output, scrolling and triangles are within a few percent and a window's
+clear is a tenth faster, but a whole-screen clear in MODE 0 takes twice as
+long, a horizontal line fill three times, VDU 5 a third longer and lines a
+quarter longer, and the scan while a key is held takes 11% of the machine to
+its 7.5%. A fill finds its run by stepping one pixel's address and mask
+along its line, then plots it as a span; reaching MOS 1.20's speed would take
+a byte at a time.
 
 **The Electron's OS.** `rom::mos::build(Target::Electron)` builds it from the
 same source: every part the two machines' interfaces share is one routine,
@@ -505,7 +552,10 @@ inline assembler, `CALL`/`USR` conventions, errors with their numbers and
 messages, and file access through the MOS. Workspace follows BASIC II: zero
 page &00–&6F, the resident integers at &0400, the variable catalogue from
 &0480, the control stacks of page &05, the string buffer at &0600 and the
-input buffer at &0700. The one image runs on both machines.
+input buffer at &0700. BRKV is BASIC II's &B402, which jumps to the error
+handler; &B433, which software sets BRKV to so any error stops the machine,
+stops it with interrupts masked, as BASIC II's code there is observed to.
+The one image runs on both machines.
 
 BASIC is written afresh in `rom::basic`, laid out as BASIC II is. Workspace
 facts, taken from the published guides and confirmed by observing BASIC II
@@ -569,14 +619,20 @@ Behaviour pinned by observation, each with its test:
 - Entering BASIC with the RND seed all zero, as at power-on, sets it to
   `41 52 57 00 00`; any other seed survives BREAK. The execution address
   SAVE gives a program, &8023, is the cold start the language entry makes.
+- DIM's byte block is one more than its size: -1 takes nothing, naming where
+  the free space starts, and below -1, or 65535 and over, is Bad DIM.
+- A number in a program is read each time it is met. A digit alone, or
+  several with no point or exponent that fit in sixteen bits, is an integer
+  at once, the several gathered as the tokeniser gathers a line number;
+  anything else is read through the forty-bit mantissa.
 
 Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
 placed after that code, where BASIC II's bytes go astray; a byte formal is
 neither kept nor restored, where BASIC II's damages the program; and, in 16
-KiB, against BASIC II's speed integer loops take from 8% to 29% longer and
-the functions up to a tenth longer, while TAN and small whole powers are
-faster.
+KiB, against BASIC II's speed loops take from 2% to 11% longer, 29% where
+an integer FOR adds integers, and the functions up to a tenth longer, while
+TAN and small whole powers are faster.
 
 **DFS.** The Acorn DFS 1.20 interface over the 8271: the catalogue format,
 every `*` command, OSFILE, OSFIND, OSGBPB, OSARGS, OSBGET and OSBPUT on up to
@@ -612,6 +668,10 @@ Behaviour pinned by observation, each with its scenario:
 - *RUN of a file to be entered in &8000–&BFFF, as a program BASIC saves is,
   loads it and returns, where DFS 1.20 enters its own code paged there.
 - Loads take as long as DFS 1.20's to within two centiseconds.
+- The count of open files, in page &10, is all that is read of the channel
+  blocks while none is open, so a program may load over &1100 on once its
+  files are closed; CLOSE#0 closes every one.
+- OSWORD &7F with no disc in the drive waits for one, until ESCAPE.
 
 Where it differs on purpose: its banner and copyright are its own; V, the C
 flags the manuals leave undefined and the registers a program is *RUN with

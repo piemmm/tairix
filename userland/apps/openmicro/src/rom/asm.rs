@@ -12,13 +12,26 @@
 //! Code placed over bytes already placed is refused too, so code growing
 //! into a table at a fixed address cannot do so unseen.
 //!
+//! [`Asm::pin`] places code at an address ahead of the code that will flow
+//! past it, for an entry point software calls by its address. An instruction
+//! that would leave no room for a `JMP` before a pin hops over it: with that
+//! `JMP`, or a branch the last instruction's flags make certain, where the
+//! code before runs on, otherwise by moving its labels past the pin. Data
+//! meeting a pin moves past it, from where the last instruction ended or the
+//! named label last bound in it, its labels and uses with it, unless code
+//! runs on into it or an [`Asm::org`] fixed it there. A table held by
+//! [`Asm::later`] fills the room a pin leaves unused, or goes where
+//! [`Asm::place_later`] puts the rest; [`Asm::error`] and
+//! [`Asm::call_with_text`] place an instruction and the data after it whole.
+//!
 //! The first mistake is kept and returned by [`Asm::finish`]; the methods
 //! themselves never fail, so a ROM's source reads as its instructions.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::Add;
+use core::ops::{Add, Range};
 
 use crate::cpu::isa::{self, Mnemonic, Mode};
 use crate::cpu::ADDRESS_SPACE;
@@ -347,6 +360,13 @@ pub enum AsmError {
         /// The label's name, or `""` for a local one.
         name: &'static str,
     },
+    /// Code running on into a pin had no room left for a `JMP` over it.
+    PinBlocked {
+        /// Where the code stands.
+        at: u16,
+        /// The pin's address.
+        pin: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -408,7 +428,104 @@ pub struct Asm {
     returns: Vec<u16>,
     /// Where code runs on into a label, and the label.
     falls: Vec<(u16, Addr)>,
+    /// What [`Asm::pin`] placed, by offset and in order.
+    pins: Vec<Range<usize>>,
+    /// The labels bound since the last byte was placed.
+    pending: Vec<Label>,
+    /// The last thing placed was an instruction that runs on into the next
+    /// byte: not a jump, a return or data.
+    runs_on: bool,
+    /// The branch the flags that instruction leaves make certain, if any.
+    certain: Option<Mnemonic>,
+    /// Nothing has been placed since the origin was set, so what comes next
+    /// belongs exactly there.
+    anchored: bool,
+    data_run: DataRun,
+    /// A pin is being placed, where it is put.
+    pinning: bool,
+    later: Later,
+    /// The rooms hops left free, filled from what is held once it all is.
+    rooms: Vec<Range<usize>>,
     error: Option<AsmError>,
+}
+
+/// What [`Asm::later`] holds for [`Asm::place_later`], in order.
+struct Later(Vec<Held>);
+
+/// A table held for later, and the bytes it places.
+struct Held {
+    body: Box<dyn Fn(&mut Asm)>,
+    len: usize,
+}
+
+impl core::fmt::Debug for Later {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} held", self.0.len())
+    }
+}
+
+/// The bytes a `JMP` over a pin takes.
+const HOP: usize = 3;
+
+/// How far past a hop's own two bytes a branch over a pin reaches.
+const BRANCH_REACH: usize = 2 + 127;
+
+/// The branch a conditional branch not taken makes certain.
+/// The held tables, by index in the order held, whose lengths together fill
+/// the most of `room` bytes.
+fn fullest(held: &[Held], room: usize) -> Vec<usize> {
+    const NONE_YET: usize = usize::MAX;
+    // by[total]: the table that first brought a choice to `total` bytes.
+    let mut by: Vec<Option<usize>> = alloc::vec![None; room + 1];
+    by[0] = Some(NONE_YET);
+    for (index, table) in held.iter().enumerate() {
+        if table.len == 0 || table.len > room {
+            continue;
+        }
+        for total in (table.len..=room).rev() {
+            if by[total].is_none() && by[total - table.len].is_some() {
+                by[total] = Some(index);
+            }
+        }
+    }
+    let mut total = (0..=room)
+        .rev()
+        .find(|&total| by[total].is_some())
+        .unwrap_or(0);
+    let mut chosen = Vec::new();
+    while let Some(index) = by[total].filter(|&index| index != NONE_YET) {
+        chosen.push(index);
+        total -= held[index].len;
+    }
+    chosen.reverse();
+    chosen
+}
+
+const fn opposite(branch: Mnemonic) -> Option<Mnemonic> {
+    match branch {
+        Mnemonic::Bcc => Some(Mnemonic::Bcs),
+        Mnemonic::Bcs => Some(Mnemonic::Bcc),
+        Mnemonic::Beq => Some(Mnemonic::Bne),
+        Mnemonic::Bne => Some(Mnemonic::Beq),
+        Mnemonic::Bmi => Some(Mnemonic::Bpl),
+        Mnemonic::Bpl => Some(Mnemonic::Bmi),
+        Mnemonic::Bvc => Some(Mnemonic::Bvs),
+        Mnemonic::Bvs => Some(Mnemonic::Bvc),
+        _ => None,
+    }
+}
+
+/// The data placed since the last instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DataRun {
+    /// There is none: an instruction or an origin was the last thing.
+    Absent,
+    /// Its latest item, from its run's start or the named label last bound
+    /// in it, starts at this offset; nothing runs on into the run, so the
+    /// item may move past a pin.
+    Movable(usize),
+    /// It stays where it is placed.
+    Fixed,
 }
 
 macro_rules! implied {
@@ -457,6 +574,15 @@ impl Asm {
             fixups: Vec::new(),
             returns: Vec::new(),
             falls: Vec::new(),
+            pins: Vec::new(),
+            pending: Vec::new(),
+            runs_on: false,
+            certain: None,
+            anchored: true,
+            data_run: DataRun::Absent,
+            pinning: false,
+            later: Later(Vec::new()),
+            rooms: Vec::new(),
             error: None,
         };
         if !fits {
@@ -513,8 +639,13 @@ impl Asm {
         if slot.address.is_some() {
             let name = slot.name;
             self.fail(AsmError::Rebound { name, at });
-        } else {
-            slot.address = Some(at);
+            return;
+        }
+        slot.address = Some(at);
+        let named = !slot.name.is_empty();
+        self.pending.push(label);
+        if named && matches!(self.data_run, DataRun::Movable(_)) {
+            self.data_run = DataRun::Movable(self.offset);
         }
     }
 
@@ -545,11 +676,228 @@ impl Asm {
         match address.checked_sub(self.origin) {
             Some(offset) if usize::from(offset) <= self.image.len() => {
                 self.offset = usize::from(offset);
+                self.pending.clear();
+                self.runs_on = false;
+                self.anchored = true;
+                self.data_run = DataRun::Absent;
             }
             _ => self.fail(AsmError::OutsideImage {
                 offset: usize::from(address.wrapping_sub(self.origin)),
             }),
         }
+    }
+
+    /// Emit `body` where [`Asm::place_later`] is next called, or sooner in
+    /// the room a pin leaves unused before it, not here: for tables, which
+    /// their labels reach wherever they lie.
+    pub fn later(&mut self, body: impl Fn(&mut Self) + 'static) {
+        let mut measure = Self::new(self.origin, self.image.len());
+        body(&mut measure);
+        let len = measure.offset;
+        self.later.0.push(Held {
+            body: Box::new(body),
+            len,
+        });
+    }
+
+    /// Emit what [`Asm::later`] holds: into the rooms hops left, then here
+    /// in the order it was held.
+    pub fn place_later(&mut self) {
+        self.fill_rooms();
+        for held in core::mem::take(&mut self.later.0) {
+            (held.body)(self);
+        }
+    }
+
+    /// Fill each room hops left, in address order, with the held tables
+    /// that fill the most of it.
+    fn fill_rooms(&mut self) {
+        let mut rooms = core::mem::take(&mut self.rooms);
+        rooms.sort_by_key(|room| room.start);
+        for room in rooms {
+            let chosen = fullest(&self.later.0, room.end - room.start);
+            self.fill_room(room.start, &chosen);
+        }
+    }
+
+    /// Place the held tables `chosen` picks, in the order they were held,
+    /// from `start`, the flow left as it was.
+    fn fill_room(&mut self, start: usize, chosen: &[usize]) {
+        let flow = (
+            self.offset,
+            self.runs_on,
+            self.certain,
+            self.anchored,
+            self.data_run,
+        );
+        let pending = core::mem::take(&mut self.pending);
+        self.pinning = true;
+        let mut at = start;
+        let mut held = core::mem::take(&mut self.later.0);
+        let mut tables: Vec<Held> = chosen
+            .iter()
+            .rev()
+            .map(|&index| held.remove(index))
+            .collect();
+        tables.reverse();
+        for table in tables {
+            (self.offset, self.runs_on, self.anchored, self.data_run) =
+                (at, false, false, DataRun::Absent);
+            (table.body)(self);
+            at = self.offset;
+        }
+        held.append(&mut self.later.0);
+        self.later.0 = held;
+        self.pinning = false;
+        (
+            self.offset,
+            self.runs_on,
+            self.certain,
+            self.anchored,
+            self.data_run,
+        ) = flow;
+        self.pending = pending;
+    }
+
+    /// Leave the room from `start` to `end` the pins leave free to be filled.
+    fn leave_rooms(&mut self, start: usize, end: usize) {
+        if self.pinning {
+            return;
+        }
+        let first = self.pins.partition_point(|pin| pin.end <= start);
+        let mut at = start;
+        let mut free = Vec::new();
+        for pin in &self.pins[first..] {
+            if pin.start >= end {
+                break;
+            }
+            if pin.start > at {
+                free.push(at..pin.start);
+            }
+            at = at.max(pin.end);
+        }
+        if at < end {
+            free.push(at..end);
+        }
+        self.rooms.extend(free);
+    }
+
+    /// Fill the room from here to `end`, and those hops left, with what
+    /// [`Asm::later`] holds that fits, then carry on from `end`.
+    pub fn place_later_before(&mut self, end: u16) {
+        if let Some(room) = end.checked_sub(self.origin) {
+            self.leave_rooms(self.offset, usize::from(room));
+        }
+        self.fill_rooms();
+        self.org(end);
+    }
+
+    /// Leave `len` bytes here for held tables to fill, as many as fit: the
+    /// slots a table laid out on a stride does not use.
+    pub fn room(&mut self, len: usize) {
+        self.rooms.push(self.offset..self.offset + len);
+        self.offset += len;
+        self.runs_on = false;
+    }
+
+    /// Leave the bytes from here to `address` for held tables to fill, then
+    /// carry on there: what a pin leaves before an address of its own. Being
+    /// past `address` already is the overlap [`Asm::finish`] reports.
+    pub fn room_to(&mut self, address: u16) {
+        match address.checked_sub(self.pc()) {
+            Some(len) => self.room(usize::from(len)),
+            None => self.org(address),
+        }
+    }
+
+    /// Emit what `body` emits with no pin inside it, the flow hopping first
+    /// if one would be: for code whose branches must reach across it.
+    pub fn whole(&mut self, body: impl Fn(&mut Self)) {
+        let mut measure = Self::new(self.origin, self.image.len());
+        body(&mut measure);
+        self.make_way(measure.offset, false);
+        body(self);
+    }
+
+    /// Place the code `body` emits at `address` now, ahead of the code that
+    /// will flow past it, which then hops over it.
+    pub fn pin(&mut self, address: u16, body: impl FnOnce(&mut Self)) {
+        let flow = (
+            self.offset,
+            self.runs_on,
+            self.certain,
+            self.anchored,
+            self.data_run,
+        );
+        let pending = core::mem::take(&mut self.pending);
+        self.org(address);
+        let start = self.offset;
+        self.pinning = true;
+        body(self);
+        self.pinning = false;
+        let place = self.pins.partition_point(|pin| pin.start < start);
+        self.pins.insert(place, start..self.offset);
+        (
+            self.offset,
+            self.runs_on,
+            self.certain,
+            self.anchored,
+            self.data_run,
+        ) = flow;
+        self.pending = pending;
+    }
+
+    /// Where something of `len` bytes from `start` can go: there, or past
+    /// each pin it would meet.
+    fn clear_of_pins(&self, start: usize, len: usize) -> usize {
+        let first = self.pins.partition_point(|pin| pin.end <= start);
+        let mut at = start;
+        for pin in &self.pins[first..] {
+            if pin.start >= at + len {
+                break;
+            }
+            at = pin.end;
+        }
+        at
+    }
+
+    /// Move the flow past the pins an instruction of `len` bytes would meet,
+    /// leaving room for a `JMP` before the next unless the instruction ends
+    /// the flow.
+    fn make_way(&mut self, len: usize, ends_flow: bool) {
+        if self.pinning || self.anchored {
+            return;
+        }
+        let needed = if ends_flow { len } else { len + HOP };
+        let resume = self.clear_of_pins(self.offset, needed);
+        if resume == self.offset {
+            return;
+        }
+        if self.runs_on {
+            let first = self.pins.partition_point(|pin| pin.end <= self.offset);
+            let pin = self.pins[first].start;
+            if pin < self.offset + HOP {
+                let (at, pin) = (self.pc(), self.address(pin));
+                self.fail(AsmError::PinBlocked { at, pin });
+                return;
+            }
+            // A label here may be reached with other flags.
+            let target = self.address(resume);
+            let reach = resume - self.offset <= BRANCH_REACH;
+            match self.certain.filter(|_| reach && self.pending.is_empty()) {
+                Some(branch) => self.place_branch(branch, Addr::At(target)),
+                None => self.jmp(abs(target)),
+            }
+        } else {
+            let at = self.address(resume);
+            for &label in &self.pending {
+                if let Some(slot) = self.labels.get_mut(label.0) {
+                    slot.address = Some(at);
+                }
+            }
+        }
+        self.leave_rooms(self.offset, resume);
+        self.offset = resume;
     }
 
     fn put(&mut self, byte: u8) {
@@ -568,6 +916,83 @@ impl Asm {
             }
         }
         self.offset += 1;
+        self.pending.clear();
+        self.anchored = false;
+    }
+
+    /// Make way for `len` bytes of data: the item they extend moves whole
+    /// past any pin they would meet, if it may.
+    fn make_way_for_data(&mut self, len: usize) {
+        if self.pinning {
+            return;
+        }
+        if self.data_run == DataRun::Absent {
+            self.data_run = if self.anchored || self.runs_on {
+                DataRun::Fixed
+            } else {
+                DataRun::Movable(self.offset)
+            };
+        }
+        let DataRun::Movable(start) = self.data_run else {
+            return;
+        };
+        let run = self.offset - start;
+        let to = self.clear_of_pins(start, run + len);
+        if to == start {
+            return;
+        }
+        let Some(gap) = self.image.get(to..to + run).map(|_| to - start) else {
+            let offset = to + run;
+            self.fail(AsmError::OutsideImage { offset });
+            return;
+        };
+        self.relocate(start, gap);
+    }
+
+    /// Move the data from `start` to the current offset on by `gap` bytes,
+    /// with the labels bound in it or at its end and the uses in it.
+    fn relocate(&mut self, start: usize, gap: usize) {
+        let end = self.offset;
+        let (first, last) = (self.address(start), self.address(end));
+        let shift = u16::try_from(gap).unwrap_or(u16::MAX);
+        for from in start..end {
+            let to = from + gap;
+            if self.placed[to] {
+                let at = self.address(to);
+                self.fail(AsmError::Overlap { at });
+                return;
+            }
+            self.image[to] = self.image[from];
+            self.placed[to] = true;
+            self.image[from] = ERASED;
+            self.placed[from] = false;
+        }
+        for fixup in self
+            .fixups
+            .iter_mut()
+            .filter(|fixup| (start..end).contains(&fixup.offset))
+        {
+            fixup.offset += gap;
+            fixup.at = fixup.at.wrapping_add(shift);
+        }
+        for slot in &mut self.labels {
+            if let Some(address) = slot
+                .address
+                .filter(|address| (first..=last).contains(address))
+            {
+                slot.address = Some(address.wrapping_add(shift));
+            }
+        }
+        for (at, _) in self
+            .falls
+            .iter_mut()
+            .filter(|(at, _)| (first..=last).contains(at))
+        {
+            *at = at.wrapping_add(shift);
+        }
+        self.offset = end + gap;
+        self.data_run = DataRun::Movable(start + gap);
+        self.leave_rooms(start, start + gap);
     }
 
     fn put_word(&mut self, word: u16) {
@@ -589,6 +1014,7 @@ impl Asm {
 
     /// A data byte.
     pub fn byte(&mut self, byte: impl Into<Byte>) {
+        self.make_way_for_data(1);
         match byte.into() {
             Byte::Value(value) => self.put(value),
             byte => {
@@ -596,22 +1022,27 @@ impl Asm {
                 self.defer(at, Use::Byte(byte), 1);
             }
         }
+        self.runs_on = false;
     }
 
     /// Data bytes.
     pub fn bytes(&mut self, bytes: &[u8]) {
+        self.make_way_for_data(bytes.len());
         for &byte in bytes {
             self.put(byte);
         }
+        self.runs_on = false;
     }
 
     /// A data word, little-endian.
     pub fn word(&mut self, word: impl Into<Addr>) {
+        self.make_way_for_data(2);
         let at = self.pc();
         match word.into() {
             Addr::At(value) => self.put_word(value),
             word => self.defer(at, Use::Word(word), 2),
         }
+        self.runs_on = false;
     }
 
     /// ASCII text, as its bytes.
@@ -623,15 +1054,58 @@ impl Asm {
         self.bytes(text.as_bytes());
     }
 
+    /// `BRK` and the block its handler reads after it: the error's number,
+    /// its message and a zero, placed whole, with nothing running on past it.
+    pub fn error(&mut self, number: u8, message: &str) {
+        if !message.is_ascii() {
+            let at = self.pc();
+            self.fail(AsmError::NotAscii { at });
+        }
+        let Some(brk) = isa::encode(Mnemonic::Brk, Mode::Implied) else {
+            let at = self.pc();
+            self.fail(AsmError::NoEncoding {
+                at,
+                mnemonic: Mnemonic::Brk,
+                mode: Mode::Implied,
+            });
+            return;
+        };
+        self.make_way(message.len() + 3, true);
+        self.put(brk);
+        self.put(number);
+        for &byte in message.as_bytes() {
+            self.put(byte);
+        }
+        self.put(0);
+        self.runs_on = false;
+        self.data_run = DataRun::Absent;
+    }
+
+    /// `JSR target` with the text after it that the routine reads and
+    /// returns past, `parts` in turn and a zero, placed whole.
+    pub fn call_with_text(&mut self, target: impl Into<Addr>, parts: &[&str]) {
+        let len = parts.iter().map(|part| part.len()).sum::<usize>();
+        self.make_way(3 + len + 1, false);
+        self.jsr(target);
+        for part in parts {
+            self.text(part);
+        }
+        self.put(0);
+        self.runs_on = true;
+        self.certain = None;
+        self.data_run = DataRun::Absent;
+    }
+
     /// `count` bytes of `value`.
     pub fn fill(&mut self, count: usize, value: u8) {
+        self.make_way_for_data(count);
         for _ in 0..count {
             self.put(value);
         }
+        self.runs_on = false;
     }
 
     fn instruction(&mut self, mnemonic: Mnemonic, operand: Option<Operand>) {
-        let at = self.pc();
         let operand = operand.map(|operand| operand.0);
         let mode = match operand {
             None => Mode::Implied,
@@ -640,9 +1114,27 @@ impl Asm {
             Some(Kind::Memory(mode, _)) => mode,
         };
         let Some(code) = isa::encode(mnemonic, mode) else {
+            let at = self.pc();
             self.fail(AsmError::NoEncoding { at, mnemonic, mode });
             return;
         };
+        let ends_flow = matches!(mnemonic, Mnemonic::Jmp | Mnemonic::Rts | Mnemonic::Rti);
+        let certain = match (mnemonic, operand) {
+            (Mnemonic::Clc, _) => Some(Mnemonic::Bcc),
+            (Mnemonic::Sec, _) => Some(Mnemonic::Bcs),
+            (Mnemonic::Clv, _) => Some(Mnemonic::Bvc),
+            (
+                Mnemonic::Lda | Mnemonic::Ldx | Mnemonic::Ldy,
+                Some(Kind::Immediate(Byte::Value(0))),
+            ) => Some(Mnemonic::Beq),
+            (
+                Mnemonic::Lda | Mnemonic::Ldx | Mnemonic::Ldy,
+                Some(Kind::Immediate(Byte::Value(_))),
+            ) => Some(Mnemonic::Bne),
+            _ => None,
+        };
+        self.make_way(1 + usize::from(mode.operand_bytes()), ends_flow);
+        let at = self.pc();
         if mnemonic == Mnemonic::Rts {
             self.returns.push(at);
         }
@@ -667,9 +1159,17 @@ impl Asm {
                 (_, address) => self.defer(at, Use::Word(address), 2),
             },
         }
+        self.runs_on = !ends_flow;
+        self.certain = certain;
+        self.data_run = DataRun::Absent;
     }
 
     fn branch(&mut self, mnemonic: Mnemonic, target: Addr) {
+        self.make_way(2, false);
+        self.place_branch(mnemonic, target);
+    }
+
+    fn place_branch(&mut self, mnemonic: Mnemonic, target: Addr) {
         let at = self.pc();
         let Some(code) = isa::encode(mnemonic, Mode::Relative) else {
             self.fail(AsmError::NoEncoding {
@@ -681,6 +1181,9 @@ impl Asm {
         };
         self.put(code);
         self.defer(at, Use::Branch(target), 1);
+        self.runs_on = true;
+        self.certain = opposite(mnemonic);
+        self.data_run = DataRun::Absent;
     }
 
     implied! {

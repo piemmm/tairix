@@ -710,12 +710,12 @@ const fn register(addr: u16) -> u8 {
 }
 
 /// The amount the hardware adds to an address past the top of memory, from
-/// the latch's screen-size bits.
+/// the latch's screen-size bits, C1 above C0.
 const fn screen_wrap(latch: u8) -> u16 {
     match (latch & latch::SCREEN_SIZE) >> 4 {
-        0b11 => 0x3000,
+        0b10 => 0x3000,
         0b00 => 0x4000,
-        0b10 => 0x5800,
+        0b11 => 0x5800,
         _ => 0x6000,
     }
 }

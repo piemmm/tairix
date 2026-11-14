@@ -9,8 +9,7 @@
 //! the pixel's mask makes every GCOL action.
 
 use super::ws::{buffer, var, vdu, vdu_zp, vector};
-use super::{copy, return_in_teletext};
-use crate::machine::bbc::sheila;
+use super::{copy, has_teletext, return_in_teletext};
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 
@@ -68,6 +67,8 @@ const DY: u16 = vdu::DELTAS + 2;
 /// pixel's address leaves alone.
 const DECISION: u16 = vdu_zp::TEMP + 2;
 const LINE_COUNT: u16 = vdu_zp::TEMP + 4;
+/// A fill's pixels left before the window's edge, inverted likewise.
+const FILL_COUNT: u16 = LINE_COUNT;
 /// The minor steps a line's window has room for, inverted likewise, and the
 /// two steps its decision term takes, M - m with a minor step and -m without;
 /// where a triangle keeps its corners.
@@ -83,7 +84,8 @@ pub fn emit(a: &mut Asm, model: Model) {
     origin_and_window(a, model);
     plot(a, model);
     point(a);
-    line(a);
+    a.whole(line);
+    edge_room(a);
     fills(a);
     triangle(a);
     spans(a);
@@ -136,7 +138,8 @@ fn origin_and_window(a: &mut Asm, model: Model) {
     for (corner, point) in [0u16, 4].into_iter().zip(points) {
         a.ldx(imm(point));
         a.jsr("external_point");
-        copy(a, &[(PX, &[CORNERS + corner])], 4);
+        a.ldx(imm(variable_offset(CORNERS + corner)));
+        a.jsr("point_store");
     }
     a.ldx(abs(vdu::MODE));
     a.ldy(imm(4));
@@ -169,6 +172,18 @@ fn origin_and_window(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::GRAPHICS_WINDOW).y());
     a.dey();
     a.bpl("vdu_24_copy");
+    a.rts();
+
+    // (PX, PY) into the four bytes X bytes into the VDU variables.
+    a.here("point_store");
+    a.ldy(imm(0));
+    let store = a.here_local();
+    a.lda(abs(PX).y());
+    a.sta(abs(vdu::GRAPHICS_WINDOW).x());
+    a.inx();
+    a.iny();
+    a.cpy(imm(4));
+    a.bne(store);
     a.rts();
 
     // (PX, PY) from the external point X bytes into the VDU variables.
@@ -246,11 +261,15 @@ fn external_to_internal(a: &mut Asm) {
     a.rts();
 }
 
-/// PLOT k, x, y.
+/// PLOT k, x, y; VDUV has the rest with k in A and C clear, and every PLOT
+/// in the teletext mode.
 fn plot(a: &mut Asm, model: Model) {
     a.here("vdu_25");
-    return_in_teletext(a, model);
     a.lda(abs(PLOT_CODE));
+    if has_teletext(model) {
+        a.ldx(abs(vdu::COLOURS));
+        a.beq("plot_unrecognised");
+    }
     a.cmp(imm(96));
     a.bcs("plot_unrecognised");
     a.cmp(imm(32));
@@ -258,7 +277,7 @@ fn plot(a: &mut Asm, model: Model) {
     a.cmp(imm(64));
     a.bcs("plot_recognised");
     a.here("plot_unrecognised");
-    a.sec();
+    a.clc();
     a.jmp(abs(vector::VDU).ind());
     a.here("plot_recognised");
     // Relative coordinates add to the cursor's.
@@ -282,7 +301,8 @@ fn plot(a: &mut Asm, model: Model) {
     a.ldx(imm(const { variable_offset(vdu::GRAPHICS_CURSOR) }));
     a.jsr("external_point");
     // The target, internal, at &320.
-    copy(a, &[(PX, &[vdu::PLOT_POINT])], 4);
+    a.ldx(imm(const { variable_offset(vdu::PLOT_POINT) }));
+    a.jsr("point_store");
     a.jsr("plot_masks");
     a.lda(abs(PLOT_CODE));
     a.and(imm(3));
@@ -350,23 +370,29 @@ fn action_masks(a: &mut Asm) {
     a.sta(zp(vdu_zp::GRAPHICS_EOR));
     a.rts();
     // set: (FF, ~c); OR: (c, 0); AND: (~c, ~c); EOR: (0, c); invert: (0, FF).
-    a.here("action_or_m");
-    a.bytes(&[0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00]);
-    a.here("action_or_k");
-    a.bytes(&[0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00]);
-    a.here("action_eor_m");
-    a.bytes(&[0xFF, 0x00, 0xFF, 0xFF, 0x00, 0x00]);
-    a.here("action_eor_k");
-    a.bytes(&[0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]);
-
-    a.here("plot_kind_low");
-    for kind in PLOT_KINDS {
-        a.byte(lo(kind));
+    for (name, bytes) in [
+        ("action_or_m", [0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00]),
+        ("action_or_k", [0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00]),
+        ("action_eor_m", [0xFF, 0x00, 0xFF, 0xFF, 0x00, 0x00]),
+        ("action_eor_k", [0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]),
+    ] {
+        a.later(move |a| {
+            a.here(name);
+            a.bytes(&bytes);
+        });
     }
-    a.here("plot_kind_high");
-    for kind in PLOT_KINDS {
-        a.byte(hi(kind));
-    }
+    a.later(|a| {
+        a.here("plot_kind_low");
+        for kind in PLOT_KINDS {
+            a.byte(lo(kind));
+        }
+    });
+    a.later(|a| {
+        a.here("plot_kind_high");
+        for kind in PLOT_KINDS {
+            a.byte(hi(kind));
+        }
+    });
 }
 
 /// Each group of eight PLOT codes' routine, from 0 to 95.
@@ -386,18 +412,6 @@ const PLOT_KINDS: [&str; 12] = [
 ];
 
 /// The pixel at (&D6) under its mask, through the action's masks.
-fn pixel_write(a: &mut Asm) {
-    a.ldy(imm(0));
-    a.lda(zp(vdu_zp::GRAPHICS_OR));
-    a.and(zp(vdu_zp::PIXEL_MASK));
-    a.ora(zp(vdu_zp::GRAPHICS_CELL).ind_y());
-    a.sta(zp(vdu_zp::TEMP));
-    a.lda(zp(vdu_zp::GRAPHICS_EOR));
-    a.and(zp(vdu_zp::PIXEL_MASK));
-    a.eor(zp(vdu_zp::TEMP));
-    a.sta(zp(vdu_zp::GRAPHICS_CELL).ind_y());
-}
-
 /// One pixel: clipped to the window, then plotted through the masks.
 fn point(a: &mut Asm) {
     a.here("plot_target");
@@ -412,7 +426,15 @@ fn point(a: &mut Asm) {
     a.here("span_apply");
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.here("plot_cell");
-    pixel_write(a);
+    a.ldy(imm(0));
+    a.lda(zp(vdu_zp::GRAPHICS_OR));
+    a.and(zp(vdu_zp::PIXEL_MASK));
+    a.ora(zp(vdu_zp::GRAPHICS_CELL).ind_y());
+    a.sta(zp(vdu_zp::TEMP));
+    a.lda(zp(vdu_zp::GRAPHICS_EOR));
+    a.and(zp(vdu_zp::PIXEL_MASK));
+    a.eor(zp(vdu_zp::TEMP));
+    a.sta(zp(vdu_zp::GRAPHICS_CELL).ind_y());
     a.rts();
 
     // C set if (PX, PY) lies within the graphics window; X is kept.
@@ -470,14 +492,7 @@ fn point(a: &mut Asm) {
         a.asl(zp(vdu_zp::TEMP));
         a.rol(zp(vdu_zp::TEMP + 1));
     }
-    a.lda(zp(vdu_zp::TEMP));
-    a.clc();
-    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
-    a.sta(zp(vdu_zp::TEMP));
-    a.iny();
-    a.lda(zp(vdu_zp::TEMP + 1));
-    a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
-    a.sta(zp(vdu_zp::TEMP + 1));
+    a.jsr("row_add");
     a.pla();
     a.and(imm(7));
     a.sta(abs(vdu::PIXEL_LINE));
@@ -675,13 +690,9 @@ fn line_seek(a: &mut Asm) {
     // is held inverted, edge distance plus one below zero.
     a.here("line_found");
     a.jsr("pixel_address");
-    a.ldx(abs(MAJOR));
-    a.clc();
-    a.lda(abs(PX).x());
-    a.sbc(abs(vdu::GRAPHICS_WINDOW + 4).x());
-    a.tay();
-    a.lda(abs(PX + 1).x());
-    a.sbc(abs(vdu::GRAPHICS_WINDOW + 5).x());
+    a.lda(abs(MAJOR));
+    a.tax();
+    a.jsr("edge_room");
     a.cpy(zp(LINE_COUNT));
     a.pha();
     a.sbc(zp(LINE_COUNT + 1));
@@ -691,23 +702,33 @@ fn line_seek(a: &mut Asm) {
     a.sta(zp(LINE_COUNT + 1));
     a.here("line_count_kept");
     a.ldx(abs(MINOR));
-    a.clc();
     a.lda(abs(MINOR_STEP));
-    a.bmi("line_room_down");
+    a.jsr("edge_room");
+    a.sty(abs(MINOR_ROOM));
+    a.sta(abs(MINOR_ROOM + 1));
+}
+
+/// The room along axis X, x 0 or y 2, from (PX, PY) to the window's edge:
+/// its right or top with A's bit 7 clear, its left or bottom with it set.
+/// Held inverted, the distance plus one below zero: low in Y, high in A.
+fn edge_room(a: &mut Asm) {
+    a.here("edge_room");
+    a.asl(Acc);
+    a.bcs("edge_room_near");
     a.lda(abs(PX).x());
     a.sbc(abs(vdu::GRAPHICS_WINDOW + 4).x());
-    a.sta(abs(MINOR_ROOM));
+    a.tay();
     a.lda(abs(PX + 1).x());
     a.sbc(abs(vdu::GRAPHICS_WINDOW + 5).x());
-    a.sta(abs(MINOR_ROOM + 1));
-    a.bcc("line_draw");
-    a.here("line_room_down");
+    a.rts();
+    a.here("edge_room_near");
+    a.clc();
     a.lda(abs(vdu::GRAPHICS_WINDOW).x());
     a.sbc(abs(PX).x());
-    a.sta(abs(MINOR_ROOM));
+    a.tay();
     a.lda(abs(vdu::GRAPHICS_WINDOW + 1).x());
     a.sbc(abs(PX + 1).x());
-    a.sta(abs(MINOR_ROOM + 1));
+    a.rts();
 }
 
 /// Plotted through the stepped address, the major axis always forwards:
@@ -717,7 +738,7 @@ fn line_draw(a: &mut Asm) {
     a.asl(abs(DOTS));
     a.bcc("line_dark");
     a.inc(abs(DOTS));
-    pixel_write(a);
+    a.jsr("plot_cell");
     a.here("line_dark");
     a.inc(zp(LINE_COUNT));
     a.bne("line_forward");
@@ -740,9 +761,8 @@ fn line_draw(a: &mut Asm) {
     a.here("line_up_line");
     a.dec(zp(vdu_zp::GRAPHICS_CELL));
     a.here("line_stepped");
-    decision_step(a, "line_draw_decided");
-    a.txa();
-    a.bne("line_draw");
+    a.jsr("line_decide");
+    a.bcs("line_draw");
     a.inc(abs(MINOR_ROOM));
     a.bne("line_draw_minor");
     a.inc(abs(MINOR_ROOM + 1));
@@ -753,9 +773,21 @@ fn line_draw(a: &mut Asm) {
     a.jsr("cell_step");
     a.jmp("line_draw");
 
-    // The decision term steps on; C clear if the minor axis steps with it.
+    // The decision term steps on, X 2 if it was not negative, else 0; C
+    // clear if the minor axis steps with it.
     a.here("line_decide");
-    decision_step(a, "line_decided");
+    a.ldx(imm(2));
+    a.lda(zp(DECISION + 1));
+    a.bpl("line_decided");
+    a.ldx(imm(0));
+    a.here("line_decided");
+    a.clc();
+    a.lda(zp(DECISION));
+    a.adc(abs(DECISION_STEPS).x());
+    a.sta(zp(DECISION));
+    a.lda(zp(DECISION + 1));
+    a.adc(abs(DECISION_STEPS + 1).x());
+    a.sta(zp(DECISION + 1));
     a.cpx(imm(1));
     a.rts();
 }
@@ -874,26 +906,11 @@ fn cell_add(a: &mut Asm) {
     a.rts();
 }
 
-/// The decision term's step: by M - m, X 0, while it is negative, the minor
-/// axis then stepping too; otherwise by -m, X 2.
-fn decision_step(a: &mut Asm, decided: &'static str) {
-    a.ldx(imm(2));
-    a.lda(zp(DECISION + 1));
-    a.bpl(decided);
-    a.ldx(imm(0));
-    a.here(decided);
-    a.clc();
-    a.lda(zp(DECISION));
-    a.adc(abs(DECISION_STEPS).x());
-    a.sta(zp(DECISION));
-    a.lda(zp(DECISION + 1));
-    a.adc(abs(DECISION_STEPS + 1).x());
-    a.sta(zp(DECISION + 1));
-}
-
 /// Horizontal line fills from the target, left and right over background or
 /// right over anything else. The run's start becomes the previous point and
-/// its end the cursor; with nothing filled the target is the cursor.
+/// its end the cursor; with nothing filled the target is the cursor. A run is
+/// found by stepping one pixel's address and mask along its line, then
+/// plotted as a span.
 fn fills(a: &mut Asm) {
     a.here("plot_fill_both");
     a.jsr("target_point");
@@ -901,51 +918,29 @@ fn fills(a: &mut Asm) {
     a.bcc("fill_none");
     a.jsr("pixel_is_background");
     a.bne("fill_none");
-    // Find the left end, then fill right to the first non-background pixel.
-    a.here("fill_left");
     a.ldx(imm(0xFF));
-    a.jsr("step_px");
-    a.jsr("pixel_inside");
-    a.bcc("fill_left_end");
-    a.jsr("pixel_is_background");
-    a.beq("fill_left");
-    a.here("fill_left_end");
-    a.ldx(imm(1));
-    a.jsr("step_px");
     a.lda(imm(0));
-    a.beq("fill_from");
+    a.jsr("fill_scan");
+    a.jsr("fill_start");
+    a.jsr("target_point");
+    a.lda(imm(0));
+    a.beq("fill_right");
 
     a.here("plot_fill_right");
     a.jsr("target_point");
     a.jsr("pixel_inside");
     a.bcc("fill_none");
+    a.jsr("fill_start");
     a.lda(imm(0xFF));
-
-    // Plot along from PX while the pixel is (A zero) or is not (A &FF)
-    // background, stopping at the window's edge.
-    a.here("fill_from");
-    a.sta(abs(DOTS));
-    a.jsr("point_internal");
-    a.here("fill_run_next");
-    a.jsr("pixel_inside");
-    a.bcc("fill_run_end");
-    a.jsr("pixel_is_background");
-    a.php();
-    a.lda(abs(DOTS));
-    a.plp();
-    a.beq("fill_run_background");
-    a.eor(imm(0xFF));
-    a.here("fill_run_background");
-    a.cmp(imm(0));
-    a.bne("fill_run_end");
-    a.jsr("plot_pixel");
+    // On to the run's end, the cursor. The cursor goes first, as the span
+    // works in PX; the target's line then has the run from its start, unless
+    // the run is empty.
+    a.here("fill_right");
     a.ldx(imm(1));
-    a.jsr("step_px");
-    a.jmp("fill_run_next");
-    a.here("fill_run_end");
-    a.ldx(imm(0xFF));
-    a.jsr("step_px");
-    a.jmp("fill_cursor");
+    a.jsr("fill_scan");
+    a.jsr("fill_cursor");
+    a.jsr("target_point");
+    a.jmp("span_ordered");
 
     // Nothing filled: the previous point is the target a line up, carried
     // into no high byte, as MOS 1.20 leaves it.
@@ -958,26 +953,85 @@ fn fills(a: &mut Asm) {
     // The external cursor, scaled back from the pixel (PX, PY).
     a.here("pixel_cursor");
     a.jsr("internal_to_external");
-    copy(a, &[(PX, &[vdu::GRAPHICS_CURSOR])], 4);
-    a.rts();
+    a.ldx(imm(const { variable_offset(vdu::GRAPHICS_CURSOR) }));
+    a.jmp("point_store");
 
     // The internal cursor = (PX, PY).
     a.here("point_internal");
-    copy(a, &[(PX, &[vdu::GRAPHICS_INTERNAL])], 4);
-    a.rts();
+    a.ldx(imm(const { variable_offset(vdu::GRAPHICS_INTERNAL) }));
+    a.jmp("point_store");
 
     // (PX, PY) = the target.
     a.here("target_point");
     copy(a, &[(vdu::PLOT_POINT, &[PX])], 4);
     a.rts();
 
-    // Z set if pixel (PX, PY) is the graphics background colour.
+    // Z set if pixel (PX, PY), or the one at (&D6) under its mask, is the
+    // graphics background colour.
     a.here("pixel_is_background");
     a.jsr("pixel_address");
+    a.here("cell_is_background");
     a.ldy(imm(0));
     a.lda(zp(vdu_zp::GRAPHICS_CELL).ind_y());
     a.eor(abs(vdu::GRAPHICS_BACKGROUND));
     a.and(zp(vdu_zp::PIXEL_MASK));
+    a.rts();
+
+    // The run's start: the internal cursor, so the previous point after the
+    // PLOT, and the span's.
+    a.here("fill_start");
+    a.jsr("point_internal");
+    copy(a, &[(PX, &[X1])], 2);
+    a.rts();
+
+    // PX the last pixel along its line from PX, inside the window, stepping
+    // by X, 1 or -1, that is (A zero) or is not (A &FF) background; one back
+    // from PX if PX's own is not.
+    a.here("fill_scan");
+    a.sta(abs(DOTS));
+    a.txa();
+    a.pha();
+    a.ldx(imm(0));
+    a.jsr("edge_room");
+    a.sty(zp(FILL_COUNT));
+    a.sta(zp(FILL_COUNT + 1));
+    a.jsr("pixel_address");
+    a.pla();
+    a.tax();
+    a.here("fill_scan_next");
+    a.jsr("cell_is_background");
+    a.beq("fill_scan_background");
+    a.lda(imm(0xFF));
+    a.here("fill_scan_background");
+    a.eor(abs(DOTS));
+    a.bne("fill_scan_end");
+    a.inc(zp(FILL_COUNT));
+    a.bne("fill_scan_step");
+    a.inc(zp(FILL_COUNT + 1));
+    a.beq("fill_scan_end");
+    a.here("fill_scan_step");
+    a.jsr("cell_step_x");
+    a.jmp("fill_scan_next");
+    // The window's edge, back by the room left.
+    a.here("fill_scan_end");
+    a.txa();
+    a.bmi("fill_scan_left_end");
+    a.clc();
+    a.lda(abs(vdu::GRAPHICS_WINDOW + 4));
+    a.adc(zp(FILL_COUNT));
+    a.sta(abs(PX));
+    a.lda(abs(vdu::GRAPHICS_WINDOW + 5));
+    a.adc(zp(FILL_COUNT + 1));
+    a.sta(abs(PX + 1));
+    a.rts();
+    a.here("fill_scan_left_end");
+    a.sec();
+    a.lda(abs(vdu::GRAPHICS_WINDOW));
+    a.sbc(zp(FILL_COUNT));
+    a.sta(abs(PX));
+    a.lda(abs(vdu::GRAPHICS_WINDOW + 1));
+    a.sbc(zp(FILL_COUNT + 1));
+    a.sta(abs(PX + 1));
     a.rts();
 }
 
@@ -1272,17 +1326,18 @@ fn span_masks(a: &mut Asm) {
     a.dex();
     a.bpl("span_right_mask");
     a.sta(abs(SPAN_RIGHT));
-    // The left end's: its own pixel and those after it in its byte.
-    a.lda(abs(X1));
-    a.and(abs(vdu::PIXELS_PER_BYTE));
-    a.tax();
-    a.lda(abs(vdu::LEFT_MASK));
-    a.here("span_left_shift");
-    a.dex();
-    a.bmi("span_left_shifted");
-    a.lsr(Acc);
-    a.jmp("span_left_shift");
-    a.here("span_left_shifted");
+    // The left end's byte, then its mask: its own pixel, which addressing it
+    // gives, and those after it in its byte.
+    a.lda(abs(PX));
+    a.sta(zp(vdu_zp::TEMP + 4));
+    a.lda(abs(PX + 1));
+    a.sta(zp(vdu_zp::TEMP + 5));
+    for offset in 0..2 {
+        a.lda(abs(X1 + offset));
+        a.sta(abs(PX + offset));
+    }
+    a.jsr("pixel_address");
+    a.lda(zp(vdu_zp::PIXEL_MASK));
     a.sta(zp(vdu_zp::TEMP + 3));
     a.lda(abs(X1));
     a.and(abs(vdu::PIXELS_PER_BYTE));
@@ -1295,16 +1350,6 @@ fn span_masks(a: &mut Asm) {
     a.dex();
     a.bpl("span_left_mask");
     a.sta(abs(SPAN_LEFT));
-    // The left end's byte.
-    a.lda(abs(PX));
-    a.sta(zp(vdu_zp::TEMP + 4));
-    a.lda(abs(PX + 1));
-    a.sta(zp(vdu_zp::TEMP + 5));
-    for offset in 0..2 {
-        a.lda(abs(X1 + offset));
-        a.sta(abs(PX + offset));
-    }
-    a.jsr("pixel_address");
     // Bytes across from the left end's to the right end's.
     a.ldx(abs(vdu::PIXELS_PER_BYTE));
     a.here("span_count_divide");
@@ -1564,7 +1609,8 @@ fn vdu5_step(a: &mut Asm) {
 }
 
 /// VDU 23: a character's definition, or the Model B's 6845 registers, which
-/// the Electron has none of, and the cursor; the rest to VDUV.
+/// the Electron has none of, and the cursor; the rest to VDUV, with the
+/// first parameter in A and C set.
 fn vdu_23(a: &mut Asm, model: Model) {
     a.here("vdu_23");
     a.lda(abs(QUEUE_LAST - 8));
@@ -1574,13 +1620,14 @@ fn vdu_23(a: &mut Asm, model: Model) {
     a.beq("vdu_23_cursor");
     a.bcs("vdu_23_other");
     // VDU 23, 0, register, value.
-    if model == Model::ModelB {
-        a.lda(abs(QUEUE_LAST - 7));
-        a.sta(abs(sheila::CRTC_ADDRESS));
-        a.lda(abs(QUEUE_LAST - 6));
-        a.sta(abs(sheila::CRTC_DATA));
+    match model {
+        Model::ModelB => {
+            a.ldx(abs(QUEUE_LAST - 7));
+            a.lda(abs(QUEUE_LAST - 6));
+            a.jmp("crtc_write");
+        }
+        Model::Electron => a.rts(),
     }
-    a.rts();
     a.here("vdu_23_cursor");
     a.lda(abs(QUEUE_LAST - 7));
     a.bne("vdu_23_cursor_on");
@@ -1588,7 +1635,6 @@ fn vdu_23(a: &mut Asm, model: Model) {
     a.here("vdu_23_cursor_on");
     a.jmp("vdu_cursor_show");
     a.here("vdu_23_other");
-    a.clc();
     a.jmp(abs(vector::VDU).ind());
 
     // A character's zone comes into RAM, its ROM definitions with it, the
@@ -1675,8 +1721,10 @@ fn font_explode(a: &mut Asm) {
     a.ldy(abs(var::OSHWM));
     a.ldx(imm(0xFF));
     a.rts();
-    a.here("font_explosion");
-    a.bytes(&EXPLOSION);
+    a.later(|a| {
+        a.here("font_explosion");
+        a.bytes(&EXPLOSION);
+    });
 
     a.here("font_implode");
     a.lda(imm(FONT_DEFAULT_FLAGS));

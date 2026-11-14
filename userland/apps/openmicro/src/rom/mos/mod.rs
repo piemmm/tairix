@@ -30,36 +30,84 @@ use crate::machine::bbc::sheila;
 use crate::machine::{Model, IO_BASE, IO_END, OS_BASE, ROM_SIZE};
 use crate::rom::asm::{Asm, AsmError, Image, ERASED};
 
-/// The routines each vector holds after a reset, in vector order.
-const VECTOR_DEFAULTS: [&str; 27] = [
-    "bad_command",
-    "brk_default",
-    "irq1_default",
-    "irq2_default",
-    "oscli_default",
-    "osbyte_default",
-    "osword_default",
-    "oswrch_default",
-    "osrdch_default",
-    "cfs_file",
-    "cfs_args",
-    "cfs_bget",
-    "cfs_bput",
-    "return",
-    "cfs_find",
-    "cfs_fsc",
-    "return",
-    "return",
-    "return",
-    "return",
-    "keyv_default",
-    "insv_default",
-    "remv_default",
-    "cnpv_default",
-    "return",
-    "return",
-    "return",
+/// The routine each vector holds after a reset, in vector order, and the
+/// address MOS 1.20's table gives for it: the Model B's table gives those
+/// addresses, where software calls them, and each leads to the routine.
+const VECTOR_DEFAULTS: [(&str, u16); 27] = [
+    ("bad_command", 0xE310),
+    ("brk_default", 0xDC54),
+    ("irq1_default", 0xDC93),
+    ("irq2_default", 0xDE89),
+    ("oscli_default", 0xDF89),
+    ("osbyte_default", 0xE772),
+    ("osword_default", 0xE7EB),
+    ("oswrch_default", 0xE0A4),
+    ("osrdch_default", 0xDEC5),
+    ("cfs_file", 0xF27D),
+    ("cfs_args", 0xF18E),
+    ("cfs_bget", 0xF4C9),
+    ("cfs_bput", 0xF529),
+    (NOTHING, 0xFFA6),
+    ("cfs_find", 0xF3CA),
+    ("cfs_fsc", 0xF1B1),
+    (NOTHING, 0xFFA6),
+    (NOTHING, 0xFFA6),
+    (NOTHING, 0xFFA6),
+    (NOTHING, 0xFFA6),
+    ("keyv_default", 0xEF02),
+    ("insv_default", 0xE4B3),
+    ("remv_default", 0xE464),
+    ("cnpv_default", 0xE1D1),
+    (NOTHING, 0xFFA6),
+    (NOTHING, 0xFFA6),
+    (NOTHING, 0xFFA6),
 ];
+
+/// The routine of a vector that does nothing: a return.
+const NOTHING: &str = "return";
+
+/// What emits a routine for a model.
+type Emit = fn(&mut Asm, Model);
+
+/// The default routines the Model B places whole at MOS 1.20's address for
+/// them: each short and self-contained, so the code flowing past it is not
+/// pushed beyond its branches' reach. The Electron places them with the
+/// rest.
+const PLACED: [(&str, Emit); 10] = [
+    ("oswrch_default", |a, _| serial::oswrch_default(a)),
+    ("osrdch_default", |a, _| keyboard::osrdch_default(a)),
+    ("brk_default", |a, _| reset::brk_default(a)),
+    ("irq2_default", irq::irq2_default),
+    ("cnpv_default", buffers::count_purge),
+    ("remv_default", buffers::remove),
+    ("insv_default", buffers::insert),
+    ("cfs_file", |a, _| cfs::cfs_file(a)),
+    ("cfs_args", |a, _| cfs::cfs_args(a)),
+    ("cfs_fsc", |a, _| cfs::cfs_fsc(a)),
+];
+
+/// The Model B's vector entries at MOS 1.20's addresses: each routine
+/// placed there whole, or a jump to it, and a return where the vector does
+/// nothing.
+fn vector_entries(a: &mut Asm) {
+    for (index, &(routine, address)) in VECTOR_DEFAULTS.iter().enumerate() {
+        if VECTOR_DEFAULTS[..index]
+            .iter()
+            .any(|&(_, earlier)| earlier == address)
+        {
+            continue;
+        }
+        let placed = PLACED.iter().find(|&&(name, _)| name == routine);
+        a.pin(address, |a| match placed {
+            Some(&(_, emit)) => emit(a, Model::ModelB),
+            None if routine == NOTHING => {
+                a.here(NOTHING);
+                a.rts();
+            }
+            None => a.jmp(routine),
+        });
+    }
+}
 
 /// Whether `model` has the teletext mode, MODE 7, whose screen holds
 /// characters rather than pixels: the one mode whose COLOURS is zero.
@@ -133,7 +181,20 @@ pub fn electron() -> Result<Image, AsmError> {
 /// The builder's first [`AsmError`].
 pub fn build(model: Model) -> Result<Image, AsmError> {
     let mut a = Asm::new(OS_BASE, ROM_SIZE);
+    if model == Model::ModelB {
+        vector_entries(&mut a);
+        reset::pin_vector_defaults(&mut a);
+        modes::pin_rows_640(&mut a);
+        vdu::pin_mode(&mut a);
+    }
     font::emit(&mut a);
+    if model == Model::Electron {
+        a.here(NOTHING);
+        a.rts();
+        for (_, emit) in PLACED {
+            emit(&mut a, model);
+        }
+    }
     reset::emit(&mut a, model);
     common(&mut a);
     if model == Model::Electron {
@@ -155,10 +216,14 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
         adc::emit(&mut a);
     }
     cfs::emit(&mut a, model);
+    // The top page first, so what it leaves free takes held tables.
+    let flow_end = a.pc();
+    high::emit(&mut a, model);
+    a.org(flow_end);
+    a.place_later();
     // The hole is reserved, so code running into it is refused.
     a.org(IO_BASE);
     a.fill(usize::from(IO_END - IO_BASE), ERASED);
-    high::emit(&mut a, model);
     a.finish()
 }
 
@@ -168,6 +233,43 @@ enum Held {
     A,
     X,
     Y,
+}
+
+/// OSBYTE's and OSWORD's entries: each call is dispatched with interrupts
+/// disabled, as MOS 1.20 dispatches them, so an interrupt routine's own calls
+/// meet it only where it waits for an interrupt. A, X and Y are kept in the
+/// call registers and the caller's interrupt state comes back with the
+/// call's result flags. OSWORD goes on to `osword_dispatch` with A reloaded;
+/// OSBYTE's dispatch follows this.
+fn masked_calls(a: &mut Asm) {
+    use crate::cpu::flag;
+    use crate::rom::asm::{imm, zp};
+    use ws::os;
+    a.here("osbyte_default");
+    a.php();
+    a.sei();
+    a.clc();
+    a.bcc("masked_call");
+    a.here("osword_default");
+    a.php();
+    a.sei();
+    a.sec();
+    // C says which call it is, from here to the dispatch.
+    a.here("masked_call");
+    a.sta(zp(os::CALL_A));
+    a.stx(zp(os::CALL_X));
+    a.sty(zp(os::CALL_Y));
+    a.pla();
+    a.and(imm(flag::I));
+    a.bne("masked_dispatch");
+    a.jsr("masked_dispatch");
+    a.cli();
+    a.rts();
+    a.here("masked_dispatch");
+    a.lda(zp(os::CALL_A));
+    a.bcc("osbyte_dispatch");
+    a.jmp("osword_dispatch");
+    a.here("osbyte_dispatch");
 }
 
 /// Page in the ROM `held` holds, noting it at &F4 first, where an interrupt
@@ -262,9 +364,6 @@ fn copy(a: &mut Asm, sources: &[(u16, &[u16])], count: u8) {
 fn common(a: &mut Asm) {
     use crate::rom::asm::{imm, zp};
     use ws::fs;
-
-    a.here("return");
-    a.rts();
 
     // Print the zero-terminated text following the JSR, then carry on after
     // it, leaving the error pointer naming the last error.

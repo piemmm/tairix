@@ -75,14 +75,10 @@ fn common(a: &mut Asm) {
     a.inx();
     a.bind(apart);
     a.stx(zp(c::SWAPS));
-    a.jsr("print_inline");
-    a.text("Copying from :");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Copying from :"]);
     a.lda(zp(c::FROM));
     a.jsr("print_digit");
-    a.jsr("print_inline");
-    a.text(" to :");
-    a.byte(0);
+    a.call_with_text("print_inline", &[" to :"]);
     a.lda(zp(c::TO));
     a.jsr("print_digit");
     a.jmp(abs(entry::OSNEWL));
@@ -113,15 +109,11 @@ fn common(a: &mut Asm) {
         a.cmp(abs(c::IN));
         a.beq(RTS);
         a.sta(abs(c::IN));
-        a.jsr("print_inline");
-        a.text(prompt);
-        a.byte(0);
+        a.call_with_text("print_inline", &[prompt]);
         a.jmp("ask_key");
     }
     a.here("ask_key");
-    a.jsr("print_inline");
-    a.text(" and hit a key");
-    a.byte(0);
+    a.call_with_text("print_inline", &[" and hit a key"]);
     a.jsr("read_key");
     a.jmp(abs(entry::OSNEWL));
 }
@@ -361,9 +353,7 @@ fn compact(a: &mut Asm) {
     a.sta(zp(c::FROM));
     a.sta(zp(c::TO));
     each_open(a, |a| a.jsr("flush"));
-    a.jsr("print_inline");
-    a.text("Compacting :");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Compacting :"]);
     a.lda(zp(c::FROM));
     a.jsr("print_digit");
     a.jsr(entry::OSNEWL);
@@ -469,9 +459,7 @@ fn compact_files(a: &mut Asm) {
     a.jsr("print_digit");
     a.txa();
     a.jsr("print_hex");
-    a.jsr("print_inline");
-    a.text(" free sectors\r");
-    a.byte(0);
+    a.call_with_text("print_inline", &[" free sectors\r"]);
     a.rts();
 }
 
@@ -515,8 +503,6 @@ fn destroy(a: &mut Asm) {
     a.jmp(each);
     a.bind(finished);
     a.jsr("write_catalogue");
-    a.jsr("print_inline");
-    a.text("Deleted\r");
-    a.byte(0);
+    a.call_with_text("print_inline", &["Deleted\r"]);
     a.rts();
 }

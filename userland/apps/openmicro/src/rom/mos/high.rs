@@ -28,6 +28,7 @@ pub fn emit(a: &mut Asm, model: Model) {
         a.jsr("extended_vector");
     }
     extended_vector(a, model);
+    a.place_later_before(DEFAULTS_DESCRIPTOR);
     a.org(DEFAULTS_DESCRIPTOR);
     a.byte(2 * vector::COUNT);
     a.word("vector_defaults");
@@ -82,15 +83,14 @@ fn extended_vector(a: &mut Asm, model: Model) {
     a.tsx();
     a.lda(abs(0x0104).x());
     page(a, model, Held::A);
-    // Close the ROM's byte out of the frame.
-    for offset in [0x0103, 0x0102, 0x0101] {
-        a.lda(abs(offset).x());
-        a.sta(abs(offset + 1).x());
-    }
-    a.pla();
+    // The flags over the ROM's byte, so popping them twice leaves the
+    // caller's return address on top.
+    a.lda(abs(0x0103).x());
+    a.sta(abs(0x0104).x());
     a.pla();
     a.tax();
     a.pla();
+    a.plp();
     a.plp();
     a.rts();
 }

@@ -42,6 +42,12 @@ const ENTER_LANGUAGE: u8 = 1;
 /// the cold start the language entry makes.
 pub(crate) const SAVED_EXEC: u16 = 0x8023;
 
+/// Where BASIC II's BRKV handler starts, which software is known to point
+/// BRKV at, and an address within it software points BRKV at to stop the
+/// machine at any error, as BASIC II's code there does.
+const ERROR_ENTRY: u16 = 0xB402;
+const ERROR_FREEZE: u16 = 0xB433;
+
 /// Build the BASIC image.
 ///
 /// # Errors
@@ -49,6 +55,12 @@ pub(crate) const SAVED_EXEC: u16 = 0x8023;
 /// The builder's first [`AsmError`].
 pub fn build() -> Result<Image, AsmError> {
     let mut a = Asm::new(SIDEWAYS_BASE, ROM_SIZE);
+    a.pin(ERROR_ENTRY, |a| a.jmp("error"));
+    a.pin(ERROR_FREEZE, |a| {
+        a.sei();
+        let halt = a.here_local();
+        a.jmp(halt);
+    });
     header(&mut a);
     text(&mut a);
     editor::emit(&mut a);
@@ -68,6 +80,7 @@ pub fn build() -> Result<Image, AsmError> {
     trans::emit(&mut a);
     assembler::emit(&mut a);
     errors::emit(&mut a);
+    a.place_later();
     a.finish()
 }
 
@@ -95,9 +108,9 @@ fn header(a: &mut Asm) {
     a.cld();
     a.ldx(imm(0xFF));
     a.txs();
-    a.lda(imm(lo("error")));
+    a.lda(imm(lo(ERROR_ENTRY)));
     a.sta(abs(vector::BRK));
-    a.lda(imm(crate::rom::asm::hi("error")));
+    a.lda(imm(crate::rom::asm::hi(ERROR_ENTRY)));
     a.sta(abs(vector::BRK + 1));
     a.cli();
     a.jmp("cold");

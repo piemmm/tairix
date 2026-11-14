@@ -1,12 +1,15 @@
 //! Numbers in decimal, as BASIC II reads and writes them.
 //!
-//! Reading gathers the digits into the forty-bit mantissa as an integer,
-//! keeping digits while it has room for one more, and gives an integer when
-//! there is no point or exponent and the value fits in 31 bits; otherwise
-//! the mantissa is scaled by its decimal exponent a ten at a time. Writing
+//! Reading takes a digit alone, or several with no point or exponent that
+//! fit in sixteen bits, as an integer at once. Anything else is gathered
+//! into the forty-bit mantissa as an integer, keeping digits while it has
+//! room for one more, and gives an integer when there is no point or
+//! exponent and the value fits in 31 bits; otherwise the mantissa is scaled
+//! by its decimal exponent a ten at a time. Writing
 //! scales the value into 1–10 the same way, adds half a unit of the last
 //! digit wanted, and takes the digits from the result's top four bits.
 
+use super::crunch::NUMBER;
 use super::float::{FAC, FAC2};
 use super::ws::{kind, page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, Label, RTS};
@@ -19,6 +22,9 @@ const POINT_SEEN: u8 = 0x80;
 const REAL: u8 = 0x40;
 /// Where the number ends.
 const END: u16 = FLAGS + 1;
+// The sixteen bits several digits are first gathered in lie past what reading
+// keeps, and below the integer left operand.
+const _: () = assert!(NUMBER > END && NUMBER + 3 < z::IAC2);
 
 /// The scaled value's decimal exponent.
 const KEXP: u16 = z::DECIMAL;
@@ -72,7 +78,7 @@ fn reading(a: &mut Asm) -> (Label, Label) {
     // A number at (TEXT_A),Y: A its type, IAC or FAC its value, Y past it.
     // A digit alone, as most numbers in programs are, is an integer at once.
     a.here("read_number");
-    let full = a.local();
+    let (several, full) = (a.local(), a.local());
     a.lda(zp(z::TEXT_A).ind_y());
     a.sec();
     a.sbc(imm(b'0'));
@@ -89,7 +95,7 @@ fn reading(a: &mut Asm) -> (Label, Label) {
     a.sec();
     a.sbc(imm(b'0'));
     a.cmp(imm(10));
-    a.bcc(full);
+    a.bcc(several);
     a.lda(imm(0));
     a.sta(zp(z::IAC + 1));
     a.sta(zp(z::IAC + 2));
@@ -97,6 +103,7 @@ fn reading(a: &mut Asm) -> (Label, Label) {
     a.iny();
     a.lda(imm(kind::INTEGER));
     a.rts();
+    several_digits(a, several, full);
     a.bind(full);
     a.lda(imm(0));
     a.ldx(imm(4));
@@ -151,6 +158,44 @@ fn reading(a: &mut Asm) -> (Label, Label) {
     a.inc(zp(DEXP + 1));
     a.bpl(next);
     (not_digit, ended)
+}
+
+/// From `several`, with Y at the first of two digits or more: gathered in
+/// sixteen bits, as the tokeniser gathers a line number, and an integer if
+/// neither a point nor an exponent follows; otherwise Y back at the first,
+/// read in full from `full`.
+fn several_digits(a: &mut Asm, several: Label, full: Label) {
+    a.bind(several);
+    a.sty(zp(END));
+    a.lda(imm(0));
+    a.sta(zp(NUMBER));
+    a.sta(zp(NUMBER + 1));
+    let (digit, gathered, again) = (a.here_local(), a.local(), a.local());
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.jsr("is_digit");
+    a.bcc(gathered);
+    a.and(imm(0x0F));
+    a.jsr("ten_times_add");
+    a.bcs(again);
+    a.iny();
+    a.bne(digit);
+    a.bind(gathered);
+    a.cmp(imm(b'.'));
+    a.beq(again);
+    a.cmp(imm(b'E'));
+    a.beq(again);
+    a.lda(zp(NUMBER));
+    a.sta(zp(z::IAC));
+    a.lda(zp(NUMBER + 1));
+    a.sta(zp(z::IAC + 1));
+    a.lda(imm(0));
+    a.sta(zp(z::IAC + 2));
+    a.sta(zp(z::IAC + 3));
+    a.lda(imm(kind::INTEGER));
+    a.rts();
+    a.bind(again);
+    a.ldy(zp(END));
+    a.fall_into(full);
 }
 
 fn exponent(a: &mut Asm, not_digit: Label, ended: Label) {

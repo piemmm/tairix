@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::{model_b, var};
+use super::{boot_rom, var};
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::Machine;
 use crate::rom::asm::{abs, imm, zp};
@@ -43,9 +43,7 @@ fn reader(settings: &[(u8, u8)]) -> Machine {
         a.inc(zp(COUNT));
         a.jmp(next);
     });
-    let os = model_b().expect("the MOS assembles");
-    let mut machine = Machine::new(&os.bytes).expect("a 16 KiB OS");
-    machine.insert_rom(15, &rom).expect("slot 15 exists");
+    let mut machine = boot_rom(&rom);
     wait(&mut machine, STARTED);
     machine
 }

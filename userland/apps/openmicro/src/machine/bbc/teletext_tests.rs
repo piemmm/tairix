@@ -1,5 +1,5 @@
 use super::teletext::{Saa5050, SLOTS};
-use crate::machine::canvas::encode;
+use crate::machine::canvas::{encode, shows_dot};
 
 /// A chip on scan line `line` of a row, the line's attributes fresh.
 fn at_line(line: u8) -> Saa5050 {
@@ -27,12 +27,9 @@ fn colours(cell: &[u8; SLOTS]) -> (u8, u8) {
     (cell[0] & 7, (cell[0] >> 3) & 7)
 }
 
-/// Slots where a dot shows: some coverage of a foreground unlike the
-/// background.
+/// Slots where a dot shows.
 fn lit_slots(cell: &[u8; SLOTS]) -> usize {
-    cell.iter()
-        .filter(|&&slot| slot >> 6 != 0 && slot & 7 != (slot >> 3) & 7)
-        .count()
+    cell.iter().filter(|&&slot| shows_dot(slot)).count()
 }
 
 #[test]

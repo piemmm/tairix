@@ -3,7 +3,7 @@
 
 use alloc::format;
 
-use super::{assert_screen, bytes_after, from, typed, PROMPTED};
+use super::{after, assert_screen, bytes_after, from, typed, PROMPTED};
 use crate::scenario::{mode7_text, press_break, type_text, wait};
 
 /// Sixteen arguments from a seeded RND, and each function's packed result
@@ -582,6 +582,21 @@ fn literals_beyond_the_range_and_bare_exponents() {
             ">",
         ],
     );
+}
+
+/// The regression: a number of several digits was read through the
+/// forty-bit mantissa a digit at a time; a whole one of sixteen bits now
+/// gathers as a line number does. Five hundred loops of three such numbers
+/// are held to a bound, in centiseconds.
+#[test]
+fn whole_numbers_of_several_digits_read_in_sixteen_bits() {
+    const LOOP: &str = "T%=TIME:FORI%=1TO500:A%=1000+2000+3000:NEXT:PRINTTIME-T%";
+    let screen = from(&after(&[LOOP], 300), &format!(">{}", &LOOP[..PROMPTED]));
+    let taken: u32 = screen[screen.len() - 2]
+        .trim()
+        .parse()
+        .expect("the time taken, before the prompt");
+    assert!(taken <= 120, "{taken} centiseconds");
 }
 
 #[test]

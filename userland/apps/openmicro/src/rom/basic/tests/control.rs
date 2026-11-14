@@ -124,6 +124,35 @@ fn repeat_if_else_and_on() {
     );
 }
 
+/// A true IF with no statements of its own, THEN or not, ends where its ELSE
+/// part begins, and a false one runs that part.
+#[test]
+fn an_if_with_nothing_before_its_else() {
+    assert_screen(
+        &[
+            "10 IF 1 ELSE PRINT \"N1\"",
+            "20 IF 0 ELSE PRINT \"Y2\"",
+            "30 IF 1 THEN ELSE PRINT \"N3\"",
+            "40 IF 0 THEN ELSE PRINT \"Y4\"",
+            "50 PRINT \"END\"",
+            "RUN",
+        ],
+        60,
+        &[
+            ">10 IF 1 ELSE PRINT \"N1\"",
+            ">20 IF 0 ELSE PRINT \"Y2\"",
+            ">30 IF 1 THEN ELSE PRINT \"N3\"",
+            ">40 IF 0 THEN ELSE PRINT \"Y4\"",
+            ">50 PRINT \"END\"",
+            ">RUN",
+            "Y2",
+            "Y4",
+            "END",
+            ">",
+        ],
+    );
+}
+
 #[test]
 fn restore_and_out_of_data() {
     assert_screen(

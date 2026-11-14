@@ -4,7 +4,7 @@
 //! VSYNC's flashing, and the hardware setup reset performs.
 
 use super::ws::{os, page2, var, vector};
-use super::{latch, svia, uvia};
+use super::{latch, page, svia, uvia, Held};
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::bbc::sheila;
 use crate::machine::bbc::via::{irq, reg};
@@ -34,29 +34,102 @@ const FIRST_LINK: u8 = 0x02;
 const LAST_LINK: u8 = 0x09;
 
 pub fn emit(a: &mut Asm, model: Model) {
-    entry(a);
+    entry(a, model);
     match model {
         Model::ModelB => handler(a),
         Model::Electron => electron_handler(a),
     }
     tick(a, model);
     vsync(a, model);
+    window(a);
     match model {
         Model::ModelB => hardware(a),
         Model::Electron => electron_hardware(a),
     }
 }
 
-fn entry(a: &mut Asm) {
+/// `interrupt_window`: take any interrupt waiting, for an OS call waiting on
+/// one. An interrupt routine's own OS calls overwrite the interrupted A and
+/// the call registers, which this call may be relying on, as an interrupt
+/// routine making it is; they are kept, and so are the registers and flags.
+fn window(a: &mut Asm) {
+    const KEPT: [u16; 4] = [os::IRQ_A, os::CALL_A, os::CALL_X, os::CALL_Y];
+    a.here("interrupt_window");
+    a.php();
+    a.pha();
+    for at in KEPT {
+        a.lda(zp(at));
+        a.pha();
+    }
+    a.cli();
+    // An interrupt is taken only after the instruction after CLI.
+    a.nop();
+    a.sei();
+    for at in KEPT.into_iter().rev() {
+        a.pla();
+        a.sta(zp(at));
+    }
+    a.pla();
+    a.plp();
+    a.rts();
+}
+
+/// The IRQ and BRK entry: an IRQ goes on through IRQ1V; a BRK, its error at
+/// (&FD), is offered to the ROMs, then given to BRKV with the language paged
+/// in.
+fn entry(a: &mut Asm, model: Model) {
     a.here("irq_entry");
     a.sta(zp(os::IRQ_A));
     a.pla();
     a.pha();
     a.and(imm(0x10));
-    a.beq("irq_vectored");
-    a.jmp("brk_entry");
-    a.here("irq_vectored");
+    a.bne("brk_entry");
     a.jmp(abs(vector::IRQ1).ind());
+
+    a.here("brk_entry");
+    a.txa();
+    a.pha();
+    a.tsx();
+    a.lda(abs(0x0103).x());
+    a.sec();
+    a.sbc(imm(1));
+    a.sta(zp(os::ERROR));
+    a.lda(abs(0x0104).x());
+    a.sbc(imm(0));
+    a.sta(zp(os::ERROR + 1));
+    a.lda(zp(os::ROM));
+    a.sta(abs(var::BRK_ROM));
+    a.ldy(imm(0));
+    a.lda(imm(service::BRK));
+    a.jsr("service_call");
+    a.ldx(abs(var::LANGUAGE));
+    page(a, model, Held::X);
+    a.pla();
+    a.tax();
+    a.lda(zp(os::IRQ_A));
+    a.cli();
+    a.jmp(abs(vector::BRK).ind());
+}
+
+/// IRQ2V's default: on the Model B the interrupt is offered to the ROMs,
+/// then returned from; on the Electron nothing else is the OS's.
+pub(super) fn irq2_default(a: &mut Asm, model: Model) {
+    a.here("irq2_default");
+    match model {
+        Model::ModelB => {
+            a.txa();
+            a.pha();
+            a.tya();
+            a.pha();
+            a.lda(imm(service::INTERRUPT));
+            a.jsr("service_call");
+            a.jmp("irq_done");
+        }
+        Model::Electron => {
+            a.lda(zp(os::IRQ_A));
+            a.rti();
+        }
+    }
 }
 
 /// IRQ1V: the 6850, then the System VIA's causes, then the User VIA's, the
@@ -109,19 +182,24 @@ fn handler(a: &mut Asm) {
     a.pha();
     a.lda(imm(lo(sym("irq_done") + -1)));
     a.pha();
-    for (cause, routine) in [
-        (irq::CA1, "irq_vsync"),
-        (irq::T1, "irq_tick"),
-        (irq::CB1, "adc_interrupt"),
-        (irq::T2, "irq_timer_2"),
-        (irq::CA2, "irq_keyboard"),
+    // The routines within a branch's reach are branched to.
+    for (cause, routine, near) in [
+        (irq::CA1, "irq_vsync", false),
+        (irq::T1, "irq_tick", true),
+        (irq::CB1, "adc_interrupt", false),
+        (irq::T2, "irq_timer_2", true),
+        (irq::CA2, "irq_keyboard", false),
     ] {
-        let next = a.local();
         a.txa();
         a.and(imm(cause));
-        a.beq(next);
-        a.jmp(routine);
-        a.bind(next);
+        if near {
+            a.bne(routine);
+        } else {
+            let next = a.local();
+            a.beq(next);
+            a.jmp(routine);
+            a.bind(next);
+        }
     }
     a.pla();
     a.pla();
@@ -132,16 +210,6 @@ fn handler(a: &mut Asm) {
     a.lda(imm(irq::T2));
     a.sta(abs(svia(reg::IFR)));
     a.rts();
-
-    // IRQ2V: offered to the ROMs, then returned from.
-    a.here("irq2_default");
-    a.txa();
-    a.pha();
-    a.tya();
-    a.pha();
-    a.lda(imm(service::INTERRUPT));
-    a.jsr("service_call");
-    a.jmp("irq_done");
 }
 
 /// IRQ1V on the Electron: RTC is a tick, and display end the VSYNC's work
@@ -183,11 +251,6 @@ fn electron_handler(a: &mut Asm) {
     a.tax();
     a.lda(zp(os::IRQ_A));
     a.jmp(abs(vector::IRQ2).ind());
-
-    // IRQ2V: nothing else is the OS's.
-    a.here("irq2_default");
-    a.lda(zp(os::IRQ_A));
-    a.rti();
 
     // Clear the ULA's conditions A names, keeping the ROM paged.
     a.here("ula_clear");

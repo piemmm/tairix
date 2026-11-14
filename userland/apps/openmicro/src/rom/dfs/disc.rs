@@ -203,10 +203,21 @@ fn claiming(a: &mut Asm, nmi: &Nmi) {
 /// `select_drive`: the drive in `OP_DRIVE` selected with its head loaded,
 /// waited for until a disc turns in it, which ESCAPE abandons, and its head
 /// sent to find track 0 if it has not since the chip was programmed. Leaves
-/// the drive's select bits in `OP_SELECT`. `select_only` selects it and
-/// waits for nothing.
+/// the drive's select bits in `OP_SELECT`. `select_ready` selects it and
+/// waits for the disc; `select_only` selects it and waits for nothing.
 fn selecting(a: &mut Asm) {
     a.here("select_drive");
+    a.jsr("select_ready");
+    a.ldx(abs(page::OP_PHYSICAL));
+    a.lda(abs(page::CALIBRATED).x());
+    let uncalibrated = a.local();
+    a.beq(uncalibrated);
+    a.rts();
+    a.bind(uncalibrated);
+    a.dec(abs(page::CALIBRATED).x());
+    a.jmp("recalibrate");
+
+    a.here("select_ready");
     a.jsr("select_only");
     let wait = a.here_local();
     a.lda(imm(command::DRIVE_STATUS));
@@ -220,18 +231,18 @@ fn selecting(a: &mut Asm) {
     // A drive found not ready may hold another disc now.
     a.lda(imm(NO_CATALOGUE));
     a.sta(abs(page::CAT_DRIVE));
+    // Called from OSWORD, interrupts are off: they are let in, for the
+    // keyboard to raise an Escape.
+    a.php();
+    a.cli();
+    a.nop();
+    a.plp();
     a.bit(zp(ESCAPE_FLAG));
     a.bpl(wait);
     a.jsr("release_nmi");
     a.jmp("escape");
     a.bind(ready);
-    a.lda(abs(page::CALIBRATED).x());
-    let uncalibrated = a.local();
-    a.beq(uncalibrated);
     a.rts();
-    a.bind(uncalibrated);
-    a.dec(abs(page::CALIBRATED).x());
-    a.fall_into("recalibrate");
 
     // The head out to track 0.
     a.here("recalibrate");
@@ -583,7 +594,7 @@ fn osword_command(a: &mut Asm) {
     a.lda(imm(NO_CATALOGUE));
     a.sta(abs(page::CAT_DRIVE));
     a.jsr("claim_nmi");
-    a.jsr("select_only");
+    a.jsr("select_ready");
     // The parameters, from block offset 7.
     a.ldx(imm(0));
     let copy = a.here_local();

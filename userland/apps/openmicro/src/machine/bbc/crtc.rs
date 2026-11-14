@@ -213,6 +213,13 @@ impl Crtc {
         self.odd_field
     }
 
+    /// Whether this field's VSYNC starts half a line late, as an odd field's
+    /// does while sync interlaces.
+    #[must_use]
+    pub const fn vsync_late(&self) -> bool {
+        self.odd_field && self.interlaced_sync()
+    }
+
     /// Whether the chip interlaces video as well as sync, giving each field
     /// alternate scan lines of every row.
     #[must_use]
@@ -372,7 +379,7 @@ impl Crtc {
             self.v_display = false;
         }
         if self.vc == self.regs[reg::V_SYNC_POS] && self.vsync_left == 0 && self.adjust.is_none() {
-            if self.odd_field && self.interlaced_sync() {
+            if self.vsync_late() {
                 self.vsync_armed = true;
             } else {
                 self.start_vsync();

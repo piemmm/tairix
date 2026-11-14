@@ -58,10 +58,7 @@ const ERRORS: [(&str, u8, &str); 46] = [
 pub fn emit(a: &mut Asm) {
     for (routine, number, message) in ERRORS {
         a.here(routine);
-        a.brk();
-        a.byte(number);
-        a.text(message);
-        a.byte(0);
+        a.error(number, message);
     }
 
     // BRKV: the message on a line of its own, at the line being run if a

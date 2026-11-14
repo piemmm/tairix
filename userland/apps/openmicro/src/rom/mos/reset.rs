@@ -52,7 +52,7 @@ pub fn emit(a: &mut Asm, model: Model) {
     service_call(a, model);
     boot_and_enter(a, model);
     enter_language(a, model);
-    brk(a, model);
+    error_text(a);
     defaults(a, model);
 }
 
@@ -165,20 +165,14 @@ fn banner(a: &mut Asm, model: Model) {
     a.here("print_banner");
     a.bit(abs(var::STARTUP));
     a.bpl("print_banner_none");
-    a.jsr("print_inline");
-    match model {
-        Model::ModelB => a.text("\nOpenMOS Micro "),
-        Model::Electron => a.text("\nOpenMOS Electron"),
-    }
-    a.byte(0);
+    let (name, memory) = match model {
+        Model::ModelB => ("\nOpenMOS Micro ", "32K\x07"),
+        Model::Electron => ("\nOpenMOS Electron", "\x07"),
+    };
+    a.call_with_text("print_inline", &[name]);
     a.lda(abs(var::LAST_BREAK));
     a.beq("print_banner_soft");
-    a.jsr("print_inline");
-    match model {
-        Model::ModelB => a.text("32K\x07"),
-        Model::Electron => a.text("\x07"),
-    }
-    a.byte(0);
+    a.call_with_text("print_inline", &[memory]);
     a.here("print_banner_soft");
     if model == Model::ModelB {
         a.lda(imm(0x08));
@@ -345,10 +339,7 @@ fn boot_and_enter(a: &mut Asm, model: Model) {
         a.ldx(abs(var::BASIC_ROM));
         a.bpl("enter_found_language");
     }
-    a.brk();
-    a.byte(0);
-    a.text("Language?");
-    a.byte(0);
+    a.error(0, "Language?");
     a.here("enter_found_language");
     a.stx(abs(var::LANGUAGE));
     a.here("enter_kept_language");
@@ -387,38 +378,8 @@ fn enter_language(a: &mut Asm, model: Model) {
 
 /// BRK: point &FD at the error number, note the ROM it happened in, offer
 /// service call 6, then call BRKV with the language paged in.
-fn brk(a: &mut Asm, model: Model) {
-    a.here("brk_entry");
-    a.txa();
-    a.pha();
-    a.tsx();
-    a.lda(abs(0x0103).x());
-    a.sec();
-    a.sbc(imm(1));
-    a.sta(zp(os::ERROR));
-    a.lda(abs(0x0104).x());
-    a.sbc(imm(0));
-    a.sta(zp(os::ERROR + 1));
-    a.lda(zp(os::ROM));
-    a.sta(abs(var::BRK_ROM));
-    a.ldy(imm(0));
-    a.lda(imm(service::BRK));
-    a.jsr("service_call");
-    a.ldx(abs(var::LANGUAGE));
-    page(a, model, Held::X);
-    a.pla();
-    a.tax();
-    a.lda(zp(os::IRQ_A));
-    a.cli();
-    a.jmp(abs(vector::BRK).ind());
-
-    // With no language to take it, an error is printed and the machine stops.
-    a.here("brk_default");
-    a.jsr("error_text");
-    a.here("brk_default_halt");
-    a.jmp("brk_default_halt");
-
-    // The last error's message, then a newline.
+/// The last error's message, then a newline.
+fn error_text(a: &mut Asm) {
     a.here("error_text");
     a.ldy(imm(1));
     a.here("error_text_next");
@@ -431,12 +392,33 @@ fn brk(a: &mut Asm, model: Model) {
     a.jmp("osnewl");
 }
 
-/// The vectors' defaults, then the OSBYTE settings to &27F; `hard_defaults`
-/// holds &280 on, restored by hard resets alone.
-fn defaults(a: &mut Asm, model: Model) {
+/// BRKV's default: with no language to take it, an error is printed and the
+/// machine stops.
+pub(super) fn brk_default(a: &mut Asm) {
+    a.here("brk_default");
+    a.jsr("error_text");
+    let halt = a.here_local();
+    a.jmp(halt);
+}
+
+/// Where MOS 1.20 keeps the vectors' defaults, which software copies to page
+/// 2 itself.
+pub(super) const VECTOR_DEFAULTS_AT: u16 = 0xD940;
+
+/// The Model B's `vector_defaults` at MOS 1.20's address.
+pub(super) fn pin_vector_defaults(a: &mut Asm) {
+    a.pin(VECTOR_DEFAULTS_AT, |a| vector_defaults(a, Model::ModelB));
+}
+
+/// The vectors' defaults, then the OSBYTE settings to &27F, every reset
+/// restores.
+fn vector_defaults(a: &mut Asm, model: Model) {
     a.here("vector_defaults");
-    for routine in VECTOR_DEFAULTS {
-        a.word(routine);
+    for (routine, address) in VECTOR_DEFAULTS {
+        match model {
+            Model::ModelB => a.word(address),
+            Model::Electron => a.word(routine),
+        }
     }
     // &236: the addresses of the variables, the extended vectors, the ROM
     // table, the keyboard table and the VDU variables.
@@ -444,15 +426,25 @@ fn defaults(a: &mut Asm, model: Model) {
         var::BASE.into(),
         page_d::EXTENDED_VECTORS.into(),
         page2::ROM_TYPES.into(),
-        "key_translation".into(),
+        super::keyboard::key_table(),
         vdu::GRAPHICS_WINDOW.into(),
     ];
     for address in addresses {
         a.word(address);
     }
     a.bytes(&settings(model));
-    a.here("hard_defaults");
-    a.bytes(&hard(model));
+}
+
+/// The Electron's `vector_defaults` wherever they fit, and on either model
+/// `hard_defaults`, &280 on, which hard resets alone restore.
+fn defaults(a: &mut Asm, model: Model) {
+    if model == Model::Electron {
+        a.later(|a| vector_defaults(a, Model::Electron));
+    }
+    a.later(move |a| {
+        a.here("hard_defaults");
+        a.bytes(&hard(model));
+    });
 }
 
 /// The OSBYTE settings from &240 every reset restores.

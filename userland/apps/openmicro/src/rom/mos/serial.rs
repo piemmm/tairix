@@ -80,7 +80,7 @@ pub fn emit(a: &mut Asm, model: Model) {
             rs423(a);
             rs423_interrupts(a);
             setup(a);
-            tables(a);
+            a.later(tables);
         }
         Model::Electron => electron_rs423(a),
     }
@@ -93,7 +93,7 @@ fn electron_rs423(a: &mut Asm) {
     a.here("rs423_put_try");
     a.jsr("buffer_insert");
     a.bcc(RTS);
-    a.cli();
+    a.jsr("interrupt_window");
     a.bcs("rs423_put_try");
 
     // X is kept.
@@ -119,7 +119,8 @@ fn character(a: &mut Asm) {
     a.lda(abs(0x0105).x());
 }
 
-fn oswrch(a: &mut Asm) {
+/// WRCHV's default: the character to each output stream in turn.
+pub(super) fn oswrch_default(a: &mut Asm) {
     a.here("oswrch_default");
     a.here("nvwrch");
     a.pha();
@@ -137,7 +138,9 @@ fn oswrch(a: &mut Asm) {
     a.tax();
     a.pla();
     a.rts();
+}
 
+fn oswrch(a: &mut Asm) {
     a.here("wrch_rs423");
     a.lda(abs(var::OUTPUT_STREAMS));
     a.and(imm(stream::RS423));
@@ -182,7 +185,7 @@ fn oswrch(a: &mut Asm) {
     a.here("wrch_printer_check");
     a.cmp(abs(var::PRINTER_IGNORE));
     a.beq(RTS);
-    a.jmp("printer_put");
+    a.bne("printer_put");
 
     // The handle is clear while the byte is written, so an error writing it
     // closes the spool rather than recurring.
@@ -209,7 +212,7 @@ fn printers(a: &mut Asm, model: Model) {
     a.here("printer_put_try");
     a.jsr("buffer_insert");
     a.bcc(RTS);
-    a.cli();
+    a.jsr("interrupt_window");
     a.bcs("printer_put_try");
 
     // VDU 1's parameter: printed raw, while VDU 2 has the printer on.
@@ -342,7 +345,7 @@ fn rs423(a: &mut Asm) {
     a.here("rs423_put_try");
     a.jsr("buffer_insert");
     a.bcc(RTS);
-    a.cli();
+    a.jsr("interrupt_window");
     a.bcs("rs423_put_try");
 
     // Something to send: the transmitter interrupt on, unless the input
@@ -459,8 +462,6 @@ fn rs423_transmitter(a: &mut Asm) {
     a.lda(imm(number::RS423_INPUT));
     a.here("rs423_input_keyboard");
     a.sta(abs(var::INPUT_SOURCE));
-    a.php();
-    a.sei();
     a.lda(abs(var::ACIA_CONTROL));
     a.and(imm(!control::RECEIVE_INTERRUPT));
     a.cpx(imm(0));
@@ -469,7 +470,6 @@ fn rs423_transmitter(a: &mut Asm) {
     a.here("rs423_input_set");
     a.sta(abs(var::ACIA_CONTROL));
     a.jsr("rs423_chip");
-    a.plp();
     a.cpx(imm(0));
     a.beq(RTS);
     a.jmp("rs423_wake");

@@ -1,0 +1,61 @@
+# Recorded by `cargo xtask openmicro --reference` from MOS 1.20, BASIC II and DFS 1.20,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario osbyte_and_osword_dispatch_with_interrupts_off
+row >A%=&88:CALL &FFF4:B%=?&70 AND 4:A%=&E0:
+row X%=0:Y%=&A:CALL &FFF1:P.B%,?&70 AND 4
+row          4         4
+row >
+
+scenario an_interrupted_a_survives_a_sound_waiting_in_an_event
+row          1         1
+row >
+
+scenario unknown_osbytes_below_the_variables_are_refused
+row   F000FF74
+row   F006FFA1
+row   F006FFA5
+row >
+
+scenario osbyte_155_writes_the_palette_inverted_and_keeps_its_copy
+row          7        15        82
+row >
+
+scenario mode_and_vdu_19_write_the_palette_a_colour_at_a_time
+row         57        D3        77        F4
+row >
+
+scenario vduv_takes_vdu_23_with_c_set_and_plot_with_c_clear
+row          1        1C         0        C8
+row          4         0         0        C8
+row >
+
+scenario osword_127_waits_for_a_disc_until_escape
+row Escape
+row >P.ERR
+row         17
+row >
+
+scenario the_mode_routine_at_cb1d_takes_the_mode_in_a
+row          1        16       280         3
+row         50
+row >
+
+scenario vdu_23_0_10_sets_the_cursor_shape_vdu_23_1_restores
+row         72        20        20        60
+row >
+
+scenario mode_resets_the_paged_line_count
+row          3         0
+row >
+
+scenario osbyte_172_gives_the_key_table_by_internal_key_number
+row >P.?(T%+&10),?(T%+&11),?(T%+&19),?(T%+&2
+row 0)
+row        113        51       140       128
+row >P.?(T%+&30),?(T%+&40),?(T%+&50),?(T%+&6
+row 0)
+row         49         1         2         0
+row >P.?(T%+&70),?(T%+&79)
+row         27       141
+row >
