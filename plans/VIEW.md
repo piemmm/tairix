@@ -216,9 +216,10 @@ What "complete" means, per format:
   8:8:8:8 packings, sprite palettes including the full 256-entry form and the
   short VIDC1 ones, and all three mask forms — an old-format mask at the
   image's own depth, a new-format 1-bit mask, and a wide 8-bit alpha mask.
-  `plans/RISCOS-EMULATOR.md` already specifies a sandboxed sprite *data*
-  decode for `!Sprites22`/`!Sprites` icon loading, so this decoder has a
-  second planned consumer and belongs in the shared crate.
+  It belongs in the shared crate because it has other consumers: the icon
+  pipeline draws a RISC OS application from its `!Sprites` through it
+  (`plans/ICONS.md` I17), and the RISC OS emulator's sprite operations read
+  its structures (`plans/RISCOS-EMULATOR.md` RO22).
 
 ### A format with no signature is recognised by the length it states
 
@@ -242,9 +243,10 @@ those plus `sniff`, so there is one dispatch table rather than two. The named
 format's own parser still validates the bytes, so naming the wrong one is
 refused rather than misread.
 
-The sprite *name* is not surfaced. Nothing addresses a sprite by name yet, and
-a `Frame::name` would be `None` for every other format — speculative surface.
-Name-addressed lookup lands with the emulator, its first consumer.
+The viewer does not surface a sprite's *name*: a `Frame::name` would be `None`
+for every other format. Name-addressed lookup is `find_named` and
+`decode_named`, which the icon pipeline uses to draw a RISC OS application's
+own sprite (`plans/ICONS.md` I17).
 
 ## Where each piece lives, and why there
 

@@ -194,6 +194,7 @@ plan's ledger. A `blocked` row names its blocker.
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 | BEEB | The Open Micro emulator `OpenMicro.app` — the BBC Micro Model B and the Acorn Electron with its Plus 1 — and their clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs (`plans/BEEB.md`) | blocked: BB18 needs a corpus of real software images a developer holds outside the tree |
 | PCEMU | `PCEmulator.app`, the PC/XT-class emulator up to the 80186, TAIRiX DOS, and the BR26 code installation its translator needs (`plans/PCEMU.md`) | in progress |
+| RISCOS-EMULATOR | `RISCOSEmulator.app`: RISC OS applications on the TAIRiX desktop — the ARM processor, a first-party RISC OS, BBC BASIC V and VI, the Wimp and Toolbox, machine mode for software that drives the Acorn chips, the translator, and the shared libraries and desktop facilities they need (`plans/RISCOS-EMULATOR.md`) | planned |
 
 ### Desktop
 

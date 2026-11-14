@@ -1,9 +1,12 @@
 //! The services answering a program that has written over the data area,
-//! the tables it points at, or the registers, with the sizes and addresses
-//! a 16-bit BIOS computes: each case once overflowed a sum and stopped the
-//! emulator.
+//! the tables it points at, or the registers: the sizes and addresses a
+//! 16-bit BIOS computes, where a case once overflowed a sum and stopped the
+//! emulator, and the ports it is pointed at, which it drives as the
+//! hardware's BIOS does.
 
-use super::tests::{booted, call, carry, poke};
+use super::tests::{booted, call, carry, poke, run, wait_ticks};
+use crate::chips::keyboard::Scan;
+use crate::chips::ppi::port_b;
 use crate::cpu::Bus as _;
 use crate::machine::Template;
 
@@ -100,4 +103,30 @@ fn a_print_screen_over_a_column_count_written_over_prints_each_row_by_its_low_by
         let count = u16::from_le_bytes([m.board().peek(0x05F0), m.board().peek(0x05F1)]);
         assert_eq!(count, printed, "{columns:02X?}");
     }
+}
+
+#[test]
+fn a_crtc_port_aimed_at_the_board_reaches_its_device_as_the_hardware_would() {
+    // The planar decodes 60h–7Fh to the 8255, so 7Dh is port B.
+    let mut m = booted(Template::IbmXt, None);
+    poke(&mut m, CRTC_PORT, &[0x7D, 0x00]);
+    call(&mut m, 0x10, |r| r.set16(0, 0x0500));
+    let at = m.board().cycles_at(m.now());
+    assert_eq!(
+        m.board_mut().input(0x61, at) & port_b::KEYBOARD_CLOCK,
+        0,
+        "the page's CRTC indexes take the keyboard's clock down"
+    );
+    m.board_mut().key(Scan::plain(0x1E), true);
+    m.board_mut().key(Scan::plain(0x1E), false);
+    run(&mut m, |asm| wait_ticks(asm, 4), |_| {});
+    assert_eq!(super::keys_waiting(&m), Some(0), "no key reaches the BIOS");
+    assert!(
+        !m.board().keyboard_idle(),
+        "the keyboard keeps what it cannot send"
+    );
+
+    let mut workstation = booted(Template::Workstation186, None);
+    poke(&mut workstation, CRTC_PORT, &[0x22, 0xFF]);
+    call(&mut workstation, 0x10, |r| r.set16(0, 0x0500));
 }

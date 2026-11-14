@@ -265,6 +265,16 @@ mechanism is deleted (D19). A presentation child the desktop draws itself is
 the information panel's kind, and one that takes an answer is the field's;
 neither is an application's surface.
 
+`plans/RISCOS-EMULATOR.md` RO35 plans the client D19 lacked: a hosted RISC OS
+application's Save and Info boxes, as the owner's own window hung where a
+submenu hangs. With it come:
+
+- children built on demand;
+- plates that scroll;
+- rows from a hosted environment that state no function, the one exception to
+  M10;
+- a grab for a hosted look's own menu popups.
+
 ### 1.5 The grab
 
 While a chain is up the seat's pointer and keyboard route to it:

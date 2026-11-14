@@ -1198,7 +1198,10 @@ are silent the 80387 reference's lists of how it differs from them decide.
   protocol in both directions, and the translator differentially against the
   interpreter, and the 8087 over hostile instruction streams (`fuzz_fpu`).
   So does every service a guest calls with hostile registers:
-  the BIOS over a written-over data area on every adapter (`fuzz_bios`), the
+  the BIOS over a written-over data area on every adapter (`fuzz_bios`; its
+  CRTC port is aimed anywhere but the system board's own devices, where the
+  BIOS stops the keyboard as the hardware's would, a case its hostile tests
+  pin), the
   EMS manager, TAIRiX DOS's INT 21h, 25h and 26h (`fuzz_dos`), INT 33h
   under motion and mode changes (`fuzz_mouse`), and `COMMAND.COM` typed at
   with hostile lines and running hostile batch files, every line ending in a

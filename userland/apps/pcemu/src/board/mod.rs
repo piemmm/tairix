@@ -1628,6 +1628,19 @@ impl Board {
         };
     }
 
+    /// Whether I/O port `port` reaches one of the system board's own devices
+    /// — the planar's, in every kilobyte its decode repeats, or the 80186's
+    /// control block where its relocation register places it — rather than
+    /// a card's.
+    #[must_use]
+    pub fn is_board_port(&self, port: u16) -> bool {
+        self.pcb_port(port).is_some()
+            || matches!(
+                self.planar.decode[usize::from(port) % PORTS],
+                Port::Dma | Port::Pic | Port::Pit | Port::Ppi | Port::DmaPage | Port::NmiMask
+            )
+    }
+
     /// The control block's offset for an I/O port it decodes.
     fn pcb_port(&self, port: u16) -> Option<u8> {
         match self.pcb.as_ref()?.space() {

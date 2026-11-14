@@ -47,7 +47,10 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   secondary press opens the menu that **the application itself** declared,
   whose *Info* row shows a session-drawn information panel of its bundle's
   **signed** manifest. There is no pinning: applications are launched from
-  the program library or from a desktop shortcut;
+  the program library or from a desktop shortcut. `plans/RISCOS-EMULATOR.md`
+  RO36 plans hosted slots: a slot per guest application of a bundle that
+  hosts a foreign desktop, attested to the host, with clicks and menus
+  answered on demand;
 - on the right, the **notification area**;
 - and, always right-most and immovable, the **account capsule** — the
   signed-in account's own circular identity disc, behind which lives the

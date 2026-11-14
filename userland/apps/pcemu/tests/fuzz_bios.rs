@@ -10,8 +10,9 @@
 //! The data area's video fields and the vectors to the parameter and font
 //! tables are scrambled between calls, as a program that writes them
 //! scrambles them; pointers passed in registers point at the harness's own
-//! area, so what is hostile is what a program may say to the BIOS, not a
-//! program overwriting the stub that calls it. Runs the fixed smoke sweep
+//! area, and the CRTC's port at anything but the system board's own
+//! devices, so what is hostile is what a program may say to the BIOS, not a
+//! program overwriting the stub that calls it or the machine that runs it. Runs the fixed smoke sweep
 //! under plain `cargo test`; keeps drawing from the same seeded stream until
 //! `TAIRIX_FUZZ_BUDGET_SECS` elapses under `cargo xtask fuzz`.
 
@@ -37,10 +38,17 @@ const STUB: u16 = 0x0060;
 const STACK: u16 = 0x1000;
 /// The segment pointers in registers point into.
 const AREA: u16 = 0x2000;
-/// The video fields of the BIOS data area: the mode, columns, page size and
-/// start, cursors, shape, page, CRTC port, mode register and palette; the
-/// EGA's and VGA's rows, character height and switches.
-const VIDEO_FIELDS: [core::ops::Range<u32>; 2] = [0x449..0x467, 0x484..0x48B];
+/// The video fields of the BIOS data area but the CRTC's port: the mode,
+/// columns, page size and start, cursors, shape and page, mode register and
+/// palette; the EGA's and VGA's rows, character height and switches.
+const VIDEO_FIELDS: [core::ops::Range<u32>; 3] = [0x449..0x463, 0x465..0x467, 0x484..0x48B];
+/// The data area's CRTC port. Aimed at the system board's own devices, the
+/// BIOS writes there as the hardware's does and can stop the keyboard a later
+/// read waits on forever, as its hostile tests pin, so it is never aimed there.
+const CRTC_PORT: u32 = 0x463;
+/// How far past its CRTC's index port a 6845 adapter's registers run
+/// (3B4h–3BFh, 3D4h–3DFh): as far as a service reaches through the field.
+const CRTC_BLOCK_END: u16 = 11;
 /// The vectors to the video parameters, the CGA's upper font and the EGA's
 /// and VGA's font.
 const TABLE_VECTORS: [u32; 3] = [0x1D, 0x1F, 0x43];
@@ -60,15 +68,23 @@ const ADAPTERS: [Adapter; 5] = [
     Adapter::Vga(Monitor::Colour),
 ];
 
+/// The machines a run may be.
+const TEMPLATES: [Template; 4] = [
+    Template::IbmPc,
+    Template::IbmXt,
+    Template::TurboXt,
+    Template::Workstation186,
+];
+
 /// A machine past its power-on self test, waiting at its no-boot prompt.
 fn machine(rng: &mut Prng) -> Machine {
-    let templates = [
-        Template::IbmPc,
-        Template::IbmXt,
-        Template::TurboXt,
-        Template::Workstation186,
-    ];
-    let mut config = rng.pick(&templates).config();
+    let template = *rng.pick(&TEMPLATES);
+    powered(template, rng)
+}
+
+/// A `template` machine past its power-on self test, its adapter drawn.
+fn powered(template: Template, rng: &mut Prng) -> Machine {
+    let mut config = template.config();
     if rng.below(2) == 0 {
         config.video = [Some(*rng.pick(&ADAPTERS)), None];
     }
@@ -91,6 +107,19 @@ fn scramble(machine: &mut Machine, rng: &mut Prng) {
         for at in field {
             if rng.below(8) == 0 {
                 poke(machine, at, rng.edge_biased_u8());
+            }
+        }
+    }
+    if rng.below(8) == 0 {
+        let port = match rng.below(3) {
+            0 => 0x03B4,
+            1 => 0x03D4,
+            _ => u16::from_le_bytes([rng.edge_biased_u8(), rng.next_u8()]),
+        };
+        let board = machine.board();
+        if !(0..=CRTC_BLOCK_END).any(|past| board.is_board_port(port.wrapping_add(past))) {
+            for (at, byte) in (CRTC_PORT..).zip(port.to_le_bytes()) {
+                poke(machine, at, byte);
             }
         }
     }
@@ -177,6 +206,23 @@ fn run(rng: &mut Prng) {
             scramble(&mut machine, rng);
         }
         call(&mut machine, rng);
+    }
+}
+
+#[test]
+fn scrambling_never_aims_the_crtc_at_the_board() {
+    let mut rng = Prng::new(0x6845_0063);
+    for template in TEMPLATES {
+        let mut machine = powered(template, &mut rng);
+        for _ in 0..1024 {
+            scramble(&mut machine, &mut rng);
+            let board = machine.board();
+            let port = u16::from_le_bytes([board.peek(CRTC_PORT), board.peek(CRTC_PORT + 1)]);
+            assert!(
+                !(0..=CRTC_BLOCK_END).any(|past| board.is_board_port(port.wrapping_add(past))),
+                "{template:?}: {port:04X}h"
+            );
+        }
     }
 }
 

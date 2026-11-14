@@ -87,7 +87,11 @@ to the outer frame.
   resize/maximize) — that is cooperative lifecycle handling, not a decoration
   path. Such app-crate changes are permitted provided they are first-class,
   correct, and well-reasoned; the ban is only on an app painting or
-  intercepting window-manager furniture.
+  intercepting window-manager furniture. The one planned exception is a bundle
+  whose signed manifest declares it hosts a foreign desktop. Its RISC OS look
+  draws that desktop's furniture in borderless windows, and the WM still
+  performs every move, resize, restack and minimise
+  (`plans/RISCOS-EMULATOR.md` RO33, RO44).
 - **No second visual recipe or constant (§2.2).** Frame/title metrics, palette
   roles, and motion come from `lib/theme`; drawing goes through the one
   `lib/raster` path already used for rounded corners; the rounded-corner math

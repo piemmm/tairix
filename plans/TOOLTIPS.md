@@ -37,7 +37,9 @@ region and a line, and the seat owns everything else.
   rename of the former `MenuAnchor`).
 - **`text` is a `TooltipText`** (`BoundedText<0, TOOLTIP_TEXT_MAX>`): bounded
   and control-character-refusing like a `WindowTitle`, validated at
-  construction *and* again at decode.
+  construction *and* again at decode. `plans/RISCOS-EMULATOR.md` RO38 plans
+  multi-line text up to a RISC OS `HelpReply`'s bound for hosted interactive
+  help.
 - **Idempotent replace, and empty withdraws.** A window holds at most one
   declaration, so a second replaces the first; empty text retracts it and
   takes a tip already on screen down. One operation, so there is no second

@@ -125,7 +125,10 @@ there, and the full folder browser one press away.
   begins a *save* drag on the seat's one drag carrier (`drag.rs`): the
   document's large tile — its picture above its name, as a listing draws it —
   held where the press held the panel's picture (`PictureGrab`), the pointer
-  showing whether a drop there saves.
+  showing whether a drop there saves. Only the Save panel starts a save drag
+  today. `plans/RISCOS-EMULATOR.md` RO37 plans one started by an application
+  for a document it holds: a RISC OS Save box's file icon, answered by
+  `SaveInto` as this drag is.
 - **Where a save drag lands.** On the desktop: the folder the pinboard shows
   there, a folder icon's or the `Desktop` folder itself, resolved by the
   session. On a window of an application that answers the offer (SD4): the

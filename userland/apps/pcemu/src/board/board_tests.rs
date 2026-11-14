@@ -88,6 +88,27 @@ fn ten_bit_decode_repeats_every_kilobyte() {
 }
 
 #[test]
+fn the_board_names_its_own_ports_in_every_kilobyte_and_its_control_block() {
+    let xt = board(CpuModel::I8088);
+    for port in [
+        0x0000, 0x0021, 0x0061, 0x007D, 0x0461, 0xFC40, 0x00A0, 0x0081,
+    ] {
+        assert!(xt.is_board_port(port), "{port:04X}h");
+    }
+    for port in [0x00C0, 0x00FF, 0x0100, 0x03D4, 0x03F2, 0xFF22] {
+        assert!(!xt.is_board_port(port), "{port:04X}h is not the XT's");
+    }
+    let workstation = board(CpuModel::I80186);
+    for port in [0xFF00, 0xFF22, 0xFFFF] {
+        assert!(
+            workstation.is_board_port(port),
+            "{port:04X}h, the control block"
+        );
+    }
+    assert!(!workstation.is_board_port(0xFEFF));
+}
+
+#[test]
 fn the_page_registers_are_write_only() {
     let mut b = board(CpuModel::I8088);
     b.output(0x81, 0x05, 0);

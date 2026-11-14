@@ -234,6 +234,9 @@ for the pointer with `LockPointer` (PO15).
 The client grab (PO16) holds every button of its gesture: a primary or
 secondary press on content takes it, a second button pressed meanwhile joins
 it wherever the pointer is, and each release comes back to the window. The
+middle button reaches content only under pointer lock.
+`plans/RISCOS-EMULATOR.md` RO34 plans it as a third client button, the RISC
+OS Adjust, together with an application's own bounded cursor image. The
 seat's pointer channel (PO17) keeps a slot for every button release it owes
 and folds motion and scrolling into its newest record when full, so a wedged
 desktop loses intermediate samples, never displacement or a release.

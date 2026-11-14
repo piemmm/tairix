@@ -568,6 +568,13 @@ draws (`plans/COMPOSITOR-WORK.md` stage M).
   transient's parent is a top-level window of the caller's, never a transient
   or a layer surface (`NotSupported`), for popups as for tool windows. Not
   opened while the seat is held, since opening restacks the family.
+  `plans/RISCOS-EMULATOR.md` RO33 plans what a hosted desktop's panes need,
+  still never revealing a screen position:
+  - attached windows, at any depth, that follow their parent;
+  - borderless top-level windows;
+  - client-initiated move and resize;
+  - relative moves, with move deltas reported;
+  - restacking among one's own windows.
 - Coverage: `lib/abi` round trip and fail-closed decode (zero parent, a
   reserved endpoint, a bad extent, a dirty or out-of-band carry, an over-long,
   dirty or control-character title, a dirty, crossed or fixed-with-a-range
