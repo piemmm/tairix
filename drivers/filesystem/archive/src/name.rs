@@ -14,7 +14,9 @@ use tairix_fsmeta::preset::acorn;
 
 use crate::tree::MAX_DEPTH;
 
-/// A character set an archive spells names in.
+/// A character set an archive spells names in. RISC OS's names cross through
+/// [`from_riscos`] and [`to_riscos`] instead, since a RISC OS leaf is more
+/// than its characters.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Charset {
     /// UTF-8, as written.
@@ -23,9 +25,6 @@ pub(crate) enum Charset {
     Cp437,
     /// ISO 8859-1.
     Latin1,
-    /// RISC OS's Latin-1: ISO 8859-1 with characters of its own in
-    /// `0x80..=0x9F`.
-    RiscOs,
 }
 
 impl Charset {
@@ -39,10 +38,9 @@ impl Charset {
                 core::str::from_utf8(bytes).ok()?;
                 out.extend_from_slice(bytes);
             }
-            Self::Cp437 | Self::Latin1 | Self::RiscOs => {
+            Self::Cp437 | Self::Latin1 => {
                 for &byte in bytes {
                     let ch = match self {
-                        Self::RiscOs => acorn::latin1_char(byte)?,
                         Self::Latin1 => char::from(byte),
                         _ => tairix_cp437::char_of(byte),
                     };
@@ -65,11 +63,6 @@ impl Charset {
             Self::Latin1 => {
                 for ch in text.chars() {
                     out.push(u8::try_from(u32::from(ch)).ok()?);
-                }
-            }
-            Self::RiscOs => {
-                for ch in text.chars() {
-                    out.push(acorn::latin1_byte(ch)?);
                 }
             }
             Self::Cp437 => {
@@ -100,10 +93,9 @@ pub(crate) enum Spelled {
     Refused,
 }
 
-/// The UTF-8 member path `path`, cut at `separator`, each component crossed
-/// through `cross` (RISC OS's exchange of `.` and `/`, or none); refused past
-/// the depth the tree nests to, before a component past it is made.
-pub(crate) fn spelled(path: &[u8], separator: u8, cross: fn(u8) -> u8) -> Spelled {
+/// The UTF-8 member path `path`, cut at `separator`; refused past the depth
+/// the tree nests to, before a component past it is made.
+pub(crate) fn spelled(path: &[u8], separator: u8) -> Spelled {
     let mut parts = Vec::new();
     for part in path.split(|&byte| byte == separator) {
         match part {
@@ -116,7 +108,7 @@ pub(crate) fn spelled(path: &[u8], separator: u8, cross: fn(u8) -> u8) -> Spelle
         if component.try_reserve_exact(part.len()).is_err() {
             return Spelled::Refused;
         }
-        component.extend(part.iter().map(|&byte| cross(byte)));
+        component.extend_from_slice(part);
         if !servable(&component) || parts.try_reserve(1).is_err() {
             return Spelled::Refused;
         }
@@ -129,31 +121,29 @@ pub(crate) fn spelled(path: &[u8], separator: u8, cross: fn(u8) -> u8) -> Spelle
     }
 }
 
-/// A byte that crosses as itself.
-pub(crate) const fn as_is(byte: u8) -> u8 {
-    byte
-}
-
-/// A RISC OS leaf name as an archive spells it — RISC OS's Latin-1, a dot
-/// written as `/` — served, or `None` for one no volume serves.
+/// A RISC OS leaf name as an archive spells it, served, or `None` for one no
+/// RISC OS name can be ([`acorn::leaf_from_riscos`]).
 pub(crate) fn from_riscos(spelt: &[u8]) -> Option<Vec<u8>> {
-    let mut crossed = Vec::new();
-    crossed.try_reserve_exact(spelt.len()).ok()?;
-    crossed.extend(spelt.iter().map(|&byte| acorn::crossed_name_byte(byte)));
-    let name = Charset::RiscOs.decode(&crossed)?;
-    servable(&name).then_some(name)
+    owned(acorn::leaf_from_riscos(spelt).ok()?.as_bytes())
 }
 
 /// The served `name` as RISC OS spells it in an archive, in at most `max`
-/// bytes, or `None` where it cannot be: a character RISC OS's Latin-1 lacks,
-/// a space, or one of the characters RISC OS keeps out of a name.
+/// bytes, or `None` where it cannot be ([`acorn::leaf_to_riscos`]).
 pub(crate) fn to_riscos(name: &[u8], max: usize) -> Option<Vec<u8>> {
-    let mut spelt = Charset::RiscOs.encode(name)?;
-    for byte in &mut spelt {
-        *byte = acorn::crossed_name_byte(*byte);
+    let leaf = acorn::leaf_to_riscos(name).ok()?;
+    let spelt = leaf.as_bytes();
+    if spelt.len() > max {
+        return None;
     }
-    let keeps = |byte: &u8| *byte != b' ' && !acorn::RESERVED_NAME_BYTES.contains(byte);
-    (!spelt.is_empty() && spelt.len() <= max && spelt.iter().all(keeps)).then_some(spelt)
+    owned(spelt)
+}
+
+/// `bytes`, held, or `None` where no room could be had for them.
+fn owned(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes.len()).ok()?;
+    out.extend_from_slice(bytes);
+    Some(out)
 }
 
 #[cfg(test)]

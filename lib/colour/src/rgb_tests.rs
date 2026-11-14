@@ -62,3 +62,18 @@ fn an_opaque_colour_and_its_channels_convert_both_ways() {
     assert!(rgb.opaque().is_opaque());
     assert!(!rgb.with_alpha(254).is_opaque());
 }
+
+#[test]
+fn a_risc_os_colour_word_holds_blue_green_red_above_an_unused_byte() {
+    assert_eq!(Rgb::from_riscos_word(0x0000_FF00), Rgb::new(0xFF, 0, 0));
+    assert_eq!(Rgb::from_riscos_word(0x00FF_0000), Rgb::new(0, 0xFF, 0));
+    assert_eq!(Rgb::from_riscos_word(0xFF00_0000), Rgb::new(0, 0, 0xFF));
+    assert_eq!(
+        Rgb::from_riscos_word(0x3366_99A5),
+        Rgb::new(0x99, 0x66, 0x33),
+        "the low byte says nothing of the colour"
+    );
+    let colour = Rgb::new(0x12, 0x34, 0x56);
+    assert_eq!(colour.riscos_word(), 0x5634_1200);
+    assert_eq!(Rgb::from_riscos_word(colour.riscos_word()), colour);
+}

@@ -241,6 +241,29 @@ fn the_table_is_written_afresh_and_unchanged_bytes_copied() {
     assert_eq!(order, [0x82, 0xFF, 0x00, 0xFF, 0x82, 0x82, 0x00][..6]);
 }
 
+/// An entry named as RISC OS could not have named it is left out, and the
+/// archive is not written back, which would lose it.
+#[test]
+fn an_entry_named_as_no_risc_os_name_can_be_is_left_out_and_kept() {
+    for name in [&b"wild*card"[..], b"has space", b"colon:"] {
+        let bytes = arcfs(
+            &[
+                Item::File(0x82, b"Kept", b"kept".to_vec(), 4, stored_attr(b"kept")),
+                Item::File(0x82, name, b"x".to_vec(), 1, stored_attr(b"x")),
+            ],
+            false,
+        );
+        let mut fs = open(&MemoryAttachment::new(&bytes, true, b"odd.arc"));
+        let root = fs.root();
+        assert_eq!(names(&mut fs, root), [b"Kept".to_vec()], "{name:?}");
+        assert_eq!(
+            fs.write_refusal(),
+            Some(WriteRefusal::UnsupportedFeature),
+            "{name:?}"
+        );
+    }
+}
+
 #[test]
 fn a_name_longer_than_an_entry_holds_is_refused() {
     let mut fs = open(&MemoryAttachment::new(&sample(false), true, b"sample.arc"));

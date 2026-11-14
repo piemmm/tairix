@@ -46,6 +46,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_colour::Rgb;
 use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
@@ -996,8 +997,7 @@ impl IndexedPalette {
         Self { entries: table }
     }
 
-    /// The colour stored at `index`. An entry is `&BBGGRR00`, so it lands in
-    /// memory as an unused byte and then red, green, and blue.
+    /// The colour stored at `index`, an entry being a RISC OS colour word.
     fn stored(palette: &[u8], index: u32) -> [u8; 3] {
         let at = usize::try_from(index)
             .ok()
@@ -1008,7 +1008,7 @@ impl IndexedPalette {
         else {
             return [0, 0, 0];
         };
-        [entry[1], entry[2], entry[3]]
+        Rgb::from_riscos_word(u32::from_le_bytes(*entry)).to_array()
     }
 
     /// Override the supremacy bits a 256-colour pixel's top four carry: red

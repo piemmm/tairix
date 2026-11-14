@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight};
+use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight, GenericFamily};
 use tairix_collections::{try_arc, OrderedMap};
 use tairix_drawing::{Glyph, Glyphs};
 use tairix_font::OwnedOutline;
@@ -214,35 +214,69 @@ impl<S: OutlineSource> Glyphs for Lettering<S> {
     }
 }
 
-/// The installed family `family` names: a generic name its family, any
-/// other the family of that key, sans-serif where it names none.
+/// Most entries of one family list read: a containment bound on a
+/// document's list, well past any a typesetter writes.
+const MOST_FAMILIES: usize = 8;
+
+/// The family a drawing's text is set in where its list names none.
+const DEFAULT_KEY: FamilyKey = match FamilyKey::new(tairix_drawing::DEFAULT_FAMILY) {
+    Ok(key) => key,
+    Err(_) => panic!("the drawing's default family is a family key"),
+};
+
+/// The font-service family a family list, as a drawing spells one, is set
+/// in: its first entry the service always answers — a generic family, a
+/// RISC OS family by the generic it is set in, a familiar family by the
+/// generic it stands for — else its first entry's own family, which the
+/// service answers only where the store holds it, else the drawing's default.
+///
+/// The service answers a generic from the installed family whose own
+/// manifest claims it, so no installed family is named here.
 #[must_use]
-pub fn family_key(family: &str) -> FamilyKey {
-    let mut spelt = [0u8; tairix_abi::font_ipc::FONT_FAMILY_KEY_LEN];
-    let bare = family.trim().trim_matches(|c| c == '"' || c == '\'');
-    let lowered = match spelt.get_mut(..bare.len()) {
-        Some(room) => {
-            for (slot, byte) in room.iter_mut().zip(bare.bytes()) {
-                *slot = if byte == b' ' {
-                    b'-'
-                } else {
-                    byte.to_ascii_lowercase()
-                };
-            }
-            core::str::from_utf8(room).unwrap_or("")
+pub fn family_key(list: &str) -> FamilyKey {
+    let mut named = None;
+    for entry in list.split(',').take(MOST_FAMILIES) {
+        let bare = entry.trim().trim_matches(|c| c == '"' || c == '\'');
+        let spelt = tairix_drawing::riscos::riscos_family_generic(bare).unwrap_or(bare);
+        let Some(key) = key_of(spelt) else {
+            continue;
+        };
+        if let Some(generic) = generic_of(key) {
+            return generic;
         }
-        // Too long to be any family's key.
-        None => "",
+        named.get_or_insert(key);
+    }
+    named.unwrap_or(DEFAULT_KEY)
+}
+
+/// The key a family's name spells, in lower case with a hyphen for a space,
+/// or `None` for a name no family's key can be.
+fn key_of(name: &str) -> Option<FamilyKey> {
+    let mut spelt = [0u8; tairix_abi::font_ipc::FONT_FAMILY_KEY_LEN];
+    let room = spelt.get_mut(..name.len())?;
+    for (slot, byte) in room.iter_mut().zip(name.bytes()) {
+        *slot = if byte == b' ' {
+            b'-'
+        } else {
+            byte.to_ascii_lowercase()
+        };
+    }
+    FamilyKey::new(core::str::from_utf8(room).ok()?).ok()
+}
+
+/// The generic family `key` is, or the one a familiar family it names
+/// stands for.
+fn generic_of(key: FamilyKey) -> Option<FamilyKey> {
+    if GenericFamily::from_key(key).is_some() {
+        return Some(key);
+    }
+    let generic = match key.as_str() {
+        "times" | "times-new-roman" | "georgia" => "serif",
+        "courier" | "courier-new" => "monospace",
+        "helvetica" | "arial" | "sans" | "system-ui" => "sans-serif",
+        _ => return None,
     };
-    let named = match lowered {
-        "serif" | "times" | "times-new-roman" | "georgia" | "trinity" => "noto-serif",
-        "monospace" | "mono" | "courier" | "courier-new" | "corpus" => "mono",
-        "sans-serif" | "sans" | "helvetica" | "arial" | "homerton" | "system-ui" => "noto-sans",
-        other => other,
-    };
-    FamilyKey::new(named)
-        .or_else(|_| FamilyKey::new("noto-sans"))
-        .unwrap_or(FamilyKey::MONO)
+    FamilyKey::new(generic).ok()
 }
 
 /// The glyph a font service outline is: its contours in ems from the pen on
@@ -303,7 +337,8 @@ mod tests {
     use tairix_drawing::Glyphs;
     use tairix_font::{OwnedContour, OwnedOutline, OwnedSegment};
 
-    use super::{family_key, glyph_of, Lettering, OutlineSource};
+    use super::{family_key, glyph_of, Lettering, OutlineSource, MOST_FAMILIES};
+    use alloc::string::String;
 
     #[test]
     fn an_outline_comes_out_in_ems_downward_and_sheared() {
@@ -432,11 +467,46 @@ mod tests {
             "another weight is another glyph"
         );
         assert_eq!(family_key("Times New Roman"), family_key("serif"));
-        assert_eq!(family_key("'Courier'"), FamilyKey::MONO);
+        assert_eq!(family_key("'Courier'"), family_key("monospace"));
         assert_eq!(
             family_key("no-such-face/.."),
             family_key("sans-serif"),
             "never a path"
+        );
+    }
+
+    /// A family list is set in its first entry the service always answers,
+    /// a generic going to the service as itself, which answers it from the
+    /// family that claims it; a list of named families in its first.
+    #[test]
+    fn a_family_list_is_set_in_its_first_family_the_service_always_answers() {
+        let key = |name: &str| FamilyKey::new(name).expect("a key");
+        for (list, family) in [
+            ("serif", "serif"),
+            ("monospace", "monospace"),
+            ("cursive", "cursive"),
+            ("Trinity", "serif"),
+            ("corpus", "monospace"),
+            ("Homerton", "sans-serif"),
+            ("NewHall, sans-serif", "sans-serif"),
+            ("Georgia, serif", "serif"),
+            ("\"Fira Sans\", monospace", "monospace"),
+            ("Inter", "inter"),
+            ("Inter, Fira Sans", "inter"),
+            ("mono", "mono"),
+            ("", "sans-serif"),
+            (", ,", "sans-serif"),
+        ] {
+            assert_eq!(family_key(list), key(family), "{list:?}");
+        }
+        let long: String = (0..MOST_FAMILIES)
+            .map(|at| alloc::format!("named{at}, "))
+            .chain(core::iter::once(String::from("serif")))
+            .collect();
+        assert_eq!(
+            family_key(&long),
+            key("named0"),
+            "a list is read no further than its bound"
         );
     }
 }

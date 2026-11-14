@@ -446,31 +446,26 @@ fn quoted(text: &str) -> Option<(&str, &str)> {
 
 /// The RISC OS `path`, expanded, as a path inside the application spelled as
 /// TAIRiX spells it, or `None` where it starts anywhere but the application's
-/// own directory, lies more than [`MAX_DEPTH`] deep, or holds a component no
-/// name can be.
+/// own directory, lies more than [`MAX_DEPTH`] deep, or holds a leaf no RISC
+/// OS name can be.
+///
+/// Only an ASCII path is taken: a line read as UTF-8 says what RISC OS's
+/// Latin-1 would only in ASCII.
 fn within_application(path: &str) -> Option<String> {
     let inside = path.strip_prefix(APPLICATION)?.strip_prefix('.')?;
+    if !inside.is_ascii() {
+        return None;
+    }
     let mut out = String::new();
     out.try_reserve_exact(inside.len()).ok()?;
-    for (depth, component) in inside.split('.').enumerate() {
-        if depth == MAX_DEPTH
-            || component.is_empty()
-            || !component
-                .bytes()
-                .all(|byte| byte.is_ascii_graphic() && !acorn::RESERVED_NAME_BYTES.contains(&byte))
-        {
+    for (depth, leaf) in acorn::path_from_riscos(inside.as_bytes()).enumerate() {
+        if depth == MAX_DEPTH {
             return None;
         }
-        let start = out.len();
         if depth > 0 {
             out.push('/');
         }
-        out.extend(
-            component
-                .bytes()
-                .map(|byte| char::from(acorn::crossed_name_byte(byte))),
-        );
-        tairix_path::validate_file_name(&out[start + usize::from(depth > 0)..]).ok()?;
+        out.push_str(core::str::from_utf8(leaf.ok()?.as_bytes()).ok()?);
     }
     Some(out)
 }

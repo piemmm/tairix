@@ -54,7 +54,7 @@ use tairix_abi::fs::{DirEntry, DocumentStamp, FileKind};
 use tairix_abi::home::USERS_DIR;
 use tairix_abi::window_ipc::{DragPicture, IconAsset};
 use tairix_abi::{BundleEntry, ProgramKind, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
-use tairix_fsmeta::preset::acorn::{self, Filetype};
+use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard, Thumbnail};
 
 use crate::entry::{resolve_target, Entry, EntryKind};
@@ -1508,8 +1508,8 @@ const FILETYPE_TABLE: &[(MediaType, &[&str])] = &[
 
 /// Every filetype's row in [`FILETYPE_TABLE`] plus one, or zero where it has
 /// none, so a lookup is one load however many types the table holds. Building
-/// it proves at compile time that each code is three lowercase hex digits, that
-/// no filetype names two types and that no type has two rows.
+/// it proves at compile time that each code is three lower-case hex digits,
+/// that no filetype names two types and that no type has two rows.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "a hex digit is four bits, and the table holds fewer rows than a u8 counts"
@@ -1529,20 +1529,12 @@ const FILETYPE_ROWS: [u8; 0x1000] = {
         let mut at = 0;
         while at < codes.len() {
             let code = codes[at].as_bytes();
-            assert!(code.len() == 3);
-            let mut raw = 0usize;
-            let mut digit = 0;
-            while digit < 3 {
-                let byte = code[digit];
-                assert!(byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
-                let nibble = if byte.is_ascii_digit() {
-                    byte - b'0'
-                } else {
-                    byte - b'a' + 10
-                };
-                raw = raw << 4 | nibble as usize;
-                digit += 1;
-            }
+            let Some(filetype) = Filetype::from_hex(code) else {
+                panic!("a filetype is three hex digits");
+            };
+            let spelt = filetype.hex();
+            assert!(code[0] == spelt[0] && code[1] == spelt[1] && code[2] == spelt[2]);
+            let raw = filetype.get() as usize;
             assert!(rows[raw] == 0);
             rows[raw] = (row + 1) as u8;
             at += 1;
@@ -1561,51 +1553,23 @@ pub fn media_for_filetype(filetype: Filetype) -> Option<MediaType> {
         .map(|(media, _)| *media)
 }
 
-/// What ends a file name: the RISC OS filetype after its last comma, when
-/// that is three hex digits, and the extension after the last dot of what
-/// comes before it. Each needs a stem of its own, so a name whose only dot or
-/// comma starts it ends in neither.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Ending<'a> {
-    /// What the ending follows: the whole name when it ends in neither.
-    pub stem: &'a str,
-    /// The filetype the name carries.
-    pub filetype: Option<Filetype>,
-    /// The extension, without its dot.
-    pub extension: Option<&'a str>,
+/// The filetype RISC OS gives a new file of `media`: the first its row in
+/// [`FILETYPE_TABLE`] lists, the reverse of [`media_for_filetype`]. `None`
+/// for a type no filetype holds.
+#[must_use]
+pub(crate) fn canonical_filetype(media: MediaType) -> Option<Filetype> {
+    Filetype::from_hex(canonical_code(media)?.as_bytes())
 }
 
-impl<'a> Ending<'a> {
-    /// What ends `name`.
-    #[must_use]
-    pub fn of(name: &'a str) -> Self {
-        let carried = name.rsplit_once(',').and_then(|(stem, code)| {
-            let filetype = acorn::filetype_from_value(code.as_bytes()).ok()?;
-            (!stem.is_empty()).then_some((stem, filetype))
-        });
-        let (rest, filetype) = match carried {
-            Some((stem, filetype)) => (stem, Some(filetype)),
-            None => (name, None),
-        };
-        let (stem, extension) = match rest.rsplit_once('.') {
-            Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
-                (stem, Some(extension))
-            }
-            _ => (rest, None),
-        };
-        Self {
-            stem,
-            filetype,
-            extension,
-        }
-    }
-
-    /// Whether the name ends in neither.
-    #[must_use]
-    pub const fn is_none(&self) -> bool {
-        self.filetype.is_none() && self.extension.is_none()
-    }
+/// [`canonical_filetype`]'s digits, as the table spells them.
+fn canonical_code(media: MediaType) -> Option<&'static str> {
+    FILETYPE_TABLE
+        .iter()
+        .find(|(held, _)| *held == media)
+        .and_then(|(_, codes)| codes.first().copied())
 }
+
+pub use tairix_path::Ending;
 
 /// The media type a file name implies, if any: its [`Ending`]'s filetype
 /// when that is one the registry knows, else its extension.
@@ -1673,13 +1637,7 @@ pub fn named_extension(media: MediaType) -> Option<&'static str> {
 /// extensions, most usual first, as many as a save pick carries.
 #[must_use]
 pub fn save_format(media: MediaType) -> tairix_abi::window_ipc::SaveFormat {
-    let filetype = FILETYPE_TABLE
-        .iter()
-        .find(|(held, _)| *held == media)
-        .and_then(|(_, codes)| codes.first())
-        .and_then(|code| u16::from_str_radix(code, 16).ok())
-        .and_then(Filetype::new);
-    let mut format = tairix_abi::window_ipc::SaveFormat::new(filetype);
+    let mut format = tairix_abi::window_ipc::SaveFormat::new(canonical_filetype(media));
     if !FILETYPE_NAMED.contains(&media) {
         let extensions = EXTENSION_TABLE
             .iter()
@@ -1707,12 +1665,7 @@ pub fn name_endings(media: MediaType) -> impl Iterator<Item = (char, &'static st
         .iter()
         .filter(move |(held, _)| *held == media)
         .flat_map(|(_, extensions)| extensions.iter().map(|extension| ('.', *extension)));
-    let filetype = FILETYPE_TABLE
-        .iter()
-        .filter(move |(held, _)| *held == media)
-        .filter_map(|(_, codes)| codes.first())
-        .map(|code| (',', *code));
-    extensions.chain(filetype)
+    extensions.chain(canonical_code(media).map(|code| (',', code)))
 }
 
 /// A document type New ▸ can make: an empty file is already a complete

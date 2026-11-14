@@ -567,10 +567,17 @@ launch, the file manager's is never answered with a second process beside one
 still starting or one that turned the target away (`hand_file_manager`): that
 is stated instead
 ([disk images](../filesystem/images.md)); a plain file resolves its
-association through the catalog the session holds and launches that
+association through the table the session holds and launches that
 application with the file as its argument; and a file nothing is associated
 with is refused, stating the reason on the error stream rather than failing
-silently. Every launch rides the session's existing
+silently. The table is the file manager's: the same rule for which bundles open
+documents (`tairix_browse::association_of` — a command or application in a place
+its signed kind may run from) over the same stores in the same precedence, the
+system's before the account's own however deeply either is filed. A document
+handed to an application is recorded under `DOCUMENT_HANDED`, with the bundle
+and whether it may write, and one nothing claims under `DOCUMENT_UNCLAIMED`,
+with the type it was taken for — never the document's name. Every launch rides
+the session's existing
 [asynchronous launch path](#launch-bookkeeping), so the compositor never
 blocks on one.
 
@@ -2072,10 +2079,11 @@ A `PickPurpose::Folder` pick is titled `FOLDER_TITLE` and carries a band of two
 answers under the listing: *Open* chooses the folder shown, and `Enter` goes
 into a selected folder or, with a file or nothing selected, chooses the one
 shown. A file row chooses nothing. The application never holds the folder: the
-session's reader for its volume lists it and keeps the regular files whose
-content type the requester's signed manifest associates
+session's reader for its volume lists it and keeps the regular files the
+bundle the requester runs opens, by the one matching rule *Open With* applies —
+a file's own type or any broader one it is a subclass of
 (`picker::folder_selection`, in the order the picker lists them, never
-following a link), opens each read-only without following a link, and the
+following a link) — opens each read-only without following a link, and the
 serve loop delegates each to the requester before concluding with
 `FolderPicked` — how many were delegated and how many were left out, the bound
 (`WINDOW_FOLDER_PICK_MAX`, the most delegations one grantor may hold pending to

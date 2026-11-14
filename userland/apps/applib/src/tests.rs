@@ -969,6 +969,39 @@ fn rescan_user_walks_both_home_stores_into_the_overlay() {
 }
 
 #[test]
+fn a_rescan_keeps_the_higher_store_s_bundle_of_one_identifier_however_deep_it_is_filed() {
+    let machine = MemStore::new(None);
+    let user = MemStore::new(None);
+    let mut bundles = MemBundles::default();
+    bundles.dir("/Users/root/Commands", &[("tools", true)]);
+    bundles.dir("/Users/root/Commands/tools", &[("edit.app", true)]);
+    bundles.dir("/Users/root/Applications", &[("edit.app", true)]);
+    for bundle in [
+        "/Users/root/Commands/tools/edit.app",
+        "/Users/root/Applications/edit.app",
+    ] {
+        bundles.manifest(
+            bundle,
+            &manifest_bytes("edit", Some(LibraryCategory::Accessories), None),
+        );
+    }
+    run(
+        Command::Rescan { user: true },
+        None,
+        &stores(&machine, &user),
+        &bundles,
+        &NoHelp,
+        &MemOutput::default(),
+    )
+    .expect("rescans");
+    let text = user.text().expect("written");
+    assert!(
+        text.contains("os.tairix.edit.bundle = /Users/root/Commands/tools/edit.app\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_rescan_walk_is_bounded() {
     let machine = MemStore::new(None);
     let user = MemStore::new(None);

@@ -95,6 +95,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_abi::driver::filesystem::VolumeTitle;
+use tairix_abi::fs::Filetype;
 use tairix_abi::sysinfo::VOLUME_ID_LEN;
 use tairix_abi::window_ipc::{
     AuthorisedOutcome, DocumentName, DragItems, DragPicture, LandingOutcome, LandingStep,
@@ -113,7 +114,7 @@ use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, volume,
     AppAssociation, DesktopDrives, DirectorySource, Entry, EntryChange, EntryKind,
     FilerPreferences, GridFlow, GridView, HiddenEndings, LinkTarget, Listing, NewEntry, Order,
-    Pictures, SortKey, SortMode, Volume,
+    Pictures, SortKey, SortMode, Unclaimed, Volume,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::{ChainModel, IconTile, LabelHalo};
@@ -275,11 +276,12 @@ pub enum DesktopAction {
 }
 
 /// A refused gesture, worded once for the alert the user reads and the line
-/// `stderr` records.
+/// `stderr` records, with the system-log record it carries where it is one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GestureRefusal {
     headline: String,
     detail: String,
+    unclaimed: Option<Unclaimed>,
 }
 
 impl GestureRefusal {
@@ -289,6 +291,30 @@ impl GestureRefusal {
         Self {
             headline: headline.into(),
             detail: detail.into(),
+            unclaimed: None,
+        }
+    }
+
+    /// The document `name`, its volume recording `recorded`, which no
+    /// installed application opens.
+    #[must_use]
+    pub fn unclaimed(name: &str, recorded: Option<Filetype>) -> Self {
+        Self {
+            unclaimed: Some(Unclaimed::of(name, recorded)),
+            ..Self::new(
+                format!(
+                    "No installed application opens \u{201c}{}\u{201d}",
+                    tairix_util::utf8::shown(name)
+                ),
+                "No program installed here claims files of this kind.",
+            )
+        }
+    }
+
+    /// Record the refusal in the system log, where it is one the log keeps.
+    pub fn note<S: tairix_log::Sink + ?Sized>(&self, audit: &S) {
+        if let Some(unclaimed) = self.unclaimed {
+            unclaimed.note(audit);
         }
     }
 
@@ -3859,13 +3885,9 @@ impl<S: DirectorySource> Desktop<S> {
                             edits: app.writes_documents(),
                         }),
                     ))),
-                    None => DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
-                        format!(
-                            "No installed application opens \u{201c}{}\u{201d}",
-                            tairix_util::utf8::shown(entry.name())
-                        ),
-                        "No program installed here claims files of this kind.",
-                    ))),
+                    None => DesktopOutcome::acting(DesktopAction::Refuse(
+                        GestureRefusal::unclaimed(entry.name(), entry.filetype()),
+                    )),
                 }
             }
             // A shortcut whose target cannot be reached: reported, never

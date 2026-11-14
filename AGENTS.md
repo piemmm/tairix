@@ -804,7 +804,11 @@ tairix/
 │   │   ├── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
 │   │   ├── discoveryd/  # Link-local service discovery (mDNS / DNS-SD).
 │   │   └── smbfs/       # Network shares: SMB 3 listing, mounting and serving.
-│   ├── apps/            # Default apps. Each app is its own crate.
+│   ├── apps/            # Default apps. Each app is its own crate, but for:
+│   │   └── riscos/      #   The RISC OS emulator (plans/RISCOS-EMULATOR.md). A
+│   │                    #   leaf subtree of one crate per subsystem: its crates
+│   │                    #   compose each other and `lib/*`, and NOTHING outside
+│   │                    #   it may depend on them.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.
@@ -2585,6 +2589,7 @@ drivers/*                   → lib/abi, lib/*               (NEVER kernel/*)
 userland/*                  → lib/* and the public syscall ABI only
 userland/gui/*              → no reverse dependents (see §17.3)
 userland/games/*            → lib/*, userland/games/*; no reverse dependents
+userland/apps/riscos/*      → lib/*, userland/apps/riscos/*; no reverse dependents
 ```
 
 In particular: no kernel subsystem outside `kernel/core` may depend

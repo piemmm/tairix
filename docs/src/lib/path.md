@@ -99,6 +99,14 @@ a speculative interface, so they are added by the stage that introduces their
 callers (`id::` landed with the kernel volume forest, `plans/DEVICES.md`
 D3a).
 
+## What ends a name
+
+`Ending::of(name)` is what ends a file name: a RISC OS filetype in a `,xxx`
+suffix, read strictly (a comma and exactly three hex digits,
+`Filetype::split_suffix`), and the extension after the last dot before it,
+each only after a stem. The file manager's registry, the Trash, Paint and the
+document host's offered save name all read a name by this one rule.
+
 ## Fail closed, bounded, and round-tripping
 
 A path string is untrusted input, so every dimension is a fixed **security**

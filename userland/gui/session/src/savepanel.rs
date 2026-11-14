@@ -847,21 +847,21 @@ fn stem_len(name: &str, formats: &SaveFormats, chosen: Option<usize>) -> usize {
 }
 
 /// What a format is called: its type's name in the registry, else the ending
-/// it is named by.
+/// it is named by, else the name RISC OS gives its file type, else that type's
+/// number.
 fn format_label(format: &SaveFormat) -> String {
-    format_media(format).map_or_else(
-        || {
-            format.extensions().next().map_or_else(
-                || {
-                    format.filetype().map_or_else(String::new, |filetype| {
-                        format!("File type &{:03X}", filetype.get())
-                    })
-                },
-                String::from,
-            )
-        },
-        |media| String::from(media.name()),
-    )
+    if let Some(media) = format_media(format) {
+        return String::from(media.name());
+    }
+    if let Some(extension) = format.extensions().next() {
+        return String::from(extension);
+    }
+    format.filetype().map_or_else(String::new, |filetype| {
+        tairix_fsmeta::preset::acorn::filetype_name(filetype).map_or_else(
+            || format!("File type &{:03X}", filetype.get()),
+            String::from,
+        )
+    })
 }
 
 #[cfg(test)]

@@ -22,16 +22,17 @@ needed to read it — and rejects three classes of defect:
 - **Concrete-scheduler naming (§17.1).** A kernel crate outside
   `kernel/core` and `kernel/sched/*` may not name a concrete scheduler
   crate; the rest of the kernel depends on the policy trait instead.
-- **Leaf subtrees with no reverse dependents (§17.3, §17.4).** Two strata are
-  leaves: `userland/gui/*`, which keeps the desktop omittable, and
-  `userland/games/*`, which keeps game code out of the OS libraries. Crates
-  inside a leaf compose each other and `lib/*`; nothing outside may reach one,
-  even transitively, and nothing outside includes the *other* leaf. Both are
-  checked with no exceptions.
+- **Leaf subtrees with no reverse dependents (§17.3, §17.4).** Three strata
+  are leaves: `userland/gui/*`, which keeps the desktop omittable;
+  `userland/games/*`, which keeps game code out of the OS libraries; and
+  `userland/apps/riscos/*`, the RISC OS emulator's subsystems, one crate each
+  for their size and private to the emulator. Crates inside a leaf compose
+  each other and `lib/*`; nothing outside may reach one, even transitively,
+  and no leaf reaches another. All three are checked with no exceptions.
 
-  The games arm precedes the generic `userland/` one in `classify`, or every
-  game crate would fall through to plain `Userland` and its own internal edges
-  would be refused. The subtree is nested under `userland/` rather than made
+  The games and emulator arms precede the generic `userland/` one in
+  `classify`, or every crate of theirs would fall through to plain `Userland`
+  and its own internal edges would be refused. The subtree is nested under `userland/` rather than made
   top-level for a fail-safe reason: `classify`'s fallthrough is
   `Layer::Tooling`, which is layering-*exempt*, so a forgotten arm on a
   top-level tree would silently let game code name kernel internals, where a

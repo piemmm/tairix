@@ -159,6 +159,18 @@ fn a_format_is_named_by_its_type() {
     );
     let unknown = formats(&[(None, &[".zzq"])], 0);
     assert_eq!(format_label(unknown.get(0).expect("a format")), ".zzq");
+    let config = formats(&[(Some(0xFF2), &[])], 0);
+    assert_eq!(
+        format_label(config.get(0).expect("a format")),
+        "Config",
+        "a type known only to RISC OS is named as RISC OS names it"
+    );
+    let numbered = formats(&[(Some(0x123), &[])], 0);
+    assert_eq!(
+        format_label(numbered.get(0).expect("a format")),
+        "File type &123",
+        "one RISC OS leaves to its software is named by its number"
+    );
 }
 
 /// `Tab` walks every control that can take the keyboard and wraps, and

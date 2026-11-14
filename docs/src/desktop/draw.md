@@ -317,6 +317,13 @@ reads nothing and waits on nothing:
   box; a selection framed by an estimate is framed again when tiles land, one
   framed by its glyphs is not. Object to path refuses text whose glyphs could
   not all be had rather than tracing it without them;
+- text is set in the first family of its family list the font service always
+  answers: a generic family, which goes to the service as itself and is
+  answered by the installed family whose manifest claims it; a RISC OS family
+  by the generic it is set in (`tairix_drawing::riscos::riscos_family_generic`);
+  a familiar family (Times, Courier, Arial) by the generic it stands for.
+  A list naming none of these is set in its first family, and an empty one in
+  sans-serif;
 - the window's own labels are drawn without waiting on the font service: the
   document host draws what it has not fetched provisionally, fetches it on a
   thread of its own, and lays the windows out again when it lands.

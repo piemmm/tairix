@@ -16,6 +16,18 @@ pub(super) fn opening(name: &str) -> String {
     alloc::format!("Opening {}\u{2026}", tairix_util::utf8::shown(name))
 }
 
+/// The name a document called `name` is offered under in a format named by
+/// `extension`: its stem, without the extension or `,xxx` suffix that ends it,
+/// and the format's extension, none for a format named by its file type alone.
+pub(super) fn offered_name(name: &str, extension: &str) -> String {
+    let stem = tairix_path::Ending::of(name).stem;
+    if extension.is_empty() {
+        String::from(stem)
+    } else {
+        alloc::format!("{stem}.{extension}")
+    }
+}
+
 /// Whether a window is kept off the screen while the document it was opened
 /// for is read in, and until when.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -99,8 +111,26 @@ impl Title {
 
 #[cfg(test)]
 mod tests {
-    use super::{opening, Title, Withheld, OPENING_SHOWN_AFTER_NS};
+    use super::{offered_name, opening, Title, Withheld, OPENING_SHOWN_AFTER_NS};
     use alloc::string::String;
+
+    /// A save offers the document's stem with the format's ending, cutting
+    /// only an extension or a `,xxx` suffix that really ends the name.
+    #[test]
+    fn a_save_offers_the_stem_without_the_ending_the_name_really_has() {
+        for (name, extension, offered) in [
+            ("photo.png", "jpg", "photo.jpg"),
+            ("notes.txt,fff", "rs", "notes.rs"),
+            ("Sprites,ff9", "", "Sprites"),
+            ("Smith, J", "txt", "Smith, J.txt"),
+            ("a,b", "txt", "a,b.txt"),
+            ("trailing.", "txt", "trailing..txt"),
+            (".profile", "txt", ".profile.txt"),
+            ("Untitled", "", "Untitled"),
+        ] {
+            assert_eq!(offered_name(name, extension), offered, "{name}");
+        }
+    }
 
     /// A window opened for a document stays off the screen until the wait is
     /// over, then shows from then on and asks for no further wake.

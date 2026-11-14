@@ -16,11 +16,14 @@
 //!
 //! * **Fixed precedence.** [`store_roots`] spells the roots in the order a
 //!   program word resolves against them, and [`identity_roots`] the wider set
-//!   a running process's identity is resolved against, so a duplicate
-//!   resolves to the shipped bundle deterministically rather than to whichever
-//!   listing came back first. Each visited bundle carries the index of the
-//!   root it was found under, so a consumer resolving a collision reads the
-//!   precedence rather than re-deriving it from path prefixes.
+//!   a running process's identity is resolved against. The walk finishes each
+//!   root before starting the next, so the order bundles are offered in is
+//!   their precedence: the first claim a consumer meets is the one the stores
+//!   rank first, however deeply either bundle is filed. Within a root,
+//!   shallower bundles come first, and those at one depth in the order of the
+//!   folders holding them, then by name. Each bundle also carries its root's
+//!   index, so a consumer resolving a collision reads the precedence rather
+//!   than re-deriving it from path prefixes.
 //! * **Contained.** Bundles may be filed in nested plain subdirectories, so
 //!   the walk descends — to [`MAX_WALK_DEPTH`], and across no more than
 //!   [`MAX_WALK_ENTRIES`] directory entries in total. A tree that exhausts
@@ -305,12 +308,14 @@ pub fn decode_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
 }
 
 /// Walk `roots` for installed bundles, offering each one's decoded manifest
-/// to `visit`.
+/// to `visit` in precedence order.
 ///
-/// Breadth-first with listings consumed in sorted order, so the sequence is
-/// deterministic; a `.app` directory is never descended into; an absent root
-/// contributes nothing. A bundle whose manifest cannot be read or decoded is
-/// counted among [`Scan::skipped`] and the scan carries on.
+/// Each root is walked whole before the next, breadth-first with listings
+/// consumed in sorted order, so the sequence is deterministic and earlier
+/// roots outrank later ones at any depth; a `.app` directory is never
+/// descended into; an absent root contributes nothing. A bundle whose manifest
+/// cannot be read or decoded is counted among [`Scan::skipped`] and the scan
+/// carries on. The entry bound spans every root.
 ///
 /// # Errors
 ///
@@ -324,37 +329,35 @@ where
     S: AsRef<str>,
     V: FnMut(Bundle<'_>) -> Verdict,
 {
-    let mut queue: VecDeque<(String, usize, usize)> = roots
-        .iter()
-        .enumerate()
-        .map(|(root, dir)| (String::from(dir.as_ref()), root, 0))
-        .collect();
     let mut scan = Scan::default();
     let mut visited = 0usize;
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
-    while let Some((dir, root, depth)) = queue.pop_front() {
-        let Some(mut entries) = reader.list_dir(&dir).map_err(WalkError::Listing)? else {
-            continue;
-        };
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        for item in entries {
-            visited += 1;
-            if visited > MAX_WALK_ENTRIES {
-                return Err(WalkError::TreeTooLarge);
-            }
-            if !item.directory {
+    for (root, dir) in roots.iter().enumerate() {
+        queue.push_back((String::from(dir.as_ref()), 0));
+        while let Some((dir, depth)) = queue.pop_front() {
+            let Some(mut entries) = reader.list_dir(&dir).map_err(WalkError::Listing)? else {
                 continue;
-            }
-            let path = format!("{dir}/{}", item.name);
-            if !item.name.ends_with(BUNDLE_SUFFIX) {
-                if depth + 1 < MAX_WALK_DEPTH {
-                    queue.push_back((path, root, depth + 1));
+            };
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            for item in entries {
+                visited += 1;
+                if visited > MAX_WALK_ENTRIES {
+                    return Err(WalkError::TreeTooLarge);
                 }
-                continue;
-            }
-            match offer(reader, &path, root, &mut visit) {
-                Some(Verdict::Accepted) => scan.accepted += 1,
-                Some(Verdict::Refused) | None => scan.skipped += 1,
+                let bundle = item.name.ends_with(BUNDLE_SUFFIX);
+                if !item.directory || (!bundle && depth + 1 >= MAX_WALK_DEPTH) {
+                    continue;
+                }
+                let path = format!("{dir}/{}", item.name);
+                if !bundle {
+                    queue.push_back((path, depth + 1));
+                    continue;
+                }
+                match offer(reader, &path, root, &mut visit) {
+                    Some(Verdict::Accepted) => scan.accepted += 1,
+                    Some(Verdict::Refused) | None => scan.skipped += 1,
+                }
             }
         }
     }

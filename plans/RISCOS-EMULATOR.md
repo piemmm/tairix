@@ -33,10 +33,10 @@ an application's own documents folder, the reference harness);
 | Item | What it is | Status |
 |---|---|---|
 | RO0 | This plan, its jump-sheet row and its `PLAN.md` row | done |
-| RO1 | The `userland/apps/riscos` leaf subtree: its rows in the charter's layout and layering, and `deps-check`'s rule with its tests | planned |
-| RO2 | One association path: the file manager and the session read the same stores, the picker's matcher is replaced by `applications_for`, the precedence rule is stated once, open and launch decisions are logged, and a test proves browsing never launches | planned |
-| RO3 | RISC OS names defined once in `lib/fsmeta::preset::acorn`: leaf and path spelling, the `,xxx` suffix, filetype names; each content type's canonical filetype is defined beside `lib/browse`'s table; the archive, ADFS, icon, window-protocol, picker and document-host copies move onto it | planned |
-| RO4 | RISC OS colours and font names defined once: the `&BBGGRR00` palette word in `lib/image`, the font-name map made public in `lib/drawing`; Draw's private copy is deleted | planned |
+| RO1 | The `userland/apps/riscos` leaf subtree: its rows in the charter's layout and layering, and `deps-check`'s rule with its tests | done |
+| RO2 | One association path: one table the file manager and the desktop both build, one matching rule Open With, icon-bar drops and folder picks apply, one store precedence, the records of an open, and a test that browsing launches nothing | done |
+| RO3 | RISC OS names defined once: leaf and path spelling and filetype names in `lib/fsmeta::preset::acorn`, the `,xxx` suffix on `Filetype`, each content type's canonical filetype beside `lib/browse`'s table; the archive, ADFS, icon, window-protocol, picker, save-panel and document-host copies move onto them | done |
+| RO4 | RISC OS colours and font names defined once: the `&BBGGRR00` colour word in `lib/colour`, the font-name map made public in `lib/drawing`; Draw's private copy and its re-derivation of the generic families are deleted | done |
 | RO5 | `lib/softfloat`: exact binary32, binary64 and double-extended arithmetic in every rounding mode with its exceptions, plus the FPA and x87 memory formats; the 8087 moves onto it with its digest unchanged | planned |
 | RO6 | `lib/obey`: GSTrans, system variables, expressions, Obey parameters and `OS_ReadArgs` templates; `lib/icon`'s `!Boot` reader is rebuilt on its read-only mode | planned |
 | RO7 | `lib/bbcbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | planned |
@@ -310,12 +310,10 @@ run of items is finished.
 ## 1. The crate subtree (RO1)
 
 `userland/apps/riscos/` is a leaf subtree, as `userland/games/` is: its crates
-compose each other and `lib/*`, and nothing outside it depends on them. RO1
-does the following:
-
-- amends `AGENTS.md` §3 and §17.4 with its row;
-- adds the subtree to `deps-check`'s leaf-subtree rule, with tests;
-- logs the amendment in `PLAN.md`.
+compose each other and `lib/*`, and nothing outside it depends on them. The
+charter's layout and layering name it, and `deps-check` refuses an edge into it
+from outside, even a transitive one, and an edge out of it to anything but
+`lib/*` and its own crates.
 
 The crates are `tairix-riscos-*`, listed here from the bottom of the dependency
 graph up. Each owns one subsystem behind a stated interface:
@@ -702,8 +700,9 @@ is fuzzed.
   datestamp come from one of three places, in order:
   1. its volume's `acorn.*` attributes, where the volume keeps them;
   2. the `,xxx` suffix, read and written;
-  3. otherwise, the canonical filetype of its TAIRiX content type (RO3), and
-     else Data.
+  3. otherwise, the canonical filetype of its TAIRiX content type, or of the
+     nearest broader type that has one (RO3, made public here), and else
+     Data.
 
   Stamps convert through `Time64` and are range-checked: a stamp a format
   cannot hold is an error, never truncated.
@@ -1152,30 +1151,49 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
 `lib/*` crate enters `AGENTS.md` §3 and `PLAN.md` in the change that adds it
 (`AGENTS.md` §6).
 
-- **RO3 — `lib/fsmeta::preset::acorn`:**
-  - **Leaf and path spelling, in both directions.** It replaces four private
-    compositions: the archive driver's `name.rs`, its two Spark and ArcFS
-    `spelling()` copies, ADFS's `Crossed`, and `lib/icon`'s
-    `within_application`. The two `spelling()` copies also skip the reserved-
-    byte check.
-  - **The `,xxx` suffix.** One writer replaces two: the window protocol's
-    `comma_filetype` and the picker's `Typing::leaf`. A strict reader replaces
-    the document host's `stem()`, which cuts at any `,` with no hex check.
-  - **Filetype names.** RISC OS's type names (Text, Sprite, DrawFile, BASIC,
-    Obey, …) are added. The save panel's "File type &XXX" fallback names a
-    known type.
-  - **Canonical filetypes.** Each content type `lib/browse` knows names one
-    canonical RISC OS filetype, the reverse of `FILETYPE_TABLE`, defined beside
-    it.
-  - **Spark's directory test.** Spark's `names_directory` decodes the load word
-    itself; it moves onto `decode_load_exec`.
+- **RO3 — RISC OS names, defined once:**
+  - **Leaf spelling, in both directions.** `acorn::leaf_from_riscos` and
+    `acorn::leaf_to_riscos` cross a leaf between RISC OS's Latin-1, a dot
+    written as `/`, and TAIRiX's UTF-8. Each refuses, as `BadName`, what RISC
+    OS could not have written — a space, a reserved byte, a control code, a
+    character its Latin-1 lacks — and a crossing to `.` or `..`, so a name
+    that converts turns back into itself. The archive driver, ADFS and
+    `lib/icon` share it. A Spark or ArcFS member named as no RISC OS name can
+    be is left out and its archive is not written back, which would lose it;
+    ADFS leaves such an entry out of its listing.
+  - **Path spelling.** `acorn::path_from_riscos` splits a RISC OS path into
+    crossed leaves. The reverse direction arrives with its first consumer,
+    HostFS (RO19).
+  - **The `,xxx` suffix.** `lib/abi`'s `Filetype` owns its text forms, since
+    the window protocol in `lib/abi` reads them: `hex`/`from_hex` (the
+    `acorn.filetype` value), the `suffix` writer and the strict
+    `split_suffix` reader. `lib/path`'s `Ending` reads a name's ending through
+    it, and the file manager's registry, the save panel, Paint and the
+    document host's offered save name all read a name by that one rule.
+  - **Filetype names.** `acorn::filetype_name` names the types RISC OS
+    allocates itself, its reserved block `&A00`–`&AFF` and its generic data
+    types `&E00`–`&FFF`. A type elsewhere belongs to the software that uses it,
+    several programs naming one number differently, so the save panel shows it
+    by its number.
+  - **Canonical filetypes.** `canonical_filetype` in `lib/browse` is the first
+    filetype a content type's row lists, the reverse of `FILETYPE_TABLE`;
+    `save_format` and `name_endings` read it. RO19 makes it public, walking a
+    type with no row of its own up its subclass chain.
+  - **Spark's directory test** reads its load word through
+    `decode_load_exec`.
 - **RO4 — colours and font names:**
-  - The `&BBGGRR00` palette word is defined once in `lib/image`, replacing
-    three private copies: `lib/drawing`, the sprite decoder and the sprite
-    encoder.
-  - `lib/drawing`'s RISC OS font-name map is made the public definition. The
-    Draw application's `family_key` copy is deleted, along with its re-derivation
-    of the font service's generic families.
+  - `Rgb::from_riscos_word` and `Rgb::riscos_word` in `lib/colour` are the
+    `&BBGGRR00` colour word, a colour notation beside the hex spellings, which
+    the sprite decoder and encoder and `lib/drawing` read and write.
+  - `tairix_drawing::riscos::riscos_family_generic` is RISC OS's font-name
+    map: Trinity serif, Homerton sans-serif, Corpus monospace.
+  - CSS's generic families are the font protocol's vocabulary,
+    `tairix_abi::font_ipc::GenericFamily`, which the font service resolves
+    by manifest and a client names without naming an installed family.
+  - Draw sets text in the first family of its family list the service always
+    answers — a generic, a RISC OS family by its generic, a familiar family
+    (Times, Courier, Arial) by the generic it stands for — else its first
+    family, else sans-serif. It names no installed family.
 - **RO5 — `lib/softfloat`:**
   - Exact binary32, binary64 and double-extended arithmetic with unnormal
     values, as the FPA and the 8087 have them.
@@ -1227,17 +1245,30 @@ Each item amends the plan that owns the facility in the same change, and keeps
 that plan's guarantees: real screen positions are never revealed; window
 management stays the window manager's; identity stays manifest-attested.
 
-- **RO2 — one association path.** This fixes defects found in review:
-  - **Divergent candidate sets.** The file manager offers handlers from the
-    system stores only (`MACHINE_ROOTS`), while the session adds the user's
-    own. Both will read the same stores.
-  - **A second matcher.** The picker's `folder_selection` matches exact
-    strings with no parent chain; it is replaced by `applications_for`.
-  - **Ordering.** The precedence rule — system stores before user stores, then
-    a stated tie rule — is defined once. Today the session's breadth-first walk
-    can rank a nested system bundle after a user one.
-  - **Logging.** Open, launch and refusal decisions carry stable event ids.
-  - **A test.** An explicit test proves listing and browsing never launch.
+- **RO2 — one association path.** What RO32 builds on:
+  - **One table.** `tairix_browse::association_of` is the one rule for which
+    installed bundles open documents: a command or an application, in a place
+    its signed kind may run from. The file manager walks the program stores,
+    the system's and then the account's own; the desktop walks every store for
+    its identity index; both build the same table.
+  - **One matcher.** `AppAssociation::opens` is the one matching rule — a
+    file's own type or any broader one it is a subclass of, declarations
+    matched however they are cased. Open With, a drop on an icon-bar slot and
+    a folder pick all apply it.
+  - **One precedence.** `lib/appstore`'s walk finishes each store before the
+    next, so visit order is precedence: the system's stores before the user's
+    however deeply either bundle is filed, then shallower before deeper, then
+    folder and name order. `applications_for` ranks by specificity and keeps
+    that order at one specificity.
+  - **Records.** A document handed to an application is recorded under
+    `DOCUMENT_HANDED`, with the bundle and whether it may write; one no
+    application claims under `DOCUMENT_UNCLAIMED`, with the type it was taken
+    for. Neither carries the document's name. Launches and their refusals are
+    the load gate's records.
+  - **Browsing launches nothing.** Listing, sorting, selecting and descending
+    — into a folder, a RISC OS application folder, or a bundle browsed rather
+    than run — read only folders and name nothing to launch or open; only
+    activating a program or a document does.
 - **RO32 — RISC OS applications on the desktop.**
   - **Activation.** A `!Name` directory holding `!Run` is a runnable unit.
     Double-click launches it through the handler that claims RISC OS

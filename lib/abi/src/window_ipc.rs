@@ -449,17 +449,13 @@ impl SaveFormat {
     }
 
     /// Whether `name` ends in one of its extensions, or in its own file type
-    /// after a `,`, with a stem before it.
+    /// as a `,xxx` suffix, with a stem before it.
     #[must_use]
     pub fn types(&self, name: &str) -> bool {
-        if self.extensions().any(|ending| ends_in(name, ending)) {
-            return true;
-        }
-        let Some(filetype) = self.filetype else {
-            return false;
-        };
-        let mut own = [0u8; 4];
-        ends_in(name, comma_filetype(filetype.get(), &mut own))
+        self.extensions().any(|ending| ends_in(name, ending))
+            || self.filetype.is_some_and(|own| {
+                Filetype::split_suffix(name).is_some_and(|(_, carried)| carried == own)
+            })
     }
 
     /// Bytes it takes on the wire.
@@ -512,17 +508,6 @@ impl SaveFormat {
         }
         Ok((format, rest))
     }
-}
-
-/// `filetype` as a name carries it, `,ff9`, written into `out`.
-fn comma_filetype(filetype: u16, out: &mut [u8; 4]) -> &str {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out[0] = b',';
-    for (at, shift) in [8u16, 4, 0].into_iter().enumerate() {
-        out[at + 1] = HEX[usize::from((filetype >> shift) & 0xF)];
-    }
-    // Four ASCII bytes.
-    core::str::from_utf8(out).unwrap_or(",")
 }
 
 /// Whether `name` ends in `ending`, ignoring ASCII case, with a stem before

@@ -21,6 +21,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ops::Range;
 
+pub use tairix_abi::font_ipc::GenericFamily;
 use tairix_abi::font_ipc::{FamilyKey, FamilyKind, FONT_FAMILY_LABEL_LEN};
 
 use tairix_util::conf::Located;
@@ -51,47 +52,6 @@ const MAX_FACE_NAME: usize = 64;
 /// The extension every face file carries. The engine decodes TrueType
 /// outlines only, so a manifest cannot name a container it could not read.
 const FACE_EXTENSION: &str = ".ttf";
-
-/// One of CSS's generic family names — the vocabulary a document uses when
-/// it asks for a *kind* of face rather than a named one.
-///
-/// A family declares which generic the store answers with, in its own
-/// manifest, so the mapping is discovered like everything else about the
-/// store: shipping a cursive family is dropping its directory in with
-/// `generic = cursive`, and nothing in the service, the kernel or the image
-/// builder names a family. A generic no installed family claims falls
-/// through to [`SansSerif`](Self::SansSerif) and then fails closed, rather
-/// than silently substituting a face of the wrong kind.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum GenericFamily {
-    /// Letterforms with finishing strokes.
-    Serif,
-    /// Letterforms without them. The generic every other one falls through
-    /// to, being the one a desktop always has.
-    SansSerif,
-    /// A fixed-advance face: a character grid.
-    Monospace,
-    /// Joined, handwriting-like letterforms.
-    Cursive,
-    /// Decorative letterforms.
-    Fantasy,
-}
-
-impl GenericFamily {
-    /// The generic `key` spells, or `None` for a key naming a concrete
-    /// family.
-    #[must_use]
-    pub fn from_key(key: FamilyKey) -> Option<Self> {
-        match key.as_str() {
-            "serif" => Some(Self::Serif),
-            "sans-serif" => Some(Self::SansSerif),
-            "monospace" => Some(Self::Monospace),
-            "cursive" => Some(Self::Cursive),
-            "fantasy" => Some(Self::Fantasy),
-            _ => None,
-        }
-    }
-}
 
 /// What a family is for.
 ///

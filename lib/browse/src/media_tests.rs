@@ -12,14 +12,13 @@ use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
 use tairix_abi::window_ipc::{DragOwnIcon, DragOwnSource, ICON_PATH_MAX};
 use tairix_abi::{SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
-use tairix_fsmeta::preset::acorn;
 use tairix_fsmeta::preset::acorn::Filetype;
 use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard};
 
 use super::{
-    ancestry, drag_picture, entry_icon, folder_sample, media_for_document, media_for_entry,
-    media_for_filetype, media_for_name, media_for_named, name_endings, BlankDocument, Ending,
-    Family, MediaType, Site, ALL, EXTENSION_TABLE, FILETYPE_TABLE,
+    ancestry, canonical_filetype, drag_picture, entry_icon, folder_sample, media_for_document,
+    media_for_entry, media_for_filetype, media_for_name, media_for_named, name_endings,
+    BlankDocument, Ending, Family, MediaType, Site, ALL, EXTENSION_TABLE, FILETYPE_TABLE,
 };
 use crate::entry::{Entry, EntryKind, LinkTarget, Occupancy};
 use crate::presentation::Pictures;
@@ -264,34 +263,6 @@ fn a_risc_os_file_type_after_a_comma_names_the_media() {
     assert_eq!(media_for_name("a,b,ff9"), Some(MediaType::ImageSprite));
     assert_eq!(media_for_name("Track,123"), None);
     assert_eq!(media_for_name(",b60"), None, "a file type needs a stem");
-}
-
-/// A name ends in a file type only after a stem and only as three hex
-/// digits, and in an extension only after a stem: anything else ends it in
-/// nothing.
-#[test]
-fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
-    let both = Ending::of("notes.txt,ffb");
-    assert_eq!(
-        (both.stem, both.filetype, both.extension),
-        ("notes", Filetype::new(0xFFB), Some("txt"))
-    );
-    for bare in [
-        "Smith, J",
-        ",b60",
-        ".png",
-        "plain",
-        "trailing.",
-        "a,b6",
-        "a,b600",
-    ] {
-        let ending = Ending::of(bare);
-        assert!(ending.is_none(), "{bare}");
-        assert_eq!(ending.stem, bare, "{bare}");
-    }
-    assert_eq!(Ending::of("a.tar.gz").stem, "a.tar");
-    assert_eq!(Ending::of("my.photos").extension, Some("photos"));
-    assert_eq!(Ending::of("Logo,B60").filetype, Filetype::new(0xB60));
 }
 
 /// A type is saved typed by its file type and, unless RISC OS is its home,
@@ -1326,7 +1297,7 @@ fn a_risc_os_filetype_names_the_type_it_holds() {
 fn every_listed_filetype_reads_back_and_a_new_files_comes_first() {
     for (media, codes) in FILETYPE_TABLE {
         for code in *codes {
-            let parsed = acorn::filetype_from_value(code.as_bytes()).expect("three hex digits");
+            let parsed = Filetype::from_hex(code.as_bytes()).expect("three hex digits");
             assert_eq!(media_for_filetype(parsed), Some(*media), "{code}");
             let named = alloc::format!("File,{code}");
             assert_eq!(media_for_name(&named), Some(*media), "{named}");
@@ -1336,6 +1307,11 @@ fn every_listed_filetype_reads_back_and_a_new_files_comes_first() {
             .map(|(_, code)| code)
             .collect();
         assert_eq!(after_comma, [codes[0]], "{media:?}");
+        assert_eq!(
+            canonical_filetype(*media).map(Filetype::hex),
+            Some(*<&[u8; 3]>::try_from(codes[0].as_bytes()).expect("three digits")),
+            "{media:?}"
+        );
     }
 }
 

@@ -2254,3 +2254,41 @@ fn a_window_closing_under_icons_offered_it_forgets_them() {
         }))
     );
 }
+
+/// A slot's application opens the one file its signed manifest claims, by
+/// the rule Open With applies, and refuses anything else in its own name,
+/// even where it opens no documents at all.
+#[test]
+fn a_slot_opens_what_its_application_claims_and_refuses_the_rest_in_its_name() {
+    let editor = tairix_browse::AppAssociation::new(
+        "TextEdit",
+        "/System/Applications/TextEdit.app",
+        alloc::vec![String::from("text/plain")],
+    )
+    .writing_documents();
+    let bundle = editor.bundle_path();
+    let Some(SlotAnswer::Opens(target)) =
+        SlotAnswer::of("TextEdit", bundle, Some(&editor), &file("main.rs"))
+    else {
+        panic!("a text editor opens Rust source");
+    };
+    assert_eq!(
+        *target,
+        DropTarget {
+            run_path: BundleRunPath::new("/System/Applications/TextEdit.app/Run")
+                .expect("an entry"),
+            writes_documents: true,
+        }
+    );
+    for (opener, items) in [
+        (Some(&editor), file("photo.png")),
+        (Some(&editor), several()),
+        (None, file("notes.txt")),
+    ] {
+        let Some(SlotAnswer::Refuses(refusal)) = SlotAnswer::of("Files", bundle, opener, &items)
+        else {
+            panic!("refused");
+        };
+        assert_eq!(refusal.app(), "Files", "refused in the application's name");
+    }
+}

@@ -107,9 +107,9 @@ mod program {
     use tairix_abi::time::WallTimeState;
     use tairix_abi::window_ipc::LandingStep;
     use tairix_abi::window_ipc::{
-        event_endpoint_for, AlertSeverity, AlertSpec, AuthorisedOutcome, BundleRunPath,
-        DocumentName, DocumentsRefusal, DragItems, DropTarget, MenuOutcome, PointerAction,
-        PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+        event_endpoint_for, AlertSeverity, AlertSpec, AuthorisedOutcome, DocumentName,
+        DocumentsRefusal, DragItems, MenuOutcome, PointerAction, PreviewOutcome, WindowEvent,
+        WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
         CapabilityId, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags, WaitSetOp,
@@ -6552,12 +6552,10 @@ mod program {
                 .is_some_and(AppAssociation::writes_documents)
         }
 
-        /// The content types `owner`'s manifest says it opens: none for an
-        /// owner nothing attests, so a folder delegates nothing to it.
-        fn kinds(&self, owner: ProcId) -> Vec<alloc::string::String> {
-            self.association(owner)
-                .map(|association| association.mime_types().to_vec())
-                .unwrap_or_default()
+        /// What `owner`'s manifest says it opens: nothing for an owner
+        /// nothing attests, so a folder delegates nothing to it.
+        fn opener(&self, owner: ProcId) -> Option<AppAssociation> {
+            self.association(owner).cloned()
         }
 
         fn association(&self, owner: ProcId) -> Option<&AppAssociation> {
@@ -8618,13 +8616,13 @@ mod program {
             /// How a save's file is typed where it is made.
             typing: Typing,
         },
-        /// Open the files of the folder pick `pick` chose whose content type
-        /// is one of `kinds`, for its attempt `serial`.
+        /// Open the files of the folder pick `pick` chose that `opener`
+        /// opens, for its attempt `serial`.
         Folder {
             pick: PickId,
             serial: u64,
             path: alloc::string::String,
-            kinds: Vec<alloc::string::String>,
+            opener: Option<AppAssociation>,
         },
         /// Open the folder the subtree pick `pick` hands over, for its attempt
         /// `serial`, for a requester that `edits` documents or does not.
@@ -8910,11 +8908,11 @@ mod program {
                     pick,
                     serial,
                     path,
-                    kinds,
+                    opener,
                 } => FileAnswer::Picked(PickAnswer::Folder {
                     pick,
                     serial,
-                    opened: open_folder(&path, &kinds),
+                    opened: open_folder(&path, opener.as_ref()),
                 }),
                 Self::Subtree {
                     pick,
@@ -9146,11 +9144,10 @@ mod program {
             }
         };
         if let (Some(filetype), true) = (typing.filetype, records) {
-            let value = tairix_fsmeta::preset::acorn::filetype_to_value(filetype);
             let set = tairix_rt::fs_attr_set(
                 file.fd(),
                 tairix_fsmeta::preset::acorn::FILETYPE_KEY,
-                &value,
+                &filetype.hex(),
             );
             if set < 0 {
                 // A file of the wrong type is not left behind.
@@ -9190,17 +9187,17 @@ mod program {
     }
 
     /// Open, read-only, the files of the folder at `path` the picker's
-    /// selection keeps for `kinds`.
+    /// selection keeps for the bundle the requester runs.
     ///
     /// Opened without following a link, so a name turned into one since the
     /// listing hands over nothing. A file that will not open is left out, and
     /// counted.
-    fn open_folder(path: &str, kinds: &[alloc::string::String]) -> Result<FolderFiles, Errno> {
+    fn open_folder(path: &str, requester: Option<&AppAssociation>) -> Result<FolderFiles, Errno> {
         let components = tairix_browse::vfs::components_from_absolute_path(path)?;
         let mut entries = read_directory(&components)?;
         let mut found = FolderFiles {
             files: Vec::new(),
-            left_out: tairix_desktop_session::picker::folder_selection(&mut entries, kinds),
+            left_out: tairix_desktop_session::picker::folder_selection(&mut entries, requester),
         };
         for entry in &entries {
             let mut child = alloc::string::String::from(path);
@@ -11059,35 +11056,12 @@ mod program {
 
         /// What the application on icon-bar slot `slot` answers a drag of
         /// `items` with: it opens the one file, or it refuses, said in its
-        /// name; `None` for a slot no installed bundle is attested to.
+        /// name; `None` for a slot no installed bundle is attested to, which
+        /// nothing can vouch for.
         fn slot_answer(&self, slot: usize, items: &DragItems) -> Option<SlotAnswer> {
-            // Only a slot attested to an installed bundle can be vouched for,
-            // and only a bundle whose signed manifest claims the file takes
-            // it — by the one matching rule "Open With" uses.
             let bundle = self.apps.strip.get(slot)?.bundle.as_deref()?;
-            let association = self.programs.association(bundle)?;
-            let name = items.first().as_str();
-            let claimed = items.openable()
-                && !tairix_browse::applications_for(
-                    name,
-                    items.filetype(),
-                    core::slice::from_ref(association),
-                )
-                .is_empty();
-            if !claimed {
-                return Some(SlotAnswer::Refuses(alloc::boxed::Box::new(
-                    DropRefusal::new(
-                        association.name(),
-                        name,
-                        items.openable(),
-                        association.mime_types(),
-                    ),
-                )));
-            }
-            Some(SlotAnswer::Opens(alloc::boxed::Box::new(DropTarget {
-                run_path: BundleRunPath::new(&tairix_appstore::entry_path(bundle)).ok()?,
-                writes_documents: association.writes_documents(),
-            })))
+            let app = self.programs.bundles.identity_of(bundle)?;
+            SlotAnswer::of(&app.name, bundle, self.programs.association(bundle), items)
         }
 
         /// Tell the window icons carried off the desktop were last offered to
@@ -14934,6 +14908,7 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) {
+        refusal.note(&LOG_SINK);
         app::report_line(&refusal.line());
         let Ok(spec) =
             AlertSpec::acknowledged(AlertSeverity::Error, refusal.headline(), refusal.detail())
@@ -15919,6 +15894,8 @@ mod program {
             };
             if launched.is_some() {
                 self.launched.note_used(run_path);
+                let bundle = tairix_appstore::bundle_of_entry(run_path).unwrap_or(run_path);
+                tairix_browse::note_handed(&LOG_SINK, bundle, opened.writable);
             }
             launched
         }
@@ -16294,7 +16271,7 @@ mod program {
 
     /// What a reader carries out for pick `pick`'s attempt `serial` to open
     /// `path` for the window's attested `owner`: a folder pick opens the
-    /// folder's files of the kinds the owner opens, a subtree pick the folder
+    /// folder's files the owner opens, a subtree pick the folder
     /// itself, an import the file read-only, any other the file, for writing
     /// where the owner edits documents.
     fn open_job(
@@ -16307,12 +16284,11 @@ mod program {
         let edits = access.opens_to_edit(owner.is_some_and(|owner| openers.edits(owner)));
         match access {
             PickAccess::Folder => {
-                let kinds = owner.map(|owner| openers.kinds(owner)).unwrap_or_default();
                 return FileJob::Folder {
                     pick,
                     serial,
                     path,
-                    kinds,
+                    opener: owner.and_then(|owner| openers.opener(owner)),
                 };
             }
             PickAccess::Subtree => {

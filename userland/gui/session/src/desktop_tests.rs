@@ -1302,15 +1302,42 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
         &editor(),
         &mut Region::new(),
     );
+    let Some(DesktopAction::Refuse(refusal)) = acted.action else {
+        panic!("the file is refused");
+    };
     assert_eq!(
-        acted.action,
-        Some(DesktopAction::Refuse(GestureRefusal::new(
-            "No installed application opens \u{201c}mystery.qqq\u{201d}",
-            "No program installed here claims files of this kind.",
-        ))),
+        refusal,
+        GestureRefusal::unclaimed("mystery.qqq", None),
         "the refusal names the file"
     );
+    assert_eq!(
+        refusal.headline(),
+        "No installed application opens \u{201c}mystery.qqq\u{201d}"
+    );
+    assert_eq!(
+        refusal.detail(),
+        "No program installed here claims files of this kind."
+    );
     assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
+
+    let recorded = RefCell::new(Vec::new());
+    let sink = Recorded(&recorded);
+    refusal.note(&sink);
+    GestureRefusal::new("Nothing was opened", "Several were selected.").note(&sink);
+    assert_eq!(
+        *recorded.borrow(),
+        [tairix_browse::open_with::DOCUMENT_UNCLAIMED.0],
+        "only the refusal of a document nothing claims reaches the log"
+    );
+}
+
+/// A sink keeping the id of every record it is handed.
+struct Recorded<'a>(&'a RefCell<Vec<u32>>);
+
+impl tairix_log::Sink for Recorded<'_> {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
+        self.0.borrow_mut().push(event.id.0);
+    }
 }
 
 #[test]

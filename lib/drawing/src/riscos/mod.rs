@@ -16,7 +16,7 @@ mod write;
 use alloc::string::String;
 
 use tairix_collections::SharedStr;
-use tairix_colour::Rgba;
+use tairix_colour::{Rgb, Rgba};
 
 use crate::drawing::{Paper, PAPER};
 use crate::ReadError;
@@ -153,18 +153,28 @@ pub fn recognised(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// The colour a Draw colour word, `&BBGGRR00`, holds, or none.
+/// The generic family RISC OS's own font family `family` is set in —
+/// Trinity serif, Homerton sans-serif, Corpus monospace — matched ignoring
+/// case, or `None` for a family RISC OS does not ship.
+#[must_use]
+pub fn riscos_family_generic(family: &str) -> Option<&'static str> {
+    FAMILIES
+        .iter()
+        .find(|(own, _, _)| own.eq_ignore_ascii_case(family))
+        .map(|&(_, kind, _)| kind)
+}
+
+/// The colour a Draw colour word holds, or none.
 const fn colour_of(word: u32) -> Option<Rgba> {
     if word == NO_COLOUR {
         return None;
     }
-    let [_, r, g, b] = word.to_le_bytes();
-    Some(Rgba::new(r, g, b, u8::MAX))
+    Some(Rgb::from_riscos_word(word).opaque())
 }
 
 /// `colour` as a Draw colour word, its alpha set aside.
 const fn word_of(colour: Rgba) -> u32 {
-    u32::from_le_bytes([0, colour.r, colour.g, colour.b])
+    Rgb::new(colour.r, colour.g, colour.b).riscos_word()
 }
 
 /// `value` as the two words RISC OS's floating point stores a double in,
@@ -214,10 +224,7 @@ fn face_of(name: &str) -> Result<Face, ReadError> {
     {
         return Err(ReadError::OutOfMemory);
     }
-    if let Some((_, kind, _)) = FAMILIES
-        .iter()
-        .find(|(own, _, _)| own.eq_ignore_ascii_case(family))
-    {
+    if let Some(kind) = riscos_family_generic(family) {
         list.push_str(kind);
     } else {
         list.extend(family.chars().filter(|&c| !matches!(c, ',' | '"' | '\'')));

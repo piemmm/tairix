@@ -53,7 +53,7 @@ use super::closing::{
 use super::members::{members_of, route, Route};
 use super::offers::{FileOffer, FileOffers, OfferStep};
 use super::refit::Refit;
-use super::title::{opening, Title, Withheld};
+use super::title::{offered_name, opening, Title, Withheld};
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, SaveTarget, ToolGone, ToolMove,
     ViewOutcome,
@@ -2205,7 +2205,7 @@ impl<A: DocumentApp> Host<A> {
         let offered = if view.access() == Access::Untitled {
             offered_name(UNTITLED, view.offered_extension())
         } else if view.refuse_save(view.name(), SaveTarget::Another).is_some() {
-            offered_name(stem(view.name()), view.offered_extension())
+            offered_name(view.name(), view.offered_extension())
         } else {
             String::from(view.name())
         };
@@ -2232,7 +2232,7 @@ impl<A: DocumentApp> Host<A> {
                 return;
             }
         };
-        let offered = offered_name(stem(window.view.name()), window.view.copy_extension());
+        let offered = offered_name(window.view.name(), window.view.copy_extension());
         let Ok(suggested) = DocumentName::new(&offered).or_else(|_| DocumentName::new(UNTITLED))
         else {
             return;
@@ -3681,24 +3681,6 @@ impl<A: DocumentApp> Host<A> {
 pub fn commit(file: &Handle, len: u64) -> Result<(), Errno> {
     file.truncate(len).map_err(Errno::from_syscall)?;
     file.sync().map_err(Errno::from_syscall)
-}
-
-/// The name `stem` is offered under with `extension`: none for a format named
-/// by its file type alone.
-fn offered_name(stem: &str, extension: &str) -> String {
-    if extension.is_empty() {
-        String::from(stem)
-    } else {
-        format!("{stem}.{extension}")
-    }
-}
-
-/// `name` without the extension or RISC OS file type that ends it.
-fn stem(name: &str) -> &str {
-    match name.rfind(['.', ',']) {
-        Some(at) if at > 0 => &name[..at],
-        _ => name,
-    }
 }
 
 /// Tell the session afresh that `pane` may be sized from `least` up, where

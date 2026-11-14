@@ -65,3 +65,8 @@ document cannot hold it at all, since its grammar starts a comment there and
 `Rgb::from_hex` takes exactly the six bare digits. `Rgb::hex` and `Rgba::hex`
 write lowercase digits — eight where the colour is translucent — and
 `Hex::hashed` puts the `#` before them.
+
+`Rgb::from_riscos_word` and `Rgb::riscos_word` are RISC OS's colour word,
+`&BBGGRR00`: blue, green and red above an unused low byte, which a sprite's
+palette and a Draw file both hold a colour in. It is defined once here, so the
+sprite codec, the Draw format and the RISC OS emulator spell it alike.

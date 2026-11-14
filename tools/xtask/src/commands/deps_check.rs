@@ -4,8 +4,8 @@
 //! fails the build when any of these holds:
 //!
 //! 1. the layering graph is violated,
-//! 2. anything outside a leaf subtree — `userland/gui/*`, `userland/games/*`
-//!    — transitively depends on a crate inside it, or
+//! 2. anything outside a leaf subtree — `userland/gui/*`, `userland/games/*`,
+//!    `userland/apps/riscos/*` — transitively depends on a crate inside it, or
 //! 3. a kernel crate outside `kernel/sched/*` / `kernel/core` names a
 //!    concrete scheduler crate.
 //!
@@ -34,8 +34,8 @@
 //! (`PLAN.md`). The list is append-never: it may only shrink, and a *new*
 //! violating edge is always rejected. It is now empty — the layering is
 //! satisfied (see [`GRANDFATHERED`] for how the last edges were retired).
-//! The transitive rule into a leaf subtree has no exceptions — the desktop
-//! boundary and the games boundary are clean and must stay clean.
+//! The transitive rule into a leaf subtree has no exceptions — the desktop,
+//! games and RISC OS emulator boundaries are clean and must stay clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -59,6 +59,8 @@ pub enum Layer {
     Userland,
     UserGui,
     UserGame,
+    /// The RISC OS emulator's crates (`plans/RISCOS-EMULATOR.md`).
+    UserRiscOs,
     /// Tooling and integration tests: outside the product layering.
     Tooling,
 }
@@ -79,6 +81,7 @@ impl Layer {
             Layer::Userland => "userland/*",
             Layer::UserGui => "userland/gui/*",
             Layer::UserGame => "userland/games/*",
+            Layer::UserRiscOs => "userland/apps/riscos/*",
             Layer::Tooling => "tooling/tests",
         }
     }
@@ -109,9 +112,10 @@ pub struct Crate {
 const GRANDFATHERED: &[(&str, &str)] = &[];
 
 /// The strata nothing outside may depend on, even transitively: the optional
-/// desktop, and the games tree whose crates compose each other without game
-/// code ever entering the OS libraries.
-const LEAF_SUBTREES: &[Layer] = &[Layer::UserGui, Layer::UserGame];
+/// desktop, the games tree whose crates compose each other without game code
+/// ever entering the OS libraries, and the RISC OS emulator's subsystems,
+/// split into crates for their size and private to the emulator.
+const LEAF_SUBTREES: &[Layer] = &[Layer::UserGui, Layer::UserGame, Layer::UserRiscOs];
 
 /// Classify a crate by its workspace-relative directory.
 pub fn classify(rel_dir: &str) -> Layer {
@@ -151,6 +155,9 @@ pub fn classify(rel_dir: &str) -> Layer {
         // `Userland` a game crate could not name its siblings, and the whole
         // subtree's internal edges would be refused.
         Layer::UserGame
+    } else if rel_dir.starts_with("userland/apps/riscos/") {
+        // Ahead of the generic arm for the same reason as the games.
+        Layer::UserRiscOs
     } else if rel_dir.starts_with("userland/") {
         Layer::Userland
     } else {
@@ -163,7 +170,7 @@ pub fn classify(rel_dir: &str) -> Layer {
 pub fn layer_allows(from: Layer, to: Layer) -> bool {
     use Layer::{
         ArchApi, ArchImpl, Driver, IommuApi, IommuFamily, KernelCore, KernelSubsystem, Lib,
-        SchedApi, SchedImpl, Tooling, UserGame, UserGui, Userland,
+        SchedApi, SchedImpl, Tooling, UserGame, UserGui, UserRiscOs, Userland,
     };
     match from {
         // Leaf strata that may consume only shared libraries: `lib/*`
@@ -195,6 +202,8 @@ pub fn layer_allows(from: Layer, to: Layer) -> bool {
         // Game crates likewise: the client, the realm binaries and the admin
         // command share one simulation without game code entering the OS.
         UserGame => matches!(to, Lib | UserGame),
+        // The emulator's subsystems likewise, its `app` crate composing them.
+        UserRiscOs => matches!(to, Lib | UserRiscOs),
         // Tooling and tests sit outside the product layering.
         Tooling => true,
     }
@@ -974,6 +983,12 @@ required-features = [\n    \"model\",\n    \"slow\",\n]\n";
             Layer::UserGame,
             "the games arm must win over the generic userland one"
         );
+        assert_eq!(
+            classify("userland/apps/riscos/arm"),
+            Layer::UserRiscOs,
+            "the emulator's arm must win over the generic userland one"
+        );
+        assert_eq!(classify("userland/apps/openmicro"), Layer::Userland);
         assert_eq!(classify("userland/system/init"), Layer::Userland);
         assert_eq!(classify("tools/xtask"), Layer::Tooling);
     }
@@ -1122,6 +1137,97 @@ required-features = [\n    \"model\",\n    \"slow\",\n]\n";
             violations.iter().any(|v| v.contains("userland/gui")),
             "{violations:#?}"
         );
+    }
+
+    #[test]
+    fn emulator_crates_compose_each_other_and_lib_only() {
+        assert!(layer_allows(Layer::UserRiscOs, Layer::UserRiscOs));
+        assert!(layer_allows(Layer::UserRiscOs, Layer::Lib));
+        for other in [
+            Layer::Userland,
+            Layer::UserGui,
+            Layer::UserGame,
+            Layer::KernelSubsystem,
+            Layer::Driver,
+        ] {
+            assert!(!layer_allows(Layer::UserRiscOs, other), "{other:?}");
+            assert!(!layer_allows(other, Layer::UserRiscOs), "{other:?}");
+        }
+        assert!(!layer_allows(Layer::Lib, Layer::UserRiscOs));
+    }
+
+    #[test]
+    fn synthetic_transitive_dependency_on_an_emulator_crate_is_flagged() {
+        let crates = vec![
+            Crate {
+                name: "tairix-files".into(),
+                rel_dir: "userland/apps/files".into(),
+                layer: Layer::Userland,
+                deps: vec!["tairix-view".into()],
+            },
+            Crate {
+                name: "tairix-view".into(),
+                rel_dir: "userland/apps/view".into(),
+                layer: Layer::Userland,
+                deps: vec!["tairix-riscos-kernel".into()],
+            },
+            Crate {
+                name: "tairix-riscos-kernel".into(),
+                rel_dir: "userland/apps/riscos/kernel".into(),
+                layer: Layer::UserRiscOs,
+                deps: vec!["tairix-riscos-arm".into()],
+            },
+            Crate {
+                name: "tairix-riscos-arm".into(),
+                rel_dir: "userland/apps/riscos/arm".into(),
+                layer: Layer::UserRiscOs,
+                deps: vec![],
+            },
+        ];
+        let violations = analyze(&crates);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.starts_with("tairix-files") && v.contains("userland/apps/riscos")),
+            "{violations:#?}"
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.starts_with("tairix-riscos-kernel")),
+            "the intra-subtree edge is legitimate: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn synthetic_emulator_crate_reaching_another_leaf_is_flagged() {
+        let crates = vec![
+            Crate {
+                name: "tairix-riscos-app".into(),
+                rel_dir: "userland/apps/riscos/app".into(),
+                layer: Layer::UserRiscOs,
+                deps: vec!["tairix-wm".into(), "wintersun-net".into()],
+            },
+            Crate {
+                name: "tairix-wm".into(),
+                rel_dir: "userland/gui/wm".into(),
+                layer: Layer::UserGui,
+                deps: vec![],
+            },
+            Crate {
+                name: "wintersun-net".into(),
+                rel_dir: "userland/games/wintersun/net".into(),
+                layer: Layer::UserGame,
+                deps: vec![],
+            },
+        ];
+        let violations = analyze(&crates);
+        for leaf in ["userland/gui", "userland/games"] {
+            assert!(
+                violations.iter().any(|v| v.contains(leaf)),
+                "{leaf}: {violations:#?}"
+            );
+        }
     }
 
     /// Only `kernel/core` reaches a translation family, and a family reaches

@@ -329,6 +329,79 @@ fn each_bundle_carries_the_precedence_of_the_root_it_was_found_under() {
 }
 
 #[test]
+fn a_nested_bundle_outranks_every_bundle_of_a_later_root() {
+    let mut tree = MemTree::default();
+    tree.entry("/System/Applications", "Utilities", true)
+        .bundle(
+            "/System/Applications/Utilities",
+            "view.app",
+            manifest("os.tairix.view"),
+        );
+    tree.bundle(
+        "/Users/ada/Applications",
+        "view.app",
+        manifest("os.tairix.view"),
+    );
+
+    let (seen, _) = visited(&tree, &["/System/Applications", "/Users/ada/Applications"]);
+    assert_eq!(
+        seen,
+        [
+            ("/System/Applications/Utilities/view.app".to_string(), 0),
+            ("/Users/ada/Applications/view.app".to_string(), 1),
+        ],
+        "the first claim met is the one the stores rank first"
+    );
+}
+
+#[test]
+fn within_a_root_shallower_bundles_come_first_then_by_folder_then_name() {
+    let mut tree = MemTree::default();
+    tree.bundle(
+        "/Users/ada/Applications",
+        "zz.app",
+        manifest("os.tairix.zz"),
+    )
+    .entry("/Users/ada/Applications", "beta", true)
+    .entry("/Users/ada/Applications", "alpha", true);
+    tree.bundle(
+        "/Users/ada/Applications/alpha",
+        "b.app",
+        manifest("os.tairix.b"),
+    )
+    .entry("/Users/ada/Applications/alpha", "inner", true)
+    .bundle(
+        "/Users/ada/Applications/alpha",
+        "a.app",
+        manifest("os.tairix.a"),
+    );
+    tree.bundle(
+        "/Users/ada/Applications/alpha/inner",
+        "x.app",
+        manifest("os.tairix.x"),
+    );
+    tree.bundle(
+        "/Users/ada/Applications/beta",
+        "a.app",
+        manifest("os.tairix.a"),
+    );
+
+    let (seen, _) = visited(&tree, &["/Users/ada/Applications"]);
+    assert_eq!(
+        seen.iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/Users/ada/Applications/zz.app",
+            "/Users/ada/Applications/alpha/a.app",
+            "/Users/ada/Applications/alpha/b.app",
+            "/Users/ada/Applications/beta/a.app",
+            "/Users/ada/Applications/alpha/inner/x.app",
+        ]
+    );
+}
+
+#[test]
 fn an_absent_root_contributes_nothing_and_a_refused_listing_fails_the_scan_closed() {
     let mut tree = MemTree::default();
     tree.bundle(

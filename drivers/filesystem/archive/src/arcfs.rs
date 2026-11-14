@@ -21,7 +21,7 @@ use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Check, Coding, Data, Lead};
 use crate::format::{leaves_out, Content, Format, Placed, Read};
-use crate::name::{from_riscos, to_riscos, Charset};
+use crate::name::{from_riscos, to_riscos};
 use crate::region::{Regions, Sink};
 use crate::riscos::{meta_of, words_of, Words};
 use crate::spark::compress_into;
@@ -290,19 +290,11 @@ fn admit<A: VolumeAccess>(
     tree.add(dir, &name, body, meta, kept)
 }
 
-/// The name a member is written under, as RISC OS spells it: what an entry
-/// read held, or a new name held to what an entry holds.
+/// The name a member is written under, as RISC OS spells it, in the bytes an
+/// entry holds: what one read held, or a new name already held to what it
+/// holds with its NUL.
 fn spelling(name: &[u8]) -> Result<Vec<u8>, DriverError> {
-    Charset::RiscOs
-        .encode(name)
-        .map(|mut spelt| {
-            for byte in &mut spelt {
-                *byte = tairix_fsmeta::preset::acorn::crossed_name_byte(*byte);
-            }
-            spelt
-        })
-        .filter(|spelt| spelt.len() <= NAME_FIELD)
-        .ok_or(DriverError::LengthOutOfRange)
+    to_riscos(name, NAME_FIELD).ok_or(DriverError::LengthOutOfRange)
 }
 
 /// One entry of the table being written.

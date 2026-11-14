@@ -30,7 +30,7 @@ path = "src/run.rs"
 # The one rule for showing a name so nothing in it can hide
 # (`tairix_util::utf8::shown`), and the shared latest-wins job desk
 # (`tairix_util::defer`) the deferred bundle scan hands its work to the reader
-# thread through, so walking three program stores never happens on the loop
+# thread through, so walking the program stores never happens on the loop
 # that owes the window a frame.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno`, the input/display vocabulary, and the window-channel

@@ -50,6 +50,20 @@ impl Rgb {
     pub const fn to_array(self) -> [u8; 3] {
         [self.r, self.g, self.b]
     }
+
+    /// The colour a RISC OS colour word, `&BBGGRR00`, holds: how a sprite's
+    /// palette and a Draw file spell a colour, the low byte unused.
+    #[must_use]
+    pub const fn from_riscos_word(word: u32) -> Self {
+        let [_, r, g, b] = word.to_le_bytes();
+        Self::new(r, g, b)
+    }
+
+    /// The colour as a RISC OS colour word, `&BBGGRR00`, its low byte clear.
+    #[must_use]
+    pub const fn riscos_word(self) -> u32 {
+        u32::from_le_bytes([0, self.r, self.g, self.b])
+    }
 }
 
 impl From<Rgb> for Rgba {

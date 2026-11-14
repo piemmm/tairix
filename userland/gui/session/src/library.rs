@@ -31,12 +31,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{AppIdentity, Errno, SYSTEM_SERVICE_STORE};
+use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::Document;
 use tairix_appdata::{read_published, AppDataHost};
 use tairix_appload::publisher_id_of;
 use tairix_appstore::{identity_roots, walk, Bundle, StoreReader, Verdict, WalkError};
-use tairix_browse::open_with::{association_from_manifest, AppAssociation};
+use tairix_browse::open_with::{association_of, AppAssociation};
 use tairix_proglib::{
     load, merge, Catalog, EntryId, LibraryEntry, LIBRARY_PATH, LIBRARY_PUBLISHER,
 };
@@ -151,11 +151,13 @@ pub(crate) struct InstalledBundles {
 /// manifest declares, the account's own two stores after the machine-wide
 /// ones.
 ///
-/// The service store is walked as well as the program stores because a
-/// service can own a window — the Switchboard does — whose slot and title band
-/// read its manifest. A service opens no file, so it names no association.
-/// Fail-closed per bundle: a manifest that cannot be read or does not decode
-/// contributes nothing, so one broken bundle costs only itself.
+/// The system-started stores are walked as well as the program stores because
+/// a service or a component can own a window — the Switchboard does — whose
+/// slot and title band read its manifest. Which bundles open documents is
+/// [`association_of`]'s rule, so the associations are the file manager's,
+/// in the same precedence. Fail-closed per bundle: a manifest that cannot be
+/// read or does not decode contributes nothing, so one broken bundle costs
+/// only itself.
 ///
 /// # Errors
 ///
@@ -169,18 +171,8 @@ where
     R: StoreReader + ?Sized,
 {
     let mut installed = InstalledBundles::default();
-    let roots = identity_roots(home);
-    let services = roots
-        .iter()
-        .position(|root| root.as_str() == SYSTEM_SERVICE_STORE);
-    walk(reader, &roots, |bundle: Bundle<'_>| {
-        if Some(bundle.root) != services {
-            if let Some(assoc) =
-                association_from_manifest(bundle.path, bundle.header, bundle.manifest)
-            {
-                installed.associations.push(assoc);
-            }
-        }
+    walk(reader, &identity_roots(home), |bundle: Bundle<'_>| {
+        installed.associations.extend(association_of(&bundle));
         // The identity the manifest *claims*. Nothing here verifies its
         // signature, so it is only ever matched against what the kernel
         // attested for a running process; a claim the identity grammar

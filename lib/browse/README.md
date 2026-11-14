@@ -24,9 +24,9 @@ can never diverge in navigation semantics, listing policy, or look.
   file-type icon and the "Open With…" association vocabulary read, so the two
   can never drift apart. `MediaType` names a type by its IANA (or TAIRiX
   vendor) media-type spelling (`as_str` / `from_media_str`, round-tripping
-  case-insensitively); `Ending::of(name)` is what ends a name — a RISC OS
-  file type after a comma (`,ff9`) and an extension after a dot, each only
-  after a stem, which it also answers — `media_for_name(name)` maps that ending to its type
+  case-insensitively); `Ending::of(name)`, `lib/path`'s, is what ends a name — a
+  RISC OS file type after a comma (`,ff9`) and an extension after a dot, each
+  only after a stem, which it also answers — `media_for_name(name)` maps that ending to its type
   (ASCII-case-insensitive, allocating nothing), `name_endings(media)` lists
   the endings a type is known by, and `media_for_entry(entry,
   parent)` classifies a listed entry — `inode/directory` for a directory
@@ -283,28 +283,27 @@ can never diverge in navigation semantics, listing policy, or look.
   this engine the item the second press resolved to.
 - **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
   the pure type→bundle model behind offering a file to a chosen application.
-  A file's content type is the shared registry's (`media_for_name`), so the
-  association vocabulary is exactly the one the drawn glyph comes from.
-  `BundleSource` is the injected installed-bundle enumeration seam (the "Open
-  With…" analogue of `DirectorySource`), and `applications_for` selects the
-  `AppAssociation`s whose declared MIME set handles the file's type **or any
-  broader type it is a subclass of** (`MediaType::parent`) — an editor
-  declaring `text/plain` is offered for a `.rs` file. Candidates are ordered by
-  how specifically they claim it (a bundle declaring `text/x-rust` before one
-  declaring `text/plain`), and bundles claiming at the same level keep the
-  source's enumeration order, so no existing ordering is disturbed. No match is
-  an honest empty answer — a "no application" notice, never a fabricated
-  default — and the type decision is a display hint only: the load gate still
+  `association_of` builds an `AppAssociation` from one bundle the shared store
+  walk (`lib/appstore`) found, and is the one rule for which bundles open
+  documents: a command or an application, in a place its signed kind may run
+  from, whose declared MIME table decodes. Anything else, or a corrupt table,
+  is skipped rather than offered on a guess. `AppAssociation::opens` is the one
+  matching rule: the file's own type, from the shared registry
+  (`media_for_document`), or any broader type it is a subclass of
+  (`MediaType::parent`), declarations matched however they are cased, so an
+  editor declaring `text/plain` opens a `.rs` file. `applications_for` ranks
+  the bundles that open a file by how specifically they claim it and, at one
+  specificity, keeps the table's order, which a table built from the walk has
+  in store precedence. No match is an honest empty answer, never a fabricated
+  default, and the declared types are a display hint only: the load gate still
   verifies and capability-checks whichever bundle the user picks. The engine
   never spawns. The renderer draws the candidate list as the scrolled
   `OpenWithChooser` panel above, so the files app can offer the full list —
-  however long — where the default open picks the first.
-  `association_from_appinfo(bundle_path, appinfo)` is the pure, fail-closed
-  decode a running-system `BundleSource` uses per bundle: it reads a manifest's
-  header and declared MIME table (the same body layout the loader reads) into an
-  `AppAssociation`, skipping a corrupt or non-parsing manifest rather than
-  offering it on a guess. It reads the declared types as a hint only and never
-  verifies the signature — the signed load gate does that at launch.
+  however long — where the default open picks the first. `note_handed` and
+  `Unclaimed` are the records a surface makes of an open, under
+  `DOCUMENT_HANDED` (the bundle and whether it may write) and
+  `DOCUMENT_UNCLAIMED` (the type) in the crate's `38000..38100` event range,
+  never the document's name.
 - **Multi-selection** (`select`, `Browser` selection methods,
   `plans/NEW-FILEMANAGER.md` FM7): the per-listing set of marked entries the
   management verbs act on. `Selection` models a plain click (`single`), a

@@ -777,7 +777,7 @@ fn attr_read(handle: &tairix_rt::File, out: &mut [u8]) -> i64 {
 pub fn recorded_filetype_of(file: &tairix_rt::File) -> Option<Filetype> {
     let mut value = [0u8; acorn::ATTR_VALUE_MAX];
     let len = usize::try_from(attr_read(file, &mut value)).ok()?;
-    acorn::filetype_from_value(value.get(..len)?).ok()
+    Filetype::from_hex(value.get(..len)?)
 }
 
 #[cfg(feature = "rt")]

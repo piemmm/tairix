@@ -448,6 +448,41 @@ pub enum SlotAnswer {
     Refuses(Box<DropRefusal>),
 }
 
+impl SlotAnswer {
+    /// What the bundle at `bundle`, attested as the application named `app`,
+    /// answers a drag of `items` with: it opens the one file its signed
+    /// `opener` claims, by the one matching rule Open With uses, or it refuses
+    /// in its own name. A bundle that opens no documents has no `opener`, and
+    /// refuses every drop. `None` only where `bundle` names no entry binary.
+    #[must_use]
+    pub fn of(
+        app: &str,
+        bundle: &str,
+        opener: Option<&tairix_browse::AppAssociation>,
+        items: &DragItems,
+    ) -> Option<Self> {
+        let name = items.first().as_str();
+        let taken =
+            opener.filter(|opener| items.openable() && opener.opens(name, items.filetype()));
+        let Some(opener) = taken else {
+            let claims = opener.map_or(&[][..], tairix_browse::AppAssociation::mime_types);
+            return Some(Self::Refuses(Box::new(DropRefusal::new(
+                app,
+                name,
+                items.openable(),
+                claims,
+            ))));
+        };
+        Some(Self::Opens(Box::new(DropTarget {
+            run_path: tairix_abi::window_ipc::BundleRunPath::new(&tairix_appstore::entry_path(
+                bundle,
+            ))
+            .ok()?,
+            writes_documents: opener.writes_documents(),
+        })))
+    }
+}
+
 /// Why an application does not take what was dropped on its slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DropRefusal {

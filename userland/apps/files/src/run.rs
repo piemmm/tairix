@@ -172,15 +172,15 @@ mod program {
     use tairix_browse::render::{properties_drive_hit, properties_title_rect, ClashPanel};
     use tairix_browse::TitleKeyed;
     use tairix_browse::{
-        applications_for, association_from_manifest, blank_documents, browser_floor,
-        context_choice_from_item, context_menu, drop_operation, empty_trash_plan, fitted_sizing,
-        manager_opening, network_context_menu, paste_strategy, place_menu, plan_paste,
-        quick_applications, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
-        win_floor_width, Activation, AppAssociation, Attribute, Attributes, BlankDocument, Browser,
-        BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel,
-        ContextQuick, DeleteDisposition, DeletePlan, DirectorySource, Drive, DriveChange,
-        DriveSample, Entry, EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob,
-        Location, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NetworkItem, NewEntry,
+        applications_for, association_of, blank_documents, browser_floor, context_choice_from_item,
+        context_menu, drop_operation, empty_trash_plan, fitted_sizing, manager_opening,
+        network_context_menu, paste_strategy, place_menu, plan_paste, quick_applications,
+        trash_dest_path, trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation,
+        AppAssociation, Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard,
+        ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel, ContextQuick,
+        DeleteDisposition, DeletePlan, DirectorySource, Drive, DriveChange, DriveSample, Entry,
+        EntryKind, HiddenEndings, Listed, Listing, ListingDesk, ListingJob, Location,
+        ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NetworkItem, NewEntry,
         OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
         PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
         RowList, RtLinkReader, ScrollColumn, SortMode, Subject, Survey, SurveyStep, Tally, Took,
@@ -5459,7 +5459,14 @@ mod program {
                 return;
             }
             match launch {
-                HandedLaunch::Bare { handoff, .. } | HandedLaunch::Document { handoff, .. } => {
+                HandedLaunch::Bare { handoff, .. } => self.handoffs.handed(handoff),
+                HandedLaunch::Document {
+                    run_path,
+                    writable,
+                    handoff,
+                    ..
+                } => {
+                    note_document_handed(&run_path, writable);
                     self.handoffs.handed(handoff);
                 }
                 HandedLaunch::Settings { .. } => {}
@@ -5621,11 +5628,11 @@ mod program {
                 .first()
                 .map(|assoc| (String::from(assoc.bundle_path()), assoc.writes_documents()));
             drop(installed);
-            match chosen {
-                Some((bundle_path, edits)) => {
-                    self.launch_viewer(client, &bundle_path, edits, file_path, name, handoff);
-                }
-                None => self.not_opened(name, "no installed application opens it"),
+            if let Some((bundle_path, edits)) = chosen {
+                self.launch_viewer(client, &bundle_path, edits, file_path, name, handoff);
+            } else {
+                tairix_browse::Unclaimed::of(name, recorded).note(&tairix_rt::LogSink);
+                self.not_opened(name, "no installed application opens it");
             }
         }
 
@@ -5780,8 +5787,16 @@ mod program {
             }
             #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
             self.in_flight.insert(pid as u64, label);
+            note_document_handed(run_path, writable);
             self.handoffs.handed(handoff);
         }
+    }
+
+    /// Record that the document a user opened was handed to the bundle whose
+    /// entry binary is `run_path`, for writing where `writable`.
+    fn note_document_handed(run_path: &str, writable: bool) {
+        let bundle = tairix_appstore::bundle_of_entry(run_path).unwrap_or(run_path);
+        tairix_browse::note_handed(&tairix_rt::LogSink, bundle, writable);
     }
 
     /// Hand the file open read-only on `fd`, called `name`, to the window the
@@ -8096,33 +8111,25 @@ mod program {
         }
     }
 
-    /// Walk the machine-wide program stores for the file types their bundles
-    /// declare, under the file manager's own `CAP_FS_ACCESS` (never a
-    /// compiled-in list).
+    /// Walk the program stores — the system's, then the account's own under
+    /// `HOME` — for the file types their bundles declare, under the file
+    /// manager's own `CAP_FS_ACCESS` (never a compiled-in list).
     ///
-    /// The walk is the shared one (`lib/appstore`), so this table, the program
-    /// library's `rescan`, and the desktop's icon-bar identity index find the
-    /// same bundles by the same rule. A declared type is a display *hint*: a
-    /// bundle offered here is still launched through the ordinary signed load
-    /// gate. Fail-closed per bundle: one whose manifest cannot be read, is
-    /// over-long, or does not decode simply declares no types, so a corrupt
-    /// bundle is never offered on a guess. A tree the shared walk refuses
-    /// outright yields no candidates at all rather than a partial table.
+    /// The walk and the rule for which bundles open documents are the shared
+    /// ones (`lib/appstore`, [`association_of`]), so this table is the one the
+    /// desktop offers, in the same precedence. A declared type is a display
+    /// *hint*: a bundle offered here is still launched through the ordinary
+    /// signed load gate. A tree the shared walk refuses outright yields no
+    /// candidates at all rather than a partial table.
     fn scan_bundles() -> Vec<AppAssociation> {
+        let home = tairix_rt::env_var(b"HOME").and_then(|home| core::str::from_utf8(home).ok());
         let mut out = Vec::new();
         let scanned = tairix_appstore::walk(
             &RtStoreReader,
-            &tairix_appstore::MACHINE_ROOTS,
-            |bundle: tairix_appstore::Bundle<'_>| match association_from_manifest(
-                bundle.path,
-                bundle.header,
-                bundle.manifest,
-            ) {
-                Some(assoc) => {
-                    out.push(assoc);
-                    Verdict::Accepted
-                }
-                None => Verdict::Refused,
+            &tairix_appstore::store_roots(home),
+            |bundle: tairix_appstore::Bundle<'_>| {
+                out.extend(association_of(&bundle));
+                Verdict::Accepted
             },
         );
         if scanned.is_err() {
@@ -11983,11 +11990,10 @@ mod program {
     /// Take whatever the bundle scan has answered into `installed`, and ask for
     /// it again so the next read is current.
     ///
-    /// The scan walks three program stores and reads one manifest per installed
-    /// application, which is far more than a frame's worth of work, so it runs
-    /// on the reader and every consumer reads the answer that has already
-    /// landed. A machine that granted no reader answers here, on this thread,
-    /// exactly as it always did.
+    /// The scan walks the program stores and reads one manifest per installed
+    /// bundle, which is far more than a frame's worth of work, so it runs on the
+    /// reader and every consumer reads the answer that has already landed. A
+    /// machine that granted no reader answers here, on this thread.
     fn adopt_bundles(reads: &Reads, installed: &Installed) {
         if let Some(found) = reads.take_bundles() {
             *installed.borrow_mut() = Some(found);

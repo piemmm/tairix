@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The RISC OS colour word, `&BBGGRR00`, a sprite's palette is written in: one
+# definition shared with Draw files and the RISC OS emulator's ColourTrans.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 # PNG's `IDAT` chunk stream is zlib-wrapped DEFLATE (RFC 1950/1951); the
 # `inflate`/`zlib` modules there are the one definition of that foreign
 # format, so PNG reading and writing never carry a second copy of it.

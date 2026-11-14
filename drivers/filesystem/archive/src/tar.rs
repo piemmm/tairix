@@ -25,7 +25,7 @@ use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Check, Coding, Data, Lead};
 use crate::format::{leaves_out, put_zeros, Content, Format, Out, Placed, Read};
-use crate::name::{as_is, spelled, Charset, Spelled};
+use crate::name::{spelled, Charset, Spelled};
 use crate::region::Regions;
 use crate::stream::{Compression, Packing, Stream};
 use crate::tree::{Body, Kept, Meta, Recorded, Tree, MAX_MEMBERS, ROOT};
@@ -727,7 +727,7 @@ fn admit(tree: &mut Tree, header: &Header<'_>, coding: Coding) -> Result<Admitte
         record: header.record.clone(),
         notes: Vec::new(),
     });
-    let mut parts = match spelled(&path, b'/', as_is) {
+    let mut parts = match spelled(&path, b'/') {
         Spelled::Within(parts) => parts,
         Spelled::Root if kind == b'5' => {
             let root = tree.node_mut(ROOT)?;
@@ -773,7 +773,7 @@ fn admit(tree: &mut Tree, header: &Header<'_>, coding: Coding) -> Result<Admitte
             // A hard link is read as a copy of what it names, which an
             // earlier member must be.
             let target = header.link()?;
-            let Spelled::Within(target) = spelled(&target, b'/', as_is) else {
+            let Spelled::Within(target) = spelled(&target, b'/') else {
                 return Err(DriverError::OutOfRange);
             };
             let mut at = ROOT;

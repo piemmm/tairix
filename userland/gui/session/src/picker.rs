@@ -528,9 +528,7 @@ impl Typing {
     #[must_use]
     pub fn leaf(self, name: &str, records: bool) -> Option<String> {
         let suffixed = match self.filetype {
-            Some(filetype) if self.bare && !records => {
-                format!("{name},{:03x}", filetype.get())
-            }
+            Some(filetype) if self.bare && !records => format!("{name}{}", filetype.suffix()),
             _ => String::from(name),
         };
         tairix_path::validate_file_name(&suffixed).ok()?;
@@ -628,7 +626,7 @@ impl SaveBand {
                 refusal.push_str(extension);
             }
             if let Some(filetype) = filetype {
-                let _ = write!(refusal, " or ,{:03x}", filetype.get());
+                let _ = write!(refusal, " or {}", filetype.suffix());
             }
             return Err(refusal);
         }
@@ -3159,17 +3157,20 @@ impl<S: DirectorySource> Pick<S> {
     }
 }
 
-/// Keep, of a chosen folder's `entries`, the regular files whose content type
-/// — by name, else by the filetype their volume records — is one of `kinds`,
-/// in the order the picker lists them and at most the most one folder pick
-/// delegates, answering how many matching files the bound left out.
+/// Keep, of a chosen folder's `entries`, the regular files `opener` opens by
+/// the one matching rule Open With applies, in the order the picker lists them
+/// and at most the most one folder pick delegates, answering how many matching
+/// files the bound left out. A requester no installed bundle is attested to
+/// opens nothing.
 ///
 /// A link is never kept: a pick hands over only what the folder itself holds.
-pub fn folder_selection(entries: &mut Vec<Entry>, kinds: &[String]) -> u32 {
+pub fn folder_selection(
+    entries: &mut Vec<Entry>,
+    opener: Option<&tairix_browse::AppAssociation>,
+) -> u32 {
     entries.retain(|entry| {
         entry.kind() == EntryKind::File
-            && tairix_browse::media_for_document(entry.name(), entry.filetype())
-                .is_some_and(|media| kinds.iter().any(|kind| kind == media.as_str()))
+            && opener.is_some_and(|opener| opener.opens(entry.name(), entry.filetype()))
     });
     tairix_browse::sort_entries(entries, tairix_browse::SortMode::default_order().into());
     let left_out = entries

@@ -201,8 +201,8 @@ pub use media::{
 pub use mode_edit::{validate_mode, InvalidMode};
 pub use network::{NetworkEndpoint, NetworkItem, Omission};
 pub use open_with::{
-    applications_for, association_from_manifest, blank_documents, quick_applications,
-    AppAssociation, OpenWithCandidate, OpenWithChooser,
+    applications_for, association_of, blank_documents, note_handed, quick_applications,
+    AppAssociation, OpenWithCandidate, OpenWithChooser, Unclaimed,
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{

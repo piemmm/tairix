@@ -535,19 +535,28 @@ fn a_name_crosses_between_the_disc_and_the_vfs_with_dot_and_slash_exchanged() {
     }
 }
 
-/// A name on the disc no path can spell is left out of the listing, so one
-/// such entry cannot make its whole directory unlistable.
+/// A name on the disc no path can spell, or that RISC OS itself could not
+/// have written, is left out of the listing, so one such entry cannot make
+/// its whole directory unlistable.
 #[test]
 fn a_name_no_path_can_spell_is_left_out_rather_than_refusing_the_listing() {
-    for name in [&b"/"[..], b"//", b"a.b", b"."] {
-        assert!(super::Crossed::listed(name).is_none(), "{name:?}");
+    for name in [
+        &b"/"[..],
+        b"//",
+        b"a.b",
+        b".",
+        b"has space",
+        b"wild*card",
+        b"$",
+    ] {
+        assert!(super::listed(name).is_none(), "{name:?}");
     }
     for (name, spelled) in [
         (&b"Read/Me"[..], &b"Read.Me"[..]),
         (b"!Boot", b"!Boot"),
         (b"///", b"..."),
     ] {
-        let crossed = super::Crossed::listed(name).expect("spellable");
+        let crossed = super::listed(name).expect("spellable");
         assert_eq!(crossed.as_bytes(), spelled);
     }
 }
@@ -2098,8 +2107,8 @@ fn a_name_crosses_risc_os_latin_1_and_utf_8_both_ways() {
         (&b"Euro\x80"[..], "Euro\u{20ac}"),
         (b"Hard\xa0Space", "Hard\u{a0}Space"),
     ] {
-        let crossed = super::Crossed::listed(name).expect("spellable");
+        let crossed = super::listed(name).expect("spellable");
         assert_eq!(crossed.as_bytes(), spelled.as_bytes());
     }
-    assert!(super::Crossed::listed(b"Bell\x07").is_none());
+    assert!(super::listed(b"Bell\x07").is_none());
 }

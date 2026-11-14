@@ -1037,6 +1037,11 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-11-14 — §3, §17.4: `userland/apps/riscos/` is a leaf subtree.**
+  The RISC OS emulator is a processor, an operating system and a desktop, too
+  large for one crate and private to the emulator, so its crates may compose
+  each other while nothing outside reaches them.
+
 - **2026-11-13 — §16.5: an application's own documents folder.** An emulator's
   discs and tapes are the user's files, so they belong in `Home/Documents/`
   where the user sees them, yet a picker for every disc it makes would ask the

@@ -102,10 +102,10 @@ fn row_stride(width: u32, bits: u32) -> Result<u32, EncodeError> {
     mask_stride(width, bits).map_err(|_| EncodeError::TooLarge)
 }
 
-/// A palette entry pair as a control block holds it: `&BBGGRR00`, twice,
-/// the second word being the flash colour.
+/// A palette entry pair as a control block holds it: the colour's RISC OS
+/// colour word, twice, the second being the flash colour.
 fn palette_entry(out: &mut Output, entry: Rgba8) -> Result<(), EncodeError> {
-    let word = u32::from(entry[0]) << 8 | u32::from(entry[1]) << 16 | u32::from(entry[2]) << 24;
+    let word = tairix_colour::Rgb::new(entry[0], entry[1], entry[2]).riscos_word();
     out.le_u32(word)?;
     out.le_u32(word)
 }

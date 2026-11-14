@@ -126,6 +126,261 @@ pub fn latin1_byte(ch: char) -> Option<u8> {
     }
 }
 
+/// Why a name cannot cross between RISC OS and TAIRiX: what RISC OS reports
+/// as a bad name.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BadName {
+    /// The name is empty.
+    Empty,
+    /// It holds a character no RISC OS name can: a control code, a space, one
+    /// RISC OS keeps out of a name, or one its Latin-1 lacks. A TAIRiX name
+    /// that is not UTF-8 is refused the same way.
+    Character,
+    /// Crossed, it would be `.` or `..`, which name no entry of their own.
+    NoEntry,
+    /// It is longer than [`LEAF_MAX`] bytes as the side it crosses to spells
+    /// it.
+    TooLong,
+}
+
+/// The longest leaf name either side holds, in bytes: TAIRiX's, which is also
+/// the longest a `FileCore` directory holds.
+pub const LEAF_MAX: usize = tairix_abi::fs::FS_NAME_MAX;
+
+/// One leaf name, as the side it crossed to spells it: the UTF-8 a TAIRiX
+/// directory lists, or the bytes RISC OS writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Leaf {
+    bytes: [u8; LEAF_MAX],
+    len: usize,
+}
+
+impl Leaf {
+    const EMPTY: Self = Self {
+        bytes: [0; LEAF_MAX],
+        len: 0,
+    };
+
+    /// The name's bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    fn push(&mut self, spelt: &[u8]) -> Result<(), BadName> {
+        let end = self.len + spelt.len();
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(BadName::TooLong)?
+            .copy_from_slice(spelt);
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Whether RISC OS's Latin-1 `byte` may stand in a RISC OS name.
+fn is_name_byte(byte: u8) -> bool {
+    byte != b' ' && !RESERVED_NAME_BYTES.contains(&byte) && latin1_char(byte).is_some()
+}
+
+/// The RISC OS leaf `spelt` — RISC OS's Latin-1, a dot written as `/` — as
+/// TAIRiX spells it: a name a TAIRiX directory can hold, which turns back into
+/// `spelt` through [`leaf_to_riscos`].
+///
+/// # Errors
+///
+/// The [`BadName`] that stops it crossing.
+pub fn leaf_from_riscos(spelt: &[u8]) -> Result<Leaf, BadName> {
+    if spelt.is_empty() {
+        return Err(BadName::Empty);
+    }
+    let mut leaf = Leaf::EMPTY;
+    for &byte in spelt {
+        if !is_name_byte(byte) {
+            return Err(BadName::Character);
+        }
+        let ch = latin1_char(crossed_name_byte(byte)).ok_or(BadName::Character)?;
+        leaf.push(ch.encode_utf8(&mut [0; 4]).as_bytes())?;
+    }
+    if matches!(leaf.as_bytes(), b"." | b"..") {
+        return Err(BadName::NoEntry);
+    }
+    Ok(leaf)
+}
+
+/// The TAIRiX leaf `name` as RISC OS spells it: each character in RISC OS's
+/// Latin-1, a dot written as `/`, which turns back into `name` through
+/// [`leaf_from_riscos`].
+///
+/// # Errors
+///
+/// The [`BadName`] that stops it crossing.
+pub fn leaf_to_riscos(name: &[u8]) -> Result<Leaf, BadName> {
+    match core::str::from_utf8(name).map_err(|_| BadName::Character)? {
+        "" => Err(BadName::Empty),
+        "." | ".." => Err(BadName::NoEntry),
+        text => {
+            let mut leaf = Leaf::EMPTY;
+            for ch in text.chars() {
+                let byte = latin1_byte(ch)
+                    .map(crossed_name_byte)
+                    .filter(|&byte| is_name_byte(byte))
+                    .ok_or(BadName::Character)?;
+                leaf.push(&[byte])?;
+            }
+            Ok(leaf)
+        }
+    }
+}
+
+/// The leaves of the RISC OS path `path`, which joins them with `.`, each as
+/// TAIRiX spells it ([`leaf_from_riscos`]).
+pub fn path_from_riscos(path: &[u8]) -> impl Iterator<Item = Result<Leaf, BadName>> + '_ {
+    path.split(|&byte| byte == b'.').map(leaf_from_riscos)
+}
+
+/// The names RISC OS gives the filetypes it allocates itself — its reserved
+/// block `&A00` to `&AFF` and its generic data types `&E00` to `&FFF` — in
+/// ascending order. A filetype elsewhere is the software's that uses it, and
+/// several programs name one number differently, so it is shown by its number.
+const FILETYPE_NAMES: &[(u16, &str)] = &[
+    (0xAAE, "OrUpgrd"),
+    (0xAB7, "PPD"),
+    (0xAB9, "Monitor"),
+    (0xABB, "PlugIn"),
+    (0xACA, "LaTeX"),
+    (0xACC, "ISO-9660"),
+    (0xADB, "New Font"),
+    (0xADF, "PDF"),
+    (0xAE3, "Director"),
+    (0xAE4, "Java"),
+    (0xAE6, "MSWord"),
+    (0xAE7, "Replay"),
+    (0xAE9, "Alarm"),
+    (0xAF1, "Music"),
+    (0xAF2, "PostTray"),
+    (0xAF3, "PostBox"),
+    (0xAF4, "PostFile"),
+    (0xAF5, "PostData"),
+    (0xAF6, "SimTrace"),
+    (0xAF7, "HelpInfo"),
+    (0xAF8, "1stWord+"),
+    (0xAF9, "DtpDoc"),
+    (0xAFA, "DtpStyle"),
+    (0xAFC, "GCODE"),
+    (0xAFD, "GCAL"),
+    (0xAFE, "Mouse"),
+    (0xAFF, "DrawFile"),
+    (0xE13, "Drummer"),
+    (0xE92, "DiscIndx"),
+    (0xECB, "PCBFile"),
+    (0xECD, "TeleSoft"),
+    (0xECF, "ECFData"),
+    (0xED0, "RawSound"),
+    (0xED1, "EdSProg"),
+    (0xEEA, "TinyLogo"),
+    (0xEEB, "TinyDraw"),
+    (0xF09, "WiniUtil"),
+    (0xF0E, "BasicIV"),
+    (0xF1B, "65Host"),
+    (0xF7C, "Teletext"),
+    (0xF89, "GZip"),
+    (0xF95, "Code"),
+    (0xF9D, "DiscCD"),
+    (0xF9E, "DiscDP"),
+    (0xF9F, "DiscD"),
+    (0xFA2, "HomeWrks"),
+    (0xFA8, "EasyData"),
+    (0xFAA, "UtlLabel"),
+    (0xFAF, "HTML"),
+    (0xFB0, "Allocate"),
+    (0xFB1, "Wave"),
+    (0xFB2, "MovieFS"),
+    (0xFB4, "DiscR"),
+    (0xFB5, "NoDisc"),
+    (0xFBC, "PBAbacus"),
+    (0xFBD, "PBWrite"),
+    (0xFBE, "PBCards"),
+    (0xFC0, "Link"),
+    (0xFC2, "AIFF"),
+    (0xFC3, "Patch"),
+    (0xFC6, "PrntDefn"),
+    (0xFC8, "DOSDisc"),
+    (0xFC9, "SunRastr"),
+    (0xFCA, "Squash"),
+    (0xFCC, "Device"),
+    (0xFCD, "HardDisc"),
+    (0xFCE, "Floppy"),
+    (0xFCF, "Cache"),
+    (0xFD0, "PCEmConf"),
+    (0xFD1, "BASICTxt"),
+    (0xFD2, "ScrDiff"),
+    (0xFD3, "DebImage"),
+    (0xFD4, "MIDI"),
+    (0xFD5, "Pict"),
+    (0xFD6, "TaskExec"),
+    (0xFD7, "TaskObey"),
+    (0xFD8, "MSDOScom"),
+    (0xFD9, "MSDOSexe"),
+    (0xFDA, "MSDOSbat"),
+    (0xFDB, "TextCRLF"),
+    (0xFDC, "SoftLink"),
+    (0xFDE, "VTSetup"),
+    (0xFDF, "VTScript"),
+    (0xFE0, "Accessry"),
+    (0xFE1, "Make"),
+    (0xFE2, "Amiga"),
+    (0xFE3, "Atari"),
+    (0xFE4, "DOS"),
+    (0xFE5, "EPROM"),
+    (0xFE6, "UNIX Ex"),
+    (0xFE7, "ViewSht"),
+    (0xFE8, "ViewPS"),
+    (0xFE9, "ViewWord"),
+    (0xFEA, "Desktop"),
+    (0xFEB, "Obey"),
+    (0xFEC, "Template"),
+    (0xFED, "Palette"),
+    (0xFF0, "TIFF"),
+    (0xFF1, "RawData"),
+    (0xFF2, "Config"),
+    (0xFF3, "LaserJet"),
+    (0xFF4, "Printout"),
+    (0xFF5, "PoScript"),
+    (0xFF6, "Font"),
+    (0xFF7, "BBC font"),
+    (0xFF8, "Absolute"),
+    (0xFF9, "Sprite"),
+    (0xFFA, "Module"),
+    (0xFFB, "BASIC"),
+    (0xFFC, "Utility"),
+    (0xFFD, "Data"),
+    (0xFFE, "Command"),
+    (0xFFF, "Text"),
+];
+
+// The lookup searches the table in halves, so it must be in ascending order;
+// each name is one RISC OS's eight characters hold.
+const _: () = {
+    let mut at = 0;
+    while at < FILETYPE_NAMES.len() {
+        let (raw, name) = FILETYPE_NAMES[at];
+        assert!(matches!(raw, 0xA00..=0xAFF | 0xE00..=0xFFF));
+        assert!(at == 0 || FILETYPE_NAMES[at - 1].0 < raw);
+        assert!(!name.is_empty() && name.len() <= 8);
+        at += 1;
+    }
+};
+
+/// The name RISC OS gives `filetype`, where it allocates the type itself.
+#[must_use]
+pub fn filetype_name(filetype: Filetype) -> Option<&'static str> {
+    let at = FILETYPE_NAMES
+        .binary_search_by_key(&filetype.get(), |&(raw, _)| raw)
+        .ok()?;
+    FILETYPE_NAMES.get(at).map(|&(_, name)| name)
+}
+
 /// A decoded RISC OS load/exec pair.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LoadExec {
@@ -175,37 +430,6 @@ pub fn encode_typed(filetype: Filetype, centiseconds: u64) -> Result<(u32, u32),
     let load = (TYPED_MARKER << 20) | (u32::from(filetype.get()) << 8) | high_byte;
     let exec = u32::try_from(centiseconds & 0xFFFF_FFFF).unwrap_or(0);
     Ok((load, exec))
-}
-
-/// Encode a filetype as three lowercase hex digits (e.g. `&FFF` → `b"fff"`),
-/// the canonical `acorn.filetype` value.
-#[must_use]
-pub fn filetype_to_value(filetype: Filetype) -> [u8; 3] {
-    let raw = filetype.get();
-    [
-        hex_digit(u8::try_from((raw >> 8) & 0xF).unwrap_or(0)),
-        hex_digit(u8::try_from((raw >> 4) & 0xF).unwrap_or(0)),
-        hex_digit(u8::try_from(raw & 0xF).unwrap_or(0)),
-    ]
-}
-
-/// Parse an `acorn.filetype` value (three hex digits, upper or lower case)
-/// back into a filetype.
-///
-/// # Errors
-///
-/// [`MetadataError::NotRepresentable`] if the value is not exactly three hex
-/// digits.
-pub fn filetype_from_value(value: &[u8]) -> Result<Filetype, MetadataError> {
-    if value.len() != 3 {
-        return Err(MetadataError::NotRepresentable);
-    }
-    let mut out: u16 = 0;
-    for &byte in value {
-        let nibble = hex_value(byte).ok_or(MetadataError::NotRepresentable)?;
-        out = (out << 4) | u16::from(nibble);
-    }
-    Filetype::new(out).ok_or(MetadataError::NotRepresentable)
 }
 
 /// Encode a 32-bit load or exec address as eight lowercase hex digits, the
@@ -572,9 +796,7 @@ impl Object {
                 let (encoded, len) = attr_to_value(self.attr)?;
                 put(out, &encoded[..len])
             }
-            (FILETYPE_KEY, LoadExec::Typed { filetype, .. }) => {
-                put(out, &filetype_to_value(filetype))
-            }
+            (FILETYPE_KEY, LoadExec::Typed { filetype, .. }) => put(out, &filetype.hex()),
             (DATESTAMP_KEY, LoadExec::Typed { centiseconds, .. }) => {
                 put(out, &datestamp_to_value(centiseconds)?)
             }
@@ -610,7 +832,7 @@ impl Object {
                 self.attr = attr;
             }
             FILETYPE_KEY => {
-                let filetype = filetype_from_value(value).map_err(shape)?;
+                let filetype = Filetype::from_hex(value).ok_or(DriverError::OutOfRange)?;
                 let centiseconds = match decoded {
                     LoadExec::Typed { centiseconds, .. } => centiseconds,
                     LoadExec::Untyped { .. } => 0,

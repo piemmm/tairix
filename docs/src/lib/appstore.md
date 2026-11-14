@@ -7,7 +7,8 @@ say?":
 
 - the program-library `rescan` (`userland/apps/applib`), which registers every
   bundle that declares a library folder,
-- the file manager's "Open With…" table (`userland/apps/files`), which reads
+- the "Open With…" table the file manager (`userland/apps/files`) and the
+  desktop session both build, through `lib/browse`'s `association_of`, from
   the file types each bundle claims,
 - the [desktop session](../desktop/session.md)'s icon-bar identity index, which
   resolves the bundle a kernel-attested `AppIdentity` names,
@@ -23,9 +24,14 @@ own manifest decode. This crate is that walk, defined once (§2.2).
 `Bundle { path, root, header, manifest }` and answers a `Scan { accepted,
 skipped }`:
 
-- **Breadth-first, sorted.** Listings are consumed in name order, so the same
-  tree always yields the same sequence — which is what makes "the first bundle
-  in store order owns an identifier" a rule rather than a race.
+- **Store by store, breadth-first, sorted.** Each root is walked whole before
+  the next, and listings are consumed in name order, so the same tree always
+  yields the same sequence and that sequence is the precedence: every bundle of
+  an earlier store comes before any of a later one, however deeply either is
+  filed; within a store, shallower bundles come first, and those at one depth
+  in the order of the folders holding them, then by name. That is what makes
+  "the first bundle in store order owns an identifier or a file type" a rule
+  rather than a race.
 - **A `.app` is a sealed unit.** The walk never descends into one, so a bundle
   can never contain another; nested *plain* subdirectories are descended, so a
   store may be organised (`Applications/games/chess.app`).
@@ -83,12 +89,10 @@ uses, for a consumer that reads one *known* bundle rather than walking.
   and a consumer that draws an identity from a manifest must say which of the
   two it has — the session's icon bar matches its claims against what the
   kernel attested rather than believing them (§23.1).
-- **Fixed precedence, reported not re-derived.** Each visited bundle carries
-  the index of the root it was found under. The walk is breadth-first across
-  every root at once, so a nested bundle in a system store is *seen* after a
-  top-level one in a user store; a consumer resolving a collision therefore
-  reads the precedence instead of guessing from visit order or re-parsing path
-  prefixes.
+- **Fixed precedence, reported not re-derived.** Visit order is precedence
+  order, and each visited bundle also carries the index of the root it was
+  found under, so a consumer resolving a collision across roots reads the
+  precedence rather than re-parsing path prefixes.
 
 ## Stability
 

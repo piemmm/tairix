@@ -931,7 +931,13 @@ hand-off, the TAIRiX spelling of `viewer < file`: the manager resolves the
 associated application from the installed bundles' declared file-type
 associations (the reader's warm scan + `applications_for`, keyed off the file's
 leaf name — never a hard-coded viewer path; a document opened before the first
-scan has landed waits for it), opens the file **in its own table** on its
+scan has landed waits for it). The scan walks the program stores, the system's
+and then the account's own under `HOME`, through the desktop's own rule for
+which bundles open documents (`tairix_browse::association_of`), so the manager
+and the desktop offer one table in one precedence. A document no application
+claims is recorded under `DOCUMENT_UNCLAIMED` with the type it was taken for,
+and one handed over under `DOCUMENT_HANDED` with the bundle and whether it may
+write — never the document's name. The manager opens the file **in its own table** on its
 reader serving its volume, so a slow disk never stalls the window — read-only, or
 read-write for an application whose signed manifest claims to edit its
 documents — and spawns that bundle's `Run` with the descriptor wired

@@ -221,6 +221,45 @@ impl FamilyKey {
     }
 }
 
+/// One of CSS's generic family names — the vocabulary a document uses when it
+/// asks for a *kind* of face rather than a named one.
+///
+/// A request naming one by its key is served from the installed family whose
+/// own manifest claims it, so a client asks for a kind and never names an
+/// installed family to get one. A generic no installed family claims falls
+/// through to [`SansSerif`](Self::SansSerif) and then fails closed, rather
+/// than silently substituting a face of the wrong kind.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum GenericFamily {
+    /// Letterforms with finishing strokes.
+    Serif,
+    /// Letterforms without them. The generic every other one falls through
+    /// to, being the one a desktop always has.
+    SansSerif,
+    /// A fixed-advance face: a character grid.
+    Monospace,
+    /// Joined, handwriting-like letterforms.
+    Cursive,
+    /// Decorative letterforms.
+    Fantasy,
+}
+
+impl GenericFamily {
+    /// The generic `key` spells, or `None` for a key naming a concrete
+    /// family.
+    #[must_use]
+    pub fn from_key(key: FamilyKey) -> Option<Self> {
+        match key.as_str() {
+            "serif" => Some(Self::Serif),
+            "sans-serif" => Some(Self::SansSerif),
+            "monospace" => Some(Self::Monospace),
+            "cursive" => Some(Self::Cursive),
+            "fantasy" => Some(Self::Fantasy),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a family lays text out on a fixed grid or by per-glyph advances.
 ///
 /// A caller that needs a character grid — a terminal, a hex view, the

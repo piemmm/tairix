@@ -20,6 +20,7 @@ use tairix_abi::time::{DosTime, Time64};
 use tairix_abi::volume::ARCHIVE_REGION;
 use tairix_abi::DriverError;
 use tairix_compress::arc::{self, Hash, Method};
+use tairix_fsmeta::preset::acorn;
 use tairix_fsprobe::archive::{ARC_HEADER_LEN, ARC_MARKER, ARC_NAME_LEN, ARC_RISCOS_BIT};
 use tairix_fsserve::VolumeAccess;
 
@@ -94,7 +95,10 @@ impl Header {
     fn names_directory(&self) -> bool {
         self.kind == STORED
             && self.words.is_some_and(|words| {
-                words.load >> 8 == 0x00FF_F000 | u32::from(DIRECTORY_TYPE.get())
+                matches!(
+                    acorn::decode_load_exec(words.load, words.exec),
+                    acorn::LoadExec::Typed { filetype, .. } if filetype == DIRECTORY_TYPE
+                )
             })
     }
 }
@@ -505,16 +509,7 @@ fn header_bytes(
 /// The name a member is written under: its own, as RISC OS spells it, and
 /// held to what a header holds.
 fn spelling(name: &[u8]) -> Result<Vec<u8>, DriverError> {
-    Charset::RiscOs
-        .encode(name)
-        .map(|mut spelt| {
-            for byte in &mut spelt {
-                *byte = tairix_fsmeta::preset::acorn::crossed_name_byte(*byte);
-            }
-            spelt
-        })
-        .filter(|spelt| spelt.len() <= NAME_MAX)
-        .ok_or(DriverError::LengthOutOfRange)
+    to_riscos(name, NAME_MAX).ok_or(DriverError::LengthOutOfRange)
 }
 
 /// The members of `dir`, in the order a writer keeps.

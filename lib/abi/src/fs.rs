@@ -187,7 +187,9 @@ pub const FS_ATTR_VALUE_MAX: usize = 3072;
 
 /// A RISC OS filetype: the twelve bits that say what an object holds, as
 /// `&FFF` says text. A volume records one as the object's `acorn.filetype`
-/// attribute, and `lib/fsmeta` spells it there.
+/// attribute, in the three digits [`hex`](Self::hex) spells, and a name
+/// carries one where its volume records none in a `,xxx`
+/// [suffix](Self::suffix).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Filetype(u16);
 
@@ -218,6 +220,78 @@ impl Filetype {
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0
+    }
+
+    /// The filetype exactly three hexadecimal digits spell, in either case,
+    /// or `None` for anything else.
+    #[must_use]
+    pub const fn from_hex(digits: &[u8]) -> Option<Self> {
+        let &[high, middle, low] = digits else {
+            return None;
+        };
+        match (nibble(high), nibble(middle), nibble(low)) {
+            (Some(high), Some(middle), Some(low)) => Some(Self(high << 8 | middle << 4 | low)),
+            _ => None,
+        }
+    }
+
+    /// The three lower-case hexadecimal digits that spell this filetype.
+    #[must_use]
+    pub const fn hex(self) -> [u8; 3] {
+        let digits = crate::hex::LOWER;
+        let raw = self.0 as usize;
+        [
+            digits[raw >> 8 & 0xF],
+            digits[raw >> 4 & 0xF],
+            digits[raw & 0xF],
+        ]
+    }
+
+    /// The `,xxx` suffix a name carries this filetype in.
+    #[must_use]
+    pub const fn suffix(self) -> FiletypeSuffix {
+        FiletypeSuffix(self)
+    }
+
+    /// `name` without the `,xxx` suffix that ends it, and the filetype the
+    /// suffix carries: a comma and exactly three hexadecimal digits, after a
+    /// stem of at least one byte. `None` where no suffix ends it.
+    #[must_use]
+    pub fn split_suffix(name: &str) -> Option<(&str, Self)> {
+        let (stem, digits) = name.rsplit_once(',')?;
+        if stem.is_empty() {
+            return None;
+        }
+        Some((stem, Self::from_hex(digits.as_bytes())?))
+    }
+}
+
+/// The value of one hexadecimal digit, in either case.
+const fn nibble(digit: u8) -> Option<u16> {
+    let value = match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        b'A'..=b'F' => digit - b'A' + 10,
+        _ => return None,
+    };
+    Some(value as u16)
+}
+
+/// A filetype as the `,xxx` suffix of a name: a comma and its three
+/// lower-case hexadecimal digits.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FiletypeSuffix(Filetype);
+
+impl core::fmt::Display for FiletypeSuffix {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [high, middle, low] = self.0.hex();
+        write!(
+            f,
+            ",{}{}{}",
+            char::from(high),
+            char::from(middle),
+            char::from(low)
+        )
     }
 }
 
@@ -2201,6 +2275,49 @@ mod tests {
         );
         assert_eq!(Filetype::from_low_bits(0x1000).get(), 0);
         assert_eq!(Filetype::DATA.get(), 0xFFD);
+    }
+
+    #[test]
+    fn every_filetype_spells_as_three_lower_case_digits_and_reads_back_in_either_case() {
+        for raw in 0..=0xFFF {
+            let filetype = Filetype::new(raw).expect("twelve bits");
+            let hex = filetype.hex();
+            assert_eq!(hex, *alloc::format!("{raw:03x}").as_bytes());
+            assert_eq!(Filetype::from_hex(&hex), Some(filetype));
+            assert_eq!(
+                Filetype::from_hex(&hex.to_ascii_uppercase()),
+                Some(filetype)
+            );
+            assert_eq!(
+                alloc::format!("{}", filetype.suffix()),
+                alloc::format!(",{raw:03x}")
+            );
+        }
+        for digits in [&b""[..], b"ff", b"ffff", b"fg0", b" ff", b"0x1"] {
+            assert_eq!(Filetype::from_hex(digits), None, "{digits:?}");
+        }
+    }
+
+    #[test]
+    fn a_suffix_is_a_comma_and_three_hex_digits_after_a_stem() {
+        let text = Filetype::new(0xFFF);
+        assert_eq!(
+            Filetype::split_suffix("ReadMe,fff"),
+            Some(("ReadMe", text.expect("twelve bits")))
+        );
+        assert_eq!(
+            Filetype::split_suffix("Logo,B60"),
+            Some(("Logo", Filetype::new(0xB60).expect("twelve bits")))
+        );
+        assert_eq!(
+            Filetype::split_suffix("a,b,fff"),
+            Some(("a,b", text.expect("twelve bits")))
+        );
+        for bare in [
+            ",fff", "Smith, J", "a,b", "a,ff", "a,ffff", "a,fffx", "plain", "a.fff",
+        ] {
+            assert_eq!(Filetype::split_suffix(bare), None, "{bare}");
+        }
     }
 
     #[test]

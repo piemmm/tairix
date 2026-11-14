@@ -5925,9 +5925,10 @@ fn a_bundle_claiming_both_a_type_and_its_ancestor_is_offered_once() {
 /// Build a well-formed `AppInfo` wire image — the neutral shared header, then
 /// the MIME table these tests are actually about.
 ///
-/// The signature is left zero: [`association_from_manifest`] reads the declared
-/// types as a display hint and never verifies one (the signed load gate does
-/// that at launch), so an unsigned fixture exercises exactly the decode.
+/// The signature is left zero: [`association_of`](crate::open_with::association_of)
+/// reads the declared types as a display hint and never verifies one (the
+/// signed load gate does that at launch), so an unsigned fixture exercises
+/// exactly the decode. The header is an application's.
 fn build_appinfo(name: &str, icon: Option<&str>, mimes: &[&str]) -> Vec<u8> {
     use tairix_abi::{manifest_header, MIME_ENTRY_LEN, MIME_TYPE_MAX};
 
@@ -5948,11 +5949,24 @@ fn build_appinfo(name: &str, icon: Option<&str>, mimes: &[&str]) -> Vec<u8> {
     bytes
 }
 
+/// `bytes` re-signed — in the fixture's sense — as declaring `kind`.
+fn of_kind(mut bytes: Vec<u8>, kind: tairix_abi::ProgramKind) -> Vec<u8> {
+    let mut header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("decodes");
+    header.kind = kind.to_wire();
+    bytes[..tairix_abi::AppInfoHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+    bytes
+}
+
 /// Decode `bytes` and build the association for the bundle at `path`, the way
 /// the shared store walk hands a bundle over.
 fn association(path: &str, bytes: &[u8]) -> Option<crate::open_with::AppAssociation> {
     let header = tairix_abi::AppInfoHeader::from_bytes(bytes).ok()?;
-    crate::open_with::association_from_manifest(path, &header, bytes)
+    crate::open_with::association_of(&tairix_appstore::Bundle {
+        path,
+        root: 0,
+        header: &header,
+        manifest: bytes,
+    })
 }
 
 #[test]
@@ -6009,7 +6023,10 @@ fn an_association_carries_the_documents_folder_its_manifest_names() {
 fn a_bundle_that_declares_no_types_is_never_an_open_with_candidate() {
     // A pure command declares no associations: it decodes to an empty MIME
     // set (never an error) and is simply never an "open with" candidate.
-    let bytes = build_appinfo("printf", None, &[]);
+    let bytes = of_kind(
+        build_appinfo("printf", None, &[]),
+        tairix_abi::ProgramKind::Command,
+    );
     let assoc = association("/System/Commands/printf.app", &bytes).expect("decodes");
     assert!(assoc.mime_types().is_empty());
     assert!(applications_for("notes.txt", None, core::slice::from_ref(&assoc)).is_empty());
@@ -6020,11 +6037,373 @@ fn an_association_fails_closed_on_a_mime_table_the_body_does_not_carry() {
     let mut bytes = build_appinfo("viewer", None, &["text/plain"]);
     let short = bytes.len() - 4;
     bytes.truncate(short);
-    let header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("the header still decodes");
     assert!(
-        crate::open_with::association_from_manifest("/x.app", &header, &bytes).is_none(),
+        tairix_abi::AppInfoHeader::from_bytes(&bytes).is_ok(),
+        "the header still decodes"
+    );
+    assert!(
+        association("/x.app", &bytes).is_none(),
         "a header claiming an entry the body does not hold is skipped, never guessed"
     );
+}
+
+/// Program stores laid out in memory, as the store walk reads them: each
+/// folder's listing and each bundle's manifest.
+#[derive(Default)]
+struct Stores {
+    dirs: BTreeMap<String, Vec<tairix_appstore::DirEntry>>,
+    manifests: BTreeMap<String, Vec<u8>>,
+}
+
+impl Stores {
+    /// Plant a bundle of `kind` declaring `mimes` at the absolute `path`, with
+    /// every folder above it listing the next.
+    fn plant(&mut self, path: &str, kind: tairix_abi::ProgramKind, mimes: &[&str]) -> &mut Self {
+        let mut dir = String::new();
+        for part in path.trim_start_matches('/').split('/') {
+            let parent = if dir.is_empty() { "/" } else { dir.as_str() };
+            let listing = self.dirs.entry(parent.to_string()).or_default();
+            if !listing.iter().any(|entry| entry.name == part) {
+                listing.push(tairix_appstore::DirEntry {
+                    name: part.to_string(),
+                    directory: true,
+                });
+            }
+            dir.push('/');
+            dir.push_str(part);
+        }
+        self.manifests.insert(
+            path.to_string(),
+            of_kind(build_appinfo("fixture", None, mimes), kind),
+        );
+        self
+    }
+
+    /// The open-with table a walk of `roots` builds.
+    fn table<S: AsRef<str>>(&self, roots: &[S]) -> Vec<AppAssociation> {
+        let mut table = Vec::new();
+        tairix_appstore::walk(self, roots, |bundle| {
+            table.extend(crate::open_with::association_of(&bundle));
+            tairix_appstore::Verdict::Accepted
+        })
+        .expect("the walk completes");
+        table
+    }
+}
+
+impl tairix_appstore::StoreReader for Stores {
+    fn list_dir(&self, path: &str) -> Result<Option<Vec<tairix_appstore::DirEntry>>, Errno> {
+        Ok(self.dirs.get(path).cloned())
+    }
+
+    fn read_appinfo(&self, bundle: &str) -> Result<Option<Vec<u8>>, Errno> {
+        Ok(self.manifests.get(bundle).cloned())
+    }
+}
+
+#[test]
+fn only_a_program_a_user_starts_from_where_it_may_run_opens_documents() {
+    use tairix_abi::ProgramKind::{Application, Command, Component, Screensaver, Service};
+    use tairix_abi::{
+        SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE,
+        SYSTEM_SCREENSAVER_STORE, SYSTEM_SERVICE_STORE,
+    };
+
+    let home = Some("/Users/ada");
+    let users = tairix_appstore::user_roots(home);
+    let saver = &tairix_appstore::saver_roots(home)[1];
+    let opens = |store: &str, kind| {
+        let bytes = of_kind(build_appinfo("fixture", None, &["text/plain"]), kind);
+        association(&format!("{store}/fixture.app"), &bytes).is_some()
+    };
+    assert!(opens(SYSTEM_APPLICATION_STORE, Application));
+    assert!(opens(SYSTEM_COMMAND_STORE, Command));
+    assert!(opens(&users[0], Command));
+    assert!(opens(&users[1], Application));
+    assert!(
+        opens(&users[0], Application),
+        "a user's stores hold either kind"
+    );
+    for (store, kind) in [
+        (SYSTEM_SERVICE_STORE, Service),
+        (SYSTEM_COMPONENT_STORE, Component),
+        (SYSTEM_SCREENSAVER_STORE, Screensaver),
+        (saver.as_str(), Screensaver),
+    ] {
+        assert!(
+            !opens(store, kind),
+            "the system starts a {kind:?}, never with a document"
+        );
+    }
+    assert!(
+        !opens(SYSTEM_COMMAND_STORE, Application),
+        "the load gate refuses an application in the command store"
+    );
+    assert!(
+        !opens(&users[1], Screensaver),
+        "a screensaver runs only from a screensaver store"
+    );
+}
+
+#[test]
+fn the_desktop_s_walk_and_the_file_manager_s_offer_one_table_in_store_precedence() {
+    use tairix_abi::ProgramKind::{Application, Command, Component, Screensaver, Service};
+
+    let home = Some("/Users/ada");
+    let [commands, applications] = tairix_appstore::MACHINE_ROOTS;
+    let users = tairix_appstore::user_roots(home);
+    let nested = format!("{applications}/Utilities/view.app");
+    let mut stores = Stores::default();
+    stores
+        .plant(
+            &format!("{}/edit.app", users[1]),
+            Application,
+            &["text/plain"],
+        )
+        .plant(&format!("{}/more.app", users[0]), Command, &["text/plain"])
+        .plant(&nested, Application, &["text/plain"])
+        .plant(&format!("{commands}/vim.app"), Command, &["text/plain"]);
+    for (kind, store) in [
+        (Service, tairix_abi::SYSTEM_SERVICE_STORE),
+        (Component, tairix_abi::SYSTEM_COMPONENT_STORE),
+        (Screensaver, tairix_abi::SYSTEM_SCREENSAVER_STORE),
+    ] {
+        stores.plant(&format!("{store}/started.app"), kind, &["text/plain"]);
+    }
+
+    let desktop = stores.table(&tairix_appstore::identity_roots(home));
+    let files = stores.table(&tairix_appstore::store_roots(home));
+    assert_eq!(desktop, files, "both surfaces offer one table");
+    let offered: Vec<&str> = applications_for("notes.txt", None, &files)
+        .iter()
+        .map(|app| app.bundle_path())
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            format!("{commands}/vim.app"),
+            nested,
+            format!("{}/more.app", users[0]),
+            format!("{}/edit.app", users[1]),
+        ],
+        "a nested system bundle outranks the user's own at one specificity"
+    );
+}
+
+#[test]
+fn opens_is_the_one_matching_rule_open_with_applies() {
+    let editor = AppAssociation::new(
+        "editor",
+        "/System/Applications/editor.app",
+        vec!["TEXT/Plain".to_string()],
+    );
+    assert!(
+        editor.opens("main.rs", None),
+        "Rust source is text, and a declaration matches however it is cased"
+    );
+    assert!(editor.opens("ReadMe", Filetype::new(0xFFF)));
+    assert!(!editor.opens("scan.jpeg", None));
+    assert!(!editor.opens("", None), "an empty name names no file");
+    for name in ["main.rs", "notes.txt", "scan.jpeg", "backup.tgz", ""] {
+        assert_eq!(
+            editor.opens(name, None),
+            !applications_for(name, None, core::slice::from_ref(&editor)).is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// One record a test's surface made: its id, message and fields.
+type Record = (u32, String, Vec<(String, String)>);
+
+/// Every record a test's surface made.
+#[derive(Default)]
+struct Records(core::cell::RefCell<Vec<Record>>);
+
+impl tairix_log::Sink for Records {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
+        let fields = event
+            .fields
+            .iter()
+            .map(|field| {
+                let value = match field.value {
+                    tairix_log::FieldValue::Str(text) => text.to_string(),
+                    other => format!("{other:?}"),
+                };
+                (field.key.to_string(), value)
+            })
+            .collect();
+        self.0
+            .borrow_mut()
+            .push((event.id.0, event.message.to_string(), fields));
+    }
+}
+
+#[test]
+fn an_open_records_the_application_and_access_and_never_the_document_s_name() {
+    use crate::open_with::{
+        note_handed, Unclaimed, DOCUMENT_HANDED, DOCUMENT_HANDED_MESSAGE, DOCUMENT_UNCLAIMED,
+        DOCUMENT_UNCLAIMED_MESSAGE,
+    };
+
+    let records = Records::default();
+    note_handed(&records, "/System/Applications/TextEdit.app", true);
+    note_handed(&records, "/System/Applications/View.app", false);
+    let unclaimed = Unclaimed::of("backup.tgz", None);
+    unclaimed.note(&records);
+    let pair = |key: &str, value: &str| (key.to_string(), value.to_string());
+    assert_eq!(
+        *records.0.borrow(),
+        [
+            (
+                DOCUMENT_HANDED.0,
+                DOCUMENT_HANDED_MESSAGE.to_string(),
+                vec![
+                    pair("application", "/System/Applications/TextEdit.app"),
+                    pair("access", "write"),
+                ],
+            ),
+            (
+                DOCUMENT_HANDED.0,
+                DOCUMENT_HANDED_MESSAGE.to_string(),
+                vec![
+                    pair("application", "/System/Applications/View.app"),
+                    pair("access", "read"),
+                ],
+            ),
+            (
+                DOCUMENT_UNCLAIMED.0,
+                DOCUMENT_UNCLAIMED_MESSAGE.to_string(),
+                vec![pair("type", unclaimed.media().as_str())],
+            ),
+        ]
+    );
+    assert_ne!(unclaimed.media(), MediaType::ApplicationOctetStream);
+}
+
+/// A source that records every folder it is asked to list.
+struct RecordingSource(
+    BTreeMap<String, Vec<Entry>>,
+    alloc::rc::Rc<core::cell::RefCell<Vec<String>>>,
+);
+
+impl DirectorySource for RecordingSource {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        let path = key(components);
+        self.1.borrow_mut().push(path.clone());
+        self.0
+            .get(&path)
+            .cloned()
+            .map(Listing::Ready)
+            .ok_or(Errno::NotFound)
+    }
+}
+
+#[test]
+fn listing_and_browsing_launch_and_open_nothing() {
+    let bundle = |name: &str| Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH);
+    let mut tree = BTreeMap::new();
+    tree.insert(
+        "/".to_string(),
+        vec![
+            Entry::directory("Projects"),
+            Entry::directory("!Edit"),
+            bundle("Chess.app"),
+            Entry::file("notes.txt"),
+            Entry::file("disc.adf"),
+        ],
+    );
+    tree.insert(
+        "/Projects".to_string(),
+        vec![Entry::file("main.rs"), bundle("Tool.app")],
+    );
+    tree.insert(
+        "/!Edit".to_string(),
+        vec![
+            Entry::file("!Boot"),
+            Entry::file("!Run"),
+            Entry::file("!Sprites"),
+        ],
+    );
+    tree.insert(
+        "/Chess.app".to_string(),
+        vec![Entry::file("AppInfo"), Entry::file("Run")],
+    );
+    let folders: BTreeSet<String> = tree.keys().cloned().collect();
+    let asked = alloc::rc::Rc::default();
+    let mut browser =
+        Browser::open_root(RecordingSource(tree, alloc::rc::Rc::clone(&asked))).expect("lists");
+
+    for mode in [
+        SortMode {
+            key: SortKey::Size,
+            direction: SortDirection::Descending,
+            ..SortMode::default_order()
+        },
+        SortMode {
+            key: SortKey::Kind,
+            ..SortMode::default_order()
+        },
+        SortMode::default_order(),
+    ] {
+        browser.set_sort_mode(mode);
+    }
+    browser.select_all();
+    browser.select_previous();
+    browser.select_next();
+    browser.refresh().expect("relists");
+    // Into every folder and back: a folder, a RISC OS application folder and
+    // a bundle browsed rather than run are all descended into.
+    for name in ["Projects", "!Edit", "Chess.app"] {
+        let index = names_of(&browser)
+            .iter()
+            .position(|shown| shown == name)
+            .expect(name);
+        let intent = if name == "Projects" {
+            BundleIntent::Launch
+        } else {
+            BundleIntent::Browse
+        };
+        assert_eq!(
+            browser.activate_index(index, intent),
+            Ok(Activation::Descended),
+            "{name}"
+        );
+        for index in 0..browser.entries().len() {
+            browser.select(index).expect("selects");
+        }
+        assert_eq!(browser.go_up(), Ok(true));
+    }
+    let listed: BTreeSet<String> = asked.borrow().iter().cloned().collect();
+    assert_eq!(
+        listed, folders,
+        "only folders were ever read, and each one asked about"
+    );
+
+    // Only activating a program or a document names one.
+    let at = |browser: &Browser<RecordingSource>, name: &str| {
+        names_of(browser)
+            .iter()
+            .position(|shown| shown == name)
+            .expect(name)
+    };
+    assert!(matches!(
+        browser.activate_index(at(&browser, "Chess.app"), BundleIntent::Launch),
+        Ok(Activation::LaunchBundle { .. })
+    ));
+    assert!(matches!(
+        browser.activate_index(at(&browser, "notes.txt"), BundleIntent::Launch),
+        Ok(Activation::OpenFile { .. })
+    ));
+}
+
+/// The names `browser` shows, in the order it shows them.
+fn names_of<S: DirectorySource>(browser: &Browser<S>) -> Vec<String> {
+    browser
+        .entries()
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

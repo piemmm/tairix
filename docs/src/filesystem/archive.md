@@ -149,8 +149,12 @@ stamps it, and an object typed afresh is dated as the member is. A member made
 here, or carried from a format that records none, is written typed as Data,
 and a directory as the format's own type. The attribute bits a format holds
 are the bits it takes: a tar's records spell every one, the others' a
-`FileSwitch` byte, which has no place for public execute or private. Spark and ArcFS names cross between RISC OS's Latin-1 and
-UTF-8, a dot and a slash trading places as ADFS trades them.
+`FileSwitch` byte, which has no place for public execute or private. Spark
+and ArcFS names cross through the one RISC OS name conversion
+(`acorn::leaf_from_riscos`, `acorn::leaf_to_riscos`), as ADFS's do: RISC OS's
+Latin-1 and UTF-8, a dot and a slash trading places, and no name RISC OS could
+not have written in either direction. A member named as no RISC OS name can be
+is left out, and the archive is not written back, which would lose it.
 
 ## Refused archives
 

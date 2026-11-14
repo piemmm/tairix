@@ -261,6 +261,23 @@ fn a_member_removed_from_a_directory_has_it_written_afresh() {
     assert_eq!(contents(&mut reopened, readme), README);
 }
 
+/// A member named as RISC OS could not have named it is left out, and the
+/// archive is not written back, which would lose it.
+#[test]
+fn a_member_named_as_no_risc_os_name_can_be_is_left_out_and_kept() {
+    for name in [&b"wild*card"[..], b"has space", b"colon:", b"a.b"] {
+        let bytes = archive(&[stored(b"Kept", b"kept", 0xFFF), stored(name, b"x", 0xFFF)]);
+        let mut fs = open(&MemoryAttachment::new(&bytes, true, b"odd.spk"));
+        let root = fs.root();
+        assert_eq!(names(&mut fs, root), [b"Kept".to_vec()], "{name:?}");
+        assert_eq!(
+            fs.write_refusal(),
+            Some(WriteRefusal::UnsupportedFeature),
+            "{name:?}"
+        );
+    }
+}
+
 #[test]
 fn what_the_format_has_no_place_for_is_refused() {
     let attachment = MemoryAttachment::new(&sample(), true, b"sample.spk");

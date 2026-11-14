@@ -36,7 +36,7 @@ use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Check as DataCheck, Coding, Data, Heap, Lead};
 use crate::format::{leaves_out, Format, Read};
-use crate::name::{as_is, spelled, Spelled};
+use crate::name::{spelled, Spelled};
 use crate::region::{ByteInput, Input, Regions};
 use crate::tree::{Body, Meta, Recorded, Tree};
 use crate::zip::directory_meta;
@@ -750,7 +750,7 @@ fn admit<A: VolumeAccess>(
     member: Member,
     entry: Option<usize>,
 ) -> Result<(), DriverError> {
-    let Spelled::Within(mut parts) = spelled(&member.name, b'/', as_is) else {
+    let Spelled::Within(mut parts) = spelled(&member.name, b'/') else {
         return Err(DriverError::OutOfRange);
     };
     let leaf = parts.pop().ok_or(DriverError::OutOfRange)?;
@@ -797,7 +797,7 @@ fn admit<A: VolumeAccess>(
             file(entry, record.len)
         }
         Kind::Copy(target) => {
-            let Spelled::Within(target) = spelled(&target, b'/', as_is) else {
+            let Spelled::Within(target) = spelled(&target, b'/') else {
                 return Err(DriverError::NotFound);
             };
             let entry = *files

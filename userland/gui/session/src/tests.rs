@@ -5553,13 +5553,17 @@ fn a_subtree_is_handed_over_to_change_only_to_an_editor() {
     assert_eq!(PickAccess::Subtree.save_flags(), None);
 }
 
-/// A folder hands over its regular files of the requester's kinds, in the
-/// order the picker lists them and no more than a folder pick delegates.
+/// A folder hands over the regular files its requester opens, in the order
+/// the picker lists them and no more than a folder pick delegates.
 #[test]
 fn a_folder_selection_keeps_the_requesters_files_in_listing_order_within_the_bound() {
     use crate::picker::folder_selection;
     use tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX;
-    let kinds = [String::from("audio/flac"), String::from("audio/wav")];
+    let player = tairix_browse::AppAssociation::new(
+        "Music",
+        "/System/Applications/Music.app",
+        vec![String::from("audio/flac"), String::from("Audio/WAV")],
+    );
     let mut entries = vec![
         Entry::file("b.flac"),
         Entry::directory("Extras.flac"),
@@ -5583,23 +5587,36 @@ fn a_folder_selection_keeps_the_requesters_files_in_listing_order_within_the_bou
             tairix_abi::time::Time64::UNIX_EPOCH,
         ),
     ];
-    assert_eq!(folder_selection(&mut entries, &kinds), 0);
+    assert_eq!(folder_selection(&mut entries, Some(&player)), 0);
     let names: Vec<&str> = entries.iter().map(Entry::name).collect();
     assert_eq!(
         names,
         ["A.wav", "b.flac", "Fanfare"],
-        "a recorded WAVE kept"
+        "a recorded WAVE kept, and a declaration matches however it is cased"
     );
-    assert_eq!(folder_selection(&mut entries, &[]), 0);
+    assert_eq!(folder_selection(&mut entries, None), 0);
     assert!(
         entries.is_empty(),
-        "nothing for a requester that opens nothing"
+        "nothing for a requester no installed bundle is attested to"
+    );
+
+    let editor = tairix_browse::AppAssociation::new(
+        "TextEdit",
+        "/System/Applications/TextEdit.app",
+        vec![String::from("text/plain")],
+    );
+    let mut sources = vec![Entry::file("main.rs"), Entry::file("logo.png")];
+    assert_eq!(folder_selection(&mut sources, Some(&editor)), 0);
+    assert_eq!(
+        sources.iter().map(Entry::name).collect::<Vec<_>>(),
+        ["main.rs"],
+        "a type is kept for the broader type its requester opens, as Open With offers it"
     );
 
     let mut many: Vec<Entry> = (0..WINDOW_FOLDER_PICK_MAX + 3)
         .map(|at| Entry::file(format!("{at:03}.flac")))
         .collect();
-    assert_eq!(folder_selection(&mut many, &kinds), 3);
+    assert_eq!(folder_selection(&mut many, Some(&player)), 3);
     assert_eq!(many.len(), WINDOW_FOLDER_PICK_MAX);
     assert_eq!(many.first().map(Entry::name), Some("000.flac"));
 }

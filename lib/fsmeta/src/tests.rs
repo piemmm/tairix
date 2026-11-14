@@ -334,19 +334,150 @@ fn filetype(raw: u16) -> acorn::Filetype {
 }
 
 #[test]
-fn acorn_filetype_round_trips() {
-    assert_eq!(&acorn::filetype_to_value(filetype(0xFFF)), b"fff");
-    assert_eq!(&acorn::filetype_to_value(filetype(0x0FA)), b"0fa");
-    assert_eq!(acorn::filetype_from_value(b"fff"), Ok(filetype(0xFFF)));
-    assert_eq!(acorn::filetype_from_value(b"FFF"), Ok(filetype(0xFFF)));
+fn a_filetype_value_sets_the_type_in_either_case_and_keeps_the_stamp() {
+    let (load, exec) = acorn::encode_typed(filetype(0xFFF), 0x12_3456_789A).expect("typed");
+    let mut object = acorn::Object {
+        load,
+        exec,
+        attr: 0,
+    };
+    object
+        .set(acorn::FILETYPE_KEY, b"FFB", acorn::ATTR_BITS)
+        .expect("a filetype");
     assert_eq!(
-        acorn::filetype_from_value(b"ffff"),
-        Err(MetadataError::NotRepresentable)
+        acorn::decode_load_exec(object.load, object.exec),
+        acorn::LoadExec::Typed {
+            filetype: filetype(0xFFB),
+            centiseconds: 0x12_3456_789A,
+        }
+    );
+    for refused in [&b"ffff"[..], b"ffg", b"ff", b""] {
+        assert_eq!(
+            object.set(acorn::FILETYPE_KEY, refused, acorn::ATTR_BITS),
+            Err(DriverError::OutOfRange),
+            "{refused:?}"
+        );
+    }
+}
+
+#[test]
+fn a_leaf_crosses_either_way_and_back_or_is_a_bad_name() {
+    use acorn::BadName;
+
+    for (riscos, tairix) in [
+        (&b"ReadMe/txt"[..], "ReadMe.txt"),
+        (b"!Boot", "!Boot"),
+        (b"///", "..."),
+        (b"Caf\xe9", "Caf\u{e9}"),
+        (b"Euro\x80", "Euro\u{20ac}"),
+        (b"Hard\xa0Space", "Hard\u{a0}Space"),
+    ] {
+        let crossed = acorn::leaf_from_riscos(riscos).expect("crosses");
+        assert_eq!(crossed.as_bytes(), tairix.as_bytes());
+        assert!(tairix_abi::fs::is_component(crossed.as_bytes()));
+        let back = acorn::leaf_to_riscos(tairix.as_bytes()).expect("crosses back");
+        assert_eq!(back.as_bytes(), riscos);
+    }
+    for (riscos, bad) in [
+        (&b""[..], BadName::Empty),
+        (b"/", BadName::NoEntry),
+        (b"//", BadName::NoEntry),
+        (b"a.b", BadName::Character),
+        (b"a b", BadName::Character),
+        (b"Bell\x07", BadName::Character),
+        (b"Gap\x83", BadName::Character),
+    ] {
+        assert_eq!(acorn::leaf_from_riscos(riscos), Err(bad), "{riscos:?}");
+    }
+    for (tairix, bad) in [
+        (&b""[..], BadName::Empty),
+        (b".", BadName::NoEntry),
+        (b"..", BadName::NoEntry),
+        (b"a/b", BadName::Character),
+        (b"a b", BadName::Character),
+        ("smile\u{263a}".as_bytes(), BadName::Character),
+        (b"\xff", BadName::Character),
+    ] {
+        assert_eq!(acorn::leaf_to_riscos(tairix), Err(bad), "{tairix:?}");
+    }
+    for &reserved in acorn::RESERVED_NAME_BYTES {
+        assert_eq!(
+            acorn::leaf_from_riscos(&[b'a', reserved]),
+            Err(BadName::Character),
+            "{reserved:?}"
+        );
+        let tairix = [b'a', acorn::crossed_name_byte(reserved)];
+        assert_eq!(
+            acorn::leaf_to_riscos(&tairix),
+            Err(BadName::Character),
+            "{reserved:?}"
+        );
+    }
+    for byte in 0..=u8::MAX {
+        if let Ok(crossed) = acorn::leaf_from_riscos(&[byte]) {
+            let back = acorn::leaf_to_riscos(crossed.as_bytes()).expect("crosses back");
+            assert_eq!(back.as_bytes(), [byte], "{byte:#04x}");
+        }
+    }
+}
+
+#[test]
+fn a_leaf_is_bounded_by_the_side_it_crosses_to() {
+    use acorn::{BadName, LEAF_MAX};
+
+    let longest = acorn::leaf_from_riscos(&[b'a'; LEAF_MAX]).expect("fits");
+    assert_eq!(longest.as_bytes().len(), LEAF_MAX);
+    assert_eq!(
+        acorn::leaf_from_riscos(&[b'a'; LEAF_MAX + 1]),
+        Err(BadName::TooLong)
     );
     assert_eq!(
-        acorn::filetype_from_value(b"ffg"),
-        Err(MetadataError::NotRepresentable)
+        acorn::leaf_from_riscos(&[0xE9; LEAF_MAX / 2 + 1]),
+        Err(BadName::TooLong),
+        "two bytes of UTF-8 a character"
     );
+    assert_eq!(
+        acorn::leaf_to_riscos(&[b'a'; LEAF_MAX + 1]),
+        Err(BadName::TooLong)
+    );
+}
+
+#[test]
+fn a_risc_os_path_is_its_leaves_each_crossed() {
+    let leaves: Vec<_> = acorn::path_from_riscos(b"Sprites.Read/Me")
+        .map(|leaf| leaf.map(|leaf| leaf.as_bytes().to_vec()))
+        .collect();
+    assert_eq!(leaves, [Ok(b"Sprites".to_vec()), Ok(b"Read.Me".to_vec())]);
+    for path in [&b"a..b"[..], b"a.", b".a", b""] {
+        assert!(
+            acorn::path_from_riscos(path).any(|leaf| leaf == Err(acorn::BadName::Empty)),
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn risc_os_names_the_filetypes_it_allocates_itself() {
+    for (raw, name) in [
+        (0xFFF, "Text"),
+        (0xFFD, "Data"),
+        (0xFF9, "Sprite"),
+        (0xFFB, "BASIC"),
+        (0xFEB, "Obey"),
+        (0xFD6, "TaskExec"),
+        (0xFD7, "TaskObey"),
+        (0xAFF, "DrawFile"),
+        (0xAAE, "OrUpgrd"),
+    ] {
+        assert_eq!(
+            acorn::filetype_name(filetype(raw)),
+            Some(name),
+            "{raw:#05x}"
+        );
+    }
+    for raw in [0x000, 0x695, 0xB60, 0xDDC, 0x9FF, 0xE00, 0xFDD] {
+        assert_eq!(acorn::filetype_name(filetype(raw)), None, "{raw:#05x}");
+    }
 }
 
 #[test]

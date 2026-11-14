@@ -8415,8 +8415,7 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
         .expect("create");
     let node = fs.lookup(root, b"doc").expect("lookup");
 
-    let filetype = preset::acorn::filetype_to_value(text);
-    fs.set_attr(node, preset::acorn::FILETYPE_KEY, &filetype)
+    fs.set_attr(node, preset::acorn::FILETYPE_KEY, &text.hex())
         .expect("set filetype");
     fs.set_attr(node, b"acorn.loadaddr", &preset::acorn::addr_to_value(load))
         .expect("set load");
@@ -8425,7 +8424,7 @@ fn acorn_preset_metadata_round_trips_through_the_store() {
 
     // Read back and reconstruct the native fields exactly.
     let ft = get_attr_vec(&mut fs, node, preset::acorn::FILETYPE_KEY).expect("filetype present");
-    assert_eq!(preset::acorn::filetype_from_value(&ft), Ok(text));
+    assert_eq!(preset::acorn::Filetype::from_hex(&ft), Some(text));
     let rload = preset::acorn::addr_from_value(
         &get_attr_vec(&mut fs, node, b"acorn.loadaddr").expect("load present"),
     )

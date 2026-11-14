@@ -580,8 +580,9 @@ What now guarantees §16.5/§18.5's "no compiled-in app list":
   consumers read the listing off the verified header's own accessors.
 - **The fold (`lib/proglib::Catalog::reconcile`)** + **`applib rescan`** —
   the walk covers the system program stores (machine) or the caller's
-  own stores (`--user`), breadth-first in sorted order (deterministic
-  duplicate resolution), descending nested plain subdirectories but never
+  own stores (`--user`), store by store and breadth-first in sorted order
+  within each (deterministic duplicate resolution in store precedence, however
+  deeply a bundle is filed), descending nested plain subdirectories but never
   into a sealed `.app`, bounded by `MAX_WALK_DEPTH`/`MAX_WALK_ENTRIES`
   (fail-closed on a tree it cannot believe). Every listed bundle not yet
   catalogued is declared under its manifest folder; unlisted bundles are
@@ -2015,8 +2016,10 @@ What it guarantees now:
   and adopts its identity when the scan lands.
 - **The same walk produces the file-type associations**, replacing a manifest
   read per *catalogued* bundle — which silently gave an installed but
-  uncatalogued bundle no associations at all. A service opens no file, so a
-  bundle found in the service store names none.
+  uncatalogued bundle no associations at all. Which bundles open documents is
+  `lib/browse`'s `association_of` — a command or an application, where its
+  signed kind may run — so a service, a component or a screensaver names none,
+  and the table is the file manager's in the same precedence.
 - **A shared walk, not a fourth copy.** `lib/appstore` is the one
   program-store walk: the roots in store precedence, the depth and entry
   containment bounds, the fail-closed-per-bundle rule, and the bounded manifest

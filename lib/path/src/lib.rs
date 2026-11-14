@@ -99,6 +99,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::fs::Filetype;
+
 /// Largest accepted path string, in bytes: the longest path a filesystem
 /// syscall takes. Longer input is rejected outright, before any
 /// per-component work, so an over-long string cannot drive cost.
@@ -769,6 +771,48 @@ pub fn validate_visible_name(name: &str) -> Result<(), PathError> {
     Ok(())
 }
 
+/// What ends a file name: the RISC OS filetype of a `,xxx` suffix
+/// ([`Filetype::split_suffix`]), and the extension after the last dot of what
+/// comes before it. Each needs a stem of its own, so a name whose only dot or
+/// comma starts it ends in neither.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ending<'a> {
+    /// What the ending follows: the whole name when it ends in neither.
+    pub stem: &'a str,
+    /// The filetype the name carries.
+    pub filetype: Option<Filetype>,
+    /// The extension, without its dot.
+    pub extension: Option<&'a str>,
+}
+
+impl<'a> Ending<'a> {
+    /// What ends `name`.
+    #[must_use]
+    pub fn of(name: &'a str) -> Self {
+        let (rest, filetype) = match Filetype::split_suffix(name) {
+            Some((stem, filetype)) => (stem, Some(filetype)),
+            None => (name, None),
+        };
+        let (stem, extension) = match rest.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+                (stem, Some(extension))
+            }
+            _ => (rest, None),
+        };
+        Self {
+            stem,
+            filetype,
+            extension,
+        }
+    }
+
+    /// Whether the name ends in neither.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.filetype.is_none() && self.extension.is_none()
+    }
+}
+
 /// Whether the grammar reads `input` as a path relative to the working
 /// directory: no leading `/` and no `:` before its first `/`.
 ///
@@ -985,6 +1029,34 @@ pub fn staging_name(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// A name ends in a file type only after a stem and only as three hex
+    /// digits, and in an extension only after a stem: anything else ends it in
+    /// nothing.
+    #[test]
+    fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
+        let both = Ending::of("notes.txt,ffb");
+        assert_eq!(
+            (both.stem, both.filetype, both.extension),
+            ("notes", Filetype::new(0xFFB), Some("txt"))
+        );
+        for bare in [
+            "Smith, J",
+            ",b60",
+            ".png",
+            "plain",
+            "trailing.",
+            "a,b6",
+            "a,b600",
+        ] {
+            let ending = Ending::of(bare);
+            assert!(ending.is_none(), "{bare}");
+            assert_eq!(ending.stem, bare, "{bare}");
+        }
+        assert_eq!(Ending::of("a.tar.gz").stem, "a.tar");
+        assert_eq!(Ending::of("my.photos").extension, Some("photos"));
+        assert_eq!(Ending::of("Logo,B60").filetype, Filetype::new(0xB60));
+    }
 
     #[test]
     fn a_staging_name_carries_its_tag_unless_too_long_to() {

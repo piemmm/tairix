@@ -20,10 +20,17 @@
 //!   ([`MediaType::parent`](crate::media::MediaType::parent)), so a text editor
 //!   declaring `text/plain` is offered for a `.rs` file while an application
 //!   declaring `text/x-rust` is offered ahead of it. Bundles that declare the
-//!   same type keep the source's order. No match is an **honest empty answer**
-//!   — the caller shows a "no application" notice, never a crash and never a
+//!   same type keep the table's order, which [`association_of`] builds in the
+//!   store walk's precedence. No match is an **honest empty answer** — the
+//!   caller shows a "no application" notice, never a crash and never a
 //!   fabricated default.
-//!
+//! * [`association_of`] is the one rule for which installed bundles open
+//!   documents, and [`AppAssociation::opens`] the one matching rule, so the
+//!   file manager, the desktop and the picker cannot offer different
+//!   applications for one file.
+//! * [`note_handed`] and [`Unclaimed`] are what a surface records of an open:
+//!   the application a document was handed to and with what access, or the
+//!   type no application claimed.
 //! * [`OpenWithChooser`] is the surface the user picks on: the ranked
 //!   candidates, a selection, and a scroll offset. It is deliberately **not** a
 //!   menu — the set grows with the applications a user installs, so no menu
@@ -39,12 +46,28 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{mime_type_at, AppInfoHeader};
+use tairix_appstore::Bundle;
 use tairix_fsmeta::preset::acorn::Filetype;
+use tairix_log::{EventId, Field, FieldValue, Level, Sink};
 
 use crate::column::ScrollColumn;
 use crate::entry::EntryKind;
-use crate::media::{ancestry, media_for_named, BlankDocument, ALL};
+use crate::media::{ancestry, media_for_named, BlankDocument, MediaType, Site, ALL};
 use crate::rowlist::RowList;
+
+/// Event id of a document handed to the application its user opened it
+/// with.
+pub const DOCUMENT_HANDED: EventId = EventId(38_000);
+
+/// The exact message [`DOCUMENT_HANDED`] is emitted with.
+pub const DOCUMENT_HANDED_MESSAGE: &str = "document handed to an application";
+
+/// Event id of a document opened in nothing, because no installed
+/// application claims its type.
+pub const DOCUMENT_UNCLAIMED: EventId = EventId(38_001);
+
+/// The exact message [`DOCUMENT_UNCLAIMED`] is emitted with.
+pub const DOCUMENT_UNCLAIMED_MESSAGE: &str = "document claimed by no application";
 
 /// One installed application and the file types its signed `AppInfo` claims to
 /// open — a single "Open With…" candidate.
@@ -127,31 +150,67 @@ impl AppAssociation {
     ///
     /// This is the bundle's *own* declaration, tested exactly: a bundle that
     /// declares only `text/plain` does not "handle" `text/x-rust` here.
-    /// Offering it for a Rust file is [`applications_for`]'s job, which walks
-    /// the subclass chain and asks this question once per broader type.
+    /// Whether it opens a Rust file is [`opens`](Self::opens)'s question,
+    /// which walks the subclass chain and asks this one once per broader type.
     #[must_use]
     pub fn handles(&self, mime: &str) -> bool {
         self.mime_types
             .iter()
             .any(|declared| declared.eq_ignore_ascii_case(mime))
     }
+
+    /// Whether this bundle opens a file named `name`, whose volume records
+    /// `recorded` as its RISC OS filetype: whether it claims the file's type
+    /// or any broader type it is a subclass of.
+    ///
+    /// The one matching rule: Open With, a drop on an icon-bar slot and a
+    /// folder pick all ask it, so no surface offers a bundle another would
+    /// refuse. An empty name names no file and is opened by nothing.
+    #[must_use]
+    pub fn opens(&self, name: &str, recorded: Option<Filetype>) -> bool {
+        document_media(name, recorded).is_some_and(|media| self.claim(media).is_some())
+    }
+
+    /// How far up `media`'s subclass chain the first type this bundle
+    /// declares lies: 0 for the file's own type.
+    fn claim(&self, media: MediaType) -> Option<usize> {
+        ancestry(media).position(|claim| self.handles(claim.as_str()))
+    }
 }
 
-/// Build an [`AppAssociation`] from the decoded manifest of the bundle at
-/// `bundle_path`.
+/// What a document named `name`, its volume recording `recorded`, is opened
+/// as, or `None` for an empty name, which names no file.
+fn document_media(name: &str, recorded: Option<Filetype>) -> Option<MediaType> {
+    (!name.is_empty()).then(|| media_for_named(name, EntryKind::File, recorded, Site::Plain))
+}
+
+/// The association an installed bundle the store walk found offers, or `None`
+/// for one that opens no document.
 ///
-/// `header` is that bundle's already-decoded `AppInfo` and `manifest` the whole
-/// manifest it came from, because the declared MIME table sits in the body past
-/// the header — the shared store walk (`lib/appstore`) hands both, so a bundle
-/// is decoded once however many things read it.
+/// The one rule for which bundles open documents, so the file manager and the
+/// desktop offer the same applications whichever stores each walks: a command
+/// or an application, in a place its signed kind may run from, whose declared
+/// MIME table decodes. A service, a component or a screensaver is started by
+/// the system and never with a document, and a bundle somewhere its kind may
+/// not run would be refused by the load gate, so neither is offered.
 ///
 /// **Fail-closed**: a MIME table that is malformed or non-UTF-8 yields `None`,
-/// so a corrupt bundle is silently skipped rather than offered on a guess. The
-/// MIME set is a display *hint* only: nothing here verifies the manifest
-/// signature (the signed load gate does that when the chosen bundle is
-/// launched), it only reads what the bundle claims.
+/// so a corrupt bundle is skipped rather than offered on a guess. The MIME set
+/// is a display *hint* only: nothing here verifies the manifest signature (the
+/// signed load gate does that when the chosen bundle is launched), it only
+/// reads what the bundle claims.
 #[must_use]
-pub fn association_from_manifest(
+pub fn association_of(bundle: &Bundle<'_>) -> Option<AppAssociation> {
+    let kind = bundle.header.program_kind()?;
+    if !kind.is_searched() || !kind.launchable_from(bundle.path) {
+        return None;
+    }
+    association_from_manifest(bundle.path, bundle.header, bundle.manifest)
+}
+
+/// The association the decoded manifest of the bundle at `bundle_path`
+/// declares, the MIME table read from the body past the header.
+fn association_from_manifest(
     bundle_path: &str,
     header: &AppInfoHeader,
     manifest: &[u8],
@@ -180,14 +239,13 @@ pub fn association_from_manifest(
 /// vocabulary is exactly the one the icon classifier draws from — the two can
 /// never drift apart.
 ///
-/// A bundle is offered when it [`handles`](AppAssociation::handles) that type
-/// **or any broader type it is a subclass of**
-/// ([`MediaType::parent`](crate::media::MediaType::parent)): an editor
-/// declaring `text/plain` opens a `.rs` file, because Rust source is readable
-/// text. Candidates are ordered by how specifically they claim the file — an
-/// application declaring the file's own type comes before one declaring an
-/// ancestor — and bundles claiming at the same level keep `bundles`'
-/// enumeration order, so no existing ordering is disturbed.
+/// A bundle is offered when it [`opens`](AppAssociation::opens) the file. The
+/// order is the one precedence rule: the bundle claiming the file most
+/// specifically first — an application declaring the file's own type before
+/// one declaring an ancestor — and at one specificity, `bundles`' own order.
+/// A table built from the store walk through [`association_of`] is in the
+/// walk's precedence, so the system's stores outrank the user's and, within a
+/// store, a shallower bundle a deeper one, then folder and name order.
 ///
 /// The file is typed as [`media_for_document`](crate::media_for_document)
 /// types it, from its name and `recorded`, the RISC OS filetype its listing
@@ -203,20 +261,79 @@ pub fn applications_for<'a>(
     recorded: Option<Filetype>,
     bundles: &'a [AppAssociation],
 ) -> Vec<&'a AppAssociation> {
-    if name.is_empty() {
+    let Some(media) = document_media(name, recorded) else {
         return Vec::new();
-    }
-    let media = media_for_named(name, EntryKind::File, recorded, crate::media::Site::Plain);
+    };
     let mut ranked: Vec<(usize, &AppAssociation)> = bundles
         .iter()
-        .filter_map(|bundle| {
-            ancestry(media)
-                .position(|claim| bundle.handles(claim.as_str()))
-                .map(|distance| (distance, bundle))
-        })
+        .filter_map(|bundle| bundle.claim(media).map(|distance| (distance, bundle)))
         .collect();
     ranked.sort_by_key(|(distance, _)| *distance);
     ranked.into_iter().map(|(_, bundle)| bundle).collect()
+}
+
+/// Record that a document the user opened was handed to the bundle at
+/// `bundle`, for writing where `writable`. The document's name is the user's
+/// and stays out of the record.
+pub fn note_handed<S: Sink + ?Sized>(audit: &S, bundle: &str, writable: bool) {
+    tairix_log::log(
+        audit,
+        &tairix_log::Event {
+            level: Level::Info,
+            id: DOCUMENT_HANDED,
+            message: DOCUMENT_HANDED_MESSAGE,
+            fields: &[
+                Field {
+                    key: "application",
+                    value: FieldValue::Str(bundle),
+                },
+                Field {
+                    key: "access",
+                    value: FieldValue::Str(if writable { "write" } else { "read" }),
+                },
+            ],
+        },
+    );
+}
+
+/// A document opened in nothing because no installed application claims it:
+/// the type it was taken for, which is all its record keeps.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Unclaimed(MediaType);
+
+impl Unclaimed {
+    /// The document named `name`, its volume recording `recorded`.
+    #[must_use]
+    pub fn of(name: &str, recorded: Option<Filetype>) -> Self {
+        Self(media_for_named(
+            name,
+            EntryKind::File,
+            recorded,
+            Site::Plain,
+        ))
+    }
+
+    /// The type the document was taken for.
+    #[must_use]
+    pub const fn media(self) -> MediaType {
+        self.0
+    }
+
+    /// Record it under [`DOCUMENT_UNCLAIMED`].
+    pub fn note<S: Sink + ?Sized>(self, audit: &S) {
+        tairix_log::log(
+            audit,
+            &tairix_log::Event {
+                level: Level::Info,
+                id: DOCUMENT_UNCLAIMED,
+                message: DOCUMENT_UNCLAIMED_MESSAGE,
+                fields: &[Field {
+                    key: "type",
+                    value: FieldValue::Str(self.0.as_str()),
+                }],
+            },
+        );
+    }
 }
 
 /// The documents New ▸ offers: every [`BlankDocument`] type an installed

@@ -609,16 +609,17 @@ worker, an eject to its volume's reader once the app has let go of the volume (F
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven), and
 so now is **FM6b's pure type→bundle "open with" association model** (the
-`lib/browse::open_with` module — the `BundleSource` enumeration seam and
-`applications_for` over the shared `lib/browse::media` content-type registry,
-host-proven like FM6a). **FM6b's app-side bundle launch is now done too**: `Enter` on the
+`lib/browse::open_with` module — `association_of`, the one rule for which
+installed bundles open documents, and `applications_for` over the shared
+`lib/browse::media` content-type registry, host-proven like FM6a). **FM6b's app-side bundle launch is now done too**: `Enter` on the
 selection dispatches through `Browser::activate_selected`, and a `LaunchBundle`
 spawns the `<Name>.app` bundle's own `Run` through the ordinary signed load
 gate under the `CAP_PROC_SPAWN` grant this stage added (async and
 non-blocking, with launched children reaped on an any-child wait-set member).
 **Handing a data file to its associated viewer (`OpenFile`) is now done too**:
 `Activation::OpenFile` resolves the viewer from the installed bundles' signed
-`AppInfo` MIME associations (`RtBundleSource` + `applications_for`), opens the
+`AppInfo` MIME associations (the shared store walk, `association_of` and
+`applications_for`), opens the
 file read-only in its own table, and **offers it to a live instance first**
 through the desktop's single-instance funnel
 (`WindowRequest::HandOverLaunch` with a `Document`): the grant is minted from
@@ -654,8 +655,9 @@ user pick any. See FM6b below.
   icon artwork every visible tile draws (recorded on `tairix_icon::ArtworkDesk`
   from inside the paint), the folder cue every visible folder draws (likewise
   recorded from inside the paint and answered a frame later, so the paint
-  performs no I/O at all), and the three-program-store walk the *Open With…*
-  chooser is built from. Within a volume's lane they are served in one stated
+  performs no I/O at all), and the program-store walk the *Open With…*
+  chooser is built from — the system's stores and the account's own, through
+  the desktop's own `association_of` rule, so the two offer one table. Within a volume's lane they are served in one stated
   order (`deferred::READ_ORDER`): the listing first (the user navigated and is
   waiting), then the artwork (which the listing's own tiles are drawn from),
   then the cues (which decorate a listing already shown), then the bundle scan
@@ -1237,18 +1239,20 @@ module lands the type→bundle "open with" model host-proven ahead of the app
 wiring, exactly as FM6a landed the activation decision. `media_for_name`
 derives a file's content type from its filename extension through the one
 `lib/browse::media` registry the icon is drawn from (one table, one `extension`
-split, §2.2), `BundleSource` is the injected installed-bundle
-enumeration seam mirroring `DirectorySource`, and `applications_for(name,
-bundles)` returns the `AppAssociation`s whose declared `AppInfo` MIME set
-handles the file's type or any broader type it subclasses
+split, §2.2), `association_of` reads one bundle the shared store walk
+(`lib/appstore`) found into an `AppAssociation` — a command or an application,
+where its signed kind may run — and `applications_for(name, recorded,
+bundles)` returns the `AppAssociation`s that `opens` the file: its declared
+`AppInfo` MIME set handles the file's type or any broader type it subclasses
 (`MediaType::parent`, the shared-mime-info relation — an editor declaring
-`text/plain` opens a `.rs` file), most specific claim first and source order
-within a claim — no match being an honest empty
+`text/plain` opens a `.rs` file), most specific claim first and, within a
+claim, the walk's store precedence — no match being an honest empty
 answer (§2.24), never a fabricated default. The type decision is a display
 hint only; the load gate still verifies and capability-checks the picked
 bundle, and the engine never spawns. Host-tested (the registry's type per
 name, case-insensitivity, unknown/dotfile fail-closed, `handles`, match /
-single / none / unrecognised, seam refusal, the subclass chain terminating for
+single / none / unrecognised, the kinds and places that open documents, the
+one table both surfaces build, the subclass chain terminating for
 every type, a generic `text/plain` application matching a refined extension,
 and a specific declaration outranking a generic one). Docs:
 `docs/src/desktop/apps.md`,
@@ -1300,11 +1304,11 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   `mime_type_at`); the whole body — capabilities then MIME table — is under the
   signature, so a tampered association breaks the bundle. `view.app` declares
   the picture types its decoder supports completely.
-- **The running-system `BundleSource` is `files.app`'s `RtBundleSource`**: a
-  bounded recursive walk of the system program stores, reading each
-  `<Name>.app/AppInfo` through the shared, host-tested
-  `lib/browse::association_from_appinfo` decode (fail-closed — a corrupt
-  manifest is skipped, never offered). `Activation::OpenFile { path }` resolves
+- **The table is the shared store walk's**: `files.app` walks the program
+  stores — the system's, then the account's own under `HOME` — through
+  `lib/appstore`, reading each bundle through `association_of` (fail-closed —
+  a corrupt manifest is skipped, never offered), and the desktop builds the
+  same table from its own walk. `Activation::OpenFile { path }` resolves
   the associated bundle via `applications_for` (keyed off the file's leaf
   name — never a hard-coded viewer path), and `Launcher::open_file` /
   `launch_viewer` `fs_open`s the file read-only and `spawn_attached`es the
@@ -1313,7 +1317,7 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   member. A file no installed application claims is stated fail-loud on
   `stderr`, never a fabricated open (§2.24). Only the write/spawn-capable file
   manager does this; the read-only picker composes the same `Browser` and never
-  launches. Host-tested (`association_from_appinfo` valid / empty / fail-closed);
+  launches. Host-tested (`association_of` valid / empty / fail-closed);
   the app wiring rides the FM9 vertical and builds clippy-clean cross-compiled.
 - **The viewer's inherited-document startup path**: `view.app`
   detects `DOCUMENT_ROLE_ARG` and reads its document from the inherited `STDIN`
@@ -1327,13 +1331,13 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
 **The explicit "Open With…" chooser is now done, and it is not a menu**
 (`plans/NEW-MENUS.md` §6, decision 2 — the candidate set grows with the
 applications a user installs, so no menu plate can promise to hold it, and a
-menu's rows must all exist before it opens, which would put a read of three
+menu's rows must all exist before it opens, which would put a walk of the
 program stores on every right-click). `OpenWith` is a row of
 `chrome::CONTEXT_COMMANDS`, enabled only for a regular file — a directory
 descends and a bundle launches itself, so neither has an application to pick, and
 each says so. Choosing it concludes the chain; the app then resolves the file's
 absolute path (the shared `chosen_target_path`), enumerates the full
-`applications_for` candidate list over `RtBundleSource`, and — when at least one
+`applications_for` candidate list over the scan the reader keeps warm, and — when at least one
 application claims the type — opens an `open_with::OpenWithChooser` in its own
 popup window, opening with the identity band that names the file, then one
 `ListRow` per candidate in ranked order, scrolled in pixels inside its own

@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use tairix_bezier::{Affine, FillRule, Point};
 use tairix_colour::Rgba;
 
-use super::{face_of, fpa_double, fpa_words, read, recognised, write, Dropped, Font};
+use super::{
+    face_of, fpa_double, fpa_words, read, recognised, riscos_family_generic, write, Dropped, Font,
+};
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Page, Unit, PAPER};
 use crate::id::Ids;
@@ -628,6 +630,20 @@ fn doubles_are_stored_sign_and_exponent_first() {
     assert_eq!(fpa_words(1.0), [0x3FF0_0000, 0]);
     for value in [0.0, 2.54, -1e-300, 1e300] {
         assert_eq!(fpa_double(fpa_words(value)).to_bits(), value.to_bits());
+    }
+}
+
+#[test]
+fn risc_os_s_own_families_are_set_in_their_generic_families() {
+    for (family, generic) in [
+        ("Trinity", "serif"),
+        ("homerton", "sans-serif"),
+        ("CORPUS", "monospace"),
+    ] {
+        assert_eq!(riscos_family_generic(family), Some(generic), "{family}");
+    }
+    for other in ["Trinity.Bold", "NewHall", "serif", ""] {
+        assert_eq!(riscos_family_generic(other), None, "{other:?}");
     }
 }
 

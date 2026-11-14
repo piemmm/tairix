@@ -3244,6 +3244,7 @@ dependencies = [
 name = "tairix-image"
 version = "0.0.0"
 dependencies = [
+ "tairix-colour",
  "tairix-compress",
  "tairix-crc32",
  "tairix-fuzzseed",

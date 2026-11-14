@@ -27,7 +27,7 @@ use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Check, Coding, Cursors, Data, Heap, Lead};
 use crate::format::{leaves_out, Content, Format, Placed, Read};
-use crate::name::{as_is, spelled, Charset, Spelled};
+use crate::name::{spelled, Charset, Spelled};
 use crate::region::{Regions, Sink};
 use crate::tree::{Body, Meta, Node, Recorded, Tree, MAX_MEMBERS};
 use crate::wire::{le16, le32, le64, Out};
@@ -512,7 +512,7 @@ fn admit<A: VolumeAccess>(
     regions: &Regions<A>,
     cursors: &mut Cursors,
 ) -> Result<(), DriverError> {
-    let Spelled::Within(mut parts) = spelled(&record.name, b'/', as_is) else {
+    let Spelled::Within(mut parts) = spelled(&record.name, b'/') else {
         return Err(DriverError::OutOfRange);
     };
     let leaf = parts.pop().ok_or(DriverError::OutOfRange)?;

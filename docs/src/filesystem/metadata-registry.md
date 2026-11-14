@@ -34,7 +34,14 @@ words (`load >> 20 == 0xFFF`). The registry stores the decoded `acorn.filetype`
 native fields byte-for-byte. The desktop types a file by its `acorn.filetype`
 wherever its name says nothing (`lib/browse`'s `media_for_document`), so a
 RISC OS file copied to a volume that keeps attributes keeps its type and its
-icon. The value is a `tairix_abi::fs::Filetype`, the type a drag carries too.
+icon. The value is a `tairix_abi::fs::Filetype`, the type a drag carries too,
+and its three digits are `Filetype::hex` and `Filetype::from_hex` — the same
+spelling a name's `,xxx` suffix carries one in where its volume records none
+(`Filetype::suffix`, `Filetype::split_suffix`). A name crosses between RISC OS
+and TAIRiX through `acorn::leaf_from_riscos` and `acorn::leaf_to_riscos`, the
+one conversion ADFS, the archive driver and `lib/icon` share, and
+`acorn::filetype_name` gives the name RISC OS gives a type it allocates itself
+(`&FFF` Text, `&AFF` DrawFile), a type elsewhere being its software's to name.
 
 ## Amiga (AmigaDOS / FFS)
 

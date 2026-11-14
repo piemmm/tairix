@@ -1333,65 +1333,34 @@ fn share_base_bytes(record: &tairix_fsprobe::adfs::DiscRecord, indaddr: u32) -> 
 /// Largest big directory the format permits (4096 KiB).
 const MAX_BIG_DIR: u32 = 4096 * 1024;
 
-/// A name crossed between the disc's spelling — RISC OS's Latin-1, a dot
-/// written as `/` — and the VFS's UTF-8 ([`acorn::latin1_char`],
-/// [`acorn::crossed_name_byte`]): every name is crossed once as it enters or
-/// leaves the driver, and nothing within it sees the VFS's spelling.
-struct Crossed {
-    bytes: [u8; dir::MAX_NAME_LEN],
-    len: usize,
+/// The VFS's `name` as the disc spells it. Every name crosses once as it
+/// enters or leaves the driver, through the one RISC OS name conversion, and
+/// nothing within the driver sees the VFS's spelling.
+///
+/// # Errors
+///
+/// [`DriverError::LengthOutOfRange`] for a name no directory format holds;
+/// [`DriverError::OutOfRange`] for one no RISC OS name can be.
+fn spelt(name: &[u8]) -> Result<acorn::Leaf, DriverError> {
+    acorn::leaf_to_riscos(name).map_err(|bad| match bad {
+        acorn::BadName::Empty | acorn::BadName::TooLong => DriverError::LengthOutOfRange,
+        acorn::BadName::Character | acorn::BadName::NoEntry => DriverError::OutOfRange,
+    })
 }
 
-impl Crossed {
-    /// The VFS's `name` as the disc spells it.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::LengthOutOfRange`] for a name no directory format
-    /// holds; [`DriverError::OutOfRange`] for one with a character RISC OS's
-    /// Latin-1 lacks.
-    fn of(name: &[u8]) -> Result<Self, DriverError> {
-        let text = core::str::from_utf8(name).map_err(|_| DriverError::OutOfRange)?;
-        let mut bytes = [0u8; dir::MAX_NAME_LEN];
-        let mut len = 0;
-        for ch in text.chars() {
-            let byte = acorn::latin1_byte(ch).ok_or(DriverError::OutOfRange)?;
-            *bytes.get_mut(len).ok_or(DriverError::LengthOutOfRange)? =
-                acorn::crossed_name_byte(byte);
-            len += 1;
-        }
-        Ok(Self { bytes, len })
-    }
-
-    /// `name`, read from the disc, as the VFS lists it, or `None` where no
-    /// path can spell it: RISC OS's `/` and `//` become `.` and `..`, a `.`
-    /// RISC OS keeps out of a name would become a separator, and a control
-    /// code is no character at all.
-    fn listed(name: &[u8]) -> Option<Self> {
-        let mut bytes = [0u8; dir::MAX_NAME_LEN];
-        let mut len = 0;
-        for &byte in name {
-            let ch = acorn::latin1_char(acorn::crossed_name_byte(byte))?;
-            let mut utf8 = [0u8; 4];
-            let spelt = ch.encode_utf8(&mut utf8).as_bytes();
-            bytes
-                .get_mut(len..len + spelt.len())?
-                .copy_from_slice(spelt);
-            len += spelt.len();
-        }
-        let crossed = Self { bytes, len };
-        tairix_abi::fs::is_component(crossed.as_bytes()).then_some(crossed)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
+/// `name`, read from the disc, as the VFS lists it, or `None` for one no
+/// RISC OS name can be, which is left out of its directory's listing.
+fn listed(name: &[u8]) -> Option<acorn::Leaf> {
+    acorn::leaf_from_riscos(name).ok()
 }
 
 impl<B: Block> Adfs<B> {
-    /// Validate a name being written to a directory.
+    /// Validate a name, as the disc spells it ([`spelt`]), being written to
+    /// a directory: within what its format holds, and in seven bits where it
+    /// is a fixed directory, which keeps the top bit of each byte for itself.
     fn validate_new_name(&self, name: &[u8]) -> Result<(), DriverError> {
-        let max = if self.is_big_dir() {
+        let big = self.is_big_dir();
+        let max = if big {
             dir::MAX_NAME_LEN
         } else {
             dir::FIXED_NAME_LEN
@@ -1399,20 +1368,7 @@ impl<B: Block> Adfs<B> {
         if name.is_empty() || name.len() > max {
             return Err(DriverError::LengthOutOfRange);
         }
-        // A fixed directory keeps seven bits of each name byte; a big one
-        // keeps RISC OS's Latin-1 whole.
-        let big = self.is_big_dir();
-        let held = |byte: u8| {
-            if big {
-                byte != b' ' && acorn::latin1_char(byte).is_some()
-            } else {
-                (0x21..=0x7E).contains(&byte)
-            }
-        };
-        if name
-            .iter()
-            .any(|&byte| !held(byte) || acorn::RESERVED_NAME_BYTES.contains(&byte))
-        {
+        if !big && !name.is_ascii() {
             return Err(DriverError::OutOfRange);
         }
         Ok(())
@@ -1641,7 +1597,7 @@ impl<B: Block> FilesystemRead for Adfs<B> {
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         // A name RISC OS cannot spell names nothing on its disc.
-        let name = Crossed::of(name).map_err(|_| DriverError::NotFound)?;
+        let name = spelt(name).map_err(|_| DriverError::NotFound)?;
         let dir_addr = self.entries_addr(dir)?;
         let (index, object) = self.child(dir_addr, name.as_bytes())?;
         let node = self.reported(&object, dir_addr);
@@ -1681,16 +1637,18 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         let Some(indaddr) = self.dir_addr(dir)? else {
             return Ok(());
         };
-        let after = Crossed::of(after)?;
+        // A listing from its start resumes after no name.
+        let after = (!after.is_empty()).then(|| spelt(after)).transpose()?;
+        let after = after.as_ref().map_or(&[][..], acorn::Leaf::as_bytes);
         // One load serves the whole call, however many entries it lists.
         let handle = self.load_dir(indaddr)?;
-        let start = self.resume_index(&handle, indaddr, cursor, after.as_bytes())?;
+        let start = self.resume_index(&handle, indaddr, cursor, after)?;
         for index in start..Self::dir_len(&handle) {
             let Some(object) = self.dir_entry(&handle, indaddr, index)? else {
                 break;
             };
             // Left out rather than refusing the whole directory.
-            let Some(name) = Crossed::listed(object.name()) else {
+            let Some(name) = listed(object.name()) else {
                 continue;
             };
             let entry = DirEntry {
@@ -2127,7 +2085,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         kind: NodeKind,
         _record: &NodeSecurity,
     ) -> Result<NodeId, DriverError> {
-        let name = Crossed::of(name)?;
+        let name = spelt(name)?;
         let name = name.as_bytes();
         let dir_addr = self.entries_addr(dir)?;
         self.validate_new_name(name)?;
@@ -2279,7 +2237,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        let name = Crossed::of(name)?;
+        let name = spelt(name)?;
         let dir_addr = self.entries_addr(dir)?;
         let (index, object) = self.child(dir_addr, name.as_bytes())?;
         if object.is_dir() && !self.dir_is_empty(object.indaddr)? {
@@ -2305,7 +2263,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
-        let (src_name, dst_name) = (Crossed::of(src_name)?, Crossed::of(dst_name)?);
+        let (src_name, dst_name) = (spelt(src_name)?, spelt(dst_name)?);
         let (src_name, dst_name) = (src_name.as_bytes(), dst_name.as_bytes());
         let dst_addr = self.entries_addr(dst_dir)?;
         let src_addr = self.entries_addr(src_dir)?;
