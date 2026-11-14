@@ -60,7 +60,7 @@ pub const RESET_VECTOR: u16 = 0xFFFC;
 pub const IRQ_VECTOR: u16 = 0xFFFE;
 
 /// The page the stack occupies.
-const STACK_PAGE: u16 = 0x0100;
+pub const STACK_PAGE: u16 = 0x0100;
 
 /// The programmer-visible registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

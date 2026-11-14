@@ -5,8 +5,9 @@
 //! replayed against the clean-room ROMs.
 //!
 //! A script is steps separated by `;`: `type:` text, `\n` a RETURN; `press:`
-//! a key by its label; `wait:` seconds, to the centisecond; `swap:` a disc
-//! [`discs::named`] into drive 0; `break` and `shiftbreak`.
+//! a key by its label, and `down:` and `up:` one held over the steps between;
+//! `wait:` seconds, to the centisecond; `swap:` a disc [`discs::named`] into
+//! drive 0; `break` and `shiftbreak`.
 //!
 //! A corpus file holds scenarios a block each, separated by blank lines:
 //! `scenario <name>`, then `discs <name>...` for drives 0 and 1, `protected`
@@ -252,6 +253,8 @@ fn step_on(machine: &mut Machine, step: &str) -> Result<(), ScenarioError> {
     match verb {
         "type" => type_text(machine, &argument.replace("\\n", "\n"))?,
         "press" => press(machine, key(argument)?),
+        "down" => machine.set_key(key(argument)?, true),
+        "up" => machine.set_key(key(argument)?, false),
         "wait" => wait(machine, centiseconds(argument)?),
         "swap" => machine.insert_disc(PhysicalDrive::Zero, disc(argument, false)?),
         "break" => press_break(machine, &[]),

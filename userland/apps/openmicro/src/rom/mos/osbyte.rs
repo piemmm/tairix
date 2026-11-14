@@ -436,11 +436,14 @@ fn streams(a: &mut Asm) {
     a.jmp("buffers_flush_all");
     a.here("osbyte_flush_current");
     a.ldx(abs(var::INPUT_SOURCE));
-    a.jmp("buffer_flush");
+    a.bpl("osbyte_flush_buffer");
 
+    // OSBYTE 21, and 15's one buffer: Y 0 after, as MOS 1.20 leaves it.
     a.here("osbyte_flush");
     a.cpx(imm(super::buffers::number::COUNT));
     a.bcs(RTS);
+    a.here("osbyte_flush_buffer");
+    a.ldy(imm(0));
     a.jmp("buffer_flush");
 
     a.here("osbyte_clear_escape");
@@ -616,8 +619,10 @@ fn timing(a: &mut Asm, model: Model) {
 
 /// Input: INKEY.
 fn input(a: &mut Asm, model: Model) {
-    // &81: Y &FF tests the key X, or with X zero reads the OS's version;
-    // otherwise a character within X + 256 Y centiseconds.
+    // &81: Y &FF with X zero reads the OS's version; with X's top bit set it
+    // tests key X EOR &FF, and without it, as MOS 1.20 has it, is TRUE while
+    // no key from key X EOR &7F on is down. Otherwise a character within
+    // X + 256 Y centiseconds.
     a.here("osbyte_inkey");
     a.cpy(imm(0xFF));
     a.bne("osbyte_inkey_timed");
@@ -625,14 +630,24 @@ fn input(a: &mut Asm, model: Model) {
     // 1.00's 1.
     a.txa();
     match model {
-        Model::ModelB => a.beq("osbyte_inkey_down"),
-        Model::Electron => a.beq("osbyte_inkey_identity"),
+        Model::ModelB => {
+            a.beq("osbyte_inkey_down");
+            // KEYV's scan from X, or test of key X & &7F, both TRUE with X's
+            // top bit set on return.
+            a.eor(imm(0x7F));
+            a.tax();
+            a.jsr("osbyte_keyboard_scan");
+            a.txa();
+        }
+        Model::Electron => {
+            a.beq("osbyte_inkey_identity");
+            a.eor(imm(0xFF));
+            a.tax();
+            a.jsr("key_down");
+        }
     }
-    a.eor(imm(0xFF));
-    a.tax();
-    a.jsr("key_down");
     a.bpl("osbyte_inkey_up");
-    // C, as X and Y, says whether the key is down.
+    // C, as X and Y, says the answer is TRUE.
     a.here("osbyte_inkey_down");
     a.ldx(imm(0xFF));
     a.ldy(imm(0xFF));

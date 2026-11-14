@@ -26,6 +26,7 @@ pub(crate) mod ws;
 #[cfg(test)]
 mod tests;
 
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::sheila;
 use crate::machine::{Model, IO_BASE, IO_END, OS_BASE, ROM_SIZE};
 use crate::rom::asm::{Asm, AsmError, Image, ERASED};
@@ -315,8 +316,8 @@ fn electron_hardware(a: &mut Asm) {
     a.pha();
     a.tsx();
     a.lda(abs(var::ULA_CONTROL_COPY));
-    a.and(abs(0x0101).x());
-    a.ora(abs(0x0102).x());
+    a.and(abs(STACK_PAGE + 1).x());
+    a.ora(abs(STACK_PAGE + 2).x());
     a.sta(abs(var::ULA_CONTROL_COPY));
     a.sta(abs(CONTROL));
     a.pla();

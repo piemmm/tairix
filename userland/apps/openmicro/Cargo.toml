@@ -48,6 +48,9 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The session the machine worker serves and the front end drives it over:
 # its wire codec, its share and the supervised launcher.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# Copies of the worker's answers that fail as values, and the job queue the
+# file worker's desk is built on.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The package is both the host-tested machine and front-end model and the
 # `Run` binary of the on-disk `OpenMicro.app` bundle: a freestanding program on the
@@ -82,8 +85,6 @@ tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The glyph cache trimmed under memory pressure.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
-# The job queue the file worker's desk is built on.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The glyph transport a settings dialog's text is measured through in tests.

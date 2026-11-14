@@ -6,8 +6,10 @@
 //! again, so the two never touch it at once.
 
 mod client;
+mod link;
 pub mod protocol;
 mod service;
 
 pub use client::{Busy, MachineClient};
+pub use link::Link;
 pub use service::MachineService;

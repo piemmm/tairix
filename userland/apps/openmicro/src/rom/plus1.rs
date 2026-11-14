@@ -11,6 +11,7 @@
 
 use alloc::format;
 
+use crate::cpu::STACK_PAGE;
 use crate::machine::electron::plus1::{self as port, command, status};
 use crate::machine::{FIRE_BUTTONS, ROM_SIZE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, AsmError, Image, RTS, V_SET};
@@ -365,7 +366,7 @@ fn printer_driver(a: &mut Asm) {
     a.jsr("remv");
     a.sta(abs(port::PRINTER));
     a.tsx();
-    a.dec(abs(0x0101).x());
+    a.dec(abs(STACK_PAGE + 1).x());
     a.bne(next);
     a.bind(busy);
     a.pla();

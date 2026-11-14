@@ -8,6 +8,7 @@
 
 use super::ws::{os, page2, var, vdu, vdu_zp};
 use super::{has_teletext, return_in_teletext, svia, DELETE};
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::sheila;
 use crate::machine::bbc::via::reg;
 use crate::machine::electron::control;
@@ -831,7 +832,7 @@ fn copy_row_from(a: &mut Asm) {
     a.lda(zp(vdu_zp::TEMP + 1));
     a.sta(zp(vdu_zp::TEMP + 3));
     a.tsx();
-    a.ldy(abs(0x0103).x());
+    a.ldy(abs(STACK_PAGE + 3).x());
     a.jsr("row_window");
     a.jmp("run_copy");
 }
@@ -1096,11 +1097,12 @@ fn colours(a: &mut Asm, model: Model) {
 /// the logical palette: each entry is the colour of the pixel value its
 /// index forms. `ula_palette` writes every colour's, the highest colour
 /// first, in MOS 1.20's order; &249 keeps the last written, as OSBYTE &B9
-/// reads it.
+/// reads it. Its working values are on the stack, so a VDU 19 or 20 from an
+/// interrupt routine leaves a character being drawn its address.
 fn ula_palette(a: &mut Asm) {
-    let selected = zp(vdu_zp::TEMP + 1);
+    let pushed = abs(STACK_PAGE + 1).x();
     a.here("ula_palette_colour");
-    a.sta(selected);
+    a.pha();
     a.ldy(imm(0));
     a.here("ula_palette_entry");
     a.tya();
@@ -1116,23 +1118,27 @@ fn ula_palette(a: &mut Asm) {
     a.bne("ula_palette_logical");
     a.lda(abs("palette_index_4").y());
     a.here("ula_palette_logical");
-    a.tax();
-    a.cpx(selected);
+    a.tsx();
+    a.cmp(pushed);
     a.bne("ula_palette_next");
+    a.tax();
     a.lda(abs(vdu::PALETTE).x());
     a.eor(imm(0x07));
-    a.sta(zp(vdu_zp::TEMP));
+    a.pha();
     a.tya();
     for _ in 0..4 {
         a.asl(Acc);
     }
-    a.ora(zp(vdu_zp::TEMP));
+    a.tsx();
+    a.ora(pushed);
     a.sta(abs(sheila::VIDEO_PALETTE));
     a.sta(abs(var::ULA_PALETTE));
+    a.pla();
     a.here("ula_palette_next");
     a.iny();
     a.cpy(imm(16));
     a.bne("ula_palette_entry");
+    a.pla();
     a.rts();
     a.here("ula_palette");
     a.lda(abs(vdu::COLOURS));

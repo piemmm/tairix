@@ -124,7 +124,7 @@ fn channels(a: &mut Asm) {
     a.lda(imm(OSARGS_WRITE_PTR));
     a.ldx(imm(lo(z::IAC)));
     a.jsr(entry::OSARGS);
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 }
 
 fn records(a: &mut Asm) {

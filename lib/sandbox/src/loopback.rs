@@ -25,6 +25,9 @@
 //! worker writes and its owner reads through a lock as two processes reach
 //! one region.
 //!
+//! [`MemberLedger`] is a wait-set's membership as the kernel keeps it, for a
+//! test of what an owner leaves watched ([`crate::members::Members`]).
+//!
 //! The fakes model a *healthy* worker. Containment paths are exercised by
 //! scripting a failing [`crate::proto::Channel`] or
 //! [`crate::session::SessionTransport`] directly (see `crate::host`'s and
@@ -35,10 +38,11 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, WaitSourceKind};
 use tairix_sync::SpinLock;
 
 use crate::host::Launcher;
+use crate::members::MemberSet;
 use crate::proto::{head_frame, send_frame, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
 use crate::session::{
     FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport, Share, ShareWrite,
@@ -527,6 +531,43 @@ impl<S: SessionService, F: FnMut() -> S> SessionLauncher for PipeSessionLauncher
             answers: Vec::new(),
             gauge: self.gauge.clone(),
         })
+    }
+}
+
+/// A wait-set's membership as the kernel keeps it: one member for each kind
+/// and descriptor number, a second refused whatever its token.
+#[derive(Clone, Debug, Default)]
+pub struct MemberLedger(Rc<RefCell<Vec<(WaitSourceKind, u32, u64)>>>);
+
+impl MemberLedger {
+    /// The members held, oldest first: each one's kind, descriptor number and
+    /// token.
+    #[must_use]
+    pub fn members(&self) -> Vec<(WaitSourceKind, u32, u64)> {
+        self.0.borrow().clone()
+    }
+
+    /// Whether any member names descriptor `fd`.
+    #[must_use]
+    pub fn names(&self, fd: u32) -> bool {
+        self.0.borrow().iter().any(|&(_, held, _)| held == fd)
+    }
+}
+
+impl MemberSet for MemberLedger {
+    fn add(&mut self, kind: WaitSourceKind, fd: u32, token: u64) -> Result<(), Errno> {
+        let mut members = self.0.borrow_mut();
+        if members.iter().any(|&(k, f, _)| k == kind && f == fd) {
+            return Err(Errno::AlreadyExists);
+        }
+        members.push((kind, fd, token));
+        Ok(())
+    }
+
+    fn remove(&mut self, kind: WaitSourceKind, fd: u32, _token: u64) {
+        self.0
+            .borrow_mut()
+            .retain(|&(k, f, _)| !(k == kind && f == fd));
     }
 }
 

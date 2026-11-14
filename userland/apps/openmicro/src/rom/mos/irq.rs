@@ -5,6 +5,7 @@
 
 use super::ws::{os, page2, var, vector};
 use super::{latch, page, svia, uvia, Held};
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::bbc::sheila;
 use crate::machine::bbc::via::{irq, reg};
@@ -90,11 +91,11 @@ fn entry(a: &mut Asm, model: Model) {
     a.txa();
     a.pha();
     a.tsx();
-    a.lda(abs(0x0103).x());
+    a.lda(abs(STACK_PAGE + 3).x());
     a.sec();
     a.sbc(imm(1));
     a.sta(zp(os::ERROR));
-    a.lda(abs(0x0104).x());
+    a.lda(abs(STACK_PAGE + 4).x());
     a.sbc(imm(0));
     a.sta(zp(os::ERROR + 1));
     a.lda(zp(os::ROM));

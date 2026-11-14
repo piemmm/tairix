@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::KeyboardMode;
+use tairix_abi::Errno;
 use tairix_controls::{StatusBand, StatusTone};
 use tairix_crt::screen::{fit, Drawing, Picture, Scaling, DOT};
 use tairix_crt::Tube;
@@ -27,13 +28,12 @@ use tairix_openmicro::worker::protocol::{
     session_bounds, Change, Input, Lights, Loaded, Media, ModelKey, Ran, Refusal as Refused, Reply,
     Request, MAX_INPUTS, SHARE_BYTES,
 };
-use tairix_openmicro::worker::MachineClient;
+use tairix_openmicro::worker::Link;
 use tairix_raster::resample::Region as Target;
 use tairix_raster::{Color, Surface};
 use tairix_rt::LogSink;
-use tairix_sandbox::rt::{RtSessionLauncher, SessionMembers};
+use tairix_sandbox::rt::{KernelWaitSet, RtSessionLauncher, SessionMembers};
 use tairix_sandbox::session::Share;
-use tairix_sandbox::supervise::send_waiting;
 use tairix_sandbox::{SupervisedSession, WorkerMemory};
 use tairix_theme::Theme;
 use tairix_window::app::{self, Fitted, LazyPool, WindowPane};
@@ -52,8 +52,9 @@ const TYPE_GAP: u64 = 100_000;
 /// The most pasted text taken at once.
 const MOST_PASTE: usize = 4_096;
 
-/// The session a machine's worker runs in, replaced when it fails.
-pub type Session = SupervisedSession<RtSessionLauncher, LogSink>;
+/// The link a machine's worker is driven over, the worker replaced when it
+/// fails.
+type WorkerLink = Link<RtSessionLauncher, LogSink, KernelWaitSet>;
 
 /// Where a machine stands in its window's life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +226,22 @@ pub enum Pending {
     CollectDiscs,
 }
 
+impl Pending {
+    /// Whether it puts a medium in.
+    const fn puts_in(&self) -> bool {
+        matches!(self, Self::InsertDisc { .. } | Self::InsertTape(_))
+    }
+
+    /// The file of the medium it would have put in, let go with it.
+    fn forgotten(self) -> Option<FileWork> {
+        match self {
+            Self::InsertDisc { disc, .. } => disc.medium.map(FileWork::Forget),
+            Self::InsertTape(tape) => tape.medium.map(FileWork::Forget),
+            _ => None,
+        }
+    }
+}
+
 /// What became of a reply, for the application to act on.
 pub enum Event {
     /// Nothing more.
@@ -281,10 +298,10 @@ pub struct MachineWindow {
     damage: Region,
     owing: Owing,
     picture: Picture,
-    session: Option<Session>,
-    members: SessionMembers,
+    /// Its wait-set and the tokens its worker's two pipes are reported under.
+    wait: (u64, u64, u64),
+    link: Option<WorkerLink>,
     share: Option<Arc<dyn Share>>,
-    machine: MachineClient,
     asked: Option<Pending>,
     pending: VecDeque<Pending>,
     inputs: VecDeque<(u64, Change)>,
@@ -388,10 +405,9 @@ impl MachineWindow {
             damage: Region::new(),
             owing: Owing::Nothing,
             picture,
-            session: None,
-            members: SessionMembers::new(set, tokens.0, tokens.1),
+            wait: (set, tokens.0, tokens.1),
+            link: None,
             share: None,
-            machine: MachineClient::new(),
             asked: None,
             pending: VecDeque::new(),
             inputs: VecDeque::new(),
@@ -444,19 +460,22 @@ impl MachineWindow {
             .ok_or_else(|| String::from("its picture has no size"))?;
         let bounds = session_bounds().map_err(|err| format!("{err:?}"))?;
         let launcher = RtSessionLauncher::own_binary(WorkerMemory::Documents).sharing(share);
-        let mut session = SupervisedSession::new(launcher, bounds, LogSink);
-        let _ = session.start(now);
-        self.share = session.share().cloned();
-        self.session = Some(session);
+        let (set, read, write) = self.wait;
+        let mut link = Link::new(
+            SupervisedSession::new(launcher, bounds, LogSink),
+            SessionMembers::new(set, read, write),
+        );
+        let _ = link.start(now);
+        self.share = link.share().cloned();
+        self.link = Some(link);
         self.images = Some(images);
         self.life = Life::Running;
         self.message = None;
-        self.ask(Pending::Configure);
-        // Queued with the build, so whatever is put in later goes in after.
-        if let Some((screen, kept)) = resume {
+        let resume = resume.map(|(screen, kept)| {
             self.show_kept(&screen);
-            self.ask(Pending::Resume(kept));
-        }
+            Pending::Resume(kept)
+        });
+        self.ask_first(core::iter::once(Pending::Configure).chain(resume));
         self.owe_strip();
         Ok(())
     }
@@ -523,21 +542,48 @@ impl MachineWindow {
         self.pending.push_back(pending);
     }
 
+    /// `requests`, in their order, ahead of every request waiting: a build
+    /// goes in before what was put in while it was due.
+    fn ask_first(&mut self, requests: impl IntoIterator<Item = Pending>) {
+        let waiting = core::mem::take(&mut self.pending);
+        self.pending.extend(requests);
+        self.pending.extend(waiting);
+    }
+
+    /// What waits given up: the files of what it would have put in, to be let
+    /// go.
+    fn give_up_waiting(&mut self) -> Vec<FileWork> {
+        self.pending
+            .drain(..)
+            .filter_map(Pending::forgotten)
+            .collect()
+    }
+
     /// Whether the machine's worker is live.
     #[must_use]
     pub fn live(&self) -> bool {
-        self.session.as_ref().is_some_and(Session::is_live)
+        self.link.as_ref().is_some_and(Link::is_live)
+    }
+
+    /// Whether it is being suspended or shut down, and takes nothing more.
+    #[must_use]
+    pub const fn put_away(&self) -> bool {
+        matches!(self.life, Life::Suspending(_) | Life::ShuttingDown(_))
     }
 
     /// Ask for the next request waiting, or the slice the pace asks for.
     pub fn pump(&mut self, now: u64) {
-        if !self.machine.is_idle() || !self.live() {
+        let Some(link) = self
+            .link
+            .as_mut()
+            .filter(|link| link.is_live() && link.is_idle())
+        else {
             return;
-        }
+        };
         let collect = self.rack.filed();
         while let Some(pending) = self.pending.pop_front() {
             if let Some(request) = request_of(&pending, self.images.as_deref(), collect) {
-                if self.machine.ask(&request).is_ok() {
+                if link.ask(&request).is_ok() {
                     self.asked = Some(pending);
                 }
                 return;
@@ -564,83 +610,43 @@ impl MachineWindow {
                 sound: sound && self.sound.is_some(),
                 inputs,
             };
-            if self.machine.ask(&request).is_ok() {
+            if link.ask(&request).is_ok() {
                 self.timeline = end;
             }
         }
     }
 
-    /// Send what waits, and arm the session's readiness.
-    pub fn sync(&mut self, now: u64) {
-        let Some(session) = self.session.as_mut() else {
-            return;
+    /// Send what waits, and watch the worker's pipes as its session wants
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// The wait-set's refusal to watch a pipe: the machine cannot be heard.
+    pub fn sync(&mut self, now: u64) -> Result<(), Errno> {
+        let Some(link) = self.link.as_mut() else {
+            return Ok(());
         };
-        let _ = send_waiting(&mut self.machine, session, now);
-        if let Err(err) = self.members.sync(
-            session.descriptors(),
-            session.wants_read(),
-            session.wants_write(),
-        ) {
-            app::report(
-                APP_NAME,
-                format_args!("a machine's session cannot be waited on ({err})"),
-            );
+        if let Some(why) = link.sync(now)? {
+            self.lost(why);
         }
+        Ok(())
     }
 
-    /// Serve the session as its pipes are ready: what it can take, what it
-    /// answered, and the loss of a worker that died. A read is made only on
-    /// readiness, as it blocks.
-    pub fn serve(&mut self, now: u64, (readable, writable): (bool, bool)) -> Vec<Vec<u8>> {
+    /// Serve the worker's pipes as `ready` says they are: the replies it sent,
+    /// in order, and why it was lost, if it was.
+    pub fn serve(&mut self, now: u64, ready: (bool, bool)) -> (Vec<Vec<u8>>, Option<&'static str>) {
         let mut frames = Vec::new();
-        let Some(session) = self.session.as_mut() else {
-            return frames;
-        };
-        let mut lost = None;
-        if writable && session.wants_write() {
-            if let Err(err) = session.on_writable(now) {
-                lost = Some(format!("{err:?}"));
-            }
-        }
-        if readable && session.wants_read() {
-            if let Err(err) = session.on_readable(now) {
-                lost = Some(format!("{err:?}"));
-            }
-        }
-        if let Some(why) = lost {
-            self.lost(&why);
-        }
-        loop {
-            let Some(session) = self.session.as_mut() else {
-                return frames;
-            };
-            let machine = &mut self.machine;
-            let got = session.recv(now, |frame| match machine.answer(frame) {
-                Ok(_) => Ok(frame.to_vec()),
-                Err(why) => Err(why),
-            });
-            match got {
-                Ok(Some(Ok(frame))) => {
-                    if frames.try_reserve(1).is_ok() {
-                        frames.push(frame);
-                    }
-                }
-                Ok(Some(Err(why))) => {
-                    session.condemn(now, why);
-                    self.lost(why);
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    self.lost(&format!("{err:?}"));
-                    break;
-                }
-            }
-        }
-        frames
+        let lost = self
+            .link
+            .as_mut()
+            .and_then(|link| link.serve(now, ready, &mut frames));
+        (frames, lost)
     }
 
-    /// The worker is gone; a replacement starts from power-on.
-    fn lost(&mut self, why: &str) {
+    /// The worker was lost `why`, nothing left asked of it: a replacement
+    /// starts from power-on, and what was being put in goes in after it is
+    /// built.
+    pub fn lost(&mut self, why: &str) {
         if self.share.take().is_some() {
             record(events::WORKER_REPLACED, events::WORKER_REPLACED_MESSAGE);
             self.say(
@@ -648,9 +654,10 @@ impl MachineWindow {
                 StatusTone::Warning,
             );
         }
-        self.machine.restart();
-        self.asked = None;
-        self.pending.clear();
+        self.pending.retain(Pending::puts_in);
+        if let Some(asked) = self.asked.take().filter(Pending::puts_in) {
+            self.pending.push_front(asked);
+        }
         self.inputs.clear();
         self.pressed_at = [0; keys::KEY_NUMBERS];
         self.loaded = Loaded::default();
@@ -659,38 +666,39 @@ impl MachineWindow {
     /// A replacement worker, once its deadline comes: the machine built
     /// again, its media put back.
     pub fn restart_due(&mut self, now: u64) {
-        let Some(session) = self.session.as_mut() else {
+        let Some(link) = self.link.as_mut() else {
             return;
         };
-        if self.life != Life::Running || session.restart_deadline().is_none_or(|at| at > now) {
+        if self.life != Life::Running || link.restart_deadline().is_none_or(|at| at > now) {
             return;
         }
-        if session.start(now).is_none() {
+        if link.start(now).is_none() {
             return;
         }
-        self.share = session.share().cloned();
+        self.share = link.share().cloned();
         self.timeline = 0;
-        self.ask(Pending::Configure);
-        for drive in PhysicalDrive::ALL {
-            if let Some(disc) = self.rack.disc(drive).cloned() {
-                self.ask(Pending::InsertDisc {
-                    drive,
-                    write_protected: disc.medium.is_none(),
-                    disc,
-                });
-            }
-        }
-        if let Some(tape) = self.rack.tape().cloned() {
-            self.ask(Pending::InsertTape(tape));
-        }
+        let discs = PhysicalDrive::ALL.into_iter().filter_map(|drive| {
+            let disc = self.rack.disc(drive)?.clone();
+            Some(Pending::InsertDisc {
+                drive,
+                write_protected: disc.medium.is_none(),
+                disc,
+            })
+        });
+        let tape = self.rack.tape().cloned().map(Pending::InsertTape);
+        let build: Vec<Pending> = core::iter::once(Pending::Configure)
+            .chain(discs)
+            .chain(tape)
+            .collect();
+        self.ask_first(build);
     }
 
     /// When the window next wants the loop: a replacement worker, the tube's
     /// next step, or the pace's next slice.
     pub fn due(&mut self, now: u64) -> Option<u64> {
-        let restart = self.session.as_ref().and_then(Session::restart_deadline);
+        let restart = self.link.as_ref().and_then(Link::restart_deadline);
         let tube = self.picture.due();
-        let paced = (self.machine.is_idle()
+        let paced = (self.link.as_ref().is_some_and(Link::is_idle)
             && self.pending.is_empty()
             && self.images.is_some()
             && self.life == Life::Running)
@@ -1026,20 +1034,23 @@ impl MachineWindow {
     }
 
     /// Ask for the machine's snapshot to suspend it, by `by`: its discs
-    /// collected first, what was waiting given up.
-    pub fn suspend(&mut self, by: u64) {
-        self.pending.clear();
+    /// collected first, what was waiting given up and the files of what it
+    /// would have put in answered, to be let go.
+    pub fn suspend(&mut self, by: u64) -> Vec<FileWork> {
+        let work = self.give_up_waiting();
         self.inputs.clear();
         self.ask(Pending::CollectDiscs);
         self.ask(Pending::SuspendSnapshot);
         self.life = Life::Suspending(by);
         self.say("Saving\u{2026}", StatusTone::Muted);
+        work
     }
 
     /// Take every medium out to shut it down, by `by`, what was waiting
-    /// given up.
-    pub fn shut_down(&mut self, by: u64) {
-        self.pending.clear();
+    /// given up and the files of what it would have put in answered, to be
+    /// let go.
+    pub fn shut_down(&mut self, by: u64) -> Vec<FileWork> {
+        let work = self.give_up_waiting();
         self.inputs.clear();
         if self.model.has_drives() {
             for drive in PhysicalDrive::ALL {
@@ -1049,22 +1060,28 @@ impl MachineWindow {
         self.ask(Pending::EjectTape);
         self.life = Life::ShuttingDown(Some(by));
         self.say("Shutting down\u{2026}", StatusTone::Muted);
+        work
     }
 
     /// Whether nothing is asked of the worker or waiting to be.
     #[must_use]
     pub fn settled(&self) -> bool {
-        self.machine.is_idle() && self.pending.is_empty()
+        self.link.as_ref().is_none_or(Link::is_idle) && self.pending.is_empty()
     }
 
-    /// The worker and the sound let go, the window kept.
-    pub fn retire(&mut self, set: u64, sound_token: u64) {
-        self.session = None;
+    /// The worker and the sound let go, the window kept: the files of every
+    /// medium it held or was to put in answered, to be let go.
+    pub fn retire(&mut self, set: u64, sound_token: u64) -> Vec<FileWork> {
+        self.link = None;
         self.share = None;
         if let Some(sound) = self.sound.take() {
             unwatch_sound(set, &sound, sound_token);
             sound.close();
         }
+        let mut work = self.give_up_waiting();
+        work.extend(self.asked.take().and_then(Pending::forgotten));
+        self.rack.let_go(&mut work);
+        work
     }
 
     /// Draw what changed into the surface, then present only that.

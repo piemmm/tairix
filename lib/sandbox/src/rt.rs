@@ -34,6 +34,7 @@ use tairix_rt::shm::{SharedRegion, SpawnPart, SpawnShare};
 
 use crate::host::Launcher;
 use crate::link::TimedChannel;
+use crate::members::{MemberSet, Members};
 use crate::memory::WorkerMemory;
 use crate::proto::Channel;
 use crate::session::{
@@ -676,90 +677,31 @@ impl SessionLauncher for RtSessionLauncher {
     }
 }
 
-/// An owner's wait-set registration for one session's two descriptors:
-/// `Stream` on the read end while the session wants to read, `StreamRoom`
-/// on the write end while it wants to write.
-///
-/// A direction is registered only while wanted, which is what keeps a
-/// level-triggered readiness source from waking an owner with nothing to
-/// do. A replaced worker brings new descriptors, so a member naming one the
-/// session no longer holds is removed before the new one is added.
-pub struct SessionMembers {
-    set: u64,
-    read_token: u64,
-    write_token: u64,
-    read: Option<u32>,
-    write: Option<u32>,
+/// The owner's own wait-set, reached through the kernel.
+pub struct KernelWaitSet(u64);
+
+impl MemberSet for KernelWaitSet {
+    fn add(&mut self, kind: WaitSourceKind, fd: u32, token: u64) -> Result<(), Errno> {
+        match tairix_rt::waitset_ctl(self.0, WaitSetOp::Add, kind, u64::from(fd), token) {
+            0 => Ok(()),
+            refused => Err(Errno::from_syscall(refused)),
+        }
+    }
+
+    fn remove(&mut self, kind: WaitSourceKind, fd: u32, token: u64) {
+        let _ = tairix_rt::waitset_ctl(self.0, WaitSetOp::Del, kind, u64::from(fd), token);
+    }
 }
+
+/// An owner's wait-set registration for one session's two descriptors
+/// ([`Members`] over the kernel's wait-set).
+pub type SessionMembers = Members<KernelWaitSet>;
 
 impl SessionMembers {
     /// Track the members of wait-set `set`, reporting the read end's
     /// readiness as `read_token` and the write end's room as `write_token`.
     #[must_use]
     pub const fn new(set: u64, read_token: u64, write_token: u64) -> Self {
-        Self {
-            set,
-            read_token,
-            write_token,
-            read: None,
-            write: None,
-        }
+        Members::over(KernelWaitSet(set), read_token, write_token)
     }
-
-    /// Register exactly the wanted directions of `descriptors` — none at all
-    /// when there are no descriptors.
-    ///
-    /// # Errors
-    ///
-    /// The wait-set's typed refusal to add or remove a member.
-    pub fn sync(
-        &mut self,
-        descriptors: Option<SessionDescriptors>,
-        wants_read: bool,
-        wants_write: bool,
-    ) -> Result<(), Errno> {
-        let read = descriptors.filter(|_| wants_read).map(|d| d.read_fd);
-        let write = descriptors.filter(|_| wants_write).map(|d| d.write_fd);
-        sync_member(
-            self.set,
-            WaitSourceKind::Stream,
-            self.read_token,
-            &mut self.read,
-            read,
-        )?;
-        sync_member(
-            self.set,
-            WaitSourceKind::StreamRoom,
-            self.write_token,
-            &mut self.write,
-            write,
-        )
-    }
-}
-
-/// Move one direction's registration from `armed` to `want`.
-fn sync_member(
-    set: u64,
-    kind: WaitSourceKind,
-    token: u64,
-    armed: &mut Option<u32>,
-    want: Option<u32>,
-) -> Result<(), Errno> {
-    if *armed == want {
-        return Ok(());
-    }
-    if let Some(fd) = armed.take() {
-        let ret = tairix_rt::waitset_ctl(set, WaitSetOp::Del, kind, u64::from(fd), token);
-        if ret != 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-    }
-    if let Some(fd) = want {
-        let ret = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, u64::from(fd), token);
-        if ret != 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        *armed = Some(fd);
-    }
-    Ok(())
 }

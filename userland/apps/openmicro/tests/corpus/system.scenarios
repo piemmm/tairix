@@ -41,3 +41,19 @@ script type:CLS:VDU 14:P."A":P."B":P."C":A%=?&269:MODE 7:B%=?&269:VDU 15:P.A%,B%
 # OSBYTE &AC and &AD give the key translation table, indexed by internal key number, ten codes in each sixteen; TAB, ESCAPE and the locks are marked.
 scenario osbyte_172_gives_the_key_table_by_internal_key_number
 script type:CLS:A%=&AC:X%=0:Y%=&FF:R%=USR&FFF4:T%=(R% AND &FFFF00) DIV 256\n;wait:0.3;type:P.?(T%+&10),?(T%+&11),?(T%+&19),?(T%+&20)\n;wait:0.3;type:P.?(T%+&30),?(T%+&40),?(T%+&50),?(T%+&60)\n;wait:0.3;type:P.?(T%+&70),?(T%+&79)\n;wait:0.3
+
+# INKEY(-129) to INKEY(-255) are TRUE while no key from key X EOR &7F on is down, and a scan from below key &10, OSBYTE &79's or theirs, never finds SHIFT or CTRL.
+scenario inkey_past_minus_128_is_true_while_no_key_from_its_own_is_down
+script type:NEW\n;type:10 T%=TIME:REPEAT UNTIL TIME>T%+50:PRINT INKEY(-129),INKEY(-194),INKEY(-195)\n;type:20 A%=121:X%=0:PRINT ~(USR&FFF4 AND &FF00) DIV &100\n;type:30 T%=TIME:REPEAT UNTIL TIME>T%+100:*FX15,1\n;type:CLS:RUN\n;wait:0.2;down:A;wait:1;up:A;wait:0.6;type:RUN\n;wait:0.2;down:SHIFT;wait:1;up:SHIFT;wait:0.6;type:RUN\n;wait:2
+
+# Both forms of a key INKEY, and OSBYTE &79's scan, go through KEYV, so a routine on it sees each.
+scenario inkey_s_key_forms_go_through_keyv
+script type:NEW\n;type:10 FOR I%=0 TO 2 STEP 2:P%=&900:[OPT I%:BCC S:BVS S:INC &70:.S JMP (&A00):]:NEXT\n;type:20 ?&A00=?&228:?&A01=?&229\n;type:30 ?&70=0:?&228=0:?&229=9:A%=INKEY(-99):B%=?&70:A%=INKEY(-200):C%=?&70:A%=121:X%=&10:D%=USR&FFF4:E%=?&70:?&228=?&A00:?&229=?&A01:PRINT B%,C%,E%\n;type:CLS:RUN\n;wait:1
+
+# Any of the channel word's F bits flushes the queue before the note goes in, as Hunchback's synchronised notes need; with none, the note queues behind the rest.
+scenario sound_flushes_for_any_of_its_f_bits
+script type:NEW\n;type:10 DEF PROCF(C%):SOUND &11,-15,100,200:SOUND 1,-15,100,200:SOUND 1,-15,100,200:SOUND C%,-15,100,200:T%=TIME:REPEAT UNTIL TIME>T%+30:PRINT ADVAL(-6),:ENDPROC\n;type:CLS:PROCF(&41):PROCF(&21):PROCF(&81):PROCF(&F1):PROCF(1):SOUND &11,0,0,0\n;wait:3
+
+# *FX15 with X non-zero and *FX21 leave Y 0, which Galaforce 2's loader times an INKEY by.
+scenario a_single_buffer_flush_leaves_y_zero
+script type:CLS:A%=15:X%=1:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=0:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=4:Y%=&55:PRINT ~USR&FFF4\n;wait:0.5

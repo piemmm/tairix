@@ -10,7 +10,7 @@ use super::{
 use crate::machine::bbc::latch;
 use crate::machine::bbc::sheila;
 use crate::machine::bbc::via::reg;
-use crate::rom::asm::{abs, imm, zp, Asm};
+use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
 use crate::rom::mos::high::DEFAULTS_DESCRIPTOR;
 use crate::rom::mos::modes::ROWS_640;
 use crate::rom::mos::reset::VECTOR_DEFAULTS_AT;
@@ -476,4 +476,97 @@ fn osword_0_keeps_its_registers_while_interrupt_routines_make_calls() {
     assert_eq!(flags & super::CARRY, 0, "no Escape");
     let line: Vec<u8> = (0..6).map(|i| machine.peek(LINE + i)).collect();
     assert_eq!(line, b"HELLO\r");
+}
+
+/// The screen, the vectors but EVNTV, and *FX210's sound suppression after
+/// sixty lines are printed in MODE 1, with each VSYNC's event writing VDU 20
+/// while `interrupting`.
+fn printed_under_vdu_20_events(interrupting: bool) -> (Vec<u8>, Vec<u8>, u8) {
+    let rom = program(None, move |a| {
+        let (handler, armed, line, character, next_line, text) = (
+            a.local(),
+            a.local(),
+            a.local(),
+            a.local(),
+            a.local(),
+            a.local(),
+        );
+        if interrupting {
+            a.lda(imm(lo(handler)));
+            a.sta(abs(vector::EVENT));
+            a.lda(imm(hi(handler)));
+            a.sta(abs(vector::EVENT + 1));
+            a.lda(imm(14));
+            a.ldx(imm(event::VSYNC));
+            a.jsr(OSBYTE);
+            a.jmp(armed);
+            a.bind(handler);
+            a.php();
+            a.pha();
+            a.txa();
+            a.pha();
+            a.tya();
+            a.pha();
+            a.lda(imm(20));
+            a.jsr(OSWRCH);
+            a.pla();
+            a.tay();
+            a.pla();
+            a.tax();
+            a.pla();
+            a.plp();
+            a.rts();
+            a.bind(armed);
+        }
+        for byte in [22, 1] {
+            a.lda(imm(byte));
+            a.jsr(OSWRCH);
+        }
+        a.ldy(imm(60));
+        a.bind(line);
+        a.ldx(imm(0));
+        a.bind(character);
+        a.lda(abs(text).x());
+        a.beq(next_line);
+        a.jsr(OSWRCH);
+        a.inx();
+        a.bne(character);
+        a.bind(next_line);
+        a.dey();
+        a.bne(line);
+        if interrupting {
+            a.lda(imm(13));
+            a.ldx(imm(event::VSYNC));
+            a.jsr(OSBYTE);
+        }
+        let done = a.local();
+        a.jmp(done);
+        a.bind(text);
+        a.text("THE QUICK BROWN FOX 0123456789\r\n");
+        a.byte(0);
+        a.bind(done);
+    });
+    let machine = run_rom(&rom);
+    let screen = (0x3000u16..0x8000).map(|at| machine.peek(at)).collect();
+    let vectors = (vector::USER..vector::USER + 0x36)
+        .filter(|at| !(vector::EVENT..vector::EVENT + 2).contains(at))
+        .map(|at| machine.peek(at))
+        .collect();
+    (screen, vectors, machine.peek(ws::var::SOUND_SUPPRESS))
+}
+
+/// The regression: an interrupt routine's VDU 20 rewrote the palette through
+/// the VDU drivers' temporaries, so a character being drawn when it came went
+/// through a pointer into pages 0 to 3, where Castle Quest's music player lost
+/// HIMEM or set *FX210's sound suppression.
+#[test]
+fn vdu_20_from_an_interrupt_routine_leaves_text_being_drawn_alone() {
+    let (screen, vectors, suppressed) = printed_under_vdu_20_events(false);
+    let interrupted = printed_under_vdu_20_events(true);
+    assert!(
+        screen == interrupted.0,
+        "the screen printed under the events"
+    );
+    assert_eq!(vectors, interrupted.1, "the vectors");
+    assert_eq!((suppressed, interrupted.2), (0, 0), "sound suppression");
 }

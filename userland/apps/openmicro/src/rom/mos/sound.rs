@@ -221,11 +221,11 @@ pub fn emit(a: &mut Asm, model: Model) {
 fn commands(a: &mut Asm, model: Model) {
     // OSWORD 7: the block at (&F0) holds the channel word, amplitude,
     // pitch and duration. The note waits for room in its queue, or until
-    // an Escape.
+    // an Escape; any of F's bits flushes the queue first, as MOS 1.20's do.
     a.here("sound_command");
     a.ldy(imm(0));
     a.lda(zp(os::CALL_X).ind_y());
-    a.and(imm(0x10));
+    a.and(imm(0xF0));
     a.beq("sound_no_flush");
     a.jsr("sound_buffer");
     a.jsr("buffer_flush");

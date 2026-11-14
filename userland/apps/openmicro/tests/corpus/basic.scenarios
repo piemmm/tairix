@@ -7,3 +7,15 @@ script type:CLS:A=TOP:DIM X% -1:DIM Y% -1:DIM Z% 0:DIM W% 0:P.~A,~X%,~Y%,~Z%,~W%
 # Numbers of several digits read as their values: whole ones of sixteen bits at once, and those with a point or an exponent, or past sixteen bits, in full.
 scenario numbers_of_several_digits_read_as_their_values
 script type:CLS:PRINT 10,99,100,9999\n;wait:0.5;type:PRINT 0012,65535,65536,99999\n;wait:0.5;type:PRINT 1234567890,10.5,1000.25,12E2\n;wait:0.5;type:PRINT 12E,65535.5,00.5,10E-1\n;wait:0.5;type:PRINT 12345 DIV 10,12345 MOD 100,-1000,2*1000\n;wait:0.5;type:PRINT 65535+1,&100+10,1000=1E3,100-99.5\n;wait:0.5
+
+# A statement's end is read from its text, so nothing it runs loses it: a store into BASIC's scratch, a program's code by CALL or a * command, or a hooked OS call.
+scenario statements_end_where_their_text_does_whatever_they_ran
+script type:CLS:FORI%=&50TO&90:?I%=0:NEXT:PRINT"ONE"\n;wait:0.5;type:P%=&900:[OPT0:LDA#0:LDX#&2F:.L STA&50,X:DEX:BPL L:RTS:]:CALL&900:PRINT"TWO"\n;wait:0.5;type:Q%=5:CALL&900,Q%:PRINT"THREE"\n;wait:0.5;type:?&200=0:?&201=9:OSCLI "CODE":PRINT"FOUR"\n;wait:0.5;type:P%=&A00:[OPT0:PHP:PHA:TXA:PHA:LDA#0:LDX#&1F:.M STA&50,X:DEX:BPL M:PLA:TAX:PLA:PLP:JMP(&C00):]\n;wait:0.3;type:?&C00=?&20C:?&C01=?&20D:?&20C=0:?&20D=&A:TIME=0:SOUND 1,-15,100,2:PRINT"FIVE"\n;wait:0.5
+
+# A subroutine that clears BASIC's scratch, as Nyan SID's does, returns.
+scenario a_subroutine_clearing_basic_s_scratch_returns
+script type:NEW\n;type:10 GOSUB 100:PRINT"BACK":END\n;type:100 FORI%=&50TO&90:?I%=00:NEXT:RETURN\n;type:CLS:RUN\n;wait:0.5
+
+# A block's place starts with a name: an indirection alone is Bad DIM, one after a name is not.
+scenario dim_places_start_with_a_name
+script type:CLS:X%=&3000:DIM ?X% 10\n;wait:0.3;type:DIM !&56 10\n;wait:0.3;type:DIM X%!2 10:P.X%!2>0\n;wait:0.3;type:DIM $X% 10\n;wait:0.3;type:A=TOP:DIM B 10:P.B>=A\n;wait:0.3

@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use super::model_b;
 use super::ws::{buffer, page2, page_d, var, vdu, vector};
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::Machine;
 use crate::media::tape::Tape;
@@ -759,7 +760,7 @@ fn logging_find(a: &mut Asm) {
     a.txa();
     a.pha();
     a.tsx();
-    a.lda(abs(0x0102).x());
+    a.lda(abs(STACK_PAGE + 2).x());
     a.ldx(zp(LOGGED));
     a.sta(abs(LOG).x());
     a.tya();
@@ -1442,7 +1443,7 @@ fn counting(vector: u16) -> Vec<u8> {
         a.txa();
         a.pha();
         a.tsx();
-        a.lda(abs(0x0103).x());
+        a.lda(abs(STACK_PAGE + 3).x());
         a.and(imm(OVERFLOW | CARRY));
         a.tax();
         a.inc(abs(COUNTS).x());
