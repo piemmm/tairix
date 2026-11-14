@@ -40,6 +40,9 @@
 //!   [`supervise::SupervisedSession`] replaces a failed worker, after a
 //!   paced delay a crafted input cannot shorten, and reports each fresh one
 //!   as a new generation.
+//! * [`members`] — a session's two descriptors on its owner's wait-set,
+//!   [`members::Members`] registering each direction exactly while it is
+//!   wanted and nothing once it is dropped.
 //! * [`loopback`] — the public in-process fakes, so a consumer's host tests
 //!   run the full parent path without processes (the `Fs`/`Tty` seam
 //!   pattern) — [`loopback::LoopbackLauncher`] for the one-shot seam,
@@ -119,6 +122,7 @@ pub mod imagerender;
 pub mod link;
 pub mod listing;
 pub mod loopback;
+pub mod members;
 pub mod memory;
 pub mod moviedecode;
 pub mod paged;

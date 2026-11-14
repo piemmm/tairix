@@ -31,3 +31,37 @@ row       1234        45     -1000      2000
 row >PRINT 65535+1,&100+10,1000=1E3,100-99.5
 row      65536       266        -1       0.5
 row >
+
+scenario statements_end_where_their_text_does_whatever_they_ran
+row ONE
+row >P%=&900:[OPT0:LDA_0:LDX_&2F:.L STA&50,X
+row :DEX:BPL L:RTS:]:CALL&900:PRINT"TWO"
+row TWO
+row >Q%=5:CALL&900,Q%:PRINT"THREE"
+row THREE
+row >?&200=0:?&201=9:OSCLI "CODE":PRINT"FOUR
+row "
+row FOUR
+row >P%=&A00:[OPT0:PHP:PHA:TXA:PHA:LDA_0:LDX
+row _&1F:.M STA&50,X:DEX:BPL M:PLA:TAX:PLA:P
+row LP:JMP(&C00):]
+row >?&C00=?&20C:?&C01=?&20D:?&20C=0:?&20D=&
+row A:TIME=0:SOUND 1,-15,100,2:PRINT"FIVE"
+row FIVE
+row >
+
+scenario a_subroutine_clearing_basic_s_scratch_returns
+row BACK
+row >
+
+scenario dim_places_start_with_a_name
+row Bad DIM
+row >DIM !&56 10
+row Bad DIM
+row >DIM X%!2 10:P.X%!2>0
+row         -1
+row >DIM $X% 10
+row Bad DIM
+row >A=TOP:DIM B 10:P.B>=A
+row         -1
+row >

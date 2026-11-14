@@ -114,6 +114,9 @@ mod program {
     /// is turned off.
     const SUSPEND_GRACE_NS: u64 = 10_000_000_000;
 
+    /// Why a machine being suspended or shut down is asked for nothing more.
+    const PUT_AWAY: &str = "It is being put away; it takes nothing more.";
+
     /// What a machine's deletion takes with it, as its question says.
     const DELETE_TAKES: &str =
         "Its settings and saved state are deleted; its folder in Documents is kept.";
@@ -372,8 +375,6 @@ mod program {
         installing: Option<(Socket, Option<u64>)>,
         /// The machine whose window had the keyboard last.
         focused: Option<u32>,
-        /// A document handed over for a machine that is starting.
-        waiting: Option<(u32, Handed)>,
         /// The document the application was opened with, until the library
         /// is read.
         launched: Option<Handed>,
@@ -1417,9 +1418,7 @@ mod program {
         /// saying `why` it stopped where something went wrong.
         fn stop(&mut self, n: usize, why: Option<String>) {
             let mut window = self.machines.remove(n);
-            report_unsaved(&window);
-            let (_, _, sound_token) = machine_tokens(window.slot);
-            window.retire(self.set, sound_token);
+            self.retire(&mut window);
             if let Some(why) = why {
                 self.refuse(&format!("\u{201c}{}\u{201d} stopped", window.name), &why);
             }
@@ -1450,10 +1449,24 @@ mod program {
             let window = &mut self.machines[n];
             match window.life {
                 Life::Running if window.live() => {
-                    window.suspend(tairix_rt::clock_get().saturating_add(SUSPEND_GRACE_NS));
+                    let work =
+                        window.suspend(tairix_rt::clock_get().saturating_add(SUSPEND_GRACE_NS));
+                    self.file_work(work);
                 }
                 Life::Suspending(_) | Life::ShuttingDown(_) => {}
                 Life::Starting(_) | Life::Running => self.stop(n, None),
+            }
+        }
+
+        /// `window`'s worker and sound let go as it leaves, and every file it
+        /// held: its media's, and the file a picker gave it.
+        fn retire(&mut self, window: &mut MachineWindow) {
+            report_unsaved(window);
+            let (_, _, sound_token) = machine_tokens(window.slot);
+            let work = window.retire(self.set, sound_token);
+            self.file_work(work);
+            if let Some((handle, _)) = window.picked.take() {
+                drop(File::from_delegation(handle));
             }
         }
 
@@ -1494,9 +1507,7 @@ mod program {
                 return;
             }
             let mut window = self.machines.remove(n);
-            report_unsaved(&window);
-            let (_, _, sound_token) = machine_tokens(window.slot);
-            window.retire(self.set, sound_token);
+            self.retire(&mut window);
             self.close_sheet_over(window.window_id());
             if self.focused == Some(id) {
                 self.focused = None;
@@ -1745,18 +1756,23 @@ mod program {
             self.file(job, "The machine's folder could not be used");
         }
 
-        /// A file was read for machine `id`: put in where it runs, or, made
-        /// for one at rest, kept with it to be put in when it starts.
+        /// A file was read for machine `id`: put in where it runs or is
+        /// starting, or, made for one at rest, kept with it to be put in when
+        /// it starts.
         fn taken(
             &mut self,
             id: u32,
             (purpose, name, bytes): (Purpose, String, Vec<u8>),
             (medium, writable, of_folder): (Option<u32>, bool, bool),
         ) {
-            let Some(n) = self
-                .index(id)
-                .filter(|&n| self.machines[n].life == Life::Running)
-            else {
+            let window = self.index(id);
+            let Some(n) = window.filter(|&n| !self.machines[n].put_away()) else {
+                if let Some(n) = window {
+                    self.machines[n].say(
+                        format!("\u{201c}{name}\u{201d} was not put in. {PUT_AWAY}"),
+                        StatusTone::Muted,
+                    );
+                }
                 if of_folder {
                     let held = Some(Held { name, digest: None });
                     self.remember(id, |machine| match purpose {
@@ -2198,9 +2214,7 @@ mod program {
                 let busy = match self.machines[n].life {
                     Life::Running => None,
                     Life::Starting(_) => Some("It is still starting."),
-                    Life::Suspending(_) | Life::ShuttingDown(_) => {
-                        Some("It is being put away; it takes nothing more.")
-                    }
+                    Life::Suspending(_) | Life::ShuttingDown(_) => Some(PUT_AWAY),
                 };
                 if let Some(busy) = busy {
                     self.machines[n].say(busy, StatusTone::Muted);
@@ -2264,8 +2278,9 @@ mod program {
                 }
                 Command::Library => self.open_shelf(),
                 Command::ShutDown => {
-                    self.machines[n]
+                    let work = self.machines[n]
                         .shut_down(tairix_rt::clock_get().saturating_add(SUSPEND_GRACE_NS));
+                    self.file_work(work);
                 }
             }
         }
@@ -2364,12 +2379,9 @@ mod program {
                 return;
             };
             self.start(id);
-            if self.index(id).is_some() {
-                if let Some((_, stale)) = self.waiting.replace((id, handed)) {
-                    stale.drop_file();
-                }
-            } else {
-                handed.drop_file();
+            match self.index(id) {
+                Some(n) => self.give(n, handed),
+                None => handed.drop_file(),
             }
         }
 
@@ -2734,7 +2746,8 @@ mod program {
                     woke.members & member_bit(write) != 0,
                 );
                 let id = self.machines[n].id;
-                for frame in self.machines[n].serve(now, ready) {
+                let (frames, lost) = self.machines[n].serve(now, ready);
+                for frame in frames {
                     // An answer may end the machine's window.
                     let Some(n) = self.index(id) else {
                         break;
@@ -2742,37 +2755,18 @@ mod program {
                     self.machine_answered(n, &frame);
                     self.shut_down_if_done(id);
                 }
+                if let (Some(why), Some(n)) = (lost, self.index(id)) {
+                    self.machines[n].lost(why);
+                }
             }
             for window in &mut self.machines {
                 window.restart_due(now);
                 window.step(now);
             }
             self.give_up(now);
-            self.deliver_waiting();
             if let Some(win) = &mut self.shelf {
                 let looks = (self.desktop.scale(), self.themes.active());
                 win.step(now, looks, &self.pictures);
-            }
-        }
-
-        /// A document waiting for a machine starting, given once it runs.
-        fn deliver_waiting(&mut self) {
-            let Some((id, _)) = &self.waiting else {
-                return;
-            };
-            let id = *id;
-            match self.index(id) {
-                Some(n) if self.machines[n].life == Life::Running => {
-                    if let Some((_, handed)) = self.waiting.take() {
-                        self.give(n, handed);
-                    }
-                }
-                Some(_) => {}
-                None => {
-                    if let Some((_, handed)) = self.waiting.take() {
-                        handed.drop_file();
-                    }
-                }
             }
         }
 
@@ -2815,9 +2809,17 @@ mod program {
 
         /// Ask each machine for what waits, present every window.
         fn settle(&mut self, now: u64) {
+            let mut unheard = Vec::new();
             for window in &mut self.machines {
                 window.pump(now);
-                window.sync(now);
+                if let Err(err) = window.sync(now) {
+                    unheard.push((window.id, err));
+                }
+            }
+            for (id, err) in unheard {
+                if let Some(n) = self.index(id) {
+                    self.stop(n, Some(format!("it cannot be waited on ({err})")));
+                }
             }
             self.follow_menus();
             let (desktop, theme) = (&self.desktop, self.themes.active());
@@ -2965,7 +2967,6 @@ mod program {
             pool: LazyPool::new(APP_NAME, online, "the picture"),
             installing: None,
             focused: None,
-            waiting: None,
             launched: None,
             sheet_owner: None,
             folders_owed: Vec::new(),

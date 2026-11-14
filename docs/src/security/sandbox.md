@@ -271,7 +271,9 @@ sandboxes a parse imports it:
   caller without one fails closed `NotFound`. `RtSessionLauncher` starts
   supervised workers the same way. `SessionMembers` keeps a session's two
   descriptors on the owner's wait-set exactly while the session wants
-  them, and moves them to each generation's new pipe pair.
+  them, moves them to each generation's new pipe pair, and takes them out
+  when it is dropped, since a member left on a descriptor number follows the
+  next pipe given it.
 - **First consumers** (`decode`): executable-container summaries
   (`lib/binfmt`) and per-window instruction disassembly (`lib/disasm`)
   run inside the worker; the client-side helpers validate every reply

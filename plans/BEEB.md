@@ -60,6 +60,7 @@ grants), `plans/OPENFILE.md` OF12 (the subtree grant), `plans/APPDATA.md`
 | BB28 | The library front end: the library window, the assistant, each machine's settings, several machines each in its window, suspend, resume and shut down, the icon-bar lifetime | done |
 | BB29 | Machine folders: discs and tapes made for a machine, kept with it in the user's files | done |
 | BB30 | The bundle again: the icon, help in every locale, the docs page; the fuzz harnesses; the QEMU vertical through the library | done |
+| BB31 | The Model B's reset and interrupt entries at MOS 1.20's &D9CD and &DC1C, which software reads from &FFFC to know the OS by (*Bounty Bob Strikes Back* refuses any other) | blocked: the MOS's 15 free bytes are too few for the two pins and the hops round them, and the line code they land in is one unsplittable block |
 
 Items are built in ledger order; each lands complete with its tests.
 
@@ -158,7 +159,8 @@ end and, re-spawned through `@self` in its sandbox role, a machine worker.
   freestanding binary never compiles it; xtask and the crate's tests drive
   it.
 - `worker` — the protocol, encoded and validated on both sides; the
-  worker's `MachineService`; the owner's `MachineClient`.
+  worker's `MachineService`; the owner's `MachineClient`, and the `Link` a
+  window drives its worker over.
 - `front` — the host-tested front end: the library record of a machine, key
   mapping per model, the presentation, pacing, menus, each machine's
   settings, media and machine folders.
@@ -428,7 +430,8 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   with the bell and a new line, and its addresses are &FFFFFFFF. OPENOUT
   while a file is open to write abandons that file unwritten and reopens
   the one channel, so a `*SPOOL` holding it carries on into the new file.
-- A silent sound channel leaves REMV alone until a note is queued on it.
+- A silent sound channel leaves REMV alone until a note is queued on it. A
+  channel word with any of F's four bits set flushes the queue first.
   Each channel counts twentieths of its own: a note that breaks silence, or
   ends a release past its duration, has a first twentieth a centisecond
   short, and a note queued behind another starts as it ends. An envelope
@@ -444,7 +447,12 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   followed through each exchange of the two cursors.
 - *FX118 returns X 1, Y &7F and C clear; OSBYTE &79 and &7A leave Y &7F
   after a key's test and &EE after a scan; a negative INKEY's C says whether
-  the key is down; OSBYTE &80 reading the fire buttons leaves C set.
+  the key is down; OSBYTE &80 reading the fire buttons leaves C set; *FX15
+  with X non-zero and *FX21 return Y 0.
+- A negative INKEY goes through KEYV as OSBYTE &79 does, with X EOR &7F:
+  INKEY(-1) to INKEY(-128) test their key, and INKEY(-129) to INKEY(-255)
+  scan from key X EOR &7F, TRUE while no key from it on is down. A scan from
+  below key &10 starts there, so none finds SHIFT, CTRL or the links.
 - CAPS LOCK makes letters capitals with SHIFT or without. CAPS LOCK turns
   itself over and SHIFT LOCK off; with SHIFT it turns itself on with SHIFT
   reversing the locks (status bit 7), so SHIFT types lower case; SHIFT LOCK
@@ -463,7 +471,9 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
 - OSBYTE &9B writes the physical colour inverted, as the ULA takes it, and
   keeps it at &249; MODE and VDU 20 write each logical colour's entries, the
   highest colour first and each colour's lowest entry first, and VDU 19 only
-  its own colour's. Flushing a sound queue silences the note it plays.
+  its own colour's; the palette's working values are on the stack, so a VDU
+  19 or 20 from an interrupt routine leaves a character being drawn its
+  address. Flushing a sound queue silences the note it plays.
 - VDUV takes VDU 23 with C set and A its first parameter, and a PLOT the MOS
   does not draw, or any PLOT in MODE 7, with C clear and A its code.
 - MODE writes the latch's screen-size bits for each mode, then the 6845's
@@ -620,7 +630,11 @@ Behaviour pinned by observation, each with its test:
   `41 52 57 00 00`; any other seed survives BREAK. The execution address
   SAVE gives a program, &8023, is the cold start the language entry makes.
 - DIM's byte block is one more than its size: -1 takes nothing, naming where
-  the free space starts, and below -1, or 65535 and over, is Bad DIM.
+  the free space starts, and below -1, or 65535 and over, is Bad DIM. A
+  block's place starts with a name: an indirection alone is Bad DIM.
+- A statement ends where its text does: its terminator is read again from the
+  text, never kept in zero page, so a store into BASIC's scratch, a program's
+  code by CALL or a `*` command, or a hooked OS call cannot lose it.
 - A number in a program is read each time it is met. A digit alone, or
   several with no point or exponent that fit in sixteen bits, is an integer
   at once, the several gathered as the tokeniser gathers a line number;
@@ -630,7 +644,7 @@ Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
 placed after that code, where BASIC II's bytes go astray; a byte formal is
 neither kept nor restored, where BASIC II's damages the program; and, in 16
-KiB, against BASIC II's speed loops take from 2% to 11% longer, 29% where
+KiB, against BASIC II's speed loops take from 2% to 11% longer, 30% where
 an integer FOR adds integers, and the functions up to a tenth longer, while
 TAN and small whole powers are faster.
 
@@ -765,7 +779,16 @@ slice of the cycles asked, with no sound unless asked and no more samples
 than those cycles make, lamps and media the model has — the model of the last
 configure the worker took, none believed before one. A reply that does not
 condemns the worker. A crashed worker is replaced by the supervisor and its
-machine restarts from power-on, and the user is told why.
+machine restarts from power-on, its media put back and what was being put in
+going in after them, and the user is told why.
+
+A window drives its worker over `worker::Link`: the supervised session, its
+two pipes on the window's wait-set (`lib/sandbox`'s `Members`), and the
+client. A worker lost — found reading, writing, or not believing what it sent
+— leaves nothing asked and neither pipe watched, so its replacement is asked
+afresh and no member names a descriptor number the next pipe may be given;
+a link let go stops watching its pipes before it closes them. A machine whose
+pipes cannot be watched cannot be heard, and is stopped with that reason.
 
 ## 5. The front end
 
@@ -819,7 +842,10 @@ to the windows, the sessions, the audio streams and the store.
   *Quit* ends it, suspending every running machine first. Starting a
   suspended machine resumes it where it stopped, its snapshot restored before
   anything else is put in; a snapshot the machine refuses leaves it running
-  from power-on with its folder's media put in, as a fresh start's are.
+  from power-on with its folder's media put in, as a fresh start's are. A
+  disc or tape that arrives while a machine starts goes in once it is built;
+  one for a machine being suspended or shut down is refused, and the window
+  says so. A machine put away lets go of every file its media were read from.
 - **Keyboard.** Read raw. *Logical*: a symbol presses the machine's key and
   modifier its keyboard types it with, a letter its own key, its case the
   machine's CAPS LOCK and the host's Shift; *physical*: each key the

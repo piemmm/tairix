@@ -9,6 +9,7 @@ use tairix_abi::driver::audio::SampleFormat;
 use tairix_audio::{convert, AcCoupling, FilterBank, Ratio, Resampler};
 use tairix_sandbox::session::ShareWrite;
 use tairix_sandbox::{FrameOut, SessionService, SessionStep};
+use tairix_util::fallible;
 
 use super::protocol::{
     Change, Configuration, Input, Lights, Loaded, Media, ModelKey, Plus1, Ran, Refusal, Reply,
@@ -452,11 +453,7 @@ impl Taken {
 }
 
 fn owned(image: &[u8]) -> Result<Vec<u8>, Refusal> {
-    let mut copy = Vec::new();
-    copy.try_reserve_exact(image.len())
-        .map_err(|_| Refusal::Memory)?;
-    copy.extend_from_slice(image);
-    Ok(copy)
+    fallible::copied(image).ok_or(Refusal::Memory)
 }
 
 fn build(built: &Built) -> Result<Machine, RomError> {

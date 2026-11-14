@@ -7,6 +7,7 @@
 
 use super::ws::{os, page2, var, vector};
 use super::{copy, DELETE};
+use crate::cpu::STACK_PAGE;
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
 use crate::rom::os::{fsc, service};
@@ -395,7 +396,7 @@ fn star_spool(a: &mut Asm) {
     a.sta(abs(var::EXEC_HANDLE).x());
     // The handle, from beneath Y on the stack.
     a.tsx();
-    a.ldy(abs(0x0102).x());
+    a.ldy(abs(STACK_PAGE + 2).x());
     a.jsr("osfind");
     a.pla();
     a.tay();

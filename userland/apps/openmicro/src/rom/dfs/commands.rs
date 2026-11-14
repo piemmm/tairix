@@ -736,10 +736,16 @@ fn confirm(a: &mut Asm) {
     a.lda(imm(0));
     a.rts();
 
+    // Y, a command's place in its text, kept across the flush, which MOS
+    // 1.20 returns with Y zero.
     a.here("read_key");
+    a.tya();
+    a.pha();
     a.lda(imm(osbyte::FLUSH_INPUT));
     a.ldx(imm(1));
     a.jsr(entry::OSBYTE);
+    a.pla();
+    a.tay();
     a.jsr(entry::OSRDCH);
     far(a, Asm::bcc, "escape");
     a.rts();

@@ -13,6 +13,7 @@
 use super::float::PACKED;
 use super::vars::{FROM, NAME_END, S_LENGTH, TNAME};
 use super::ws::{kind, page, zp as z};
+use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, Label, RTS};
 
 const PROC: u8 = 0xF2;
@@ -138,7 +139,7 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
     a.jsr("skip_spaces_b");
     // The kind waits below the list entry's address.
     a.tsx();
-    a.cmp(abs(0x0103).x());
+    a.cmp(abs(STACK_PAGE + 3).x());
     a.bne(next_line);
     // The name from Y + 1, read with TNAME's bias.
     a.tya();
@@ -317,7 +318,7 @@ fn call_frame(a: &mut Asm) {
     a.cpx(imm(STACK_TOP));
     a.beq(copied);
     a.inx();
-    a.lda(abs(0x0100).x());
+    a.lda(abs(STACK_PAGE).x());
     a.sta(zp(z::STACK).ind_y());
     a.iny();
     a.bne(copy);
@@ -646,7 +647,7 @@ fn leaving(a: &mut Asm) {
     a.beq(restored);
     a.inx();
     a.lda(zp(z::STACK).ind_y());
-    a.sta(abs(0x0100).x());
+    a.sta(abs(STACK_PAGE).x());
     a.iny();
     a.bne(back);
     a.bind(restored);

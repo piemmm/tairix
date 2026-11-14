@@ -301,6 +301,14 @@ impl Rack {
         true
     }
 
+    /// Every medium's record taken out and its file let go, pushed onto
+    /// `work`: the machine is put away.
+    pub fn let_go(&mut self, work: &mut Vec<FileWork>) {
+        let discs = self.discs.iter_mut().filter_map(|disc| disc.take()?.medium);
+        let tape = self.tape.take().and_then(|tape| tape.medium);
+        work.extend(discs.chain(tape).map(FileWork::Forget));
+    }
+
     /// `saving` waits for the picker, which shows one at a time, so no offer
     /// displaces another's bytes.
     pub fn offer(&mut self, saving: Saving) {

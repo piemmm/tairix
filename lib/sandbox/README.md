@@ -235,7 +235,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   owner registers on a wait-set. `RtSessionLauncher` starts supervised
   workers the same way, and `SessionMembers` keeps a session's two
   descriptors registered on the owner's wait-set exactly while the session
-  wants them, across every generation's new pipe pair.
+  wants them, across every generation's new pipe pair, each direction
+  whatever came of the other, and takes them out when it is dropped: the
+  kernel keys a member by descriptor number, so one left behind would follow
+  the next pipe given that number. Its bookkeeping is `members::Members`,
+  host-tested against `loopback::MemberLedger`.
 
 ## Security posture
 

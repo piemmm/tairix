@@ -15,6 +15,7 @@
 
 use super::ws::{buffer, os, page2, var, vdu, vdu_zp};
 use super::{latch, svia, DELETE};
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::bbc::via::{irq, reg};
@@ -256,11 +257,15 @@ fn matrix(a: &mut Asm) {
     a.rts();
 
     // X = the first key down from key X on, skipping the columns past the
-    // tenth, or &FF: the whole scan one stretch with interrupts off.
+    // tenth, or &FF: the whole scan one stretch with interrupts off. Row 0's
+    // SHIFT, CTRL and links are never found, as MOS 1.20's scan finds none.
     a.here("key_scan_from");
     a.php();
     a.sei();
     a.jsr("key_scan_on");
+    a.cpx(imm(FIRST_SCANNED));
+    a.bcs("key_scan_next");
+    a.ldx(imm(FIRST_SCANNED));
     a.here("key_scan_next");
     a.txa();
     a.and(imm(0x0F));
@@ -403,7 +408,7 @@ fn electron_key_scan(a: &mut Asm, count: u8) {
     // Line n lies at &101 + S + n, the first number wanted above them.
     a.tsx();
     a.stx(zp(scratch));
-    a.lda(abs(0x0101 + u16::from(ELECTRON_LINES)).x());
+    a.lda(abs(STACK_PAGE + 1 + u16::from(ELECTRON_LINES)).x());
     a.sta(zp(scratch + 1));
     a.ldy(imm(0));
     a.here("key_scan_next");
@@ -419,7 +424,7 @@ fn electron_key_scan(a: &mut Asm, count: u8) {
     for _ in 0..PLACE_BIT {
         a.lsr(Acc);
     }
-    a.and(abs(0x0101).x());
+    a.and(abs(STACK_PAGE + 1).x());
     a.bne("key_scan_found");
     a.here("key_scan_skip");
     a.iny();

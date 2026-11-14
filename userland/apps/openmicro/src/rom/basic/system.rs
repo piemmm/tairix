@@ -47,7 +47,6 @@ fn vdu(a: &mut Asm) {
     // Bad MODE where it would meet the variables or a call is in progress.
     a.here("statement_mode");
     a.jsr("expr_integer");
-    a.stx(zp(z::OP));
     a.lda(zp(z::STACK));
     a.cmp(zp(z::HIMEM));
     a.bne("bad_mode");
@@ -83,7 +82,7 @@ fn vdu(a: &mut Asm) {
     a.stx(zp(z::STACK));
     a.sty(zp(z::HIMEM + 1));
     a.sty(zp(z::STACK + 1));
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 }
 
 fn screen(a: &mut Asm) {
@@ -191,7 +190,6 @@ fn lists(a: &mut Asm) {
     a.jsr("comma");
     a.beq(value);
     a.bind(done);
-    a.stx(zp(z::OP));
     a.ldx(imm(SOUND_BYTES - 1));
     a.tya();
     a.bmi(pull);
@@ -204,7 +202,7 @@ fn lists(a: &mut Asm) {
     a.pla();
     a.ldx(imm(lo(BLOCK)));
     a.jsr("osword_zp");
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 
     // OSWORD A with its block at IAC, its fifth byte FAC's sign, which
     // nothing holds between values; or at zero page X.
@@ -225,10 +223,9 @@ fn calls(a: &mut Asm) {
     // OSCLI: the string, with a CR, to the command line interpreter.
     a.here("statement_oscli");
     a.jsr("expr_string");
-    a.stx(zp(z::OP));
     a.jsr("string_cr");
     a.jsr(entry::OSCLI);
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 
     // CALL address[, location...]: the block at &600 counts them, each with
     // its address and type, then the code is called with A%, X%, Y% and C%
@@ -265,7 +262,6 @@ fn calls(a: &mut Asm) {
     a.tax();
     a.bne(more);
     a.bind(made);
-    a.stx(zp(z::OP));
     a.pla();
     a.sta(abs(page::STRING));
     a.tay();
@@ -294,7 +290,7 @@ fn calls(a: &mut Asm) {
     a.sta(zp(z::IAC));
     a.jsr("call_iac");
     a.cld();
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 }
 
 fn memory(a: &mut Asm) {
@@ -305,14 +301,14 @@ fn memory(a: &mut Asm) {
     a.sta(zp(z::IAC + 4));
     a.lda(imm(2));
     a.jsr("osword_iac");
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 
     // PAGE = p: its high byte.
     a.here("statement_page");
     a.jsr("pseudo_value");
     a.lda(zp(z::IAC + 1));
     a.sta(zp(z::PAGE));
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 
     // LOMEM = l: the variables start there, and are gone.
     a.here("statement_lomem");
@@ -322,10 +318,9 @@ fn memory(a: &mut Asm) {
     a.lda(zp(z::IAC + 1));
     a.sta(zp(z::LOMEM + 1));
     a.jsr("clear_lists");
-    a.jmp("pseudo_done");
+    a.jmp("statement_ended");
 
-    // `=` and the value a pseudo-variable is given; and the statement's end
-    // after it.
+    // `=` and the value a pseudo-variable is given.
     a.here("pseudo_value");
     a.jsr("next_a");
     a.cmp(imm(b'='));
@@ -333,12 +328,7 @@ fn memory(a: &mut Asm) {
     a.beq(given);
     a.jmp("err_mistake");
     a.bind(given);
-    a.jsr("expr_integer");
-    a.stx(zp(z::OP));
-    a.rts();
-    a.here("pseudo_done");
-    a.ldx(zp(z::OP));
-    a.jmp("statement_done_x");
+    a.jmp("expr_integer");
 
     // CLEAR: the variables gone.
     a.here("statement_clear");

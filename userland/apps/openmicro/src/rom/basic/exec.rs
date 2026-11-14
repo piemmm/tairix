@@ -122,6 +122,16 @@ fn looping(a: &mut Asm) {
     a.inc(zp(z::TEXT_A + 1));
     a.rts();
 
+    // The statement's end read again from the text, just behind the
+    // statement pointer: nothing the statement ran, a program's code or a
+    // store into BASIC's scratch, can lose it, as BASIC II's cannot.
+    a.here("statement_ended");
+    a.ldy(zp(z::OFFSET_A));
+    a.dey();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.tax();
+    a.jmp("statement_done_x");
+
     a.here("statement_report");
     a.jsr("report");
     a.fall_into("statement_done");
@@ -246,7 +256,6 @@ fn running(a: &mut Asm) {
     let mistake = a.local();
     a.bne(mistake);
     a.jsr("expr");
-    a.stx(zp(z::OP));
     a.tay();
     a.pla();
     a.sta(zp(z::VTYPE));
@@ -256,8 +265,7 @@ fn running(a: &mut Asm) {
     a.sta(zp(z::VAR));
     a.tya();
     a.jsr("store_variable");
-    a.ldx(zp(z::OP));
-    a.jmp("statement_done_x");
+    a.jmp("statement_ended");
     a.bind(mistake);
     a.jmp("err_mistake");
 

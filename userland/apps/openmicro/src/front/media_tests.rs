@@ -252,6 +252,23 @@ fn a_restore_takes_every_record_out_and_lets_every_file_go() {
     );
 }
 
+/// The regression: a machine put away kept its media's files open, one more
+/// each time it was suspended or stopped.
+#[test]
+fn a_machine_put_away_lets_every_file_go() {
+    let mut shelf = shelf(
+        [Some(disc("A.ssd", Some(1))), Some(disc("B.dsd", None))],
+        Some(tape("T.uef", Some(2))),
+    );
+    let mut work = Vec::new();
+    shelf.let_go(&mut work);
+    assert_eq!(work, [FileWork::Forget(1), FileWork::Forget(2)]);
+    assert_eq!(
+        (shelf.disc(ZERO), shelf.disc(ONE), shelf.tape()),
+        (None, None, None)
+    );
+}
+
 /// The regression: a second offer replaced the bytes of the first while its
 /// picker was still open, so one of two discs taken out together was lost.
 #[test]

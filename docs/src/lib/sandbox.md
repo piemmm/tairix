@@ -113,7 +113,16 @@ Stability tier: **experimental**.
   pipe pair: a write takes at most `PIPE_ROOM` bytes, and its `PipeGauge` says
   what a wait-set would report and counts every read of an empty pipe — which
   on a machine parks its reader — so an owner is tested under the readiness it
-  will be woken by.
+  will be woken by. `MemberLedger` is a wait-set's membership as the kernel
+  keeps it, one member per kind and descriptor number, a second refused.
+- **`members`** — a session's two descriptors on its owner's wait-set:
+  `Members` registers `Stream` on the reply end while the session wants to
+  read and `StreamRoom` on the request end while it wants to write, each
+  direction whatever came of the other, and takes both out when the worker is
+  gone (`release`) or it is dropped. The kernel keys a member by descriptor
+  number and resolves the number at every wait, so one left behind would
+  follow the next pipe given that number and refuse the member its new owner
+  adds for it. `rt::SessionMembers` is `Members` over the kernel's wait-set.
 - **`decode`** — the first consumers behind the seam: executable-container
   summaries and file reports through [`tairix-binfmt`](./binfmt.md) and
   per-window instruction disassembly through [`tairix-disasm`](./disasm.md).

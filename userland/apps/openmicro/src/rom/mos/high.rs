@@ -4,6 +4,7 @@
 
 use super::ws::{os, page_d, vector};
 use super::{page, Held};
+use crate::cpu::STACK_PAGE;
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm};
 use crate::rom::os::{entry, EXTENDED_ENTRIES};
@@ -55,17 +56,17 @@ fn extended_vector(a: &mut Asm, model: Model) {
     a.pha();
     a.tsx();
     // The return address's low byte is 3n + 2 for vector n.
-    a.ldy(abs(0x0108).x());
+    a.ldy(abs(STACK_PAGE + 8).x());
     a.lda(abs(page_d::EXTENDED_VECTORS - 2).y());
-    a.sta(abs(0x0105).x());
+    a.sta(abs(STACK_PAGE + 5).x());
     a.lda(abs(page_d::EXTENDED_VECTORS - 1).y());
-    a.sta(abs(0x0106).x());
+    a.sta(abs(STACK_PAGE + 6).x());
     a.lda(imm(lo(sym("extended_return") + -1)));
-    a.sta(abs(0x0107).x());
+    a.sta(abs(STACK_PAGE + 7).x());
     a.lda(imm(hi(sym("extended_return") + -1)));
-    a.sta(abs(0x0108).x());
+    a.sta(abs(STACK_PAGE + 8).x());
     a.lda(zp(os::ROM));
-    a.sta(abs(0x0109).x());
+    a.sta(abs(STACK_PAGE + 9).x());
     a.lda(abs(page_d::EXTENDED_VECTORS).y());
     page(a, model, Held::A);
     a.pla();
@@ -81,12 +82,12 @@ fn extended_vector(a: &mut Asm, model: Model) {
     a.txa();
     a.pha();
     a.tsx();
-    a.lda(abs(0x0104).x());
+    a.lda(abs(STACK_PAGE + 4).x());
     page(a, model, Held::A);
     // The flags over the ROM's byte, so popping them twice leaves the
     // caller's return address on top.
-    a.lda(abs(0x0103).x());
-    a.sta(abs(0x0104).x());
+    a.lda(abs(STACK_PAGE + 3).x());
+    a.sta(abs(STACK_PAGE + 4).x());
     a.pla();
     a.tax();
     a.pla();

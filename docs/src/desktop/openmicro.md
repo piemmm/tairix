@@ -67,6 +67,14 @@ only when it answers what was asked within what that could produce; one that
 does not condemns the worker, which is replaced. Every message is decoded
 whole against fixed bounds and is the one encoding of what it decodes to.
 
+A window drives its worker over `tairix_openmicro::worker::Link`: the
+supervised session, its two pipes on the window's wait-set, and the client.
+A worker lost leaves nothing asked and neither pipe watched, so its
+replacement, built from power-on with the machine's media put back, is asked
+afresh; a window let go stops watching its pipes before it closes them, so
+the descriptor numbers they held are free for the next pipe. A machine whose
+pipes cannot be watched is stopped with that reason.
+
 ## The library
 
 The library is `lib/machines`' (`docs/src/lib/machines.md`), the one
@@ -117,7 +125,10 @@ is due each 20 ms of the clock; at the fastest speed, or while a tape loads
 fast, slices run back to back.
 
 Discs and tapes come from the picker, a drop on the window, Open With, or the
-machine's folder. A disc whose file may be written is written back to it as
+machine's folder; one that arrives while the machine starts goes in once it
+is built, and one for a machine being put away is refused, the window saying
+so. A machine suspended, shut down or stopped lets go of every file its media
+came from. A disc whose file may be written is written back to it as
 the machine writes, and one whose file may not be is write-protected; a tape
 recorded on is saved as it is taken out, back to the UEF it came from or
 offered to be saved as one. A restored snapshot's discs and tape belong to it:
@@ -212,7 +223,7 @@ message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
 astray; a byte (`?`) as a PROC or FN parameter is neither kept nor put back,
 where BASIC II's damages the program; and, in 16 KiB, it is slower than
-BASIC II, loops taking from 2% to 11% longer, 29% where an integer FOR adds
+BASIC II, loops taking from 2% to 11% longer, 30% where an integer FOR adds
 integers, and the functions within a tenth, while TAN and small whole powers
 are faster.
 

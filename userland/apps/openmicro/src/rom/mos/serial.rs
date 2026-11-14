@@ -16,6 +16,7 @@ use super::buffers::{number, PRINTER_BUSY};
 use super::vdu::status;
 use super::ws::{os, var, vdu_zp, vector};
 use super::{uvia, DELETE};
+use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::acia::{control, status as acia_status};
 use crate::machine::bbc::serial;
 use crate::machine::bbc::sheila;
@@ -116,7 +117,7 @@ fn electron_rs423(a: &mut Asm) {
 /// The character OSWRCH was given, from a routine it calls directly.
 fn character(a: &mut Asm) {
     a.tsx();
-    a.lda(abs(0x0105).x());
+    a.lda(abs(STACK_PAGE + 5).x());
 }
 
 /// WRCHV's default: the character to each output stream in turn.
@@ -255,7 +256,7 @@ fn printers(a: &mut Asm, model: Model) {
         a.tya();
         a.pha();
         a.tsx();
-        a.lda(abs(0x0103).x());
+        a.lda(abs(STACK_PAGE + 3).x());
         a.jsr("service_call");
         a.tax();
         a.pla();
@@ -564,7 +565,7 @@ fn setup(a: &mut Asm) {
     }
     a.here("serial_baud_field");
     a.tsx();
-    a.ora(abs(0x0101).x());
+    a.ora(abs(STACK_PAGE + 1).x());
     a.tax();
     a.pla();
     a.ldy(abs(var::SERIAL_ULA));

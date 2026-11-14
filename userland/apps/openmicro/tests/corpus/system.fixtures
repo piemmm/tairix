@@ -59,3 +59,32 @@ row         49         1         2         0
 row >P.?(T%+&70),?(T%+&79)
 row         27       141
 row >
+
+scenario inkey_past_minus_128_is_true_while_no_key_from_its_own_is_down
+row          0         0        -1
+row         41
+row >RUN
+row         -1        -1        -1
+row         FF
+row >RUN
+row         -1        -1        -1
+row         FF
+row >
+
+scenario inkey_s_key_forms_go_through_keyv
+row          1         2         3
+row >
+
+scenario sound_flushes_for_any_of_its_f_bits
+row         15
+row         15
+row         15
+row         15
+row          6
+row >
+
+scenario a_single_buffer_flush_leaves_y_zero
+row   3000000F
+row   30000015
+row   30000415
+row >

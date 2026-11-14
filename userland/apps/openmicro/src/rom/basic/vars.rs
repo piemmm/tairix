@@ -9,6 +9,7 @@
 
 use super::float::PACKED;
 use super::ws::{kind, page, place, zp as z};
+use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, Label, RTS};
 
 /// The pointer that reads the name with the entry's offsets.
@@ -59,9 +60,9 @@ const DIMS: u16 = z::STATEMENT;
 const AFTER: u16 = DIMS + 1;
 /// The 6502 stack frame an element is found in, from the stack pointer
 /// after its pushes.
-const FRAME_INDEX: u16 = 0x0101;
-const FRAME_OFFSET: u16 = 0x0102;
-const FRAME_BLOCK: u16 = 0x0104;
+const FRAME_INDEX: u16 = STACK_PAGE + 1;
+const FRAME_OFFSET: u16 = STACK_PAGE + 2;
+const FRAME_BLOCK: u16 = STACK_PAGE + 4;
 
 fn arrays(a: &mut Asm) -> (Label, Label) {
     // The element named by the subscripts after the array's `(`, VAR the
@@ -194,7 +195,14 @@ fn element_end(a: &mut Asm, subscript: Label, range: Label) {
 fn dim(a: &mut Asm) -> Label {
     // DIM: arrays and byte blocks, separated by commas.
     a.here("statement_dim");
+    let (absent, bad, block) = (a.local(), a.local(), a.local());
     a.jsr("next_a");
+    // A block's place starts with a name, as BASIC II has it: an indirection
+    // alone is Bad DIM.
+    a.cmp(imm(b'?'));
+    a.beq(bad);
+    a.cmp(imm(b'!'));
+    a.beq(bad);
     a.dec(zp(z::OFFSET_A));
     a.lda(zp(z::OFFSET_A));
     a.pha();
@@ -203,7 +211,6 @@ fn dim(a: &mut Asm) -> Label {
     // is Bad DIM.
     a.lda(zp(NAME_TYPE));
     a.and(imm(ARRAY));
-    let (absent, bad, block) = (a.local(), a.local(), a.local());
     a.beq(block);
     a.bcs(absent);
     a.bind(bad);
