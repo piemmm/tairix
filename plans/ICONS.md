@@ -661,10 +661,10 @@ the page — so the rule stays total.
 A RISC OS application directory (`!Name`) asks for
 `IconRequest::riscos_application`, so on every file surface it is drawn as
 RISC OS's Filer draws it. Its `!Boot` is **read, never run**, and read in the
-parser sandbox: of its commands only `Set`, `SetMacro`, `Unset`, an `If`
-comparing two quoted strings and `IconSprites` are understood (`lib/icon`'s
+parser sandbox, through `lib/obey`'s read-only mode: of its commands only
+`Set`, `SetMacro`, `Unset`, `If` and `IconSprites` are read (`lib/icon`'s
 `riscos::boot_sprite_files`, `OP_BOOT_SPRITES`), the scan is bounded in bytes,
-lines, variables, macro depth, references expanded and files, and the caller
+lines, variables, references expanded and files, and the caller
 believes a path it answers only inside the application
 (`is_application_path`), opening every file there through no link
 (`open_inside`). Each sprite file it names is tried,

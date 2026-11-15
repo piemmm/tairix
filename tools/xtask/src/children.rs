@@ -281,7 +281,7 @@ impl Children {
 
     /// Take a terminating signal: the first passes on to every live child as
     /// the run's end begins, and any later one kills what is still live.
-    fn take(&self, signal: i32) {
+    pub(crate) fn take(&self, signal: i32) {
         let mut live = self.live();
         let ending = match live.ending {
             None => Ending {
@@ -297,6 +297,11 @@ impl Children {
         live.signal_all(ending.owed());
         drop(live);
         self.changed.notify_all();
+    }
+
+    /// The signal the run is ending on, once it has taken one.
+    pub(crate) fn ending(&self) -> Option<i32> {
+        self.live().ending.map(|ending| ending.signal)
     }
 
     /// The signal the run ends on, once it is ending and no child is live or

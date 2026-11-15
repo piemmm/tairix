@@ -4,10 +4,10 @@ use tairix_fuzzseed::Prng;
 
 use super::*;
 use crate::fpu::arith::{self, flag, Mode, Rounding};
-use crate::fpu::real::{Binary, Real, BIAS};
+use crate::fpu::real::{from_double, Binary, Real, BIAS};
 
 fn parts(x: f64) -> Parts {
-    Parts::of(Real::from_double(x.to_bits()).0)
+    Parts::of(from_double(x.to_bits()).0)
 }
 
 fn nearest(x: Exact) -> Real {

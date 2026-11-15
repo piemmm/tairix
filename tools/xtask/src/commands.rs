@@ -12,7 +12,8 @@ use tairix_fuzzseed::firmware::{PI_FIRMWARE_CACHE, PI_FIRMWARE_ENV};
 use tairix_itest_harness::pie::{PieArch, Profile};
 use tairix_procinfo::display::format_bytes;
 
-use crate::{elapsed_line, output_or_reason, Context, LONG_BUILD_COMMAND_TIMEOUT};
+use crate::children::Children;
+use crate::{elapsed_line, output_or_reason, Context, Ended, LONG_BUILD_COMMAND_TIMEOUT};
 
 mod abi_check;
 mod artsheet;
@@ -51,6 +52,7 @@ mod pcemu_vectors;
 mod pie_build;
 mod proptest;
 mod qemu_tests;
+mod riscos_vectors;
 mod rngsoak;
 mod sbom;
 mod seed;
@@ -89,6 +91,7 @@ pub enum Command {
     Spirv,
     Shaders,
     PcemuVectors,
+    RiscosVectors,
     DepsCheck,
     CfgCheck,
     BoardCheck,
@@ -139,6 +142,7 @@ impl Command {
         Command::Spirv,
         Command::Shaders,
         Command::PcemuVectors,
+        Command::RiscosVectors,
         Command::DepsCheck,
         Command::CfgCheck,
         Command::BoardCheck,
@@ -188,6 +192,7 @@ impl Command {
             "spirv" => Command::Spirv,
             "shaders" => Command::Shaders,
             "pcemu-vectors" => Command::PcemuVectors,
+            "riscos-vectors" => Command::RiscosVectors,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
             "board-check" => Command::BoardCheck,
@@ -239,6 +244,7 @@ impl Command {
             Command::Spirv => "spirv",
             Command::Shaders => "shaders",
             Command::PcemuVectors => "pcemu-vectors",
+            Command::RiscosVectors => "riscos-vectors",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
             Command::BoardCheck => "board-check",
@@ -320,6 +326,10 @@ impl Command {
             Command::PcemuVectors => {
                 "Import PCEmulator's SingleStepTests CPU vectors (`--import <dir>`; developer-run)."
             }
+            Command::RiscosVectors => {
+                "Hold the RISC OS emulator's ARM to the SingleStepTests ARM7TDMI suite \
+                 (`<dir>`, `--write-sample` to refresh the committed sample; developer-run only)."
+            }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
             Command::BoardCheck => "Reject a board, SoC or board part named in generic code.",
@@ -394,6 +404,7 @@ impl Command {
             Command::Spirv => spirv::run(ctx, args),
             Command::Shaders => shaders::run(ctx, args),
             Command::PcemuVectors => pcemu_vectors::run(ctx, args),
+            Command::RiscosVectors => riscos_vectors::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
             Command::BoardCheck => run_board_check(ctx),
@@ -1489,12 +1500,16 @@ fn run_charter_cite(ctx: &Context) -> Result<(), String> {
 /// grepped cannot be ordered against the others on evidence. The `stage:`
 /// prefix keeps these totals distinguishable from the per-command lines they
 /// contain.
-fn stage(label: &str, run: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+fn stage(
+    children: &Children,
+    label: &str,
+    run: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let started = Instant::now();
     let outcome = run();
     crate::note(&elapsed_line(
         &format!("stage: {label}"),
-        outcome.is_ok(),
+        Ended::of(outcome.is_ok(), children),
         started.elapsed(),
     ));
     outcome
@@ -1619,7 +1634,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // machine without one fails here rather than a stage in.
     ctx.signing_keys()?;
     for ci_stage in CI_STAGES {
-        stage(ci_stage.label(), || ci_stage.run(ctx))?;
+        stage(&ctx.children, ci_stage.label(), || ci_stage.run(ctx))?;
     }
     Ok(())
 }
@@ -1735,8 +1750,10 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     ctx.signing_keys()?;
     for step in ci_long_plan() {
         match step {
-            LongStep::Once(ci_stage) => stage(ci_stage.label(), || ci_stage.run(ctx))?,
-            LongStep::FlakeHunt => stage("flake hunt", || {
+            LongStep::Once(ci_stage) => {
+                stage(&ctx.children, ci_stage.label(), || ci_stage.run(ctx))?;
+            }
+            LongStep::FlakeHunt => stage(&ctx.children, "flake hunt", || {
                 // Every QEMU enrolment and wasm32 vertical is built, and the
                 // firmware the host tests read staged, once, so the repeated
                 // runs re-execute rather than rebuild.

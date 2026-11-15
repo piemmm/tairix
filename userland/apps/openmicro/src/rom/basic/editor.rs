@@ -6,14 +6,15 @@
 //! first, the record's length and its text; a CR and &FF end it, TOP just
 //! past them.
 
+use tairix_bbcbasic::{basic2, lineref, program};
+
 use super::crunch::{FROM, NUMBER, REFERENCE, WRITE};
 use super::list::LINE;
-use super::tokens::LINE_REFERENCE;
 use super::ws::{page, zp as z, AT_DEFAULT};
 use super::FAILED_AT;
 use super::SAVED_EXEC;
-use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, Label, RTS};
-use crate::rom::os::{entry, osbyte, ESCAPE_FLAG};
+use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, Label, RTS};
+use crate::rom::os::{entry, osbyte, CR, ESCAPE_FLAG};
 
 /// The record the editor works at; a move's or a walk's pointer, and the
 /// number a walked record is given; a record's length.
@@ -45,19 +46,19 @@ const FILE_BLOCK: u16 = z::SCRATCH;
 const FILE_BLOCK_LENGTH: u8 = 18;
 const OSFILE_SAVE: u8 = 0;
 const OSFILE_LOAD: u8 = 0xFF;
-const CR: u8 = 0x0D;
-/// The program's end: a record whose line number's high byte is this.
-const END: u8 = 0xFF;
-/// The highest line number, the one a line number's top bit clear allows.
-const LAST_LINE: u16 = 32_767;
-const _: () = assert!(LAST_LINE == 0x7FFF);
+/// The highest line number is the one a line number's top bit clear allows,
+/// which the editor tests by the sign bit.
+const _: () = assert!(basic2::LAST_LINE == 0x7FFF);
 /// `@%` starts with its top two bytes 0; SAVE's reason is also the 0 of its
 /// start's low byte, as PAGE's; and a file's name is in a buffer at a page's
 /// start.
 const _: () =
     assert!(AT_DEFAULT >> 16 == 0 && OSFILE_SAVE == 0 && page::STRING.trailing_zeros() >= 8);
-/// A record's bytes before its text, as many as an encoded line number's.
-const HEADER: u8 = REFERENCE;
+/// A record's bytes before its text.
+const HEADER: u8 = byte(program::HEADER);
+/// A typed line's text lies after its number's reference just as a record's
+/// lies after its header, so one offset reads both.
+const _: () = assert!(HEADER == REFERENCE);
 /// The seed's first bytes as BASIC II starts RND from an all-zero seed, as
 /// at power-on; the rest stay zero.
 const FIRST_SEED: [u8; 3] = *b"ARW";
@@ -121,7 +122,7 @@ fn starting(a: &mut Asm) {
     a.tay();
     a.lda(imm(CR));
     a.sta(zp(RECORD).ind_y());
-    a.lda(imm(END));
+    a.lda(imm(program::END));
     let mark = a.local();
     a.bne(mark);
     // OLD: the first record's number restored.
@@ -164,7 +165,7 @@ fn prompt(a: &mut Asm) {
     a.bind(started);
     a.jsr("crunch");
     a.lda(abs(page::INPUT));
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     a.beq("enter_line");
     // A command only as the line's first keyword.
     a.jsr("next_a");
@@ -172,7 +173,7 @@ fn prompt(a: &mut Asm) {
     a.sbc(imm(super::exec::FIRST_COMMAND));
     let statement = a.local();
     a.bcc(statement);
-    a.cmp(imm(super::byte(super::exec::COMMANDS.len())));
+    a.cmp(imm(byte(super::exec::COMMANDS.len())));
     a.bcs(statement);
     a.tax();
     a.lda(abs("command_high").x());
@@ -573,7 +574,7 @@ fn listing(a: &mut Asm) -> Label {
     a.bmi("escaped");
     a.ldy(imm(1));
     a.lda(zp(LINE).ind_y());
-    a.cmp(imm(END));
+    a.cmp(imm(program::END));
     a.beq(done);
     // Past LAST the listing ends; before FIRST a line is passed over.
     a.ldy(imm(2));
@@ -626,7 +627,7 @@ fn deleting(a: &mut Asm, syntax: Label) {
     let (delete, deleted) = (a.here_local(), a.local());
     a.ldy(imm(1));
     a.lda(zp(RECORD).ind_y());
-    a.cmp(imm(END));
+    a.cmp(imm(program::END));
     a.beq(deleted);
     a.jsr("delete_record");
     // The end's number is past any LAST.
@@ -645,7 +646,7 @@ fn deleting(a: &mut Asm, syntax: Label) {
     // pointer past it; C set if there is none, the pointer at what is.
     a.here("line_argument");
     a.jsr("next_a");
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     let reference = a.local();
     a.beq(reference);
     a.dec(zp(z::OFFSET_A));
@@ -800,7 +801,7 @@ fn renumbering(a: &mut Asm, silly: Label) {
     a.lda(zp(RECORD).ind_y());
     a.cmp(imm(CR));
     a.beq(line_done);
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     a.beq(reference);
     a.bind(step_on);
     a.iny();
@@ -849,7 +850,7 @@ fn records(a: &mut Asm) {
     a.bind(ended);
     a.ldy(imm(1));
     a.lda(zp(RECORD).ind_y());
-    a.cmp(imm(END));
+    a.cmp(imm(program::END));
     a.rts();
 
     // C clear and XY the new number of line TARGET; C set if no line has
@@ -864,7 +865,7 @@ fn records(a: &mut Asm) {
     let (search, missing, found) = (a.here_local(), a.local(), a.local());
     a.ldy(imm(1));
     a.lda(zp(SOURCE).ind_y());
-    a.cmp(imm(END));
+    a.cmp(imm(program::END));
     a.beq(missing);
     a.iny();
     a.lda(zp(SOURCE).ind_y());

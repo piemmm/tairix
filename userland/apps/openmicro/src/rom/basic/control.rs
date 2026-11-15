@@ -6,18 +6,13 @@
 //! byte in two tables. A return point is the address of the character a
 //! statement ended at.
 
+use tairix_bbcbasic::keyword::word;
+use tairix_bbcbasic::lineref;
+
 use super::editor::{LINE_NUMBER, RECORD};
 use super::ws::{kind, page, place, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, Label, RTS};
-
-const TO: u8 = 0xB8;
-const STEP: u8 = 0x88;
-const THEN: u8 = 0x8C;
-const ELSE: u8 = 0x8B;
-const GOTO: u8 = 0xE5;
-const GOSUB: u8 = 0xE4;
-const LINE_REFERENCE: u8 = super::tokens::LINE_REFERENCE;
-const CR: u8 = 0x0D;
+use crate::rom::os::CR;
 
 /// A FOR entry: the variable's address and type, the step, the limit,
 /// and the return point.
@@ -54,7 +49,7 @@ fn lines(a: &mut Asm) {
     // number, or an expression's value. LINE_NUMBER the number.
     a.here("line_target");
     a.jsr("next_a");
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     let expression = a.local();
     a.bne(expression);
     a.lda(zp(z::TEXT_A));
@@ -100,13 +95,13 @@ fn lines(a: &mut Asm) {
     a.here("statement_trace");
     a.jsr("next_a");
     a.ldx(imm(0));
-    a.cmp(imm(0x87));
+    a.cmp(imm(word::OFF.token));
     let (on, set) = (a.local(), a.local());
     a.beq(set);
     a.dex();
     a.stx(zp(z::TRACE_LIMIT));
     a.stx(zp(z::TRACE_LIMIT + 1));
-    a.cmp(imm(0xEE));
+    a.cmp(imm(word::ON.token));
     a.beq(on);
     a.dec(zp(z::OFFSET_A));
     a.jsr("line_target");
@@ -289,7 +284,7 @@ fn loops(a: &mut Asm) {
     a.pla();
     a.jsr("store_variable");
     a.lda(zp(z::OP));
-    a.cmp(imm(TO));
+    a.cmp(imm(word::TO.token));
     let to = a.local();
     a.beq(to);
     a.jmp("err_no_to");
@@ -299,7 +294,7 @@ fn loops(a: &mut Asm) {
     a.jsr("expr");
     a.ldy(imm(lo(FOR_LIMIT)));
     a.jsr("store_for_value");
-    a.cpx(imm(STEP));
+    a.cpx(imm(word::STEP.token));
     let (stepped, given) = (a.local(), a.local());
     a.beq(stepped);
     a.stx(zp(z::OP));
@@ -534,7 +529,7 @@ fn conditions(a: &mut Asm) {
     a.jsr("condition");
     let false_ = a.local();
     a.beq(false_);
-    a.cpx(imm(THEN));
+    a.cpx(imm(word::THEN.token));
     let then = a.local();
     a.beq(then);
     a.dec(zp(z::OFFSET_A));
@@ -542,7 +537,7 @@ fn conditions(a: &mut Asm) {
     a.bind(then);
     a.here("branch_part");
     a.jsr("next_a");
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     let statements = a.local();
     a.bne(statements);
     a.dec(zp(z::OFFSET_A));
@@ -556,7 +551,7 @@ fn conditions(a: &mut Asm) {
     let (scan, found) = (a.here_local(), a.local());
     a.lda(zp(z::TEXT_A).ind_y());
     a.iny();
-    a.cmp(imm(ELSE));
+    a.cmp(imm(word::ELSE.token));
     a.beq(found);
     a.cmp(imm(CR));
     a.bne(scan);
@@ -573,17 +568,17 @@ fn on(a: &mut Asm) {
     // part, else ON range.
     a.here("statement_on");
     a.jsr("next_a");
-    a.cmp(imm(0x85));
+    a.cmp(imm(word::ERROR.token));
     let not_error = a.local();
     a.bne(not_error);
     a.jmp("statement_on_error");
     a.bind(not_error);
     a.dec(zp(z::OFFSET_A));
     a.jsr("expr_integer");
-    a.cpx(imm(GOTO));
+    a.cpx(imm(word::GOTO.token));
     let kind = a.local();
     a.beq(kind);
-    a.cpx(imm(GOSUB));
+    a.cpx(imm(word::GOSUB.token));
     a.beq(kind);
     a.jmp("err_on_syntax");
     a.bind(kind);
@@ -612,7 +607,7 @@ fn on(a: &mut Asm) {
     a.jsr("next_a");
     a.cmp(imm(b','));
     a.beq(item);
-    a.cmp(imm(ELSE));
+    a.cmp(imm(word::ELSE.token));
     a.beq(else_part);
     a.cmp(imm(CR));
     a.beq(missing);
@@ -622,7 +617,7 @@ fn on(a: &mut Asm) {
     a.jmp("err_on_range");
     a.bind(range);
     a.jsr("next_a");
-    a.cmp(imm(ELSE));
+    a.cmp(imm(word::ELSE.token));
     a.beq(else_part);
     a.cmp(imm(CR));
     a.beq(missing);
@@ -641,7 +636,7 @@ fn on(a: &mut Asm) {
     a.bne(end);
     a.dec(zp(z::OFFSET_A));
     a.pla();
-    a.cmp(imm(GOTO));
+    a.cmp(imm(word::GOTO.token));
     let gosub = a.local();
     a.bne(gosub);
     a.jmp("goto_line");

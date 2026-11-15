@@ -38,6 +38,9 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 tairix-video = { path = "../video", version = "=0.0.0" }
 # The shared XML element scanner OpenRaster's layer stack is read through.
 tairix-xml = { path = "../xml", version = "=0.0.0" }
+# RISC OS 5's numbered screen modes, which an old sprite names its depth and
+# pixel shape by.
+tairix-vdu = { path = "../vdu", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget

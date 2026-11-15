@@ -1,0 +1,12 @@
+[package]
+name = "tairix-vdu"
+description = "TAIRiX's Acorn VDU vocabulary: the control codes 0-31 and 127 the BBC Micro and RISC OS define alike with their parameter counts, VDU 23's operations, RISC OS 5's numbered screen modes with their mode variables, and the 8x8 system character set drawn for TAIRiX in the BBC's and RISC OS's arrangements. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

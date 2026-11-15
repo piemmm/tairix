@@ -67,7 +67,7 @@ use std::time::{Duration, Instant};
 
 use super::libtest::{Account, Tally};
 use crate::children::Children;
-use crate::{elapsed_line, output_within, run_within, WaitFailure, DEFAULT_COMMAND_TIMEOUT};
+use crate::{elapsed_line, output_within, run_within, Ended, WaitFailure, DEFAULT_COMMAND_TIMEOUT};
 
 /// A unit of work done in-process that reports its own pass or failure: a
 /// closure job's work, or a job's check.
@@ -417,14 +417,26 @@ fn run_job(job: Job, shown: Shown, runtime: &Runtime<'_>) -> Result<(), String> 
     match work {
         Work::Closure(_) if account.is_some() => {
             let why = format!("{label} holds an account, which binds only a command job");
-            runtime.say(&verdict(&label, Some(&why), Duration::ZERO));
+            runtime.say(&verdict(
+                &label,
+                Some(&why),
+                Duration::ZERO,
+                runtime.children,
+            ));
             Err(why)
         }
         Work::Closure(work) => run_closure(&label, work, runtime),
         Work::Command(command) => {
             // Refused before it starts, the work's step ends at once.
-            let budget = remaining(&label, runtime.children.raised(budget), checked)
-                .inspect_err(|why| runtime.say(&verdict(&label, Some(why), Duration::ZERO)))?;
+            let budget =
+                remaining(&label, runtime.children.raised(budget), checked).inspect_err(|why| {
+                    runtime.say(&verdict(
+                        &label,
+                        Some(why),
+                        Duration::ZERO,
+                        runtime.children,
+                    ));
+                })?;
             match (shown, account) {
                 (Shown::Live, None) => run_live(&label, command, budget, runtime),
                 (Shown::Live, Some(account)) => {
@@ -458,7 +470,12 @@ fn run_live(
         |status| *status,
     );
     let failure = outcome.err().map(|failure| failure.message);
-    runtime.say(&verdict(label, failure.as_deref(), started.elapsed()));
+    runtime.say(&verdict(
+        label,
+        failure.as_deref(),
+        started.elapsed(),
+        runtime.children,
+    ));
     failure.map_or(Ok(()), Err)
 }
 
@@ -524,7 +541,12 @@ fn run_relayed(
             runtime.say(logged);
         }
     }
-    runtime.say(&verdict(label, failure.as_deref(), started.elapsed()));
+    runtime.say(&verdict(
+        label,
+        failure.as_deref(),
+        started.elapsed(),
+        runtime.children,
+    ));
     failure.map_or(Ok(()), Err)
 }
 
@@ -618,7 +640,12 @@ fn run_captured(
     }
     // Closes the block as well as reporting the cost, so the output above it
     // has an unambiguous end.
-    block.push_str(&verdict(label, failure.as_deref(), elapsed));
+    block.push_str(&verdict(
+        label,
+        failure.as_deref(),
+        elapsed,
+        runtime.children,
+    ));
     runtime.say(&block);
     failure.map_or(Ok(()), Err)
 }
@@ -631,7 +658,8 @@ fn run_closure(label: &str, work: Task, runtime: &Runtime<'_>) -> Result<(), Str
     runtime.say(&format!("xtask: [{label}] starting\n"));
     let started = Instant::now();
     let outcome = work();
-    runtime.say(&elapsed_line(label, outcome.is_ok(), started.elapsed()));
+    let ended = Ended::of(outcome.is_ok(), runtime.children);
+    runtime.say(&elapsed_line(label, ended, started.elapsed()));
     outcome
 }
 
@@ -647,14 +675,15 @@ fn run_check(label: &str, check: Task, runtime: &Runtime<'_>) -> Result<Duration
         &label,
         outcome.as_ref().err().map(String::as_str),
         elapsed,
+        runtime.children,
     ));
     outcome.map(|()| elapsed)
 }
 
 /// A step's closing line, after why where it failed, so the reason is logged
 /// as the step ends rather than only once the whole run does.
-fn verdict(label: &str, failure: Option<&str>, elapsed: Duration) -> String {
-    let closing = elapsed_line(label, failure.is_none(), elapsed);
+fn verdict(label: &str, failure: Option<&str>, elapsed: Duration, children: &Children) -> String {
+    let closing = elapsed_line(label, Ended::of(failure.is_none(), children), elapsed);
     match failure {
         None => closing,
         Some(why) => format!("xtask: [{label}] {why}\n{closing}"),
@@ -1031,6 +1060,19 @@ mod tests {
             assert!(log.contains("[refused check] stale skip\n"), "{log}");
             assert!(log.contains("[refused check] FAILED in"), "{log}");
         }
+    }
+
+    #[test]
+    fn a_job_the_run_s_end_cuts_off_is_reported_interrupted_not_failed() {
+        let children = Children::new(None);
+        children.take(libc::SIGTERM);
+        let jobs = vec![Job::closure("cut off", 1, || {
+            Err("the guest died of SIGTERM".into())
+        })];
+        let (outcome, log) = super::run_recorded(jobs, 1, &children);
+        assert_eq!(outcome, Err("the guest died of SIGTERM".into()));
+        assert!(log.contains("[cut off] INTERRUPTED by SIGTERM in"), "{log}");
+        assert!(!log.contains("FAILED"), "{log}");
     }
 
     #[test]

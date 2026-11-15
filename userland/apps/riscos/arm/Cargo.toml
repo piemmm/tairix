@@ -1,0 +1,21 @@
+[package]
+name = "tairix-riscos-arm"
+description = "The RISC OS emulator's ARM processor: the one A32 encoding table its decoder, interpreter, disassembler and encoder are derived from, the 26-bit and 32-bit programmer's models, the profiles that fix every implementation-defined choice, and architectural exceptions. It knows nothing of RISC OS. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The checksums `CRC32` and `CRC32C` compute.
+tairix-crc32 = { path = "../../../../lib/crc32", version = "=0.0.0" }
+tairix-crc32c = { path = "../../../../lib/crc32c", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harness and the randomised tests draw from.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0" }

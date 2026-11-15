@@ -16,7 +16,7 @@ use crate::machine::electron::plus1::{self as port, command, status};
 use crate::machine::{FIRE_BUTTONS, ROM_SIZE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, AsmError, Image, RTS, V_SET};
 use crate::rom::os::{
-    buffer, entry, event, osbyte, page2, page_d, printer, service, var, vector, zp as os,
+    buffer, entry, event, osbyte, page2, page_d, printer, service, var, vector, zp as os, CR,
     PRINTER_BUSY,
 };
 
@@ -39,7 +39,6 @@ const _: () = assert!(FX163_ON == 0);
 const PER_POLL: u8 = 8;
 // BIT reads the printer's busy line into N and a conversion's into V.
 const _: () = assert!(status::BUSY == 0x80 && status::CONVERTING == 0x40);
-const CR: u8 = 0x0D;
 
 /// Build the Plus 1 ROM's image.
 ///

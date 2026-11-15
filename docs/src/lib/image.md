@@ -405,8 +405,10 @@ wide mask — the mode word's top bit — is eight bits of alpha per pixel.
 The shared sequence shape addresses a sprite by page index; its name, mode
 and palette are what `open_native` reports ([Writing](#writing)). The CMYK,
 JPEG-data, and YCbCr sprite types are refused by name rather than half-read,
-because none is a depth the decoder claims — as are Teletext and third-party
-extension mode numbers, whose depth only the module that defined them knows.
+because none is a depth the decoder claims — as are the text modes 3, 6 and 7,
+in which RISC OS refuses a sprite, and third-party extension mode numbers,
+whose depth only the module that defined them knows. A numbered mode's depth
+and pixel shape are RISC OS 5's, read from `lib/vdu`.
 As with an icon container, one unreadable sprite does not refuse the file: a
 sprite whose *mode* the decoder does not claim is passed over when the area is
 measured and refused only if it is asked for. A malformed *control block* is

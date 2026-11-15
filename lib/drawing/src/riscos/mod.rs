@@ -177,19 +177,6 @@ const fn word_of(colour: Rgba) -> u32 {
     Rgb::new(colour.r, colour.g, colour.b).riscos_word()
 }
 
-/// `value` as the two words RISC OS's floating point stores a double in,
-/// first to last: the word holding its sign and exponent first.
-fn fpa_words(value: f64) -> [u32; 2] {
-    let bits = value.to_bits();
-    let word = |bits: u64| u32::try_from(bits & u64::from(u32::MAX)).unwrap_or(u32::MAX);
-    [word(bits >> 32), word(bits)]
-}
-
-/// The double two words stored so hold.
-fn fpa_double([high, low]: [u32; 2]) -> f64 {
-    f64::from_bits(u64::from(high) << 32 | u64::from(low))
-}
-
 /// The A-series paper numbered `n`, A0 being the largest.
 fn a_paper(n: u32) -> Option<&'static Paper> {
     PAPER.iter().find(|paper| {

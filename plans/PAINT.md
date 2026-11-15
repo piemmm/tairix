@@ -74,7 +74,7 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   while its colours are still those (`save::restated`), and with its own full
   palette once they are not.
 - **Kept**: a sprite the editor cannot read — a CMYK, JPEG or YCbCr sprite, a
-  Teletext or extension mode, one larger than an editor opens, or one whose
+  text or extension mode, one larger than an editor opens, or one whose
   bytes are damaged (`KeptReason`) — is carried byte for byte and written back
   unchanged; it cannot be painted on. One whose length is not a whole number
   of words is refused on save rather than written, since every sprite after it

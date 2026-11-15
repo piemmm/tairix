@@ -7,16 +7,13 @@
 //! token on the 6502 stack, so nothing the right operand runs, an FN
 //! included, can disturb them.
 
+use tairix_bbcbasic::keyword::word;
+
 use super::float::FAC;
 use super::ws::{kind, page, place, zp as z};
 use crate::rom::asm::byte;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-
-const AND: u8 = 0x80;
-const DIV: u8 = 0x81;
-const EOR: u8 = 0x82;
-const MOD: u8 = 0x83;
-const OR: u8 = 0x84;
+use crate::rom::os::CR;
 
 /// A comparison's outcomes that make it true: less, equal, greater.
 const LESS: u8 = 1;
@@ -25,8 +22,6 @@ const GREATER: u8 = 4;
 
 /// The left operand's kind while the pair is made numbers.
 const LEFT: u16 = z::INT_WORK + 3;
-
-const CR: u8 = 0x0D;
 
 pub fn emit(a: &mut Asm) {
     levels(a);
@@ -69,10 +64,10 @@ fn levels(a: &mut Asm) {
     a.here("expr");
     a.jsr("level_and");
     a.here("expr_next");
-    a.cpx(imm(OR));
+    a.cpx(imm(word::OR.token));
     let op = a.local();
     a.beq(op);
-    a.cpx(imm(EOR));
+    a.cpx(imm(word::EOR.token));
     a.bne(RTS);
     a.bind(op);
     step(a, "level_and", "logical", "expr_next");
@@ -80,7 +75,7 @@ fn levels(a: &mut Asm) {
     a.here("level_and");
     a.jsr("level_compare");
     a.here("and_next");
-    a.cpx(imm(AND));
+    a.cpx(imm(word::AND.token));
     a.bne(RTS);
     step(a, "level_compare", "logical", "and_next");
 
@@ -154,11 +149,11 @@ fn levels(a: &mut Asm) {
     a.jsr("level_power");
     a.here("multiply_next");
     let op = a.local();
-    for operator in [b'*', b'/', DIV] {
+    for operator in [b'*', b'/', word::DIV.token] {
         a.cpx(imm(operator));
         a.beq(op);
     }
-    a.cpx(imm(MOD));
+    a.cpx(imm(word::MOD.token));
     a.bne(RTS);
     a.bind(op);
     step(a, "level_power", "multiply_values", "multiply_next");
@@ -278,10 +273,10 @@ fn arithmetic(a: &mut Asm) {
 
     // *, /, DIV and MOD, X the operator.
     a.here("multiply_values");
-    a.cpx(imm(DIV));
+    a.cpx(imm(word::DIV.token));
     let integer_division = a.local();
     a.beq(integer_division);
-    a.cpx(imm(MOD));
+    a.cpx(imm(word::MOD.token));
     a.beq(integer_division);
     a.cpx(imm(b'/'));
     let divide = a.local();
@@ -309,7 +304,7 @@ fn arithmetic(a: &mut Asm) {
     a.pha();
     a.jsr("int_divide");
     a.pla();
-    a.cmp(imm(MOD));
+    a.cmp(imm(word::MOD.token));
     let quotient = a.local();
     a.bne(quotient);
     a.ldx(imm(3));
@@ -337,9 +332,9 @@ fn bitwise(a: &mut Asm) {
     a.here("logical");
     a.jsr("integer_pair");
     let (or, eor) = (a.local(), a.local());
-    a.cpx(imm(OR));
+    a.cpx(imm(word::OR.token));
     a.beq(or);
-    a.cpx(imm(EOR));
+    a.cpx(imm(word::EOR.token));
     a.beq(eor);
     for (label, op) in [(None, 0u8), (Some(or), 1), (Some(eor), 2)] {
         if let Some(label) = label {

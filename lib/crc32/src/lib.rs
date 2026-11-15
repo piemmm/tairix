@@ -35,6 +35,17 @@ const fn table() -> [u32; 256] {
     table
 }
 
+/// Advances the raw CRC-32 register `state` over `data`, inverting neither
+/// side: what ARMv8's `CRC32` instructions compute, and the step every
+/// checksum here takes.
+#[must_use]
+pub fn update(state: u32, data: &[u8]) -> u32 {
+    data.iter().fold(state, |crc, &byte| {
+        let index = usize::from(crc.to_le_bytes()[0] ^ byte);
+        (crc >> 8) ^ TABLE[index]
+    })
+}
+
 /// The CRC-32 of `data`.
 #[must_use]
 pub fn checksum(data: &[u8]) -> u32 {
@@ -65,10 +76,7 @@ impl Crc32 {
 
     /// Fold `data` in.
     pub fn update(&mut self, data: &[u8]) {
-        for &byte in data {
-            let index = usize::from(self.state.to_le_bytes()[0] ^ byte);
-            self.state = (self.state >> 8) ^ TABLE[index];
-        }
+        self.state = update(self.state, data);
     }
 
     /// The checksum of everything folded in.

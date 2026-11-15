@@ -28,6 +28,10 @@ test-util = ["tairix-codegen/test-util"]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one code generator, whose IR the translator lowers hot guest code to.
 tairix-codegen = { path = "../../../lib/codegen", version = "=0.0.0" }
+# The 8087's arithmetic core and its double-extended value: each result held
+# exactly and rounded once, the 8087's own register and memory rules built on
+# it.
+tairix-softfloat = { path = "../../../lib/softfloat", version = "=0.0.0" }
 # The one resampler, which carries the mix to the audio stream's rate, and the
 # windowed sinc its band-limited steps are drawn with.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }

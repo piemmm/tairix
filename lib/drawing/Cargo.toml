@@ -36,6 +36,8 @@ tairix-compress = { path = "../compress", version = "=0.0.0" }
 # RISC OS's Latin-1, the alphabet a Draw file's text and names are spelled
 # in.
 tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
+# The FPA's word order, which a Draw file's grid spacing is stored in.
+tairix-softfloat = { path = "../softfloat", version = "=0.0.0" }
 # The shared text and slices a drawing holds, and the shared values it is made
 # of, every one allocated fallibly.
 tairix-collections = { path = "../collections", version = "=0.0.0" }

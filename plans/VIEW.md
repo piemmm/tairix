@@ -724,7 +724,8 @@ clients, and their exit-code sets are their own.
   and a mask supersedes a pixel's own alpha. Indexed pixels run least
   significant first, the opposite of every other format here. The CMYK,
   JPEG-data, and YCbCr sprite types are refused by name rather than
-  half-read, as are Teletext and third-party extension mode numbers. Because
+  half-read, as are the text modes 3, 6 and 7 and third-party extension mode
+  numbers. Because
   the format has no signature, the fuzz harness drives *every* input it
   already builds through the naming door as well, so the sprite decoder gets
   the whole corpus rather than only its own.

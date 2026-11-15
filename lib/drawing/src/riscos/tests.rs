@@ -8,10 +8,9 @@ use alloc::vec::Vec;
 
 use tairix_bezier::{Affine, FillRule, Point};
 use tairix_colour::Rgba;
+use tairix_softfloat::fpa_words;
 
-use super::{
-    face_of, fpa_double, fpa_words, read, recognised, riscos_family_generic, write, Dropped, Font,
-};
+use super::{face_of, read, recognised, riscos_family_generic, write, Dropped, Font};
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Page, Unit, PAPER};
 use crate::id::Ids;
@@ -97,7 +96,7 @@ fn path(fill: u32, outline: u32, width: u32, style: u32, components: &[i32]) -> 
 /// An options object for A`paper`, turned when `landscape`, its grid
 /// `spacing` centimetres apart.
 fn options(paper: u32, landscape: bool, spacing: f64) -> Vec<u8> {
-    let [high, low] = fpa_words(spacing);
+    let [high, low] = fpa_words(spacing.to_bits());
     let turned = if landscape { 1 << 4 } else { 0 };
     object(
         11,
@@ -623,14 +622,6 @@ fn a_broken_file_is_refused_whole() {
         deep = object(6, &body);
     }
     assert_eq!(refused(&file(&[deep])), Some(ReadError::TooComplex));
-}
-
-#[test]
-fn doubles_are_stored_sign_and_exponent_first() {
-    assert_eq!(fpa_words(1.0), [0x3FF0_0000, 0]);
-    for value in [0.0, 2.54, -1e-300, 1e300] {
-        assert_eq!(fpa_double(fpa_words(value)).to_bits(), value.to_bits());
-    }
 }
 
 #[test]

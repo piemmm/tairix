@@ -16,13 +16,14 @@ mod io;
 mod list;
 mod procs;
 mod system;
-mod tokens;
 mod trans;
 mod vars;
 mod ws;
 
 #[cfg(test)]
 mod tests;
+
+use tairix_bbcbasic::keyword::Word;
 
 use crate::machine::{ROM_SIZE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, byte, imm, lo, zp, Asm, AsmError, Image, RTS};
@@ -159,4 +160,17 @@ const fn message_at(index: usize) -> u8 {
         i += 1;
     }
     byte(at)
+}
+
+/// Whether `table` runs in token order from `first`, so a token less the
+/// first indexes it.
+const fn in_token_order(first: u8, table: &[(Word<u8>, &str)]) -> bool {
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].0.token as usize != first as usize + i {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }

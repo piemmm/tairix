@@ -430,6 +430,10 @@ tairix-shaders = { path = "../../lib/shaders", version = "=0.0.0" }
 # through the crate's own vector runner, so the sample its tests replay and
 # the full suite are judged by one definition.
 tairix-openmicro = { path = "../../userland/apps/openmicro", version = "=0.0.0" }
+# The RISC OS emulator's ARM: held to the external ARM7TDMI conformance suite
+# through the crate's own vector runner, so the sample its tests replay and
+# the full suite are judged by one definition.
+tairix-riscos-arm = { path = "../../userland/apps/riscos/arm", version = "=0.0.0" }
 # The emulators' machine library: the Open Micro vertical aims at a card and
 # its menu, and declares the icon-bar menu, through the library's own layout
 # and rows.

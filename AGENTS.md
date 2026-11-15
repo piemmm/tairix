@@ -619,6 +619,7 @@ tairix/
 │   │                    #   channel matrices, the device clock model, routing
 │   │                    #   policy, the volume model, the audio-v1 client.
 │   ├── audiochan/       # Audio device-channel driver side (audiochan-v1 server).
+│   ├── bbcbasic/        # BBC BASIC II and V/VI: tokens, tokenising, LIST, program images.
 │   ├── bezier/          # Plane geometry: segments, paths, flattening, booleans.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
@@ -707,6 +708,8 @@ tairix/
 │   ├── netconfig/       # network.conf per-interface configuration store engine.
 │   ├── netshare/        # Network-share client (netshare-v1 to smbfs).
 │   ├── noise/           # Procedural noise: gradient, octave, ridged, cellular.
+│   ├── obey/            # RISC OS command-line machinery: GSTrans, system variables,
+│   │                    #   expressions, argument templates, a read-only Obey reading.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner, pool,
 │   │                    #   ordered dispatch).
@@ -737,6 +740,8 @@ tairix/
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── shaders/         # The pinned shader set: the desktop's passes as committed SPIR-V.
 │   ├── smb/             # The pure SMB 3 protocol engine (no I/O, clock, or RNG).
+│   ├── softfloat/       # Software floating point: binary32, binary64 and
+│   │                    #   double-extended, rounded in every IEEE 754 mode.
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated
 │   │                    #   FLAC and Opus encoders.
@@ -761,6 +766,7 @@ tairix/
 │   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox client.
+│   ├── vdu/             # Acorn VDU vocabulary: control codes, numbered modes, the 8×8 font.
 │   ├── video/           # Video codecs and containers: VP8, WebM.
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.

@@ -10,7 +10,7 @@ fn op(group: u8, modrm: u8) -> u16 {
 }
 
 fn real(x: f64) -> Real {
-    Real::from_double(x.to_bits()).0
+    from_double(x.to_bits()).0
 }
 
 /// A register file with `values` pushed in order, so the last is ST(0).
@@ -121,7 +121,7 @@ fn a_push_onto_a_full_stack_is_invalid() {
     let mut regs = with(&[Real::ONE; 8]);
     let done = run(&mut regs, 1, 0xE8);
     assert_eq!(done.raised, flag::INVALID);
-    assert_eq!(st(&regs, 0), Real::INDEFINITE);
+    assert_eq!(st(&regs, 0), INDEFINITE);
     // Unmasked, nothing moves.
     let mut regs = with(&[Real::ONE; 8]);
     unmask(&mut regs, flag::INVALID);
@@ -135,11 +135,11 @@ fn an_empty_operand_is_invalid_and_answers_the_indefinite() {
     let mut regs = with(&[Real::ONE]);
     let done = run(&mut regs, 0, 0xC1);
     assert_eq!(done.raised, flag::INVALID);
-    assert_eq!(st(&regs, 0), Real::INDEFINITE);
+    assert_eq!(st(&regs, 0), INDEFINITE);
     // FXCH with an empty register: the empty one becomes the indefinite.
     let mut regs = with(&[Real::ONE]);
     run(&mut regs, 1, 0xC9);
-    assert_eq!((st(&regs, 0), st(&regs, 1)), (Real::INDEFINITE, Real::ONE));
+    assert_eq!((st(&regs, 0), st(&regs, 1)), (INDEFINITE, Real::ONE));
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn fxam_tells_each_class_and_honours_the_tag() {
     check(real(-1.0), cc::C2 | cc::C1);
     check(Real::new(false, 0x4000, 1), 0);
     check(Real::INFINITY, cc::C2 | cc::C0);
-    check(Real::INDEFINITE, cc::C1 | cc::C0);
+    check(INDEFINITE, cc::C1 | cc::C0);
     check(Real::ZERO, cc::C3);
     check(Real::new(false, 0, 5), cc::C3 | cc::C2);
     let mut regs = Registers::default();
@@ -326,15 +326,12 @@ fn square_roots_refuse_what_the_8087_refuses() {
         root(Real::ZERO.with_sign(true), false),
         (Real::ZERO.with_sign(true), 0)
     );
-    assert_eq!(root(real(-1.0), false), (Real::INDEFINITE, flag::INVALID));
+    assert_eq!(root(real(-1.0), false), (INDEFINITE, flag::INVALID));
     assert_eq!(
         root(Real::new(false, 0x4000, 1 << 62), false).1,
         flag::INVALID
     );
-    assert_eq!(
-        root(Real::INFINITY, false),
-        (Real::INDEFINITE, flag::INVALID)
-    );
+    assert_eq!(root(Real::INFINITY, false), (INDEFINITE, flag::INVALID));
     assert_eq!(root(Real::INFINITY, true), (Real::INFINITY, 0));
 }
 
@@ -345,7 +342,7 @@ fn binary_stores_refuse_an_unnormal_in_range_and_keep_a_nan_a_nan() {
     assert_eq!(done.raised, flag::INVALID);
     assert_eq!(
         done.store.unwrap().data(),
-        &Binary::DOUBLE.indefinite().to_le_bytes()
+        &indefinite(Binary::DOUBLE).to_le_bytes()
     );
     let mut regs = with(&[Real::new(false, 0x7FFF, INTEGER | 1)]);
     let done = execute(Insn::Store(Format::Single, false), &mut regs, &[], Some(0));

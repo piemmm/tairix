@@ -4,6 +4,10 @@
 
 use crate::machine::SIDEWAYS_BASE;
 
+/// What ends a line of text the MOS reads, a command it is given and a
+/// string GSREAD reads; OSASCI writes it as a new line.
+pub const CR: u8 = b'\r';
+
 /// The entry points at the top of memory.
 pub mod entry {
     /// OSEVEN: raise event Y, A its parameter.

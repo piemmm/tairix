@@ -80,19 +80,25 @@ fn an_if_takes_the_branch_its_comparison_chooses_and_no_other() {
     assert_eq!(files(chosen), ["Wide"]);
     let otherwise = "If \"a\"=\"b\" Then IconSprites <Obey$Dir>.A Else IconSprites <Obey$Dir>.B";
     assert_eq!(files(otherwise), ["B"]);
-    let unjudged = "If Boot$OSVersion >= 500 Then IconSprites <Obey$Dir>.New";
+    let unset = "If Boot$OSVersion >= 500 Then IconSprites <Obey$Dir>.New";
     assert!(
-        files(unjudged).is_empty(),
-        "a condition not judged runs neither branch"
+        files(unset).is_empty(),
+        "a condition naming an unset variable fails, and neither branch runs"
     );
+    let judged = "Set V 520\nIf V >= 500 Then IconSprites <Obey$Dir>.New";
+    assert_eq!(files(judged), ["New"], "any expression is judged");
     let nested = "If \"a\"=\"a\" Then If \"b\"=\"b\" Then IconSprites <Obey$Dir>.Deep";
-    assert!(
-        files(nested).is_empty(),
-        "no If runs inside another's branch"
+    assert_eq!(
+        files(nested),
+        ["Deep"],
+        "the chosen command runs as any command does, another If among them"
     );
     let quoted_then =
         "If \"x Then y\"=\"\" Then IconSprites <Obey$Dir>.A Else IconSprites <Obey$Dir>.B";
-    assert_eq!(files(quoted_then), ["B"], "a keyword inside quotes is text");
+    assert!(
+        files(quoted_then).is_empty(),
+        "If finds Then whatever the quotes say, leaving a broken condition"
+    );
 }
 
 #[test]
@@ -183,8 +189,10 @@ fn a_boot_file_beyond_its_bounds_is_not_read() {
         writeln!(many, "IconSprites <Obey$Dir>.S{index}").expect("a string takes any line");
     }
     assert_eq!(boot_sprite_files(many.as_bytes()).len(), MAX_SPRITE_FILES);
-    let line = alloc::format!("IconSprites <Obey$Dir>.{}", "x".repeat(300));
+    let line = alloc::format!("IconSprites <Obey$Dir>.{}", "x".repeat(1024));
     assert!(files(&line).is_empty(), "a line past RISC OS's own length");
+    let leaf = alloc::format!("IconSprites <Obey$Dir>.{}", "x".repeat(300));
+    assert!(files(&leaf).is_empty(), "a leaf longer than any name");
     let loop_ = "SetMacro A <B>\nSetMacro B <A>\nIconSprites <A>.!Sprites";
     assert!(files(loop_).is_empty(), "macros naming each other end");
     let latin1 = b"Set A \xa3\nIconSprites <Obey$Dir>.!Sprites";

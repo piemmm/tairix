@@ -109,6 +109,10 @@ members = [
     "lib/i2cbus",
     "lib/icon",
     "lib/image",
+    "lib/softfloat",
+    "lib/obey",
+    "lib/bbcbasic",
+    "lib/vdu",
     "lib/sound",
     "lib/soundtheme",
     "lib/player",
@@ -340,6 +344,7 @@ members = [
     "userland/apps/patience",
     "userland/apps/sapper",
     "userland/apps/openmicro",
+    "userland/apps/riscos/arm",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/settings",
@@ -845,6 +850,12 @@ opt-level = 3
 # The patience solver searches tens of thousands of positions after every
 # move and more for each hint and deal, so at `opt-level = 1` a debug image's
 # hints and winnable deals would measure the profile, not the search.
+# The emulated ARM runs tens of millions of guest instructions a second, each
+# one fetched, decoded through its page's slots and executed, so at
+# `opt-level = 1` a debug image would measure the profile, not the processor.
+[profile.dev.package.tairix-riscos-arm]
+opt-level = 3
+
 [profile.dev.package.tairix-patience]
 opt-level = 3
 

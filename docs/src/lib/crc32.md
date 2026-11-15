@@ -4,7 +4,7 @@ The CRC-32 foreign formats specify: IEEE 802.3's reflected polynomial
 `0xEDB8_8320`, started from all ones and complemented at the end. PNG frames
 every chunk with it and GPT checks its header and entry array with it, so
 `lib/image` and `lib/partition` both reach it here rather than each carrying a
-copy.
+copy, as does the RISC OS emulator's processor for its `CRC32` instructions.
 
 It is a framing checksum, not TAIRiX's own: the integrity checksum of TAIRiX's
 formats is CRC-32C (`lib/crc32c`), a different polynomial.
@@ -12,6 +12,7 @@ formats is CRC-32C (`lib/crc32c`), a different polynomial.
 | Item | What it is |
 |---|---|
 | `checksum(data)` | The CRC-32 of one slice. |
+| `update(state, data)` | The raw register advanced over `data`, inverting neither side: what ARMv8's `CRC32` instructions compute, which the RISC OS emulator's processor executes through it. |
 | `Crc32` | The same over bytes that arrive in pieces: `new`, then `update` each piece in order, then `finish`. A PNG chunk's checksum covers its type and its payload, which are separate slices. |
 
 The 256-entry table is built at compile time from the polynomial. Tests hold

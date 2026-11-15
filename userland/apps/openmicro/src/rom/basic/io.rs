@@ -1,15 +1,13 @@
 //! PRINT and BASIC's character output: COUNT, WIDTH, the `@%` fields, TAB
 //! and SPC, and numbers in decimal or hex.
 
+use tairix_bbcbasic::keyword::word;
+
 use super::decimal::{FORMAT, PLACES};
 use super::ws::{kind, page, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, Label, RTS};
-use crate::rom::os::entry;
+use crate::rom::os::{entry, CR};
 
-const TAB: u8 = 0x8A;
-const SPC: u8 = 0x89;
-const ELSE: u8 = 0x8B;
-const CR: u8 = 0x0D;
 /// `@%`'s bytes: the field width, digits, format and STR$'s flag.
 const AT_WIDTH: u16 = page::RESIDENT;
 const AT_DIGITS: u16 = page::RESIDENT + 1;
@@ -41,8 +39,6 @@ const LINE_BLOCK: u16 = NEXT_ITEM + 1;
 const LINE_ROOM: u8 = 240;
 /// The DATA pointer, and the text an item is read from.
 const ITEM: u16 = z::TEXT_B;
-const DATA_TOKEN: u8 = 0xDC;
-const LINE_TOKEN: u8 = 0x86;
 
 fn items(a: &mut Asm) {
     // Z set if A ends a statement: a colon, a CR or ELSE.
@@ -51,7 +47,7 @@ fn items(a: &mut Asm) {
     a.beq(RTS);
     a.cmp(imm(CR));
     a.beq(RTS);
-    a.cmp(imm(ELSE));
+    a.cmp(imm(word::ELSE.token));
     a.rts();
 
     // A raw item at (ITEM),Y into the string buffer: spaces before it
@@ -226,7 +222,7 @@ fn data(a: &mut Asm) {
     let scan = a.here_local();
     a.iny();
     a.lda(zp(ITEM).ind_y());
-    a.cmp(imm(DATA_TOKEN));
+    a.cmp(imm(word::DATA.token));
     a.beq(found);
     a.cmp(imm(CR));
     a.bne(scan);
@@ -284,7 +280,7 @@ fn input(a: &mut Asm) -> Label {
     a.jsr("stack_claim");
     a.ldx(imm(0));
     a.jsr("next_a");
-    a.cmp(imm(LINE_TOKEN));
+    a.cmp(imm(word::LINE.token));
     let whole = a.local();
     a.beq(whole);
     a.dec(zp(z::OFFSET_A));
@@ -466,17 +462,17 @@ fn printing(a: &mut Asm) -> Label {
     for (character, target) in [
         (b':', ended),
         (CR, ended),
-        (ELSE, ended),
+        (word::ELSE.token, ended),
         (b';', semicolon),
         (b',', comma),
         (b'\'', quote),
         (b'~', tilde),
-        (SPC, spc),
+        (word::SPC.token, spc),
     ] {
         a.cmp(imm(character));
         a.beq(target);
     }
-    a.cmp(imm(TAB));
+    a.cmp(imm(word::TAB.token));
     let item = a.local();
     a.bne(item);
     a.jmp(tab);

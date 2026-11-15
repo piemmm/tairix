@@ -49,6 +49,7 @@ use core::fmt;
 use tairix_colour::Rgb;
 use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
+use tairix_vdu as vdu;
 
 use crate::channel::{Channel, Sampler};
 use crate::pages::{PageSource, Pages};
@@ -85,74 +86,6 @@ const VIDC_ENTRIES: u32 = 16;
 /// in, and the channel widths and bytes of one of its pixels.
 const TRUECOLOUR_TYPE: u32 = 6;
 const TRUECOLOUR_PIXEL: ([u32; RGBA_BYTES], u32) = ([8, 8, 8, 8], 4);
-
-/// Bits per pixel each numbered screen mode holds, indexed by mode number;
-/// zero for mode 7, whose Teletext cells are character codes rather than
-/// pixels. Numbers past this table are third-party extension modes, whose
-/// depth only the module that defined them knows.
-const MODE_BITS: [u8; 54] = [
-    1, 2, 4, 1, 1, 2, 1, 0, 2, 4, 8, 2, 4, 8, 4, 8, 4, 4, 1, 2, 4, 8, 4, 1, 8, 1, 2, 4, 8, 1, 2, 4,
-    8, 1, 2, 4, 8, 1, 2, 4, 8, 1, 2, 4, 1, 2, 4, 8, 4, 8, 1, 2, 4, 8,
-];
-
-/// Each numbered mode's `XEigFactor` and `YEigFactor`: a pixel is `1 << eig`
-/// OS units across and down, which is its shape and its size on a desktop.
-const MODE_EIG: [(u8, u8); 54] = [
-    (1, 2),
-    (2, 2),
-    (3, 2),
-    (1, 2),
-    (2, 2),
-    (3, 2),
-    (2, 2),
-    (2, 2),
-    (1, 2),
-    (2, 2),
-    (3, 2),
-    (1, 2),
-    (1, 2),
-    (2, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (0, 1),
-    (1, 1),
-    (1, 2),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 1),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (1, 2),
-    (2, 1),
-    (2, 1),
-    (2, 1),
-    (2, 2),
-    (2, 2),
-    (2, 2),
-    (2, 2),
-];
 
 /// The finest resolution an eigen factor can state: OS units per inch.
 const OS_UNITS_PER_INCH: u32 = 180;
@@ -382,21 +315,20 @@ fn data_format(flags: u32) -> Result<Order, DecodeError> {
     })
 }
 
-/// What a numbered screen mode says about its pixels.
-fn numbered_mode(mode: u32) -> Result<Mode, DecodeError> {
-    let index = usize::try_from(mode).map_err(|_| DecodeError::SpriteUnknownMode)?;
-    let bits = MODE_BITS
-        .get(index)
-        .copied()
-        .filter(|&bits| bits != 0)
+/// What a numbered screen mode says about its pixels. A text mode has none,
+/// and RISC OS refuses a sprite in one; a number past RISC OS 5's own names
+/// a mode only the module that defined it knows.
+fn numbered_mode(number: u32) -> Result<Mode, DecodeError> {
+    let mode = vdu::mode::numbered(number)
+        .filter(|mode| mode.graphic())
         .ok_or(DecodeError::SpriteUnknownMode)?;
     Ok(Mode {
         layout: Layout::Indexed {
-            bits: u32::from(bits),
+            bits: 1 << mode.log2_bpp,
         },
         mask: MaskDepth::Image,
         numbered: true,
-        eig: MODE_EIG[index],
+        eig: (mode.x_eig, mode.y_eig),
     })
 }
 
@@ -622,8 +554,12 @@ impl SpriteMode {
     pub fn indexed(depth: IndexDepth, eig: (u8, u8), alpha_mask: bool) -> Self {
         if !alpha_mask {
             let numbered = (0u32..)
-                .zip(MODE_BITS.iter().zip(MODE_EIG))
-                .find(|&(_, (&bits, mode_eig))| u32::from(bits) == depth.bits() && mode_eig == eig)
+                .zip(&vdu::mode::MODES)
+                .find(|(_, mode)| {
+                    mode.graphic()
+                        && 1 << mode.log2_bpp == depth.bits()
+                        && (mode.x_eig, mode.y_eig) == eig
+                })
                 .map(|(number, _)| number);
             if let Some(mode) = numbered.and_then(Self::from_value) {
                 return mode;

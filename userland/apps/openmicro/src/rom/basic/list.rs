@@ -2,12 +2,16 @@
 //! each line reference shown as its number; and the decimal numbers both
 //! print.
 
-use super::crunch::{KEYWORD, READ};
+use tairix_bbcbasic::keyword::{word, PSEUDO_LHS};
+use tairix_bbcbasic::list::Options;
+use tairix_bbcbasic::{lineref, program};
+
+use super::crunch::{KEYWORD, PSEUDO_TOKENS, READ};
 use super::editor::LISTING_LOOPS;
-use super::tokens::{LINE_REFERENCE, PSEUDO_LHS};
 use super::ws::zp as z;
 use crate::rom::asm::byte;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
+use crate::rom::os::CR;
 
 /// The record being listed.
 pub(super) const LINE: u16 = z::SCRATCH + 9;
@@ -18,23 +22,12 @@ const DIGITS: u16 = NUMBER + 2;
 const OPEN_FORS: u16 = LISTING_LOOPS;
 const OPEN_REPEATS: u16 = OPEN_FORS + 1;
 const INDENT: u16 = OPEN_REPEATS + 1;
-/// LISTO's options: a space after the number, and indents inside FOR and
-/// REPEAT.
-const LISTO_SPACE: u8 = 1;
-const _: () = assert!(LISTO_SPACE == 1);
-const LISTO_FOR: u8 = 2;
-const LISTO_REPEAT: u8 = 4;
-/// The tokens that open and close each.
-const FOR: u8 = 0xE3;
-const NEXT: u8 = 0xED;
-const REPEAT: u8 = 0xF5;
-const UNTIL: u8 = 0xFD;
+/// LISTO's space after the number is its bit 0, shifted out.
+const _: () = assert!(Options::SPACE == 1);
 
 /// The powers of ten each digit is counted in.
 const POWERS: [u16; 5] = [10_000, 1_000, 100, 10, 1];
 const DIGIT_COUNT: u8 = byte(POWERS.len());
-
-const CR: u8 = 0x0D;
 
 pub fn emit(a: &mut Asm) {
     lines(a);
@@ -56,13 +49,13 @@ fn lines(a: &mut Asm) {
     a.jsr("print_line_number");
     let (no_for, no_repeat) = (a.local(), a.local());
     a.lda(zp(z::LISTO));
-    a.and(imm(LISTO_FOR));
+    a.and(imm(Options::FOR_LOOPS));
     a.beq(no_for);
     a.lda(zp(OPEN_FORS));
     a.bind(no_for);
     a.sta(zp(INDENT));
     a.lda(zp(z::LISTO));
-    a.and(imm(LISTO_REPEAT));
+    a.and(imm(Options::REPEAT_LOOPS));
     a.beq(no_repeat);
     a.lda(zp(OPEN_REPEATS));
     a.bind(no_repeat);
@@ -76,7 +69,7 @@ fn lines(a: &mut Asm) {
     a.rol(Acc);
     a.tax();
     a.jsr("print_spaces");
-    a.ldy(imm(4));
+    a.ldy(imm(byte(program::HEADER)));
     a.here("list_text");
     a.lda(zp(LINE).ind_y());
     a.cmp(imm(CR));
@@ -86,26 +79,26 @@ fn lines(a: &mut Asm) {
     let character = a.local();
     a.bcc(character);
     a.sty(zp(z::SCRATCH + 8));
-    a.cmp(imm(LINE_REFERENCE));
+    a.cmp(imm(lineref::MARKER));
     a.beq("list_reference");
     // A FOR or REPEAT opens its loop, a NEXT or UNTIL closes one if any
     // is open.
     let (open, close, counted) = (a.local(), a.local(), a.local());
     a.ldx(imm(0));
-    a.cmp(imm(FOR));
+    a.cmp(imm(word::FOR.token));
     a.beq(open);
-    a.cmp(imm(NEXT));
+    a.cmp(imm(word::NEXT.token));
     a.beq(close);
     a.inx();
-    a.cmp(imm(REPEAT));
+    a.cmp(imm(word::REPEAT.token));
     a.beq(open);
-    a.cmp(imm(UNTIL));
+    a.cmp(imm(word::UNTIL.token));
     a.bne(counted);
     a.bind(close);
     a.ldy(zp(OPEN_FORS).x());
     a.beq(counted);
     a.dec(zp(OPEN_FORS).x());
-    a.bpl(counted);
+    a.jmp(counted);
     a.bind(open);
     a.inc(zp(OPEN_FORS).x());
     a.bind(counted);
@@ -124,7 +117,7 @@ fn lines(a: &mut Asm) {
     a.jsr("print_unsigned");
     a.lda(zp(z::SCRATCH + 8));
     a.clc();
-    a.adc(imm(3));
+    a.adc(imm(byte(lineref::ENCODED)));
     a.tay();
     a.jmp("list_text");
 
@@ -154,10 +147,10 @@ fn keywords(a: &mut Asm) {
     // The keyword A stands for, a pseudo-variable's assigning token as its
     // own.
     a.here("print_token");
-    a.cmp(imm(0xCF));
+    a.cmp(imm(PSEUDO_TOKENS.0 | PSEUDO_LHS));
     let plain = a.local();
     a.bcc(plain);
-    a.cmp(imm(0xD4));
+    a.cmp(imm((PSEUDO_TOKENS.1 | PSEUDO_LHS) + 1));
     a.bcs(plain);
     a.eor(imm(PSEUDO_LHS));
     a.bind(plain);

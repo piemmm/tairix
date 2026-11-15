@@ -26,6 +26,8 @@ pub(crate) mod ws;
 #[cfg(test)]
 mod tests;
 
+use tairix_vdu::code::Control;
+
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::sheila;
 use crate::machine::{Model, IO_BASE, IO_END, OS_BASE, ROM_SIZE};
@@ -154,8 +156,8 @@ const fn latch(bit: u8, high: bool) -> u8 {
 /// The level bit of a latch write.
 const LATCH_HIGH: u8 = 0x08;
 
-/// DELETE's character code.
-const DELETE: u8 = 0x7F;
+/// DELETE's character code, which VDU 127 acts on.
+const DELETE: u8 = Control::Delete as u8;
 
 /// Build the Model B's MOS image.
 ///

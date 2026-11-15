@@ -10,15 +10,13 @@
 //! and the 6502 stack, and returns where the call was made: the top byte
 //! of each record says which it is, so no frame pointer is kept.
 
+use tairix_bbcbasic::keyword::word;
+
 use super::float::PACKED;
 use super::vars::{FROM, NAME_END, S_LENGTH, TNAME};
 use super::ws::{kind, page, zp as z};
 use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, Label, RTS};
-
-const PROC: u8 = 0xF2;
-const FN: u8 = 0xA4;
-const DEF: u8 = 0xDD;
 
 /// A frame's fields from its lowest byte, then the 6502 stack's length
 /// and bytes.
@@ -62,7 +60,7 @@ fn finding(a: &mut Asm) -> (Label, Label) {
     a.here("find_definition");
     a.pha();
     a.ldx(imm(lo(page::FN_LIST)));
-    a.cmp(imm(FN));
+    a.cmp(imm(word::FN.token));
     let listed = a.local();
     a.beq(listed);
     a.ldx(imm(lo(page::PROC_LIST)));
@@ -134,7 +132,7 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
     a.bind(present);
     a.ldy(imm(3));
     a.jsr("skip_spaces_b");
-    a.cmp(imm(DEF));
+    a.cmp(imm(word::DEF.token));
     a.bne(next_line);
     a.jsr("skip_spaces_b");
     // The kind waits below the list entry's address.
@@ -211,13 +209,13 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
 fn calling(a: &mut Asm) {
     // PROC name[(actuals)].
     a.here("statement_proc");
-    a.lda(imm(PROC));
+    a.lda(imm(word::PROC.token));
     a.jsr("call_routine");
     a.jmp("statement_done");
 
     // FN name[(actuals)], its value as any function's.
     a.here("fn_fn");
-    a.lda(imm(FN));
+    a.lda(imm(word::FN.token));
     a.jsr("call_routine");
     a.lda(zp(z::TYPE));
     a.rts();
@@ -584,14 +582,14 @@ fn clearing(a: &mut Asm) {
 fn leaving(a: &mut Asm) {
     // ENDPROC: leaving a PROC.
     a.here("statement_endproc");
-    a.lda(imm(PROC));
+    a.lda(imm(word::PROC.token));
     a.jmp("leave");
 
     // `=` in an FN: its value, then leaving it.
     a.here("statement_return_value");
     a.jsr("expr");
     a.sta(zp(z::TYPE));
-    a.lda(imm(FN));
+    a.lda(imm(word::FN.token));
 
     // Leaving the innermost call of kind A: its locals restored, then its
     // frame and the 6502 stack, and back where it was made. The string
@@ -603,9 +601,9 @@ fn leaving(a: &mut Asm) {
     let (unwind, frame, outside) = (a.here_local(), a.local(), a.local());
     a.jsr("in_routine");
     a.bcs(outside);
-    a.cmp(imm(PROC));
+    a.cmp(imm(word::PROC.token));
     a.beq(frame);
-    a.cmp(imm(FN));
+    a.cmp(imm(word::FN.token));
     a.beq(frame);
     a.jsr("pop_local");
     a.jmp(unwind);
@@ -615,7 +613,7 @@ fn leaving(a: &mut Asm) {
     a.beq(right);
     a.bind(outside);
     a.lda(zp(KIND));
-    a.cmp(imm(FN));
+    a.cmp(imm(word::FN.token));
     let proc_error = a.local();
     a.bne(proc_error);
     a.jmp("err_no_fn");

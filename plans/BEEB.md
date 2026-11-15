@@ -482,8 +482,8 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   &35F; MODE alone applies *TV's interlace to R8, and MODE 7 keeps the
   interlaced video teletext needs whatever *TV says.
 
-Deliberate divergences: the character set is this ROM's own design, so a
-glyph's pixels differ from MOS 1.20's; and &31A, the VDU driver's scratch for
+Deliberate divergences: the character set is this ROM's own design, `lib/vdu`'s
+BBC arrangement, so a glyph's pixels differ from MOS 1.20's; and &31A, the VDU driver's scratch for
 the last addressed pixel's line, is not reproduced for a line clipped at its
 start or the extra plot of an open line, which MOS 1.20 takes from other
 points of its own drawing order. The 16 KiB image has no room for the rest:
@@ -591,7 +591,9 @@ run:
 - Reals are five bytes: an exponent offset by &80, then the mantissa most
   significant first, its top bit the sign; zero is all zeros.
 
-The modules: `ws` (the workspace map), `tokens` (the keyword table),
+The keyword table and every token value are `lib/bbcbasic`'s BASIC II ones,
+which the builder emits; the two tokenisers and listers are tested against
+each other on the emulated machine. The modules: `ws` (the workspace map),
 `crunch` (tokenising), `list` (detokenising, LISTO and line numbers),
 `editor` (the prompt, lines, AUTO, DELETE, RENUMBER, LIST, SAVE, LOAD and
 CHAIN), `exec` (the statement loop and assignment), `control` (IF, the loops,

@@ -5,78 +5,80 @@
 //! character after it; one whose argument is a factor gives that factor's
 //! next character back first.
 
+use tairix_bbcbasic::keyword::{word, Word};
+
 use super::float::{FAC, FRACTION};
 use super::ws::{kind, page, zp as z};
 use crate::rom::asm::byte;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-use crate::rom::os::{entry, osbyte, ERROR_POINTER};
+use crate::rom::os::{entry, osbyte, CR, ERROR_POINTER};
 
 /// The first function token.
-const FIRST: u8 = 0x8E;
+const FIRST: u8 = word::OPENIN.token;
 
-/// Each function token's routine, from OPENIN.
-const FUNCTIONS: [&str; 56] = [
-    "fn_openin",
-    "fn_ptr",
-    "fn_page",
-    "fn_time",
-    "fn_lomem",
-    "fn_himem",
-    "fn_abs",
-    "fn_acs",
-    "fn_adval",
-    "fn_asc",
-    "fn_asn",
-    "fn_atn",
-    "fn_bget",
-    "fn_cos",
-    "fn_count",
-    "fn_deg",
-    "fn_erl",
-    "fn_err",
-    "fn_eval",
-    "fn_exp",
-    "fn_ext",
-    "fn_false",
-    "fn_fn",
-    "fn_get",
-    "fn_inkey",
-    "fn_instr",
-    "fn_int",
-    "fn_len",
-    "fn_ln",
-    "fn_log",
-    "fn_not",
-    "fn_openup",
-    "fn_openout",
-    "fn_pi",
-    "fn_point",
-    "fn_pos",
-    "fn_rad",
-    "fn_rnd",
-    "fn_sgn",
-    "fn_sin",
-    "fn_sqr",
-    "fn_tan",
-    "fn_top",
-    "fn_true",
-    "fn_usr",
-    "fn_val",
-    "fn_vpos",
-    "fn_chr",
-    "fn_get_string",
-    "fn_inkey_string",
-    "fn_left",
-    "fn_mid",
-    "fn_right",
-    "fn_str",
-    "fn_string",
-    "fn_eof",
+/// Each function token's routine, in token order from OPENIN.
+const FUNCTIONS: [(Word<u8>, &str); 56] = [
+    (word::OPENIN, "fn_openin"),
+    (word::PTR, "fn_ptr"),
+    (word::PAGE, "fn_page"),
+    (word::TIME, "fn_time"),
+    (word::LOMEM, "fn_lomem"),
+    (word::HIMEM, "fn_himem"),
+    (word::ABS, "fn_abs"),
+    (word::ACS, "fn_acs"),
+    (word::ADVAL, "fn_adval"),
+    (word::ASC, "fn_asc"),
+    (word::ASN, "fn_asn"),
+    (word::ATN, "fn_atn"),
+    (word::BGET, "fn_bget"),
+    (word::COS, "fn_cos"),
+    (word::COUNT, "fn_count"),
+    (word::DEG, "fn_deg"),
+    (word::ERL, "fn_erl"),
+    (word::ERR, "fn_err"),
+    (word::EVAL, "fn_eval"),
+    (word::EXP, "fn_exp"),
+    (word::EXT, "fn_ext"),
+    (word::FALSE, "fn_false"),
+    (word::FN, "fn_fn"),
+    (word::GET, "fn_get"),
+    (word::INKEY, "fn_inkey"),
+    (word::INSTR, "fn_instr"),
+    (word::INT, "fn_int"),
+    (word::LEN, "fn_len"),
+    (word::LN, "fn_ln"),
+    (word::LOG, "fn_log"),
+    (word::NOT, "fn_not"),
+    (word::OPENUP, "fn_openup"),
+    (word::OPENOUT, "fn_openout"),
+    (word::PI, "fn_pi"),
+    (word::POINT, "fn_point"),
+    (word::POS, "fn_pos"),
+    (word::RAD, "fn_rad"),
+    (word::RND, "fn_rnd"),
+    (word::SGN, "fn_sgn"),
+    (word::SIN, "fn_sin"),
+    (word::SQR, "fn_sqr"),
+    (word::TAN, "fn_tan"),
+    (word::TO, "fn_top"),
+    (word::TRUE, "fn_true"),
+    (word::USR, "fn_usr"),
+    (word::VAL, "fn_val"),
+    (word::VPOS, "fn_vpos"),
+    (word::CHR, "fn_chr"),
+    (word::GET_STRING, "fn_get_string"),
+    (word::INKEY_STRING, "fn_inkey_string"),
+    (word::LEFT, "fn_left"),
+    (word::MID, "fn_mid"),
+    (word::RIGHT, "fn_right"),
+    (word::STR, "fn_str"),
+    (word::STRING, "fn_string"),
+    (word::EOF, "fn_eof"),
 ];
+const _: () = assert!(super::in_token_order(FIRST, &FUNCTIONS));
 
 /// Where a part of a string starts.
 const FROM_OFFSET: u16 = z::INT_WORK;
-const CR: u8 = 0x0D;
 /// LOMEM is zero page's first word, and a string's kind the 0 INKEY$
 /// returns with nothing.
 const _: () = assert!(z::LOMEM == 0 && kind::STRING == 0);
@@ -785,11 +787,11 @@ fn string_cr(a: &mut Asm) {
 
 fn table(a: &mut Asm) {
     a.here("function_low");
-    for routine in FUNCTIONS {
+    for (_, routine) in FUNCTIONS {
         a.byte(lo(sym(routine) + -1));
     }
     a.here("function_high");
-    for routine in FUNCTIONS {
+    for (_, routine) in FUNCTIONS {
         a.byte(hi(sym(routine) + -1));
     }
 }

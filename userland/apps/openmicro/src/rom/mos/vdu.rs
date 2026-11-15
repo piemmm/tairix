@@ -6,6 +6,8 @@
 //! the address of its cell's top line, which wraps by the screen's size
 //! once hardware scrolling has moved the screen's start.
 
+use tairix_vdu::code::Control;
+
 use super::ws::{os, page2, var, vdu, vdu_zp};
 use super::{has_teletext, return_in_teletext, svia, DELETE};
 use crate::cpu::STACK_PAGE;
@@ -33,41 +35,51 @@ const CRTC_DATA: u16 = sheila::CRTC_DATA;
 /// Teletext's screen address bias: a mode 7 address less this is the 6845's.
 const TELETEXT_BIAS: u16 = 0x5400;
 
-/// Each control code's handler, and how many parameters it gathers first.
-const CONTROLS: [(&str, u8); 32] = [
-    ("return", 0),
-    ("vdu_1", 1),
-    ("vdu_2", 0),
-    ("vdu_3", 0),
-    ("vdu_4", 0),
-    ("vdu_5", 0),
-    ("vdu_6", 0),
-    ("bell", 0),
-    ("vdu_8", 0),
-    ("vdu_9", 0),
-    ("vdu_10", 0),
-    ("vdu_11", 0),
-    ("vdu_12", 0),
-    ("vdu_13", 0),
-    ("vdu_14", 0),
-    ("vdu_15", 0),
-    ("vdu_16", 0),
-    ("vdu_17", 1),
-    ("vdu_18", 2),
-    ("vdu_19", 5),
-    ("vdu_20", 0),
-    ("vdu_21", 0),
-    ("vdu_22", 1),
-    ("vdu_23", 9),
-    ("vdu_24", 8),
-    ("vdu_25", 5),
-    ("vdu_26", 0),
-    ("return", 0),
-    ("vdu_28", 4),
-    ("vdu_29", 4),
-    ("vdu_30", 0),
-    ("vdu_31", 2),
+/// Each control code, in order from 0, and its handler.
+const CONTROLS: [(Control, &str); 32] = [
+    (Control::Nothing, "return"),
+    (Control::PrinterNext, "vdu_1"),
+    (Control::PrinterOn, "vdu_2"),
+    (Control::PrinterOff, "vdu_3"),
+    (Control::TextAtText, "vdu_4"),
+    (Control::TextAtGraphics, "vdu_5"),
+    (Control::Enable, "vdu_6"),
+    (Control::Bell, "bell"),
+    (Control::Back, "vdu_8"),
+    (Control::Forward, "vdu_9"),
+    (Control::Down, "vdu_10"),
+    (Control::Up, "vdu_11"),
+    (Control::ClearText, "vdu_12"),
+    (Control::Return, "vdu_13"),
+    (Control::PagedOn, "vdu_14"),
+    (Control::PagedOff, "vdu_15"),
+    (Control::ClearGraphics, "vdu_16"),
+    (Control::TextColour, "vdu_17"),
+    (Control::GraphicsColour, "vdu_18"),
+    (Control::Palette, "vdu_19"),
+    (Control::DefaultColours, "vdu_20"),
+    (Control::Disable, "vdu_21"),
+    (Control::Mode, "vdu_22"),
+    (Control::Miscellaneous, "vdu_23"),
+    (Control::GraphicsWindow, "vdu_24"),
+    (Control::Plot, "vdu_25"),
+    (Control::DefaultWindows, "vdu_26"),
+    (Control::Escape, "return"),
+    (Control::TextWindow, "vdu_28"),
+    (Control::Origin, "vdu_29"),
+    (Control::Home, "vdu_30"),
+    (Control::MoveText, "vdu_31"),
 ];
+const _: () = {
+    let mut code = 0;
+    while code < CONTROLS.len() {
+        assert!(
+            CONTROLS[code].0 as usize == code,
+            "the control codes in order"
+        );
+        code += 1;
+    }
+};
 
 /// Where a queued command's last parameter lands; the queue fills up to it.
 const QUEUE_LAST: u16 = vdu::QUEUE_END;
@@ -1539,19 +1551,19 @@ fn tables(a: &mut Asm, model: Model) {
     // Each code's parameters, as the count &26A starts from: negated.
     a.later(|a| {
         a.here("vdu_parameters");
-        for (_, parameters) in CONTROLS {
-            a.byte(parameters.wrapping_neg());
+        for (control, _) in CONTROLS {
+            a.byte(control.parameters().wrapping_neg());
         }
     });
     a.later(|a| {
         a.here("vdu_handler_low");
-        for (handler, _) in CONTROLS {
+        for (_, handler) in CONTROLS {
             a.byte(lo(handler));
         }
     });
     a.later(|a| {
         a.here("vdu_handler_high");
-        for (handler, _) in CONTROLS {
+        for (_, handler) in CONTROLS {
             a.byte(hi(handler));
         }
     });

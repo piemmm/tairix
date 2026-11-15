@@ -75,6 +75,9 @@
 //! - `pcemu-vectors` — imports a vetted subset of the upstream CPU
 //!   conformance suites into `userland/apps/pcemu/assets/cpu-vectors/`
 //!   (`--import <dir>`; developer-run, never in `ci`)
+//! - `riscos-vectors` — holds the RISC OS emulator's ARM to the external
+//!   `SingleStepTests` ARM7TDMI suite (`<dir>`; `--write-sample` to refresh the
+//!   sample `userland/apps/riscos/arm` replays; developer-run only)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
@@ -662,6 +665,30 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_mins(45);
 /// build, never by default.
 pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
 
+/// How a step ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// It succeeded.
+    Done,
+    /// It failed.
+    Failed,
+    /// The run was ending on this signal, which went on to the step's
+    /// children, so what the step answered says nothing about what it tests.
+    Interrupted(i32),
+}
+
+impl Ended {
+    /// How a step that answered `ok` ended, while `children`'s run is or is
+    /// not ending.
+    pub(crate) fn of(ok: bool, children: &Children) -> Self {
+        match children.ending() {
+            _ if ok => Self::Done,
+            Some(signal) => Self::Interrupted(signal),
+            None => Self::Failed,
+        }
+    }
+}
+
 /// One step's closing wall-clock line, newline included.
 ///
 /// Every step reports its cost in this one shape, sequential and concurrent
@@ -669,11 +696,24 @@ pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
 /// a job quietly running at most of its budget is visible before the next
 /// slower host turns it into a kill. `docs/src/contributing.md` documents the
 /// grep, which is why the wording lives here rather than at each caller.
-pub(crate) fn elapsed_line(label: &str, ok: bool, elapsed: Duration) -> String {
-    format!(
-        "xtask: [{label}] {} in {elapsed:?}\n",
-        if ok { "done" } else { "FAILED" }
-    )
+pub(crate) fn elapsed_line(label: &str, ended: Ended, elapsed: Duration) -> String {
+    let how = match ended {
+        Ended::Done => String::from("done"),
+        Ended::Failed => String::from("FAILED"),
+        Ended::Interrupted(signal) => format!("INTERRUPTED by {}", signal_name(signal)),
+    };
+    format!("xtask: [{label}] {how} in {elapsed:?}\n")
+}
+
+/// `signal`'s name, for the terminating signals a run ends on.
+fn signal_name(signal: i32) -> String {
+    match signal {
+        libc::SIGINT => String::from("SIGINT"),
+        libc::SIGTERM => String::from("SIGTERM"),
+        libc::SIGHUP => String::from("SIGHUP"),
+        libc::SIGKILL => String::from("SIGKILL"),
+        other => format!("signal {other}"),
+    }
 }
 
 /// The floor `$TAIRIX_XTASK_TIMEOUT_SECS` raises every budget to, where the
@@ -762,6 +802,28 @@ fn is_workspace_root(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: a step the run's end cut off was reported `FAILED`,
+    /// which read as the step's own failure.
+    #[test]
+    fn a_step_s_line_says_how_it_ended() {
+        let children = Children::new(None);
+        let line = |ok| elapsed_line("s", Ended::of(ok, &children), Duration::from_secs(1));
+        assert_eq!(line(true), "xtask: [s] done in 1s\n");
+        assert_eq!(line(false), "xtask: [s] FAILED in 1s\n");
+        children.take(libc::SIGTERM);
+        assert_eq!(line(false), "xtask: [s] INTERRUPTED by SIGTERM in 1s\n");
+        assert_eq!(
+            line(true),
+            "xtask: [s] done in 1s\n",
+            "a step that got there"
+        );
+        assert_eq!(signal_name(libc::SIGINT), "SIGINT");
+        assert_eq!(
+            signal_name(libc::SIGUSR1),
+            format!("signal {}", libc::SIGUSR1)
+        );
+    }
     use crate::process::WHILE_ITS_PARENT_RUNS;
 
     /// xtask keeps its own lint tables only to leave `missing_docs` out, so

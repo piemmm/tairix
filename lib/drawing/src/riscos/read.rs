@@ -14,14 +14,15 @@ use tairix_bezier::{Affine, FillRule, Point};
 use tairix_collections::{try_arc, SharedSlice, SharedStr};
 use tairix_colour::Rgba;
 use tairix_fsmeta::preset::acorn::latin1_char;
+use tairix_softfloat::from_fpa_words;
 use tairix_util::fallible::{self, try_push};
 
 use super::{
-    a_paper, colour_of, face_of, fpa_double, Face, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE,
-    CLOSE, CLOSE_WITH_GAP, CODE, CURVE, DASHED, END, END_CAP_SHIFT, FIXED_ONE, FONT_NUMBER,
-    FONT_TABLE, GAP, GROUP, GROUP_NAME, HEADER, JOIN_BEVEL, JOIN_MITRE, JOIN_ROUND, JPEG,
-    LANDSCAPE, LINE, MAJOR_VERSION, MATRIX, MITRE_LIMIT, MONOSPACE, MOVE, OBJECT_HEADER, OPTIONS,
-    PATH, RIGHT_TO_LEFT, SPRITE, START_CAP_SHIFT, TAG, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN,
+    a_paper, colour_of, face_of, Face, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE,
+    CLOSE_WITH_GAP, CODE, CURVE, DASHED, END, END_CAP_SHIFT, FIXED_ONE, FONT_NUMBER, FONT_TABLE,
+    GAP, GROUP, GROUP_NAME, HEADER, JOIN_BEVEL, JOIN_MITRE, JOIN_ROUND, JPEG, LANDSCAPE, LINE,
+    MAJOR_VERSION, MATRIX, MITRE_LIMIT, MONOSPACE, MOVE, OBJECT_HEADER, OPTIONS, PATH,
+    RIGHT_TO_LEFT, SPRITE, START_CAP_SHIFT, TAG, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN,
     TRANSFORMED_SPRITE, TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_UNIT,
     TRIANGLE_WIDTH_SHIFT, UNITS_PER_PIXEL, WINDING_EVEN_ODD,
 };
@@ -173,7 +174,7 @@ fn options(bytes: &[u8]) -> Result<(Page, Grid), ReadError> {
     if field(28)? & LANDSCAPE != 0 {
         core::mem::swap(&mut page.width, &mut page.height);
     }
-    let spacing = fpa_double([field(32)?, field(36)?]);
+    let spacing = f64::from_bits(from_fpa_words([field(32)?, field(36)?]));
     let subdivisions = field(40)?;
     let shown = if field(60)? == 0 { Unit::In } else { Unit::Mm };
     if shown != page.unit {

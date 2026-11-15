@@ -12,7 +12,7 @@ use super::commands::{DFS, UTILS};
 use super::ws::{catalogue as cat, channel as ch, page, private, zp as z, ABSOLUTE_END};
 use crate::machine::bbc::keyboard::Key;
 use crate::rom::asm::{abs, byte, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-use crate::rom::os::{entry, fsc, osbyte, page_d, service, vector, zp as os, EXTENDED_ENTRIES};
+use crate::rom::os::{entry, fsc, osbyte, page_d, service, vector, zp as os, CR, EXTENDED_ENTRIES};
 
 /// No key down, as OSBYTE &7A reports it.
 const NO_KEY: u8 = 0xFF;
@@ -329,7 +329,7 @@ fn boot(a: &mut Asm) {
     a.sta(abs(page::WORK).x());
     a.inx();
     a.iny();
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.bne(copy);
     a.ldx(imm(lo(page::WORK)));
     a.ldy(imm(hi(page::WORK)));
@@ -372,7 +372,7 @@ fn help(a: &mut Asm) {
     a.lda(zp(os::TEXT).ind_y());
     a.cmp(imm(b' '));
     a.beq(word);
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq(out);
     a.iny();
     a.bne(skip);

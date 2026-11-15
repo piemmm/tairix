@@ -194,7 +194,7 @@ no original ROM's code is read, and no genuine ROM byte enters the tree.
 
 Its screen memory, sound chip writes and documented results match MOS 1.20's
 for the same input. Where it differs on purpose: its character set is its own
-design; it does not reproduce &31A for a clipped line's start, some private
+design, [`lib/vdu`](../lib/vdu.md)'s BBC arrangement; it does not reproduce &31A for a clipped line's start, some private
 keyboard and sound workspace, or redundant writes to a silenced sound
 channel; and, with no room left in 16 KiB, a whole-screen clear takes twice
 MOS 1.20's time, a horizontal line fill three times, VDU 5 a third longer
@@ -214,7 +214,9 @@ stacks of page 5, the string buffer at &600 and the input buffer at &700. Its
 error handler is entered at BASIC II's &B402, and &B433, where software
 points BRKV to stop the machine at any error, stops it as BASIC II does. It
 is written from the published guides and from BASIC II observed running, by
-the same rules as the MOS.
+the same rules as the MOS. Its keywords and token values are
+[`lib/bbcbasic`](../lib/bbcbasic.md)'s BASIC II tables, and its tokeniser and
+lister are tested against that library's on the emulated machine.
 
 Its screens, the memory it writes and its results match BASIC II's for the
 same input: every real it computes has BASIC II's bits, and a string is given

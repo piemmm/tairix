@@ -5,6 +5,7 @@ use alloc::string::ToString;
 use tairix_fuzzseed::Prng;
 
 use super::*;
+use crate::fpu::real::{from_double, INDEFINITE};
 
 fn shown(exponent: u16, sig: u64) -> String {
     extended(Real::new(false, exponent, sig))
@@ -74,7 +75,7 @@ fn signs_and_the_values_with_no_digits_are_named() {
     assert_eq!(extended(Real::new(false, 0x1234, 0)), "0", "a pseudo-zero");
     assert_eq!(extended(Real::INFINITY), "Infinity");
     assert_eq!(extended(Real::INFINITY.with_sign(true)), "-Infinity");
-    assert_eq!(extended(Real::INDEFINITE), "-NaN");
+    assert_eq!(extended(INDEFINITE), "-NaN");
     for value in [Real::new(true, 0x7FFE, u64::MAX), Real::new(true, 0, 1)] {
         assert!(extended(value).len() <= super::super::MOST_VALUE);
     }
@@ -104,7 +105,7 @@ fn every_double_is_written_as_the_host_writes_it() {
         if !x.is_finite() || x == 0.0 {
             continue;
         }
-        let (value, _) = Real::from_double(bits);
+        let (value, _) = from_double(bits);
         assert_eq!(extended(value), hosts(x), "{bits:016X}");
     }
     assert_eq!(hosts(0.5), "5.000000000000000000E-0001".to_string());

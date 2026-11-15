@@ -7,7 +7,7 @@ use super::{page, Held};
 use crate::cpu::STACK_PAGE;
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm};
-use crate::rom::os::{entry, EXTENDED_ENTRIES};
+use crate::rom::os::{entry, CR, EXTENDED_ENTRIES};
 
 /// The default vector table's length, then its address.
 pub const DEFAULTS_DESCRIPTOR: u16 = 0xFFB6;
@@ -131,14 +131,14 @@ fn entry_points(a: &mut Asm) {
     // OSASCI, OSNEWL, OSWRCR and OSWRCH fall into one another.
     a.org(entry::OSASCI);
     a.here("osasci");
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.bne(sym("oswrch"));
     a.org(entry::OSNEWL);
     a.here("osnewl");
     a.lda(imm(0x0A));
     a.jsr("oswrch");
     a.org(entry::OSWRCR);
-    a.lda(imm(0x0D));
+    a.lda(imm(CR));
     a.org(entry::OSWRCH);
     a.here("oswrch");
     a.jmp(abs(vector::WRCH).ind());

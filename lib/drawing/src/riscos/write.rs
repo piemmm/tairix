@@ -21,12 +21,13 @@ use tairix_image::{
     SurfacePicture,
 };
 use tairix_raster::Surface;
+use tairix_softfloat::fpa_words;
 use tairix_util::fallible;
 use tairix_util::mathf::{fabs, floor, fmax, fmin, round_i32, sqrt};
 
 use super::{
-    a_paper, fpa_words, word_of, Font, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CURVE,
-    DASHED, END, END_CAP_SHIFT, FIXED_ONE, FONT_TABLE, GROUP, GROUP_NAME, JOIN_BEVEL, JOIN_MITRE,
+    a_paper, word_of, Font, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CURVE, DASHED,
+    END, END_CAP_SHIFT, FIXED_ONE, FONT_TABLE, GROUP, GROUP_NAME, JOIN_BEVEL, JOIN_MITRE,
     JOIN_ROUND, JPEG, LANDSCAPE, LINE, MAGIC, MAJOR_VERSION, MITRE_LIMIT, MOST_A_PAPER, MOVE,
     NO_COLOUR, OBJECT_HEADER, OPTIONS, OPTIONS_SIZE, PAPER_LIMITS_SHOWN, PATH, SPRITE,
     START_CAP_SHIFT, TEXT, TRANSFORMED_SPRITE, TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT,
@@ -1387,7 +1388,7 @@ fn options(file: &mut Out, page: &Page, grid: Grid, paper: &Paper) -> Result<(),
     } else {
         PAPER_LIMITS_SHOWN
     };
-    let [spacing_high, spacing_low] = fpa_words(grid.spacing / grid_unit.pixels());
+    let [spacing_high, spacing_low] = fpa_words((grid.spacing / grid_unit.pixels()).to_bits());
     let words = [
         OPTIONS,
         OPTIONS_SIZE,

@@ -1,7 +1,7 @@
 //! The checksum against the standard's check value and a bitwise reference,
-//! and the streaming form against the one-shot one.
+//! the streaming form against the one-shot one, and the raw register.
 
-use super::{checksum, Crc32, POLY};
+use super::{checksum, update, Crc32, POLY};
 
 /// The definition, a bit at a time: the oracle the table is held to.
 fn bitwise(data: &[u8]) -> u32 {
@@ -59,4 +59,13 @@ fn pieces_fed_in_order_checksum_as_their_concatenation() {
         crc.update(tail);
         assert_eq!(crc.finish(), whole, "split at {split}");
     }
+}
+
+#[test]
+fn the_raw_register_continues_a_checksum_and_inverts_neither_side() {
+    let data = b"123456789";
+    assert_eq!(!update(u32::MAX, data), 0xCBF4_3926);
+    let (head, tail) = data.split_at(4);
+    assert_eq!(update(update(u32::MAX, head), tail), update(u32::MAX, data));
+    assert_eq!(update(0x1234_5678, &[]), 0x1234_5678);
 }

@@ -15,6 +15,7 @@ mod control;
 mod editor;
 mod numbers;
 mod output;
+mod tokenise;
 mod values;
 
 /// How long the machine takes to reach BASIC's first prompt.

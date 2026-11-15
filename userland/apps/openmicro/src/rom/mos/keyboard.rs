@@ -23,6 +23,7 @@ use crate::machine::electron::keyboard::{self as electron_keyboard, Key as Elect
 use crate::machine::electron::{control, sheila as ula, KEYBOARD_ROMS};
 use crate::machine::{Model, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, byte, imm, sym, zp, Acc, Asm, RTS, V_SET};
+use crate::rom::os::CR;
 
 /// Port B values that drive the latch's keyboard enable bit.
 const CPU_SCAN: u8 = latch(machine_latch::KEYBOARD_AUTOSCAN, false);
@@ -84,7 +85,7 @@ const TRANSLATION: [u8; 70] = [
     b'q', b'3', b'4', b'5', 0x84, b'8', 0x87, b'-', b'^', 0x8C,
     0x80, b'w', b'e', b't', b'7', b'i', b'9', b'0', b'_', 0x8E,
     b'1', b'2', b'd', b'r', b'6', b'u', b'o', b'p', b'[', 0x8F,
-    MARK_CAPS, b'a', b'x', b'f', b'y', b'j', b'k', b'@', b':', 0x0D,
+    MARK_CAPS, b'a', b'x', b'f', b'y', b'j', b'k', b'@', b':', CR,
     MARK_SHIFT_LOCK, b's', b'c', b'g', b'h', b'n', b'l', b';', b']', DELETE,
     MARK_TAB, b'z', b' ', b'v', b'b', b'm', b',', b'.', b'/', COPY,
     MARK_ESCAPE, 0x81, 0x82, 0x83, 0x85, 0x86, 0x88, 0x89, b'\\', 0x8D,
@@ -1420,7 +1421,7 @@ fn line_input(a: &mut Asm) {
     a.beq("line_delete");
     a.cmp(imm(0x15));
     a.beq("line_cancel");
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq("line_end");
     a.cpy(abs(page2::LINE_LIMITS));
     a.bcs("line_full");

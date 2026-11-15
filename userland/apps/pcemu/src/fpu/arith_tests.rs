@@ -3,19 +3,19 @@ extern crate std;
 use tairix_fuzzseed::Prng;
 
 use super::*;
-use crate::fpu::real::Class;
+use crate::fpu::real::{class, from_double, from_single, Class};
 
-const MODES: [Mode; 4] = [Mode::Nearest, Mode::Down, Mode::Up, Mode::Chop];
+const MODES: [Mode; 4] = [Mode::Nearest, Mode::Down, Mode::Up, Mode::Zero];
 
 /// A double's value as parts.
 fn parts(x: f64) -> Parts {
-    Parts::of(Real::from_double(x.to_bits()).0)
+    Parts::of(from_double(x.to_bits()).0)
 }
 
 /// A rounded register result read back as a double, where it is a normal
 /// one the double holds exactly.
 fn double(x: Real) -> Option<f64> {
-    if x.class() != Class::Normal || x.sig & ((1 << 11) - 1) != 0 {
+    if class(x) != Class::Normal || x.sig & ((1 << 11) - 1) != 0 {
         return None;
     }
     let exponent = i32::from(x.exponent()) - BIAS + 1023;
@@ -30,7 +30,7 @@ fn double(x: Real) -> Option<f64> {
 
 /// A single's bits as a double holds them exactly.
 fn single(x: Real) -> Option<f32> {
-    if x.class() != Class::Normal || x.sig & ((1 << 40) - 1) != 0 {
+    if class(x) != Class::Normal || x.sig & ((1 << 40) - 1) != 0 {
         return None;
     }
     let exponent = i32::from(x.exponent()) - BIAS + 127;
@@ -94,7 +94,7 @@ fn at_24_bits_they_round_as_ieee_singles_do() {
             f32::from_bits(u32::try_from(x.to_bits() >> 32).unwrap() & 0x807F_FFFF | 0x3F00_0000)
         };
         let (a, b) = (bits(&mut rng), bits(&mut rng));
-        let as_parts = |x: f32| Parts::of(Real::from_single(x.to_bits()).0);
+        let as_parts = |x: f32| Parts::of(from_single(x.to_bits()).0);
         for (exact, expected) in [
             (add(as_parts(a), as_parts(b), false), a + b),
             (multiply(as_parts(a), as_parts(b)), a * b),
@@ -151,7 +151,8 @@ fn reference(
         Mode::Nearest => below > half || (below == half && (sticky || kept & 1 == 1)),
         Mode::Up => !exact && !negative,
         Mode::Down => !exact && negative,
-        Mode::Chop => false,
+        Mode::Zero => false,
+        Mode::NearestAway => below >= half,
     };
     if up {
         kept += 1;
@@ -291,7 +292,7 @@ fn square_roots_bracket_their_radicand_in_every_mode() {
         let up = root(Mode::Up);
         assert!(square(down) <= radicand && radicand < square(down + 1));
         assert!(square(up - 1) < radicand && radicand <= square(up));
-        assert_eq!(root(Mode::Chop), down);
+        assert_eq!(root(Mode::Zero), down);
         // Nearest: below the midpoint's square, the root rounded down.
         let quadruple = (
             u128::from(sig) >> (63 - u32::from(odd)),
@@ -328,7 +329,7 @@ fn a_tiny_result_is_denormalised_and_flagged_as_the_8087_flags_it() {
         0
     );
     assert_eq!(
-        round(exact, Rounding::extended(Mode::Chop), flag::ALL).flags,
+        round(exact, Rounding::extended(Mode::Zero), flag::ALL).flags,
         flag::UNDERFLOW
     );
     // Unmasked, the exponent moves up by the wrap and the significand stays.
@@ -355,7 +356,7 @@ fn an_overflow_answers_by_the_mode_and_infinity_when_chopping() {
     let finite = |negative| Real::new(negative, EXP_MAX, u64::MAX);
     for (mode, negative, expected) in [
         (Mode::Nearest, false, Real::INFINITY),
-        (Mode::Chop, true, Real::INFINITY.with_sign(true)),
+        (Mode::Zero, true, Real::INFINITY.with_sign(true)),
         (Mode::Up, false, Real::INFINITY),
         (Mode::Up, true, finite(true)),
         (Mode::Down, false, finite(false)),
@@ -490,7 +491,7 @@ fn binary_stores_round_to_the_format_and_denormalise_below_it() {
         round_binary(
             huge,
             Binary::SINGLE,
-            Mode::Chop,
+            Mode::Zero,
             flag::ALL & !flag::OVERFLOW
         ),
         (None, flag::OVERFLOW)
@@ -516,7 +517,7 @@ fn integers_round_in_each_mode() {
         (2.5, Mode::Up, 3),
         (2.5, Mode::Down, 2),
         (-2.5, Mode::Down, 3),
-        (-2.5, Mode::Chop, 2),
+        (-2.5, Mode::Zero, 2),
         (0.25, Mode::Nearest, 0),
         (0.5, Mode::Nearest, 0),
         (0.75, Mode::Nearest, 1),

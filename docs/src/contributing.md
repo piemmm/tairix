@@ -38,7 +38,10 @@ finer per-command lines inside them — sequential steps and concurrent jobs
 alike, so a job running at most of its budget is visible before a slower host
 turns it into a kill. A job that is killed still prints the output it had
 produced, which names the test it was in, and a command or check that fails
-says why on the line before its closing `FAILED in`. A measured warm run:
+says why on the line before its closing `FAILED in`. A step a terminating
+signal cut off, which the run passes on to every child as it ends, closes with
+`INTERRUPTED by SIGTERM in` (or the signal taken) instead, so a stopped run's
+log never reads as a test that failed. A measured warm run:
 
 | Stage | Cost | Shape |
 | --- | --- | --- |

@@ -3,10 +3,14 @@
 //! references, and strings, REM and DATA tails, star commands and the names
 //! after FN and PROC are left as typed.
 
-use super::tokens::{flag, Keyword, KEYWORDS, LINE_REFERENCE, PSEUDO_LHS};
+use tairix_bbcbasic::basic2::KEYWORDS;
+use tairix_bbcbasic::keyword::{Flags, Keyword, PSEUDO_LHS};
+use tairix_bbcbasic::lineref;
+
 use super::ws::page;
 use super::ws::zp as z;
-use crate::rom::asm::{hi, imm, lo, zp, Acc, Asm, RTS};
+use crate::rom::asm::{byte, hi, imm, lo, zp, Acc, Asm, RTS};
+use crate::rom::os::CR;
 
 /// Where the next character is read from, and the next byte written to.
 pub(super) const READ: u16 = z::SCRATCH + 2;
@@ -28,24 +32,23 @@ pub(super) const FROM: u16 = BEFORE + 2;
 /// Where the input goes on after a keyword.
 const END: u16 = FROM + 2;
 
-const CR: u8 = 0x0D;
 /// An encoded line number's bytes, its token among them.
-pub(super) const REFERENCE: u8 = 4;
+pub(super) const REFERENCE: u8 = 1 + byte(lineref::ENCODED);
 /// A table entry's flags byte, which only a keyword with flags has, bears
 /// this bit, as its token does.
 const FLAGGED: u8 = 0x80;
 /// The order the flags come off in.
 const _: () = assert!(
-    flag::CONDITIONAL == 1
-        && flag::MIDDLE == 2
-        && flag::START == 4
-        && flag::LINE_NUMBER == 8
-        && flag::NAME == 0x10
-        && flag::RAW == 0x20
+    Flags::CONDITIONAL == 1
+        && Flags::MIDDLE == 2
+        && Flags::START == 4
+        && Flags::LINE_NUMBER == 8
+        && Flags::NAME == 0x10
+        && Flags::RAW == 0x20
 );
 /// The pseudo-variables' tokens, which at a statement's start take their
 /// assigning ones: those flagged PSEUDO, which run unbroken.
-const PSEUDO_TOKENS: (u8, u8) = pseudo_tokens();
+pub(super) const PSEUDO_TOKENS: (u8, u8) = pseudo_tokens();
 
 /// # Panics
 ///
@@ -55,9 +58,10 @@ const fn pseudo_tokens() -> (u8, u8) {
     let (mut first, mut last, mut count) = (0xFF_u8, 0_u8, 0_u8);
     let mut i = 0;
     while i < KEYWORDS.len() {
-        let Keyword { token, flags, .. } = KEYWORDS[i];
-        assert!(flags & FLAGGED == 0);
-        if flags & flag::PSEUDO != 0 {
+        let Keyword { word, flags } = KEYWORDS[i];
+        let token = word.token;
+        assert!(flags.bits() & FLAGGED == 0);
+        if flags.has(Flags::PSEUDO) {
             if token < first {
                 first = token;
             }
@@ -86,14 +90,11 @@ pub fn emit(a: &mut Asm) {
 /// ends it.
 fn table(a: &mut Asm) {
     a.here("keywords");
-    for Keyword {
-        name, token, flags, ..
-    } in KEYWORDS
-    {
-        a.text(name);
-        a.byte(token);
-        if flags != 0 {
-            a.byte(FLAGGED | flags);
+    for Keyword { word, flags } in KEYWORDS {
+        a.text(word.name);
+        a.byte(word.token);
+        if flags != Flags::default() {
+            a.byte(FLAGGED | flags.bits());
         }
     }
     a.byte(0);
@@ -514,7 +515,7 @@ fn line_numbers(a: &mut Asm) {
     a.adc(zp(BEFORE));
     a.sta(zp(READ));
     a.bind(fits);
-    a.lda(imm(LINE_REFERENCE));
+    a.lda(imm(lineref::MARKER));
     a.jsr("write_byte");
     a.jsr("encode_number");
     a.jmp("crunch_next");

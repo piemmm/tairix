@@ -27,7 +27,7 @@ use crate::machine::bbc::sheila;
 use crate::machine::electron::{control as ula_control, irq as ula_irq, sheila as ula};
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-use crate::rom::os::{filing_system, fsc, osbyte, service};
+use crate::rom::os::{filing_system, fsc, osbyte, service, CR};
 
 /// &E2's bits.
 mod state {
@@ -1591,7 +1591,7 @@ fn tones(a: &mut Asm, model: Model) {
     a.here("cfs_record_wait");
     a.jsr("osrdch");
     a.bcs("cfs_escape_far");
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.bne("cfs_record_wait");
     a.jmp("osnewl");
 
@@ -1651,7 +1651,7 @@ fn osrdrm(a: &mut Asm, model: Model) {
     a.later(|a| {
         a.here("boot_name");
         a.text("!BOOT");
-        a.byte(0x0D);
+        a.byte(CR);
     });
 }
 
@@ -1704,7 +1704,7 @@ fn cfs_show_read(a: &mut Asm) {
     a.bne("cfs_show_line");
     a.jsr("osnewl");
     a.here("cfs_show_line");
-    a.lda(imm(0x0D));
+    a.lda(imm(CR));
     a.jsr("oswrch");
     a.ldy(imm(0));
     a.here("cfs_show_name");

@@ -6,9 +6,8 @@
 use super::float::PACKED;
 use super::ws::{kind, page, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
-use crate::rom::os::{entry, osbyte};
+use crate::rom::os::{entry, osbyte, CR};
 
-const CR: u8 = 0x0D;
 const OSARGS_READ_PTR: u8 = 0;
 const OSARGS_WRITE_PTR: u8 = 1;
 const OSARGS_EXTENT: u8 = 2;

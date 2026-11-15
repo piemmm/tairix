@@ -9,9 +9,8 @@
 use super::far;
 use super::ws::{page, private, zp as z};
 use crate::rom::asm::{abs, imm, zp, Asm, RTS};
-use crate::rom::os::{entry, page_d, zp as os, ESCAPE_FLAG};
+use crate::rom::os::{entry, page_d, zp as os, CR, ESCAPE_FLAG};
 
-const CR: u8 = 0x0D;
 /// OSFIND's modes for reading and writing.
 const OPEN_IN: u8 = 0x40;
 const OPEN_OUT: u8 = 0x80;

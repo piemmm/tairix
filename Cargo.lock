@@ -1228,6 +1228,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-bbcbasic"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-bezier"
 version = "0.0.0"
 dependencies = [
@@ -1960,6 +1968,7 @@ dependencies = [
  "tairix-inline",
  "tairix-pdf",
  "tairix-raster",
+ "tairix-softfloat",
  "tairix-svg",
  "tairix-util",
  "tairix-xml",
@@ -3232,6 +3241,7 @@ dependencies = [
  "tairix-hash",
  "tairix-image",
  "tairix-log",
+ "tairix-obey",
  "tairix-path",
  "tairix-raster",
  "tairix-reclaim",
@@ -3251,6 +3261,7 @@ dependencies = [
  "tairix-inline",
  "tairix-raster",
  "tairix-util",
+ "tairix-vdu",
  "tairix-video",
  "tairix-xml",
 ]
@@ -4157,12 +4168,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-obey"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-openmicro"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appdata",
  "tairix-audio",
+ "tairix-bbcbasic",
  "tairix-browse",
  "tairix-buildcfg",
  "tairix-compress",
@@ -4185,6 +4205,7 @@ dependencies = [
  "tairix-sandbox",
  "tairix-theme",
  "tairix-util",
+ "tairix-vdu",
  "tairix-window",
 ]
 
@@ -4332,6 +4353,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-softfloat",
  "tairix-theme",
  "tairix-unicode",
  "tairix-util",
@@ -4603,6 +4625,15 @@ dependencies = [
  "tairix-raster",
  "tairix-theme",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-riscos-arm"
+version = "0.0.0"
+dependencies = [
+ "tairix-crc32",
+ "tairix-crc32c",
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -5039,6 +5070,13 @@ dependencies = [
  "tairix-smbfs",
  "tairix-util",
  "tairix-writeback",
+]
+
+[[package]]
+name = "tairix-softfloat"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
 ]
 
 [[package]]
@@ -9587,6 +9625,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-vdu"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-video"
 version = "0.0.0"
 dependencies = [
@@ -10023,6 +10065,7 @@ dependencies = [
  "tairix-qemu",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-riscos-arm",
  "tairix-sandbox",
  "tairix-settings",
  "tairix-shaders",

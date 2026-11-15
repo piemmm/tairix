@@ -194,7 +194,7 @@ plan's ledger. A `blocked` row names its blocker.
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 | BEEB | The Open Micro emulator `OpenMicro.app` — the BBC Micro Model B and the Acorn Electron with its Plus 1 — and their clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs (`plans/BEEB.md`) | blocked: BB18 needs a corpus of real software images a developer holds outside the tree |
 | PCEMU | `PCEmulator.app`, the PC/XT-class emulator up to the 80186, TAIRiX DOS, and the BR26 code installation its translator needs (`plans/PCEMU.md`) | in progress |
-| RISCOS-EMULATOR | `RISCOSEmulator.app`: RISC OS applications on the TAIRiX desktop — the ARM processor, a first-party RISC OS, BBC BASIC V and VI, the Wimp and Toolbox, machine mode for software that drives the Acorn chips, the translator, and the shared libraries and desktop facilities they need (`plans/RISCOS-EMULATOR.md`) | planned |
+| RISCOS-EMULATOR | `RISCOSEmulator.app`: RISC OS applications on the TAIRiX desktop — the ARM processor, a first-party RISC OS, BBC BASIC V and VI, the Wimp and Toolbox, machine mode for software that drives the Acorn chips, the translator, and the shared libraries and desktop facilities they need (`plans/RISCOS-EMULATOR.md`) | in progress |
 
 ### Desktop
 
@@ -334,6 +334,30 @@ SPIR-V, each `lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6),
 `lib/video` (the one VP8 codec, which a lossy WebP picture and a screen
 recording are made of, and the WebM container a recording is kept in,
 `plans/CAPTURE.md`),
+`lib/softfloat` (the one software floating point — exact binary32, binary64
+and double-extended arithmetic rounded once in every IEEE 754 mode with its
+exceptions, and the x87 and FPA memory layouts — which PCEmulator's 8087
+computes through, `lib/drawing` stores a Draw file's doubles by, and the RISC
+OS emulator's FPA and VFP are to compute through, `plans/RISCOS-EMULATOR.md`
+RO5),
+`lib/obey` (the one reading of RISC OS's command-line machinery — GSTrans,
+system variables and their expansion, `OS_EvaluateExpression`,
+`OS_SubstituteArgs` and `OS_ReadArgs`, pure over a variable store, and an Obey
+file read as data without running it — through which `lib/icon` reads an
+application's `!Boot`, and the RISC OS emulator's kernel and registry are to,
+`plans/RISCOS-EMULATOR.md` RO6),
+`lib/bbcbasic` (the one definition of BBC BASIC's tokens — the keywords BASIC
+II and BASIC V share, each dialect's table, tokeniser and lister under
+`LISTO`, the line-reference encoding and the program image — from which
+OpenMicro's BASIC ROM builds its keyword table and token values, and which
+the RISC OS emulator's BASIC and TextEdit are to use,
+`plans/RISCOS-EMULATOR.md` RO7),
+`lib/vdu` (the one Acorn VDU vocabulary — the control codes with their
+parameter counts, VDU 23's operations, RISC OS 5's numbered modes with their
+mode variables, and the 8×8 system character set drawn for TAIRiX — from which
+OpenMicro's MOS builds its font and control table and `lib/image` reads a
+sprite's numbered mode, and which the RISC OS emulator's VDU drivers are to
+use, `plans/RISCOS-EMULATOR.md` RO8),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
@@ -1036,6 +1060,22 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-11-14 — §3: `lib/vdu`.** OpenMicro's MOS, the RISC OS emulator and
+  the sprite decoder share the VDU codes, the numbered modes and one system
+  font, so each is defined once.
+
+- **2026-11-14 — §3: `lib/bbcbasic`.** OpenMicro's BASIC II and the RISC OS
+  emulator's BASIC V share most of their tokens, so the tables, tokenisers
+  and listers are written once beside each other.
+
+- **2026-11-14 — §3: `lib/obey`.** The icon library reads a `!Boot` and the
+  emulator's kernel runs the same commands, so RISC OS's string, variable and
+  argument rules are written once.
+
+- **2026-11-14 — §3: `lib/softfloat`.** The 8087, the FPA and VFP each
+  round exact results in IEEE 754's modes, so the arithmetic is written once
+  and each unit keeps only the rules that are its own.
 
 - **2026-11-14 — §3, §17.4: `userland/apps/riscos/` is a leaf subtree.**
   The RISC OS emulator is a processor, an operating system and a desktop, too

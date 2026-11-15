@@ -15,11 +15,13 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use tairix_bbcbasic::keyword::word;
+
 use super::ws::{kind, page, zp as z};
 use crate::cpu::isa::{encode, Mnemonic, Mode, OPCODES};
 use crate::rom::asm::byte;
 use crate::rom::asm::{abs, hi, imm, zp, Acc, Asm, Label, RTS};
-use crate::rom::os::ESCAPE_FLAG;
+use crate::rom::os::{CR, ESCAPE_FLAG};
 
 /// The modes in the order of their bits in a class's set.
 const MODES: [Mode; 13] = [
@@ -79,9 +81,11 @@ const INDEXED: u8 = window_bit(ZERO_PAGE_X)
 const PSEUDO: [&str; 2] = ["OPT", "EQU"];
 const EQU_KINDS: [(u8, u8); 4] = [(b'B', 1), (b'W', 2), (b'D', 4), (b'S', 0)];
 /// The tokens a mnemonic can be spelt with: ORA is OR's and an A.
-const TOKENS: [(u8, &str); 3] = [(0x80, "AND"), (0x82, "EOR"), (0x84, "ORA")];
-const OR: u8 = 0x84;
-const CR: u8 = 0x0D;
+const TOKENS: [(u8, &str); 3] = [
+    (word::AND.token, "AND"),
+    (word::EOR.token, "EOR"),
+    (word::OR.token, "ORA"),
+];
 /// Where a listed statement's text starts, a continued line of bytes'
 /// indent, and the bytes a line shows.
 const SOURCE_COLUMN: u8 = 14;
@@ -408,7 +412,7 @@ fn mnemonic(a: &mut Asm, tables: &Tables) -> (Label, Label, Label) {
     a.bpl(each);
     a.bmi(syntax);
     a.bind(spelt);
-    a.cmp(imm(OR));
+    a.cmp(imm(word::OR.token));
     a.bne(spelling);
     a.lda(zp(z::TEXT_A).ind_y());
     a.cmp(imm(b'A'));

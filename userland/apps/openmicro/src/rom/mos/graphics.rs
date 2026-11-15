@@ -8,6 +8,8 @@
 //! at `&D4` the PLOT's action and colour set up: `(screen | or) ^ eor` under
 //! the pixel's mask makes every GCOL action.
 
+use tairix_vdu::code::{self, Operation};
+
 use super::ws::{buffer, var, vdu, vdu_zp, vector};
 use super::{copy, has_teletext, return_in_teletext};
 use crate::machine::Model;
@@ -1614,9 +1616,9 @@ fn vdu5_step(a: &mut Asm) {
 fn vdu_23(a: &mut Asm, model: Model) {
     a.here("vdu_23");
     a.lda(abs(QUEUE_LAST - 8));
-    a.cmp(imm(32));
+    a.cmp(imm(code::FIRST_DEFINED));
     a.bcs("define_character");
-    a.cmp(imm(1));
+    a.cmp(imm(Operation::Cursor as u8));
     a.beq("vdu_23_cursor");
     a.bcs("vdu_23_other");
     // VDU 23, 0, register, value.

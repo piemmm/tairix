@@ -13,9 +13,8 @@ use super::far;
 use super::ws::{catalogue as cat, page, zp as z};
 use crate::machine::{OS_BASE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, byte, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-use crate::rom::os::{entry, fsc, osbyte, page_d, zp as os};
+use crate::rom::os::{entry, fsc, osbyte, page_d, zp as os, CR};
 
-const CR: u8 = 0x0D;
 /// The *OPT numbers the DFS takes.
 const OPT_MESSAGES: u8 = 1;
 const OPT_BOOT: u8 = 4;

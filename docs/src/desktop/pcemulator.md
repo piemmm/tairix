@@ -273,9 +273,10 @@ differs from them decide.
   unit's instructions (FNINIT, FNCLEX, FNSTSW, FNSTCW, FNENI, FNDISI) act at
   once and never hold BUSY. A numeric instruction issued before the last has
   ended, which no assembler's output does, ends that one early.
-- **Arithmetic** is exact over the 64-bit significand and rounded once, in
-  the control word's mode at its precision for add, subtract, multiply,
-  divide and square root. The 8087's own semantics hold where it predates the
+- **Arithmetic** is `lib/softfloat`'s core: exact over the 64-bit
+  significand and rounded once, in the control word's mode at its precision
+  for add, subtract, multiply, divide and square root. The 8087's own
+  semantics hold where it predates the
   finished IEEE 754: projective infinity by default; one kind of NaN, any
   arithmetic operand of which is invalid; unnormals and pseudo-zeros as valid
   numbers, a short or long denormal loaded as the equivalent unnormal, with

@@ -77,6 +77,9 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 # slash a name crosses with exchanged, so an application's sprite file is found
 # as the volume spells it.
 tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
+# RISC OS's command-line machinery: an application's `!Boot` read as data,
+# its variables and `IconSprites` files learned without running it.
+tairix-obey = { path = "../obey", version = "=0.0.0" }
 # The sprite name an application's icons are sought by, so the name asked for
 # is the one the sandboxed decoder matches. Nothing here parses a sprite.
 tairix-image = { path = "../image", version = "=0.0.0" }

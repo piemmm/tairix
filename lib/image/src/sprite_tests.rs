@@ -1625,3 +1625,28 @@ fn a_mode_states_the_density_its_eigen_factors_make() {
         crate::Density::whole(90, 45, crate::DensityUnit::Inch)
     );
 }
+
+/// The regression: modes 3 and 6 were read as one bit a pixel and mode 47's
+/// pixels as twice as wide as they are tall, where RISC OS 5 has the first two
+/// text modes, refusing a sprite in one, and mode 47's pixels square; so an
+/// eight-bit sprite twice as wide was written in mode 47 and read back square.
+#[test]
+fn numbered_modes_are_risc_os_5_s_and_a_sprite_is_never_in_a_text_mode() {
+    for text in [3, 6, 7] {
+        assert!(SpriteMode::from_value(text).is_none(), "mode {text}");
+    }
+    let shape = |mode| SpriteMode::from_value(mode).expect("a mode").pixel_aspect();
+    assert_eq!(shape(47), (1, 1));
+    assert_eq!(
+        SpriteMode::indexed(IndexDepth::Eight, (2, 1), false).value(),
+        49
+    );
+    assert_eq!(
+        SpriteMode::indexed(IndexDepth::Two, (1, 2), false).value(),
+        8
+    );
+    assert_eq!(
+        SpriteMode::indexed(IndexDepth::Eight, (1, 1), false).value(),
+        21
+    );
+}

@@ -1,0 +1,20 @@
+[package]
+name = "tairix-obey"
+description = "TAIRiX's reading of RISC OS's command-line machinery: GSTrans with every escape, system variables and their expansion, OS_EvaluateExpression, OS_SubstituteArgs and OS_ReadArgs, all pure over a variable store, and a read-only reading of an Obey file that runs no command. no_std, forbids unsafe, every allocation fallible."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The fallible reservations every buffer a hostile string sizes takes.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harness and the randomised tests draw from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

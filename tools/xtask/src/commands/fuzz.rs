@@ -135,6 +135,26 @@ pub const TARGETS: &[Target] = &[
         description: "lib/collections heap-backed tier (hash map, recency map, range map and set, spilling small vector) against naive models",
     },
     Target {
+        package: "tairix-obey",
+        test: "fuzz_obey",
+        description: "lib/obey: hostile strings, expressions, templates and Obey files through GSTrans, the evaluator, OS_ReadArgs, OS_SubstituteArgs and the read-only reading; escapes round-trip, arithmetic agrees",
+    },
+    Target {
+        package: "tairix-bbcbasic",
+        test: "fuzz_bbcbasic",
+        description: "lib/bbcbasic: hostile text tokenised and hostile tokens listed in BASIC II and BASIC V under every LISTO, bounded however deep the structures; hostile program images read, and read lines imaged back",
+    },
+    Target {
+        package: "tairix-riscos-arm",
+        test: "fuzz_arm",
+        description: "userland/apps/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks",
+    },
+    Target {
+        package: "tairix-softfloat",
+        test: "fuzz_decimal",
+        description: "lib/softfloat decimal conversion and the FPA's packed decimal: any value and any words, their brackets and round trips",
+    },
+    Target {
         package: "tairix-gpu",
         test: "fuzz_gpu",
         description: "lib/gpu submission model (copies, fills and updates over buffers sharing allocations, ranges inside, across and past what they name) on the software device against a byte-array reference",
@@ -1253,6 +1273,38 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-compress");
+    }
+
+    #[test]
+    fn obey_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_obey"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-obey");
+    }
+
+    #[test]
+    fn bbcbasic_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_bbcbasic"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-bbcbasic");
+    }
+
+    #[test]
+    fn arm_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_arm"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-riscos-arm");
+    }
+
+    #[test]
+    fn softfloat_decimal_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_decimal"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-softfloat");
     }
 
     #[test]

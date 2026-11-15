@@ -37,11 +37,11 @@ an application's own documents folder, the reference harness);
 | RO2 | One association path: one table the file manager and the desktop both build, one matching rule Open With, icon-bar drops and folder picks apply, one store precedence, the records of an open, and a test that browsing launches nothing | done |
 | RO3 | RISC OS names defined once: leaf and path spelling and filetype names in `lib/fsmeta::preset::acorn`, the `,xxx` suffix on `Filetype`, each content type's canonical filetype beside `lib/browse`'s table; the archive, ADFS, icon, window-protocol, picker, save-panel and document-host copies move onto them | done |
 | RO4 | RISC OS colours and font names defined once: the `&BBGGRR00` colour word in `lib/colour`, the font-name map made public in `lib/drawing`; Draw's private copy and its re-derivation of the generic families are deleted | done |
-| RO5 | `lib/softfloat`: exact binary32, binary64 and double-extended arithmetic in every rounding mode with its exceptions, plus the FPA and x87 memory formats; the 8087 moves onto it with its digest unchanged | planned |
-| RO6 | `lib/obey`: GSTrans, system variables, expressions, Obey parameters and `OS_ReadArgs` templates; `lib/icon`'s `!Boot` reader is rebuilt on its read-only mode | planned |
-| RO7 | `lib/bbcbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | planned |
-| RO8 | `lib/vdu`: the Acorn VDU vocabulary, RISC OS's numbered screen modes and the 8×8 system character set; OpenMicro's MOS and `lib/image` move onto it | planned |
-| RO9 | The ARM integer core: the one A32 table, the interpreter, the 26-bit and 32-bit programmer's models, the two profiles, exceptions, the disassembler and encoder, the conformance vectors | planned |
+| RO5 | `lib/softfloat`: exact binary32, binary64 and double-extended arithmetic in every rounding mode with its exceptions, exact decimal conversion, plus the FPA and x87 memory formats; the 8087 moves onto it with its digest unchanged | done |
+| RO6 | `lib/obey`: GSTrans, system variables, expressions, Obey parameters and `OS_ReadArgs` templates; `lib/icon`'s `!Boot` reader is rebuilt on its read-only mode | done |
+| RO7 | `lib/bbcbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | done |
+| RO8 | `lib/vdu`: the Acorn VDU vocabulary, RISC OS's numbered screen modes and the 8×8 system character set; OpenMicro's MOS and `lib/image` move onto it | done |
+| RO9 | The ARM integer core: the one A32 table, the interpreter, the 26-bit and 32-bit programmer's models, the two profiles, exceptions, the disassembler and encoder, the conformance vectors | done |
 | RO10 | Thumb and Thumb-2, and interworking | planned |
 | RO11 | The FPA: every instruction and precision, rounding and exceptions, the transcendental results | planned |
 | RO12 | VFP and Advanced SIMD, through ARMv8-A's AArch32 additions | planned |
@@ -358,16 +358,19 @@ responsibility across this table needs the plan updated in the same change.
   not listed here.
 
 A **profile** fixes every implementation-defined choice. It fixes the stored PC
-offset, unaligned access, `SWP`, the ID registers, the exception vectors' base
-and which programmer's models exist. There are exactly two outside machine
+offset, unaligned access, `SWP`, the ID registers, the exception vectors' base,
+which programmer's models exist and what an UNPREDICTABLE encoding does. There are exactly two outside machine
 mode; machine mode's timed tier adds ARM2 and ARM3 profiles, which carry their
 cycle timings (§12):
 
 - **26-bit:** ARMv4 with the 26-bit models, as the SA-110 has them. A
-  misaligned `LDR` returns the rotated word, as those cores did.
+  misaligned `LDR` returns the rotated word, as those cores did. An
+  UNPREDICTABLE encoding executes as a core without a pipeline would, since
+  classic software ran on cores that executed them.
 - **32-bit:** ARMv7-A with ARMv8-A's AArch32 additions, configured as RISC OS 5
   configures it. Alignment faults are on, so legacy rotated-load code faults as
-  it does there.
+  it does there. An UNPREDICTABLE encoding takes the undefined instruction
+  exception, as the architecture permits.
 
 A profile is chosen for each program a task runs:
 
@@ -401,9 +404,11 @@ is fuzzed.
 - **26-bit.** R15 holds N, Z, C, V, I and F in bits 31–26, the word PC in bits
   25–2, and the mode in bits 1–0 (USR26, FIQ26, IRQ26, SVC26).
   - The model covers the `TEQP` family's PSR writes, `MOVS pc, …` and
-    `LDM …^` restoring flags, and the 64 MiB address space with the address
-    exception.
+    `LDM …^` restoring flags, and the 64 MiB address space.
   - Each 26-bit mode shares the banks of its 32-bit counterpart.
+  - An exception taken in a 26-bit mode enters a 32-bit one, as on the SA-110.
+    Exception entry in the 26-bit modes and the address exception are the ARM2
+    and ARM3 profiles' (RO50), as those cores have them.
 - **32-bit.** CPSR, an SPSR per exception mode, and the banks of FIQ, IRQ, SVC,
   ABT and UND. SYS shares USR's.
 - **PC reads.** The PC reads as the instruction's address plus 8 in ARM state
@@ -411,8 +416,10 @@ is fuzzed.
   architecture version defines.
 - **Exceptions** enter the guest's handlers through the kernel's vector model
   (§4.2), never through Rust panics.
-  - Undefined instruction, prefetch abort, data abort and address exception
-    reach the environment handlers.
+  - Undefined instruction, prefetch abort, data abort and, on the ARM2 and
+    ARM3 profiles, address exception reach the environment handlers. A `SWI`
+    stops the processor for the kernel, which enters the vector when a guest
+    has claimed it.
   - An unclaimed coprocessor instruction reaches the undefined-instruction
     vector, as on hardware.
 - **Exclusives.** The exclusive monitor is single-core, as RISC OS is. It is
@@ -462,8 +469,12 @@ is fuzzed.
     builds;
   - where a public vector set's licence is compatible, that set, with its
     notice kept beside it (`plans/BEEB.md` §7's SingleStepTests precedent).
+    The `SingleStepTests` ARM7TDMI suite (MIT), which the NanoBoyAdvance
+    emulator generated, holds the 26-bit profile to ARMv4 wherever ARMv4
+    defines the result.
 
-  `cargo xtask riscos-vectors` imports them; a crate test samples them.
+  `cargo xtask riscos-vectors` replays them and writes the sample a crate test
+  replays.
 - **Unit tests.** Each instruction class has them: shifter carry, the
   writeback forms of `LDM`/`STM`, the 26-bit PSR writes, interworking, and
   every floating-point exception.
@@ -638,8 +649,8 @@ is fuzzed.
 ## 5. The command line and scripts (RO17)
 
 - **`OS_CLI` resolution** follows RISC OS's order:
-  1. the modules' command tables;
-  2. `Alias$…` aliases;
+  1. `Alias$…` aliases, unless a `%` before the command skips them;
+  2. the modules' command tables;
   3. a file found on `Run$Path`, run by type through `Alias$@RunType_XXX`.
 
   An unknown command is therefore the "not found" error the `Run$Path` fallback
@@ -1194,36 +1205,80 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     answers — a generic, a RISC OS family by its generic, a familiar family
     (Times, Courier, Arial) by the generic it stands for — else its first
     family, else sans-serif. It names no installed family.
-- **RO5 — `lib/softfloat`:**
-  - Exact binary32, binary64 and double-extended arithmetic with unnormal
-    values, as the FPA and the 8087 have them.
-  - Every rounding mode and exception flag.
-  - The FPA's memory formats (word order, extended, packed decimal) and the
-    x87's.
-  - PCEmulator's 8087 keeps its own value classes and moves onto the shared
-    core with its digest unchanged. `lib/drawing`'s FPA word order moves onto
-    it too.
-- **RO6 — `lib/obey`:** GSTrans with every escape, the system-variable types
-  and their expansion, `OS_EvaluateExpression`'s grammar, Obey parameter
-  substitution and `OS_ReadArgs` templates. All of it is pure, over a
-  variable-store trait.
-  - `lib/icon`'s `!Boot` reader is rebuilt on its read-only mode, which runs no
-    command and only reads `Set`, `SetMacro`, `Unset`, `If` and `IconSprites`.
+- **RO5 — `lib/softfloat`** (`docs/src/lib/softfloat.md`):
+  - The core holds binary32, binary64 and double-extended results exactly
+    over operands with unnormal values. It rounds them once in IEEE 754's five
+    modes and decides nothing about overflow, underflow or NaNs.
+  - The IEEE layer adds default exception handling, the five flags, and a
+    `Policy` for tininess and NaN propagation, which VFP (RO12) sets.
+  - `Decimal` converts between binary and decimal values exactly, to 1–38
+    digits in any mode.
+  - The memory formats are binary64 in the FPA's word order, the x87's
+    ten-byte and the FPA's three-word extended layouts, and the FPA's packed
+    decimal, P and EP (`Packed`).
+  - PCEmulator's 8087 computes on the core, its digest unchanged. It keeps its
+    own value classes, register wrap, chop-mode results, partial remainder,
+    real indefinite and packed BCD. Its debugger writes registers through
+    `Decimal`.
+  - `lib/drawing` stores a Draw file's doubles in the FPA's word order through
+    it.
+  - The FPA (RO11) keeps its own rules over these formats: which encodings are
+    infinities, NaNs or illegal, the digits STFP writes, and how LDFP rounds.
+- **RO6 — `lib/obey`** (`docs/src/lib/obey.md`):
+  - GSTrans with every escape, the system-variable types with
+    `OS_SetVarVal`'s and `OS_ReadVarVal`'s semantics, and
+    `OS_EvaluateExpression` on RISC OS's operator stack, so a malformed
+    expression gives RISC OS's error.
+  - `OS_SubstituteArgs`, and `OS_ReadArgs` with its buffer laid out as the
+    call leaves it.
+  - All of it is pure over a `Variables` store, which the kernel (RO15)
+    implements over guest memory and `Store` in host memory.
+  - Every reading is bounded by a budget of references; the kernel chooses
+    one for trusted guest text.
+  - Where RISC OS 5's sources read past a string or crash, the documented
+    intent is kept.
+  - The read-only mode reads an Obey file as data. It reads only `Set`,
+    `SetMacro`, `Unset`, `If` and `IconSprites`, and skips a line that names
+    its command by an alias or an abbreviation, or opens a redirection.
+    `lib/icon`'s `!Boot` reader is built on it, nested `If`s and any
+    condition included.
   - RO32's registry extends that read-only reading to the type claims.
-- **RO7 — `lib/bbcbasic`:** the token tables of BASIC II and of BASIC V and VI,
-  sharing what the dialects define alike, plus tokenising, listing with `LISTO`
-  and the line-reference encoding.
-  - OpenMicro's ROM builder emits its keyword table from it.
+- **RO7 — `lib/bbcbasic`** (`docs/src/lib/bbcbasic.md`):
+  - The 113 keywords BASIC II and BASIC V spell and number alike are defined
+    once. Each dialect's table lists every keyword in its tokeniser's order
+    with its flags, BASIC II's typed one byte a token and BASIC V's with its
+    prefixed tokens.
+  - Each dialect's tokeniser and `LIST` under `LISTO` are its own: BASIC II's
+    as its ROM's, BASIC V's as RISC OS 5's, warnings, structure indent and
+    statement splitting included. Each counts its listing depth in the width
+    its original does, so a listed line is bounded by its own length.
+  - The line-reference encoding, the program image read and built, and a typed
+    line's text as each dialect stores it.
+  - OpenMicro's BASIC builds its keyword table, its statement, function and
+    command tables, and every token it tests from these tables. Its tokeniser
+    and lister are tested against the library's on the emulated machine, with
+    programs drawn afresh each run.
+  - Where RISC OS 5's lister reads past its table for a token it has no
+    spelling for, the token lists as nothing.
   - Its other consumers are the emulator (RO20) and TextEdit (RO49).
-- **RO8 — `lib/vdu`:**
-  - The VDU control codes and their parameter counts, which BBC and RISC OS
-    define alike, and VDU 23's sub-codes.
-  - RISC OS's numbered modes with their depth, eigen factors and geometry.
-    `lib/image`'s private mode tables move onto it.
-  - The 8×8 system character set: OpenMicro's glyph designs, placed at 96 for
-    the BBC's £ and at 163 for RISC OS's, with RISC OS's Latin-1 half added.
-    OpenMicro's MOS, for the Model B and the Electron alike, emits its font
-    from it.
+- **RO8 — `lib/vdu`** (`docs/src/lib/vdu.md`):
+  - The control codes 0–31 and 127 with the parameters each gathers, which
+    the BBC and RISC OS define alike, and VDU 23's operations: those RISC OS 5
+    performs, the rest passed to the unknown-VDU 23 vector, and characters
+    defined from 32.
+  - RISC OS 5's numbered modes 0–53 with every mode variable
+    `OS_ReadModeVariable` reads. Mode 7 is RISC OS 5's 256-colour Teletext.
+    Modes 3, 6 and 7 are text modes, in which no sprite may be.
+  - The 8×8 system character set in TAIRiX's own designs: OpenMicro's for
+    32–126, and new ones in its style for the rest. RISC OS's arrangement runs
+    32–255, ISO 8859-1 with RISC OS's own characters at 128–159 and its
+    unassigned codes showing their number. The BBC's runs 32–127, with the
+    pound sign at 96 and a hatched block at 127.
+  - OpenMicro's MOS builds its font, its control-code table, DELETE and VDU
+    23's tests from it, for the Model B and the Electron alike.
+  - `lib/image` reads a sprite's numbered mode through it, so modes 3 and 6 are
+    refused as mode 7 is, and mode 47's pixels are square, as RISC OS 5 has
+    them.
 - **RO51 — the µPD765A floppy controller.** PCEmulator's model moves into a
   `lib/*` crate, and PCEmulator moves onto it, before machine mode's A5000-class
   controller, a member of the same family, is built on it.

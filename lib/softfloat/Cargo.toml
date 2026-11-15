@@ -1,0 +1,16 @@
+[package]
+name = "tairix-softfloat"
+description = "TAIRiX software floating point: exact binary32, binary64 and double-extended arithmetic, rounded once in every IEEE 754 mode with its exceptions, the unnormal-aware core the 8087 and the RISC OS emulator's FPA and VFP share, and the x87 and FPA memory layouts. no_std, allocation-free, integers only, so every target computes the same bits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The seeded generator the differential tests draw their operands from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

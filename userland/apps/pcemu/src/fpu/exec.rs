@@ -6,7 +6,10 @@
 use core::cmp::Ordering;
 
 use super::arith::{self, flag, Exact, Mode, Parts, Rounding};
-use super::real::{Binary, Class, Real, BIAS, INTEGER};
+use super::real::{
+    class, from_bcd, from_double, from_single, indefinite, Binary, Class, Real, BIAS, INDEFINITE,
+    INTEGER,
+};
 use super::{tag, timing, trans, Registers, Store, IEM, STATE_BYTES};
 
 /// The size and kind of a memory operand.
@@ -554,7 +557,7 @@ enum Kind {
 impl Value {
     /// The value of `x` by its bits.
     fn of(x: Real) -> Self {
-        match x.class() {
+        match class(x) {
             Class::Zero => Self::Zero(x.negative()),
             Class::Normal => Self::Finite(Parts::of(x), Kind::Normal),
             Class::Unnormal => Self::Finite(Parts::of(x), Kind::Unnormal),
@@ -581,7 +584,7 @@ impl Value {
 
 /// The two-bit tag a value written to a register takes.
 const fn tag_of(x: Real) -> u16 {
-    match x.class() {
+    match class(x) {
         Class::Zero => tag::ZERO,
         Class::Normal | Class::Unnormal | Class::PseudoZero => tag::VALID,
         Class::Denormal | Class::Infinity | Class::Nan => tag::SPECIAL,
@@ -626,7 +629,7 @@ impl Registers {
     }
 
     fn mode(&self) -> Mode {
-        Mode::of(self.control >> 10)
+        arith::mode_of(self.control >> 10)
     }
 
     /// The rounding add, subtract, multiply, divide and square root take.
@@ -686,7 +689,7 @@ impl Outcome {
     /// give the indefinite where masked.
     fn invalid(regs: &Registers, flags: u16) -> Self {
         Self {
-            value: regs.masked(flags).then_some(Real::INDEFINITE),
+            value: regs.masked(flags).then_some(INDEFINITE),
             flags,
         }
     }
@@ -941,9 +944,9 @@ fn load_value(format: Format, bytes: &[u8]) -> Value {
     match format {
         Format::Single | Format::Double => {
             let (x, denormal) = if format == Format::Single {
-                Real::from_single(int32)
+                from_single(int32)
             } else {
-                Real::from_double(int64)
+                from_double(int64)
             };
             if denormal {
                 Value::Finite(Parts::of(x), Kind::Denormal)
@@ -954,7 +957,7 @@ fn load_value(format: Format, bytes: &[u8]) -> Value {
         Format::Int16 => Value::of(Real::from_int(i64::from(word.cast_signed()))),
         Format::Int32 => Value::of(Real::from_int(i64::from(int32.cast_signed()))),
         Format::Int64 => Value::of(Real::from_int(int64.cast_signed())),
-        Format::Bcd => Value::of(Real::from_bcd(raw)),
+        Format::Bcd => Value::of(from_bcd(raw)),
         _ => Value::of(Real::from_bytes(raw)),
     }
 }
@@ -1159,7 +1162,7 @@ fn compare_into_codes_with(regs: &mut Registers, source: Value, pops: u8) -> u16
 fn push_checked(regs: &mut Registers, x: Real) -> u16 {
     if !regs.empty(7) {
         if regs.masked(flag::INVALID) {
-            regs.push(Real::INDEFINITE);
+            regs.push(INDEFINITE);
         }
         return flag::INVALID;
     }
@@ -1181,7 +1184,7 @@ fn load(regs: &mut Registers, format: Format, operand: &[u8]) -> u16 {
         (_, Value::Zero(negative)) => Real::ZERO.with_sign(negative),
         (_, Value::Infinity(negative)) => Real::INFINITY.with_sign(negative),
         (_, Value::Nan(x)) => x,
-        (_, Value::Empty) => Real::INDEFINITE,
+        (_, Value::Empty) => INDEFINITE,
     };
     // Every load but FILD's and FBLD's checks its operand for a denormal.
     let denormal = !format.integer() && format != Format::Bcd && value.denormal();
@@ -1197,7 +1200,7 @@ fn load_register(regs: &mut Registers, i: u8) -> u16 {
         if !regs.masked(flag::INVALID) {
             return flag::INVALID;
         }
-        return flag::INVALID | push_checked(regs, Real::INDEFINITE);
+        return flag::INVALID | push_checked(regs, INDEFINITE);
     }
     let x = regs.data[regs.physical(i)];
     push_checked(regs, x)
@@ -1208,7 +1211,7 @@ fn store_register(regs: &mut Registers, i: u8, pop: bool) -> u16 {
         if !regs.masked(flag::INVALID) {
             return flag::INVALID;
         }
-        (Real::INDEFINITE, flag::INVALID)
+        (INDEFINITE, flag::INVALID)
     } else {
         (regs.data[regs.physical(0)], 0)
     };
@@ -1226,7 +1229,7 @@ fn exchange(regs: &mut Registers, i: u8) -> u16 {
     }
     let read = |regs: &Registers, n: u8| {
         if regs.empty(n) {
-            Real::INDEFINITE
+            INDEFINITE
         } else {
             regs.data[regs.physical(n)]
         }
@@ -1244,7 +1247,7 @@ fn exchange(regs: &mut Registers, i: u8) -> u16 {
 fn sign(regs: &mut Registers, change: bool) -> u16 {
     if regs.empty(0) {
         if regs.masked(flag::INVALID) {
-            regs.put(0, Real::INDEFINITE);
+            regs.put(0, INDEFINITE);
         }
         return flag::INVALID;
     }
@@ -1263,7 +1266,7 @@ fn examine(regs: &mut Registers) {
     let codes = match regs.tag(physical) {
         tag::EMPTY => cc::C3 | cc::C0,
         tag::ZERO => cc::C3,
-        _ => match x.class() {
+        _ => match class(x) {
             Class::Unnormal | Class::PseudoZero => 0,
             Class::Nan => cc::C0,
             Class::Normal => cc::C2,
@@ -1323,9 +1326,7 @@ fn store_memory(regs: &mut Registers, format: Format, pop: bool) -> (Option<[u8;
         Format::Bcd => store_bcd(regs, value),
         _ => match value {
             Value::Empty => {
-                let bytes = regs
-                    .masked(flag::INVALID)
-                    .then(|| Real::INDEFINITE.to_bytes());
+                let bytes = regs.masked(flag::INVALID).then(|| INDEFINITE.to_bytes());
                 (bytes, flag::INVALID)
             }
             _ => (Some(regs.data[regs.physical(0)].to_bytes()), 0),
@@ -1349,33 +1350,29 @@ fn store_binary(regs: &Registers, format: Format, value: Value) -> (Option<[u8; 
     } else {
         Binary::DOUBLE
     };
-    let fraction_bits = binary.precision - 1;
-    let sign = |negative: bool| u64::from(negative) << (binary.width - 1);
-    let special = binary.exp_mask() << fraction_bits;
     let (bits, flags) = match value {
         Value::Empty => {
-            let bits = regs.masked(flag::INVALID).then_some(binary.indefinite());
+            let bits = regs.masked(flag::INVALID).then_some(indefinite(binary));
             (bits, flag::INVALID)
         }
-        Value::Zero(negative) => (Some(sign(negative)), 0),
-        Value::Infinity(negative) => (Some(sign(negative) | special), 0),
+        Value::Zero(negative) => (Some(binary.zero(negative)), 0),
+        Value::Infinity(negative) => (Some(binary.infinity(negative)), 0),
         Value::Nan(x) => {
-            // The fraction's top bits; one kept nonzero so the NaN stays
-            // one.
-            let mut fraction = (x.sig & !INTEGER) >> (64 - binary.precision);
-            if fraction == 0 {
-                fraction = 1 << (fraction_bits - 1);
-            }
-            (Some(sign(x.negative()) | special | fraction), 0)
+            // The fraction's top bits, kept nonzero so the NaN stays one.
+            let fraction = match (x.sig & !INTEGER) >> (64 - binary.precision) {
+                0 => binary.quiet_bit(),
+                kept => kept,
+            };
+            (Some(binary.infinity(x.negative()) | fraction), 0)
         }
         Value::Finite(p, kind) => {
             let in_range = p.exp >= binary.min_exp();
             match kind {
                 Kind::Unnormal | Kind::PseudoZero if in_range => {
-                    let bits = regs.masked(flag::INVALID).then_some(binary.indefinite());
+                    let bits = regs.masked(flag::INVALID).then_some(indefinite(binary));
                     (bits, flag::INVALID)
                 }
-                Kind::PseudoZero => (Some(sign(p.negative)), 0),
+                Kind::PseudoZero => (Some(binary.zero(p.negative)), 0),
                 _ => arith::round_binary(p.normalized(), binary, regs.mode(), regs.masks()),
             }
         }
@@ -1618,9 +1615,9 @@ fn extract(regs: &mut Registers) -> u16 {
             return flag::INVALID;
         }
         if a == Value::Empty {
-            regs.put(0, Real::INDEFINITE);
+            regs.put(0, INDEFINITE);
         }
-        regs.push(Real::INDEFINITE);
+        regs.push(INDEFINITE);
         return flag::INVALID;
     }
     let (exponent, significand, flags) = match a {
@@ -1645,7 +1642,7 @@ fn extract(regs: &mut Registers) -> u16 {
             if !regs.masked(flag::INVALID) {
                 return flag::INVALID;
             }
-            (Real::INDEFINITE, Real::INDEFINITE, flag::INVALID)
+            (INDEFINITE, INDEFINITE, flag::INVALID)
         }
     };
     regs.put(0, exponent);
@@ -1661,9 +1658,9 @@ fn partial_tangent(regs: &mut Registers) -> u16 {
             return flag::INVALID;
         }
         if a == Value::Empty {
-            regs.put(0, Real::INDEFINITE);
+            regs.put(0, INDEFINITE);
         }
-        regs.push(Real::INDEFINITE);
+        regs.push(INDEFINITE);
         return flag::INVALID;
     }
     let (y, x, flags) = match a {
@@ -1691,7 +1688,7 @@ fn partial_tangent(regs: &mut Registers) -> u16 {
             if !regs.masked(flag::INVALID) {
                 return flag::INVALID;
             }
-            (Real::INDEFINITE, Real::INDEFINITE, flag::INVALID)
+            (INDEFINITE, INDEFINITE, flag::INVALID)
         }
     };
     regs.set_codes(cc::C2, 0);

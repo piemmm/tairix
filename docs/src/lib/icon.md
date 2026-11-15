@@ -169,12 +169,13 @@ different ways:
 - `IconRequest::riscos_application(kind, dir, stamp)` — a RISC OS application
   (`!Name`) drawn as RISC OS's Filer draws it, by the sprite of its own name.
   `riscos::application_picture` has the application's `!Boot` read in the
-  parser sandbox (`ArtworkRasteriser::boot_sprite_files`), and never run: of
-  its commands only `Set`, `SetMacro`, `Unset`, an `If` comparing two quoted
-  strings and `IconSprites` are understood, `<Obey$Dir>` standing for the
-  application's directory and a path variable read as its `$Path` says
-  (`boot_sprite_files`), and the scan expands a bounded number of variable
-  references however its macros nest. Each sprite file it loads is tried in
+  parser sandbox (`ArtworkRasteriser::boot_sprite_files`), and never run. It
+  is read as data through `lib/obey`'s read-only mode
+  (`docs/src/lib/obey.md`). Of its commands only `Set`, `SetMacro`, `Unset`,
+  `If` and `IconSprites` are read. `<Obey$Dir>` stands for the application's
+  directory, a path variable is read as its `$Path` says
+  (`boot_sprite_files`), and the file as a whole expands a bounded number of
+  variable references however its macros nest. Each sprite file it loads is tried in
   turn, then `!Sprites`, each first as its `11` and `22` copies for finer
   screens. A file is believed only as a path inside the application
   (`is_application_path`: plain names at most `MAX_DEPTH` deep), at most

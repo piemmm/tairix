@@ -8,9 +8,8 @@
 use super::far;
 use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
-use crate::rom::os::{entry, zp as os};
+use crate::rom::os::{entry, zp as os, CR};
 
-const CR: u8 = 0x0D;
 /// The name's length and the wildcards.
 pub(super) const NAME_LEN: u8 = 7;
 pub(super) const MANY: u8 = b'*';

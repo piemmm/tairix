@@ -1,80 +1,82 @@
 //! Running: each statement in turn, from a typed line or the program, its
 //! keyword's handler chosen by token.
 
+use tairix_bbcbasic::basic2;
+use tairix_bbcbasic::keyword::{word, Word, PSEUDO_LHS};
+
 use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
-use crate::rom::os::{entry, ESCAPE_FLAG};
+use crate::rom::os::{entry, CR, ESCAPE_FLAG};
 
 /// The first statement token.
-const FIRST_STATEMENT: u8 = 0xC6;
-const ELSE: u8 = 0x8B;
-const CR: u8 = 0x0D;
+const FIRST_STATEMENT: u8 = basic2::AUTO.token;
 
-/// The commands, AUTO to SAVE, by token from the first: as BASIC II has
-/// them, only a typed line's first keyword, and a Syntax error anywhere
+/// The commands, AUTO to SAVE, in token order from the first: as BASIC II
+/// has them, only a typed line's first keyword, and a Syntax error anywhere
 /// else.
-pub(super) const COMMANDS: [&str; 8] = [
-    "statement_auto",
-    "statement_delete",
-    "statement_load",
-    "statement_list",
-    "statement_new",
-    "statement_old",
-    "statement_renumber",
-    "statement_save",
+pub(super) const COMMANDS: [(Word<u8>, &str); 8] = [
+    (basic2::AUTO, "statement_auto"),
+    (basic2::DELETE, "statement_delete"),
+    (basic2::LOAD, "statement_load"),
+    (basic2::LIST, "statement_list"),
+    (basic2::NEW, "statement_new"),
+    (basic2::OLD, "statement_old"),
+    (basic2::RENUMBER, "statement_renumber"),
+    (basic2::SAVE, "statement_save"),
 ];
+const _: () = assert!(super::in_token_order(FIRST_COMMAND, &COMMANDS));
 
 /// The statements, by token.
 const HANDLED: [(u8, &str); 49] = [
-    (0xCF, "statement_ptr"),
-    (0xD0, "statement_page"),
-    (0xD1, "statement_time"),
-    (0xD2, "statement_lomem"),
-    (0xD3, "statement_himem"),
-    (0xD4, "statement_sound"),
-    (0xD5, "statement_bput"),
-    (0xD6, "statement_call"),
-    (0xD7, "statement_chain"),
-    (0xD8, "statement_clear"),
-    (0xD9, "statement_close"),
-    (0xDA, "statement_clg"),
-    (0xDB, "statement_cls"),
-    (0xDC, "skip_line"),
-    (0xDD, "skip_line"),
-    (0xDE, "statement_dim"),
-    (0xDF, "statement_draw"),
-    (0xE0, "prompt_checked"),
-    (0xE1, "statement_endproc"),
-    (0xE2, "statement_envelope"),
-    (0xE3, "statement_for"),
-    (0xE4, "statement_gosub"),
-    (0xE5, "statement_goto"),
-    (0xE6, "statement_gcol"),
-    (0xE7, "statement_if"),
-    (0xE8, "statement_input"),
-    (0xE9, "statement_let"),
-    (0xEA, "statement_local"),
-    (0xEB, "statement_mode"),
-    (0xEC, "statement_move"),
-    (0xED, "statement_next"),
-    (0xEE, "statement_on"),
-    (0xEF, "statement_vdu"),
-    (0xF0, "statement_plot"),
-    (0xF1, "statement_print"),
-    (0xF2, "statement_proc"),
-    (0xF3, "statement_read"),
-    (0xF4, "skip_line"),
-    (0xF5, "statement_repeat"),
-    (0xF6, "statement_report"),
-    (0xF7, "statement_restore"),
-    (0xF8, "statement_return"),
-    (0xF9, "statement_run"),
-    (0xFA, "err_stop"),
-    (0xFB, "statement_colour"),
-    (0xFC, "statement_trace"),
-    (0xFD, "statement_until"),
-    (0xFE, "statement_width"),
-    (0xFF, "statement_oscli"),
+    (word::PTR.token | PSEUDO_LHS, "statement_ptr"),
+    (word::PAGE.token | PSEUDO_LHS, "statement_page"),
+    (word::TIME.token | PSEUDO_LHS, "statement_time"),
+    (word::LOMEM.token | PSEUDO_LHS, "statement_lomem"),
+    (word::HIMEM.token | PSEUDO_LHS, "statement_himem"),
+    (word::SOUND.token, "statement_sound"),
+    (word::BPUT.token, "statement_bput"),
+    (word::CALL.token, "statement_call"),
+    (word::CHAIN.token, "statement_chain"),
+    (word::CLEAR.token, "statement_clear"),
+    (word::CLOSE.token, "statement_close"),
+    (word::CLG.token, "statement_clg"),
+    (word::CLS.token, "statement_cls"),
+    (word::DATA.token, "skip_line"),
+    (word::DEF.token, "skip_line"),
+    (word::DIM.token, "statement_dim"),
+    (word::DRAW.token, "statement_draw"),
+    (word::END.token, "prompt_checked"),
+    (word::ENDPROC.token, "statement_endproc"),
+    (word::ENVELOPE.token, "statement_envelope"),
+    (word::FOR.token, "statement_for"),
+    (word::GOSUB.token, "statement_gosub"),
+    (word::GOTO.token, "statement_goto"),
+    (word::GCOL.token, "statement_gcol"),
+    (word::IF.token, "statement_if"),
+    (word::INPUT.token, "statement_input"),
+    (word::LET.token, "statement_let"),
+    (word::LOCAL.token, "statement_local"),
+    (word::MODE.token, "statement_mode"),
+    (word::MOVE.token, "statement_move"),
+    (word::NEXT.token, "statement_next"),
+    (word::ON.token, "statement_on"),
+    (word::VDU.token, "statement_vdu"),
+    (word::PLOT.token, "statement_plot"),
+    (word::PRINT.token, "statement_print"),
+    (word::PROC.token, "statement_proc"),
+    (word::READ.token, "statement_read"),
+    (word::REM.token, "skip_line"),
+    (word::REPEAT.token, "statement_repeat"),
+    (word::REPORT.token, "statement_report"),
+    (word::RESTORE.token, "statement_restore"),
+    (word::RETURN.token, "statement_return"),
+    (word::RUN.token, "statement_run"),
+    (word::STOP.token, "err_stop"),
+    (word::COLOUR.token, "statement_colour"),
+    (word::TRACE.token, "statement_trace"),
+    (word::UNTIL.token, "statement_until"),
+    (word::WIDTH.token, "statement_width"),
+    (word::OSCLI.token, "statement_oscli"),
 ];
 
 /// Each statement token's handler from &C6, a command's a Syntax error; any
@@ -146,7 +148,7 @@ fn looping(a: &mut Asm) {
     a.beq("statement");
     a.cpx(imm(CR));
     a.beq("end_of_line");
-    a.cpx(imm(ELSE));
+    a.cpx(imm(word::ELSE.token));
     a.beq("skip_line");
     a.here("statement_syntax");
     a.jmp("err_syntax");
@@ -154,7 +156,7 @@ fn looping(a: &mut Asm) {
     // ON ERROR statements, kept for an error to run.
     a.here("statement_on_error");
     a.jsr("next_a");
-    a.cmp(imm(0x87));
+    a.cmp(imm(word::OFF.token));
     a.beq(off);
     a.dec(zp(z::OFFSET_A));
     a.jsr("return_point");
@@ -223,7 +225,7 @@ fn running(a: &mut Asm) {
     a.cmp(imm(CR));
     a.beq("end_of_line");
     // A true IF whose statements are none ends where its ELSE part begins.
-    a.cmp(imm(ELSE));
+    a.cmp(imm(word::ELSE.token));
     a.beq("skip_line");
     a.cmp(imm(b'*'));
     a.beq("statement_star");
@@ -386,11 +388,11 @@ fn tables(a: &mut Asm) {
         a.byte(hi(sym(handler) + -1));
     }
     a.here("command_low");
-    for handler in COMMANDS {
+    for (_, handler) in COMMANDS {
         a.byte(lo(sym(handler) + -1));
     }
     a.here("command_high");
-    for handler in COMMANDS {
+    for (_, handler) in COMMANDS {
         a.byte(hi(sym(handler) + -1));
     }
 }

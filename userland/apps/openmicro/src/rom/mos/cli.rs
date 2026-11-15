@@ -10,7 +10,7 @@ use super::{copy, DELETE};
 use crate::cpu::STACK_PAGE;
 use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
-use crate::rom::os::{fsc, service};
+use crate::rom::os::{fsc, service, CR};
 
 /// The commands, each with its routine, in the order abbreviations match.
 const COMMANDS: [(&str, &str); 17] = [
@@ -72,7 +72,7 @@ fn oscli(a: &mut Asm) {
     a.here("oscli_start");
     a.cmp(imm(b'|'));
     a.beq(RTS);
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq(RTS);
     a.cmp(imm(b'/'));
     a.bne("oscli_match");
@@ -245,7 +245,7 @@ fn commands(a: &mut Asm, model: Model) {
     // Nothing but spaces may be left of the line.
     a.here("command_end");
     a.jsr("skip_spaces");
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.bne("bad_command");
     a.rts();
 
@@ -355,7 +355,7 @@ fn star_spool(a: &mut Asm) {
     a.here("star_spool");
     a.jsr("close_spool");
     a.lda(zp(os::TEXT).ind_y());
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq(RTS);
     a.jsr("text_address");
     a.lda(imm(0x80));
@@ -366,7 +366,7 @@ fn star_spool(a: &mut Asm) {
     a.here("star_exec");
     a.jsr("close_exec");
     a.lda(zp(os::TEXT).ind_y());
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq(RTS);
     a.jsr("text_address");
     a.lda(imm(0x40));
@@ -423,7 +423,7 @@ fn gs(a: &mut Asm) {
     a.iny();
     a.here("gsinit_plain");
     a.lda(zp(os::TEXT).ind_y());
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.rts();
 
     // GSREAD: A = the next character; C set at the string's end, with Y at
@@ -433,7 +433,7 @@ fn gs(a: &mut Asm) {
     a.sta(zp(os::GS_CHAR));
     a.here("gsread_next");
     a.lda(zp(os::TEXT).ind_y());
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.bne("gsread_not_end");
     a.bit(zp(os::GS_QUOTE));
     a.bmi("gsread_bad");
@@ -468,7 +468,7 @@ fn gs(a: &mut Asm) {
     a.cmp(imm(b'|'));
     a.bne("gsread_char");
     a.lda(zp(os::TEXT).ind_y());
-    a.cmp(imm(0x0D));
+    a.cmp(imm(CR));
     a.beq("gsread_bad");
     a.iny();
     a.cmp(imm(b'!'));

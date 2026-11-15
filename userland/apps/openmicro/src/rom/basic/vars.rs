@@ -11,6 +11,7 @@ use super::float::PACKED;
 use super::ws::{kind, page, place, zp as z};
 use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, Label, RTS};
+use crate::rom::os::CR;
 
 /// The pointer that reads the name with the entry's offsets.
 pub(super) const TNAME: u16 = z::RUN;
@@ -33,7 +34,6 @@ const _: () = assert!(S_ROOM == S_ADDRESS + 2 && S_LENGTH == S_ROOM + 1);
 /// length on.
 const SLACK_FROM: u8 = 8;
 const SLACK: u8 = 8;
-const CR: u8 = 0x0D;
 
 pub fn emit(a: &mut Asm) {
     names(a);
