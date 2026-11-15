@@ -2,7 +2,7 @@
 //! its flags, saturation and the parallel lanes.
 
 use super::execute::wrap;
-use crate::a32::{Lanes, Prefix, Shift, ShiftType};
+use crate::instruction::{Lanes, Prefix, Shift, ShiftType};
 
 /// A shifter's output and its carry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

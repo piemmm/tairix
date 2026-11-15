@@ -6,11 +6,12 @@
 use core::fmt::{self, Display, Formatter, Write as _};
 
 use super::op::{
-    ArithmeticOp, BarrierOp, BitfieldOp, BlockMode, BlockOp, CallOp, CoIndex, CoTransferOp, HintOp,
-    Index, Instruction, LongOp, MultiplyOp, Offset, Op, Operand, SaturateOp, Shift, Source, SwapOp,
-    TransferOp,
+    ArithmeticOp, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CoIndex,
+    CoTransferOp, HintOp, Index, Instruction, LongOp, MultiplyOp, Offset, Op, Operand, SaturateOp,
+    Shift, Source, SwapOp,
 };
-use super::table;
+use super::Set;
+use crate::a32;
 use crate::cond::Condition;
 use crate::reg::Reg;
 
@@ -19,6 +20,7 @@ use crate::reg::Reg;
 pub struct Text {
     pub(super) instruction: Instruction,
     pub(super) address: u32,
+    pub(super) set: Set,
 }
 
 /// The column the operands start in after a mnemonic shorter than it.
@@ -73,6 +75,8 @@ impl Display for OperandText {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.0 {
             Operand::Immediate(immediate) => write!(f, "#{}", Number(immediate.value())),
+            Operand::Expanded(expanded) => write!(f, "#{}", Number(expanded.value())),
+            Operand::Literal(value) => write!(f, "#{}", Number(u32::from(value))),
             Operand::Register { rm, shift } => write!(f, "{rm}{}", ShiftText(shift)),
             Operand::Shifted { rm, kind, rs } => write!(f, "{rm},{} {rs}", kind.name()),
         }
@@ -135,10 +139,9 @@ fn half(top: bool) -> char {
     }
 }
 
-/// Splits a single transfer's mnemonic at its suffix, which the condition
-/// precedes: `LDR` and `B` for `LDRB`.
-fn transfer_parts(op: TransferOp) -> (&'static str, &'static str) {
-    let name = op.name();
+/// Splits a transfer's mnemonic at its suffix, which the condition precedes:
+/// `LDR` and `B` for `LDRB`.
+fn transfer_parts(name: &'static str) -> (&'static str, &'static str) {
     name.split_at(3)
 }
 
@@ -211,12 +214,22 @@ impl fmt::Write for Buffer {
     }
 }
 
+impl Text {
+    /// The PC as the instruction reads it.
+    const fn pc(&self) -> u32 {
+        self.address.wrapping_add(match self.set {
+            Set::A32 => 8,
+            Set::T32 => 4,
+        })
+    }
+}
+
 impl Display for Text {
     #[allow(clippy::too_many_lines)] // One arm per form, each its own syntax.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let Instruction { cond, op } = self.instruction;
         let c = cond.suffix();
-        let c = if cond == Condition::Nv && table::unconditional(op.kind()) {
+        let c = if self.set == Set::A32 && cond == Condition::Nv && a32::unconditional(op.kind()) {
             ""
         } else {
             c
@@ -431,8 +444,38 @@ impl Display for Text {
             Op::Branch { op, offset } => {
                 m.push(op.name())?;
                 m.push(c)?;
-                let target = self.address.wrapping_add(8).wrapping_add_signed(offset);
-                write!(operands, "&{target:08X}")?;
+                let pc = if self.set == Set::T32 && op == BranchOp::Blx {
+                    self.pc() & !3
+                } else {
+                    self.pc()
+                };
+                write!(operands, "&{:08X}", pc.wrapping_add_signed(offset))?;
+            }
+            Op::CompareBranch {
+                nonzero,
+                rn,
+                offset,
+            } => {
+                m.push(if nonzero { "CBNZ" } else { "CBZ" })?;
+                write!(operands, "{rn},&{:08X}", self.pc().wrapping_add(offset))?;
+            }
+            Op::IfThen { firstcond, mask } => {
+                m.push("IT")?;
+                // Each instruction after the first takes the next mask bit
+                // down: then when it matches the condition's low bit.
+                let length = 4 - u32::from(mask & 15).trailing_zeros().min(3);
+                for bit in (4 - length..3).rev() {
+                    let then = u32::from(mask >> (bit + 1)) & 1 == firstcond.bits() & 1;
+                    m.push(if then { "T" } else { "E" })?;
+                }
+                operands.write_str(match firstcond {
+                    Condition::Al => "AL",
+                    other => other.suffix(),
+                })?;
+            }
+            Op::TableBranch { half, rn, rm } => {
+                m.push(if half { "TBH" } else { "TBB" })?;
+                write!(operands, "[{rn},{rm}{}]", if half { ",LSL #1" } else { "" })?;
             }
             Op::Exchange { op, rm } => {
                 m.push(op.name())?;
@@ -456,11 +499,11 @@ impl Display for Text {
             }
             Op::Barrier { op, option } => {
                 m.push(op.name())?;
-                match barrier_option(option) {
-                    Some(name) if op != BarrierOp::Isb || option == 15 => {
-                        operands.write_str(name)?;
-                    }
-                    _ => write!(operands, "#{option}")?,
+                match (op, barrier_option(option)) {
+                    (BarrierOp::Ssbb | BarrierOp::Pssbb, _) => {}
+                    (BarrierOp::Isb, _) if option != 15 => write!(operands, "#{option}")?,
+                    (_, Some(name)) => operands.write_str(name)?,
+                    (_, None) => write!(operands, "#{option}")?,
                 }
             }
             Op::ClearExclusive => m.push("CLREX")?,
@@ -472,17 +515,37 @@ impl Display for Text {
                 offset,
                 index,
             } => {
-                let (base, suffix) = transfer_parts(op);
+                let (base, suffix) = transfer_parts(op.name());
                 m.push(base)?;
                 m.push(c)?;
                 m.push(suffix)?;
-                write!(operands, "{rt},")?;
-                if matches!(op, TransferOp::Ldrd | TransferOp::Strd) {
-                    write!(operands, "{},", rt.next())?;
-                }
                 write!(
                     operands,
-                    "{}",
+                    "{rt},{}",
+                    Address {
+                        rn,
+                        up,
+                        offset,
+                        index,
+                    }
+                )?;
+            }
+            Op::Dual {
+                op,
+                rt,
+                rt2,
+                rn,
+                up,
+                offset,
+                index,
+            } => {
+                let (base, suffix) = transfer_parts(op.name());
+                m.push(base)?;
+                m.push(c)?;
+                m.push(suffix)?;
+                write!(
+                    operands,
+                    "{rt},{rt2},{}",
                     Address {
                         rn,
                         up,
@@ -528,17 +591,28 @@ impl Display for Text {
                 m.push(if op == SwapOp::Swpb { "B" } else { "" })?;
                 write!(operands, "{rt},{rt2},[{rn}]")?;
             }
-            Op::Exclusive { op, rd, rt, rn } => {
+            Op::Exclusive {
+                op,
+                rd,
+                rt,
+                rt2,
+                rn,
+                offset,
+            } => {
                 m.push(op.name())?;
                 m.push(c)?;
                 if let Some(rd) = rd {
                     write!(operands, "{rd},")?;
                 }
                 write!(operands, "{rt},")?;
-                if op.name().ends_with('D') {
-                    write!(operands, "{},", rt.next())?;
+                if let Some(rt2) = rt2 {
+                    write!(operands, "{rt2},")?;
                 }
-                write!(operands, "[{rn}]")?;
+                if offset == 0 {
+                    write!(operands, "[{rn}]")?;
+                } else {
+                    write!(operands, "[{rn},#{}]", Number(u32::from(offset)))?;
+                }
             }
             Op::ChangeState {
                 imod,

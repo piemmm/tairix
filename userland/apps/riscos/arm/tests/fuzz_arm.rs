@@ -1,28 +1,32 @@
-//! Deterministic fuzz harness for the ARM processor: the decoder, the
-//! encoder and the assembler's text over any word, and the interpreter over
-//! any program, registers and modes.
+//! Deterministic fuzz harness for the ARM processor: the decoders, the
+//! encoders and the assembler's text over any A32 word and any T32
+//! halfwords at any place in an `IT` block, and the interpreter over any
+//! program, registers, modes and state.
 //!
 //! A guest's code is a stranger's bytes. The invariants:
 //!
-//! * decoding any word on any profile never panics; whatever decodes has an
-//!   encoding that decodes back to it exactly, a text of bounded length,
+//! * decoding any word or halfwords on any profile never panics; whatever
+//!   decodes has an encoding that decodes back to it exactly, in a T32
+//!   instruction's own width and in the narrowest, a text of bounded length,
 //!   and an answer to whether it is UNPREDICTABLE;
-//! * running any words from any state never panics, never leaves the
-//!   processor in a mode its profile lacks, and leaves a state that loads
-//!   back as itself.
+//! * running any words from any state, ARM or Thumb, never panics, never
+//!   leaves the processor in a mode its profile lacks, and leaves a state
+//!   that loads back as itself.
 //!
 //! Inputs are drawn from a per-run-seeded `Prng`; the smoke sweep runs on a
 //! plain `cargo test` and `cargo xtask fuzz --soak` extends it to a
 //! wall-clock budget.
 
 use tairix_fuzzseed::Prng;
-use tairix_riscos_arm::a32::decode;
+use tairix_riscos_arm::a32::{self, decode};
 use tairix_riscos_arm::bus::{Abort, Bus, Fetch, Width};
 use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::cpu::{Cpu, State};
+use tairix_riscos_arm::instruction::Set;
 use tairix_riscos_arm::isa::{Feature, Isa};
 use tairix_riscos_arm::profile::{Profile, BIT26, BIT32};
 use tairix_riscos_arm::psr::{self, Mode};
+use tairix_riscos_arm::t32::{self, Encoding, Position, Size};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 400;
@@ -133,8 +137,8 @@ fn check_decoding(word: u32) {
         let Some(instruction) = decode(word, isa) else {
             continue;
         };
-        let _ = instruction.unpredictable(isa);
-        let text = format!("{}", instruction.text(word));
+        let _ = a32::unpredictable(&instruction, isa);
+        let text = format!("{}", instruction.text(Set::A32, word));
         assert!(
             !text.is_empty() && text.len() <= LONGEST_TEXT,
             "{word:08X}: {text}"
@@ -144,7 +148,7 @@ fn check_decoding(word: u32) {
         } else {
             Isa::ALL
         };
-        if let Ok(encoded) = instruction.encode() {
+        if let Ok(encoded) = a32::encode(&instruction) {
             assert_eq!(
                 decode(encoded, check_isa),
                 Some(instruction),
@@ -152,6 +156,80 @@ fn check_decoding(word: u32) {
             );
         } else {
             assert_ne!(isa, Isa::ALL, "{word:08X}: every word ALL decodes encodes");
+        }
+    }
+}
+
+/// A T32 instruction's halfwords, the first in the low half: anything, a
+/// 32-bit one, or a mutated common shape of either width.
+fn drawn_halfwords(rng: &mut Prng) -> u32 {
+    match rng.below(4) {
+        0 => rng.next_u32(),
+        1 => {
+            let prefix = *rng.pick(&[0xE800u32, 0xF000, 0xF800]);
+            (rng.next_u32() & 0xFFFF_07FF) | prefix
+        }
+        2 => {
+            let shapes = [0x4770u32, 0xBD00, 0xBF08, 0xDF00, 0xB500, 0x4687, 0xE7FE];
+            (*rng.pick(&shapes) ^ (rng.next_u32() & 0xFF)) | (rng.next_u32() & 0xFFFF_0000)
+        }
+        _ => {
+            let shapes = [
+                0xF800_F000u32,
+                0x8000_E8BD,
+                0xF000_F8DF,
+                0xF000_E8DF,
+                0x8000_F3AF,
+            ];
+            *rng.pick(&shapes) ^ (rng.next_u32() & 0x0FFF_000F)
+        }
+    }
+}
+
+/// A place in an `IT` block: mostly outside one.
+fn drawn_position(rng: &mut Prng) -> Position {
+    let cond = Condition::field(rng.next_u32());
+    match rng.below(4) {
+        0 => Position::Inside(cond),
+        1 => Position::Last(cond),
+        _ => Position::Outside,
+    }
+}
+
+fn halves(encoding: Encoding) -> (u16, u16) {
+    match encoding {
+        Encoding::Narrow(first) => (first, 0),
+        Encoding::Wide(first, second) => (first, second),
+    }
+}
+
+fn check_thumb_decoding(bits: u32, position: Position) {
+    let [a, b, c, d] = bits.to_le_bytes();
+    let (first, second) = (u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]));
+    for isa in [BIT32.isa, Isa::ALL] {
+        let Some(decoded) = t32::decode(first, second, isa, position) else {
+            continue;
+        };
+        let text = format!("{}", decoded.instruction.text(Set::T32, bits));
+        assert!(
+            !text.is_empty() && text.len() <= LONGEST_TEXT,
+            "{bits:08X}: {text}"
+        );
+        let own = if decoded.wide {
+            Size::Wide
+        } else {
+            Size::Narrow
+        };
+        for size in [Size::Narrowest, own] {
+            let encoded = t32::encode(&decoded.instruction, position, size)
+                .unwrap_or_else(|e| panic!("{bits:08X} at {position:?}: {e:?}"));
+            let (again_first, again_second) = halves(encoded);
+            let again = t32::decode(again_first, again_second, Isa::ALL, position);
+            assert_eq!(
+                again.map(|again| again.instruction),
+                Some(decoded.instruction),
+                "{bits:08X} -> {encoded:04X?}"
+            );
         }
     }
 }
@@ -164,11 +242,16 @@ fn drawn_state(rng: &mut Prng, profile: &Profile) -> State {
         .collect();
     let mode = *rng.pick(&modes);
     let flags = rng.next_u32() & (psr::NZCV | psr::Q | psr::GE | psr::E | psr::A | psr::I | psr::F);
+    // Thumb state, and any IT state, where the profile has them.
+    let thumb = rng.next_u32() & (psr::T | psr::IT_LOW | psr::IT_HIGH) & profile.psr;
     let mut state = State {
-        pc: 4 * u32::try_from(rng.below(2048)).unwrap_or(0),
-        cpsr: flags | mode.bits(),
+        pc: 2 * u32::try_from(rng.below(4096)).unwrap_or(0),
+        cpsr: flags | thumb | mode.bits(),
         ..State::default()
     };
+    if thumb & psr::T == 0 {
+        state.pc &= !3;
+    }
     let word = |rng: &mut Prng| match rng.below(3) {
         0 => rng.next_u32(),
         1 => 4 * u32::try_from(rng.below(3 * 1024)).unwrap_or(0),
@@ -191,8 +274,13 @@ fn check_running(rng: &mut Prng, profile: &'static Profile) {
         words: [0; 3 * 1024],
         host: [rng.below(4) == 0, rng.below(4) == 0, false],
     };
+    let thumb_code = rng.below(2) == 0;
     for word in &mut memory.words {
-        *word = drawn_word(rng);
+        *word = if thumb_code {
+            drawn_halfwords(rng)
+        } else {
+            drawn_word(rng)
+        };
     }
     let mut cpu = Cpu::new(profile, 2);
     let state = drawn_state(rng, profile);
@@ -227,6 +315,8 @@ fn any_word_decodes_encodes_and_runs_within_the_architecture() {
     loop {
         for _ in 0..WORDS {
             check_decoding(drawn_word(&mut rng));
+            let position = drawn_position(&mut rng);
+            check_thumb_decoding(drawn_halfwords(&mut rng), position);
         }
         check_running(&mut rng, &BIT26);
         check_running(&mut rng, &BIT32);

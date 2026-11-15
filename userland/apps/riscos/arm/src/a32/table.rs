@@ -7,13 +7,13 @@
 //! a group a row that refines a later one comes first; a test holds that no
 //! row is shadowed by an earlier, less specific one.
 
-use super::form::Kind;
-use super::layout::Layout;
-use super::op::{
+use crate::encoding::form::Kind;
+use crate::encoding::layout::Layout;
+use crate::instruction::{
     ArithmeticOp as A, BarrierOp, BitfieldOp, BlockOp, BranchOp, CallOp, CoRegisterOp,
-    CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, ExchangeOp, ExclusiveOp as X,
-    ExtendOp as E, HintOp, LongOp, MoveOp, MultiplyOp as M, PackOp, PreloadOp, SaturateOp, SwapOp,
-    TransferOp as T, UnaryOp, WideOp,
+    CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, DualOp, ExchangeOp,
+    ExclusiveOp as X, ExtendOp as E, HintOp, LongOp, MoveOp, MultiplyOp as M, PackOp, PreloadOp,
+    SaturateOp, SwapOp, TransferOp as T, UnaryOp, WideOp,
 };
 use crate::isa::Feature::{
     self, Crc32, Divide, Jazelle, LongMultiply, Mp, Swp, V2, V3, V4, V4T, V5, V5TE, V6, V6K, V6T2,
@@ -450,12 +450,12 @@ static GROUP_000: &[Row] = &[
     ),
     row(
         "cccc 000P U1W0 nnnn tttt iiii 1101 iiii",
-        Kind::Transfer(T::Ldrd),
+        Kind::Dual(DualOp::Ldrd),
         V5TE,
     ),
     row(
         "cccc 000P U0W0 nnnn tttt ---- 1101 mmmm",
-        Kind::Transfer(T::Ldrd),
+        Kind::Dual(DualOp::Ldrd),
         V5TE,
     ),
     row(
@@ -470,12 +470,12 @@ static GROUP_000: &[Row] = &[
     ),
     row(
         "cccc 000P U1W0 nnnn tttt iiii 1111 iiii",
-        Kind::Transfer(T::Strd),
+        Kind::Dual(DualOp::Strd),
         V5TE,
     ),
     row(
         "cccc 000P U0W0 nnnn tttt ---- 1111 mmmm",
-        Kind::Transfer(T::Strd),
+        Kind::Dual(DualOp::Strd),
         V5TE,
     ),
     row(
@@ -642,6 +642,16 @@ static GROUP_010: &[Row] = &[
         "1111 0101 0111 ++++ ++++ ---- 0001 ++++",
         Kind::ClearExclusive,
         V6K,
+    ),
+    row(
+        "1111 0101 0111 ++++ ++++ ---- 0100 0000",
+        Kind::Barrier(BarrierOp::Ssbb),
+        V8,
+    ),
+    row(
+        "1111 0101 0111 ++++ ++++ ---- 0100 0100",
+        Kind::Barrier(BarrierOp::Pssbb),
+        V8,
     ),
     row(
         "1111 0101 0111 ++++ ++++ ---- 0100 iiii",

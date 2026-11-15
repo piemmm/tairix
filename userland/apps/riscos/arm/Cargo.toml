@@ -1,6 +1,6 @@
 [package]
 name = "tairix-riscos-arm"
-description = "The RISC OS emulator's ARM processor: the one A32 encoding table its decoder, interpreter, disassembler and encoder are derived from, the 26-bit and 32-bit programmer's models, the profiles that fix every implementation-defined choice, and architectural exceptions. It knows nothing of RISC OS. no_std, forbids unsafe."
+description = "The RISC OS emulator's ARM processor: the A32 and T32 encoding tables its decoders, interpreter, disassembler and encoders are derived from, the 26-bit and 32-bit programmer's models with Thumb state, the profiles that fix every implementation-defined choice, and architectural exceptions. It knows nothing of RISC OS. no_std, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

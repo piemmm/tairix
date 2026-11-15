@@ -2,8 +2,10 @@
 //!
 //! - [`cpu`]: the processor, stepping through a [`bus::Bus`] under a
 //!   [`profile::Profile`].
-//! - [`a32`]: the one A32 encoding table, and the decoder, encoder and
-//!   assembler's text derived from it.
+//! - [`instruction`]: the vocabulary every instruction set decodes to, and
+//!   the assembler's text for it.
+//! - [`a32`] and [`t32`]: each instruction set's one encoding table, and
+//!   the decoder and encoder derived from it.
 //! - [`isa`]: the architecture features an encoding needs.
 //! - [`psr`], [`reg`] and [`cond`]: the programmer's model's vocabulary.
 //! - [`vectors`]: the conformance vectors' encoding and the runner that
@@ -22,8 +24,11 @@ pub mod bus;
 pub mod cond;
 mod cp15;
 pub mod cpu;
+mod encoding;
+pub mod instruction;
 pub mod isa;
 pub mod profile;
 pub mod psr;
 pub mod reg;
+pub mod t32;
 pub mod vectors;

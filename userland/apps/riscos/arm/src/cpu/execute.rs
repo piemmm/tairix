@@ -3,13 +3,13 @@
 
 use super::alu::{self, add_with_carry, shift_immediate, shift_register, Shifted};
 use super::{Cpu, Flow, Stop, Unmodelled};
-use crate::a32::{
+use crate::bus::Bus;
+use crate::cp15::{Fault, Outcome};
+use crate::instruction::{
     ArithmeticOp, BitfieldOp, BranchOp, CallOp, CoRegisterOp, CompareOp, DataOp, ExchangeOp,
     ExtendOp, HintOp, Instruction, LongOp, MoveOp, MultiplyOp, Op, Operand, PackOp, SaturateOp,
     Shift, Source, UnaryOp, WideOp,
 };
-use crate::bus::Bus;
-use crate::cp15::{Fault, Outcome};
 use crate::isa::Feature;
 use crate::psr;
 use crate::reg::Reg;
@@ -73,9 +73,40 @@ enum Alu {
 }
 
 impl Cpu {
-    /// R15 as an operand: the instruction's address plus 8.
+    /// Whether the processor is in Thumb state.
+    pub(super) const fn thumb(&self) -> bool {
+        self.cpsr & psr::T != 0
+    }
+
+    /// R15 as an operand: the instruction's address plus 8, or plus 4 in
+    /// Thumb state.
     pub(super) const fn pc_operand(&self) -> u32 {
-        self.advance(self.pc, 8)
+        if self.thumb() {
+            self.pc.wrapping_add(4)
+        } else {
+            self.advance(self.pc, 8)
+        }
+    }
+
+    /// A register as a transfer's base or an immediate's first operand: in
+    /// Thumb state R15 is the PC aligned to a word, as literal addressing
+    /// and `ADR` have it.
+    pub(super) fn base(&self, reg: Reg) -> u32 {
+        if reg == PC && self.thumb() {
+            self.pc_operand() & !3
+        } else {
+            self.read(reg)
+        }
+    }
+
+    /// What a branch with link leaves in R14: the next instruction, with
+    /// the PSR in a 26-bit mode and bit 0 set in Thumb state.
+    const fn link(&self) -> u32 {
+        if self.thumb() {
+            self.next | 1
+        } else {
+            self.next | self.r15_psr()
+        }
     }
 
     /// The PSR bits R15 holds beside the PC in a 26-bit mode; none in a
@@ -150,19 +181,34 @@ impl Cpu {
         }
     }
 
-    /// A load to the PC: interworking from ARMv5.
+    /// Whether loads to the PC interwork: from ARMv5.
+    pub(super) const fn loads_interwork(&self) -> bool {
+        self.profile.isa.has(Feature::V5)
+    }
+
+    /// A load to the PC.
     pub(super) const fn load_pc(&mut self, target: u32) {
-        if self.profile.isa.has(Feature::V5) {
+        if self.loads_interwork() {
             self.exchange(target);
         } else {
             self.branch(target);
         }
     }
 
-    /// A data-processing write to the PC: interworking from ARMv7.
-    const fn alu_pc(&mut self, target: u32) {
-        if self.profile.isa.version() >= 7 {
-            self.exchange(target);
+    /// Whether an interworking branch to `target`, an ARM address that is
+    /// not word-aligned, is refused as the UNPREDICTABLE it is; the caller
+    /// asks before anything else changes.
+    pub(super) fn misaligned_exchange(&mut self, target: u32) -> bool {
+        target & 3 == 2 && self.refuse()
+    }
+
+    /// A data-processing write to the PC: interworking from ARMv7 in ARM
+    /// state, a plain branch in Thumb state.
+    fn alu_pc(&mut self, target: u32) {
+        if self.profile.isa.version() >= 7 && !self.thumb() {
+            if !self.misaligned_exchange(target) {
+                self.exchange(target);
+            }
         } else {
             self.branch(target);
         }
@@ -368,11 +414,18 @@ impl Cpu {
                 match op {
                     BranchOp::B => self.branch(target),
                     BranchOp::Bl => {
-                        self.r[14] = self.advance(self.pc, 4) | self.r15_psr();
+                        self.r[14] = self.link();
                         self.branch(target);
                     }
+                    // From Thumb the target is word-aligned ARM code; from
+                    // ARM it is Thumb code.
+                    BranchOp::Blx if self.thumb() => {
+                        self.r[14] = self.link();
+                        let aligned = (self.pc_operand() & !3).wrapping_add_signed(offset);
+                        self.exchange(aligned);
+                    }
                     BranchOp::Blx => {
-                        self.r[14] = self.pc.wrapping_add(4);
+                        self.r[14] = self.link();
                         self.exchange(target | 1);
                     }
                 }
@@ -380,12 +433,30 @@ impl Cpu {
             }
             Op::Exchange { op, rm } => {
                 let target = self.read(rm);
+                if self.misaligned_exchange(target) {
+                    return Flow::Next;
+                }
                 if op == ExchangeOp::Blx {
-                    self.r[14] = self.pc.wrapping_add(4);
+                    self.r[14] = self.link();
                 }
                 self.exchange(target);
                 Flow::Next
             }
+            Op::CompareBranch {
+                nonzero,
+                rn,
+                offset,
+            } => {
+                if (self.read(rn) != 0) == nonzero {
+                    self.branch(self.pc_operand().wrapping_add(offset));
+                }
+                Flow::Next
+            }
+            Op::IfThen { firstcond, mask } => {
+                self.set_itstate((firstcond.bits().to_le_bytes()[0] << 4) | (mask & 15));
+                Flow::Next
+            }
+            Op::TableBranch { half, rn, rm } => self.table_branch(bus, half, rn, rm),
             Op::Call { op, value } => match op {
                 CallOp::Swi => Flow::Stop(Stop::Swi { number: value }),
                 CallOp::Udf if host => Flow::Stop(Stop::HostCall { number: value }),
@@ -394,7 +465,7 @@ impl Cpu {
                     Flow::Next
                 }
                 CallOp::Bkpt => {
-                    self.prefetch_abort(Fault::Debug, self.pc);
+                    self.prefetch_abort(Fault::Debug, self.pc, self.pc);
                     Flow::Next
                 }
             },
@@ -420,8 +491,24 @@ impl Cpu {
                 user,
                 list,
             } => self.block(bus, op, rn, mode, writeback, user, list),
+            Op::Dual {
+                op,
+                rt,
+                rt2,
+                rn,
+                up,
+                offset,
+                index,
+            } => self.dual(bus, op, [rt, rt2], rn, up, offset, index),
             Op::Swap { op, rt, rt2, rn } => self.swap(bus, op, rt, rt2, rn),
-            Op::Exclusive { op, rd, rt, rn } => self.exclusive(bus, op, rd, rt, rn),
+            Op::Exclusive {
+                op,
+                rd,
+                rt,
+                rt2,
+                rn,
+                offset,
+            } => self.exclusive(bus, op, rd, rt, rt2, rn, offset),
             Op::ChangeState {
                 imod,
                 change_mode,
@@ -482,8 +569,22 @@ impl Cpu {
                 } else {
                     value >> 31 != 0
                 };
-                (self.read(rn), Shifted { value, carry })
+                (self.base(rn), Shifted { value, carry })
             }
+            Operand::Expanded(expanded) => (
+                self.base(rn),
+                Shifted {
+                    value: expanded.value(),
+                    carry: expanded.carry(carry),
+                },
+            ),
+            Operand::Literal(value) => (
+                self.base(rn),
+                Shifted {
+                    value: u32::from(value),
+                    carry,
+                },
+            ),
             Operand::Register { rm, shift } => (
                 self.read(rn),
                 shift_immediate(self.read_with_psr(rm), shift, carry),
@@ -508,6 +609,7 @@ impl Cpu {
             Alu::Data(DataOp::Eor) | Alu::Compare(CompareOp::Teq) => (a ^ b, shifted.carry, None),
             Alu::Data(DataOp::Orr) => (a | b, shifted.carry, None),
             Alu::Data(DataOp::Bic) => (a & !b, shifted.carry, None),
+            Alu::Data(DataOp::Orn) => (a | !b, shifted.carry, None),
             Alu::Move(MoveOp::Mov) => (b, shifted.carry, None),
             Alu::Move(MoveOp::Mvn) => (!b, shifted.carry, None),
             Alu::Data(DataOp::Sub) | Alu::Compare(CompareOp::Cmp) => {

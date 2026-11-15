@@ -1,25 +1,28 @@
 //! The processor: its registers and banks, its step through memory, and the
 //! exceptions it takes.
 //!
-//! A step takes a pending interrupt, fetches the next word through the bus,
-//! finds its decoding in the page's memo and executes it. A `SWI`, a host
-//! call, a wait and anything unmodelled stop the run so the session can
-//! answer; every other exception is taken architecturally, through the
-//! profile's vectors.
+//! A step takes a pending interrupt, fetches the next instruction through
+//! the bus, finds its decoding in the page's memo and executes it: an A32
+//! word, or in Thumb state one or two halfwords under the `IT` block's
+//! condition. A `SWI`, a host call, a wait and anything unmodelled stop the
+//! run so the session can answer; every other exception is taken
+//! architecturally, through the profile's vectors.
 
 mod alu;
 mod execute;
 mod memo;
 mod memory;
 
-use crate::bus::Bus;
+use crate::bus::{Abort, Bus};
+use crate::cond::Condition;
 use crate::cp15::{Cp15, Fault};
 use crate::isa::Feature;
 use crate::profile::{Profile, Unpredictable};
 use crate::psr::{self, Bank, Mode};
 use crate::reg::Reg;
+use crate::t32::{self, Position};
 
-use memo::{Decoded, Memo};
+use memo::{Decoded, Memo, Thumb};
 
 /// An exception.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -80,8 +83,6 @@ pub enum Unmodelled {
         /// Whether the access was a write.
         write: bool,
     },
-    /// Thumb state, which RO10 brings.
-    Thumb,
 }
 
 /// Why a run stopped.
@@ -169,15 +170,24 @@ pub struct Cpu {
     event: bool,
     /// The address an exclusive load marked, if any.
     exclusive: Option<u32>,
+    /// Whether the instruction executing wrote the IT state, by `IT`, an
+    /// exception or an exception return, so the state is not advanced past
+    /// it.
+    it_written: bool,
     cp15: Cp15,
-    memo: Memo,
+    memo: Memo<u32, 2>,
+    thumb: Memo<Thumb, 1>,
 }
 
 impl Cpu {
     /// A processor of `profile` at reset, keeping at most `memo_pages`
-    /// pages of decoded instructions.
+    /// pages of each instruction set's decoded instructions.
     #[must_use]
     pub fn new(profile: &'static Profile, memo_pages: usize) -> Self {
+        let thumb_zero = Thumb {
+            halfwords: 0,
+            position: Position::Outside,
+        };
         let mut cpu = Self {
             profile,
             r: [0; 15],
@@ -191,8 +201,10 @@ impl Cpu {
             lines: 0,
             event: false,
             exclusive: None,
+            it_written: false,
             cp15: Cp15::new(profile.system),
-            memo: Memo::new(memo_pages, profile),
+            memo: Memo::new(memo_pages, 0, Decoded::arm(0, profile)),
+            thumb: Memo::new(memo_pages, thumb_zero, Decoded::thumb(thumb_zero, profile)),
         };
         cpu.reset();
         cpu
@@ -238,33 +250,115 @@ impl Cpu {
             self.interrupt();
         }
         if self.cpsr & psr::T != 0 {
-            return Step::stopped(Stop::Unmodelled(Unmodelled::Thumb), false);
+            return self.step_thumb(bus);
         }
         let pc = self.pc;
         self.next = self.advance(pc, 4);
         let fetched = match bus.fetch(pc, self.mode.privileged()) {
             Ok(fetched) => fetched,
             Err(abort) => {
-                self.prefetch_abort(Fault::Bus(abort), pc);
+                self.prefetch_abort(Fault::Bus(abort), pc, pc);
                 self.pc = self.next;
                 return Step::ran();
             }
         };
-        let decoded = self.memo.decoded(pc, fetched.word, self.profile);
-        let flow = match decoded {
-            Decoded::Execute(instruction) if instruction.cond.passes(self.cpsr) => {
-                self.execute(bus, &instruction, fetched.host)
+        let profile = self.profile;
+        let decoded = self
+            .memo
+            .decoded(pc, fetched.word, |word| Decoded::arm(word, profile));
+        let flow = self.dispatch(bus, decoded, fetched.host);
+        self.finish(flow)
+    }
+
+    /// A step in Thumb state: one or two halfwords, under the condition the
+    /// `IT` block gives them, which then advances past them.
+    fn step_thumb<B: Bus>(&mut self, bus: &mut B) -> Step {
+        let pc = self.pc;
+        self.it_written = false;
+        let halfwords = match self.fetch_thumb(bus, pc) {
+            Ok(halfwords) => halfwords,
+            Err((abort, address)) => {
+                self.prefetch_abort(Fault::Bus(abort), address, pc);
+                self.pc = self.next;
+                return Step::ran();
+            }
+        };
+        let profile = self.profile;
+        let in_block = self.cpsr & (psr::IT_LOW | psr::IT_HIGH) != 0;
+        let position = if in_block {
+            Position::of(self.itstate())
+        } else {
+            Position::Outside
+        };
+        let decoded = self.thumb.decoded(
+            pc,
+            Thumb {
+                halfwords,
+                position,
+            },
+            |key| Decoded::thumb(key, profile),
+        );
+        // A host page's UDF calls the host only from A32 code.
+        let flow = self.dispatch(bus, decoded, false);
+        if in_block && !self.it_written && !matches!(flow, Flow::Refuse(_)) {
+            self.advance_itstate();
+        }
+        self.finish(flow)
+    }
+
+    /// The instruction at `pc` in Thumb state, its halfwords packed as
+    /// [`Thumb`] keys them, with `next` set past it; or the abort and the
+    /// address of the halfword the bus refused.
+    fn fetch_thumb<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<u32, (Abort, u32)> {
+        let privileged = self.mode.privileged();
+        let word = bus
+            .fetch(pc & !3, privileged)
+            .map_err(|abort| (abort, pc))?
+            .word;
+        let first = (word >> (8 * (pc & 2))) & 0xFFFF;
+        if !t32::is_wide(halfword(first)) {
+            self.next = pc.wrapping_add(2);
+            return Ok(first);
+        }
+        self.next = pc.wrapping_add(4);
+        let second = if pc & 2 == 0 {
+            word >> 16
+        } else {
+            let after = pc.wrapping_add(2);
+            bus.fetch(after, privileged)
+                .map_err(|abort| (abort, after))?
+                .word
+                & 0xFFFF
+        };
+        Ok(first | (second << 16))
+    }
+
+    /// Executes `decoded` if its condition holds, fetched from a host page
+    /// when `host`.
+    fn dispatch<B: Bus>(&mut self, bus: &mut B, decoded: Decoded, host: bool) -> Flow {
+        match decoded {
+            Decoded::Execute(instruction) if self.holds(instruction.cond) => {
+                self.execute(bus, &instruction, host)
             }
             Decoded::Execute(_) => Flow::Next,
             Decoded::Undefined(cond) => {
-                let unconditional = cond == crate::cond::Condition::Nv
-                    && !self.profile.isa.has(Feature::ConditionNever);
-                if unconditional || cond.passes(self.cpsr) {
+                if self.holds(cond) {
                     self.undefined();
                 }
                 Flow::Next
             }
-        };
+        }
+    }
+
+    /// Whether `cond` holds: `NV` never on a core where it means never, and
+    /// always otherwise, where it marks an unconditional instruction.
+    fn holds(&self, cond: Condition) -> bool {
+        cond.passes(self.cpsr)
+            || (cond == Condition::Nv && !self.profile.isa.has(Feature::ConditionNever))
+    }
+
+    /// Moves on past an instruction that did what `flow` says.
+    const fn finish(&mut self, flow: Flow) -> Step {
         match flow {
             Flow::Next => {
                 self.pc = self.next;
@@ -448,12 +542,13 @@ impl Cpu {
     /// they run.
     pub fn release_memo(&mut self) {
         self.memo.release();
+        self.thumb.release();
     }
 
     /// The bytes the decoded pages hold.
     #[must_use]
     pub fn memo_bytes(&self) -> usize {
-        self.memo.bytes()
+        self.memo.bytes() + self.thumb.bytes()
     }
 
     /// The mode `cpsr` names, if the profile has it.
@@ -493,11 +588,15 @@ impl Cpu {
         if mask & psr::M != 0 && self.valid_mode(value).is_none() {
             mask &= !psr::M;
         }
-        let cpsr = (self.cpsr & !mask) | (value & mask);
+        let mut cpsr = (self.cpsr & !mask) | (value & mask);
+        if restore && !restorable_itstate(cpsr) {
+            cpsr &= !(psr::IT_LOW | psr::IT_HIGH);
+        }
         if let Some(mode) = self.valid_mode(cpsr) {
             self.switch_mode(mode);
         }
         self.cpsr = cpsr;
+        self.it_written |= restore;
     }
 
     /// Writes the 26-bit PSR bits R15's layout holds in `r15`: the flags in
@@ -557,6 +656,7 @@ impl Cpu {
         }
         self.cpsr = cpsr & !psr::T & self.profile.psr;
         self.exclusive = None;
+        self.it_written = true;
         self.next = self.profile.vectors.wrapping_add(exception.offset());
     }
 
@@ -573,12 +673,47 @@ impl Cpu {
     }
 
     fn undefined(&mut self) {
-        self.take(Exception::Undefined, self.pc.wrapping_add(4));
+        let width = if self.cpsr & psr::T != 0 { 2 } else { 4 };
+        self.take(Exception::Undefined, self.pc.wrapping_add(width));
     }
 
-    fn prefetch_abort(&mut self, fault: Fault, address: u32) {
+    /// Sets the IT state, which the instruction executing then keeps rather
+    /// than advancing.
+    fn set_itstate(&mut self, itstate: u8) {
+        self.put_itstate(itstate);
+        self.it_written = true;
+    }
+
+    const fn put_itstate(&mut self, itstate: u8) {
+        let itstate = itstate as u32;
+        self.cpsr = (self.cpsr & !(psr::IT_LOW | psr::IT_HIGH))
+            | ((itstate & 3) << 25)
+            | ((itstate >> 2) << 10);
+    }
+
+    const fn itstate(&self) -> u8 {
+        itstate_of(self.cpsr)
+    }
+
+    /// Moves the IT state on to the block's next instruction, or out of the
+    /// block after its last.
+    const fn advance_itstate(&mut self) {
+        let itstate = self.itstate();
+        if itstate.trailing_zeros() >= 3 {
+            if itstate != 0 {
+                self.put_itstate(0);
+            }
+        } else {
+            self.put_itstate((itstate & 0xE0) | ((itstate << 1) & 0x1F));
+        }
+    }
+
+    /// The prefetch abort `fault` at `address` takes for the instruction at
+    /// `instruction`: the same address unless the second halfword of a
+    /// 32-bit Thumb instruction faulted.
+    fn prefetch_abort(&mut self, fault: Fault, address: u32, instruction: u32) {
         self.cp15.prefetch_fault(fault, address);
-        self.take(Exception::PrefetchAbort, address.wrapping_add(4));
+        self.take(Exception::PrefetchAbort, instruction.wrapping_add(4));
     }
 
     fn data_abort(&mut self, fault: Fault, address: u32, write: bool) {
@@ -596,6 +731,28 @@ impl Cpu {
         }
         refused
     }
+}
+
+/// The IT state `cpsr` holds: the condition and mask of the block in
+/// progress, zero outside one.
+const fn itstate_of(cpsr: u32) -> u8 {
+    let bits = ((cpsr >> 25) & 3) | (((cpsr >> 10) & 0x3F) << 2);
+    bits.to_le_bytes()[0]
+}
+
+/// Whether an exception return may restore the IT state `cpsr` holds: never
+/// to ARM state, nor a reserved value, as ARMv8 defines it.
+const fn restorable_itstate(cpsr: u32) -> bool {
+    let itstate = itstate_of(cpsr);
+    // A condition with no block left to give it.
+    let reserved = itstate != 0 && itstate.trailing_zeros() >= 4;
+    !reserved && (cpsr & psr::T != 0 || itstate == 0)
+}
+
+/// The low halfword of `bits`.
+const fn halfword(bits: u32) -> u16 {
+    let bytes = bits.to_le_bytes();
+    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 /// What executing an instruction did.

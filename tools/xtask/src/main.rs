@@ -77,7 +77,7 @@
 //!   (`--import <dir>`; developer-run, never in `ci`)
 //! - `riscos-vectors` — holds the RISC OS emulator's ARM to the external
 //!   `SingleStepTests` ARM7TDMI suite (`<dir>`; `--write-sample` to refresh the
-//!   sample `userland/apps/riscos/arm` replays; developer-run only)
+//!   samples `userland/apps/riscos/arm` replays; developer-run only)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation

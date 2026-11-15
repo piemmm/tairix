@@ -2,11 +2,12 @@
 //! architecture manual's decode pseudocode states them for each
 //! instruction, with the rules ARMv6 relaxed applied before it.
 
-use super::op::{
-    BitfieldOp, BlockOp, ExchangeOp, ExclusiveOp, Index, Instruction, LongOp, MultiplyOp, Offset,
-    Op, Operand, Source, TransferOp,
-};
 use crate::cond::Condition;
+use crate::encoding::check;
+use crate::instruction::{
+    BlockOp, CoIndex, CoRegisterOp, CoRegistersOp, DualOp, ExchangeOp, Index, Instruction, LongOp,
+    MultiplyOp, Offset, Op, Operand, Source, TransferOp,
+};
 use crate::isa::{Feature, Isa};
 use crate::reg::Reg;
 
@@ -71,16 +72,7 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
             rn,
             lsb,
             top,
-            ..
-        } => {
-            rd == PC
-                || match op {
-                    BitfieldOp::Sbfx | BitfieldOp::Ubfx => {
-                        rn == Some(PC) || u32::from(lsb) + u32::from(top) > 31
-                    }
-                    BitfieldOp::Bfi | BitfieldOp::Bfc => top < lsb,
-                }
-        }
+        } => rd == PC || rn == Some(PC) || check::bitfield(op, lsb, top),
         Op::StatusWrite { fields, source, .. } => fields == 0 || source == Source::Register(PC),
         Op::Exchange { op, rm } => rm == PC && (op == ExchangeOp::Blx || isa.version() < 7),
         Op::Transfer {
@@ -109,43 +101,51 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
             rn == PC || list.is_empty() || unknown_base || (user_bank && writeback)
         }
         Op::Swap { rt, rt2, rn, .. } => rt == PC || rt2 == PC || rn == PC || rn == rt || rn == rt2,
-        Op::Exclusive { op, rd, rt, rn } => exclusive(op, rd, rt, rn),
+        Op::Exclusive {
+            rd, rt, rt2, rn, ..
+        } => exclusive(rd, rt, rt2, rn),
+        Op::Dual {
+            op,
+            rt,
+            rt2,
+            rn,
+            offset,
+            index,
+            ..
+        } => {
+            let writeback = index != Index::Offset;
+            let rm = match offset {
+                Offset::Register { rm, .. } => Some(rm),
+                Offset::Immediate(_) => None,
+            };
+            rt.number() & 1 != 0
+                || rt == Reg::LR
+                || rm == Some(PC)
+                || (before_v6 && writeback && rm == Some(rn))
+                || (writeback && (rn == PC || rn == rt || rn == rt2))
+                || (op == DualOp::Ldrd && (rm == Some(rt) || rm == Some(rt2)))
+        }
         Op::ChangeState {
             imod,
             change_mode,
             interrupts,
             mode,
-        } => {
-            let enables = imod & 2 != 0;
-            (mode != 0 && !change_mode)
-                || (enables && interrupts == 0)
-                || (!enables && interrupts != 0)
-                || (imod == 0 && !change_mode)
-                || imod == 1
-        }
+        } => check::change_state(imod, change_mode, interrupts, mode),
         Op::ReturnFromException { rn, .. } => rn == PC,
         Op::CoprocessorRegister { op, rt, .. } => {
-            rt == PC
-                && matches!(
-                    op,
-                    super::op::CoRegisterOp::Mcr | super::op::CoRegisterOp::Mcr2
-                )
+            rt == PC && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mcr2)
         }
         Op::CoprocessorRegisters { op, rt, rt2, .. } => {
-            let read = matches!(
-                op,
-                super::op::CoRegistersOp::Mrrc | super::op::CoRegistersOp::Mrrc2
-            );
+            let read = matches!(op, CoRegistersOp::Mrrc | CoRegistersOp::Mrrc2);
             rt == PC || rt2 == PC || (read && rt == rt2)
         }
         Op::CoprocessorTransfer { rn, index, .. } => {
-            rn == PC
-                && !matches!(
-                    index,
-                    super::op::CoIndex::Offset | super::op::CoIndex::Unindexed
-                )
+            rn == PC && !matches!(index, CoIndex::Offset | CoIndex::Unindexed)
         }
         Op::Branch { .. }
+        | Op::CompareBranch { .. }
+        | Op::IfThen { .. }
+        | Op::TableBranch { .. }
         | Op::Call { .. }
         | Op::Hint { .. }
         | Op::Barrier { .. }
@@ -165,38 +165,23 @@ fn transfer(
     before_v6: bool,
 ) -> bool {
     use TransferOp as T;
-    let unprivileged = matches!(
-        op,
-        T::Ldrt | T::Strt | T::Ldrbt | T::Strbt | T::Ldrht | T::Strht | T::Ldrsbt | T::Ldrsht
-    );
-    let writeback = unprivileged || index != Index::Offset;
+    let writeback = index != Index::Offset;
     let rm = match offset {
         Offset::Register { rm, .. } => Some(rm),
         Offset::Immediate(_) => None,
     };
     let offset_unpredictable = rm == Some(PC) || (before_v6 && writeback && rm == Some(rn));
-    let pair = matches!(op, T::Ldrd | T::Strd);
-    let second = rt.next();
-    let destination_pc = !matches!(op, T::Ldr | T::Str | T::Strt | T::Ldrd | T::Strd) && rt == PC;
-    let base_conflict = if pair {
-        writeback && (rn == PC || rn == rt || rn == second)
-    } else if unprivileged {
+    let destination_pc = !matches!(op, T::Ldr | T::Str | T::Strt) && rt == PC;
+    let base_conflict = if op.unprivileged() {
         rn == PC || rn == rt
     } else {
         writeback && (rn == PC || rn == rt)
     };
-    let pair_conflict = pair
-        && (rt.number() & 1 != 0
-            || rt == Reg::LR
-            || (op == T::Ldrd && (rm == Some(rt) || rm == Some(second))));
-    offset_unpredictable || destination_pc || base_conflict || pair_conflict
+    offset_unpredictable || destination_pc || base_conflict
 }
 
-fn exclusive(op: ExclusiveOp, rd: Option<Reg>, rt: Reg, rn: Reg) -> bool {
-    use ExclusiveOp as X;
-    let pair = matches!(op, X::Ldrexd | X::Strexd | X::Ldaexd | X::Stlexd);
-    let pair_bad = pair && (rt.number() & 1 != 0 || rt == Reg::LR);
-    let status_bad =
-        rd.is_some_and(|rd| rd == PC || rd == rn || rd == rt || (pair && rd == rt.next()));
+fn exclusive(rd: Option<Reg>, rt: Reg, rt2: Option<Reg>, rn: Reg) -> bool {
+    let pair_bad = rt2.is_some() && (rt.number() & 1 != 0 || rt == Reg::LR);
+    let status_bad = rd.is_some_and(|rd| rd == PC || rd == rn || rd == rt || Some(rd) == rt2);
     rt == PC || rn == PC || pair_bad || status_bad
 }

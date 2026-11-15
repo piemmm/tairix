@@ -3,12 +3,13 @@
 //! inverse, from which a row's layout writes a word.
 
 use super::layout::{Field, Fields, Layout};
-use super::op::{
+use crate::cond::Condition;
+use crate::instruction::{
     ArithmeticOp, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CoIndex,
-    CoRegisterOp, CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, ExchangeOp,
-    ExclusiveOp, ExtendOp, HintOp, Immediate, Index, Lanes, LongOp, MoveOp, MultiplyOp, Offset, Op,
-    Operand, PackOp, Prefix, PreloadOp, SaturateOp, Shift, ShiftType, Source, SwapOp, TransferOp,
-    UnaryOp, WideOp,
+    CoRegisterOp, CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, DualOp,
+    ExchangeOp, ExclusiveOp, ExtendOp, HintOp, Immediate, Index, Lanes, LongOp, MoveOp, MultiplyOp,
+    Offset, Op, Operand, PackOp, Prefix, PreloadOp, SaturateOp, Shift, ShiftType, Source, SwapOp,
+    TransferOp, UnaryOp, WideOp,
 };
 use crate::reg::{Reg, RegList};
 
@@ -38,6 +39,7 @@ pub(crate) enum Kind {
     Barrier(BarrierOp),
     ClearExclusive,
     Transfer(TransferOp),
+    Dual(DualOp),
     Preload(PreloadOp),
     Block(BlockOp),
     Swap(SwapOp),
@@ -50,6 +52,9 @@ pub(crate) enum Kind {
     CoprocessorRegister(CoRegisterOp),
     CoprocessorRegisters(CoRegistersOp),
     CoprocessorTransfer(CoTransferOp),
+    CompareBranch,
+    IfThen,
+    TableBranch,
 }
 
 fn reg(fields: &Fields, field: Field) -> Reg {
@@ -109,20 +114,6 @@ fn index(fields: &Fields) -> Option<Index> {
         (false, false) => Some(Index::PostIndexed),
         (false, true) => None,
     }
-}
-
-const fn unprivileged(op: TransferOp) -> bool {
-    matches!(
-        op,
-        TransferOp::Ldrt
-            | TransferOp::Strt
-            | TransferOp::Ldrbt
-            | TransferOp::Strbt
-            | TransferOp::Ldrht
-            | TransferOp::Strht
-            | TransferOp::Ldrsbt
-            | TransferOp::Ldrsht
-    )
 }
 
 /// A 24-bit word offset, as a byte offset.
@@ -294,12 +285,24 @@ impl Kind {
                 rn: r(Field::Rn),
                 up: f.bit(Field::U),
                 offset: offset(layout, f)?,
-                index: if unprivileged(op) {
+                index: if op.unprivileged() {
                     Index::PostIndexed
                 } else {
                     index(f)?
                 },
             },
+            Self::Dual(op) => {
+                let rt = r(Field::Rt);
+                Op::Dual {
+                    op,
+                    rt,
+                    rt2: optional(Field::Rt2).unwrap_or_else(|| rt.next()),
+                    rn: r(Field::Rn),
+                    up: f.bit(Field::U),
+                    offset: offset(layout, f)?,
+                    index: index(f)?,
+                }
+            }
             Self::Preload(op) => Op::Preload {
                 op,
                 rn: r(Field::Rn),
@@ -320,11 +323,37 @@ impl Kind {
                 rt2: r(Field::Rt2),
                 rn: r(Field::Rn),
             },
-            Self::Exclusive(op) => Op::Exclusive {
-                op,
-                rd: optional(Field::Rd),
-                rt: r(Field::Rt),
+            Self::Exclusive(op) => {
+                let rt = r(Field::Rt);
+                let pair = matches!(
+                    op,
+                    ExclusiveOp::Ldrexd
+                        | ExclusiveOp::Strexd
+                        | ExclusiveOp::Ldaexd
+                        | ExclusiveOp::Stlexd
+                );
+                Op::Exclusive {
+                    op,
+                    rd: optional(Field::Rd),
+                    rt,
+                    rt2: optional(Field::Rt2).or_else(|| pair.then(|| rt.next())),
+                    rn: r(Field::Rn),
+                    offset: 0,
+                }
+            }
+            Self::CompareBranch => Op::CompareBranch {
+                nonzero: f.bit(Field::X),
                 rn: r(Field::Rn),
+                offset: f.get(Field::Imm) << 1,
+            },
+            Self::IfThen => Op::IfThen {
+                firstcond: Condition::field(f.get(Field::Opc1)),
+                mask: byte(f, Field::Opc2),
+            },
+            Self::TableBranch => Op::TableBranch {
+                half: f.bit(Field::X),
+                rn: r(Field::Rn),
+                rm: r(Field::Rm),
             },
             Self::ChangeState => Op::ChangeState {
                 imod: byte(f, Field::Imod),
@@ -406,6 +435,8 @@ fn set_operand(f: &mut Fields, operand: Operand) {
             f.set(Field::Type, kind.bits());
             f.set(Field::Rs, rs.number());
         }
+        // The T32 forms; no A32 row holds them, so the encoder refuses.
+        Operand::Expanded(_) | Operand::Literal(_) => f.set(Field::Rotate, u32::MAX),
     }
 }
 
@@ -468,6 +499,7 @@ impl Op {
             Self::Barrier { op, .. } => Kind::Barrier(op),
             Self::ClearExclusive => Kind::ClearExclusive,
             Self::Transfer { op, .. } => Kind::Transfer(op),
+            Self::Dual { op, .. } => Kind::Dual(op),
             Self::Preload { op, .. } => Kind::Preload(op),
             Self::Block { op, .. } => Kind::Block(op),
             Self::Swap { op, .. } => Kind::Swap(op),
@@ -480,6 +512,9 @@ impl Op {
             Self::CoprocessorRegister { op, .. } => Kind::CoprocessorRegister(op),
             Self::CoprocessorRegisters { op, .. } => Kind::CoprocessorRegisters(op),
             Self::CoprocessorTransfer { op, .. } => Kind::CoprocessorTransfer(op),
+            Self::CompareBranch { .. } => Kind::CompareBranch,
+            Self::IfThen { .. } => Kind::IfThen,
+            Self::TableBranch { .. } => Kind::TableBranch,
         }
     }
 
@@ -681,9 +716,25 @@ impl Op {
                 f.set(Field::Rn, rn.number());
                 f.flag(Field::U, up);
                 set_offset(&mut f, offset);
-                if !unprivileged(op) {
+                if !op.unprivileged() {
                     set_index(&mut f, index);
                 }
+            }
+            Self::Dual {
+                rt,
+                rt2,
+                rn,
+                up,
+                offset,
+                index,
+                ..
+            } => {
+                f.set(Field::Rt, rt.number());
+                f.set(Field::Rt2, rt2.number());
+                f.set(Field::Rn, rn.number());
+                f.flag(Field::U, up);
+                set_offset(&mut f, offset);
+                set_index(&mut f, index);
             }
             Self::Preload { rn, up, offset, .. } => {
                 f.set(Field::Rn, rn.number());
@@ -709,12 +760,42 @@ impl Op {
                 f.set(Field::Rt2, rt2.number());
                 f.set(Field::Rn, rn.number());
             }
-            Self::Exclusive { rd, rt, rn, .. } => {
+            Self::Exclusive {
+                rd, rt, rt2, rn, ..
+            } => {
                 if let Some(rd) = rd {
                     f.set(Field::Rd, rd.number());
                 }
                 f.set(Field::Rt, rt.number());
+                if let Some(rt2) = rt2 {
+                    f.set(Field::Rt2, rt2.number());
+                }
                 f.set(Field::Rn, rn.number());
+            }
+            Self::CompareBranch {
+                nonzero,
+                rn,
+                offset,
+            } => {
+                f.flag(Field::X, nonzero);
+                f.set(Field::Rn, rn.number());
+                f.set(
+                    Field::Imm,
+                    if offset & 1 == 0 {
+                        offset >> 1
+                    } else {
+                        u32::MAX
+                    },
+                );
+            }
+            Self::IfThen { firstcond, mask } => {
+                f.set(Field::Opc1, firstcond.bits());
+                f.set(Field::Opc2, u32::from(mask));
+            }
+            Self::TableBranch { half, rn, rm } => {
+                f.flag(Field::X, half);
+                f.set(Field::Rn, rn.number());
+                f.set(Field::Rm, rm.number());
             }
             Self::ChangeState {
                 imod,

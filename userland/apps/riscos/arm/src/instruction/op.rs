@@ -1,14 +1,19 @@
-//! The A32 instruction vocabulary: an [`Op`] for each form, carrying the
-//! operation its rows select and the operands its fields hold.
+//! The instruction vocabulary: an [`Op`] for each form, carrying the
+//! operation its encodings select and the operands their fields hold.
 
 use crate::cond::Condition;
 use crate::reg::{Reg, RegList};
 
-/// A decoded A32 instruction.
+// Every decoded page slot holds one; past 16 bytes the interpreter measurably
+// slows.
+const _: () = assert!(core::mem::size_of::<Instruction>() <= 16);
+
+/// A decoded instruction.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Instruction {
-    /// The condition field; [`Condition::Nv`] for an unconditional
-    /// instruction.
+    /// The condition: an A32 instruction's field, [`Condition::Nv`] for an
+    /// unconditional one; a T32 instruction's from its `IT` block, or a
+    /// conditional branch's own.
     pub cond: Condition,
     /// The operation and its operands.
     pub op: Op,
@@ -50,6 +55,7 @@ operations! {
         Rsc = "RSC",
         Orr = "ORR",
         Bic = "BIC",
+        Orn = "ORN",
     }
 }
 
@@ -259,11 +265,13 @@ operations! {
 }
 
 operations! {
-    /// A memory barrier (ARMv7).
+    /// A memory barrier (ARMv7), or a speculation barrier (ARMv8).
     BarrierOp {
         Dsb = "DSB",
         Dmb = "DMB",
         Isb = "ISB",
+        Ssbb = "SSBB",
+        Pssbb = "PSSBB",
     }
 }
 
@@ -282,12 +290,46 @@ operations! {
         Strh = "STRH",
         Ldrsb = "LDRSB",
         Ldrsh = "LDRSH",
-        Ldrd = "LDRD",
-        Strd = "STRD",
         Ldrht = "LDRHT",
         Strht = "STRHT",
         Ldrsbt = "LDRSBT",
         Ldrsht = "LDRSHT",
+    }
+}
+
+impl TransferOp {
+    /// Whether the transfer reaches memory as User mode would: the `T`
+    /// forms.
+    #[must_use]
+    pub const fn unprivileged(self) -> bool {
+        matches!(
+            self,
+            Self::Ldrt
+                | Self::Strt
+                | Self::Ldrbt
+                | Self::Strbt
+                | Self::Ldrht
+                | Self::Strht
+                | Self::Ldrsbt
+                | Self::Ldrsht
+        )
+    }
+
+    /// Whether the transfer stores.
+    #[must_use]
+    pub const fn stores(self) -> bool {
+        matches!(
+            self,
+            Self::Str | Self::Strb | Self::Strh | Self::Strt | Self::Strbt | Self::Strht
+        )
+    }
+}
+
+operations! {
+    /// A transfer of a pair of words (ARMv5TE).
+    DualOp {
+        Ldrd = "LDRD",
+        Strd = "STRD",
     }
 }
 
@@ -509,11 +551,50 @@ impl Immediate {
     }
 }
 
+/// A T32 modified immediate: the 12-bit field that expands to a byte
+/// repeated in a pattern, or a rotated byte with its top bit set.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Expanded(pub u16);
+
+impl Expanded {
+    /// The value the field expands to.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        let field = self.0 as u32 & 0xFFF;
+        let byte = field & 0xFF;
+        if field >> 10 != 0 {
+            return (0x80 | (field & 0x7F)).rotate_right(field >> 7);
+        }
+        match (field >> 8) & 3 {
+            0 => byte,
+            1 => (byte << 16) | byte,
+            2 => (byte << 24) | (byte << 8),
+            _ => byte * 0x0101_0101,
+        }
+    }
+
+    /// The carry out, given the carry in: unchanged by a repeated byte, the
+    /// value's top bit for a rotated one.
+    #[must_use]
+    pub const fn carry(self, carry: bool) -> bool {
+        if self.0 & 0xC00 == 0 {
+            carry
+        } else {
+            self.value() >> 31 != 0
+        }
+    }
+}
+
 /// A data-processing instruction's second operand.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Operand {
-    /// A rotated immediate.
+    /// A rotated immediate (A32).
     Immediate(Immediate),
+    /// A modified immediate (T32).
+    Expanded(Expanded),
+    /// An immediate as written, unrotated (T32), which leaves the carry:
+    /// twelve bits at most.
+    Literal(u16),
     /// Rm shifted by an immediate.
     Register {
         /// The register.
@@ -813,7 +894,8 @@ pub enum Op {
     Branch {
         /// The operation.
         op: BranchOp,
-        /// The target less the instruction's address plus 8.
+        /// The target less the PC as the instruction reads it, which a
+        /// `BLX` from T32 reads word-aligned.
         offset: i32,
     },
     /// `BX`, `BXJ` and `BLX` to a register.
@@ -850,8 +932,7 @@ pub enum Op {
     Transfer {
         /// The operation.
         op: TransferOp,
-        /// The register transferred; the first of the pair for `LDRD` and
-        /// `STRD`.
+        /// The register transferred.
         rt: Reg,
         /// The base.
         rn: Reg,
@@ -859,8 +940,25 @@ pub enum Op {
         up: bool,
         /// The offset.
         offset: Offset,
-        /// When the offset applies; always post-indexed for the
-        /// unprivileged forms.
+        /// When the offset applies: A32's unprivileged forms are
+        /// post-indexed, T32's at an offset.
+        index: Index,
+    },
+    /// `LDRD` and `STRD`.
+    Dual {
+        /// The operation.
+        op: DualOp,
+        /// The first register, at the lower address.
+        rt: Reg,
+        /// The second register: the next one in A32, any in T32.
+        rt2: Reg,
+        /// The base.
+        rn: Reg,
+        /// Add the offset rather than subtract it.
+        up: bool,
+        /// The offset.
+        offset: Offset,
+        /// When the offset applies.
         index: Index,
     },
     /// The preloads.
@@ -906,11 +1004,40 @@ pub enum Op {
         op: ExclusiveOp,
         /// The status register, for the exclusive stores.
         rd: Option<Reg>,
-        /// The register transferred; the first of the pair for the
-        /// doubleword forms.
+        /// The register transferred.
         rt: Reg,
-        /// The address.
+        /// The doubleword forms' second register: the next one in A32, any
+        /// in T32.
+        rt2: Option<Reg>,
+        /// The base.
         rn: Reg,
+        /// T32's word-scaled offset from the base, in bytes; zero in A32.
+        offset: u16,
+    },
+    /// `CBZ` and `CBNZ` (T32).
+    CompareBranch {
+        /// Branch when the register is not zero.
+        nonzero: bool,
+        /// The register tested.
+        rn: Reg,
+        /// The forward distance from the PC.
+        offset: u32,
+    },
+    /// `IT` (T32): up to four following instructions made conditional.
+    IfThen {
+        /// The first instruction's condition.
+        firstcond: Condition,
+        /// The block's length and its then-or-else pattern.
+        mask: u8,
+    },
+    /// `TBB` and `TBH` (T32).
+    TableBranch {
+        /// Halfword entries rather than bytes.
+        half: bool,
+        /// The table's base.
+        rn: Reg,
+        /// The index.
+        rm: Reg,
     },
     /// `CPS`.
     ChangeState {

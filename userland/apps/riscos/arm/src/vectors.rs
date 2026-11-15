@@ -35,7 +35,8 @@ pub struct Transfer {
 /// One case.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vector {
-    /// The instruction.
+    /// The instruction: an A32 word, or in Thumb state its halfwords in the
+    /// order they are fetched, the first in the low half.
     pub word: u32,
     /// The registers it starts from; the PC is the instruction's address.
     pub before: State,
@@ -251,10 +252,26 @@ const fn mask(width: Width) -> u32 {
 }
 
 impl Bus for Replay<'_> {
+    /// The instruction's bytes where they lie in the word at `address`; a
+    /// word holding none of them is unmapped.
     fn fetch(&mut self, address: u32, _privileged: bool) -> Result<Fetch, Abort> {
-        if address == self.vector.before.pc {
+        let start = self.vector.before.pc;
+        let instruction = self.vector.word.to_le_bytes();
+        let mut bytes = [0; 4];
+        let mut mapped = false;
+        for (n, byte) in (0u32..4).zip(&mut bytes) {
+            let offset = address.wrapping_add(n).wrapping_sub(start);
+            if let Some(&value) = usize::try_from(offset)
+                .ok()
+                .and_then(|n| instruction.get(n))
+            {
+                *byte = value;
+                mapped = true;
+            }
+        }
+        if mapped {
             Ok(Fetch {
-                word: self.vector.word,
+                word: u32::from_le_bytes(bytes),
                 host: false,
             })
         } else {
@@ -362,7 +379,7 @@ pub fn check(profile: &'static Profile, vector: &Vector) -> Result<(), Mismatch>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::BIT26;
+    use crate::profile::{BIT26, BIT32};
     use crate::psr::{self, Mode};
 
     fn vector() -> Vector {
@@ -404,6 +421,29 @@ mod tests {
         let mut wrong = encoded;
         wrong[0] ^= 1;
         assert_eq!(decode(&wrong), Err(DecodeError::BadMagic));
+    }
+
+    #[test]
+    fn a_vector_at_the_top_of_the_address_space_wraps_past_it() {
+        for (word, cpsr, pc) in [
+            (0xE1A0_0000, Mode::User.bits(), 0xFFFF_FFFC),
+            (0x0000_BF00, Mode::User.bits() | psr::T, 0xFFFF_FFFE),
+        ] {
+            let before = State {
+                pc,
+                cpsr,
+                ..State::default()
+            };
+            let after = State { pc: 0, ..before };
+            let vector = Vector {
+                word,
+                before,
+                after,
+                psr: psr::NZCV | psr::T | psr::M,
+                transfers: alloc::vec::Vec::new(),
+            };
+            assert_eq!(check(&BIT32, &vector), Ok(()), "{word:08X}");
+        }
     }
 
     #[test]

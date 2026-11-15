@@ -91,10 +91,14 @@ pub(crate) enum Field {
     Endian,
     /// `Z`: the SPSR rather than the CPSR.
     Spsr,
+    /// `J`: T32's first branch-offset bit beside the sign.
+    J1,
+    /// `K`: T32's second branch-offset bit beside the sign.
+    J2,
 }
 
 /// How many fields there are.
-pub(crate) const FIELDS: usize = Field::Spsr as usize + 1;
+pub(crate) const FIELDS: usize = Field::J2 as usize + 1;
 
 impl Field {
     const fn of(letter: u8) -> Option<Self> {
@@ -139,6 +143,8 @@ impl Field {
             b'u' => Self::ChangeMode,
             b'E' => Self::Endian,
             b'Z' => Self::Spsr,
+            b'J' => Self::J1,
+            b'K' => Self::J2,
             _ => return None,
         })
     }
@@ -160,9 +166,18 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// The layout `pattern` spells. Evaluated in the table's initialiser, so
-    /// a malformed pattern fails the build.
+    /// The layout a 32-bit `pattern` spells. Evaluated in a table's
+    /// initialiser, so a malformed pattern fails the build.
     pub const fn of(pattern: &str) -> Self {
+        Self::parse(pattern, 32)
+    }
+
+    /// The layout a 16-bit `pattern` spells, in the low half.
+    pub const fn halfword(pattern: &str) -> Self {
+        Self::parse(pattern, 16)
+    }
+
+    const fn parse(pattern: &str, width: u32) -> Self {
         let bytes = pattern.as_bytes();
         let mut layout = Self {
             mask: 0,
@@ -179,8 +194,8 @@ impl Layout {
             if letter == b' ' || letter == b'_' {
                 continue;
             }
-            assert!(seen < 32, "a pattern spells 32 bits");
-            let bit = 1u32 << (31 - seen);
+            assert!(seen < width, "a pattern spells its width's bits");
+            let bit = 1u32 << (width - 1 - seen);
             seen += 1;
             match letter {
                 b'0' => layout.mask |= bit,
@@ -199,7 +214,7 @@ impl Layout {
                 },
             }
         }
-        assert!(seen == 32, "a pattern spells 32 bits");
+        assert!(seen == width, "a pattern spells its width's bits");
         layout
     }
 
@@ -326,6 +341,15 @@ mod tests {
         let bx = Layout::of("cccc 0001 0010 ++++ ++++ ++++ 0001 mmmm");
         assert_eq!(bx.should_mask, 0x000F_FF00);
         assert_eq!(bx.should_bits, 0x000F_FF00);
+    }
+
+    #[test]
+    fn a_halfword_pattern_reads_into_the_low_half() {
+        let layout = Layout::halfword("1101 cccc iiii iiii");
+        assert_eq!(layout.mask, 0xF000);
+        assert_eq!(layout.bits, 0xD000);
+        assert_eq!(layout.field(Field::Cond), 0x0F00);
+        assert_eq!(layout.field(Field::Imm), 0x00FF);
     }
 
     #[test]

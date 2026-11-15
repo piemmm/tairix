@@ -8,9 +8,11 @@ use alloc::vec::Vec;
 use super::{BadState, Cpu, Exception, Run, State, Stop, Unmodelled};
 use crate::a32::decode;
 use crate::bus::{Abort, Bus, Fetch, Width};
+use crate::instruction::{Op, Set};
 use crate::profile::{Profile, BIT26, BIT32};
 use crate::psr::{self, Mode};
 use crate::reg::Reg;
+use crate::t32::{self, Position};
 
 /// Memory: 64 KiB at zero and a page of high vectors, with a page that
 /// refuses writes, a page the bus does not map, and host pages.
@@ -59,13 +61,42 @@ impl Ram {
         self.slot(address).expect("mapped")[..4].copy_from_slice(&word.to_le_bytes());
     }
 
+    fn put_half(&mut self, address: u32, half: u16) {
+        self.slot(address).expect("mapped")[..2].copy_from_slice(&half.to_le_bytes());
+    }
+
+    /// Writes the Thumb `program` at `address`, each instruction checked
+    /// against the text the disassembler gives it where it stands in the
+    /// straight-line code's `IT` blocks.
+    fn thumb(&mut self, address: u32, program: &[(&[u16], &str)]) {
+        let mut at = address;
+        let mut itstate = 0u8;
+        for &(halves, text) in program {
+            let second = halves.get(1).copied().unwrap_or(0);
+            let decoded = t32::decode(halves[0], second, BIT32.isa, Position::of(itstate))
+                .unwrap_or_else(|| panic!("{halves:04X?} decodes"));
+            assert_eq!(decoded.wide, halves.len() == 2, "{halves:04X?}");
+            let shown = format!("{}", decoded.instruction.text(Set::T32, at));
+            assert_eq!(shown, text, "{halves:04X?}");
+            itstate = match decoded.instruction.op {
+                Op::IfThen { firstcond, mask } => (firstcond.bits().to_le_bytes()[0] << 4) | mask,
+                _ if itstate.trailing_zeros() >= 3 => 0,
+                _ => (itstate & 0xE0) | ((itstate << 1) & 0x1F),
+            };
+            for &half in halves {
+                self.put_half(at, half);
+                at += 2;
+            }
+        }
+    }
+
     /// Writes `program` at `address`, each word checked against the text
     /// the disassembler gives it so a test cannot run a word it misread.
     fn program(&mut self, profile: &Profile, address: u32, program: &[(u32, &str)]) {
         for (n, &(word, text)) in (0u32..).zip(program) {
             let at = address + 4 * n;
-            let shown =
-                decode(word, profile.isa).map(|instruction| format!("{}", instruction.text(at)));
+            let shown = decode(word, profile.isa)
+                .map(|instruction| format!("{}", instruction.text(Set::A32, at)));
             assert_eq!(shown.as_deref(), Some(text), "{word:08X}");
             self.put(at, word);
         }
@@ -410,15 +441,15 @@ fn branches_and_loads_to_the_pc_interwork_as_the_architecture_version_does() {
             (0xE1A0_F002, "MOV     PC,R2"),
         ],
     );
+    ram.thumb(0x9000, &[(&[0x2105], "MOVS    R1,#5")]);
     let mut cpu = processor(&BIT32, Mode::User, 0x8000);
     cpu.set_reg(r(0), 0x9001);
     run(&mut cpu, &mut ram, 1);
     assert_eq!(cpu.pc(), 0x9000);
     assert_ne!(cpu.cpsr() & psr::T, 0, "bit 0 selects Thumb");
-    assert_eq!(
-        run(&mut cpu, &mut ram, 1).stop,
-        Stop::Unmodelled(Unmodelled::Thumb)
-    );
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(1)), 5, "the Thumb instruction ran");
+    assert_eq!(cpu.pc(), 0x9002);
     for (word, target) in [(0x8004u32, 0x9003u32), (0x8008, 0x9005)] {
         let mut cpu = processor(&BIT32, Mode::User, word);
         cpu.set_reg(r(1), 0x4000);
@@ -849,4 +880,343 @@ fn reset_enters_supervisor_mode_at_the_reset_vector() {
     );
     let legacy = Cpu::new(&BIT26, 0);
     assert_eq!(legacy.pc(), 0);
+}
+
+/// A processor of the 32-bit profile in Thumb state.
+fn thumb(mode: Mode, pc: u32) -> Cpu {
+    let mut cpu = processor(&BIT32, mode, pc);
+    cpu.set_cpsr(mode.bits() | psr::T).expect("Thumb state");
+    cpu
+}
+
+#[test]
+fn thumb_data_processing_sets_the_flags_outside_a_block() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x8000,
+        &[
+            (&[0x2005], "MOVS    R0,#5"),
+            (&[0x1D41], "ADDS    R1,R0,#5"),
+            (&[0x1A0A], "SUBS    R2,R1,R0"),
+            (&[0x4240], "RSBS    R0,R0,#0"),
+            (&[0x0049], "MOVS    R1,R1,LSL #1"),
+            (&[0xF04F, 0x0307], "MOV     R3,#7"),
+        ],
+    );
+    let mut cpu = thumb(Mode::User, 0x8000);
+    run(&mut cpu, &mut ram, 3);
+    assert_eq!((cpu.reg(r(1)), cpu.reg(r(2))), (10, 5));
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 0xFFFF_FFFB);
+    assert_eq!(cpu.cpsr() & psr::NZCV, psr::N, "the negation borrowed");
+    run(&mut cpu, &mut ram, 2);
+    assert_eq!(cpu.reg(r(1)), 20);
+    assert_eq!(cpu.reg(r(3)), 7);
+    assert_eq!(cpu.cpsr() & psr::NZCV, 0, "MOV.W left the flags");
+    assert_eq!(cpu.pc(), 0x800E);
+}
+
+#[test]
+fn an_it_block_conditions_its_instructions_and_ends() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x8000,
+        &[
+            (&[0x2800], "CMP     R0,#0"),
+            (&[0xBF0A], "ITET    EQ"),
+            (&[0x2101], "MOVEQ   R1,#1"),
+            (&[0x2202], "MOVNE   R2,#2"),
+            (&[0x2303], "MOVEQ   R3,#3"),
+            (&[0x2404], "MOVS    R4,#4"),
+        ],
+    );
+    for (r0, expected) in [(0, [1, 0, 3]), (1, [0, 2, 0])] {
+        let mut cpu = thumb(Mode::User, 0x8000);
+        cpu.set_reg(r(0), r0);
+        run(&mut cpu, &mut ram, 5);
+        assert_eq!(
+            [cpu.reg(r(1)), cpu.reg(r(2)), cpu.reg(r(3))],
+            expected,
+            "R0 = {r0}: a MOV in a block sets no flags, so the block reads one Z"
+        );
+        assert_eq!(
+            cpu.cpsr() & (psr::IT_LOW | psr::IT_HIGH),
+            0,
+            "the block ended"
+        );
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.reg(r(4)), 4);
+        assert_eq!(
+            cpu.cpsr() & psr::Z,
+            0,
+            "MOVS after the block sets the flags"
+        );
+    }
+}
+
+#[test]
+fn compare_and_branch_and_the_table_branches_go_where_they_point() {
+    let mut ram = Ram::new();
+    ram.thumb(0x8000, &[(&[0xB108], "CBZ     R0,&00008006")]);
+    for (r0, target) in [(0, 0x8006), (1, 0x8002)] {
+        let mut cpu = thumb(Mode::User, 0x8000);
+        cpu.set_reg(r(0), r0);
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.pc(), target, "R0 = {r0}");
+    }
+    ram.thumb(0x8100, &[(&[0xE8DF, 0xF001], "TBB     [PC,R1]")]);
+    ram.put(0x8104, 0x0000_0302);
+    for (index, target) in [(0, 0x8108), (1, 0x810A)] {
+        let mut cpu = thumb(Mode::User, 0x8100);
+        cpu.set_reg(r(1), index);
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.pc(), target, "TBB entry {index}");
+    }
+    ram.thumb(0x8200, &[(&[0xE8DF, 0xF011], "TBH     [PC,R1,LSL #1]")]);
+    ram.put(0x8204, 0x0005_0001);
+    let mut cpu = thumb(Mode::User, 0x8200);
+    cpu.set_reg(r(1), 1);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0x8204 + 2 * 5, "TBH's second halfword entry");
+}
+
+#[test]
+fn thumb_interworks_with_arm_as_armv7_defines_it() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x9000,
+        &[
+            (&[0xF000, 0xE804], "BLX     &0000900C"),
+            (&[0x2303], "MOVS    R3,#3"),
+        ],
+    );
+    ram.program(
+        &BIT32,
+        0x900C,
+        &[(0xE3A0_2007, "MOV     R2,#7"), (0xE12F_FF1E, "BX      R14")],
+    );
+    let mut cpu = thumb(Mode::User, 0x9000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0x900C);
+    assert_eq!(cpu.cpsr() & psr::T, 0, "BLX selects ARM");
+    assert_eq!(cpu.reg(Reg::LR), 0x9005, "the return is Thumb code");
+    run(&mut cpu, &mut ram, 3);
+    assert_eq!((cpu.reg(r(2)), cpu.reg(r(3))), (7, 3));
+    assert_ne!(cpu.cpsr() & psr::T, 0, "BX returned to Thumb");
+
+    ram.thumb(
+        0xA000,
+        &[
+            (&[0xBD00], "LDMFD   R13!,{PC}"),
+            (&[0x4687], "MOV     PC,R0"),
+            (&[0xF8D1, 0xF000], "LDR     PC,[R1]"),
+        ],
+    );
+    ram.put(0x4000, 0x0000_A101);
+    let mut cpu = thumb(Mode::User, 0xA000);
+    cpu.set_reg(Reg::SP, 0x4000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0xA100);
+    assert_ne!(
+        cpu.cpsr() & psr::T,
+        0,
+        "POP {{PC}} interworks: bit 0 set stays Thumb"
+    );
+    let mut cpu = thumb(Mode::User, 0xA002);
+    cpu.set_reg(r(0), 0xA200);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0xA200);
+    assert_ne!(cpu.cpsr() & psr::T, 0, "MOV PC stays in Thumb state");
+    let mut cpu = thumb(Mode::User, 0xA004);
+    cpu.set_reg(r(1), 0x4000);
+    ram.put(0x4000, 0x0000_A300);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0xA300);
+    assert_eq!(cpu.cpsr() & psr::T, 0, "LDR PC interworks to ARM");
+}
+
+#[test]
+fn literal_addressing_reads_the_pc_word_aligned() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x8002,
+        &[
+            (&[0x4801], "LDR     R0,[PC,#4]"),
+            (&[0xA001], "ADD     R0,PC,#4"),
+        ],
+    );
+    ram.put(0x8008, 0x1234_5678);
+    let mut cpu = thumb(Mode::User, 0x8002);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 0x1234_5678, "from &8004 plus 4");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 0x800C, "ADR from &8008 plus 4");
+}
+
+#[test]
+fn exceptions_from_thumb_return_to_it() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x9000,
+        &[(&[0xDE00], "UDF     #0"), (&[0x2101], "MOVS    R1,#1")],
+    );
+    ram.program(&BIT32, HIGH + 4, &[(0xE1B0_F00E, "MOVS    PC,R14")]);
+    let mut cpu = thumb(Mode::User, 0x9000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Undefined);
+    assert_eq!(cpu.pc(), HIGH + 4);
+    assert_eq!(cpu.reg(Reg::LR), 0x9002, "the undefined instruction plus 2");
+    assert_eq!(cpu.cpsr() & psr::T, 0, "exceptions are taken in ARM state");
+    assert_ne!(cpu.spsr().unwrap_or(0) & psr::T, 0);
+    run(&mut cpu, &mut ram, 2);
+    assert_eq!(cpu.mode(), Mode::User);
+    assert_eq!(cpu.reg(r(1)), 1, "back in Thumb past the UDF");
+
+    ram.thumb(0x9100, &[(&[0xBE00], "BKPT    #0")]);
+    let mut cpu = thumb(Mode::User, 0x9100);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Abort);
+    assert_eq!(cpu.reg(Reg::LR), 0x9104, "a breakpoint's return is plus 4");
+}
+
+#[test]
+fn a_swi_in_a_block_leaves_the_block_advanced_for_its_handler() {
+    let mut ram = Ram::new();
+    ram.thumb(
+        0x8000,
+        &[
+            (&[0x4280], "CMP     R0,R0"),
+            (&[0xBF04], "ITT     EQ"),
+            (&[0xDF01], "SWIEQ   &000001"),
+            (&[0x2101], "MOVEQ   R1,#1"),
+        ],
+    );
+    let mut cpu = thumb(Mode::User, 0x8000);
+    let ran = run(&mut cpu, &mut ram, 10);
+    assert_eq!(ran.stop, Stop::Swi { number: 1 });
+    assert_eq!(cpu.pc(), 0x8006);
+    cpu.enter(Exception::Swi, cpu.pc());
+    let spsr = cpu.spsr().unwrap_or(0);
+    assert_eq!(cpu.reg(Reg::LR), 0x8006);
+    assert_ne!(spsr & psr::T, 0);
+    assert_eq!(
+        (spsr >> 25) & 3 | ((spsr >> 10) & 0x3F) << 2,
+        0x08,
+        "the SPSR holds the block's last instruction to come"
+    );
+}
+
+#[test]
+fn a_32_bit_instruction_may_straddle_a_word_and_its_second_halfword_may_abort() {
+    let mut ram = Ram::new();
+    ram.thumb(0x8002, &[(&[0xF04F, 0x0007], "MOV     R0,#7")]);
+    let mut cpu = thumb(Mode::User, 0x8002);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 7);
+    assert_eq!(cpu.pc(), 0x8006);
+    ram.put_half(UNMAPPED - 2, 0xF04F);
+    let mut cpu = thumb(Mode::User, UNMAPPED - 2);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Abort);
+    assert_eq!(cpu.pc(), HIGH + 0x0C);
+    assert_eq!(
+        cpu.reg(Reg::LR),
+        UNMAPPED + 2,
+        "the instruction's address plus 4"
+    );
+}
+
+#[test]
+fn the_unconditional_space_executes_on_the_32_bit_profile() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xF10C_0080, "CPSID   I"),
+            (0xF101_0200, "SETEND  BE"),
+            (0xF101_0000, "SETEND  LE"),
+            (0xFA00_0000, "BLX     &00008014"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+    run(&mut cpu, &mut ram, 1);
+    assert_ne!(cpu.cpsr() & psr::I, 0, "CPSID I masked IRQs");
+    run(&mut cpu, &mut ram, 1);
+    assert_ne!(cpu.cpsr() & psr::E, 0);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.cpsr() & psr::E, 0);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.pc(), 0x8014);
+    assert_ne!(cpu.cpsr() & psr::T, 0, "BLX selects Thumb");
+    assert_eq!(cpu.reg(Reg::LR), 0x8010);
+}
+
+#[test]
+fn thumb_code_decodes_again_where_it_or_its_block_changes() {
+    let mut ram = Ram::new();
+    ram.thumb(0x8000, &[(&[0x2001], "MOVS    R0,#1")]);
+    let mut cpu = thumb(Mode::User, 0x8000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 1);
+    ram.put_half(0x8000, 0x2002);
+    cpu.set_reg(Reg::PC, 0x8000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(0)), 2, "rewritten");
+    ram.thumb(
+        0x8100,
+        &[(&[0x2800], "CMP     R0,#0"), (&[0xBF08], "IT      EQ")],
+    );
+    ram.put_half(0x8104, 0x2000);
+    let mut cpu = thumb(Mode::User, 0x8104);
+    cpu.set_reg(r(0), 5);
+    run(&mut cpu, &mut ram, 1);
+    assert_ne!(cpu.cpsr() & psr::Z, 0, "outside a block MOVS #0 sets Z");
+    cpu.set_reg(r(0), 0);
+    cpu.set_reg(Reg::PC, 0x8100);
+    run(&mut cpu, &mut ram, 1);
+    cpu.set_cpsr(cpu.cpsr() & !psr::Z).expect("Z clear");
+    run(&mut cpu, &mut ram, 2);
+    assert_eq!(
+        cpu.reg(r(0)),
+        0,
+        "MOVEQ skipped under the block's condition"
+    );
+    assert_eq!(cpu.cpsr() & psr::Z, 0, "and set no flags");
+}
+
+#[test]
+fn an_exception_return_restores_an_it_state_only_into_thumb_state() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xE16F_F000, "MSR     SPSR_fsxc,R0"),
+            (0xE1B0_F00E, "MOVS    PC,R14"),
+        ],
+    );
+    let user = Mode::User.bits();
+    for (spsr, kept) in [
+        (user | 0x0400_0000, 0, "an IT state returning to ARM state"),
+        (
+            user | psr::T | 0x0000_0800,
+            0x0000_0800,
+            "a block's last, in Thumb",
+        ),
+        (user | psr::T | 0x0000_1000, 0, "a reserved IT state"),
+    ]
+    .map(|(spsr, kept, _)| (spsr, kept))
+    {
+        let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+        cpu.set_reg(r(0), spsr);
+        cpu.set_reg(Reg::LR, 0x9000);
+        run(&mut cpu, &mut ram, 2);
+        assert_eq!(cpu.mode(), Mode::User);
+        assert_eq!(
+            cpu.cpsr() & (psr::IT_LOW | psr::IT_HIGH),
+            kept,
+            "SPSR {spsr:08X}"
+        );
+    }
 }

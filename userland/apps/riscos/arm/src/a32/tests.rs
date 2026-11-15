@@ -1,10 +1,11 @@
 use alloc::format;
 use alloc::string::String;
 
-use super::form::Kind;
-use super::layout::Field;
 use super::table::{self, Row};
 use super::*;
+use crate::encoding::form::Kind;
+use crate::encoding::layout::Field;
+use crate::instruction::*;
 use crate::isa::{Feature, Isa};
 use crate::reg::{Reg, RegList};
 use tairix_fuzzseed::Prng;
@@ -22,7 +23,7 @@ const ARMV4: Isa = Isa::of(&[
 
 fn text(word: u32, isa: Isa, address: u32) -> String {
     let instruction = decode(word, isa).expect("decodes");
-    format!("{}", instruction.text(address))
+    format!("{}", instruction.text(Set::A32, address))
 }
 
 #[test]
@@ -120,7 +121,7 @@ fn each_decoded_word_encodes_to_itself_with_its_should_be_bits_made_canonical() 
                 continue;
             };
             let instruction = decoded.instruction;
-            let Ok(encoded) = instruction.encode() else {
+            let Ok(encoded) = encode(&instruction) else {
                 // ARMv4 reads a few encodings later architectures gave to
                 // other instructions; those have no encoding of their own.
                 assert_eq!(isa, ARMV4, "{word:08X}: {instruction:?}");
@@ -198,6 +199,9 @@ fn instructions_disassemble_as_basic_and_the_debugger_spell_them() {
         (0xE6AF_0471, "SXTB    R0,R1,ROR #8"),
         (0xE7DF_0F1F, "BFC     R0,#30,#2"),
         (0xF57F_F05F, "DMB     SY"),
+        (0xF57F_F040, "SSBB"),
+        (0xF57F_F044, "PSSBB"),
+        (0xF57F_F04F, "DSB     SY"),
         (0xE320_F003, "WFI"),
         (0xE7F0_00F0, "UDF     #0"),
         (0xE1A0_0000, "MOV     R0,R0"),
@@ -226,7 +230,7 @@ fn instructions_disassemble_as_basic_and_the_debugger_spell_them() {
     for &(word, expected) in cases {
         assert_eq!(text(word, Isa::ALL, 0x8000), expected, "{word:08X}");
         let instruction = decode(word, Isa::ALL).expect("decodes");
-        assert_eq!(instruction.encode(), Ok(word), "{expected}");
+        assert_eq!(encode(&instruction), Ok(word), "{expected}");
     }
 }
 
@@ -251,7 +255,7 @@ fn the_comparisons_p_forms_and_the_never_condition_read_on_armv4() {
     assert_eq!(text(0xF1A0_0000, ARMV4, 0), "MOVNV   R0,R0");
     let never = decode(0xF1A0_0000, ARMV4).expect("decodes");
     assert_eq!(never.cond, Condition::Nv);
-    assert_eq!(never.encode(), Ok(0xF1A0_0000));
+    assert_eq!(encode(&never), Ok(0xF1A0_0000));
     assert_eq!(decode(0xF1A0_0000, Isa::ALL), None, "unconditional space");
 }
 
@@ -277,7 +281,7 @@ fn should_be_bits_out_of_place_decode_but_are_not_canonical() {
     let word = 0xE12F_0F1E; // BX with SBO bits 19:16 clear
     let decoded = decode_detail(word, Isa::ALL).expect("decodes as BX");
     assert!(!decoded.canonical);
-    assert_eq!(decoded.instruction.encode(), Ok(0xE12F_FF1E));
+    assert_eq!(encode(&decoded.instruction), Ok(0xE12F_FF1E));
 }
 
 #[test]
@@ -295,7 +299,7 @@ fn operands_no_encoding_holds_are_refused() {
             ra: Some(Reg::field(3)),
         },
     };
-    assert_eq!(mul_with_accumulator.encode(), Err(EncodeError::Unencodable));
+    assert_eq!(encode(&mul_with_accumulator), Err(EncodeError::Unencodable));
     let bad_shift = Instruction {
         cond: Condition::Al,
         op: Op::Move {
@@ -308,7 +312,7 @@ fn operands_no_encoding_holds_are_refused() {
             },
         },
     };
-    assert_eq!(bad_shift.encode(), Err(EncodeError::Range));
+    assert_eq!(encode(&bad_shift), Err(EncodeError::Range));
     let conditional_pld = Instruction {
         cond: Condition::Eq,
         op: Op::Preload {
@@ -318,7 +322,7 @@ fn operands_no_encoding_holds_are_refused() {
             offset: Offset::Immediate(0),
         },
     };
-    assert_eq!(conditional_pld.encode(), Err(EncodeError::Unencodable));
+    assert_eq!(encode(&conditional_pld), Err(EncodeError::Unencodable));
     let wide_offset = Instruction {
         cond: Condition::Al,
         op: Op::Transfer {
@@ -330,7 +334,7 @@ fn operands_no_encoding_holds_are_refused() {
             index: Index::Offset,
         },
     };
-    assert_eq!(wide_offset.encode(), Err(EncodeError::Range));
+    assert_eq!(encode(&wide_offset), Err(EncodeError::Range));
 }
 
 #[test]
@@ -389,7 +393,7 @@ fn every_shift_round_trips_through_its_fields() {
 
 #[test]
 fn the_architecture_s_unpredictable_encodings_are_reported() {
-    let check = |word: u32, isa: Isa| decode(word, isa).expect("decodes").unpredictable(isa);
+    let check = |word: u32, isa: Isa| unpredictable(&decode(word, isa).expect("decodes"), isa);
     assert!(check(0xE000_0090, ARMV4), "MUL R0,R0,R0 before ARMv6");
     assert!(!check(0xE000_0090, Isa::ALL), "fine from ARMv6");
     assert!(check(0xE5B1_1004, Isa::ALL), "LDR R1,[R1,#4]!");

@@ -42,7 +42,7 @@ an application's own documents folder, the reference harness);
 | RO7 | `lib/bbcbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | done |
 | RO8 | `lib/vdu`: the Acorn VDU vocabulary, RISC OS's numbered screen modes and the 8×8 system character set; OpenMicro's MOS and `lib/image` move onto it | done |
 | RO9 | The ARM integer core: the one A32 table, the interpreter, the 26-bit and 32-bit programmer's models, the two profiles, exceptions, the disassembler and encoder, the conformance vectors | done |
-| RO10 | Thumb and Thumb-2, and interworking | planned |
+| RO10 | Thumb and Thumb-2, and interworking | done |
 | RO11 | The FPA: every instruction and precision, rounding and exceptions, the transcendental results | planned |
 | RO12 | VFP and Advanced SIMD, through ARMv8-A's AArch32 additions | planned |
 | RO13 | The guest address space: pages and permissions, aborts, task slots, the 26-bit window, dynamic areas, host pages, write tracking, the memory policy | planned |
@@ -349,8 +349,10 @@ responsibility across this table needs the plan updated in the same change.
   load-acquire and store-release, `SEVL`, CRC32, the floating-point additions,
   and the optional Cryptographic Extension. Each is reported through the ID
   registers the profile exposes.
-- **T32**: Thumb and Thumb-2, with interworking as each architecture version
-  defines it (RO10).
+- **T32**: Thumb and Thumb-2 through ARMv8-A's AArch32 integer additions,
+  with interworking as each architecture version defines it and `IT` blocks
+  as ARMv7 does (RO10). Its UNPREDICTABLE rules are ARMv8-A's, which permit
+  R13 where ARMv7 forbade it.
 - **The FPA** (RO11), **VFPv2 to VFPv4 with D32**, and **Advanced SIMD**
   including ARMv8's AArch32 additions (RO12).
 - Absent, and undefined as on a core without them: Jazelle (`BXJ` is `BX`),
@@ -471,9 +473,10 @@ is fuzzed.
     notice kept beside it (`plans/BEEB.md` §7's SingleStepTests precedent).
     The `SingleStepTests` ARM7TDMI suite (MIT), which the NanoBoyAdvance
     emulator generated, holds the 26-bit profile to ARMv4 wherever ARMv4
-    defines the result.
+    defines the result, and the 32-bit profile's Thumb and `BX` to ARMv4T
+    wherever ARMv7 defines the same.
 
-  `cargo xtask riscos-vectors` replays them and writes the sample a crate test
+  `cargo xtask riscos-vectors` replays them and writes the samples a crate test
   replays.
 - **Unit tests.** Each instruction class has them: shifter carry, the
   writeback forms of `LDM`/`STM`, the 26-bit PSR writes, interworking, and

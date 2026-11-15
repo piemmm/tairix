@@ -6,9 +6,11 @@
 use super::alu::shift_immediate;
 use super::execute::{sext16, sext8};
 use super::{Cpu, Flow};
-use crate::a32::{BlockMode, BlockOp, ExclusiveOp, Index, Offset, SwapOp, TransferOp};
 use crate::bus::{Bus, Width};
 use crate::cp15::Fault;
+use crate::instruction::{
+    BlockMode, BlockOp, DualOp, ExclusiveOp, Index, Offset, SwapOp, TransferOp,
+};
 use crate::psr::{self, Bank, Mode};
 use crate::reg::{Reg, RegList};
 
@@ -133,19 +135,9 @@ impl Cpu {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // One per operand the transfer form has.
-    pub(super) fn transfer<B: Bus>(
-        &mut self,
-        bus: &mut B,
-        op: TransferOp,
-        rt: Reg,
-        rn: Reg,
-        up: bool,
-        offset: Offset,
-        index: Index,
-    ) -> Flow {
-        use TransferOp as T;
-        let base = self.read(rn);
+    /// A single or dual transfer's address, and the base it writes back.
+    fn addressed(&self, rn: Reg, up: bool, offset: Offset, index: Index) -> (u32, u32) {
+        let base = self.base(rn);
         let distance = match offset {
             Offset::Immediate(value) => u32::from(value),
             Offset::Register { rm, shift } => {
@@ -162,74 +154,110 @@ impl Cpu {
         } else {
             offset_address
         };
-        let unprivileged = matches!(
-            op,
-            T::Ldrt | T::Strt | T::Ldrbt | T::Strbt | T::Ldrht | T::Strht | T::Ldrsbt | T::Ldrsht
-        );
-        let privileged = self.mode.privileged() && !unprivileged;
-        let pair_address = address.wrapping_add(4);
-        let stored = match op {
-            T::Str | T::Strt => self.store(bus, address, Width::Word, self.stored(rt), privileged),
-            T::Strb | T::Strbt => {
-                self.store(bus, address, Width::Byte, self.stored(rt), privileged)
-            }
-            T::Strh | T::Strht => {
-                self.store(bus, address, Width::Half, self.stored(rt), privileged)
-            }
-            T::Strd => self
-                .store(bus, address, Width::Word, self.read(rt), privileged)
-                .and_then(|()| {
-                    self.store(
-                        bus,
-                        pair_address,
-                        Width::Word,
-                        self.read(rt.next()),
-                        privileged,
-                    )
-                }),
-            _ => Ok(()),
-        };
-        let loaded = stored.and_then(|()| -> Access<[Option<u32>; 2]> {
-            let one = |value| [Some(value), None];
-            Ok(match op {
-                T::Ldr | T::Ldrt => one(self.load(bus, address, Width::Word, privileged)?),
-                T::Ldrb | T::Ldrbt => one(self.load(bus, address, Width::Byte, privileged)?),
-                T::Ldrh | T::Ldrht => one(self.load(bus, address, Width::Half, privileged)?),
-                T::Ldrsb | T::Ldrsbt => {
-                    one(sext8(self.load(bus, address, Width::Byte, privileged)?))
-                }
-                T::Ldrsh | T::Ldrsht => {
-                    let half = self.load(bus, address, Width::Half, privileged)?;
-                    // A misaligned halfword arrives rotated: its byte at the
-                    // address is what ARMv4 cores sign-extended.
-                    one(if address & 1 == 0 {
+        (address, offset_address)
+    }
+
+    #[allow(clippy::too_many_arguments)] // One per operand the transfer form has.
+    pub(super) fn transfer<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        op: TransferOp,
+        rt: Reg,
+        rn: Reg,
+        up: bool,
+        offset: Offset,
+        index: Index,
+    ) -> Flow {
+        use TransferOp as T;
+        let (address, offset_address) = self.addressed(rn, up, offset, index);
+        let privileged = self.mode.privileged() && !op.unprivileged();
+        let moved = match op {
+            T::Str | T::Strt => self
+                .store(bus, address, Width::Word, self.stored(rt), privileged)
+                .map(|()| None),
+            T::Strb | T::Strbt => self
+                .store(bus, address, Width::Byte, self.stored(rt), privileged)
+                .map(|()| None),
+            T::Strh | T::Strht => self
+                .store(bus, address, Width::Half, self.stored(rt), privileged)
+                .map(|()| None),
+            T::Ldr | T::Ldrt => self.load(bus, address, Width::Word, privileged).map(Some),
+            T::Ldrb | T::Ldrbt => self.load(bus, address, Width::Byte, privileged).map(Some),
+            T::Ldrh | T::Ldrht => self.load(bus, address, Width::Half, privileged).map(Some),
+            T::Ldrsb | T::Ldrsbt => self
+                .load(bus, address, Width::Byte, privileged)
+                .map(|byte| Some(sext8(byte))),
+            // A misaligned halfword arrives rotated: its byte at the address
+            // is what ARMv4 cores sign-extended.
+            T::Ldrsh | T::Ldrsht => self
+                .load(bus, address, Width::Half, privileged)
+                .map(|half| {
+                    Some(if address & 1 == 0 {
                         sext16(half)
                     } else {
                         sext8(half)
                     })
-                }
-                T::Ldrd => [
-                    Some(self.load(bus, address, Width::Word, privileged)?),
-                    Some(self.load(bus, pair_address, Width::Word, privileged)?),
-                ],
-                _ => [None, None],
-            })
-        });
-        let [value, second] = match loaded {
-            Ok(values) => values,
+                }),
+        };
+        let loaded = match moved {
+            Ok(loaded) => loaded,
             Err(aborted) => return self.aborted(&aborted),
         };
-        if index != Index::Offset || unprivileged {
-            self.write(rn, offset_address);
-        }
-        if let Some(value) = value {
-            match op {
-                T::Ldr | T::Ldrt if rt == PC => self.load_pc(value),
-                _ => self.write(rt, value),
+        let loads_pc = rt == PC && matches!(op, T::Ldr | T::Ldrt);
+        if let Some(value) = loaded.filter(|_| loads_pc && self.loads_interwork()) {
+            if self.misaligned_exchange(value) {
+                return Flow::Next;
             }
         }
-        if let Some(second) = second {
-            self.write(rt.next(), second);
+        if index != Index::Offset {
+            self.write(rn, offset_address);
+        }
+        match loaded {
+            Some(value) if loads_pc => self.load_pc(value),
+            Some(value) => self.write(rt, value),
+            None => {}
+        }
+        Flow::Next
+    }
+
+    #[allow(clippy::too_many_arguments)] // One per operand the dual form has.
+    pub(super) fn dual<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        op: DualOp,
+        [rt, rt2]: [Reg; 2],
+        rn: Reg,
+        up: bool,
+        offset: Offset,
+        index: Index,
+    ) -> Flow {
+        let (address, offset_address) = self.addressed(rn, up, offset, index);
+        let second = address.wrapping_add(4);
+        let privileged = self.mode.privileged();
+        let moved = match op {
+            DualOp::Strd => self
+                .store(bus, address, Width::Word, self.read(rt), privileged)
+                .and_then(|()| self.store(bus, second, Width::Word, self.read(rt2), privileged))
+                .map(|()| None),
+            DualOp::Ldrd => self
+                .load(bus, address, Width::Word, privileged)
+                .and_then(|first| {
+                    Ok(Some([
+                        first,
+                        self.load(bus, second, Width::Word, privileged)?,
+                    ]))
+                }),
+        };
+        let loaded = match moved {
+            Ok(loaded) => loaded,
+            Err(aborted) => return self.aborted(&aborted),
+        };
+        if index != Index::Offset {
+            self.write(rn, offset_address);
+        }
+        if let Some([first, second]) = loaded {
+            self.write(rt, first);
+            self.write(rt2, second);
         }
         Flow::Next
     }
@@ -293,10 +321,14 @@ impl Cpu {
                         Err(aborted) => return self.aborted(&aborted),
                     }
                 }
+                let loads_pc = list.contains(PC);
+                let interworks = loads_pc && !user && self.loads_interwork();
+                if interworks && self.misaligned_exchange(values[PC.index()]) {
+                    return Flow::Next;
+                }
                 if writeback {
                     self.write(rn, written_back);
                 }
-                let loads_pc = list.contains(PC);
                 for reg in list.iter().filter(|&reg| reg != PC) {
                     if user && !loads_pc {
                         self.set_user_reg(reg, values[reg.index()]);
@@ -327,6 +359,28 @@ impl Cpu {
         }
     }
 
+    pub(super) fn table_branch<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        half: bool,
+        rn: Reg,
+        rm: Reg,
+    ) -> Flow {
+        let (base, index) = (self.read(rn), self.read(rm));
+        let (address, width) = if half {
+            (base.wrapping_add(index << 1), Width::Half)
+        } else {
+            (base.wrapping_add(index), Width::Byte)
+        };
+        match self.load(bus, address, width, self.mode.privileged()) {
+            Ok(entry) => {
+                self.branch(self.pc_operand().wrapping_add(entry << 1));
+                Flow::Next
+            }
+            Err(aborted) => self.aborted(&aborted),
+        }
+    }
+
     pub(super) fn swap<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -354,24 +408,26 @@ impl Cpu {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // One per operand the exclusive form has.
     pub(super) fn exclusive<B: Bus>(
         &mut self,
         bus: &mut B,
         op: ExclusiveOp,
         rd: Option<Reg>,
         rt: Reg,
+        rt2: Option<Reg>,
         rn: Reg,
+        offset: u16,
     ) -> Flow {
         use ExclusiveOp as X;
-        let address = self.read(rn);
+        let address = self.read(rn).wrapping_add(u32::from(offset));
         let privileged = self.mode.privileged();
         let width = match op {
             X::Ldrexb | X::Strexb | X::Ldab | X::Stlb | X::Ldaexb | X::Stlexb => Width::Byte,
             X::Ldrexh | X::Strexh | X::Ldah | X::Stlh | X::Ldaexh | X::Stlexh => Width::Half,
             _ => Width::Word,
         };
-        let pair = matches!(op, X::Ldrexd | X::Strexd | X::Ldaexd | X::Stlexd);
-        let alignment = if pair { 8 } else { width.bytes() };
+        let alignment = if rt2.is_some() { 8 } else { width.bytes() };
         if !address.is_multiple_of(alignment) {
             let aborted = Aborted {
                 fault: Fault::Alignment,
@@ -396,10 +452,11 @@ impl Cpu {
             let loaded = self
                 .load(bus, address, width, privileged)
                 .and_then(|first| {
-                    let second = if pair {
-                        self.load(bus, address.wrapping_add(4), Width::Word, privileged)?
-                    } else {
-                        0
+                    let second = match rt2 {
+                        Some(_) => {
+                            self.load(bus, address.wrapping_add(4), Width::Word, privileged)?
+                        }
+                        None => 0,
                     };
                     Ok((first, second))
                 });
@@ -410,10 +467,10 @@ impl Cpu {
             if marks {
                 self.exclusive = Some(address);
             }
-            if pair {
-                self.write(rt.next(), second);
-            }
             self.write(rt, first);
+            if let Some(rt2) = rt2 {
+                self.write(rt2, second);
+            }
             return Flow::Next;
         }
         let Some(status) = rd else {
@@ -426,18 +483,15 @@ impl Cpu {
         if held {
             let stored = self
                 .store(bus, address, width, self.read(rt), privileged)
-                .and_then(|()| {
-                    if pair {
-                        self.store(
-                            bus,
-                            address.wrapping_add(4),
-                            Width::Word,
-                            self.read(rt.next()),
-                            privileged,
-                        )
-                    } else {
-                        Ok(())
-                    }
+                .and_then(|()| match rt2 {
+                    Some(rt2) => self.store(
+                        bus,
+                        address.wrapping_add(4),
+                        Width::Word,
+                        self.read(rt2),
+                        privileged,
+                    ),
+                    None => Ok(()),
                 });
             if let Err(aborted) = stored {
                 return self.aborted(&aborted);
