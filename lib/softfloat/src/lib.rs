@@ -1,5 +1,5 @@
-//! Software floating point: exact binary32, binary64 and double-extended
-//! arithmetic, each result rounded once in any of IEEE 754's modes, in
+//! Software floating point: exact binary16, binary32, binary64 and
+//! double-extended arithmetic, each result rounded once in any of IEEE 754's modes, in
 //! integers alone so every target computes the same bits.
 //!
 //! Two layers, so one core serves units whose rules differ:
@@ -9,10 +9,10 @@
 //!   among them, and rounds it at 24, 53 or 64 bits ([`Exact::rounded`]). It
 //!   decides nothing about overflow, underflow or NaNs, so the 8087 builds its
 //!   own register and memory rules on it.
-//! * The **IEEE layer** ([`Ieee`]) is IEEE 754's arithmetic on binary32 and
-//!   binary64 values with default exception handling, the [`Flags`] each
-//!   operation raises, and the choices the standard leaves to an
-//!   implementation made by a [`Policy`].
+//! * The **IEEE layer** ([`Ieee`]) is IEEE 754's arithmetic on binary16,
+//!   binary32 and binary64 values with default exception handling, the
+//!   [`Flags`] each operation raises, and the choices the standard leaves to
+//!   an implementation made by a [`Policy`], with ARM's flush-to-zero.
 //!
 //! [`Extended`] is the double-extended value both the 8087's registers and the
 //! FPA's extended precision hold, with the x87's ten-byte and the FPA's

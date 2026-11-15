@@ -740,8 +740,8 @@ tairix/
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── shaders/         # The pinned shader set: the desktop's passes as committed SPIR-V.
 │   ├── smb/             # The pure SMB 3 protocol engine (no I/O, clock, or RNG).
-│   ├── softfloat/       # Software floating point: binary32, binary64 and
-│   │                    #   double-extended, rounded in every IEEE 754 mode.
+│   ├── softfloat/       # Software floating point: binary16, binary32, binary64
+│   │                    #   and double-extended, rounded in every IEEE 754 mode.
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated
 │   │                    #   FLAC and Opus encoders.

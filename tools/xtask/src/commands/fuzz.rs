@@ -150,6 +150,26 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks",
     },
     Target {
+        package: "tairix-riscos-arm",
+        test: "fuzz_fpa",
+        description: "userland/apps/riscos/arm: the FPA's every operation, load and store on any register values and FPSR, trapping only where enabled; any FPA program run from any state",
+    },
+    Target {
+        package: "tairix-riscos-arm",
+        test: "fuzz_simdfp",
+        description: "userland/apps/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather",
+    },
+    Target {
+        package: "tairix-riscos-arm",
+        test: "fuzz_mmu",
+        description: "userland/apps/riscos/arm guest MMU: random runs of frame, mapping, space, watch and access operations over TLB-aliasing pages, each answer held to a TLB-free reference model",
+    },
+    Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_areas",
+        description: "userland/apps/riscos/kernel address space: random slot, dynamic-area, sparse and pool calls with hostile arguments under handlers that answer at random and call back in; every page in use stays accounted for and every reported page mapped",
+    },
+    Target {
         package: "tairix-softfloat",
         test: "fuzz_decimal",
         description: "lib/softfloat decimal conversion and the FPA's packed decimal: any value and any words, their brackets and round trips",

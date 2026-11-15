@@ -30,8 +30,9 @@ fn text(word: u32, isa: Isa, address: u32) -> String {
 fn every_row_spells_each_bit_once() {
     for row in table::all() {
         let layout = &row.layout;
-        let mut seen = layout.mask | layout.should_mask;
+        let mut seen = layout.mask | layout.should_mask | layout.ignored;
         assert_eq!(layout.mask & layout.should_mask, 0, "{row:?}");
+        assert_eq!((layout.mask | layout.should_mask) & layout.ignored, 0);
         for (n, &field) in layout.fields.iter().enumerate() {
             assert_eq!(seen & field, 0, "field {n} overlaps in {row:?}");
             seen |= field;
@@ -49,19 +50,61 @@ fn overlap(a: &Row, b: &Row) -> bool {
     (a.layout.bits ^ b.layout.bits) & both == 0 && a.unconditional() == b.unconditional()
 }
 
+/// Whether `earlier` is a coprocessor's own encoding and `later` one of the
+/// generic forms every coprocessor number shares: the coprocessor claims its
+/// number's words from them, however the two fix the bits besides.
+fn claims_its_number(earlier: &Row, later: &Row) -> bool {
+    let number = later.layout.field(Field::Cp);
+    number != 0 && earlier.layout.mask & number == number
+}
+
 #[test]
 fn no_row_is_shadowed_by_an_earlier_less_specific_one() {
-    for group in 0..8 {
-        let rows = table::rows(group);
+    for rows in table::GROUPS {
         for (i, earlier) in rows.iter().enumerate() {
             for later in &rows[i + 1..] {
-                if overlap(earlier, later) {
+                if overlap(earlier, later) && !claims_its_number(earlier, later) {
                     assert_eq!(
                         later.layout.mask & !earlier.layout.mask,
                         0,
                         "{earlier:?} shadows the more specific {later:?}"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Whether every word `later` matches `earlier` matches too.
+fn covers(earlier: &Row, later: &Row) -> bool {
+    earlier.layout.mask & !later.layout.mask == 0 && overlap(earlier, later)
+}
+
+#[test]
+fn no_floating_point_or_simd_row_is_wholly_covered_by_an_earlier_one() {
+    for rows in table::SIMDFP {
+        for (i, earlier) in rows.iter().enumerate() {
+            for later in &rows[i + 1..] {
+                assert!(!covers(earlier, later), "{earlier:?} covers {later:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_floating_point_and_simd_rows_meet_the_others_only_on_the_numbers_they_claim() {
+    for (main, vector) in table::GROUPS.iter().zip(table::SIMDFP) {
+        for row in vector {
+            // Every coprocessor number the row's fixed bits allow is claimed.
+            let fixed = row.layout.mask & 0xF00;
+            let claimed = (0..16u32)
+                .filter(|number| (number << 8) & fixed == row.layout.bits & fixed)
+                .all(|number| Isa::ALL.claims_coprocessor(number));
+            for other in main.iter().filter(|other| overlap(other, row)) {
+                assert!(
+                    other.kind.generic_coprocessor() && claimed,
+                    "{row:?} meets {other:?}"
+                );
             }
         }
     }
@@ -112,7 +155,7 @@ fn every_row_decodes_its_own_words_or_a_row_that_refines_it() {
 }
 
 #[test]
-fn each_decoded_word_encodes_to_itself_with_its_should_be_bits_made_canonical() {
+fn each_decoded_word_encodes_to_itself_made_canonical() {
     let mut rng = Prng::new(0xA32_0002);
     for _ in 0..200_000 {
         let word = rng.next_u32();
@@ -131,17 +174,20 @@ fn each_decoded_word_encodes_to_itself_with_its_should_be_bits_made_canonical() 
                 );
                 continue;
             };
+            let row = table::all()
+                .find(|row| {
+                    row.kind == instruction.op.kind()
+                        && isa.has(row.since)
+                        && row.layout.matches(word)
+                })
+                .expect("a row");
+            let layout = &row.layout;
+            let canonical = (word & !(layout.should_mask | layout.ignored)) | layout.should_bits;
+            assert_eq!(encoded, canonical, "{word:08X} {encoded:08X}");
             assert_eq!(
                 decoded.canonical,
-                encoded == word,
-                "{word:08X} {encoded:08X}"
-            );
-            let row = table::all()
-                .find(|row| row.kind == instruction.op.kind() && row.layout.matches(encoded))
-                .expect("a row");
-            assert_eq!(
-                encoded & !row.layout.should_mask,
-                word & !row.layout.should_mask
+                word & layout.should_mask == layout.should_bits,
+                "{word:08X}"
             );
         }
     }
@@ -213,9 +259,9 @@ fn instructions_disassemble_as_basic_and_the_debugger_spell_them() {
         (0xE1A0_1022, "MOV     R1,R2,LSR #32"),
         (0xE1D2_00B4, "LDRH    R0,[R2,#4]"),
         (0xE1C0_20D0, "LDRD    R2,R3,[R0]"),
-        (0xEE00_0100, "CDP     CP1,0,C0,C0,C0,0"),
+        (0xEE00_0300, "CDP     CP3,0,C0,C0,C0,0"),
         (0xEE01_0F10, "MCR     CP15,0,R0,C1,C0,0"),
-        (0xED90_1101, "LDC     CP1,C1,[R0,#4]"),
+        (0xED90_1301, "LDC     CP3,C1,[R0,#4]"),
         (0xE103_0091, "SWP     R0,R1,[R3]"),
         (0xE191_0F9F, "LDREX   R0,[R1]"),
         (0xE182_0F91, "STREX   R0,R1,[R2]"),
@@ -231,6 +277,89 @@ fn instructions_disassemble_as_basic_and_the_debugger_spell_them() {
         assert_eq!(text(word, Isa::ALL, 0x8000), expected, "{word:08X}");
         let instruction = decode(word, Isa::ALL).expect("decodes");
         assert_eq!(encode(&instruction), Ok(word), "{expected}");
+    }
+}
+
+#[test]
+fn the_fpa_instructions_disassemble_as_basic_spells_them() {
+    let cases: &[(u32, &str)] = &[
+        (0xEE01_0109, "ADFS    F0,F1,#1"),
+        (0xEE42_31CE, "DVFDM   F3,F2,#0.5"),
+        (0xEEC1_1180, "POLD    F1,F1,F0"),
+        (0xEE00_C188, "MVFD    F4,#0"),
+        (0xEE10_F168, "MNFSZ   F7,#0"),
+        (0xEE90_8120, "COSSP   F0,F0"),
+        (0xEE30_81E6, "RNDDZ   F0,F6"),
+        (0xEE00_0110, "FLTS    F0,R0"),
+        (0xEE20_0110, "WFS     R0"),
+        (0xEE30_0110, "RFS     R0"),
+        (0xEE90_F111, "CMF     F0,F1"),
+        (0xEEF0_F111, "CNFE    F0,F1"),
+        (0xEDB1_8102, "LDFD    F0,[R1,#8]!"),
+        (0xEC21_0101, "STFS    F0,[R1],#-4"),
+        (0xEDC1_D103, "STFP    F5,[R1,#&C]"),
+        (0xED9F_2101, "LDFS    F2,[PC,#4]"),
+        (0xED2D_420C, "SFM     F4,4,[R13,#-&30]!"),
+        (0xECBD_4203, "LFM     F4,4,[R13],#&C"),
+    ];
+    for &(word, expected) in cases {
+        assert_eq!(text(word, Isa::ALL, 0x8000), expected, "{word:08X}");
+        let instruction = decode(word, Isa::ALL).expect("decodes");
+        assert_eq!(encode(&instruction), Ok(word), "{expected}");
+    }
+}
+
+#[test]
+fn the_fpa_claims_its_coprocessors_words_and_leaves_the_rest_generic() {
+    let cases: &[(u32, &str)] = &[
+        // FPEmulator's: the flags to a register, and at the base unindexed.
+        (0xEE90_3111, "MRC     CP1,4,R3,C0,C1,0"),
+        (0xECD1_1103, "LDCL    CP1,C1,[R1],{3}"),
+        (0xEC80_4200, "STC     CP2,C4,[R0],{0}"),
+        // Not FPEmulator's: precision 11, dyadic opcode 13, WFC, and
+        // another coprocessor.
+        (0xEE08_0180, "CDP     CP1,0,C0,C8,C0,4"),
+        (0xEED0_0100, "CDP     CP1,13,C0,C0,C0,0"),
+        (0xEE40_8110, "MCR     CP1,2,R8,C0,C0,0"),
+        (0xED91_7300, "LDC     CP3,C7,[R1,#0]"),
+    ];
+    for &(word, expected) in cases {
+        assert_eq!(text(word, Isa::ALL, 0x8000), expected, "{word:08X}");
+    }
+    let claimed = |word| {
+        matches!(
+            decode(word, Isa::ALL).map(|instruction| instruction.op),
+            Some(Op::FpaCompare { .. } | Op::FpaTransfer { .. } | Op::FpaMultiple { .. })
+        )
+    };
+    assert!(claimed(0xEE90_3111), "the flags to R3");
+    assert!(claimed(0xECD1_1103), "unindexed, which MCRR's space holds");
+    assert!(!claimed(0xEE08_0180), "precision 11");
+    let generic = decode(0xEDB1_8102, ARMV4).map(|instruction| instruction.op);
+    assert!(
+        matches!(generic, Some(Op::CoprocessorTransfer { .. })),
+        "a core without the FPA"
+    );
+    assert!(
+        matches!(
+            decode(0xFD91_0100, Isa::ALL).map(|instruction| instruction.op),
+            Some(Op::CoprocessorTransfer { .. })
+        ),
+        "the unconditional space is never the FPA's"
+    );
+    let never = decode(0xFD91_0100, ARMV4.with(Feature::Fpa)).expect("decodes");
+    assert_eq!(never.cond, Condition::Nv);
+    assert!(matches!(never.op, Op::FpaTransfer { .. }), "NV is never");
+}
+
+#[test]
+fn bits_fpemulator_ignores_decode_alike_and_encode_clear() {
+    // FIX R3,F2 with its unused Fn field, and WFS R0 with every field it
+    // ignores set; precision 10 in both.
+    for (word, canonical) in [(0xEE1E_3112, 0xEE18_3112), (0xEE2F_017F, 0xEE28_0110)] {
+        let decoded = decode_detail(word, Isa::ALL).expect("decodes");
+        assert!(decoded.canonical, "{word:08X} is no UNPREDICTABLE encoding");
+        assert_eq!(encode(&decoded.instruction), Ok(canonical), "{word:08X}");
     }
 }
 
@@ -424,8 +553,10 @@ fn a_register_list_reads_in_ranges() {
 fn every_row_s_kind_builds_from_its_own_fields_and_the_encoder_finds_a_row_for_each() {
     let mut rng = Prng::new(0xA32_0003);
     let mut kinds_seen: alloc::vec::Vec<Kind> = alloc::vec::Vec::new();
+    // The rarest forms, the quadword crypto operations, build from one
+    // random word in sixteen: this many draws miss one with odds of 1e-14.
     for row in table::all() {
-        for _ in 0..32 {
+        for _ in 0..512 {
             let mut word = drawn(&mut rng, row);
             if !row.unconditional() && word >> 28 == 0xF {
                 word &= 0xEFFF_FFFF;
@@ -441,5 +572,67 @@ fn every_row_s_kind_builds_from_its_own_fields_and_the_encoder_finds_a_row_for_e
     }
     let mut kinds: alloc::vec::Vec<Kind> = table::all().map(|row| row.kind).collect();
     kinds.dedup();
-    assert!(kinds.iter().all(|kind| kinds_seen.contains(kind)));
+    let missing: alloc::vec::Vec<&Kind> = kinds
+        .iter()
+        .filter(|kind| !kinds_seen.contains(kind))
+        .collect();
+    assert!(missing.is_empty(), "{missing:?}");
+}
+
+#[test]
+fn floating_point_and_simd_instructions_disassemble_in_ual() {
+    let cases: &[(u32, &str)] = &[
+        (0xEE30_0A81, "VADD.F32 S0,S1,S2"),
+        (0xEE01_0B02, "VMLA.F64 D0,D1,D2"),
+        (0xEEB7_0A00, "VMOV.F32 S0,#1.0"),
+        (0xEEBD_0BC1, "VCVT.S32.F64 S0,D1"),
+        (0xEEB3_0A60, "VCVTB.F16.F32 S0,S1"),
+        (0xECB0_0B08, "VLDMIA  R0!,{D0-D3}"),
+        (0xED2D_8B10, "VPUSH   {D8-D15}"),
+        (0xECBD_8A10, "VPOP    {S16-S31}"),
+        (0xED42_0A02, "VSTR    S1,[R2,#-8]"),
+        (0xEC51_0B12, "VMOV    R0,R1,D2"),
+        (0xEE20_1B10, "VMOV.32 D0[1],R1"),
+        (0xEE73_2B30, "VMOV.S8 R2,D3[5]"),
+        (0xEEC0_1B10, "VDUP.8  D0,R1"),
+        (0xEEF1_FA10, "VMRS    APSR_nzcv,FPSCR"),
+        (0xF420_022D, "VLD1.8  {D0-D3},[R0:128]!"),
+        (0xF4A1_0542, "VLD2.16 {D0[1],D1[1]},[R1],R2"),
+        (0xF222_0844, "VADD.I32 Q0,Q1,Q2"),
+        (0xF202_0401, "VSHL.S8 D0,D1,D2"),
+        (0xF221_0111, "VMOV    D0,D1"),
+        (0xF291_0C4A, "VQDMULH.S16 D0,D1,D2[1]"),
+        (0xF28D_0812, "VSHRN.I16 D0,Q1,#3"),
+        (0xF2B2_0344, "VEXT.8  Q0,Q1,Q2,#3"),
+        (0xF3B1_0A04, "VTBL.8  D0,{D1-D3},D4"),
+        (0xF3BA_0C41, "VDUP.16 Q0,D1[2]"),
+        (0xF382_0E3A, "VMOV.I64 D0,#&FF00FF00FF00FF00"),
+        (0xF387_035F, "VORR.I32 Q0,#&FF00"),
+        (0xF3B0_0302, "AESE.8  Q0,Q1"),
+        (0xF302_0C44, "SHA256H.32 Q0,Q1,Q2"),
+        (0xF2A1_0E02, "VMULL.P64 Q0,D1,D2"),
+        (0xFE20_0A81, "VSELGE.F32 S0,S1,S2"),
+        (0xFEBC_0AE0, "VCVTA.S32.F32 S0,S1"),
+        (0xEEB6_0BC1, "VRINTZ.F64 D0,D1"),
+    ];
+    for &(word, expected) in cases {
+        assert_eq!(text(word, Isa::ALL, 0x8000), expected, "{word:08X}");
+        let instruction = decode(word, Isa::ALL).expect("decodes");
+        assert_eq!(encode(&instruction), Ok(word), "{expected}");
+    }
+}
+
+#[test]
+fn a_coprocessor_form_on_vfp_s_numbers_is_undefined_where_vfp_claims_them() {
+    // CDP and LDC on coprocessor 10: VFP's, so no generic form decodes them,
+    // but a core without VFP reads them as the generic forms.
+    for word in [0xEE00_0A00u32, 0xED90_0A00 | 1 << 22] {
+        let without = Isa::ALL.without(Feature::Vfp);
+        assert!(
+            decode(word, without).is_some(),
+            "{word:08X} on a core without VFP"
+        );
+    }
+    assert_eq!(decode(0xEEB9_0A40, Isa::ALL), None, "no VFP encoding");
+    assert!(decode(0xEEB9_0A40, Isa::ALL.without(Feature::Vfp)).is_some());
 }

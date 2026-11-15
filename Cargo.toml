@@ -345,6 +345,7 @@ members = [
     "userland/apps/sapper",
     "userland/apps/openmicro",
     "userland/apps/riscos/arm",
+    "userland/apps/riscos/kernel",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/settings",

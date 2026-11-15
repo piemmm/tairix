@@ -15,11 +15,13 @@ use crate::{
 const ARM: Policy = Policy {
     tininess: Tininess::BeforeRounding,
     nans: Nans::Propagate,
+    flush_to_zero: false,
 };
 
 const X86: Policy = Policy {
     tininess: Tininess::AfterRounding,
     nans: Nans::Propagate,
+    flush_to_zero: false,
 };
 
 fn double(mode: Mode) -> Ieee {
@@ -312,6 +314,15 @@ fn invalid_operations_answer_the_default_nan() {
     assert!(invalid(fp.rem(one, zero)));
     assert!(invalid(fp.rem(inf, one)));
     assert!(invalid(fp.fused_multiply_add(quiet, inf, zero)));
+    // A signalling addend is the NaN chosen, as beside any other product.
+    let signalling = 0xFFF0_0000_0000_0005;
+    assert_eq!(
+        fp.fused_multiply_add(signalling, inf, zero),
+        crate::Outcome {
+            bits: 0xFFF8_0000_0000_0005,
+            flags: Flags::INVALID,
+        }
+    );
     assert_eq!(
         fp.div(one, zero),
         crate::Outcome {
@@ -546,4 +557,100 @@ fn the_fpa_keeps_a_double_high_word_first() {
         let bits = rng.next_u64();
         assert_eq!(from_fpa_words(fpa_words(bits)), bits);
     }
+}
+
+#[test]
+fn flush_to_zero_makes_a_result_tiny_before_rounding_zero_raising_underflow_alone() {
+    let flushing = Ieee {
+        policy: Policy {
+            flush_to_zero: true,
+            ..ARM
+        },
+        ..single(Mode::Nearest)
+    };
+    let least_normal = 0x0080_0000;
+    let half = 0x3F00_0000;
+    let flushed = flushing.mul(least_normal, half);
+    assert_eq!(
+        flushed,
+        crate::Outcome {
+            bits: 0,
+            flags: Flags::UNDERFLOW
+        }
+    );
+    // 2^-126 × (1 − 2^-24): tiny before rounding, though it rounds up to the
+    // least normal.
+    let just_below = flushing.mul(least_normal, 0x3F7F_FFFF);
+    assert_eq!(just_below.bits, 0);
+    assert_eq!(
+        single(Mode::Nearest).mul(least_normal, 0x3F7F_FFFF).bits,
+        least_normal
+    );
+    let negative = flushing.mul(least_normal | 0x8000_0000, half);
+    assert_eq!(negative.bits, 0x8000_0000, "a zero of its sign");
+    assert_eq!(
+        single(Mode::Nearest).mul(least_normal, half).bits,
+        0x0040_0000
+    );
+    assert_eq!(flushing.mul(least_normal, 0x3F80_0000).bits, least_normal);
+}
+
+#[test]
+fn binary16_holds_its_own_range_and_converts_with_the_others() {
+    let half = Ieee {
+        format: Binary::HALF,
+        mode: Mode::Nearest,
+        policy: ARM,
+    };
+    assert_eq!(Binary::HALF.infinity(false), 0x7C00);
+    assert_eq!(Binary::HALF.default_nan(), 0x7E00);
+    assert_eq!(Binary::HALF.largest(true), 0xFBFF);
+    assert_eq!(half.add(0x3C00, 0x3C00).bits, 0x4000, "1 + 1");
+    let to_half = single(Mode::Nearest).convert(0x3F80_0000, Binary::HALF);
+    assert_eq!(to_half.bits, 0x3C00);
+    let overflowed = single(Mode::Nearest).convert(0x4780_0000, Binary::HALF);
+    assert_eq!(overflowed.bits, 0x7C00, "65536 overflows");
+    assert!(overflowed.flags.contains(Flags::OVERFLOW));
+    assert_eq!(
+        half.convert(0x0001, Binary::SINGLE).bits,
+        0x3380_0000,
+        "the least subnormal"
+    );
+}
+
+#[test]
+fn fixed_point_values_convert_with_one_rounding() {
+    let fp = single(Mode::Nearest);
+    // 3 with one fraction bit is 1.5; 0x1_0000_0001 × 2^-32 rounds to 1.
+    assert_eq!(fp.from_fixed(false, 3, 1).bits, 0x3FC0_0000);
+    let rounded = fp.from_fixed(true, 0x1_0000_0001, 32);
+    assert_eq!(rounded.bits, 0xBF80_0000);
+    assert_eq!(rounded.flags, Flags::INEXACT);
+    assert_eq!(fp.from_fixed(true, 0, 16).bits, 0, "zero is positive");
+    assert_eq!(
+        fp.from_integer(false, 5).bits,
+        fp.from_fixed(false, 5, 0).bits
+    );
+    let quarter = 0x3E80_0000;
+    assert_eq!(
+        fp.to_fixed(quarter, 4, Mode::Nearest),
+        Integral::Value {
+            negative: false,
+            magnitude: 4,
+            inexact: false
+        },
+        "a quarter with four fraction bits"
+    );
+    assert_eq!(
+        fp.to_fixed(quarter, 1, Mode::Zero),
+        Integral::Value {
+            negative: false,
+            magnitude: 0,
+            inexact: true
+        }
+    );
+    assert_eq!(
+        fp.to_integer(0x4040_0000, Mode::Down),
+        fp.to_fixed(0x4040_0000, 0, Mode::Down)
+    );
 }

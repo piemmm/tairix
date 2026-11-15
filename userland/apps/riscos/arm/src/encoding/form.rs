@@ -3,13 +3,16 @@
 //! inverse, from which a row's layout writes a word.
 
 use super::layout::{Field, Fields, Layout};
+use super::simdfp::SimdFpKind;
 use crate::cond::Condition;
+use crate::fpa::{Format, Precision, Rounding};
 use crate::instruction::{
     ArithmeticOp, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CoIndex,
     CoRegisterOp, CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, DualOp,
-    ExchangeOp, ExclusiveOp, ExtendOp, HintOp, Immediate, Index, Lanes, LongOp, MoveOp, MultiplyOp,
-    Offset, Op, Operand, PackOp, Prefix, PreloadOp, SaturateOp, Shift, ShiftType, Source, SwapOp,
-    TransferOp, UnaryOp, WideOp,
+    ExchangeOp, ExclusiveOp, ExtendOp, FpaCompareOp, FpaDyadicOp, FpaMonadicOp, FpaMultipleOp,
+    FpaOperand, FpaRegisterOp, FpaTransferOp, HintOp, Immediate, Index, Lanes, LongOp, MoveOp,
+    MultiplyOp, Offset, Op, Operand, PackOp, Prefix, PreloadOp, SaturateOp, Shift, ShiftType,
+    Source, SwapOp, TransferOp, UnaryOp, WideOp,
 };
 use crate::reg::{Reg, RegList};
 
@@ -55,6 +58,13 @@ pub(crate) enum Kind {
     CompareBranch,
     IfThen,
     TableBranch,
+    FpaDyadic(FpaDyadicOp),
+    FpaMonadic(FpaMonadicOp),
+    FpaRegister(FpaRegisterOp),
+    FpaCompare(FpaCompareOp),
+    FpaTransfer(FpaTransferOp),
+    FpaMultiple(FpaMultipleOp),
+    SimdFp(SimdFpKind),
 }
 
 fn reg(fields: &Fields, field: Field) -> Reg {
@@ -69,6 +79,38 @@ fn byte(fields: &Fields, field: Field) -> u8 {
 
 fn has(layout: &Layout, field: Field) -> bool {
     layout.field(field) != 0
+}
+
+/// An FPA precision; the fourth value has none.
+fn precision(fields: &Fields) -> Option<Precision> {
+    Precision::ALL
+        .get(fields.get(Field::Precision) as usize)
+        .copied()
+}
+
+fn rounding(fields: &Fields) -> Rounding {
+    Rounding::ALL[fields.get(Field::Rounding) as usize & 3]
+}
+
+/// An FPA operand: a register, or by bit 3 a constant.
+fn fpa_operand(fields: &Fields) -> FpaOperand {
+    let m = byte(fields, Field::CRm);
+    if m & 8 == 0 {
+        FpaOperand::Register(m & 7)
+    } else {
+        FpaOperand::Constant(m & 7)
+    }
+}
+
+/// An FPA transfer's addressing: with P and W clear, at the base without
+/// writeback whichever way U points.
+fn fpa_index(fields: &Fields) -> CoIndex {
+    match (fields.bit(Field::P), fields.bit(Field::W)) {
+        (true, false) => CoIndex::Offset,
+        (true, true) => CoIndex::PreIndexed,
+        (false, true) => CoIndex::PostIndexed,
+        (false, false) => CoIndex::Unindexed,
+    }
 }
 
 fn operand(layout: &Layout, fields: &Fields) -> Operand {
@@ -122,6 +164,18 @@ const fn branch_offset(imm24: u32) -> i32 {
 }
 
 impl Kind {
+    /// Whether the kind is a coprocessor form every coprocessor number
+    /// shares, which a number a unit claims never decodes to.
+    pub const fn generic_coprocessor(self) -> bool {
+        matches!(
+            self,
+            Self::Coprocessor(_)
+                | Self::CoprocessorRegister(_)
+                | Self::CoprocessorRegisters(_)
+                | Self::CoprocessorTransfer(_)
+        )
+    }
+
     /// The instruction `fields` hold under `layout`, or `None` when they hold
     /// a combination the form excludes.
     #[allow(clippy::too_many_lines)] // One arm per form: splitting would scatter the inverse of `Op::fields`.
@@ -416,6 +470,58 @@ impl Kind {
                 },
                 offset: byte(f, Field::Imm),
             },
+            Self::FpaDyadic(op) => Op::FpaDyadic {
+                op,
+                precision: precision(f)?,
+                rounding: rounding(f),
+                fd: byte(f, Field::CRd),
+                fn_: byte(f, Field::CRn),
+                fm: fpa_operand(f),
+            },
+            Self::FpaMonadic(op) => Op::FpaMonadic {
+                op,
+                precision: precision(f)?,
+                rounding: rounding(f),
+                fd: byte(f, Field::CRd),
+                fm: fpa_operand(f),
+            },
+            Self::FpaRegister(op) => Op::FpaRegister {
+                op,
+                precision: precision(f)?,
+                rounding: rounding(f),
+                fn_: byte(f, Field::CRn),
+                fm: fpa_operand(f),
+                rd: r(Field::Rt),
+            },
+            Self::FpaCompare(op) => Op::FpaCompare {
+                op,
+                precision: precision(f)?,
+                fn_: byte(f, Field::CRn),
+                fm: fpa_operand(f),
+                rd: r(Field::Rt),
+            },
+            Self::FpaTransfer(op) => Op::FpaTransfer {
+                op,
+                format: Format::ALL[f.get(Field::Precision) as usize & 3],
+                fd: byte(f, Field::CRd),
+                rn: r(Field::Rn),
+                up: f.bit(Field::U),
+                index: fpa_index(f),
+                offset: byte(f, Field::Imm),
+            },
+            Self::FpaMultiple(op) => Op::FpaMultiple {
+                op,
+                fd: byte(f, Field::CRd),
+                count: match byte(f, Field::Count) {
+                    0 => 4,
+                    n => n,
+                },
+                rn: r(Field::Rn),
+                up: f.bit(Field::U),
+                index: fpa_index(f),
+                offset: byte(f, Field::Imm),
+            },
+            Self::SimdFp(kind) => Op::SimdFp(kind.build(layout, f)?),
         })
     }
 }
@@ -515,6 +621,13 @@ impl Op {
             Self::CompareBranch { .. } => Kind::CompareBranch,
             Self::IfThen { .. } => Kind::IfThen,
             Self::TableBranch { .. } => Kind::TableBranch,
+            Self::FpaDyadic { op, .. } => Kind::FpaDyadic(op),
+            Self::FpaMonadic { op, .. } => Kind::FpaMonadic(op),
+            Self::FpaRegister { op, .. } => Kind::FpaRegister(op),
+            Self::FpaCompare { op, .. } => Kind::FpaCompare(op),
+            Self::FpaTransfer { op, .. } => Kind::FpaTransfer(op),
+            Self::FpaMultiple { op, .. } => Kind::FpaMultiple(op),
+            Self::SimdFp(op) => Kind::SimdFp(op.kind()),
         }
     }
 
@@ -898,7 +1011,138 @@ impl Op {
                 f.flag(Field::U, up);
                 f.set(Field::Imm, u32::from(offset));
             }
+            Self::FpaDyadic {
+                precision,
+                rounding,
+                fd,
+                fn_,
+                fm,
+                ..
+            } => {
+                set_rounded(&mut f, precision, rounding);
+                f.set(Field::CRd, u32::from(fd));
+                f.set(Field::CRn, u32::from(fn_));
+                set_fpa_operand(&mut f, fm);
+            }
+            Self::FpaMonadic {
+                precision,
+                rounding,
+                fd,
+                fm,
+                ..
+            } => {
+                set_rounded(&mut f, precision, rounding);
+                f.set(Field::CRd, u32::from(fd));
+                set_fpa_operand(&mut f, fm);
+            }
+            Self::FpaRegister {
+                precision,
+                rounding,
+                fn_,
+                fm,
+                rd,
+                ..
+            } => {
+                set_rounded(&mut f, precision, rounding);
+                f.set(Field::CRn, u32::from(fn_));
+                set_fpa_operand(&mut f, fm);
+                f.set(Field::Rt, rd.number());
+            }
+            Self::FpaCompare {
+                precision,
+                fn_,
+                fm,
+                rd,
+                ..
+            } => {
+                f.set(Field::Precision, precision_bits(precision));
+                f.set(Field::CRn, u32::from(fn_));
+                set_fpa_operand(&mut f, fm);
+                f.set(Field::Rt, rd.number());
+            }
+            Self::FpaTransfer {
+                format,
+                fd,
+                rn,
+                up,
+                index,
+                offset,
+                ..
+            } => {
+                f.set(Field::Precision, format_bits(format));
+                f.set(Field::CRd, u32::from(fd));
+                set_fpa_address(&mut f, rn, up, index, offset);
+            }
+            Self::FpaMultiple {
+                fd,
+                count,
+                rn,
+                up,
+                index,
+                offset,
+                ..
+            } => {
+                f.set(Field::Count, u32::from(count) & 3);
+                f.set(Field::CRd, u32::from(fd));
+                set_fpa_address(&mut f, rn, up, index, offset);
+            }
+            Self::SimdFp(op) => op.fields(&mut f),
         }
         f
     }
+}
+
+const fn precision_bits(precision: Precision) -> u32 {
+    match precision {
+        Precision::Single => 0,
+        Precision::Double => 1,
+        Precision::Extended => 2,
+    }
+}
+
+const fn rounding_bits(rounding: Rounding) -> u32 {
+    match rounding {
+        Rounding::Nearest => 0,
+        Rounding::PlusInfinity => 1,
+        Rounding::MinusInfinity => 2,
+        Rounding::Zero => 3,
+    }
+}
+
+const fn format_bits(format: Format) -> u32 {
+    match format {
+        Format::Single => 0,
+        Format::Double => 1,
+        Format::Extended => 2,
+        Format::Packed => 3,
+    }
+}
+
+fn set_rounded(f: &mut Fields, precision: Precision, rounding: Rounding) {
+    f.set(Field::Precision, precision_bits(precision));
+    f.set(Field::Rounding, rounding_bits(rounding));
+}
+
+fn set_fpa_operand(f: &mut Fields, operand: FpaOperand) {
+    f.set(
+        Field::CRm,
+        match operand {
+            FpaOperand::Register(n) => u32::from(n),
+            FpaOperand::Constant(n) => 8 | u32::from(n),
+        },
+    );
+}
+
+fn set_fpa_address(f: &mut Fields, rn: Reg, up: bool, index: CoIndex, offset: u8) {
+    f.set(Field::Rn, rn.number());
+    f.flag(Field::U, up);
+    let (p, w) = match index {
+        CoIndex::Offset => (true, false),
+        CoIndex::PreIndexed => (true, true),
+        CoIndex::PostIndexed => (false, true),
+        CoIndex::Unindexed => (false, false),
+    };
+    f.flag(Field::P, p);
+    f.flag(Field::W, w);
+    f.set(Field::Imm, u32::from(offset));
 }

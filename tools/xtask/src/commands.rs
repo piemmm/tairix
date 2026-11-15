@@ -52,6 +52,8 @@ mod pcemu_vectors;
 mod pie_build;
 mod proptest;
 mod qemu_tests;
+mod riscos;
+mod riscos_fpa;
 mod riscos_vectors;
 mod rngsoak;
 mod sbom;
@@ -91,6 +93,8 @@ pub enum Command {
     Spirv,
     Shaders,
     PcemuVectors,
+    Riscos,
+    RiscosFpa,
     RiscosVectors,
     DepsCheck,
     CfgCheck,
@@ -142,6 +146,8 @@ impl Command {
         Command::Spirv,
         Command::Shaders,
         Command::PcemuVectors,
+        Command::Riscos,
+        Command::RiscosFpa,
         Command::RiscosVectors,
         Command::DepsCheck,
         Command::CfgCheck,
@@ -192,6 +198,8 @@ impl Command {
             "spirv" => Command::Spirv,
             "shaders" => Command::Shaders,
             "pcemu-vectors" => Command::PcemuVectors,
+            "riscos" => Command::Riscos,
+            "riscos-fpa" => Command::RiscosFpa,
             "riscos-vectors" => Command::RiscosVectors,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
@@ -244,6 +252,8 @@ impl Command {
             Command::Spirv => "spirv",
             Command::Shaders => "shaders",
             Command::PcemuVectors => "pcemu-vectors",
+            Command::Riscos => "riscos",
+            Command::RiscosFpa => "riscos-fpa",
             Command::RiscosVectors => "riscos-vectors",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
@@ -326,6 +336,14 @@ impl Command {
             Command::PcemuVectors => {
                 "Import PCEmulator's SingleStepTests CPU vectors (`--import <dir>`; developer-run)."
             }
+            Command::Riscos => {
+                "Record the RISC OS emulator's corpus on a developer's genuine RISC OS \
+                 (`--reference <dir>`; developer-run only)."
+            }
+            Command::RiscosFpa => {
+                "Hold the RISC OS emulator's FPA to a developer's own FPEmulator module \
+                 (`<module>`, `--write-sample` to refresh the committed sample; developer-run only)."
+            }
             Command::RiscosVectors => {
                 "Hold the RISC OS emulator's ARM to the SingleStepTests ARM7TDMI suite \
                  (`<dir>`, `--write-sample` to refresh the committed sample; developer-run only)."
@@ -404,6 +422,8 @@ impl Command {
             Command::Spirv => spirv::run(ctx, args),
             Command::Shaders => shaders::run(ctx, args),
             Command::PcemuVectors => pcemu_vectors::run(ctx, args),
+            Command::Riscos => riscos::run(ctx, args),
+            Command::RiscosFpa => riscos_fpa::run(ctx, args),
             Command::RiscosVectors => riscos_vectors::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),

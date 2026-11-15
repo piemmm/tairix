@@ -3,7 +3,9 @@
 //!
 //! A pattern spells the 32 bits from bit 31 down; spaces and underscores
 //! are ignored. `0` and `1` are fixed bits, `-` and `+` bits that should be
-//! zero and one, and every letter a bit of the field it names. A field's
+//! zero and one, `*` bits the instruction reads none of, so that any value
+//! is the same instruction and the encoder writes zero, and every letter a
+//! bit of the field it names. A field's
 //! value is its bits read from the most significant down, so a split
 //! immediate such as `MOVW`'s `imm4:imm12` reads whole.
 
@@ -95,10 +97,24 @@ pub(crate) enum Field {
     J1,
     /// `K`: T32's second branch-offset bit beside the sign.
     J2,
+    /// `v`: an FPA precision or memory format, or a VFP or Advanced SIMD
+    /// size.
+    Precision,
+    /// `w`: an FPA rounding mode.
+    Rounding,
+    /// `z`: an FPA multiple transfer's register count, or a table's or a
+    /// structure's registers less one.
+    Count,
+    /// `Q`: Advanced SIMD's quadword registers.
+    Q,
+    /// `C`: how an Advanced SIMD immediate expands.
+    Cmode,
+    /// `A`: an element transfer's alignment, or its lane and alignment.
+    Align,
 }
 
 /// How many fields there are.
-pub(crate) const FIELDS: usize = Field::J2 as usize + 1;
+pub(crate) const FIELDS: usize = Field::Align as usize + 1;
 
 impl Field {
     const fn of(letter: u8) -> Option<Self> {
@@ -145,6 +161,12 @@ impl Field {
             b'Z' => Self::Spsr,
             b'J' => Self::J1,
             b'K' => Self::J2,
+            b'v' => Self::Precision,
+            b'w' => Self::Rounding,
+            b'z' => Self::Count,
+            b'Q' => Self::Q,
+            b'C' => Self::Cmode,
+            b'A' => Self::Align,
             _ => return None,
         })
     }
@@ -161,6 +183,8 @@ pub(crate) struct Layout {
     pub should_mask: u32,
     /// Their required values.
     pub should_bits: u32,
+    /// The bits the instruction ignores.
+    pub ignored: u32,
     /// Each field's bits, by [`Field`].
     pub fields: [u32; FIELDS],
 }
@@ -184,6 +208,7 @@ impl Layout {
             bits: 0,
             should_mask: 0,
             should_bits: 0,
+            ignored: 0,
             fields: [0; FIELDS],
         };
         let mut seen = 0u32;
@@ -208,6 +233,7 @@ impl Layout {
                     layout.should_mask |= bit;
                     layout.should_bits |= bit;
                 }
+                b'*' => layout.ignored |= bit,
                 _ => match Field::of(letter) {
                     Some(field) => layout.fields[field as usize] |= bit,
                     None => panic!("a pattern letter names no field"),

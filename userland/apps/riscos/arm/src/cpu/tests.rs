@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use super::{BadState, Cpu, Exception, Run, State, Stop, Unmodelled};
 use crate::a32::decode;
 use crate::bus::{Abort, Bus, Fetch, Width};
+use crate::fpa::{self, Internal};
 use crate::instruction::{Op, Set};
 use crate::profile::{Profile, BIT26, BIT32};
 use crate::psr::{self, Mode};
@@ -16,7 +17,7 @@ use crate::t32::{self, Position};
 
 /// Memory: 64 KiB at zero and a page of high vectors, with a page that
 /// refuses writes, a page the bus does not map, and host pages.
-struct Ram {
+pub(super) struct Ram {
     low: Vec<u8>,
     high: Vec<u8>,
     host: Vec<u32>,
@@ -24,13 +25,13 @@ struct Ram {
     accesses: Vec<(u32, Width, bool, bool)>,
 }
 
-const LOW: u32 = 0x1_0000;
+pub(super) const LOW: u32 = 0x1_0000;
 const HIGH: u32 = 0xFFFF_0000;
 const READ_ONLY: u32 = 0xE000;
-const UNMAPPED: u32 = 0xF000;
+pub(super) const UNMAPPED: u32 = 0xF000;
 
 impl Ram {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             low: vec![0; LOW as usize],
             high: vec![0; 0x1000],
@@ -53,22 +54,22 @@ impl Ram {
         }
     }
 
-    fn word(&mut self, address: u32) -> u32 {
+    pub(super) fn word(&mut self, address: u32) -> u32 {
         self.read(address, Width::Word, true).expect("mapped")
     }
 
-    fn put(&mut self, address: u32, word: u32) {
+    pub(super) fn put(&mut self, address: u32, word: u32) {
         self.slot(address).expect("mapped")[..4].copy_from_slice(&word.to_le_bytes());
     }
 
-    fn put_half(&mut self, address: u32, half: u16) {
+    pub(super) fn put_half(&mut self, address: u32, half: u16) {
         self.slot(address).expect("mapped")[..2].copy_from_slice(&half.to_le_bytes());
     }
 
     /// Writes the Thumb `program` at `address`, each instruction checked
     /// against the text the disassembler gives it where it stands in the
     /// straight-line code's `IT` blocks.
-    fn thumb(&mut self, address: u32, program: &[(&[u16], &str)]) {
+    pub(super) fn thumb(&mut self, address: u32, program: &[(&[u16], &str)]) {
         let mut at = address;
         let mut itstate = 0u8;
         for &(halves, text) in program {
@@ -92,7 +93,7 @@ impl Ram {
 
     /// Writes `program` at `address`, each word checked against the text
     /// the disassembler gives it so a test cannot run a word it misread.
-    fn program(&mut self, profile: &Profile, address: u32, program: &[(u32, &str)]) {
+    pub(super) fn program(&mut self, profile: &Profile, address: u32, program: &[(u32, &str)]) {
         for (n, &(word, text)) in (0u32..).zip(program) {
             let at = address + 4 * n;
             let shown = decode(word, profile.isa)
@@ -140,20 +141,20 @@ impl Bus for Ram {
     }
 }
 
-fn r(n: u32) -> Reg {
+pub(super) fn r(n: u32) -> Reg {
     Reg::new(n).expect("a register")
 }
 
 /// A processor of `profile` in `mode` at `pc`, flags clear, interrupts
 /// enabled.
-fn processor(profile: &'static Profile, mode: Mode, pc: u32) -> Cpu {
+pub(super) fn processor(profile: &'static Profile, mode: Mode, pc: u32) -> Cpu {
     let mut cpu = Cpu::new(profile, 4);
     cpu.set_cpsr(mode.bits()).expect("a mode the profile has");
     cpu.set_reg(Reg::PC, pc);
     cpu
 }
 
-fn run(cpu: &mut Cpu, ram: &mut Ram, instructions: u64) -> Run {
+pub(super) fn run(cpu: &mut Cpu, ram: &mut Ram, instructions: u64) -> Run {
     cpu.run(ram, instructions)
 }
 
@@ -1219,4 +1220,289 @@ fn an_exception_return_restores_an_it_state_only_into_thumb_state() {
             "SPSR {spsr:08X}"
         );
     }
+}
+
+const ONE: [u32; 3] = [0x3FFF, 0x8000_0000, 0];
+const TWO: [u32; 3] = [0x4000, 0x8000_0000, 0];
+const THREE: [u32; 3] = [0x4000, 0xC000_0000, 0];
+
+fn set_fpa(cpu: &mut Cpu, n: u8, words: [u32; 3]) {
+    cpu.fpa_mut().set_register(n, Internal::from_words(words));
+}
+
+fn fpa_words(cpu: &Cpu, n: u8) -> [u32; 3] {
+    cpu.fpa().register(n).words()
+}
+
+#[test]
+fn fpa_transfers_address_memory_and_write_back_as_fpemulator_does() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEDB1_8102, "LDFD    F0,[R1,#8]!"),
+            (0xEC21_0101, "STFS    F0,[R1],#-4"),
+            (0xECD1_1103, "LDCL    CP1,C1,[R1],{3}"),
+            (0xEDBF_2101, "LDFS    F2,[PC,#4]!"),
+        ],
+    );
+    ram.put(0x4008, 0x3FF0_0000);
+    ram.put(0x8018, 0x4000_0000);
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(1), 0x4000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(fpa_words(&cpu, 0), ONE, "a double, high word first");
+    assert_eq!(cpu.reg(r(1)), 0x4008, "pre-indexed, written back");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(ram.word(0x4008), 0x3F80_0000, "stored at the base");
+    assert_eq!(cpu.reg(r(1)), 0x4004, "then moved down a word");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(
+        cpu.reg(r(1)),
+        0x4004,
+        "unindexed: at the base, no writeback"
+    );
+    assert_eq!(
+        fpa_words(&cpu, 1),
+        [0x4000_0000, 0x3F80_0000, 0],
+        "an extended denormal, marked uncommon"
+    );
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(
+        fpa_words(&cpu, 2),
+        TWO,
+        "the PC as the instruction's address plus 8"
+    );
+    assert_eq!(cpu.pc(), 0x8010, "and never written back");
+}
+
+#[test]
+fn lfm_and_sfm_move_the_internal_format_wrapping_past_f7() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEDC0_E200, "SFM     F6,3,[R0,#0]"),
+            (0xEDD0_7203, "LFM     F7,2,[R0,#&C]"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(0), 0x4000);
+    for (n, words) in [(6, ONE), (7, TWO), (0, THREE)] {
+        set_fpa(&mut cpu, n, words);
+    }
+    run(&mut cpu, &mut ram, 1);
+    let stored: Vec<u32> = (0..9).map(|n| ram.word(0x4000 + 4 * n)).collect();
+    assert_eq!(stored, [ONE, TWO, THREE].concat(), "F6, F7, then F0");
+    set_fpa(&mut cpu, 7, [0; 3]);
+    set_fpa(&mut cpu, 0, [0; 3]);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!((fpa_words(&cpu, 7), fpa_words(&cpu, 0)), (TWO, THREE));
+}
+
+#[test]
+fn a_trapped_store_writes_nothing_and_a_trapped_packed_load_writes_its_base_back() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEDA1_0101, "STFS    F0,[R1,#4]!"),
+            (0xEDC1_A100, "STFP    F2,[R1,#0]"),
+            (0xECF1_9103, "LDFP    F1,[R1],#&C"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(1), 0x4000);
+    // A third, and a tenth: inexact as a single, and as packed decimal.
+    set_fpa(&mut cpu, 0, [0x3FFD, 0xAAAA_AAAA, 0xAAAA_AAAB]);
+    set_fpa(&mut cpu, 2, [0x3FFB, 0xCCCC_CCCC, 0xCCCC_CCCD]);
+    let inexact = fpa::fpsr::SYSTEM_ID | fpa::Exception::Inexact.enable();
+    cpu.fpa_mut().write_fpsr(inexact);
+    let trap = Stop::FloatingPoint {
+        exception: fpa::Exception::Inexact,
+    };
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, trap);
+    assert_eq!(ram.word(0x4004), 0, "nothing stored");
+    assert_eq!(cpu.reg(r(1)), 0x4000, "nor written back");
+    assert_eq!(cpu.pc(), 0x8004, "the PC past the instruction");
+    assert_eq!(cpu.fpa().fpsr(), inexact, "its flag left clear");
+    cpu.fpa_mut().write_fpsr(fpa::fpsr::SYSTEM_ID);
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, Stop::Budget);
+    cpu.fpa_mut().write_fpsr(inexact);
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, trap);
+    assert_eq!(cpu.reg(r(1)), 0x400C, "the base written back first");
+    assert_eq!(fpa_words(&cpu, 1), [0; 3], "the register not loaded");
+}
+
+#[test]
+fn a_comparison_sets_the_flags_or_writes_them_to_its_register() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEE90_F111, "CMF     F0,F1"),
+            (0xEE90_3111, "MRC     CP1,4,R3,C0,C1,0"),
+            (0xEE90_F112, "CMF     F0,F2"),
+            (0xEE90_F112, "CMF     F0,F2"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    set_fpa(&mut cpu, 0, ONE);
+    set_fpa(&mut cpu, 1, TWO);
+    set_fpa(&mut cpu, 2, [0x4000_7FFF, 0xC000_0000, 0]);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.cpsr() & psr::NZCV, psr::N, "less than");
+    cpu.set_cpsr(Mode::User.bits()).expect("User mode");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(3)), psr::N, "the flags to R3");
+    assert_eq!(cpu.cpsr() & psr::NZCV, 0, "and not to the PSR");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.cpsr() & psr::NZCV, psr::V, "unordered");
+    cpu.fpa_mut().write_fpsr(fpa::fpsr::AC);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(
+        cpu.cpsr() & psr::NZCV,
+        psr::C | psr::V,
+        "unordered, C too with AC"
+    );
+}
+
+#[test]
+fn flt_and_wfs_read_r15_as_fpemulator_does() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[(0xEE00_F110, "FLTS    F0,PC"), (0xEE20_F110, "WFS     PC")],
+    );
+    let float = |value: u32| {
+        let mut expected = fpa::Fpa::new();
+        expected
+            .float(fpa::Precision::Single, fpa::Rounding::Nearest, 0, value)
+            .expect("no trap enabled");
+        expected.register(0).words()
+    };
+    let mut user = processor(&BIT32, Mode::User, 0x8000);
+    run(&mut user, &mut ram, 2);
+    assert_eq!(
+        fpa_words(&user, 0),
+        float(0x8004),
+        "User mode: the next instruction"
+    );
+    assert_eq!(
+        user.fpa().fpsr(),
+        fpa::fpsr::SYSTEM_ID | 0x8010,
+        "its address plus 12"
+    );
+    let mut supervisor = processor(&BIT32, Mode::Supervisor, 0x8000);
+    supervisor.set_reg(Reg::LR, 100);
+    run(&mut supervisor, &mut ram, 1);
+    assert_eq!(
+        fpa_words(&supervisor, 0),
+        float(100),
+        "a privileged mode: R14"
+    );
+    // The 26-bit PSR rides in R15, its mode bits reaching the FPSR's flags.
+    let mut legacy = processor(&BIT26, Mode::Supervisor26, 0x8000);
+    legacy
+        .set_cpsr(Mode::User26.bits() | psr::Z)
+        .expect("26-bit User mode");
+    run(&mut legacy, &mut ram, 1);
+    assert_eq!(fpa_words(&legacy, 0), float(0x4000_8004));
+    let mut legacy = processor(&BIT26, Mode::Supervisor26, 0x8004);
+    run(&mut legacy, &mut ram, 1);
+    assert_eq!(legacy.fpa().fpsr(), fpa::fpsr::SYSTEM_ID | 0x8010 | 3);
+}
+
+#[test]
+fn system_mode_loses_what_the_fpa_writes_to_r13_and_r14() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEE30_D110, "RFS     R13"),
+            (0xEE30_C110, "RFS     R12"),
+            (0xECBD_0101, "LDFS    F0,[R13],#4"),
+        ],
+    );
+    let fpsr = fpa::fpsr::SYSTEM_ID;
+    let mut system = processor(&BIT32, Mode::System, 0x8000);
+    system.set_reg(Reg::SP, 0x4000);
+    run(&mut system, &mut ram, 3);
+    assert_eq!(
+        system.reg(Reg::SP),
+        0x4000,
+        "neither RFS nor writeback reaches R13"
+    );
+    assert_eq!(system.reg(r(12)), fpsr, "but R12 is written");
+    let mut supervisor = processor(&BIT32, Mode::Supervisor, 0x8000);
+    supervisor.set_reg(Reg::SP, 0x4000);
+    run(&mut supervisor, &mut ram, 1);
+    assert_eq!(
+        supervisor.reg(Reg::SP),
+        fpsr,
+        "Supervisor mode's is written"
+    );
+    supervisor.set_reg(Reg::SP, 0x4000);
+    supervisor.set_reg(Reg::PC, 0x8008);
+    run(&mut supervisor, &mut ram, 1);
+    assert_eq!(supervisor.reg(Reg::SP), 0x4004, "and written back");
+}
+
+#[test]
+fn user_mode_fpa_transfers_move_each_word_without_privilege() {
+    let mut ram = Ram::new();
+    ram.program(&BIT26, 0x8000, &[(0xED91_8100, "LDFD    F0,[R1,#0]")]);
+    ram.put(0x4000, 0xF000_003F);
+    let mut user = processor(&BIT26, Mode::User26, 0x8000);
+    user.set_reg(r(1), 0x4001);
+    run(&mut user, &mut ram, 1);
+    assert_eq!(
+        ram.accesses,
+        [
+            (0x4000, Width::Word, false, false),
+            (0x4004, Width::Word, false, false)
+        ],
+        "a word at a time, as LDRT reads"
+    );
+    assert_eq!(fpa_words(&user, 0), ONE, "each rotated as ARMv4 rotates");
+    ram.accesses.clear();
+    let mut supervisor = processor(&BIT26, Mode::Supervisor26, 0x8000);
+    supervisor.set_reg(r(1), 0x4001);
+    run(&mut supervisor, &mut ram, 1);
+    assert_eq!(
+        ram.accesses,
+        [
+            (0x4000, Width::Word, false, true),
+            (0x4004, Width::Word, false, true)
+        ],
+        "a block, as LDM reads"
+    );
+    let mut unrotated = fpa::Fpa::new();
+    unrotated
+        .load(fpa::Format::Double, 0, [0xF000_003F, 0, 0, 0])
+        .expect("a double load raises nothing");
+    assert_eq!(fpa_words(&supervisor, 0), unrotated.register(0).words());
+    let mut modern = processor(&BIT32, Mode::User, 0x8000);
+    modern.set_reg(r(1), 0x4001);
+    run(&mut modern, &mut ram, 1);
+    assert_eq!(modern.mode(), Mode::Abort, "the 32-bit profile faults it");
+}
+
+#[test]
+fn an_aborted_fpa_load_changes_nothing() {
+    let mut ram = Ram::new();
+    ram.program(&BIT32, 0x8000, &[(0xEDF1_0101, "LDFE    F0,[R1,#4]!")]);
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(1), UNMAPPED - 12);
+    set_fpa(&mut cpu, 0, ONE);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Abort);
+    assert_eq!(cpu.state().user[1], UNMAPPED - 12, "the base as it was");
+    assert_eq!(fpa_words(&cpu, 0), ONE, "the register as it was");
 }

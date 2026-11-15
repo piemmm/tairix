@@ -2,6 +2,7 @@
 //! defines it, with each profile's choices where it leaves one.
 
 use super::alu::{self, add_with_carry, shift_immediate, shift_register, Shifted};
+use super::fpa::completed;
 use super::{Cpu, Flow, Stop, Unmodelled};
 use crate::bus::Bus;
 use crate::cp15::{Fault, Outcome};
@@ -13,20 +14,9 @@ use crate::instruction::{
 use crate::isa::Feature;
 use crate::psr;
 use crate::reg::Reg;
+use crate::word::{high, low};
 
 const PC: Reg = Reg::PC;
-
-/// The low word of a 64-bit value: the architecture's own truncation.
-pub(super) const fn low(value: u64) -> u32 {
-    let b = value.to_le_bytes();
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-}
-
-/// The high word of a 64-bit value.
-pub(super) const fn high(value: u64) -> u32 {
-    let b = value.to_le_bytes();
-    u32::from_le_bytes([b[4], b[5], b[6], b[7]])
-}
 
 /// `value`'s low 32 bits, as the architecture's arithmetic wraps.
 pub(super) const fn wrap(value: i64) -> u32 {
@@ -547,7 +537,53 @@ impl Cpu {
             } if cp == 15 && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mrc) => {
                 self.system(op == CoRegisterOp::Mcr, [opc1, crn, crm, opc2], rt)
             }
-            Op::Coprocessor { .. }
+            Op::FpaDyadic {
+                op,
+                precision,
+                rounding,
+                fd,
+                fn_,
+                fm,
+            } => completed(self.fpa.dyadic(op, precision, rounding, fd, fn_, fm)),
+            Op::FpaMonadic {
+                op,
+                precision,
+                rounding,
+                fd,
+                fm,
+            } => completed(self.fpa.monadic(op, precision, rounding, fd, fm)),
+            Op::FpaRegister {
+                op,
+                precision,
+                rounding,
+                fn_,
+                fm,
+                rd,
+            } => self.fpa_register(op, precision, rounding, fn_, fm, rd),
+            Op::FpaCompare {
+                op, fn_, fm, rd, ..
+            } => self.fpa_compare(op, fn_, fm, rd),
+            Op::FpaTransfer {
+                op,
+                format,
+                fd,
+                rn,
+                up,
+                index,
+                offset,
+            } => self.fpa_transfer(bus, op, format, fd, rn, up, index, offset),
+            Op::FpaMultiple {
+                op,
+                fd,
+                count,
+                rn,
+                up,
+                index,
+                offset,
+            } => self.fpa_multiple(bus, op, fd, count, rn, up, index, offset),
+            Op::SimdFp(op) if self.profile.isa.has(Feature::Vfp) => self.simdfp(bus, &op),
+            Op::SimdFp(_)
+            | Op::Coprocessor { .. }
             | Op::CoprocessorRegister { .. }
             | Op::CoprocessorRegisters { .. }
             | Op::CoprocessorTransfer { .. } => {

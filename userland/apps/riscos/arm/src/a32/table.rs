@@ -1,23 +1,26 @@
 //! The A32 encoding table: every encoding from ARMv2 to ARMv7-A with
 //! ARMv8-A's AArch32 integer additions, as the ARMv7-A architecture manual
-//! lays them out. The floating-point and Advanced SIMD encodings are in the
-//! coprocessor and unconditional spaces this table leaves to them.
+//! lays them out, and the FPA's on coprocessors 1 and 2 as FPEmulator claims
+//! them. The VFP and Advanced SIMD encodings are in the coprocessor and
+//! unconditional spaces this table leaves to them.
 //!
 //! The rows are grouped by bits 27 to 25, which every encoding fixes. Within
 //! a group a row that refines a later one comes first; a test holds that no
 //! row is shadowed by an earlier, less specific one.
 
+use super::simdfp;
 use crate::encoding::form::Kind;
 use crate::encoding::layout::Layout;
 use crate::instruction::{
     ArithmeticOp as A, BarrierOp, BitfieldOp, BlockOp, BranchOp, CallOp, CoRegisterOp,
     CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, DualOp, ExchangeOp,
-    ExclusiveOp as X, ExtendOp as E, HintOp, LongOp, MoveOp, MultiplyOp as M, PackOp, PreloadOp,
+    ExclusiveOp as X, ExtendOp as E, FpaCompareOp, FpaDyadicOp, FpaMonadicOp, FpaMultipleOp,
+    FpaRegisterOp, FpaTransferOp, HintOp, LongOp, MoveOp, MultiplyOp as M, PackOp, PreloadOp,
     SaturateOp, SwapOp, TransferOp as T, UnaryOp, WideOp,
 };
 use crate::isa::Feature::{
-    self, Crc32, Divide, Jazelle, LongMultiply, Mp, Swp, V2, V3, V4, V4T, V5, V5TE, V6, V6K, V6T2,
-    V7, V8,
+    self, Crc32, Divide, Fpa, Jazelle, LongMultiply, Mp, Swp, V2, V3, V4, V4T, V5, V5TE, V6, V6K,
+    V6T2, V7, V8,
 };
 
 /// One encoding: what it decodes to, the feature it needs and its layout.
@@ -36,7 +39,7 @@ impl Row {
     }
 }
 
-const fn row(pattern: &str, kind: Kind, since: Feature) -> Row {
+pub(super) const fn row(pattern: &str, kind: Kind, since: Feature) -> Row {
     Row {
         kind,
         since,
@@ -73,6 +76,39 @@ macro_rules! by_register {
             concat!("cccc 000", $op, $s, $rn, "dddd ssss 0yy1 mmmm"),
             $kind,
             V2,
+        )
+    };
+}
+
+/// An FPA dyadic operation's row, by its opcode.
+macro_rules! fpa_dyadic {
+    ($op:ident, $opcode:literal) => {
+        row(
+            concat!("cccc 1110 ", $opcode, " vNNN 0DDD 0001 vww0 MMMM"),
+            Kind::FpaDyadic(FpaDyadicOp::$op),
+            Fpa,
+        )
+    };
+}
+
+/// An FPA monadic operation's row, by its opcode.
+macro_rules! fpa_monadic {
+    ($op:ident, $opcode:literal) => {
+        row(
+            concat!("cccc 1110 ", $opcode, " v*** 1DDD 0001 vww0 MMMM"),
+            Kind::FpaMonadic(FpaMonadicOp::$op),
+            Fpa,
+        )
+    };
+}
+
+/// An FPA comparison's row, by its opcode.
+macro_rules! fpa_compare {
+    ($op:ident, $opcode:literal) => {
+        row(
+            concat!("cccc 1110 ", $opcode, "1 vNNN tttt 0001 v**1 MMMM"),
+            Kind::FpaCompare(FpaCompareOp::$op),
+            Fpa,
         )
     };
 }
@@ -990,6 +1026,28 @@ static GROUP_101: &[Row] = &[
 
 /// Rows whose bits 27 to 25 are `110`.
 static GROUP_110: &[Row] = &[
+    // The FPA claims every addressing form on its coprocessors, MCRR's and
+    // MRRC's words among them.
+    row(
+        "cccc 110P UvW0 nnnn vDDD 0001 iiii iiii",
+        Kind::FpaTransfer(FpaTransferOp::Stf),
+        Fpa,
+    ),
+    row(
+        "cccc 110P UvW1 nnnn vDDD 0001 iiii iiii",
+        Kind::FpaTransfer(FpaTransferOp::Ldf),
+        Fpa,
+    ),
+    row(
+        "cccc 110P UzW0 nnnn zDDD 0010 iiii iiii",
+        Kind::FpaMultiple(FpaMultipleOp::Sfm),
+        Fpa,
+    ),
+    row(
+        "cccc 110P UzW1 nnnn zDDD 0010 iiii iiii",
+        Kind::FpaMultiple(FpaMultipleOp::Lfm),
+        Fpa,
+    ),
     row(
         "cccc 1100 0100 TTTT tttt pppp oooo MMMM",
         Kind::CoprocessorRegisters(CoRegistersOp::Mcrr),
@@ -1034,6 +1092,65 @@ static GROUP_110: &[Row] = &[
 
 /// Rows whose bits 27 to 25 are `111`.
 static GROUP_111: &[Row] = &[
+    // SWI, which no other row in the group overlaps, first as the most common.
+    row(
+        "cccc 1111 iiii iiii iiii iiii iiii iiii",
+        Kind::Call(CallOp::Swi),
+        V2,
+    ),
+    fpa_dyadic!(Adf, "0000"),
+    fpa_dyadic!(Muf, "0001"),
+    fpa_dyadic!(Suf, "0010"),
+    fpa_dyadic!(Rsf, "0011"),
+    fpa_dyadic!(Dvf, "0100"),
+    fpa_dyadic!(Rdf, "0101"),
+    fpa_dyadic!(Pow, "0110"),
+    fpa_dyadic!(Rpw, "0111"),
+    fpa_dyadic!(Rmf, "1000"),
+    fpa_dyadic!(Fml, "1001"),
+    fpa_dyadic!(Fdv, "1010"),
+    fpa_dyadic!(Frd, "1011"),
+    fpa_dyadic!(Pol, "1100"),
+    fpa_monadic!(Mvf, "0000"),
+    fpa_monadic!(Mnf, "0001"),
+    fpa_monadic!(Abs, "0010"),
+    fpa_monadic!(Rnd, "0011"),
+    fpa_monadic!(Sqt, "0100"),
+    fpa_monadic!(Log, "0101"),
+    fpa_monadic!(Lgn, "0110"),
+    fpa_monadic!(Exp, "0111"),
+    fpa_monadic!(Sin, "1000"),
+    fpa_monadic!(Cos, "1001"),
+    fpa_monadic!(Tan, "1010"),
+    fpa_monadic!(Asn, "1011"),
+    fpa_monadic!(Acs, "1100"),
+    fpa_monadic!(Atn, "1101"),
+    fpa_monadic!(Urd, "1110"),
+    fpa_monadic!(Nrm, "1111"),
+    row(
+        "cccc 1110 0000 vNNN tttt 0001 vww1 ****",
+        Kind::FpaRegister(FpaRegisterOp::Flt),
+        Fpa,
+    ),
+    row(
+        "cccc 1110 0001 v*** tttt 0001 vww1 MMMM",
+        Kind::FpaRegister(FpaRegisterOp::Fix),
+        Fpa,
+    ),
+    row(
+        "cccc 1110 0010 v*** tttt 0001 v**1 ****",
+        Kind::FpaRegister(FpaRegisterOp::Wfs),
+        Fpa,
+    ),
+    row(
+        "cccc 1110 0011 v*** tttt 0001 v**1 ****",
+        Kind::FpaRegister(FpaRegisterOp::Rfs),
+        Fpa,
+    ),
+    fpa_compare!(Cmf, "100"),
+    fpa_compare!(Cnf, "101"),
+    fpa_compare!(Cmfe, "110"),
+    fpa_compare!(Cnfe, "111"),
     row(
         "cccc 1110 oooo NNNN DDDD pppp qqq0 MMMM",
         Kind::Coprocessor(CoprocessorOp::Cdp),
@@ -1047,11 +1164,6 @@ static GROUP_111: &[Row] = &[
     row(
         "cccc 1110 ooo1 NNNN tttt pppp qqq1 MMMM",
         Kind::CoprocessorRegister(CoRegisterOp::Mrc),
-        V2,
-    ),
-    row(
-        "cccc 1111 iiii iiii iiii iiii iiii iiii",
-        Kind::Call(CallOp::Swi),
         V2,
     ),
     row(
@@ -1072,19 +1184,31 @@ static GROUP_111: &[Row] = &[
 ];
 
 /// The rows of each group, by bits 27 to 25.
-static GROUPS: [&[Row]; 8] = [
+pub(super) static GROUPS: [&[Row]; 8] = [
     GROUP_000, GROUP_001, GROUP_010, GROUP_011, GROUP_100, GROUP_101, GROUP_110, GROUP_111,
 ];
 
-/// The rows a word whose bits 27 to 25 are `group` may match, most specific
-/// first.
-pub(crate) fn rows(group: usize) -> &'static [Row] {
-    GROUPS[group & 7]
+/// The floating-point and Advanced SIMD rows of each group.
+pub(super) static SIMDFP: [&[Row]; 8] = [
+    &[],
+    simdfp::GROUP_001,
+    simdfp::GROUP_010,
+    &[],
+    &[],
+    &[],
+    simdfp::GROUP_110,
+    simdfp::GROUP_111,
+];
+
+/// The rows a word whose bits 27 to 25 are `group` may match, in the order
+/// the first match decides.
+pub(crate) fn rows(group: usize) -> impl Iterator<Item = &'static Row> {
+    GROUPS[group & 7].iter().chain(SIMDFP[group & 7])
 }
 
 /// Every row, for the encoder and the table's tests.
 pub(crate) fn all() -> impl Iterator<Item = &'static Row> {
-    GROUPS.iter().flat_map(|group| group.iter())
+    GROUPS.iter().chain(&SIMDFP).flat_map(|group| group.iter())
 }
 
 /// Whether `kind`'s rows are in the unconditional space, so its condition

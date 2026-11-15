@@ -46,6 +46,23 @@ pub enum Feature {
     V8,
     /// ARMv8's `CRC32` and `CRC32C` instructions.
     Crc32,
+    /// The FPA on coprocessors 1 and 2, as FPEmulator implements it: its
+    /// data operations, register transfers, loads and stores.
+    Fpa,
+    /// VFPv4 with 32 doubleword registers on coprocessors 10 and 11: single
+    /// and double precision, fused multiply-add, conversions to and from
+    /// half precision, and VFPv2's short vectors.
+    Vfp,
+    /// Advanced SIMD with its fused multiply-add and half-precision
+    /// conversion.
+    Simd,
+    /// ARMv8's floating-point additions to both: `VSEL`, `VMAXNM` and
+    /// `VMINNM`, conversions and roundings in a named mode, and conversions
+    /// between half and double precision.
+    FpV8,
+    /// ARMv8's Cryptographic Extension: AES, SHA-1, SHA-256 and the 64-bit
+    /// polynomial multiply.
+    Crypto,
     /// A condition field of `1111` means never, as on every core before
     /// ARMv5; without it that field marks the unconditional instructions.
     ConditionNever,
@@ -65,6 +82,15 @@ impl Feature {
 pub struct Isa(u32);
 
 impl Isa {
+    /// Whether the architecture reserves coprocessor `number`'s low four
+    /// bits for a unit the set has, so that no generic coprocessor form
+    /// decodes there: VFP and Advanced SIMD's 10 and 11. The FPA claims only
+    /// the encodings FPEmulator implements, by its rows.
+    #[must_use]
+    pub const fn claims_coprocessor(self, number: u32) -> bool {
+        matches!(number & 15, 10 | 11) && self.has(Feature::Vfp)
+    }
+
     /// A set of `features`.
     #[must_use]
     pub const fn of(features: &[Feature]) -> Self {
@@ -115,6 +141,11 @@ impl Isa {
         Feature::Divide,
         Feature::V8,
         Feature::Crc32,
+        Feature::Fpa,
+        Feature::Vfp,
+        Feature::Simd,
+        Feature::FpV8,
+        Feature::Crypto,
     ]);
 
     /// The architecture version, for the rules that change between versions.

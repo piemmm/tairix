@@ -167,7 +167,7 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         let _ = writeln!(
             digests,
             "- `{file}.json.bin` `{}`",
-            hex(&tairix_crypto::sha256(&bytes))
+            tairix_util::hex::encode(&tairix_crypto::sha256(&bytes))
         );
         let raws = parse(&bytes).map_err(|e| format!("riscos-vectors: {file}: {e}"))?;
         let mut kept = 0usize;
@@ -421,13 +421,6 @@ fn write_samples(
     );
     std::fs::write(out.join("README.md"), readme)
         .map_err(|e| format!("riscos-vectors: README.md: {e}"))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
 }
 
 /// One upstream vector: the 40 words of each state, the transactions, the
@@ -707,6 +700,7 @@ fn classify(file: &str, held: Held, raw: &Raw) -> Result<Vector, Dropped> {
         after,
         psr: psr_held,
         transfers,
+        fpa: None,
     })
 }
 

@@ -3,6 +3,7 @@
 //! derived from it.
 
 mod check;
+mod simdfp;
 mod table;
 
 pub(crate) use table::unconditional;
@@ -32,11 +33,11 @@ pub(crate) fn decode_detail(word: u32, isa: Isa) -> Option<Decoded> {
     let field = word >> 28;
     let unconditional_space = field == 0xF && !isa.has(Feature::ConditionNever);
     table::rows((word >> 25) as usize & 7)
-        .iter()
         .filter(|row| {
             row.layout.matches(word)
                 && isa.has(row.since)
                 && (row.unconditional() || !unconditional_space)
+                && !(row.kind.generic_coprocessor() && isa.claims_coprocessor(word >> 8))
         })
         .find_map(|row| {
             let fields = row.layout.extract(word);
@@ -47,6 +48,45 @@ pub(crate) fn decode_detail(word: u32, isa: Isa) -> Option<Decoded> {
                 },
                 canonical: word & row.layout.should_mask == row.layout.should_bits,
             })
+        })
+}
+
+/// A floating-point or Advanced SIMD decoding, for T32, whose encodings of
+/// them are A32's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct SimdFpDecoded {
+    pub instruction: Instruction,
+    /// Whether the should-be bits held their values.
+    pub canonical: bool,
+    /// Whether T32 forbids it in an `IT` block: ARMv8's unconditional
+    /// additions.
+    pub outside: bool,
+}
+
+/// The floating-point or Advanced SIMD instruction the A32 `word` encodes on
+/// a core with `isa`; the other rows are not consulted.
+pub(crate) fn decode_simdfp(word: u32, isa: Isa) -> Option<SimdFpDecoded> {
+    let unconditional_space = word >> 28 == 0xF && !isa.has(Feature::ConditionNever);
+    table::rows((word >> 25) as usize & 7)
+        .filter(|row| {
+            matches!(row.kind, crate::encoding::form::Kind::SimdFp(_))
+                && row.layout.matches(word)
+                && isa.has(row.since)
+                && (row.unconditional() || !unconditional_space)
+        })
+        .find_map(|row| {
+            let fields = row.layout.extract(word);
+            row.kind
+                .build(&row.layout, &fields)
+                .map(|op| SimdFpDecoded {
+                    instruction: Instruction {
+                        cond: Condition::field(word >> 28),
+                        op,
+                    },
+                    canonical: word & row.layout.should_mask == row.layout.should_bits,
+                    outside: row.unconditional()
+                        && matches!(row.since, Feature::FpV8 | Feature::Crypto),
+                })
         })
 }
 

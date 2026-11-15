@@ -1,0 +1,24 @@
+[package]
+name = "tairix-riscos-kernel"
+description = "The RISC OS emulator's kernel: the guest address space's two layouts, the memory policy that sizes a session, task slots switched in O(1) under the 26-bit window rule, and the dynamic-area manager with its handler protocol. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The processor whose MMU the address space is built on.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The area table and the address reservations, whose growth can refuse.
+tairix-collections = { path = "../../../../lib/collections", version = "=0.0.0" }
+# An area's title, held inline.
+tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harness draws from.
+tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0" }

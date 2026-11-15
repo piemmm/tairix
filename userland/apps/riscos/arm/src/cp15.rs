@@ -9,6 +9,7 @@
 //! control register is refused.
 
 use crate::bus::Abort;
+use crate::isa::{Feature, Isa};
 use crate::profile::System;
 
 /// What a CP15 access does.
@@ -102,9 +103,16 @@ const ARMV7_FEATURES: [u32; 14] = [
     // ID_ISAR4: the unprivileged transfers, shifts in addressing,
     // writeback, the barriers; no SMC and no SWP.
     0x0001_0142,
-    // ID_ISAR5: SEVL and CRC32.
+    // ID_ISAR5: SEVL and CRC32, and the Cryptographic Extension's
+    // instructions where the set has them.
     0x0001_0001,
 ];
+
+/// `ID_ISAR5`'s AES with the 64-bit polynomial multiply, SHA-1 and SHA-256.
+const ARMV7_CRYPTO: u32 = 0x0000_1120;
+
+/// CPACR's access fields for coprocessors 10 and 11.
+const VFP_ACCESS: u32 = 0x00F0_0000;
 
 /// The coprocessor's state.
 #[derive(Clone, Debug)]
@@ -119,11 +127,17 @@ pub(crate) struct Cp15 {
     context: u32,
     /// TPIDRURW, TPIDRURO and TPIDRPRW.
     thread: [u32; 3],
+    /// CPACR.
+    access: u32,
+    /// The CPACR bits the processor's coprocessors have.
+    access_mask: u32,
+    /// `ID_ISAR5`.
+    isar5: u32,
 }
 
 impl Cp15 {
     /// The coprocessor at reset.
-    pub(crate) const fn new(system: System) -> Self {
+    pub(crate) const fn new(system: System, isa: Isa) -> Self {
         Self {
             system,
             control: match system {
@@ -137,7 +151,21 @@ impl Cp15 {
             cache_selection: 0,
             context: 0,
             thread: [0; 3],
+            access: 0,
+            access_mask: if isa.has(Feature::Vfp) { VFP_ACCESS } else { 0 },
+            isar5: ARMV7_FEATURES[13]
+                | if isa.has(Feature::Crypto) {
+                    ARMV7_CRYPTO
+                } else {
+                    0
+                },
         }
+    }
+
+    /// CPACR's two-bit access field for coprocessor `cp`: none, privileged
+    /// only, reserved, or full.
+    pub(crate) const fn coprocessor_access(&self, cp: u32) -> u32 {
+        (self.access >> (2 * (cp & 15))) & 3
     }
 
     /// Records a data abort at `address`.
@@ -236,9 +264,11 @@ impl Cp15 {
             [0, 0, 0, 1] => ARMV7_CACHE_TYPE,
             [0, 0, 0, 2 | 3 | 6]
             | [1, 0, 0, 7]
-            | [0, 1, 0, 1 | 2]
+            | [0, 1, 0, 1]
             | [0, 5, 1, 0 | 1]
             | [0, 13, 0, 0] => 0,
+            [0, 1, 0, 2] => self.access,
+            [0, 0, 2, 5] => self.isar5,
             [0, 0, 0, 5] => ARMV7_MULTIPROCESSOR,
             [0, 0, crm @ 1..=2, opc2 @ 0..=7] => {
                 let index = usize::from((crm - 1) * 8 + opc2);
@@ -279,9 +309,9 @@ impl Cp15 {
             [0, 13, 0, 1] => self.context = value,
             // RAZ/WI registers; cache and branch predictor maintenance by
             // address, by set and way and in whole; TLB maintenance.
+            [0, 1, 0, 2] => self.access = value & self.access_mask,
             [0, 13, 0, 0]
             | [0, 5, 1, 0 | 1]
-            | [0, 1, 0, 2]
             | [0, 7, 1, 0 | 6]
             | [0, 7, 5, 0 | 1 | 6 | 7]
             | [0, 7, 6 | 10 | 14, 1 | 2]
@@ -308,10 +338,11 @@ impl Cp15 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::{BIT26, BIT32};
 
     #[test]
     fn user_mode_reaches_only_the_thread_registers_and_the_barriers() {
-        let mut cp15 = Cp15::new(System::Armv7);
+        let mut cp15 = Cp15::new(System::Armv7, BIT32.isa);
         assert_eq!(cp15.read([0, 0, 0, 0], false), Outcome::Undefined);
         assert_eq!(cp15.write([0, 13, 0, 2], 7, false), Outcome::Done(0));
         assert_eq!(cp15.read([0, 13, 0, 2], false), Outcome::Done(7));
@@ -319,24 +350,24 @@ mod tests {
         assert_eq!(cp15.write([0, 13, 0, 3], 9, true), Outcome::Done(0));
         assert_eq!(cp15.read([0, 13, 0, 3], false), Outcome::Done(9));
         assert_eq!(cp15.write([0, 7, 10, 5], 0, false), Outcome::Done(0));
-        let mut sa110 = Cp15::new(System::Sa110);
+        let mut sa110 = Cp15::new(System::Sa110, BIT26.isa);
         assert_eq!(sa110.read([0, 0, 0, 0], false), Outcome::Undefined);
         assert_eq!(sa110.write([0, 7, 7, 0], 0, false), Outcome::Undefined);
     }
 
     #[test]
     fn the_identity_and_features_are_the_profile_s() {
-        let cp15 = Cp15::new(System::Armv7);
+        let cp15 = Cp15::new(System::Armv7, BIT32.isa);
         assert_eq!(cp15.read([0, 0, 0, 0], true), Outcome::Done(ARMV7_ID));
-        assert_eq!(cp15.read([0, 0, 2, 5], true), Outcome::Done(0x0001_0001));
+        assert_eq!(cp15.read([0, 0, 2, 5], true), Outcome::Done(0x0001_1121));
         assert_eq!(cp15.read([0, 0, 2, 0], true), Outcome::Done(0x0214_1110));
-        let sa110 = Cp15::new(System::Sa110);
+        let sa110 = Cp15::new(System::Sa110, BIT26.isa);
         assert_eq!(sa110.read([0, 0, 0, 0], true), Outcome::Done(SA110_ID));
     }
 
     #[test]
     fn only_the_cache_enables_of_the_control_register_change() {
-        let mut cp15 = Cp15::new(System::Armv7);
+        let mut cp15 = Cp15::new(System::Armv7, BIT32.isa);
         assert_eq!(
             cp15.write([0, 1, 0, 0], ARMV7_CONTROL & !(1 << 12), true),
             Outcome::Done(0)
@@ -350,7 +381,7 @@ mod tests {
             Outcome::Unmodelled
         );
         assert_eq!(cp15.write([0, 2, 0, 0], 0x4000, true), Outcome::Unmodelled);
-        let mut sa110 = Cp15::new(System::Sa110);
+        let mut sa110 = Cp15::new(System::Sa110, BIT26.isa);
         assert_eq!(
             sa110.write([0, 1, 0, 0], SA110_CONTROL | 2, true),
             Outcome::Unmodelled
@@ -360,15 +391,31 @@ mod tests {
 
     #[test]
     fn faults_record_their_status_and_address() {
-        let mut cp15 = Cp15::new(System::Armv7);
+        let mut cp15 = Cp15::new(System::Armv7, BIT32.isa);
         cp15.data_fault(Fault::Bus(Abort::Permission), 0x1234, true);
         assert_eq!(cp15.read([0, 5, 0, 0], true), Outcome::Done(0x80F));
         assert_eq!(cp15.read([0, 6, 0, 0], true), Outcome::Done(0x1234));
         cp15.prefetch_fault(Fault::Debug, 0x8000);
         assert_eq!(cp15.read([0, 5, 0, 1], true), Outcome::Done(0b0010));
         assert_eq!(cp15.read([0, 6, 0, 2], true), Outcome::Done(0x8000));
-        let mut sa110 = Cp15::new(System::Sa110);
+        let mut sa110 = Cp15::new(System::Sa110, BIT26.isa);
         sa110.data_fault(Fault::Alignment, 0x8001, false);
         assert_eq!(sa110.read([0, 5, 0, 0], true), Outcome::Done(1));
+    }
+    #[test]
+    fn cpacr_holds_only_the_vfp_access_fields_and_isar5_the_crypto_extension() {
+        let mut cp15 = Cp15::new(System::Armv7, BIT32.isa);
+        assert_eq!(cp15.write([0, 1, 0, 2], u32::MAX, true), Outcome::Done(0));
+        assert_eq!(cp15.read([0, 1, 0, 2], true), Outcome::Done(VFP_ACCESS));
+        assert_eq!(cp15.coprocessor_access(10), 3);
+        assert_eq!(cp15.coprocessor_access(11), 3);
+        assert_eq!(cp15.coprocessor_access(1), 0);
+        assert_eq!(cp15.read([0, 1, 0, 2], false), Outcome::Undefined);
+        assert_eq!(cp15.read([0, 0, 2, 5], true), Outcome::Done(0x0001_1121));
+        let bare = Cp15::new(System::Armv7, crate::isa::Isa::of(&[]));
+        assert_eq!(bare.read([0, 0, 2, 5], true), Outcome::Done(0x0001_0001));
+        let mut no_vfp = bare;
+        assert_eq!(no_vfp.write([0, 1, 0, 2], u32::MAX, true), Outcome::Done(0));
+        assert_eq!(no_vfp.read([0, 1, 0, 2], true), Outcome::Done(0));
     }
 }

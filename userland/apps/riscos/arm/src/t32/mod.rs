@@ -13,7 +13,7 @@ mod table;
 use crate::cond::Condition;
 use crate::encoding::layout::Field;
 use crate::instruction::{CallOp, EncodeError, Instruction, Op};
-use crate::isa::Isa;
+use crate::isa::{Feature, Isa};
 
 use form::Shape;
 use table::Row;
@@ -84,6 +84,12 @@ pub struct Decoded {
 /// A 16-bit instruction ignores `second`.
 #[must_use]
 pub fn decode(first: u16, second: u16, isa: Isa, position: Position) -> Option<Decoded> {
+    if is_wide(first) {
+        let word = (u32::from(first) << 16) | u32::from(second);
+        if let Some(a32_word) = simdfp_word(word, isa) {
+            return decode_simdfp(a32_word, isa, position);
+        }
+    }
     let detail = decode_detail(first, second, isa, position)?;
     let row = detail.row;
     Some(Decoded {
@@ -91,6 +97,51 @@ pub fn decode(first: u16, second: u16, isa: Isa, position: Position) -> Option<D
         wide: row.wide,
         unpredictable: !detail.canonical
             || check::unpredictable(row, &detail.instruction, position),
+    })
+}
+
+/// The A32 word whose floating-point or Advanced SIMD encoding the 32-bit
+/// T32 `word` shares, where the core has the unit whose space it lies in:
+/// Advanced SIMD's data processing and element transfers move their prefix,
+/// and VFP's encodings are A32's with the condition `AL`, or unconditional.
+const fn simdfp_word(word: u32, isa: Isa) -> Option<u32> {
+    let simd = isa.has(Feature::Simd);
+    let vfp = word >> 9 & 7 == 0b101 && isa.has(Feature::Vfp);
+    match word >> 24 {
+        0xEF if simd => Some(0xF200_0000 | (word & 0x00FF_FFFF)),
+        0xFF if simd => Some(0xF300_0000 | (word & 0x00FF_FFFF)),
+        0xF9 if simd && word & (1 << 20) == 0 => Some(0xF400_0000 | (word & 0x00FF_FFFF)),
+        0xEC..=0xEE | 0xFC..=0xFE if vfp => Some(word),
+        _ => None,
+    }
+}
+
+/// The T32 word an A32 floating-point or Advanced SIMD encoding is.
+const fn simdfp_thumb(word: u32) -> Option<u32> {
+    match word >> 24 {
+        0xF2 => Some(0xEF00_0000 | (word & 0x00FF_FFFF)),
+        0xF3 => Some(0xFF00_0000 | (word & 0x00FF_FFFF)),
+        0xF4 => Some(0xF900_0000 | (word & 0x00FF_FFFF)),
+        0xEC..=0xEE | 0xFC..=0xFE => Some(word),
+        _ => None,
+    }
+}
+
+/// A floating-point or Advanced SIMD instruction, decoded by A32's rows and
+/// placed by the `IT` block it stands in.
+fn decode_simdfp(a32_word: u32, isa: Isa, position: Position) -> Option<Decoded> {
+    let decoded = crate::a32::decode_simdfp(a32_word, isa)?;
+    let Op::SimdFp(op) = decoded.instruction.op else {
+        return None;
+    };
+    let placed = position.in_block() && (position.condition() == Condition::Nv || decoded.outside);
+    Some(Decoded {
+        instruction: Instruction {
+            cond: position.condition(),
+            op: decoded.instruction.op,
+        },
+        wide: true,
+        unpredictable: !decoded.canonical || placed || crate::encoding::check::simdfp(&op, true),
     })
 }
 
@@ -112,7 +163,11 @@ fn decode_detail(first: u16, second: u16, isa: Isa, position: Position) -> Optio
         (table::narrow_rows(first), u32::from(first))
     };
     rows.iter()
-        .filter(|row| row.layout.matches(word) && isa.has(row.since))
+        .filter(|row| {
+            row.layout.matches(word)
+                && isa.has(row.since)
+                && !(row.kind.generic_coprocessor() && isa.claims_coprocessor(word >> 8))
+        })
         .find_map(|row| decode_row(row, word, position))
 }
 
@@ -188,6 +243,9 @@ pub fn encode(
     position: Position,
     size: Size,
 ) -> Result<Encoding, EncodeError> {
+    if let Op::SimdFp(_) = instruction.op {
+        return encode_simdfp(instruction, position, size);
+    }
     let kind = instruction.op.kind();
     let mut too_large = false;
     let mut unpredictable = None;
@@ -231,6 +289,33 @@ pub fn encode(
     } else {
         EncodeError::Unencodable
     })
+}
+
+/// A floating-point or Advanced SIMD instruction's encoding: A32's, its
+/// condition the one the `IT` block gives it.
+fn encode_simdfp(
+    instruction: &Instruction,
+    position: Position,
+    size: Size,
+) -> Result<Encoding, EncodeError> {
+    if size == Size::Narrow || instruction.cond != position.condition() {
+        return Err(EncodeError::Unencodable);
+    }
+    let unconditional = crate::a32::unconditional(instruction.op.kind());
+    let a32 = Instruction {
+        cond: if unconditional {
+            Condition::Nv
+        } else {
+            Condition::Al
+        },
+        op: instruction.op,
+    };
+    let word = simdfp_thumb(crate::a32::encode(&a32)?).ok_or(EncodeError::Unencodable)?;
+    let (first, second) = (halfword(word >> 16), halfword(word));
+    match decode(first, second, Isa::ALL, position) {
+        Some(decoded) if decoded.instruction == *instruction => Ok(Encoding::Wide(first, second)),
+        _ => Err(EncodeError::Unencodable),
+    }
 }
 
 /// The low halfword of `word`.

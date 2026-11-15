@@ -4,3 +4,4 @@
 pub(crate) mod check;
 pub(crate) mod form;
 pub(crate) mod layout;
+pub(crate) mod simdfp;

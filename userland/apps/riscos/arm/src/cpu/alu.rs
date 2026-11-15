@@ -3,6 +3,7 @@
 
 use super::execute::wrap;
 use crate::instruction::{Lanes, Prefix, Shift, ShiftType};
+use crate::word::low;
 
 /// A shifter's output and its carry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -98,7 +99,7 @@ pub(super) const fn shift_register(
 /// `a + b + carry`, with the carry and overflow out.
 pub(super) fn add_with_carry(a: u32, b: u32, carry: bool) -> (u32, bool, bool) {
     let wide = u64::from(a) + u64::from(b) + u64::from(carry);
-    let result = super::execute::low(wide);
+    let result = low(wide);
     let overflow = ((a ^ result) & (b ^ result)) >> 31 != 0;
     (result, wide >> 32 != 0, overflow)
 }

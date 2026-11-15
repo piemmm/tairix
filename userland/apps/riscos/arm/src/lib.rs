@@ -7,6 +7,8 @@
 //! - [`a32`] and [`t32`]: each instruction set's one encoding table, and
 //!   the decoder and encoder derived from it.
 //! - [`isa`]: the architecture features an encoding needs.
+//! - [`mmu`]: the guest MMU: frames, spaces, page permissions, aborts and
+//!   the write watch, as a [`bus::Bus`].
 //! - [`psr`], [`reg`] and [`cond`]: the programmer's model's vocabulary.
 //! - [`vectors`]: the conformance vectors' encoding and the runner that
 //!   holds a processor to them.
@@ -25,10 +27,14 @@ pub mod cond;
 mod cp15;
 pub mod cpu;
 mod encoding;
+pub mod fpa;
 pub mod instruction;
 pub mod isa;
+pub mod mmu;
 pub mod profile;
 pub mod psr;
 pub mod reg;
 pub mod t32;
 pub mod vectors;
+pub mod vfp;
+mod word;

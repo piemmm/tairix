@@ -116,6 +116,7 @@ fn offset_pc(offset: Offset) -> bool {
 #[allow(clippy::too_many_lines)] // One arm per form, as the manual lists them.
 fn wide(row: &Row, op: &Op) -> bool {
     match *op {
+        Op::SimdFp(op) => check::simdfp(&op, true),
         Op::Data {
             rd, rn, operand, ..
         } => {
@@ -228,6 +229,12 @@ fn wide(row: &Row, op: &Op) -> bool {
         | Op::Swap { .. }
         | Op::SetEndian { .. }
         | Op::SaveState { .. }
-        | Op::Coprocessor { .. } => false,
+        | Op::Coprocessor { .. }
+        | Op::FpaDyadic { .. }
+        | Op::FpaMonadic { .. }
+        | Op::FpaRegister { .. }
+        | Op::FpaCompare { .. }
+        | Op::FpaTransfer { .. }
+        | Op::FpaMultiple { .. } => false,
     }
 }

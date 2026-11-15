@@ -17,13 +17,25 @@ use crate::reg::{Reg, RegList};
 const PC: Reg = Reg::PC;
 
 /// A data access that aborted: why, and where.
-struct Aborted {
+pub(super) struct Aborted {
     fault: Fault,
     address: u32,
     write: bool,
 }
 
-type Access<T> = Result<T, Aborted>;
+pub(super) type Access<T> = Result<T, Aborted>;
+
+impl Aborted {
+    /// An alignment fault at `address`: an access the instruction itself
+    /// requires aligned, whatever the profile's rule.
+    pub(super) const fn misaligned(address: u32, write: bool) -> Self {
+        Self {
+            fault: Fault::Alignment,
+            address,
+            write,
+        }
+    }
+}
 
 /// The first address of a block of `count` words from `base`, and the base
 /// written back.
@@ -43,7 +55,7 @@ const fn block_range(mode: BlockMode, base: u32, count: u32) -> (u32, u32) {
 impl Cpu {
     /// The data at `address`, under the profile's alignment rule: a fault,
     /// or a misaligned word or halfword rotated as ARMv4 cores rotated it.
-    fn load<B: Bus>(
+    pub(super) fn load<B: Bus>(
         &self,
         bus: &mut B,
         address: u32,
@@ -68,7 +80,7 @@ impl Cpu {
 
     /// Stores `value` at `address`; a misaligned store faults, or writes the
     /// aligned unit the address falls in.
-    fn store<B: Bus>(
+    pub(super) fn store<B: Bus>(
         &self,
         bus: &mut B,
         address: u32,
@@ -109,9 +121,19 @@ impl Cpu {
     }
 
     /// Takes the data abort an access raised.
-    fn aborted(&mut self, aborted: &Aborted) -> Flow {
+    pub(super) fn aborted(&mut self, aborted: &Aborted) -> Flow {
         self.data_abort(aborted.fault, aborted.address, aborted.write);
         Flow::Next
+    }
+
+    /// Where a block of words at `start` begins: ARMv4 cores ignore the
+    /// address's low bits, and a profile with alignment faults faults them.
+    pub(super) const fn block_start(&self, start: u32) -> u32 {
+        if self.profile.alignment_faults {
+            start
+        } else {
+            start & !3
+        }
     }
 
     /// A User-bank register, as `LDM` and `STM` with the S bit reach it.
@@ -284,13 +306,7 @@ impl Cpu {
     ) -> Flow {
         let base = self.read(rn);
         let (start, written_back) = block_range(mode, base, list.len());
-        // A block's words are aligned: ARMv4 cores ignore the base's low bits,
-        // and a profile with alignment faults faults them.
-        let start = if self.profile.alignment_faults {
-            start
-        } else {
-            start & !3
-        };
+        let start = self.block_start(start);
         let privileged = self.mode.privileged();
         let address = |n: u32| start.wrapping_add(4 * n);
         match op {

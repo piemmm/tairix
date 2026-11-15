@@ -34,13 +34,17 @@ pub enum Nans {
     Default,
 }
 
-/// The choices IEEE 754 leaves to an implementation.
+/// The choices IEEE 754 leaves to an implementation, and the one ARM's
+/// flush-to-zero mode departs from it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Policy {
     /// When an underflow is tiny.
     pub tininess: Tininess,
     /// What a NaN operand makes the result.
     pub nans: Nans,
+    /// Whether a result tiny before rounding is a zero of its sign, raising
+    /// underflow alone.
+    pub flush_to_zero: bool,
 }
 
 /// A result and the exceptions computing it raised.
@@ -202,8 +206,8 @@ impl Ieee {
 
     /// `addend + a × b`, rounded once. A NaN is chosen in the order the
     /// arguments come, the addend first, as ARM's fused multiply-add takes
-    /// them; `∞ × 0` signals invalid even beside a quiet NaN addend, a choice
-    /// the standard leaves open.
+    /// them; `∞ × 0` beside a quiet NaN addend is invalid and answers the
+    /// default NaN, a choice the standard leaves open.
     #[must_use]
     pub fn fused_multiply_add(self, addend: u64, a: u64, b: u64) -> Outcome {
         let format = self.format;
@@ -215,14 +219,17 @@ impl Ieee {
         );
         let nan = |value: Unpacked| matches!(value, Unpacked::Nan { .. });
         if nan(summand) || nan(left) || nan(right) {
-            let chosen = self.nan(&[addend, a, b]);
-            if infinity_times_zero && nan(summand) {
-                return Outcome {
-                    bits: format.default_nan(),
-                    flags: Flags::INVALID,
-                };
+            let quiet_summand = matches!(
+                summand,
+                Unpacked::Nan {
+                    signalling: false,
+                    ..
+                }
+            );
+            if infinity_times_zero && quiet_summand {
+                return self.invalid();
             }
-            return chosen;
+            return self.nan(&[addend, a, b]);
         }
         if infinity_times_zero {
             return self.invalid();
@@ -321,6 +328,15 @@ impl Ieee {
     /// it converts to.
     #[must_use]
     pub fn to_integer(self, a: u64, mode: Mode) -> Integral {
+        self.to_fixed(a, 0, mode)
+    }
+
+    /// `a × 2^fraction` rounded to an integer in `mode`: `a` as a fixed-point
+    /// value with `fraction` fraction bits, the caller holding it to the range
+    /// it converts to.
+    #[must_use]
+    pub fn to_fixed(self, a: u64, fraction: u32, mode: Mode) -> Integral {
+        let scale = i32::try_from(fraction).unwrap_or(i32::MAX);
         match self.format.unpack(a) {
             Unpacked::Nan { .. } => Integral::Nan,
             Unpacked::Infinity { negative } => Integral::OutOfRange { negative },
@@ -331,6 +347,10 @@ impl Ieee {
             },
             Unpacked::Finite { parts, .. } => {
                 let parts = parts.normalized();
+                let parts = Parts {
+                    exp: parts.exp.saturating_add(scale),
+                    ..parts
+                };
                 match exact::to_integer(parts, mode) {
                     (Some(magnitude), inexact) => Integral::Value {
                         negative: parts.negative,
@@ -349,10 +369,22 @@ impl Ieee {
     /// zero magnitude is positive zero.
     #[must_use]
     pub fn from_integer(self, negative: bool, magnitude: u64) -> Outcome {
+        self.from_fixed(negative, magnitude, 0)
+    }
+
+    /// The fixed-point value `magnitude × 2^−fraction` of sign `negative`,
+    /// rounded once; a zero magnitude is positive zero.
+    #[must_use]
+    pub fn from_fixed(self, negative: bool, magnitude: u64, fraction: u32) -> Outcome {
         if magnitude == 0 {
             return Outcome::exact(self.format.zero(false));
         }
-        self.round(Exact::of(integer_parts(negative, magnitude)))
+        let parts = integer_parts(negative, magnitude);
+        let scale = i32::try_from(fraction).unwrap_or(i32::MAX);
+        self.round(Exact::of(Parts {
+            exp: parts.exp.saturating_sub(scale),
+            ..parts
+        }))
     }
 
     /// `a`, in this format, in the format `to`, rounded where `to` is
@@ -404,6 +436,12 @@ impl Ieee {
             bits: format.precision,
         };
         if x.exp < format.min_exp() || x.sig == 0 {
+            if self.policy.flush_to_zero {
+                return Outcome {
+                    bits: format.zero(x.negative),
+                    flags: Flags::UNDERFLOW,
+                };
+            }
             return self.tiny(x, rounding);
         }
         let rounded = x.rounded(rounding);

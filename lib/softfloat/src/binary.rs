@@ -1,5 +1,6 @@
-//! The IEEE 754 binary interchange formats: binary32 and binary64, each a
-//! sign, a biased exponent field and a fraction with its integer bit hidden.
+//! The IEEE 754 binary interchange formats: binary16, binary32 and binary64,
+//! each a sign, a biased exponent field and a fraction with its integer bit
+//! hidden.
 
 use crate::exact::Parts;
 use crate::extended::INTEGER;
@@ -49,6 +50,13 @@ pub enum Unpacked {
 }
 
 impl Binary {
+    /// binary16, the half format.
+    pub const HALF: Self = Self {
+        width: 16,
+        precision: 11,
+        bias: 15,
+    };
+
     /// binary32, the single format.
     pub const SINGLE: Self = Self {
         width: 32,

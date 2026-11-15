@@ -3,8 +3,8 @@
 
 use crate::isa::{
     Feature::{
-        ConditionNever, Crc32, Divide, Jazelle, LongMultiply, Modes26, Mp, Swp, V2, V3, V4, V4T,
-        V5, V5TE, V6, V6K, V6T2, V7, V8,
+        ConditionNever, Crc32, Crypto, Divide, FpV8, Fpa, Jazelle, LongMultiply, Modes26, Mp, Simd,
+        Swp, Vfp, V2, V3, V4, V4T, V5, V5TE, V6, V6K, V6T2, V7, V8,
     },
     Isa,
 };
@@ -71,7 +71,7 @@ impl Profile {
 /// software runs on.
 pub static BIT26: Profile = Profile {
     name: "26-bit",
-    isa: Isa::of(&[V2, Swp, V3, LongMultiply, V4, ConditionNever, Modes26]),
+    isa: Isa::of(&[V2, Swp, V3, LongMultiply, V4, ConditionNever, Modes26, Fpa]),
     stored_pc: 8,
     alignment_faults: false,
     vectors: 0,
@@ -104,6 +104,11 @@ pub static BIT32: Profile = Profile {
         Divide,
         V8,
         Crc32,
+        Fpa,
+        Vfp,
+        Simd,
+        FpV8,
+        Crypto,
     ]),
     stored_pc: 8,
     alignment_faults: true,

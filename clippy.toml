@@ -29,6 +29,16 @@ doc-valid-idents = [
     "RISC",
     # RISC OS's string translation, `OS_GSTrans`, named as the PRMs name it.
     "GSTrans",
+    # RISC OS's floating-point emulator module, by its module name.
+    "FPEmulator",
+    "VFPv2",
+    # RISC OS's low workspace, its host filing system, Acorn's machine and the
+    # emulator of it, as RISC OS names them.
+    "ScratchSpace",
+    "HostFS",
+    "RiscPC",
+    "RPCEmu",
+    "VFPv4",
     "RISC-V",
     "POSIX",
     "VESA",

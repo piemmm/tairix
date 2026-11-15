@@ -335,6 +335,21 @@ impl<K: RangeKey, V> RangeMap<K, V> {
             .map(|gap| gap.start)
     }
 
+    /// The highest start inside `within` where `count` free elements fit:
+    /// the top of the highest gap that holds them, for a window that hands
+    /// ranges out downward from its end.
+    #[must_use]
+    pub fn last_free(&self, within: Range<K>, count: u64) -> Option<K> {
+        if count == 0 {
+            return None;
+        }
+        let gap = self
+            .gaps(within)
+            .filter(|gap| gap.end.distance_from(gap.start) >= count)
+            .last()?;
+        gap.start.advance(gap.end.distance_from(gap.start) - count)
+    }
+
     /// Every held range and its value, in ascending order.
     #[must_use]
     pub fn iter(&self) -> Iter<'_, K, V> {

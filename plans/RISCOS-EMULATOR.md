@@ -43,10 +43,10 @@ an application's own documents folder, the reference harness);
 | RO8 | `lib/vdu`: the Acorn VDU vocabulary, RISC OS's numbered screen modes and the 8×8 system character set; OpenMicro's MOS and `lib/image` move onto it | done |
 | RO9 | The ARM integer core: the one A32 table, the interpreter, the 26-bit and 32-bit programmer's models, the two profiles, exceptions, the disassembler and encoder, the conformance vectors | done |
 | RO10 | Thumb and Thumb-2, and interworking | done |
-| RO11 | The FPA: every instruction and precision, rounding and exceptions, the transcendental results | planned |
-| RO12 | VFP and Advanced SIMD, through ARMv8-A's AArch32 additions | planned |
-| RO13 | The guest address space: pages and permissions, aborts, task slots, the 26-bit window, dynamic areas, host pages, write tracking, the memory policy | planned |
-| RO14 | The reference harness and the recorded observation corpus | planned |
+| RO11 | The FPA: every instruction and precision, rounding and exceptions, the transcendental results | done |
+| RO12 | VFP and Advanced SIMD, through ARMv8-A's AArch32 additions | done |
+| RO13 | The guest address space: pages and permissions, aborts, task slots, the 26-bit window, dynamic areas, host pages, write tracking, the memory policy | done |
+| RO14 | The reference harness and the recorded observation corpus | done |
 | RO15 | The kernel: SWI dispatch and errors, vectors, services, events, callbacks and tickers, heaps, system variables, `OS_Byte` and `OS_Word`, environment handlers, and the kernel's remaining SWIs | planned |
 | RO16 | Modules: the built-in inventory and its versions, guest modules in either mode, instances, `RMEnsure` and replacement | planned |
 | RO17 | The command line: `OS_CLI`, Obey and Exec, each executable type's run action, every built-in module's `*` commands, the boot utilities | planned |
@@ -92,6 +92,7 @@ an application's own documents folder, the reference harness);
 | RO56 | Software acceptance over a recorded corpus | blocked: needs a corpus of real software a developer holds outside the tree |
 | RO57 | Machine mode held to real hardware: RO14's harness run on an Archimedes and a RiscPC, their observations pinning what the data sheets leave open | blocked: needs an Archimedes and a RiscPC a developer holds |
 | RO58 | wasm32 | blocked: the wasm32 port runs no userland (`plans/ARCHSUPPORT.md`), and its host cannot instantiate a generated module |
+| RO59 | Processor captures from genuine cores: RO14's harness recording instruction vectors on a 26-bit ARMv4 machine and an ARMv7 or ARMv8 one running RISC OS 5 | blocked: needs those machines a developer holds |
 
 Items are built in ledger order. Each lands complete — tests, fuzz targets,
 docs — before an item that depends on it starts. The gate runs once a session's
@@ -438,20 +439,37 @@ is fuzzed.
   - the FPSR's system ID.
 
   Arithmetic is `lib/softfloat`'s, with FPA's extended format and its
-  unnormalised values. The transcendental results — `SIN` to `POL` — are
-  FPEmulator's bits, pinned from recorded observation (RO14). An enabled trap
-  enters the guest's floating-point exception path, as the FPE's would.
-- **VFP.** FPSCR modes: rounding, flush-to-zero, default NaN, alternative half
+  unnormalised values. Every result, the transcendental ones included, is
+  FPEmulator 4's bits: `cargo xtask riscos-fpa` runs a developer's own copy of
+  the module as an opaque program on the processor and records the vectors
+  the crate replays (§17). Where FPEmulator's answer depends on its own
+  workings — an operand the data sheet leaves undefined, a caller in FIQ or
+  Undefined mode, an aborted transfer — the FPA's hardware or the operand's
+  value decides, as the docs page states. An enabled trap stops the processor
+  for the session to enter the guest's floating-point exception path, as the
+  FPE's would (RO26).
+- **VFP.** VFPv4 with 32 doublewords and ARMv8's AArch32 additions, under
+  the FPSCR's modes: rounding, flush-to-zero, default NaN, alternative half
   precision, the cumulative flags, and the short-vector `LEN`/`STRIDE` mode
-  VFPv2 executes.
+  VFPv2 executes, which the 32-bit profile keeps (its MVFR0 says so).
   - Every result is the bits `lib/softfloat` defines, so every target computes
     the same ones.
+  - Short vectors step within their banks, a first-bank destination or last
+    operand a scalar; a reserved stride, a vector longer than its bank and a
+    fused operation with either set are UNPREDICTABLE.
+  - CPACR's grant of coprocessors 10 and 11 and FPEXC.EN gate the unit, so a
+    disabled unit takes the undefined instruction exception VFPSupport's
+    lazy context switch relies on (RO26).
   - The interpreter may use the host FPU only where that is proven
     bit-identical: a correctly rounded operation in round-to-nearest, with
     ARM's NaN and flag rules applied to its result. A differential test holds
     that path to `lib/softfloat`.
 - **Advanced SIMD.** Every instruction of ARMv7 and ARMv8's AArch32 set, with
-  its saturation flag.
+  its saturation flag, under the standard controls; and the Cryptographic
+  Extension, whose AES steps run in constant time.
+- **One table.** The VFP and Advanced SIMD encodings are rows of A32's table;
+  T32's are A32's with the prefix moved or the condition `AL`, decoded and
+  encoded through those rows under the `IT` block's condition.
 
 ### 2.5 Memory interface
 
@@ -468,7 +486,7 @@ is fuzzed.
   registers, flags, memory and the abort taken. Their sources:
   - captured from genuine cores a developer holds — a 26-bit ARMv4 machine,
     and an ARMv7 or ARMv8 one running RISC OS 5 — by the harness program RO14
-    builds;
+    builds (RO59);
   - where a public vector set's licence is compatible, that set, with its
     notice kept beside it (`plans/BEEB.md` §7's SingleStepTests precedent).
     The `SingleStepTests` ARM7TDMI suite (MIT), which the NanoBoyAdvance
@@ -484,39 +502,55 @@ is fuzzed.
 
 ## 3. The guest address space (RO13)
 
-- **Pages.** 4 KiB pages through a two-level table owned by the worker, with a
-  direct-mapped software TLB in front of it. Each page carries USR and SVC
-  read/write permissions and whether it may be executed.
-  - Unmapped pages abort. The low 32 KiB holds only the workspace software is
-    known to read on the profile's RISC OS. The rest of it aborts, as RISC OS
-    5's relocated zero page makes a null pointer abort.
-  - **The host pages** are read-only and executable (decision 5).
-- **Task slots.** Application space begins at `&8000` and is per task. A task
-  switch swaps one subtree pointer, so it costs O(1) whatever the slot's size.
-  - A 26-bit task's slot is at most 28 MiB.
-  - A 32-bit task's slot grows to what the memory policy allows.
-  - Translations survive switches because they are keyed by physical frame
-    (§16).
-- **The 26-bit window.** Everything a 26-bit context can be handed a pointer to
-  lies below 64 MiB: the RMA, the system heap, the Wimp sprite pool, message
-  file blocks, and the dynamic areas a 26-bit caller creates. A 32-bit task's
-  slot never grows over the window while 26-bit code is resident in the
-  session. A growth refused for that reason is the "no more memory" answer, and
-  the session window says why.
-- **Heaps and areas.**
-  - The RMA and system heap are `OS_Heap` heaps in guest memory and grow on
-    demand.
-  - Dynamic areas implement `OS_DynamicArea` whole, including the guest
-    handlers called around a resize.
+- **Pages** (`arm::mmu`). 4 KiB frames, numbered as physical pages, behind a
+  global table and per-space tables, with a direct-mapped software TLB in
+  front tagged by space. Each page carries User and privileged rights and
+  whether it may be executed. Unmapped pages abort.
+  - **The host pages** are read-only and executable (decision 5): no mapping
+    lets the guest write a host frame.
+  - A range's tables can be reserved, so a multi-page change never fails
+    halfway; an area's whole reservation and a slot's reach are reserved.
+- **Two layouts**, chosen when a session starts:
+  - **The shared session** admits 26-bit code. Everything a 26-bit context
+    can be handed a pointer to lies below 64 MiB: the host pages, the
+    stacks, the system heap and the RMA at the top of that window, and the
+    dynamic areas a 26-bit caller creates below them, placed downward. A
+    26-bit task's slot is at most 28 MiB. A 32-bit task's slot may also grow
+    into the window's free space, but only while no 26-bit code is
+    resident; a growth refused for that reason is the "no more memory"
+    answer, and the session window says why.
+  - **An isolated session whose program declares 32-bit** gets RISC OS 5's
+    own layout: slots to 512 MiB, the RMA at `&20000000`, the system heap
+    at `&30000000`, the host pages at `&FC000000`. It refuses 26-bit code
+    with RISC OS's error (RO16, RO32 choose the session).
+- **The low 32 KiB** holds only the workspace software is known to read on
+  the profile's RISC OS. A 26-bit task sees zero page at zero, the same
+  frames as zero page at `&FFFF0000`; a 32-bit task sees RISC OS 5's
+  read-only compatibility page there. Both see ScratchSpace at `&4000`. The
+  rest aborts.
+- **Task slots.** Application space begins at `&8000` and is per task, a
+  space of its own. A task switch swaps one pointer, so it costs O(1)
+  whatever the slot's size. Translations survive switches because they are
+  keyed by physical frame (§16).
+- **Dynamic areas.** `OS_DynamicArea` whole, `OS_ChangeDynamicArea` and
+  `OS_ReadDynamicArea`, reason by reason as RISC OS 5 defines them, with the
+  free pool as the lever for application space and every handler, service
+  and upcall made through one seam. RO15 adds the SWIs' entry, marshals their
+  registers and runs the guest's handlers. The RMA and system heap are areas
+  0 and 1 there, `OS_Heap` heaps that grow on demand, made by RO15 in the
+  layout's places.
   - Screen memory for single-tasking screens lives in guest memory and is
-    write-tracked by granule into damage.
+    write-tracked by granule into damage (RO21).
+- **Write tracking.** A store into a watched 256-byte granule reports it to
+  each watcher, once until taken; the display and the translator watch
+  independently.
 - **Machine mode's layout.** A program in machine mode is loaded into its
   machine's layout instead (§12), since software that drives the chips
   hard-codes it. The chips' I/O space is device pages, which answer to the chip
-  models rather than to memory.
+  models rather than to memory (RO31).
 - **The memory policy.**
-  - **The session's ceiling.** It is derived from the machine (a fraction of
-    usable RAM) and from the user's limits, and is settable downward.
+  - **The session's ceiling.** A quarter of usable RAM, lowered by the user's
+    limits and the setting, never raised; at most 32 bits of physical address.
   - **What the guest is shown.** Its RAM size is the ceiling, and its free
     pool is the ceiling less what is used.
   - **Growth.** It happens before refusal (`AGENTS.md` §24.1). Exhausting the
@@ -595,6 +629,9 @@ is fuzzed.
 - **Guest modules** may be loaded in either mode, with instances
   (`Module%Instance`), the full initialise, finalise and service protocol,
   `*` commands, help, SWIs and message files.
+  - A squeezed module is expanded as the kernel expands one. The expander
+    `cargo xtask riscos-fpa` carries moves into the module loader then, and
+    the tool takes it from there.
   - A guest module may replace a built-in one, as `RMLoad` replaces a ROM
     module.
   - The exception is a module that is a bridge: the kernel, FileSwitch and
@@ -1007,6 +1044,10 @@ is fuzzed.
   - The heap lives in the program's memory.
 - **Support modules.** The FPEmulator SWIs, VFPSupport's contexts, CallASWI and
   DDEUtils (long command lines, throwback).
+  - An FPA trap (`Stop::FloatingPoint`) is raised as FPEmulator raises it:
+    the registers into the exception dump area, the FPA's into its own dump,
+    then the error from `&80000200` (invalid operation, overflow, division by
+    zero, underflow, inexact).
 - **Other modules** from the inventory (§4.3), each complete: Squash, over
   `lib/compress`'s LZW and the `SQSH` container; MimeMap, over the shared
   filetype table; Hourglass, as the desktop's busy cursor; Free; BufferManager;
@@ -1213,7 +1254,7 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     over operands with unnormal values. It rounds them once in IEEE 754's five
     modes and decides nothing about overflow, underflow or NaNs.
   - The IEEE layer adds default exception handling, the five flags, and a
-    `Policy` for tininess and NaN propagation, which VFP (RO12) sets.
+    `Policy` for tininess, NaN propagation and flush-to-zero, which VFP sets.
   - `Decimal` converts between binary and decimal values exactly, to 1–38
     digits in any mode.
   - The memory formats are binary64 in the FPA's word order, the x87's
@@ -1540,19 +1581,25 @@ that request could produce.
     some.
 - **The reference harness (RO14).** `cargo xtask riscos --reference <dir>`
   works like this:
-  1. It builds the harness program, a RISC OS program written with the crate's
-     encoder and `lib/bbcbasic`.
-  2. The program runs the corpus scenarios on a genuine RISC OS machine a
-     developer holds, and records what each leaves: screens, files, registers,
-     errors.
-  3. The recorded observations are imported into fixtures, with the emulator's
-     own names put in.
+  1. It writes the harness program, a BASIC V program built with
+     `lib/bbcbasic`, and a `!Boot` that runs it, into `<dir>`'s `hostfs/`.
+  2. The program runs the corpus scenarios on a genuine RISC OS and records
+     what each left: registers, the flags the SWI defines, and errors by
+     number. Where `<dir>` holds RPCEmu running RISC OS Open's ROM, the
+     command runs it headless until the harness is done; on a machine a
+     developer holds, the developer boots it from `hostfs/` and runs the
+     command again.
+  3. The recorded observations are imported into fixtures. An observation
+     kind that names the machine, once one joins, has the emulator's own
+     names put in.
   4. A scenario marked `ours` keeps the fixture that states the emulator's own
      behaviour.
 
   The import refuses an observation carrying twelve bytes in a row of genuine
   ROM, module or font content that the emulator's own resources do not hold
-  (`plans/BEEB.md` §7).
+  (`plans/BEEB.md` §7). The SWI layer (RO15) replays the corpus on the
+  kernel; screens and files join the scenarios as the items that draw and
+  file land. Processor captures need genuine cores (RO59).
 - **Fuzzing.** Every decoder of untrusted input has a registered harness in the
   change that adds it: AIF and module headers, templates, Res files, message
   files, Acorn fonts, BASIC programs, Squash, the session protocol in both

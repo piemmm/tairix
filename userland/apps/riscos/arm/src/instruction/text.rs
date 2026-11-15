@@ -7,12 +7,16 @@ use core::fmt::{self, Display, Formatter, Write as _};
 
 use super::op::{
     ArithmeticOp, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CoIndex,
-    CoTransferOp, HintOp, Index, Instruction, LongOp, MultiplyOp, Offset, Op, Operand, SaturateOp,
+    CoRegisterOp, CoTransferOp, FpaCompareOp, FpaMultipleOp, FpaOperand, FpaRegisterOp,
+    FpaTransferOp, HintOp, Index, Instruction, LongOp, MultiplyOp, Offset, Op, Operand, SaturateOp,
     Shift, Source, SwapOp,
 };
 use super::Set;
+
+mod simdfp;
 use crate::a32;
 use crate::cond::Condition;
+use crate::fpa::{Format, Precision, Rounding};
 use crate::reg::Reg;
 
 /// An instruction's text, placed at an address so a branch shows its target.
@@ -51,6 +55,89 @@ impl Display for Signed {
             f.write_char('-')?;
         }
         Number(self.value).fmt(f)
+    }
+}
+
+/// An FPA operand: a register, or a constant as `#0.5` spells one.
+struct FpaOperandText(FpaOperand);
+
+impl Display for FpaOperandText {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            FpaOperand::Register(n) => write!(f, "F{n}"),
+            FpaOperand::Constant(6) => f.write_str("#0.5"),
+            FpaOperand::Constant(7) => f.write_str("#10"),
+            FpaOperand::Constant(n) => write!(f, "#{n}"),
+        }
+    }
+}
+
+const fn precision_suffix(precision: Precision) -> &'static str {
+    match precision {
+        Precision::Single => "S",
+        Precision::Double => "D",
+        Precision::Extended => "E",
+    }
+}
+
+const fn rounding_suffix(rounding: Rounding) -> &'static str {
+    match rounding {
+        Rounding::Nearest => "",
+        Rounding::PlusInfinity => "P",
+        Rounding::MinusInfinity => "M",
+        Rounding::Zero => "Z",
+    }
+}
+
+const fn format_suffix(format: Format) -> &'static str {
+    match format {
+        Format::Single => "S",
+        Format::Double => "D",
+        Format::Extended => "E",
+        Format::Packed => "P",
+    }
+}
+
+/// An FPA transfer the FPA's syntax has no spelling for, as the generic
+/// coprocessor transfer the RISC OS Debugger shows it as: the two precision
+/// or count bits in `bits` are the long bit and `CRd`'s top bit.
+const fn generic_transfer(
+    load: bool,
+    cp: u8,
+    fd: u8,
+    bits: u8,
+    rn: Reg,
+    up: bool,
+    offset: u8,
+) -> Op {
+    Op::CoprocessorTransfer {
+        op: if load {
+            CoTransferOp::Ldc
+        } else {
+            CoTransferOp::Stc
+        },
+        cp,
+        crd: fd | (bits & 1) << 3,
+        rn,
+        long: bits & 2 != 0,
+        up,
+        index: CoIndex::Unindexed,
+        offset,
+    }
+}
+
+/// A coprocessor transfer's address: its offset in words written as bytes,
+/// or an unindexed transfer's option.
+fn address(out: &mut Buffer, rn: Reg, up: bool, index: CoIndex, offset: u8) -> fmt::Result {
+    let bytes = Signed {
+        up,
+        value: 4 * u32::from(offset),
+    };
+    match index {
+        CoIndex::Offset => write!(out, "[{rn},#{bytes}]"),
+        CoIndex::PreIndexed => write!(out, "[{rn},#{bytes}]!"),
+        CoIndex::PostIndexed => write!(out, "[{rn}],#{bytes}"),
+        CoIndex::Unindexed => write!(out, "[{rn}],{{{offset}}}"),
     }
 }
 
@@ -236,7 +323,9 @@ impl Display for Text {
         };
         let mut m = Buffer::new();
         let mut operands = Buffer::new();
+        let generic = |op: Op| Instruction { cond, op }.text(self.set, self.address);
         match op {
+            Op::SimdFp(op) => simdfp::write(&op, c, &mut m, &mut operands)?,
             Op::Data {
                 op,
                 s,
@@ -704,6 +793,140 @@ impl Display for Text {
                 m.push(c)?;
                 write!(operands, "CP{cp},{opc1},{rt},{rt2},C{crm}")?;
             }
+            Op::FpaDyadic {
+                op,
+                precision,
+                rounding,
+                fd,
+                fn_,
+                fm,
+            } => {
+                m.push(op.name())?;
+                m.push(c)?;
+                m.push(precision_suffix(precision))?;
+                m.push(rounding_suffix(rounding))?;
+                write!(operands, "F{fd},F{fn_},{}", FpaOperandText(fm))?;
+            }
+            Op::FpaMonadic {
+                op,
+                precision,
+                rounding,
+                fd,
+                fm,
+            } => {
+                m.push(op.name())?;
+                m.push(c)?;
+                m.push(precision_suffix(precision))?;
+                m.push(rounding_suffix(rounding))?;
+                write!(operands, "F{fd},{}", FpaOperandText(fm))?;
+            }
+            Op::FpaRegister {
+                op,
+                precision,
+                rounding,
+                fn_,
+                fm,
+                rd,
+            } => {
+                m.push(op.name())?;
+                m.push(c)?;
+                match op {
+                    FpaRegisterOp::Flt => {
+                        m.push(precision_suffix(precision))?;
+                        m.push(rounding_suffix(rounding))?;
+                        write!(operands, "F{fn_},{rd}")?;
+                    }
+                    FpaRegisterOp::Fix => {
+                        m.push(rounding_suffix(rounding))?;
+                        write!(operands, "{rd},{}", FpaOperandText(fm))?;
+                    }
+                    FpaRegisterOp::Wfs | FpaRegisterOp::Rfs => write!(operands, "{rd}")?,
+                }
+            }
+            Op::FpaCompare {
+                op,
+                precision,
+                fn_,
+                fm,
+                rd,
+            } => {
+                if rd != Reg::PC {
+                    // The flags to a register: no FPA syntax spells it.
+                    let crm = match fm {
+                        FpaOperand::Register(n) => n,
+                        FpaOperand::Constant(n) => 8 | n,
+                    };
+                    let opc1 = match op {
+                        FpaCompareOp::Cmf => 4,
+                        FpaCompareOp::Cnf => 5,
+                        FpaCompareOp::Cmfe => 6,
+                        FpaCompareOp::Cnfe => 7,
+                    };
+                    // The precision's two bits are CRn's top bit and opc2's.
+                    let (crn, opc2) = match precision {
+                        Precision::Single => (0, 0),
+                        Precision::Double => (0, 4),
+                        Precision::Extended => (8, 0),
+                    };
+                    return generic(Op::CoprocessorRegister {
+                        op: CoRegisterOp::Mrc,
+                        cp: 1,
+                        opc1,
+                        rt: rd,
+                        crn: fn_ | crn,
+                        crm,
+                        opc2,
+                    })
+                    .fmt(f);
+                }
+                m.push(op.name())?;
+                m.push(c)?;
+                write!(operands, "F{fn_},{}", FpaOperandText(fm))?;
+            }
+            Op::FpaTransfer {
+                op,
+                format,
+                fd,
+                rn,
+                up,
+                index,
+                offset,
+            } => {
+                let load = op == FpaTransferOp::Ldf;
+                if index == CoIndex::Unindexed {
+                    let bits = match format {
+                        Format::Single => 0,
+                        Format::Double => 1,
+                        Format::Extended => 2,
+                        Format::Packed => 3,
+                    };
+                    return generic(generic_transfer(load, 1, fd, bits, rn, up, offset)).fmt(f);
+                }
+                m.push(op.name())?;
+                m.push(c)?;
+                m.push(format_suffix(format))?;
+                write!(operands, "F{fd},")?;
+                address(&mut operands, rn, up, index, offset)?;
+            }
+            Op::FpaMultiple {
+                op,
+                fd,
+                count,
+                rn,
+                up,
+                index,
+                offset,
+            } => {
+                let load = op == FpaMultipleOp::Lfm;
+                if index == CoIndex::Unindexed {
+                    return generic(generic_transfer(load, 2, fd, count & 3, rn, up, offset))
+                        .fmt(f);
+                }
+                m.push(op.name())?;
+                m.push(c)?;
+                write!(operands, "F{fd},{count},")?;
+                address(&mut operands, rn, up, index, offset)?;
+            }
             Op::CoprocessorTransfer {
                 op,
                 cp,
@@ -724,16 +947,7 @@ impl Display for Text {
                 m.push(c)?;
                 m.push(if long { "L" } else { "" })?;
                 write!(operands, "CP{cp},C{crd},")?;
-                let bytes = Signed {
-                    up,
-                    value: 4 * u32::from(offset),
-                };
-                match index {
-                    CoIndex::Offset => write!(operands, "[{rn},#{bytes}]")?,
-                    CoIndex::PreIndexed => write!(operands, "[{rn},#{bytes}]!")?,
-                    CoIndex::PostIndexed => write!(operands, "[{rn}],#{bytes}")?,
-                    CoIndex::Unindexed => write!(operands, "[{rn}],{{{offset}}}")?,
-                }
+                address(&mut operands, rn, up, index, offset)?;
             }
         }
         let mnemonic = m.as_str();

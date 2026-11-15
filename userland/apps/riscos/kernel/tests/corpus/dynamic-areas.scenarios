@@ -1,0 +1,123 @@
+# Dynamic areas as RISC OS 5 answers them. Each records only what does not
+# depend on what else the machine holds: no area's number or base.
+
+scenario unknown-reasons
+call XOS_DynamicArea r0=11
+show v
+call XOS_DynamicArea r0=29
+show v
+call XOS_DynamicArea r0=-1
+show v
+
+scenario unknown-area
+call XOS_DynamicArea r0=2 r1=&7777777
+show v
+call XOS_DynamicArea r0=3 r1=&7777777
+show v
+call XOS_ChangeDynamicArea r0=&7777777 r1=&1000
+show r1 v
+
+scenario application-space-is-no-area-to-change
+call XOS_ChangeDynamicArea r0=-1 r1=&1000
+show r1 v
+call XOS_ReadDynamicArea r0=-1
+show r0 v
+
+scenario numbers-refused
+call XOS_DynamicArea r0=0 r1=&150 r2=0 r3=-1 r4=0 r5=&1000 r6=0 r7=0 r8="Corpus"
+show v
+call XOS_DynamicArea r0=4 r1=5 r2=&1000
+show v
+
+scenario options-refused
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100000 r5=&1000 r6=&8000 r7=0 r8="Corpus"
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100100 r5=&1000 r6=0 r7=0 r8="Corpus"
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&40 r5=&1000 r6=0 r7=0 r8="Corpus"
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&10000 r5=&1000 r6=0 r7=0 r8="Corpus"
+show v
+
+scenario make-grow-shrink-remove
+call XOS_DynamicArea r0=0 r1=-1 r2=&2000 r3=-1 r4=0 r5=&10000 r6=0 r7=0 r8="Corpus"
+show r5 v
+keep r1 area
+call XOS_DynamicArea r0=2 r1=$area
+show r2 r4 r5 r6 r7 v
+call XOS_ChangeDynamicArea r0=$area r1=&1000
+show r1 v
+call XOS_ChangeDynamicArea r0=$area r1=1
+show r1 v
+call XOS_ChangeDynamicArea r0=$area r1=&100000
+show r1 v
+call XOS_ChangeDynamicArea r0=$area r1=-1
+show r1 v
+call XOS_ChangeDynamicArea r0=$area r1=-&1001
+show r1 v
+call XOS_ReadDynamicArea r0=$area
+show r1 r2 v
+call XOS_DynamicArea r0=4 r1=$area r2=&150
+show v
+call XOS_DynamicArea r0=1 r1=$area
+show v
+call XOS_DynamicArea r0=2 r1=$area
+show v
+
+scenario a-maximum-is-at-least-the-size
+call XOS_DynamicArea r0=0 r1=-1 r2=&3000 r3=-1 r4=0 r5=&1001 r6=0 r7=0 r8="Corpus"
+show r5 v
+keep r1 area
+call XOS_DynamicArea r0=1 r1=$area
+show v
+
+scenario a-plain-area-is-not-sparse
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=0 r5=&4000 r6=0 r7=0 r8="Corpus"
+keep r1 area
+keep r3 base
+call XOS_DynamicArea r0=9 r1=$area r2=$base r3=&1000
+show v
+call XOS_DynamicArea r0=1 r1=$area
+show v
+
+scenario sparse-claims-and-releases
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&400 r5=&10000 r6=0 r7=0 r8="Corpus"
+show v
+keep r1 area
+keep r3 base
+call XOS_DynamicArea r0=2 r1=$area
+show r2 r4 r6 v
+call XOS_DynamicArea r0=9 r1=$area r2=$base+&3001 r3=&1FFF
+show v
+call XOS_DynamicArea r0=2 r1=$area
+show r2 v
+call XOS_DynamicArea r0=10 r1=$area r2=$base+&3001 r3=&2000
+show v
+call XOS_DynamicArea r0=2 r1=$area
+show r2 v
+call XOS_DynamicArea r0=9 r1=$area r2=$base+&10000 r3=&1000
+show v
+call XOS_ChangeDynamicArea r0=$area r1=&1000
+show r1 v
+call XOS_DynamicArea r0=1 r1=$area
+show v
+
+scenario the-free-pool
+call XOS_DynamicArea r0=2 r1=6
+show r4 v
+
+# RISC OS 5 on a StrongARM keeps zero page at zero, the IOMD build's
+# answer; the 32-bit profile is RISC OS 5's on ARMv7, which has the
+# compatibility page there.
+scenario locate-the-compatibility-page ours
+call XOS_DynamicArea r0=20 r1=&10
+show r0 r1 v
+
+scenario a-pool-is-made-empty
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100100 r5=&4000 r6=&8000 r7=0 r8="Corpus" r9=4
+show v
+keep r1 area
+call XOS_DynamicArea r0=24 r1=$area
+show r2 r4 r5 r6 r7 v
+call XOS_DynamicArea r0=1 r1=$area
+show v

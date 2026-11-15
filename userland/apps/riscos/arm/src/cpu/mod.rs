@@ -10,17 +10,21 @@
 
 mod alu;
 mod execute;
+mod fpa;
 mod memo;
 mod memory;
+mod simdfp;
 
 use crate::bus::{Abort, Bus};
 use crate::cond::Condition;
 use crate::cp15::{Cp15, Fault};
+use crate::fpa::Fpa;
 use crate::isa::Feature;
 use crate::profile::{Profile, Unpredictable};
 use crate::psr::{self, Bank, Mode};
 use crate::reg::Reg;
 use crate::t32::{self, Position};
+use crate::vfp::Vfp;
 
 use memo::{Decoded, Memo, Thumb};
 
@@ -108,6 +112,14 @@ pub enum Stop {
     /// The instruction at the PC reached something this processor does not
     /// model; it has not executed.
     Unmodelled(Unmodelled),
+    /// An FPA instruction met an exception its trap is enabled for, where
+    /// FPEmulator raises its error. The PC is past it; it wrote nothing but
+    /// the flags of exceptions it raised first and, as FPEmulator's do, a
+    /// load's written-back base.
+    FloatingPoint {
+        /// The exception.
+        exception: crate::fpa::Exception,
+    },
 }
 
 /// A run's outcome.
@@ -175,6 +187,8 @@ pub struct Cpu {
     /// it.
     it_written: bool,
     cp15: Cp15,
+    fpa: Fpa,
+    vfp: Vfp,
     memo: Memo<u32, 2>,
     thumb: Memo<Thumb, 1>,
 }
@@ -202,7 +216,9 @@ impl Cpu {
             event: false,
             exclusive: None,
             it_written: false,
-            cp15: Cp15::new(profile.system),
+            cp15: Cp15::new(profile.system, profile.isa),
+            fpa: Fpa::new(),
+            vfp: Vfp::new(),
             memo: Memo::new(memo_pages, 0, Decoded::arm(0, profile)),
             thumb: Memo::new(memo_pages, thumb_zero, Decoded::thumb(thumb_zero, profile)),
         };
@@ -215,7 +231,8 @@ impl Cpu {
     /// values, as on hardware, and the interrupt lines stay as the devices
     /// driving them hold them.
     pub fn reset(&mut self) {
-        self.cp15 = Cp15::new(self.profile.system);
+        self.cp15 = Cp15::new(self.profile.system, self.profile.isa);
+        self.vfp.set_fpexc(0);
         self.take(Exception::Reset, self.pc);
         self.pc = self.next;
         self.event = false;
@@ -486,6 +503,18 @@ impl Cpu {
     #[must_use]
     pub const fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The VFP and Advanced SIMD register file and its control registers.
+    #[must_use]
+    pub const fn vfp(&self) -> &Vfp {
+        &self.vfp
+    }
+
+    /// The VFP and Advanced SIMD state, for a session to load or a test to
+    /// set.
+    pub fn vfp_mut(&mut self) -> &mut Vfp {
+        &mut self.vfp
     }
 
     /// Replaces the CPSR, switching banks if its mode changes; refused if

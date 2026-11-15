@@ -26,6 +26,7 @@ fn shifted(operand: Operand) -> bool {
 pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
     let before_v6 = isa.version() < 6;
     match instruction.op {
+        Op::SimdFp(op) => check::simdfp(&op, false),
         Op::Data {
             rd, rn, operand, ..
         } => shifted(operand) && (rd == PC || rn == PC || shifted_by_pc(operand)),
@@ -152,7 +153,13 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
         | Op::ClearExclusive
         | Op::SetEndian { .. }
         | Op::SaveState { .. }
-        | Op::Coprocessor { .. } => false,
+        | Op::Coprocessor { .. }
+        | Op::FpaDyadic { .. }
+        | Op::FpaMonadic { .. }
+        | Op::FpaRegister { .. }
+        | Op::FpaCompare { .. }
+        | Op::FpaTransfer { .. }
+        | Op::FpaMultiple { .. } => false,
     }
 }
 

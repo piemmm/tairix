@@ -1,6 +1,6 @@
 [package]
 name = "tairix-softfloat"
-description = "TAIRiX software floating point: exact binary32, binary64 and double-extended arithmetic, rounded once in every IEEE 754 mode with its exceptions, the unnormal-aware core the 8087 and the RISC OS emulator's FPA and VFP share, and the x87 and FPA memory layouts. no_std, allocation-free, integers only, so every target computes the same bits."
+description = "TAIRiX software floating point: exact binary16, binary32, binary64 and double-extended arithmetic, rounded once in every IEEE 754 mode with its exceptions, the unnormal-aware core the 8087 and the RISC OS emulator's FPA and VFP share, and the x87 and FPA memory layouts. no_std, allocation-free, integers only, so every target computes the same bits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

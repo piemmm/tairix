@@ -1,0 +1,69 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5, but for
+# a scenario marked `ours`, whose observation is this emulator's own.
+
+scenario unknown-reasons
+1 v=1 error=&00000180
+2 v=1 error=&00000180
+3 v=1 error=&00000180
+
+scenario unknown-area
+1 v=1 error=&00000105
+2 v=1 error=&00000105
+3 r1=&00000000 v=1 error=&000001C1
+
+scenario application-space-is-no-area-to-change
+1 r1=&00000000 v=1 error=&000001C1
+2 r0=&00008000 v=0
+
+scenario numbers-refused
+1 v=1 error=&000001C4
+2 v=1 error=&00000000
+
+scenario options-refused
+1 v=1 error=&000001D0
+2 v=1 error=&000001D0
+3 v=1 error=&000001D0
+4 v=1 error=&000001D0
+
+scenario make-grow-shrink-remove
+1 r5=&00010000 v=0
+2 r2=&00002000 r4=&00000000 r5=&00010000 r6=&00000000 r7=&00000000 v=0
+3 r1=&00001000 v=0
+4 r1=&00001000 v=0
+5 r1=&00000000 v=1 error=&000001C1
+6 r1=&00000000 v=0
+7 r1=&00001000 v=0
+8 r1=&00003000 r2=&00010000 v=0
+9 v=1 error=&00000000
+10 v=0
+11 v=1 error=&00000105
+
+scenario a-maximum-is-at-least-the-size
+1 r5=&00003000 v=0
+2 v=0
+
+scenario a-plain-area-is-not-sparse
+2 v=1 error=&00000000
+3 v=0
+
+scenario sparse-claims-and-releases
+1 v=0
+2 r2=&00000000 r4=&00000480 r6=&00000000 v=0
+3 v=0
+4 r2=&00002000 v=0
+5 v=0
+6 r2=&00001000 v=0
+7 v=1 error=&00000000
+8 r1=&00000000 v=1 error=&000001C1
+9 v=0
+
+scenario the-free-pool
+1 r4=&00100032 v=0
+
+scenario locate-the-compatibility-page
+1 r0=&00000001 r1=&00000010 v=0
+
+scenario a-pool-is-made-empty
+1 v=0
+2 r2=&00000000 r4=&00100100 r5=&00004000 r6=&00000000 r7=&00000004 v=0
+3 v=0

@@ -166,6 +166,7 @@ fn round_to(format: Binary, x: Exact) -> u64 {
         policy: Policy {
             tininess: Tininess::AfterRounding,
             nans: Nans::Propagate,
+            flush_to_zero: false,
         },
     };
     ieee.round(x).bits

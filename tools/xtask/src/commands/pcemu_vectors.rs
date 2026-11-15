@@ -142,7 +142,10 @@ fn import_suite(upstream: &Upstream, dir: &Path) -> Result<(Suite, Vec<(String, 
         let path = dir.join(format!("{name}.MOO.gz"));
         let gz =
             std::fs::read(&path).map_err(|e| format!("pcemu-vectors: {}: {e}", path.display()))?;
-        files.push((format!("{name}.MOO.gz"), hex(&tairix_crypto::sha256(&gz))));
+        files.push((
+            format!("{name}.MOO.gz"),
+            tairix_util::hex::encode(&tairix_crypto::sha256(&gz)),
+        ));
         let moo = gunzip(&gz).map_err(|e| format!("pcemu-vectors: {}: {e}", path.display()))?;
         let vectors = parse_moo(&moo, PER_GROUP)
             .map_err(|e| format!("pcemu-vectors: {}: {e}", path.display()))?;
@@ -193,13 +196,6 @@ fn classify(opcodes: &Json, stem: &str) -> Result<(Status, u16), String> {
         None => 0xFFFF,
     };
     Ok((status, mask))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
 }
 
 /// A 32-bit length, then the zlib stream.

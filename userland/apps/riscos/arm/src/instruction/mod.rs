@@ -2,10 +2,36 @@
 //! each form, carrying the operation its encodings select and the operands
 //! their fields hold, and the assembler's text for it.
 
+/// An operation enum: each variant's mnemonic, and every variant in order.
+macro_rules! operations {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident = $text:literal,)* }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        pub enum $name {
+            $(#[doc = concat!("`", $text, "`.")] $variant,)*
+        }
+
+        impl $name {
+            /// Every operation of the form.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
+            /// The mnemonic.
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text,)*
+                }
+            }
+        }
+    };
+}
+
 mod op;
+mod simdfp;
 mod text;
 
 pub use op::*;
+pub use simdfp::*;
 pub use text::Text;
 
 /// An instruction set.

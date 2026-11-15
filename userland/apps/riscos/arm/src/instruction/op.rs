@@ -1,7 +1,9 @@
 //! The instruction vocabulary: an [`Op`] for each form, carrying the
 //! operation its encodings select and the operands their fields hold.
 
+use super::SimdFp;
 use crate::cond::Condition;
+use crate::fpa::{Format, Precision, Rounding};
 use crate::reg::{Reg, RegList};
 
 // Every decoded page slot holds one; past 16 bytes the interpreter measurably
@@ -17,29 +19,6 @@ pub struct Instruction {
     pub cond: Condition,
     /// The operation and its operands.
     pub op: Op,
-}
-
-macro_rules! operations {
-    ($(#[$meta:meta])* $name:ident { $($variant:ident = $text:literal,)* }) => {
-        $(#[$meta])*
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-        pub enum $name {
-            $(#[doc = concat!("`", $text, "`.")] $variant,)*
-        }
-
-        impl $name {
-            /// Every operation of the form.
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
-
-            /// The mnemonic.
-            #[must_use]
-            pub const fn name(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $text,)*
-                }
-            }
-        }
-    };
 }
 
 operations! {
@@ -422,6 +401,93 @@ operations! {
         Ldc2 = "LDC2",
         Stc2 = "STC2",
     }
+}
+
+operations! {
+    /// An FPA dyadic data operation.
+    FpaDyadicOp {
+        Adf = "ADF",
+        Muf = "MUF",
+        Suf = "SUF",
+        Rsf = "RSF",
+        Dvf = "DVF",
+        Rdf = "RDF",
+        Pow = "POW",
+        Rpw = "RPW",
+        Rmf = "RMF",
+        Fml = "FML",
+        Fdv = "FDV",
+        Frd = "FRD",
+        Pol = "POL",
+    }
+}
+
+operations! {
+    /// An FPA monadic data operation.
+    FpaMonadicOp {
+        Mvf = "MVF",
+        Mnf = "MNF",
+        Abs = "ABS",
+        Rnd = "RND",
+        Sqt = "SQT",
+        Log = "LOG",
+        Lgn = "LGN",
+        Exp = "EXP",
+        Sin = "SIN",
+        Cos = "COS",
+        Tan = "TAN",
+        Asn = "ASN",
+        Acs = "ACS",
+        Atn = "ATN",
+        Urd = "URD",
+        Nrm = "NRM",
+    }
+}
+
+operations! {
+    /// A transfer between a core register and the FPA.
+    FpaRegisterOp {
+        Flt = "FLT",
+        Fix = "FIX",
+        Wfs = "WFS",
+        Rfs = "RFS",
+    }
+}
+
+operations! {
+    /// An FPA comparison.
+    FpaCompareOp {
+        Cmf = "CMF",
+        Cnf = "CNF",
+        Cmfe = "CMFE",
+        Cnfe = "CNFE",
+    }
+}
+
+operations! {
+    /// An FPA load or store.
+    FpaTransferOp {
+        Ldf = "LDF",
+        Stf = "STF",
+    }
+}
+
+operations! {
+    /// An FPA multiple load or store.
+    FpaMultipleOp {
+        Lfm = "LFM",
+        Sfm = "SFM",
+    }
+}
+
+/// An FPA data operation's last operand: a register, or one of the eight
+/// constants 0, 1, 2, 3, 4, 5, 0.5 and 10 by index.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FpaOperand {
+    /// F0 to F7.
+    Register(u8),
+    /// A constant's index.
+    Constant(u8),
 }
 
 /// An immediate shift, as a data-processing operand or a transfer's offset
@@ -1123,6 +1189,100 @@ pub enum Op {
         /// The coprocessor register.
         crm: u8,
     },
+    /// An FPA dyadic operation: `fd = fn op fm`.
+    FpaDyadic {
+        /// The operation.
+        op: FpaDyadicOp,
+        /// The result's precision.
+        precision: Precision,
+        /// The result's rounding.
+        rounding: Rounding,
+        /// The destination.
+        fd: u8,
+        /// The first operand.
+        fn_: u8,
+        /// The second operand.
+        fm: FpaOperand,
+    },
+    /// An FPA monadic operation: `fd = op fm`.
+    FpaMonadic {
+        /// The operation.
+        op: FpaMonadicOp,
+        /// The result's precision.
+        precision: Precision,
+        /// The result's rounding.
+        rounding: Rounding,
+        /// The destination.
+        fd: u8,
+        /// The operand.
+        fm: FpaOperand,
+    },
+    /// `FLT`, `FIX`, `WFS` and `RFS`.
+    FpaRegister {
+        /// The operation.
+        op: FpaRegisterOp,
+        /// The precision field: `FLT`'s result precision, which the others
+        /// do not read.
+        precision: Precision,
+        /// `FLT`'s and `FIX`'s rounding.
+        rounding: Rounding,
+        /// `FLT`'s destination.
+        fn_: u8,
+        /// `FIX`'s operand.
+        fm: FpaOperand,
+        /// The core register.
+        rd: Reg,
+    },
+    /// `CMF`, `CNF`, `CMFE` and `CNFE`: the flags to the PSR, or, where `rd`
+    /// is not the PC, to `rd`.
+    FpaCompare {
+        /// The operation.
+        op: FpaCompareOp,
+        /// The precision field, which a comparison does not read.
+        precision: Precision,
+        /// The first operand.
+        fn_: u8,
+        /// The second operand.
+        fm: FpaOperand,
+        /// Where the flags go.
+        rd: Reg,
+    },
+    /// `LDF` and `STF`.
+    FpaTransfer {
+        /// The operation.
+        op: FpaTransferOp,
+        /// The memory format.
+        format: Format,
+        /// The register.
+        fd: u8,
+        /// The base.
+        rn: Reg,
+        /// Add the offset rather than subtract it.
+        up: bool,
+        /// How memory is addressed; unindexed, at the base without
+        /// writeback.
+        index: CoIndex,
+        /// The offset in words.
+        offset: u8,
+    },
+    /// `LFM` and `SFM`.
+    FpaMultiple {
+        /// The operation.
+        op: FpaMultipleOp,
+        /// The first register; the rest follow it, wrapping past F7.
+        fd: u8,
+        /// How many, from 1 to 4.
+        count: u8,
+        /// The base.
+        rn: Reg,
+        /// Add the offset rather than subtract it.
+        up: bool,
+        /// How memory is addressed; unindexed, at the base without
+        /// writeback.
+        index: CoIndex,
+        /// The offset in words.
+        offset: u8,
+    },
     /// `LDC`, `STC`, `LDC2` and `STC2`.
     CoprocessorTransfer {
         /// The operation.
@@ -1142,4 +1302,6 @@ pub enum Op {
         /// The offset in words, or the unindexed form's option.
         offset: u8,
     },
+    /// A floating-point or Advanced SIMD instruction.
+    SimdFp(SimdFp),
 }

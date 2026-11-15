@@ -1,7 +1,7 @@
 # tairix-softfloat
 
-Software floating point: exact binary32, binary64 and double-extended
-arithmetic, each result rounded once in any of IEEE 754's modes, in integers
+Software floating point: exact binary16, binary32, binary64 and
+double-extended arithmetic, each result rounded once in any of IEEE 754's modes, in integers
 alone so every target computes the same bits.
 
 - **The core** (`exact`): a result held exactly — a 64-bit significand, 62
@@ -10,17 +10,17 @@ alone so every target computes the same bits.
   nothing about overflow, underflow or NaNs, so a unit with rules of its own
   builds them on it: PCEmulator's 8087 does, its register wrap and memory
   stores its own.
-- **The IEEE layer** (`Ieee`): IEEE 754's arithmetic on binary32 and binary64
-  values with default exception handling — add, subtract, multiply, divide,
+- **The IEEE layer** (`Ieee`): IEEE 754's arithmetic on binary16, binary32 and
+  binary64 values with default exception handling — add, subtract, multiply, divide,
   square root, fused multiply-add, remainder, rounding to an integral value,
   conversions between the formats and to and from integers, and comparison —
   each raising the `Flags` the standard defines. A `Policy` makes the choices
   the standard leaves open: when an underflow is tiny, and whether a NaN
-  result carries an operand's payload.
+  result carries an operand's payload; and ARM's flush-to-zero.
 - **Decimal conversion** (`Decimal`): a finite value written to 1 to 38
   significant digits in any mode, and a decimal value read exactly enough to
   round correctly at any precision, both from the whole expansion.
-- **The formats**: `Binary` (binary32, binary64), with the FPA's high word
+- **The formats**: `Binary` (binary16, binary32, binary64), with the FPA's high word
   first order for binary64 (`fpa_words`); `Extended`, the double-extended
   value the 8087's registers and the FPA's extended precision hold, with the
   x87's ten-byte and the FPA's three-word memory layouts; and `Packed`, the

@@ -1,11 +1,10 @@
 # `tairix-softfloat`
 
-The one software floating point: binary32, binary64 and double-extended
-arithmetic, each result computed exactly and rounded once, in integers alone
-so every target computes the same bits. PCEmulator's 8087 computes through
-it, `lib/drawing` stores a Draw file's doubles in the FPA's word order by it,
-and the RISC OS emulator's FPA and VFP are to (`plans/RISCOS-EMULATOR.md`
-RO11, RO12).
+The one software floating point: binary16, binary32, binary64 and
+double-extended arithmetic, each result computed exactly and rounded once, in integers alone
+so every target computes the same bits. PCEmulator's 8087 and the RISC OS
+emulator's FPA, VFP and Advanced SIMD compute through it, and `lib/drawing`
+stores a Draw file's doubles in the FPA's word order by it.
 
 ## The core
 
@@ -25,19 +24,20 @@ away from zero, down, up, and toward zero.
 
 ## The IEEE layer
 
-`Ieee { format, mode, policy }` is IEEE 754's arithmetic on binary32 and
-binary64 bit patterns with default exception handling. Each operation answers
+`Ieee { format, mode, policy }` is IEEE 754's arithmetic on binary16,
+binary32 and binary64 bit patterns with default exception handling. Each operation answers
 an `Outcome`: the result's bits and the `Flags` it raised (invalid,
 divide-by-zero, overflow, underflow, inexact).
 
 | Operation | Notes |
 |---|---|
 | `add`, `sub`, `mul`, `div`, `sqrt` | |
-| `fused_multiply_add` | Rounded once, the product held exactly. A NaN operand is chosen addend first, as ARM's fused multiply-add takes them. `∞ × 0` signals invalid even beside a quiet NaN addend. |
+| `fused_multiply_add` | Rounded once, the product held exactly. A NaN operand is chosen addend first, as ARM's fused multiply-add takes them. `∞ × 0` beside a quiet NaN addend is invalid and answers the default NaN; beside a signalling one, that addend quieted. |
 | `rem` | IEEE 754's remainder, the quotient rounded to the even integer. It is always exact. |
 | `round_to_integral` | Rounding in the value's own format; inexact only where asked, as `roundToIntegralExact` raises it. |
 | `to_integer`, `from_integer` | An `Integral` (a value, out of range, or a NaN) for the caller to hold to its own range, and the rounded value of an integer. |
-| `convert` | Between binary32 and binary64, rounded where the target is narrower. |
+| `to_fixed`, `from_fixed` | The same of a fixed-point value with a number of fraction bits, rounded once. |
+| `convert` | Between the three formats, rounded where the target is narrower. |
 | `compare` | `None` when unordered. A signalling NaN raises invalid, and so does a quiet one where the comparison signals. |
 
 `Policy` makes the choices the standard leaves to an implementation:
@@ -47,6 +47,9 @@ divide-by-zero, overflow, underflow, inexact).
 - `Nans::Propagate` answers the first signalling NaN operand quieted, else the
   first quiet one. `Nans::Default` answers the default NaN, as VFP's
   default-NaN mode does.
+- `flush_to_zero` makes a result tiny before rounding a zero of its sign,
+  raising underflow alone, as ARM's flush-to-zero mode does. Flushing a
+  denormal operand is the caller's: the standard has no flag for it.
 
 ## Decimal conversion
 

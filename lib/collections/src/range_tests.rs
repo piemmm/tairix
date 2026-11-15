@@ -122,6 +122,26 @@ fn ending_at_or_below_finds_the_highest_end_not_past_a_point() {
 }
 
 #[test]
+fn last_free_is_the_top_of_the_highest_gap_that_fits() {
+    let mut map: RangeMap<u64, char> = RangeMap::new();
+    map.insert(10..20, 'a').expect("fits");
+    map.insert(35..40, 'b').expect("fits");
+    // Gaps of 10, 15, and 60: the highest that fits wins, at its top.
+    assert_eq!(map.last_free(0..100, 10), Some(90));
+    assert_eq!(map.last_free(0..100, 60), Some(40));
+    assert_eq!(map.last_free(0..100, 61), None, "no gap is that large");
+    assert_eq!(
+        map.last_free(0..40, 15),
+        Some(20),
+        "the window ends the tail"
+    );
+    assert_eq!(map.last_free(0..40, 10), Some(25));
+    assert_eq!(map.last_free(0..35, 16), None);
+    assert_eq!(map.last_free(0..12, 10), Some(0), "below the held range");
+    assert_eq!(map.last_free(0..100, 0), None, "nothing to place");
+}
+
+#[test]
 fn first_free_is_first_fit_over_the_gaps() {
     let mut map: RangeMap<u64, char> = RangeMap::new();
     map.insert(10..20, 'a').expect("fits");

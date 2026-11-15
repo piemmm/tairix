@@ -4631,9 +4631,21 @@ dependencies = [
 name = "tairix-riscos-arm"
 version = "0.0.0"
 dependencies = [
+ "tairix-collections",
  "tairix-crc32",
  "tairix-crc32c",
  "tairix-fuzzseed",
+ "tairix-softfloat",
+]
+
+[[package]]
+name = "tairix-riscos-kernel"
+version = "0.0.0"
+dependencies = [
+ "tairix-collections",
+ "tairix-fuzzseed",
+ "tairix-inline",
+ "tairix-riscos-arm",
 ]
 
 [[package]]
@@ -9970,6 +9982,7 @@ dependencies = [
  "tairix-appload",
  "tairix-appstore",
  "tairix-arch-api",
+ "tairix-bbcbasic",
  "tairix-browse",
  "tairix-cinder",
  "tairix-colour",
@@ -10066,6 +10079,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-riscos-kernel",
  "tairix-sandbox",
  "tairix-settings",
  "tairix-shaders",

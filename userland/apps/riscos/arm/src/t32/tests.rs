@@ -149,6 +149,47 @@ fn position(rng: &mut Prng) -> Position {
 }
 
 #[test]
+fn each_floating_point_and_simd_instruction_encodes_back_as_a32_s_encoding() {
+    let mut rng = Prng::new(0x732_0005);
+    let prefixes = [
+        0xEF00_0000u32,
+        0xFF00_0000,
+        0xF900_0000,
+        0xEC00_0A00,
+        0xED00_0A00,
+        0xEE00_0A00,
+        0xFE00_0A00,
+    ];
+    let mut decoded = 0;
+    for _ in 0..200_000 {
+        let draw = rng.next_u32();
+        let prefix = prefixes[draw as usize % prefixes.len()];
+        let low = rng.next_u32();
+        let word = match prefix {
+            // Element transfers clear bit 20, which loads of a core register set.
+            0xF900_0000 => prefix | (low & 0x00EF_FFFF),
+            _ if prefix & 0xF00 == 0 => prefix | (low & 0x00FF_FFFF),
+            _ => prefix | (low & 0x00FF_F1FF),
+        };
+        let (first, second) = (halfword(word >> 16), halfword(word));
+        let position = position(&mut rng);
+        let Some(found) = decode(first, second, Isa::ALL, position) else {
+            continue;
+        };
+        decoded += 1;
+        assert!(matches!(found.instruction.op, Op::SimdFp(_)), "{word:08X}");
+        let encoded = encode(&found.instruction, position, Size::Wide)
+            .unwrap_or_else(|e| panic!("{word:08X} {:?}: {e:?}", found.instruction));
+        let Encoding::Wide(a, b) = encoded else {
+            panic!("{word:08X} narrowed");
+        };
+        let back = decode(a, b, Isa::ALL, position).expect("decodes");
+        assert_eq!(back.instruction, found.instruction, "{word:08X}");
+    }
+    assert!(decoded > 50_000, "{decoded}");
+}
+
+#[test]
 fn each_decoded_instruction_encodes_back_and_each_row_inverts_its_own_fields() {
     let mut rng = Prng::new(0x732_0002);
     for _ in 0..200_000 {
