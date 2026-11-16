@@ -119,6 +119,22 @@ operations! {
     }
 }
 
+impl ArithmeticOp {
+    /// Whether it is one of ARMv8's CRC32 checksums.
+    #[must_use]
+    pub const fn checksum(self) -> bool {
+        matches!(
+            self,
+            Self::Crc32b
+                | Self::Crc32h
+                | Self::Crc32w
+                | Self::Crc32cb
+                | Self::Crc32ch
+                | Self::Crc32cw
+        )
+    }
+}
+
 operations! {
     /// How a parallel operation treats each lane's result (ARMv6).
     Prefix {
@@ -404,6 +420,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An FPA dyadic data operation.
     FpaDyadicOp {
         Adf = "ADF",
@@ -423,6 +440,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An FPA monadic data operation.
     FpaMonadicOp {
         Mvf = "MVF",
@@ -455,6 +473,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An FPA comparison.
     FpaCompareOp {
         Cmf = "CMF",
@@ -639,6 +658,14 @@ impl Expanded {
         }
     }
 
+    /// Whether the architecture leaves the field UNPREDICTABLE: a repeated
+    /// pattern of a zero byte, which `ThumbExpandImm` refuses.
+    #[must_use]
+    pub const fn unpredictable(self) -> bool {
+        let field = self.0 & 0xFFF;
+        field & 0xC00 == 0 && field & 0x300 != 0 && field.trailing_zeros() >= 8
+    }
+
     /// The carry out, given the carry in: unchanged by a repeated byte, the
     /// value's top bit for a rotated one.
     #[must_use]
@@ -753,6 +780,30 @@ pub enum CoIndex {
     PostIndexed,
     /// At the base; the immediate is an option for the coprocessor.
     Unindexed,
+}
+
+impl CoIndex {
+    /// The addressing an encoding's P and W bits give.
+    #[must_use]
+    pub const fn of(p: bool, w: bool) -> Self {
+        match (p, w) {
+            (true, false) => Self::Offset,
+            (true, true) => Self::PreIndexed,
+            (false, true) => Self::PostIndexed,
+            (false, false) => Self::Unindexed,
+        }
+    }
+
+    /// The P and W bits an encoding gives it.
+    #[must_use]
+    pub const fn bits(self) -> (bool, bool) {
+        match self {
+            Self::Offset => (true, false),
+            Self::PreIndexed => (true, true),
+            Self::PostIndexed => (false, true),
+            Self::Unindexed => (false, false),
+        }
+    }
 }
 
 /// `MSR`'s source.
@@ -975,7 +1026,8 @@ pub enum Op {
     Call {
         /// The operation.
         op: CallOp,
-        /// The immediate: 24 bits for `SWI`, 16 for the others.
+        /// The immediate: 24 bits for `SWI`, 16 for the others in A32; 8
+        /// for T32's 16-bit forms.
         value: u32,
     },
     /// The hints.

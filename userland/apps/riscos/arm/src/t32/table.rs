@@ -16,10 +16,9 @@ use super::form::{Base, Block, Branch, Flags, Rd, Rn, Shape, Source};
 use crate::encoding::form::Kind;
 use crate::encoding::layout::Layout;
 use crate::instruction::{
-    ArithmeticOp as A, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CoRegisterOp,
-    CoRegistersOp, CoTransferOp, CompareOp, CoprocessorOp, DataOp, DualOp, ExchangeOp,
-    ExclusiveOp as X, ExtendOp as E, HintOp, LongOp, MoveOp, MultiplyOp as M, PackOp, PreloadOp,
-    SaturateOp, ShiftType, TransferOp as T, UnaryOp, WideOp,
+    ArithmeticOp as A, BarrierOp, BitfieldOp, BlockMode, BlockOp, BranchOp, CallOp, CompareOp,
+    DataOp, DualOp, ExchangeOp, ExclusiveOp as X, ExtendOp as E, HintOp, LongOp, MoveOp,
+    MultiplyOp as M, PackOp, PreloadOp, SaturateOp, ShiftType, TransferOp as T, UnaryOp, WideOp,
 };
 use crate::isa::Feature::{self, Crc32, Divide, Mp, V4T, V5, V6, V6T2, V7, V8};
 
@@ -754,52 +753,6 @@ static WIDE_SHIFTED: &[Row] = &[
         "1110 1011 110S nnnn -kkk dddd kkyy mmmm",
         Kind::Data(DataOp::Rsb),
         DP_REGISTER,
-        V6T2,
-    ),
-];
-
-/// 32-bit coprocessor rows with bit 28 clear.
-static WIDE_COPROCESSOR: &[Row] = &[
-    wide(
-        "1110 1100 0100 TTTT tttt pppp oooo MMMM",
-        Kind::CoprocessorRegisters(CoRegistersOp::Mcrr),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 1100 0101 TTTT tttt pppp oooo MMMM",
-        Kind::CoprocessorRegisters(CoRegistersOp::Mrrc),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 110P UBW0 nnnn DDDD pppp iiii iiii",
-        Kind::CoprocessorTransfer(CoTransferOp::Stc),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 110P UBW1 nnnn DDDD pppp iiii iiii",
-        Kind::CoprocessorTransfer(CoTransferOp::Ldc),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 1110 oooo NNNN DDDD pppp qqq0 MMMM",
-        Kind::Coprocessor(CoprocessorOp::Cdp),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 1110 ooo0 NNNN tttt pppp qqq1 MMMM",
-        Kind::CoprocessorRegister(CoRegisterOp::Mcr),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1110 1110 ooo1 NNNN tttt pppp qqq1 MMMM",
-        Kind::CoprocessorRegister(CoRegisterOp::Mrc),
-        C,
         V6T2,
     ),
 ];
@@ -1812,56 +1765,13 @@ static WIDE_REGISTER: &[Row] = &[
     ),
 ];
 
-/// 32-bit coprocessor rows with bit 28 set.
-static WIDE_COPROCESSOR2: &[Row] = &[
-    wide(
-        "1111 1100 0100 TTTT tttt pppp oooo MMMM",
-        Kind::CoprocessorRegisters(CoRegistersOp::Mcrr2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 1100 0101 TTTT tttt pppp oooo MMMM",
-        Kind::CoprocessorRegisters(CoRegistersOp::Mrrc2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 110P UBW0 nnnn DDDD pppp iiii iiii",
-        Kind::CoprocessorTransfer(CoTransferOp::Stc2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 110P UBW1 nnnn DDDD pppp iiii iiii",
-        Kind::CoprocessorTransfer(CoTransferOp::Ldc2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 1110 oooo NNNN DDDD pppp qqq0 MMMM",
-        Kind::Coprocessor(CoprocessorOp::Cdp2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 1110 ooo0 NNNN tttt pppp qqq1 MMMM",
-        Kind::CoprocessorRegister(CoRegisterOp::Mcr2),
-        C,
-        V6T2,
-    ),
-    wide(
-        "1111 1110 ooo1 NNNN tttt pppp qqq1 MMMM",
-        Kind::CoprocessorRegister(CoRegisterOp::Mrc2),
-        C,
-        V6T2,
-    ),
-];
-
 /// The 16-bit rows, by the top three bits.
 pub(super) static NARROW: [&[Row]; 8] = [
     NARROW_000, NARROW_001, NARROW_010, NARROW_011, NARROW_100, NARROW_101, NARROW_110, NARROW_111,
 ];
+
+/// The rows of the coprocessor spaces, which A32's rows decode.
+static WIDE_COPROCESSOR: &[Row] = &[];
 
 /// The 32-bit rows, by [`wide_group`].
 pub(super) static WIDE: [&[Row]; 8] = [
@@ -1872,7 +1782,7 @@ pub(super) static WIDE: [&[Row]; 8] = [
     WIDE_BRANCH,
     WIDE_SINGLE,
     WIDE_REGISTER,
-    WIDE_COPROCESSOR2,
+    WIDE_COPROCESSOR,
 ];
 
 /// The group of a 32-bit encoding, from its first halfword's top seven bits

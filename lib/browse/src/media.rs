@@ -264,6 +264,25 @@ pub enum MediaType {
     /// A cassette tape as the compressed square wave it plays
     /// (`application/x-csw-tape`).
     TapeCsw,
+    /// A Commodore 1541 disk's sectors in order, with or without a byte of
+    /// error code each (`application/x-d64-disk`): a Commodore 64's disk,
+    /// served as no volume.
+    CommodoreD64,
+    /// A Commodore 1541 disk as its head reads it, each half-track's GCR
+    /// recording (`application/x-g64-disk`).
+    CommodoreG64,
+    /// A Commodore cassette tape as the lengths of the pulses on it
+    /// (`application/x-c64-tap`).
+    TapeTap,
+    /// A Commodore 64 cartridge: its ROMs and the hardware that banks them
+    /// (`application/x-c64-cartridge`).
+    C64Cartridge,
+    /// A Commodore program: its load address, then its bytes
+    /// (`application/x-c64-program`).
+    C64Program,
+    /// Commodore programs as a tape held them, in an emulators' archive
+    /// (`application/x-t64-archive`).
+    T64Archive,
     /// An MPEG audio file of any layer — MP3, MP2 or MP1 (`audio/mpeg`).
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
@@ -400,6 +419,12 @@ impl MediaType {
             Self::AcornDfsDisc => "Acorn DFS disc image",
             Self::TapeUef => "UEF tape image",
             Self::TapeCsw => "CSW tape image",
+            Self::CommodoreD64 => "Commodore 1541 disk image",
+            Self::CommodoreG64 => "Commodore 1541 GCR disk image",
+            Self::TapeTap => "Commodore TAP tape image",
+            Self::C64Cartridge => "Commodore 64 cartridge",
+            Self::C64Program => "Commodore program",
+            Self::T64Archive => "Commodore T64 tape archive",
             Self::AudioMpeg => "MPEG audio",
             Self::AudioFlac => "FLAC audio",
             Self::AudioOgg => "Ogg audio",
@@ -515,6 +540,12 @@ impl MediaType {
             Self::AcornDfsDisc => "application/x-acorn-dfs-disc",
             Self::TapeUef => "application/x-uef-tape",
             Self::TapeCsw => "application/x-csw-tape",
+            Self::CommodoreD64 => "application/x-d64-disk",
+            Self::CommodoreG64 => "application/x-g64-disk",
+            Self::TapeTap => "application/x-c64-tap",
+            Self::C64Cartridge => "application/x-c64-cartridge",
+            Self::C64Program => "application/x-c64-program",
+            Self::T64Archive => "application/x-t64-archive",
             Self::AudioMpeg => "audio/mpeg",
             Self::AudioFlac => "audio/flac",
             Self::AudioOgg => "audio/ogg",
@@ -664,6 +695,12 @@ impl MediaType {
             | Self::AcornDfsDisc
             | Self::TapeUef
             | Self::TapeCsw
+            | Self::CommodoreD64
+            | Self::CommodoreG64
+            | Self::TapeTap
+            | Self::C64Cartridge
+            | Self::C64Program
+            | Self::T64Archive
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -718,13 +755,17 @@ impl MediaType {
     /// ships no distinct raster artwork for it, so the returned kind is always
     /// drawable (`lib/icon`).
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a type: the registry's icons read as the one table they are"
+    )]
     pub const fn icon(self) -> IconKind {
         match self {
             Self::InodeDirectory => IconKind::Folder,
             Self::TairixApp => IconKind::AppBundle,
             Self::TairixService => IconKind::ServiceBundle,
             Self::TairixScreensaver => IconKind::Screensaver,
-            Self::TairixRxe => IconKind::Executable,
+            Self::TairixRxe | Self::C64Cartridge | Self::C64Program => IconKind::Executable,
             Self::Wasm => IconKind::WasmModule,
             Self::Elf => IconKind::ElfExecutable,
             Self::TairixDriver => IconKind::Driver,
@@ -790,10 +831,18 @@ impl MediaType {
             Self::RiscOsSquash => IconKind::RiscOsSquash,
             Self::ArcFs => IconKind::ArchiveArcFs,
             Self::ArchiveSpark => IconKind::ArchiveSpark,
-            Self::RiscOsArchive | Self::TapeUef | Self::TapeCsw => IconKind::Archive,
+            Self::RiscOsArchive
+            | Self::TapeUef
+            | Self::TapeCsw
+            | Self::TapeTap
+            | Self::T64Archive => IconKind::Archive,
             Self::RawDiskImage => IconKind::DiskHard,
             Self::CdImage => IconKind::DiskOptical,
-            Self::RawFloppyDiskImage | Self::ImageDisk | Self::AcornDfsDisc => IconKind::DiskFloppy,
+            Self::RawFloppyDiskImage
+            | Self::ImageDisk
+            | Self::AcornDfsDisc
+            | Self::CommodoreD64
+            | Self::CommodoreG64 => IconKind::DiskFloppy,
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -898,6 +947,12 @@ impl MediaType {
             | Self::AcornDfsDisc
             | Self::TapeUef
             | Self::TapeCsw
+            | Self::CommodoreD64
+            | Self::CommodoreG64
+            | Self::TapeTap
+            | Self::C64Cartridge
+            | Self::C64Program
+            | Self::T64Archive
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
@@ -1005,6 +1060,10 @@ impl MediaType {
     /// folder's picture shows no card for: a directory, or content of no
     /// recognised type.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a family: the registry's families read as the one table they are"
+    )]
     pub const fn family(self) -> Option<Family> {
         match self {
             Self::ImagePng
@@ -1086,8 +1145,14 @@ impl MediaType {
             | Self::ImageDisk
             | Self::AcornDfsDisc
             | Self::TapeUef
-            | Self::TapeCsw => Some(Family::Archive),
+            | Self::TapeCsw
+            | Self::CommodoreD64
+            | Self::CommodoreG64
+            | Self::TapeTap
+            | Self::T64Archive => Some(Family::Archive),
             Self::TairixApp
+            | Self::C64Cartridge
+            | Self::C64Program
             | Self::TairixService
             | Self::TairixScreensaver
             | Self::TairixRxe
@@ -1305,6 +1370,12 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::AcornDfsDisc,
     MediaType::TapeUef,
     MediaType::TapeCsw,
+    MediaType::CommodoreD64,
+    MediaType::CommodoreG64,
+    MediaType::TapeTap,
+    MediaType::C64Cartridge,
+    MediaType::C64Program,
+    MediaType::T64Archive,
     MediaType::AudioMpeg,
     MediaType::AudioFlac,
     MediaType::AudioOgg,
@@ -1407,6 +1478,12 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::AcornDfsDisc, &["ssd", "dsd"]),
     (MediaType::TapeUef, &["uef"]),
     (MediaType::TapeCsw, &["csw"]),
+    (MediaType::CommodoreD64, &["d64"]),
+    (MediaType::CommodoreG64, &["g64"]),
+    (MediaType::TapeTap, &["tap"]),
+    (MediaType::C64Cartridge, &["crt"]),
+    (MediaType::C64Program, &["prg"]),
+    (MediaType::T64Archive, &["t64"]),
     (MediaType::AudioMpeg, &["mp3", "mp2", "mp1", "mpa"]),
     (MediaType::AudioFlac, &["flac"]),
     (MediaType::AudioOgg, &["ogg", "oga"]),

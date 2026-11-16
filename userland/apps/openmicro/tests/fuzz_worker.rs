@@ -12,19 +12,26 @@
 //!   and
 //! * whatever frame reaches the client, it never panics, and believes a
 //!   slice only of the length asked, carrying sound only when asked and the
-//!   lamps and media only of the model configured.
+//!   lamps and media only of the machine configured: its model's lights, and
+//!   discs only of the drives it has.
 //!
 //! Inputs are drawn from a per-run-seeded `Prng`; the smoke sweep runs on a
 //! plain `cargo test` and `cargo xtask fuzz --soak` extends it to a
 //! wall-clock budget.
 
 use tairix_fuzzseed::Prng;
+use tairix_openmicro::firmware::{
+    C1541_DOS_IMAGE, C64_BASIC_IMAGE, C64_CHARACTER_IMAGE, C64_KERNAL_IMAGE,
+};
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
+use tairix_openmicro::machine::c64::keyboard::{Key as C64Key, Keycap};
+use tairix_openmicro::machine::c64::{joystick, sid, Standard};
 use tairix_openmicro::machine::{bbc, electron, Model, ANALOGUE_CHANNELS, FIRE_BUTTONS};
+use tairix_openmicro::media::c1541::d64;
 use tairix_openmicro::media::disc::ImageFormat;
 use tairix_openmicro::worker::protocol::{
-    Change, Configuration, Input, ModelKey, Plus1, Reply, Request, Slot, MAX_INPUTS, SHARE_BYTES,
-    SLOTS,
+    Change, Configuration, DeckKey, DiscFormat, Input, ModelKey, Plus1, Reply, Request, Slot,
+    MAX_INPUTS, SHARE_BYTES, SLOTS,
 };
 use tairix_openmicro::worker::{MachineClient, MachineService};
 use tairix_sandbox::loopback::HeapShare;
@@ -40,6 +47,17 @@ const SESSION: usize = 8;
 const MOST_CYCLES: usize = 40_000;
 /// A tape of one data block.
 const TAPE: &[u8] = b"UEF File!\0\x0A\x00\x00\x01\x03\x00\x00\x00***";
+/// A C64's tape of three pulses.
+const TAP: &[u8] = b"C64-TAPE-RAW\x01\x00\x00\x00\x03\x00\x00\x00\x30\x30\x42";
+/// A program of two bytes for the screen.
+const PRG: &[u8] = &[0x00, 0x04, 0x01, 0x02];
+/// Every disc format a request may claim.
+const DISC_FORMATS: [DiscFormat; 4] = [
+    DiscFormat::Acorn(ImageFormat::Ssd),
+    DiscFormat::Acorn(ImageFormat::Dsd),
+    DiscFormat::D64,
+    DiscFormat::G64,
+];
 
 struct Collected(Vec<Vec<u8>>);
 
@@ -58,6 +76,8 @@ struct Media {
     dfs: Vec<u8>,
     plus1: Vec<u8>,
     disc: Vec<u8>,
+    disk: Vec<u8>,
+    cartridge: Vec<u8>,
 }
 
 impl Media {
@@ -75,8 +95,23 @@ impl Media {
                 .expect("the Plus 1 ROM")
                 .bytes,
             disc: tairix_openmicro::scenario::discs::named("testdisc").expect("a disc"),
+            disk: d64::formatted(b"FUZZ", *b"FZ"),
+            cartridge: generic_cartridge(),
         }
     }
+}
+
+/// A generic 8K cartridge.
+fn generic_cartridge() -> Vec<u8> {
+    let mut image = b"C64 CARTRIDGE   ".to_vec();
+    image.extend_from_slice(&0x40u32.to_be_bytes());
+    image.extend_from_slice(&[1, 0, 0, 0, 0, 1]);
+    image.resize(0x40, 0);
+    image.extend_from_slice(b"CHIP");
+    image.extend_from_slice(&0x2010u32.to_be_bytes());
+    image.extend_from_slice(&[0, 0, 0, 0, 0x80, 0x00, 0x20, 0x00]);
+    image.resize(image.len() + 0x2000, 0xEA);
+    image
 }
 
 /// `bytes` as a request, if they decode as one, checked to be its one
@@ -99,8 +134,21 @@ fn coin(rng: &mut Prng) -> bool {
     rng.below(2) == 0
 }
 
-/// A configure for either model, its images mostly real.
+/// A configure for any model, its images mostly real.
 fn configuration<'a>(rng: &mut Prng, media: &'a Media, noise: &'a [u8]) -> Configuration<'a> {
+    if rng.below(3) == 0 {
+        return Configuration::C64 {
+            standard: *rng.pick(&Standard::ALL),
+            sid: *rng.pick(&sid::Model::ALL),
+            kernal: either(rng, C64_KERNAL_IMAGE, noise, 8),
+            basic: either(rng, C64_BASIC_IMAGE, noise, 8),
+            character: either(rng, C64_CHARACTER_IMAGE, noise, 8),
+            drives: [
+                coin(rng).then(|| either(rng, C1541_DOS_IMAGE, noise, 8)),
+                (rng.below(4) == 0).then_some(C1541_DOS_IMAGE),
+            ],
+        };
+    }
     if coin(rng) {
         return Configuration::Electron {
             os: either(rng, &media.electron_os, noise, 8),
@@ -137,14 +185,17 @@ fn change(rng: &mut Prng, model: Option<Model>) -> Change {
         _ => *rng.pick(&Model::ALL),
     };
     let channel = u8::try_from(rng.below(ANALOGUE_CHANNELS)).expect("four channels");
-    match rng.below(4) {
+    match rng.below(5) {
         0 => Change::Break(coin(rng)),
         1 => Change::Analogue(channel, rng.next_u16()),
         2 => Change::Fire(rng.next_u8() & FIRE_BUTTONS),
+        3 => Change::Joystick(u8::from(coin(rng)), rng.next_u8() & joystick::ALL),
         _ => Change::Key(
             match model {
                 Model::ModelB => ModelKey::ModelB(*rng.pick(bbc::keyboard::Key::ALL)),
                 Model::Electron => ModelKey::Electron(*rng.pick(electron::keyboard::Key::ALL)),
+                Model::C64 if rng.below(8) == 0 => ModelKey::C64(Keycap::Restore),
+                Model::C64 => ModelKey::C64(Keycap::Matrix(*rng.pick(&C64Key::ALL))),
             },
             coin(rng),
         ),
@@ -187,16 +238,26 @@ fn request<'a>(
     model: Option<Model>,
 ) -> Request<'a> {
     let drive = *rng.pick(&PhysicalDrive::ALL);
-    match rng.below(14) {
+    match rng.below(18) {
         0 => Request::Configure(Box::new(configuration(rng, media, noise))),
-        1 => Request::InsertDisc {
-            drive,
-            format: *rng.pick(&[ImageFormat::Ssd, ImageFormat::Dsd]),
-            write_protected: coin(rng),
-            image: either(rng, &media.disc, noise, 4),
-        },
+        1 => {
+            let format = *rng.pick(&DISC_FORMATS);
+            let real = match format {
+                DiscFormat::Acorn(_) => &media.disc,
+                DiscFormat::D64 | DiscFormat::G64 => &media.disk,
+            };
+            Request::InsertDisc {
+                drive,
+                format,
+                write_protected: coin(rng),
+                image: either(rng, real, noise, 4),
+            }
+        }
         2 => Request::EjectDisc(drive),
-        3 => Request::InsertTape(either(rng, TAPE, noise, 4)),
+        3 => {
+            let tape = *rng.pick(&[TAPE, TAP]);
+            Request::InsertTape(either(rng, tape, noise, 4))
+        }
         4 => Request::EjectTape,
         5 => Request::RewindTape,
         6 => Request::RecordTape(coin(rng)),
@@ -204,6 +265,10 @@ fn request<'a>(
         8 => Request::TakeSnapshot,
         9 => Request::RestoreSnapshot(either(rng, snapshot, noise, 4)),
         10 => Request::CollectDiscs([coin(rng), coin(rng)]),
+        11 => Request::Deck(*rng.pick(&[DeckKey::Play, DeckKey::Record, DeckKey::Stop])),
+        12 => Request::InsertCartridge(either(rng, &media.cartridge, noise, 4)),
+        13 => Request::RemoveCartridge,
+        14 => Request::LoadProgram(either(rng, PRG, noise, 4)),
         _ => {
             let cycles = 1 + u32::try_from(rng.at_most(MOST_CYCLES)).expect("small");
             Request::Run {
@@ -251,10 +316,13 @@ fn exchange(
     (frame, reply)
 }
 
-/// A client that has seen the worker configured as `model`, if any.
-fn client_of(model: Option<Model>) -> MachineClient {
+/// The machine a session's configure built: its model and its drives.
+type Session = (Model, [bool; 2]);
+
+/// A client that has seen the worker configured as `session`, if any.
+fn client_of(session: Option<Session>) -> MachineClient {
     let mut client = MachineClient::new();
-    if let Some(model) = model {
+    if let Some((model, drives)) = session {
         let configure = Request::Configure(Box::new(match model {
             Model::ModelB => Configuration::ModelB {
                 os: &[],
@@ -266,6 +334,14 @@ fn client_of(model: Option<Model>) -> MachineClient {
                 basic: &[],
                 plus1: None,
             },
+            Model::C64 => Configuration::C64 {
+                standard: Standard::Pal,
+                sid: sid::Model::Mos6581,
+                kernal: &[],
+                basic: &[],
+                character: &[],
+                drives: drives.map(|fitted| fitted.then_some(&[][..])),
+            },
         }));
         client.ask(&configure).expect("a new client is idle");
         client.sent();
@@ -275,13 +351,14 @@ fn client_of(model: Option<Model>) -> MachineClient {
 }
 
 /// The exchange's frames mutated: the request's handed to the worker, the
-/// reply's to a client that asked the same of a worker of `model`.
+/// reply's to a client that asked the same of a worker configured as
+/// `session`.
 fn mutations(
     rng: &mut Prng,
     service: &mut MachineService<HeapShare>,
     request: &Request<'_>,
     exchanged: (&[u8], &[u8]),
-    model: Option<Model>,
+    session: Option<Session>,
 ) {
     let (frame, reply) = exchanged;
     let sent = rng.mutated(frame);
@@ -292,7 +369,7 @@ fn mutations(
     );
     // A first configure the owner did not make would set the session's model
     // behind its client's back; once there is one, another model is refused.
-    if model.is_none() && matches!(decoded, Some(Request::Configure(_))) {
+    if session.is_none() && matches!(decoded, Some(Request::Configure(_))) {
         let share = HeapShare::new(SHARE_BYTES).expect("a share");
         answered(
             &mut MachineService::new(share).expect("a share large enough"),
@@ -304,10 +381,10 @@ fn mutations(
 
     let forged = rng.mutated(reply);
     canonical_reply(&forged);
-    let mut client = client_of(model);
+    let mut client = client_of(session);
     client.ask(request).expect("an idle client");
     client.sent();
-    let drives_held = model.is_some_and(Model::has_drives);
+    let drives = session.map_or([false; 2], |(_, drives)| drives);
     match (client.answer(&forged), request) {
         (Ok(Reply::Ran(ran)), Request::Run { cycles, sound, .. }) => {
             assert_eq!(
@@ -318,23 +395,27 @@ fn mutations(
                 *sound || ran.sound.is_empty(),
                 "sound believed only when asked"
             );
-            let model = model.expect("a slice believed only once configured");
+            let (model, _) = session.expect("a slice believed only once configured");
             assert!(
-                (model.has_shift_lock() || !ran.lights.shift_lock)
-                    && (drives_held
-                        || (ran.drives == [false; 2] && ran.loaded.discs == [false; 2])),
-                "lamps believed only of the model's"
+                (model.has_caps_lock() || !ran.lights.caps_lock)
+                    && (model.has_shift_lock() || !ran.lights.shift_lock)
+                    && (model.has_play_key() || !ran.loaded.playing)
+                    && (model == Model::C64 || !ran.loaded.cartridge)
+                    && (0..2)
+                        .all(|drive| drives[drive]
+                            || !(ran.drives[drive] || ran.loaded.discs[drive])),
+                "lamps believed only of the machine's"
             );
         }
-        (Ok(Reply::Media(media)), Request::CollectDiscs(drives)) => {
+        (Ok(Reply::Media(media)), Request::CollectDiscs(marked)) => {
+            let (model, _) = session.expect("media believed only once configured");
             assert!(
                 media.tape.is_none()
-                    && (drives_held || media.discs.is_empty())
-                    && media
-                        .discs
-                        .iter()
-                        .all(|written| drives[written.drive.index()]),
-                "a collect believed only of the drives it marks"
+                    && media.discs.iter().all(|written| {
+                        let drive = written.drive.index();
+                        marked[drive] && drives[drive] && written.format.model() == model
+                    }),
+                "a collect believed only of the drives it marks and the machine has"
             );
         }
         _ => {}
@@ -355,21 +436,27 @@ fn the_worker_answers_every_frame_and_the_owner_believes_only_answers() {
         let mut service = MachineService::new(share).expect("a share large enough");
         let mut client = MachineClient::new();
         let mut snapshot = Vec::new();
-        let mut model = None;
+        let mut session = None;
         for step in 0..SESSION {
             let len = rng.at_most(512);
             let noise = rng.noise(len);
             let request = if step == 0 && rng.below(8) != 0 {
                 Request::Configure(Box::new(configuration(&mut rng, &media, &noise)))
             } else {
-                request(&mut rng, &media, &snapshot, &noise, model)
+                request(
+                    &mut rng,
+                    &media,
+                    &snapshot,
+                    &noise,
+                    session.map(|(model, _)| model),
+                )
             };
             let (frame, reply) = exchange(&mut service, &mut client, &request);
-            mutations(&mut rng, &mut service, &request, (&frame, &reply), model);
+            mutations(&mut rng, &mut service, &request, (&frame, &reply), session);
             match (canonical_reply(&reply), &request) {
                 (Some(Reply::Snapshot(taken)), _) => snapshot = taken.to_vec(),
                 (Some(Reply::Done), Request::Configure(configuration)) => {
-                    model = Some(configuration.model());
+                    session = Some((configuration.model(), configuration.drives()));
                 }
                 _ => {}
             }

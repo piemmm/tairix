@@ -2,7 +2,8 @@
 //! and discs then show. The ROMs' tests drive the machine through these
 //! steps, and the recorded corpus (`plans/BEEB.md` §7) is a set of scenarios
 //! with the observations DFS 1.20, BASIC II and MOS 1.20 gave for them,
-//! replayed against the clean-room ROMs.
+//! replayed against the clean-room ROMs; [`c64`]'s, the Commodore 64's, with
+//! the originals' KERNAL, BASIC V2 and 1541 DOS.
 //!
 //! A script is steps separated by `;`: `type:` text, `\n` a RETURN; `press:`
 //! a key by its label, and `down:` and `up:` one held over the steps between;
@@ -19,6 +20,7 @@
 //! a character outside printable ASCII, and `disc <drive> <sha-256>` for each
 //! drive checked. `#` starts a comment line in either.
 
+pub mod c64;
 pub mod discs;
 
 use alloc::format;

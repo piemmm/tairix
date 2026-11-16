@@ -122,6 +122,16 @@ fn a_file_outside_the_application_is_never_named() {
 }
 
 #[test]
+fn a_control_character_ends_a_name_and_one_opening_it_starts_in_the_application() {
+    assert_eq!(files("IconSprites <Obey$Dir>.Icons|@Rest"), ["Icons"]);
+    assert_eq!(files("IconSprites <Obey$Dir>.Icons<7>Rest"), ["Icons"]);
+    assert!(files("IconSprites <Obey$Dir>.|@Icons").is_empty());
+    for opened in ["IconSprites |@.Icons", "IconSprites <0>.Icons"] {
+        assert_eq!(files(opened), ["Icons"], "{opened}");
+    }
+}
+
+#[test]
 fn each_file_is_named_once_and_comments_name_none() {
     let boot = "| IconSprites <Obey$Dir>.Commented\n\
                 IconSprites <Obey$Dir>.!Sprites\n\

@@ -135,6 +135,32 @@ pub fn refused_at_each<T, E: core::fmt::Debug>(
     }
 }
 
+/// [`refused_at_each`], with every run the heap's refusals still let complete
+/// answering what the unrefused one does: a refusal never passes for a
+/// smaller success.
+///
+/// # Panics
+///
+/// As [`refused_at_each`], and when a refused run completes with another
+/// answer.
+pub fn refused_at_each_or_whole<T: PartialEq + core::fmt::Debug, E: core::fmt::Debug>(
+    work: impl Fn() -> Result<T, E>,
+    refused: impl Fn(&E) -> bool,
+) {
+    let whole = work().expect("made with room to spare");
+    let ((), taken) = metered(|| work().map(drop).expect("made with room to spare"));
+    assert!(taken.allocations > 0, "no request to refuse");
+    for granted in 0..taken.allocations {
+        let (answer, metering) =
+            metered(|| refusing_after(granted, &work).map(|done| done == whole));
+        match answer {
+            Ok(same) => assert!(same, "a different answer at request {granted}"),
+            Err(error) => assert!(refused(&error), "{error:?} at request {granted}"),
+        }
+        assert_eq!(metering.retained, 0, "held past request {granted}");
+    }
+}
+
 /// The metered system allocator. Install it as a test binary's
 /// `#[global_allocator]`.
 pub struct Metered;

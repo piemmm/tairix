@@ -481,8 +481,27 @@ fn send_signal(pid: u32, signal: i32) {
     }
 }
 
-/// The signals that end xtask, each passed on to every live child first.
-const TERMINATING: [i32; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+/// The signals that end xtask, each passed on to every live child first, and
+/// their names.
+const TERMINATING: [(i32, &str); 4] = [
+    (libc::SIGINT, "SIGINT"),
+    (libc::SIGTERM, "SIGTERM"),
+    (libc::SIGHUP, "SIGHUP"),
+    (libc::SIGQUIT, "SIGQUIT"),
+];
+
+/// The signals [`TERMINATING`] names.
+fn terminating() -> [i32; 4] {
+    TERMINATING.map(|(signal, _)| signal)
+}
+
+/// `signal`'s name, which a run ends on.
+pub(crate) fn signal_name(signal: i32) -> String {
+    TERMINATING
+        .iter()
+        .find(|&&(ending, _)| ending == signal)
+        .map_or_else(|| format!("signal {signal}"), |&(_, name)| name.to_string())
+}
 
 /// Run `command` with the terminating signals taken as this module describes,
 /// a second ending xtask `grace` after its kill, and `report_grace` after that
@@ -515,7 +534,7 @@ fn forward_signals(
     grace: Duration,
     report_grace: Duration,
 ) -> Result<(), String> {
-    let taken: Vec<i32> = TERMINATING
+    let taken: Vec<i32> = terminating()
         .into_iter()
         .filter(|&signal| !ignored(signal))
         .collect();

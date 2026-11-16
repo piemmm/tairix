@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use crate::bus::{Abort, Bus, Fetch, Width};
 use crate::cpu::{Cpu, Exception, State, Stop};
 use crate::fpa::{self, Internal};
+use crate::mmu::PAGE_BITS;
 use crate::profile::Profile;
 
 /// The encoding's magic number and version.
@@ -130,14 +131,18 @@ pub enum DecodeError {
     BadFpa,
 }
 
-/// A vector with more transfers than the encoding counts: more than 255,
-/// which no single instruction makes.
+/// More vectors than the encoding counts, or a vector with more transfers:
+/// past `u32::MAX` vectors, or 255 transfers, which no single instruction
+/// makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TooLong;
 
 /// How a run departed from its vector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mismatch {
+    /// The vector's state before names a mode the profile lacks, so no
+    /// processor of the profile can be given it.
+    Unloadable(Box<State>),
     /// The transfer at this index differs, or one side has none there.
     Transfer {
         /// Which transfer.
@@ -385,14 +390,6 @@ struct Replay<'a> {
     made: Vec<Transfer>,
 }
 
-const fn mask(width: Width) -> u32 {
-    match width {
-        Width::Byte => 0xFF,
-        Width::Half => 0xFFFF,
-        Width::Word => u32::MAX,
-    }
-}
-
 impl Bus for Replay<'_> {
     /// The instruction's bytes where they lie in the word at `address`; a
     /// word holding none of them is unmapped.
@@ -415,6 +412,7 @@ impl Bus for Replay<'_> {
             Ok(Fetch {
                 word: u32::from_le_bytes(bytes),
                 host: false,
+                page: address >> PAGE_BITS,
             })
         } else {
             Err(Abort::Translation)
@@ -451,7 +449,7 @@ impl Bus for Replay<'_> {
             write: true,
             width,
             address,
-            data: value & mask(width),
+            data: value & width.mask(),
         });
         Ok(())
     }
@@ -461,11 +459,8 @@ impl Bus for Replay<'_> {
 /// what it did.
 pub fn check(profile: &'static Profile, vector: &Vector) -> Result<(), Mismatch> {
     let mut cpu = Cpu::new(profile, 0);
-    let unrepresentable = |_| Mismatch::Registers {
-        expected: Box::new(vector.after),
-        actual: Box::new(vector.before),
-    };
-    cpu.set_state(&vector.before).map_err(unrepresentable)?;
+    cpu.set_state(&vector.before)
+        .map_err(|_| Mismatch::Unloadable(Box::new(vector.before)))?;
     if let Some(case) = &vector.fpa {
         case.before.set(cpu.fpa_mut());
     }
@@ -500,7 +495,7 @@ pub fn check(profile: &'static Profile, vector: &Vector) -> Result<(), Mismatch>
                 want.write == got.write
                     && want.width == got.width
                     && want.address == got.address
-                    && want.data & mask(want.width) == got.data & mask(got.width)
+                    && want.data & want.width.mask() == got.data & got.width.mask()
             }
             _ => false,
         };

@@ -4,8 +4,7 @@ use tairix_fuzzseed::Prng;
 
 use super::*;
 use crate::fpu::real::{class, from_double, from_single, Class};
-
-const MODES: [Mode; 4] = [Mode::Nearest, Mode::Down, Mode::Up, Mode::Zero];
+use tairix_softfloat::exact::{add, divide, multiply, square_root, to_integer};
 
 /// A double's value as parts.
 fn parts(x: f64) -> Parts {
@@ -14,7 +13,7 @@ fn parts(x: f64) -> Parts {
 
 /// A rounded register result read back as a double, where it is a normal
 /// one the double holds exactly.
-fn double(x: Real) -> Option<f64> {
+fn double(x: Extended) -> Option<f64> {
     if class(x) != Class::Normal || x.sig & ((1 << 11) - 1) != 0 {
         return None;
     }
@@ -29,7 +28,7 @@ fn double(x: Real) -> Option<f64> {
 }
 
 /// A single's bits as a double holds them exactly.
-fn single(x: Real) -> Option<f32> {
+fn single(x: Extended) -> Option<f32> {
     if class(x) != Class::Normal || x.sig & ((1 << 40) - 1) != 0 {
         return None;
     }
@@ -53,8 +52,10 @@ fn random_double(rng: &mut Prng, spread: i32) -> f64 {
     f64::from_bits((sign << 63) | (field << 52) | fraction)
 }
 
-fn rounded(x: Exact, mode: Mode, bits: u32) -> Real {
-    round(x, Rounding { mode, bits }, flag::ALL).value.unwrap()
+fn rounded(x: Exact, mode: Mode, bits: u32) -> Extended {
+    round(x, Rounding::new(mode, bits).unwrap(), flag::ALL)
+        .value
+        .unwrap()
 }
 
 #[test]
@@ -78,7 +79,7 @@ fn sums_products_quotients_and_roots_round_as_ieee_doubles_do() {
         check(add(parts(a), parts(b), false), a + b);
         check(add(parts(a), parts(b), true), a - b);
         check(multiply(parts(a), parts(b)), a * b);
-        check(divide(parts(a), parts(b)), a / b);
+        check(divide(parts(a), parts(b)).unwrap(), a / b);
         check(square_root(parts(a.abs())), a.abs().sqrt());
     }
     assert!(checked > 90_000, "{checked}");
@@ -98,7 +99,7 @@ fn at_24_bits_they_round_as_ieee_singles_do() {
         for (exact, expected) in [
             (add(as_parts(a), as_parts(b), false), a + b),
             (multiply(as_parts(a), as_parts(b)), a * b),
-            (divide(as_parts(a), as_parts(b)), a / b),
+            (divide(as_parts(a), as_parts(b)).unwrap(), a / b),
             (square_root(as_parts(a.abs())), a.abs().sqrt()),
         ] {
             if expected == 0.0 || !expected.is_normal() {
@@ -111,199 +112,6 @@ fn at_24_bits_they_round_as_ieee_singles_do() {
                 "{a:e} {b:e}"
             );
         }
-    }
-}
-
-/// The 64-bit significand and exponent `magnitude × 2^scale` rounds to at
-/// `bits` in `mode`, `sticky` saying more lies below: rounded the long way,
-/// apart from the code under test.
-fn reference(
-    negative: bool,
-    magnitude: u128,
-    sticky: bool,
-    scale: i32,
-    bits: u32,
-    mode: Mode,
-) -> (u64, i32) {
-    let top = magnitude.ilog2();
-    let cut = i32::try_from(top + 1).unwrap() - i32::try_from(bits).unwrap();
-    let (mut kept, mut scale, below, half, exact) = if cut <= 0 {
-        let shift = u32::try_from(-cut).unwrap();
-        (
-            magnitude << shift,
-            scale - i32::try_from(shift).unwrap(),
-            0u128,
-            1u128,
-            !sticky,
-        )
-    } else {
-        let cut = u32::try_from(cut).unwrap();
-        let below = magnitude & ((1 << cut) - 1);
-        (
-            magnitude >> cut,
-            scale + i32::try_from(cut).unwrap(),
-            below,
-            1 << (cut - 1),
-            below == 0 && !sticky,
-        )
-    };
-    let up = match mode {
-        Mode::Nearest => below > half || (below == half && (sticky || kept & 1 == 1)),
-        Mode::Up => !exact && !negative,
-        Mode::Down => !exact && negative,
-        Mode::Zero => false,
-        Mode::NearestAway => below >= half,
-    };
-    if up {
-        kept += 1;
-        if kept >> bits != 0 {
-            kept >>= 1;
-            scale += 1;
-        }
-    }
-    let sig = u64::try_from(kept << (64 - bits)).unwrap();
-    (sig, scale + i32::try_from(bits).unwrap() - 1)
-}
-
-fn random_sig(rng: &mut Prng) -> u64 {
-    rng.next_u64() | INTEGER
-}
-
-#[test]
-fn sums_and_products_round_exactly_at_every_precision_and_mode() {
-    let mut rng = Prng::new(0x8087_0064);
-    for _ in 0..20_000 {
-        let (sa, sb) = (random_sig(&mut rng), random_sig(&mut rng));
-        let gap = i32::try_from(rng.below(60)).unwrap();
-        let negative = rng.next_u64() & 1 == 1;
-        let a = Parts {
-            negative: false,
-            exp: gap,
-            sig: sa,
-        };
-        let b = Parts {
-            negative,
-            exp: 0,
-            sig: sb,
-        };
-        // Exactly: sa × 2^gap ± sb, scaled by 2^-63.
-        let wide = u128::from(sa) << gap;
-        let (magnitude, sum_negative) = if negative {
-            if wide >= u128::from(sb) {
-                (wide - u128::from(sb), false)
-            } else {
-                (u128::from(sb) - wide, true)
-            }
-        } else {
-            (wide + u128::from(sb), false)
-        };
-        let product = u128::from(sa) * u128::from(sb);
-        for mode in MODES {
-            for bits in [24, 53, 64] {
-                if magnitude != 0 {
-                    let got = rounded(add(a, b, false), mode, bits);
-                    let (sig, exp) = reference(sum_negative, magnitude, false, -63, bits, mode);
-                    assert_eq!(
-                        (got.sig, i32::from(got.exponent()) - BIAS, got.negative()),
-                        (sig, exp, sum_negative)
-                    );
-                }
-                let got = rounded(multiply(a, b), mode, bits);
-                let (sig, exp) = reference(negative, product, false, gap - 126, bits, mode);
-                assert_eq!(
-                    (got.sig, i32::from(got.exponent()) - BIAS),
-                    (sig, exp),
-                    "{mode:?} {bits}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn quotients_round_exactly_at_every_precision_and_mode() {
-    let mut rng = Prng::new(0x8087_0D17);
-    for _ in 0..20_000 {
-        let (sa, sb) = (random_sig(&mut rng), random_sig(&mut rng));
-        // 67 quotient bits by restoring division, the integer bit first.
-        let (mut rest, divisor, mut q) = (u128::from(sa), u128::from(sb), 0u128);
-        for _ in 0..67 {
-            q <<= 1;
-            if rest >= divisor {
-                rest -= divisor;
-                q |= 1;
-            }
-            rest <<= 1;
-        }
-        let a = Parts {
-            negative: false,
-            exp: 0,
-            sig: sa,
-        };
-        let b = Parts {
-            negative: true,
-            exp: 5,
-            sig: sb,
-        };
-        for mode in MODES {
-            for bits in [24, 53, 64] {
-                let got = rounded(divide(a, b), mode, bits);
-                let (sig, exp) = reference(true, q, rest != 0, -66 - 5, bits, mode);
-                assert_eq!(
-                    (got.sig, i32::from(got.exponent()) - BIAS),
-                    (sig, exp),
-                    "{sa:#x}/{sb:#x} {mode:?} {bits}"
-                );
-            }
-        }
-    }
-}
-
-/// `x²` in 256 bits, high half first, for `x` below 2^66.
-fn square(x: u128) -> (u128, u128) {
-    let mask = u128::from(u64::MAX);
-    let (high, low) = (x >> 64, x & mask);
-    let middle = 2 * high * low;
-    let (low_part, carry) = (low * low).overflowing_add((middle & mask) << 64);
-    (high * high + (middle >> 64) + u128::from(carry), low_part)
-}
-
-#[test]
-fn square_roots_bracket_their_radicand_in_every_mode() {
-    let mut rng = Prng::new(0x8087_5097);
-    for _ in 0..20_000 {
-        let sig = random_sig(&mut rng);
-        let odd = rng.next_u64() & 1 == 1;
-        // x = sig × 2^(e − 63) in [1, 4); its root in [1, 2) is R × 2^-63,
-        // and R² against sig × 2^(63 + e).
-        let e = i32::from(odd);
-        let radicand = (0u128, u128::from(sig) << (63 + u32::from(odd)));
-        let x = Parts {
-            negative: false,
-            exp: e,
-            sig,
-        };
-        let root = |mode| {
-            let r = rounded(square_root(x), mode, 64);
-            assert_eq!(i32::from(r.exponent()) - BIAS, 0);
-            u128::from(r.sig)
-        };
-        let down = root(Mode::Down);
-        let up = root(Mode::Up);
-        assert!(square(down) <= radicand && radicand < square(down + 1));
-        assert!(square(up - 1) < radicand && radicand <= square(up));
-        assert_eq!(root(Mode::Zero), down);
-        // Nearest: below the midpoint's square, the root rounded down.
-        let quadruple = (
-            u128::from(sig) >> (63 - u32::from(odd)),
-            u128::from(sig) << (65 + u32::from(odd)),
-        );
-        let nearest = if down == up || square(2 * down + 1) > quadruple {
-            down
-        } else {
-            up
-        };
-        assert_eq!(root(Mode::Nearest), nearest);
     }
 }
 
@@ -353,14 +161,14 @@ fn an_overflow_answers_by_the_mode_and_infinity_when_chopping() {
             sig: INTEGER,
         })
     };
-    let finite = |negative| Real::new(negative, EXP_MAX, u64::MAX);
+    let finite = |negative| Extended::new(negative, EXP_MAX, u64::MAX);
     for (mode, negative, expected) in [
-        (Mode::Nearest, false, Real::INFINITY),
-        (Mode::Zero, true, Real::INFINITY.with_sign(true)),
-        (Mode::Up, false, Real::INFINITY),
+        (Mode::Nearest, false, Extended::INFINITY),
+        (Mode::Zero, true, Extended::INFINITY.with_sign(true)),
+        (Mode::Up, false, Extended::INFINITY),
         (Mode::Up, true, finite(true)),
         (Mode::Down, false, finite(false)),
-        (Mode::Down, true, Real::INFINITY.with_sign(true)),
+        (Mode::Down, true, Extended::INFINITY.with_sign(true)),
     ] {
         let result = round(huge(negative), Rounding::extended(mode), flag::ALL);
         assert_eq!(result.value, Some(expected), "{mode:?} {negative}");
@@ -369,15 +177,12 @@ fn an_overflow_answers_by_the_mode_and_infinity_when_chopping() {
     // At 24 bits the largest finite value has 24 ones.
     let result = round(
         huge(false),
-        Rounding {
-            mode: Mode::Down,
-            bits: 24,
-        },
+        Rounding::new(Mode::Down, 24).unwrap(),
         flag::ALL,
     );
     assert_eq!(
         result.value,
-        Some(Real::new(false, EXP_MAX, 0xFFFF_FF00_0000_0000))
+        Some(Extended::new(false, EXP_MAX, 0xFFFF_FF00_0000_0000))
     );
     // Unmasked: wrapped down, no precision flag.
     let result = round(
@@ -408,7 +213,7 @@ fn an_unnormal_operand_leaves_a_product_or_quotient_unnormal_and_a_sum_follows_t
     assert_eq!((x.exponent(), x.sig), (0x3FFF, INTEGER >> 2));
     // The divider's one place of normalisation, which a normal quotient
     // below one takes, leaves it unnormal still.
-    let x = rounded(divide(unnormal, one), Mode::Nearest, 64);
+    let x = rounded(divide(unnormal, one).unwrap(), Mode::Nearest, 64);
     assert_eq!((x.exponent(), x.sig), (0x3FFE, INTEGER >> 1));
     // The normal one is the larger: normalized.
     let x = rounded(add(unnormal, one, false), Mode::Nearest, 64);
@@ -430,7 +235,7 @@ fn an_unnormal_operand_leaves_a_product_or_quotient_unnormal_and_a_sum_follows_t
     };
     assert_eq!(
         rounded(add(pseudo, one, false), Mode::Nearest, 64),
-        Real::ONE
+        Extended::ONE
     );
 }
 
@@ -558,7 +363,7 @@ fn a_remainder_is_exact_and_partial_past_63_places() {
 
 #[test]
 fn an_exponent_far_past_every_format_still_rounds() {
-    for (exp, expected) in [(i32::MAX, Real::INFINITY), (i32::MIN, Real::ZERO)] {
+    for (exp, expected) in [(i32::MAX, Extended::INFINITY), (i32::MIN, Extended::ZERO)] {
         let x = Exact {
             negative: false,
             exp,

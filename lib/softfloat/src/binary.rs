@@ -8,12 +8,9 @@ use crate::extended::INTEGER;
 /// A binary interchange format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Binary {
-    /// Bits in the whole format.
-    pub width: u32,
-    /// Significand bits, the hidden integer bit counted.
-    pub precision: u32,
-    /// The exponent bias.
-    pub bias: i32,
+    width: u32,
+    precision: u32,
+    bias: i32,
 }
 
 /// What the bits of a binary value are.
@@ -49,7 +46,58 @@ pub enum Unpacked {
     },
 }
 
+/// What a binary value is, before its parts are needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Class {
+    /// A zero.
+    Zero,
+    /// A finite nonzero value, subnormals among them.
+    Finite,
+    /// An infinity.
+    Infinity,
+    /// A quiet NaN.
+    Quiet,
+    /// A signalling NaN.
+    Signalling,
+}
+
 impl Binary {
+    /// Bits in the whole format.
+    #[must_use]
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Significand bits, the hidden integer bit counted.
+    #[must_use]
+    pub const fn precision(self) -> u32 {
+        self.precision
+    }
+
+    /// The exponent bias.
+    #[must_use]
+    pub const fn bias(self) -> i32 {
+        self.bias
+    }
+
+    /// What `bits` are.
+    #[must_use]
+    pub const fn class(self, bits: u64) -> Class {
+        let magnitude = bits & !self.sign_bit();
+        let infinity = self.infinity(false);
+        if magnitude == 0 {
+            Class::Zero
+        } else if magnitude < infinity {
+            Class::Finite
+        } else if magnitude == infinity {
+            Class::Infinity
+        } else if bits & self.quiet_bit() != 0 {
+            Class::Quiet
+        } else {
+            Class::Signalling
+        }
+    }
+
     /// binary16, the half format.
     pub const HALF: Self = Self {
         width: 16,

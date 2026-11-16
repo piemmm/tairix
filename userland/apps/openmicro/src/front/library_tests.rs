@@ -7,6 +7,7 @@ use tairix_machines::{Kept, Library};
 
 use super::*;
 use crate::front::keys::Mapping;
+use crate::machine::c64::{sid, Standard};
 
 fn kept(machines: Vec<Machine>) -> Library<Machine> {
     let mut library = Library::new();
@@ -190,4 +191,78 @@ fn a_machine_is_described_by_its_model_and_what_it_adds() {
         **slots = core::array::from_fn(|_| Image::Empty);
     }
     assert_eq!(describe(&bare), "BBC Micro Model B");
+}
+
+fn a_c64(drives: usize) -> Machine {
+    Machine::new(
+        0,
+        String::from("Commodore"),
+        Fitting::c64(Standard::Pal, sid::Model::Mos6581, drives),
+    )
+}
+
+/// A C64, as made and as changed, reads back exactly from its record.
+#[test]
+fn a_commodore_reads_back_from_its_record() {
+    let mut changed = a_c64(2);
+    if let Fitting::C64 { standard, sid, .. } = &mut changed.fitting {
+        *standard = Standard::Ntsc;
+        *sid = sid::Model::Mos8580;
+    }
+    if let Some(image) = changed.fitting.socket_mut(Socket::Kernal) {
+        *image = Image::Installed(String::from("rom.jiffydos"));
+    }
+    changed.joystick = Joystick::Port1;
+    changed.folder = Some(String::from("Commodore"));
+    changed.discs[1] = Some(Held {
+        name: String::from("Games.d64"),
+        digest: None,
+    });
+    let library = kept(alloc::vec![a_c64(0), a_c64(1), changed]);
+    let record = library.record().expect("a record");
+    let read = Library::<Machine>::decode(&record.bytes).expect("it reads back");
+    assert_eq!(read.machines(), library.machines());
+}
+
+#[test]
+fn a_commodore_holds_discs_only_in_the_drives_it_has_and_lists_its_sockets() {
+    let mut one = a_c64(1);
+    one.folder = Some(String::from("Commodore"));
+    one.discs[1] = Some(Held {
+        name: String::from("Games.d64"),
+        digest: None,
+    });
+    assert_eq!(
+        one.invalid(),
+        Some(Invalid::Media),
+        "device 9 is not fitted"
+    );
+    one.discs.swap(0, 1);
+    assert_eq!(one.invalid(), None);
+    let sockets: Vec<Socket> = a_c64(2).fitting.sockets().map(|(s, _)| s).collect();
+    assert_eq!(
+        sockets,
+        [
+            Socket::Kernal,
+            Socket::C64Basic,
+            Socket::Character,
+            Socket::Dos(0),
+            Socket::Dos(1)
+        ]
+    );
+    assert_eq!(Socket::Dos(1).label(), "Drive 9's DOS");
+    let mut wrong = a_c64(1);
+    if let Some(image) = wrong.fitting.socket_mut(Socket::Kernal) {
+        *image = Image::Shipped(Shipped::Mos);
+    }
+    assert_eq!(
+        wrong.invalid(),
+        Some(Invalid::Fitting),
+        "an Acorn OS for a KERNAL"
+    );
+    assert_eq!(
+        describe(&a_c64(2)),
+        "Commodore 64 (PAL, 6581 SID) with two 1541s"
+    );
+    assert_eq!(describe(&a_c64(0)), "Commodore 64 (PAL, 6581 SID)");
 }

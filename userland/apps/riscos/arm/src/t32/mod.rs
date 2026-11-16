@@ -14,6 +14,7 @@ use crate::cond::Condition;
 use crate::encoding::layout::Field;
 use crate::instruction::{CallOp, EncodeError, Instruction, Op};
 use crate::isa::{Feature, Isa};
+use crate::word::low16;
 
 use form::Shape;
 use table::Row;
@@ -89,6 +90,9 @@ pub fn decode(first: u16, second: u16, isa: Isa, position: Position) -> Option<D
         if let Some(a32_word) = simdfp_word(word, isa) {
             return decode_simdfp(a32_word, isa, position);
         }
+        if isa.has(Feature::V6T2) && is_coprocessor(word) {
+            return decode_coprocessor(word, isa, position);
+        }
     }
     let detail = decode_detail(first, second, isa, position)?;
     let row = detail.row;
@@ -106,7 +110,7 @@ pub fn decode(first: u16, second: u16, isa: Isa, position: Position) -> Option<D
 /// and VFP's encodings are A32's with the condition `AL`, or unconditional.
 const fn simdfp_word(word: u32, isa: Isa) -> Option<u32> {
     let simd = isa.has(Feature::Simd);
-    let vfp = word >> 9 & 7 == 0b101 && isa.has(Feature::Vfp);
+    let vfp = isa.claims_coprocessor(word >> 8);
     match word >> 24 {
         0xEF if simd => Some(0xF200_0000 | (word & 0x00FF_FFFF)),
         0xFF if simd => Some(0xF300_0000 | (word & 0x00FF_FFFF)),
@@ -116,7 +120,14 @@ const fn simdfp_word(word: u32, isa: Isa) -> Option<u32> {
     }
 }
 
-/// The T32 word an A32 floating-point or Advanced SIMD encoding is.
+/// Whether the 32-bit T32 `word` lies in the coprocessor space, which A32's
+/// encodings share with the condition `AL`, or unconditional.
+const fn is_coprocessor(word: u32) -> bool {
+    matches!(word >> 24, 0xEC..=0xEE | 0xFC..=0xFE)
+}
+
+/// The T32 word an A32 floating-point, Advanced SIMD or coprocessor encoding
+/// is.
 const fn simdfp_thumb(word: u32) -> Option<u32> {
     match word >> 24 {
         0xF2 => Some(0xEF00_0000 | (word & 0x00FF_FFFF)),
@@ -142,6 +153,23 @@ fn decode_simdfp(a32_word: u32, isa: Isa, position: Position) -> Option<Decoded>
         },
         wide: true,
         unpredictable: !decoded.canonical || placed || crate::encoding::check::simdfp(&op, true),
+    })
+}
+
+/// A generic coprocessor instruction, decoded by A32's rows and placed by the
+/// `IT` block it stands in.
+fn decode_coprocessor(word: u32, isa: Isa, position: Position) -> Option<Decoded> {
+    let decoded = crate::a32::decode_coprocessor(word, isa)?;
+    let op = decoded.instruction.op;
+    Some(Decoded {
+        instruction: Instruction {
+            cond: position.condition(),
+            op,
+        },
+        wide: true,
+        unpredictable: !decoded.canonical
+            || check::placed(false, &op, position)
+            || check::coprocessor(&op),
     })
 }
 
@@ -212,17 +240,6 @@ pub enum Encoding {
     Wide(u16, u16),
 }
 
-impl Encoding {
-    /// The instruction's size in bytes.
-    #[must_use]
-    pub const fn bytes(self) -> u32 {
-        match self {
-            Self::Narrow(_) => 2,
-            Self::Wide(..) => 4,
-        }
-    }
-}
-
 /// The encoding sizes an encoder may choose from, as UAL's qualifiers ask
 /// for them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -243,8 +260,8 @@ pub fn encode(
     position: Position,
     size: Size,
 ) -> Result<Encoding, EncodeError> {
-    if let Op::SimdFp(_) = instruction.op {
-        return encode_simdfp(instruction, position, size);
+    if matches!(instruction.op, Op::SimdFp(_)) || instruction.op.kind().generic_coprocessor() {
+        return encode_by_a32(instruction, position, size);
     }
     let kind = instruction.op.kind();
     let mut too_large = false;
@@ -267,11 +284,11 @@ pub fn encode(
             continue;
         };
         let (encoding, first, second) = if row.wide {
-            let first = halfword(word >> 16);
-            let second = halfword(word);
+            let first = low16(word >> 16);
+            let second = low16(word);
             (Encoding::Wide(first, second), first, second)
         } else {
-            (Encoding::Narrow(halfword(word)), halfword(word), 0)
+            (Encoding::Narrow(low16(word)), low16(word), 0)
         };
         let Some(decoded) = decode(first, second, Isa::ALL, position) else {
             continue;
@@ -291,9 +308,9 @@ pub fn encode(
     })
 }
 
-/// A floating-point or Advanced SIMD instruction's encoding: A32's, its
-/// condition the one the `IT` block gives it.
-fn encode_simdfp(
+/// A floating-point, Advanced SIMD or generic coprocessor instruction's
+/// encoding: A32's, its condition the one the `IT` block gives it.
+fn encode_by_a32(
     instruction: &Instruction,
     position: Position,
     size: Size,
@@ -310,18 +327,17 @@ fn encode_simdfp(
         },
         op: instruction.op,
     };
-    let word = simdfp_thumb(crate::a32::encode(&a32)?).ok_or(EncodeError::Unencodable)?;
-    let (first, second) = (halfword(word >> 16), halfword(word));
+    let word = if let Op::SimdFp(_) = instruction.op {
+        crate::a32::encode(&a32)?
+    } else {
+        crate::a32::encode_coprocessor(&a32)?
+    };
+    let word = simdfp_thumb(word).ok_or(EncodeError::Unencodable)?;
+    let (first, second) = (low16(word >> 16), low16(word));
     match decode(first, second, Isa::ALL, position) {
         Some(decoded) if decoded.instruction == *instruction => Ok(Encoding::Wide(first, second)),
         _ => Err(EncodeError::Unencodable),
     }
-}
-
-/// The low halfword of `word`.
-const fn halfword(word: u32) -> u16 {
-    let bytes = word.to_le_bytes();
-    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 #[cfg(test)]

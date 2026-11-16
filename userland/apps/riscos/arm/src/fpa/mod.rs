@@ -1,10 +1,10 @@
 //! The FPA: the floating-point coprocessor RISC OS programs reach through
-//! coprocessors 1 and 2, computed as FPEmulator 4 computes it.
+//! coprocessors 1 and 2, answering as FPEmulator 4 answers.
 //!
 //! RISC OS 5 runs no FPA hardware: FPEmulator, the module that takes FPA
-//! instructions at the undefined instruction trap, defines every result its
-//! software sees. So each result here is the one FPEmulator produces, its
-//! choices among IEEE 754-1985's options and its quirks with them:
+//! instructions at the undefined instruction trap, defines what its software
+//! sees. So each result follows the FPA's data sheets, with FPEmulator's
+//! choices among IEEE 754-1985's options, observed black-box:
 //!
 //! - registers hold FPEmulator's internal format ([`Internal`]), which keeps
 //!   a single or double precision denormal, infinity or NaN in its own
@@ -15,18 +15,18 @@
 //! - an enabled exception writes nothing: the instruction stops with it, its
 //!   cumulative flag clear, for the session to raise as FPEmulator does.
 //!
-//! Where the FPA's data sheet leaves an operand's meaning undefined, and
-//! FPEmulator's answer is whatever its internal paths make of it, the
-//! operand is taken at its value: a `URD` result anywhere but `NRM`, and the
-//! marker of a single or double denormal with no fraction, a pattern only
-//! `LFM` of hand-made words loads, which is zero.
+//! Where FPEmulator is inexact the FPA is not: a transcendental value and a
+//! packed decimal conversion are rounded correctly.
 //!
-//! The arithmetic is `lib/softfloat`'s; the transcendental functions follow
-//! FPEmulator's own algorithms over that arithmetic.
+//! Where the data sheet leaves an operand's meaning undefined, the operand is
+//! taken at its value: a `URD` result anywhere but `NRM`, and the marker of a
+//! single or double denormal with no fraction, a pattern only `LFM` of
+//! hand-made words loads, which is zero.
+//!
+//! The arithmetic is `lib/softfloat`'s.
 
 mod arith;
 mod internal;
-mod machine;
 mod packed;
 mod trans;
 mod transfer;

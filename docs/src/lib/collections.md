@@ -25,7 +25,7 @@ enough that the ordered set is the cheaper structure.
 | `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry | a cache's `(tick -> key)` `BTreeMap` eviction index, O(log n) on all three |
 | `OrderedMap<K, V>` | ordered lookup, insertion and removal, each a descent of a B-tree's height comparing at most five keys a level; reads and removals allocate nothing, an insertion is all or nothing, and room for a run of them is reserved ahead | `alloc`'s `BTreeMap`, whose insertion cannot refuse for want of memory |
 | `OrderedSet<T>` | the same, over a zero-sized value | `alloc`'s `BTreeSet`, likewise |
-| `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion that refuses an overlap, and first-fit placement over the gaps | a `base -> length` `BTreeMap` plus a hand-written overlap probe, and the occupancy bitmap a window scanned to place |
+| `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion that refuses an overlap, and placement over the gaps, lowest-first or highest-first | a `base -> length` `BTreeMap` plus a hand-written overlap probe, and the occupancy bitmap a window scanned to place |
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts | a run set built by hand per subsystem, and the free-list that fragmented beside a live-region map |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
 | `ByteQueue` | a byte FIFO under its holder's bound, kept as one contiguous run; amortised O(1) per byte, storage committed up front or as bytes arrive, and wiped before it is given back | the session frame arena `lib/sandbox` carried privately, and the SSH transport's three stream buffers |
@@ -302,7 +302,10 @@ first-fit over the gaps *between* what the window has already handed out. That
 is the whole free-space representation: a released range is available again the
 moment its record leaves, two released neighbours serve one larger request
 between them, and there is no free-list or occupancy bitmap to fall out of step
-with the live records.
+with the live records. `first_free` asks where `place` would put a run without
+placing it; `last_free` asks for the top of the highest gap that fits, for a
+window handed out downward from its end, and walks down from that end, so it
+costs the runs above the gap it finds.
 
 It replaced both halves of that mistake. The anonymous placement window kept a
 released-hole map beside its live-region map, and the two holes a pair of

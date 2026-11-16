@@ -9,12 +9,12 @@ fn op(group: u8, modrm: u8) -> u16 {
     (u16::from(group) << 8) | u16::from(modrm)
 }
 
-fn real(x: f64) -> Real {
+fn real(x: f64) -> Extended {
     from_double(x.to_bits()).0
 }
 
 /// A register file with `values` pushed in order, so the last is ST(0).
-fn with(values: &[Real]) -> Registers {
+fn with(values: &[Extended]) -> Registers {
     let mut regs = Registers::default();
     for &x in values {
         regs.push(x);
@@ -22,7 +22,7 @@ fn with(values: &[Real]) -> Registers {
     regs
 }
 
-fn st(regs: &Registers, i: u8) -> Real {
+fn st(regs: &Registers, i: u8) -> Extended {
     regs.data[regs.physical(i)]
 }
 
@@ -118,12 +118,12 @@ fn each_group_decodes_to_its_instruction() {
 
 #[test]
 fn a_push_onto_a_full_stack_is_invalid() {
-    let mut regs = with(&[Real::ONE; 8]);
+    let mut regs = with(&[Extended::ONE; 8]);
     let done = run(&mut regs, 1, 0xE8);
     assert_eq!(done.raised, flag::INVALID);
     assert_eq!(st(&regs, 0), INDEFINITE);
     // Unmasked, nothing moves.
-    let mut regs = with(&[Real::ONE; 8]);
+    let mut regs = with(&[Extended::ONE; 8]);
     unmask(&mut regs, flag::INVALID);
     let top = regs.top();
     run(&mut regs, 1, 0xE8);
@@ -132,20 +132,20 @@ fn a_push_onto_a_full_stack_is_invalid() {
 
 #[test]
 fn an_empty_operand_is_invalid_and_answers_the_indefinite() {
-    let mut regs = with(&[Real::ONE]);
+    let mut regs = with(&[Extended::ONE]);
     let done = run(&mut regs, 0, 0xC1);
     assert_eq!(done.raised, flag::INVALID);
     assert_eq!(st(&regs, 0), INDEFINITE);
     // FXCH with an empty register: the empty one becomes the indefinite.
-    let mut regs = with(&[Real::ONE]);
+    let mut regs = with(&[Extended::ONE]);
     run(&mut regs, 1, 0xC9);
-    assert_eq!((st(&regs, 0), st(&regs, 1)), (INDEFINITE, Real::ONE));
+    assert_eq!((st(&regs, 0), st(&regs, 1)), (INDEFINITE, Extended::ONE));
 }
 
 #[test]
 fn any_nan_operand_is_invalid_the_larger_nan_answered() {
-    let small = Real::new(false, 0x7FFF, INTEGER | 1);
-    let large = Real::new(true, 0x7FFF, INTEGER | 0x100);
+    let small = Extended::new(false, 0x7FFF, INTEGER | 1);
+    let large = Extended::new(true, 0x7FFF, INTEGER | 0x100);
     let mut regs = with(&[large, small]);
     let done = run(&mut regs, 0, 0xC1);
     assert_eq!(done.raised, flag::INVALID);
@@ -158,20 +158,20 @@ fn any_nan_operand_is_invalid_the_larger_nan_answered() {
 
 #[test]
 fn infinity_is_projective_until_affine_is_asked_for() {
-    let mut regs = with(&[Real::INFINITY, Real::INFINITY]);
+    let mut regs = with(&[Extended::INFINITY, Extended::INFINITY]);
     assert_eq!(run(&mut regs, 0, 0xC1).raised, flag::INVALID);
-    let mut regs = with(&[Real::INFINITY, Real::INFINITY]);
+    let mut regs = with(&[Extended::INFINITY, Extended::INFINITY]);
     regs.control |= 0x1000;
     assert_eq!(run(&mut regs, 0, 0xC1).raised, 0);
-    assert_eq!(st(&regs, 0), Real::INFINITY);
+    assert_eq!(st(&regs, 0), Extended::INFINITY);
     // Compared projectively, infinity equals itself and nothing else.
-    let mut regs = with(&[Real::INFINITY.with_sign(true), Real::INFINITY]);
+    let mut regs = with(&[Extended::INFINITY.with_sign(true), Extended::INFINITY]);
     run(&mut regs, 0, 0xD1);
     assert_eq!(codes(&regs), cc::C3);
-    let mut regs = with(&[Real::ONE, Real::INFINITY]);
+    let mut regs = with(&[Extended::ONE, Extended::INFINITY]);
     assert_eq!(run(&mut regs, 0, 0xD1).raised, flag::INVALID);
     assert_eq!(codes(&regs), cc::COMPARE);
-    let mut regs = with(&[Real::ONE, Real::INFINITY]);
+    let mut regs = with(&[Extended::ONE, Extended::INFINITY]);
     regs.control |= 0x1000;
     run(&mut regs, 0, 0xD1);
     assert_eq!(codes(&regs), 0, "greater");
@@ -193,10 +193,10 @@ fn compares_set_the_codes_and_pop_as_they_say() {
     run(&mut regs, 6, 0xD9);
     assert_eq!((codes(&regs), regs.top()), (0, 0), "greater, popped twice");
     // +0 and -0 are equal; a pseudo-zero is a zero.
-    let mut regs = with(&[Real::ZERO.with_sign(true)]);
+    let mut regs = with(&[Extended::ZERO.with_sign(true)]);
     run(&mut regs, 1, 0xE4);
     assert_eq!(codes(&regs), cc::C3);
-    let mut regs = with(&[Real::new(false, 0x4000, 0)]);
+    let mut regs = with(&[Extended::new(false, 0x4000, 0)]);
     run(&mut regs, 1, 0xE4);
     assert_eq!(codes(&regs), cc::C3);
     // FICOM with a word integer.
@@ -207,23 +207,23 @@ fn compares_set_the_codes_and_pop_as_they_say() {
 
 #[test]
 fn fxam_tells_each_class_and_honours_the_tag() {
-    let check = |x: Real, expected: u16| {
+    let check = |x: Extended, expected: u16| {
         let mut regs = with(&[x]);
         run(&mut regs, 1, 0xE5);
         assert_eq!(codes(&regs), expected, "{x:?}");
     };
-    check(Real::ONE, cc::C2);
+    check(Extended::ONE, cc::C2);
     check(real(-1.0), cc::C2 | cc::C1);
-    check(Real::new(false, 0x4000, 1), 0);
-    check(Real::INFINITY, cc::C2 | cc::C0);
+    check(Extended::new(false, 0x4000, 1), 0);
+    check(Extended::INFINITY, cc::C2 | cc::C0);
     check(INDEFINITE, cc::C1 | cc::C0);
-    check(Real::ZERO, cc::C3);
-    check(Real::new(false, 0, 5), cc::C3 | cc::C2);
+    check(Extended::ZERO, cc::C3);
+    check(Extended::new(false, 0, 5), cc::C3 | cc::C2);
     let mut regs = Registers::default();
     run(&mut regs, 1, 0xE5);
     assert_eq!(codes(&regs) & !cc::C1, cc::C3 | cc::C0, "empty");
     // A register tagged zero is a zero, whatever it holds.
-    let mut regs = with(&[Real::ONE]);
+    let mut regs = with(&[Extended::ONE]);
     let physical = regs.physical(0);
     regs.set_tag(physical, tag::ZERO);
     run(&mut regs, 1, 0xE5);
@@ -238,7 +238,7 @@ fn the_constants_are_truncated_whatever_the_rounding_mode() {
         run(&mut regs, 1, 0xEB);
         assert_eq!(
             st(&regs, 0),
-            Real::new(false, 0x4000, 0xC90F_DAA2_2168_C234)
+            Extended::new(false, 0x4000, 0xC90F_DAA2_2168_C234)
         );
         run(&mut regs, 1, 0xEA);
         assert_eq!(st(&regs, 0).sig, 0xB8AA_3B29_5C17_F0BB);
@@ -266,38 +266,38 @@ fn precision_control_rounds_arithmetic_only() {
 fn a_difference_of_equals_is_plus_zero_but_minus_rounding_down() {
     let mut regs = with(&[real(1.5), real(1.5)]);
     run(&mut regs, 0, 0xE1);
-    assert_eq!(st(&regs, 0), Real::ZERO);
+    assert_eq!(st(&regs, 0), Extended::ZERO);
     let mut regs = with(&[real(1.5), real(1.5)]);
     regs.control |= 0x0400;
     run(&mut regs, 0, 0xE1);
-    assert_eq!(st(&regs, 0), Real::ZERO.with_sign(true));
+    assert_eq!(st(&regs, 0), Extended::ZERO.with_sign(true));
 }
 
 #[test]
 fn division_by_zero_or_by_an_unnormal() {
-    let mut regs = with(&[Real::ZERO, real(-2.0)]);
+    let mut regs = with(&[Extended::ZERO, real(-2.0)]);
     run(&mut regs, 0, 0xF1);
-    assert_eq!(st(&regs, 0), Real::INFINITY.with_sign(true));
-    let mut regs = with(&[Real::ZERO, real(2.0)]);
+    assert_eq!(st(&regs, 0), Extended::INFINITY.with_sign(true));
+    let mut regs = with(&[Extended::ZERO, real(2.0)]);
     unmask(&mut regs, flag::ZERO_DIVIDE);
     assert_eq!(run(&mut regs, 0, 0xF1).raised, flag::ZERO_DIVIDE);
     assert_eq!(st(&regs, 0), real(2.0), "unmasked: left as it was");
-    let mut regs = with(&[Real::ZERO, Real::ZERO]);
+    let mut regs = with(&[Extended::ZERO, Extended::ZERO]);
     assert_eq!(run(&mut regs, 0, 0xF1).raised, flag::INVALID);
-    let mut regs = with(&[Real::new(false, 0x3FFF, 1 << 62), real(2.0)]);
+    let mut regs = with(&[Extended::new(false, 0x3FFF, 1 << 62), real(2.0)]);
     assert_eq!(run(&mut regs, 0, 0xF1).raised, flag::INVALID);
     // A denormal divisor is invalid, not denormal.
-    let mut regs = with(&[Real::new(false, 0, 1), real(2.0)]);
+    let mut regs = with(&[Extended::new(false, 0, 1), real(2.0)]);
     assert_eq!(run(&mut regs, 0, 0xF1).raised, flag::INVALID);
 }
 
 #[test]
 fn a_denormal_operand_is_flagged_and_worked_on_as_its_unnormal() {
-    let tiny = Real::new(false, 0, INTEGER >> 1);
-    let mut regs = with(&[tiny, Real::ONE]);
+    let tiny = Extended::new(false, 0, INTEGER >> 1);
+    let mut regs = with(&[tiny, Extended::ONE]);
     let done = run(&mut regs, 0, 0xC1);
     assert_eq!(done.raised, flag::DENORMAL | flag::PRECISION);
-    assert_eq!(st(&regs, 0), Real::ONE);
+    assert_eq!(st(&regs, 0), Extended::ONE);
     // Masked, it costs 33 clocks more; unmasked, the add never happens.
     assert_eq!(done.clocks, 85 + 33);
     let mut regs = with(&[tiny, real(2.0)]);
@@ -308,12 +308,12 @@ fn a_denormal_operand_is_flagged_and_worked_on_as_its_unnormal() {
     let mut regs = Registers::default();
     let done = run_memory(&mut regs, 1, 0, &1u32.to_le_bytes());
     assert_eq!(done.raised, flag::DENORMAL);
-    assert_eq!(st(&regs, 0), Real::new(false, 0x3FFF - 126, 1 << 40));
+    assert_eq!(st(&regs, 0), Extended::new(false, 0x3FFF - 126, 1 << 40));
 }
 
 #[test]
 fn square_roots_refuse_what_the_8087_refuses() {
-    let root = |x: Real, affine: bool| {
+    let root = |x: Extended, affine: bool| {
         let mut regs = with(&[x]);
         if affine {
             regs.control |= 0x1000;
@@ -323,34 +323,34 @@ fn square_roots_refuse_what_the_8087_refuses() {
     };
     assert_eq!(root(real(2.25), false), (real(1.5), 0));
     assert_eq!(
-        root(Real::ZERO.with_sign(true), false),
-        (Real::ZERO.with_sign(true), 0)
+        root(Extended::ZERO.with_sign(true), false),
+        (Extended::ZERO.with_sign(true), 0)
     );
     assert_eq!(root(real(-1.0), false), (INDEFINITE, flag::INVALID));
     assert_eq!(
-        root(Real::new(false, 0x4000, 1 << 62), false).1,
+        root(Extended::new(false, 0x4000, 1 << 62), false).1,
         flag::INVALID
     );
-    assert_eq!(root(Real::INFINITY, false), (INDEFINITE, flag::INVALID));
-    assert_eq!(root(Real::INFINITY, true), (Real::INFINITY, 0));
+    assert_eq!(root(Extended::INFINITY, false), (INDEFINITE, flag::INVALID));
+    assert_eq!(root(Extended::INFINITY, true), (Extended::INFINITY, 0));
 }
 
 #[test]
 fn binary_stores_refuse_an_unnormal_in_range_and_keep_a_nan_a_nan() {
-    let mut regs = with(&[Real::new(false, 0x3FFF, 1 << 62)]);
+    let mut regs = with(&[Extended::new(false, 0x3FFF, 1 << 62)]);
     let done = execute(Insn::Store(Format::Double, true), &mut regs, &[], Some(0));
     assert_eq!(done.raised, flag::INVALID);
     assert_eq!(
         done.store.unwrap().data(),
         &indefinite(Binary::DOUBLE).to_le_bytes()
     );
-    let mut regs = with(&[Real::new(false, 0x7FFF, INTEGER | 1)]);
+    let mut regs = with(&[Extended::new(false, 0x7FFF, INTEGER | 1)]);
     let done = execute(Insn::Store(Format::Single, false), &mut regs, &[], Some(0));
     let bits = u32::from_le_bytes(done.store.unwrap().data().try_into().unwrap());
     assert_eq!(bits & 0x7F80_0000, 0x7F80_0000);
     assert_ne!(bits & 0x007F_FFFF, 0, "still a NaN");
     // An unmasked overflow stores nothing and pops nothing.
-    let mut regs = with(&[Real::new(false, 0x7FF0, INTEGER)]);
+    let mut regs = with(&[Extended::new(false, 0x7FF0, INTEGER)]);
     unmask(&mut regs, flag::OVERFLOW);
     let done = execute(Insn::Store(Format::Single, true), &mut regs, &[], Some(0));
     assert_eq!(
@@ -361,7 +361,7 @@ fn binary_stores_refuse_an_unnormal_in_range_and_keep_a_nan_a_nan() {
 
 #[test]
 fn integer_stores_round_check_their_range_and_store_the_indefinite() {
-    let store = |x: Real, format: Format| {
+    let store = |x: Extended, format: Format| {
         let mut regs = with(&[x]);
         let done = execute(Insn::Store(format, false), &mut regs, &[], Some(0));
         (done.store.map(|s| s.data().to_vec()), done.raised)
@@ -380,14 +380,14 @@ fn integer_stores_round_check_their_range_and_store_the_indefinite() {
         (Some(vec![0, 0x80]), 0)
     );
     assert_eq!(
-        store(Real::ZERO.with_sign(true), Format::Int32),
+        store(Extended::ZERO.with_sign(true), Format::Int32),
         (Some(vec![0; 4]), 0)
     );
     assert_eq!(
-        store(Real::new(false, 0x4000, 1 << 62), Format::Int32).1,
+        store(Extended::new(false, 0x4000, 1 << 62), Format::Int32).1,
         flag::INVALID
     );
-    assert_eq!(store(Real::INFINITY, Format::Int64).1, flag::INVALID);
+    assert_eq!(store(Extended::INFINITY, Format::Int64).1, flag::INVALID);
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn fprem_gives_the_quotients_low_bits_and_reports_an_incomplete_reduction() {
     run(&mut regs, 1, 0xF8);
     assert_eq!(codes(&regs) & cc::C2, cc::C2, "incomplete");
     // An unnormal modulus is invalid.
-    let mut regs = with(&[Real::new(false, 0x4000, 1 << 62), real(5.0)]);
+    let mut regs = with(&[Extended::new(false, 0x4000, 1 << 62), real(5.0)]);
     assert_eq!(run(&mut regs, 1, 0xF8).raised, flag::INVALID);
 }
 
@@ -439,9 +439,9 @@ fn frndint_rounds_in_the_mode_and_takes_a_pseudo_zero_for_zero() {
         assert_eq!(run(&mut regs, 1, 0xFC).raised, flag::PRECISION);
         assert_eq!(st(&regs, 0), real(expected), "{x} in mode {rc}");
     }
-    let mut regs = with(&[Real::new(true, 0x5000, 0)]);
+    let mut regs = with(&[Extended::new(true, 0x5000, 0)]);
     run(&mut regs, 1, 0xFC);
-    assert_eq!(st(&regs, 0), Real::ZERO.with_sign(true));
+    assert_eq!(st(&regs, 0), Extended::ZERO.with_sign(true));
 }
 
 #[test]
@@ -449,11 +449,11 @@ fn fscale_scales_by_the_chopped_power_and_raises_no_precision() {
     let mut regs = with(&[real(-3.7), real(1.5)]);
     run(&mut regs, 1, 0xFD);
     assert_eq!(st(&regs, 0), real(1.5 / 8.0));
-    let mut regs = with(&[Real::INFINITY, real(1.0)]);
+    let mut regs = with(&[Extended::INFINITY, real(1.0)]);
     assert_eq!(run(&mut regs, 1, 0xFD).raised, flag::INVALID);
-    let mut regs = with(&[real(2.0), Real::INFINITY]);
+    let mut regs = with(&[real(2.0), Extended::INFINITY]);
     assert_eq!(run(&mut regs, 1, 0xFD).raised, 0);
-    assert_eq!(st(&regs, 0), Real::INFINITY);
+    assert_eq!(st(&regs, 0), Extended::INFINITY);
     // Down into the denormals: underflow, but no precision exception.
     let mut regs = with(&[real(-16_400.0), real(1.0 + 2.0f64.powi(-52))]);
     let done = run(&mut regs, 1, 0xFD);
@@ -466,13 +466,16 @@ fn fxtract_splits_a_value_and_gives_two_zeros_for_zero() {
     let mut regs = with(&[real(-12.0)]);
     run(&mut regs, 1, 0xF4);
     assert_eq!((st(&regs, 0), st(&regs, 1)), (real(-1.5), real(3.0)));
-    let mut regs = with(&[Real::ZERO.with_sign(true)]);
+    let mut regs = with(&[Extended::ZERO.with_sign(true)]);
     run(&mut regs, 1, 0xF4);
     assert_eq!(
         (st(&regs, 0), st(&regs, 1)),
-        (Real::ZERO.with_sign(true), Real::ZERO.with_sign(true))
+        (
+            Extended::ZERO.with_sign(true),
+            Extended::ZERO.with_sign(true)
+        )
     );
-    let mut regs = with(&[Real::INFINITY]);
+    let mut regs = with(&[Extended::INFINITY]);
     assert_eq!(run(&mut regs, 1, 0xF4).raised, flag::INVALID);
 }
 
@@ -485,9 +488,12 @@ fn the_transcendentals_answer_exactly_where_the_value_is_exact() {
     let mut regs = with(&[real(1.0)]);
     assert_eq!(run(&mut regs, 1, 0xF0).raised, 0, "2^1 - 1");
     assert_eq!(st(&regs, 0), real(1.0));
-    let mut regs = with(&[Real::ZERO]);
+    let mut regs = with(&[Extended::ZERO]);
     run(&mut regs, 1, 0xF2);
-    assert_eq!((st(&regs, 0), st(&regs, 1)), (Real::ONE, Real::ZERO));
+    assert_eq!(
+        (st(&regs, 0), st(&regs, 1)),
+        (Extended::ONE, Extended::ZERO)
+    );
     // FPTAN past 2^63: C2 set, the operand left alone.
     let mut regs = with(&[real(2.0f64.powi(70))]);
     run(&mut regs, 1, 0xF2);
@@ -495,9 +501,9 @@ fn the_transcendentals_answer_exactly_where_the_value_is_exact() {
     // FYL2X of a negative is invalid; of zero a zero divide.
     let mut regs = with(&[real(1.0), real(-2.0)]);
     assert_eq!(run(&mut regs, 1, 0xF1).raised, flag::INVALID);
-    let mut regs = with(&[real(1.0), Real::ZERO]);
+    let mut regs = with(&[real(1.0), Extended::ZERO]);
     assert_eq!(run(&mut regs, 1, 0xF1).raised, flag::ZERO_DIVIDE);
-    assert_eq!(st(&regs, 0), Real::INFINITY.with_sign(true));
+    assert_eq!(st(&regs, 0), Extended::INFINITY.with_sign(true));
 }
 
 #[test]
@@ -518,7 +524,7 @@ fn fmul_by_a_short_operand_takes_its_faster_row() {
 
 #[test]
 fn the_stack_pointer_moves_and_ffree_empties() {
-    let mut regs = with(&[Real::ONE]);
+    let mut regs = with(&[Extended::ONE]);
     run(&mut regs, 1, 0xF6);
     assert_eq!(regs.top(), 6);
     run(&mut regs, 1, 0xF7);

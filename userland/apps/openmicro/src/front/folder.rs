@@ -8,8 +8,13 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::media::{disc_ending, tape_ending, Purpose};
 use super::menu::{Offered, FOLDER_ROWS};
-use crate::media::disc::{SECTORS_PER_TRACK, TRACK_BYTES};
+use crate::machine::Model;
+use crate::media::c1541::{d64, layout::NAME_BYTES};
+use crate::media::disc::{ImageFormat, SECTORS_PER_TRACK, TRACK_BYTES};
+use crate::media::tap;
+use crate::worker::protocol::DiscFormat;
 
 /// The longest name a folder or a file of it is given.
 const MAX_NAME: usize = 64;
@@ -80,25 +85,50 @@ pub fn blank_disc() -> Vec<u8> {
     image
 }
 
-/// A blank tape: a UEF image of nothing.
+/// What a blank medium for `purpose` on a `model`'s machine is named, before
+/// its number, and its ending; `None` for what is not a disc or tape.
 #[must_use]
-pub fn blank_tape() -> Vec<u8> {
-    UEF_HEADER.to_vec()
+pub const fn blank_name(purpose: Purpose, model: Model) -> Option<(&'static str, &'static str)> {
+    match (purpose, model) {
+        (Purpose::Disc(_), Model::C64) => Some(("Disk", disc_ending(DiscFormat::D64))),
+        (Purpose::Disc(_), _) => Some(("Disc", disc_ending(DiscFormat::Acorn(ImageFormat::Ssd)))),
+        (Purpose::Tape, model) => Some(("Tape", tape_ending(model))),
+        _ => None,
+    }
 }
 
-/// Whether `name` is a disc image, by its ending.
-fn is_disc(name: &str) -> bool {
-    ends_with(name, &[".ssd", ".dsd"])
+/// A blank medium for `purpose` on a `model`'s machine, made as the file
+/// `name`: an empty DFS disc, a 1541 disk formatted with the file's name and
+/// an ID of its own, or a tape of nothing.
+#[must_use]
+pub fn blank_image(purpose: Purpose, model: Model, name: &str) -> Vec<u8> {
+    match (purpose, model) {
+        (Purpose::Disc(_), Model::C64) => d64::formatted(&disk_name(name), disk_id(name)),
+        (Purpose::Disc(_), _) => blank_disc(),
+        (_, Model::C64) => tap::Tape::blank().encode(),
+        _ => UEF_HEADER.to_vec(),
+    }
 }
 
-/// Whether `name` is a tape image, by its ending.
-fn is_tape(name: &str) -> bool {
-    ends_with(name, &[".uef", ".csw"])
+/// A 1541 disk's name from the file `name`: its stem's letters, digits and
+/// spaces, the letters capitals, as the upper-case set shows them.
+fn disk_name(name: &str) -> Vec<u8> {
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    stem.bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric() || *byte == b' ')
+        .map(|byte| byte.to_ascii_uppercase())
+        .take(usize::from(NAME_BYTES))
+        .collect()
 }
 
-fn ends_with(name: &str, endings: &[&str]) -> bool {
-    let lower = name.to_ascii_lowercase();
-    endings.iter().any(|ending| lower.ends_with(ending))
+/// An ID for the disk made as the file `name`, two letters or digits from
+/// its digest, so disks made in turn tell themselves apart to a DOS.
+fn disk_id(name: &str) -> [u8; 2] {
+    const SYMBOLS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let digest = digest(name.as_bytes());
+    digest[..2].try_into().map_or(*b"00", |pair: [u8; 2]| {
+        pair.map(|byte| SYMBOLS[usize::from(byte) % SYMBOLS.len()])
+    })
 }
 
 /// `name` as it sorts whatever its case.
@@ -106,12 +136,22 @@ fn folded(name: &str) -> impl Iterator<Item = char> + '_ {
     name.chars().flat_map(char::to_lowercase)
 }
 
-/// What a folder holding `names` offers a machine: its disc and tape images
-/// in name order, at most [`FOLDER_ROWS`] of each.
+/// What a folder holding `names` offers a `model`'s machine fitted with
+/// `drives`: the disc and tape images it takes, in name order, at most
+/// [`FOLDER_ROWS`] of each.
 #[must_use]
-pub fn offered(names: &[String]) -> Offered {
-    let mut discs: Vec<String> = names.iter().filter(|n| is_disc(n)).cloned().collect();
-    let mut tapes: Vec<String> = names.iter().filter(|n| is_tape(n)).cloned().collect();
+pub fn offered(names: &[String], model: Model, drives: [bool; 2]) -> Offered {
+    let purpose = |name: &String| Purpose::of(name, model, drives);
+    let mut discs: Vec<String> = names
+        .iter()
+        .filter(|name| matches!(purpose(name), Some(Purpose::Disc(_))))
+        .cloned()
+        .collect();
+    let mut tapes: Vec<String> = names
+        .iter()
+        .filter(|name| purpose(name) == Some(Purpose::Tape))
+        .cloned()
+        .collect();
     for list in [&mut discs, &mut tapes] {
         list.sort_unstable_by(|a, b| folded(a).cmp(folded(b)).then_with(|| a.cmp(b)));
         list.truncate(FOLDER_ROWS);

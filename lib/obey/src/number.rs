@@ -2,6 +2,11 @@
 //! `&` and hex, or `base_digits` in any base from 2 to 36 — and the signed
 //! decimal every integer is written in.
 
+use alloc::vec::Vec;
+
+use tairix_util::fallible;
+use tairix_util::fmt::format_i32;
+
 use crate::Error;
 
 /// How [`read_unsigned`] reads a number: `OS_ReadUnsigned`'s flags.
@@ -104,50 +109,11 @@ pub fn read_unsigned(text: &[u8], how: Reading) -> Result<(u64, usize), Error> {
     Ok((value, end))
 }
 
-/// An integer in signed decimal, as RISC OS writes one: `-` before a negative
+/// `n` in signed decimal, as RISC OS writes an integer: `-` before a negative
 /// one, no leading zeros, `0` for zero.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Decimal {
-    bytes: [u8; 11],
-    len: u8,
-}
-
-impl Decimal {
-    /// `n` written out.
-    #[must_use]
-    pub fn of(n: i32) -> Self {
-        let mut digits = [0u8; 10];
-        let mut magnitude = n.unsigned_abs();
-        let mut count = 0;
-        loop {
-            digits[count] = b'0' + u8::try_from(magnitude % 10).unwrap_or(0);
-            count += 1;
-            magnitude /= 10;
-            if magnitude == 0 {
-                break;
-            }
-        }
-        let mut bytes = [0u8; 11];
-        let mut len = 0;
-        if n < 0 {
-            bytes[0] = b'-';
-            len = 1;
-        }
-        for &d in digits[..count].iter().rev() {
-            bytes[len] = d;
-            len += 1;
-        }
-        Self {
-            bytes,
-            len: u8::try_from(len).unwrap_or(11),
-        }
-    }
-
-    /// The text.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
-    }
+pub(crate) fn decimal(n: i32) -> Result<Vec<u8>, Error> {
+    let mut text = [0; 12];
+    fallible::copied(format_i32(n, &mut text).as_bytes()).ok_or(Error::SystemHeapFull)
 }
 
 #[cfg(test)]
@@ -215,9 +181,9 @@ mod tests {
 
     #[test]
     fn integers_are_written_in_signed_decimal() {
-        assert_eq!(Decimal::of(0).as_bytes(), b"0");
-        assert_eq!(Decimal::of(-5).as_bytes(), b"-5");
-        assert_eq!(Decimal::of(i32::MIN).as_bytes(), b"-2147483648");
-        assert_eq!(Decimal::of(i32::MAX).as_bytes(), b"2147483647");
+        assert_eq!(decimal(0).as_deref(), Ok(&b"0"[..]));
+        assert_eq!(decimal(-5).as_deref(), Ok(&b"-5"[..]));
+        assert_eq!(decimal(i32::MIN).as_deref(), Ok(&b"-2147483648"[..]));
+        assert_eq!(decimal(i32::MAX).as_deref(), Ok(&b"2147483647"[..]));
     }
 }

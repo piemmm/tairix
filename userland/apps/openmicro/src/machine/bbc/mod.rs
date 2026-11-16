@@ -9,7 +9,6 @@ pub mod serial;
 pub mod sound;
 pub mod teletext;
 pub mod ula;
-pub mod via;
 pub mod video;
 
 #[cfg(test)]
@@ -44,8 +43,10 @@ use fdc::{Fdc, PhysicalDrive};
 use keyboard::{Key, Keyboard};
 use serial::SerialUla;
 use sound::Sn76489;
-use via::Via;
 use video::{Signal, Video};
+
+/// The 6522, as the machine clocks it.
+type Via = crate::machine::via::Via<crate::machine::via::HalfRate>;
 
 /// The bits of ROM select that choose a slot.
 const ROMSEL_MASK: u8 = 0x0F;
@@ -827,12 +828,6 @@ impl Machine {
     pub fn set_key(&mut self, key: Key, down: bool) {
         self.board
             .change_keyboard(|keyboard| keyboard.set(key, down));
-    }
-
-    /// Release every key: what the keyboard is left with when the window
-    /// loses focus mid-press.
-    pub fn release_keys(&mut self) {
-        self.board.change_keyboard(Keyboard::release_all);
     }
 
     /// The startup options the keyboard links set; the OS reads them at a

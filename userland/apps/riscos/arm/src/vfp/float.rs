@@ -5,7 +5,9 @@
 
 use core::cmp::Ordering;
 
-use tairix_softfloat::{Binary, Flags, Ieee, Integral, Mode, Nans, Outcome, Policy, Tininess};
+use tairix_softfloat::{
+    Binary, Class, Flags, Ieee, Integral, Mode, Nans, Outcome, Policy, Tininess,
+};
 
 use super::fpscr;
 
@@ -36,32 +38,6 @@ const fn raised(flags: Flags) -> u32 {
         out |= fpscr::IXC;
     }
     out
-}
-
-/// What a value of a format is, as the unit's special cases need it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Class {
-    Zero,
-    Finite,
-    Infinity,
-    Quiet,
-    Signalling,
-}
-
-const fn class(format: Binary, bits: u64) -> Class {
-    let magnitude = bits & !format.sign_bit();
-    let infinity = format.infinity(false);
-    if magnitude == 0 {
-        Class::Zero
-    } else if magnitude < infinity {
-        Class::Finite
-    } else if magnitude == infinity {
-        Class::Infinity
-    } else if bits & format.quiet_bit() != 0 {
-        Class::Quiet
-    } else {
-        Class::Signalling
-    }
 }
 
 /// A comparison Advanced SIMD makes, which answers a lane's truth.
@@ -231,30 +207,11 @@ impl Unit {
         }
     }
 
-    /// The NaN an operation over `operands` answers, if any is one: the first
-    /// signalling one quieted, else the first quiet one, or the default.
+    /// The NaN an operation over `operands` answers, if any is one.
     fn nans(&mut self, format: Binary, operands: &[u64]) -> Option<u64> {
-        let mut chosen = None;
-        let mut signalled = false;
-        for &op in operands {
-            match class(format, op) {
-                Class::Signalling if !signalled => {
-                    signalled = true;
-                    chosen = Some(op);
-                }
-                Class::Quiet if chosen.is_none() => chosen = Some(op),
-                _ => {}
-            }
-        }
-        if signalled {
-            self.flags |= fpscr::IOC;
-        }
-        let chosen = chosen?;
-        Some(if self.default_nan {
-            format.default_nan()
-        } else {
-            chosen | format.quiet_bit()
-        })
+        let outcome = self.ieee(format).nan_among(operands)?;
+        self.flags |= raised(outcome.flags);
+        Some(outcome.bits)
     }
 
     /// `VMAX`: the greater, a zero of each sign giving positive zero.
@@ -273,7 +230,7 @@ impl Unit {
             return nan;
         }
         if matches!(
-            (class(format, a), class(format, b)),
+            (format.class(a), format.class(b)),
             (Class::Zero, Class::Zero)
         ) {
             let (left, right) = (format.negative(a), format.negative(b));
@@ -415,7 +372,7 @@ impl Unit {
     fn round_alternative(&mut self, from: Binary, a: u64) -> u64 {
         let negative = from.negative(a);
         let largest = u64::from(negative) << 15 | 0x7FFF;
-        match class(from, a) {
+        match from.class(a) {
             Class::Quiet | Class::Signalling => {
                 self.flags |= fpscr::IOC;
                 return u64::from(negative) << 15;
@@ -462,7 +419,7 @@ impl Unit {
         let negative = a >> 31 != 0;
         let sign = a & 0x8000_0000;
         let magnitude = a & 0x7FFF_FFFF;
-        match class(format, bits) {
+        match format.class(bits) {
             Class::Infinity => return sign,
             Class::Zero => {
                 self.flags |= fpscr::DZC;
@@ -499,7 +456,7 @@ impl Unit {
             return crate::word::low(nan);
         }
         let a = crate::word::low(bits);
-        match class(format, bits) {
+        match format.class(bits) {
             Class::Zero => {
                 self.flags |= fpscr::DZC;
                 return (a & 0x8000_0000) | 0x7F80_0000;
@@ -555,7 +512,7 @@ impl Unit {
         if let Some(nan) = self.nans(format, &[a, b]) {
             return Err(nan);
         }
-        Ok(match (class(format, a), class(format, b)) {
+        Ok(match (format.class(a), format.class(b)) {
             (Class::Infinity, Class::Zero) | (Class::Zero, Class::Infinity) => 0,
             _ => self.mul(format, a, b),
         })
@@ -566,8 +523,8 @@ impl Unit {
 const fn number_operands(format: Binary, a: u64, b: u64, greatest: bool) -> (u64, u64) {
     let loser = format.infinity(greatest);
     match (
-        matches!(class(format, a), Class::Quiet),
-        matches!(class(format, b), Class::Quiet),
+        matches!(format.class(a), Class::Quiet),
+        matches!(format.class(b), Class::Quiet),
     ) {
         (true, false) => (loser, b),
         (false, true) => (a, loser),

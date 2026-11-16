@@ -8,7 +8,7 @@ use core::cmp::Ordering;
 use tairix_fuzzseed::Prng;
 
 use crate::{
-    fpa_words, from_fpa_words, Binary, Extended, Flags, Ieee, Integral, Mode, Nans, Policy,
+    fpa_words, from_fpa_words, Binary, Class, Extended, Flags, Ieee, Integral, Mode, Nans, Policy,
     Tininess,
 };
 
@@ -430,7 +430,7 @@ fn rounding_to_an_integral_value_follows_the_mode() {
 fn integers_convert_in_each_mode() {
     let fp = double(Mode::Nearest);
     assert_eq!(
-        fp.to_integer(f64::to_bits(-2.5), Mode::NearestAway),
+        fp.to_fixed(f64::to_bits(-2.5), 0, Mode::NearestAway),
         Integral::Value {
             negative: true,
             magnitude: 3,
@@ -438,24 +438,27 @@ fn integers_convert_in_each_mode() {
         }
     );
     assert_eq!(
-        fp.to_integer(f64::to_bits(2.5), Mode::Nearest),
+        fp.to_fixed(f64::to_bits(2.5), 0, Mode::Nearest),
         Integral::Value {
             negative: false,
             magnitude: 2,
             inexact: true,
         }
     );
-    assert_eq!(fp.to_integer(f64::NAN.to_bits(), Mode::Zero), Integral::Nan);
     assert_eq!(
-        fp.to_integer(f64::to_bits(1e30), Mode::Zero),
+        fp.to_fixed(f64::NAN.to_bits(), 0, Mode::Zero),
+        Integral::Nan
+    );
+    assert_eq!(
+        fp.to_fixed(f64::to_bits(1e30), 0, Mode::Zero),
         Integral::OutOfRange { negative: false }
     );
-    assert_eq!(fp.from_integer(true, 3).bits, f64::to_bits(-3.0));
-    let big = fp.from_integer(false, u64::MAX);
+    assert_eq!(fp.from_fixed(true, 3, 0).bits, f64::to_bits(-3.0));
+    let big = fp.from_fixed(false, u64::MAX, 0);
     assert_eq!(big.bits, f64::to_bits(18_446_744_073_709_551_616.0));
     assert_eq!(big.flags, Flags::INEXACT);
     assert_eq!(
-        fp.from_integer(true, 0).bits,
+        fp.from_fixed(true, 0, 0).bits,
         0,
         "an integer zero is positive"
     );
@@ -527,7 +530,7 @@ fn comparisons_order_values_and_raise_invalid_on_nans_as_asked() {
 }
 
 #[test]
-fn the_extended_value_has_the_x87_and_fpa_memory_layouts() {
+fn the_extended_value_has_the_x87_memory_layout() {
     let x = Extended::new(true, 0x4000, 0xC000_0000_0000_0001);
     assert_eq!(
         x.to_bytes(),
@@ -535,13 +538,6 @@ fn the_extended_value_has_the_x87_and_fpa_memory_layouts() {
         "the significand first, then sign and exponent"
     );
     assert_eq!(Extended::from_bytes(x.to_bytes()), x);
-    assert_eq!(x.to_fpa_words(), [0x8000_4000, 0xC000_0000, 0x0000_0001]);
-    assert_eq!(Extended::from_fpa_words(x.to_fpa_words()), x);
-    assert_eq!(
-        Extended::from_fpa_words([0x7FFF_8000 | 0x4000, 0x8000_0000, 0]),
-        Extended::new(false, 0x4000, 0x8000_0000_0000_0000),
-        "bits 30 to 15 of the first word are not the value's"
-    );
     assert_eq!(
         Extended::from_int(-6),
         Extended::new(true, 0x4001, 0xC000_0000_0000_0000)
@@ -627,10 +623,6 @@ fn fixed_point_values_convert_with_one_rounding() {
     assert_eq!(rounded.bits, 0xBF80_0000);
     assert_eq!(rounded.flags, Flags::INEXACT);
     assert_eq!(fp.from_fixed(true, 0, 16).bits, 0, "zero is positive");
-    assert_eq!(
-        fp.from_integer(false, 5).bits,
-        fp.from_fixed(false, 5, 0).bits
-    );
     let quarter = 0x3E80_0000;
     assert_eq!(
         fp.to_fixed(quarter, 4, Mode::Nearest),
@@ -649,8 +641,38 @@ fn fixed_point_values_convert_with_one_rounding() {
             inexact: true
         }
     );
+}
+
+#[test]
+fn a_value_s_class_and_the_nan_its_operation_answers() {
+    let format = Binary::SINGLE;
+    for (bits, class) in [
+        (0x8000_0000, Class::Zero),
+        (0x0000_0001, Class::Finite),
+        (0x7F7F_FFFF, Class::Finite),
+        (0xFF80_0000, Class::Infinity),
+        (0x7FC0_0000, Class::Quiet),
+        (0x7F80_0001, Class::Signalling),
+    ] {
+        assert_eq!(format.class(bits), class, "{bits:08X}");
+    }
+    let fp = single(Mode::Nearest);
+    assert_eq!(fp.nan_among(&[0x3F80_0000, 0xFF80_0000]), None, "no NaN");
+    let quiet = fp.nan_among(&[0x3F80_0000, 0x7FC0_0001, 0x7F80_0002]);
     assert_eq!(
-        fp.to_integer(0x4040_0000, Mode::Down),
-        fp.to_fixed(0x4040_0000, 0, Mode::Down)
+        quiet.map(|outcome| (outcome.bits, outcome.flags)),
+        Some((0x7FC0_0002, Flags::INVALID)),
+        "the signalling one quieted, and invalid"
+    );
+    let fp = Ieee {
+        policy: Policy {
+            nans: Nans::Default,
+            ..ARM
+        },
+        ..fp
+    };
+    assert_eq!(
+        fp.nan_among(&[0xFFC1_2345]).map(|outcome| outcome.bits),
+        Some(Binary::SINGLE.default_nan())
     );
 }

@@ -1,15 +1,15 @@
 //! Running: each statement in turn, from a typed line or the program, its
 //! keyword's handler chosen by token.
 
-use tairix_bbcbasic::basic2;
-use tairix_bbcbasic::keyword::{word, Word, PSEUDO_LHS};
+use tairix_openbasic::basic2;
+use tairix_openbasic::keyword::{word, Word, PSEUDO_LHS};
 
 use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
 use crate::rom::os::{entry, CR, ESCAPE_FLAG};
 
-/// The first statement token.
-const FIRST_STATEMENT: u8 = basic2::AUTO.token;
+/// The token of the first statement, the first command too.
+pub(super) const FIRST_STATEMENT: u8 = basic2::AUTO.token;
 
 /// The commands, AUTO to SAVE, in token order from the first: as BASIC II
 /// has them, only a typed line's first keyword, and a Syntax error anywhere
@@ -24,7 +24,7 @@ pub(super) const COMMANDS: [(Word<u8>, &str); 8] = [
     (basic2::RENUMBER, "statement_renumber"),
     (basic2::SAVE, "statement_save"),
 ];
-const _: () = assert!(super::in_token_order(FIRST_COMMAND, &COMMANDS));
+const _: () = assert!(super::in_token_order(FIRST_STATEMENT, &COMMANDS));
 
 /// The statements, by token.
 const HANDLED: [(u8, &str); 49] = [
@@ -396,6 +396,3 @@ fn tables(a: &mut Asm) {
         a.byte(hi(sym(handler) + -1));
     }
 }
-
-/// The token of the first command.
-pub(super) const FIRST_COMMAND: u8 = FIRST_STATEMENT;

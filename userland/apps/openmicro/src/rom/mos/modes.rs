@@ -3,9 +3,9 @@
 //! Electron's seven through its ULA's mode field.
 
 use super::latch;
+use super::Model;
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::electron::control;
-use crate::machine::Model;
 use crate::rom::asm::{hi, lo, Asm, Byte};
 
 /// What one mode is.

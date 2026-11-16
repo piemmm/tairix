@@ -6,7 +6,7 @@
 //! first, the record's length and its text; a CR and &FF end it, TOP just
 //! past them.
 
-use tairix_bbcbasic::{basic2, lineref, program};
+use tairix_openbasic::{basic2, lineref, program};
 
 use super::crunch::{FROM, NUMBER, REFERENCE, WRITE};
 use super::list::LINE;
@@ -170,7 +170,7 @@ fn prompt(a: &mut Asm) {
     // A command only as the line's first keyword.
     a.jsr("next_a");
     a.sec();
-    a.sbc(imm(super::exec::FIRST_COMMAND));
+    a.sbc(imm(super::exec::FIRST_STATEMENT));
     let statement = a.local();
     a.bcc(statement);
     a.cmp(imm(byte(super::exec::COMMANDS.len())));

@@ -57,7 +57,9 @@ fn the_text_and_teletext_modes_are_not_graphic() {
         assert_eq!(mode.graphic(), !text.contains(&number), "mode {number}");
     }
     let teletext = MODES[7];
-    assert!(teletext.flags.has(Flags::TELETEXT | Flags::FULL_PALETTE));
+    assert!(teletext.flags.has(Flags::TELETEXT));
+    assert!(teletext.flags.has(Flags::FULL_PALETTE));
+    assert!(!Flags::TELETEXT.has(Flags::TELETEXT.union(Flags::FULL_PALETTE)));
     assert_eq!(
         (teletext.width, teletext.height, teletext.ncolour),
         (640, 500, 255)

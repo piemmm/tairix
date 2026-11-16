@@ -2,7 +2,7 @@ use super::*;
 
 /// The glyph RISC OS's arrangement gives `code`.
 fn risc_os(code: u8) -> Glyph {
-    RISC_OS[usize::from(code - FIRST)]
+    *risc_os_glyph(code).expect("a drawn character")
 }
 
 #[test]
@@ -13,7 +13,7 @@ fn a_glyph_s_rows_are_its_drawing_s() {
     );
     assert_eq!(risc_os(127), [0xFF; 8], "RISC OS's solid block");
     assert_eq!(
-        BBC[usize::from(127 - FIRST)],
+        *bbc_glyph(127).expect("drawn"),
         [0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55]
     );
 }
@@ -21,7 +21,7 @@ fn a_glyph_s_rows_are_its_drawing_s() {
 #[test]
 fn the_bbc_s_arrangement_is_risc_os_s_but_for_96_and_127() {
     for code in FIRST..=127 {
-        let bbc = BBC[usize::from(code - FIRST)];
+        let bbc = *bbc_glyph(code).expect("drawn");
         match code {
             96 => assert_eq!(bbc, risc_os(163), "the pound sign"),
             127 => assert_ne!(bbc, risc_os(127)),
@@ -69,4 +69,19 @@ fn an_accented_letter_keeps_its_letter_below_its_accent() {
         assert_eq!(risc_os(letter)[..2], [0, 0]);
         assert_ne!(risc_os(accented)[..2], [0, 0]);
     }
+}
+
+#[test]
+fn only_the_drawn_characters_have_glyphs() {
+    assert_eq!(risc_os_glyph(FIRST - 1), None, "a control code");
+    assert!(risc_os_glyph(255).is_some());
+    assert_eq!(bbc_glyph(128), None, "past the BBC's set");
+    assert_eq!(bbc_glyph(FIRST), Some(&BBC[0]));
+    assert_eq!(
+        draw([
+            "#.......", ".......#", "........", "........", "........", "........", "........",
+            "########"
+        ]),
+        [0x80, 0x01, 0, 0, 0, 0, 0, 0xFF]
+    );
 }

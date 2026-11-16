@@ -193,6 +193,7 @@ plan's ledger. A `blocked` row names its blocker.
 | PDF | The `lib/pdf` reader and opening PDFs in Draw and View.app (`plans/PDF.md`) | in progress |
 | BROWSER | The first-party web browser, its JavaScript engine, and the TLS, HTTP, text-shaping and URL facilities it needs (`plans/BROWSER.md`) | planned |
 | BEEB | The Open Micro emulator `OpenMicro.app` — the BBC Micro Model B and the Acorn Electron with its Plus 1 — and their clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs (`plans/BEEB.md`) | blocked: BB18 needs a corpus of real software images a developer holds outside the tree |
+| C64 | The Commodore 64 in `OpenMicro.app` — the 6510, VIC-II, CIAs, SID, datasette, cartridges and a true 1541 — and its clean-room KERNAL, BASIC V2, character and 1541 DOS ROMs (`plans/C64.md`) | in progress |
 | PCEMU | `PCEmulator.app`, the PC/XT-class emulator up to the 80186, TAIRiX DOS, and the BR26 code installation its translator needs (`plans/PCEMU.md`) | in progress |
 | RISCOS-EMULATOR | `RISCOSEmulator.app`: RISC OS applications on the TAIRiX desktop — the ARM processor, a first-party RISC OS, BBC BASIC V and VI, the Wimp and Toolbox, machine mode for software that drives the Acorn chips, the translator, and the shared libraries and desktop facilities they need (`plans/RISCOS-EMULATOR.md`) | in progress |
 
@@ -334,11 +335,11 @@ SPIR-V, each `lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6),
 `lib/video` (the one VP8 codec, which a lossy WebP picture and a screen
 recording are made of, and the WebM container a recording is kept in,
 `plans/CAPTURE.md`),
-`lib/softfloat` (the one software floating point — exact binary32, binary64
-and double-extended arithmetic rounded once in every IEEE 754 mode with its
-exceptions, and the x87 and FPA memory layouts — which PCEmulator's 8087
-computes through, `lib/drawing` stores a Draw file's doubles by, and the RISC
-OS emulator's FPA and VFP are to compute through, `plans/RISCOS-EMULATOR.md`
+`lib/softfloat` (the one software floating point — exact binary16, binary32,
+binary64 and double-extended arithmetic rounded once in every IEEE 754 mode
+with its exceptions, and the x87 and FPA memory layouts — which PCEmulator's
+8087 and the RISC OS emulator's FPA, VFP and Advanced SIMD compute through and
+`lib/drawing` stores a Draw file's doubles by, `plans/RISCOS-EMULATOR.md`
 RO5),
 `lib/obey` (the one reading of RISC OS's command-line machinery — GSTrans,
 system variables and their expansion, `OS_EvaluateExpression`,
@@ -346,11 +347,11 @@ system variables and their expansion, `OS_EvaluateExpression`,
 file read as data without running it — through which `lib/icon` reads an
 application's `!Boot`, and the RISC OS emulator's kernel and registry are to,
 `plans/RISCOS-EMULATOR.md` RO6),
-`lib/bbcbasic` (the one definition of BBC BASIC's tokens — the keywords BASIC
-II and BASIC V share, each dialect's table, tokeniser and lister under
-`LISTO`, the line-reference encoding and the program image — from which
-OpenMicro's BASIC ROM builds its keyword table and token values, and which
-the RISC OS emulator's BASIC and TextEdit are to use,
+`lib/openbasic` (OpenBASIC, the one definition of the tokens compatible with
+BBC BASIC — the keywords BASIC II and BASIC V share, each dialect's table,
+tokeniser and lister under `LISTO`, the line-reference encoding and the
+program image — from which OpenMicro's BASIC ROM builds its keyword table and
+token values, and which the RISC OS emulator's BASIC and TextEdit are to use,
 `plans/RISCOS-EMULATOR.md` RO7),
 `lib/vdu` (the one Acorn VDU vocabulary — the control codes with their
 parameter counts, VDU 23's operations, RISC OS 5's numbered modes with their
@@ -1065,9 +1066,10 @@ lives in the charter.
   the sprite decoder share the VDU codes, the numbered modes and one system
   font, so each is defined once.
 
-- **2026-11-14 — §3: `lib/bbcbasic`.** OpenMicro's BASIC II and the RISC OS
+- **2026-11-14 — §3: `lib/openbasic`.** OpenMicro's BASIC II and the RISC OS
   emulator's BASIC V share most of their tokens, so the tables, tokenisers
-  and listers are written once beside each other.
+  and listers are written once beside each other, under a name that claims
+  compatibility with BBC BASIC and never the BBC's making.
 
 - **2026-11-14 — §3: `lib/obey`.** The icon library reads a `!Boot` and the
   emulator's kernel runs the same commands, so RISC OS's string, variable and

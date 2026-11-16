@@ -140,14 +140,14 @@ pub const TARGETS: &[Target] = &[
         description: "lib/obey: hostile strings, expressions, templates and Obey files through GSTrans, the evaluator, OS_ReadArgs, OS_SubstituteArgs and the read-only reading; escapes round-trip, arithmetic agrees",
     },
     Target {
-        package: "tairix-bbcbasic",
-        test: "fuzz_bbcbasic",
-        description: "lib/bbcbasic: hostile text tokenised and hostile tokens listed in BASIC II and BASIC V under every LISTO, bounded however deep the structures; hostile program images read, and read lines imaged back",
+        package: "tairix-openbasic",
+        test: "fuzz_openbasic",
+        description: "lib/openbasic: hostile text tokenised and hostile tokens listed in BASIC II and BASIC V under every LISTO, bounded however deep the structures; hostile program images read, and read lines imaged back",
     },
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_arm",
-        description: "userland/apps/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks",
+        description: "userland/apps/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks, and over the guest MMU without writing a host page or storing into a watched granule unreported",
     },
     Target {
         package: "tairix-riscos-arm",
@@ -157,12 +157,12 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_simdfp",
-        description: "userland/apps/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather",
+        description: "userland/apps/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather; any built with hostile numbers encoded, shown and judged without a panic",
     },
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_mmu",
-        description: "userland/apps/riscos/arm guest MMU: random runs of frame, mapping, space, watch and access operations over TLB-aliasing pages, each answer held to a TLB-free reference model",
+        description: "userland/apps/riscos/arm guest MMU: random runs of frame, mapping, space, watch and access operations over TLB-aliasing pages and frame numbers past any limit, each answer held to a TLB-free reference model",
     },
     Target {
         package: "tairix-riscos-kernel",
@@ -626,19 +626,19 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-openmicro",
         test: "fuzz_media",
         description:
-            "Open Micro disc and tape image decode (untrusted SSD/DSD images, UEF chunks, CSW pulses stored or zlib-compressed, gzip members) + disc and UEF round trips",
+            "Open Micro disc, tape, cartridge and program image decode (untrusted SSD/DSD, D64/G64, UEF chunks, CSW pulses stored or zlib-compressed, gzip members, TAP pulses, CRT chips, PRG and T64) + disc, D64, UEF and TAP round trips",
     },
     Target {
         package: "tairix-openmicro",
         test: "fuzz_snapshot",
         description:
-            "Open Micro snapshot restore on the Model B and the Electron (untrusted container, sections, every device's fields and times) + hostile guest code driving every device",
+            "Open Micro snapshot restore on the Model B, the Electron and the Commodore 64 (untrusted container, sections, every device's fields and times, drives, disks, tapes, cartridges) + hostile guest code driving every device",
     },
     Target {
         package: "tairix-openmicro",
         test: "fuzz_worker",
         description:
-            "Open Micro machine worker protocol for either model (untrusted requests into the sandboxed worker's service, untrusted replies into the owner's client) + canonical encodings",
+            "Open Micro machine worker protocol for every model (untrusted requests into the sandboxed worker's service, untrusted replies into the owner's client) + canonical encodings",
     },
     Target {
         package: "tairix-machines",
@@ -1253,277 +1253,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn net_stack_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_net_stack"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-net");
-    }
-
-    #[test]
-    fn arxfs_mount_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_mount"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-drv-fs-arxfs");
-    }
-
-    #[test]
-    fn machine_library_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_library"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-machines");
-    }
-
-    #[test]
-    fn openmicro_harnesses_are_registered() {
-        for target in ["fuzz_media", "fuzz_snapshot", "fuzz_worker"] {
-            let opts = parse(&argv(&["--target", target])).expect("flag parses");
-            let chosen = selected(&opts).expect("known target");
-            assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "tairix-openmicro");
-        }
-    }
-
-    #[test]
-    fn compress_decode_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_compress"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-compress");
-    }
-
-    #[test]
-    fn obey_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_obey"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-obey");
-    }
-
-    #[test]
-    fn bbcbasic_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_bbcbasic"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-bbcbasic");
-    }
-
-    #[test]
-    fn arm_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_arm"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-riscos-arm");
-    }
-
-    #[test]
-    fn softfloat_decimal_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_decimal"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-softfloat");
-    }
-
-    #[test]
-    fn deflate_harnesses_are_registered() {
-        for target in ["fuzz_inflate", "fuzz_zlib", "fuzz_gzip"] {
-            let opts = parse(&argv(&["--target", target])).expect("flag parses");
-            let chosen = selected(&opts).expect("known target");
-            assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "tairix-compress");
-        }
-    }
-
-    #[test]
-    fn ssh_harnesses_are_registered() {
-        for target in ["fuzz_ssh_wire", "fuzz_ssh_ident", "fuzz_ssh_packet"] {
-            let opts = parse(&argv(&["--target", target])).expect("flag parses");
-            let chosen = selected(&opts).expect("known target");
-            assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "tairix-ssh");
-        }
-    }
-
-    #[test]
-    fn svg_decode_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_svg"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-svg");
-    }
-
-    #[test]
-    fn virtqueue_fuzz_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_virtqueue"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-virtio");
-    }
-
-    #[test]
-    fn vt_parser_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_vt"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-vt");
-    }
-
-    #[test]
-    fn firmware_dma_table_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_acpi"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-arch-x86_64");
-    }
-
-    #[test]
-    fn fdt_reader_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_fdt"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-fdt");
-    }
-
-    #[test]
-    fn curses_input_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_curses_input"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-curses");
-    }
-
-    #[test]
-    fn glob_matcher_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_glob"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-glob");
-    }
-
-    #[test]
-    fn shell_expansion_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_expand"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-elsh");
-    }
-
-    #[test]
-    fn der_codec_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_der"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-der");
-    }
-
-    #[test]
-    fn smb_engine_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_smb"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-smb");
-    }
-
-    #[test]
-    fn ws_discovery_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_net_wsd"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-net");
-    }
-
-    #[test]
-    fn path_parser_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_path"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-path");
-    }
-
-    #[test]
-    fn devids_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_devids"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-devids");
-    }
-
-    #[test]
-    fn binfmt_harnesses_are_registered() {
-        for name in ["fuzz_rxe", "fuzz_elf", "fuzz_wasm"] {
-            let opts = parse(&argv(&["--target", name])).expect("flag parses");
-            let chosen = selected(&opts).expect("known target");
-            assert_eq!(chosen.len(), 1);
-            assert_eq!(chosen[0].package, "tairix-binfmt");
-        }
-    }
-
-    #[test]
-    fn supervisor_repl_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_repl"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-supervisor");
-    }
-
-    #[test]
-    fn ipc_port_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_port"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-kernel-ipc");
-    }
-
-    #[test]
-    fn program_library_store_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_proglib"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-proglib");
-    }
-
-    #[test]
-    fn pinboard_settings_store_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_wallpaper_settings"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-wallpaper");
-    }
-
-    #[test]
-    fn sound_settings_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_sound_settings"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-soundtheme");
-    }
-
-    #[test]
-    fn raster_image_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_image"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-image");
-    }
-
-    #[test]
-    fn sound_file_harness_is_registered() {
-        let opts = parse(&argv(&["--target", "fuzz_sound"])).expect("flag parses");
-        let chosen = selected(&opts).expect("known target");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-sound");
-    }
-
-    /// Collects the harness names (`fuzz_<name>` integration-test files) a
-    /// crate publishes under its own `tests/` directory.
-    fn harnesses_below(dir: &std::path::Path, found: &mut Vec<String>) {
+    /// Collects each harness (`fuzz_<name>` integration-test file) a crate
+    /// publishes under its own `tests/` directory, with that crate's package.
+    fn harnesses_below(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        let in_tests_dir = dir.file_name().is_some_and(|name| name == "tests");
+        let package = dir
+            .file_name()
+            .is_some_and(|name| name == "tests")
+            .then(|| dir.parent().and_then(package_of))
+            .flatten();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
@@ -1531,20 +1271,33 @@ mod tests {
                 if name != "target" {
                     harnesses_below(&path, found);
                 }
-            } else if in_tests_dir {
+            } else if let Some(package) = &package {
                 if let Some(stem) = name.strip_suffix(".rs") {
                     if stem.starts_with("fuzz_") {
-                        found.push(stem.to_owned());
+                        found.push((stem.to_owned(), package.clone()));
                     }
                 }
             }
         }
     }
 
+    /// The package `crate_dir`'s manifest names.
+    fn package_of(crate_dir: &std::path::Path) -> Option<String> {
+        let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+        let table = &manifest[manifest.find("[package]")?..];
+        let table = &table[..table[1..].find("\n[").map_or(table.len(), |end| end + 1)];
+        table.lines().find_map(|line| {
+            line.strip_prefix("name = \"")?
+                .strip_suffix('"')
+                .map(String::from)
+        })
+    }
+
     /// A harness that exists on disk but is absent from the registry is never
-    /// run by the gate, so its subject is unfuzzed however green CI looks.
+    /// run by the gate, so its subject is unfuzzed however green CI looks; one
+    /// registered under another package runs nothing.
     #[test]
-    fn every_harness_in_the_tree_is_registered() {
+    fn every_harness_in_the_tree_is_registered_under_its_own_package() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(2)
@@ -1558,13 +1311,18 @@ mod tests {
             "walked {} but found no harnesses at all",
             root.display()
         );
-        let unregistered: Vec<&String> = found
+        let misregistered: Vec<&(String, String)> = found
             .iter()
-            .filter(|name| !TARGETS.iter().any(|t| t.test == name.as_str()))
+            .filter(|(name, package)| {
+                let chosen = parse(&argv(&["--target", name]))
+                    .ok()
+                    .and_then(|opts| selected(&opts).ok());
+                !chosen.is_some_and(|chosen| chosen.len() == 1 && chosen[0].package == package)
+            })
             .collect();
         assert!(
-            unregistered.is_empty(),
-            "fuzz harnesses missing from the registry: {unregistered:?}"
+            misregistered.is_empty(),
+            "fuzz harnesses missing from the registry or under another package: {misregistered:?}"
         );
     }
 

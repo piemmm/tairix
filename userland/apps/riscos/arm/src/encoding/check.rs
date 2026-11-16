@@ -1,9 +1,43 @@
 //! The UNPREDICTABLE rules both instruction sets state alike, decided by an
 //! instruction's operands alone.
 
-use crate::instruction::{BitfieldOp, SimdFp};
+use crate::instruction::{BitfieldOp, CoRegisterOp, CoRegistersOp, Op, SimdFp, Source};
 use crate::reg::Reg;
 use crate::vfp::System;
+
+/// Whether one of the forms both instruction sets judge alike is
+/// UNPREDICTABLE: a core register the form may not name, `MSR` of no field,
+/// `MRRC` of one register twice, a bitfield past bit 31. Any other form is
+/// its instruction set's to judge.
+pub(crate) fn shared(op: &Op) -> bool {
+    let pc = Reg::PC;
+    match *op {
+        Op::Wide { rd, .. } | Op::Status { rd, .. } => rd == pc,
+        Op::Parallel { rd, rn, rm, .. } | Op::Pack { rd, rn, rm, .. } => {
+            rd == pc || rn == pc || rm == pc
+        }
+        Op::Unary { rd, rm, .. } | Op::Extend { rd, rm, .. } | Op::Saturate { rd, rn: rm, .. } => {
+            rd == pc || rm == pc
+        }
+        Op::Bitfield {
+            op,
+            rd,
+            rn,
+            lsb,
+            top,
+        } => rd == pc || rn == Some(pc) || bitfield(op, lsb, top),
+        Op::StatusWrite { fields, source, .. } => fields == 0 || source == Source::Register(pc),
+        Op::ReturnFromException { rn, .. } => rn == pc,
+        Op::CoprocessorRegister { op, rt, .. } => {
+            rt == pc && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mcr2)
+        }
+        Op::CoprocessorRegisters { op, rt, rt2, .. } => {
+            let read = matches!(op, CoRegistersOp::Mrrc | CoRegistersOp::Mrrc2);
+            rt == pc || rt2 == pc || (read && rt == rt2)
+        }
+        _ => false,
+    }
+}
 
 /// Whether a `CPS` is UNPREDICTABLE: a mode given without the change, A, I
 /// and F named without an enable or disable or not named with one, or the
@@ -69,7 +103,11 @@ pub(crate) const fn simdfp(op: &SimdFp, thumb: bool) -> bool {
         }
         SimdFp::Table { length, n, .. } => n as u32 + length as u32 > 32,
         SimdFp::Structure { shape, d, rn, .. } => {
-            is_pc(rn) || d as u32 + shape.register(shape.registers() - 1) as u32 > 31
+            is_pc(rn)
+                || match shape.registers().checked_sub(1) {
+                    Some(last) => d as u32 + shape.register(last) > 31,
+                    None => true,
+                }
         }
         _ => false,
     }

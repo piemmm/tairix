@@ -4,7 +4,7 @@ use super::*;
 use crate::vars::Store;
 
 fn vars() -> Store {
-    let mut vars = Store::with_room(16, 1024).unwrap();
+    let mut vars = Store::with_room(16, 1024, 1024).unwrap();
     vars.assign(b"Name", Value::String(b"Fred".to_vec()))
         .unwrap();
     vars.assign(b"Raw", Value::String(b"a b\r<x>|M".to_vec()))
@@ -161,7 +161,7 @@ fn gstrans_stores_the_terminator_and_overflows_a_byte_early() {
     assert_eq!(done.stored, 4);
     assert_eq!(done.ended, Ok(Some(b' ')));
     assert_eq!(&buffer[..5], b"Fred ");
-    assert_eq!(done.next, 7, "past the space");
+    assert_eq!(done.next, Some(7), "past the space");
     let mut exact = [0u8; 4];
     let full = gstrans(
         b"Fred",
@@ -186,7 +186,22 @@ fn gstrans_stores_the_terminator_and_overflows_a_byte_early() {
     );
     assert_eq!(
         (quoted.stored, quoted.ended, quoted.next),
-        (1, Ok(Some(b'b')), 5)
+        (1, Ok(Some(b'b')), Some(5))
+    );
+    store
+        .assign(b"Closes", Value::Macro(b"a\"b".to_vec()))
+        .unwrap();
+    let inside = gstrans(
+        b"\"<Closes>\"\r",
+        Flags::NONE,
+        &mut store,
+        &mut Budget::new(10),
+        &mut buffer,
+    );
+    assert_eq!(
+        (inside.stored, inside.ended, inside.next),
+        (1, Ok(Some(b'b')), None),
+        "the string ends inside the macro, which is no place in the text"
     );
     let bad = gstrans(
         b"ab|",
@@ -218,5 +233,30 @@ fn gsinit_answers_the_first_character_and_whether_the_string_is_empty() {
         wide.read(&mut store, &mut Budget::new(1)),
         Ok(Read::Char(0x1234_5678)),
         "OS_GSRead answers the whole number"
+    );
+}
+
+#[test]
+fn a_wildcard_reference_costs_a_reference_for_each_variable_it_may_examine() {
+    let mut vars = Store::with_room(8, 64, 4).unwrap();
+    for name in [&b"Ab"[..], b"Ac", b"B"] {
+        vars.assign(name, Value::String(b"1".to_vec())).unwrap();
+    }
+    assert_eq!(
+        vars.assign(b"Abcde", Value::String(b"1".to_vec())),
+        Err(Error::NoRoomForVariable),
+        "a name past the bound"
+    );
+    assert_eq!((vars.cost(b"A*"), vars.cost(b"Ab")), (3, 1));
+    assert_eq!(
+        (vars.lookup(b"*abcde*"), vars.cost(b"*abcde*")),
+        (Ok(None), 1),
+        "more literal bytes than any name holds, matched against none"
+    );
+    let three = translated(b"<A*>", Flags::NONE, &mut vars, &mut Budget::new(3), 64);
+    assert_eq!(three.map(|(bytes, _)| bytes), Ok(b"1".to_vec()));
+    assert_eq!(
+        translated(b"<A*>", Flags::NONE, &mut vars, &mut Budget::new(2), 64),
+        Err(Error::ExpansionTooComplex)
     );
 }

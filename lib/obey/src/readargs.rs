@@ -4,10 +4,13 @@
 //! A template is entries separated by commas, each one or more names joined by
 //! `=` and qualified by `/A` (required), `/K` (only by keyword), `/S` (a
 //! switch), `/E` (an expression's value) or `/G` (GSTrans'd). An argument is
-//! given positionally, or after `-name`; a switch's name may be abbreviated to
-//! its first letter, and abbreviated switches run together, `-abc`.
+//! given positionally, or after `-name`; a name may be abbreviated to its
+//! first letter, and abbreviated switches run together, `-abc`.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::ops::Range;
 
 use tairix_util::fallible;
 
@@ -26,10 +29,10 @@ pub enum Arg {
     Absent,
     /// A switch, present.
     Switch,
-    /// Text, its quotes removed.
-    Text(Vec<u8>),
-    /// A `/G` argument, GSTrans'd.
-    Translated(Vec<u8>),
+    /// Text, its quotes removed: where the buffer holds it.
+    Text(Range<usize>),
+    /// A `/G` argument, GSTrans'd: where the buffer holds it.
+    Translated(Range<usize>),
     /// A `/E` argument's value.
     Evaluated(Answer),
 }
@@ -40,9 +43,12 @@ pub struct ReadArgs {
     /// Each template entry's argument, in template order.
     pub args: Vec<Arg>,
     /// The buffer as the call leaves it: a word per entry, an argument's the
-    /// address of its value, then the values in the order they were given.
+    /// address of its value, then the values in the order they were given,
+    /// each laid where the one before ended, with what is left of the text
+    /// an `/E` or `/G` value was copied from.
     pub buffer: Vec<u8>,
-    /// The bytes of the buffer left unused.
+    /// The room left as RISC OS 5 counts it: each `/E` integer takes eight
+    /// bytes, three it never writes, and a `/G` value's terminator none.
     pub left: usize,
 }
 
@@ -79,21 +85,43 @@ impl Qualifiers {
     }
 }
 
-/// A template read: each entry's qualifiers, and every name with its entry
-/// in template order.
+/// A template read: each entry's qualifiers; every name with its entry,
+/// sorted by name without regard to case and then by entry; and the first
+/// entry each name's first two letters abbreviate.
 struct Template<'t> {
     entries: Vec<Qualifiers>,
-    names: Vec<(usize, &'t [u8])>,
+    names: Vec<(&'t [u8], usize)>,
+    abbreviated: Vec<usize>,
 }
 
 const fn is_keyword_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// The keyword characters, one class each without regard to case.
+const CLASSES: usize = 26 + 10 + 1;
+
+/// `b`'s class, where it is a keyword character.
+const fn class(b: u8) -> Option<usize> {
+    match b.to_ascii_uppercase() {
+        letter @ b'A'..=b'Z' => Some((letter - b'A') as usize),
+        digit @ b'0'..=b'9' => Some(26 + (digit - b'0') as usize),
+        b'_' => Some(36),
+        _ => None,
+    }
+}
+
+/// `a` against `b`, without regard to case.
+fn folded(a: &[u8], b: &[u8]) -> Ordering {
+    a.iter()
+        .map(u8::to_ascii_uppercase)
+        .cmp(b.iter().map(u8::to_ascii_uppercase))
+}
+
 fn template(text: &[u8]) -> Result<Template<'_>, Error> {
     let end = text.iter().position(|&b| b < b' ').unwrap_or(text.len());
     let mut entries = Vec::new();
-    let mut names = Vec::new();
+    let mut names: Vec<(&[u8], usize)> = Vec::new();
     for (index, entry) in text[..end].split(|&b| b == b',').enumerate() {
         let mut qualifiers = Qualifiers::default();
         let mut at = 0;
@@ -109,7 +137,7 @@ fn template(text: &[u8]) -> Result<Template<'_>, Error> {
                 .iter()
                 .take_while(|&&b| is_keyword_byte(b))
                 .count();
-            if !fallible::push(&mut names, (index, &alias[start..start + len])) {
+            if !fallible::push(&mut names, (&alias[start..start + len], index)) {
                 return Err(Error::SystemHeapFull);
             }
         }
@@ -117,64 +145,115 @@ fn template(text: &[u8]) -> Result<Template<'_>, Error> {
             return Err(Error::SystemHeapFull);
         }
     }
-    Ok(Template { entries, names })
+    let mut abbreviated = Vec::new();
+    if !fallible::reserve(&mut abbreviated, CLASSES * CLASSES) {
+        return Err(Error::SystemHeapFull);
+    }
+    abbreviated.resize(CLASSES * CLASSES, usize::MAX);
+    for &(name, entry) in &names {
+        if let [first, second, ..] = *name {
+            if let (Some(first), Some(second)) = (class(first), class(second)) {
+                let slot = &mut abbreviated[first * CLASSES + second];
+                *slot = (*slot).min(entry);
+            }
+        }
+    }
+    names.sort_unstable_by(|(a, x), (b, y)| folded(a, b).then(x.cmp(y)));
+    Ok(Template {
+        entries,
+        names,
+        abbreviated,
+    })
 }
 
 /// The bytes after a `-` at `at` that name an entry: a whole name not
-/// followed by a keyword character, else a name whose first letter alone they
-/// begin with. The entry, where the name ends in the text, and whether it
-/// was whole.
+/// followed by a keyword character, else the first entry with a name of two
+/// letters or more whose first letter alone they begin with. The entry, where
+/// the name ends in the text, and whether it was whole.
 fn keyword(t: &Template<'_>, args: &[u8], at: usize) -> Option<(usize, usize, bool)> {
-    let fold = |b: u8| b.to_ascii_uppercase();
-    let whole = t.names.iter().find(|(_, name)| {
-        args.get(at..at + name.len())
-            .is_some_and(|text| text.eq_ignore_ascii_case(name))
-            && !is_keyword_byte(byte(args, at + name.len()))
-    });
-    if let Some(&(entry, name)) = whole {
-        return Some((entry, at + name.len(), true));
+    let word = &args[at.min(args.len())..];
+    let word = &word[..word.iter().take_while(|&&b| is_keyword_byte(b)).count()];
+    let first = t
+        .names
+        .partition_point(|&(name, _)| folded(name, word) == Ordering::Less);
+    if let Some(&(name, entry)) = t.names.get(first) {
+        if folded(name, word) == Ordering::Equal {
+            return Some((entry, at + word.len(), true));
+        }
     }
-    t.names
-        .iter()
-        .find(|(_, name)| {
-            name.len() > 1
-                && fold(name[0]) == fold(byte(args, at))
-                && fold(name[1]) != fold(byte(args, at + 1))
-        })
-        .map(|&(entry, _)| (entry, at + 1, false))
+    let first = class(byte(args, at))?;
+    let unlike = class(byte(args, at + 1));
+    (0..CLASSES)
+        .filter(|&second| Some(second) != unlike)
+        .map(|second| t.abbreviated[first * CLASSES + second])
+        .min()
+        .filter(|&entry| entry != usize::MAX)
+        .map(|entry| (entry, at + 1, false))
 }
 
-/// The buffer as it fills.
+/// The room an `/E` integer is counted as taking: its five bytes, and three
+/// RISC OS 5 counts and leaves unwritten, the next value laid after the five.
+const INTEGER_ROOM: usize = 8;
+
+/// The buffer as it fills: a word per entry, then the values, each laid where
+/// the one before ended.
 struct Layout {
     base: u32,
     capacity: usize,
-    slots: Vec<u32>,
-    data: Vec<u8>,
-    /// The data's bytes counted as used; a `/G` value's terminator is not.
-    used: usize,
+    /// Every byte written: each value, and the text an `/E` or `/G` value was
+    /// copied from first, which a shorter value leaves the rest of.
+    buffer: Vec<u8>,
+    /// Where the next value is laid.
+    end: usize,
+    /// The room taken: the bytes laid, but for a `/G` value's terminator, and
+    /// each `/E` integer as [`INTEGER_ROOM`].
+    taken: usize,
 }
 
 impl Layout {
     fn free(&self) -> usize {
-        self.capacity - 4 * self.slots.len() - self.used
+        self.capacity.saturating_sub(self.taken)
     }
 
     /// The address the next value is laid at.
     fn next(&self) -> u32 {
-        let offset = 4 * self.slots.len() + self.used;
         self.base
-            .wrapping_add(u32::try_from(offset).unwrap_or(u32::MAX))
+            .wrapping_add(u32::try_from(self.end).unwrap_or(u32::MAX))
     }
 
-    /// `bytes` laid at the next place, `counted` of them used.
-    fn put(&mut self, bytes: &[u8], counted: usize) -> Result<(), Error> {
-        self.data.truncate(self.used);
-        self.data
-            .try_reserve(bytes.len())
-            .map_err(|_| Error::SystemHeapFull)?;
-        self.data.extend_from_slice(bytes);
-        self.used += counted;
+    fn set_slot(&mut self, entry: usize, word: u32) {
+        self.buffer[4 * entry..4 * entry + 4].copy_from_slice(&word.to_le_bytes());
+    }
+
+    /// `bytes` written at `at`, beyond the buffer's end as it stands where
+    /// they reach it.
+    fn write(&mut self, at: usize, bytes: &[u8]) -> Result<(), Error> {
+        let end = at + bytes.len();
+        if let Some(grow) = end.checked_sub(self.buffer.len()) {
+            if !fallible::reserve(&mut self.buffer, grow) {
+                return Err(Error::SystemHeapFull);
+            }
+            self.buffer.resize(end, 0);
+        }
+        self.buffer[at..end].copy_from_slice(bytes);
         Ok(())
+    }
+
+    /// `bytes` laid at the next place, taking `room` of the buffer's room;
+    /// where they lie.
+    fn put(&mut self, bytes: &[u8], room: usize) -> Result<Range<usize>, Error> {
+        let at = self.end;
+        self.write(at, bytes)?;
+        self.end += bytes.len();
+        self.taken += room;
+        Ok(at..self.end)
+    }
+
+    /// `text` copied to the next place with a NUL after it, as RISC OS copies
+    /// a value's text before reading it, taking no room.
+    fn copy(&mut self, text: &[u8]) -> Result<(), Error> {
+        self.write(self.end, text)?;
+        self.write(self.end + text.len(), &[0])
     }
 }
 
@@ -196,14 +275,14 @@ pub fn read_args(
     let mut layout = Layout {
         base,
         capacity,
-        slots: Vec::new(),
-        data: Vec::new(),
-        used: 0,
+        buffer: Vec::new(),
+        end: 4 * count,
+        taken: 4 * count,
     };
-    if !fallible::reserve(&mut layout.slots, count) {
+    if !fallible::reserve(&mut layout.buffer, 4 * count) {
         return Err(Error::SystemHeapFull);
     }
-    layout.slots.resize(count, 0);
+    layout.buffer.resize(4 * count, 0);
     let mut read: Vec<Option<Arg>> = Vec::new();
     if !fallible::reserve(&mut read, count) {
         return Err(Error::SystemHeapFull);
@@ -212,6 +291,10 @@ pub fn read_args(
     let mut at = 0;
     // A keyword given, waiting for its value.
     let mut pending: Option<usize> = None;
+    // Entries are only ever filled, so the first a positional item can take
+    // never moves back.
+    let mut positional = 0;
+    let mut first = true;
     loop {
         at += args[at.min(args.len())..]
             .iter()
@@ -221,26 +304,41 @@ pub fn read_args(
         if b < b' ' {
             break;
         }
+        let opening = core::mem::replace(&mut first, false);
         if b == b'-' {
             if pending.is_some() {
                 return Err(Error::BadParameters);
             }
-            at = dashed(&t, args, at + 1, &mut read, &mut layout, &mut pending)?;
+            match dashed(&t, args, at + 1, &mut read, &mut layout, &mut pending)? {
+                Some(after) => at = after,
+                // An unknown name first on the line gives the first entry
+                // a positional item could take an empty value, and ends
+                // the reading; anywhere else it is refused.
+                None if opening => {
+                    let entry = first_positional(&t, &read, 0).ok_or(Error::BadParameters)?;
+                    read[entry] = Some(value(
+                        t.entries[entry],
+                        b"",
+                        vars,
+                        budget,
+                        &mut layout,
+                        entry,
+                    )?);
+                    break;
+                }
+                None => return Err(Error::BadParameters),
+            }
             continue;
         }
         let (text, after) = item(args, at)?;
         at = after;
-        let entry = match pending.take() {
-            Some(entry) => entry,
-            None => (0..count)
-                .find(|&e| {
-                    read[e].is_none()
-                        && !t.entries[e].has(Qualifiers::KEYWORD)
-                        && !t.entries[e].has(Qualifiers::SWITCH)
-                })
-                .ok_or(Error::BadParameters)?,
+        let entry = if let Some(entry) = pending.take() {
+            entry
+        } else {
+            positional = first_positional(&t, &read, positional).ok_or(Error::BadParameters)?;
+            positional
         };
-        let arg = value(t.entries[entry], text, vars, budget, &mut layout, entry)?;
+        let arg = value(t.entries[entry], &text, vars, budget, &mut layout, entry)?;
         read[entry] = Some(arg);
     }
     if pending.is_some() {
@@ -257,25 +355,27 @@ pub fn read_args(
             None => out.push(Arg::Absent),
         }
     }
-    let mut buffer = Vec::new();
-    if !fallible::reserve(&mut buffer, 4 * count + layout.data.len()) {
-        return Err(Error::SystemHeapFull);
-    }
-    for slot in &layout.slots {
-        buffer.extend_from_slice(&slot.to_le_bytes());
-    }
-    buffer.extend_from_slice(&layout.data);
     let left = layout.free();
     Ok(ReadArgs {
         args: out,
-        buffer,
+        buffer: layout.buffer,
         left,
     })
 }
 
-/// The keywords and switches a `-` at `at - 1` gives; where reading goes on.
-/// A name no entry has is refused, as RISC OS 5 refuses one on any command
-/// line.
+/// The first entry from `from` that a positional item may take: unfilled,
+/// neither a keyword's alone nor a switch.
+fn first_positional(t: &Template<'_>, read: &[Option<Arg>], from: usize) -> Option<usize> {
+    (from..t.entries.len()).find(|&entry| {
+        read[entry].is_none()
+            && !t.entries[entry].has(Qualifiers::KEYWORD)
+            && !t.entries[entry].has(Qualifiers::SWITCH)
+    })
+}
+
+/// The keywords and switches a `-` at `at - 1` gives; where reading goes on,
+/// or `None` where the first names no entry. A later name in a run of
+/// switches that names none is refused.
 fn dashed(
     t: &Template<'_>,
     args: &[u8],
@@ -283,64 +383,81 @@ fn dashed(
     read: &mut [Option<Arg>],
     layout: &mut Layout,
     pending: &mut Option<usize>,
-) -> Result<usize, Error> {
+) -> Result<Option<usize>, Error> {
+    let mut run = false;
     loop {
-        let (entry, after, whole) = keyword(t, args, at).ok_or(Error::BadParameters)?;
+        let Some((entry, after, whole)) = keyword(t, args, at) else {
+            return if run {
+                Err(Error::BadParameters)
+            } else {
+                Ok(None)
+            };
+        };
+        run = true;
         if read[entry].is_some() {
             return Err(Error::ArgumentRepeated);
         }
         if !t.entries[entry].has(Qualifiers::SWITCH) {
             *pending = Some(entry);
-            return Ok(after);
+            return Ok(Some(after));
         }
         read[entry] = Some(Arg::Switch);
-        layout.slots[entry] = SWITCH;
+        layout.set_slot(entry, SWITCH);
         // Abbreviated switches run together; a whole name ends the run.
         if whole || !is_keyword_byte(byte(args, after)) {
-            return Ok(after);
+            return Ok(Some(after));
         }
         at = after;
     }
 }
 
 /// The item at `at`: quoted, `""` within it a `"`, or to the next space or
-/// control character; and where it ends.
-fn item(args: &[u8], at: usize) -> Result<(Vec<u8>, usize), Error> {
-    let mut text = Vec::new();
-    let push = |text: &mut Vec<u8>, b: u8| {
-        if fallible::push(text, b) {
-            Ok(())
-        } else {
-            Err(Error::SystemHeapFull)
-        }
-    };
+/// control character; and where it ends. Only a quoted item holding a `""`
+/// is copied.
+fn item(args: &[u8], at: usize) -> Result<(Cow<'_, [u8]>, usize), Error> {
     if byte(args, at) != b'"' {
         let len = args[at..].iter().take_while(|&&b| b > b' ').count();
-        let text = fallible::copied(&args[at..at + len]).ok_or(Error::SystemHeapFull)?;
-        return Ok((text, at + len));
+        return Ok((Cow::Borrowed(&args[at..at + len]), at + len));
     }
-    let mut at = at + 1;
+    let start = at + 1;
+    let mut at = start;
+    let mut doubled = false;
     loop {
         let b = byte(args, at);
         if b < b' ' {
             return Err(Error::BadString);
         }
-        at += 1;
         if b == b'"' {
-            if byte(args, at) != b'"' {
-                return Ok((text, at));
+            if byte(args, at + 1) != b'"' {
+                break;
             }
+            doubled = true;
             at += 1;
         }
-        push(&mut text, b)?;
+        at += 1;
     }
+    let quoted = &args[start..at];
+    if !doubled {
+        return Ok((Cow::Borrowed(quoted), at + 1));
+    }
+    let mut text = Vec::new();
+    if !fallible::reserve(&mut text, quoted.len()) {
+        return Err(Error::SystemHeapFull);
+    }
+    let mut rest = quoted;
+    while let Some(quote) = rest.iter().position(|&b| b == b'"') {
+        text.extend_from_slice(&rest[..=quote]);
+        rest = &rest[quote + 2..];
+    }
+    text.extend_from_slice(rest);
+    Ok((Cow::Owned(text), at + 1))
 }
 
 /// `text` laid out as `entry`'s value: copied with a NUL after it, then for
 /// `/E` its value and for `/G` its translation laid over that copy.
 fn value(
     qualifiers: Qualifiers,
-    text: Vec<u8>,
+    text: &[u8],
     vars: &mut dyn Variables,
     budget: &mut Budget,
     layout: &mut Layout,
@@ -349,23 +466,21 @@ fn value(
     if text.len() + 1 > layout.free() {
         return Err(Error::BufferOverflow);
     }
-    layout.slots[entry] = layout.next();
+    layout.set_slot(entry, layout.next());
     if qualifiers.has(Qualifiers::EVALUATE) {
-        if layout.free() < 3 {
-            return Err(Error::BufferOverflow);
-        }
-        let answer = evaluate(&text, vars, budget)?;
+        layout.copy(text)?;
+        let answer = evaluate(text, vars, budget)?;
         match &answer {
             Answer::Integer(n) => {
-                if layout.free() < 5 {
+                if layout.free() < INTEGER_ROOM {
                     return Err(Error::BufferOverflow);
                 }
                 let mut block = [0u8; 5];
                 block[1..].copy_from_slice(&n.to_le_bytes());
-                layout.put(&block, 5)?;
+                layout.put(&block, INTEGER_ROOM)?;
             }
             Answer::String(bytes) => {
-                if bytes.len() > layout.free() - 3 {
+                if bytes.len() + 3 > layout.free() {
                     return Err(Error::BufferOverflow);
                 }
                 let len = u16::try_from(bytes.len() & 0xFFFF).unwrap_or(0);
@@ -377,24 +492,25 @@ fn value(
         return Ok(Arg::Evaluated(answer));
     }
     if qualifiers.has(Qualifiers::GSTRANS) {
-        if layout.free() < 2 {
-            return Err(Error::BufferOverflow);
-        }
-        // GSTrans needs a byte past its result for its terminator, so with no
-        // room at all it overflows even on nothing.
-        let longest = (layout.free() - 2)
-            .checked_sub(1)
-            .ok_or(Error::BufferOverflow)?;
-        let (bytes, _) = translated(&text, Flags::NO_QUOTES, vars, budget, longest)?;
-        let len = u16::try_from(bytes.len() & 0xFFFF).unwrap_or(0);
+        layout.copy(text)?;
+        // GSTrans needs a byte past its result for its terminator, and the
+        // length word holds sixteen bits.
+        let longest = layout
+            .free()
+            .checked_sub(3)
+            .ok_or(Error::BufferOverflow)?
+            .min(usize::from(u16::MAX));
+        let (bytes, _) = translated(text, Flags::NO_QUOTES, vars, budget, longest)?;
+        let len = u16::try_from(bytes.len()).map_err(|_| Error::BufferOverflow)?;
         layout.put(&len.to_le_bytes(), 2)?;
-        layout.put(&bytes, bytes.len())?;
-        layout.put(&[0], 0)?;
-        return Ok(Arg::Translated(bytes));
+        let at = layout.put(&bytes, bytes.len())?;
+        // Written, but neither counted nor kept from the next value.
+        layout.copy(&[])?;
+        return Ok(Arg::Translated(at));
     }
-    layout.put(&text, text.len())?;
+    let at = layout.put(text, text.len())?;
     layout.put(&[0], 1)?;
-    Ok(Arg::Text(text))
+    Ok(Arg::Text(at))
 }
 
 #[cfg(test)]

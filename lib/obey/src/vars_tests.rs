@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use super::*;
 
 fn store() -> Store {
-    Store::with_room(16, 64).unwrap()
+    Store::with_room(16, 64, 64).unwrap()
 }
 
 fn budget() -> Budget {
@@ -13,7 +13,7 @@ fn budget() -> Budget {
 fn string(vars: &mut Store, name: &[u8]) -> Option<Vec<u8>> {
     match vars.lookup(name).unwrap()? {
         Value::String(bytes) | Value::Macro(bytes) => Some(bytes),
-        Value::Number(n) => Some(crate::number::Decimal::of(n).as_bytes().to_vec()),
+        Value::Number(n) => crate::number::decimal(n).ok(),
     }
 }
 
@@ -46,7 +46,7 @@ fn a_wildcard_means_the_first_match_in_sort_order() {
 
 #[test]
 fn a_new_variable_needs_a_plain_name_and_room() {
-    let mut vars = Store::with_room(1, 4).unwrap();
+    let mut vars = Store::with_room(1, 4, 4).unwrap();
     assert_eq!(
         vars.assign(b"*", Value::Number(1)),
         Err(Error::BadVariableName)
@@ -73,15 +73,29 @@ fn a_new_variable_needs_a_plain_name_and_room() {
 }
 
 #[test]
-fn unset_deletes_every_match() {
+fn a_deletion_takes_the_first_match_alone() {
     let mut vars = store();
-    for name in [&b"App$Dir"[..], b"App$Path", b"Other"] {
+    for name in [&b"App$Path"[..], b"App$Dir", b"Other"] {
         vars.assign(name, Value::Number(1)).unwrap();
     }
-    assert_eq!(vars.delete(b"App$*"), Ok(2));
-    assert_eq!(vars.delete(b"App$*"), Ok(0));
-    assert_eq!(vars.delete(b"other"), Ok(1));
+    assert_eq!(vars.delete(b"App$*"), Ok(true));
+    assert!(vars.exists(b"App$Path").unwrap(), "only the first");
+    assert!(!vars.exists(b"App$Dir").unwrap());
+    assert_eq!(vars.delete(b"App$*"), Ok(true));
+    assert_eq!(vars.delete(b"App$*"), Ok(false));
+    assert_eq!(vars.delete(b"other"), Ok(true));
     assert!(vars.entries.is_empty());
+}
+
+#[test]
+fn unset_takes_every_match_in_one_pass() {
+    let mut vars = store();
+    for name in [&b"App$Path"[..], b"App$Dir", b"Other"] {
+        vars.assign(name, Value::Number(1)).unwrap();
+    }
+    assert_eq!(vars.unset(b"App$*"), Ok(2));
+    assert_eq!(vars.unset(b"App$*"), Ok(0));
+    assert!(vars.exists(b"Other").unwrap());
 }
 
 #[test]

@@ -1228,14 +1228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-bbcbasic"
-version = "0.0.0"
-dependencies = [
- "tairix-fuzzseed",
- "tairix-util",
-]
-
-[[package]]
 name = "tairix-bezier"
 version = "0.0.0"
 dependencies = [
@@ -4176,13 +4168,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-openbasic"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+]
+
+[[package]]
 name = "tairix-openmicro"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appdata",
  "tairix-audio",
- "tairix-bbcbasic",
  "tairix-browse",
  "tairix-buildcfg",
  "tairix-compress",
@@ -4198,6 +4196,7 @@ dependencies = [
  "tairix-input",
  "tairix-log",
  "tairix-machines",
+ "tairix-openbasic",
  "tairix-path",
  "tairix-procinfo",
  "tairix-raster",
@@ -9982,7 +9981,6 @@ dependencies = [
  "tairix-appload",
  "tairix-appstore",
  "tairix-arch-api",
- "tairix-bbcbasic",
  "tairix-browse",
  "tairix-cinder",
  "tairix-colour",
@@ -10070,6 +10068,7 @@ dependencies = [
  "tairix-net",
  "tairix-netconfig",
  "tairix-netmap",
+ "tairix-openbasic",
  "tairix-openmicro",
  "tairix-parallel",
  "tairix-pcemu",
@@ -10084,6 +10083,7 @@ dependencies = [
  "tairix-settings",
  "tairix-shaders",
  "tairix-signkeys",
+ "tairix-softfloat",
  "tairix-sound",
  "tairix-soundd",
  "tairix-soundtheme",

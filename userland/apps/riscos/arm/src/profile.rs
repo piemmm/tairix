@@ -14,7 +14,9 @@ use crate::psr;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Unpredictable {
     /// What an implementation without a pipeline does, as the cores that
-    /// software for the profile ran on did.
+    /// software for the profile ran on did: an `STM` that writes back a base
+    /// it lists after its first register stores the written-back base, as
+    /// the ARM6 and ARM7 data sheets give it.
     Execute,
     /// It takes the undefined instruction exception, as the architecture
     /// permits, so a program that relies on one fails loudly.

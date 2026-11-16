@@ -7,17 +7,56 @@ use alloc::vec::Vec;
 
 use tairix_sandbox::supervise::Requests;
 
-use super::protocol::{Ran, Reply, Request, MAX_SAMPLES, SAMPLE_BYTES, SAMPLE_RATE};
+use super::protocol::{Configuration, Ran, Reply, Request, MAX_SAMPLES, SAMPLE_BYTES, SAMPLE_RATE};
 use crate::machine::bbc::fdc::PhysicalDrive;
-use crate::machine::{Model, CLOCK};
+use crate::machine::{LetterCase, Model, Timing};
+
+/// What a configured machine's replies may carry: its model's lamps, its
+/// drives' discs, and its own time's sound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Session {
+    model: Model,
+    timing: Timing,
+    drives: [bool; 2],
+}
+
+impl Session {
+    const fn of(configuration: &Configuration<'_>) -> Self {
+        Self {
+            model: configuration.model(),
+            timing: configuration.timing(),
+            drives: configuration.drives(),
+        }
+    }
+
+    /// Whether `ran`'s lamps, letter case and media are ones the machine
+    /// has: the lock lights its model has, the case CAPS LOCK makes where it
+    /// has one and the C64's otherwise, PLAY and a cartridge only on a C64,
+    /// and lights and discs only of drives fitted.
+    fn lamps_fit(self, ran: &Ran<'_>) -> bool {
+        let commodore = self.model == Model::C64;
+        let case_fits = match ran.case {
+            LetterCase::Capitals => self.model.has_caps_lock() && ran.lights.caps_lock,
+            LetterCase::Small => !ran.lights.caps_lock,
+            LetterCase::CapitalsOnly => !self.model.has_caps_lock(),
+        };
+        case_fits
+            && (self.model.has_caps_lock() || !ran.lights.caps_lock)
+            && (self.model.has_shift_lock() || !ran.lights.shift_lock)
+            && (self.model.has_play_key() || !ran.loaded.playing)
+            && (commodore || !ran.loaded.cartridge)
+            && (0..2)
+                .all(|drive| self.drives[drive] || !(ran.drives[drive] || ran.loaded.discs[drive]))
+    }
+}
 
 /// What was asked, as far as its answer depends on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Asked {
     /// Answered by Done or a refusal.
     Done,
-    /// A configure, whose Done makes its model the session's.
-    Configure(Model),
+    /// A configure, whose Done makes its machine the session's.
+    Configure(Session),
     /// A slice of `cycles`, with its sound or without.
     Run {
         cycles: u32,
@@ -58,8 +97,14 @@ impl Asked {
                 drives: [true; 2],
                 tape: true,
             },
-            Request::Configure(configuration) => Self::Configure(configuration.model()),
-            Request::RewindTape | Request::RecordTape(_) | Request::PowerOn => Self::Done,
+            Request::Configure(configuration) => Self::Configure(Session::of(configuration)),
+            Request::RewindTape
+            | Request::RecordTape(_)
+            | Request::PowerOn
+            | Request::Deck(_)
+            | Request::InsertCartridge(_)
+            | Request::RemoveCartridge
+            | Request::LoadProgram(_) => Self::Done,
         }
     }
 }
@@ -75,8 +120,8 @@ pub struct MachineClient {
     waiting: Option<(Vec<u8>, Asked)>,
     /// What the request sent and not yet answered asked.
     asked: Option<Asked>,
-    /// The model the worker was configured as, once it said it was.
-    model: Option<Model>,
+    /// The machine the worker was configured as, once it said it was.
+    configured: Option<Session>,
 }
 
 impl MachineClient {
@@ -86,7 +131,7 @@ impl MachineClient {
         Self {
             waiting: None,
             asked: None,
-            model: None,
+            configured: None,
         }
     }
 
@@ -119,28 +164,31 @@ impl MachineClient {
     pub fn answer<'f>(&mut self, frame: &'f [u8]) -> Result<Reply<'f>, &'static str> {
         let asked = self.asked.take().ok_or("a reply nothing asked for")?;
         let reply = Reply::decode(frame).map_err(|_| "a reply that does not decode")?;
-        let drives_held = self.model.is_some_and(Model::has_drives);
         let believed = match (&reply, asked) {
             (Reply::Refused(_), _)
             | (Reply::Done, Asked::Done)
             | (Reply::Snapshot(_), Asked::Snapshot) => true,
-            (Reply::Done, Asked::Configure(model)) => {
-                self.model = Some(model);
+            (Reply::Done, Asked::Configure(session)) => {
+                self.configured = Some(session);
                 true
             }
             (Reply::Ran(ran), Asked::Run { cycles, sound }) => {
                 ran.cycles == cycles
                     && (sound || ran.sound.is_empty())
-                    && ran.sound.len() <= most_samples(cycles) * SAMPLE_BYTES
-                    && self.model.is_some_and(|model| lamps_fit(model, ran))
+                    && self.configured.is_some_and(|session| {
+                        ran.sound.len() <= most_samples(cycles, session.timing) * SAMPLE_BYTES
+                            && session.lamps_fit(ran)
+                    })
             }
             (Reply::Media(media), Asked::Media { drives, tape }) => {
                 (tape || media.tape.is_none())
-                    && (drives_held || media.discs.is_empty())
-                    && media
-                        .discs
-                        .iter()
-                        .all(|written| drives[written.drive.index()])
+                    && media.discs.iter().all(|written| {
+                        let drive = written.drive.index();
+                        drives[drive]
+                            && self.configured.is_some_and(|session| {
+                                session.drives[drive] && written.format.model() == session.model
+                            })
+                    })
             }
             _ => false,
         };
@@ -156,7 +204,7 @@ impl MachineClient {
     pub fn restart(&mut self) {
         self.waiting = None;
         self.asked = None;
-        self.model = None;
+        self.configured = None;
     }
 }
 
@@ -172,17 +220,10 @@ impl Requests for MachineClient {
     }
 }
 
-/// Whether `ran`'s lamps and media are ones `model` has: SHIFT LOCK's light
-/// and the drives only where it has them.
-fn lamps_fit(model: Model, ran: &Ran<'_>) -> bool {
-    (model.has_shift_lock() || !ran.lights.shift_lock)
-        && (model.has_drives() || (ran.drives == [false; 2] && ran.loaded.discs == [false; 2]))
-}
-
-/// The most samples `cycles` make at the output rate, a frame either way
-/// for where the resampler's phase falls.
-fn most_samples(cycles: u32) -> usize {
-    let samples = u64::from(cycles) * u64::from(SAMPLE_RATE) / CLOCK + 2;
+/// The most samples `cycles` of a machine keeping `timing` make at the
+/// output rate, a frame either way for where the resampler's phase falls.
+fn most_samples(cycles: u32, timing: Timing) -> usize {
+    let samples = u64::from(cycles) * u64::from(SAMPLE_RATE) / timing.clock() + 2;
     usize::try_from(samples).map_or(MAX_SAMPLES, |samples| samples.min(MAX_SAMPLES))
 }
 

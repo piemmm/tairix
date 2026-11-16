@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
-use crate::number::{read_unsigned, Decimal, Reading};
+use crate::number::{decimal, read_unsigned, Reading};
 use crate::vars::{Value, Variables};
 use crate::{byte, is_terminator, Budget, Error};
 
@@ -259,15 +259,13 @@ impl<'t> Reader<'t> {
                 return Ok(Reference::Char(u32::try_from(code).unwrap_or(u32::MAX)));
             }
         }
-        budget.spend()?;
-        // A code variable's read entry is not checked: its failure reads as
-        // nothing.
-        let Ok(Some(value)) = vars.lookup(content) else {
-            return Ok(Reference::Expanded);
-        };
+        budget.charge(vars.cost(content))?;
         if self.frames.len() >= MOST_ACTIVE {
             return Ok(Reference::Expanded);
         }
+        let Some(value) = vars.lookup(content)? else {
+            return Ok(Reference::Expanded);
+        };
         let frame = match value {
             Value::String(bytes) => Frame {
                 bytes,
@@ -275,7 +273,7 @@ impl<'t> Reader<'t> {
                 scanned: false,
             },
             Value::Number(n) => Frame {
-                bytes: fallible::copied(Decimal::of(n).as_bytes()).ok_or(Error::SystemHeapFull)?,
+                bytes: decimal(n)?,
                 at: 0,
                 scanned: false,
             },
@@ -318,8 +316,9 @@ fn escaped(b: u8) -> Escape {
 pub struct Translation {
     /// The bytes stored, a terminator after them not counted.
     pub stored: usize,
-    /// Where reading stopped in the text.
-    pub next: usize,
+    /// Where reading stopped in the text; `None` where it stopped inside a
+    /// variable's value, as a quoted string a macro closes does.
+    pub next: Option<usize>,
     /// The byte that ended the string, stored after the others; `None` where
     /// the buffer filled first, a result needing one byte more than it has.
     pub ended: Result<Option<u8>, Error>,
@@ -354,7 +353,7 @@ pub fn gstrans(
     };
     Translation {
         stored,
-        next: reader.position(),
+        next: (!reader.expanding()).then(|| reader.position()),
         ended,
     }
 }

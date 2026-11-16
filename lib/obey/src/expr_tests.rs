@@ -5,7 +5,7 @@ use super::*;
 use crate::vars::Store;
 
 fn vars() -> Store {
-    let mut vars = Store::with_room(16, 2048).unwrap();
+    let mut vars = Store::with_room(16, 2048, 2048).unwrap();
     vars.assign(b"Num", Value::Number(10)).unwrap();
     vars.assign(b"Word", Value::String(b"1234".to_vec()))
         .unwrap();
@@ -221,4 +221,45 @@ fn strings_and_expressions_are_bounded() {
     deep.extend_from_slice(b"Big");
     deep.extend(core::iter::repeat_n(b')', 15));
     assert_eq!(eval(&deep), Err(Error::ExpressionStackOverflow));
+}
+
+#[test]
+fn a_bound_spent_inside_an_operand_is_passed_on_as_itself() {
+    let mut vars = Store::with_room(4, 64, 64).unwrap();
+    vars.assign(b"A", Value::String(b"x".to_vec())).unwrap();
+    vars.assign(b"M", Value::Macro(b"<A><A><A>".to_vec()))
+        .unwrap();
+    assert_eq!(
+        evaluate(b"M", &mut vars, &mut Budget::new(2)),
+        Err(Error::ExpansionTooComplex)
+    );
+    assert_eq!(
+        evaluate(b"M", &mut vars, &mut Budget::new(4)),
+        Ok(Answer::String(b"xxx".to_vec()))
+    );
+}
+
+/// A store whose every lookup the host refuses.
+struct Refusing;
+
+impl Variables for Refusing {
+    fn lookup(&mut self, _: &[u8]) -> Result<Option<Value>, Error> {
+        Err(Error::SystemHeapFull)
+    }
+
+    fn assign(&mut self, _: &[u8], _: Value) -> Result<(), Error> {
+        Err(Error::SystemHeapFull)
+    }
+
+    fn delete(&mut self, _: &[u8]) -> Result<bool, Error> {
+        Err(Error::SystemHeapFull)
+    }
+}
+
+#[test]
+fn an_operand_the_host_cannot_read_is_its_refusal() {
+    assert_eq!(
+        evaluate(b"A", &mut Refusing, &mut Budget::new(4)),
+        Err(Error::SystemHeapFull)
+    );
 }

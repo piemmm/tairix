@@ -10,6 +10,7 @@ use crate::a32::decode;
 use crate::bus::{Abort, Bus, Fetch, Width};
 use crate::fpa::{self, Internal};
 use crate::instruction::{Op, Set};
+use crate::mmu::PAGE_BITS;
 use crate::profile::{Profile, BIT26, BIT32};
 use crate::psr::{self, Mode};
 use crate::reg::Reg;
@@ -109,7 +110,11 @@ impl Bus for Ram {
         let host = self.host.contains(&(address & !0xFFF));
         let slot = self.slot(address)?;
         let word = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
-        Ok(Fetch { word, host })
+        Ok(Fetch {
+            word,
+            host,
+            page: address >> PAGE_BITS,
+        })
     }
 
     fn read(&mut self, address: u32, width: Width, privileged: bool) -> Result<u32, Abort> {
@@ -309,9 +314,7 @@ fn ldm_with_the_s_bit_and_r15_restores_the_26_bit_psr() {
     assert_eq!(cpu.pc(), 0xA000);
     assert_eq!(cpu.mode(), Mode::User26);
     assert_eq!(cpu.cpsr() & psr::NZCV, psr::Z);
-    let mut supervisor = cpu.state();
-    supervisor.cpsr = Mode::Supervisor26.bits();
-    assert_eq!(supervisor.banked[1][0], 0x4004, "SVC26's R13 written back");
+    assert_eq!(cpu.state().banked[1][0], 0x4004, "SVC26's R13 written back");
 }
 
 /// The flat memory, seen again every 32 KiB.
@@ -883,10 +886,12 @@ fn reset_enters_supervisor_mode_at_the_reset_vector() {
     assert_eq!(legacy.pc(), 0);
 }
 
-/// A processor of the 32-bit profile in Thumb state.
+/// A processor of the 32-bit profile in Thumb state, the state set before
+/// the PC it holds to a halfword.
 fn thumb(mode: Mode, pc: u32) -> Cpu {
-    let mut cpu = processor(&BIT32, mode, pc);
+    let mut cpu = Cpu::new(&BIT32, 4);
     cpu.set_cpsr(mode.bits() | psr::T).expect("Thumb state");
+    cpu.set_reg(Reg::PC, pc);
     cpu
 }
 
@@ -1505,4 +1510,182 @@ fn an_aborted_fpa_load_changes_nothing() {
     assert_eq!(cpu.mode(), Mode::Abort);
     assert_eq!(cpu.state().user[1], UNMAPPED - 12, "the base as it was");
     assert_eq!(fpa_words(&cpu, 0), ONE, "the register as it was");
+}
+
+#[test]
+fn the_state_setters_hold_the_pc_and_the_it_state_to_what_the_state_can_hold() {
+    let mut cpu = Cpu::new(&BIT32, 4);
+    cpu.set_cpsr(Mode::User.bits()).expect("USR");
+    cpu.set_reg(Reg::PC, 0x8003);
+    assert_eq!(cpu.pc(), 0x8000, "a word in ARM state");
+    cpu.set_cpsr(Mode::User.bits() | psr::T).expect("Thumb");
+    cpu.set_reg(Reg::PC, 0x8003);
+    assert_eq!(cpu.pc(), 0x8002, "a halfword in Thumb state");
+    cpu.set_cpsr(Mode::User.bits() | 0x0000_0800)
+        .expect("an IT state in ARM state");
+    assert_eq!(cpu.cpsr() & (psr::IT_LOW | psr::IT_HIGH), 0, "dropped");
+    assert_eq!(cpu.pc(), 0x8000, "and a word again");
+    let mut state = cpu.state();
+    state.pc = 0x9001;
+    state.cpsr = Mode::User.bits() | psr::T | 0x0000_1000;
+    cpu.set_state(&state).expect("USR");
+    assert_eq!(
+        (cpu.pc(), cpu.cpsr() & (psr::IT_LOW | psr::IT_HIGH)),
+        (0x9000, 0),
+        "a reserved IT state dropped"
+    );
+    let mut old = Cpu::new(&BIT26, 4);
+    old.set_cpsr(Mode::User26.bits()).expect("USR26");
+    old.set_reg(Reg::PC, 0x0C00_8000 | 2);
+    assert_eq!(old.pc(), 0x8000, "within 26 bits in a 26-bit mode");
+}
+
+#[test]
+fn a_switch_into_a_26_bit_mode_holds_the_next_instruction_within_26_bits() {
+    let mut ram = Ram::new();
+    ram.program(&BIT26, HIGH, &[(0xE321_F003, "MSR     CPSR_c,#3")]);
+    let mut cpu = processor(&BIT26, Mode::Supervisor, HIGH);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Supervisor26);
+    assert_eq!(cpu.pc(), (HIGH + 4) & psr::R15_PC);
+}
+
+#[test]
+fn an_exception_return_is_an_event_as_sev_and_a_signal_are() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xE16F_F000, "MSR     SPSR_fsxc,R0"),
+            (0xE1B0_F00E, "MOVS    PC,R14"),
+        ],
+    );
+    ram.program(
+        &BIT32,
+        0x9000,
+        &[
+            (0xE320_F002, "WFE"),
+            (0xE320_F002, "WFE"),
+            (0xE320_F004, "SEV"),
+            (0xE320_F002, "WFE"),
+            (0xE320_F002, "WFE"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+    cpu.set_reg(r(0), Mode::User.bits());
+    cpu.set_reg(Reg::LR, 0x9000);
+    assert_eq!(
+        run(&mut cpu, &mut ram, 3).stop,
+        Stop::Budget,
+        "the return's event is the first WFE's"
+    );
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, Stop::WaitForEvent);
+    assert_eq!(cpu.pc(), 0x9008, "past it");
+    assert_eq!(run(&mut cpu, &mut ram, 2).stop, Stop::Budget, "SEV's");
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, Stop::WaitForEvent);
+    cpu.set_reg(Reg::PC, 0x9000);
+    cpu.signal_event();
+    assert_eq!(run(&mut cpu, &mut ram, 1).stop, Stop::Budget, "a signal's");
+}
+
+#[test]
+fn a_cleared_monitor_fails_the_exclusive_store_it_marked() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xE190_1F9F, "LDREX   R1,[R0]"),
+            (0xE180_2F93, "STREX   R2,R3,[R0]"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(0), 0x4000);
+    run(&mut cpu, &mut ram, 1);
+    cpu.clear_exclusive();
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(2)), 1, "a context switch spent the mark");
+}
+
+#[test]
+fn a_mode_the_32_bit_profile_lacks_is_refused_by_msr_and_by_an_exception_return() {
+    let mut ram = Ram::new();
+    ram.program(&BIT32, 0x8000, &[(0xE321_F015, "MSR     CPSR_c,#&15")]);
+    ram.program(
+        &BIT32,
+        0x8100,
+        &[
+            (0xE16F_F000, "MSR     SPSR_fsxc,R0"),
+            (0xE1B0_F00E, "MOVS    PC,R14"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.mode(), Mode::Undefined, "MSR");
+    assert_eq!(cpu.reg(Reg::LR), 0x8004);
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8100);
+    cpu.set_reg(r(0), 0x15);
+    cpu.set_reg(Reg::LR, 0x9000);
+    run(&mut cpu, &mut ram, 2);
+    assert_eq!(cpu.mode(), Mode::Undefined, "an exception return");
+    assert_eq!(cpu.reg(Reg::LR), 0x8108);
+    let mut old = Ram::new();
+    old.program(&BIT26, 0x8000, &[(0xE321_F015, "MSR     CPSR_c,#&15")]);
+    let mut cpu = processor(&BIT26, Mode::Supervisor, 0x8000);
+    run(&mut cpu, &mut old, 1);
+    assert_eq!(
+        cpu.mode(),
+        Mode::Supervisor,
+        "the 26-bit profile keeps its mode"
+    );
+}
+
+#[test]
+fn srs_saves_a_return_state_that_rfe_returns_to() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xE16F_F000, "MSR     SPSR_fsxc,R0"),
+            (0xF96D_0513, "SRSDB   SP!,#&13"),
+            (0xF8BD_0A00, "RFEIA   R13!"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+    let returned = Mode::User.bits() | psr::C;
+    cpu.set_reg(r(0), returned);
+    cpu.set_reg(r(13), 0x6000);
+    cpu.set_reg(Reg::LR, 0x9000);
+    run(&mut cpu, &mut ram, 2);
+    assert_eq!((ram.word(0x5FF8), ram.word(0x5FFC)), (0x9000, returned));
+    assert_eq!(cpu.reg(r(13)), 0x5FF8);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!((cpu.pc(), cpu.mode()), (0x9000, Mode::User));
+    assert_eq!(cpu.cpsr() & psr::C, psr::C);
+    assert_eq!(cpu.state().banked[1][0], 0x6000, "SVC's stack popped");
+    let mut user = Ram::new();
+    user.program(&BIT32, 0x8000, &[(0xE16F_F000, "MSR     SPSR_fsxc,R0")]);
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    run(&mut cpu, &mut user, 1);
+    assert_eq!(cpu.mode(), Mode::Undefined, "User mode has no SPSR");
+}
+
+#[test]
+fn a_26_bit_stm_listing_its_base_after_the_first_stores_the_written_back_base() {
+    for (profile, stored) in [(&BIT26, 0x4008), (&BIT32, 0x4000)] {
+        let mut ram = Ram::new();
+        ram.program(profile, 0x8000, &[(0xE8A1_0003, "STMIA   R1!,{R0,R1}")]);
+        let mut cpu = processor(profile, Mode::Supervisor, 0x8000);
+        cpu.set_reg(r(0), 7);
+        cpu.set_reg(r(1), 0x4000);
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(
+            (ram.word(0x4000), ram.word(0x4004), cpu.reg(r(1))),
+            (7, stored, 0x4008),
+            "{}",
+            profile.name
+        );
+    }
 }

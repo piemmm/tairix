@@ -490,9 +490,9 @@ are silent the 80387 reference's lists of how it differs from them decide.
   24 576 and refuse a memory one; precision, unmasked, completes. Masked
   responses are the 80287 reference's table. An unmasked exception sets IR;
   with IEM clear it raises INT and holds BUSY until it is cleared.
-- **Transcendentals** are computed in 128-bit significands and rounded once,
-  correctly rounded unless the true value lies within 2^-120 of a boundary,
-  in the operand ranges Intel documents (FPTAN `0 ≤ x ≤ π/4`, FPATAN
+- **Transcendentals** are `lib/softfloat`'s elementary functions, computed in
+  128-bit significands and rounded once, correctly rounded unless the true
+  value lies within 2^-120 of a boundary, in the operand ranges Intel documents (FPTAN `0 ≤ x ≤ π/4`, FPATAN
   `0 ≤ y < x`, F2XM1 `0 ≤ x ≤ ½`, FYL2X `x > 0`, FYL2XP1 `|x| < 1 − √2/2`),
   FPTAN answering tan x over one; a logarithm of a power of two and a power
   of two at an integer are exact. Outside those ranges, where the 8087's

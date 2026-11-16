@@ -1,6 +1,6 @@
-//! IEEE 754 arithmetic on binary32 and binary64 values: each result exact,
-//! rounded once in the chosen mode, with the exceptions default handling
-//! raises.
+//! IEEE 754 arithmetic on binary16, binary32 and binary64 values: each
+//! result exact, rounded once in the chosen mode, with the exceptions
+//! default handling raises.
 //!
 //! Where the standard leaves a choice to the implementation, [`Policy`] makes
 //! it: when an underflow is tiny, and whether a NaN result carries an
@@ -9,7 +9,7 @@
 
 use core::cmp::Ordering;
 
-use crate::binary::{Binary, Unpacked};
+use crate::binary::{Binary, Class, Unpacked};
 use crate::exact::{self, Exact, Parts, POINT};
 use crate::extended::INTEGER;
 use crate::flags::Flags;
@@ -173,6 +173,10 @@ impl Ieee {
     pub fn div(self, a: u64, b: u64) -> Outcome {
         let format = self.format;
         let negative = format.negative(a) != format.negative(b);
+        let by_zero = Outcome {
+            bits: format.infinity(negative),
+            flags: Flags::DIVIDE_BY_ZERO,
+        };
         match (format.unpack(a), format.unpack(b)) {
             (Unpacked::Nan { .. }, _) | (_, Unpacked::Nan { .. }) => self.nan(&[a, b]),
             (Unpacked::Infinity { .. }, Unpacked::Infinity { .. })
@@ -181,12 +185,10 @@ impl Ieee {
             (_, Unpacked::Infinity { .. }) | (Unpacked::Zero { .. }, _) => {
                 Outcome::exact(format.zero(negative))
             }
-            (Unpacked::Finite { .. }, Unpacked::Zero { .. }) => Outcome {
-                bits: format.infinity(negative),
-                flags: Flags::DIVIDE_BY_ZERO,
-            },
+            (Unpacked::Finite { .. }, Unpacked::Zero { .. }) => by_zero,
             (Unpacked::Finite { parts: left, .. }, Unpacked::Finite { parts: right, .. }) => {
-                self.round(exact::divide(left.normalized(), right.normalized()))
+                exact::divide(left.normalized(), right.normalized())
+                    .map_or(by_zero, |quotient| self.round(quotient))
             }
         }
     }
@@ -287,7 +289,7 @@ impl Ieee {
                 Outcome::exact(a)
             }
             (Unpacked::Finite { parts: left, .. }, Unpacked::Finite { parts: right, .. }) => {
-                let rest = remainder(left.normalized(), right.normalized());
+                let rest = exact::remainder(left.normalized(), right.normalized());
                 if rest.is_zero() {
                     return Outcome::exact(format.zero(left.negative));
                 }
@@ -324,13 +326,6 @@ impl Ieee {
         }
     }
 
-    /// `a` rounded to an integer in `mode`, the caller holding it to the range
-    /// it converts to.
-    #[must_use]
-    pub fn to_integer(self, a: u64, mode: Mode) -> Integral {
-        self.to_fixed(a, 0, mode)
-    }
-
     /// `a × 2^fraction` rounded to an integer in `mode`: `a` as a fixed-point
     /// value with `fraction` fraction bits, the caller holding it to the range
     /// it converts to.
@@ -363,13 +358,6 @@ impl Ieee {
                 }
             }
         }
-    }
-
-    /// The integer of sign `negative` and magnitude `magnitude`, rounded; a
-    /// zero magnitude is positive zero.
-    #[must_use]
-    pub fn from_integer(self, negative: bool, magnitude: u64) -> Outcome {
-        self.from_fixed(negative, magnitude, 0)
     }
 
     /// The fixed-point value `magnitude × 2^−fraction` of sign `negative`,
@@ -431,10 +419,7 @@ impl Ieee {
     pub(crate) fn round(self, x: Exact) -> Outcome {
         let format = self.format;
         let x = x.normalized(true);
-        let rounding = Rounding {
-            mode: self.mode,
-            bits: format.precision,
-        };
+        let rounding = Rounding::of(format, self.mode);
         if x.exp < format.min_exp() || x.sig == 0 {
             if self.policy.flush_to_zero {
                 return Outcome {
@@ -457,7 +442,7 @@ impl Ieee {
                 flags: Flags::OVERFLOW | Flags::INEXACT,
             };
         }
-        let field = u64::try_from(exp + format.bias).unwrap_or(0);
+        let field = u64::try_from(exp + format.bias()).unwrap_or(0);
         Outcome {
             bits: format.pack(x.negative, field, rounded.sig),
             flags: Flags::when(rounded.inexact, Flags::INEXACT),
@@ -489,6 +474,17 @@ impl Ieee {
             bits: format.pack(x.negative, field, rounded.sig),
             flags,
         }
+    }
+
+    /// The NaN an operation over `operands` answers when any is a NaN: the
+    /// first signalling one quieted, else the first quiet one, or the
+    /// default NaN where the policy asks for it; invalid where one signals.
+    #[must_use]
+    pub fn nan_among(self, operands: &[u64]) -> Option<Outcome> {
+        operands
+            .iter()
+            .any(|&bits| matches!(self.format.class(bits), Class::Quiet | Class::Signalling))
+            .then(|| self.nan(operands))
     }
 
     /// The NaN an operation over `operands`, at least one a NaN, answers.
@@ -558,53 +554,6 @@ fn order(u: Unpacked) -> (i8, i32, u64) {
             }
         }
     }
-}
-
-/// The remainder of `a` by `b`, both normalized and nonzero, as IEEE 754
-/// defines it: exact, its magnitude at most half of `b`'s.
-fn remainder(a: Parts, b: Parts) -> Parts {
-    let gap = a.exp - b.exp;
-    if gap < -1 {
-        return a;
-    }
-    let divisor = u128::from(b.sig);
-    // `rest` stays below `divisor` and `odd` is the quotient's last bit.
-    let (mut rest, mut odd) = if gap == -1 {
-        (u128::from(a.sig), false)
-    } else {
-        (
-            u128::from(a.sig) % divisor,
-            (u128::from(a.sig) / divisor) & 1 != 0,
-        )
-    };
-    let mut left = gap.max(0);
-    while left > 0 {
-        let step = left.min(63);
-        let shifted = rest << u32::try_from(step).unwrap_or(63);
-        odd = (shifted / divisor) & 1 != 0;
-        rest = shifted % divisor;
-        left -= step;
-    }
-    // `rest` is at `b`'s scale, or at half of it where `a` is the smaller,
-    // so half of `b` is the divisor once or twice `rest`'s units.
-    let (scale, twice) = if gap == -1 {
-        (b.exp - 1, rest)
-    } else {
-        (b.exp, rest << 1)
-    };
-    let flip = twice > divisor || (twice == divisor && odd);
-    let magnitude = match (flip, gap == -1) {
-        (false, _) => rest,
-        (true, true) => (divisor << 1) - rest,
-        (true, false) => divisor - rest,
-    };
-    let negative = a.negative != flip;
-    Parts {
-        negative,
-        exp: scale,
-        sig: u64::try_from(magnitude).unwrap_or(u64::MAX),
-    }
-    .normalized()
 }
 
 /// An exact product of two normalized values: `sig × 2^(exp − 127)`, its

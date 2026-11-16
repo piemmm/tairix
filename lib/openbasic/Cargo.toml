@@ -1,0 +1,16 @@
+[package]
+name = "tairix-openbasic"
+description = "OpenBASIC, TAIRiX's token tables and tokenising and listing of program text compatible with BBC BASIC, which is neither made nor endorsed by the BBC: BASIC II's and BASIC V and VI's keywords and tokens, sharing those the dialects define alike, each dialect's tokeniser and LIST with LISTO, the line-reference encoding and the program image. no_std, forbids unsafe, every allocation fallible."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The seeded generator the fuzz harness and the randomised tests draw from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

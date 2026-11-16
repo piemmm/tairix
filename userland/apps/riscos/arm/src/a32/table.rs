@@ -114,7 +114,7 @@ macro_rules! fpa_compare {
 }
 
 /// Rows whose bits 27 to 25 are `000`.
-static GROUP_000: &[Row] = &[
+const GROUP_000: &[Row] = &[
     // Data processing, which no other row in the group overlaps, first as
     // the most common.
     shifted!(Kind::Data(DataOp::And), "0000", "S", "nnnn"),
@@ -538,7 +538,7 @@ static GROUP_000: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `001`.
-static GROUP_001: &[Row] = &[
+const GROUP_001: &[Row] = &[
     immediate!(Kind::Data(DataOp::And), "0000", "S", "nnnn"),
     immediate!(Kind::Data(DataOp::Eor), "0001", "S", "nnnn"),
     immediate!(Kind::Data(DataOp::Sub), "0010", "S", "nnnn"),
@@ -618,7 +618,7 @@ static GROUP_001: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `010`.
-static GROUP_010: &[Row] = &[
+const GROUP_010: &[Row] = &[
     row(
         "cccc 0100 U010 nnnn tttt iiii iiii iiii",
         Kind::Transfer(T::Strt),
@@ -707,7 +707,7 @@ static GROUP_010: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `011`.
-static GROUP_011: &[Row] = &[
+const GROUP_011: &[Row] = &[
     // Word and byte transfers by a register.
     row(
         "cccc 0110 U010 nnnn tttt kkkk kyy0 mmmm",
@@ -982,7 +982,7 @@ static GROUP_011: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `100`.
-static GROUP_100: &[Row] = &[
+const GROUP_100: &[Row] = &[
     row(
         "cccc 100P UBW0 nnnn RRRR RRRR RRRR RRRR",
         Kind::Block(BlockOp::Stm),
@@ -1006,7 +1006,7 @@ static GROUP_100: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `101`.
-static GROUP_101: &[Row] = &[
+const GROUP_101: &[Row] = &[
     row(
         "cccc 1010 iiii iiii iiii iiii iiii iiii",
         Kind::Branch(BranchOp::B),
@@ -1025,7 +1025,7 @@ static GROUP_101: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `110`.
-static GROUP_110: &[Row] = &[
+const GROUP_110: &[Row] = &[
     // The FPA claims every addressing form on its coprocessors, MCRR's and
     // MRRC's words among them.
     row(
@@ -1091,7 +1091,7 @@ static GROUP_110: &[Row] = &[
 ];
 
 /// Rows whose bits 27 to 25 are `111`.
-static GROUP_111: &[Row] = &[
+const GROUP_111: &[Row] = &[
     // SWI, which no other row in the group overlaps, first as the most common.
     row(
         "cccc 1111 iiii iiii iiii iiii iiii iiii",
@@ -1188,20 +1188,95 @@ pub(super) static GROUPS: [&[Row]; 8] = [
     GROUP_000, GROUP_001, GROUP_010, GROUP_011, GROUP_100, GROUP_101, GROUP_110, GROUP_111,
 ];
 
+/// A group with no floating-point or Advanced SIMD rows.
+const NO_ROWS: &[Row] = &[];
+
 /// The floating-point and Advanced SIMD rows of each group.
 pub(super) static SIMDFP: [&[Row]; 8] = [
-    &[],
+    NO_ROWS,
     simdfp::GROUP_001,
     simdfp::GROUP_010,
-    &[],
-    &[],
-    &[],
+    NO_ROWS,
+    NO_ROWS,
+    NO_ROWS,
     simdfp::GROUP_110,
     simdfp::GROUP_111,
 ];
 
+/// A row's fixed bits and their values, apart from the rest of it: a decode
+/// scans these, eight bytes a row, and reads a row only where its bits match.
+#[derive(Clone, Copy)]
+struct Probe {
+    mask: u32,
+    bits: u32,
+}
+
+/// The probes of `rows`, in their order.
+const fn probes<const N: usize>(rows: &[Row]) -> [Probe; N] {
+    let mut probes = [Probe { mask: 0, bits: 0 }; N];
+    let mut index = 0;
+    while index < N {
+        probes[index] = Probe {
+            mask: rows[index].layout.mask,
+            bits: rows[index].layout.bits,
+        };
+        index += 1;
+    }
+    probes
+}
+
+/// The probes of a group's rows, in [`GROUPS`]' and [`SIMDFP`]'s order.
+macro_rules! probes_of {
+    ($($rows:expr),* $(,)?) => {
+        [$(&probes::<{ $rows.len() }>($rows)),*]
+    };
+}
+
+static PROBES: [&[Probe]; 8] = probes_of![
+    GROUP_000, GROUP_001, GROUP_010, GROUP_011, GROUP_100, GROUP_101, GROUP_110, GROUP_111,
+];
+
+static SIMDFP_PROBES: [&[Probe]; 8] = probes_of![
+    NO_ROWS,
+    simdfp::GROUP_001,
+    simdfp::GROUP_010,
+    NO_ROWS,
+    NO_ROWS,
+    NO_ROWS,
+    simdfp::GROUP_110,
+    simdfp::GROUP_111,
+];
+
+/// The rows of `rows` whose fixed bits `word` holds, by their probes.
+fn matching(
+    rows: &'static [Row],
+    probes: &'static [Probe],
+    word: u32,
+) -> impl Iterator<Item = &'static Row> {
+    probes
+        .iter()
+        .zip(rows)
+        .filter(move |(probe, _)| word & probe.mask == probe.bits)
+        .map(|(_, row)| row)
+}
+
+/// The rows of `word`'s group whose fixed bits it holds, in the order the
+/// first match decides.
+pub(crate) fn rows_matching(word: u32) -> impl Iterator<Item = &'static Row> {
+    let group = (word >> 25) as usize & 7;
+    matching(GROUPS[group], PROBES[group], word).chain(simdfp_matching(word))
+}
+
+/// The floating-point and Advanced SIMD rows of `word`'s group whose fixed
+/// bits it holds.
+pub(crate) fn simdfp_matching(word: u32) -> impl Iterator<Item = &'static Row> {
+    let group = (word >> 25) as usize & 7;
+    matching(SIMDFP[group], SIMDFP_PROBES[group], word)
+}
+
 /// The rows a word whose bits 27 to 25 are `group` may match, in the order
 /// the first match decides.
+#[cfg(test)]
 pub(crate) fn rows(group: usize) -> impl Iterator<Item = &'static Row> {
     GROUPS[group & 7].iter().chain(SIMDFP[group & 7])
 }
@@ -1212,7 +1287,16 @@ pub(crate) fn all() -> impl Iterator<Item = &'static Row> {
 }
 
 /// Whether `kind`'s rows are in the unconditional space, so its condition
-/// field is not a condition.
+/// field is not a condition: the probes say which rows are, and only those
+/// rows are read.
 pub(crate) fn unconditional(kind: Kind) -> bool {
-    all().any(|row| row.kind == kind && row.unconditional())
+    let (groups, probes) = (
+        GROUPS.iter().chain(&SIMDFP),
+        PROBES.iter().chain(&SIMDFP_PROBES),
+    );
+    groups.zip(probes).any(|(rows, probes)| {
+        probes.iter().zip(rows.iter()).any(|(probe, row)| {
+            probe.mask >> 28 == 0xF && probe.bits >> 28 == 0xF && row.kind == kind
+        })
+    })
 }

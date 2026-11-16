@@ -13,9 +13,9 @@
 //!
 //! `--write-sample` also writes the samples the crate's tests replay in `ci`,
 //! one per profile, with the suite's licence and a provenance record.
-//! Developer-run only: `<dir>` holds a local copy of the suite,
-//! `<dir>/v1/*.json.bin`, its `LICENSE`, and a `COMMIT` file naming the
-//! upstream revision.
+//! Developer-run only: `<dir>` holds the suite at [`COMMIT`], its
+//! `v1/*.json.bin` and its `LICENSE`, each refused unless it hashes to its
+//! pin.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -34,6 +34,7 @@ use tairix_riscos_arm::reg::Reg;
 use tairix_riscos_arm::t32::{self, Position};
 use tairix_riscos_arm::vectors::{self, Mismatch, Transfer, Vector};
 
+use super::pinned::{Pinned, SINGLE_STEP_LICENSE};
 use crate::Context;
 
 /// The profile a file is held to.
@@ -64,54 +65,233 @@ impl Held {
 
 const BOTH: [Held; 2] = [Held::Bit26, Held::Bit32];
 
-/// The files, in upstream order, and the profile each is held to. Left out:
+/// An upstream file: its name less `.json.bin`, the profile it is held to,
+/// and its SHA-256 at [`COMMIT`].
+struct Upstream {
+    stem: &'static str,
+    held: Held,
+    sha256: &'static str,
+}
+
+/// The upstream revision [`FILES`] are pinned at.
+const COMMIT: &str = "e3097d88d428752736b949d94c094d5da50f0db6";
+
+/// The files, in upstream order. Left out:
 /// the two halves of ARMv4T's `BL`, which Thumb-2 reads as one 32-bit
 /// instruction; and `thumb_undefined_bcc`, the conditional branch with the
 /// condition `1110`, which ARMv4T leaves undefined, the suite's emulator runs
 /// as a branch, and ARMv7 makes `UDF`.
-const FILES: [(&str, Held); 42] = [
-    ("arm_b_bl", Held::Bit26),
-    ("arm_bx", Held::Bit32),
-    ("arm_cdp", Held::Bit26),
-    ("arm_data_proc_immediate", Held::Bit26),
-    ("arm_data_proc_immediate_shift", Held::Bit26),
-    ("arm_data_proc_register_shift", Held::Bit26),
-    ("arm_ldm_stm", Held::Bit26),
-    ("arm_ldr_str_immediate_offset", Held::Bit26),
-    ("arm_ldr_str_register_offset", Held::Bit26),
-    ("arm_ldrh_strh", Held::Bit26),
-    ("arm_ldrsb_ldrsh", Held::Bit26),
-    ("arm_mcr_mrc", Held::Bit26),
-    ("arm_mrs", Held::Bit26),
-    ("arm_msr_imm", Held::Bit26),
-    ("arm_msr_reg", Held::Bit26),
-    ("arm_mul_mla", Held::Bit26),
-    ("arm_mull_mlal", Held::Bit26),
-    ("arm_stc_ldc", Held::Bit26),
-    ("arm_swi", Held::Bit26),
-    ("arm_swp", Held::Bit26),
-    ("thumb_add_cmp_mov_hi", Held::Bit32),
-    ("thumb_add_sp_or_pc", Held::Bit32),
-    ("thumb_add_sub", Held::Bit32),
-    ("thumb_add_sub_sp", Held::Bit32),
-    ("thumb_b", Held::Bit32),
-    ("thumb_bcc", Held::Bit32),
-    ("thumb_bx", Held::Bit32),
-    ("thumb_data_proc", Held::Bit32),
-    ("thumb_ldm_stm", Held::Bit32),
-    ("thumb_ldr_pc_rel", Held::Bit32),
-    ("thumb_ldr_str_imm_offset", Held::Bit32),
-    ("thumb_ldr_str_reg_offset", Held::Bit32),
-    ("thumb_ldr_str_sp_rel", Held::Bit32),
-    ("thumb_ldrb_strb_imm_offset", Held::Bit32),
-    ("thumb_ldrh_strh_imm_offset", Held::Bit32),
-    ("thumb_ldrh_strh_reg_offset", Held::Bit32),
-    ("thumb_ldrsb_strb_reg_offset", Held::Bit32),
-    ("thumb_ldrsh_ldrsb_reg_offset", Held::Bit32),
-    ("thumb_lsl_lsr_asr", Held::Bit32),
-    ("thumb_mov_cmp_add_sub", Held::Bit32),
-    ("thumb_push_pop", Held::Bit32),
-    ("thumb_swi", Held::Bit32),
+const FILES: [Upstream; 42] = [
+    Upstream {
+        stem: "arm_b_bl",
+        held: Held::Bit26,
+        sha256: "08a34cf3cce61e88110fafa110a609ec20d1426f6779ac01c052341ffaf59e4a",
+    },
+    Upstream {
+        stem: "arm_bx",
+        held: Held::Bit32,
+        sha256: "8b75a2f6166d0fcb4f17ecee0bff0601b59488803a3ef6c87574e36039b1084a",
+    },
+    Upstream {
+        stem: "arm_cdp",
+        held: Held::Bit26,
+        sha256: "7d4b9c685b71ca1bd0f824511024e407590be2f150d2aa631a1b4dfdc30597ff",
+    },
+    Upstream {
+        stem: "arm_data_proc_immediate",
+        held: Held::Bit26,
+        sha256: "1cc79b425f7dd483ca5c3afaed5665922fbbaa17653200465af708564ff5086e",
+    },
+    Upstream {
+        stem: "arm_data_proc_immediate_shift",
+        held: Held::Bit26,
+        sha256: "afadd0d0f1c4a9926b1e5418e76bff5e1056706aff452c1ba5e4c1622c3f7c4b",
+    },
+    Upstream {
+        stem: "arm_data_proc_register_shift",
+        held: Held::Bit26,
+        sha256: "542b831c90f93bd739857fd48448806c0e880a8b965e19b0979b6efe26f432ac",
+    },
+    Upstream {
+        stem: "arm_ldm_stm",
+        held: Held::Bit26,
+        sha256: "a8e6d88b18f37cfdbba214a034e8a89760f58fbdf1a7b7c7bf45d76e3599745f",
+    },
+    Upstream {
+        stem: "arm_ldr_str_immediate_offset",
+        held: Held::Bit26,
+        sha256: "799154dc74202ef821b5fdf617b4f8057ea97c1ed216509507fbcb99b8cadab2",
+    },
+    Upstream {
+        stem: "arm_ldr_str_register_offset",
+        held: Held::Bit26,
+        sha256: "e4f5b4dafd708bb256c6620afe6e611d232eb896bc64c2e1c74fc4c9ec2e0b43",
+    },
+    Upstream {
+        stem: "arm_ldrh_strh",
+        held: Held::Bit26,
+        sha256: "6a8c7b909de59e0687097caa9d39fffa6d674af95c534f76fe34e55b48961ee4",
+    },
+    Upstream {
+        stem: "arm_ldrsb_ldrsh",
+        held: Held::Bit26,
+        sha256: "8cd920d3b933deecc70c9988871ee58346448201547d685379066e21c3f64eb6",
+    },
+    Upstream {
+        stem: "arm_mcr_mrc",
+        held: Held::Bit26,
+        sha256: "86ac57f74c9bfec7200421e3778412ba4319434d6c93a3abf9998223dc1c4a71",
+    },
+    Upstream {
+        stem: "arm_mrs",
+        held: Held::Bit26,
+        sha256: "8f2389f06cd794b6c7085b1b87c8df7fa0187791aeba9c5c21b8c934079a10f2",
+    },
+    Upstream {
+        stem: "arm_msr_imm",
+        held: Held::Bit26,
+        sha256: "77459c806fbc7dbeea2bc165c4b59e7d22e8a6365cfdd9b43a748df8572dc89f",
+    },
+    Upstream {
+        stem: "arm_msr_reg",
+        held: Held::Bit26,
+        sha256: "402131447d908a2eeed5f7bf3315793b963fb3a76b343537de7343914b5ba31c",
+    },
+    Upstream {
+        stem: "arm_mul_mla",
+        held: Held::Bit26,
+        sha256: "40fd66bd248e7a54cbe4637b8d10f36558f1a78e1b7a689ed31f568f3ee09aa7",
+    },
+    Upstream {
+        stem: "arm_mull_mlal",
+        held: Held::Bit26,
+        sha256: "24bbfd810f5d2f833cda25c40577154c8c603a03b0c57b466eaad4f8fe93add5",
+    },
+    Upstream {
+        stem: "arm_stc_ldc",
+        held: Held::Bit26,
+        sha256: "8eac2385c05c7a60aa436af89fdeb20346611fcb8ee078311ee100a71c8015fe",
+    },
+    Upstream {
+        stem: "arm_swi",
+        held: Held::Bit26,
+        sha256: "b2d54cccd1cc04b42eae7490a23ed80242cd199c58420d020fe687b9005ef821",
+    },
+    Upstream {
+        stem: "arm_swp",
+        held: Held::Bit26,
+        sha256: "ce9dc62b94fd5f8ff893c056cc6d24b831869cd1518030395658dcd23566675c",
+    },
+    Upstream {
+        stem: "thumb_add_cmp_mov_hi",
+        held: Held::Bit32,
+        sha256: "e9fd8c961548a11a155c957140f442c5c8c559ca34ef19b1c1df1412f3157dfb",
+    },
+    Upstream {
+        stem: "thumb_add_sp_or_pc",
+        held: Held::Bit32,
+        sha256: "cf75feb7b2483e3f679091dd0fc851ef6b4772c7dc5109025eff0c546d5beea9",
+    },
+    Upstream {
+        stem: "thumb_add_sub",
+        held: Held::Bit32,
+        sha256: "c5aab8bfd9187c7e6a0194024a603cbaf63cf678508e623780188f733155b386",
+    },
+    Upstream {
+        stem: "thumb_add_sub_sp",
+        held: Held::Bit32,
+        sha256: "297b8ffa8cdc768612e823b0b60b15dea1ac1f8633adb47dd750289a09d8ac1a",
+    },
+    Upstream {
+        stem: "thumb_b",
+        held: Held::Bit32,
+        sha256: "c9dad33ec000901b147e8d11bd6cba48d0f2e7053404f110ffc9c49ecca430ea",
+    },
+    Upstream {
+        stem: "thumb_bcc",
+        held: Held::Bit32,
+        sha256: "0163f7f6558da679896993d62dbf81b73e1fa8b783acba9485c8d3d10c366114",
+    },
+    Upstream {
+        stem: "thumb_bx",
+        held: Held::Bit32,
+        sha256: "b322617160e7249c1a6d4fe3bc91913a22d0882298b46cf5ff28171f5f1e967b",
+    },
+    Upstream {
+        stem: "thumb_data_proc",
+        held: Held::Bit32,
+        sha256: "65b91a6abcf5e916c938f34cdeb700061ac198268d15b6564de45b7ba691c581",
+    },
+    Upstream {
+        stem: "thumb_ldm_stm",
+        held: Held::Bit32,
+        sha256: "b8032580bbb3c689e1f61de7811780b70d5bb1ba2fde3125c28193f9a8e617a3",
+    },
+    Upstream {
+        stem: "thumb_ldr_pc_rel",
+        held: Held::Bit32,
+        sha256: "2ab87b83cdba0d3eb47114ad8aca002eb75c77592483294ee6fd277cfcb0c2be",
+    },
+    Upstream {
+        stem: "thumb_ldr_str_imm_offset",
+        held: Held::Bit32,
+        sha256: "fcd15247b7846586cc556d72195a92732066bf604b5c35219145ba9690d9f522",
+    },
+    Upstream {
+        stem: "thumb_ldr_str_reg_offset",
+        held: Held::Bit32,
+        sha256: "41343ac100577130240251d285c4bdd4c5e123cd1d36f7d02feb5b34d179ad06",
+    },
+    Upstream {
+        stem: "thumb_ldr_str_sp_rel",
+        held: Held::Bit32,
+        sha256: "6157c583329b23c74620a1440194ed479a91ee4ea45617786e4e926838b496c2",
+    },
+    Upstream {
+        stem: "thumb_ldrb_strb_imm_offset",
+        held: Held::Bit32,
+        sha256: "ec12a5926407add41b7efbfc99cdf06252eed6e631c3bf3d0c576e5da9ea2e64",
+    },
+    Upstream {
+        stem: "thumb_ldrh_strh_imm_offset",
+        held: Held::Bit32,
+        sha256: "c37ed68dd94483d150a45c34d5944e6b2eb6bc1afc7f8591ee65e264967bd13e",
+    },
+    Upstream {
+        stem: "thumb_ldrh_strh_reg_offset",
+        held: Held::Bit32,
+        sha256: "d574e2531549741129cfbb16e1572b8d6c32ef2ddbee37b4c283e27363fc7085",
+    },
+    Upstream {
+        stem: "thumb_ldrsb_strb_reg_offset",
+        held: Held::Bit32,
+        sha256: "e1bc905052d2b21dc6ac10cb0310d0e9ee46a7de1186d77d46473a4b32bfd2da",
+    },
+    Upstream {
+        stem: "thumb_ldrsh_ldrsb_reg_offset",
+        held: Held::Bit32,
+        sha256: "b150a820c4778b95105b58ed431da81c08ba66b0939ab4be2a2128ef62440ea7",
+    },
+    Upstream {
+        stem: "thumb_lsl_lsr_asr",
+        held: Held::Bit32,
+        sha256: "ee06a2b0ad0567e2a0c6b3be9fe6dbe5a59437a5f8562c64793f7642381cea7e",
+    },
+    Upstream {
+        stem: "thumb_mov_cmp_add_sub",
+        held: Held::Bit32,
+        sha256: "3fad2efb2e3a8b3e083f3265a1e65d5eadbab816956d03ae6553832915092407",
+    },
+    Upstream {
+        stem: "thumb_push_pop",
+        held: Held::Bit32,
+        sha256: "877d3a7e6613ffa96a268d82ece29c65501ffdc3a89049f33facdcddf4bb9535",
+    },
+    Upstream {
+        stem: "thumb_swi",
+        held: Held::Bit32,
+        sha256: "b90f9b4425d5bd872c7b047646103b0701c61d4929bfb8b51b23e3644d01a273",
+    },
 ];
 
 /// Where the samples and their records are committed.
@@ -151,24 +331,20 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         [dir, "--write-sample"] => (Path::new(dir), true),
         _ => return Err(usage()),
     };
-    let commit = std::fs::read_to_string(dir.join("COMMIT"))
-        .map_err(|e| format!("riscos-vectors: {}: no COMMIT file: {e}", dir.display()))?;
-    let commit = commit.trim().to_string();
     let mut failures: Vec<String> = Vec::new();
     let mut failed = 0usize;
     let mut samples: [Vec<Vector>; 2] = [Vec::new(), Vec::new()];
     let mut summaries: [Vec<Summary>; 2] = [Vec::new(), Vec::new()];
-    let mut digests = String::new();
     let mut dropped_total: BTreeMap<Dropped, usize> = BTreeMap::new();
-    for (file, held) in FILES {
-        let path = dir.join("v1").join(format!("{file}.json.bin"));
-        let bytes =
-            std::fs::read(&path).map_err(|e| format!("riscos-vectors: {}: {e}", path.display()))?;
-        let _ = writeln!(
-            digests,
-            "- `{file}.json.bin` `{}`",
-            tairix_util::hex::encode(&tairix_crypto::sha256(&bytes))
-        );
+    let suite = dir.join("v1");
+    for upstream in &FILES {
+        let (file, held) = (upstream.stem, upstream.held);
+        let name = format!("{file}.json.bin");
+        let bytes = Pinned {
+            file: &name,
+            sha256: upstream.sha256,
+        }
+        .read("riscos-vectors", &suite)?;
         let raws = parse(&bytes).map_err(|e| format!("riscos-vectors: {file}: {e}"))?;
         let mut kept = 0usize;
         let mut file_failures = 0usize;
@@ -225,9 +401,7 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     if write {
         let records = Records {
             dir,
-            commit: &commit,
             summaries: &summaries,
-            digests: &digests,
             dropped: &dropped_total,
         };
         write_samples(ctx, &records, &samples)?;
@@ -356,9 +530,7 @@ fn passes(held: Held, vector: &Vector) -> bool {
 /// What a sample's provenance file states.
 struct Records<'a> {
     dir: &'a Path,
-    commit: &'a str,
     summaries: &'a [Vec<Summary>; 2],
-    digests: &'a str,
     dropped: &'a BTreeMap<Dropped, usize>,
 }
 
@@ -367,6 +539,7 @@ fn write_samples(
     records: &Records<'_>,
     samples: &[Vec<Vector>; 2],
 ) -> Result<(), String> {
+    let licence = SINGLE_STEP_LICENSE.read("riscos-vectors", records.dir)?;
     let out = ctx.workspace_root.join(SAMPLE_DIR);
     std::fs::create_dir_all(&out)
         .map_err(|e| format!("riscos-vectors: cannot create {}: {e}", out.display()))?;
@@ -391,20 +564,26 @@ fn write_samples(
         }
         tables.push('\n');
     }
-    let licence = std::fs::read(records.dir.join("LICENSE"))
-        .map_err(|e| format!("riscos-vectors: {}: LICENSE: {e}", records.dir.display()))?;
     std::fs::write(out.join("LICENSE"), licence)
         .map_err(|e| format!("riscos-vectors: LICENSE: {e}"))?;
     let mut reasons = String::new();
     for (reason, count) in records.dropped {
         let _ = writeln!(reasons, "- {count}: {}", reason.describe());
     }
+    let mut digests = String::new();
+    for upstream in &FILES {
+        let _ = writeln!(
+            digests,
+            "- `{}.json.bin` `{}`",
+            upstream.stem, upstream.sha256
+        );
+    }
     let readme = format!(
         "# ARM conformance vectors\n\n\
          Generated by `cargo xtask riscos-vectors <dir> --write-sample`; never edit\n\
          by hand.\n\n\
          Source: the `SingleStepTests` ARM7TDMI suite ({REPOSITORY}, commit\n\
-         `{commit}`), under the MIT licence in `LICENSE` beside this file. The\n\
+         `{COMMIT}`), under the MIT licence in `LICENSE` beside this file. The\n\
          suite was generated by the NanoBoyAdvance emulator, not captured from\n\
          silicon.\n\n\
          Each sample is the `tairix_riscos_arm::vectors` encoding of up to {PER_FILE}\n\
@@ -416,8 +595,6 @@ fn write_samples(
          {tables}\
          ## Vectors not kept\n\n{reasons}\n\
          ## Upstream files (SHA-256)\n\n{digests}",
-        commit = records.commit,
-        digests = records.digests,
     );
     std::fs::write(out.join("README.md"), readme)
         .map_err(|e| format!("riscos-vectors: README.md: {e}"))
@@ -440,26 +617,35 @@ struct Cursor<'a> {
 
 impl Cursor<'_> {
     fn u32_at(&self, at: usize) -> Result<u32, String> {
-        let bytes = self
-            .bytes
-            .get(at..at + 4)
+        let bytes = at
+            .checked_add(4)
+            .and_then(|end| self.bytes.get(at..end))
             .ok_or_else(|| format!("truncated at {at}"))?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    /// A length-prefixed part's start and the offset past it.
-    fn part(&mut self) -> Result<(usize, usize), String> {
+    /// The offset past `size` bytes at `start`, where the file holds them.
+    fn extent(&self, start: usize, size: usize) -> Result<usize, String> {
+        start
+            .checked_add(size)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or_else(|| format!("{size} bytes at {start} run past the file"))
+    }
+
+    /// A length-prefixed part holding at least `need` bytes, the cursor
+    /// moved past it: its start and its size.
+    fn part(&mut self, need: usize) -> Result<(usize, usize), String> {
         let start = self.at;
         let size = usize::try_from(self.u32_at(start)?).map_err(|e| e.to_string())?;
-        if size < 4 {
+        if size < need {
             return Err(format!("a part of {size} bytes at {start}"));
         }
-        self.at = start + size;
-        Ok((start, self.at))
+        self.at = self.extent(start, size)?;
+        Ok((start, size))
     }
 
     fn state(&mut self) -> Result<[u32; 40], String> {
-        let (start, _) = self.part()?;
+        let (start, _) = self.part(8 + 4 * 40)?;
         let mut words = [0; 40];
         for (n, word) in words.iter_mut().enumerate() {
             *word = self.u32_at(start + 8 + 4 * n)?;
@@ -476,17 +662,25 @@ fn parse(bytes: &[u8]) -> Result<Vec<Raw>, String> {
     }
     let count = cursor.u32_at(4)?;
     let mut raws = Vec::new();
+    // Each vector is read only within its own bytes and the file's, so the
+    // count a file claims costs no more than the bytes it holds.
     for _ in 0..count {
         let test_start = cursor.at;
         let size = usize::try_from(cursor.u32_at(test_start)?).map_err(|e| e.to_string())?;
-        let end = test_start + size;
+        let end = cursor.extent(test_start, size)?;
         cursor.at = test_start + 4;
         let initial = cursor.state()?;
         let last = cursor.state()?;
-        let (start, _) = cursor.part()?;
-        let transactions = (0..cursor.u32_at(start + 8)?)
+        let (start, held) = cursor.part(12)?;
+        let transactions = usize::try_from(cursor.u32_at(start + 8)?).map_err(|e| e.to_string())?;
+        if transactions > (held - 12) / 24 {
+            return Err(format!(
+                "{transactions} transactions in a part of {held} bytes at {start}"
+            ));
+        }
+        let transactions = (0..transactions)
             .map(|n| {
-                let at = start + 12 + 24 * usize::try_from(n).map_err(|e| e.to_string())?;
+                let at = start + 12 + 24 * n;
                 let mut fields = [0; 6];
                 for (k, field) in fields.iter_mut().enumerate() {
                     *field = cursor.u32_at(at + 4 * k)?;
@@ -494,9 +688,14 @@ fn parse(bytes: &[u8]) -> Result<Vec<Raw>, String> {
                 Ok(fields)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let (start, _) = cursor.part()?;
+        let (start, _) = cursor.part(16)?;
         let opcode = cursor.u32_at(start + 8)?;
         let base = cursor.u32_at(start + 12)?;
+        if cursor.at > end {
+            return Err(format!(
+                "a vector of {size} bytes at {test_start} holds more"
+            ));
+        }
         cursor.at = end;
         raws.push(Raw {
             initial,
@@ -942,5 +1141,83 @@ mod tests {
         let mut header = FILE_MAGIC.to_le_bytes().to_vec();
         header.extend_from_slice(&1u32.to_le_bytes());
         assert!(parse(&header).is_err(), "a vector counted but absent");
+    }
+
+    fn part(body: &[u8]) -> Vec<u8> {
+        let mut part = u32::try_from(8 + body.len())
+            .expect("a small part")
+            .to_le_bytes()
+            .to_vec();
+        part.extend_from_slice(&[0; 4]);
+        part.extend_from_slice(body);
+        part
+    }
+
+    /// A vector of zeroed states, two zeroed transactions and one opcode.
+    fn vector() -> Vec<u8> {
+        let mut parts = part(&[0; 160]);
+        parts.extend(part(&[0; 160]));
+        let mut held = 2u32.to_le_bytes().to_vec();
+        held.extend_from_slice(&[0; 48]);
+        parts.extend(part(&held));
+        parts.extend(part(
+            &[0xE1A0_0000u32, 0x100].map(u32::to_le_bytes).concat(),
+        ));
+        let mut vector = u32::try_from(4 + parts.len())
+            .expect("a small vector")
+            .to_le_bytes()
+            .to_vec();
+        vector.extend(parts);
+        vector
+    }
+
+    /// Where a vector's transaction count lies: past its size and two states.
+    const TRANSACTIONS: usize = 4 + 168 + 168 + 8;
+
+    fn file(count: u32, vectors: &[Vec<u8>]) -> Vec<u8> {
+        let mut file = FILE_MAGIC.to_le_bytes().to_vec();
+        file.extend_from_slice(&count.to_le_bytes());
+        for vector in vectors {
+            file.extend_from_slice(vector);
+        }
+        file
+    }
+
+    fn with_word(mut vector: Vec<u8>, at: usize, word: u32) -> Vec<u8> {
+        vector[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        vector
+    }
+
+    #[test]
+    fn a_vector_is_read_whole_and_only_within_its_own_bytes() {
+        let raws = parse(&file(2, &[vector(), vector()])).expect("two vectors");
+        assert_eq!(raws.len(), 2);
+        assert_eq!(raws[1].transactions.len(), 2);
+        assert_eq!((raws[1].opcode, raws[1].base), (0xE1A0_0000, 0x100));
+        let empty = with_word(vector(), 0, 0);
+        assert!(
+            parse(&file(1000, &[empty])).is_err(),
+            "a vector of no bytes is not read again and again"
+        );
+        let short = with_word(vector(), 0, 16);
+        assert!(
+            parse(&file(1, &[short])).is_err(),
+            "a vector smaller than its parts"
+        );
+        let long = with_word(vector(), 0, u32::MAX);
+        assert!(
+            parse(&file(1, &[long])).is_err(),
+            "a vector past the file's end"
+        );
+        let counted = with_word(vector(), TRANSACTIONS, 3);
+        assert!(
+            parse(&file(2, &[counted, vector()])).is_err(),
+            "transactions past their own part, though not past the file"
+        );
+        let thin = with_word(vector(), 4, 12);
+        assert!(
+            parse(&file(1, &[thin])).is_err(),
+            "a state part too small for its words"
+        );
     }
 }

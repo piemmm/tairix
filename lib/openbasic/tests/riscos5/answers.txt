@@ -1,0 +1,4399 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# Never edit by hand.
+program 0 0 8
+line "1PRINT\x22"
+= stored "\xF1\x22" warns quote
+line "2PRINT)"
+= stored "\xF1)" warns brackets
+line "3GOTO 65280"
+= stored "\xE5 65280" warns line
+line "4GOTO1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+= refused long
+line "5GOTO 5"
+= stored "\xE5 \x8DTE@" warns none
+listo 0
+= "    1PRINT\x22\x0A\x0D    2PRINT)\x0A\x0D    3GOTO 65280\x0A\x0D    5GOTO 5\x0A\x0D"
+listo 8
+= "PRINT\x22\x0A\x0DPRINT)\x0A\x0DGOTO 65280\x0A\x0DGOTO 5\x0A\x0D" stopped 5
+program 0 0
+line "1AND"
+= stored "\x80" warns none
+line "2X=AND"
+= stored "X=\x80" warns none
+line "3ANDA"
+= stored "\x80A" warns none
+line "4AND 10"
+= stored "\x80 10" warns none
+line "5AND TIME"
+= stored "\x80 \x91" warns none
+line "6X=AND TIME"
+= stored "X=\x80 \x91" warns none
+line "7AND)"
+= stored "\x80)" warns brackets
+line "8AND PRINT"
+= stored "\x80 \xF1" warns none
+line "9ABS"
+= stored "\x94" warns none
+line "10X=ABS"
+= stored "X=\x94" warns none
+line "11ABSA"
+= stored "\x94A" warns none
+line "12ABS 10"
+= stored "\x94 \x8DTJ@" warns none
+line "13ABS TIME"
+= stored "\x94 \xD1" warns none
+line "14X=ABS TIME"
+= stored "X=\x94 \x91" warns none
+line "15ABS)"
+= stored "\x94)" warns brackets
+line "16ABS PRINT"
+= stored "\x94 \xF1" warns none
+line "17ACS"
+= stored "\x95" warns none
+line "18X=ACS"
+= stored "X=\x95" warns none
+line "19ACSA"
+= stored "\x95A" warns none
+line "20ACS 10"
+= stored "\x95 \x8DTJ@" warns none
+line "21ACS TIME"
+= stored "\x95 \xD1" warns none
+line "22X=ACS TIME"
+= stored "X=\x95 \x91" warns none
+line "23ACS)"
+= stored "\x95)" warns brackets
+line "24ACS PRINT"
+= stored "\x95 \xF1" warns none
+line "25ADVAL"
+= stored "\x96" warns none
+line "26X=ADVAL"
+= stored "X=\x96" warns none
+line "27ADVALA"
+= stored "\x96A" warns none
+line "28ADVAL 10"
+= stored "\x96 \x8DTJ@" warns none
+line "29ADVAL TIME"
+= stored "\x96 \xD1" warns none
+line "30X=ADVAL TIME"
+= stored "X=\x96 \x91" warns none
+line "31ADVAL)"
+= stored "\x96)" warns brackets
+line "32ADVAL PRINT"
+= stored "\x96 \xF1" warns none
+line "33ASC"
+= stored "\x97" warns none
+line "34X=ASC"
+= stored "X=\x97" warns none
+line "35ASCA"
+= stored "\x97A" warns none
+line "36ASC 10"
+= stored "\x97 \x8DTJ@" warns none
+line "37ASC TIME"
+= stored "\x97 \xD1" warns none
+line "38X=ASC TIME"
+= stored "X=\x97 \x91" warns none
+line "39ASC)"
+= stored "\x97)" warns brackets
+line "40ASC PRINT"
+= stored "\x97 \xF1" warns none
+line "41ASN"
+= stored "\x98" warns none
+line "42X=ASN"
+= stored "X=\x98" warns none
+line "43ASNA"
+= stored "\x98A" warns none
+line "44ASN 10"
+= stored "\x98 \x8DTJ@" warns none
+line "45ASN TIME"
+= stored "\x98 \xD1" warns none
+line "46X=ASN TIME"
+= stored "X=\x98 \x91" warns none
+line "47ASN)"
+= stored "\x98)" warns brackets
+line "48ASN PRINT"
+= stored "\x98 \xF1" warns none
+line "49ATN"
+= stored "\x99" warns none
+line "50X=ATN"
+= stored "X=\x99" warns none
+line "51ATNA"
+= stored "\x99A" warns none
+line "52ATN 10"
+= stored "\x99 \x8DTJ@" warns none
+line "53ATN TIME"
+= stored "\x99 \xD1" warns none
+line "54X=ATN TIME"
+= stored "X=\x99 \x91" warns none
+line "55ATN)"
+= stored "\x99)" warns brackets
+line "56ATN PRINT"
+= stored "\x99 \xF1" warns none
+line "57AUTO"
+= stored "\xC7\x8F" warns none
+line "58X=AUTO"
+= stored "X=\xC7\x8F" warns none
+line "59AUTOA"
+= stored "\xC7\x8FA" warns none
+line "60AUTO 10"
+= stored "\xC7\x8F \x8DTJ@" warns none
+line "61AUTO TIME"
+= stored "\xC7\x8F \xD1" warns none
+line "62X=AUTO TIME"
+= stored "X=\xC7\x8F \x91" warns none
+line "63AUTO)"
+= stored "\xC7\x8F)" warns brackets
+line "64AUTO PRINT"
+= stored "\xC7\x8F \xF1" warns none
+line "65APPEND"
+= stored "\xC7\x8E" warns none
+line "66X=APPEND"
+= stored "X=\xC7\x8E" warns none
+line "67APPENDA"
+= stored "\xC7\x8EA" warns none
+line "68APPEND 10"
+= stored "\xC7\x8E 10" warns none
+line "69APPEND TIME"
+= stored "\xC7\x8E \x91" warns none
+line "70X=APPEND TIME"
+= stored "X=\xC7\x8E \x91" warns none
+line "71APPEND)"
+= stored "\xC7\x8E)" warns brackets
+line "72APPEND PRINT"
+= stored "\xC7\x8E \xF1" warns none
+line "73BGET"
+= stored "\x9A" warns none
+line "74X=BGET"
+= stored "X=\x9A" warns none
+line "75BGETA"
+= stored "BGETA" warns none
+line "76BGET 10"
+= stored "\x9A \x8DTJ@" warns none
+line "77BGET TIME"
+= stored "\x9A \xD1" warns none
+line "78X=BGET TIME"
+= stored "X=\x9A \x91" warns none
+line "79BGET)"
+= stored "\x9A)" warns brackets
+line "80BGET PRINT"
+= stored "\x9A \xF1" warns none
+line "81BPUT"
+= stored "\xD5" warns none
+line "82X=BPUT"
+= stored "X=\xD5" warns none
+line "83BPUTA"
+= stored "BPUTA" warns none
+line "84BPUT 10"
+= stored "\xD5 10" warns none
+line "85BPUT TIME"
+= stored "\xD5 \x91" warns none
+line "86X=BPUT TIME"
+= stored "X=\xD5 \x91" warns none
+line "87BPUT)"
+= stored "\xD5)" warns brackets
+line "88BPUT PRINT"
+= stored "\xD5 \xF1" warns none
+line "89BEATS"
+= stored "\xC8\x9E" warns none
+line "90X=BEATS"
+= stored "X=\xC8\x9E" warns none
+line "91BEATSA"
+= stored "\xC8\x9EA" warns none
+line "92BEATS 10"
+= stored "\xC8\x9E 10" warns none
+line "93BEATS TIME"
+= stored "\xC8\x9E \x91" warns none
+line "94X=BEATS TIME"
+= stored "X=\xC8\x9E \x91" warns none
+line "95BEATS)"
+= stored "\xC8\x9E)" warns brackets
+line "96BEATS PRINT"
+= stored "\xC8\x9E \xF1" warns none
+line "97BEAT"
+= stored "\xC6\x8F" warns none
+line "98X=BEAT"
+= stored "X=\xC6\x8F" warns none
+line "99BEATA"
+= stored "\xC6\x8FA" warns none
+line "100BEAT 10"
+= stored "\xC6\x8F 10" warns none
+line "101BEAT TIME"
+= stored "\xC6\x8F \x91" warns none
+line "102X=BEAT TIME"
+= stored "X=\xC6\x8F \x91" warns none
+line "103BEAT)"
+= stored "\xC6\x8F)" warns brackets
+line "104BEAT PRINT"
+= stored "\xC6\x8F \xF1" warns none
+line "105COLOUR"
+= stored "\xFB" warns none
+line "106X=COLOUR"
+= stored "X=\xFB" warns none
+line "107COLOURA"
+= stored "\xFBA" warns none
+line "108COLOUR 10"
+= stored "\xFB 10" warns none
+line "109COLOUR TIME"
+= stored "\xFB \x91" warns none
+line "110X=COLOUR TIME"
+= stored "X=\xFB \x91" warns none
+line "111COLOUR)"
+= stored "\xFB)" warns brackets
+line "112COLOUR PRINT"
+= stored "\xFB \xF1" warns none
+line "113CALL"
+= stored "\xD6" warns none
+line "114X=CALL"
+= stored "X=\xD6" warns none
+line "115CALLA"
+= stored "\xD6A" warns none
+line "116CALL 10"
+= stored "\xD6 10" warns none
+line "117CALL TIME"
+= stored "\xD6 \x91" warns none
+line "118X=CALL TIME"
+= stored "X=\xD6 \x91" warns none
+line "119CALL)"
+= stored "\xD6)" warns brackets
+line "120CALL PRINT"
+= stored "\xD6 \xF1" warns none
+line "121CASE"
+= stored "\xC8\x8E" warns none
+line "122X=CASE"
+= stored "X=\xC8\x8E" warns none
+line "123CASEA"
+= stored "\xC8\x8EA" warns none
+line "124CASE 10"
+= stored "\xC8\x8E 10" warns none
+line "125CASE TIME"
+= stored "\xC8\x8E \x91" warns none
+line "126X=CASE TIME"
+= stored "X=\xC8\x8E \x91" warns none
+line "127CASE)"
+= stored "\xC8\x8E)" warns brackets
+line "128CASE PRINT"
+= stored "\xC8\x8E \xF1" warns none
+line "129CHAIN"
+= stored "\xD7" warns none
+line "130X=CHAIN"
+= stored "X=\xD7" warns none
+line "131CHAINA"
+= stored "\xD7A" warns none
+line "132CHAIN 10"
+= stored "\xD7 10" warns none
+line "133CHAIN TIME"
+= stored "\xD7 \x91" warns none
+line "134X=CHAIN TIME"
+= stored "X=\xD7 \x91" warns none
+line "135CHAIN)"
+= stored "\xD7)" warns brackets
+line "136CHAIN PRINT"
+= stored "\xD7 \xF1" warns none
+line "137CHR$"
+= stored "\xBD" warns none
+line "138X=CHR$"
+= stored "X=\xBD" warns none
+line "139CHR$A"
+= stored "\xBDA" warns none
+line "140CHR$ 10"
+= stored "\xBD \x8DTJ@" warns none
+line "141CHR$ TIME"
+= stored "\xBD \xD1" warns none
+line "142X=CHR$ TIME"
+= stored "X=\xBD \x91" warns none
+line "143CHR$)"
+= stored "\xBD)" warns brackets
+line "144CHR$ PRINT"
+= stored "\xBD \xF1" warns none
+line "145CLEAR"
+= stored "\xD8" warns none
+line "146X=CLEAR"
+= stored "X=\xD8" warns none
+line "147CLEARA"
+= stored "CLEARA" warns none
+line "148CLEAR 10"
+= stored "\xD8 \x8DTJ@" warns none
+line "149CLEAR TIME"
+= stored "\xD8 \xD1" warns none
+line "150X=CLEAR TIME"
+= stored "X=\xD8 \x91" warns none
+line "151CLEAR)"
+= stored "\xD8)" warns brackets
+line "152CLEAR PRINT"
+= stored "\xD8 \xF1" warns none
+line "153CLOSE"
+= stored "\xD9" warns none
+line "154X=CLOSE"
+= stored "X=\xD9" warns none
+line "155CLOSEA"
+= stored "CLOSEA" warns none
+line "156CLOSE 10"
+= stored "\xD9 10" warns none
+line "157CLOSE TIME"
+= stored "\xD9 \x91" warns none
+line "158X=CLOSE TIME"
+= stored "X=\xD9 \x91" warns none
+line "159CLOSE)"
+= stored "\xD9)" warns brackets
+line "160CLOSE PRINT"
+= stored "\xD9 \xF1" warns none
+line "161CLG"
+= stored "\xDA" warns none
+line "162X=CLG"
+= stored "X=\xDA" warns none
+line "163CLGA"
+= stored "CLGA" warns none
+line "164CLG 10"
+= stored "\xDA \x8DTJ@" warns none
+line "165CLG TIME"
+= stored "\xDA \xD1" warns none
+line "166X=CLG TIME"
+= stored "X=\xDA \x91" warns none
+line "167CLG)"
+= stored "\xDA)" warns brackets
+line "168CLG PRINT"
+= stored "\xDA \xF1" warns none
+line "169CLS"
+= stored "\xDB" warns none
+line "170X=CLS"
+= stored "X=\xDB" warns none
+line "171CLSA"
+= stored "CLSA" warns none
+line "172CLS 10"
+= stored "\xDB \x8DTJ@" warns none
+line "173CLS TIME"
+= stored "\xDB \xD1" warns none
+line "174X=CLS TIME"
+= stored "X=\xDB \x91" warns none
+line "175CLS)"
+= stored "\xDB)" warns brackets
+line "176CLS PRINT"
+= stored "\xDB \xF1" warns none
+line "177COS"
+= stored "\x9B" warns none
+line "178X=COS"
+= stored "X=\x9B" warns none
+line "179COSA"
+= stored "\x9BA" warns none
+line "180COS 10"
+= stored "\x9B \x8DTJ@" warns none
+line "181COS TIME"
+= stored "\x9B \xD1" warns none
+line "182X=COS TIME"
+= stored "X=\x9B \x91" warns none
+line "183COS)"
+= stored "\x9B)" warns brackets
+line "184COS PRINT"
+= stored "\x9B \xF1" warns none
+line "185COUNT"
+= stored "\x9C" warns none
+line "186X=COUNT"
+= stored "X=\x9C" warns none
+line "187COUNTA"
+= stored "COUNTA" warns none
+line "188COUNT 10"
+= stored "\x9C \x8DTJ@" warns none
+line "189COUNT TIME"
+= stored "\x9C \xD1" warns none
+line "190X=COUNT TIME"
+= stored "X=\x9C \x91" warns none
+line "191COUNT)"
+= stored "\x9C)" warns brackets
+line "192COUNT PRINT"
+= stored "\x9C \xF1" warns none
+line "193CIRCLE"
+= stored "\xC8\x8F" warns none
+line "194X=CIRCLE"
+= stored "X=\xC8\x8F" warns none
+line "195CIRCLEA"
+= stored "\xC8\x8FA" warns none
+line "196CIRCLE 10"
+= stored "\xC8\x8F 10" warns none
+line "197CIRCLE TIME"
+= stored "\xC8\x8F \x91" warns none
+line "198X=CIRCLE TIME"
+= stored "X=\xC8\x8F \x91" warns none
+line "199CIRCLE)"
+= stored "\xC8\x8F)" warns brackets
+line "200CIRCLE PRINT"
+= stored "\xC8\x8F \xF1" warns none
+line "201CRUNCH"
+= stored "\xC7\x90" warns none
+line "202X=CRUNCH"
+= stored "X=\xC7\x90" warns none
+line "203CRUNCHA"
+= stored "\xC7\x90A" warns none
+line "204CRUNCH 10"
+= stored "\xC7\x90 10" warns none
+line "205CRUNCH TIME"
+= stored "\xC7\x90 \x91" warns none
+line "206X=CRUNCH TIME"
+= stored "X=\xC7\x90 \x91" warns none
+line "207CRUNCH)"
+= stored "\xC7\x90)" warns brackets
+line "208CRUNCH PRINT"
+= stored "\xC7\x90 \xF1" warns none
+line "209COLOR"
+= stored "\xFB" warns none
+line "210X=COLOR"
+= stored "X=\xFB" warns none
+line "211COLORA"
+= stored "\xFBA" warns none
+line "212COLOR 10"
+= stored "\xFB 10" warns none
+line "213COLOR TIME"
+= stored "\xFB \x91" warns none
+line "214X=COLOR TIME"
+= stored "X=\xFB \x91" warns none
+line "215COLOR)"
+= stored "\xFB)" warns brackets
+line "216COLOR PRINT"
+= stored "\xFB \xF1" warns none
+line "217DATA"
+= stored "\xDC" warns none
+line "218X=DATA"
+= stored "X=\xDC" warns none
+line "219DATAA"
+= stored "\xDCA" warns none
+line "220DATA 10"
+= stored "\xDC 10" warns none
+line "221DATA TIME"
+= stored "\xDC TIME" warns none
+line "222X=DATA TIME"
+= stored "X=\xDC TIME" warns none
+line "223DATA)"
+= stored "\xDC)" warns none
+line "224DATA PRINT"
+= stored "\xDC PRINT" warns none
+line "225DEG"
+= stored "\x9D" warns none
+line "226X=DEG"
+= stored "X=\x9D" warns none
+line "227DEGA"
+= stored "\x9DA" warns none
+line "228DEG 10"
+= stored "\x9D \x8DTJ@" warns none
+line "229DEG TIME"
+= stored "\x9D \xD1" warns none
+line "230X=DEG TIME"
+= stored "X=\x9D \x91" warns none
+line "231DEG)"
+= stored "\x9D)" warns brackets
+line "232DEG PRINT"
+= stored "\x9D \xF1" warns none
+line "233DEF"
+= stored "\xDD" warns none
+line "234X=DEF"
+= stored "X=\xDD" warns none
+line "235DEFA"
+= stored "\xDDA" warns none
+line "236DEF 10"
+= stored "\xDD \x8DTJ@" warns none
+line "237DEF TIME"
+= stored "\xDD \xD1" warns none
+line "238X=DEF TIME"
+= stored "X=\xDD \x91" warns none
+line "239DEF)"
+= stored "\xDD)" warns brackets
+line "240DEF PRINT"
+= stored "\xDD \xF1" warns none
+line "241DELETE"
+= stored "\xC7\x91" warns none
+line "242X=DELETE"
+= stored "X=\xC7\x91" warns none
+line "243DELETEA"
+= stored "\xC7\x91A" warns none
+line "244DELETE 10"
+= stored "\xC7\x91 \x8DTJ@" warns none
+line "245DELETE TIME"
+= stored "\xC7\x91 \xD1" warns none
+line "246X=DELETE TIME"
+= stored "X=\xC7\x91 \x91" warns none
+line "247DELETE)"
+= stored "\xC7\x91)" warns brackets
+line "248DELETE PRINT"
+= stored "\xC7\x91 \xF1" warns none
+line "249DIV"
+= stored "\x81" warns none
+line "250X=DIV"
+= stored "X=\x81" warns none
+line "251DIVA"
+= stored "\x81A" warns none
+line "252DIV 10"
+= stored "\x81 \x8DTJ@" warns none
+line "253DIV TIME"
+= stored "\x81 \xD1" warns none
+line "254X=DIV TIME"
+= stored "X=\x81 \x91" warns none
+line "255DIV)"
+= stored "\x81)" warns brackets
+line "256DIV PRINT"
+= stored "\x81 \xF1" warns none
+line "257DIM"
+= stored "\xDE" warns none
+line "258X=DIM"
+= stored "X=\xDE" warns none
+line "259DIMA"
+= stored "\xDEA" warns none
+line "260DIM 10"
+= stored "\xDE 10" warns none
+line "261DIM TIME"
+= stored "\xDE \x91" warns none
+line "262X=DIM TIME"
+= stored "X=\xDE \x91" warns none
+line "263DIM)"
+= stored "\xDE)" warns brackets
+line "264DIM PRINT"
+= stored "\xDE \xF1" warns none
+line "265DRAW"
+= stored "\xDF" warns none
+line "266X=DRAW"
+= stored "X=\xDF" warns none
+line "267DRAWA"
+= stored "\xDFA" warns none
+line "268DRAW 10"
+= stored "\xDF 10" warns none
+line "269DRAW TIME"
+= stored "\xDF \x91" warns none
+line "270X=DRAW TIME"
+= stored "X=\xDF \x91" warns none
+line "271DRAW)"
+= stored "\xDF)" warns brackets
+line "272DRAW PRINT"
+= stored "\xDF \xF1" warns none
+line "273ENDPROC"
+= stored "\xE1" warns none
+line "274X=ENDPROC"
+= stored "X=\xE1" warns none
+line "275ENDPROCA"
+= stored "ENDPROCA" warns none
+line "276ENDPROC 10"
+= stored "\xE1 \x8DTJ@" warns none
+line "277ENDPROC TIME"
+= stored "\xE1 \xD1" warns none
+line "278X=ENDPROC TIME"
+= stored "X=\xE1 \x91" warns none
+line "279ENDPROC)"
+= stored "\xE1)" warns brackets
+line "280ENDPROC PRINT"
+= stored "\xE1 \xF1" warns none
+line "281EDIT"
+= stored "\xC7\x92" warns none
+line "282X=EDIT"
+= stored "X=\xC7\x92" warns none
+line "283EDITA"
+= stored "\xC7\x92A" warns none
+line "284EDIT 10"
+= stored "\xC7\x92 10" warns none
+line "285EDIT TIME"
+= stored "\xC7\x92 TIME" warns none
+line "286X=EDIT TIME"
+= stored "X=\xC7\x92 TIME" warns none
+line "287EDIT)"
+= stored "\xC7\x92)" warns none
+line "288EDIT PRINT"
+= stored "\xC7\x92 PRINT" warns none
+line "289ENDWHILE"
+= stored "\xCE" warns none
+line "290X=ENDWHILE"
+= stored "X=\xCE" warns none
+line "291ENDWHILEA"
+= stored "ENDWHILEA" warns none
+line "292ENDWHILE 10"
+= stored "\xCE \x8DTJ@" warns none
+line "293ENDWHILE TIME"
+= stored "\xCE \xD1" warns none
+line "294X=ENDWHILE TIME"
+= stored "X=\xCE \x91" warns none
+line "295ENDWHILE)"
+= stored "\xCE)" warns brackets
+line "296ENDWHILE PRINT"
+= stored "\xCE \xF1" warns none
+line "297ENDCASE"
+= stored "\xCB" warns none
+line "298X=ENDCASE"
+= stored "X=\xCB" warns none
+line "299ENDCASEA"
+= stored "ENDCASEA" warns none
+line "300ENDCASE 10"
+= stored "\xCB \x8DTJ@" warns none
+line "301ENDCASE TIME"
+= stored "\xCB \xD1" warns none
+line "302X=ENDCASE TIME"
+= stored "X=\xCB \x91" warns none
+line "303ENDCASE)"
+= stored "\xCB)" warns brackets
+line "304ENDCASE PRINT"
+= stored "\xCB \xF1" warns none
+line "305ENDIF"
+= stored "\xCD" warns none
+line "306X=ENDIF"
+= stored "X=\xCD" warns none
+line "307ENDIFA"
+= stored "ENDIFA" warns none
+line "308ENDIF 10"
+= stored "\xCD \x8DTJ@" warns none
+line "309ENDIF TIME"
+= stored "\xCD \xD1" warns none
+line "310X=ENDIF TIME"
+= stored "X=\xCD \x91" warns none
+line "311ENDIF)"
+= stored "\xCD)" warns brackets
+line "312ENDIF PRINT"
+= stored "\xCD \xF1" warns none
+line "313END"
+= stored "\xE0" warns none
+line "314X=END"
+= stored "X=\xE0" warns none
+line "315ENDA"
+= stored "ENDA" warns none
+line "316END 10"
+= stored "\xE0 \x8DTJ@" warns none
+line "317END TIME"
+= stored "\xE0 \xD1" warns none
+line "318X=END TIME"
+= stored "X=\xE0 \x91" warns none
+line "319END)"
+= stored "\xE0)" warns brackets
+line "320END PRINT"
+= stored "\xE0 \xF1" warns none
+line "321ENVELOPE"
+= stored "\xE2" warns none
+line "322X=ENVELOPE"
+= stored "X=\xE2" warns none
+line "323ENVELOPEA"
+= stored "\xE2A" warns none
+line "324ENVELOPE 10"
+= stored "\xE2 10" warns none
+line "325ENVELOPE TIME"
+= stored "\xE2 \x91" warns none
+line "326X=ENVELOPE TIME"
+= stored "X=\xE2 \x91" warns none
+line "327ENVELOPE)"
+= stored "\xE2)" warns brackets
+line "328ENVELOPE PRINT"
+= stored "\xE2 \xF1" warns none
+line "329ELSE"
+= stored "\xCC" warns none
+line "330X=ELSE"
+= stored "X=\x8B" warns none
+line "331ELSEA"
+= stored "\xCCA" warns none
+line "332ELSE 10"
+= stored "\xCC \x8DTJ@" warns none
+line "333ELSE TIME"
+= stored "\xCC \xD1" warns none
+line "334X=ELSE TIME"
+= stored "X=\x8B \xD1" warns none
+line "335ELSE)"
+= stored "\xCC)" warns brackets
+line "336ELSE PRINT"
+= stored "\xCC \xF1" warns none
+line "337EVAL"
+= stored "\xA0" warns none
+line "338X=EVAL"
+= stored "X=\xA0" warns none
+line "339EVALA"
+= stored "\xA0A" warns none
+line "340EVAL 10"
+= stored "\xA0 \x8DTJ@" warns none
+line "341EVAL TIME"
+= stored "\xA0 \xD1" warns none
+line "342X=EVAL TIME"
+= stored "X=\xA0 \x91" warns none
+line "343EVAL)"
+= stored "\xA0)" warns brackets
+line "344EVAL PRINT"
+= stored "\xA0 \xF1" warns none
+line "345ERL"
+= stored "\x9E" warns none
+line "346X=ERL"
+= stored "X=\x9E" warns none
+line "347ERLA"
+= stored "ERLA" warns none
+line "348ERL 10"
+= stored "\x9E \x8DTJ@" warns none
+line "349ERL TIME"
+= stored "\x9E \xD1" warns none
+line "350X=ERL TIME"
+= stored "X=\x9E \x91" warns none
+line "351ERL)"
+= stored "\x9E)" warns brackets
+line "352ERL PRINT"
+= stored "\x9E \xF1" warns none
+line "353ERROR"
+= stored "\x85" warns none
+line "354X=ERROR"
+= stored "X=\x85" warns none
+line "355ERRORA"
+= stored "\x85A" warns none
+line "356ERROR 10"
+= stored "\x85 10" warns none
+line "357ERROR TIME"
+= stored "\x85 \xD1" warns none
+line "358X=ERROR TIME"
+= stored "X=\x85 \xD1" warns none
+line "359ERROR)"
+= stored "\x85)" warns brackets
+line "360ERROR PRINT"
+= stored "\x85 \xF1" warns none
+line "361EOF"
+= stored "\xC5" warns none
+line "362X=EOF"
+= stored "X=\xC5" warns none
+line "363EOFA"
+= stored "EOFA" warns none
+line "364EOF 10"
+= stored "\xC5 \x8DTJ@" warns none
+line "365EOF TIME"
+= stored "\xC5 \xD1" warns none
+line "366X=EOF TIME"
+= stored "X=\xC5 \x91" warns none
+line "367EOF)"
+= stored "\xC5)" warns brackets
+line "368EOF PRINT"
+= stored "\xC5 \xF1" warns none
+line "369EOR"
+= stored "\x82" warns none
+line "370X=EOR"
+= stored "X=\x82" warns none
+line "371EORA"
+= stored "\x82A" warns none
+line "372EOR 10"
+= stored "\x82 10" warns none
+line "373EOR TIME"
+= stored "\x82 \x91" warns none
+line "374X=EOR TIME"
+= stored "X=\x82 \x91" warns none
+line "375EOR)"
+= stored "\x82)" warns brackets
+line "376EOR PRINT"
+= stored "\x82 \xF1" warns none
+line "377ERR"
+= stored "\x9F" warns none
+line "378X=ERR"
+= stored "X=\x9F" warns none
+line "379ERRA"
+= stored "ERRA" warns none
+line "380ERR 10"
+= stored "\x9F \x8DTJ@" warns none
+line "381ERR TIME"
+= stored "\x9F \xD1" warns none
+line "382X=ERR TIME"
+= stored "X=\x9F \x91" warns none
+line "383ERR)"
+= stored "\x9F)" warns brackets
+line "384ERR PRINT"
+= stored "\x9F \xF1" warns none
+line "385EXP"
+= stored "\xA1" warns none
+line "386X=EXP"
+= stored "X=\xA1" warns none
+line "387EXPA"
+= stored "\xA1A" warns none
+line "388EXP 10"
+= stored "\xA1 \x8DTJ@" warns none
+line "389EXP TIME"
+= stored "\xA1 \xD1" warns none
+line "390X=EXP TIME"
+= stored "X=\xA1 \x91" warns none
+line "391EXP)"
+= stored "\xA1)" warns brackets
+line "392EXP PRINT"
+= stored "\xA1 \xF1" warns none
+line "393EXT"
+= stored "\xA2" warns none
+line "394X=EXT"
+= stored "X=\xA2" warns none
+line "395EXTA"
+= stored "EXTA" warns none
+line "396EXT 10"
+= stored "\xA2 \x8DTJ@" warns none
+line "397EXT TIME"
+= stored "\xA2 \xD1" warns none
+line "398X=EXT TIME"
+= stored "X=\xA2 \x91" warns none
+line "399EXT)"
+= stored "\xA2)" warns brackets
+line "400EXT PRINT"
+= stored "\xA2 \xF1" warns none
+line "401ELLIPSE"
+= stored "\xC8\x9D" warns none
+line "402X=ELLIPSE"
+= stored "X=\xC8\x9D" warns none
+line "403ELLIPSEA"
+= stored "\xC8\x9DA" warns none
+line "404ELLIPSE 10"
+= stored "\xC8\x9D 10" warns none
+line "405ELLIPSE TIME"
+= stored "\xC8\x9D \x91" warns none
+line "406X=ELLIPSE TIME"
+= stored "X=\xC8\x9D \x91" warns none
+line "407ELLIPSE)"
+= stored "\xC8\x9D)" warns brackets
+line "408ELLIPSE PRINT"
+= stored "\xC8\x9D \xF1" warns none
+line "409FOR"
+= stored "\xE3" warns none
+line "410X=FOR"
+= stored "X=\xE3" warns none
+line "411FORA"
+= stored "\xE3A" warns none
+line "412FOR 10"
+= stored "\xE3 10" warns none
+line "413FOR TIME"
+= stored "\xE3 \x91" warns none
+line "414X=FOR TIME"
+= stored "X=\xE3 \x91" warns none
+line "415FOR)"
+= stored "\xE3)" warns brackets
+line "416FOR PRINT"
+= stored "\xE3 \xF1" warns none
+line "417FALSE"
+= stored "\xA3" warns none
+line "418X=FALSE"
+= stored "X=\xA3" warns none
+line "419FALSEA"
+= stored "FALSEA" warns none
+line "420FALSE 10"
+= stored "\xA3 \x8DTJ@" warns none
+line "421FALSE TIME"
+= stored "\xA3 \xD1" warns none
+line "422X=FALSE TIME"
+= stored "X=\xA3 \x91" warns none
+line "423FALSE)"
+= stored "\xA3)" warns brackets
+line "424FALSE PRINT"
+= stored "\xA3 \xF1" warns none
+line "425FILL"
+= stored "\xC8\x90" warns none
+line "426X=FILL"
+= stored "X=\xC8\x90" warns none
+line "427FILLA"
+= stored "\xC8\x90A" warns none
+line "428FILL 10"
+= stored "\xC8\x90 10" warns none
+line "429FILL TIME"
+= stored "\xC8\x90 \x91" warns none
+line "430X=FILL TIME"
+= stored "X=\xC8\x90 \x91" warns none
+line "431FILL)"
+= stored "\xC8\x90)" warns brackets
+line "432FILL PRINT"
+= stored "\xC8\x90 \xF1" warns none
+listo 0
+= "    1AND\x0A\x0D    2X=AND\x0A\x0D    3ANDA\x0A\x0D    4AND 10\x0A\x0D    5AND TIME\x0A\x0D    6X=AND TIME\x0A\x0D    7AND)\x0A\x0D    8AND PRINT\x0A\x0D    9ABS\x0A\x0D   10X=ABS\x0A\x0D   11ABSA\x0A\x0D   12ABS 10\x0A\x0D   13ABS TIME\x0A\x0D   14X=ABS TIME\x0A\x0D   15ABS)\x0A\x0D   16ABS PRINT\x0A\x0D   17ACS\x0A\x0D   18X=ACS\x0A\x0D   19ACSA\x0A\x0D   20ACS 10\x0A\x0D   21ACS TIME\x0A\x0D   22X=ACS TIME\x0A\x0D   23ACS)\x0A\x0D   24ACS PRINT\x0A\x0D   25ADVAL\x0A\x0D   26X=ADVAL\x0A\x0D   27ADVALA\x0A\x0D   28ADVAL 10\x0A\x0D   29ADVAL TIME\x0A\x0D   30X=ADVAL TIME\x0A\x0D   31ADVAL)\x0A\x0D   32ADVAL PRINT\x0A\x0D   33ASC\x0A\x0D   34X=ASC\x0A\x0D   35ASCA\x0A\x0D   36ASC 10\x0A\x0D   37ASC TIME\x0A\x0D   38X=ASC TIME\x0A\x0D   39ASC)\x0A\x0D   40ASC PRINT\x0A\x0D   41ASN\x0A\x0D   42X=ASN\x0A\x0D   43ASNA\x0A\x0D   44ASN 10\x0A\x0D   45ASN TIME\x0A\x0D   46X=ASN TIME\x0A\x0D   47ASN)\x0A\x0D   48ASN PRINT\x0A\x0D   49ATN\x0A\x0D   50X=ATN\x0A\x0D   51ATNA\x0A\x0D   52ATN 10\x0A\x0D   53ATN TIME\x0A\x0D   54X=ATN TIME\x0A\x0D   55ATN)\x0A\x0D   56ATN PRINT\x0A\x0D   57AUTO\x0A\x0D   58X=AUTO\x0A\x0D   59AUTOA\x0A\x0D   60AUTO 10\x0A\x0D   61AUTO TIME\x0A\x0D   62X=AUTO TIME\x0A\x0D   63AUTO)\x0A\x0D   64AUTO PRINT\x0A\x0D   65APPEND\x0A\x0D   66X=APPEND\x0A\x0D   67APPENDA\x0A\x0D   68APPEND 10\x0A\x0D   69APPEND TIME\x0A\x0D   70X=APPEND TIME\x0A\x0D   71APPEND)\x0A\x0D   72APPEND PRINT\x0A\x0D   73BGET\x0A\x0D   74X=BGET\x0A\x0D   75BGETA\x0A\x0D   76BGET 10\x0A\x0D   77BGET TIME\x0A\x0D   78X=BGET TIME\x0A\x0D   79BGET)\x0A\x0D   80BGET PRINT\x0A\x0D   81BPUT\x0A\x0D   82X=BPUT\x0A\x0D   83BPUTA\x0A\x0D   84BPUT 10\x0A\x0D   85BPUT TIME\x0A\x0D   86X=BPUT TIME\x0A\x0D   87BPUT)\x0A\x0D   88BPUT PRINT\x0A\x0D   89BEATS\x0A\x0D   90X=BEATS\x0A\x0D   91BEATSA\x0A\x0D   92BEATS 10\x0A\x0D   93BEATS TIME\x0A\x0D   94X=BEATS TIME\x0A\x0D   95BEATS)\x0A\x0D   96BEATS PRINT\x0A\x0D   97BEAT\x0A\x0D   98X=BEAT\x0A\x0D   99BEATA\x0A\x0D  100BEAT 10\x0A\x0D  101BEAT TIME\x0A\x0D  102X=BEAT TIME\x0A\x0D  103BEAT)\x0A\x0D  104BEAT PRINT\x0A\x0D  105COLOUR\x0A\x0D  106X=COLOUR\x0A\x0D  107COLOURA\x0A\x0D  108COLOUR 10\x0A\x0D  109COLOUR TIME\x0A\x0D  110X=COLOUR TIME\x0A\x0D  111COLOUR)\x0A\x0D  112COLOUR PRINT\x0A\x0D  113CALL\x0A\x0D  114X=CALL\x0A\x0D  115CALLA\x0A\x0D  116CALL 10\x0A\x0D  117CALL TIME\x0A\x0D  118X=CALL TIME\x0A\x0D  119CALL)\x0A\x0D  120CALL PRINT\x0A\x0D  121CASE\x0A\x0D  122X=CASE\x0A\x0D  123CASEA\x0A\x0D  124CASE 10\x0A\x0D  125CASE TIME\x0A\x0D  126X=CASE TIME\x0A\x0D  127CASE)\x0A\x0D  128CASE PRINT\x0A\x0D  129CHAIN\x0A\x0D  130X=CHAIN\x0A\x0D  131CHAINA\x0A\x0D  132CHAIN 10\x0A\x0D  133CHAIN TIME\x0A\x0D  134X=CHAIN TIME\x0A\x0D  135CHAIN)\x0A\x0D  136CHAIN PRINT\x0A\x0D  137CHR$\x0A\x0D  138X=CHR$\x0A\x0D  139CHR$A\x0A\x0D  140CHR$ 10\x0A\x0D  141CHR$ TIME\x0A\x0D  142X=CHR$ TIME\x0A\x0D  143CHR$)\x0A\x0D  144CHR$ PRINT\x0A\x0D  145CLEAR\x0A\x0D  146X=CLEAR\x0A\x0D  147CLEARA\x0A\x0D  148CLEAR 10\x0A\x0D  149CLEAR TIME\x0A\x0D  150X=CLEAR TIME\x0A\x0D  151CLEAR)\x0A\x0D  152CLEAR PRINT\x0A\x0D  153CLOSE\x0A\x0D  154X=CLOSE\x0A\x0D  155CLOSEA\x0A\x0D  156CLOSE 10\x0A\x0D  157CLOSE TIME\x0A\x0D  158X=CLOSE TIME\x0A\x0D  159CLOSE)\x0A\x0D  160CLOSE PRINT\x0A\x0D  161CLG\x0A\x0D  162X=CLG\x0A\x0D  163CLGA\x0A\x0D  164CLG 10\x0A\x0D  165CLG TIME\x0A\x0D  166X=CLG TIME\x0A\x0D  167CLG)\x0A\x0D  168CLG PRINT\x0A\x0D  169CLS\x0A\x0D  170X=CLS\x0A\x0D  171CLSA\x0A\x0D  172CLS 10\x0A\x0D  173CLS TIME\x0A\x0D  174X=CLS TIME\x0A\x0D  175CLS)\x0A\x0D  176CLS PRINT\x0A\x0D  177COS\x0A\x0D  178X=COS\x0A\x0D  179COSA\x0A\x0D  180COS 10\x0A\x0D  181COS TIME\x0A\x0D  182X=COS TIME\x0A\x0D  183COS)\x0A\x0D  184COS PRINT\x0A\x0D  185COUNT\x0A\x0D  186X=COUNT\x0A\x0D  187COUNTA\x0A\x0D  188COUNT 10\x0A\x0D  189COUNT TIME\x0A\x0D  190X=COUNT TIME\x0A\x0D  191COUNT)\x0A\x0D  192COUNT PRINT\x0A\x0D  193CIRCLE\x0A\x0D  194X=CIRCLE\x0A\x0D  195CIRCLEA\x0A\x0D  196CIRCLE 10\x0A\x0D  197CIRCLE TIME\x0A\x0D  198X=CIRCLE TIME\x0A\x0D  199CIRCLE)\x0A\x0D  200CIRCLE PRINT\x0A\x0D  201CRUNCH\x0A\x0D  202X=CRUNCH\x0A\x0D  203CRUNCHA\x0A\x0D  204CRUNCH 10\x0A\x0D  205CRUNCH TIME\x0A\x0D  206X=CRUNCH TIME\x0A\x0D  207CRUNCH)\x0A\x0D  208CRUNCH PRINT\x0A\x0D  209COLOUR\x0A\x0D  210X=COLOUR\x0A\x0D  211COLOURA\x0A\x0D  212COLOUR 10\x0A\x0D  213COLOUR TIME\x0A\x0D  214X=COLOUR TIME\x0A\x0D  215COLOUR)\x0A\x0D  216COLOUR PRINT\x0A\x0D  217DATA\x0A\x0D  218X=DATA\x0A\x0D  219DATAA\x0A\x0D  220DATA 10\x0A\x0D  221DATA TIME\x0A\x0D  222X=DATA TIME\x0A\x0D  223DATA)\x0A\x0D  224DATA PRINT\x0A\x0D  225DEG\x0A\x0D  226X=DEG\x0A\x0D  227DEGA\x0A\x0D  228DEG 10\x0A\x0D  229DEG TIME\x0A\x0D  230X=DEG TIME\x0A\x0D  231DEG)\x0A\x0D  232DEG PRINT\x0A\x0D  233DEF\x0A\x0D  234X=DEF\x0A\x0D  235DEFA\x0A\x0D  236DEF 10\x0A\x0D  237DEF TIME\x0A\x0D  238X=DEF TIME\x0A\x0D  239DEF)\x0A\x0D  240DEF PRINT\x0A\x0D  241DELETE\x0A\x0D  242X=DELETE\x0A\x0D  243DELETEA\x0A\x0D  244DELETE 10\x0A\x0D  245DELETE TIME\x0A\x0D  246X=DELETE TIME\x0A\x0D  247DELETE)\x0A\x0D  248DELETE PRINT\x0A\x0D  249DIV\x0A\x0D  250X=DIV\x0A\x0D  251DIVA\x0A\x0D  252DIV 10\x0A\x0D  253DIV TIME\x0A\x0D  254X=DIV TIME\x0A\x0D  255DIV)\x0A\x0D  256DIV PRINT\x0A\x0D  257DIM\x0A\x0D  258X=DIM\x0A\x0D  259DIMA\x0A\x0D  260DIM 10\x0A\x0D  261DIM TIME\x0A\x0D  262X=DIM TIME\x0A\x0D  263DIM)\x0A\x0D  264DIM PRINT\x0A\x0D  265DRAW\x0A\x0D  266X=DRAW\x0A\x0D  267DRAWA\x0A\x0D  268DRAW 10\x0A\x0D  269DRAW TIME\x0A\x0D  270X=DRAW TIME\x0A\x0D  271DRAW)\x0A\x0D  272DRAW PRINT\x0A\x0D  273ENDPROC\x0A\x0D  274X=ENDPROC\x0A\x0D  275ENDPROCA\x0A\x0D  276ENDPROC 10\x0A\x0D  277ENDPROC TIME\x0A\x0D  278X=ENDPROC TIME\x0A\x0D  279ENDPROC)\x0A\x0D  280ENDPROC PRINT\x0A\x0D  281EDIT\x0A\x0D  282X=EDIT\x0A\x0D  283EDITA\x0A\x0D  284EDIT 10\x0A\x0D  285EDIT TIME\x0A\x0D  286X=EDIT TIME\x0A\x0D  287EDIT)\x0A\x0D  288EDIT PRINT\x0A\x0D  289ENDWHILE\x0A\x0D  290X=ENDWHILE\x0A\x0D  291ENDWHILEA\x0A\x0D  292ENDWHILE 10\x0A\x0D  293ENDWHILE TIME\x0A\x0D  294X=ENDWHILE TIME\x0A\x0D  295ENDWHILE)\x0A\x0D  296ENDWHILE PRINT\x0A\x0D  297ENDCASE\x0A\x0D  298X=ENDCASE\x0A\x0D  299ENDCASEA\x0A\x0D  300ENDCASE 10\x0A\x0D  301ENDCASE TIME\x0A\x0D  302X=ENDCASE TIME\x0A\x0D  303ENDCASE)\x0A\x0D  304ENDCASE PRINT\x0A\x0D  305ENDIF\x0A\x0D  306X=ENDIF\x0A\x0D  307ENDIFA\x0A\x0D  308ENDIF 10\x0A\x0D  309ENDIF TIME\x0A\x0D  310X=ENDIF TIME\x0A\x0D  311ENDIF)\x0A\x0D  312ENDIF PRINT\x0A\x0D  313END\x0A\x0D  314X=END\x0A\x0D  315ENDA\x0A\x0D  316END 10\x0A\x0D  317END TIME\x0A\x0D  318X=END TIME\x0A\x0D  319END)\x0A\x0D  320END PRINT\x0A\x0D  321ENVELOPE\x0A\x0D  322X=ENVELOPE\x0A\x0D  323ENVELOPEA\x0A\x0D  324ENVELOPE 10\x0A\x0D  325ENVELOPE TIME\x0A\x0D  326X=ENVELOPE TIME\x0A\x0D  327ENVELOPE)\x0A\x0D  328ENVELOPE PRINT\x0A\x0D  329ELSE\x0A\x0D  330X=ELSE\x0A\x0D  331ELSEA\x0A\x0D  332ELSE 10\x0A\x0D  333ELSE TIME\x0A\x0D  334X=ELSE TIME\x0A\x0D  335ELSE)\x0A\x0D  336ELSE PRINT\x0A\x0D  337EVAL\x0A\x0D  338X=EVAL\x0A\x0D  339EVALA\x0A\x0D  340EVAL 10\x0A\x0D  341EVAL TIME\x0A\x0D  342X=EVAL TIME\x0A\x0D  343EVAL)\x0A\x0D  344EVAL PRINT\x0A\x0D  345ERL\x0A\x0D  346X=ERL\x0A\x0D  347ERLA\x0A\x0D  348ERL 10\x0A\x0D  349ERL TIME\x0A\x0D  350X=ERL TIME\x0A\x0D  351ERL)\x0A\x0D  352ERL PRINT\x0A\x0D  353ERROR\x0A\x0D  354X=ERROR\x0A\x0D  355ERRORA\x0A\x0D  356ERROR 10\x0A\x0D  357ERROR TIME\x0A\x0D  358X=ERROR TIME\x0A\x0D  359ERROR)\x0A\x0D  360ERROR PRINT\x0A\x0D  361EOF\x0A\x0D  362X=EOF\x0A\x0D  363EOFA\x0A\x0D  364EOF 10\x0A\x0D  365EOF TIME\x0A\x0D  366X=EOF TIME\x0A\x0D  367EOF)\x0A\x0D  368EOF PRINT\x0A\x0D  369EOR\x0A\x0D  370X=EOR\x0A\x0D  371EORA\x0A\x0D  372EOR 10\x0A\x0D  373EOR TIME\x0A\x0D  374X=EOR TIME\x0A\x0D  375EOR)\x0A\x0D  376EOR PRINT\x0A\x0D  377ERR\x0A\x0D  378X=ERR\x0A\x0D  379ERRA\x0A\x0D  380ERR 10\x0A\x0D  381ERR TIME\x0A\x0D  382X=ERR TIME\x0A\x0D  383ERR)\x0A\x0D  384ERR PRINT\x0A\x0D  385EXP\x0A\x0D  386X=EXP\x0A\x0D  387EXPA\x0A\x0D  388EXP 10\x0A\x0D  389EXP TIME\x0A\x0D  390X=EXP TIME\x0A\x0D  391EXP)\x0A\x0D  392EXP PRINT\x0A\x0D  393EXT\x0A\x0D  394X=EXT\x0A\x0D  395EXTA\x0A\x0D  396EXT 10\x0A\x0D  397EXT TIME\x0A\x0D  398X=EXT TIME\x0A\x0D  399EXT)\x0A\x0D  400EXT PRINT\x0A\x0D  401ELLIPSE\x0A\x0D  402X=ELLIPSE\x0A\x0D  403ELLIPSEA\x0A\x0D  404ELLIPSE 10\x0A\x0D  405ELLIPSE TIME\x0A\x0D  406X=ELLIPSE TIME\x0A\x0D  407ELLIPSE)\x0A\x0D  408ELLIPSE PRINT\x0A\x0D  409FOR\x0A\x0D  410X=FOR\x0A\x0D  411FORA\x0A\x0D  412FOR 10\x0A\x0D  413FOR TIME\x0A\x0D  414X=FOR TIME\x0A\x0D  415FOR)\x0A\x0D  416FOR PRINT\x0A\x0D  417FALSE\x0A\x0D  418X=FALSE\x0A\x0D  419FALSEA\x0A\x0D  420FALSE 10\x0A\x0D  421FALSE TIME\x0A\x0D  422X=FALSE TIME\x0A\x0D  423FALSE)\x0A\x0D  424FALSE PRINT\x0A\x0D  425FILL\x0A\x0D  426X=FILL\x0A\x0D  427FILLA\x0A\x0D  428FILL 10\x0A\x0D  429FILL TIME\x0A\x0D  430X=FILL TIME\x0A\x0D  431FILL)\x0A\x0D  432FILL PRINT\x0A\x0D"
+program 0 0
+line "1FN"
+= stored "\xA4" warns none
+line "2X=FN"
+= stored "X=\xA4" warns none
+line "3FNA"
+= stored "\xA4A" warns none
+line "4FN 10"
+= stored "\xA4 10" warns none
+line "5FN TIME"
+= stored "\xA4 \x91" warns none
+line "6X=FN TIME"
+= stored "X=\xA4 \x91" warns none
+line "7FN)"
+= stored "\xA4)" warns brackets
+line "8FN PRINT"
+= stored "\xA4 \xF1" warns none
+line "9GOTO"
+= stored "\xE5" warns none
+line "10X=GOTO"
+= stored "X=\xE5" warns none
+line "11GOTOA"
+= stored "\xE5A" warns none
+line "12GOTO 10"
+= stored "\xE5 \x8DTJ@" warns none
+line "13GOTO TIME"
+= stored "\xE5 \x91" warns none
+line "14X=GOTO TIME"
+= stored "X=\xE5 \x91" warns none
+line "15GOTO)"
+= stored "\xE5)" warns brackets
+line "16GOTO PRINT"
+= stored "\xE5 \xF1" warns none
+line "17GET$"
+= stored "\xBE" warns none
+line "18X=GET$"
+= stored "X=\xBE" warns none
+line "19GET$A"
+= stored "\xBEA" warns none
+line "20GET$ 10"
+= stored "\xBE \x8DTJ@" warns none
+line "21GET$ TIME"
+= stored "\xBE \xD1" warns none
+line "22X=GET$ TIME"
+= stored "X=\xBE \x91" warns none
+line "23GET$)"
+= stored "\xBE)" warns brackets
+line "24GET$ PRINT"
+= stored "\xBE \xF1" warns none
+line "25GET"
+= stored "\xA5" warns none
+line "26X=GET"
+= stored "X=\xA5" warns none
+line "27GETA"
+= stored "\xA5A" warns none
+line "28GET 10"
+= stored "\xA5 \x8DTJ@" warns none
+line "29GET TIME"
+= stored "\xA5 \xD1" warns none
+line "30X=GET TIME"
+= stored "X=\xA5 \x91" warns none
+line "31GET)"
+= stored "\xA5)" warns brackets
+line "32GET PRINT"
+= stored "\xA5 \xF1" warns none
+line "33GOSUB"
+= stored "\xE4" warns none
+line "34X=GOSUB"
+= stored "X=\xE4" warns none
+line "35GOSUBA"
+= stored "\xE4A" warns none
+line "36GOSUB 10"
+= stored "\xE4 \x8DTJ@" warns none
+line "37GOSUB TIME"
+= stored "\xE4 \x91" warns none
+line "38X=GOSUB TIME"
+= stored "X=\xE4 \x91" warns none
+line "39GOSUB)"
+= stored "\xE4)" warns brackets
+line "40GOSUB PRINT"
+= stored "\xE4 \xF1" warns none
+line "41GCOL"
+= stored "\xE6" warns none
+line "42X=GCOL"
+= stored "X=\xE6" warns none
+line "43GCOLA"
+= stored "\xE6A" warns none
+line "44GCOL 10"
+= stored "\xE6 10" warns none
+line "45GCOL TIME"
+= stored "\xE6 \x91" warns none
+line "46X=GCOL TIME"
+= stored "X=\xE6 \x91" warns none
+line "47GCOL)"
+= stored "\xE6)" warns brackets
+line "48GCOL PRINT"
+= stored "\xE6 \xF1" warns none
+line "49HIMEM"
+= stored "\xD3" warns none
+line "50X=HIMEM"
+= stored "X=\x93" warns none
+line "51HIMEMA"
+= stored "HIMEMA" warns none
+line "52HIMEM 10"
+= stored "\xD3 10" warns none
+line "53HIMEM TIME"
+= stored "\xD3 \x91" warns none
+line "54X=HIMEM TIME"
+= stored "X=\x93 \x91" warns none
+line "55HIMEM)"
+= stored "\xD3)" warns brackets
+line "56HIMEM PRINT"
+= stored "\xD3 \xF1" warns none
+line "57HELP"
+= stored "\xC7\x93" warns none
+line "58X=HELP"
+= stored "X=\xC7\x93" warns none
+line "59HELPA"
+= stored "HELPA" warns none
+line "60HELP 10"
+= stored "\xC7\x93 \x8DTJ@" warns none
+line "61HELP TIME"
+= stored "\xC7\x93 \xD1" warns none
+line "62X=HELP TIME"
+= stored "X=\xC7\x93 \x91" warns none
+line "63HELP)"
+= stored "\xC7\x93)" warns brackets
+line "64HELP PRINT"
+= stored "\xC7\x93 \xF1" warns none
+line "65INPUT"
+= stored "\xE8" warns none
+line "66X=INPUT"
+= stored "X=\xE8" warns none
+line "67INPUTA"
+= stored "\xE8A" warns none
+line "68INPUT 10"
+= stored "\xE8 10" warns none
+line "69INPUT TIME"
+= stored "\xE8 \x91" warns none
+line "70X=INPUT TIME"
+= stored "X=\xE8 \x91" warns none
+line "71INPUT)"
+= stored "\xE8)" warns brackets
+line "72INPUT PRINT"
+= stored "\xE8 \xF1" warns none
+line "73IF"
+= stored "\xE7" warns none
+line "74X=IF"
+= stored "X=\xE7" warns none
+line "75IFA"
+= stored "\xE7A" warns none
+line "76IF 10"
+= stored "\xE7 10" warns none
+line "77IF TIME"
+= stored "\xE7 \x91" warns none
+line "78X=IF TIME"
+= stored "X=\xE7 \x91" warns none
+line "79IF)"
+= stored "\xE7)" warns brackets
+line "80IF PRINT"
+= stored "\xE7 \xF1" warns none
+line "81INKEY$"
+= stored "\xBF" warns none
+line "82X=INKEY$"
+= stored "X=\xBF" warns none
+line "83INKEY$A"
+= stored "\xBFA" warns none
+line "84INKEY$ 10"
+= stored "\xBF \x8DTJ@" warns none
+line "85INKEY$ TIME"
+= stored "\xBF \xD1" warns none
+line "86X=INKEY$ TIME"
+= stored "X=\xBF \x91" warns none
+line "87INKEY$)"
+= stored "\xBF)" warns brackets
+line "88INKEY$ PRINT"
+= stored "\xBF \xF1" warns none
+line "89INKEY"
+= stored "\xA6" warns none
+line "90X=INKEY"
+= stored "X=\xA6" warns none
+line "91INKEYA"
+= stored "\xA6A" warns none
+line "92INKEY 10"
+= stored "\xA6 \x8DTJ@" warns none
+line "93INKEY TIME"
+= stored "\xA6 \xD1" warns none
+line "94X=INKEY TIME"
+= stored "X=\xA6 \x91" warns none
+line "95INKEY)"
+= stored "\xA6)" warns brackets
+line "96INKEY PRINT"
+= stored "\xA6 \xF1" warns none
+line "97INT"
+= stored "\xA8" warns none
+line "98X=INT"
+= stored "X=\xA8" warns none
+line "99INTA"
+= stored "\xA8A" warns none
+line "100INT 10"
+= stored "\xA8 \x8DTJ@" warns none
+line "101INT TIME"
+= stored "\xA8 \xD1" warns none
+line "102X=INT TIME"
+= stored "X=\xA8 \x91" warns none
+line "103INT)"
+= stored "\xA8)" warns brackets
+line "104INT PRINT"
+= stored "\xA8 \xF1" warns none
+line "105INSTR("
+= stored "\xA7" warns brackets
+line "106X=INSTR("
+= stored "X=\xA7" warns brackets
+line "107INSTR(A"
+= stored "\xA7A" warns brackets
+line "108INSTR( 10"
+= stored "\xA7 \x8DTJ@" warns brackets
+line "109INSTR( TIME"
+= stored "\xA7 \xD1" warns brackets
+line "110X=INSTR( TIME"
+= stored "X=\xA7 \x91" warns brackets
+line "111INSTR()"
+= stored "\xA7)" warns none
+line "112INSTR( PRINT"
+= stored "\xA7 \xF1" warns brackets
+line "113INSTALL"
+= stored "\xC7\x9F" warns none
+line "114X=INSTALL"
+= stored "X=\xC7\x9F" warns none
+line "115INSTALLA"
+= stored "\xC7\x9FA" warns none
+line "116INSTALL 10"
+= stored "\xC7\x9F 10" warns none
+line "117INSTALL TIME"
+= stored "\xC7\x9F \x91" warns none
+line "118X=INSTALL TIME"
+= stored "X=\xC7\x9F \x91" warns none
+line "119INSTALL)"
+= stored "\xC7\x9F)" warns brackets
+line "120INSTALL PRINT"
+= stored "\xC7\x9F \xF1" warns none
+line "121LIST"
+= stored "\xC7\x94" warns none
+line "122X=LIST"
+= stored "X=\xC7\x94" warns none
+line "123LISTA"
+= stored "\xC7\x94A" warns none
+line "124LIST 10"
+= stored "\xC7\x94 \x8DTJ@" warns none
+line "125LIST TIME"
+= stored "\xC7\x94 \xD1" warns none
+line "126X=LIST TIME"
+= stored "X=\xC7\x94 \x91" warns none
+line "127LIST)"
+= stored "\xC7\x94)" warns brackets
+line "128LIST PRINT"
+= stored "\xC7\x94 \xF1" warns none
+line "129LINE"
+= stored "\x86" warns none
+line "130X=LINE"
+= stored "X=\x86" warns none
+line "131LINEA"
+= stored "\x86A" warns none
+line "132LINE 10"
+= stored "\x86 10" warns none
+line "133LINE TIME"
+= stored "\x86 \x91" warns none
+line "134X=LINE TIME"
+= stored "X=\x86 \x91" warns none
+line "135LINE)"
+= stored "\x86)" warns brackets
+line "136LINE PRINT"
+= stored "\x86 \xF1" warns none
+line "137LOAD"
+= stored "\xC7\x95" warns none
+line "138X=LOAD"
+= stored "X=\xC7\x95" warns none
+line "139LOADA"
+= stored "\xC7\x95A" warns none
+line "140LOAD 10"
+= stored "\xC7\x95 10" warns none
+line "141LOAD TIME"
+= stored "\xC7\x95 \x91" warns none
+line "142X=LOAD TIME"
+= stored "X=\xC7\x95 \x91" warns none
+line "143LOAD)"
+= stored "\xC7\x95)" warns brackets
+line "144LOAD PRINT"
+= stored "\xC7\x95 \xF1" warns none
+line "145LOMEM"
+= stored "\xD2" warns none
+line "146X=LOMEM"
+= stored "X=\x92" warns none
+line "147LOMEMA"
+= stored "LOMEMA" warns none
+line "148LOMEM 10"
+= stored "\xD2 10" warns none
+line "149LOMEM TIME"
+= stored "\xD2 \x91" warns none
+line "150X=LOMEM TIME"
+= stored "X=\x92 \x91" warns none
+line "151LOMEM)"
+= stored "\xD2)" warns brackets
+line "152LOMEM PRINT"
+= stored "\xD2 \xF1" warns none
+line "153LOCAL"
+= stored "\xEA" warns none
+line "154X=LOCAL"
+= stored "X=\xEA" warns none
+line "155LOCALA"
+= stored "\xEAA" warns none
+line "156LOCAL 10"
+= stored "\xEA 10" warns none
+line "157LOCAL TIME"
+= stored "\xEA \x91" warns none
+line "158X=LOCAL TIME"
+= stored "X=\xEA \x91" warns none
+line "159LOCAL)"
+= stored "\xEA)" warns brackets
+line "160LOCAL PRINT"
+= stored "\xEA \xF1" warns none
+line "161LEFT$("
+= stored "\xC0" warns brackets
+line "162X=LEFT$("
+= stored "X=\xC0" warns brackets
+line "163LEFT$(A"
+= stored "\xC0A" warns brackets
+line "164LEFT$( 10"
+= stored "\xC0 \x8DTJ@" warns brackets
+line "165LEFT$( TIME"
+= stored "\xC0 \xD1" warns brackets
+line "166X=LEFT$( TIME"
+= stored "X=\xC0 \x91" warns brackets
+line "167LEFT$()"
+= stored "\xC0)" warns none
+line "168LEFT$( PRINT"
+= stored "\xC0 \xF1" warns brackets
+line "169LEN"
+= stored "\xA9" warns none
+line "170X=LEN"
+= stored "X=\xA9" warns none
+line "171LENA"
+= stored "\xA9A" warns none
+line "172LEN 10"
+= stored "\xA9 \x8DTJ@" warns none
+line "173LEN TIME"
+= stored "\xA9 \xD1" warns none
+line "174X=LEN TIME"
+= stored "X=\xA9 \x91" warns none
+line "175LEN)"
+= stored "\xA9)" warns brackets
+line "176LEN PRINT"
+= stored "\xA9 \xF1" warns none
+line "177LET"
+= stored "\xE9" warns none
+line "178X=LET"
+= stored "X=\xE9" warns none
+line "179LETA"
+= stored "\xE9A" warns none
+line "180LET 10"
+= stored "\xE9 10" warns none
+line "181LET TIME"
+= stored "\xE9 \xD1" warns none
+line "182X=LET TIME"
+= stored "X=\xE9 \xD1" warns none
+line "183LET)"
+= stored "\xE9)" warns brackets
+line "184LET PRINT"
+= stored "\xE9 \xF1" warns none
+line "185LOG"
+= stored "\xAB" warns none
+line "186X=LOG"
+= stored "X=\xAB" warns none
+line "187LOGA"
+= stored "\xABA" warns none
+line "188LOG 10"
+= stored "\xAB \x8DTJ@" warns none
+line "189LOG TIME"
+= stored "\xAB \xD1" warns none
+line "190X=LOG TIME"
+= stored "X=\xAB \x91" warns none
+line "191LOG)"
+= stored "\xAB)" warns brackets
+line "192LOG PRINT"
+= stored "\xAB \xF1" warns none
+line "193LN"
+= stored "\xAA" warns none
+line "194X=LN"
+= stored "X=\xAA" warns none
+line "195LNA"
+= stored "\xAAA" warns none
+line "196LN 10"
+= stored "\xAA \x8DTJ@" warns none
+line "197LN TIME"
+= stored "\xAA \xD1" warns none
+line "198X=LN TIME"
+= stored "X=\xAA \x91" warns none
+line "199LN)"
+= stored "\xAA)" warns brackets
+line "200LN PRINT"
+= stored "\xAA \xF1" warns none
+line "201LIBRARY"
+= stored "\xC8\x9B" warns none
+line "202X=LIBRARY"
+= stored "X=\xC8\x9B" warns none
+line "203LIBRARYA"
+= stored "\xC8\x9BA" warns none
+line "204LIBRARY 10"
+= stored "\xC8\x9B 10" warns none
+line "205LIBRARY TIME"
+= stored "\xC8\x9B \x91" warns none
+line "206X=LIBRARY TIME"
+= stored "X=\xC8\x9B \x91" warns none
+line "207LIBRARY)"
+= stored "\xC8\x9B)" warns brackets
+line "208LIBRARY PRINT"
+= stored "\xC8\x9B \xF1" warns none
+line "209LVAR"
+= stored "\xC7\x96" warns none
+line "210X=LVAR"
+= stored "X=\xC7\x96" warns none
+line "211LVARA"
+= stored "LVARA" warns none
+line "212LVAR 10"
+= stored "\xC7\x96 \x8DTJ@" warns none
+line "213LVAR TIME"
+= stored "\xC7\x96 \xD1" warns none
+line "214X=LVAR TIME"
+= stored "X=\xC7\x96 \x91" warns none
+line "215LVAR)"
+= stored "\xC7\x96)" warns brackets
+line "216LVAR PRINT"
+= stored "\xC7\x96 \xF1" warns none
+line "217MID$("
+= stored "\xC1" warns brackets
+line "218X=MID$("
+= stored "X=\xC1" warns brackets
+line "219MID$(A"
+= stored "\xC1A" warns brackets
+line "220MID$( 10"
+= stored "\xC1 \x8DTJ@" warns brackets
+line "221MID$( TIME"
+= stored "\xC1 \xD1" warns brackets
+line "222X=MID$( TIME"
+= stored "X=\xC1 \x91" warns brackets
+line "223MID$()"
+= stored "\xC1)" warns none
+line "224MID$( PRINT"
+= stored "\xC1 \xF1" warns brackets
+line "225MODE"
+= stored "\xEB" warns none
+line "226X=MODE"
+= stored "X=\xEB" warns none
+line "227MODEA"
+= stored "\xEBA" warns none
+line "228MODE 10"
+= stored "\xEB 10" warns none
+line "229MODE TIME"
+= stored "\xEB \x91" warns none
+line "230X=MODE TIME"
+= stored "X=\xEB \x91" warns none
+line "231MODE)"
+= stored "\xEB)" warns brackets
+line "232MODE PRINT"
+= stored "\xEB \xF1" warns none
+line "233MOD"
+= stored "\x83" warns none
+line "234X=MOD"
+= stored "X=\x83" warns none
+line "235MODA"
+= stored "\x83A" warns none
+line "236MOD 10"
+= stored "\x83 \x8DTJ@" warns none
+line "237MOD TIME"
+= stored "\x83 \xD1" warns none
+line "238X=MOD TIME"
+= stored "X=\x83 \x91" warns none
+line "239MOD)"
+= stored "\x83)" warns brackets
+line "240MOD PRINT"
+= stored "\x83 \xF1" warns none
+line "241MOVE"
+= stored "\xEC" warns none
+line "242X=MOVE"
+= stored "X=\xEC" warns none
+line "243MOVEA"
+= stored "\xECA" warns none
+line "244MOVE 10"
+= stored "\xEC 10" warns none
+line "245MOVE TIME"
+= stored "\xEC \x91" warns none
+line "246X=MOVE TIME"
+= stored "X=\xEC \x91" warns none
+line "247MOVE)"
+= stored "\xEC)" warns brackets
+line "248MOVE PRINT"
+= stored "\xEC \xF1" warns none
+line "249MOUSE"
+= stored "\xC8\x97" warns none
+line "250X=MOUSE"
+= stored "X=\xC8\x97" warns none
+line "251MOUSEA"
+= stored "\xC8\x97A" warns none
+line "252MOUSE 10"
+= stored "\xC8\x97 10" warns none
+line "253MOUSE TIME"
+= stored "\xC8\x97 \x91" warns none
+line "254X=MOUSE TIME"
+= stored "X=\xC8\x97 \x91" warns none
+line "255MOUSE)"
+= stored "\xC8\x97)" warns brackets
+line "256MOUSE PRINT"
+= stored "\xC8\x97 \xF1" warns none
+line "257NEXT"
+= stored "\xED" warns none
+line "258X=NEXT"
+= stored "X=\xED" warns none
+line "259NEXTA"
+= stored "\xEDA" warns none
+line "260NEXT 10"
+= stored "\xED 10" warns none
+line "261NEXT TIME"
+= stored "\xED \x91" warns none
+line "262X=NEXT TIME"
+= stored "X=\xED \x91" warns none
+line "263NEXT)"
+= stored "\xED)" warns brackets
+line "264NEXT PRINT"
+= stored "\xED \xF1" warns none
+line "265NEW"
+= stored "\xC7\x97" warns none
+line "266X=NEW"
+= stored "X=\xC7\x97" warns none
+line "267NEWA"
+= stored "NEWA" warns none
+line "268NEW 10"
+= stored "\xC7\x97 \x8DTJ@" warns none
+line "269NEW TIME"
+= stored "\xC7\x97 \xD1" warns none
+line "270X=NEW TIME"
+= stored "X=\xC7\x97 \x91" warns none
+line "271NEW)"
+= stored "\xC7\x97)" warns brackets
+line "272NEW PRINT"
+= stored "\xC7\x97 \xF1" warns none
+line "273NOT"
+= stored "\xAC" warns none
+line "274X=NOT"
+= stored "X=\xAC" warns none
+line "275NOTA"
+= stored "\xACA" warns none
+line "276NOT 10"
+= stored "\xAC \x8DTJ@" warns none
+line "277NOT TIME"
+= stored "\xAC \xD1" warns none
+line "278X=NOT TIME"
+= stored "X=\xAC \x91" warns none
+line "279NOT)"
+= stored "\xAC)" warns brackets
+line "280NOT PRINT"
+= stored "\xAC \xF1" warns none
+line "281OLD"
+= stored "\xC7\x98" warns none
+line "282X=OLD"
+= stored "X=\xC7\x98" warns none
+line "283OLDA"
+= stored "OLDA" warns none
+line "284OLD 10"
+= stored "\xC7\x98 \x8DTJ@" warns none
+line "285OLD TIME"
+= stored "\xC7\x98 \xD1" warns none
+line "286X=OLD TIME"
+= stored "X=\xC7\x98 \x91" warns none
+line "287OLD)"
+= stored "\xC7\x98)" warns brackets
+line "288OLD PRINT"
+= stored "\xC7\x98 \xF1" warns none
+line "289ON"
+= stored "\xEE" warns none
+line "290X=ON"
+= stored "X=\xEE" warns none
+line "291ONA"
+= stored "\xEEA" warns none
+line "292ON 10"
+= stored "\xEE 10" warns none
+line "293ON TIME"
+= stored "\xEE \x91" warns none
+line "294X=ON TIME"
+= stored "X=\xEE \x91" warns none
+line "295ON)"
+= stored "\xEE)" warns brackets
+line "296ON PRINT"
+= stored "\xEE \xF1" warns none
+line "297OFF"
+= stored "\x87" warns none
+line "298X=OFF"
+= stored "X=\x87" warns none
+line "299OFFA"
+= stored "\x87A" warns none
+line "300OFF 10"
+= stored "\x87 \x8DTJ@" warns none
+line "301OFF TIME"
+= stored "\x87 \xD1" warns none
+line "302X=OFF TIME"
+= stored "X=\x87 \x91" warns none
+line "303OFF)"
+= stored "\x87)" warns brackets
+line "304OFF PRINT"
+= stored "\x87 \xF1" warns none
+line "305OF"
+= stored "\xCA" warns none
+line "306X=OF"
+= stored "X=\xCA" warns none
+line "307OFA"
+= stored "\xCAA" warns none
+line "308OF 10"
+= stored "\xCA \x8DTJ@" warns none
+line "309OF TIME"
+= stored "\xCA \xD1" warns none
+line "310X=OF TIME"
+= stored "X=\xCA \x91" warns none
+line "311OF)"
+= stored "\xCA)" warns brackets
+line "312OF PRINT"
+= stored "\xCA \xF1" warns none
+line "313ORIGIN"
+= stored "\xC8\x91" warns none
+line "314X=ORIGIN"
+= stored "X=\xC8\x91" warns none
+line "315ORIGINA"
+= stored "\xC8\x91A" warns none
+line "316ORIGIN 10"
+= stored "\xC8\x91 10" warns none
+line "317ORIGIN TIME"
+= stored "\xC8\x91 \x91" warns none
+line "318X=ORIGIN TIME"
+= stored "X=\xC8\x91 \x91" warns none
+line "319ORIGIN)"
+= stored "\xC8\x91)" warns brackets
+line "320ORIGIN PRINT"
+= stored "\xC8\x91 \xF1" warns none
+line "321OR"
+= stored "\x84" warns none
+line "322X=OR"
+= stored "X=\x84" warns none
+line "323ORA"
+= stored "\x84A" warns none
+line "324OR 10"
+= stored "\x84 10" warns none
+line "325OR TIME"
+= stored "\x84 \x91" warns none
+line "326X=OR TIME"
+= stored "X=\x84 \x91" warns none
+line "327OR)"
+= stored "\x84)" warns brackets
+line "328OR PRINT"
+= stored "\x84 \xF1" warns none
+line "329OPENIN"
+= stored "\x8E" warns none
+line "330X=OPENIN"
+= stored "X=\x8E" warns none
+line "331OPENINA"
+= stored "\x8EA" warns none
+line "332OPENIN 10"
+= stored "\x8E \x8DTJ@" warns none
+line "333OPENIN TIME"
+= stored "\x8E \xD1" warns none
+line "334X=OPENIN TIME"
+= stored "X=\x8E \x91" warns none
+line "335OPENIN)"
+= stored "\x8E)" warns brackets
+line "336OPENIN PRINT"
+= stored "\x8E \xF1" warns none
+line "337OPENOUT"
+= stored "\xAE" warns none
+line "338X=OPENOUT"
+= stored "X=\xAE" warns none
+line "339OPENOUTA"
+= stored "\xAEA" warns none
+line "340OPENOUT 10"
+= stored "\xAE \x8DTJ@" warns none
+line "341OPENOUT TIME"
+= stored "\xAE \xD1" warns none
+line "342X=OPENOUT TIME"
+= stored "X=\xAE \x91" warns none
+line "343OPENOUT)"
+= stored "\xAE)" warns brackets
+line "344OPENOUT PRINT"
+= stored "\xAE \xF1" warns none
+line "345OPENUP"
+= stored "\xAD" warns none
+line "346X=OPENUP"
+= stored "X=\xAD" warns none
+line "347OPENUPA"
+= stored "\xADA" warns none
+line "348OPENUP 10"
+= stored "\xAD \x8DTJ@" warns none
+line "349OPENUP TIME"
+= stored "\xAD \xD1" warns none
+line "350X=OPENUP TIME"
+= stored "X=\xAD \x91" warns none
+line "351OPENUP)"
+= stored "\xAD)" warns brackets
+line "352OPENUP PRINT"
+= stored "\xAD \xF1" warns none
+line "353OSCLI"
+= stored "\xFF" warns none
+line "354X=OSCLI"
+= stored "X=\xFF" warns none
+line "355OSCLIA"
+= stored "\xFFA" warns none
+line "356OSCLI 10"
+= stored "\xFF 10" warns none
+line "357OSCLI TIME"
+= stored "\xFF \x91" warns none
+line "358X=OSCLI TIME"
+= stored "X=\xFF \x91" warns none
+line "359OSCLI)"
+= stored "\xFF)" warns brackets
+line "360OSCLI PRINT"
+= stored "\xFF \xF1" warns none
+line "361OTHERWISE"
+= stored "\x7F" warns none
+line "362X=OTHERWISE"
+= stored "X=\x7F" warns none
+line "363OTHERWISEA"
+= stored "\x7FA" warns none
+line "364OTHERWISE 10"
+= stored "\x7F 10" warns none
+line "365OTHERWISE TIME"
+= stored "\x7F \xD1" warns none
+line "366X=OTHERWISE TIME"
+= stored "X=\x7F \xD1" warns none
+line "367OTHERWISE)"
+= stored "\x7F)" warns brackets
+line "368OTHERWISE PRINT"
+= stored "\x7F \xF1" warns none
+line "369OVERLAY"
+= stored "\xC8\xA3" warns none
+line "370X=OVERLAY"
+= stored "X=\xC8\xA3" warns none
+line "371OVERLAYA"
+= stored "\xC8\xA3A" warns none
+line "372OVERLAY 10"
+= stored "\xC8\xA3 10" warns none
+line "373OVERLAY TIME"
+= stored "\xC8\xA3 \x91" warns none
+line "374X=OVERLAY TIME"
+= stored "X=\xC8\xA3 \x91" warns none
+line "375OVERLAY)"
+= stored "\xC8\xA3)" warns brackets
+line "376OVERLAY PRINT"
+= stored "\xC8\xA3 \xF1" warns none
+line "377PRINT"
+= stored "\xF1" warns none
+line "378X=PRINT"
+= stored "X=\xF1" warns none
+line "379PRINTA"
+= stored "\xF1A" warns none
+line "380PRINT 10"
+= stored "\xF1 10" warns none
+line "381PRINT TIME"
+= stored "\xF1 \x91" warns none
+line "382X=PRINT TIME"
+= stored "X=\xF1 \x91" warns none
+line "383PRINT)"
+= stored "\xF1)" warns brackets
+line "384PRINT PRINT"
+= stored "\xF1 \xF1" warns none
+line "385PAGE"
+= stored "\xD0" warns none
+line "386X=PAGE"
+= stored "X=\x90" warns none
+line "387PAGEA"
+= stored "PAGEA" warns none
+line "388PAGE 10"
+= stored "\xD0 10" warns none
+line "389PAGE TIME"
+= stored "\xD0 \x91" warns none
+line "390X=PAGE TIME"
+= stored "X=\x90 \x91" warns none
+line "391PAGE)"
+= stored "\xD0)" warns brackets
+line "392PAGE PRINT"
+= stored "\xD0 \xF1" warns none
+line "393PTR"
+= stored "\xCF" warns none
+line "394X=PTR"
+= stored "X=\x8F" warns none
+line "395PTRA"
+= stored "PTRA" warns none
+line "396PTR 10"
+= stored "\xCF 10" warns none
+line "397PTR TIME"
+= stored "\xCF \x91" warns none
+line "398X=PTR TIME"
+= stored "X=\x8F \x91" warns none
+line "399PTR)"
+= stored "\xCF)" warns brackets
+line "400PTR PRINT"
+= stored "\xCF \xF1" warns none
+line "401PI"
+= stored "\xAF" warns none
+line "402X=PI"
+= stored "X=\xAF" warns none
+line "403PIA"
+= stored "PIA" warns none
+line "404PI 10"
+= stored "\xAF \x8DTJ@" warns none
+line "405PI TIME"
+= stored "\xAF \xD1" warns none
+line "406X=PI TIME"
+= stored "X=\xAF \x91" warns none
+line "407PI)"
+= stored "\xAF)" warns brackets
+line "408PI PRINT"
+= stored "\xAF \xF1" warns none
+line "409PLOT"
+= stored "\xF0" warns none
+line "410X=PLOT"
+= stored "X=\xF0" warns none
+line "411PLOTA"
+= stored "\xF0A" warns none
+line "412PLOT 10"
+= stored "\xF0 10" warns none
+line "413PLOT TIME"
+= stored "\xF0 \x91" warns none
+line "414X=PLOT TIME"
+= stored "X=\xF0 \x91" warns none
+line "415PLOT)"
+= stored "\xF0)" warns brackets
+line "416PLOT PRINT"
+= stored "\xF0 \xF1" warns none
+line "417POINT("
+= stored "\xB0" warns brackets
+line "418X=POINT("
+= stored "X=\xB0" warns brackets
+line "419POINT(A"
+= stored "\xB0A" warns brackets
+line "420POINT( 10"
+= stored "\xB0 \x8DTJ@" warns brackets
+line "421POINT( TIME"
+= stored "\xB0 \xD1" warns brackets
+line "422X=POINT( TIME"
+= stored "X=\xB0 \x91" warns brackets
+line "423POINT()"
+= stored "\xB0)" warns none
+line "424POINT( PRINT"
+= stored "\xB0 \xF1" warns brackets
+line "425POINT"
+= stored "\xC8\x92" warns none
+line "426X=POINT"
+= stored "X=\xC8\x92" warns none
+line "427POINTA"
+= stored "\xC8\x92A" warns none
+line "428POINT 10"
+= stored "\xC8\x92 10" warns none
+line "429POINT TIME"
+= stored "\xC8\x92 \x91" warns none
+line "430X=POINT TIME"
+= stored "X=\xC8\x92 \x91" warns none
+line "431POINT)"
+= stored "\xC8\x92)" warns brackets
+line "432POINT PRINT"
+= stored "\xC8\x92 \xF1" warns none
+listo 0
+= "    1FN\x0A\x0D    2X=FN\x0A\x0D    3FNA\x0A\x0D    4FN 10\x0A\x0D    5FN TIME\x0A\x0D    6X=FN TIME\x0A\x0D    7FN)\x0A\x0D    8FN PRINT\x0A\x0D    9GOTO\x0A\x0D   10X=GOTO\x0A\x0D   11GOTOA\x0A\x0D   12GOTO 10\x0A\x0D   13GOTO TIME\x0A\x0D   14X=GOTO TIME\x0A\x0D   15GOTO)\x0A\x0D   16GOTO PRINT\x0A\x0D   17GET$\x0A\x0D   18X=GET$\x0A\x0D   19GET$A\x0A\x0D   20GET$ 10\x0A\x0D   21GET$ TIME\x0A\x0D   22X=GET$ TIME\x0A\x0D   23GET$)\x0A\x0D   24GET$ PRINT\x0A\x0D   25GET\x0A\x0D   26X=GET\x0A\x0D   27GETA\x0A\x0D   28GET 10\x0A\x0D   29GET TIME\x0A\x0D   30X=GET TIME\x0A\x0D   31GET)\x0A\x0D   32GET PRINT\x0A\x0D   33GOSUB\x0A\x0D   34X=GOSUB\x0A\x0D   35GOSUBA\x0A\x0D   36GOSUB 10\x0A\x0D   37GOSUB TIME\x0A\x0D   38X=GOSUB TIME\x0A\x0D   39GOSUB)\x0A\x0D   40GOSUB PRINT\x0A\x0D   41GCOL\x0A\x0D   42X=GCOL\x0A\x0D   43GCOLA\x0A\x0D   44GCOL 10\x0A\x0D   45GCOL TIME\x0A\x0D   46X=GCOL TIME\x0A\x0D   47GCOL)\x0A\x0D   48GCOL PRINT\x0A\x0D   49HIMEM\x0A\x0D   50X=HIMEM\x0A\x0D   51HIMEMA\x0A\x0D   52HIMEM 10\x0A\x0D   53HIMEM TIME\x0A\x0D   54X=HIMEM TIME\x0A\x0D   55HIMEM)\x0A\x0D   56HIMEM PRINT\x0A\x0D   57HELP\x0A\x0D   58X=HELP\x0A\x0D   59HELPA\x0A\x0D   60HELP 10\x0A\x0D   61HELP TIME\x0A\x0D   62X=HELP TIME\x0A\x0D   63HELP)\x0A\x0D   64HELP PRINT\x0A\x0D   65INPUT\x0A\x0D   66X=INPUT\x0A\x0D   67INPUTA\x0A\x0D   68INPUT 10\x0A\x0D   69INPUT TIME\x0A\x0D   70X=INPUT TIME\x0A\x0D   71INPUT)\x0A\x0D   72INPUT PRINT\x0A\x0D   73IF\x0A\x0D   74X=IF\x0A\x0D   75IFA\x0A\x0D   76IF 10\x0A\x0D   77IF TIME\x0A\x0D   78X=IF TIME\x0A\x0D   79IF)\x0A\x0D   80IF PRINT\x0A\x0D   81INKEY$\x0A\x0D   82X=INKEY$\x0A\x0D   83INKEY$A\x0A\x0D   84INKEY$ 10\x0A\x0D   85INKEY$ TIME\x0A\x0D   86X=INKEY$ TIME\x0A\x0D   87INKEY$)\x0A\x0D   88INKEY$ PRINT\x0A\x0D   89INKEY\x0A\x0D   90X=INKEY\x0A\x0D   91INKEYA\x0A\x0D   92INKEY 10\x0A\x0D   93INKEY TIME\x0A\x0D   94X=INKEY TIME\x0A\x0D   95INKEY)\x0A\x0D   96INKEY PRINT\x0A\x0D   97INT\x0A\x0D   98X=INT\x0A\x0D   99INTA\x0A\x0D  100INT 10\x0A\x0D  101INT TIME\x0A\x0D  102X=INT TIME\x0A\x0D  103INT)\x0A\x0D  104INT PRINT\x0A\x0D  105INSTR(\x0A\x0D  106X=INSTR(\x0A\x0D  107INSTR(A\x0A\x0D  108INSTR( 10\x0A\x0D  109INSTR( TIME\x0A\x0D  110X=INSTR( TIME\x0A\x0D  111INSTR()\x0A\x0D  112INSTR( PRINT\x0A\x0D  113INSTALL\x0A\x0D  114X=INSTALL\x0A\x0D  115INSTALLA\x0A\x0D  116INSTALL 10\x0A\x0D  117INSTALL TIME\x0A\x0D  118X=INSTALL TIME\x0A\x0D  119INSTALL)\x0A\x0D  120INSTALL PRINT\x0A\x0D  121LIST\x0A\x0D  122X=LIST\x0A\x0D  123LISTA\x0A\x0D  124LIST 10\x0A\x0D  125LIST TIME\x0A\x0D  126X=LIST TIME\x0A\x0D  127LIST)\x0A\x0D  128LIST PRINT\x0A\x0D  129LINE\x0A\x0D  130X=LINE\x0A\x0D  131LINEA\x0A\x0D  132LINE 10\x0A\x0D  133LINE TIME\x0A\x0D  134X=LINE TIME\x0A\x0D  135LINE)\x0A\x0D  136LINE PRINT\x0A\x0D  137LOAD\x0A\x0D  138X=LOAD\x0A\x0D  139LOADA\x0A\x0D  140LOAD 10\x0A\x0D  141LOAD TIME\x0A\x0D  142X=LOAD TIME\x0A\x0D  143LOAD)\x0A\x0D  144LOAD PRINT\x0A\x0D  145LOMEM\x0A\x0D  146X=LOMEM\x0A\x0D  147LOMEMA\x0A\x0D  148LOMEM 10\x0A\x0D  149LOMEM TIME\x0A\x0D  150X=LOMEM TIME\x0A\x0D  151LOMEM)\x0A\x0D  152LOMEM PRINT\x0A\x0D  153LOCAL\x0A\x0D  154X=LOCAL\x0A\x0D  155LOCALA\x0A\x0D  156LOCAL 10\x0A\x0D  157LOCAL TIME\x0A\x0D  158X=LOCAL TIME\x0A\x0D  159LOCAL)\x0A\x0D  160LOCAL PRINT\x0A\x0D  161LEFT$(\x0A\x0D  162X=LEFT$(\x0A\x0D  163LEFT$(A\x0A\x0D  164LEFT$( 10\x0A\x0D  165LEFT$( TIME\x0A\x0D  166X=LEFT$( TIME\x0A\x0D  167LEFT$()\x0A\x0D  168LEFT$( PRINT\x0A\x0D  169LEN\x0A\x0D  170X=LEN\x0A\x0D  171LENA\x0A\x0D  172LEN 10\x0A\x0D  173LEN TIME\x0A\x0D  174X=LEN TIME\x0A\x0D  175LEN)\x0A\x0D  176LEN PRINT\x0A\x0D  177LET\x0A\x0D  178X=LET\x0A\x0D  179LETA\x0A\x0D  180LET 10\x0A\x0D  181LET TIME\x0A\x0D  182X=LET TIME\x0A\x0D  183LET)\x0A\x0D  184LET PRINT\x0A\x0D  185LOG\x0A\x0D  186X=LOG\x0A\x0D  187LOGA\x0A\x0D  188LOG 10\x0A\x0D  189LOG TIME\x0A\x0D  190X=LOG TIME\x0A\x0D  191LOG)\x0A\x0D  192LOG PRINT\x0A\x0D  193LN\x0A\x0D  194X=LN\x0A\x0D  195LNA\x0A\x0D  196LN 10\x0A\x0D  197LN TIME\x0A\x0D  198X=LN TIME\x0A\x0D  199LN)\x0A\x0D  200LN PRINT\x0A\x0D  201LIBRARY\x0A\x0D  202X=LIBRARY\x0A\x0D  203LIBRARYA\x0A\x0D  204LIBRARY 10\x0A\x0D  205LIBRARY TIME\x0A\x0D  206X=LIBRARY TIME\x0A\x0D  207LIBRARY)\x0A\x0D  208LIBRARY PRINT\x0A\x0D  209LVAR\x0A\x0D  210X=LVAR\x0A\x0D  211LVARA\x0A\x0D  212LVAR 10\x0A\x0D  213LVAR TIME\x0A\x0D  214X=LVAR TIME\x0A\x0D  215LVAR)\x0A\x0D  216LVAR PRINT\x0A\x0D  217MID$(\x0A\x0D  218X=MID$(\x0A\x0D  219MID$(A\x0A\x0D  220MID$( 10\x0A\x0D  221MID$( TIME\x0A\x0D  222X=MID$( TIME\x0A\x0D  223MID$()\x0A\x0D  224MID$( PRINT\x0A\x0D  225MODE\x0A\x0D  226X=MODE\x0A\x0D  227MODEA\x0A\x0D  228MODE 10\x0A\x0D  229MODE TIME\x0A\x0D  230X=MODE TIME\x0A\x0D  231MODE)\x0A\x0D  232MODE PRINT\x0A\x0D  233MOD\x0A\x0D  234X=MOD\x0A\x0D  235MODA\x0A\x0D  236MOD 10\x0A\x0D  237MOD TIME\x0A\x0D  238X=MOD TIME\x0A\x0D  239MOD)\x0A\x0D  240MOD PRINT\x0A\x0D  241MOVE\x0A\x0D  242X=MOVE\x0A\x0D  243MOVEA\x0A\x0D  244MOVE 10\x0A\x0D  245MOVE TIME\x0A\x0D  246X=MOVE TIME\x0A\x0D  247MOVE)\x0A\x0D  248MOVE PRINT\x0A\x0D  249MOUSE\x0A\x0D  250X=MOUSE\x0A\x0D  251MOUSEA\x0A\x0D  252MOUSE 10\x0A\x0D  253MOUSE TIME\x0A\x0D  254X=MOUSE TIME\x0A\x0D  255MOUSE)\x0A\x0D  256MOUSE PRINT\x0A\x0D  257NEXT\x0A\x0D  258X=NEXT\x0A\x0D  259NEXTA\x0A\x0D  260NEXT 10\x0A\x0D  261NEXT TIME\x0A\x0D  262X=NEXT TIME\x0A\x0D  263NEXT)\x0A\x0D  264NEXT PRINT\x0A\x0D  265NEW\x0A\x0D  266X=NEW\x0A\x0D  267NEWA\x0A\x0D  268NEW 10\x0A\x0D  269NEW TIME\x0A\x0D  270X=NEW TIME\x0A\x0D  271NEW)\x0A\x0D  272NEW PRINT\x0A\x0D  273NOT\x0A\x0D  274X=NOT\x0A\x0D  275NOTA\x0A\x0D  276NOT 10\x0A\x0D  277NOT TIME\x0A\x0D  278X=NOT TIME\x0A\x0D  279NOT)\x0A\x0D  280NOT PRINT\x0A\x0D  281OLD\x0A\x0D  282X=OLD\x0A\x0D  283OLDA\x0A\x0D  284OLD 10\x0A\x0D  285OLD TIME\x0A\x0D  286X=OLD TIME\x0A\x0D  287OLD)\x0A\x0D  288OLD PRINT\x0A\x0D  289ON\x0A\x0D  290X=ON\x0A\x0D  291ONA\x0A\x0D  292ON 10\x0A\x0D  293ON TIME\x0A\x0D  294X=ON TIME\x0A\x0D  295ON)\x0A\x0D  296ON PRINT\x0A\x0D  297OFF\x0A\x0D  298X=OFF\x0A\x0D  299OFFA\x0A\x0D  300OFF 10\x0A\x0D  301OFF TIME\x0A\x0D  302X=OFF TIME\x0A\x0D  303OFF)\x0A\x0D  304OFF PRINT\x0A\x0D  305OF\x0A\x0D  306X=OF\x0A\x0D  307OFA\x0A\x0D  308OF 10\x0A\x0D  309OF TIME\x0A\x0D  310X=OF TIME\x0A\x0D  311OF)\x0A\x0D  312OF PRINT\x0A\x0D  313ORIGIN\x0A\x0D  314X=ORIGIN\x0A\x0D  315ORIGINA\x0A\x0D  316ORIGIN 10\x0A\x0D  317ORIGIN TIME\x0A\x0D  318X=ORIGIN TIME\x0A\x0D  319ORIGIN)\x0A\x0D  320ORIGIN PRINT\x0A\x0D  321OR\x0A\x0D  322X=OR\x0A\x0D  323ORA\x0A\x0D  324OR 10\x0A\x0D  325OR TIME\x0A\x0D  326X=OR TIME\x0A\x0D  327OR)\x0A\x0D  328OR PRINT\x0A\x0D  329OPENIN\x0A\x0D  330X=OPENIN\x0A\x0D  331OPENINA\x0A\x0D  332OPENIN 10\x0A\x0D  333OPENIN TIME\x0A\x0D  334X=OPENIN TIME\x0A\x0D  335OPENIN)\x0A\x0D  336OPENIN PRINT\x0A\x0D  337OPENOUT\x0A\x0D  338X=OPENOUT\x0A\x0D  339OPENOUTA\x0A\x0D  340OPENOUT 10\x0A\x0D  341OPENOUT TIME\x0A\x0D  342X=OPENOUT TIME\x0A\x0D  343OPENOUT)\x0A\x0D  344OPENOUT PRINT\x0A\x0D  345OPENUP\x0A\x0D  346X=OPENUP\x0A\x0D  347OPENUPA\x0A\x0D  348OPENUP 10\x0A\x0D  349OPENUP TIME\x0A\x0D  350X=OPENUP TIME\x0A\x0D  351OPENUP)\x0A\x0D  352OPENUP PRINT\x0A\x0D  353OSCLI\x0A\x0D  354X=OSCLI\x0A\x0D  355OSCLIA\x0A\x0D  356OSCLI 10\x0A\x0D  357OSCLI TIME\x0A\x0D  358X=OSCLI TIME\x0A\x0D  359OSCLI)\x0A\x0D  360OSCLI PRINT\x0A\x0D  361OTHERWISE\x0A\x0D  362X=OTHERWISE\x0A\x0D  363OTHERWISEA\x0A\x0D  364OTHERWISE 10\x0A\x0D  365OTHERWISE TIME\x0A\x0D  366X=OTHERWISE TIME\x0A\x0D  367OTHERWISE)\x0A\x0D  368OTHERWISE PRINT\x0A\x0D  369OVERLAY\x0A\x0D  370X=OVERLAY\x0A\x0D  371OVERLAYA\x0A\x0D  372OVERLAY 10\x0A\x0D  373OVERLAY TIME\x0A\x0D  374X=OVERLAY TIME\x0A\x0D  375OVERLAY)\x0A\x0D  376OVERLAY PRINT\x0A\x0D  377PRINT\x0A\x0D  378X=PRINT\x0A\x0D  379PRINTA\x0A\x0D  380PRINT 10\x0A\x0D  381PRINT TIME\x0A\x0D  382X=PRINT TIME\x0A\x0D  383PRINT)\x0A\x0D  384PRINT PRINT\x0A\x0D  385PAGE\x0A\x0D  386X=PAGE\x0A\x0D  387PAGEA\x0A\x0D  388PAGE 10\x0A\x0D  389PAGE TIME\x0A\x0D  390X=PAGE TIME\x0A\x0D  391PAGE)\x0A\x0D  392PAGE PRINT\x0A\x0D  393PTR\x0A\x0D  394X=PTR\x0A\x0D  395PTRA\x0A\x0D  396PTR 10\x0A\x0D  397PTR TIME\x0A\x0D  398X=PTR TIME\x0A\x0D  399PTR)\x0A\x0D  400PTR PRINT\x0A\x0D  401PI\x0A\x0D  402X=PI\x0A\x0D  403PIA\x0A\x0D  404PI 10\x0A\x0D  405PI TIME\x0A\x0D  406X=PI TIME\x0A\x0D  407PI)\x0A\x0D  408PI PRINT\x0A\x0D  409PLOT\x0A\x0D  410X=PLOT\x0A\x0D  411PLOTA\x0A\x0D  412PLOT 10\x0A\x0D  413PLOT TIME\x0A\x0D  414X=PLOT TIME\x0A\x0D  415PLOT)\x0A\x0D  416PLOT PRINT\x0A\x0D  417POINT(\x0A\x0D  418X=POINT(\x0A\x0D  419POINT(A\x0A\x0D  420POINT( 10\x0A\x0D  421POINT( TIME\x0A\x0D  422X=POINT( TIME\x0A\x0D  423POINT()\x0A\x0D  424POINT( PRINT\x0A\x0D  425POINT\x0A\x0D  426X=POINT\x0A\x0D  427POINTA\x0A\x0D  428POINT 10\x0A\x0D  429POINT TIME\x0A\x0D  430X=POINT TIME\x0A\x0D  431POINT)\x0A\x0D  432POINT PRINT\x0A\x0D"
+program 0 0
+line "1PROC"
+= stored "\xF2" warns none
+line "2X=PROC"
+= stored "X=\xF2" warns none
+line "3PROCA"
+= stored "\xF2A" warns none
+line "4PROC 10"
+= stored "\xF2 10" warns none
+line "5PROC TIME"
+= stored "\xF2 \x91" warns none
+line "6X=PROC TIME"
+= stored "X=\xF2 \x91" warns none
+line "7PROC)"
+= stored "\xF2)" warns brackets
+line "8PROC PRINT"
+= stored "\xF2 \xF1" warns none
+line "9POS"
+= stored "\xB1" warns none
+line "10X=POS"
+= stored "X=\xB1" warns none
+line "11POSA"
+= stored "POSA" warns none
+line "12POS 10"
+= stored "\xB1 \x8DTJ@" warns none
+line "13POS TIME"
+= stored "\xB1 \xD1" warns none
+line "14X=POS TIME"
+= stored "X=\xB1 \x91" warns none
+line "15POS)"
+= stored "\xB1)" warns brackets
+line "16POS PRINT"
+= stored "\xB1 \xF1" warns none
+line "17QUIT"
+= stored "\xC8\x98" warns none
+line "18X=QUIT"
+= stored "X=\xC8\x98" warns none
+line "19QUITA"
+= stored "\xC8\x98A" warns none
+line "20QUIT 10"
+= stored "\xC8\x98 10" warns none
+line "21QUIT TIME"
+= stored "\xC8\x98 \x91" warns none
+line "22X=QUIT TIME"
+= stored "X=\xC8\x98 \x91" warns none
+line "23QUIT)"
+= stored "\xC8\x98)" warns brackets
+line "24QUIT PRINT"
+= stored "\xC8\x98 \xF1" warns none
+line "25RETURN"
+= stored "\xF8" warns none
+line "26X=RETURN"
+= stored "X=\xF8" warns none
+line "27RETURNA"
+= stored "RETURNA" warns none
+line "28RETURN 10"
+= stored "\xF8 \x8DTJ@" warns none
+line "29RETURN TIME"
+= stored "\xF8 \xD1" warns none
+line "30X=RETURN TIME"
+= stored "X=\xF8 \x91" warns none
+line "31RETURN)"
+= stored "\xF8)" warns brackets
+line "32RETURN PRINT"
+= stored "\xF8 \xF1" warns none
+line "33REPEAT"
+= stored "\xF5" warns none
+line "34X=REPEAT"
+= stored "X=\xF5" warns none
+line "35REPEATA"
+= stored "\xF5A" warns none
+line "36REPEAT 10"
+= stored "\xF5 \x8DTJ@" warns none
+line "37REPEAT TIME"
+= stored "\xF5 \xD1" warns none
+line "38X=REPEAT TIME"
+= stored "X=\xF5 \x91" warns none
+line "39REPEAT)"
+= stored "\xF5)" warns brackets
+line "40REPEAT PRINT"
+= stored "\xF5 \xF1" warns none
+line "41REPORT"
+= stored "\xF6" warns none
+line "42X=REPORT"
+= stored "X=\xF6" warns none
+line "43REPORTA"
+= stored "REPORTA" warns none
+line "44REPORT 10"
+= stored "\xF6 \x8DTJ@" warns none
+line "45REPORT TIME"
+= stored "\xF6 \xD1" warns none
+line "46X=REPORT TIME"
+= stored "X=\xF6 \x91" warns none
+line "47REPORT)"
+= stored "\xF6)" warns brackets
+line "48REPORT PRINT"
+= stored "\xF6 \xF1" warns none
+line "49READ"
+= stored "\xF3" warns none
+line "50X=READ"
+= stored "X=\xF3" warns none
+line "51READA"
+= stored "\xF3A" warns none
+line "52READ 10"
+= stored "\xF3 10" warns none
+line "53READ TIME"
+= stored "\xF3 \x91" warns none
+line "54X=READ TIME"
+= stored "X=\xF3 \x91" warns none
+line "55READ)"
+= stored "\xF3)" warns brackets
+line "56READ PRINT"
+= stored "\xF3 \xF1" warns none
+line "57REM"
+= stored "\xF4" warns none
+line "58X=REM"
+= stored "X=\xF4" warns none
+line "59REMA"
+= stored "\xF4A" warns none
+line "60REM 10"
+= stored "\xF4 10" warns none
+line "61REM TIME"
+= stored "\xF4 TIME" warns none
+line "62X=REM TIME"
+= stored "X=\xF4 TIME" warns none
+line "63REM)"
+= stored "\xF4)" warns none
+line "64REM PRINT"
+= stored "\xF4 PRINT" warns none
+line "65RUN"
+= stored "\xF9" warns none
+line "66X=RUN"
+= stored "X=\xF9" warns none
+line "67RUNA"
+= stored "RUNA" warns none
+line "68RUN 10"
+= stored "\xF9 \x8DTJ@" warns none
+line "69RUN TIME"
+= stored "\xF9 \xD1" warns none
+line "70X=RUN TIME"
+= stored "X=\xF9 \x91" warns none
+line "71RUN)"
+= stored "\xF9)" warns brackets
+line "72RUN PRINT"
+= stored "\xF9 \xF1" warns none
+line "73RAD"
+= stored "\xB2" warns none
+line "74X=RAD"
+= stored "X=\xB2" warns none
+line "75RADA"
+= stored "\xB2A" warns none
+line "76RAD 10"
+= stored "\xB2 \x8DTJ@" warns none
+line "77RAD TIME"
+= stored "\xB2 \xD1" warns none
+line "78X=RAD TIME"
+= stored "X=\xB2 \x91" warns none
+line "79RAD)"
+= stored "\xB2)" warns brackets
+line "80RAD PRINT"
+= stored "\xB2 \xF1" warns none
+line "81RESTORE"
+= stored "\xF7" warns none
+line "82X=RESTORE"
+= stored "X=\xF7" warns none
+line "83RESTOREA"
+= stored "\xF7A" warns none
+line "84RESTORE 10"
+= stored "\xF7 \x8DTJ@" warns none
+line "85RESTORE TIME"
+= stored "\xF7 \x91" warns none
+line "86X=RESTORE TIME"
+= stored "X=\xF7 \x91" warns none
+line "87RESTORE)"
+= stored "\xF7)" warns brackets
+line "88RESTORE PRINT"
+= stored "\xF7 \xF1" warns none
+line "89RIGHT$("
+= stored "\xC2" warns brackets
+line "90X=RIGHT$("
+= stored "X=\xC2" warns brackets
+line "91RIGHT$(A"
+= stored "\xC2A" warns brackets
+line "92RIGHT$( 10"
+= stored "\xC2 \x8DTJ@" warns brackets
+line "93RIGHT$( TIME"
+= stored "\xC2 \xD1" warns brackets
+line "94X=RIGHT$( TIME"
+= stored "X=\xC2 \x91" warns brackets
+line "95RIGHT$()"
+= stored "\xC2)" warns none
+line "96RIGHT$( PRINT"
+= stored "\xC2 \xF1" warns brackets
+line "97RND"
+= stored "\xB3" warns none
+line "98X=RND"
+= stored "X=\xB3" warns none
+line "99RNDA"
+= stored "RNDA" warns none
+line "100RND 10"
+= stored "\xB3 \x8DTJ@" warns none
+line "101RND TIME"
+= stored "\xB3 \xD1" warns none
+line "102X=RND TIME"
+= stored "X=\xB3 \x91" warns none
+line "103RND)"
+= stored "\xB3)" warns brackets
+line "104RND PRINT"
+= stored "\xB3 \xF1" warns none
+line "105RECTANGLE"
+= stored "\xC8\x93" warns none
+line "106X=RECTANGLE"
+= stored "X=\xC8\x93" warns none
+line "107RECTANGLEA"
+= stored "\xC8\x93A" warns none
+line "108RECTANGLE 10"
+= stored "\xC8\x93 10" warns none
+line "109RECTANGLE TIME"
+= stored "\xC8\x93 \x91" warns none
+line "110X=RECTANGLE TIME"
+= stored "X=\xC8\x93 \x91" warns none
+line "111RECTANGLE)"
+= stored "\xC8\x93)" warns brackets
+line "112RECTANGLE PRINT"
+= stored "\xC8\x93 \xF1" warns none
+line "113RENUMBER"
+= stored "\xC7\x99" warns none
+line "114X=RENUMBER"
+= stored "X=\xC7\x99" warns none
+line "115RENUMBERA"
+= stored "\xC7\x99A" warns none
+line "116RENUMBER 10"
+= stored "\xC7\x99 \x8DTJ@" warns none
+line "117RENUMBER TIME"
+= stored "\xC7\x99 \xD1" warns none
+line "118X=RENUMBER TIME"
+= stored "X=\xC7\x99 \x91" warns none
+line "119RENUMBER)"
+= stored "\xC7\x99)" warns brackets
+line "120RENUMBER PRINT"
+= stored "\xC7\x99 \xF1" warns none
+line "121STEP"
+= stored "\x88" warns none
+line "122X=STEP"
+= stored "X=\x88" warns none
+line "123STEPA"
+= stored "\x88A" warns none
+line "124STEP 10"
+= stored "\x88 \x8DTJ@" warns none
+line "125STEP TIME"
+= stored "\x88 \xD1" warns none
+line "126X=STEP TIME"
+= stored "X=\x88 \x91" warns none
+line "127STEP)"
+= stored "\x88)" warns brackets
+line "128STEP PRINT"
+= stored "\x88 \xF1" warns none
+line "129SAVE"
+= stored "\xC7\x9A" warns none
+line "130X=SAVE"
+= stored "X=\xC7\x9A" warns none
+line "131SAVEA"
+= stored "\xC7\x9AA" warns none
+line "132SAVE 10"
+= stored "\xC7\x9A 10" warns none
+line "133SAVE TIME"
+= stored "\xC7\x9A \x91" warns none
+line "134X=SAVE TIME"
+= stored "X=\xC7\x9A \x91" warns none
+line "135SAVE)"
+= stored "\xC7\x9A)" warns brackets
+line "136SAVE PRINT"
+= stored "\xC7\x9A \xF1" warns none
+line "137SGN"
+= stored "\xB4" warns none
+line "138X=SGN"
+= stored "X=\xB4" warns none
+line "139SGNA"
+= stored "\xB4A" warns none
+line "140SGN 10"
+= stored "\xB4 \x8DTJ@" warns none
+line "141SGN TIME"
+= stored "\xB4 \xD1" warns none
+line "142X=SGN TIME"
+= stored "X=\xB4 \x91" warns none
+line "143SGN)"
+= stored "\xB4)" warns brackets
+line "144SGN PRINT"
+= stored "\xB4 \xF1" warns none
+line "145SIN"
+= stored "\xB5" warns none
+line "146X=SIN"
+= stored "X=\xB5" warns none
+line "147SINA"
+= stored "\xB5A" warns none
+line "148SIN 10"
+= stored "\xB5 \x8DTJ@" warns none
+line "149SIN TIME"
+= stored "\xB5 \xD1" warns none
+line "150X=SIN TIME"
+= stored "X=\xB5 \x91" warns none
+line "151SIN)"
+= stored "\xB5)" warns brackets
+line "152SIN PRINT"
+= stored "\xB5 \xF1" warns none
+line "153SQR"
+= stored "\xB6" warns none
+line "154X=SQR"
+= stored "X=\xB6" warns none
+line "155SQRA"
+= stored "\xB6A" warns none
+line "156SQR 10"
+= stored "\xB6 \x8DTJ@" warns none
+line "157SQR TIME"
+= stored "\xB6 \xD1" warns none
+line "158X=SQR TIME"
+= stored "X=\xB6 \x91" warns none
+line "159SQR)"
+= stored "\xB6)" warns brackets
+line "160SQR PRINT"
+= stored "\xB6 \xF1" warns none
+line "161SOUND"
+= stored "\xD4" warns none
+line "162X=SOUND"
+= stored "X=\xD4" warns none
+line "163SOUNDA"
+= stored "\xD4A" warns none
+line "164SOUND 10"
+= stored "\xD4 10" warns none
+line "165SOUND TIME"
+= stored "\xD4 \x91" warns none
+line "166X=SOUND TIME"
+= stored "X=\xD4 \x91" warns none
+line "167SOUND)"
+= stored "\xD4)" warns brackets
+line "168SOUND PRINT"
+= stored "\xD4 \xF1" warns none
+line "169SPC"
+= stored "\x89" warns none
+line "170X=SPC"
+= stored "X=\x89" warns none
+line "171SPCA"
+= stored "\x89A" warns none
+line "172SPC 10"
+= stored "\x89 \x8DTJ@" warns none
+line "173SPC TIME"
+= stored "\x89 \xD1" warns none
+line "174X=SPC TIME"
+= stored "X=\x89 \x91" warns none
+line "175SPC)"
+= stored "\x89)" warns brackets
+line "176SPC PRINT"
+= stored "\x89 \xF1" warns none
+line "177STR$"
+= stored "\xC3" warns none
+line "178X=STR$"
+= stored "X=\xC3" warns none
+line "179STR$A"
+= stored "\xC3A" warns none
+line "180STR$ 10"
+= stored "\xC3 \x8DTJ@" warns none
+line "181STR$ TIME"
+= stored "\xC3 \xD1" warns none
+line "182X=STR$ TIME"
+= stored "X=\xC3 \x91" warns none
+line "183STR$)"
+= stored "\xC3)" warns brackets
+line "184STR$ PRINT"
+= stored "\xC3 \xF1" warns none
+line "185STRING$("
+= stored "\xC4" warns brackets
+line "186X=STRING$("
+= stored "X=\xC4" warns brackets
+line "187STRING$(A"
+= stored "\xC4A" warns brackets
+line "188STRING$( 10"
+= stored "\xC4 \x8DTJ@" warns brackets
+line "189STRING$( TIME"
+= stored "\xC4 \xD1" warns brackets
+line "190X=STRING$( TIME"
+= stored "X=\xC4 \x91" warns brackets
+line "191STRING$()"
+= stored "\xC4)" warns none
+line "192STRING$( PRINT"
+= stored "\xC4 \xF1" warns brackets
+line "193STOP"
+= stored "\xFA" warns none
+line "194X=STOP"
+= stored "X=\xFA" warns none
+line "195STOPA"
+= stored "STOPA" warns none
+line "196STOP 10"
+= stored "\xFA \x8DTJ@" warns none
+line "197STOP TIME"
+= stored "\xFA \xD1" warns none
+line "198X=STOP TIME"
+= stored "X=\xFA \x91" warns none
+line "199STOP)"
+= stored "\xFA)" warns brackets
+line "200STOP PRINT"
+= stored "\xFA \xF1" warns none
+line "201STEREO"
+= stored "\xC8\xA2" warns none
+line "202X=STEREO"
+= stored "X=\xC8\xA2" warns none
+line "203STEREOA"
+= stored "\xC8\xA2A" warns none
+line "204STEREO 10"
+= stored "\xC8\xA2 10" warns none
+line "205STEREO TIME"
+= stored "\xC8\xA2 \x91" warns none
+line "206X=STEREO TIME"
+= stored "X=\xC8\xA2 \x91" warns none
+line "207STEREO)"
+= stored "\xC8\xA2)" warns brackets
+line "208STEREO PRINT"
+= stored "\xC8\xA2 \xF1" warns none
+line "209SUM"
+= stored "\xC6\x8E" warns none
+line "210X=SUM"
+= stored "X=\xC6\x8E" warns none
+line "211SUMA"
+= stored "\xC6\x8EA" warns none
+line "212SUM 10"
+= stored "\xC6\x8E 10" warns none
+line "213SUM TIME"
+= stored "\xC6\x8E \x91" warns none
+line "214X=SUM TIME"
+= stored "X=\xC6\x8E \x91" warns none
+line "215SUM)"
+= stored "\xC6\x8E)" warns brackets
+line "216SUM PRINT"
+= stored "\xC6\x8E \xF1" warns none
+line "217SWAP"
+= stored "\xC8\x94" warns none
+line "218X=SWAP"
+= stored "X=\xC8\x94" warns none
+line "219SWAPA"
+= stored "\xC8\x94A" warns none
+line "220SWAP 10"
+= stored "\xC8\x94 10" warns none
+line "221SWAP TIME"
+= stored "\xC8\x94 \x91" warns none
+line "222X=SWAP TIME"
+= stored "X=\xC8\x94 \x91" warns none
+line "223SWAP)"
+= stored "\xC8\x94)" warns brackets
+line "224SWAP PRINT"
+= stored "\xC8\x94 \xF1" warns none
+line "225SYS"
+= stored "\xC8\x99" warns none
+line "226X=SYS"
+= stored "X=\xC8\x99" warns none
+line "227SYSA"
+= stored "\xC8\x99A" warns none
+line "228SYS 10"
+= stored "\xC8\x99 10" warns none
+line "229SYS TIME"
+= stored "\xC8\x99 \x91" warns none
+line "230X=SYS TIME"
+= stored "X=\xC8\x99 \x91" warns none
+line "231SYS)"
+= stored "\xC8\x99)" warns brackets
+line "232SYS PRINT"
+= stored "\xC8\x99 \xF1" warns none
+line "233TAN"
+= stored "\xB7" warns none
+line "234X=TAN"
+= stored "X=\xB7" warns none
+line "235TANA"
+= stored "\xB7A" warns none
+line "236TAN 10"
+= stored "\xB7 \x8DTJ@" warns none
+line "237TAN TIME"
+= stored "\xB7 \xD1" warns none
+line "238X=TAN TIME"
+= stored "X=\xB7 \x91" warns none
+line "239TAN)"
+= stored "\xB7)" warns brackets
+line "240TAN PRINT"
+= stored "\xB7 \xF1" warns none
+line "241TAB("
+= stored "\x8A" warns brackets
+line "242X=TAB("
+= stored "X=\x8A" warns brackets
+line "243TAB(A"
+= stored "\x8AA" warns brackets
+line "244TAB( 10"
+= stored "\x8A \x8DTJ@" warns brackets
+line "245TAB( TIME"
+= stored "\x8A \xD1" warns brackets
+line "246X=TAB( TIME"
+= stored "X=\x8A \x91" warns brackets
+line "247TAB()"
+= stored "\x8A)" warns none
+line "248TAB( PRINT"
+= stored "\x8A \xF1" warns brackets
+line "249TEMPO"
+= stored "\xC8\x9F" warns none
+line "250X=TEMPO"
+= stored "X=\xC8\x9F" warns none
+line "251TEMPOA"
+= stored "\xC8\x9FA" warns none
+line "252TEMPO 10"
+= stored "\xC8\x9F 10" warns none
+line "253TEMPO TIME"
+= stored "\xC8\x9F \x91" warns none
+line "254X=TEMPO TIME"
+= stored "X=\xC8\x9F \x91" warns none
+line "255TEMPO)"
+= stored "\xC8\x9F)" warns brackets
+line "256TEMPO PRINT"
+= stored "\xC8\x9F \xF1" warns none
+line "257TEXTLOAD"
+= stored "\xC7\x9B" warns none
+line "258X=TEXTLOAD"
+= stored "X=\xC7\x9B" warns none
+line "259TEXTLOADA"
+= stored "\xC7\x9BA" warns none
+line "260TEXTLOAD 10"
+= stored "\xC7\x9B 10" warns none
+line "261TEXTLOAD TIME"
+= stored "\xC7\x9B \x91" warns none
+line "262X=TEXTLOAD TIME"
+= stored "X=\xC7\x9B \x91" warns none
+line "263TEXTLOAD)"
+= stored "\xC7\x9B)" warns brackets
+line "264TEXTLOAD PRINT"
+= stored "\xC7\x9B \xF1" warns none
+line "265TEXTSAVE"
+= stored "\xC7\x9C" warns none
+line "266X=TEXTSAVE"
+= stored "X=\xC7\x9C" warns none
+line "267TEXTSAVEA"
+= stored "\xC7\x9CA" warns none
+line "268TEXTSAVE 10"
+= stored "\xC7\x9C 10" warns none
+line "269TEXTSAVE TIME"
+= stored "\xC7\x9C \x91" warns none
+line "270X=TEXTSAVE TIME"
+= stored "X=\xC7\x9C \x91" warns none
+line "271TEXTSAVE)"
+= stored "\xC7\x9C)" warns brackets
+line "272TEXTSAVE PRINT"
+= stored "\xC7\x9C \xF1" warns none
+line "273THEN"
+= stored "\x8C" warns none
+line "274X=THEN"
+= stored "X=\x8C" warns none
+line "275THENA"
+= stored "\x8CA" warns none
+line "276THEN 10"
+= stored "\x8C \x8DTJ@" warns none
+line "277THEN TIME"
+= stored "\x8C \xD1" warns none
+line "278X=THEN TIME"
+= stored "X=\x8C \xD1" warns none
+line "279THEN)"
+= stored "\x8C)" warns brackets
+line "280THEN PRINT"
+= stored "\x8C \xF1" warns none
+line "281TIME"
+= stored "\xD1" warns none
+line "282X=TIME"
+= stored "X=\x91" warns none
+line "283TIMEA"
+= stored "TIMEA" warns none
+line "284TIME 10"
+= stored "\xD1 10" warns none
+line "285TIME TIME"
+= stored "\xD1 \x91" warns none
+line "286X=TIME TIME"
+= stored "X=\x91 \x91" warns none
+line "287TIME)"
+= stored "\xD1)" warns brackets
+line "288TIME PRINT"
+= stored "\xD1 \xF1" warns none
+line "289TINT"
+= stored "\xC8\x9C" warns none
+line "290X=TINT"
+= stored "X=\xC8\x9C" warns none
+line "291TINTA"
+= stored "\xC8\x9CA" warns none
+line "292TINT 10"
+= stored "\xC8\x9C 10" warns none
+line "293TINT TIME"
+= stored "\xC8\x9C \x91" warns none
+line "294X=TINT TIME"
+= stored "X=\xC8\x9C \x91" warns none
+line "295TINT)"
+= stored "\xC8\x9C)" warns brackets
+line "296TINT PRINT"
+= stored "\xC8\x9C \xF1" warns none
+line "297TO"
+= stored "\xB8" warns none
+line "298X=TO"
+= stored "X=\xB8" warns none
+line "299TOA"
+= stored "\xB8A" warns none
+line "300TO 10"
+= stored "\xB8 \x8DTJ@" warns none
+line "301TO TIME"
+= stored "\xB8 \xD1" warns none
+line "302X=TO TIME"
+= stored "X=\xB8 \x91" warns none
+line "303TO)"
+= stored "\xB8)" warns brackets
+line "304TO PRINT"
+= stored "\xB8 \xF1" warns none
+line "305TRACE"
+= stored "\xFC" warns none
+line "306X=TRACE"
+= stored "X=\xFC" warns none
+line "307TRACEA"
+= stored "\xFCA" warns none
+line "308TRACE 10"
+= stored "\xFC \x8DTJ@" warns none
+line "309TRACE TIME"
+= stored "\xFC \x91" warns none
+line "310X=TRACE TIME"
+= stored "X=\xFC \x91" warns none
+line "311TRACE)"
+= stored "\xFC)" warns brackets
+line "312TRACE PRINT"
+= stored "\xFC \xF1" warns none
+line "313TRUE"
+= stored "\xB9" warns none
+line "314X=TRUE"
+= stored "X=\xB9" warns none
+line "315TRUEA"
+= stored "TRUEA" warns none
+line "316TRUE 10"
+= stored "\xB9 \x8DTJ@" warns none
+line "317TRUE TIME"
+= stored "\xB9 \xD1" warns none
+line "318X=TRUE TIME"
+= stored "X=\xB9 \x91" warns none
+line "319TRUE)"
+= stored "\xB9)" warns brackets
+line "320TRUE PRINT"
+= stored "\xB9 \xF1" warns none
+line "321TWINO"
+= stored "\xC7\x9E" warns none
+line "322X=TWINO"
+= stored "X=\xC7\x9E" warns none
+line "323TWINOA"
+= stored "\xC7\x9EA" warns none
+line "324TWINO 10"
+= stored "\xC7\x9E 10" warns none
+line "325TWINO TIME"
+= stored "\xC7\x9E \x91" warns none
+line "326X=TWINO TIME"
+= stored "X=\xC7\x9E \x91" warns none
+line "327TWINO)"
+= stored "\xC7\x9E)" warns brackets
+line "328TWINO PRINT"
+= stored "\xC7\x9E \xF1" warns none
+line "329TWIN"
+= stored "\xC7\x9D" warns none
+line "330X=TWIN"
+= stored "X=\xC7\x9D" warns none
+line "331TWINA"
+= stored "TWINA" warns none
+line "332TWIN 10"
+= stored "\xC7\x9D \x8DTJ@" warns none
+line "333TWIN TIME"
+= stored "\xC7\x9D \xD1" warns none
+line "334X=TWIN TIME"
+= stored "X=\xC7\x9D \x91" warns none
+line "335TWIN)"
+= stored "\xC7\x9D)" warns brackets
+line "336TWIN PRINT"
+= stored "\xC7\x9D \xF1" warns none
+line "337UNTIL"
+= stored "\xFD" warns none
+line "338X=UNTIL"
+= stored "X=\xFD" warns none
+line "339UNTILA"
+= stored "\xFDA" warns none
+line "340UNTIL 10"
+= stored "\xFD 10" warns none
+line "341UNTIL TIME"
+= stored "\xFD \x91" warns none
+line "342X=UNTIL TIME"
+= stored "X=\xFD \x91" warns none
+line "343UNTIL)"
+= stored "\xFD)" warns brackets
+line "344UNTIL PRINT"
+= stored "\xFD \xF1" warns none
+line "345USR"
+= stored "\xBA" warns none
+line "346X=USR"
+= stored "X=\xBA" warns none
+line "347USRA"
+= stored "\xBAA" warns none
+line "348USR 10"
+= stored "\xBA \x8DTJ@" warns none
+line "349USR TIME"
+= stored "\xBA \xD1" warns none
+line "350X=USR TIME"
+= stored "X=\xBA \x91" warns none
+line "351USR)"
+= stored "\xBA)" warns brackets
+line "352USR PRINT"
+= stored "\xBA \xF1" warns none
+line "353VDU"
+= stored "\xEF" warns none
+line "354X=VDU"
+= stored "X=\xEF" warns none
+line "355VDUA"
+= stored "\xEFA" warns none
+line "356VDU 10"
+= stored "\xEF 10" warns none
+line "357VDU TIME"
+= stored "\xEF \x91" warns none
+line "358X=VDU TIME"
+= stored "X=\xEF \x91" warns none
+line "359VDU)"
+= stored "\xEF)" warns brackets
+line "360VDU PRINT"
+= stored "\xEF \xF1" warns none
+line "361VAL"
+= stored "\xBB" warns none
+line "362X=VAL"
+= stored "X=\xBB" warns none
+line "363VALA"
+= stored "\xBBA" warns none
+line "364VAL 10"
+= stored "\xBB \x8DTJ@" warns none
+line "365VAL TIME"
+= stored "\xBB \xD1" warns none
+line "366X=VAL TIME"
+= stored "X=\xBB \x91" warns none
+line "367VAL)"
+= stored "\xBB)" warns brackets
+line "368VAL PRINT"
+= stored "\xBB \xF1" warns none
+line "369VPOS"
+= stored "\xBC" warns none
+line "370X=VPOS"
+= stored "X=\xBC" warns none
+line "371VPOSA"
+= stored "VPOSA" warns none
+line "372VPOS 10"
+= stored "\xBC \x8DTJ@" warns none
+line "373VPOS TIME"
+= stored "\xBC \xD1" warns none
+line "374X=VPOS TIME"
+= stored "X=\xBC \x91" warns none
+line "375VPOS)"
+= stored "\xBC)" warns brackets
+line "376VPOS PRINT"
+= stored "\xBC \xF1" warns none
+line "377VOICES"
+= stored "\xC8\xA0" warns none
+line "378X=VOICES"
+= stored "X=\xC8\xA0" warns none
+line "379VOICESA"
+= stored "\xC8\xA0A" warns none
+line "380VOICES 10"
+= stored "\xC8\xA0 10" warns none
+line "381VOICES TIME"
+= stored "\xC8\xA0 \x91" warns none
+line "382X=VOICES TIME"
+= stored "X=\xC8\xA0 \x91" warns none
+line "383VOICES)"
+= stored "\xC8\xA0)" warns brackets
+line "384VOICES PRINT"
+= stored "\xC8\xA0 \xF1" warns none
+line "385VOICE"
+= stored "\xC8\xA1" warns none
+line "386X=VOICE"
+= stored "X=\xC8\xA1" warns none
+line "387VOICEA"
+= stored "\xC8\xA1A" warns none
+line "388VOICE 10"
+= stored "\xC8\xA1 10" warns none
+line "389VOICE TIME"
+= stored "\xC8\xA1 \x91" warns none
+line "390X=VOICE TIME"
+= stored "X=\xC8\xA1 \x91" warns none
+line "391VOICE)"
+= stored "\xC8\xA1)" warns brackets
+line "392VOICE PRINT"
+= stored "\xC8\xA1 \xF1" warns none
+line "393WHILE"
+= stored "\xC8\x95" warns none
+line "394X=WHILE"
+= stored "X=\xC8\x95" warns none
+line "395WHILEA"
+= stored "\xC8\x95A" warns none
+line "396WHILE 10"
+= stored "\xC8\x95 10" warns none
+line "397WHILE TIME"
+= stored "\xC8\x95 \x91" warns none
+line "398X=WHILE TIME"
+= stored "X=\xC8\x95 \x91" warns none
+line "399WHILE)"
+= stored "\xC8\x95)" warns brackets
+line "400WHILE PRINT"
+= stored "\xC8\x95 \xF1" warns none
+line "401WHEN"
+= stored "\xC9" warns none
+line "402X=WHEN"
+= stored "X=\xC9" warns none
+line "403WHENA"
+= stored "\xC9A" warns none
+line "404WHEN 10"
+= stored "\xC9 10" warns none
+line "405WHEN TIME"
+= stored "\xC9 \x91" warns none
+line "406X=WHEN TIME"
+= stored "X=\xC9 \x91" warns none
+line "407WHEN)"
+= stored "\xC9)" warns brackets
+line "408WHEN PRINT"
+= stored "\xC9 \xF1" warns none
+line "409WAIT"
+= stored "\xC8\x96" warns none
+line "410X=WAIT"
+= stored "X=\xC8\x96" warns none
+line "411WAITA"
+= stored "WAITA" warns none
+line "412WAIT 10"
+= stored "\xC8\x96 \x8DTJ@" warns none
+line "413WAIT TIME"
+= stored "\xC8\x96 \xD1" warns none
+line "414X=WAIT TIME"
+= stored "X=\xC8\x96 \x91" warns none
+line "415WAIT)"
+= stored "\xC8\x96)" warns brackets
+line "416WAIT PRINT"
+= stored "\xC8\x96 \xF1" warns none
+line "417WIDTH"
+= stored "\xFE" warns none
+line "418X=WIDTH"
+= stored "X=\xFE" warns none
+line "419WIDTHA"
+= stored "\xFEA" warns none
+line "420WIDTH 10"
+= stored "\xFE 10" warns none
+line "421WIDTH TIME"
+= stored "\xFE \x91" warns none
+line "422X=WIDTH TIME"
+= stored "X=\xFE \x91" warns none
+line "423WIDTH)"
+= stored "\xFE)" warns brackets
+line "424WIDTH PRINT"
+= stored "\xFE \xF1" warns none
+listo 0
+= "    1PROC\x0A\x0D    2X=PROC\x0A\x0D    3PROCA\x0A\x0D    4PROC 10\x0A\x0D    5PROC TIME\x0A\x0D    6X=PROC TIME\x0A\x0D    7PROC)\x0A\x0D    8PROC PRINT\x0A\x0D    9POS\x0A\x0D   10X=POS\x0A\x0D   11POSA\x0A\x0D   12POS 10\x0A\x0D   13POS TIME\x0A\x0D   14X=POS TIME\x0A\x0D   15POS)\x0A\x0D   16POS PRINT\x0A\x0D   17QUIT\x0A\x0D   18X=QUIT\x0A\x0D   19QUITA\x0A\x0D   20QUIT 10\x0A\x0D   21QUIT TIME\x0A\x0D   22X=QUIT TIME\x0A\x0D   23QUIT)\x0A\x0D   24QUIT PRINT\x0A\x0D   25RETURN\x0A\x0D   26X=RETURN\x0A\x0D   27RETURNA\x0A\x0D   28RETURN 10\x0A\x0D   29RETURN TIME\x0A\x0D   30X=RETURN TIME\x0A\x0D   31RETURN)\x0A\x0D   32RETURN PRINT\x0A\x0D   33REPEAT\x0A\x0D   34X=REPEAT\x0A\x0D   35REPEATA\x0A\x0D   36REPEAT 10\x0A\x0D   37REPEAT TIME\x0A\x0D   38X=REPEAT TIME\x0A\x0D   39REPEAT)\x0A\x0D   40REPEAT PRINT\x0A\x0D   41REPORT\x0A\x0D   42X=REPORT\x0A\x0D   43REPORTA\x0A\x0D   44REPORT 10\x0A\x0D   45REPORT TIME\x0A\x0D   46X=REPORT TIME\x0A\x0D   47REPORT)\x0A\x0D   48REPORT PRINT\x0A\x0D   49READ\x0A\x0D   50X=READ\x0A\x0D   51READA\x0A\x0D   52READ 10\x0A\x0D   53READ TIME\x0A\x0D   54X=READ TIME\x0A\x0D   55READ)\x0A\x0D   56READ PRINT\x0A\x0D   57REM\x0A\x0D   58X=REM\x0A\x0D   59REMA\x0A\x0D   60REM 10\x0A\x0D   61REM TIME\x0A\x0D   62X=REM TIME\x0A\x0D   63REM)\x0A\x0D   64REM PRINT\x0A\x0D   65RUN\x0A\x0D   66X=RUN\x0A\x0D   67RUNA\x0A\x0D   68RUN 10\x0A\x0D   69RUN TIME\x0A\x0D   70X=RUN TIME\x0A\x0D   71RUN)\x0A\x0D   72RUN PRINT\x0A\x0D   73RAD\x0A\x0D   74X=RAD\x0A\x0D   75RADA\x0A\x0D   76RAD 10\x0A\x0D   77RAD TIME\x0A\x0D   78X=RAD TIME\x0A\x0D   79RAD)\x0A\x0D   80RAD PRINT\x0A\x0D   81RESTORE\x0A\x0D   82X=RESTORE\x0A\x0D   83RESTOREA\x0A\x0D   84RESTORE 10\x0A\x0D   85RESTORE TIME\x0A\x0D   86X=RESTORE TIME\x0A\x0D   87RESTORE)\x0A\x0D   88RESTORE PRINT\x0A\x0D   89RIGHT$(\x0A\x0D   90X=RIGHT$(\x0A\x0D   91RIGHT$(A\x0A\x0D   92RIGHT$( 10\x0A\x0D   93RIGHT$( TIME\x0A\x0D   94X=RIGHT$( TIME\x0A\x0D   95RIGHT$()\x0A\x0D   96RIGHT$( PRINT\x0A\x0D   97RND\x0A\x0D   98X=RND\x0A\x0D   99RNDA\x0A\x0D  100RND 10\x0A\x0D  101RND TIME\x0A\x0D  102X=RND TIME\x0A\x0D  103RND)\x0A\x0D  104RND PRINT\x0A\x0D  105RECTANGLE\x0A\x0D  106X=RECTANGLE\x0A\x0D  107RECTANGLEA\x0A\x0D  108RECTANGLE 10\x0A\x0D  109RECTANGLE TIME\x0A\x0D  110X=RECTANGLE TIME\x0A\x0D  111RECTANGLE)\x0A\x0D  112RECTANGLE PRINT\x0A\x0D  113RENUMBER\x0A\x0D  114X=RENUMBER\x0A\x0D  115RENUMBERA\x0A\x0D  116RENUMBER 10\x0A\x0D  117RENUMBER TIME\x0A\x0D  118X=RENUMBER TIME\x0A\x0D  119RENUMBER)\x0A\x0D  120RENUMBER PRINT\x0A\x0D  121STEP\x0A\x0D  122X=STEP\x0A\x0D  123STEPA\x0A\x0D  124STEP 10\x0A\x0D  125STEP TIME\x0A\x0D  126X=STEP TIME\x0A\x0D  127STEP)\x0A\x0D  128STEP PRINT\x0A\x0D  129SAVE\x0A\x0D  130X=SAVE\x0A\x0D  131SAVEA\x0A\x0D  132SAVE 10\x0A\x0D  133SAVE TIME\x0A\x0D  134X=SAVE TIME\x0A\x0D  135SAVE)\x0A\x0D  136SAVE PRINT\x0A\x0D  137SGN\x0A\x0D  138X=SGN\x0A\x0D  139SGNA\x0A\x0D  140SGN 10\x0A\x0D  141SGN TIME\x0A\x0D  142X=SGN TIME\x0A\x0D  143SGN)\x0A\x0D  144SGN PRINT\x0A\x0D  145SIN\x0A\x0D  146X=SIN\x0A\x0D  147SINA\x0A\x0D  148SIN 10\x0A\x0D  149SIN TIME\x0A\x0D  150X=SIN TIME\x0A\x0D  151SIN)\x0A\x0D  152SIN PRINT\x0A\x0D  153SQR\x0A\x0D  154X=SQR\x0A\x0D  155SQRA\x0A\x0D  156SQR 10\x0A\x0D  157SQR TIME\x0A\x0D  158X=SQR TIME\x0A\x0D  159SQR)\x0A\x0D  160SQR PRINT\x0A\x0D  161SOUND\x0A\x0D  162X=SOUND\x0A\x0D  163SOUNDA\x0A\x0D  164SOUND 10\x0A\x0D  165SOUND TIME\x0A\x0D  166X=SOUND TIME\x0A\x0D  167SOUND)\x0A\x0D  168SOUND PRINT\x0A\x0D  169SPC\x0A\x0D  170X=SPC\x0A\x0D  171SPCA\x0A\x0D  172SPC 10\x0A\x0D  173SPC TIME\x0A\x0D  174X=SPC TIME\x0A\x0D  175SPC)\x0A\x0D  176SPC PRINT\x0A\x0D  177STR$\x0A\x0D  178X=STR$\x0A\x0D  179STR$A\x0A\x0D  180STR$ 10\x0A\x0D  181STR$ TIME\x0A\x0D  182X=STR$ TIME\x0A\x0D  183STR$)\x0A\x0D  184STR$ PRINT\x0A\x0D  185STRING$(\x0A\x0D  186X=STRING$(\x0A\x0D  187STRING$(A\x0A\x0D  188STRING$( 10\x0A\x0D  189STRING$( TIME\x0A\x0D  190X=STRING$( TIME\x0A\x0D  191STRING$()\x0A\x0D  192STRING$( PRINT\x0A\x0D  193STOP\x0A\x0D  194X=STOP\x0A\x0D  195STOPA\x0A\x0D  196STOP 10\x0A\x0D  197STOP TIME\x0A\x0D  198X=STOP TIME\x0A\x0D  199STOP)\x0A\x0D  200STOP PRINT\x0A\x0D  201STEREO\x0A\x0D  202X=STEREO\x0A\x0D  203STEREOA\x0A\x0D  204STEREO 10\x0A\x0D  205STEREO TIME\x0A\x0D  206X=STEREO TIME\x0A\x0D  207STEREO)\x0A\x0D  208STEREO PRINT\x0A\x0D  209SUM\x0A\x0D  210X=SUM\x0A\x0D  211SUMA\x0A\x0D  212SUM 10\x0A\x0D  213SUM TIME\x0A\x0D  214X=SUM TIME\x0A\x0D  215SUM)\x0A\x0D  216SUM PRINT\x0A\x0D  217SWAP\x0A\x0D  218X=SWAP\x0A\x0D  219SWAPA\x0A\x0D  220SWAP 10\x0A\x0D  221SWAP TIME\x0A\x0D  222X=SWAP TIME\x0A\x0D  223SWAP)\x0A\x0D  224SWAP PRINT\x0A\x0D  225SYS\x0A\x0D  226X=SYS\x0A\x0D  227SYSA\x0A\x0D  228SYS 10\x0A\x0D  229SYS TIME\x0A\x0D  230X=SYS TIME\x0A\x0D  231SYS)\x0A\x0D  232SYS PRINT\x0A\x0D  233TAN\x0A\x0D  234X=TAN\x0A\x0D  235TANA\x0A\x0D  236TAN 10\x0A\x0D  237TAN TIME\x0A\x0D  238X=TAN TIME\x0A\x0D  239TAN)\x0A\x0D  240TAN PRINT\x0A\x0D  241TAB(\x0A\x0D  242X=TAB(\x0A\x0D  243TAB(A\x0A\x0D  244TAB( 10\x0A\x0D  245TAB( TIME\x0A\x0D  246X=TAB( TIME\x0A\x0D  247TAB()\x0A\x0D  248TAB( PRINT\x0A\x0D  249TEMPO\x0A\x0D  250X=TEMPO\x0A\x0D  251TEMPOA\x0A\x0D  252TEMPO 10\x0A\x0D  253TEMPO TIME\x0A\x0D  254X=TEMPO TIME\x0A\x0D  255TEMPO)\x0A\x0D  256TEMPO PRINT\x0A\x0D  257TEXTLOAD\x0A\x0D  258X=TEXTLOAD\x0A\x0D  259TEXTLOADA\x0A\x0D  260TEXTLOAD 10\x0A\x0D  261TEXTLOAD TIME\x0A\x0D  262X=TEXTLOAD TIME\x0A\x0D  263TEXTLOAD)\x0A\x0D  264TEXTLOAD PRINT\x0A\x0D  265TEXTSAVE\x0A\x0D  266X=TEXTSAVE\x0A\x0D  267TEXTSAVEA\x0A\x0D  268TEXTSAVE 10\x0A\x0D  269TEXTSAVE TIME\x0A\x0D  270X=TEXTSAVE TIME\x0A\x0D  271TEXTSAVE)\x0A\x0D  272TEXTSAVE PRINT\x0A\x0D  273THEN\x0A\x0D  274X=THEN\x0A\x0D  275THENA\x0A\x0D  276THEN 10\x0A\x0D  277THEN TIME\x0A\x0D  278X=THEN TIME\x0A\x0D  279THEN)\x0A\x0D  280THEN PRINT\x0A\x0D  281TIME\x0A\x0D  282X=TIME\x0A\x0D  283TIMEA\x0A\x0D  284TIME 10\x0A\x0D  285TIME TIME\x0A\x0D  286X=TIME TIME\x0A\x0D  287TIME)\x0A\x0D  288TIME PRINT\x0A\x0D  289TINT\x0A\x0D  290X=TINT\x0A\x0D  291TINTA\x0A\x0D  292TINT 10\x0A\x0D  293TINT TIME\x0A\x0D  294X=TINT TIME\x0A\x0D  295TINT)\x0A\x0D  296TINT PRINT\x0A\x0D  297TO\x0A\x0D  298X=TO\x0A\x0D  299TOA\x0A\x0D  300TO 10\x0A\x0D  301TO TIME\x0A\x0D  302X=TO TIME\x0A\x0D  303TO)\x0A\x0D  304TO PRINT\x0A\x0D  305TRACE\x0A\x0D  306X=TRACE\x0A\x0D  307TRACEA\x0A\x0D  308TRACE 10\x0A\x0D  309TRACE TIME\x0A\x0D  310X=TRACE TIME\x0A\x0D  311TRACE)\x0A\x0D  312TRACE PRINT\x0A\x0D  313TRUE\x0A\x0D  314X=TRUE\x0A\x0D  315TRUEA\x0A\x0D  316TRUE 10\x0A\x0D  317TRUE TIME\x0A\x0D  318X=TRUE TIME\x0A\x0D  319TRUE)\x0A\x0D  320TRUE PRINT\x0A\x0D  321TWINO\x0A\x0D  322X=TWINO\x0A\x0D  323TWINOA\x0A\x0D  324TWINO 10\x0A\x0D  325TWINO TIME\x0A\x0D  326X=TWINO TIME\x0A\x0D  327TWINO)\x0A\x0D  328TWINO PRINT\x0A\x0D  329TWIN\x0A\x0D  330X=TWIN\x0A\x0D  331TWINA\x0A\x0D  332TWIN 10\x0A\x0D  333TWIN TIME\x0A\x0D  334X=TWIN TIME\x0A\x0D  335TWIN)\x0A\x0D  336TWIN PRINT\x0A\x0D  337UNTIL\x0A\x0D  338X=UNTIL\x0A\x0D  339UNTILA\x0A\x0D  340UNTIL 10\x0A\x0D  341UNTIL TIME\x0A\x0D  342X=UNTIL TIME\x0A\x0D  343UNTIL)\x0A\x0D  344UNTIL PRINT\x0A\x0D  345USR\x0A\x0D  346X=USR\x0A\x0D  347USRA\x0A\x0D  348USR 10\x0A\x0D  349USR TIME\x0A\x0D  350X=USR TIME\x0A\x0D  351USR)\x0A\x0D  352USR PRINT\x0A\x0D  353VDU\x0A\x0D  354X=VDU\x0A\x0D  355VDUA\x0A\x0D  356VDU 10\x0A\x0D  357VDU TIME\x0A\x0D  358X=VDU TIME\x0A\x0D  359VDU)\x0A\x0D  360VDU PRINT\x0A\x0D  361VAL\x0A\x0D  362X=VAL\x0A\x0D  363VALA\x0A\x0D  364VAL 10\x0A\x0D  365VAL TIME\x0A\x0D  366X=VAL TIME\x0A\x0D  367VAL)\x0A\x0D  368VAL PRINT\x0A\x0D  369VPOS\x0A\x0D  370X=VPOS\x0A\x0D  371VPOSA\x0A\x0D  372VPOS 10\x0A\x0D  373VPOS TIME\x0A\x0D  374X=VPOS TIME\x0A\x0D  375VPOS)\x0A\x0D  376VPOS PRINT\x0A\x0D  377VOICES\x0A\x0D  378X=VOICES\x0A\x0D  379VOICESA\x0A\x0D  380VOICES 10\x0A\x0D  381VOICES TIME\x0A\x0D  382X=VOICES TIME\x0A\x0D  383VOICES)\x0A\x0D  384VOICES PRINT\x0A\x0D  385VOICE\x0A\x0D  386X=VOICE\x0A\x0D  387VOICEA\x0A\x0D  388VOICE 10\x0A\x0D  389VOICE TIME\x0A\x0D  390X=VOICE TIME\x0A\x0D  391VOICE)\x0A\x0D  392VOICE PRINT\x0A\x0D  393WHILE\x0A\x0D  394X=WHILE\x0A\x0D  395WHILEA\x0A\x0D  396WHILE 10\x0A\x0D  397WHILE TIME\x0A\x0D  398X=WHILE TIME\x0A\x0D  399WHILE)\x0A\x0D  400WHILE PRINT\x0A\x0D  401WHEN\x0A\x0D  402X=WHEN\x0A\x0D  403WHENA\x0A\x0D  404WHEN 10\x0A\x0D  405WHEN TIME\x0A\x0D  406X=WHEN TIME\x0A\x0D  407WHEN)\x0A\x0D  408WHEN PRINT\x0A\x0D  409WAIT\x0A\x0D  410X=WAIT\x0A\x0D  411WAITA\x0A\x0D  412WAIT 10\x0A\x0D  413WAIT TIME\x0A\x0D  414X=WAIT TIME\x0A\x0D  415WAIT)\x0A\x0D  416WAIT PRINT\x0A\x0D  417WIDTH\x0A\x0D  418X=WIDTH\x0A\x0D  419WIDTHA\x0A\x0D  420WIDTH 10\x0A\x0D  421WIDTH TIME\x0A\x0D  422X=WIDTH TIME\x0A\x0D  423WIDTH)\x0A\x0D  424WIDTH PRINT\x0A\x0D"
+program 0 0
+line "1A."
+= stored "\x80" warns none
+line "2X=A.X"
+= stored "X=\x80X" warns none
+line "3AN."
+= stored "\x80" warns none
+line "4X=AN.X"
+= stored "X=\x80X" warns none
+line "5AB."
+= stored "\x94" warns none
+line "6X=AB.X"
+= stored "X=\x94X" warns none
+line "7AC."
+= stored "\x95" warns none
+line "8X=AC.X"
+= stored "X=\x95X" warns none
+line "9AD."
+= stored "\x96" warns none
+line "10X=AD.X"
+= stored "X=\x96X" warns none
+line "11ADV."
+= stored "\x96" warns none
+line "12X=ADV.X"
+= stored "X=\x96X" warns none
+line "13ADVA."
+= stored "\x96" warns none
+line "14X=ADVA.X"
+= stored "X=\x96X" warns none
+line "15AS."
+= stored "\x97" warns none
+line "16X=AS.X"
+= stored "X=\x97X" warns none
+line "17AT."
+= stored "\x99" warns none
+line "18X=AT.X"
+= stored "X=\x99X" warns none
+line "19AU."
+= stored "\xC7\x8F" warns none
+line "20X=AU.X"
+= stored "X=\xC7\x8FX" warns none
+line "21AUT."
+= stored "\xC7\x8F" warns none
+line "22X=AUT.X"
+= stored "X=\xC7\x8FX" warns none
+line "23AP."
+= stored "\xC7\x8E" warns none
+line "24X=AP.X"
+= stored "X=\xC7\x8EX" warns none
+line "25APP."
+= stored "\xC7\x8E" warns none
+line "26X=APP.X"
+= stored "X=\xC7\x8EX" warns none
+line "27APPE."
+= stored "\xC7\x8E" warns none
+line "28X=APPE.X"
+= stored "X=\xC7\x8EX" warns none
+line "29APPEN."
+= stored "\xC7\x8E" warns none
+line "30X=APPEN.X"
+= stored "X=\xC7\x8EX" warns none
+line "31B."
+= stored "\x9A" warns none
+line "32X=B.X"
+= stored "X=B.X" warns none
+line "33BG."
+= stored "\x9A" warns none
+line "34X=BG.X"
+= stored "X=BG.X" warns none
+line "35BGE."
+= stored "\x9A" warns none
+line "36X=BGE.X"
+= stored "X=BGE.X" warns none
+line "37BP."
+= stored "\xD5" warns none
+line "38X=BP.X"
+= stored "X=BP.X" warns none
+line "39BPU."
+= stored "\xD5" warns none
+line "40X=BPU.X"
+= stored "X=BPU.X" warns none
+line "41BE."
+= stored "\xC8\x9E" warns none
+line "42X=BE.X"
+= stored "X=\xC8\x9EX" warns none
+line "43BEA."
+= stored "\xC8\x9E" warns none
+line "44X=BEA.X"
+= stored "X=\xC8\x9EX" warns none
+line "45BEAT."
+= stored "\xC8\x9E" warns none
+line "46X=BEAT.X"
+= stored "X=\xC8\x9EX" warns none
+line "47C."
+= stored "\xFB" warns none
+line "48X=C.X"
+= stored "X=\xFBX" warns none
+line "49CO."
+= stored "\xFB" warns none
+line "50X=CO.X"
+= stored "X=\xFBX" warns none
+line "51COL."
+= stored "\xFB" warns none
+line "52X=COL.X"
+= stored "X=\xFBX" warns none
+line "53COLO."
+= stored "\xFB" warns none
+line "54X=COLO.X"
+= stored "X=\xFBX" warns none
+line "55COLOU."
+= stored "\xFB" warns none
+line "56X=COLOU.X"
+= stored "X=\xFBX" warns none
+line "57CA."
+= stored "\xD6" warns none
+line "58X=CA.X"
+= stored "X=\xD6X" warns none
+line "59CAL."
+= stored "\xD6" warns none
+line "60X=CAL.X"
+= stored "X=\xD6X" warns none
+line "61CAS."
+= stored "\xC8\x8E" warns none
+line "62X=CAS.X"
+= stored "X=\xC8\x8EX" warns none
+line "63CH."
+= stored "\xD7" warns none
+line "64X=CH.X"
+= stored "X=\xD7X" warns none
+line "65CHA."
+= stored "\xD7" warns none
+line "66X=CHA.X"
+= stored "X=\xD7X" warns none
+line "67CHAI."
+= stored "\xD7" warns none
+line "68X=CHAI.X"
+= stored "X=\xD7X" warns none
+line "69CHR."
+= stored "\xBD" warns none
+line "70X=CHR.X"
+= stored "X=\xBDX" warns none
+line "71CL."
+= stored "\xD8" warns none
+line "72X=CL.X"
+= stored "X=CL.X" warns none
+line "73CLE."
+= stored "\xD8" warns none
+line "74X=CLE.X"
+= stored "X=CLE.X" warns none
+line "75CLEA."
+= stored "\xD8" warns none
+line "76X=CLEA.X"
+= stored "X=CLEA.X" warns none
+line "77CLO."
+= stored "\xD9" warns none
+line "78X=CLO.X"
+= stored "X=CLO.X" warns none
+line "79CLOS."
+= stored "\xD9" warns none
+line "80X=CLOS.X"
+= stored "X=CLOS.X" warns none
+line "81COU."
+= stored "\x9C" warns none
+line "82X=COU.X"
+= stored "X=COU.X" warns none
+line "83COUN."
+= stored "\x9C" warns none
+line "84X=COUN.X"
+= stored "X=COUN.X" warns none
+line "85CI."
+= stored "\xC8\x8F" warns none
+line "86X=CI.X"
+= stored "X=\xC8\x8FX" warns none
+line "87CIR."
+= stored "\xC8\x8F" warns none
+line "88X=CIR.X"
+= stored "X=\xC8\x8FX" warns none
+line "89CIRC."
+= stored "\xC8\x8F" warns none
+line "90X=CIRC.X"
+= stored "X=\xC8\x8FX" warns none
+line "91CIRCL."
+= stored "\xC8\x8F" warns none
+line "92X=CIRCL.X"
+= stored "X=\xC8\x8FX" warns none
+line "93CR."
+= stored "\xC7\x90" warns none
+line "94X=CR.X"
+= stored "X=\xC7\x90X" warns none
+line "95CRU."
+= stored "\xC7\x90" warns none
+line "96X=CRU.X"
+= stored "X=\xC7\x90X" warns none
+line "97CRUN."
+= stored "\xC7\x90" warns none
+line "98X=CRUN.X"
+= stored "X=\xC7\x90X" warns none
+line "99CRUNC."
+= stored "\xC7\x90" warns none
+line "100X=CRUNC.X"
+= stored "X=\xC7\x90X" warns none
+line "101D."
+= stored "\xDC" warns none
+line "102X=D.X"
+= stored "X=\xDCX" warns none
+line "103DA."
+= stored "\xDC" warns none
+line "104X=DA.X"
+= stored "X=\xDCX" warns none
+line "105DAT."
+= stored "\xDC" warns none
+line "106X=DAT.X"
+= stored "X=\xDCX" warns none
+line "107DE."
+= stored "\x9D" warns none
+line "108X=DE.X"
+= stored "X=\x9DX" warns none
+line "109DEL."
+= stored "\xC7\x91" warns none
+line "110X=DEL.X"
+= stored "X=\xC7\x91X" warns none
+line "111DELE."
+= stored "\xC7\x91" warns none
+line "112X=DELE.X"
+= stored "X=\xC7\x91X" warns none
+line "113DELET."
+= stored "\xC7\x91" warns none
+line "114X=DELET.X"
+= stored "X=\xC7\x91X" warns none
+line "115DI."
+= stored "\x81" warns none
+line "116X=DI.X"
+= stored "X=\x81X" warns none
+line "117DR."
+= stored "\xDF" warns none
+line "118X=DR.X"
+= stored "X=\xDFX" warns none
+line "119DRA."
+= stored "\xDF" warns none
+line "120X=DRA.X"
+= stored "X=\xDFX" warns none
+line "121E."
+= stored "\xE1" warns none
+line "122X=E.X"
+= stored "X=E.X" warns none
+line "123EN."
+= stored "\xE1" warns none
+line "124X=EN.X"
+= stored "X=EN.X" warns none
+line "125END."
+= stored "\xE1" warns none
+line "126X=END.X"
+= stored "X=END.X" warns none
+line "127ENDP."
+= stored "\xE1" warns none
+line "128X=ENDP.X"
+= stored "X=ENDP.X" warns none
+line "129ENDPR."
+= stored "\xE1" warns none
+line "130X=ENDPR.X"
+= stored "X=ENDPR.X" warns none
+line "131ENDPRO."
+= stored "\xE1" warns none
+line "132X=ENDPRO.X"
+= stored "X=ENDPRO.X" warns none
+line "133ED."
+= stored "\xC7\x92" warns none
+line "134X=ED.X"
+= stored "X=\xC7\x92X" warns none
+line "135EDI."
+= stored "\xC7\x92" warns none
+line "136X=EDI.X"
+= stored "X=\xC7\x92X" warns none
+line "137ENDW."
+= stored "\xCE" warns none
+line "138X=ENDW.X"
+= stored "X=ENDW.X" warns none
+line "139ENDWH."
+= stored "\xCE" warns none
+line "140X=ENDWH.X"
+= stored "X=ENDWH.X" warns none
+line "141ENDWHI."
+= stored "\xCE" warns none
+line "142X=ENDWHI.X"
+= stored "X=ENDWHI.X" warns none
+line "143ENDWHIL."
+= stored "\xCE" warns none
+line "144X=ENDWHIL.X"
+= stored "X=ENDWHIL.X" warns none
+line "145ENDC."
+= stored "\xCB" warns none
+line "146X=ENDC.X"
+= stored "X=ENDC.X" warns none
+line "147ENDCA."
+= stored "\xCB" warns none
+line "148X=ENDCA.X"
+= stored "X=ENDCA.X" warns none
+line "149ENDCAS."
+= stored "\xCB" warns none
+line "150X=ENDCAS.X"
+= stored "X=ENDCAS.X" warns none
+line "151ENDI."
+= stored "\xCD" warns none
+line "152X=ENDI.X"
+= stored "X=ENDI.X" warns none
+line "153ENV."
+= stored "\xE2" warns none
+line "154X=ENV.X"
+= stored "X=\xE2X" warns none
+line "155ENVE."
+= stored "\xE2" warns none
+line "156X=ENVE.X"
+= stored "X=\xE2X" warns none
+line "157ENVEL."
+= stored "\xE2" warns none
+line "158X=ENVEL.X"
+= stored "X=\xE2X" warns none
+line "159ENVELO."
+= stored "\xE2" warns none
+line "160X=ENVELO.X"
+= stored "X=\xE2X" warns none
+line "161ENVELOP."
+= stored "\xE2" warns none
+line "162X=ENVELOP.X"
+= stored "X=\xE2X" warns none
+line "163EL."
+= stored "\xCC" warns none
+line "164X=EL.X"
+= stored "X=\x8BX" warns none
+line "165ELS."
+= stored "\xCC" warns none
+line "166X=ELS.X"
+= stored "X=\x8BX" warns none
+line "167EV."
+= stored "\xA0" warns none
+line "168X=EV.X"
+= stored "X=\xA0X" warns none
+line "169EVA."
+= stored "\xA0" warns none
+line "170X=EVA.X"
+= stored "X=\xA0X" warns none
+line "171ER."
+= stored "\x9E" warns none
+line "172X=ER.X"
+= stored "X=ER.X" warns none
+line "173ERR."
+= stored "\x85" warns none
+line "174X=ERR.X"
+= stored "X=\x85X" warns none
+line "175ERRO."
+= stored "\x85" warns none
+line "176X=ERRO.X"
+= stored "X=\x85X" warns none
+line "177EO."
+= stored "\xC5" warns none
+line "178X=EO.X"
+= stored "X=EO.X" warns none
+line "179EX."
+= stored "\xA1" warns none
+line "180X=EX.X"
+= stored "X=\xA1X" warns none
+line "181ELL."
+= stored "\xC8\x9D" warns none
+line "182X=ELL.X"
+= stored "X=\xC8\x9DX" warns none
+line "183ELLI."
+= stored "\xC8\x9D" warns none
+line "184X=ELLI.X"
+= stored "X=\xC8\x9DX" warns none
+line "185ELLIP."
+= stored "\xC8\x9D" warns none
+line "186X=ELLIP.X"
+= stored "X=\xC8\x9DX" warns none
+line "187ELLIPS."
+= stored "\xC8\x9D" warns none
+line "188X=ELLIPS.X"
+= stored "X=\xC8\x9DX" warns none
+line "189F."
+= stored "\xE3" warns none
+line "190X=F.X"
+= stored "X=\xE3X" warns none
+line "191FO."
+= stored "\xE3" warns none
+line "192X=FO.X"
+= stored "X=\xE3X" warns none
+line "193FA."
+= stored "\xA3" warns none
+line "194X=FA.X"
+= stored "X=FA.X" warns none
+line "195FAL."
+= stored "\xA3" warns none
+line "196X=FAL.X"
+= stored "X=FAL.X" warns none
+line "197FALS."
+= stored "\xA3" warns none
+line "198X=FALS.X"
+= stored "X=FALS.X" warns none
+line "199FI."
+= stored "\xC8\x90" warns none
+line "200X=FI.X"
+= stored "X=\xC8\x90X" warns none
+line "201FIL."
+= stored "\xC8\x90" warns none
+line "202X=FIL.X"
+= stored "X=\xC8\x90X" warns none
+line "203G."
+= stored "\xE5" warns none
+line "204X=G.X"
+= stored "X=\xE5X" warns none
+line "205GO."
+= stored "\xE5" warns none
+line "206X=GO.X"
+= stored "X=\xE5X" warns none
+line "207GOT."
+= stored "\xE5" warns none
+line "208X=GOT.X"
+= stored "X=\xE5X" warns none
+line "209GE."
+= stored "\xBE" warns none
+line "210X=GE.X"
+= stored "X=\xBEX" warns none
+line "211GET."
+= stored "\xBE" warns none
+line "212X=GET.X"
+= stored "X=\xBEX" warns none
+line "213GOS."
+= stored "\xE4" warns none
+line "214X=GOS.X"
+= stored "X=\xE4X" warns none
+line "215GOSU."
+= stored "\xE4" warns none
+line "216X=GOSU.X"
+= stored "X=\xE4X" warns none
+line "217GC."
+= stored "\xE6" warns none
+line "218X=GC.X"
+= stored "X=\xE6X" warns none
+line "219GCO."
+= stored "\xE6" warns none
+line "220X=GCO.X"
+= stored "X=\xE6X" warns none
+line "221H."
+= stored "\xD3" warns none
+line "222X=H.X"
+= stored "X=H.X" warns none
+line "223HI."
+= stored "\xD3" warns none
+line "224X=HI.X"
+= stored "X=HI.X" warns none
+line "225HIM."
+= stored "\xD3" warns none
+line "226X=HIM.X"
+= stored "X=HIM.X" warns none
+line "227HIME."
+= stored "\xD3" warns none
+line "228X=HIME.X"
+= stored "X=HIME.X" warns none
+line "229HE."
+= stored "\xC7\x93" warns none
+line "230X=HE.X"
+= stored "X=HE.X" warns none
+line "231HEL."
+= stored "\xC7\x93" warns none
+line "232X=HEL.X"
+= stored "X=HEL.X" warns none
+line "233I."
+= stored "\xE8" warns none
+line "234X=I.X"
+= stored "X=\xE8X" warns none
+line "235IN."
+= stored "\xE8" warns none
+line "236X=IN.X"
+= stored "X=\xE8X" warns none
+line "237INP."
+= stored "\xE8" warns none
+line "238X=INP.X"
+= stored "X=\xE8X" warns none
+line "239INPU."
+= stored "\xE8" warns none
+line "240X=INPU.X"
+= stored "X=\xE8X" warns none
+line "241INK."
+= stored "\xBF" warns none
+line "242X=INK.X"
+= stored "X=\xBFX" warns none
+line "243INKE."
+= stored "\xBF" warns none
+line "244X=INKE.X"
+= stored "X=\xBFX" warns none
+line "245INKEY."
+= stored "\xBF" warns none
+line "246X=INKEY.X"
+= stored "X=\xBFX" warns none
+line "247INS."
+= stored "\xA7" warns brackets
+line "248X=INS.X"
+= stored "X=\xA7X" warns brackets
+line "249INST."
+= stored "\xA7" warns brackets
+line "250X=INST.X"
+= stored "X=\xA7X" warns brackets
+line "251INSTR."
+= stored "\xA7" warns brackets
+line "252X=INSTR.X"
+= stored "X=\xA7X" warns brackets
+line "253INSTA."
+= stored "\xC7\x9F" warns none
+line "254X=INSTA.X"
+= stored "X=\xC7\x9FX" warns none
+line "255INSTAL."
+= stored "\xC7\x9F" warns none
+line "256X=INSTAL.X"
+= stored "X=\xC7\x9FX" warns none
+line "257L."
+= stored "\xC7\x94" warns none
+line "258X=L.X"
+= stored "X=\xC7\x94X" warns none
+line "259LI."
+= stored "\xC7\x94" warns none
+line "260X=LI.X"
+= stored "X=\xC7\x94X" warns none
+line "261LIS."
+= stored "\xC7\x94" warns none
+line "262X=LIS.X"
+= stored "X=\xC7\x94X" warns none
+line "263LIN."
+= stored "\x86" warns none
+line "264X=LIN.X"
+= stored "X=\x86X" warns none
+line "265LO."
+= stored "\xC7\x95" warns none
+line "266X=LO.X"
+= stored "X=\xC7\x95X" warns none
+line "267LOA."
+= stored "\xC7\x95" warns none
+line "268X=LOA.X"
+= stored "X=\xC7\x95X" warns none
+line "269LOM."
+= stored "\xD2" warns none
+line "270X=LOM.X"
+= stored "X=LOM.X" warns none
+line "271LOME."
+= stored "\xD2" warns none
+line "272X=LOME.X"
+= stored "X=LOME.X" warns none
+line "273LOC."
+= stored "\xEA" warns none
+line "274X=LOC.X"
+= stored "X=\xEAX" warns none
+line "275LOCA."
+= stored "\xEA" warns none
+line "276X=LOCA.X"
+= stored "X=\xEAX" warns none
+line "277LE."
+= stored "\xC0" warns brackets
+line "278X=LE.X"
+= stored "X=\xC0X" warns brackets
+line "279LEF."
+= stored "\xC0" warns brackets
+line "280X=LEF.X"
+= stored "X=\xC0X" warns brackets
+line "281LEFT."
+= stored "\xC0" warns brackets
+line "282X=LEFT.X"
+= stored "X=\xC0X" warns brackets
+line "283LEFT$."
+= stored "\xC0" warns brackets
+line "284X=LEFT$.X"
+= stored "X=\xC0X" warns brackets
+line "285LIB."
+= stored "\xC8\x9B" warns none
+line "286X=LIB.X"
+= stored "X=\xC8\x9BX" warns none
+line "287LIBR."
+= stored "\xC8\x9B" warns none
+line "288X=LIBR.X"
+= stored "X=\xC8\x9BX" warns none
+line "289LIBRA."
+= stored "\xC8\x9B" warns none
+line "290X=LIBRA.X"
+= stored "X=\xC8\x9BX" warns none
+line "291LIBRAR."
+= stored "\xC8\x9B" warns none
+line "292X=LIBRAR.X"
+= stored "X=\xC8\x9BX" warns none
+line "293LV."
+= stored "\xC7\x96" warns none
+line "294X=LV.X"
+= stored "X=LV.X" warns none
+line "295LVA."
+= stored "\xC7\x96" warns none
+line "296X=LVA.X"
+= stored "X=LVA.X" warns none
+line "297M."
+= stored "\xC1" warns brackets
+line "298X=M.X"
+= stored "X=\xC1X" warns brackets
+line "299MI."
+= stored "\xC1" warns brackets
+line "300X=MI.X"
+= stored "X=\xC1X" warns brackets
+line "301MID."
+= stored "\xC1" warns brackets
+line "302X=MID.X"
+= stored "X=\xC1X" warns brackets
+line "303MID$."
+= stored "\xC1" warns brackets
+line "304X=MID$.X"
+= stored "X=\xC1X" warns brackets
+line "305MO."
+= stored "\xEB" warns none
+line "306X=MO.X"
+= stored "X=\xEBX" warns none
+line "307MOD."
+= stored "\xEB" warns none
+line "308X=MOD.X"
+= stored "X=\xEBX" warns none
+line "309MOV."
+= stored "\xEC" warns none
+line "310X=MOV.X"
+= stored "X=\xECX" warns none
+line "311MOU."
+= stored "\xC8\x97" warns none
+line "312X=MOU.X"
+= stored "X=\xC8\x97X" warns none
+line "313MOUS."
+= stored "\xC8\x97" warns none
+line "314X=MOUS.X"
+= stored "X=\xC8\x97X" warns none
+line "315N."
+= stored "\xED" warns none
+line "316X=N.X"
+= stored "X=\xEDX" warns none
+line "317NE."
+= stored "\xED" warns none
+line "318X=NE.X"
+= stored "X=\xEDX" warns none
+line "319NEX."
+= stored "\xED" warns none
+line "320X=NEX.X"
+= stored "X=\xEDX" warns none
+line "321NO."
+= stored "\xAC" warns none
+line "322X=NO.X"
+= stored "X=\xACX" warns none
+line "323O."
+= stored "\xC7\x98" warns none
+line "324X=O.X"
+= stored "X=O.X" warns none
+line "325OL."
+= stored "\xC7\x98" warns none
+line "326X=OL.X"
+= stored "X=OL.X" warns none
+line "327OF."
+= stored "\x87" warns none
+line "328X=OF.X"
+= stored "X=\x87X" warns none
+line "329OR."
+= stored "\xC8\x91" warns none
+line "330X=OR.X"
+= stored "X=\xC8\x91X" warns none
+line "331ORI."
+= stored "\xC8\x91" warns none
+line "332X=ORI.X"
+= stored "X=\xC8\x91X" warns none
+line "333ORIG."
+= stored "\xC8\x91" warns none
+line "334X=ORIG.X"
+= stored "X=\xC8\x91X" warns none
+line "335ORIGI."
+= stored "\xC8\x91" warns none
+line "336X=ORIGI.X"
+= stored "X=\xC8\x91X" warns none
+line "337OP."
+= stored "\x8E" warns none
+line "338X=OP.X"
+= stored "X=\x8EX" warns none
+line "339OPE."
+= stored "\x8E" warns none
+line "340X=OPE.X"
+= stored "X=\x8EX" warns none
+line "341OPEN."
+= stored "\x8E" warns none
+line "342X=OPEN.X"
+= stored "X=\x8EX" warns none
+line "343OPENI."
+= stored "\x8E" warns none
+line "344X=OPENI.X"
+= stored "X=\x8EX" warns none
+line "345OPENO."
+= stored "\xAE" warns none
+line "346X=OPENO.X"
+= stored "X=\xAEX" warns none
+line "347OPENOU."
+= stored "\xAE" warns none
+line "348X=OPENOU.X"
+= stored "X=\xAEX" warns none
+line "349OPENU."
+= stored "\xAD" warns none
+line "350X=OPENU.X"
+= stored "X=\xADX" warns none
+line "351OS."
+= stored "\xFF" warns none
+line "352X=OS.X"
+= stored "X=\xFFX" warns none
+line "353OSC."
+= stored "\xFF" warns none
+line "354X=OSC.X"
+= stored "X=\xFFX" warns none
+line "355OSCL."
+= stored "\xFF" warns none
+line "356X=OSCL.X"
+= stored "X=\xFFX" warns none
+line "357OT."
+= stored "\x7F" warns none
+line "358X=OT.X"
+= stored "X=\x7FX" warns none
+line "359OTH."
+= stored "\x7F" warns none
+line "360X=OTH.X"
+= stored "X=\x7FX" warns none
+line "361OTHE."
+= stored "\x7F" warns none
+line "362X=OTHE.X"
+= stored "X=\x7FX" warns none
+line "363OTHER."
+= stored "\x7F" warns none
+line "364X=OTHER.X"
+= stored "X=\x7FX" warns none
+line "365OTHERW."
+= stored "\x7F" warns none
+line "366X=OTHERW.X"
+= stored "X=\x7FX" warns none
+line "367OTHERWI."
+= stored "\x7F" warns none
+line "368X=OTHERWI.X"
+= stored "X=\x7FX" warns none
+line "369OTHERWIS."
+= stored "\x7F" warns none
+line "370X=OTHERWIS.X"
+= stored "X=\x7FX" warns none
+line "371OV."
+= stored "\xC8\xA3" warns none
+line "372X=OV.X"
+= stored "X=\xC8\xA3X" warns none
+line "373OVE."
+= stored "\xC8\xA3" warns none
+line "374X=OVE.X"
+= stored "X=\xC8\xA3X" warns none
+line "375OVER."
+= stored "\xC8\xA3" warns none
+line "376X=OVER.X"
+= stored "X=\xC8\xA3X" warns none
+line "377OVERL."
+= stored "\xC8\xA3" warns none
+line "378X=OVERL.X"
+= stored "X=\xC8\xA3X" warns none
+line "379OVERLA."
+= stored "\xC8\xA3" warns none
+line "380X=OVERLA.X"
+= stored "X=\xC8\xA3X" warns none
+line "381P."
+= stored "\xF1" warns none
+line "382X=P.X"
+= stored "X=\xF1X" warns none
+line "383PR."
+= stored "\xF1" warns none
+line "384X=PR.X"
+= stored "X=\xF1X" warns none
+line "385PRI."
+= stored "\xF1" warns none
+line "386X=PRI.X"
+= stored "X=\xF1X" warns none
+line "387PRIN."
+= stored "\xF1" warns none
+line "388X=PRIN.X"
+= stored "X=\xF1X" warns none
+line "389PA."
+= stored "\xD0" warns none
+line "390X=PA.X"
+= stored "X=PA.X" warns none
+line "391PAG."
+= stored "\xD0" warns none
+line "392X=PAG.X"
+= stored "X=PAG.X" warns none
+line "393PT."
+= stored "\xCF" warns none
+line "394X=PT.X"
+= stored "X=PT.X" warns none
+line "395PL."
+= stored "\xF0" warns none
+line "396X=PL.X"
+= stored "X=\xF0X" warns none
+line "397PLO."
+= stored "\xF0" warns none
+line "398X=PLO.X"
+= stored "X=\xF0X" warns none
+line "399PO."
+= stored "\xB0" warns brackets
+line "400X=PO.X"
+= stored "X=\xB0X" warns brackets
+line "401POI."
+= stored "\xB0" warns brackets
+line "402X=POI.X"
+= stored "X=\xB0X" warns brackets
+line "403POIN."
+= stored "\xB0" warns brackets
+line "404X=POIN.X"
+= stored "X=\xB0X" warns brackets
+line "405POINT."
+= stored "\xB0" warns brackets
+line "406X=POINT.X"
+= stored "X=\xB0X" warns brackets
+line "407PRO."
+= stored "\xF2" warns none
+line "408X=PRO.X"
+= stored "X=\xF2X" warns none
+line "409Q."
+= stored "\xC8\x98" warns none
+line "410X=Q.X"
+= stored "X=\xC8\x98X" warns none
+line "411QU."
+= stored "\xC8\x98" warns none
+line "412X=QU.X"
+= stored "X=\xC8\x98X" warns none
+line "413QUI."
+= stored "\xC8\x98" warns none
+line "414X=QUI.X"
+= stored "X=\xC8\x98X" warns none
+line "415R."
+= stored "\xF8" warns none
+line "416X=R.X"
+= stored "X=R.X" warns none
+line "417RE."
+= stored "\xF8" warns none
+line "418X=RE.X"
+= stored "X=RE.X" warns none
+line "419RET."
+= stored "\xF8" warns none
+line "420X=RET.X"
+= stored "X=RET.X" warns none
+line "421RETU."
+= stored "\xF8" warns none
+line "422X=RETU.X"
+= stored "X=RETU.X" warns none
+line "423RETUR."
+= stored "\xF8" warns none
+line "424X=RETUR.X"
+= stored "X=RETUR.X" warns none
+line "425REP."
+= stored "\xF5" warns none
+line "426X=REP.X"
+= stored "X=\xF5X" warns none
+line "427REPE."
+= stored "\xF5" warns none
+line "428X=REPE.X"
+= stored "X=\xF5X" warns none
+line "429REPEA."
+= stored "\xF5" warns none
+line "430X=REPEA.X"
+= stored "X=\xF5X" warns none
+line "431REPO."
+= stored "\xF6" warns none
+line "432X=REPO.X"
+= stored "X=REPO.X" warns none
+line "433REPOR."
+= stored "\xF6" warns none
+line "434X=REPOR.X"
+= stored "X=REPOR.X" warns none
+line "435REA."
+= stored "\xF3" warns none
+line "436X=REA.X"
+= stored "X=\xF3X" warns none
+line "437RU."
+= stored "\xF9" warns none
+line "438X=RU.X"
+= stored "X=RU.X" warns none
+line "439RA."
+= stored "\xB2" warns none
+line "440X=RA.X"
+= stored "X=\xB2X" warns none
+line "441RES."
+= stored "\xF7" warns none
+line "442X=RES.X"
+= stored "X=\xF7X" warns none
+line "443REST."
+= stored "\xF7" warns none
+line "444X=REST.X"
+= stored "X=\xF7X" warns none
+line "445RESTO."
+= stored "\xF7" warns none
+line "446X=RESTO.X"
+= stored "X=\xF7X" warns none
+line "447RESTOR."
+= stored "\xF7" warns none
+line "448X=RESTOR.X"
+= stored "X=\xF7X" warns none
+line "449RI."
+= stored "\xC2" warns brackets
+line "450X=RI.X"
+= stored "X=\xC2X" warns brackets
+line "451RIG."
+= stored "\xC2" warns brackets
+line "452X=RIG.X"
+= stored "X=\xC2X" warns brackets
+line "453RIGH."
+= stored "\xC2" warns brackets
+line "454X=RIGH.X"
+= stored "X=\xC2X" warns brackets
+line "455RIGHT."
+= stored "\xC2" warns brackets
+line "456X=RIGHT.X"
+= stored "X=\xC2X" warns brackets
+line "457RIGHT$."
+= stored "\xC2" warns brackets
+line "458X=RIGHT$.X"
+= stored "X=\xC2X" warns brackets
+line "459RN."
+= stored "\xB3" warns none
+line "460X=RN.X"
+= stored "X=RN.X" warns none
+line "461REC."
+= stored "\xC8\x93" warns none
+line "462X=REC.X"
+= stored "X=\xC8\x93X" warns none
+line "463RECT."
+= stored "\xC8\x93" warns none
+line "464X=RECT.X"
+= stored "X=\xC8\x93X" warns none
+line "465RECTA."
+= stored "\xC8\x93" warns none
+line "466X=RECTA.X"
+= stored "X=\xC8\x93X" warns none
+line "467RECTAN."
+= stored "\xC8\x93" warns none
+line "468X=RECTAN.X"
+= stored "X=\xC8\x93X" warns none
+line "469RECTANG."
+= stored "\xC8\x93" warns none
+line "470X=RECTANG.X"
+= stored "X=\xC8\x93X" warns none
+line "471RECTANGL."
+= stored "\xC8\x93" warns none
+line "472X=RECTANGL.X"
+= stored "X=\xC8\x93X" warns none
+line "473REN."
+= stored "\xC7\x99" warns none
+line "474X=REN.X"
+= stored "X=\xC7\x99X" warns none
+line "475RENU."
+= stored "\xC7\x99" warns none
+line "476X=RENU.X"
+= stored "X=\xC7\x99X" warns none
+line "477RENUM."
+= stored "\xC7\x99" warns none
+line "478X=RENUM.X"
+= stored "X=\xC7\x99X" warns none
+line "479RENUMB."
+= stored "\xC7\x99" warns none
+line "480X=RENUMB.X"
+= stored "X=\xC7\x99X" warns none
+line "481RENUMBE."
+= stored "\xC7\x99" warns none
+line "482X=RENUMBE.X"
+= stored "X=\xC7\x99X" warns none
+line "483S."
+= stored "\x88" warns none
+line "484X=S.X"
+= stored "X=\x88X" warns none
+line "485ST."
+= stored "\x88" warns none
+line "486X=ST.X"
+= stored "X=\x88X" warns none
+line "487STE."
+= stored "\x88" warns none
+line "488X=STE.X"
+= stored "X=\x88X" warns none
+line "489SA."
+= stored "\xC7\x9A" warns none
+line "490X=SA.X"
+= stored "X=\xC7\x9AX" warns none
+line "491SAV."
+= stored "\xC7\x9A" warns none
+line "492X=SAV.X"
+= stored "X=\xC7\x9AX" warns none
+line "493SG."
+= stored "\xB4" warns none
+line "494X=SG.X"
+= stored "X=\xB4X" warns none
+line "495SI."
+= stored "\xB5" warns none
+line "496X=SI.X"
+= stored "X=\xB5X" warns none
+line "497SQ."
+= stored "\xB6" warns none
+line "498X=SQ.X"
+= stored "X=\xB6X" warns none
+line "499SO."
+= stored "\xD4" warns none
+line "500X=SO.X"
+= stored "X=\xD4X" warns none
+line "501SOU."
+= stored "\xD4" warns none
+line "502X=SOU.X"
+= stored "X=\xD4X" warns none
+line "503SOUN."
+= stored "\xD4" warns none
+line "504X=SOUN.X"
+= stored "X=\xD4X" warns none
+line "505SP."
+= stored "\x89" warns none
+line "506X=SP.X"
+= stored "X=\x89X" warns none
+line "507STR."
+= stored "\xC3" warns none
+line "508X=STR.X"
+= stored "X=\xC3X" warns none
+line "509STRI."
+= stored "\xC4" warns brackets
+line "510X=STRI.X"
+= stored "X=\xC4X" warns brackets
+line "511STRIN."
+= stored "\xC4" warns brackets
+line "512X=STRIN.X"
+= stored "X=\xC4X" warns brackets
+line "513STRING."
+= stored "\xC4" warns brackets
+line "514X=STRING.X"
+= stored "X=\xC4X" warns brackets
+line "515STRING$."
+= stored "\xC4" warns brackets
+line "516X=STRING$.X"
+= stored "X=\xC4X" warns brackets
+line "517STO."
+= stored "\xFA" warns none
+line "518X=STO.X"
+= stored "X=STO.X" warns none
+line "519STER."
+= stored "\xC8\xA2" warns none
+line "520X=STER.X"
+= stored "X=\xC8\xA2X" warns none
+line "521STERE."
+= stored "\xC8\xA2" warns none
+line "522X=STERE.X"
+= stored "X=\xC8\xA2X" warns none
+line "523SU."
+= stored "\xC6\x8E" warns none
+line "524X=SU.X"
+= stored "X=\xC6\x8EX" warns none
+line "525SW."
+= stored "\xC8\x94" warns none
+line "526X=SW.X"
+= stored "X=\xC8\x94X" warns none
+line "527SWA."
+= stored "\xC8\x94" warns none
+line "528X=SWA.X"
+= stored "X=\xC8\x94X" warns none
+line "529SY."
+= stored "\xC8\x99" warns none
+line "530X=SY.X"
+= stored "X=\xC8\x99X" warns none
+line "531T."
+= stored "\xB7" warns none
+line "532X=T.X"
+= stored "X=\xB7X" warns none
+line "533TA."
+= stored "\xB7" warns none
+line "534X=TA.X"
+= stored "X=\xB7X" warns none
+line "535TAB."
+= stored "\x8A" warns brackets
+line "536X=TAB.X"
+= stored "X=\x8AX" warns brackets
+line "537TE."
+= stored "\xC8\x9F" warns none
+line "538X=TE.X"
+= stored "X=\xC8\x9FX" warns none
+line "539TEM."
+= stored "\xC8\x9F" warns none
+line "540X=TEM.X"
+= stored "X=\xC8\x9FX" warns none
+line "541TEMP."
+= stored "\xC8\x9F" warns none
+line "542X=TEMP.X"
+= stored "X=\xC8\x9FX" warns none
+line "543TEX."
+= stored "\xC7\x9B" warns none
+line "544X=TEX.X"
+= stored "X=\xC7\x9BX" warns none
+line "545TEXT."
+= stored "\xC7\x9B" warns none
+line "546X=TEXT.X"
+= stored "X=\xC7\x9BX" warns none
+line "547TEXTL."
+= stored "\xC7\x9B" warns none
+line "548X=TEXTL.X"
+= stored "X=\xC7\x9BX" warns none
+line "549TEXTLO."
+= stored "\xC7\x9B" warns none
+line "550X=TEXTLO.X"
+= stored "X=\xC7\x9BX" warns none
+line "551TEXTLOA."
+= stored "\xC7\x9B" warns none
+line "552X=TEXTLOA.X"
+= stored "X=\xC7\x9BX" warns none
+line "553TEXTS."
+= stored "\xC7\x9C" warns none
+line "554X=TEXTS.X"
+= stored "X=\xC7\x9CX" warns none
+line "555TEXTSA."
+= stored "\xC7\x9C" warns none
+line "556X=TEXTSA.X"
+= stored "X=\xC7\x9CX" warns none
+line "557TEXTSAV."
+= stored "\xC7\x9C" warns none
+line "558X=TEXTSAV.X"
+= stored "X=\xC7\x9CX" warns none
+line "559TH."
+= stored "\x8C" warns none
+line "560X=TH.X"
+= stored "X=\x8CX" warns none
+line "561THE."
+= stored "\x8C" warns none
+line "562X=THE.X"
+= stored "X=\x8CX" warns none
+line "563TI."
+= stored "\xD1" warns none
+line "564X=TI.X"
+= stored "X=TI.X" warns none
+line "565TIM."
+= stored "\xD1" warns none
+line "566X=TIM.X"
+= stored "X=TIM.X" warns none
+line "567TIN."
+= stored "\xC8\x9C" warns none
+line "568X=TIN.X"
+= stored "X=\xC8\x9CX" warns none
+line "569TR."
+= stored "\xFC" warns none
+line "570X=TR.X"
+= stored "X=\xFCX" warns none
+line "571TRA."
+= stored "\xFC" warns none
+line "572X=TRA.X"
+= stored "X=\xFCX" warns none
+line "573TRAC."
+= stored "\xFC" warns none
+line "574X=TRAC.X"
+= stored "X=\xFCX" warns none
+line "575TRU."
+= stored "\xB9" warns none
+line "576X=TRU.X"
+= stored "X=TRU.X" warns none
+line "577TW."
+= stored "\xC7\x9E" warns none
+line "578X=TW.X"
+= stored "X=\xC7\x9EX" warns none
+line "579TWI."
+= stored "\xC7\x9E" warns none
+line "580X=TWI.X"
+= stored "X=\xC7\x9EX" warns none
+line "581TWIN."
+= stored "\xC7\x9E" warns none
+line "582X=TWIN.X"
+= stored "X=\xC7\x9EX" warns none
+line "583U."
+= stored "\xFD" warns none
+line "584X=U.X"
+= stored "X=\xFDX" warns none
+line "585UN."
+= stored "\xFD" warns none
+line "586X=UN.X"
+= stored "X=\xFDX" warns none
+line "587UNT."
+= stored "\xFD" warns none
+line "588X=UNT.X"
+= stored "X=\xFDX" warns none
+line "589UNTI."
+= stored "\xFD" warns none
+line "590X=UNTI.X"
+= stored "X=\xFDX" warns none
+line "591US."
+= stored "\xBA" warns none
+line "592X=US.X"
+= stored "X=\xBAX" warns none
+line "593V."
+= stored "\xEF" warns none
+line "594X=V.X"
+= stored "X=\xEFX" warns none
+line "595VD."
+= stored "\xEF" warns none
+line "596X=VD.X"
+= stored "X=\xEFX" warns none
+line "597VA."
+= stored "\xBB" warns none
+line "598X=VA.X"
+= stored "X=\xBBX" warns none
+line "599VP."
+= stored "\xBC" warns none
+line "600X=VP.X"
+= stored "X=VP.X" warns none
+listo 0
+= "    1AND\x0A\x0D    2X=ANDX\x0A\x0D    3AND\x0A\x0D    4X=ANDX\x0A\x0D    5ABS\x0A\x0D    6X=ABSX\x0A\x0D    7ACS\x0A\x0D    8X=ACSX\x0A\x0D    9ADVAL\x0A\x0D   10X=ADVALX\x0A\x0D   11ADVAL\x0A\x0D   12X=ADVALX\x0A\x0D   13ADVAL\x0A\x0D   14X=ADVALX\x0A\x0D   15ASC\x0A\x0D   16X=ASCX\x0A\x0D   17ATN\x0A\x0D   18X=ATNX\x0A\x0D   19AUTO\x0A\x0D   20X=AUTOX\x0A\x0D   21AUTO\x0A\x0D   22X=AUTOX\x0A\x0D   23APPEND\x0A\x0D   24X=APPENDX\x0A\x0D   25APPEND\x0A\x0D   26X=APPENDX\x0A\x0D   27APPEND\x0A\x0D   28X=APPENDX\x0A\x0D   29APPEND\x0A\x0D   30X=APPENDX\x0A\x0D   31BGET\x0A\x0D   32X=B.X\x0A\x0D   33BGET\x0A\x0D   34X=BG.X\x0A\x0D   35BGET\x0A\x0D   36X=BGE.X\x0A\x0D   37BPUT\x0A\x0D   38X=BP.X\x0A\x0D   39BPUT\x0A\x0D   40X=BPU.X\x0A\x0D   41BEATS\x0A\x0D   42X=BEATSX\x0A\x0D   43BEATS\x0A\x0D   44X=BEATSX\x0A\x0D   45BEATS\x0A\x0D   46X=BEATSX\x0A\x0D   47COLOUR\x0A\x0D   48X=COLOURX\x0A\x0D   49COLOUR\x0A\x0D   50X=COLOURX\x0A\x0D   51COLOUR\x0A\x0D   52X=COLOURX\x0A\x0D   53COLOUR\x0A\x0D   54X=COLOURX\x0A\x0D   55COLOUR\x0A\x0D   56X=COLOURX\x0A\x0D   57CALL\x0A\x0D   58X=CALLX\x0A\x0D   59CALL\x0A\x0D   60X=CALLX\x0A\x0D   61CASE\x0A\x0D   62X=CASEX\x0A\x0D   63CHAIN\x0A\x0D   64X=CHAINX\x0A\x0D   65CHAIN\x0A\x0D   66X=CHAINX\x0A\x0D   67CHAIN\x0A\x0D   68X=CHAINX\x0A\x0D   69CHR$\x0A\x0D   70X=CHR$X\x0A\x0D   71CLEAR\x0A\x0D   72X=CL.X\x0A\x0D   73CLEAR\x0A\x0D   74X=CLE.X\x0A\x0D   75CLEAR\x0A\x0D   76X=CLEA.X\x0A\x0D   77CLOSE\x0A\x0D   78X=CLO.X\x0A\x0D   79CLOSE\x0A\x0D   80X=CLOS.X\x0A\x0D   81COUNT\x0A\x0D   82X=COU.X\x0A\x0D   83COUNT\x0A\x0D   84X=COUN.X\x0A\x0D   85CIRCLE\x0A\x0D   86X=CIRCLEX\x0A\x0D   87CIRCLE\x0A\x0D   88X=CIRCLEX\x0A\x0D   89CIRCLE\x0A\x0D   90X=CIRCLEX\x0A\x0D   91CIRCLE\x0A\x0D   92X=CIRCLEX\x0A\x0D   93CRUNCH\x0A\x0D   94X=CRUNCHX\x0A\x0D   95CRUNCH\x0A\x0D   96X=CRUNCHX\x0A\x0D   97CRUNCH\x0A\x0D   98X=CRUNCHX\x0A\x0D   99CRUNCH\x0A\x0D  100X=CRUNCHX\x0A\x0D  101DATA\x0A\x0D  102X=DATAX\x0A\x0D  103DATA\x0A\x0D  104X=DATAX\x0A\x0D  105DATA\x0A\x0D  106X=DATAX\x0A\x0D  107DEG\x0A\x0D  108X=DEGX\x0A\x0D  109DELETE\x0A\x0D  110X=DELETEX\x0A\x0D  111DELETE\x0A\x0D  112X=DELETEX\x0A\x0D  113DELETE\x0A\x0D  114X=DELETEX\x0A\x0D  115DIV\x0A\x0D  116X=DIVX\x0A\x0D  117DRAW\x0A\x0D  118X=DRAWX\x0A\x0D  119DRAW\x0A\x0D  120X=DRAWX\x0A\x0D  121ENDPROC\x0A\x0D  122X=E.X\x0A\x0D  123ENDPROC\x0A\x0D  124X=EN.X\x0A\x0D  125ENDPROC\x0A\x0D  126X=END.X\x0A\x0D  127ENDPROC\x0A\x0D  128X=ENDP.X\x0A\x0D  129ENDPROC\x0A\x0D  130X=ENDPR.X\x0A\x0D  131ENDPROC\x0A\x0D  132X=ENDPRO.X\x0A\x0D  133EDIT\x0A\x0D  134X=EDITX\x0A\x0D  135EDIT\x0A\x0D  136X=EDITX\x0A\x0D  137ENDWHILE\x0A\x0D  138X=ENDW.X\x0A\x0D  139ENDWHILE\x0A\x0D  140X=ENDWH.X\x0A\x0D  141ENDWHILE\x0A\x0D  142X=ENDWHI.X\x0A\x0D  143ENDWHILE\x0A\x0D  144X=ENDWHIL.X\x0A\x0D  145ENDCASE\x0A\x0D  146X=ENDC.X\x0A\x0D  147ENDCASE\x0A\x0D  148X=ENDCA.X\x0A\x0D  149ENDCASE\x0A\x0D  150X=ENDCAS.X\x0A\x0D  151ENDIF\x0A\x0D  152X=ENDI.X\x0A\x0D  153ENVELOPE\x0A\x0D  154X=ENVELOPEX\x0A\x0D  155ENVELOPE\x0A\x0D  156X=ENVELOPEX\x0A\x0D  157ENVELOPE\x0A\x0D  158X=ENVELOPEX\x0A\x0D  159ENVELOPE\x0A\x0D  160X=ENVELOPEX\x0A\x0D  161ENVELOPE\x0A\x0D  162X=ENVELOPEX\x0A\x0D  163ELSE\x0A\x0D  164X=ELSEX\x0A\x0D  165ELSE\x0A\x0D  166X=ELSEX\x0A\x0D  167EVAL\x0A\x0D  168X=EVALX\x0A\x0D  169EVAL\x0A\x0D  170X=EVALX\x0A\x0D  171ERL\x0A\x0D  172X=ER.X\x0A\x0D  173ERROR\x0A\x0D  174X=ERRORX\x0A\x0D  175ERROR\x0A\x0D  176X=ERRORX\x0A\x0D  177EOF\x0A\x0D  178X=EO.X\x0A\x0D  179EXP\x0A\x0D  180X=EXPX\x0A\x0D  181ELLIPSE\x0A\x0D  182X=ELLIPSEX\x0A\x0D  183ELLIPSE\x0A\x0D  184X=ELLIPSEX\x0A\x0D  185ELLIPSE\x0A\x0D  186X=ELLIPSEX\x0A\x0D  187ELLIPSE\x0A\x0D  188X=ELLIPSEX\x0A\x0D  189FOR\x0A\x0D  190X=FORX\x0A\x0D  191FOR\x0A\x0D  192X=FORX\x0A\x0D  193FALSE\x0A\x0D  194X=FA.X\x0A\x0D  195FALSE\x0A\x0D  196X=FAL.X\x0A\x0D  197FALSE\x0A\x0D  198X=FALS.X\x0A\x0D  199FILL\x0A\x0D  200X=FILLX\x0A\x0D  201FILL\x0A\x0D  202X=FILLX\x0A\x0D  203GOTO\x0A\x0D  204X=GOTOX\x0A\x0D  205GOTO\x0A\x0D  206X=GOTOX\x0A\x0D  207GOTO\x0A\x0D  208X=GOTOX\x0A\x0D  209GET$\x0A\x0D  210X=GET$X\x0A\x0D  211GET$\x0A\x0D  212X=GET$X\x0A\x0D  213GOSUB\x0A\x0D  214X=GOSUBX\x0A\x0D  215GOSUB\x0A\x0D  216X=GOSUBX\x0A\x0D  217GCOL\x0A\x0D  218X=GCOLX\x0A\x0D  219GCOL\x0A\x0D  220X=GCOLX\x0A\x0D  221HIMEM\x0A\x0D  222X=H.X\x0A\x0D  223HIMEM\x0A\x0D  224X=HI.X\x0A\x0D  225HIMEM\x0A\x0D  226X=HIM.X\x0A\x0D  227HIMEM\x0A\x0D  228X=HIME.X\x0A\x0D  229HELP\x0A\x0D  230X=HE.X\x0A\x0D  231HELP\x0A\x0D  232X=HEL.X\x0A\x0D  233INPUT\x0A\x0D  234X=INPUTX\x0A\x0D  235INPUT\x0A\x0D  236X=INPUTX\x0A\x0D  237INPUT\x0A\x0D  238X=INPUTX\x0A\x0D  239INPUT\x0A\x0D  240X=INPUTX\x0A\x0D  241INKEY$\x0A\x0D  242X=INKEY$X\x0A\x0D  243INKEY$\x0A\x0D  244X=INKEY$X\x0A\x0D  245INKEY$\x0A\x0D  246X=INKEY$X\x0A\x0D  247INSTR(\x0A\x0D  248X=INSTR(X\x0A\x0D  249INSTR(\x0A\x0D  250X=INSTR(X\x0A\x0D  251INSTR(\x0A\x0D  252X=INSTR(X\x0A\x0D  253INSTALL\x0A\x0D  254X=INSTALLX\x0A\x0D  255INSTALL\x0A\x0D  256X=INSTALLX\x0A\x0D  257LIST\x0A\x0D  258X=LISTX\x0A\x0D  259LIST\x0A\x0D  260X=LISTX\x0A\x0D  261LIST\x0A\x0D  262X=LISTX\x0A\x0D  263LINE\x0A\x0D  264X=LINEX\x0A\x0D  265LOAD\x0A\x0D  266X=LOADX\x0A\x0D  267LOAD\x0A\x0D  268X=LOADX\x0A\x0D  269LOMEM\x0A\x0D  270X=LOM.X\x0A\x0D  271LOMEM\x0A\x0D  272X=LOME.X\x0A\x0D  273LOCAL\x0A\x0D  274X=LOCALX\x0A\x0D  275LOCAL\x0A\x0D  276X=LOCALX\x0A\x0D  277LEFT$(\x0A\x0D  278X=LEFT$(X\x0A\x0D  279LEFT$(\x0A\x0D  280X=LEFT$(X\x0A\x0D  281LEFT$(\x0A\x0D  282X=LEFT$(X\x0A\x0D  283LEFT$(\x0A\x0D  284X=LEFT$(X\x0A\x0D  285LIBRARY\x0A\x0D  286X=LIBRARYX\x0A\x0D  287LIBRARY\x0A\x0D  288X=LIBRARYX\x0A\x0D  289LIBRARY\x0A\x0D  290X=LIBRARYX\x0A\x0D  291LIBRARY\x0A\x0D  292X=LIBRARYX\x0A\x0D  293LVAR\x0A\x0D  294X=LV.X\x0A\x0D  295LVAR\x0A\x0D  296X=LVA.X\x0A\x0D  297MID$(\x0A\x0D  298X=MID$(X\x0A\x0D  299MID$(\x0A\x0D  300X=MID$(X\x0A\x0D  301MID$(\x0A\x0D  302X=MID$(X\x0A\x0D  303MID$(\x0A\x0D  304X=MID$(X\x0A\x0D  305MODE\x0A\x0D  306X=MODEX\x0A\x0D  307MODE\x0A\x0D  308X=MODEX\x0A\x0D  309MOVE\x0A\x0D  310X=MOVEX\x0A\x0D  311MOUSE\x0A\x0D  312X=MOUSEX\x0A\x0D  313MOUSE\x0A\x0D  314X=MOUSEX\x0A\x0D  315NEXT\x0A\x0D  316X=NEXTX\x0A\x0D  317NEXT\x0A\x0D  318X=NEXTX\x0A\x0D  319NEXT\x0A\x0D  320X=NEXTX\x0A\x0D  321NOT\x0A\x0D  322X=NOTX\x0A\x0D  323OLD\x0A\x0D  324X=O.X\x0A\x0D  325OLD\x0A\x0D  326X=OL.X\x0A\x0D  327OFF\x0A\x0D  328X=OFFX\x0A\x0D  329ORIGIN\x0A\x0D  330X=ORIGINX\x0A\x0D  331ORIGIN\x0A\x0D  332X=ORIGINX\x0A\x0D  333ORIGIN\x0A\x0D  334X=ORIGINX\x0A\x0D  335ORIGIN\x0A\x0D  336X=ORIGINX\x0A\x0D  337OPENIN\x0A\x0D  338X=OPENINX\x0A\x0D  339OPENIN\x0A\x0D  340X=OPENINX\x0A\x0D  341OPENIN\x0A\x0D  342X=OPENINX\x0A\x0D  343OPENIN\x0A\x0D  344X=OPENINX\x0A\x0D  345OPENOUT\x0A\x0D  346X=OPENOUTX\x0A\x0D  347OPENOUT\x0A\x0D  348X=OPENOUTX\x0A\x0D  349OPENUP\x0A\x0D  350X=OPENUPX\x0A\x0D  351OSCLI\x0A\x0D  352X=OSCLIX\x0A\x0D  353OSCLI\x0A\x0D  354X=OSCLIX\x0A\x0D  355OSCLI\x0A\x0D  356X=OSCLIX\x0A\x0D  357OTHERWISE\x0A\x0D  358X=OTHERWISEX\x0A\x0D  359OTHERWISE\x0A\x0D  360X=OTHERWISEX\x0A\x0D  361OTHERWISE\x0A\x0D  362X=OTHERWISEX\x0A\x0D  363OTHERWISE\x0A\x0D  364X=OTHERWISEX\x0A\x0D  365OTHERWISE\x0A\x0D  366X=OTHERWISEX\x0A\x0D  367OTHERWISE\x0A\x0D  368X=OTHERWISEX\x0A\x0D  369OTHERWISE\x0A\x0D  370X=OTHERWISEX\x0A\x0D  371OVERLAY\x0A\x0D  372X=OVERLAYX\x0A\x0D  373OVERLAY\x0A\x0D  374X=OVERLAYX\x0A\x0D  375OVERLAY\x0A\x0D  376X=OVERLAYX\x0A\x0D  377OVERLAY\x0A\x0D  378X=OVERLAYX\x0A\x0D  379OVERLAY\x0A\x0D  380X=OVERLAYX\x0A\x0D  381PRINT\x0A\x0D  382X=PRINTX\x0A\x0D  383PRINT\x0A\x0D  384X=PRINTX\x0A\x0D  385PRINT\x0A\x0D  386X=PRINTX\x0A\x0D  387PRINT\x0A\x0D  388X=PRINTX\x0A\x0D  389PAGE\x0A\x0D  390X=PA.X\x0A\x0D  391PAGE\x0A\x0D  392X=PAG.X\x0A\x0D  393PTR\x0A\x0D  394X=PT.X\x0A\x0D  395PLOT\x0A\x0D  396X=PLOTX\x0A\x0D  397PLOT\x0A\x0D  398X=PLOTX\x0A\x0D  399POINT(\x0A\x0D  400X=POINT(X\x0A\x0D  401POINT(\x0A\x0D  402X=POINT(X\x0A\x0D  403POINT(\x0A\x0D  404X=POINT(X\x0A\x0D  405POINT(\x0A\x0D  406X=POINT(X\x0A\x0D  407PROC\x0A\x0D  408X=PROCX\x0A\x0D  409QUIT\x0A\x0D  410X=QUITX\x0A\x0D  411QUIT\x0A\x0D  412X=QUITX\x0A\x0D  413QUIT\x0A\x0D  414X=QUITX\x0A\x0D  415RETURN\x0A\x0D  416X=R.X\x0A\x0D  417RETURN\x0A\x0D  418X=RE.X\x0A\x0D  419RETURN\x0A\x0D  420X=RET.X\x0A\x0D  421RETURN\x0A\x0D  422X=RETU.X\x0A\x0D  423RETURN\x0A\x0D  424X=RETUR.X\x0A\x0D  425REPEAT\x0A\x0D  426X=REPEATX\x0A\x0D  427REPEAT\x0A\x0D  428X=REPEATX\x0A\x0D  429REPEAT\x0A\x0D  430X=REPEATX\x0A\x0D  431REPORT\x0A\x0D  432X=REPO.X\x0A\x0D  433REPORT\x0A\x0D  434X=REPOR.X\x0A\x0D  435READ\x0A\x0D  436X=READX\x0A\x0D  437RUN\x0A\x0D  438X=RU.X\x0A\x0D  439RAD\x0A\x0D  440X=RADX\x0A\x0D  441RESTORE\x0A\x0D  442X=RESTOREX\x0A\x0D  443RESTORE\x0A\x0D  444X=RESTOREX\x0A\x0D  445RESTORE\x0A\x0D  446X=RESTOREX\x0A\x0D  447RESTORE\x0A\x0D  448X=RESTOREX\x0A\x0D  449RIGHT$(\x0A\x0D  450X=RIGHT$(X\x0A\x0D  451RIGHT$(\x0A\x0D  452X=RIGHT$(X\x0A\x0D  453RIGHT$(\x0A\x0D  454X=RIGHT$(X\x0A\x0D  455RIGHT$(\x0A\x0D  456X=RIGHT$(X\x0A\x0D  457RIGHT$(\x0A\x0D  458X=RIGHT$(X\x0A\x0D  459RND\x0A\x0D  460X=RN.X\x0A\x0D  461RECTANGLE\x0A\x0D  462X=RECTANGLEX\x0A\x0D  463RECTANGLE\x0A\x0D  464X=RECTANGLEX\x0A\x0D  465RECTANGLE\x0A\x0D  466X=RECTANGLEX\x0A\x0D  467RECTANGLE\x0A\x0D  468X=RECTANGLEX\x0A\x0D  469RECTANGLE\x0A\x0D  470X=RECTANGLEX\x0A\x0D  471RECTANGLE\x0A\x0D  472X=RECTANGLEX\x0A\x0D  473RENUMBER\x0A\x0D  474X=RENUMBERX\x0A\x0D  475RENUMBER\x0A\x0D  476X=RENUMBERX\x0A\x0D  477RENUMBER\x0A\x0D  478X=RENUMBERX\x0A\x0D  479RENUMBER\x0A\x0D  480X=RENUMBERX\x0A\x0D  481RENUMBER\x0A\x0D  482X=RENUMBERX\x0A\x0D  483STEP\x0A\x0D  484X=STEPX\x0A\x0D  485STEP\x0A\x0D  486X=STEPX\x0A\x0D  487STEP\x0A\x0D  488X=STEPX\x0A\x0D  489SAVE\x0A\x0D  490X=SAVEX\x0A\x0D  491SAVE\x0A\x0D  492X=SAVEX\x0A\x0D  493SGN\x0A\x0D  494X=SGNX\x0A\x0D  495SIN\x0A\x0D  496X=SINX\x0A\x0D  497SQR\x0A\x0D  498X=SQRX\x0A\x0D  499SOUND\x0A\x0D  500X=SOUNDX\x0A\x0D  501SOUND\x0A\x0D  502X=SOUNDX\x0A\x0D  503SOUND\x0A\x0D  504X=SOUNDX\x0A\x0D  505SPC\x0A\x0D  506X=SPCX\x0A\x0D  507STR$\x0A\x0D  508X=STR$X\x0A\x0D  509STRING$(\x0A\x0D  510X=STRING$(X\x0A\x0D  511STRING$(\x0A\x0D  512X=STRING$(X\x0A\x0D  513STRING$(\x0A\x0D  514X=STRING$(X\x0A\x0D  515STRING$(\x0A\x0D  516X=STRING$(X\x0A\x0D  517STOP\x0A\x0D  518X=STO.X\x0A\x0D  519STEREO\x0A\x0D  520X=STEREOX\x0A\x0D  521STEREO\x0A\x0D  522X=STEREOX\x0A\x0D  523SUM\x0A\x0D  524X=SUMX\x0A\x0D  525SWAP\x0A\x0D  526X=SWAPX\x0A\x0D  527SWAP\x0A\x0D  528X=SWAPX\x0A\x0D  529SYS\x0A\x0D  530X=SYSX\x0A\x0D  531TAN\x0A\x0D  532X=TANX\x0A\x0D  533TAN\x0A\x0D  534X=TANX\x0A\x0D  535TAB(\x0A\x0D  536X=TAB(X\x0A\x0D  537TEMPO\x0A\x0D  538X=TEMPOX\x0A\x0D  539TEMPO\x0A\x0D  540X=TEMPOX\x0A\x0D  541TEMPO\x0A\x0D  542X=TEMPOX\x0A\x0D  543TEXTLOAD\x0A\x0D  544X=TEXTLOADX\x0A\x0D  545TEXTLOAD\x0A\x0D  546X=TEXTLOADX\x0A\x0D  547TEXTLOAD\x0A\x0D  548X=TEXTLOADX\x0A\x0D  549TEXTLOAD\x0A\x0D  550X=TEXTLOADX\x0A\x0D  551TEXTLOAD\x0A\x0D  552X=TEXTLOADX\x0A\x0D  553TEXTSAVE\x0A\x0D  554X=TEXTSAVEX\x0A\x0D  555TEXTSAVE\x0A\x0D  556X=TEXTSAVEX\x0A\x0D  557TEXTSAVE\x0A\x0D  558X=TEXTSAVEX\x0A\x0D  559THEN\x0A\x0D  560X=THENX\x0A\x0D  561THEN\x0A\x0D  562X=THENX\x0A\x0D  563TIME\x0A\x0D  564X=TI.X\x0A\x0D  565TIME\x0A\x0D  566X=TIM.X\x0A\x0D  567TINT\x0A\x0D  568X=TINTX\x0A\x0D  569TRACE\x0A\x0D  570X=TRACEX\x0A\x0D  571TRACE\x0A\x0D  572X=TRACEX\x0A\x0D  573TRACE\x0A\x0D  574X=TRACEX\x0A\x0D  575TRUE\x0A\x0D  576X=TRU.X\x0A\x0D  577TWINO\x0A\x0D  578X=TWINOX\x0A\x0D  579TWINO\x0A\x0D  580X=TWINOX\x0A\x0D  581TWINO\x0A\x0D  582X=TWINOX\x0A\x0D  583UNTIL\x0A\x0D  584X=UNTILX\x0A\x0D  585UNTIL\x0A\x0D  586X=UNTILX\x0A\x0D  587UNTIL\x0A\x0D  588X=UNTILX\x0A\x0D  589UNTIL\x0A\x0D  590X=UNTILX\x0A\x0D  591USR\x0A\x0D  592X=USRX\x0A\x0D  593VDU\x0A\x0D  594X=VDUX\x0A\x0D  595VDU\x0A\x0D  596X=VDUX\x0A\x0D  597VAL\x0A\x0D  598X=VALX\x0A\x0D  599VPOS\x0A\x0D  600X=VP.X\x0A\x0D"
+program 0 0
+line "1VPO."
+= stored "\xBC" warns none
+line "2X=VPO.X"
+= stored "X=VPO.X" warns none
+line "3VO."
+= stored "\xC8\xA0" warns none
+line "4X=VO.X"
+= stored "X=\xC8\xA0X" warns none
+line "5VOI."
+= stored "\xC8\xA0" warns none
+line "6X=VOI.X"
+= stored "X=\xC8\xA0X" warns none
+line "7VOIC."
+= stored "\xC8\xA0" warns none
+line "8X=VOIC.X"
+= stored "X=\xC8\xA0X" warns none
+line "9VOICE."
+= stored "\xC8\xA0" warns none
+line "10X=VOICE.X"
+= stored "X=\xC8\xA0X" warns none
+line "11W."
+= stored "\xC8\x95" warns none
+line "12X=W.X"
+= stored "X=\xC8\x95X" warns none
+line "13WH."
+= stored "\xC8\x95" warns none
+line "14X=WH.X"
+= stored "X=\xC8\x95X" warns none
+line "15WHI."
+= stored "\xC8\x95" warns none
+line "16X=WHI.X"
+= stored "X=\xC8\x95X" warns none
+line "17WHIL."
+= stored "\xC8\x95" warns none
+line "18X=WHIL.X"
+= stored "X=\xC8\x95X" warns none
+line "19WHE."
+= stored "\xC9" warns none
+line "20X=WHE.X"
+= stored "X=\xC9X" warns none
+line "21WA."
+= stored "\xC8\x96" warns none
+line "22X=WA.X"
+= stored "X=WA.X" warns none
+line "23WAI."
+= stored "\xC8\x96" warns none
+line "24X=WAI.X"
+= stored "X=WAI.X" warns none
+line "25WI."
+= stored "\xFE" warns none
+line "26X=WI.X"
+= stored "X=\xFEX" warns none
+line "27WID."
+= stored "\xFE" warns none
+line "28X=WID.X"
+= stored "X=\xFEX" warns none
+line "29WIDT."
+= stored "\xFE" warns none
+line "30X=WIDT.X"
+= stored "X=\xFEX" warns none
+listo 0
+= "    1VPOS\x0A\x0D    2X=VPO.X\x0A\x0D    3VOICES\x0A\x0D    4X=VOICESX\x0A\x0D    5VOICES\x0A\x0D    6X=VOICESX\x0A\x0D    7VOICES\x0A\x0D    8X=VOICESX\x0A\x0D    9VOICES\x0A\x0D   10X=VOICESX\x0A\x0D   11WHILE\x0A\x0D   12X=WHILEX\x0A\x0D   13WHILE\x0A\x0D   14X=WHILEX\x0A\x0D   15WHILE\x0A\x0D   16X=WHILEX\x0A\x0D   17WHILE\x0A\x0D   18X=WHILEX\x0A\x0D   19WHEN\x0A\x0D   20X=WHENX\x0A\x0D   21WAIT\x0A\x0D   22X=WA.X\x0A\x0D   23WAIT\x0A\x0D   24X=WAI.X\x0A\x0D   25WIDTH\x0A\x0D   26X=WIDTHX\x0A\x0D   27WIDTH\x0A\x0D   28X=WIDTHX\x0A\x0D   29WIDTH\x0A\x0D   30X=WIDTHX\x0A\x0D"
+program 0 0 1
+line "1print x"
+= stored "print x" warns none
+line "2XPRINT=3"
+= stored "XPRINT=3" warns none
+line "3APRINT=1"
+= stored "APRINT=1" warns none
+line "4PRINTER"
+= stored "\xF1ER" warns none
+line "5TIMER=TIME"
+= stored "TIMER=\x91" warns none
+line "6X=TIME`"
+= stored "X=TIME`" warns none
+line "7WAIT5"
+= stored "WAIT5" warns none
+line "8TIME=0:X=TIME:PAGE=X"
+= stored "\xD1=0:X=\x91:\xD0=X" warns none
+line "9IF X THEN TIME=0"
+= stored "\xE7 X \x8C \xD1=0" warns none
+line "10OTHERWISE TIME=0"
+= stored "\x7F \xD1=0" warns none
+line "11ELSE TIME=0"
+= stored "\xCC \xD1=0" warns none
+line "12LET TIME=0"
+= stored "\xE9 \xD1=0" warns none
+line "13ERROR TIME"
+= stored "\x85 \xD1" warns none
+line "14X=TI.X"
+= stored "X=TI.X" warns none
+line "15EN.X"
+= stored "EN.X" warns none
+line "16X=PI"
+= stored "X=\xAF" warns none
+line "17X=PIA"
+= stored "X=PIA" warns none
+line "18PTR#X=0"
+= stored "\xCF#X=0" warns none
+line "19X=TIME_"
+= stored "X=TIME_" warns none
+line "20X=TIME1"
+= stored "X=TIME1" warns none
+line "21HIMEM=LOMEM"
+= stored "\xD3=\x92" warns none
+line "22X=FALSE"
+= stored "X=\xA3" warns none
+line "23X=FALSEY"
+= stored "X=FALSEY" warns none
+line "24X=TRUE+1"
+= stored "X=\xB9+1" warns none
+listo 0
+= "    1print x\x0A\x0D    2XPRINT=3\x0A\x0D    3APRINT=1\x0A\x0D    4PRINTER\x0A\x0D    5TIMER=TIME\x0A\x0D    6X=TIME`\x0A\x0D    7WAIT5\x0A\x0D    8TIME=0:X=TIME:PAGE=X\x0A\x0D    9IF X THEN TIME=0\x0A\x0D   10OTHERWISE TIME=0\x0A\x0D   11ELSE TIME=0\x0A\x0D   12LET TIME=0\x0A\x0D   13ERROR TIME\x0A\x0D   14X=TI.X\x0A\x0D   15EN.X\x0A\x0D   16X=PI\x0A\x0D   17X=PIA\x0A\x0D   18PTR#X=0\x0A\x0D   19X=TIME_\x0A\x0D   20X=TIME1\x0A\x0D   21HIMEM=LOMEM\x0A\x0D   22X=FALSE\x0A\x0D   23X=FALSEY\x0A\x0D   24X=TRUE+1\x0A\x0D"
+listo 1
+= "    1 print x\x0A\x0D    2 XPRINT=3\x0A\x0D    3 APRINT=1\x0A\x0D    4 PRINTER\x0A\x0D    5 TIMER=TIME\x0A\x0D    6 X=TIME`\x0A\x0D    7 WAIT5\x0A\x0D    8 TIME=0:X=TIME:PAGE=X\x0A\x0D    9 IF X THEN TIME=0\x0A\x0D   10 OTHERWISE TIME=0\x0A\x0D   11 ELSE TIME=0\x0A\x0D   12 LET TIME=0\x0A\x0D   13 ERROR TIME\x0A\x0D   14 X=TI.X\x0A\x0D   15 EN.X\x0A\x0D   16 X=PI\x0A\x0D   17 X=PIA\x0A\x0D   18 PTR#X=0\x0A\x0D   19 X=TIME_\x0A\x0D   20 X=TIME1\x0A\x0D   21 HIMEM=LOMEM\x0A\x0D   22 X=FALSE\x0A\x0D   23 X=FALSEY\x0A\x0D   24 X=TRUE+1\x0A\x0D"
+program 0 0
+line "1PRINT\x22PRINT\x22PRINT"
+= stored "\xF1\x22PRINT\x22\xF1" warns none
+line "2PRINT\x22open"
+= stored "\xF1\x22open" warns quote
+line "3PRINT\x22a\x22\x22b\x22PRINT"
+= stored "\xF1\x22a\x22\x22b\x22\xF1" warns none
+line "4REM PRINT 10"
+= stored "\xF4 PRINT 10" warns none
+line "5DATA GOTO,1"
+= stored "\xDC GOTO,1" warns none
+line "6EDIT PRINT 10"
+= stored "\xC7\x92 PRINT 10" warns none
+line "7*CAT PRINT"
+= stored "*CAT PRINT" warns none
+line "8IF X THEN *CAT PRINT"
+= stored "\xE7 X \x8C *CAT PRINT" warns none
+line "9X=2*PI"
+= stored "X=2*\xAF" warns none
+line "10 *CAT PRINT"
+= stored " *CAT PRINT" warns none
+line "11PRINT:*CAT PRINT"
+= stored "\xF1:*CAT PRINT" warns none
+line "12X=&DEF"
+= stored "X=&DEF" warns none
+line "13X=&ffOR1"
+= stored "X=&ff\x841" warns none
+line "14X=&FFAND1"
+= stored "X=&FFAND1" warns none
+line "15X=&AbCdEfG"
+= stored "X=&AbCdEfG" warns none
+line "16X=%101"
+= stored "X=%101" warns none
+line "17X=1E3"
+= stored "X=1E3" warns none
+line "18X=.5PRINT"
+= stored "X=.5\xF1" warns none
+line "19X=1.2E-3"
+= stored "X=1.2E-3" warns none
+line "20X=1E"
+= stored "X=1E" warns none
+line "21PRINT 1.5.6"
+= stored "\xF1 1.5.6" warns none
+listo 0
+= "    1PRINT\x22PRINT\x22PRINT\x0A\x0D    2PRINT\x22open\x0A\x0D    3PRINT\x22a\x22\x22b\x22PRINT\x0A\x0D    4REM PRINT 10\x0A\x0D    5DATA GOTO,1\x0A\x0D    6EDIT PRINT 10\x0A\x0D    7*CAT PRINT\x0A\x0D    8IF X THEN *CAT PRINT\x0A\x0D    9X=2*PI\x0A\x0D   10 *CAT PRINT\x0A\x0D   11PRINT:*CAT PRINT\x0A\x0D   12X=&DEF\x0A\x0D   13X=&ffOR1\x0A\x0D   14X=&FFAND1\x0A\x0D   15X=&AbCdEfG\x0A\x0D   16X=%101\x0A\x0D   17X=1E3\x0A\x0D   18X=.5PRINT\x0A\x0D   19X=1.2E-3\x0A\x0D   20X=1E\x0A\x0D   21PRINT 1.5.6\x0A\x0D"
+program 0 0
+line "1ON X GOTO 10,20"
+= stored "\xEE X \xE5 \x8DTJ@,\x8DTT@" warns none
+line "2IF X 30 ELSE 30"
+= stored "\xE7 X 30 \x8B \x8DT^@" warns none
+line "3GOTO 20 TO 30"
+= stored "\xE5 \x8DTT@ \xB8 \x8DT^@" warns none
+line "4RESTORE +5"
+= stored "\xF7 +5" warns none
+line "5GOTO 10:20"
+= stored "\xE5 \x8DTJ@:20" warns none
+line "6GOSUB 10 20"
+= stored "\xE4 \x8DTJ@ \x8DTT@" warns none
+line "7TRACE 100"
+= stored "\xFC \x8DDd@" warns none
+line "8X=TRACE 100"
+= stored "X=\xFC 100" warns none
+line "9TRACE STEP 100"
+= stored "\xFC \x88 \x8DDd@" warns none
+line "10TRACE ON"
+= stored "\xFC \xEE" warns none
+line "11GOTO 65279"
+= stored "\xE5 \x8Dh\x7F~" warns none
+line "12GOTO 65280,20"
+= stored "\xE5 65280,20" warns line
+line "13GOTO 007"
+= stored "\xE5 \x8DTG@" warns none
+line "14GOTO 0"
+= stored "\xE5 \x8DT@@" warns none
+line "15GOTO 00000"
+= stored "\xE5 \x8DT@@" warns none
+line "16GOTO 99999"
+= stored "\xE5 99999" warns line
+line "17GOTO X"
+= stored "\xE5 X" warns none
+line "18GOTO (10)"
+= stored "\xE5 (10)" warns none
+line "19GOTO 1.5"
+= stored "\xE5 \x8DTA@.5" warns none
+line "20GOTO 1E3"
+= stored "\xE5 \x8DTA@E3" warns none
+line "21THEN 10"
+= stored "\x8C \x8DTJ@" warns none
+line "22ELSE 10"
+= stored "\xCC \x8DTJ@" warns none
+line "23LIST 10,20"
+= stored "\xC7\x94 \x8DTJ@,\x8DTT@" warns none
+line "24DELETE 10,20"
+= stored "\xC7\x91 \x8DTJ@,\x8DTT@" warns none
+line "25RENUMBER 10,10"
+= stored "\xC7\x99 \x8DTJ@,\x8DTJ@" warns none
+line "26AUTO 10"
+= stored "\xC7\x8F \x8DTJ@" warns none
+line "27GOTO 10 GOTO 20"
+= stored "\xE5 \x8DTJ@ \xE5 \x8DTT@" warns none
+line "28RESTORE 10:RESTORE"
+= stored "\xF7 \x8DTJ@:\xF7" warns none
+line "29GOTO 10,\x22x\x22,20"
+= stored "\xE5 \x8DTJ@,\x22x\x22,20" warns none
+listo 0
+= "    1ON X GOTO 10,20\x0A\x0D    2IF X 30 ELSE 30\x0A\x0D    3GOTO 20 TO 30\x0A\x0D    4RESTORE +5\x0A\x0D    5GOTO 10:20\x0A\x0D    6GOSUB 10 20\x0A\x0D    7TRACE 100\x0A\x0D    8X=TRACE 100\x0A\x0D    9TRACE STEP 100\x0A\x0D   10TRACE ON\x0A\x0D   11GOTO 65279\x0A\x0D   12GOTO 65280,20\x0A\x0D   13GOTO 7\x0A\x0D   14GOTO 0\x0A\x0D   15GOTO 0\x0A\x0D   16GOTO 99999\x0A\x0D   17GOTO X\x0A\x0D   18GOTO (10)\x0A\x0D   19GOTO 1.5\x0A\x0D   20GOTO 1E3\x0A\x0D   21THEN 10\x0A\x0D   22ELSE 10\x0A\x0D   23LIST 10,20\x0A\x0D   24DELETE 10,20\x0A\x0D   25RENUMBER 10,10\x0A\x0D   26AUTO 10\x0A\x0D   27GOTO 10 GOTO 20\x0A\x0D   28RESTORE 10:RESTORE\x0A\x0D   29GOTO 10,\x22x\x22,20\x0A\x0D"
+program 0 0
+line "1PROCPRINT:X=FNEND"
+= stored "\xF2PRINT:X=\xA4END" warns none
+line "2DEF PROCa(TIME)"
+= stored "\xDD \xF2a(\x91)" warns none
+line "3DEFFNx=TIME"
+= stored "\xDD\xA4x=\x91" warns none
+line "4PROC TIME"
+= stored "\xF2 \x91" warns none
+line "5X=FN PRINT"
+= stored "X=\xA4 \xF1" warns none
+line "6PRINT )("
+= stored "\xF1 )(" warns brackets
+line "7X=LE.A$,1)"
+= stored "X=\xC0A$,1)" warns none
+line "8POINT."
+= stored "\xB0" warns brackets
+line "9PRINT(\x22(\x22)"
+= stored "\xF1(\x22(\x22)" warns none
+line "10PRINT((1)"
+= stored "\xF1((1)" warns brackets
+line "11X=INSTR(A$,\x22(\x22)"
+= stored "X=\xA7A$,\x22(\x22)" warns none
+line "12X=MID$(A$,1"
+= stored "X=\xC1A$,1" warns brackets
+line "13X=(1))"
+= stored "X=(1))" warns brackets
+line "14REM ("
+= stored "\xF4 (" warns none
+line "15DATA ("
+= stored "\xDC (" warns none
+line "16PRINT\x22(\x22"
+= stored "\xF1\x22(\x22" warns none
+line "17X=CHR$(65)"
+= stored "X=\xBD(65)" warns none
+listo 0
+= "    1PROCPRINT:X=FNEND\x0A\x0D    2DEF PROCa(TIME)\x0A\x0D    3DEFFNx=TIME\x0A\x0D    4PROC TIME\x0A\x0D    5X=FN PRINT\x0A\x0D    6PRINT )(\x0A\x0D    7X=LEFT$(A$,1)\x0A\x0D    8POINT(\x0A\x0D    9PRINT(\x22(\x22)\x0A\x0D   10PRINT((1)\x0A\x0D   11X=INSTR(A$,\x22(\x22)\x0A\x0D   12X=MID$(A$,1\x0A\x0D   13X=(1))\x0A\x0D   14REM (\x0A\x0D   15DATA (\x0A\x0D   16PRINT\x22(\x22\x0A\x0D   17X=CHR$(65)\x0A\x0D"
+program 0 0
+line "1VDUP.Q8"
+= stored "\xEFP.Q8" warns none
+line "2VDUP.TIME"
+= stored "\xEFP.\xD1" warns none
+line "3V.P."
+= stored "\xEF\xF1" warns none
+line "4VDU P."
+= stored "\xEF \xF1" warns none
+line "5VDUPR."
+= stored "\xEF\xF1" warns none
+line "6VDU1:P."
+= stored "\xEF1:\xF1" warns none
+line "7COLOR 1"
+= stored "\xFB 1" warns none
+line "8INSTALL \x22X\x22"
+= stored "\xC7\x9F \x22X\x22" warns none
+line "9X=VDUP."
+= stored "X=\xEFP." warns none
+listo 0
+= "    1VDUP.Q8\x0A\x0D    2VDUP.TIME\x0A\x0D    3VDUPRINT\x0A\x0D    4VDU PRINT\x0A\x0D    5VDUPRINT\x0A\x0D    6VDU1:PRINT\x0A\x0D    7COLOUR 1\x0A\x0D    8INSTALL \x22X\x22\x0A\x0D    9X=VDUP.\x0A\x0D"
+program 0 0
+line "1   PRINT"
+= stored "   \xF1" warns none
+line "2PRINT   "
+= stored "\xF1" warns none
+line "3    "
+= stored " " warns none
+line "4 X "
+= stored " X" warns none
+line "5ELSE"
+= stored "\xCC" warns none
+line "6  ELSE X"
+= stored "  \xCC X" warns none
+line "7X ELSE"
+= stored "X \x8B" warns none
+line "8 ELSE"
+= stored " \xCC" warns none
+line "9ELSEX"
+= stored "\xCCX" warns none
+listo 0
+= "    1   PRINT\x0A\x0D    2PRINT\x0A\x0D    3 \x0A\x0D    4 X\x0A\x0D    5ELSE\x0A\x0D    6  ELSE X\x0A\x0D    7X ELSE\x0A\x0D    8 ELSE\x0A\x0D    9ELSEX\x0A\x0D"
+program 1 0
+line "1   PRINT"
+= stored "\xF1" warns none
+line "2PRINT   "
+= stored "\xF1" warns none
+line "3    "
+= stored "" warns none
+line "4  ELSE X"
+= stored "\xCC X" warns none
+line "5   "
+= stored "" warns none
+listo 0
+= "    1PRINT\x0A\x0D    2PRINT\x0A\x0D    3\x0A\x0D    4ELSE X\x0A\x0D    5\x0A\x0D"
+program 7 0
+line "1   PRINT"
+= stored "\xF1" warns none
+line "2PRINT   "
+= stored "\xF1" warns none
+line "3    "
+= stored "" warns none
+line "4  ELSE X"
+= stored "\xCC X" warns none
+line "5   "
+= stored "" warns none
+listo 0
+= "    1PRINT\x0A\x0D    2PRINT\x0A\x0D    3\x0A\x0D    4ELSE X\x0A\x0D    5\x0A\x0D"
+program 0 0
+line "1GOTO1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1X"
+= stored "\xE5\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@,\x8DTA@X" warns none
+line "2GOTO1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1XX"
+= refused long
+line "3GOTO1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+= refused long
+listo 0
+= "    1GOTO1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1X\x0A\x0D"
+program 0 0 1 2 3 4 5 7 16 23
+line "1FOR I=1 TO 2"
+= stored "\xE3 I=1 \xB8 2" warns none
+line "2REPEAT"
+= stored "\xF5" warns none
+line "3WHILE X"
+= stored "\xC8\x95 X" warns none
+line "4CASE X OF"
+= stored "\xC8\x8E X \xCA" warns none
+line "5WHEN 1"
+= stored "\xC9 1" warns none
+line "6OTHERWISE"
+= stored "\x7F" warns none
+line "7ENDCASE"
+= stored "\xCB" warns none
+line "8ENDWHILE"
+= stored "\xCE" warns none
+line "9UNTIL X"
+= stored "\xFD X" warns none
+line "10NEXT"
+= stored "\xED" warns none
+line "11IF X THEN"
+= stored "\xE7 X \x8C" warns none
+line "12PRINT"
+= stored "\xF1" warns none
+line "13ELSE"
+= stored "\xCC" warns none
+line "14PRINT"
+= stored "\xF1" warns none
+line "15ENDIF"
+= stored "\xCD" warns none
+line "16PRINT 1:PRINT \x22a:b\x22:REM x:y"
+= stored "\xF1 1:\xF1 \x22a:b\x22:\xF4 x:y" warns none
+line "17DATA A:B"
+= stored "\xDC A:B" warns none
+line "18PRINT TIME:X$=\x22ABC\x22"
+= stored "\xF1 \x91:X$=\x22ABC\x22" warns none
+line "19X=FNa+FNb:PROCc"
+= stored "X=\xA4a+\xA4b:\xF2c" warns none
+line "20FOR I=1 TO 2:NEXT"
+= stored "\xE3 I=1 \xB8 2:\xED" warns none
+line "21REPEAT:UNTIL X"
+= stored "\xF5:\xFD X" warns none
+line "22IF X THEN PRINT ELSE PRINT"
+= stored "\xE7 X \x8C \xF1 \x8B \xF1" warns none
+line "23X=1:FOR I=1 TO 2"
+= stored "X=1:\xE3 I=1 \xB8 2" warns none
+line "24NEXT"
+= stored "\xED" warns none
+line "25GOTO 10"
+= stored "\xE5 \x8DTJ@" warns none
+line "26PRINT \x22x\x22:*CAT"
+= stored "\xF1 \x22x\x22:*CAT" warns none
+line "27 X=1 : Y=2"
+= stored " X=1 : Y=2" warns none
+listo 0
+= "    1FOR I=1 TO 2\x0A\x0D    2REPEAT\x0A\x0D    3WHILE X\x0A\x0D    4CASE X OF\x0A\x0D    5WHEN 1\x0A\x0D    6OTHERWISE\x0A\x0D    7ENDCASE\x0A\x0D    8ENDWHILE\x0A\x0D    9UNTIL X\x0A\x0D   10NEXT\x0A\x0D   11IF X THEN\x0A\x0D   12PRINT\x0A\x0D   13ELSE\x0A\x0D   14PRINT\x0A\x0D   15ENDIF\x0A\x0D   16PRINT 1:PRINT \x22a:b\x22:REM x:y\x0A\x0D   17DATA A:B\x0A\x0D   18PRINT TIME:X$=\x22ABC\x22\x0A\x0D   19X=FNa+FNb:PROCc\x0A\x0D   20FOR I=1 TO 2:NEXT\x0A\x0D   21REPEAT:UNTIL X\x0A\x0D   22IF X THEN PRINT ELSE PRINT\x0A\x0D   23X=1:FOR I=1 TO 2\x0A\x0D   24NEXT\x0A\x0D   25GOTO 10\x0A\x0D   26PRINT \x22x\x22:*CAT\x0A\x0D   27 X=1 : Y=2\x0A\x0D"
+listo 1
+= "    1 FOR I=1 TO 2\x0A\x0D    2 REPEAT\x0A\x0D    3 WHILE X\x0A\x0D    4 CASE X OF\x0A\x0D    5 WHEN 1\x0A\x0D    6 OTHERWISE\x0A\x0D    7 ENDCASE\x0A\x0D    8 ENDWHILE\x0A\x0D    9 UNTIL X\x0A\x0D   10 NEXT\x0A\x0D   11 IF X THEN\x0A\x0D   12 PRINT\x0A\x0D   13 ELSE\x0A\x0D   14 PRINT\x0A\x0D   15 ENDIF\x0A\x0D   16 PRINT 1:PRINT \x22a:b\x22:REM x:y\x0A\x0D   17 DATA A:B\x0A\x0D   18 PRINT TIME:X$=\x22ABC\x22\x0A\x0D   19 X=FNa+FNb:PROCc\x0A\x0D   20 FOR I=1 TO 2:NEXT\x0A\x0D   21 REPEAT:UNTIL X\x0A\x0D   22 IF X THEN PRINT ELSE PRINT\x0A\x0D   23 X=1:FOR I=1 TO 2\x0A\x0D   24 NEXT\x0A\x0D   25 GOTO 10\x0A\x0D   26 PRINT \x22x\x22:*CAT\x0A\x0D   27  X=1 : Y=2\x0A\x0D"
+listo 2
+= "    1FOR I=1 TO 2\x0A\x0D    2  REPEAT\x0A\x0D    3    WHILE X\x0A\x0D    4      CASE X OF\x0A\x0D    5        WHEN 1\x0A\x0D    6        OTHERWISE\x0A\x0D    7      ENDCASE\x0A\x0D    8    ENDWHILE\x0A\x0D    9  UNTIL X\x0A\x0D   10NEXT\x0A\x0D   11IF X THEN\x0A\x0D   12  PRINT\x0A\x0D   13  ELSE\x0A\x0D   14  PRINT\x0A\x0D   15ENDIF\x0A\x0D   16PRINT 1:PRINT \x22a:b\x22:REM x:y\x0A\x0D   17DATA A:B\x0A\x0D   18PRINT TIME:X$=\x22ABC\x22\x0A\x0D   19X=FNa+FNb:PROCc\x0A\x0D   20FOR I=1 TO 2:NEXT\x0A\x0D   21REPEAT:UNTIL X\x0A\x0D   22IF X THEN PRINT ELSE PRINT\x0A\x0D   23X=1:FOR I=1 TO 2\x0A\x0D   24NEXT\x0A\x0D   25GOTO 10\x0A\x0D   26PRINT \x22x\x22:*CAT\x0A\x0D   27 X=1 : Y=2\x0A\x0D"
+listo 3
+= "    1 FOR I=1 TO 2\x0A\x0D    2   REPEAT\x0A\x0D    3     WHILE X\x0A\x0D    4       CASE X OF\x0A\x0D    5         WHEN 1\x0A\x0D    6         OTHERWISE\x0A\x0D    7       ENDCASE\x0A\x0D    8     ENDWHILE\x0A\x0D    9   UNTIL X\x0A\x0D   10 NEXT\x0A\x0D   11 IF X THEN\x0A\x0D   12   PRINT\x0A\x0D   13   ELSE\x0A\x0D   14   PRINT\x0A\x0D   15 ENDIF\x0A\x0D   16 PRINT 1:PRINT \x22a:b\x22:REM x:y\x0A\x0D   17 DATA A:B\x0A\x0D   18 PRINT TIME:X$=\x22ABC\x22\x0A\x0D   19 X=FNa+FNb:PROCc\x0A\x0D   20 FOR I=1 TO 2:NEXT\x0A\x0D   21 REPEAT:UNTIL X\x0A\x0D   22 IF X THEN PRINT ELSE PRINT\x0A\x0D   23 X=1:FOR I=1 TO 2\x0A\x0D   24 NEXT\x0A\x0D   25 GOTO 10\x0A\x0D   26 PRINT \x22x\x22:*CAT\x0A\x0D   27  X=1 : Y=2\x0A\x0D"
+listo 4
+= "    1FOR I=1 TO 2\x0A\x0D    2REPEAT\x0A\x0D    3WHILE X\x0A\x0D    4CASE X OF\x0A\x0D    5WHEN 1\x0A\x0D    6OTHERWISE\x0A\x0D    7ENDCASE\x0A\x0D    8ENDWHILE\x0A\x0D    9UNTIL X\x0A\x0D   10NEXT\x0A\x0D   11IF X THEN\x0A\x0D   12PRINT\x0A\x0D   13ELSE\x0A\x0D   14PRINT\x0A\x0D   15ENDIF\x0A\x0D   16PRINT 1:\x0A\x0D     PRINT \x22a:b\x22:\x0A\x0D     REM x:y\x0A\x0D   17DATA A:\x0A\x0D     B\x0A\x0D   18PRINT TIME:\x0A\x0D     X$=\x22ABC\x22\x0A\x0D   19X=FNa+FNb:\x0A\x0D     PROCc\x0A\x0D   20FOR I=1 TO 2:\x0A\x0D     NEXT\x0A\x0D   21REPEAT:\x0A\x0D     UNTIL X\x0A\x0D   22IF X THEN PRINT ELSE PRINT\x0A\x0D   23X=1:\x0A\x0D     FOR I=1 TO 2\x0A\x0D   24NEXT\x0A\x0D   25GOTO 10\x0A\x0D   26PRINT \x22x\x22:\x0A\x0D     *CAT\x0A\x0D   27 X=1 :\x0A\x0D      Y=2\x0A\x0D"
+listo 5
+= "    1 FOR I=1 TO 2\x0A\x0D    2 REPEAT\x0A\x0D    3 WHILE X\x0A\x0D    4 CASE X OF\x0A\x0D    5 WHEN 1\x0A\x0D    6 OTHERWISE\x0A\x0D    7 ENDCASE\x0A\x0D    8 ENDWHILE\x0A\x0D    9 UNTIL X\x0A\x0D   10 NEXT\x0A\x0D   11 IF X THEN\x0A\x0D   12 PRINT\x0A\x0D   13 ELSE\x0A\x0D   14 PRINT\x0A\x0D   15 ENDIF\x0A\x0D   16 PRINT 1:\x0A\x0D      PRINT \x22a:b\x22:\x0A\x0D      REM x:y\x0A\x0D   17 DATA A:\x0A\x0D      B\x0A\x0D   18 PRINT TIME:\x0A\x0D      X$=\x22ABC\x22\x0A\x0D   19 X=FNa+FNb:\x0A\x0D      PROCc\x0A\x0D   20 FOR I=1 TO 2:\x0A\x0D      NEXT\x0A\x0D   21 REPEAT:\x0A\x0D      UNTIL X\x0A\x0D   22 IF X THEN PRINT ELSE PRINT\x0A\x0D   23 X=1:\x0A\x0D      FOR I=1 TO 2\x0A\x0D   24 NEXT\x0A\x0D   25 GOTO 10\x0A\x0D   26 PRINT \x22x\x22:\x0A\x0D      *CAT\x0A\x0D   27  X=1 :\x0A\x0D       Y=2\x0A\x0D"
+listo 7
+= "    1 FOR I=1 TO 2\x0A\x0D    2   REPEAT\x0A\x0D    3     WHILE X\x0A\x0D    4       CASE X OF\x0A\x0D    5         WHEN 1\x0A\x0D    6         OTHERWISE\x0A\x0D    7       ENDCASE\x0A\x0D    8     ENDWHILE\x0A\x0D    9   UNTIL X\x0A\x0D   10 NEXT\x0A\x0D   11 IF X THEN\x0A\x0D   12   PRINT\x0A\x0D   13   ELSE\x0A\x0D   14   PRINT\x0A\x0D   15 ENDIF\x0A\x0D   16 PRINT 1:\x0A\x0D      PRINT \x22a:b\x22:\x0A\x0D      REM x:y\x0A\x0D   17 DATA A:\x0A\x0D      B\x0A\x0D   18 PRINT TIME:\x0A\x0D      X$=\x22ABC\x22\x0A\x0D   19 X=FNa+FNb:\x0A\x0D      PROCc\x0A\x0D   20 FOR I=1 TO 2:\x0A\x0D      NEXT\x0A\x0D   21 REPEAT:\x0A\x0D      UNTIL X\x0A\x0D   22 IF X THEN PRINT ELSE PRINT\x0A\x0D   23 X=1:\x0A\x0D      FOR I=1 TO 2\x0A\x0D   24 NEXT\x0A\x0D   25 GOTO 10\x0A\x0D   26 PRINT \x22x\x22:\x0A\x0D      *CAT\x0A\x0D   27  X=1 :\x0A\x0D       Y=2\x0A\x0D"
+listo 16
+= "    1for I=1 to 2\x0A\x0D    2repeat\x0A\x0D    3while X\x0A\x0D    4case X of\x0A\x0D    5when 1\x0A\x0D    6otherwise\x0A\x0D    7endcase\x0A\x0D    8endwhile\x0A\x0D    9until X\x0A\x0D   10next\x0A\x0D   11if X then\x0A\x0D   12print\x0A\x0D   13else\x0A\x0D   14print\x0A\x0D   15endif\x0A\x0D   16print 1:print \x22a:b\x22:rem x:y\x0A\x0D   17data A:B\x0A\x0D   18print time:X$=\x22ABC\x22\x0A\x0D   19X=fna+fnb:procc\x0A\x0D   20for I=1 to 2:next\x0A\x0D   21repeat:until X\x0A\x0D   22if X then print else print\x0A\x0D   23X=1:for I=1 to 2\x0A\x0D   24next\x0A\x0D   25goto 10\x0A\x0D   26print \x22x\x22:*CAT\x0A\x0D   27 X=1 : Y=2\x0A\x0D"
+listo 23
+= "    1 for I=1 to 2\x0A\x0D    2   repeat\x0A\x0D    3     while X\x0A\x0D    4       case X of\x0A\x0D    5         when 1\x0A\x0D    6         otherwise\x0A\x0D    7       endcase\x0A\x0D    8     endwhile\x0A\x0D    9   until X\x0A\x0D   10 next\x0A\x0D   11 if X then\x0A\x0D   12   print\x0A\x0D   13   else\x0A\x0D   14   print\x0A\x0D   15 endif\x0A\x0D   16 print 1:\x0A\x0D      print \x22a:b\x22:\x0A\x0D      rem x:y\x0A\x0D   17 data A:\x0A\x0D      B\x0A\x0D   18 print time:\x0A\x0D      X$=\x22ABC\x22\x0A\x0D   19 X=fna+fnb:\x0A\x0D      procc\x0A\x0D   20 for I=1 to 2:\x0A\x0D      next\x0A\x0D   21 repeat:\x0A\x0D      until X\x0A\x0D   22 if X then print else print\x0A\x0D   23 X=1:\x0A\x0D      for I=1 to 2\x0A\x0D   24 next\x0A\x0D   25 goto 10\x0A\x0D   26 print \x22x\x22:\x0A\x0D      *CAT\x0A\x0D   27  X=1 :\x0A\x0D       Y=2\x0A\x0D"
+program 0 8 9 10 12 15 24
+line "1FOR I=1 TO 2"
+= stored "\xE3 I=1 \xB8 2" warns none
+line "2PRINT 1:PRINT 2"
+= stored "\xF1 1:\xF1 2" warns none
+line "3NEXT"
+= stored "\xED" warns none
+line "4REM x:y"
+= stored "\xF4 x:y" warns none
+listo 8
+= "FOR I=1 TO 2\x0A\x0DPRINT 1:PRINT 2\x0A\x0DNEXT\x0A\x0DREM x:y\x0A\x0D"
+listo 9
+= " FOR I=1 TO 2\x0A\x0D PRINT 1:PRINT 2\x0A\x0D NEXT\x0A\x0D REM x:y\x0A\x0D"
+listo 10
+= "FOR I=1 TO 2\x0A\x0D  PRINT 1:PRINT 2\x0A\x0DNEXT\x0A\x0DREM x:y\x0A\x0D"
+listo 12
+= "FOR I=1 TO 2\x0A\x0DPRINT 1:\x0A\x0DPRINT 2\x0A\x0DNEXT\x0A\x0DREM x:y\x0A\x0D"
+listo 15
+= " FOR I=1 TO 2\x0A\x0D   PRINT 1:\x0A\x0D   PRINT 2\x0A\x0D NEXT\x0A\x0D REM x:y\x0A\x0D"
+listo 24
+= "for I=1 to 2\x0A\x0Dprint 1:print 2\x0A\x0Dnext\x0A\x0Drem x:y\x0A\x0D"
+program 0 2
+line "1NEXT:NEXT"
+= stored "\xED:\xED" warns none
+line "2X"
+= stored "X" warns none
+line "3FOR I=1 TO 2"
+= stored "\xE3 I=1 \xB8 2" warns none
+line "4Y"
+= stored "Y" warns none
+line "5NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED" warns none
+line "6Z"
+= stored "Z" warns none
+listo 2
+= "    1NEXT:NEXT\x0A\x0D    2X\x0A\x0D    3FOR I=1 TO 2\x0A\x0D    4  Y\x0A\x0D    5  NEXT:NEXT:NEXT\x0A\x0D    6Z\x0A\x0D"
+program 0 2
+line "1FOR"
+= stored "\xE3" warns none
+line "2NEXT:NEXT"
+= stored "\xED:\xED" warns none
+line "3X:NEXT:NEXT"
+= stored "X:\xED:\xED" warns none
+line "4Y"
+= stored "Y" warns none
+line "5FOR"
+= stored "\xE3" warns none
+line "6NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED" warns none
+line "7X:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED" warns none
+line "8Y"
+= stored "Y" warns none
+line "9FOR"
+= stored "\xE3" warns none
+line "10NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED" warns none
+line "11X:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED" warns none
+line "12Y"
+= stored "Y" warns none
+line "13FOR:FOR"
+= stored "\xE3:\xE3" warns none
+line "14NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED" warns none
+line "15X:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED" warns none
+line "16Y"
+= stored "Y" warns none
+line "17FOR:FOR"
+= stored "\xE3:\xE3" warns none
+line "18NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED" warns none
+line "19X:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED" warns none
+line "20Y"
+= stored "Y" warns none
+line "21FOR:FOR"
+= stored "\xE3:\xE3" warns none
+line "22NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED:\xED" warns none
+line "23X:NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED:\xED" warns none
+line "24Y"
+= stored "Y" warns none
+line "25FOR:FOR:FOR"
+= stored "\xE3:\xE3:\xE3" warns none
+line "26NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED" warns none
+line "27X:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED" warns none
+line "28Y"
+= stored "Y" warns none
+line "29FOR:FOR:FOR"
+= stored "\xE3:\xE3:\xE3" warns none
+line "30NEXT:NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED:\xED:\xED" warns none
+line "31X:NEXT:NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED:\xED:\xED" warns none
+line "32Y"
+= stored "Y" warns none
+line "33FOR:FOR:FOR:FOR"
+= stored "\xE3:\xE3:\xE3:\xE3" warns none
+line "34NEXT:NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "\xED:\xED:\xED:\xED:\xED:\xED" warns none
+line "35X:NEXT:NEXT:NEXT:NEXT:NEXT:NEXT"
+= stored "X:\xED:\xED:\xED:\xED:\xED:\xED" warns none
+line "36Y"
+= stored "Y" warns none
+line "37FOR:FOR"
+= stored "\xE3:\xE3" warns none
+line "38NEXT"
+= stored "\xED" warns none
+line "39X:NEXT"
+= stored "X:\xED" warns none
+line "40Y"
+= stored "Y" warns none
+line "41FOR:FOR:FOR"
+= stored "\xE3:\xE3:\xE3" warns none
+line "42NEXT:NEXT"
+= stored "\xED:\xED" warns none
+line "43X:NEXT:NEXT"
+= stored "X:\xED:\xED" warns none
+line "44Y"
+= stored "Y" warns none
+listo 2
+= "    1FOR\x0A\x0D    2  NEXT:NEXT\x0A\x0D    3X:NEXT:NEXT\x0A\x0D    4Y\x0A\x0D    5FOR\x0A\x0D    6  NEXT:NEXT:NEXT\x0A\x0D    7X:NEXT:NEXT:NEXT\x0A\x0D    8Y\x0A\x0D    9FOR\x0A\x0D   10  NEXT:NEXT:NEXT:NEXT\x0A\x0D   11X:NEXT:NEXT:NEXT:NEXT\x0A\x0D   12Y\x0A\x0D   13FOR:FOR\x0A\x0D   14    NEXT:NEXT:NEXT\x0A\x0D   15X:NEXT:NEXT:NEXT\x0A\x0D   16Y\x0A\x0D   17FOR:FOR\x0A\x0D   18    NEXT:NEXT:NEXT:NEXT\x0A\x0D   19X:NEXT:NEXT:NEXT:NEXT\x0A\x0D   20Y\x0A\x0D   21FOR:FOR\x0A\x0D   22    NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   23X:NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   24Y\x0A\x0D   25FOR:FOR:FOR\x0A\x0D   26      NEXT:NEXT:NEXT:NEXT\x0A\x0D   27X:NEXT:NEXT:NEXT:NEXT\x0A\x0D   28Y\x0A\x0D   29FOR:FOR:FOR\x0A\x0D   30      NEXT:NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   31X:NEXT:NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   32Y\x0A\x0D   33FOR:FOR:FOR:FOR\x0A\x0D   34        NEXT:NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   35X:NEXT:NEXT:NEXT:NEXT:NEXT:NEXT\x0A\x0D   36Y\x0A\x0D   37FOR:FOR\x0A\x0D   38  NEXT\x0A\x0D   39X:NEXT\x0A\x0D   40Y\x0A\x0D   41FOR:FOR:FOR\x0A\x0D   42  NEXT:NEXT\x0A\x0D   43  X:NEXT:NEXT\x0A\x0D   44Y\x0A\x0D"
+program 0 2
+line "1FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X"
+= stored "\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:X" warns none
+line "2FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X"
+= stored "\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:X" warns none
+line "3FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X"
+= stored "\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:\xE3:X" warns none
+line "4X"
+= stored "X" warns none
+listo 2
+= "    1FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X\x0A\x0D    2                                                                                          FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X\x0A\x0D    3                                                                                                                                                                                    FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:FOR:X\x0A\x0D    4              X\x0A\x0D"
+program 0 2
+line "1ACSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+= stored "\x95XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" warns none
+line "2X"
+= stored "X" warns none
+line "3ACSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+= stored "\x95XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" warns none
+line "4X"
+= stored "X" warns none
+listo 2
+= "    1ACSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\x0A\x0D    2  X\x0A\x0D    3  ACSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\x0A\x0D    4  X\x0A\x0D"
+program 0 0 2
+line "1PRINT\x22\xF4\x22:FORI=1TO2"
+= stored "\xF1\x22\xF4\x22:\xE3I=1\xB82" warns none
+line "2X"
+= stored "X" warns none
+line "3NEXT"
+= stored "\xED" warns none
+line "4X=\xF1"
+= stored "X=\xF1" warns none
+line "5PRINT\x22\xF1\x22"
+= stored "\xF1\x22\xF1\x22" warns none
+line "6DATA \xE3"
+= stored "\xDC \xE3" warns none
+line "7REM \xF1"
+= stored "\xF4 \xF1" warns none
+line "8*CAT \xF1"
+= stored "*CAT \xF1" warns none
+listo 0
+= "    1PRINT\x22\xF4\x22:FORI=1TO2\x0A\x0D    2X\x0A\x0D    3NEXT\x0A\x0D    4X=PRINT\x0A\x0D    5PRINT\x22\xF1\x22\x0A\x0D    6DATA FOR\x0A\x0D    7REM \xF1\x0A\x0D    8*CAT PRINT\x0A\x0D"
+listo 2
+= "    1PRINT\x22\xF4\x22:FORI=1TO2\x0A\x0D    2X\x0A\x0D    3NEXT\x0A\x0D    4X=PRINT\x0A\x0D    5PRINT\x22\xF1\x22\x0A\x0D    6DATA FOR\x0A\x0D    7  REM \xF1\x0A\x0D    8  *CAT PRINT\x0A\x0D"
+program 0 8
+line "1PRINT 1"
+= stored "\xF1 1" warns none
+line "2GOTO 1"
+= stored "\xE5 \x8DTA@" warns none
+line "3PRINT 3"
+= stored "\xF1 3" warns none
+listo 8
+= "PRINT 1\x0A\x0DGOTO 1\x0A\x0D" stopped 2
+program 0 0
+line "1XXXX"
+= stored "\xC8\x9AXX" warns none
+listo 0
+= "    1INSTALLXX\x0A\x0D"

@@ -12,16 +12,20 @@ use tairix_sandbox::{FrameOut, SessionService, SessionStep};
 use tairix_util::fallible;
 
 use super::protocol::{
-    Change, Configuration, Input, Lights, Loaded, Media, ModelKey, Plus1, Ran, Refusal, Reply,
-    Request, Slot, Written, MAX_BULK, MAX_SAMPLES, ROW_MAP, SAMPLE_BYTES, SAMPLE_RATE, SHARE_BYTES,
-    SLOTS,
+    Change, Configuration, DeckKey, DiscFormat, Input, Lights, Loaded, Media, ModelKey, Plus1, Ran,
+    Refusal, Reply, Request, Slot, Written, MAX_BULK, MAX_SAMPLES, ROW_MAP, SAMPLE_BYTES,
+    SAMPLE_RATE, SHARE_BYTES, SLOTS,
 };
 use crate::machine::bbc::fdc::PhysicalDrive;
+use crate::machine::c64::drive::{Drive, Unit};
+use crate::machine::c64::{self, sid, Standard};
 use crate::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::machine::electron::{CARTRIDGE_ROMS, PLUS1_ROM};
-use crate::machine::{bbc, electron, Machine, RomError, CYCLES_PER_SAMPLE, SOUND_RATE};
-use crate::media::disc::{Disc, Encoded, ImageFormat, LAST_TRACK};
-use crate::media::tape::Tape;
+use crate::machine::{bbc, electron, Machine, RomError, Timing};
+use crate::media::c1541::{d64, g64, Format, Surface};
+use crate::media::crt;
+use crate::media::disc::{Disc, LAST_TRACK};
+use crate::media::prg::{self, Program, ProgramError};
 use crate::snapshot::SnapshotError;
 
 /// The AC coupling's pole: a 10 Hz corner at the output rate.
@@ -47,6 +51,14 @@ enum Built {
         os: Vec<u8>,
         basic: Vec<u8>,
         plus1: Option<BuiltPlus1>,
+    },
+    C64 {
+        standard: Standard,
+        sid: sid::Model,
+        kernal: Vec<u8>,
+        basic: Vec<u8>,
+        character: Vec<u8>,
+        drives: [Option<Vec<u8>>; 2],
     },
 }
 
@@ -78,6 +90,24 @@ impl Built {
                 os: owned(os)?,
                 basic: owned(basic)?,
                 plus1: plus1.map(BuiltPlus1::of).transpose()?,
+            },
+            Configuration::C64 {
+                standard,
+                sid,
+                kernal,
+                basic,
+                character,
+                drives,
+            } => Self::C64 {
+                standard: *standard,
+                sid: *sid,
+                kernal: owned(kernal)?,
+                basic: owned(basic)?,
+                character: owned(character)?,
+                drives: [
+                    drives[0].map(owned).transpose()?,
+                    drives[1].map(owned).transpose()?,
+                ],
             },
         })
     }
@@ -123,7 +153,7 @@ impl<W: ShareWrite> MachineService<W> {
             share,
             machine: None,
             built: None,
-            sound: Sound::new(),
+            sound: None,
             sounding: false,
             timeline: 0,
             whole_picture: true,
@@ -142,11 +172,15 @@ impl<W: ShareWrite> MachineService<W> {
             Request::PowerOn => self.power_on().map(|()| None),
             Request::RestoreSnapshot(snapshot) => self.restore(snapshot).map(Some),
             Request::RewindTape => self.on_machine(|machine| {
-                machine.wind_tape(0);
+                machine.rewind_tape();
                 Ok(None)
             }),
             Request::RecordTape(on) => self.on_machine(|machine| {
-                machine.set_tape_record(*on);
+                match machine {
+                    Machine::ModelB(machine) => machine.set_tape_record(*on),
+                    Machine::Electron(machine) => machine.set_tape_record(*on),
+                    Machine::C64(_) => return Err(Refusal::Model),
+                }
                 Ok(None)
             }),
             Request::InsertDisc {
@@ -154,24 +188,25 @@ impl<W: ShareWrite> MachineService<W> {
                 format,
                 write_protected,
                 image,
-            } => self.on_drives(|machine| {
-                let disc =
-                    Disc::decode(image, *format, *write_protected).map_err(|_| Refusal::Disc)?;
+            } => self.on_machine(|machine| {
                 let mut taken = Taken::default();
-                taken.disc(*drive, machine.eject_disc(*drive).as_ref());
-                machine.insert_disc(*drive, disc);
+                insert_disc(
+                    machine,
+                    *drive,
+                    (*format, *write_protected, image),
+                    &mut taken,
+                )?;
                 Ok(Some(taken))
             }),
-            Request::EjectDisc(drive) => self.on_drives(|machine| {
+            Request::EjectDisc(drive) => self.on_machine(|machine| {
                 let mut taken = Taken::default();
-                taken.disc(*drive, machine.eject_disc(*drive).as_ref());
+                eject_disc(machine, *drive, &mut taken)?;
                 Ok(Some(taken))
             }),
             Request::InsertTape(image) => self.on_machine(|machine| {
-                let tape = Tape::decode(image).map_err(|_| Refusal::Tape)?;
                 let mut taken = Taken::default();
                 taken.tape(machine)?;
-                machine.insert_tape(tape);
+                machine.insert_tape(image).map_err(|_| Refusal::Tape)?;
                 Ok(Some(taken))
             }),
             Request::EjectTape => self.on_machine(|machine| {
@@ -180,16 +215,33 @@ impl<W: ShareWrite> MachineService<W> {
                 machine.eject_tape();
                 Ok(Some(taken))
             }),
-            Request::CollectDiscs(drives) => self.on_drives(|machine| {
+            Request::CollectDiscs(drives) => self.on_machine(|machine| {
                 let mut taken = Taken::default();
-                for drive in PhysicalDrive::ALL
-                    .into_iter()
-                    .filter(|drive| drives[drive.index()])
-                {
-                    taken.disc(drive, machine.disc(drive));
-                    machine.mark_disc_saved(drive);
-                }
+                collect_discs(machine, *drives, &mut taken)?;
                 Ok(Some(taken))
+            }),
+            Request::Deck(key) => self.on_c64(|machine| {
+                match key {
+                    DeckKey::Play => machine.press_play(false),
+                    DeckKey::Record => machine.press_play(true),
+                    DeckKey::Stop => machine.stop_tape(),
+                }
+                Ok(None)
+            }),
+            Request::InsertCartridge(image) => self.on_c64(|machine| {
+                let crt = crt::decode(image).map_err(|_| Refusal::Cartridge)?;
+                machine
+                    .insert_cartridge(&crt)
+                    .map_err(|_| Refusal::Cartridge)?;
+                Ok(None)
+            }),
+            Request::RemoveCartridge => self.on_c64(|machine| {
+                machine.remove_cartridge();
+                Ok(None)
+            }),
+            Request::LoadProgram(image) => self.on_c64(|machine| {
+                machine.load_into_memory(&program_of(image).ok_or(Refusal::Program)?);
+                Ok(None)
             }),
         };
         match answer {
@@ -207,15 +259,15 @@ impl<W: ShareWrite> MachineService<W> {
         act(self.machine.as_mut().ok_or(Refusal::Unconfigured)?)
     }
 
-    /// `act` done to a machine with drives, refused while there is none and
-    /// for a model without them.
-    fn on_drives<T>(
+    /// `act` done to a Commodore 64, refused while there is none and for
+    /// another model.
+    fn on_c64<T>(
         &mut self,
-        act: impl FnOnce(&mut bbc::Machine) -> Result<T, Refusal>,
+        act: impl FnOnce(&mut c64::Machine) -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
         match self.machine.as_mut().ok_or(Refusal::Unconfigured)? {
-            Machine::ModelB(machine) => act(machine),
-            Machine::Electron(_) => Err(Refusal::Model),
+            Machine::C64(machine) => act(machine),
+            Machine::ModelB(_) | Machine::Electron(_) => Err(Refusal::Model),
         }
     }
 
@@ -241,27 +293,21 @@ impl<W: ShareWrite> MachineService<W> {
     }
 
     /// The machine built from `built` at power-on, the media of the one it
-    /// replaces, always of the same model, moved across.
+    /// replaces, always of the same model, moved across; refused, nothing
+    /// changed, where that cannot be done.
     fn start(&mut self, built: &Built) -> Result<(), Refusal> {
         let mut machine = build(built).map_err(|_| Refusal::Rom)?;
         if let Some(old) = self.machine.as_mut() {
-            if let (Machine::ModelB(old), Machine::ModelB(new)) = (&mut *old, &mut machine) {
-                for drive in PhysicalDrive::ALL {
-                    if let Some(disc) = old.eject_disc(drive) {
-                        new.insert_disc(drive, disc);
-                    }
-                }
-            }
-            if let Some(tape) = old.eject_tape() {
-                machine.insert_tape(tape);
-            }
+            move_media(old, &mut machine)?;
         }
         machine.set_sound_output(self.sounding);
         self.timeline = machine.cycles();
+        let timing = machine.timing();
         self.machine = Some(machine);
         self.whole_picture = true;
-        if let Some(sound) = &mut self.sound {
-            sound.forget();
+        match &mut self.sound {
+            Some(sound) if sound.timing == timing => sound.forget(),
+            _ => self.sound = Sound::new(timing),
         }
         Ok(())
     }
@@ -271,10 +317,18 @@ impl<W: ShareWrite> MachineService<W> {
     fn restore(&mut self, snapshot: &[u8]) -> Result<Taken, Refusal> {
         let machine = self.machine.as_mut().ok_or(Refusal::Unconfigured)?;
         let mut taken = Taken::default();
-        if let Machine::ModelB(machine) = &*machine {
-            for drive in PhysicalDrive::ALL {
-                taken.disc(drive, machine.disc(drive));
+        match &*machine {
+            Machine::ModelB(machine) => {
+                for drive in PhysicalDrive::ALL {
+                    taken.acorn_disc(drive, machine.disc(drive));
+                }
             }
+            Machine::C64(machine) => {
+                for drive in PhysicalDrive::ALL {
+                    taken.c64_disk(drive, machine.drive(Unit::of(drive)).and_then(Drive::disk));
+                }
+            }
+            Machine::Electron(_) => {}
         }
         taken.tape(machine)?;
         machine.restore(snapshot).map_err(|_| Refusal::Snapshot)?;
@@ -290,7 +344,10 @@ impl<W: ShareWrite> MachineService<W> {
         let Some(machine) = self.machine.as_mut() else {
             return send(out, &Reply::Refused(Refusal::Unconfigured));
         };
-        if !inputs.iter().all(|input| takes(machine, input.change)) {
+        let timing = machine.timing();
+        if u64::from(cycles) > timing.clock()
+            || !inputs.iter().all(|input| takes(machine, input.change))
+        {
             return send(out, &Reply::Refused(Refusal::Model));
         }
         if sound != self.sounding {
@@ -311,20 +368,31 @@ impl<W: ShareWrite> MachineService<W> {
             shift_lock,
             motor: machine.tape_motor(),
         };
+        let case = machine.letter_case();
         let (drives, discs) = match &*machine {
             Machine::ModelB(machine) => (
                 PhysicalDrive::ALL.map(|drive| machine.drive_active(drive)),
                 PhysicalDrive::ALL.map(|drive| machine.disc(drive).is_some()),
             ),
             Machine::Electron(_) => ([false; 2], [false; 2]),
+            Machine::C64(machine) => (
+                Unit::ALL.map(|unit| machine.drive(unit).is_some_and(Drive::led)),
+                Unit::ALL.map(|unit| machine.drive(unit).and_then(Drive::disk).is_some()),
+            ),
+        };
+        let (playing, cartridge) = match &*machine {
+            Machine::C64(machine) => (machine.datasette().sensed(), machine.holds_cartridge()),
+            Machine::ModelB(_) | Machine::Electron(_) => (false, false),
         };
         let loaded = Loaded {
             discs,
             tape: machine.holds_tape(),
             recording: machine.tape_record().0,
+            playing,
+            cartridge,
         };
-        let overrun = (machine.cycles() / CYCLES_PER_SAMPLE)
-            .saturating_sub(self.timeline / CYCLES_PER_SAMPLE);
+        let per_sample = timing.cycles_per_sample();
+        let overrun = (machine.cycles() / per_sample).saturating_sub(self.timeline / per_sample);
         let sound: &[u8] = match (&mut self.sound, sound) {
             (Some(pipeline), true) => pipeline.take(machine, overrun),
             (Some(pipeline), false) => {
@@ -340,6 +408,7 @@ impl<W: ShareWrite> MachineService<W> {
                 rows,
                 sound,
                 lights,
+                case,
                 drives,
                 loaded,
             }),
@@ -402,26 +471,185 @@ fn picture<W: ShareWrite>(share: &mut W, machine: &mut Machine, whole: &mut bool
     }
 }
 
+/// The disc `image` holds put in `drive`, written-protected as asked, the
+/// disc it replaces taken if written since last collected; refused, nothing
+/// changed, for an image that does not decode, another model's, or a drive
+/// not fitted.
+fn insert_disc(
+    machine: &mut Machine,
+    drive: PhysicalDrive,
+    (format, write_protected, image): (DiscFormat, bool, &[u8]),
+    taken: &mut Taken,
+) -> Result<(), Refusal> {
+    match (machine, format) {
+        (Machine::ModelB(machine), DiscFormat::Acorn(format)) => {
+            let disc = Disc::decode(image, format, write_protected).map_err(|_| Refusal::Disc)?;
+            taken.acorn_disc(drive, machine.eject_disc(drive).as_ref());
+            machine.insert_disc(drive, disc);
+        }
+        (Machine::C64(machine), DiscFormat::D64 | DiscFormat::G64) => {
+            let fitted = machine.drive_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
+            let decoded = if format == DiscFormat::D64 {
+                d64::decode(image)
+            } else {
+                g64::decode(image)
+            };
+            let mut disk = decoded.map_err(|_| Refusal::Disc)?;
+            disk.write_protected = write_protected;
+            taken.c64_disk(drive, fitted.eject().as_ref());
+            fitted.insert(disk);
+        }
+        _ => return Err(Refusal::Model),
+    }
+    Ok(())
+}
+
+/// `drive`'s disc taken out, kept if written since last collected.
+fn eject_disc(
+    machine: &mut Machine,
+    drive: PhysicalDrive,
+    taken: &mut Taken,
+) -> Result<(), Refusal> {
+    match machine {
+        Machine::ModelB(machine) => taken.acorn_disc(drive, machine.eject_disc(drive).as_ref()),
+        Machine::C64(machine) => {
+            let fitted = machine.drive_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
+            taken.c64_disk(drive, fitted.eject().as_ref());
+        }
+        Machine::Electron(_) => return Err(Refusal::Model),
+    }
+    Ok(())
+}
+
+/// The disc in each drive `drives` marks taken if written since last
+/// collected, and marked saved; the discs stay in.
+fn collect_discs(
+    machine: &mut Machine,
+    drives: [bool; 2],
+    taken: &mut Taken,
+) -> Result<(), Refusal> {
+    let marked = PhysicalDrive::ALL
+        .into_iter()
+        .filter(|drive| drives[drive.index()]);
+    match machine {
+        Machine::ModelB(machine) => {
+            for drive in marked {
+                taken.acorn_disc(drive, machine.disc(drive));
+                machine.mark_disc_saved(drive);
+            }
+        }
+        Machine::C64(machine) => {
+            for drive in marked {
+                if let Some(disk) = machine.drive_mut(Unit::of(drive)).and_then(Drive::disk_mut) {
+                    taken.c64_disk(drive, Some(disk));
+                    disk.mark_saved();
+                }
+            }
+        }
+        Machine::Electron(_) => return Err(Refusal::Model),
+    }
+    Ok(())
+}
+
+/// `old`'s media moved into `new`, a machine of the same model built anew:
+/// its discs, tape and cartridge. Refused, nothing moved, where `new` has no
+/// drive for a disc `old` holds.
+fn move_media(old: &mut Machine, new: &mut Machine) -> Result<(), Refusal> {
+    match (&mut *old, &mut *new) {
+        (Machine::ModelB(old), Machine::ModelB(new)) => {
+            for drive in PhysicalDrive::ALL {
+                if let Some(disc) = old.eject_disc(drive) {
+                    new.insert_disc(drive, disc);
+                }
+            }
+        }
+        (Machine::C64(old), Machine::C64(new)) => {
+            let homeless = Unit::ALL.into_iter().any(|unit| {
+                old.drive(unit).and_then(Drive::disk).is_some() && new.drive(unit).is_none()
+            });
+            if homeless {
+                return Err(Refusal::Model);
+            }
+            for unit in Unit::ALL {
+                if let (Some(from), Some(to)) = (old.drive_mut(unit), new.drive_mut(unit)) {
+                    if let Some(disk) = from.eject() {
+                        to.insert(disk);
+                    }
+                }
+            }
+            if let Some(cartridge) = old.remove_cartridge() {
+                new.plug_cartridge(cartridge);
+            }
+        }
+        _ => {}
+    }
+    old.move_tape(new);
+    Ok(())
+}
+
+/// The program a C64 loads from `image`: a T64's first, else a PRG's.
+fn program_of(image: &[u8]) -> Option<Program> {
+    match prg::decode_t64(image) {
+        Ok(program) => Some(program),
+        Err(ProgramError::BadHeader) => prg::decode_prg(image).ok(),
+        Err(_) => None,
+    }
+}
+
+/// A disc taken out or collected, as it is handed over.
+struct TakenDisc {
+    drive: PhysicalDrive,
+    format: DiscFormat,
+    image: Vec<u8>,
+    lost: Option<(u8, u8)>,
+}
+
 /// Media a request takes out of the machine, held for its answer.
 #[derive(Default)]
 struct Taken {
-    discs: Vec<(PhysicalDrive, ImageFormat, Encoded)>,
+    discs: Vec<TakenDisc>,
     tape: Option<Vec<u8>>,
 }
 
 impl Taken {
-    /// `disc`, from `drive`, if it was written since last collected.
-    fn disc(&mut self, drive: PhysicalDrive, disc: Option<&Disc>) {
+    /// An Acorn `disc`, from `drive`, if it was written since last collected.
+    fn acorn_disc(&mut self, drive: PhysicalDrive, disc: Option<&Disc>) {
         if let Some(disc) = disc.filter(|disc| disc.is_dirty()) {
-            self.discs.push((drive, disc.format(), disc.encode()));
+            let encoded = disc.encode();
+            self.discs.push(TakenDisc {
+                drive,
+                format: DiscFormat::Acorn(disc.format()),
+                image: encoded.image,
+                lost: encoded.lost.map(|(side, track)| {
+                    (
+                        u8::from(side != 0),
+                        u8::try_from(track).map_or(LAST_TRACK, |track| track.min(LAST_TRACK)),
+                    )
+                }),
+            });
+        }
+    }
+
+    /// A 1541 `disk`, from `drive`, if it was written since last collected.
+    fn c64_disk(&mut self, drive: PhysicalDrive, disk: Option<&Surface>) {
+        if let Some(disk) = disk.filter(|disk| disk.is_dirty()) {
+            let (format, image) = disk.encode();
+            self.discs.push(TakenDisc {
+                drive,
+                format: match format {
+                    Format::D64 { .. } => DiscFormat::D64,
+                    Format::G64 => DiscFormat::G64,
+                },
+                image,
+                lost: None,
+            });
         }
     }
 
     /// The machine's tape as it now is, if it was recorded on; refused when
     /// it is too large to carry.
     fn tape(&mut self, machine: &mut Machine) -> Result<(), Refusal> {
-        if let Some(tape) = machine.tape().filter(|tape| tape.is_dirty()) {
-            let image = tape.encode_uef();
+        if let Some(image) = machine.recorded_tape() {
             if image.len() > MAX_BULK {
                 return Err(Refusal::TooLarge);
             }
@@ -435,16 +663,11 @@ impl Taken {
             discs: self
                 .discs
                 .iter()
-                .map(|(drive, format, encoded)| Written {
-                    drive: *drive,
-                    format: *format,
-                    image: &encoded.image,
-                    lost: encoded.lost.map(|(side, track)| {
-                        (
-                            u8::from(side != 0),
-                            u8::try_from(track).map_or(LAST_TRACK, |track| track.min(LAST_TRACK)),
-                        )
-                    }),
+                .map(|taken| Written {
+                    drive: taken.drive,
+                    format: taken.format,
+                    image: &taken.image,
+                    lost: taken.lost,
                 })
                 .collect(),
             tape: self.tape.as_deref(),
@@ -486,33 +709,63 @@ fn build(built: &Built) -> Result<Machine, RomError> {
             }
             Machine::Electron(Box::new(machine))
         }
+        Built::C64 {
+            standard,
+            sid,
+            kernal,
+            basic,
+            character,
+            drives,
+        } => {
+            let config = c64::Config {
+                standard: *standard,
+                sid: *sid,
+            };
+            let roms = c64::Roms {
+                basic,
+                kernal,
+                character,
+            };
+            let mut machine = c64::Machine::new(config, roms)?;
+            for (unit, dos) in Unit::ALL.into_iter().zip(drives) {
+                if let Some(dos) = dos {
+                    machine.fit_drive(unit, dos)?;
+                }
+            }
+            Machine::C64(Box::new(machine))
+        }
     };
     machine.set_sound_output(false);
     Ok(machine)
 }
 
 /// Whether `machine` has what `change` changes: its own keyboard's keys,
-/// and an analogue port, the Electron's only with the Plus 1.
+/// BREAK on an Acorn, an Acorn's analogue port, the Electron's only with
+/// the Plus 1, and a C64's paddles and joysticks.
 fn takes(machine: &Machine, change: Change) -> bool {
-    match change {
-        Change::Key(key, _) => key.model() == machine.model(),
-        Change::Break(_) => true,
-        Change::Analogue(..) | Change::Fire(_) => match machine {
-            Machine::ModelB(_) => true,
-            Machine::Electron(machine) => machine.has_plus1(),
-        },
+    match (machine, change) {
+        (_, Change::Key(key, _)) => key.model() == machine.model(),
+        (Machine::ModelB(_), Change::Break(_) | Change::Analogue(..) | Change::Fire(_))
+        | (Machine::Electron(_), Change::Break(_))
+        | (Machine::C64(_), Change::Analogue(..) | Change::Joystick(..)) => true,
+        (Machine::Electron(machine), Change::Analogue(..) | Change::Fire(_)) => machine.has_plus1(),
+        _ => false,
     }
 }
 
 /// `change` made, one [`takes`] has already allowed.
 fn apply(machine: &mut Machine, change: Change) {
     match (machine, change) {
-        (machine, Change::Break(down)) => machine.set_break(down),
+        (Machine::ModelB(machine), Change::Break(down)) => machine.set_break(down),
+        (Machine::Electron(machine), Change::Break(down)) => machine.set_break(down),
         (Machine::ModelB(machine), Change::Key(ModelKey::ModelB(key), down)) => {
             machine.set_key(key, down);
         }
         (Machine::Electron(machine), Change::Key(ModelKey::Electron(key), down)) => {
             machine.set_key(key, down);
+        }
+        (Machine::C64(machine), Change::Key(ModelKey::C64(keycap), down)) => {
+            machine.press(keycap, down);
         }
         (Machine::ModelB(machine), Change::Analogue(channel, level)) => {
             machine.set_analogue(usize::from(channel), level);
@@ -520,10 +773,16 @@ fn apply(machine: &mut Machine, change: Change) {
         (Machine::Electron(machine), Change::Analogue(channel, level)) => {
             machine.set_analogue(usize::from(channel), level);
         }
+        (Machine::C64(machine), Change::Analogue(channel, level)) => {
+            machine.set_paddle(usize::from(channel), level.to_be_bytes()[0]);
+        }
         (Machine::ModelB(machine), Change::Fire(buttons)) => machine.set_fire_buttons(buttons),
         (Machine::Electron(machine), Change::Fire(buttons)) => machine.set_fire_buttons(buttons),
-        // Another keyboard's key, refused before the slice ran.
-        (_, Change::Key(..)) => {}
+        (Machine::C64(machine), Change::Joystick(port, lines)) => {
+            machine.set_joystick(usize::from(port), lines);
+        }
+        // What `takes` refused before the slice ran.
+        _ => {}
     }
 }
 
@@ -532,6 +791,8 @@ fn apply(machine: &mut Machine, change: Change) {
 /// slice's sound is its cycles' exactly: what the instruction that ran past
 /// its end made waits for the next slice, as the picture's time does.
 struct Sound {
+    /// The timing whose samples it resamples.
+    timing: Timing,
     bank: FilterBank,
     resampler: Resampler,
     coupling: AcCoupling,
@@ -542,10 +803,18 @@ struct Sound {
 }
 
 impl Sound {
-    fn new() -> Option<Self> {
-        let bank = FilterBank::for_ratio(Ratio::new(SOUND_RATE, SAMPLE_RATE)?).ok()?;
+    /// The way for a machine keeping `timing`; `None` when its filter
+    /// cannot be built.
+    fn new(timing: Timing) -> Option<Self> {
+        let input = u32::try_from(timing.clock()).ok()?;
+        let output = timing
+            .cycles_per_sample()
+            .checked_mul(u64::from(SAMPLE_RATE))?;
+        let ratio = Ratio::new(input, u32::try_from(output).ok()?)?;
+        let bank = FilterBank::for_ratio(ratio).ok()?;
         let resampler = Resampler::new(&bank, 1).ok()?;
         Some(Self {
+            timing,
             bank,
             resampler,
             coupling: AcCoupling::new(COUPLING),

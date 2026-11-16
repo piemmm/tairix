@@ -8,7 +8,7 @@
 
 use tairix_softfloat::{Binary, Mode};
 
-use super::memory::{Aborted, Access};
+use super::memory::{block_range, Aborted, Access};
 use super::{Cpu, Flow};
 use crate::bus::{Bus, Width};
 use crate::instruction::{
@@ -685,7 +685,7 @@ impl Cpu {
                 identity => identity.identity(self.profile.isa),
             };
             if rt == Reg::PC {
-                self.cpsr = (self.cpsr & !psr::NZCV) | (value & psr::NZCV);
+                self.set_nzcv(value);
             } else {
                 self.write(rt, value);
             }
@@ -833,13 +833,8 @@ impl Cpu {
         words: u8,
     ) -> Flow {
         let registers = if double { words / 2 } else { words };
-        let size = 4 * u32::from(words);
         let base = self.read(rn);
-        let (start, end) = if mode.up() {
-            (base, base.wrapping_add(size))
-        } else {
-            (base.wrapping_sub(size), base.wrapping_sub(size))
-        };
+        let (start, end) = block_range(mode, base, u32::from(words));
         let step = if double { 8 } else { 4 };
         let mut gathered = [0u64; 32];
         for (index, slot) in (0..registers).zip(&mut gathered) {
@@ -1119,7 +1114,7 @@ impl Cpu {
                         }
                     }
                 }
-                Ok(8 * u32::from(shape.registers()))
+                Ok(8 * shape.registers())
             }
             StructureLanes::One(index) => {
                 for element in 0..shape.elements {

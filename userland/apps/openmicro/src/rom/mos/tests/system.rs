@@ -9,7 +9,7 @@ use super::{
 };
 use crate::machine::bbc::latch;
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::reg;
+use crate::machine::via::reg;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
 use crate::rom::mos::high::DEFAULTS_DESCRIPTOR;
 use crate::rom::mos::modes::ROWS_640;

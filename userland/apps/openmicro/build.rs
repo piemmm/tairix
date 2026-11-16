@@ -1,24 +1,32 @@
 //! Enables the `freestanding` cfg on a bare-metal target, and lists the
-//! recorded corpus's scenarios as tests.
+//! recorded corpora's scenarios as tests: the Model B's and the Commodore
+//! 64's.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-/// The corpus, from the manifest's directory.
-const CORPUS: &str = "tests/corpus";
+/// Each corpus, from the manifest's directory, and the file in `OUT_DIR` its
+/// tests are listed in.
+const CORPORA: [(&str, &str); 2] = [
+    ("tests/corpus", "corpus.rs"),
+    ("tests/corpus/c64", "c64_corpus.rs"),
+];
 
 fn main() -> Result<(), String> {
     tairix_buildcfg::emit_freestanding();
-    corpus_tests()
+    for (corpus, listed) in CORPORA {
+        corpus_tests(corpus, listed)?;
+    }
+    Ok(())
 }
 
-/// `corpus.rs` in `OUT_DIR`: for each `*.scenarios` file a module holding
-/// its text and its fixtures' and a test for each scenario it holds, and
-/// `GROUPS`, every group's two texts.
-fn corpus_tests() -> Result<(), String> {
+/// `listed` in `OUT_DIR`: for each of `corpus`'s `*.scenarios` files a
+/// module holding its text and its fixtures' and a test for each scenario it
+/// holds, and `GROUPS`, every group's two texts.
+fn corpus_tests(corpus: &str, listed: &str) -> Result<(), String> {
     let manifest = env::var("CARGO_MANIFEST_DIR").map_err(|e| e.to_string())?;
-    let dir = Path::new(&manifest).join(CORPUS);
+    let dir = Path::new(&manifest).join(corpus);
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut groups: Vec<PathBuf> = fs::read_dir(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -27,7 +35,7 @@ fn corpus_tests() -> Result<(), String> {
         .collect();
     groups.sort();
     let mut code = String::new();
-    let mut listed = String::new();
+    let mut groups_listed = String::new();
     for scenarios in &groups {
         let fixtures = scenarios.with_extension("fixtures");
         println!("cargo:rerun-if-changed={}", scenarios.display());
@@ -63,10 +71,10 @@ fn corpus_tests() -> Result<(), String> {
             );
         }
         code.push_str("}\n");
-        let _ = write!(listed, "({group}::SCENARIOS, {group}::FIXTURES), ");
+        let _ = write!(groups_listed, "({group}::SCENARIOS, {group}::FIXTURES), ");
     }
-    let _ = writeln!(code, "const GROUPS: &[(&str, &str)] = &[{listed}];");
-    let out = PathBuf::from(env::var("OUT_DIR").map_err(|e| e.to_string())?).join("corpus.rs");
+    let _ = writeln!(code, "const GROUPS: &[(&str, &str)] = &[{groups_listed}];");
+    let out = PathBuf::from(env::var("OUT_DIR").map_err(|e| e.to_string())?).join(listed);
     fs::write(&out, code).map_err(|e| format!("{}: {e}", out.display()))
 }
 

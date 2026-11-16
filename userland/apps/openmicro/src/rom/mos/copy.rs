@@ -9,7 +9,7 @@
 use super::has_teletext;
 use super::vdu::status;
 use super::ws::{vdu, vdu_zp};
-use crate::machine::Model;
+use super::Model;
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
 
 /// Where mode 7's marked character waits, as the original keeps it.

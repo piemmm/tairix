@@ -5,16 +5,15 @@
 
 use super::alu::shift_immediate;
 use super::execute::{sext16, sext8};
-use super::{Cpu, Flow};
+use super::{Cpu, Flow, PC};
 use crate::bus::{Bus, Width};
 use crate::cp15::Fault;
 use crate::instruction::{
     BlockMode, BlockOp, DualOp, ExclusiveOp, Index, Offset, SwapOp, TransferOp,
 };
+use crate::profile::Unpredictable;
 use crate::psr::{self, Bank, Mode};
 use crate::reg::{Reg, RegList};
-
-const PC: Reg = Reg::PC;
 
 /// A data access that aborted: why, and where.
 pub(super) struct Aborted {
@@ -39,7 +38,7 @@ impl Aborted {
 
 /// The first address of a block of `count` words from `base`, and the base
 /// written back.
-const fn block_range(mode: BlockMode, base: u32, count: u32) -> (u32, u32) {
+pub(super) const fn block_range(mode: BlockMode, base: u32, count: u32) -> (u32, u32) {
     let size = count.wrapping_mul(4);
     match mode {
         BlockMode::IncrementAfter => (base, base.wrapping_add(size)),
@@ -311,9 +310,18 @@ impl Cpu {
         let address = |n: u32| start.wrapping_add(4 * n);
         match op {
             BlockOp::Stm => {
+                // A core without a pipeline writes the base back once the
+                // first register is stored, so a base listed after it
+                // stores the written-back value.
+                let late_base = writeback
+                    && !user
+                    && self.profile.unpredictable == Unpredictable::Execute
+                    && list.lowest() != Some(rn);
                 for (n, reg) in (0..).zip(list.iter()) {
                     let value = if reg == PC {
                         self.stored_pc()
+                    } else if reg == rn && late_base {
+                        written_back
                     } else if user {
                         self.user_reg(reg)
                     } else {
@@ -368,10 +376,16 @@ impl Cpu {
         } else if self.mode.is_26bit() {
             self.write_r15_psr(target);
             self.branch(target);
-        } else if self.restore_cpsr() {
-            self.branch(target);
-        } else if !self.refuse() {
-            self.load_pc(target);
+        } else {
+            match self.restore_cpsr() {
+                Some(true) => self.branch(target),
+                Some(false) => {}
+                None => {
+                    if !self.refuse() {
+                        self.load_pc(target);
+                    }
+                }
+            }
         }
     }
 
@@ -445,12 +459,8 @@ impl Cpu {
         };
         let alignment = if rt2.is_some() { 8 } else { width.bytes() };
         if !address.is_multiple_of(alignment) {
-            let aborted = Aborted {
-                fault: Fault::Alignment,
-                address,
-                write: rd.is_some() || matches!(op, X::Stl | X::Stlb | X::Stlh),
-            };
-            return self.aborted(&aborted);
+            let write = rd.is_some() || matches!(op, X::Stl | X::Stlb | X::Stlh);
+            return self.aborted(&Aborted::misaligned(address, write));
         }
         let marks = matches!(
             op,
@@ -582,8 +592,9 @@ impl Cpu {
         if writeback {
             self.write(rn, written_back);
         }
-        self.write_cpsr(status, u32::MAX, true);
-        self.branch(target);
+        if self.restore(status) {
+            self.branch(target);
+        }
         Flow::Next
     }
 }

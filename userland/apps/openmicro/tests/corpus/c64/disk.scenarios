@@ -1,0 +1,30 @@
+# The 1541's DOS through the KERNAL and BASIC: the directory, saving and
+# loading programs, sequential files and the command channel on a freshly
+# formatted disk, as the originals answer them (plans/C64.md §6).
+
+scenario error_channel_at_power_on
+discs blank
+script type:10 OPEN15,8,15:INPUT#15,A,B$,C,D:CLOSE15\n;type:20 PRINT A,C,D:PRINT B$\n;type:RUN\n;wait:3
+
+scenario directory_of_a_blank_disk
+discs blank
+script type:LOAD"$",8\n;wait:10;type:LIST\n;wait:1
+
+scenario save_and_load_a_program
+discs blank
+check 0
+script type:10 PRINT "SAVED"\n;type:SAVE"PROG",8\n;wait:15;type:NEW\n;type:LOAD"PROG",8\n;wait:10;type:RUN\n;wait:0.5
+
+scenario a_sequential_file_written_and_read
+discs blank
+check 0
+script type:10 OPEN2,8,2,"DATA,S,W":PRINT#2,"ONE":CLOSE2\n;type:20 OPEN2,8,2,"DATA,S,R":INPUT#2,A$:CLOSE2:PRINT A$\n;type:RUN\n;wait:20
+
+scenario scratch_and_rename
+discs blank
+check 0
+script type:SAVE"OLD",8\n;wait:15;type:OPEN15,8,15,"R0:NEW=OLD":CLOSE15\n;wait:5;type:10 OPEN15,8,15,"S0:NEW":INPUT#15,A,B$,C:PRINT A,B$,C:CLOSE15\n;type:RUN\n;wait:8
+
+scenario the_bus_calls_keep_x_and_y
+discs blank
+script type:10 POKE 780,8:POKE 781,123:POKE 782,1:SYS 65457:A=PEEK(781):G=PEEK(782)\n;type:20 POKE 780,111:POKE 781,124:POKE 782,2:SYS 65427:B=PEEK(781):H=PEEK(782)\n;type:30 POKE 781,125:POKE 782,3:SYS 65454:C=PEEK(781):I=PEEK(782)\n;type:40 POKE 780,8:POKE 781,126:POKE 782,4:SYS 65460:D=PEEK(781):J=PEEK(782)\n;type:50 POKE 780,111:POKE 781,127:POKE 782,5:SYS 65430:E=PEEK(781):K=PEEK(782)\n;type:60 POKE 781,128:POKE 782,6:SYS 65451:F=PEEK(781):L=PEEK(782)\n;type:70 PRINT A,B,C:PRINT D,E,F:PRINT G,H,I:PRINT J,K,L\n;type:RUN\n;wait:3

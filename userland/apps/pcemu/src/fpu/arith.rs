@@ -4,12 +4,13 @@
 //! programmer's reference for its unnormal rules): its register wrap, its
 //! chop-mode results, and its partial remainder.
 
-pub use tairix_softfloat::exact::{add, divide, multiply, square_root, to_integer, Exact, Parts};
-pub use tairix_softfloat::{Mode, Rounding};
+use tairix_softfloat::exact::{Exact, Parts};
+use tairix_softfloat::{Mode, Rounding};
 
 use tairix_softfloat::RoundedSig;
 
-use super::real::{Binary, Real, BIAS, EXP_MAX, INTEGER};
+use tairix_softfloat::extended::{BIAS, EXP_MAX, INTEGER};
+use tairix_softfloat::{Binary, Extended};
 
 /// The exception flags, in the status and control words' low six bits.
 pub mod flag {
@@ -49,7 +50,7 @@ pub const WRAP: i32 = 24_576;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rounded {
     /// The value.
-    pub value: Option<Real>,
+    pub value: Option<Extended>,
     /// The exceptions it raised.
     pub flags: u16,
 }
@@ -60,7 +61,7 @@ pub fn round(x: Exact, rounding: Rounding, masks: u16) -> Rounded {
     let x = x.normalized(false);
     if x.is_zero() {
         return Rounded {
-            value: Some(Real::ZERO.with_sign(x.negative)),
+            value: Some(Extended::ZERO.with_sign(x.negative)),
             flags: 0,
         };
     }
@@ -81,7 +82,7 @@ pub fn round(x: Exact, rounding: Rounding, masks: u16) -> Rounded {
             // its significand chopped.
             let wrapped = x.exp.saturating_add(BIAS - WRAP);
             return Rounded {
-                value: Some(Real::new(x.negative, field(wrapped), x.chopped())),
+                value: Some(Extended::new(x.negative, field(wrapped), x.chopped())),
                 flags: flag::OVERFLOW,
             };
         }
@@ -91,7 +92,7 @@ pub fn round(x: Exact, rounding: Rounding, masks: u16) -> Rounded {
         };
     }
     Rounded {
-        value: Some(Real::new(x.negative, field(biased), sig)),
+        value: Some(Extended::new(x.negative, field(biased), sig)),
         flags: precision,
     }
 }
@@ -114,18 +115,18 @@ const fn overflows_to_largest(mode: Mode, negative: bool) -> bool {
 
 /// A masked overflow's register result, an unnormal one keeping its own
 /// significand.
-fn overflowed(x: Exact, rounding: Rounding) -> Real {
-    if !overflows_to_largest(rounding.mode, x.negative) {
-        return Real::INFINITY.with_sign(x.negative);
+fn overflowed(x: Exact, rounding: Rounding) -> Extended {
+    if !overflows_to_largest(rounding.mode(), x.negative) {
+        return Extended::INFINITY.with_sign(x.negative);
     }
-    let kept = !0u64 << (64 - rounding.bits);
+    let kept = !0u64 << (64 - rounding.bits());
     let chopped = x.chopped();
     let sig = if chopped & INTEGER != 0 {
         kept
     } else {
         chopped & kept
     };
-    Real::new(x.negative, EXP_MAX, sig)
+    Extended::new(x.negative, EXP_MAX, sig)
 }
 
 /// A result below the smallest exponent: denormalized and rounded where
@@ -137,7 +138,7 @@ fn tiny(x: Exact, rounding: Rounding, masks: u16) -> Rounded {
     let wrapped = biased.saturating_add(WRAP);
     if unmasked && wrapped >= 1 {
         return Rounded {
-            value: Some(Real::new(x.negative, field(wrapped), x.chopped())),
+            value: Some(Extended::new(x.negative, field(wrapped), x.chopped())),
             flags: flag::UNDERFLOW,
         };
     }
@@ -146,11 +147,11 @@ fn tiny(x: Exact, rounding: Rounding, masks: u16) -> Rounded {
     let RoundedSig { sig, inexact, .. } = d.rounded(rounding);
     let exponent = u16::from(sig & INTEGER != 0);
     let mut flags = if inexact { flag::PRECISION } else { 0 };
-    if inexact || rounding.mode == Mode::Zero || unmasked {
+    if inexact || rounding.mode() == Mode::Zero || unmasked {
         flags |= flag::UNDERFLOW;
     }
     Rounded {
-        value: Some(Real::new(x.negative, exponent, sig)),
+        value: Some(Extended::new(x.negative, exponent, sig)),
         flags,
     }
 }
@@ -163,10 +164,7 @@ pub fn round_binary(p: Parts, format: Binary, mode: Mode, masks: u16) -> (Option
     if p.is_zero() {
         return (Some(format.zero(p.negative)), 0);
     }
-    let rounding = Rounding {
-        mode,
-        bits: format.precision,
-    };
+    let rounding = Rounding::of(format, mode);
     let x = Exact::of(p);
     let pack = |field: u64, sig: u64| format.pack(p.negative, field, sig);
     if p.exp < format.min_exp() {
@@ -198,7 +196,7 @@ pub fn round_binary(p: Parts, format: Binary, mode: Mode, masks: u16) -> (Option
         };
         return (Some(bits), flag::OVERFLOW | flag::PRECISION);
     }
-    let biased = u64::try_from(exp + format.bias).unwrap_or(0);
+    let biased = u64::try_from(exp + format.bias()).unwrap_or(0);
     let flags = if inexact { flag::PRECISION } else { 0 };
     (Some(pack(biased, sig)), flags)
 }

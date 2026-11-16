@@ -7,10 +7,10 @@
 //! hardware it has none of do nothing.
 
 use super::ws::{os, page2, var, vdu, vector};
+use super::Model;
 use super::{masked_calls, svia};
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::reg;
-use crate::machine::Model;
+use crate::machine::via::reg;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 use crate::rom::os::osbyte;
 

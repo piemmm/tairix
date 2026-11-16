@@ -10,7 +10,7 @@
 //! and the 6502 stack, and returns where the call was made: the top byte
 //! of each record says which it is, so no frame pointer is kept.
 
-use tairix_bbcbasic::keyword::word;
+use tairix_openbasic::keyword::word;
 
 use super::float::PACKED;
 use super::vars::{FROM, NAME_END, S_LENGTH, TNAME};

@@ -13,6 +13,7 @@ use tairix_machines::record::Record;
 use tairix_machines::state::{LastScreen, Suspended};
 use tairix_machines::store::{self as kept, Resumable, Shelved};
 use tairix_openmicro::front::library::{Fitting, Image, Machine, Socket, INSTALLED, STATE_BOUNDS};
+use tairix_openmicro::machine::c64::{sid, Standard};
 use tairix_openmicro::worker::protocol::{Configuration, Plus1, Slot, MAX_ROM, SLOTS};
 use tairix_rt::work::Worker;
 use tairix_rt::File;
@@ -66,6 +67,18 @@ pub enum Images {
         /// The Plus 1's ROM and its cartridges' images.
         plus1: Option<(Rom, [[Option<Rom>; 2]; 2])>,
     },
+    /// A Commodore 64's standard and SID, its ROMs and each fitted drive's
+    /// DOS.
+    C64 {
+        /// The television standard.
+        standard: Standard,
+        /// The SID.
+        sid: sid::Model,
+        /// The KERNAL, BASIC and the character ROM.
+        roms: [Rom; 3],
+        /// Each drive's DOS, where it is fitted.
+        drives: [Option<Rom>; 2],
+    },
 }
 
 impl Images {
@@ -96,6 +109,19 @@ impl Images {
                         .each_ref()
                         .map(|pair| pair.each_ref().map(|rom| rom.as_ref().map(Rom::bytes))),
                 }),
+            },
+            Self::C64 {
+                standard,
+                sid,
+                roms: [kernal, basic, character],
+                drives,
+            } => Configuration::C64 {
+                standard: *standard,
+                sid: *sid,
+                kernal: kernal.bytes(),
+                basic: basic.bytes(),
+                character: character.bytes(),
+                drives: drives.each_ref().map(|dos| dos.as_ref().map(Rom::bytes)),
             },
         }
     }
@@ -371,6 +397,22 @@ fn images(fitting: &Fitting) -> Result<Images, String> {
                 }
                 None => None,
             },
+        },
+        Fitting::C64 {
+            standard,
+            sid,
+            kernal,
+            basic,
+            character,
+            drives,
+        } => Images::C64 {
+            standard: *standard,
+            sid: *sid,
+            roms: [rom(kernal)?, rom(basic)?, rom(character)?],
+            drives: [
+                drives[0].as_ref().map(rom).transpose()?,
+                drives[1].as_ref().map(rom).transpose()?,
+            ],
         },
     })
 }

@@ -4,6 +4,8 @@
 
 pub mod asm;
 pub mod basic;
+pub mod c1541;
+pub mod c64;
 pub mod dfs;
 #[cfg(test)]
 mod harness;
@@ -34,12 +36,16 @@ pub(crate) fn service_header(a: &mut Asm, version: u8, title: &str, version_text
     a.byte(0);
 }
 
-/// Every image the bundle ships, by its name in `Resources/`, with the
-/// builder that makes it from this tree.
-pub const SHIPPED: [(&str, Build); 5] = [
+/// Every image the bundle ships, by its file's name in `firmware/`, with
+/// the builder that makes it from this tree.
+pub const SHIPPED: [(&str, Build); 9] = [
     (crate::firmware::MOS, mos::model_b),
     (crate::firmware::ELECTRON_OS, mos::electron),
     (crate::firmware::BASIC, basic::build),
     (crate::firmware::DFS, dfs::build),
     (crate::firmware::PLUS1, plus1::build),
+    (crate::firmware::C64_CHARACTER, c64::charset::build),
+    (crate::firmware::C64_BASIC, c64::basic_image),
+    (crate::firmware::C64_KERNAL, c64::kernal_image),
+    (crate::firmware::C1541_DOS, c1541::build),
 ];

@@ -24,7 +24,7 @@ store, and `window`, over the window channel.
 | `shelf::Shelf` | The library window's model: a card of each machine's last screen and name, the commands *New*, *Start*, *Settings*, *Duplicate* and *Delete* above them, the band beneath saying what the chosen machine is; double-click and Return start, Delete deletes, the arrows choose, a secondary press asks for the card's menu. One layout serves the paint and the hit test. |
 | `shelf::LibraryLook` | The library window's title and the size it opens at. |
 | `shelf::Pictures` | Each machine's last screen drawn once at the cards' size. |
-| `assistant::Assistant` | The *New Machine* dialog over an application's models: a model, a name, and the model's one further choice. |
+| `assistant::Assistant` | The *New Machine* dialog over an application's models: a model, a name, and the further choices a machine of that model is made with, a row each. |
 | `menu::card_menu`, `card_command` | A card's menu — Start (Resume, Show Window), Settings, Duplicate, Delete — and, while the machine runs, its own rows. |
 | `menu::bar_rows`, `LIBRARY_ROW`, `BAR_CLICK` | The icon-bar menu's own row, *Machine Library*, between the information row and *Quit*, and the slot's click that opens the library. |
 | `menu::Followed` | A menu kept up, restated only when what it shows changes. |

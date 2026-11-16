@@ -10,10 +10,12 @@ use alloc::vec::Vec;
 
 use tairix_riscos_arm::mmu::{Frame, FrameKind, Table, PAGE_SIZE};
 
-use super::super::guest::{Granted, Guest, PageEntry, Service};
+use super::super::guest::{Guest, PageEntry, Service};
 use super::super::layout::APPLICATION;
 use super::super::{Holder, Memory};
-use super::{signature, Area, AreaError, AreaFlags, Failure, Handler, Id, Shape, FREE_POOL};
+use super::{
+    lower_copy, signature, Area, AreaError, AreaFlags, Failure, Handler, Id, Key, Shape, FREE_POOL,
+};
 
 /// The most pages one grow handler call names: RISC OS's page block.
 pub(super) const CHUNK: u32 = 63;
@@ -30,6 +32,20 @@ fn signed(bytes: u32) -> i32 {
     i32::try_from(bytes).unwrap_or(i32::MAX)
 }
 
+/// Area `number` as a service call names it; past the numbers a caller can
+/// name, as the most it can.
+pub(super) fn named(number: u32) -> i32 {
+    signed(number)
+}
+
+/// The pages a block names, and those another holder has.
+struct Wanted {
+    /// Each page, with where in `moving` it is when another holder has it.
+    pages: Vec<(Frame, Option<usize>)>,
+    /// The pages another holder has, where it has them: the ones to move.
+    moving: Vec<PageEntry>,
+}
+
 impl Memory {
     /// `OS_ChangeDynamicArea`: moves `bytes` into area `number`, or out of it
     /// when negative, returning the bytes moved. The free pool's change is
@@ -40,6 +56,10 @@ impl Memory {
         bytes: i32,
         guest: &mut G,
     ) -> Result<u32, Failure> {
+        // Service handlers are not run from an interrupt.
+        if guest.in_interrupt() {
+            return Err(Failure::none(AreaError::NotAllMoved));
+        }
         let refused = |memory: &mut Self, guest: &mut G| {
             guest.service(
                 memory,
@@ -50,34 +70,33 @@ impl Memory {
             );
             Err(Failure::none(AreaError::NotAllMoved))
         };
-        if self.areas.resizing || guest.in_interrupt() {
+        if self.areas.resizing {
             return refused(self, guest);
         }
         let Ok(area) = u32::try_from(number) else {
             return refused(self, guest);
         };
-        let id = if area == FREE_POOL {
+        let key = if area == FREE_POOL {
             None
         } else {
-            let Ok(id) = self.areas.id(area) else {
+            let Some(key) = self.areas.id(area).ok().and_then(|id| self.areas.key(id)) else {
                 return refused(self, guest);
             };
-            let Some(found) = self.areas.area(id) else {
+            let Some(found) = self.areas.area_at(key) else {
                 return refused(self, guest);
             };
             match (&found.shape, found.handler) {
                 (Shape::Sparse { .. }, _) => return refused(self, guest),
                 (Shape::Pmp(_), Some(handler)) => {
-                    return self.resize_pool(id, handler, bytes, number, guest);
+                    return self.resize_pool(key.id, handler, bytes, number, guest);
                 }
-                _ => Some(id),
+                _ => Some(key),
             }
         };
         // Rounded up to a page, so a shrink shrinks by less; RISC OS's
         // overflow near the top turns into a shrink, and does here too.
-        let rounded = (i64::from(bytes) + i64::from(PAGE_SIZE) - 1) & !(i64::from(PAGE_SIZE) - 1);
-        let [a, b, c, d, ..] = rounded.to_le_bytes();
-        let rounded = i32::from_le_bytes([a, b, c, d]);
+        let page = (PAGE_SIZE - 1).cast_signed();
+        let rounded = bytes.wrapping_add(page) & !page;
         if rounded == 0 {
             guest.service(
                 self,
@@ -89,11 +108,11 @@ impl Memory {
             return Ok(0);
         }
         let amount = rounded.unsigned_abs();
-        match (id, rounded > 0) {
+        match (key, rounded > 0) {
             (None, true) => self.shrink_application(amount, guest),
             (None, false) => self.grow_application(amount, guest),
-            (Some(id), false) => self.shrink_area(id, amount, true, guest),
-            (Some(id), true) => self.grow_area(id, amount, true, guest),
+            (Some(key), false) => self.shrink_area(key, amount, true, guest),
+            (Some(key), true) => self.grow_area(key, amount, true, guest),
         }
     }
 
@@ -194,11 +213,16 @@ impl Memory {
         let slot = self
             .current_slot()
             .ok_or(Failure::none(AreaError::NotAllMoved))?;
-        self.free_for(bytes / PAGE_SIZE, None, guest);
         let grown = self
             .slot_size(slot)
             .and_then(|size| size.checked_add(bytes))
             .ok_or(Failure::none(AreaError::NotAllMoved))?;
+        // A slot that may not reach the size takes nothing from the
+        // shrinkable areas.
+        if !self.slot_may_reach(slot, grown) {
+            return Err(Failure::none(AreaError::NotAllMoved));
+        }
+        self.free_for(bytes / PAGE_SIZE, None, guest);
         self.set_slot_size(slot, grown)
             .map_err(|_| Failure::none(AreaError::NotAllMoved))?;
         guest.service(
@@ -211,49 +235,78 @@ impl Memory {
         Ok(bytes)
     }
 
-    /// Shrinks the shrinkable areas, most recently made first and `except`
-    /// spared, until `pages` are free or none can give more.
-    pub(super) fn free_for<G: Guest + ?Sized>(
-        &mut self,
-        pages: u32,
-        except: Option<Id>,
-        guest: &mut G,
-    ) {
-        let mut index = 0;
-        while self.free_pages() < pages {
-            let Some(&id) = self.areas.shrinkable.get(index) else {
+    /// Shrinks the shrinkable areas as they stand, most recently made first
+    /// and `except` spared, until `pages` are free or none can give more.
+    fn free_for<G: Guest + ?Sized>(&mut self, pages: u32, except: Option<Key>, guest: &mut G) {
+        for key in self.areas.shrinkable_now() {
+            if self.free_pages() >= pages {
                 return;
-            };
-            index += 1;
-            if Some(id) == except {
+            }
+            if Some(key) == except {
                 continue;
             }
-            let size = self.areas.area(id).map_or(0, Area::size);
+            let Some(size) = self.areas.area_at(key).map(Area::size) else {
+                continue;
+            };
             let short = (pages - self.free_pages()).saturating_mul(PAGE_SIZE);
-            let _ = self.shrink_area(id, short.min(size), true, guest);
+            let _ = self.shrink_area(key, short.min(size), true, guest);
         }
+    }
+
+    /// Frees `pages` for an area other than `except`: the shrinkable areas
+    /// first, then application space's top where it holds the rest.
+    pub(super) fn make_room<G: Guest + ?Sized>(
+        &mut self,
+        pages: u32,
+        except: Option<Key>,
+        guest: &mut G,
+    ) -> Result<(), AreaError> {
+        self.free_for(pages, except, guest);
+        if self.free_pages() < pages {
+            let application = self
+                .current_slot()
+                .and_then(|slot| self.slot_size(slot))
+                .unwrap_or(0)
+                / PAGE_SIZE;
+            let short = pages - self.free_pages();
+            // Application space that cannot cover the rest is not shrunk
+            // for nothing.
+            if application < short {
+                return Err(AreaError::NotAllMoved);
+            }
+            self.shrink_application(short.saturating_mul(PAGE_SIZE), guest)
+                .map_err(|failure| failure.error)?;
+        }
+        if self.free_pages() < pages {
+            return Err(AreaError::NotAllMoved);
+        }
+        Ok(())
     }
 
     /// Takes up to `bytes` from the top of an area; `counted` when the Task
     /// Manager is to hear of it.
     pub(super) fn shrink_area<G: Guest + ?Sized>(
         &mut self,
-        id: Id,
+        key: Key,
         bytes: u32,
         counted: bool,
         guest: &mut G,
     ) -> Result<u32, Failure> {
         let area = self
             .areas
-            .area(id)
+            .area_at(key)
             .ok_or(Failure::none(AreaError::BadDynamicArea))?;
+        // Only an area of its own pages gives them back by shrinking.
+        if !matches!(area.shape, Shape::Pages(_)) {
+            return Err(Failure::none(AreaError::NotAllMoved));
+        }
         let (number, size, handler) = (area.number, area.size(), area.handler);
         let amount = bytes.min(size);
         let short = amount < bytes;
         let allowed = if amount == 0 {
             0
         } else {
-            self.areas.resizing = true;
+            let was = core::mem::replace(&mut self.areas.resizing, true);
             let allowed = match handler {
                 Some(handler) => guest
                     .pre_shrink(self, handler, amount, size)
@@ -263,17 +316,17 @@ impl Memory {
             let allowed = match allowed {
                 Ok(allowed) => allowed,
                 Err(error) => {
-                    self.areas.resizing = false;
+                    self.areas.resizing = was;
                     return Err(Failure::none(AreaError::refused(error)));
                 }
             };
             if allowed > 0 {
-                self.drop_area_pages(id, allowed / PAGE_SIZE);
+                self.drop_area_pages(key.id, allowed / PAGE_SIZE);
             }
-            self.areas.resizing = false;
+            self.areas.resizing = was;
             if allowed > 0 {
                 if let Some(handler) = handler {
-                    let size = self.areas.area(id).map_or(0, Area::size);
+                    let size = self.areas.area_at(key).map_or(0, Area::size);
                     guest.post_shrink(self, handler, allowed, size);
                 }
                 if counted {
@@ -286,7 +339,7 @@ impl Memory {
             self,
             Service::MemoryMoved {
                 bytes: -signed(allowed),
-                area: signed(number),
+                area: named(number),
             },
         );
         if short || allowed < amount {
@@ -303,37 +356,37 @@ impl Memory {
     /// them back to the free pool; a doubly mapped area's first copy then
     /// moves up by what left.
     fn drop_area_pages(&mut self, id: Id, pages: u32) {
-        let Some(area) = self.areas.area_mut(id) else {
+        let Self {
+            areas,
+            mmu,
+            pages: records,
+            ..
+        } = self;
+        let Some(area) = areas.area_mut(id) else {
             return;
         };
-        let (base, access, doubly) = (area.base, area.access(), area.doubly());
+        let (base, access, doubly) = (area.base, area.access, area.doubly());
         let Shape::Pages(list) = &mut area.shape else {
             return;
         };
         let old = u32::try_from(list.len()).unwrap_or(0);
         let keep = old.saturating_sub(pages);
-        let gone = list.split_off(keep as usize);
-        let first = |count: u32, index: u32| base - count * PAGE_SIZE + index * PAGE_SIZE;
-        for (index, &frame) in (keep..).zip(&gone) {
-            let _ = self.mmu.unmap(Table::Global, base + index * PAGE_SIZE);
+        for (index, &frame) in (keep..).zip(&list[keep as usize..]) {
+            let _ = mmu.unmap(Table::Global, base + index * PAGE_SIZE);
             if doubly {
-                let _ = self.mmu.unmap(Table::Global, first(old, index));
+                let _ = mmu.unmap(Table::Global, lower_copy(base, old, index));
             }
-            self.pages.free(frame);
+            records.free(frame);
         }
+        list.truncate(keep as usize);
         if doubly {
-            let kept = match self.areas.area(id).map(|area| &area.shape) {
-                Some(Shape::Pages(list)) => list.clone(),
-                _ => Vec::new(),
-            };
             // Moving up, each page lands where one above it was, so the
-            // highest moves first.
-            for (index, &frame) in kept.iter().enumerate().rev() {
+            // highest moves first; the area's reservation is its own, so
+            // the place left is free.
+            for (index, &frame) in list.iter().enumerate().rev() {
                 let index = u32::try_from(index).unwrap_or(0);
-                let _ = self.mmu.unmap(Table::Global, first(old, index));
-                let _ = self
-                    .mmu
-                    .map(Table::Global, first(keep, index), frame, access);
+                let _ = mmu.unmap(Table::Global, lower_copy(base, old, index));
+                let _ = mmu.map(Table::Global, lower_copy(base, keep, index), frame, access);
             }
         }
     }
@@ -342,50 +395,45 @@ impl Memory {
     /// grow's refused chunk.
     pub(super) fn grow_area<G: Guest + ?Sized>(
         &mut self,
-        id: Id,
+        key: Key,
         bytes: u32,
         counted: bool,
         guest: &mut G,
     ) -> Result<u32, Failure> {
-        let area = self
-            .areas
-            .area(id)
-            .ok_or(Failure::none(AreaError::BadDynamicArea))?;
-        let (number, size, max, flags) = (area.number, area.size(), area.max, area.flags);
-        if bytes > max.saturating_sub(size) {
+        let unmoved = |memory: &mut Self, number: u32, guest: &mut G, error: AreaError| {
             guest.service(
-                self,
+                memory,
                 Service::MemoryMoved {
                     bytes: 0,
-                    area: signed(number),
+                    area: named(number),
                 },
             );
-            return Err(Failure::none(AreaError::NotAllMoved));
+            Err(Failure::none(error))
+        };
+        let area = self
+            .areas
+            .area_at(key)
+            .ok_or(Failure::none(AreaError::BadDynamicArea))?;
+        let (number, size, max) = (area.number, area.size(), area.max);
+        if bytes > max.saturating_sub(size) {
+            return unmoved(self, number, guest, AreaError::NotAllMoved);
         }
         let pages = bytes / PAGE_SIZE;
-        self.free_for(pages, Some(id), guest);
-        if self.free_pages() < pages {
-            let application = self
-                .current_slot()
-                .and_then(|slot| self.slot_size(slot))
-                .unwrap_or(0)
-                / PAGE_SIZE;
-            let short = pages - self.free_pages();
-            if application >= short {
-                self.shrink_application(short * PAGE_SIZE, guest)
-                    .map_err(|failure| Failure::none(failure.error))?;
-            }
+        self.make_room(pages, Some(key), guest)
+            .map_err(Failure::none)?;
+        // Guest code ran making room: the area may have gone, or grown.
+        let Some(area) = self.areas.area_at(key) else {
+            return unmoved(self, number, guest, AreaError::BadDynamicArea);
+        };
+        let (size, max, flags) = (area.size(), area.max, area.flags);
+        if bytes > max.saturating_sub(size) {
+            return unmoved(self, number, guest, AreaError::NotAllMoved);
         }
-        if self.free_pages() < pages {
-            return Err(Failure::none(AreaError::NotAllMoved));
-        }
-        let chunked = flags.has(AreaFlags::NEEDS_SPECIFIC_PAGES)
-            || flags.has(AreaFlags::NEEDS_DMA)
-            || flags.has(AreaFlags::PMP);
+        let chunked = flags.has(AreaFlags::NEEDS_SPECIFIC_PAGES) || flags.has(AreaFlags::NEEDS_DMA);
         let moved = if chunked {
-            self.grow_in_chunks(id, pages, guest)
+            self.grow_in_chunks(key.id, pages, guest)
         } else {
-            self.grow_at_once(id, pages, guest)
+            self.grow_at_once(key.id, pages, guest)
         };
         let (Ok(done) | Err(Failure { moved: done, .. })) = moved;
         if counted && done > 0 {
@@ -395,7 +443,7 @@ impl Memory {
             self,
             Service::MemoryMoved {
                 bytes: signed(done),
-                area: signed(number),
+                area: named(number),
             },
         );
         moved
@@ -414,17 +462,17 @@ impl Memory {
             .area(id)
             .ok_or(Failure::none(AreaError::BadDynamicArea))?;
         let (size, handler) = (area.size(), area.handler);
-        self.areas.resizing = true;
+        let was = core::mem::replace(&mut self.areas.resizing, true);
         if let Some(handler) = handler {
             if let Err(error) = guest.pre_grow(self, handler, &mut [], bytes, size) {
-                self.areas.resizing = false;
+                self.areas.resizing = was;
                 return Err(Failure::none(AreaError::refused(error)));
             }
         }
         let added = self
             .take_pages(id, size / PAGE_SIZE, pages)
             .and_then(|frames| self.add_area_pages(id, &frames));
-        self.areas.resizing = false;
+        self.areas.resizing = was;
         added.map_err(Failure::none)?;
         if let Some(handler) = handler {
             let size = self.areas.area(id).map_or(0, Area::size);
@@ -460,11 +508,12 @@ impl Memory {
     /// Maps `frames`, held, onto the top of an area and lets go of them;
     /// on failure they are freed and the area is as it was.
     fn add_area_pages(&mut self, id: Id, frames: &[Frame]) -> Result<(), AreaError> {
-        let Some(area) = self.areas.area_mut(id) else {
+        let Self { areas, mmu, .. } = self;
+        let Some(area) = areas.area_mut(id) else {
             self.forget_pages(frames);
             return Err(AreaError::BadDynamicArea);
         };
-        let (base, access, doubly) = (area.base, area.access(), area.doubly());
+        let (base, access, doubly) = (area.base, area.access, area.doubly());
         let Shape::Pages(list) = &mut area.shape else {
             self.forget_pages(frames);
             return Err(AreaError::NotAllMoved);
@@ -475,27 +524,57 @@ impl Memory {
         }
         let old = u32::try_from(list.len()).unwrap_or(0);
         let new = old + u32::try_from(frames.len()).unwrap_or(0);
-        let kept = if doubly { list.clone() } else { Vec::new() };
-        list.extend_from_slice(frames);
-        let first = |count: u32, index: u32| base - count * PAGE_SIZE + index * PAGE_SIZE;
         // Moving down, the highest page lands where the lowest was, so each
-        // moves after the one below it has.
-        for (index, &frame) in (0u32..).zip(&kept) {
-            let _ = self.mmu.unmap(Table::Global, first(old, index));
-            let _ = self
-                .mmu
-                .map(Table::Global, first(new, index), frame, access);
-        }
-        for (index, &frame) in (old..).zip(frames) {
-            let _ = self
-                .mmu
-                .map(Table::Global, base + index * PAGE_SIZE, frame, access);
-            if doubly {
-                let _ = self
-                    .mmu
-                    .map(Table::Global, first(new, index), frame, access);
+        // of the first copies moves after the one below it has; the new
+        // pages' first copies go where the old ones were.
+        if doubly {
+            for (index, &frame) in (0u32..).zip(list.iter()) {
+                let _ = mmu.unmap(Table::Global, lower_copy(base, old, index));
+                let _ = mmu.map(Table::Global, lower_copy(base, new, index), frame, access);
             }
-            let _ = self.mmu.release(frame);
+        }
+        let mut mapped = 0;
+        let mut failed = false;
+        for (index, &frame) in (old..).zip(frames) {
+            if mmu
+                .map(Table::Global, base + index * PAGE_SIZE, frame, access)
+                .is_err()
+            {
+                failed = true;
+                break;
+            }
+            if doubly
+                && mmu
+                    .map(Table::Global, lower_copy(base, new, index), frame, access)
+                    .is_err()
+            {
+                let _ = mmu.unmap(Table::Global, base + index * PAGE_SIZE);
+                failed = true;
+                break;
+            }
+            mapped += 1;
+        }
+        if failed {
+            for (index, _) in (old..).zip(&frames[..mapped]) {
+                let _ = mmu.unmap(Table::Global, base + index * PAGE_SIZE);
+                if doubly {
+                    let _ = mmu.unmap(Table::Global, lower_copy(base, new, index));
+                }
+            }
+            if doubly {
+                // Back up, the highest first, to where they were.
+                for (index, &frame) in list.iter().enumerate().rev() {
+                    let index = u32::try_from(index).unwrap_or(0);
+                    let _ = mmu.unmap(Table::Global, lower_copy(base, new, index));
+                    let _ = mmu.map(Table::Global, lower_copy(base, old, index), frame, access);
+                }
+            }
+            self.forget_pages(frames);
+            return Err(AreaError::NotAllMoved);
+        }
+        list.extend_from_slice(frames);
+        for &frame in frames {
+            let _ = mmu.release(frame);
         }
         Ok(())
     }
@@ -510,17 +589,17 @@ impl Memory {
     ) -> Result<u32, Failure> {
         let mut moved = 0;
         let mut left = pages;
-        self.areas.resizing = true;
+        let was = core::mem::replace(&mut self.areas.resizing, true);
         while left > 0 {
             let chunk = left.min(CHUNK);
             if let Err(error) = self.grow_chunk(id, chunk, guest) {
-                self.areas.resizing = false;
+                self.areas.resizing = was;
                 return Err(Failure { error, moved });
             }
             moved += chunk * PAGE_SIZE;
             left -= chunk;
         }
-        self.areas.resizing = false;
+        self.areas.resizing = was;
         Ok(moved)
     }
 
@@ -542,19 +621,22 @@ impl Memory {
         for (index, entry) in (size / PAGE_SIZE..).zip(block.iter_mut()) {
             entry.logical = base + index * PAGE_SIZE;
         }
-        let mut granted = Granted { reserved: false };
-        if flags.has(AreaFlags::NEEDS_DMA) {
+        // A DMA area's pages are the kernel's to choose; its handler sees
+        // them, and may still refuse.
+        let dma = flags.has(AreaFlags::NEEDS_DMA);
+        if dma {
             self.pick_pages(block)?;
-        } else if let Some(handler) = handler {
-            granted = guest
+        }
+        if let Some(handler) = handler {
+            guest
                 .pre_grow(self, handler, block, bytes, size)
                 .map_err(AreaError::refused)?;
         }
-        let named = block.first().is_some_and(|entry| entry.page.is_some());
-        if !named {
+        let named = !dma && block.first().is_some_and(|entry| entry.page.is_some());
+        if !dma && !named {
             self.pick_pages(block)?;
         }
-        if let Err(error) = self.claim_pages(id, size / PAGE_SIZE, block, granted, named, guest) {
+        if let Err(error) = self.claim_pages(id, size / PAGE_SIZE, block, named, guest) {
             if let Some(handler) = handler {
                 guest.post_grow(self, handler, &[], 0, size);
             }
@@ -567,21 +649,60 @@ impl Memory {
         Ok(())
     }
 
-    /// Fills a page block with the lowest free pages no reservation keeps.
+    /// Fills a page block with the lowest free pages.
     fn pick_pages(&self, block: &mut [PageEntry]) -> Result<(), AreaError> {
         let mut from = Frame::new(0);
         for entry in block.iter_mut() {
-            let page = loop {
-                let page = self.mmu.next_free(from).ok_or(AreaError::NotAllMoved)?;
-                from = Frame::new(page.number() + 1);
-                if !self.pages.get(page.number()).reserved {
-                    break page;
-                }
-            };
+            let page = self.mmu.next_free(from).ok_or(AreaError::NotAllMoved)?;
+            from = Frame::new(page.number() + 1);
             entry.page = Some(page.number());
             entry.physical = page.number() * PAGE_SIZE;
         }
         Ok(())
+    }
+
+    /// The pages a block names for area `id`. A page the area may not take,
+    /// or named twice, refuses the whole block.
+    fn wanted_pages(&self, id: Id, block: &[PageEntry]) -> Result<Wanted, AreaError> {
+        let mut wanted: Vec<(Frame, Option<usize>)> = Vec::new();
+        wanted
+            .try_reserve(block.len())
+            .map_err(|_| AreaError::NotAllMoved)?;
+        let mut moving = Vec::new();
+        moving
+            .try_reserve(block.len())
+            .map_err(|_| AreaError::NotAllMoved)?;
+        for entry in block {
+            let page = entry.page.ok_or(AreaError::CantGetPhysicalMemory)?;
+            let frame = Frame::new(page);
+            let record = self.pages.get(page);
+            let kernel = record.holder == Some(Holder::Kernel);
+            let ours = matches!(record.holder, Some(Holder::Area { area, .. }) if area == id);
+            let unheld_in_use = record.holder.is_none() && !self.mmu.is_free(frame);
+            if page >= self.ceiling.pages()
+                || record.unavailable
+                || kernel
+                || ours
+                || unheld_in_use
+                || wanted.iter().any(|&(other, _)| other == frame)
+            {
+                return Err(AreaError::CantGetPhysicalMemory);
+            }
+            let mut held = None;
+            if let Some(holder) = record.holder {
+                held = Some(moving.len());
+                moving.push(PageEntry {
+                    page: Some(page),
+                    logical: self.places_of(holder)[0].map_or(0, |place| place.address),
+                    physical: page * PAGE_SIZE,
+                });
+            }
+            wanted.push((frame, held));
+        }
+        Ok(Wanted {
+            pages: wanted,
+            moving,
+        })
     }
 
     /// Takes the pages a block names into an area, as its pages from
@@ -592,85 +713,94 @@ impl Memory {
         id: Id,
         first: u32,
         block: &[PageEntry],
-        granted: Granted,
         named: bool,
         guest: &mut G,
     ) -> Result<(), AreaError> {
-        let mut wanted = Vec::new();
-        wanted
-            .try_reserve(block.len())
-            .map_err(|_| AreaError::NotAllMoved)?;
-        for entry in block {
-            let page = entry.page.ok_or(AreaError::CantGetPhysicalMemory)?;
-            let record = self.pages.get(page);
-            let kernel = record.holder == Some(Holder::Kernel);
-            let ours = matches!(record.holder, Some(Holder::Area { area, .. }) if area == id);
-            if page >= self.ceiling.pages()
-                || record.unavailable
-                || kernel
-                || ours
-                || (record.reserved && !granted.reserved)
-                || wanted.contains(&page)
-            {
-                return Err(AreaError::CantGetPhysicalMemory);
-            }
-            wanted.push(page);
+        let Wanted {
+            pages: wanted,
+            moving,
+        } = self.wanted_pages(id, block)?;
+        // Every page's record is made before any moves.
+        if let Some(highest) = wanted.iter().map(|&(frame, _)| frame.number()).max() {
+            self.pages
+                .get_mut(highest)
+                .map_err(|_| AreaError::NotAllMoved)?;
         }
-        if named {
-            guest.service(self, Service::PagesUnsafe { pages: block });
+        let announced = named && !moving.is_empty();
+        if announced {
+            guest.service(self, Service::PagesUnsafe { pages: &moving });
             guest.service(self, Service::ClaimFiq);
         }
+        // Each page moved, and the page that took its place, in step.
+        let mut moved = Vec::new();
         let mut replaced = Vec::new();
-        let mut taken = Vec::new();
-        let _ = replaced.try_reserve(block.len());
-        let _ = taken.try_reserve(block.len());
-        let mut outcome = Ok(());
-        for (index, &page) in (first..).zip(&wanted) {
-            let frame = Frame::new(page);
-            let step = if self.mmu.is_free(frame) {
-                self.mmu
+        let mut claimed = Vec::new();
+        let reserved = moved
+            .try_reserve(moving.len())
+            .and_then(|()| replaced.try_reserve(moving.len()))
+            .and_then(|()| claimed.try_reserve(block.len()));
+        let mut outcome = reserved.map_err(|_| AreaError::NotAllMoved);
+        // The free pages first, so no replacement is drawn from the block.
+        // Guest code ran since they were looked at, so each is taken only
+        // as it was then: a free page still free, a held one still held.
+        let free = (first..)
+            .zip(&wanted)
+            .filter(|(_, (_, held))| held.is_none());
+        let held = (first..)
+            .zip(&wanted)
+            .filter(|(_, (_, held))| held.is_some());
+        for (index, &(frame, held)) in free.chain(held) {
+            if outcome.is_err() {
+                break;
+            }
+            let step = match held.and_then(|at| moving.get(at).copied()) {
+                None => self
+                    .mmu
                     .allocate_at(frame, FrameKind::Memory)
-                    .map_err(|_| AreaError::CantGetPhysicalMemory)
-            } else {
-                self.replace_page(frame).map(|new| {
+                    .map_err(|_| AreaError::CantGetPhysicalMemory),
+                Some(before) => self.replace_page(frame).map(|new| {
+                    moved.push(before);
                     replaced.push(PageEntry {
                         page: Some(new.number()),
-                        logical: 0,
+                        logical: before.logical,
                         physical: new.number() * PAGE_SIZE,
                     });
-                })
+                }),
             };
             if let Err(error) = step {
                 outcome = Err(error);
                 break;
             }
-            if let Ok(record) = self.pages.get_mut(page) {
+            // Its record was made above.
+            if let Ok(record) = self.pages.get_mut(frame.number()) {
                 record.holder = Some(Holder::Area { area: id, index });
                 record.unavailable = named;
             }
-            taken.push(frame);
+            claimed.push(frame);
         }
-        if named {
+        if announced {
             guest.service(self, Service::ReleaseFiq);
             guest.service(
                 self,
                 Service::PagesSafe {
-                    old: block,
+                    old: &moved,
                     new: &replaced,
                 },
             );
         }
-        match outcome {
-            Ok(()) => self.add_area_pages(id, &taken),
-            Err(error) => {
-                self.forget_pages(&taken);
-                Err(error)
-            }
+        if let Err(error) = outcome {
+            self.forget_pages(&claimed);
+            return Err(error);
         }
+        // The area takes them in the block's order; `claimed` has room.
+        claimed.clear();
+        claimed.extend(wanted.iter().map(|&(frame, _)| frame));
+        self.add_area_pages(id, &claimed)
     }
 
-    /// Moves `frame`'s holder onto a free frame carrying its contents,
-    /// leaving `frame` held for the caller; returns the frame in its place.
+    /// Moves `frame`'s holder onto a free frame carrying its contents and
+    /// its watches, leaving `frame` held for the caller; returns the frame
+    /// in its place.
     pub(super) fn replace_page(&mut self, frame: Frame) -> Result<Frame, AreaError> {
         let record = self.pages.get(frame.number());
         let holder = record.holder.ok_or(AreaError::CantGetPhysicalMemory)?;
@@ -679,14 +809,21 @@ impl Memory {
             .mmu
             .allocate(FrameKind::Memory)
             .map_err(|_| AreaError::CantGetPhysicalMemory)?;
-        if let Some(from) = self.mmu.words(frame).copied() {
-            if let Some(to) = self.mmu.words_mut(new) {
-                *to = from;
-            }
+        // The new page's record is made before anything moves.
+        let carried = self.pages.get_mut(new.number()).is_ok()
+            && self
+                .mmu
+                .copy_frame(frame, new)
+                .and_then(|()| self.mmu.move_watches(frame, new))
+                .is_ok();
+        if !carried {
+            let _ = self.mmu.release(new);
+            return Err(AreaError::CantGetPhysicalMemory);
         }
         let _ = self.mmu.hold(frame);
         for place in places.iter().flatten() {
             if let Some((_, access)) = self.mmu.lookup(place.table, place.address) {
+                // Mapping where a page was just unmapped cannot fail.
                 let _ = self.mmu.unmap(place.table, place.address);
                 let _ = self.mmu.map(place.table, place.address, new, access);
             }
@@ -704,10 +841,7 @@ impl Memory {
             // A pool keeps its pages held; anything else's are its mappings'.
             let _ = self.mmu.release(new);
         }
-        if let Ok(slot) = self.pages.get_mut(frame.number()) {
-            slot.holder = None;
-            slot.unavailable = false;
-        }
+        self.pages.free(frame);
         Ok(new)
     }
 
@@ -719,11 +853,9 @@ impl Memory {
 
     /// Where a page `holder` holds is mapped.
     fn places_of(&self, holder: Holder) -> [Option<Place>; 2] {
-        let global = |address: Option<u32>| {
-            address.map(|address| Place {
-                table: Table::Global,
-                address,
-            })
+        let global = |address: u32| Place {
+            table: Table::Global,
+            address,
         };
         match holder {
             Holder::Slot { slot, index } => [
@@ -735,13 +867,14 @@ impl Memory {
             ],
             Holder::Area { area, index } => match self.areas.area(area) {
                 Some(area) => match &area.shape {
-                    Shape::Pages(_) => area.addresses(index).map(global),
-                    Shape::Sparse { .. } => [global(Some(area.base + index * PAGE_SIZE)), None],
+                    Shape::Pages(_) => {
+                        let (upper, lower) = area.addresses(index);
+                        [Some(global(upper)), lower.map(global)]
+                    }
+                    Shape::Sparse { .. } => [Some(global(area.base + index * PAGE_SIZE)), None],
                     Shape::Pmp(pool) => [
-                        global(
-                            pool.window_of(index)
-                                .map(|window| area.base + window * PAGE_SIZE),
-                        ),
+                        pool.window_of(index)
+                            .map(|window| global(area.base + window * PAGE_SIZE)),
                         None,
                     ],
                 },

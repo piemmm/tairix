@@ -1,0 +1,17 @@
+# The KERNAL's screen editor: the cursor keys, deleting, quote mode and
+# clearing the screen, as the originals answer them (plans/C64.md §6).
+
+scenario delete_and_return
+script type:PRINT "ABCDEF;press:DEL;press:DEL;type:"\n;wait:0.5
+
+scenario cursor_up_and_over
+script type:PRINT 12345\n;wait:0.5;down:SHIFT;press:DOWN;press:DOWN;press:DOWN;press:DOWN;up:SHIFT;press:RIGHT;press:RIGHT;press:RIGHT;press:RIGHT;press:RIGHT;press:RIGHT;press:RIGHT;type:9\n;wait:0.5
+
+scenario quote_mode
+script type:PRINT "A;press:RIGHT;press:HOME;type:B"\n;wait:0.5
+
+scenario clear_screen
+script type:PRINT "GONE"\n;down:SHIFT;press:HOME;up:SHIFT;type:PRINT "KEPT"\n;wait:0.5
+
+scenario run_stop_and_restore
+script type:10 GOTO 10\n;type:RUN\n;wait:0.5;stoprestore;wait:0.5;type:PRINT "AGAIN"\n;wait:0.5

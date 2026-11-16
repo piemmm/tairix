@@ -352,6 +352,21 @@ impl Load for bool {
     }
 }
 
+impl Save for f64 {
+    fn save(&self, w: &mut Writer) {
+        w.put(&self.to_bits());
+    }
+}
+
+/// Only a finite value restores: nothing a machine computes is otherwise.
+impl Load for f64 {
+    fn load(r: &mut Reader<'_>) -> Result<Self, SnapshotError> {
+        let value = Self::from_bits(r.get()?);
+        Reader::check(value.is_finite())?;
+        Ok(value)
+    }
+}
+
 impl<T: Save> Save for Option<T> {
     fn save(&self, w: &mut Writer) {
         match self {

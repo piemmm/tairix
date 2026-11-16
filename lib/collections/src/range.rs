@@ -264,9 +264,38 @@ impl<K: RangeKey, V> RangeMap<K, V> {
         })
     }
 
+    /// The gaps inside `query`, highest first: [`Self::gaps`] walked down
+    /// from the query's end.
+    fn gaps_downward(&self, query: Range<K>) -> impl Iterator<Item = Range<K>> + '_ {
+        let mut cursor = query.end;
+        let start = query.start;
+        let mut held = self.overlapping(query).rev();
+        core::iter::from_fn(move || {
+            if cursor <= start {
+                return None;
+            }
+            for (range, _) in held.by_ref() {
+                let gap = range.end..cursor;
+                cursor = cursor.min(range.start);
+                if gap.start < gap.end {
+                    return Some(gap);
+                }
+                if cursor <= start {
+                    return None;
+                }
+            }
+            let lowest = start..cursor;
+            cursor = start;
+            Some(lowest)
+        })
+    }
+
     /// Every held range intersecting `query`, in ascending order, each with
     /// its value. An empty `query` intersects nothing.
-    pub fn overlapping(&self, query: Range<K>) -> impl Iterator<Item = (Range<K>, &V)> + '_ {
+    pub fn overlapping(
+        &self,
+        query: Range<K>,
+    ) -> impl DoubleEndedIterator<Item = (Range<K>, &V)> + '_ {
         let live = query.start < query.end;
         // At most one held range can start below the query and still reach
         // into it; the rest begin inside it.
@@ -338,15 +367,17 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     /// The highest start inside `within` where `count` free elements fit:
     /// the top of the highest gap that holds them, for a window that hands
     /// ranges out downward from its end.
+    ///
+    /// Walks down from the window's end and stops at the first gap that
+    /// fits, so a placement near the top costs the ranges above it alone.
     #[must_use]
     pub fn last_free(&self, within: Range<K>, count: u64) -> Option<K> {
         if count == 0 {
             return None;
         }
         let gap = self
-            .gaps(within)
-            .filter(|gap| gap.end.distance_from(gap.start) >= count)
-            .last()?;
+            .gaps_downward(within)
+            .find(|gap| gap.end.distance_from(gap.start) >= count)?;
         gap.start.advance(gap.end.distance_from(gap.start) - count)
     }
 

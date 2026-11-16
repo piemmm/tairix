@@ -3,7 +3,7 @@
 
 use super::alu::{self, add_with_carry, shift_immediate, shift_register, Shifted};
 use super::fpa::completed;
-use super::{Cpu, Flow, Stop, Unmodelled};
+use super::{Cpu, Flow, Stop, Unmodelled, PC};
 use crate::bus::Bus;
 use crate::cp15::{Fault, Outcome};
 use crate::instruction::{
@@ -16,8 +16,6 @@ use crate::psr;
 use crate::reg::Reg;
 use crate::word::{high, low};
 
-const PC: Reg = Reg::PC;
-
 /// `value`'s low 32 bits, as the architecture's arithmetic wraps.
 pub(super) const fn wrap(value: i64) -> u32 {
     low(value.cast_unsigned())
@@ -28,6 +26,20 @@ const fn half(value: u32, top: bool) -> i64 {
     let bits = if top { value >> 16 } else { value };
     let b = bits.to_le_bytes();
     i16::from_le_bytes([b[0], b[1]]) as i64
+}
+
+/// The products of `n` and `m` halfword by halfword, summed or, when
+/// `subtract`, the high one taken from the low; `m`'s halves exchanged first
+/// when `exchanged`.
+const fn dual(n: u32, m: u32, exchanged: bool, subtract: bool) -> i64 {
+    let m = if exchanged { m.rotate_right(16) } else { m };
+    let low = half(n, false) * half(m, false);
+    let high = half(n, true) * half(m, true);
+    if subtract {
+        low - high
+    } else {
+        low + high
+    }
 }
 
 /// A byte sign-extended.
@@ -151,13 +163,20 @@ impl Cpu {
 
     /// A branch within the instruction set executing.
     pub(super) const fn branch(&mut self, target: u32) {
-        self.next = if self.mode.is_26bit() {
-            target & psr::R15_PC
+        self.next = self.aligned_pc(target);
+    }
+
+    /// `address` as the PC can hold it in the current state: within the
+    /// 26-bit address space in a 26-bit mode, a halfword in Thumb state, a
+    /// word in ARM state.
+    pub(super) const fn aligned_pc(&self, address: u32) -> u32 {
+        if self.mode.is_26bit() {
+            address & psr::R15_PC
         } else if self.cpsr & psr::T != 0 {
-            target & !1
+            address & !1
         } else {
-            target & !3
-        };
+            address & !3
+        }
     }
 
     /// A branch that selects Thumb by the target's bit 0.
@@ -394,7 +413,11 @@ impl Cpu {
                     if !self.write_spsr(value, bytes) {
                         self.refuse();
                     }
-                } else {
+                } else if !(self.mode.privileged()
+                    && bytes & psr::M != 0
+                    && self.valid_mode(value).is_none()
+                    && self.refuse())
+                {
                     self.write_cpsr(value, bytes, false);
                 }
                 Flow::Next
@@ -663,7 +686,7 @@ impl Cpu {
             if rd == PC && self.profile.modes26() {
                 if self.mode.is_26bit() {
                     self.write_r15_psr(result);
-                } else if !self.restore_cpsr() {
+                } else if self.restore_cpsr().is_none() {
                     self.set_flags(result, Some(carry), overflow);
                 }
             } else {
@@ -685,10 +708,16 @@ impl Cpu {
             self.branch(result);
         } else if !s {
             self.alu_pc(result);
-        } else if self.restore_cpsr() {
-            self.branch(result);
-        } else if !self.refuse() {
-            self.alu_pc(result);
+        } else {
+            match self.restore_cpsr() {
+                Some(true) => self.branch(result),
+                Some(false) => {}
+                None => {
+                    if !self.refuse() {
+                        self.alu_pc(result);
+                    }
+                }
+            }
         }
         Flow::Next
     }
@@ -712,16 +741,7 @@ impl Cpu {
             i64::from(m.cast_signed()),
             i64::from(addend.cast_signed()),
         );
-        let swapped = if high_n { m.rotate_right(16) } else { m };
-        let dual = |subtract: bool| -> i64 {
-            let low = half(n, false) * half(swapped, false);
-            let high = half(n, true) * half(swapped, true);
-            if subtract {
-                low - high
-            } else {
-                low + high
-            }
-        };
+        let dual = |subtract: bool| dual(n, m, high_n, subtract);
         let overflowing = |value: i64| (wrap(value), i32::try_from(value).is_err());
         // The architecture keeps the low 64 bits of the sum and its rounding.
         let most_significant = |product: i64| {
@@ -787,16 +807,7 @@ impl Cpu {
         let m = self.read(rm);
         let accumulator = (u64::from(self.read(hi)) << 32) | u64::from(self.read(lo));
         let signed = accumulator.cast_signed();
-        let swapped = if high_n { m.rotate_right(16) } else { m };
-        let dual = |subtract: bool| -> i64 {
-            let low = half(n, false) * half(swapped, false);
-            let high = half(n, true) * half(swapped, true);
-            if subtract {
-                low - high
-            } else {
-                low + high
-            }
-        };
+        let dual = |subtract: bool| dual(n, m, high_n, subtract);
         let (ns, ms) = (i64::from(n.cast_signed()), i64::from(m.cast_signed()));
         let result = match op {
             LongOp::Umull => u64::from(n) * u64::from(m),
@@ -996,7 +1007,7 @@ impl Cpu {
             Outcome::Done(value) => {
                 if !write {
                     if rt == PC {
-                        self.cpsr = (self.cpsr & !psr::NZCV) | (value & psr::NZCV);
+                        self.set_nzcv(value);
                     } else {
                         self.r[rt.index()] = value;
                     }

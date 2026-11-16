@@ -34,9 +34,9 @@ Stability: `experimental`.
 - `ems` — the LIM expanded memory board: its pages and page registers, which
   `board` shows in the frame by page table.
 - `fpu` — the 8087: exact 80-bit arithmetic rounded once, its transcendentals
-  in 128-bit significands, every instruction with the 8087's exceptions and
-  responses, and its numeric execution unit beside the CPU, each
-  instruction's result committed when it ends.
+  `lib/softfloat`'s elementary functions, every instruction with the 8087's
+  exceptions and responses, and its numeric execution unit beside the CPU,
+  each instruction's result committed when it ends.
 - `debug` — the debugger's side in the worker: the probe on the board, its
   breakpoints, watches and stepping; the listing in MASM's syntax and the
   8080's; the 8087's values written exactly in decimal.

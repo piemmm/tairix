@@ -11,8 +11,8 @@
 use tairix_vdu::code::{self, Operation};
 
 use super::ws::{buffer, var, vdu, vdu_zp, vector};
+use super::Model;
 use super::{copy, has_teletext, return_in_teletext};
-use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 
 /// Where a queued command's last parameter lands.

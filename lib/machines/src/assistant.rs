@@ -1,6 +1,6 @@
 //! The new-machine assistant: a dialog window's client offering an
-//! application's models, the name the one chosen is given, and the one further
-//! choice a machine of that model is made with.
+//! application's models, the name the one chosen is given, and the further
+//! choices a machine of that model is made with, a row each.
 
 use alloc::string::String;
 use alloc::vec;
@@ -23,21 +23,21 @@ pub const TITLE: &str = "New Machine";
 /// The window's width, in logical pixels.
 const WIDTH: u32 = 560;
 
-/// The rows, in order.
+/// The rows, in order: the name, the model, then the model's choices.
 const NAME: usize = 0;
 const MODEL: usize = 1;
-const CHOICE: usize = 2;
+const CHOICES: usize = 2;
 
 /// A model the assistant offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Offer {
     /// What the model is called.
     pub label: &'static str,
-    /// The one further choice a machine of it is made with.
-    pub choice: Choice,
+    /// The further choices a machine of it is made with, a row each.
+    pub choices: &'static [Choice],
 }
 
-/// The one further choice a model makes.
+/// A further choice a model makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     /// A row offering these, the first chosen until another is.
@@ -63,20 +63,21 @@ pub enum Choice {
 pub enum Answer {
     /// Nothing is made.
     Cancel,
-    /// Make a machine of offer `model` called `name`, its further choice the
-    /// one chosen, none where the model's is fixed.
+    /// Make a machine of offer `model` called `name`, its further choices
+    /// those chosen.
     Create {
         /// The offer chosen.
         model: usize,
         /// What it is called.
         name: String,
-        /// The further choice, an index of the model's choices.
-        choice: Option<usize>,
+        /// Each of the model's further choices, an index of its row's
+        /// choices, none where the row is fixed.
+        choices: Vec<Option<usize>>,
     },
 }
 
-/// What a machine of offer `model` with further `choice` is, in a line.
-pub type Describe = fn(usize, Option<usize>) -> String;
+/// What a machine of offer `model` with further `choices` is, in a line.
+pub type Describe = fn(usize, &[Option<usize>]) -> String;
 
 /// The assistant's state.
 #[derive(Debug)]
@@ -86,25 +87,30 @@ pub struct Assistant {
     /// The name each offer is offered under.
     names: Vec<String>,
     model: usize,
-    /// The further choice made, kept across models that offer it.
-    choice: usize,
+    /// Each choice made, by its row's label: kept across the models that
+    /// offer a row so labelled.
+    made: Vec<(&'static str, usize)>,
     describe: Describe,
 }
 
-/// The further choice offer `offer` makes with `choice` chosen, if it makes
-/// one.
-fn chosen(offer: &Offer, choice: usize) -> Option<usize> {
-    match offer.choice {
-        Choice::Offered { choices, .. } => Some(choice.min(choices.len().saturating_sub(1))),
-        Choice::Fixed { .. } => None,
-    }
+/// What `choice` makes, `made` holding the choices made, if it makes
+/// anything: the first of its choices until one is made.
+fn chosen(choice: &Choice, made: &[(&'static str, usize)]) -> Option<usize> {
+    let Choice::Offered { label, choices } = choice else {
+        return None;
+    };
+    let index = made
+        .iter()
+        .find(|(row, _)| row == label)
+        .map_or(0, |&(_, index)| index);
+    Some(index.min(choices.len().saturating_sub(1)))
 }
 
-/// The further choice's row for `offer` with `choice` chosen.
-fn choice_row(offer: &Offer, choice: usize) -> FieldRow {
-    match offer.choice {
+/// The row of `choice`, `made` holding the choices made.
+fn choice_row(choice: &Choice, made: &[(&'static str, usize)]) -> FieldRow {
+    match *choice {
         Choice::Offered { label, choices } => {
-            FieldRow::choice(label, choices, chosen(offer, choice).unwrap_or(0))
+            FieldRow::choice(label, choices, chosen(choice, made).unwrap_or(0))
         }
         Choice::Fixed { label, shown, why } => {
             let mut row = FieldRow::choice(label, &[shown], 0).with_description(why);
@@ -114,6 +120,15 @@ fn choice_row(offer: &Offer, choice: usize) -> FieldRow {
     }
 }
 
+/// What each of `offer`'s choices makes, `made` holding the choices made.
+fn made_of(offer: &Offer, made: &[(&'static str, usize)]) -> Vec<Option<usize>> {
+    offer
+        .choices
+        .iter()
+        .map(|choice| chosen(choice, made))
+        .collect()
+}
+
 impl Assistant {
     /// The assistant offering `offers`, `offered` among them first; `names`
     /// gives the name each is offered under, and `describe` what a machine
@@ -121,21 +136,9 @@ impl Assistant {
     #[must_use]
     pub fn new(offers: Vec<Offer>, names: Vec<String>, offered: usize, describe: Describe) -> Self {
         let model = offered.min(offers.len().saturating_sub(1));
-        let labels: Vec<&str> = offers.iter().map(|offer| offer.label).collect();
-        let name = TextField::new()
-            .with_text(names.get(model).map_or("", String::as_str))
-            .with_max_len(MAX_NAME);
-        let about = offers
-            .get(model)
-            .map(|offer| describe(model, chosen(offer, 0)));
-        let mut model_row = FieldRow::choice("Model", &labels, model);
-        if let Some(about) = about {
-            model_row = model_row.with_description(about);
-        }
-        let mut rows = vec![FieldRow::new("Name", FieldControl::Text(name)), model_row];
-        if let Some(offer) = offers.get(model) {
-            rows.push(choice_row(offer, 0));
-        }
+        let made = Vec::new();
+        let name = names.get(model).map_or("", String::as_str);
+        let column = FieldColumn::new(vec![group(&offers, model, &made, name, describe)]);
         let dialog = Dialog::new(TITLE).in_window().with_actions(vec![
             Button::labelled("Cancel"),
             Button::new(
@@ -143,13 +146,12 @@ impl Assistant {
                 ControlRole::Recommended,
             ),
         ]);
-        let column = FieldColumn::new(vec![FieldGroup::new("MACHINE", rows)]);
         Self {
             form: FormDialog::new(dialog, column, WIDTH),
             offers,
             names,
             model,
-            choice: 0,
+            made,
             describe,
         }
     }
@@ -221,42 +223,41 @@ impl Assistant {
             MODEL => {
                 let was = self.model;
                 self.model = index.min(self.offers.len().saturating_sub(1));
-                let offered = self.names.get(self.model).cloned();
-                if self.typed() == self.names.get(was).map_or("", String::as_str) {
-                    if let Some(offered) = offered {
-                        self.set_name(offered);
-                    }
+                let typed = self.typed();
+                let name = if typed == self.names.get(was).map_or("", String::as_str) {
+                    self.names.get(self.model).map_or("", String::as_str)
+                } else {
+                    typed
+                };
+                let rebuilt = group(&self.offers, self.model, &self.made, name, self.describe);
+                self.form.column_mut().replace(vec![rebuilt]);
+            }
+            row => {
+                let offered = row
+                    .checked_sub(CHOICES)
+                    .and_then(|at| self.offers.get(self.model)?.choices.get(at));
+                let Some(&Choice::Offered { label, .. }) = offered else {
+                    return;
+                };
+                match self.made.iter_mut().find(|(row, _)| *row == label) {
+                    Some((_, made)) => *made = index,
+                    None => self.made.push((label, index)),
                 }
-                let row = self
-                    .offers
-                    .get(self.model)
-                    .map(|offer| choice_row(offer, self.choice));
-                if let (Some(row), Some(held)) = (row, self.row_mut(CHOICE)) {
-                    *held = row;
+                let description = (self.describe)(self.model, &self.chosen());
+                if let Some(row) = self.row_mut(MODEL) {
+                    row.set_description(Some(description));
                 }
             }
-            CHOICE if self.made().is_some() => self.choice = index,
-            _ => return,
-        }
-        let description = (self.describe)(self.model, self.made());
-        if let Some(row) = self.row_mut(MODEL) {
-            row.set_description(Some(description));
         }
         let (bounds, _) = self.form.place(scale, theme);
         damage.add(bounds);
     }
 
-    /// The further choice the model chosen makes, none where it is fixed.
-    fn made(&self) -> Option<usize> {
+    /// What each of the chosen model's choices makes.
+    fn chosen(&self) -> Vec<Option<usize>> {
         self.offers
             .get(self.model)
-            .and_then(|offer| chosen(offer, self.choice))
-    }
-
-    fn set_name(&mut self, name: String) {
-        if let Some(FieldControl::Text(field)) = self.row_mut(NAME).map(FieldRow::control_mut) {
-            field.set_text(name);
-        }
+            .map_or_else(Vec::new, |offer| made_of(offer, &self.made))
     }
 
     fn answer(&self, index: usize) -> Answer {
@@ -274,9 +275,31 @@ impl Assistant {
         Answer::Create {
             model: self.model,
             name,
-            choice: self.made(),
+            choices: self.chosen(),
         }
     }
+}
+
+/// The machine's rows for offer `model` among `offers`, its choices those
+/// `made`, the name field holding `name`.
+fn group(
+    offers: &[Offer],
+    model: usize,
+    made: &[(&'static str, usize)],
+    name: &str,
+    describe: Describe,
+) -> FieldGroup {
+    let labels: Vec<&str> = offers.iter().map(|offer| offer.label).collect();
+    let name = TextField::new().with_text(name).with_max_len(MAX_NAME);
+    let mut model_row = FieldRow::choice("Model", &labels, model);
+    if let Some(offer) = offers.get(model) {
+        model_row = model_row.with_description(describe(model, &made_of(offer, made)));
+    }
+    let mut rows = vec![FieldRow::new("Name", FieldControl::Text(name)), model_row];
+    if let Some(offer) = offers.get(model) {
+        rows.extend(offer.choices.iter().map(|choice| choice_row(choice, made)));
+    }
+    FieldGroup::new("MACHINE", rows)
 }
 
 #[cfg(test)]

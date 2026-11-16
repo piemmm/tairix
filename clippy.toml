@@ -24,6 +24,8 @@ doc-valid-idents = [
     "..",
     "FreeCell",
     "OpenRaster",
+    # The tree's BBC BASIC-compatible library, by its own name.
+    "OpenBASIC",
     "WebM",
     "TAIRiX",
     "RISC",
@@ -31,14 +33,15 @@ doc-valid-idents = [
     "GSTrans",
     # RISC OS's floating-point emulator module, by its module name.
     "FPEmulator",
+    # ARM's floating-point architecture versions, as ARM names them.
     "VFPv2",
+    "VFPv4",
     # RISC OS's low workspace, its host filing system, Acorn's machine and the
     # emulator of it, as RISC OS names them.
     "ScratchSpace",
     "HostFS",
     "RiscPC",
     "RPCEmu",
-    "VFPv4",
     "RISC-V",
     "POSIX",
     "VESA",

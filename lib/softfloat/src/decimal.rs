@@ -13,9 +13,10 @@ use crate::mode::Mode;
 /// The most significant digits a [`Decimal`] holds: as many as `u128` does.
 pub const MAX_DIGITS: u32 = 38;
 
-/// The least unbiased exponent a finite double-extended value's top bit has:
-/// the least subnormal's.
-const LEAST_EXP: i32 = 1 - BIAS - 63;
+/// The least unbiased exponent a finite value's top bit has: the FPA's least
+/// denormal's, one below double-extended's, its denormals taking the normal
+/// bias.
+const LEAST_EXP: i32 = -BIAS - 63;
 
 /// The greatest.
 const MOST_EXP: i32 = EXP_MAX as i32 - BIAS;
@@ -23,8 +24,8 @@ const MOST_EXP: i32 = EXP_MAX as i32 - BIAS;
 /// The places a decimal value's first digit may stand at for the value to be
 /// worked out. Past the last, the value is at least 10^4933, above
 /// double-extended's largest finite value; before the first, it is below
-/// 10^−4951, less than half its least subnormal.
-const PLACES: core::ops::RangeInclusive<i64> = -4951..=4932;
+/// 10^−4952, less than half the FPA's least denormal and so any format's.
+const PLACES: core::ops::RangeInclusive<i64> = -4952..=4932;
 
 /// Digits taken out of an expansion at a time, and the power of ten that is.
 const CHUNK_DIGITS: u32 = 9;

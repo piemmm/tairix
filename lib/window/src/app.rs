@@ -269,8 +269,9 @@ pub enum Fitted {
     /// place at the session; the size is delivered again as a `Resized` event
     /// once one is answered. Nothing to report.
     Deferred,
-    /// It keeps the size it had and stays drawable: no region could be made
-    /// for the new one, or the session could not be asked.
+    /// It keeps the size it had and stays drawable: that is the size asked,
+    /// no region could be made for the new one, or the session could not be
+    /// asked.
     Kept,
 }
 
@@ -1161,6 +1162,9 @@ impl WindowPane {
         client: &mut WindowClient<T>,
         new_mode: &DisplayMode,
     ) -> Fitted {
+        if *new_mode == self.mode {
+            return Fitted::Kept;
+        }
         if client.resize_in_flight(self.window) {
             return Fitted::Deferred;
         }
@@ -1205,6 +1209,9 @@ impl WindowPane {
         new_mode: &DisplayMode,
         surface: &mut Surface,
     ) -> Fitted {
+        if *new_mode == self.mode {
+            return Fitted::Kept;
+        }
         if client.resize_in_flight(self.window) {
             return Fitted::Deferred;
         }

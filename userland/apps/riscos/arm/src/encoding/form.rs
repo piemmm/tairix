@@ -67,20 +67,6 @@ pub(crate) enum Kind {
     SimdFp(SimdFpKind),
 }
 
-fn reg(fields: &Fields, field: Field) -> Reg {
-    Reg::field(fields.get(field))
-}
-
-/// A field's value narrowed to a byte; every field it is used for is at
-/// most eight bits wide.
-fn byte(fields: &Fields, field: Field) -> u8 {
-    fields.get(field).to_le_bytes()[0]
-}
-
-fn has(layout: &Layout, field: Field) -> bool {
-    layout.field(field) != 0
-}
-
 /// An FPA precision; the fourth value has none.
 fn precision(fields: &Fields) -> Option<Precision> {
     Precision::ALL
@@ -94,7 +80,7 @@ fn rounding(fields: &Fields) -> Rounding {
 
 /// An FPA operand: a register, or by bit 3 a constant.
 fn fpa_operand(fields: &Fields) -> FpaOperand {
-    let m = byte(fields, Field::CRm);
+    let m = fields.byte(Field::CRm);
     if m & 8 == 0 {
         FpaOperand::Register(m & 7)
     } else {
@@ -105,41 +91,36 @@ fn fpa_operand(fields: &Fields) -> FpaOperand {
 /// An FPA transfer's addressing: with P and W clear, at the base without
 /// writeback whichever way U points.
 fn fpa_index(fields: &Fields) -> CoIndex {
-    match (fields.bit(Field::P), fields.bit(Field::W)) {
-        (true, false) => CoIndex::Offset,
-        (true, true) => CoIndex::PreIndexed,
-        (false, true) => CoIndex::PostIndexed,
-        (false, false) => CoIndex::Unindexed,
-    }
+    CoIndex::of(fields.bit(Field::P), fields.bit(Field::W))
 }
 
 fn operand(layout: &Layout, fields: &Fields) -> Operand {
-    if has(layout, Field::Rotate) {
+    if layout.has(Field::Rotate) {
         Operand::Immediate(Immediate {
-            value: byte(fields, Field::Imm),
-            rotation: byte(fields, Field::Rotate),
+            value: fields.byte(Field::Imm),
+            rotation: fields.byte(Field::Rotate),
         })
-    } else if has(layout, Field::Rs) {
+    } else if layout.has(Field::Rs) {
         Operand::Shifted {
-            rm: reg(fields, Field::Rm),
+            rm: fields.reg(Field::Rm),
             kind: ShiftType::field(fields.get(Field::Type)),
-            rs: reg(fields, Field::Rs),
+            rs: fields.reg(Field::Rs),
         }
     } else {
         Operand::Register {
-            rm: reg(fields, Field::Rm),
+            rm: fields.reg(Field::Rm),
             shift: Shift::decode(fields.get(Field::Type), fields.get(Field::Amount)),
         }
     }
 }
 
 fn offset(layout: &Layout, fields: &Fields) -> Option<Offset> {
-    Some(if has(layout, Field::Imm) {
+    Some(if layout.has(Field::Imm) {
         Offset::Immediate(u16::try_from(fields.get(Field::Imm)).ok()?)
     } else {
         Offset::Register {
-            rm: reg(fields, Field::Rm),
-            shift: if has(layout, Field::Type) {
+            rm: fields.reg(Field::Rm),
+            shift: if layout.has(Field::Type) {
                 Shift::decode(fields.get(Field::Type), fields.get(Field::Amount))
             } else {
                 Shift::NONE
@@ -180,8 +161,8 @@ impl Kind {
     /// a combination the form excludes.
     #[allow(clippy::too_many_lines)] // One arm per form: splitting would scatter the inverse of `Op::fields`.
     pub fn build(self, layout: &Layout, f: &Fields) -> Option<Op> {
-        let r = |field| reg(f, field);
-        let optional = |field| has(layout, field).then(|| reg(f, field));
+        let r = |field| f.reg(field);
+        let optional = |field| layout.has(field).then(|| f.reg(field));
         Some(match self {
             Self::Data(op) => Op::Data {
                 op,
@@ -264,9 +245,9 @@ impl Kind {
             Self::Saturate(op) => Op::Saturate {
                 op,
                 rd: r(Field::Rd),
-                saturate: byte(f, Field::Imm),
+                saturate: f.byte(Field::Imm),
                 rn: r(Field::Rn),
-                shift: if has(layout, Field::Type) {
+                shift: if layout.has(Field::Type) {
                     Shift::decode(f.get(Field::Type) << 1, f.get(Field::Amount))
                 } else {
                     Shift::NONE
@@ -277,7 +258,7 @@ impl Kind {
                 rd: r(Field::Rd),
                 rn: optional(Field::Rn),
                 rm: r(Field::Rm),
-                rotation: byte(f, Field::Rotation),
+                rotation: f.byte(Field::Rotation),
             },
             Self::Pack(op) => Op::Pack {
                 op,
@@ -293,8 +274,8 @@ impl Kind {
                 op,
                 rd: r(Field::Rd),
                 rn: optional(Field::Rn),
-                lsb: byte(f, Field::Lsb),
-                top: byte(f, Field::Msb),
+                lsb: f.byte(Field::Lsb),
+                top: f.byte(Field::Msb),
             },
             Self::Status => Op::Status {
                 spsr: f.bit(Field::Spsr),
@@ -302,11 +283,11 @@ impl Kind {
             },
             Self::StatusWrite => Op::StatusWrite {
                 spsr: f.bit(Field::Spsr),
-                fields: byte(f, Field::Mask),
-                source: if has(layout, Field::Rotate) {
+                fields: f.byte(Field::Mask),
+                source: if layout.has(Field::Rotate) {
                     Source::Immediate(Immediate {
-                        value: byte(f, Field::Imm),
-                        rotation: byte(f, Field::Rotate),
+                        value: f.byte(Field::Imm),
+                        rotation: f.byte(Field::Rotate),
                     })
                 } else {
                     Source::Register(r(Field::Rm))
@@ -326,11 +307,11 @@ impl Kind {
             },
             Self::Hint(op) => Op::Hint {
                 op,
-                value: byte(f, Field::Imm),
+                value: f.byte(Field::Imm),
             },
             Self::Barrier(op) => Op::Barrier {
                 op,
-                option: byte(f, Field::Imm),
+                option: f.byte(Field::Imm),
             },
             Self::ClearExclusive => Op::ClearExclusive,
             Self::Transfer(op) => Op::Transfer {
@@ -402,7 +383,7 @@ impl Kind {
             },
             Self::IfThen => Op::IfThen {
                 firstcond: Condition::field(f.get(Field::Opc1)),
-                mask: byte(f, Field::Opc2),
+                mask: f.byte(Field::Opc2),
             },
             Self::TableBranch => Op::TableBranch {
                 half: f.bit(Field::X),
@@ -410,10 +391,10 @@ impl Kind {
                 rm: r(Field::Rm),
             },
             Self::ChangeState => Op::ChangeState {
-                imod: byte(f, Field::Imod),
+                imod: f.byte(Field::Imod),
                 change_mode: f.bit(Field::ChangeMode),
-                interrupts: byte(f, Field::Interrupts),
-                mode: byte(f, Field::Mode),
+                interrupts: f.byte(Field::Interrupts),
+                mode: f.byte(Field::Mode),
             },
             Self::SetEndian => Op::SetEndian {
                 big: f.bit(Field::Endian),
@@ -421,7 +402,7 @@ impl Kind {
             Self::SaveState => Op::SaveState {
                 mode: BlockMode::of(f.bit(Field::P), f.bit(Field::U)),
                 writeback: f.bit(Field::W),
-                bank: byte(f, Field::Mode),
+                bank: f.byte(Field::Mode),
             },
             Self::ReturnFromException => Op::ReturnFromException {
                 rn: r(Field::Rn),
@@ -430,96 +411,94 @@ impl Kind {
             },
             Self::Coprocessor(op) => Op::Coprocessor {
                 op,
-                cp: byte(f, Field::Cp),
-                opc1: byte(f, Field::Opc1),
-                crd: byte(f, Field::CRd),
-                crn: byte(f, Field::CRn),
-                crm: byte(f, Field::CRm),
-                opc2: byte(f, Field::Opc2),
+                cp: f.byte(Field::Cp),
+                opc1: f.byte(Field::Opc1),
+                crd: f.byte(Field::CRd),
+                crn: f.byte(Field::CRn),
+                crm: f.byte(Field::CRm),
+                opc2: f.byte(Field::Opc2),
             },
             Self::CoprocessorRegister(op) => Op::CoprocessorRegister {
                 op,
-                cp: byte(f, Field::Cp),
-                opc1: byte(f, Field::Opc1),
+                cp: f.byte(Field::Cp),
+                opc1: f.byte(Field::Opc1),
                 rt: r(Field::Rt),
-                crn: byte(f, Field::CRn),
-                crm: byte(f, Field::CRm),
-                opc2: byte(f, Field::Opc2),
+                crn: f.byte(Field::CRn),
+                crm: f.byte(Field::CRm),
+                opc2: f.byte(Field::Opc2),
             },
             Self::CoprocessorRegisters(op) => Op::CoprocessorRegisters {
                 op,
-                cp: byte(f, Field::Cp),
-                opc1: byte(f, Field::Opc1),
+                cp: f.byte(Field::Cp),
+                opc1: f.byte(Field::Opc1),
                 rt: r(Field::Rt),
                 rt2: r(Field::Rt2),
-                crm: byte(f, Field::CRm),
+                crm: f.byte(Field::CRm),
             },
             Self::CoprocessorTransfer(op) => Op::CoprocessorTransfer {
                 op,
-                cp: byte(f, Field::Cp),
-                crd: byte(f, Field::CRd),
+                cp: f.byte(Field::Cp),
+                crd: f.byte(Field::CRd),
                 rn: r(Field::Rn),
                 long: f.bit(Field::B),
                 up: f.bit(Field::U),
-                index: match (f.bit(Field::P), f.bit(Field::W), f.bit(Field::U)) {
-                    (true, false, _) => CoIndex::Offset,
-                    (true, true, _) => CoIndex::PreIndexed,
-                    (false, true, _) => CoIndex::PostIndexed,
-                    (false, false, true) => CoIndex::Unindexed,
-                    (false, false, false) => return None,
+                index: match CoIndex::of(f.bit(Field::P), f.bit(Field::W)) {
+                    // Unindexed down is undefined.
+                    CoIndex::Unindexed if !f.bit(Field::U) => return None,
+                    index => index,
                 },
-                offset: byte(f, Field::Imm),
+                offset: f.byte(Field::Imm),
             },
             Self::FpaDyadic(op) => Op::FpaDyadic {
                 op,
                 precision: precision(f)?,
                 rounding: rounding(f),
-                fd: byte(f, Field::CRd),
-                fn_: byte(f, Field::CRn),
+                fd: f.byte(Field::CRd),
+                fn_: f.byte(Field::CRn),
                 fm: fpa_operand(f),
             },
             Self::FpaMonadic(op) => Op::FpaMonadic {
                 op,
                 precision: precision(f)?,
                 rounding: rounding(f),
-                fd: byte(f, Field::CRd),
+                fd: f.byte(Field::CRd),
                 fm: fpa_operand(f),
             },
             Self::FpaRegister(op) => Op::FpaRegister {
                 op,
                 precision: precision(f)?,
                 rounding: rounding(f),
-                fn_: byte(f, Field::CRn),
+                fn_: f.byte(Field::CRn),
                 fm: fpa_operand(f),
                 rd: r(Field::Rt),
             },
             Self::FpaCompare(op) => Op::FpaCompare {
                 op,
                 precision: precision(f)?,
-                fn_: byte(f, Field::CRn),
+                fn_: f.byte(Field::CRn),
                 fm: fpa_operand(f),
                 rd: r(Field::Rt),
             },
             Self::FpaTransfer(op) => Op::FpaTransfer {
                 op,
                 format: Format::ALL[f.get(Field::Precision) as usize & 3],
-                fd: byte(f, Field::CRd),
+                fd: f.byte(Field::CRd),
                 rn: r(Field::Rn),
                 up: f.bit(Field::U),
                 index: fpa_index(f),
-                offset: byte(f, Field::Imm),
+                offset: f.byte(Field::Imm),
             },
             Self::FpaMultiple(op) => Op::FpaMultiple {
                 op,
-                fd: byte(f, Field::CRd),
-                count: match byte(f, Field::Count) {
+                fd: f.byte(Field::CRd),
+                count: match f.byte(Field::Count) {
                     0 => 4,
                     n => n,
                 },
                 rn: r(Field::Rn),
                 up: f.bit(Field::U),
                 index: fpa_index(f),
-                offset: byte(f, Field::Imm),
+                offset: f.byte(Field::Imm),
             },
             Self::SimdFp(kind) => Op::SimdFp(kind.build(layout, f)?),
         })
@@ -541,8 +520,9 @@ fn set_operand(f: &mut Fields, operand: Operand) {
             f.set(Field::Type, kind.bits());
             f.set(Field::Rs, rs.number());
         }
-        // The T32 forms; no A32 row holds them, so the encoder refuses.
-        Operand::Expanded(_) | Operand::Literal(_) => f.set(Field::Rotate, u32::MAX),
+        // The T32 forms: no A32 row holds them, so whatever is deposited
+        // decodes to another operand and is refused as unencodable.
+        Operand::Expanded(_) | Operand::Literal(_) => {}
     }
 }
 
@@ -808,9 +788,15 @@ impl Op {
                 }
             }
             Self::Branch { offset, .. } => {
-                let bits = offset.cast_unsigned();
-                f.set(Field::Imm, (bits >> 2) & 0x00FF_FFFF);
-                f.set(Field::H, (bits >> 1) & 1);
+                // A misaligned offset loses its low bits here, so the word
+                // decodes to another branch and is refused as unencodable.
+                if (-(1 << 25)..1 << 25).contains(&offset) {
+                    let bits = offset.cast_unsigned();
+                    f.set(Field::Imm, (bits >> 2) & 0x00FF_FFFF);
+                    f.set(Field::H, (bits >> 1) & 1);
+                } else {
+                    f.set(Field::Imm, u32::MAX);
+                }
             }
             Self::Exchange { rm, .. } => f.set(Field::Rm, rm.number()),
             Self::Call { value, .. } => f.set(Field::Imm, value),
@@ -1000,12 +986,7 @@ impl Op {
                 f.set(Field::CRd, u32::from(crd));
                 f.set(Field::Rn, rn.number());
                 f.flag(Field::B, long);
-                let (p, w) = match index {
-                    CoIndex::Offset => (true, false),
-                    CoIndex::PreIndexed => (true, true),
-                    CoIndex::PostIndexed => (false, true),
-                    CoIndex::Unindexed => (false, false),
-                };
+                let (p, w) = index.bits();
                 f.flag(Field::P, p);
                 f.flag(Field::W, w);
                 f.flag(Field::U, up);
@@ -1055,7 +1036,7 @@ impl Op {
                 rd,
                 ..
             } => {
-                f.set(Field::Precision, precision_bits(precision));
+                f.set(Field::Precision, precision as u32);
                 f.set(Field::CRn, u32::from(fn_));
                 set_fpa_operand(&mut f, fm);
                 f.set(Field::Rt, rd.number());
@@ -1069,7 +1050,7 @@ impl Op {
                 offset,
                 ..
             } => {
-                f.set(Field::Precision, format_bits(format));
+                f.set(Field::Precision, format as u32);
                 f.set(Field::CRd, u32::from(fd));
                 set_fpa_address(&mut f, rn, up, index, offset);
             }
@@ -1092,35 +1073,29 @@ impl Op {
     }
 }
 
-const fn precision_bits(precision: Precision) -> u32 {
-    match precision {
-        Precision::Single => 0,
-        Precision::Double => 1,
-        Precision::Extended => 2,
+// An FPA precision, rounding or format is encoded as its place in its
+// `ALL` list, which decoding indexes: their declaration order.
+const _: () = {
+    let mut i = 0;
+    while i < Precision::ALL.len() {
+        assert!(Precision::ALL[i] as usize == i);
+        i += 1;
     }
-}
-
-const fn rounding_bits(rounding: Rounding) -> u32 {
-    match rounding {
-        Rounding::Nearest => 0,
-        Rounding::PlusInfinity => 1,
-        Rounding::MinusInfinity => 2,
-        Rounding::Zero => 3,
+    let mut i = 0;
+    while i < Rounding::ALL.len() {
+        assert!(Rounding::ALL[i] as usize == i);
+        i += 1;
     }
-}
-
-const fn format_bits(format: Format) -> u32 {
-    match format {
-        Format::Single => 0,
-        Format::Double => 1,
-        Format::Extended => 2,
-        Format::Packed => 3,
+    let mut i = 0;
+    while i < Format::ALL.len() {
+        assert!(Format::ALL[i] as usize == i);
+        i += 1;
     }
-}
+};
 
 fn set_rounded(f: &mut Fields, precision: Precision, rounding: Rounding) {
-    f.set(Field::Precision, precision_bits(precision));
-    f.set(Field::Rounding, rounding_bits(rounding));
+    f.set(Field::Precision, precision as u32);
+    f.set(Field::Rounding, rounding as u32);
 }
 
 fn set_fpa_operand(f: &mut Fields, operand: FpaOperand) {
@@ -1136,12 +1111,7 @@ fn set_fpa_operand(f: &mut Fields, operand: FpaOperand) {
 fn set_fpa_address(f: &mut Fields, rn: Reg, up: bool, index: CoIndex, offset: u8) {
     f.set(Field::Rn, rn.number());
     f.flag(Field::U, up);
-    let (p, w) = match index {
-        CoIndex::Offset => (true, false),
-        CoIndex::PreIndexed => (true, true),
-        CoIndex::PostIndexed => (false, true),
-        CoIndex::Unindexed => (false, false),
-    };
+    let (p, w) = index.bits();
     f.flag(Field::P, p);
     f.flag(Field::W, w);
     f.set(Field::Imm, u32::from(offset));

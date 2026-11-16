@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use tairix_util::fallible;
 
 use crate::gstrans::{translated, Flags, Read, Reader};
-use crate::number::{read_unsigned, Decimal, Reading};
+use crate::number::{decimal, read_unsigned, Reading};
 use crate::vars::{Value, Variables};
 use crate::{Budget, Error};
 
@@ -21,9 +21,9 @@ const MOST_TEXT: usize = 1022;
 /// The longest string an expression holds.
 pub const MOST_STRING: usize = 1023;
 
-/// The bytes the working stack holds. Each entry takes 8, and a string its
-/// bytes besides, rounded up to a word.
-const STACK_BYTES: usize = 0x4000 - 0x4C8;
+/// The bytes the working stack overflows on reaching. Each entry counts 8,
+/// and a string its bytes besides, rounded up to a word.
+const STACK_BYTES: usize = 15_160;
 
 /// What an expression evaluates to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,108 +36,111 @@ pub enum Answer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
-    Bra,
-    Ket,
-    Times,
-    Plus,
-    Ne,
-    Minus,
-    Str,
-    Divide,
-    Ge,
-    Le,
-    RShift,
-    LShift,
-    And,
     Or,
     Eor,
-    Not,
-    Right,
-    Left,
-    Mod,
-    /// The bottom of the stack, and the end of the expression.
-    Bottom,
-    Lt,
+    And,
     Eq,
+    Ne,
+    Lt,
     Gt,
-    Val,
+    Le,
+    Ge,
+    LShift,
+    RShift,
     LrShift,
-    Len,
+    Plus,
+    Minus,
+    Times,
+    Divide,
+    Mod,
     UnaryPlus,
     UnaryMinus,
+    Not,
+    Len,
+    Str,
+    Val,
+    Left,
+    Right,
+    Bra,
+    Ket,
+    /// The bottom of the stack, and the end of the expression.
+    Bottom,
+}
+
+/// How an operator takes its operands.
+enum Takes {
+    /// One on each side, at a level of the priority table, loosest 1.
+    Binary(u8),
+    /// One after it, binding tighter than any binary operator.
+    Prefix,
 }
 
 impl Op {
-    /// The priority an operator on the stack has: it is applied while this
-    /// exceeds an arriving operator's [`Op::right`].
-    const fn left(self) -> u8 {
-        match self {
-            Self::Bra => 2,
-            Self::Ket | Self::Bottom => 1,
-            Self::Or | Self::Eor => 4,
-            Self::And => 5,
-            Self::Ne
-            | Self::Ge
-            | Self::Le
-            | Self::RShift
-            | Self::LShift
+    /// What it takes, or `None` for a bracket or the end.
+    const fn takes(self) -> Option<Takes> {
+        Some(match self {
+            Self::Or | Self::Eor => Takes::Binary(1),
+            Self::And => Takes::Binary(2),
+            Self::Eq
+            | Self::Ne
             | Self::Lt
-            | Self::Eq
             | Self::Gt
-            | Self::LrShift => 6,
-            Self::Plus | Self::Minus => 7,
-            Self::Times | Self::Divide | Self::Mod => 8,
-            Self::Str
+            | Self::Le
+            | Self::Ge
+            | Self::LShift
+            | Self::RShift
+            | Self::LrShift => Takes::Binary(3),
+            Self::Plus | Self::Minus => Takes::Binary(4),
+            Self::Times | Self::Divide | Self::Mod => Takes::Binary(5),
+            Self::UnaryPlus
+            | Self::UnaryMinus
             | Self::Not
-            | Self::Right
-            | Self::Left
-            | Self::Val
             | Self::Len
-            | Self::UnaryPlus
-            | Self::UnaryMinus => 9,
+            | Self::Str
+            | Self::Val
+            | Self::Left
+            | Self::Right => Takes::Prefix,
+            Self::Bra | Self::Ket | Self::Bottom => return None,
+        })
+    }
+
+    /// The priority an operator on the stack has: it is applied while this
+    /// exceeds an arriving operator's [`Op::right`]. A binary operator's
+    /// exceeds its own right one, so its level associates to the left; a
+    /// prefix operator's falls short of its own, so prefixes nest to the
+    /// right; `(` stays until a `)` or the end, which apply all above it.
+    const fn left(self) -> u8 {
+        match self.takes() {
+            Some(Takes::Binary(level)) => level + 3,
+            Some(Takes::Prefix) => 9,
+            None => match self {
+                Self::Bra => 2,
+                _ => 1,
+            },
         }
     }
 
     /// The priority an arriving operator has.
     const fn right(self) -> u8 {
-        match self {
-            Self::Bra => 11,
-            Self::Ket => 0,
-            Self::Bottom => 1,
-            Self::Or | Self::Eor => 3,
-            Self::And => 4,
-            Self::Ne
-            | Self::Ge
-            | Self::Le
-            | Self::RShift
-            | Self::LShift
-            | Self::Lt
-            | Self::Eq
-            | Self::Gt
-            | Self::LrShift => 5,
-            Self::Plus | Self::Minus => 6,
-            Self::Times | Self::Divide | Self::Mod => 7,
-            Self::Str
-            | Self::Not
-            | Self::Right
-            | Self::Left
-            | Self::Val
-            | Self::Len
-            | Self::UnaryPlus
-            | Self::UnaryMinus => 10,
+        match self.takes() {
+            Some(Takes::Binary(level)) => level + 2,
+            Some(Takes::Prefix) => 10,
+            None => match self {
+                Self::Bra => 11,
+                Self::Ket => 0,
+                _ => 1,
+            },
         }
     }
 }
 
-/// The operators' spellings, in the order they are tried: the first whose
-/// whole spelling the text begins with is the one, letters matching exactly.
+/// The operators' spellings: the first whose whole spelling the text begins
+/// with is the one, letters matching exactly, so each spelling comes before
+/// any other that begins it.
 const OPERATORS: [(&[u8], Op); 25] = [
-    (b"(", Op::Bra),
-    (b")", Op::Ket),
-    (b"+", Op::Plus),
-    (b"-", Op::Minus),
-    (b"*", Op::Times),
-    (b"/", Op::Divide),
+    (b"OR", Op::Or),
+    (b"EOR", Op::Eor),
+    (b"AND", Op::And),
     (b"=", Op::Eq),
     (b"<>", Op::Ne),
     (b"<=", Op::Le),
@@ -147,16 +150,19 @@ const OPERATORS: [(&[u8], Op); 25] = [
     (b">>>", Op::LrShift),
     (b">>", Op::RShift),
     (b">", Op::Gt),
-    (b"AND", Op::And),
-    (b"OR", Op::Or),
-    (b"EOR", Op::Eor),
-    (b"NOT", Op::Not),
-    (b"RIGHT", Op::Right),
-    (b"LEFT", Op::Left),
+    (b"+", Op::Plus),
+    (b"-", Op::Minus),
+    (b"*", Op::Times),
+    (b"/", Op::Divide),
     (b"MOD", Op::Mod),
+    (b"NOT", Op::Not),
+    (b"LEN", Op::Len),
     (b"STR", Op::Str),
     (b"VAL", Op::Val),
-    (b"LEN", Op::Len),
+    (b"LEFT", Op::Left),
+    (b"RIGHT", Op::Right),
+    (b"(", Op::Bra),
+    (b")", Op::Ket),
 ];
 
 /// What the stack holds.
@@ -327,7 +333,7 @@ impl Evaluator<'_> {
 
     fn push(&mut self, entry: Entry) -> Result<(), Error> {
         let cost = cost(&entry);
-        if self.used + cost > STACK_BYTES {
+        if self.used + cost >= STACK_BYTES {
             return Err(Error::ExpressionStackOverflow);
         }
         if !fallible::push(&mut self.stack, entry) {
@@ -485,9 +491,9 @@ impl Evaluator<'_> {
 /// A variable's value as an operand: a number an integer, anything else a
 /// string, a macro's expanded.
 fn variable(name: &[u8], vars: &mut dyn Variables, budget: &mut Budget) -> Result<Answer, Error> {
-    budget.spend()?;
+    budget.charge(vars.cost(name))?;
     match vars.lookup(name) {
-        Err(_) => Err(Error::StringTooLong),
+        Err(error) => Err(error),
         Ok(None) => Err(Error::UnknownOperand),
         Ok(Some(Value::Number(n))) => Ok(Answer::Integer(n)),
         Ok(Some(Value::String(bytes))) if bytes.len() > MOST_STRING => Err(Error::StringTooLong),
@@ -495,7 +501,13 @@ fn variable(name: &[u8], vars: &mut dyn Variables, budget: &mut Budget) -> Resul
         Ok(Some(Value::Macro(text))) => {
             translated(&text, Flags::NONE, vars, budget, MOST_STRING - 1)
                 .map(|(bytes, _)| Answer::String(bytes))
-                .map_err(|_| Error::StringTooLong)
+                .map_err(|error| {
+                    if error.contains() {
+                        error
+                    } else {
+                        Error::StringTooLong
+                    }
+                })
         }
     }
 }
@@ -535,9 +547,7 @@ fn integer(value: Answer) -> Result<i32, Error> {
 fn string(value: Answer) -> Result<Vec<u8>, Error> {
     match value {
         Answer::String(text) => Ok(text),
-        Answer::Integer(n) => {
-            fallible::copied(Decimal::of(n).as_bytes()).ok_or(Error::SystemHeapFull)
-        }
+        Answer::Integer(n) => decimal(n),
     }
 }
 

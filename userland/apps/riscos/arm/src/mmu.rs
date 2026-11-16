@@ -31,7 +31,8 @@ use crate::bus::{Abort, Bus, Fetch, Width};
 
 /// Bytes in a page.
 pub const PAGE_SIZE: u32 = 1 << PAGE_BITS;
-const PAGE_BITS: u32 = 12;
+/// The bits of an address within its page.
+pub const PAGE_BITS: u32 = 12;
 /// Bytes in a granule, the unit the watch reports.
 pub const GRANULE_SIZE: u32 = 1 << GRANULE_BITS;
 const GRANULE_BITS: u32 = 8;
@@ -43,8 +44,13 @@ pub const WATCHERS: usize = 2;
 /// Pages one table maps: 4 MiB.
 const TABLE_BITS: u32 = 10;
 const TABLE_PAGES: usize = 1 << TABLE_BITS;
+/// Bytes one table maps: [`Mmu::reserve`] makes tables a span at a time.
+pub const TABLE_SPAN: u32 = PAGE_SIZE << TABLE_BITS;
 /// The tables of the whole 32-bit space.
 const TABLES: usize = 1 << (32 - PAGE_BITS - TABLE_BITS);
+/// The most frames the MMU names: a page-table entry holds a frame's number
+/// in the bits above its flags.
+pub const MOST_FRAMES: u32 = 1 << (32 - pte::FRAME_SHIFT);
 /// TLB entries, a page's chosen by its number. Large enough that a program's
 /// working set rarely collides, small enough to stay in a core's cache.
 const TLB_ENTRIES: usize = 1024;
@@ -317,9 +323,8 @@ impl Frames {
         self.free.next_one(0).unwrap_or(self.slots.len())
     }
 
-    /// Takes `frame` into use, held: refused past the limit, or if it is in
-    /// use already.
-    fn take(&mut self, frame: Frame, kind: FrameKind) -> Result<(), MmuError> {
+    /// Refuses `frame` taken into use: past the limit, or in use already.
+    fn check_take(&self, frame: Frame) -> Result<(), MmuError> {
         let index = frame.index();
         if index < self.slots.len() && self.free.get(index) != Some(true) {
             return Err(MmuError::Frame);
@@ -327,6 +332,14 @@ impl Frames {
         if frame.0 >= self.limit || self.used >= self.limit {
             return Err(MmuError::Exhausted);
         }
+        Ok(())
+    }
+
+    /// Takes `frame` into use, held: refused past the limit, or if it is in
+    /// use already.
+    fn take(&mut self, frame: Frame, kind: FrameKind) -> Result<(), MmuError> {
+        self.check_take(frame)?;
+        let index = frame.index();
         let words = zeroed().ok_or(MmuError::Exhausted)?;
         if index >= self.slots.len() {
             let len = index + 1;
@@ -592,6 +605,18 @@ impl Watch {
     }
 }
 
+/// Arms `frame` for the granules its watch still waits on, forgetting the
+/// watch once nothing is watched or pending.
+fn settle(frames: &mut Frames, watches: &mut OrderedMap<u32, Watch>, frame: Frame) {
+    let watch = watches.get(&frame.0).copied();
+    if watch.is_some_and(Watch::idle) {
+        watches.remove(&frame.0);
+    }
+    if let Some(slot) = frames.slot_mut(frame) {
+        slot.armed = watch.map_or(0, Watch::armed);
+    }
+}
+
 /// The frames and the watch over them.
 struct Store {
     frames: Frames,
@@ -616,10 +641,7 @@ impl Store {
                 watch.pending[w] |= hits;
             }
         }
-        let armed = watch.armed();
-        if let Some(slot) = self.frames.slot_mut(frame) {
-            slot.armed = armed;
-        }
+        settle(&mut self.frames, &mut self.watches, frame);
     }
 
     /// Frees `frame`, reporting every granule watched in it.
@@ -663,8 +685,8 @@ pub struct Mmu {
 }
 
 impl Mmu {
-    /// An MMU with nothing mapped, at most `limit` frames in use, and one
-    /// space of extent zero, current.
+    /// An MMU with nothing mapped, at most `limit` frames in use (no more
+    /// than [`MOST_FRAMES`]), and one space of extent zero, current.
     pub fn new(limit: u32) -> Result<Self, MmuError> {
         let mut tlb = Vec::new();
         tlb.try_reserve_exact(TLB_ENTRIES)
@@ -690,7 +712,7 @@ impl Mmu {
                 frames: Frames {
                     slots: Vec::new(),
                     free: BitVec::new(),
-                    limit,
+                    limit: limit.min(MOST_FRAMES),
                     used: 0,
                 },
                 watches: OrderedMap::new(),
@@ -713,10 +735,15 @@ impl Mmu {
         self.store.frames.limit
     }
 
-    /// Sets the most frames that may be in use. Frames in use past a lower
-    /// limit stay; allocation waits until fewer are.
+    /// Sets the most frames that may be in use, no more than
+    /// [`MOST_FRAMES`]. Frames in use past a lower limit stay; allocation
+    /// waits until fewer are.
     pub const fn set_limit(&mut self, limit: u32) {
-        self.store.frames.limit = limit;
+        self.store.frames.limit = if limit < MOST_FRAMES {
+            limit
+        } else {
+            MOST_FRAMES
+        };
     }
 
     /// The frames in use.
@@ -741,6 +768,9 @@ impl Mmu {
 
     /// Takes `frame` into use, zeroed and held.
     pub fn allocate_at(&mut self, frame: Frame, kind: FrameKind) -> Result<(), MmuError> {
+        // Refused before anything grows, so a frame past the limit costs
+        // nothing.
+        self.store.frames.check_take(frame)?;
         let len = self.store.frames.slots.len().max(frame.index() + 1);
         for pending in &mut self.store.pending {
             if pending.len() < len {
@@ -791,6 +821,66 @@ impl Mmu {
         self.store.frames.slot(frame)?;
         self.store.report(frame, u16::MAX);
         self.store.frames.slot_mut(frame)?.words.as_deref_mut()
+    }
+
+    /// Copies `from`'s words over `to`'s; every granule watched in `to` is
+    /// reported, since any may change.
+    pub fn copy_frame(&mut self, from: Frame, to: Frame) -> Result<(), MmuError> {
+        let frames = &self.store.frames;
+        if frames.slot(from).is_none() || frames.slot(to).is_none() {
+            return Err(MmuError::Frame);
+        }
+        if from == to {
+            return Ok(());
+        }
+        self.store.report(to, u16::MAX);
+        let slots = &mut self.store.frames.slots;
+        let (source, target) = if from.index() < to.index() {
+            let (low, high) = slots.split_at_mut(to.index());
+            (&low[from.index()], &mut high[0])
+        } else {
+            let (low, high) = slots.split_at_mut(from.index());
+            (&high[0], &mut low[to.index()])
+        };
+        match (source.words.as_deref(), target.words.as_deref_mut()) {
+            (Some(source), Some(target)) => {
+                *target = *source;
+                Ok(())
+            }
+            _ => Err(MmuError::Frame),
+        }
+    }
+
+    /// Moves what each watcher watches in `from` onto `to`, whose contents
+    /// are `from`'s now, reporting all of it there; a report pending for
+    /// `from` stays. Refused whole, moving nothing, if the host has no room
+    /// for `to`'s watch.
+    pub fn move_watches(&mut self, from: Frame, to: Frame) -> Result<(), MmuError> {
+        let store = &mut self.store;
+        store.frames.slot(to).ok_or(MmuError::Frame)?;
+        let Some(watched) = store.watches.get(&from.0).map(|old| old.watched) else {
+            return Ok(());
+        };
+        if from == to || watched.iter().all(|&granules| granules == 0) {
+            return Ok(());
+        }
+        if store.watches.get(&to.0).is_none() {
+            store
+                .watches
+                .try_insert(to.0, Watch::default())
+                .map_err(|_| MmuError::Exhausted)?;
+        }
+        if let Some(new) = store.watches.get_mut(&to.0) {
+            for (mask, &granules) in new.watched.iter_mut().zip(&watched) {
+                *mask |= granules;
+            }
+        }
+        if let Some(old) = store.watches.get_mut(&from.0) {
+            old.watched = [0; WATCHERS];
+        }
+        settle(&mut store.frames, &mut store.watches, from);
+        store.report(to, u16::MAX);
+        Ok(())
     }
 
     /// The lowest free frame at or past `from`, under the limit.
@@ -1111,10 +1201,7 @@ impl Mmu {
         }
         let watch = store.watches.get_mut(&frame.0).ok_or(MmuError::Exhausted)?;
         watch.watched[watcher.0] |= granules;
-        let armed = watch.armed();
-        if let Some(slot) = store.frames.slot_mut(frame) {
-            slot.armed = armed;
-        }
+        settle(&mut store.frames, &mut store.watches, frame);
         Ok(())
     }
 
@@ -1126,13 +1213,7 @@ impl Mmu {
             return;
         };
         watch.watched[watcher.0] &= !granules;
-        let armed = watch.armed();
-        if watch.idle() {
-            store.watches.remove(&frame.0);
-        }
-        if let Some(slot) = store.frames.slot_mut(frame) {
-            slot.armed = armed;
-        }
+        settle(&mut store.frames, &mut store.watches, frame);
     }
 
     /// Hands `watcher` each frame it has a report pending for, with the
@@ -1155,13 +1236,7 @@ impl Mmu {
                 continue;
             };
             let granules = core::mem::take(&mut watch.pending[watcher.0]);
-            let armed = watch.armed();
-            if watch.idle() {
-                watches.remove(&number);
-            }
-            if let Some(slot) = frames.slot_mut(Frame(number)) {
-                slot.armed = armed;
-            }
+            settle(frames, watches, Frame(number));
             each(Frame(number), granules);
         }
     }
@@ -1239,6 +1314,7 @@ impl Bus for Mmu {
         Ok(Fetch {
             word: self.word(entry.frame, address)?,
             host: entry.host,
+            page: entry.frame.number(),
         })
     }
 
@@ -1247,9 +1323,8 @@ impl Bus for Mmu {
         let word = self.word(entry.frame, address)?;
         let lane = word >> (8 * (address & 3));
         Ok(match width {
-            Width::Byte => lane & 0xFF,
-            Width::Half => lane & 0xFFFF,
             Width::Word => word,
+            narrow => lane & narrow.mask(),
         })
     }
 
@@ -1267,9 +1342,8 @@ impl Bus for Mmu {
         let words = slot.words.as_deref_mut().ok_or(Abort::External)?;
         let shift = 8 * (address & 3);
         let mask = match width {
-            Width::Byte => 0xFF << shift,
-            Width::Half => 0xFFFF << shift,
             Width::Word => u32::MAX,
+            narrow => narrow.mask() << shift,
         };
         let word = &mut words[(address as usize >> 2) % FRAME_WORDS];
         *word = (*word & !mask) | ((value << shift) & mask);

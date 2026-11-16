@@ -3,9 +3,9 @@
 //! references, and strings, REM and DATA tails, star commands and the names
 //! after FN and PROC are left as typed.
 
-use tairix_bbcbasic::basic2::KEYWORDS;
-use tairix_bbcbasic::keyword::{Flags, Keyword, PSEUDO_LHS};
-use tairix_bbcbasic::lineref;
+use tairix_openbasic::basic2::KEYWORDS;
+use tairix_openbasic::keyword::{Flags, Keyword, PSEUDO_LHS};
+use tairix_openbasic::lineref;
 
 use super::ws::page;
 use super::ws::zp as z;
@@ -525,24 +525,24 @@ fn encoding(a: &mut Asm) {
     // NUMBER's three encoded bytes written.
     a.here("encode_number");
     a.lda(zp(NUMBER + 1));
-    a.and(imm(0xC0));
+    a.and(imm(lineref::TOP_BITS));
     a.lsr(Acc);
     a.lsr(Acc);
     a.sta(zp(BEFORE));
     a.lda(zp(NUMBER));
-    a.and(imm(0xC0));
+    a.and(imm(lineref::TOP_BITS));
     a.ora(zp(BEFORE));
     a.lsr(Acc);
     a.lsr(Acc);
-    a.eor(imm(0x54));
+    a.eor(imm(lineref::FIRST_FLIP));
     a.jsr("write_byte");
     a.lda(zp(NUMBER));
-    a.and(imm(0x3F));
-    a.ora(imm(0x40));
+    a.and(imm(lineref::LOW_BITS));
+    a.ora(imm(lineref::PRINTABLE));
     a.jsr("write_byte");
     a.lda(zp(NUMBER + 1));
-    a.and(imm(0x3F));
-    a.ora(imm(0x40));
+    a.and(imm(lineref::LOW_BITS));
+    a.ora(imm(lineref::PRINTABLE));
     a.jmp("write_byte");
 
     // NUMBER = NUMBER × 10 + A, C set if that overflows sixteen bits; Y is

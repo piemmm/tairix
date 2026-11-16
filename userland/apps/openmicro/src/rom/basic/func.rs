@@ -5,7 +5,7 @@
 //! character after it; one whose argument is a factor gives that factor's
 //! next character back first.
 
-use tairix_bbcbasic::keyword::{word, Word};
+use tairix_openbasic::keyword::{word, Word};
 
 use super::float::{FAC, FRACTION};
 use super::ws::{kind, page, zp as z};

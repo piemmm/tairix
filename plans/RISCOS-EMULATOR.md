@@ -37,9 +37,9 @@ an application's own documents folder, the reference harness);
 | RO2 | One association path: one table the file manager and the desktop both build, one matching rule Open With, icon-bar drops and folder picks apply, one store precedence, the records of an open, and a test that browsing launches nothing | done |
 | RO3 | RISC OS names defined once: leaf and path spelling and filetype names in `lib/fsmeta::preset::acorn`, the `,xxx` suffix on `Filetype`, each content type's canonical filetype beside `lib/browse`'s table; the archive, ADFS, icon, window-protocol, picker, save-panel and document-host copies move onto them | done |
 | RO4 | RISC OS colours and font names defined once: the `&BBGGRR00` colour word in `lib/colour`, the font-name map made public in `lib/drawing`; Draw's private copy and its re-derivation of the generic families are deleted | done |
-| RO5 | `lib/softfloat`: exact binary32, binary64 and double-extended arithmetic in every rounding mode with its exceptions, exact decimal conversion, plus the FPA and x87 memory formats; the 8087 moves onto it with its digest unchanged | done |
+| RO5 | `lib/softfloat`: exact binary16, binary32, binary64 and double-extended arithmetic in every rounding mode with its exceptions, exact decimal conversion, plus the FPA and x87 memory formats; the 8087 computes on it | done |
 | RO6 | `lib/obey`: GSTrans, system variables, expressions, Obey parameters and `OS_ReadArgs` templates; `lib/icon`'s `!Boot` reader is rebuilt on its read-only mode | done |
-| RO7 | `lib/bbcbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | done |
+| RO7 | `lib/openbasic`: the BASIC II and BASIC V/VI token tables, tokenising and listing; OpenMicro's ROM builder emits its keyword table from it | done |
 | RO8 | `lib/vdu`: the Acorn VDU vocabulary, RISC OS's numbered screen modes and the 8×8 system character set; OpenMicro's MOS and `lib/image` move onto it | done |
 | RO9 | The ARM integer core: the one A32 table, the interpreter, the 26-bit and 32-bit programmer's models, the two profiles, exceptions, the disassembler and encoder, the conformance vectors | done |
 | RO10 | Thumb and Thumb-2, and interworking | done |
@@ -82,7 +82,7 @@ an application's own documents folder, the reference harness);
 | RO46.2 | URL messages handed to the desktop's URL hand-off | blocked: the hand-off, `plans/BROWSER.md` BR4 |
 | RO47 | Printing to PDF: PDriver over `lib/drawing` | planned |
 | RO48 | TaskWindows, the command line in a window, and RISC OS programs run from the TAIRiX terminal | planned |
-| RO49 | TextEdit opens and saves tokenised BASIC through `lib/bbcbasic` | planned |
+| RO49 | TextEdit opens and saves tokenised BASIC through `lib/openbasic` | planned |
 | RO50 | Machine mode, tier 2, the timed machine: ARM2 and ARM3 cycles with MEMC's timing and DMA, IOC whole with the keyboard, the rest of VIDC1 and MEMC, raster effects, a modelled machine's speed for any 26-bit program | planned |
 | RO51 | Machine mode, tier 3: the floppy controllers with raw disc images, I²C's CMOS RAM and clock, the RiscPC's IOMD and VIDC20 | planned |
 | RO52 | The guest-translation runtime hoisted from PCEmulator into `lib/*`, with PCEmulator moved onto it | planned |
@@ -93,6 +93,7 @@ an application's own documents folder, the reference harness);
 | RO57 | Machine mode held to real hardware: RO14's harness run on an Archimedes and a RiscPC, their observations pinning what the data sheets leave open | blocked: needs an Archimedes and a RiscPC a developer holds |
 | RO58 | wasm32 | blocked: the wasm32 port runs no userland (`plans/ARCHSUPPORT.md`), and its host cannot instantiate a generated module |
 | RO59 | Processor captures from genuine cores: RO14's harness recording instruction vectors on a 26-bit ARMv4 machine and an ARMv7 or ARMv8 one running RISC OS 5 | blocked: needs those machines a developer holds |
+| RO60 | The interpreter's access path: a frame's words reached from its TLB entry without the slot and box indirections, and a fetch cache validated by an MMU generation, held to host instructions per guest instruction class (a mixed ALU, load and store loop runs at about 10 ns an instruction today) | planned |
 
 Items are built in ledger order. Each lands complete — tests, fuzz targets,
 docs — before an item that depends on it starts. The gate runs once a session's
@@ -146,15 +147,17 @@ run of items is finished.
    - the ARM Architecture Reference Manuals and data sheets: ARM2, ARM3,
      ARM610/710, FPA10, SA-110, ARM7TDMI, and the ARMv7-A and ARMv8-A AArch32
      manuals;
-   - sources whose licence permits it and is compatible, such as RISC OS 5's
-     Apache-2.0 sources. These are read for behaviour, structure layouts and
-     documented constants; no code is copied;
+   - sources under a licence compatible with the tree's GPL-2.0-or-later,
+     read for behaviour, structure layouts and documented constants; no code
+     is copied;
    - black-box observation of genuine RISC OS run as an opaque program
      (RO14).
 
    Nothing else is read: leaked or unlicensed sources (the `RiscOS_371` tree
-   included), disassemblies, annotated ROM listings. Genuine ROM, module, font
-   or message-file bytes never enter the tree, a fixture or a build.
+   included), sources under a licence the tree's is not compatible with —
+   RISC OS 5's Apache-2.0 sources among them — disassemblies, and annotated
+   ROM listings. Genuine ROM, module, font or message-file bytes never enter
+   the tree, a fixture or a build.
 5. **Host calls.** The kernel and the built-in modules are Rust, entered from
    guest code at a trap. There are two kinds of trap:
    - a SWI the dispatcher owns;
@@ -439,13 +442,16 @@ is fuzzed.
   - the FPSR's system ID.
 
   Arithmetic is `lib/softfloat`'s, with FPA's extended format and its
-  unnormalised values. Every result, the transcendental ones included, is
-  FPEmulator 4's bits: `cargo xtask riscos-fpa` runs a developer's own copy of
-  the module as an opaque program on the processor and records the vectors
-  the crate replays (§17). Where FPEmulator's answer depends on its own
-  workings — an operand the data sheet leaves undefined, a caller in FIQ or
-  Undefined mode, an aborted transfer — the FPA's hardware or the operand's
-  value decides, as the docs page states. An enabled trap stops the processor
+  unnormalised values. Each rule is the FPA10 and ARM7500FE data sheets' or
+  FPEmulator 4's observed black-box: `cargo xtask riscos-fpa` runs a
+  developer's own copy of the module as an opaque program on the processor
+  and records the vectors the crate replays (§17). A transcendental value and
+  a packed decimal conversion are rounded correctly, where FPEmulator's are a
+  few places off, and the harness holds them to FPEmulator's measured error.
+  Where FPEmulator's answer depends on its own workings — an operand the data
+  sheet leaves undefined, a caller in FIQ or Undefined mode, an aborted
+  transfer — the FPA's hardware or the operand's value decides, as the docs
+  page states. An enabled trap stops the processor
   for the session to enter the guest's floating-point exception path, as the
   FPE's would (RO26).
 - **VFP.** VFPv4 with 32 doublewords and ARMv8's AArch32 additions, under
@@ -629,9 +635,10 @@ is fuzzed.
 - **Guest modules** may be loaded in either mode, with instances
   (`Module%Instance`), the full initialise, finalise and service protocol,
   `*` commands, help, SWIs and message files.
-  - A squeezed module is expanded as the kernel expands one. The expander
-    `cargo xtask riscos-fpa` carries moves into the module loader then, and
-    the tool takes it from there.
+  - A squeezed module is expanded as RISC OS 5 expands one. No manual
+    describes the format and its sources are not the tree's to read, so the
+    expander is written from what RISC OS 5 is observed to make of squeezed
+    modules (RO14), with a fuzz harness of its own.
   - A guest module may replace a built-in one, as `RMLoad` replaces a ROM
     module.
   - The exception is a module that is a bridge: the kernel, FileSwitch and
@@ -778,7 +785,7 @@ is fuzzed.
 ## 7. BBC BASIC V and VI (RO20)
 
 - **Programs.**
-  - Tokenising and listing are `lib/bbcbasic`'s (RO7). The program text is
+  - Tokenising and listing are `lib/openbasic`'s (RO7). The program text is
     tokenised lines in BASIC V's layout: `&0D`, the line number, the length
     and the line's bytes, ending `&0D &FF`. That covers the line-reference
     encoding and the three extension tables.
@@ -1257,17 +1264,20 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     `Policy` for tininess, NaN propagation and flush-to-zero, which VFP sets.
   - `Decimal` converts between binary and decimal values exactly, to 1–38
     digits in any mode.
+  - The elementary functions, in 128-bit significands, give the 8087's and
+    the FPA's transcendentals.
   - The memory formats are binary64 in the FPA's word order, the x87's
-    ten-byte and the FPA's three-word extended layouts, and the FPA's packed
-    decimal, P and EP (`Packed`).
-  - PCEmulator's 8087 computes on the core, its digest unchanged. It keeps its
-    own value classes, register wrap, chop-mode results, partial remainder,
-    real indefinite and packed BCD. Its debugger writes registers through
-    `Decimal`.
+    ten-byte extended layout, and the FPA's packed decimal, P and EP
+    (`Packed`), drawn from the ARM7500FE data sheet, which the FPA reads and
+    writes through.
+  - PCEmulator's 8087 computes on the core. It keeps its own value classes,
+    register wrap, chop-mode results, partial remainder, real indefinite and
+    packed BCD. Its debugger writes registers through `Decimal`.
   - `lib/drawing` stores a Draw file's doubles in the FPA's word order through
     it.
   - The FPA (RO11) keeps its own rules over these formats: which encodings are
-    infinities, NaNs or illegal, the digits STFP writes, and how LDFP rounds.
+    infinities, NaNs or illegal, how a digit above nine and a NaN's payload
+    read, and how many digits STFP writes.
 - **RO6 — `lib/obey`** (`docs/src/lib/obey.md`):
   - GSTrans with every escape, the system-variable types with
     `OS_SetVarVal`'s and `OS_ReadVarVal`'s semantics, and
@@ -1279,15 +1289,15 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     implements over guest memory and `Store` in host memory.
   - Every reading is bounded by a budget of references; the kernel chooses
     one for trusted guest text.
-  - Where RISC OS 5's sources read past a string or crash, the documented
-    intent is kept.
+  - Where RISC OS 5 reads past a string or crashes, the documented intent is
+    kept.
   - The read-only mode reads an Obey file as data. It reads only `Set`,
     `SetMacro`, `Unset`, `If` and `IconSprites`, and skips a line that names
     its command by an alias or an abbreviation, or opens a redirection.
     `lib/icon`'s `!Boot` reader is built on it, nested `If`s and any
     condition included.
   - RO32's registry extends that read-only reading to the type claims.
-- **RO7 — `lib/bbcbasic`** (`docs/src/lib/bbcbasic.md`):
+- **RO7 — `lib/openbasic`** (`docs/src/lib/openbasic.md`):
   - The 113 keywords BASIC II and BASIC V spell and number alike are defined
     once. Each dialect's table lists every keyword in its tokeniser's order
     with its flags, BASIC II's typed one byte a token and BASIC V's with its
@@ -1302,8 +1312,8 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     command tables, and every token it tests from these tables. Its tokeniser
     and lister are tested against the library's on the emulated machine, with
     programs drawn afresh each run.
-  - Where RISC OS 5's lister reads past its table for a token it has no
-    spelling for, the token lists as nothing.
+  - Where RISC OS 5's lister lists nothing for a token it has no spelling
+    for, the token lists as nothing.
   - Its other consumers are the emulator (RO20) and TextEdit (RO49).
 - **RO8 — `lib/vdu`** (`docs/src/lib/vdu.md`):
   - The control codes 0–31 and 127 with the parameters each gathers, which
@@ -1569,7 +1579,7 @@ that request could produce.
 - **Processor.** Vectors per profile (§2.6), `lib/softfloat`'s own suite, and
   FPA, VFP and NEON vectors.
 - **Kernel, modules and BASIC.** Scenario tests in the host suite. Programs
-  built with the crate's encoder and `lib/bbcbasic` run on the emulated kernel,
+  built with the crate's encoder and `lib/openbasic` run on the emulated kernel,
   and their screen, memory and files are compared with expectations from the
   PRMs and the recorded corpus.
 - **Machine mode.**
@@ -1582,7 +1592,7 @@ that request could produce.
 - **The reference harness (RO14).** `cargo xtask riscos --reference <dir>`
   works like this:
   1. It writes the harness program, a BASIC V program built with
-     `lib/bbcbasic`, and a `!Boot` that runs it, into `<dir>`'s `hostfs/`.
+     `lib/openbasic`, and a `!Boot` that runs it, into `<dir>`'s `hostfs/`.
   2. The program runs the corpus scenarios on a genuine RISC OS and records
      what each left: registers, the flags the SWI defines, and errors by
      number. Where `<dir>` holds RPCEmu running RISC OS Open's ROM, the
@@ -1594,12 +1604,21 @@ that request could produce.
      names put in.
   4. A scenario marked `ours` keeps the fixture that states the emulator's own
      behaviour.
+  5. Before the scenarios, BASIC V types `lib/openbasic`'s programs, then saves
+     and lists each; after them, the harness runs `lib/obey`'s cases. Each
+     crate's answers are written beside its cases, and its replay holds it to
+     them.
 
-  The import refuses an observation carrying twelve bytes in a row of genuine
-  ROM, module or font content that the emulator's own resources do not hold
-  (`plans/BEEB.md` §7). The SWI layer (RO15) replays the corpus on the
-  kernel; screens and files join the scenarios as the items that draw and
-  file land. Processor captures need genuine cores (RO59).
+  Every file the import writes names the RISC OS version and each ROM image's
+  SHA-256. The import refuses a recording carrying twelve bytes in a row of a
+  ROM image that the corpus's own files do not hold, in its text, in the words
+  a step shows in consecutive registers or in the bytes a `lib/obey` case's
+  buffer was given, but for a run mostly of `&00`, spaces and `&FF`
+  (`plans/BEEB.md` §7). A message BASIC prints is recorded by the kind a
+  calibration line shows it to be, never as its text. The SWI layer (RO15)
+  replays the corpus on the kernel; screens and files join the scenarios as
+  the items that draw and file land. Processor captures need genuine cores
+  (RO59).
 - **Fuzzing.** Every decoder of untrusted input has a registered harness in the
   change that adds it: AIF and module headers, templates, Res files, message
   files, Acorn fonts, BASIC programs, Squash, the session protocol in both

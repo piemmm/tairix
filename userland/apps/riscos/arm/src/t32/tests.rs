@@ -37,9 +37,9 @@ fn bits(encoding: Encoding) -> u32 {
 
 fn halves(word: u32, wide: bool) -> (u16, u16) {
     if wide {
-        (halfword(word >> 16), halfword(word))
+        (low16(word >> 16), low16(word))
     } else {
-        (halfword(word), 0)
+        (low16(word), 0)
     }
 }
 
@@ -66,7 +66,7 @@ fn every_row_sits_in_the_group_its_fixed_bits_choose() {
         for row in *rows {
             assert_eq!(row.layout.mask & 0xE000, 0xE000, "{row:?}");
             assert_eq!(usize::try_from(row.layout.bits >> 13), Ok(group), "{row:?}");
-            assert!(!is_wide(halfword(row.layout.bits)), "{row:?}");
+            assert!(!is_wide(low16(row.layout.bits)), "{row:?}");
         }
     }
     for (group, rows) in table::WIDE.iter().enumerate() {
@@ -78,7 +78,7 @@ fn every_row_sits_in_the_group_its_fixed_bits_choose() {
                 0xFE00_0000
             };
             assert_eq!(row.layout.mask & deciding, deciding, "{row:?}");
-            assert!(is_wide(halfword(first)), "{row:?}");
+            assert!(is_wide(low16(first)), "{row:?}");
             assert_eq!(table::wide_group(row.layout.bits), group, "{row:?}");
         }
     }
@@ -171,7 +171,7 @@ fn each_floating_point_and_simd_instruction_encodes_back_as_a32_s_encoding() {
             _ if prefix & 0xF00 == 0 => prefix | (low & 0x00FF_FFFF),
             _ => prefix | (low & 0x00FF_F1FF),
         };
-        let (first, second) = (halfword(word >> 16), halfword(word));
+        let (first, second) = (low16(word >> 16), low16(word));
         let position = position(&mut rng);
         let Some(found) = decode(first, second, Isa::ALL, position) else {
             continue;
@@ -190,12 +190,50 @@ fn each_floating_point_and_simd_instruction_encodes_back_as_a32_s_encoding() {
 }
 
 #[test]
+fn each_coprocessor_instruction_is_a32_s_generic_one_placed_by_its_block() {
+    let mut rng = Prng::new(0x732_0006);
+    let mut decoded = 0;
+    for _ in 0..100_000 {
+        let draw = rng.next_u32();
+        let prefix = [0xECu32, 0xED, 0xEE, 0xFC, 0xFD, 0xFE][draw as usize % 6] << 24;
+        // Any coprocessor but VFP's, whose space its own rows hold.
+        let coprocessor = [0, 1, 2, 7, 14, 15][(draw >> 8) as usize % 6] << 8;
+        let word = prefix | coprocessor | (rng.next_u32() & 0x00FF_F0FF);
+        let (first, second) = (low16(word >> 16), low16(word));
+        let position = position(&mut rng);
+        let Some(found) = decode(first, second, Isa::ALL, position) else {
+            continue;
+        };
+        decoded += 1;
+        let a32 = crate::a32::decode_coprocessor(word, Isa::ALL).expect("A32's encoding");
+        assert_eq!(found.instruction.op, a32.instruction.op, "{word:08X}");
+        assert_eq!(found.instruction.cond, position.condition(), "{word:08X}");
+        let encoded = encode(&found.instruction, position, Size::Wide)
+            .unwrap_or_else(|e| panic!("{word:08X} {:?}: {e:?}", found.instruction));
+        assert_eq!(encoded, Encoding::Wide(first, second), "{word:08X}");
+    }
+    assert!(decoded > 50_000, "{decoded}");
+    let at =
+        |word: u32| decode(low16(word >> 16), low16(word), Isa::ALL, OUTSIDE).expect("decodes");
+    // `STC p1, c0, [PC]`, `LDC p1, c0, [PC], #0` and `LDC p1, c0, [PC]`.
+    assert!(at(0xED8F_0100).unpredictable, "a store from the PC");
+    assert!(
+        at(0xECBF_0100).unpredictable,
+        "a literal load but at an offset"
+    );
+    assert!(
+        !at(0xED9F_0100).unpredictable,
+        "a literal load at an offset"
+    );
+}
+
+#[test]
 fn each_decoded_instruction_encodes_back_and_each_row_inverts_its_own_fields() {
     let mut rng = Prng::new(0x732_0002);
     for _ in 0..200_000 {
         let draw = rng.next_u32();
-        let first = halfword(draw);
-        let second = halfword(draw >> 16);
+        let first = low16(draw);
+        let second = low16(draw >> 16);
         let position = position(&mut rng);
         let Some(detail) = decode_detail(first, second, Isa::ALL, position) else {
             continue;
@@ -490,6 +528,15 @@ fn the_register_rules_are_reported() {
         unpredictable(&[0xF3DD, 0x8F04]),
         "SUBS PC from other than LR"
     );
+    for (halves, text) in [
+        ([0xF041, 0x1000], "ORR.W R0,R1"),
+        ([0xF04F, 0x2000], "MOV.W R0"),
+        ([0xF1B0, 0x3F00], "CMP.W R0"),
+    ] {
+        assert!(unpredictable(&halves), "{text} of a zero byte repeated");
+    }
+    assert!(!unpredictable(&[0xF041, 0x0000]), "ORR.W R0,R1,#0");
+    assert!(!unpredictable(&[0xF041, 0x1001]), "ORR.W R0,R1,#&10001");
 }
 
 #[test]
@@ -553,7 +600,8 @@ fn operands_no_encoding_holds_are_refused() {
     });
     assert_eq!(
         encode(&odd, OUTSIDE, Size::Narrowest),
-        Err(EncodeError::Range)
+        Err(EncodeError::Unencodable),
+        "misaligned"
     );
     let wide_literal = at(Op::Data {
         op: DataOp::Add,
@@ -602,11 +650,36 @@ fn a_reserved_hint_behaves_as_nop() {
 }
 
 #[test]
-fn every_wide_prefix_and_no_narrow_one_reads_a_second_halfword() {
-    for first in 0..=u16::MAX {
-        assert_eq!(is_wide(first), first >> 11 >= 0b11101, "{first:04X}");
+fn every_wide_prefix_and_no_narrow_one_reads_a_second_low16() {
+    // A 32-bit instruction's first halfword begins 11101, 11110 or 11111.
+    for (first, wide) in [
+        (0x0000, false),
+        (0xDFFF, false),
+        (0xE7FF, false),
+        (0xE800, true),
+        (0xEFFF, true),
+        (0xF000, true),
+        (0xFFFF, true),
+    ] {
+        assert_eq!(is_wide(first), wide, "{first:04X}");
     }
-    assert_eq!(Encoding::Narrow(0).bytes(), 2);
-    assert_eq!(Encoding::Wide(0, 0).bytes(), 4);
     assert_eq!(bits(Encoding::Wide(0xF000, 0xF800)), 0xF000_F800);
+}
+
+#[test]
+fn encodings_the_architecture_leaves_undefined_decode_to_nothing() {
+    for (first, second, what) in [
+        (0xF7F0, 0x8000, "B.W of condition 1111"),
+        (0xF3E0, 0x8020, "B.W of condition 1111, the MRS space's"),
+        (0xF380, 0x8020, "B.W of condition 1110, the MSR space's"),
+        (
+            0xF801,
+            0x2800,
+            "STRB.W with neither pre-index nor writeback",
+        ),
+        (0xE8C1, 0x2330, "STRD with neither pre-index nor writeback"),
+        (0xE8D1, 0x0030, "LDRD with neither pre-index nor writeback"),
+    ] {
+        assert_eq!(decode(first, second, Isa::ALL, OUTSIDE), None, "{what}");
+    }
 }

@@ -176,7 +176,8 @@ fn a_host_frame_is_never_writable_and_fetches_as_host_code() {
         mmu.fetch(0x1_0004, false),
         Ok(Fetch {
             word: 0xE7F0_00F0,
-            host: true
+            host: true,
+            page: host.number(),
         })
     );
     assert_eq!(
@@ -469,6 +470,91 @@ fn a_host_write_or_a_freed_frame_reports_every_watched_granule() {
     assert!(taken.is_empty(), "the new frame is nobody's watch");
     assert_eq!(mmu.watch(Frame::new(9), 1, CODE), Err(MmuError::Frame));
     assert_eq!(Watcher::new(WATCHERS), None);
+}
+
+#[test]
+fn a_frame_past_the_limit_is_refused_before_anything_grows() {
+    let mut mmu = Mmu::new(8).unwrap();
+    let slots = mmu.store.frames.slots.len();
+    let pending = mmu.store.pending.each_ref().map(BitVec::len);
+    for number in [8, MOST_FRAMES, u32::MAX] {
+        assert_eq!(
+            mmu.allocate_at(Frame::new(number), FrameKind::Memory),
+            Err(MmuError::Exhausted),
+            "{number:#x}"
+        );
+        assert_eq!(mmu.store.frames.slots.len(), slots);
+        assert_eq!(mmu.store.pending.each_ref().map(BitVec::len), pending);
+    }
+}
+
+#[test]
+fn no_limit_reaches_a_frame_a_table_entry_cannot_hold() {
+    let mut mmu = Mmu::new(u32::MAX).unwrap();
+    assert_eq!(mmu.limit(), MOST_FRAMES);
+    mmu.set_limit(4);
+    assert_eq!(mmu.limit(), 4);
+    mmu.set_limit(u32::MAX);
+    assert_eq!(mmu.limit(), MOST_FRAMES);
+}
+
+#[test]
+fn a_frames_words_are_copied_and_its_copys_watchers_told() {
+    let mut mmu = Mmu::new(8).unwrap();
+    let from = mmu.allocate(FrameKind::Memory).unwrap();
+    let to = mmu.allocate(FrameKind::Memory).unwrap();
+    mmu.words_mut(from).unwrap()[3] = 0x1234;
+    mmu.watch(to, 0b10, DISPLAY).unwrap();
+    assert_eq!(mmu.copy_frame(from, to), Ok(()));
+    assert_eq!(mmu.words(to).unwrap()[3], 0x1234);
+    let mut taken = Vec::new();
+    mmu.take_written(DISPLAY, |frame, granules| taken.push((frame, granules)));
+    assert_eq!(taken, [(to, 0b10)]);
+    mmu.words_mut(to).unwrap()[3] = 0x5678;
+    assert_eq!(mmu.copy_frame(to, from), Ok(()), "either way round");
+    assert_eq!(mmu.words(from).unwrap()[3], 0x5678);
+    assert_eq!(mmu.copy_frame(from, from), Ok(()));
+    assert_eq!(
+        mmu.copy_frame(from, Frame::new(5)),
+        Err(MmuError::Frame),
+        "a free frame"
+    );
+}
+
+#[test]
+fn watches_follow_a_frames_contents_and_a_pending_report_stays() {
+    let (mut mmu, from) = mapped(0x9000, RW);
+    let to = mmu.allocate(FrameKind::Memory).unwrap();
+    mmu.map(Table::Global, 0xA000, to, RW).unwrap();
+    mmu.watch(from, 0b11, DISPLAY).unwrap();
+    mmu.watch(from, 0b100, CODE).unwrap();
+    mmu.write(0x9000, Width::Word, 1, true).unwrap();
+    assert_eq!(mmu.move_watches(from, to), Ok(()));
+    let mut taken = Vec::new();
+    mmu.take_written(DISPLAY, |frame, granules| taken.push((frame, granules)));
+    assert_eq!(
+        taken,
+        [(from, 0b1), (to, 0b11)],
+        "the old report kept, all of the new one's reported"
+    );
+    taken.clear();
+    mmu.take_written(CODE, |frame, granules| taken.push((frame, granules)));
+    assert_eq!(taken, [(to, 0b100)]);
+    mmu.write(0x9000, Width::Word, 2, true).unwrap();
+    mmu.write(0xA000, Width::Word, 2, true).unwrap();
+    taken.clear();
+    mmu.take_written(DISPLAY, |frame, granules| taken.push((frame, granules)));
+    assert_eq!(taken, [(to, 0b1)], "stores seen where the contents are now");
+    assert_eq!(mmu.move_watches(to, Frame::new(7)), Err(MmuError::Frame));
+    assert_eq!(
+        mmu.move_watches(Frame::new(6), to),
+        Ok(()),
+        "nothing to move"
+    );
+    mmu.write(0xA100, Width::Word, 3, true).unwrap();
+    taken.clear();
+    mmu.take_written(DISPLAY, |frame, granules| taken.push((frame, granules)));
+    assert_eq!(taken, [(to, 0b10)], "a refused move moved nothing");
 }
 
 #[test]

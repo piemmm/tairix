@@ -2,9 +2,9 @@
 //! each line reference shown as its number; and the decimal numbers both
 //! print.
 
-use tairix_bbcbasic::keyword::{word, PSEUDO_LHS};
-use tairix_bbcbasic::list::Options;
-use tairix_bbcbasic::{lineref, program};
+use tairix_openbasic::keyword::{word, PSEUDO_LHS};
+use tairix_openbasic::list::Options;
+use tairix_openbasic::{lineref, program};
 
 use super::crunch::{KEYWORD, PSEUDO_TOKENS, READ};
 use super::editor::LISTING_LOOPS;
@@ -98,7 +98,8 @@ fn lines(a: &mut Asm) {
     a.ldy(zp(OPEN_FORS).x());
     a.beq(counted);
     a.dec(zp(OPEN_FORS).x());
-    a.jmp(counted);
+    // C is set: both ways in compared equal.
+    a.bcs(counted);
     a.bind(open);
     a.inc(zp(OPEN_FORS).x());
     a.bind(counted);

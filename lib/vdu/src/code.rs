@@ -103,8 +103,9 @@ controls! {
 }
 
 /// VDU 23's first parameter from which it defines a character, that
-/// character, rather than performs an operation.
-pub const FIRST_DEFINED: u8 = 32;
+/// character, rather than performs an operation: the first that is no control
+/// code.
+pub const FIRST_DEFINED: u8 = crate::font::FIRST;
 
 macro_rules! operations {
     ($($(#[$doc:meta])* $name:ident = $code:literal;)*) => {

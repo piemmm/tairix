@@ -4,9 +4,10 @@
 //!
 //! 1. Nothing panics, and every result is within its bound: GSTrans within
 //!    its buffer, an expression's string within its most, a substitution
-//!    within its limit, `OS_ReadArgs` within its buffer, and no reading past
-//!    its budget.
-//! 2. Any bytes, escaped as `*Show` writes a value, GSTrans back to themselves.
+//!    within its limit, `OS_ReadArgs` within its buffer, a variable read
+//!    within its longest, and no reading examines more variables than its
+//!    budget, wildcards over long names among them.
+//! 2. Any bytes, written in GSTrans's escapes, GSTrans back to themselves.
 //! 3. A fully bracketed integer expression evaluates as wrapping 32-bit
 //!    arithmetic does.
 //!
@@ -16,29 +17,106 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_obey::args::substitute;
-use tairix_obey::command::{read_only, Observer};
+use tairix_obey::command::{read_only, Context, Observer};
 use tairix_obey::expr::{evaluate, MOST_STRING};
 use tairix_obey::gstrans::{gstrans, Flags};
 use tairix_obey::readargs::read_args;
-use tairix_obey::{Answer, Budget, Store, Value, Variables};
+use tairix_obey::vars::read_expanded;
+use tairix_obey::{Answer, Budget, Error, Store, Value, Variables};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 300;
 
-/// Bytes a command line is made of, often the ones that mean something.
+/// Bytes a command line is made of, often the ones that mean something, and
+/// often whole references, wildcards among them.
 fn hostile(rng: &mut Prng, len: usize) -> Vec<u8> {
     const MEANINGFUL: &[u8] = b"|<>\"%*!#$&()+-/=:,. _?@AaZz09\r\n\t\x00\x01\x7F\xE9";
-    (0..len)
-        .map(|_| match rng.below(3) {
-            0 => rng.next_u8(),
-            _ => *rng.pick(MEANINGFUL),
-        })
-        .collect()
+    const REFERENCES: [&[u8]; 6] = [b"<A*>", b"<*>", b"<Long*>", b"<#*#>", b"<N>", b"<Obey$Dir>"];
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        match rng.below(6) {
+            0 => out.push(rng.next_u8()),
+            1 => out.extend_from_slice(rng.pick(&REFERENCES)),
+            _ => out.push(*rng.pick(MEANINGFUL)),
+        }
+    }
+    out
 }
 
-/// A store of a few variables, macros among them that name one another.
-fn variables(rng: &mut Prng) -> Store {
-    let mut vars = Store::with_room(8, 256).unwrap();
+/// A name as long as the store takes, `Long` and its number first.
+fn long_name(n: usize) -> Vec<u8> {
+    let mut name = format!("Long{n}").into_bytes();
+    name.resize(NAMES, b'x');
+    name
+}
+
+/// The longest name the fuzzed store takes.
+const NAMES: usize = 96;
+
+/// A [`Store`] that counts the variables its lookups examine.
+struct Counted {
+    store: Store,
+    examined: usize,
+}
+
+impl Variables for Counted {
+    fn lookup(&mut self, pattern: &[u8]) -> Result<Option<Value>, Error> {
+        self.examined += self.store.cost(pattern);
+        self.store.lookup(pattern)
+    }
+
+    fn exists(&mut self, pattern: &[u8]) -> Result<bool, Error> {
+        self.store.exists(pattern)
+    }
+
+    fn cost(&self, pattern: &[u8]) -> usize {
+        self.store.cost(pattern)
+    }
+
+    fn assign(&mut self, pattern: &[u8], value: Value) -> Result<(), Error> {
+        self.store.assign(pattern, value)
+    }
+
+    fn delete(&mut self, pattern: &[u8]) -> Result<bool, Error> {
+        self.examined += self.store.cost(pattern);
+        self.store.delete(pattern)
+    }
+
+    fn unset(&mut self, pattern: &[u8]) -> Result<usize, Error> {
+        self.examined += self.store.cost(pattern);
+        self.store.unset(pattern)
+    }
+}
+
+/// `read` with a budget of `budget`, held to examining no more variables
+/// than the budget allows.
+fn within<T>(
+    vars: &mut Counted,
+    budget: usize,
+    read: impl FnOnce(&mut Counted, &mut Budget) -> T,
+) -> T {
+    vars.examined = 0;
+    let mut reading = Budget::new(budget);
+    let answer = read(vars, &mut reading);
+    assert!(
+        vars.examined <= budget,
+        "{} variables examined on a budget of {budget}",
+        vars.examined
+    );
+    assert!(
+        vars.examined <= budget - reading.left(),
+        "a lookup the budget was not charged for"
+    );
+    answer
+}
+
+/// A store of a few variables, macros among them that name one another, and
+/// long names a wildcard must match against.
+fn variables(rng: &mut Prng) -> Counted {
+    let mut vars = Store::with_room(16, 256, NAMES).unwrap();
+    for n in 0..rng.below(8) {
+        let _ = vars.assign(&long_name(n), Value::String(b"x".to_vec()));
+    }
     for name in [&b"A"[..], b"B", b"Obey$Dir", b"N", b"Alias$Set"] {
         let len = rng.below(24);
         let value = match rng.below(3) {
@@ -55,32 +133,43 @@ fn variables(rng: &mut Prng) -> Store {
         };
         let _ = vars.assign(name, value);
     }
-    vars
+    Counted {
+        store: vars,
+        examined: 0,
+    }
 }
 
 struct Ignored;
 
 impl Observer for Ignored {
-    fn icon_sprites(&mut self, _: &[u8], _: &mut Store, _: &mut Budget) {}
+    fn icon_sprites(&mut self, _: &[u8], _: &mut dyn Variables, _: &mut Budget) {}
 }
 
 fn hostile_everything(rng: &mut Prng) {
     let mut vars = variables(rng);
     let len = rng.below(80);
     let text = hostile(rng, len);
-    let budget_size = rng.below(64);
-    let mut budget = Budget::new(budget_size);
+    let budget = rng.below(64);
     let flags = Flags::from_bits(rng.next_u32());
     let room = rng.below(64);
     let mut buffer = vec![0u8; room];
-    let done = gstrans(&text, flags, &mut vars, &mut budget, &mut buffer);
-    assert!(done.stored <= buffer.len());
-    assert!(done.next <= text.len() + 1);
-    assert!(budget.left() <= budget_size);
+    let done = within(&mut vars, budget, |vars, budget| {
+        gstrans(&text, flags, vars, budget, &mut buffer)
+    });
+    assert!(done.next.is_none_or(|next| next <= text.len() + 1));
 
-    match evaluate(&text, &mut vars, &mut Budget::new(64)) {
+    match within(&mut vars, 64, |vars, budget| evaluate(&text, vars, budget)) {
         Ok(Answer::String(s)) => assert!(s.len() <= MOST_STRING),
         Ok(Answer::Integer(_)) | Err(_) => {}
+    }
+
+    let longest = rng.below(64);
+    let len = rng.below(12);
+    let pattern = hostile(rng, len);
+    if let Ok(Some(value)) = within(&mut vars, budget, |vars, budget| {
+        read_expanded(vars, &pattern, budget, longest)
+    }) {
+        assert!(value.len() <= longest);
     }
 
     let limit = rng.below(128);
@@ -93,27 +182,43 @@ fn hostile_everything(rng: &mut Prng) {
     let len = rng.below(24);
     let template = hostile(rng, len);
     let capacity = rng.below(96);
-    if let Ok(read) = read_args(
-        &template,
-        &args,
-        &mut vars,
-        &mut Budget::new(64),
-        0x8000,
-        capacity,
-    ) {
+    if let Ok(read) = within(&mut vars, 64, |vars, budget| {
+        read_args(&template, &args, vars, budget, 0x8000, capacity)
+    }) {
         assert!(read.buffer.len() <= capacity);
-        assert!(read.left <= capacity);
+        assert_eq!(read.left, capacity - used(&read.args, &read.buffer));
     }
 
     let len = rng.below(200);
     let file = hostile(rng, len);
-    let mut store = Store::with_room(8, 128).unwrap();
-    let mut reading = Budget::new(32);
-    let _ = read_only(&file, b"\0", &mut store, &mut Ignored, &mut reading);
-    assert!(reading.left() <= 32);
+    let _ = within(&mut vars, 32, |vars, budget| {
+        let mut cx = Context {
+            vars,
+            longest: 128,
+            observer: &mut Ignored,
+            budget,
+        };
+        read_only(&file, b"\0", b"", &mut cx)
+    });
 }
 
-/// `bytes` written so that GSTrans reads them back, as `*Show` writes a value.
+/// The bytes a reading's buffer counts as used: all of it but a final `/G`
+/// value's terminator.
+fn used(args: &[tairix_obey::readargs::Arg], buffer: &[u8]) -> usize {
+    let last = args
+        .iter()
+        .filter_map(|arg| match arg {
+            tairix_obey::readargs::Arg::Translated(at) => Some(at.end),
+            _ => None,
+        })
+        .max();
+    match last {
+        Some(end) if end == buffer.len() - 1 => buffer.len() - 1,
+        _ => buffer.len(),
+    }
+}
+
+/// `bytes` written in GSTrans's escapes, so that GSTrans reads them back.
 fn escaped(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for &b in bytes {
@@ -135,7 +240,7 @@ fn escapes_round_trip(rng: &mut Prng) {
     let len = rng.below(48);
     let bytes: Vec<u8> = (0..len).map(|_| rng.next_u8()).collect();
     let text = escaped(&bytes);
-    let mut vars = Store::with_room(1, 1).unwrap();
+    let mut vars = Store::with_room(1, 1, 1).unwrap();
     let mut buffer = vec![0u8; text.len() + 1];
     let done = gstrans(
         &text,
@@ -166,7 +271,7 @@ fn bracketed(rng: &mut Prng, depth: u32) -> (String, i32) {
 
 fn arithmetic_agrees(rng: &mut Prng) {
     let (text, value) = bracketed(rng, 5);
-    let mut vars = Store::with_room(1, 1).unwrap();
+    let mut vars = Store::with_room(1, 1, 1).unwrap();
     assert_eq!(
         evaluate(text.as_bytes(), &mut vars, &mut Budget::new(0)),
         Ok(Answer::Integer(value)),

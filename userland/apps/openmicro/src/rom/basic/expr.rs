@@ -7,7 +7,7 @@
 //! token on the 6502 stack, so nothing the right operand runs, an FN
 //! included, can disturb them.
 
-use tairix_bbcbasic::keyword::word;
+use tairix_openbasic::keyword::word;
 
 use super::float::FAC;
 use super::ws::{kind, page, place, zp as z};

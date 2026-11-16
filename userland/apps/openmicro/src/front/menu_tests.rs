@@ -8,10 +8,13 @@ use super::*;
 fn shown(model: Model) -> Shown {
     Shown {
         model,
+        drives: [model == Model::ModelB; 2],
         discs: [false; 2],
         images: [false; 2],
         tape: false,
         recording: false,
+        playing: false,
+        cartridge: false,
         paused: false,
         speed: Speed::Normal,
         full_screen: false,

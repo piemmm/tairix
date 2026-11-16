@@ -619,7 +619,6 @@ tairix/
 │   │                    #   channel matrices, the device clock model, routing
 │   │                    #   policy, the volume model, the audio-v1 client.
 │   ├── audiochan/       # Audio device-channel driver side (audiochan-v1 server).
-│   ├── bbcbasic/        # BBC BASIC II and V/VI: tokens, tokenising, LIST, program images.
 │   ├── bezier/          # Plane geometry: segments, paths, flattening, booleans.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
@@ -689,7 +688,8 @@ tairix/
 │   ├── i2cbus/          # I2C controller side: the i2c-v1 endpoint every controller serves.
 │   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
 │   │                    #   and the shipped raster masters in `assets/`.
-│   ├── image/           # Fail-closed raster-image decoding (PNG).
+│   ├── image/           # Fail-closed raster-image codecs: PNG, JPEG, GIF, BMP,
+│   │                    #   TIFF, WebP, ICO, OpenRaster, RISC OS sprites.
 │   ├── inline/          # Allocation-free containers (bounded vector/string,
 │   │                    #   rings, intrusive list, fixed bitset). Links no
 │   │                    #   allocator, so the pre-heap layer can use it.
@@ -710,6 +710,7 @@ tairix/
 │   ├── noise/           # Procedural noise: gradient, octave, ridged, cellular.
 │   ├── obey/            # RISC OS command-line machinery: GSTrans, system variables,
 │   │                    #   expressions, argument templates, a read-only Obey reading.
+│   ├── openbasic/       # BBC BASIC-compatible tokens, tokenising, LIST, program images.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner, pool,
 │   │                    #   ordered dispatch).
@@ -812,9 +813,11 @@ tairix/
 │   │   └── smbfs/       # Network shares: SMB 3 listing, mounting and serving.
 │   ├── apps/            # Default apps. Each app is its own crate, but for:
 │   │   └── riscos/      #   The RISC OS emulator (plans/RISCOS-EMULATOR.md). A
-│   │                    #   leaf subtree of one crate per subsystem: its crates
-│   │                    #   compose each other and `lib/*`, and NOTHING outside
-│   │                    #   it may depend on them.
+│   │       │            #   leaf subtree of one crate per subsystem: its crates
+│   │       │            #   compose each other and `lib/*`, and NOTHING outside
+│   │       │            #   it may depend on them.
+│   │       ├── arm/     #     The ARM processor, its FPA, VFP and NEON, guest MMU.
+│   │       └── kernel/  #     The RISC OS kernel: address space, slots, areas.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.
@@ -1764,7 +1767,8 @@ You are not exempt from any rule above. In addition:
     | The temporary work list from the Raspberry Pi 4 investigation: the USB host controller's serve loop never waiting (D1125), mass-storage medium detection, spin-up and deadlines, attached-volume names, removable-media ownership, DESK-21, owned dialog windows replacing in-window panels, and content-sized alerts | `plans/TEMPORARY.md` |
     | Screen capture: the desktop as the only capturer, the compositor's capture tap, the capture chords and bar, stills, the recorder component, VP8/WebM and Opus, desktop-sound monitor streams, and playing recordings back | `plans/CAPTURE.md` |
     | The Open Micro emulator (`OpenMicro.app`): the cycle-exact 6502, the BBC Micro Model B and Acorn Electron devices and the Plus 1, the sandboxed machine worker and its protocol, the clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs and the Rust 6502 builder that emits them, the reference harness and its clean-room boundary, disc and tape media, snapshots, the machine library both emulators keep (`lib/machines`), an application's own documents folder, and the front end's pacing, key mapping and presentation | `plans/BEEB.md` |
-    | The RISC OS emulator (`RISCOSEmulator.app`) and the `userland/apps/riscos` subtree: the ARM processor in its 26-bit and 32-bit profiles with the FPA, VFP and NEON; the guest address space; the first-party RISC OS kernel, modules, FileSwitch and HostFS; BBC BASIC V and VI; the VDU, sprite, Draw and font systems; SharedCLibrary; the Wimp and Toolbox as TAIRiX windows, menus and hosted icon-bar slots in either look; sound, sockets and printing to PDF; machine mode's tiered models of the Archimedes and RiscPC chips for software that drives them; `!App` activation, the RISC OS application registry and isolated sessions; the session worker; the reference harness; the ARM translator; and the shared libraries and desktop facilities they bring (`lib/softfloat`, `lib/obey`, `lib/bbcbasic`, `lib/vdu`, hosted-environment windows and menus) | `plans/RISCOS-EMULATOR.md` |
+    | The Commodore 64 in the Open Micro emulator: the 6510 and its banking, the VIC-II, the CIAs, the SID, the datasette and cartridges, the true 1541 on the serial bus and its GCR surface, PRG, T64, TAP, D64, G64 and CRT media, and the clean-room KERNAL, BASIC V2, character and 1541 DOS ROMs | `plans/C64.md`; `plans/BEEB.md` |
+    | The RISC OS emulator (`RISCOSEmulator.app`) and the `userland/apps/riscos` subtree: the ARM processor in its 26-bit and 32-bit profiles with the FPA, VFP and NEON; the guest address space; the first-party RISC OS kernel, modules, FileSwitch and HostFS; BBC BASIC V and VI; the VDU, sprite, Draw and font systems; SharedCLibrary; the Wimp and Toolbox as TAIRiX windows, menus and hosted icon-bar slots in either look; sound, sockets and printing to PDF; machine mode's tiered models of the Archimedes and RiscPC chips for software that drives them; `!App` activation, the RISC OS application registry and isolated sessions; the session worker; the reference harness; the ARM translator; and the shared libraries and desktop facilities they bring (`lib/softfloat`, `lib/obey`, `lib/openbasic`, `lib/vdu`, hosted-environment windows and menus) | `plans/RISCOS-EMULATOR.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a

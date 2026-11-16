@@ -9,7 +9,7 @@ mod buffers;
 mod cfs;
 mod cli;
 mod copy;
-mod font;
+pub(crate) mod font;
 mod graphics;
 mod high;
 mod irq;
@@ -30,7 +30,7 @@ use tairix_vdu::code::Control;
 
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::sheila;
-use crate::machine::{Model, IO_BASE, IO_END, OS_BASE, ROM_SIZE};
+use crate::machine::{IO_BASE, IO_END, OS_BASE, ROM_SIZE};
 use crate::rom::asm::{Asm, AsmError, Image, ERASED};
 
 /// The routine each vector holds after a reset, in vector order, and the
@@ -158,6 +158,15 @@ const LATCH_HIGH: u8 = 0x08;
 
 /// DELETE's character code, which VDU 127 acts on.
 const DELETE: u8 = Control::Delete as u8;
+
+/// The machines the MOS is built for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Model {
+    /// The Model B.
+    ModelB,
+    /// The Electron.
+    Electron,
+}
 
 /// Build the Model B's MOS image.
 ///

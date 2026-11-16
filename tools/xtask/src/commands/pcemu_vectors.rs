@@ -6,10 +6,11 @@
 //! [`PER_GROUP`] vectors of every upstream file, without bus traces — in the
 //! compact format `tairix_pcemu::vectors` defines, with a provenance record.
 //!
-//! Developer-run only, never in CI: `<dir>` holds a local copy of each
-//! suite, `<dir>/<cpu>/` with its `*.MOO.gz` files, its `metadata.json` and a
-//! `COMMIT` file naming the upstream revision it was taken from. Builds stay
-//! offline; the committed subset is reviewed like any other change.
+//! Developer-run only, never in CI: `<dir>/<cpu>/` holds each suite at the
+//! revision it is pinned at — its `*.MOO.gz` files, refused unless their list
+//! hashes to the suite's pin, its `LICENSE`, refused unless it is the suites'
+//! MIT licence, and its `metadata.json`. Builds stay offline; the committed
+//! subset is reviewed like any other change.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use tairix_pcemu::vectors::{self, Group, Status, Suite, Vector, REGISTERS};
 
 use super::json::{self, Json};
+use super::pinned::{hashes_to, SINGLE_STEP_LICENSE};
 use crate::Context;
 
 /// Where the subsets are committed.
@@ -31,22 +33,42 @@ const MAX_MOO_BYTES: usize = 512 << 20;
 struct Upstream {
     cpu: &'static str,
     repo: &'static str,
+    /// The revision the suite is pinned at.
+    commit: &'static str,
+    /// The SHA-256 of the suite's [`manifest`] at that revision.
+    manifest: &'static str,
 }
 
 const SUITES: [Upstream; 3] = [
     Upstream {
         cpu: "8088",
         repo: "https://github.com/SingleStepTests/8088",
+        commit: "aea84484abc79d09639d855b7b0ab32bc9e4dbeb",
+        manifest: "8e081d74d66d39b02ad3f2277d20693b604973776256972acce81faab11135f1",
     },
     Upstream {
         cpu: "8086",
         repo: "https://github.com/SingleStepTests/8086",
+        commit: "e71c68d215a6bb8c356bd4cb3842de3bef345ca9",
+        manifest: "c92343dd90fbfb9ea894a3887633965d79bbc1376b6388bf97a3b056ec57931b",
     },
     Upstream {
         cpu: "v20",
         repo: "https://github.com/SingleStepTests/v20",
+        commit: "6b3748f97533d606249382cad8d94b1c165ef93d",
+        manifest: "df061b150db9fc8a6af9129a26eb37ffb62d021134daa90d2b95a3c5f1161b3d",
     },
 ];
+
+/// A suite's `*.MOO.gz` files as its pin covers them: one `<name> <SHA-256>`
+/// line per file, in name order.
+fn manifest(files: &[(String, String)]) -> String {
+    let mut manifest = String::new();
+    for (name, digest) in files {
+        let _ = writeln!(manifest, "{name} {digest}");
+    }
+    manifest
+}
 
 pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
     let source = match args {
@@ -57,6 +79,21 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
             )
         }
     };
+    let mut licence = Vec::new();
+    let mut imported = Vec::with_capacity(SUITES.len());
+    for upstream in &SUITES {
+        let dir = source.join(upstream.cpu);
+        licence = SINGLE_STEP_LICENSE.read("pcemu-vectors", &dir)?;
+        let (suite, files) = import_suite(upstream, &dir)?;
+        if !hashes_to(manifest(&files).as_bytes(), upstream.manifest) {
+            return Err(format!(
+                "pcemu-vectors: {}: the suite's files are not those pinned at {}",
+                dir.display(),
+                upstream.commit
+            ));
+        }
+        imported.push((upstream, suite, files));
+    }
     let out = ctx.workspace_root.join(OUT_DIR);
     std::fs::create_dir_all(&out)
         .map_err(|e| format!("pcemu-vectors: cannot create {}: {e}", out.display()))?;
@@ -71,12 +108,7 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
          | Suite | Upstream | Commit | Groups | Vectors |\n|---|---|---|---|---|\n",
     );
     let mut digests = String::new();
-    for upstream in &SUITES {
-        let dir = source.join(upstream.cpu);
-        let commit = std::fs::read_to_string(dir.join("COMMIT"))
-            .map_err(|e| format!("pcemu-vectors: {}: no COMMIT file: {e}", dir.display()))?;
-        let commit = commit.trim().to_string();
-        let (suite, files) = import_suite(upstream, &dir)?;
+    for (upstream, suite, files) in imported {
         let encoded =
             vectors::encode(&suite).map_err(|e| format!("pcemu-vectors: {}: {e}", upstream.cpu))?;
         let packed = pack(&encoded)?;
@@ -86,9 +118,10 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
         let total: usize = suite.groups.iter().map(|g| g.vectors.len()).sum();
         let _ = writeln!(
             provenance,
-            "| `{}` | {} | `{commit}` | {} | {total} |",
+            "| `{}` | {} | `{}` | {} | {total} |",
             upstream.cpu,
             upstream.repo,
+            upstream.commit,
             suite.groups.len()
         );
         let _ = writeln!(
@@ -106,9 +139,6 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
         );
     }
     provenance.push_str(&digests);
-    let licence = source.join(SUITES[0].cpu).join("LICENSE");
-    let licence = std::fs::read(&licence)
-        .map_err(|e| format!("pcemu-vectors: {}: {e}", licence.display()))?;
     std::fs::write(out.join("LICENSE"), licence)
         .map_err(|e| format!("pcemu-vectors: LICENSE: {e}"))?;
     std::fs::write(out.join("PROVENANCE.md"), provenance)
@@ -382,4 +412,19 @@ fn parse_moo(moo: &[u8], keep: usize) -> Result<Vec<Vector>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suite_s_pin_covers_each_file_s_name_and_digest_in_name_order() {
+        let files = [
+            ("00.MOO.gz".to_string(), "aa".to_string()),
+            ("01.MOO.gz".to_string(), "bb".to_string()),
+        ];
+        assert_eq!(manifest(&files), "00.MOO.gz aa\n01.MOO.gz bb\n");
+        assert_eq!(manifest(&[]), "");
+    }
 }

@@ -7,19 +7,15 @@ use crate::encoding::form::Kind;
 use crate::encoding::layout::Field;
 use crate::instruction::*;
 use crate::isa::{Feature, Isa};
+use crate::profile::BIT26;
 use crate::reg::{Reg, RegList};
 use tairix_fuzzseed::Prng;
 
-/// The 26-bit profile's instruction set: ARMv4 as the SA-110 has it.
-const ARMV4: Isa = Isa::of(&[
-    Feature::V2,
-    Feature::Swp,
-    Feature::V3,
-    Feature::LongMultiply,
-    Feature::V4,
-    Feature::ConditionNever,
-    Feature::Modes26,
-]);
+/// The 26-bit profile's instruction set, ARMv4 as the SA-110 has it,
+/// without the FPA claiming coprocessors 1 and 2.
+fn armv4() -> Isa {
+    BIT26.isa.without(Feature::Fpa)
+}
 
 fn text(word: u32, isa: Isa, address: u32) -> String {
     let instruction = decode(word, isa).expect("decodes");
@@ -159,7 +155,7 @@ fn each_decoded_word_encodes_to_itself_made_canonical() {
     let mut rng = Prng::new(0xA32_0002);
     for _ in 0..200_000 {
         let word = rng.next_u32();
-        for isa in [Isa::ALL, ARMV4] {
+        for isa in [Isa::ALL, armv4()] {
             let Some(decoded) = decode_detail(word, isa) else {
                 continue;
             };
@@ -167,7 +163,7 @@ fn each_decoded_word_encodes_to_itself_made_canonical() {
             let Ok(encoded) = encode(&instruction) else {
                 // ARMv4 reads a few encodings later architectures gave to
                 // other instructions; those have no encoding of their own.
-                assert_eq!(isa, ARMV4, "{word:08X}: {instruction:?}");
+                assert_eq!(isa, armv4(), "{word:08X}: {instruction:?}");
                 assert_ne!(
                     decode(word, Isa::ALL.with(Feature::ConditionNever)),
                     Some(instruction)
@@ -335,7 +331,7 @@ fn the_fpa_claims_its_coprocessors_words_and_leaves_the_rest_generic() {
     assert!(claimed(0xEE90_3111), "the flags to R3");
     assert!(claimed(0xECD1_1103), "unindexed, which MCRR's space holds");
     assert!(!claimed(0xEE08_0180), "precision 11");
-    let generic = decode(0xEDB1_8102, ARMV4).map(|instruction| instruction.op);
+    let generic = decode(0xEDB1_8102, armv4()).map(|instruction| instruction.op);
     assert!(
         matches!(generic, Some(Op::CoprocessorTransfer { .. })),
         "a core without the FPA"
@@ -347,7 +343,7 @@ fn the_fpa_claims_its_coprocessors_words_and_leaves_the_rest_generic() {
         ),
         "the unconditional space is never the FPA's"
     );
-    let never = decode(0xFD91_0100, ARMV4.with(Feature::Fpa)).expect("decodes");
+    let never = decode(0xFD91_0100, armv4().with(Feature::Fpa)).expect("decodes");
     assert_eq!(never.cond, Condition::Nv);
     assert!(matches!(never.op, Op::FpaTransfer { .. }), "NV is never");
 }
@@ -379,10 +375,10 @@ fn a_branch_shows_its_target() {
 
 #[test]
 fn the_comparisons_p_forms_and_the_never_condition_read_on_armv4() {
-    assert_eq!(text(0xE33F_F003, ARMV4, 0), "TEQP    PC,#3");
-    assert_eq!(text(0xF000_0000, ARMV4, 0), "ANDNV   R0,R0,R0");
-    assert_eq!(text(0xF1A0_0000, ARMV4, 0), "MOVNV   R0,R0");
-    let never = decode(0xF1A0_0000, ARMV4).expect("decodes");
+    assert_eq!(text(0xE33F_F003, armv4(), 0), "TEQP    PC,#3");
+    assert_eq!(text(0xF000_0000, armv4(), 0), "ANDNV   R0,R0,R0");
+    assert_eq!(text(0xF1A0_0000, armv4(), 0), "MOVNV   R0,R0");
+    let never = decode(0xF1A0_0000, armv4()).expect("decodes");
     assert_eq!(never.cond, Condition::Nv);
     assert_eq!(encode(&never), Ok(0xF1A0_0000));
     assert_eq!(decode(0xF1A0_0000, Isa::ALL), None, "unconditional space");
@@ -390,19 +386,19 @@ fn the_comparisons_p_forms_and_the_never_condition_read_on_armv4() {
 
 #[test]
 fn an_instruction_a_profile_lacks_is_undefined_there() {
-    assert_eq!(decode(0xE12F_FF1E, ARMV4), None, "BX needs ARMv4T");
-    assert_eq!(decode(0xE6EF_0071, ARMV4), None, "UXTB needs ARMv6");
-    assert_eq!(decode(0xE30A_0BCD, ARMV4), None, "MOVW needs ARMv6T2");
+    assert_eq!(decode(0xE12F_FF1E, armv4()), None, "BX needs ARMv4T");
+    assert_eq!(decode(0xE6EF_0071, armv4()), None, "UXTB needs ARMv6");
+    assert_eq!(decode(0xE30A_0BCD, armv4()), None, "MOVW needs ARMv6T2");
     let modern = Isa::ALL.without(Feature::Swp);
     assert_eq!(decode(0xE103_0091, modern), None, "ARMv8 removed SWP");
-    assert!(decode(0xE103_0091, ARMV4).is_some());
+    assert!(decode(0xE103_0091, armv4()).is_some());
 }
 
 #[test]
 fn the_unprivileged_halfword_forms_claim_p_clear_with_w_set_only_from_armv6t2() {
     let word = 0xE0F2_10B4; // LDRHT R1,[R2],#4
     assert_eq!(text(word, Isa::ALL, 0), "LDRHT   R1,[R2],#4");
-    assert_eq!(decode(word, ARMV4), None);
+    assert_eq!(decode(word, armv4()), None);
 }
 
 #[test]
@@ -442,6 +438,49 @@ fn operands_no_encoding_holds_are_refused() {
         },
     };
     assert_eq!(encode(&bad_shift), Err(EncodeError::Range));
+    let branch = |op, offset| Instruction {
+        cond: if op == BranchOp::Blx {
+            Condition::Nv
+        } else {
+            Condition::Al
+        },
+        op: Op::Branch { op, offset },
+    };
+    assert_eq!(
+        encode(&branch(BranchOp::B, 1 << 25)),
+        Err(EncodeError::Range)
+    );
+    assert_eq!(
+        encode(&branch(BranchOp::Bl, -(1 << 25) - 4)),
+        Err(EncodeError::Range)
+    );
+    assert!(encode(&branch(BranchOp::B, (1 << 25) - 4)).is_ok());
+    assert!(encode(&branch(BranchOp::B, -(1 << 25))).is_ok());
+    for (op, offset) in [(BranchOp::B, 2), (BranchOp::Bl, 1), (BranchOp::Blx, 1)] {
+        assert_eq!(
+            encode(&branch(op, offset)),
+            Err(EncodeError::Unencodable),
+            "{op:?} misaligned by {offset}"
+        );
+    }
+    assert!(
+        encode(&branch(BranchOp::Blx, 2)).is_ok(),
+        "BLX to a halfword"
+    );
+    let expanded = Instruction {
+        cond: Condition::Al,
+        op: Op::Move {
+            op: MoveOp::Mov,
+            s: false,
+            rd: Reg::field(0),
+            operand: Operand::Expanded(Expanded(0x100)),
+        },
+    };
+    assert_eq!(
+        encode(&expanded),
+        Err(EncodeError::Unencodable),
+        "a T32 immediate"
+    );
     let conditional_pld = Instruction {
         cond: Condition::Eq,
         op: Op::Preload {
@@ -523,7 +562,7 @@ fn every_shift_round_trips_through_its_fields() {
 #[test]
 fn the_architecture_s_unpredictable_encodings_are_reported() {
     let check = |word: u32, isa: Isa| unpredictable(&decode(word, isa).expect("decodes"), isa);
-    assert!(check(0xE000_0090, ARMV4), "MUL R0,R0,R0 before ARMv6");
+    assert!(check(0xE000_0090, armv4()), "MUL R0,R0,R0 before ARMv6");
     assert!(!check(0xE000_0090, Isa::ALL), "fine from ARMv6");
     assert!(check(0xE5B1_1004, Isa::ALL), "LDR R1,[R1,#4]!");
     assert!(!check(0xE591_1004, Isa::ALL), "LDR R1,[R1,#4]");
@@ -531,7 +570,7 @@ fn the_architecture_s_unpredictable_encodings_are_reported() {
     assert!(check(0xE8B0_0000, Isa::ALL), "an empty list");
     assert!(check(0xE081_F312, Isa::ALL), "ADD PC,R1,R2,LSL R3");
     assert!(check(0xE135_1001, Isa::ALL), "TEQ with Rd set");
-    assert!(!check(0xE33F_F003, ARMV4), "TEQP on a 26-bit core");
+    assert!(!check(0xE33F_F003, armv4()), "TEQP on a 26-bit core");
     assert!(check(0xE1C0_10D0, Isa::ALL), "LDRD of an odd pair");
     assert!(!check(0xE1C0_20D0, Isa::ALL), "LDRD R2,R3,[R0]");
     assert!(
@@ -539,6 +578,9 @@ fn the_architecture_s_unpredictable_encodings_are_reported() {
         "LDRH into its base with writeback"
     );
     assert!(check(0xE182_2F91, Isa::ALL), "STREX status is the base");
+    assert!(check(0xE12F_FF2F, Isa::ALL), "BXJ PC");
+    assert!(check(0xE12F_FF3F, Isa::ALL), "BLX PC");
+    assert!(!check(0xE12F_FF1F, Isa::ALL), "BX PC from ARMv7");
 }
 
 #[test]
@@ -635,4 +677,15 @@ fn a_coprocessor_form_on_vfp_s_numbers_is_undefined_where_vfp_claims_them() {
     }
     assert_eq!(decode(0xEEB9_0A40, Isa::ALL), None, "no VFP encoding");
     assert!(decode(0xEEB9_0A40, Isa::ALL.without(Feature::Vfp)).is_some());
+}
+
+#[test]
+fn an_advanced_simd_immediate_s_operation_is_its_cmode_s() {
+    use crate::instruction::SimdImmediateOp as O;
+    assert_eq!(O::of(0x01), Some(O::Vorr));
+    assert_eq!(O::of(0x00), Some(O::Vmov));
+    assert_eq!(O::of(0x11), Some(O::Vbic));
+    assert_eq!(O::of(0x10), Some(O::Vmvn));
+    assert_eq!(O::of(0x1E), Some(O::Vmov), "the 64-bit form");
+    assert_eq!(O::of(0x1F), None, "reserved");
 }

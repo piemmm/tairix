@@ -14,8 +14,9 @@ underflow or NaNs, so a unit with rules of its own builds them on it.
 | Item | What it is |
 |---|---|
 | `Parts` | A finite operand, `sig × 2^(exp − 63)`, its integer bit explicit, so an unnormal is an operand like any other. `Parts::of` reads a double-extended value, a denormal as the unnormal it equals. |
-| `Exact` | A result before rounding, `sig × 2^(exp − 126)`: a 64-bit significand, 62 guard bits below it, a carry bit above, and a sticky bit for anything lower. |
+| `Exact` | A result before rounding, `sig × 2^(exp − 126)`: a 64-bit significand, 63 guard bits below it, a carry bit above, and a sticky bit for anything lower. |
 | `add`, `multiply`, `divide`, `square_root` | The exact result of two `Parts`, or one. A sum is normalized as its larger operand is and a product with an unnormal factor stays unnormal, as the 8087's unnormal arithmetic leaves them. |
+| `remainder` | IEEE 754's remainder of two normalized, nonzero `Parts`: exact, at most half the divisor. |
 | `Exact::rounded` | The significand rounded to a `Rounding`: a `Mode` and the bits kept, 24, 53 or 64 for the three formats. It answers whether rounding carried and whether the result is inexact. |
 | `to_integer` | A value rounded to an integer in a `Mode`, `None` past `u64`. |
 
@@ -35,8 +36,7 @@ divide-by-zero, overflow, underflow, inexact).
 | `fused_multiply_add` | Rounded once, the product held exactly. A NaN operand is chosen addend first, as ARM's fused multiply-add takes them. `∞ × 0` beside a quiet NaN addend is invalid and answers the default NaN; beside a signalling one, that addend quieted. |
 | `rem` | IEEE 754's remainder, the quotient rounded to the even integer. It is always exact. |
 | `round_to_integral` | Rounding in the value's own format; inexact only where asked, as `roundToIntegralExact` raises it. |
-| `to_integer`, `from_integer` | An `Integral` (a value, out of range, or a NaN) for the caller to hold to its own range, and the rounded value of an integer. |
-| `to_fixed`, `from_fixed` | The same of a fixed-point value with a number of fraction bits, rounded once. |
+| `to_fixed`, `from_fixed` | An `Integral` (a value, out of range, or a NaN) for the caller to hold to its own range, and the rounded value of a fixed-point value with a number of fraction bits: none for an integer. |
 | `convert` | Between the three formats, rounded where the target is narrower. |
 | `compare` | `None` when unordered. A signalling NaN raises invalid, and so does a quiet one where the comparison signals. |
 
@@ -51,6 +51,27 @@ divide-by-zero, overflow, underflow, inexact).
   raising underflow alone, as ARM's flush-to-zero mode does. Flushing a
   denormal operand is the caller's: the standard has no flag for it.
 
+## The elementary functions
+
+`elementary` computes each function in 128-bit significands from constants
+built by exact integer series (π by Machin's formula, ln 2 and ln 10 by
+atanh), and answers an `Exact` the caller rounds once. A result is correctly
+rounded unless the true value lies within 2^-120 of a rounding boundary.
+
+| Function | Domain | Exact where |
+|---|---|---|
+| `sin`, `cos`, `tan` | finite, below 2^63 in magnitude: reduced by the nearest multiple of π/2 through 256 bits of 2/π, however close | — |
+| `atan2`, `asin`, `acos` | finite; at most one in magnitude for the arcs | — |
+| `exp`, `exp2m1` | finite: past every exponent's reach, the power of two there, or 2^x − 1 just above −1 | — |
+| `ln`, `log10` | positive, finite | `log10` of 10^1 to 10^27 |
+| `y_log2_x`, `y_log2_1p_x` | `x > 0`; `x > −1` | — |
+| `pow` | positive finite `x` other than one, finite nonzero `y` | an integer power that fits 64 bits |
+| `quarter_pis` | π × n/4 | — |
+
+Beside its leading term — sin, tan, atan, asin and cos of an argument below
+2^-58, and e^x of one below 2^-120 — a value is answered on the side it lies,
+so a directed rounding falls the right way.
+
 ## Decimal conversion
 
 `Decimal` is `±significand × 10^exponent`, its significand a `u128` of up to
@@ -59,13 +80,13 @@ fixed-width integer, so neither approximates and neither allocates.
 
 - `Decimal::of(parts, digits, mode)` writes a finite value to 1 to 38
   significant digits rounded in any `Mode`, and says whether that was
-  inexact. Any value in double-extended's range converts, the least
-  subnormal among them.
+  inexact. Any value from the FPA's least denormal, 2^-16446 and half
+  double-extended's least subnormal, to its largest finite value converts.
 - `Decimal::exact` reads a decimal value as an `Exact`: its top 127 bits and
   a sticky bit, enough to round correctly at any precision. A value past
-  double-extended's range is `Beyond::Above` its largest finite value or
-  `Beyond::Below` half its least subnormal, for the caller to overflow or
-  underflow by its own rules.
+  that range is `Beyond::Above` the largest finite value or `Beyond::Below`
+  10^-4952, under half the FPA's least denormal, for the caller to overflow
+  or underflow by its own rules.
 
 The work grows with the value's distance from one: a few words for ordinary
 values, a few hundred thousand word operations at the far ends of
@@ -82,9 +103,6 @@ double-extended's range.
   64-bit significand with its integer bit explicit.
   - `to_bytes` and `from_bytes` are the x87's ten bytes, the significand
     first and low byte first.
-  - `to_fpa_words` and `from_fpa_words` are the FPA's three words: the sign
-    in bit 31 and the exponent in bits 14 to 0, then the significand's high
-    word and its low word.
 - `Packed` is the FPA's packed decimal as memory holds it (ARM7500FE data
   sheet, 9.3.5 and 9.3.6). The first word holds the number's sign in bit 31
   and the exponent's sign in bit 30, then the exponent's BCD digits, then the
@@ -97,6 +115,7 @@ double-extended's range.
   - `Packed::of` normalizes a `Decimal` into the format, and `Packed::value`
     reads one back. A nibble above nine has no value, as an infinity's or a
     NaN's exponent has none.
+  - `packed::bcd` is an integer's binary-coded decimal, its last digit lowest.
 
 ## What each unit keeps
 
@@ -110,9 +129,10 @@ A unit keeps only the rules that are its own.
   - its value classes, its real indefinite and its packed BCD.
 - **The FPA** (RO11) keeps:
   - which encodings of its extended and packed formats are infinities, NaNs
-    or illegal;
-  - the digits its stores write and how its loads round;
-  - the rules of its extended precision.
+    or illegal, and how it reads a digit above nine and a NaN's payload;
+  - how many digits its stores write;
+  - the rules of its extended precision, and the special cases of its
+    transcendental functions.
 
 ## Tests
 
@@ -130,7 +150,16 @@ A unit keeps only the rules that are its own.
   narrows, comparisons and their flags, and both memory layouts.
 - **The core.** Ties broken to even, away or by direction and by the sticky
   bit, a carry into the next exponent, a narrower precision's own last bit,
-  integers in every mode, and exact roots of perfect squares.
+  integers in every mode, and exact roots of perfect squares. 20 000 random
+  sums, products and quotients are held to a reference rounding of their
+  exact values at 24, 53 and 64 bits in every mode, 20 000 square roots to
+  bracketing their radicands, and the root itself to the digit-by-digit
+  method's.
+- **The elementary functions.** Points worked to 160 digits, the exact
+  powers of ten and integer powers, square roots and the nearest integer at
+  every place, tiny arguments rounding to their side, exponentials past every
+  exponent, and a sweep across each function's range held to a double-double
+  reference.
 - **Decimal.**
   - 3 000 random doubles, subnormals among them, are written to a random
     number of digits in every mode. Each is held to the host's exact

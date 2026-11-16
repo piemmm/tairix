@@ -15,9 +15,9 @@ use alloc::vec::Vec;
 
 use tairix_fsmeta::preset::acorn;
 use tairix_image::SpriteName;
-use tairix_obey::command::{read_only, Observer, MOST_LINE};
+use tairix_obey::command::{read_only, Context, Observer, MOST_LINE};
 use tairix_obey::vars::read_expanded;
-use tairix_obey::{Budget, Store};
+use tairix_obey::{Budget, Store, Variables};
 use tairix_raster::Surface;
 use tairix_util::fallible;
 
@@ -57,6 +57,10 @@ pub const MAX_SPRITE_FILES: usize = 12;
 /// The most variables a scan keeps.
 const MAX_VARIABLES: usize = 32;
 
+/// The longest variable name a scan keeps: a bound on untrusted input that
+/// holds a wildcard's matching to a few thousand steps a variable.
+const MAX_NAME: usize = 64;
+
 /// The deepest a sprite file may lie inside its application: the most
 /// components a path [`boot_sprite_files`] names has.
 pub const MAX_DEPTH: usize = 4;
@@ -69,9 +73,14 @@ const MAX_REFERENCES: usize = 1024;
 /// every sprite file it tries.
 pub const MAX_APPLICATION_PICTURE_BYTES: u64 = 2 * MAX_APPLICATION_SPRITES_BYTES;
 
+/// What a path variable's name has after its own: `App:` is read as
+/// `App$Path` says.
+const PATH_SUFFIX: &[u8] = b"$Path";
+
 /// What `<Obey$Dir>` expands to: the application's own directory, marked by a
-/// byte no scanned line can hold, so a path starts there only when it really
-/// does.
+/// byte no `!Boot` line holds. GSTrans makes the same byte from `|@` or `<0>`,
+/// so a name beginning with one also starts in the directory; it names a file
+/// inside the application either way.
 const APPLICATION: u8 = 0;
 
 /// The sprites RISC OS's Filer shows an application by: one called what the
@@ -127,15 +136,22 @@ pub fn boot_sprite_files(boot: &[u8]) -> Vec<String> {
     if boot.len() > MAX_BOOT_BYTES || !is_text(boot) {
         return Vec::new();
     }
-    let (Some(mut vars), Some(mut found)) =
-        (Store::with_room(MAX_VARIABLES, MOST_LINE), Found::new())
-    else {
+    let (Some(mut vars), Some(mut found)) = (
+        Store::with_room(MAX_VARIABLES, MOST_LINE, MAX_NAME),
+        Found::new(),
+    ) else {
         return Vec::new();
     };
     let mut budget = Budget::new(MAX_REFERENCES);
-    if read_only(boot, &[APPLICATION], &mut vars, &mut found, &mut budget).is_err() {
-        return Vec::new();
-    }
+    // A reading its bounds stop ends where they did, so what it found is
+    // what the file's lines before then named.
+    let mut cx = Context {
+        vars: &mut vars,
+        longest: MOST_LINE,
+        observer: &mut found,
+        budget: &mut budget,
+    };
+    let _ = read_only(boot, &[APPLICATION], b"", &mut cx);
     found.files
 }
 
@@ -180,7 +196,7 @@ impl Found {
 }
 
 impl Observer for Found {
-    fn icon_sprites(&mut self, file: &[u8], vars: &mut Store, budget: &mut Budget) {
+    fn icon_sprites(&mut self, file: &[u8], vars: &mut dyn Variables, budget: &mut Budget) {
         let Some(colon) = file.iter().position(|&b| b == b':') else {
             self.keep(file);
             return;
@@ -191,11 +207,11 @@ impl Observer for Found {
             return;
         }
         let mut name = Vec::new();
-        if !fallible::reserve(&mut name, variable.len() + 5) {
+        if !fallible::reserve(&mut name, variable.len() + PATH_SUFFIX.len()) {
             return;
         }
         name.extend_from_slice(variable);
-        name.extend_from_slice(b"$Path");
+        name.extend_from_slice(PATH_SUFFIX);
         let Ok(Some(prefixes)) = read_expanded(vars, &name, budget, MOST_LINE) else {
             return;
         };
@@ -215,11 +231,15 @@ impl Observer for Found {
 /// The RISC OS `path`, expanded, as a path inside the application spelled as
 /// TAIRiX spells it, or `None` where it starts anywhere but the application's
 /// own directory, lies more than [`MAX_DEPTH`] deep, or holds a leaf no RISC
-/// OS name can be.
+/// OS name can be. A control character ends the name, as RISC OS ends one.
 ///
 /// Only an ASCII path is taken: its leaves become TAIRiX names unchanged.
 fn within_application(path: &[u8]) -> Option<String> {
     let inside = path.strip_prefix(&[APPLICATION, b'.'])?;
+    let inside = &inside[..inside
+        .iter()
+        .position(|&byte| byte < b' ')
+        .unwrap_or(inside.len())];
     if !inside.is_ascii() {
         return None;
     }

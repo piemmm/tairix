@@ -4,8 +4,8 @@
 
 use core::cmp::Ordering;
 
-/// Words held. The widest use is the fraction of the least double-extended
-/// subnormal, 16 508 bits below the point.
+/// Words held. The widest use is the fraction of the FPA's least denormal,
+/// 16 509 bits below the point.
 const WORDS: usize = 516;
 
 /// An unsigned integer of at most [`WORDS`] 32-bit words.

@@ -1,5 +1,6 @@
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
@@ -8,40 +9,57 @@ use tairix_geometry::Point;
 use tairix_input::{Key, Modifiers, NamedKey, PointerButton};
 
 const DISKS: [&str; 2] = ["A new disk", "None"];
+const SPEEDS: [&str; 3] = ["Slow", "Fast", "Fastest"];
 
-/// A toy application's models: one with no disk to make, two with one.
-const OFFERS: [Offer; 3] = [
+const DISK: Choice = Choice::Offered {
+    label: "Disk",
+    choices: &DISKS,
+};
+
+const SPEED: Choice = Choice::Offered {
+    label: "Speed",
+    choices: &SPEEDS,
+};
+
+/// A toy application's models: one with no disk to make, two with one, one
+/// with a disk and a speed, and one with a speed alone.
+const OFFERS: [Offer; 5] = [
     Offer {
         label: "Plain",
-        choice: Choice::Fixed {
+        choices: &[Choice::Fixed {
             label: "Disk",
             shown: "None",
             why: "This machine takes no disk.",
-        },
+        }],
     },
     Offer {
         label: "Disked",
-        choice: Choice::Offered {
-            label: "Disk",
-            choices: &DISKS,
-        },
+        choices: &[DISK],
     },
     Offer {
         label: "Big",
-        choice: Choice::Offered {
-            label: "Disk",
-            choices: &DISKS,
-        },
+        choices: &[DISK],
+    },
+    Offer {
+        label: "Twin",
+        choices: &[DISK, SPEED],
+    },
+    Offer {
+        label: "Racer",
+        choices: &[SPEED],
     },
 ];
 
-fn describe(model: usize, choice: Option<usize>) -> String {
-    let disk = if choice == Some(0) {
+fn describe(model: usize, choices: &[Option<usize>]) -> String {
+    let disk = if choices.first() == Some(&Some(0)) {
         "with a disk"
     } else {
         "without"
     };
-    format!("{} {disk}", OFFERS[model].label)
+    match choices.get(1) {
+        Some(&Some(speed)) => format!("{} {disk}, {}", OFFERS[model].label, SPEEDS[speed]),
+        _ => format!("{} {disk}", OFFERS[model].label),
+    }
 }
 
 fn names() -> Vec<String> {
@@ -116,7 +134,7 @@ fn enter_creates_the_machine_offered_with_its_choice_and_escape_cancels() {
         Some(Answer::Create {
             model: 1,
             name: String::from("Disked"),
-            choice: Some(0)
+            choices: vec![Some(0)]
         })
     );
     let (mut assistant, ..) = setup();
@@ -130,7 +148,7 @@ fn enter_creates_the_machine_offered_with_its_choice_and_escape_cancels() {
 fn a_choice_made_is_what_is_created_and_the_description_follows_it() {
     let (mut assistant, ..) = setup();
     choose(&mut assistant, MODEL, 2);
-    choose(&mut assistant, CHOICE, 1);
+    choose(&mut assistant, CHOICES, 1);
     let description = assistant.row(MODEL).unwrap().description().unwrap();
     assert_eq!(description, "Big without");
     assert_eq!(
@@ -138,7 +156,7 @@ fn a_choice_made_is_what_is_created_and_the_description_follows_it() {
         Answer::Create {
             model: 2,
             name: String::from("Big"),
-            choice: Some(1)
+            choices: vec![Some(1)]
         },
         "the offered name follows the model"
     );
@@ -148,24 +166,24 @@ fn a_choice_made_is_what_is_created_and_the_description_follows_it() {
 fn a_fixed_choice_is_shown_unchangeable_and_answers_none() {
     let (mut assistant, ..) = setup();
     choose(&mut assistant, MODEL, 0);
-    choose(&mut assistant, CHOICE, 0);
+    choose(&mut assistant, CHOICES, 0);
     assert!(matches!(
         assistant.answer(1),
         Answer::Create {
             model: 0,
-            choice: None,
+            ref choices,
             ..
-        }
+        } if choices == &[None]
     ));
-    assert!(!assistant.row(CHOICE).unwrap().state().enabled);
+    assert!(!assistant.row(CHOICES).unwrap().state().enabled);
     choose(&mut assistant, MODEL, 2);
     assert!(
         matches!(
             assistant.answer(1),
             Answer::Create {
-                choice: Some(0),
+                ref choices,
                 ..
-            }
+            } if choices == &[Some(0)]
         ),
         "a model with the choice offers it again, as it was"
     );
@@ -212,9 +230,9 @@ fn a_click_on_create_answers_with_what_is_chosen() {
             answer,
             Some(Answer::Create {
                 model: 1,
-                choice: Some(0),
+                ref choices,
                 ..
-            })
+            }) if choices == &[Some(0)]
         ),
         "the trailing action is Create: {answer:?}"
     );
@@ -255,7 +273,57 @@ fn the_model_list_stays_open_under_the_pointer_and_takes_the_model_clicked() {
         Answer::Create {
             model: 0,
             name: String::from("Plain"),
-            choice: None
+            choices: vec![None]
         }
+    );
+}
+
+#[test]
+fn a_model_brings_its_own_rows_and_each_row_keeps_its_choice() {
+    let (mut assistant, scale, theme) = setup();
+    let (_, short) = assistant.extent(scale, &theme);
+    choose(&mut assistant, CHOICES, 1);
+    choose(&mut assistant, MODEL, 3);
+    assert_eq!(assistant.column().groups()[0].rows().len(), CHOICES + 2);
+    let (_, tall) = assistant.extent(scale, &theme);
+    assert!(tall > short, "a row more makes the window taller");
+    choose(&mut assistant, CHOICES + 1, 2);
+    assert_eq!(
+        assistant.row(MODEL).unwrap().description(),
+        Some("Twin without, Fastest"),
+        "the disk row kept its choice across the models offering it"
+    );
+    assert_eq!(
+        assistant.answer(1),
+        Answer::Create {
+            model: 3,
+            name: String::from("Twin"),
+            choices: vec![Some(1), Some(2)]
+        }
+    );
+    choose(&mut assistant, MODEL, 1);
+    assert_eq!(assistant.column().groups()[0].rows().len(), CHOICES + 1);
+    choose(&mut assistant, CHOICES + 1, 0);
+    assert!(
+        matches!(assistant.answer(1), Answer::Create { ref choices, .. } if choices == &[Some(1)]),
+        "a row the model lacks takes nothing"
+    );
+}
+
+/// The regression: a choice was kept by its row's place, so another
+/// model's first row took the disk chosen as though it were its own.
+#[test]
+fn a_choice_carries_only_to_a_row_of_its_own_label() {
+    let (mut assistant, ..) = setup();
+    choose(&mut assistant, CHOICES, 1);
+    choose(&mut assistant, MODEL, 4);
+    assert_eq!(
+        assistant.answer(1),
+        Answer::Create {
+            model: 4,
+            name: String::from("Racer"),
+            choices: vec![Some(0)]
+        },
+        "the speed is its own, not the disk's"
     );
 }

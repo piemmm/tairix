@@ -14,16 +14,19 @@
 //! one before it `&ED`, each its internal number with the top bit set.
 
 use super::ws::{buffer, os, page2, var, vdu, vdu_zp};
+use super::Model;
 use super::{latch, svia, DELETE};
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::latch as machine_latch;
-use crate::machine::bbc::via::{irq, reg};
 use crate::machine::electron::keyboard::{self as electron_keyboard, Key as ElectronKey};
 use crate::machine::electron::{control, sheila as ula, KEYBOARD_ROMS};
-use crate::machine::{Model, SIDEWAYS_BASE};
+use crate::machine::via::{irq, reg};
+use crate::machine::SIDEWAYS_BASE;
 use crate::rom::asm::{abs, byte, imm, sym, zp, Acc, Asm, RTS, V_SET};
 use crate::rom::os::CR;
+use tairix_openbasic::basic2;
+use tairix_openbasic::keyword::{word, Word};
 
 /// Port B values that drive the latch's keyboard enable bit.
 const CPU_SCAN: u8 = latch(machine_latch::KEYBOARD_AUTOSCAN, false);
@@ -107,18 +110,68 @@ const FIRM_NEXT: u8 = 2;
 const FIRST_FIRM: u8 = 0x90;
 const LETTERS: u8 = b'Z' - b'A' + 1;
 const FIRM_SYMBOLS: [u8; 6] = *b":;,-./";
+/// What a firm key types: a keyword, BASIC's own so BASIC tokenises it.
+#[derive(Clone, Copy)]
+enum Firm {
+    /// Nothing: its keycap carries no keyword.
+    Blank,
+    /// The keyword alone.
+    Types(Word<u8>),
+    /// The keyword and RETURN.
+    Runs(Word<u8>),
+}
+
 /// The keyword each firm key types, in code order: the keycaps' own; the
 /// keys whose keycaps carry none type nothing.
-const FIRM_KEYWORDS: [&str; 32] = [
-    "AUTO", "RENUMBER", "COLOUR", "DRAW", "ELSE", "FOR", "GOTO", "DEG", "INPUT", "RAD", "CHAIN",
-    "LIST", "MODE", "NEXT", "OLD\r", "PLOT", "LOCAL", "RUN\r", "STEP", "THEN", "UNTIL", "VDU",
-    "RESTORE", "PROC", "REPEAT", "END", "", "", "LOAD", "", "SAVE", "PRINT",
+const FIRM_KEYWORDS: [Firm; 32] = [
+    Firm::Types(basic2::AUTO),
+    Firm::Types(basic2::RENUMBER),
+    Firm::Types(word::COLOUR),
+    Firm::Types(word::DRAW),
+    Firm::Types(word::ELSE),
+    Firm::Types(word::FOR),
+    Firm::Types(word::GOTO),
+    Firm::Types(word::DEG),
+    Firm::Types(word::INPUT),
+    Firm::Types(word::RAD),
+    Firm::Types(word::CHAIN),
+    Firm::Types(basic2::LIST),
+    Firm::Types(word::MODE),
+    Firm::Types(word::NEXT),
+    Firm::Runs(basic2::OLD),
+    Firm::Types(word::PLOT),
+    Firm::Types(word::LOCAL),
+    Firm::Runs(word::RUN),
+    Firm::Types(word::STEP),
+    Firm::Types(word::THEN),
+    Firm::Types(word::UNTIL),
+    Firm::Types(word::VDU),
+    Firm::Types(word::RESTORE),
+    Firm::Types(word::PROC),
+    Firm::Types(word::REPEAT),
+    Firm::Types(word::END),
+    Firm::Blank,
+    Firm::Blank,
+    Firm::Types(basic2::LOAD),
+    Firm::Blank,
+    Firm::Types(basic2::SAVE),
+    Firm::Types(word::PRINT),
 ];
+
+/// The characters a firm key types.
+const fn firm_len(firm: Firm) -> usize {
+    match firm {
+        Firm::Blank => 0,
+        Firm::Types(word) => word.name.len(),
+        Firm::Runs(word) => word.name.len() + 1,
+    }
+}
+
 // The keyword table is walked by an 8-bit offset.
 const _: () = {
     let (mut total, mut n) = (0, 0);
     while n < FIRM_KEYWORDS.len() {
-        total += FIRM_KEYWORDS[n].len() + 1;
+        total += firm_len(FIRM_KEYWORDS[n]) + 1;
         n += 1;
     }
     assert!(total < 0x100);
@@ -1243,9 +1296,14 @@ fn firm_keys(a: &mut Asm) {
 
     a.later(|a| {
         a.here("firm_keywords");
-        for keyword in FIRM_KEYWORDS {
-            a.byte(byte(keyword.len()));
-            a.text(keyword);
+        for firm in FIRM_KEYWORDS {
+            a.byte(byte(firm_len(firm)));
+            if let Firm::Types(word) | Firm::Runs(word) = firm {
+                a.text(word.name);
+            }
+            if let Firm::Runs(_) = firm {
+                a.byte(CR);
+            }
         }
     });
     a.later(|a| {

@@ -1,0 +1,1879 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# Never edit by hand.
+gstrans "   ab" "0" "16"
+= carry 0 next 6 stored 2 out "ab\x0D"
+gsread "   ab" "0"
+= first 97 empty 0 at 3 reads 97 98 end 13 next 6
+gsread "\x09x" "0"
+= first 9 empty 0 at 0 reads error &FD
+gsread "\x22ab\x22" "0"
+= first 34 empty 0 at 1 reads 97 98 end 13 next 4
+gsread "" "0"
+= first 13 empty 1 at 0 reads end 13 next 1
+gsread "  " "0"
+= first 13 empty 1 at 2 reads end 13 next 3
+gstrans "ab\x22c" "0" "16"
+= carry 0 next 5 stored 4 out "ab\x22c\x0D"
+gstrans "\x22a\x22\x22b\x22" "0" "16"
+= carry 0 next 6 stored 3 out "a\x22b\x0D"
+gstrans "\x22a\x22  b" "0" "16"
+= carry 0 next 5 stored 1 out "ab"
+gsread "\x22a\x22  b" "0"
+= first 34 empty 0 at 1 reads 97 end 98 next 5
+gstrans "\x22a\x22" "&80000000" "16"
+= carry 0 next 4 stored 3 out "\x22a\x22\x0D"
+gstrans "\x22open" "0" "16"
+= error &FD stored 4 out "open\xEE"
+gstrans "\x22a b\x22 c" "&20000000" "16"
+= carry 0 next 6 stored 3 out "a bc"
+gstrans "a\x09b" "0" "16"
+= error &FD stored 1 out "a\xEE"
+gstrans "a\x01b" "0" "16"
+= error &FD stored 1 out "a\xEE"
+gstrans "a\x7Fb" "0" "16"
+= carry 0 next 4 stored 3 out "a\x7Fb\x0D"
+gstrans "a\x0Ab" "0" "16"
+= carry 0 next 2 stored 1 out "a\x0A"
+gstrans "a\x00b" "0" "16"
+= carry 0 next 2 stored 1 out "a\x00"
+setvar "ZqS" "a b" "3" "4"
+= type 4
+setvar "ZqM" "c d" "3" "2"
+= type 2
+gstrans "<ZqS>x" "&20000000" "16"
+= carry 0 next 7 stored 4 out "a bx\x0D"
+gstrans "<ZqM>x" "&20000000" "16"
+= carry 0 next 7 stored 4 out "c dx\x0D"
+gstrans "a b" "&20000000" "16"
+= carry 0 next 2 stored 1 out "a "
+gstrans "ab cd" "&20000000" "16"
+= carry 0 next 3 stored 2 out "ab "
+setvar "ZqR" "a\x0D<x>|M" "7" "4"
+= type 4
+gstrans "<ZqR>!" "0" "32"
+= carry 0 next 7 stored 8 out "a\x0D<x>|M!\x0D"
+setvar "ZqN" "\xD6\xFF\xFF\xFF" "4" "1"
+= type 1
+gstrans "<ZqN>" "0" "16"
+= carry 0 next 6 stored 3 out "-42\x0D"
+setvar "ZqM2" "  \x22x\x22" "5" "2"
+= type 2
+gstrans "[<ZqM2>]" "0" "32"
+= carry 0 next 9 stored 7 out "[  \x22x\x22]\x0D"
+readvar "ZqM2" "64" "3"
+= length 1 type 2 out "x\x0D"
+setvar "ZqQ" "a\x22b" "3" "2"
+= type 2
+gstrans "\x22<ZqQ>\x22" "0" "32"
+= carry 0 next elsewhere stored 1 out "ab"
+setvar "ZqP" "a|" "2" "2"
+= type 2
+gstrans "<ZqP>M" "0" "8"
+= error &FD stored 1 out "a\xEE"
+gstrans "| |E|j|0|U|z|@|e|+|P|u|;|`|&|K|p|6|[|F|k|1|V|{|A|f|,|Q|v|<|a|'|L|q|7|\x5C|\x22|G|l|2|W|||B|g|-|R|w|=|b|(|M|r|8|]|#|H|m|3|X|}|C|h|.|S|x|>|c|)|N|s|9|^|$|I|n|4|Y|~|D|i|/|T|y|?|d|*|O|t|:|_|%|J|o|5|Z" "0" "256"
+= carry 0 next 189 stored 94 out " \x05\x0A0\x15\x1A\x00\x05+\x10\x15;\x1F&\x0B\x106\x1B\x06\x0B1\x16\x1B\x01\x06,\x11\x16<\x01'\x0C\x117\x1C\x22\x07\x0C2\x17|\x02\x07-\x12\x17=\x02(\x0D\x128\x1D#\x08\x0D3\x18\x1D\x03\x08.\x13\x18>\x03)\x0E\x139\x1E$\x09\x0E4\x19\x1E\x04\x09/\x14\x19\x7F\x04*\x0F\x14:\x1F%\x0A\x0F5\x1A\x0D"
+gstrans "|\x7F" "0" "4"
+= carry 0 next 3 stored 1 out "\x7F\x0D"
+gstrans "|\x80|\xA5|\xCA|\xEF|\x94|\xB9|\xDE|\x83|\xA8|\xCD|\xF2|\x97|\xBC|\xE1|\x86|\xAB|\xD0|\xF5|\x9A|\xBF|\xE4|\x89|\xAE|\xD3|\xF8|\x9D|\xC2|\xE7|\x8C|\xB1|\xD6|\xFB|\xA0|\xC5|\xEA|\x8F|\xB4|\xD9|\xFE|\xA3|\xC8|\xED|\x92|\xB7|\xDC|\x81|\xA6|\xCB|\xF0|\x95|\xBA|\xDF|\x84|\xA9|\xCE|\xF3|\x98|\xBD|\xE2|\x87|\xAC|\xD1|\xF6|\x9B|\xC0|\xE5|\x8A|\xAF|\xD4|\xF9|\x9E|\xC3|\xE8|\x8D|\xB2|\xD7|\xFC|\xA1|\xC6|\xEB|\x90|\xB5|\xDA|\xFF|\xA4|\xC9|\xEE|\x93|\xB8|\xDD|\x82|\xA7|\xCC|\xF1|\x96|\xBB|\xE0|\x85|\xAA|\xCF|\xF4|\x99|\xBE|\xE3|\x88|\xAD|\xD2|\xF7|\x9C|\xC1|\xE6|\x8B|\xB0|\xD5|\xFA|\x9F|\xC4|\xE9|\x8E|\xB3|\xD8|\xFD|\xA2|\xC7|\xEC|\x91|\xB6|\xDB" "0" "256"
+= carry 0 next 257 stored 128 out "\xA0\x85\xEA\xCF\xB4\x99\xFE\xA3\x88\xED\xD2\xB7\x9C\xC1\xA6\x8B\xF0\xD5\xBA\x9F\xC4\xA9\x8E\xF3\xD8\xBD\xE2\xC7\xAC\x91\xF6\xDB\x80\xE5\xCA\xAF\x94\xF9\xDE\x83\xE8\xCD\xB2\x97\xFC\xA1\x86\xEB\xD0\xB5\x9A\xFF\xA4\x89\xEE\xD3\xB8\x9D\xC2\xA7\x8C\xF1\xD6\xBB\xE0\xC5\xAA\x8F\xF4\xD9\xBE\xE3\xC8\xAD\x92\xF7\xDC\x81\xE6\xCB\xB0\x95\xFA\xDF\x84\xE9\xCE\xB3\x98\xFD\xA2\x87\xEC\xD1\xB6\x9B\xC0\xA5\x8A\xEF\xD4\xB9\x9E\xC3\xA8\x8D\xF2\xD7\xBC\xE1\xC6\xAB\x90\xF5\xDA\xBF\xE4\xC9\xAE\x93\xF8\xDD\x82\xE7\xCC\xB1\x96\xFB\x0D"
+gstrans "ab|" "0" "8"
+= error &FD stored 2 out "ab\xEE"
+gstrans "|\x01" "0" "4"
+= error &FD stored 0 out "\xEE"
+gstrans "|\x0D" "0" "4"
+= error &FD stored 0 out "\xEE"
+gstrans "|!|!A" "0" "4"
+= carry 0 next 6 stored 1 out "\xC1\x0D"
+gstrans "|!<65>" "0" "4"
+= carry 0 next 7 stored 1 out "\xC1\x0D"
+setvar "ZqName" "Fred" "4" "4"
+= type 4
+gstrans "|!<ZqName>" "0" "8"
+= carry 0 next 11 stored 4 out "\xC6red\x0D"
+gstrans "|!<ZqNoSuch>x" "0" "4"
+= carry 0 next 14 stored 1 out "\xF8\x0D"
+gstrans "|!" "0" "4"
+= carry 0 next 3 stored 0 out "\x0D"
+gstrans "a|!" "0" "4"
+= carry 0 next 4 stored 1 out "a\x0D"
+gstrans "|!|@" "0" "4"
+= carry 0 next 5 stored 1 out "\x80\x0D"
+gstrans "|!|?" "0" "4"
+= carry 0 next 5 stored 1 out "\xFF\x0D"
+gstrans "|!\x01" "0" "4"
+= error &FD stored 0 out "\xEE"
+gstrans "|!\x22a\x22" "0" "4"
+= carry 0 next 6 stored 3 out "\xA2a\x22\x0D"
+gsread "|!<321>" "0"
+= first 124 empty 0 at 0 reads 449 end 13 next 8
+gstrans "<&41><2_1000010><16_43>" "0" "8"
+= carry 0 next 24 stored 3 out "ABC\x0D"
+gstrans "<321>" "0" "4"
+= carry 0 next 6 stored 1 out "A\x0D"
+gsread "<321>" "0"
+= first 60 empty 0 at 0 reads 321 end 13 next 6
+gsread "<4294967295>" "0"
+= first 60 empty 0 at 0 reads -1 end 13 next 13
+gstrans "[<65a>]" "0" "8"
+= carry 0 next 8 stored 2 out "[]\x0D"
+gstrans "[<4294967296>]" "0" "16"
+= carry 0 next 15 stored 2 out "[]\x0D"
+gstrans "a<0>b" "0" "8"
+= carry 0 next 6 stored 3 out "a\x00b\x0D"
+gstrans "< 65>" "0" "8"
+= carry 0 next 6 stored 5 out "< 65>\x0D"
+gstrans "<65 >" "0" "8"
+= carry 0 next 6 stored 5 out "<65 >\x0D"
+gstrans "<> < x> <a b> <open" "0" "32"
+= carry 0 next 20 stored 19 out "<> < x> <a b> <open\x0D"
+gstrans "<<ZqName>>" "0" "16"
+= carry 0 next 11 stored 1 out ">\x0D"
+gstrans "<xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>!" "0" "300"
+= carry 0 next 258 stored 1 out "!\x0D"
+gstrans "<xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>!" "0" "300"
+= carry 0 next 259 stored 1 out "!\x0D"
+gstrans "<xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>!" "0" "300"
+= carry 0 next 260 stored 259 out "<xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx>!\x0D"
+gstrans "<ZqName" "0" "16"
+= carry 0 next 8 stored 7 out "<ZqName\x0D"
+gstrans "<Zq\x01Name>" "0" "16"
+= error &FD stored 3 out "<Zq\xEE"
+setvar "ZqWb" "2" "1" "4"
+= type 4
+setvar "ZqWa" "1" "1" "4"
+= type 4
+gstrans "<ZqW*>" "0" "8"
+= carry 0 next 7 stored 1 out "1\x0D"
+gstrans "<ZqW#>" "0" "8"
+= carry 0 next 7 stored 1 out "1\x0D"
+gstrans "<ZqW*b>" "0" "8"
+= carry 0 next 8 stored 1 out "2\x0D"
+gstrans "[<ZqNoSuch>]" "0" "8"
+= carry 0 next 13 stored 2 out "[]\x0D"
+gstrans "Fred" "0" "4"
+= carry 1 next 4 stored 4 out "Fred"
+gstrans "Fred" "0" "5"
+= carry 0 next 5 stored 4 out "Fred\x0D"
+gstrans "" "0" "0"
+= carry 1 next 0 stored 0 out ""
+gstrans "" "0" "1"
+= carry 0 next 1 stored 0 out "\x0D"
+gstrans "a" "0" "1"
+= carry 1 next 1 stored 1 out "a"
+gstrans "ab|" "0" "8"
+= error &FD stored 2 out "ab\xEE"
+gsread "ab c" "&20000000"
+= first 97 empty 0 at 0 reads 97 98 end 32 next 3
+gsread "\x22ab\x22  x" "0"
+= first 34 empty 0 at 1 reads 97 98 end 120 next 6
+gsread "a|Mb" "0"
+= first 97 empty 0 at 0 reads 97 13 98 end 13 next 5
+gsread "a<ZqName>b" "0"
+= first 97 empty 0 at 0 reads 97 70 114 101 100 98 end 13 next 11
+gsread "|!<ZqName>" "0"
+= first 124 empty 0 at 0 reads 198 114 101 100 end 13 next 11
+cli "Unset Zq*"
+= done said ""
+evaluate "1+2*3" "256"
+= integer 7
+evaluate "10-4-3" "256"
+= integer 3
+evaluate "8/4/2" "256"
+= integer 1
+evaluate "7 MOD 4*2" "256"
+= integer 6
+evaluate "1 << 1+1" "256"
+= integer 4
+evaluate "4=1 << 2" "256"
+= integer 0
+evaluate "3 > 2 > 1" "256"
+= integer 0
+evaluate "1 AND 3=3" "256"
+= integer 1
+evaluate "3 OR 4 AND 1" "256"
+= integer 3
+evaluate "1 OR 3 EOR 1" "256"
+= integer 2
+evaluate "-8 >>> 1" "256"
+= integer 2147483644
+evaluate "NOT 1+1" "256"
+= integer -1
+evaluate "NOT 0" "256"
+= integer -1
+evaluate "LEN \x22ab\x22+\x22cd\x22" "256"
+= error &166
+evaluate "STR 1+2" "256"
+= integer 3
+evaluate "VAL \x221\x22+\x222\x22" "256"
+= integer 3
+evaluate "\x22hello\x22 LEFT 2 LEFT 1" "256"
+= string 2 out "he\xEE"
+evaluate "STR -12 LEFT 2" "256"
+= string 3 out "-12\xEE"
+evaluate "127 * 23 >> 2" "256"
+= integer 730
+evaluate "1+7" "256"
+= integer 8
+evaluate "1234 LEFT 2" "256"
+= string 2 out "12\xEE"
+evaluate "(\x22myfile/doc\x22 RIGHT 4) LEFT 1 = \x22/\x22" "256"
+= integer -1
+evaluate "2 < 3 = -1" "256"
+= integer -1
+evaluate "-1 = 2 < 3" "256"
+= integer -1
+evaluate "1 << 2 << 3" "256"
+= integer 32
+evaluate "64 >> 2 >> 1" "256"
+= integer 8
+evaluate "5 - -3" "256"
+= integer 8
+evaluate "- -3" "256"
+= integer 3
+evaluate "2*3 MOD 4" "256"
+= integer 2
+evaluate "7 MOD 4 MOD 2" "256"
+= integer 1
+evaluate "1 EOR 3 OR 4" "256"
+= integer 6
+evaluate "6 AND 3 OR 8" "256"
+= integer 10
+evaluate "NOT 0 AND 1" "256"
+= integer 1
+evaluate "1 = 1 AND 2 = 2" "256"
+= integer -1
+evaluate "\x22a\x22 + \x22b\x22 = \x22ab\x22" "256"
+= integer -1
+evaluate "LEN \x22abc\x22 * 2" "256"
+= integer 6
+evaluate "-LEN \x22abc\x22" "256"
+= integer -3
+evaluate "VAL \x222\x22 * 3" "256"
+= integer 6
+evaluate "\x22x\x22 + STR 5" "256"
+= string 2 out "x5\xEE"
+evaluate "(1+2)*3" "256"
+= integer 9
+evaluate "((4))" "256"
+= integer 4
+evaluate "-(2+3)" "256"
+= integer -5
+setvar "ZqWord" "\xD2\x04\x00\x00" "4" "1"
+= type 1
+evaluate "ZqWord LEFT 2+1" "256"
+= integer 13
+evaluate "ZqWord RIGHT 2" "256"
+= string 2 out "34\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "978" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "979" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "980" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "981" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "982" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "983" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "984" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "985" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "986" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "987" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "988" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "989" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "990" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "991" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "992" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "400" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "600" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "916" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "917" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "918" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "919" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "920" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "921" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "922" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "923" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "924" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "860" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "861" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "862" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "863" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "864" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "865" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "866" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "867" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "868" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0)))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "728" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "729" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "730" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "731" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "732" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "733" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "734" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "735" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "736" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "476" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "480" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "484" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "488" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "348" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "352" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "356" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "360" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "272" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "276" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "280" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "284" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (0))))))))))))))))))))))))))))))))))))))))))))))))))" "2048"
+= error &163
+setvar "ZqS" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "776" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "777" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "778" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "779" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "780" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= string 0 out "\xEE"
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "781" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "782" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "783" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "784" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "785" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "786" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "787" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "788" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "789" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "790" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "791" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+setvar "ZqU" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "792" "4"
+= type 4
+evaluate "ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqS RIGHT (ZqU RIGHT (0)))))))))))))))" "2048"
+= error &163
+evaluate "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 1
+evaluate "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 1
+evaluate "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 1
+evaluate "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 1
+evaluate "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 1
+evaluate "1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1" "256"
+= integer 201
+evaluate "1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1+(1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))" "256"
+= integer 101
+evaluate "1                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             " "256"
+= integer 1
+setvar "ZqBig" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+evaluate "ZqBig+ZqBig" "4096"
+= error &167
+evaluate "ZqBig + \x22yyyyyyyyyyyyyyyyyyyyyyy\x22" "4096"
+= string 1023 out "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxyyyyyyyyyyyyyyyyyyyyyyy\xEE"
+evaluate "ZqBig + \x22yyyyyyyyyyyyyyyyyyyyyyyy\x22" "4096"
+= error &167
+setvar "ZqS1023" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1023" "4"
+= type 4
+setvar "ZqS1024" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1024" "4"
+= type 4
+setvar "ZqS1022" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1022" "4"
+= type 4
+evaluate "ZqS1023" "4096"
+= string 1023 out "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xEE"
+evaluate "ZqS1024" "4096"
+= error &167
+evaluate "LEN ZqS1023" "256"
+= integer 1023
+setvar "ZqMb" "<ZqS1022>" "9" "2"
+= type 2
+evaluate "ZqMb" "4096"
+= string 1022 out "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xEE"
+setvar "ZqMb" "<ZqS1023>" "9" "2"
+= type 2
+evaluate "ZqMb" "4096"
+= error &167
+evaluate "\x22abcdef\x22" "3"
+= error &1E4
+evaluate "\x22abcdef\x22" "6"
+= string 6 out "abcdef"
+evaluate "\x22abcdef\x22" "7"
+= string 6 out "abcdef\xEE"
+evaluate "1<<2>>1" "256"
+= integer 0
+evaluate "1 << 2 >> 1" "256"
+= integer 2
+evaluate "1<2>0" "256"
+= error &168
+evaluate "1<0>+5" "256"
+= integer 1
+evaluate "1+<256>" "256"
+= error &168
+evaluate "1+<65>" "256"
+= error &168
+evaluate "\x22<65>\x22" "256"
+= string 1 out "A\xEE"
+evaluate "\x22a|Mb\x22" "256"
+= string 4 out "a|Mb\xEE"
+evaluate "\x22a\x22\x22b\x22" "256"
+= string 3 out "a\x22b\xEE"
+evaluate "\x22open" "256"
+= error &FD
+evaluate "1\x01" "256"
+= error &FD
+setvar "ZqNum" "\x0A\x00\x00\x00" "4" "1"
+= type 1
+evaluate "\x22<ZqNum>|G\x22" "256"
+= string 4 out "10|G\xEE"
+evaluate "<ZqNum>+1" "256"
+= integer 11
+setvar "ZqQ2" "\x22" "1" "4"
+= type 4
+evaluate "<ZqQ2>abc<ZqQ2>" "256"
+= error &FD
+evaluate "<ZqQ2>abc<ZqQ2>=\x22\x22" "256"
+= error &FD
+evaluate "2AND3" "256"
+= integer 2
+evaluate "2_101+16_ff" "256"
+= integer 260
+evaluate "4294967295" "256"
+= integer -1
+evaluate "4294967296" "256"
+= error &16C
+evaluate "2147483648" "256"
+= integer -2147483648
+evaluate "&" "256"
+= error &16B
+evaluate "37_1" "256"
+= error &16A
+evaluate "&FFAND1" "256"
+= error &168
+evaluate "&ff" "256"
+= integer 255
+evaluate "&7FFFFFFF+1" "256"
+= integer -2147483648
+evaluate "0" "256"
+= integer 0
+evaluate "00012" "256"
+= integer 12
+evaluate "1_1" "256"
+= error &16A
+evaluate "36_zz" "256"
+= integer 1295
+evaluate "10_99" "256"
+= integer 99
+setvar "ZqN5" "\x05\x00\x00\x00" "4" "1"
+= type 1
+evaluate "ZqN5+1" "256"
+= integer 6
+setvar "ZqW" "12" "2" "0"
+= type 0
+evaluate "ZqW+1" "256"
+= integer 13
+setvar "ZqMac" "a|Mb" "4" "2"
+= type 2
+evaluate "ZqMac" "256"
+= string 3 out "a\x0Db\xEE"
+evaluate "<ZqMac>" "256"
+= error &168
+evaluate "and" "256"
+= error &168
+evaluate "ZqNoSuch" "256"
+= error &168
+setvar "DER" "\x04\x00\x00\x00" "4" "1"
+= type 1
+evaluate "1 ORDER" "256"
+= integer 5
+cli "Unset DER"
+= done said ""
+setvar "MODEX" "\x03\x00\x00\x00" "4" "1"
+= type 1
+evaluate "MODEX" "256"
+= error &168
+cli "Unset MODEX"
+= done said ""
+setvar "ZqNX" "\x07\x00\x00\x00" "4" "1"
+= type 1
+evaluate "ZqN#" "256"
+= integer 5
+evaluate "ZqN*" "256"
+= error &168
+evaluate "ZqN5*2" "256"
+= integer 10
+evaluate "ZqN5 *2" "256"
+= integer 10
+evaluate "VAL \x22 -  5 \x22" "256"
+= integer -5
+evaluate "VAL \x22&ff\x22" "256"
+= integer 255
+evaluate "VAL \x22\x22" "256"
+= integer 0
+evaluate "VAL \x22-\x22" "256"
+= integer 0
+evaluate "VAL \x22+\x22" "256"
+= integer 0
+evaluate "VAL \x2212d3\x22" "256"
+= error &166
+evaluate "VAL \x2299999999999\x22" "256"
+= error &166
+evaluate "VAL \x22  7\x22" "256"
+= integer 7
+evaluate "VAL \x227  \x22" "256"
+= integer 7
+evaluate "VAL \x22- 7\x22" "256"
+= integer -7
+evaluate "VAL \x22--7\x22" "256"
+= error &166
+evaluate "\x22abc\x22=1" "256"
+= error &166
+evaluate "\x222\x22+1" "256"
+= integer 3
+evaluate "1+\x222\x22" "256"
+= integer 3
+evaluate "\x2210\x22>9" "256"
+= integer -1
+evaluate "\x22B\x22<\x22a\x22" "256"
+= integer -1
+evaluate "\x22ab\x22<\x22abc\x22" "256"
+= integer -1
+evaluate "\x22abc\x22<\x22ab\x22" "256"
+= integer 0
+evaluate "\x22\xE9\x22>\x22z\x22" "256"
+= integer -1
+evaluate "\x22a\x22=\x22A\x22" "256"
+= integer 0
+evaluate "LEN -5" "256"
+= integer 2
+evaluate "LEN 123" "256"
+= integer 3
+evaluate "STR \x22ab\x22" "256"
+= string 2 out "ab\xEE"
+evaluate "\x223\x22*\x224\x22" "256"
+= integer 12
+evaluate "\x22\x22=0" "256"
+= integer -1
+evaluate "\x22\x22 = \x22\x22" "256"
+= integer -1
+evaluate "\x22a\x22 <> \x22b\x22" "256"
+= integer -1
+evaluate "\x22b\x22 >= \x22a\x22" "256"
+= integer -1
+evaluate "\x22a\x22 <= \x22a\x22" "256"
+= integer -1
+evaluate "2147483647+1" "256"
+= integer -2147483648
+evaluate "-7/2" "256"
+= integer -3
+evaluate "7/-2" "256"
+= integer -3
+evaluate "-7 MOD 2" "256"
+= integer -1
+evaluate "7 MOD -2" "256"
+= integer 1
+evaluate "-2147483648/-1" "256"
+= integer -2147483648
+evaluate "-2147483648 MOD -1" "256"
+= integer 0
+evaluate "1/0" "256"
+= error &169
+evaluate "1 MOD 0" "256"
+= error &169
+evaluate "65536*65536" "256"
+= integer 0
+evaluate "-2147483648*-1" "256"
+= integer -2147483648
+evaluate "1 << 32" "256"
+= integer 0
+evaluate "1 << 31" "256"
+= integer -2147483648
+evaluate "1 << 256" "256"
+= integer 0
+evaluate "1 << 257" "256"
+= integer 0
+evaluate "-1 >> 40" "256"
+= integer -1
+evaluate "-1 >> 31" "256"
+= integer -1
+evaluate "8 >> -1" "256"
+= integer 16
+evaluate "-4 << -1" "256"
+= integer -2
+evaluate "-8 >>> 32" "256"
+= integer 0
+evaluate "-8 >>> 31" "256"
+= integer 1
+evaluate "5 << -2147483648" "256"
+= integer 5
+evaluate "5 >> 0" "256"
+= integer 5
+evaluate "\x22abc\x22 LEFT -1" "256"
+= string 3 out "abc\xEE"
+evaluate "\x22abc\x22 RIGHT 4" "256"
+= string 3 out "abc\xEE"
+evaluate "\x22abc\x22 LEFT 0" "256"
+= string 0 out "\xEE"
+evaluate "\x22abc\x22 RIGHT 0" "256"
+= string 0 out "\xEE"
+evaluate "\x22abc\x22 RIGHT -1" "256"
+= string 3 out "abc\xEE"
+evaluate "\x22abc\x22 LEFT 2" "256"
+= string 2 out "ab\xEE"
+evaluate "12345 RIGHT 2" "256"
+= string 2 out "45\xEE"
+evaluate "\x22\x22 LEFT 3" "256"
+= string 0 out "\xEE"
+evaluate "" "256"
+= error &164
+evaluate " " "256"
+= error &164
+evaluate "1+" "256"
+= error &164
+evaluate "*2" "256"
+= error &164
+evaluate "()" "256"
+= error &164
+evaluate "NOT *2" "256"
+= error &164
+evaluate "1 2" "256"
+= error &164
+evaluate "1 2+3" "256"
+= error &165
+evaluate "(1 2)" "256"
+= error &165
+evaluate "2(3)" "256"
+= error &165
+evaluate ")" "256"
+= error &162
+evaluate "(1" "256"
+= error &162
+evaluate "1)" "256"
+= error &162
+evaluate "1@" "256"
+= error &168
+evaluate "1--1" "256"
+= integer 2
+evaluate "50*-3" "256"
+= integer -150
+evaluate "1 NOT 2" "256"
+= error &165
+evaluate "NOT" "256"
+= error &164
+evaluate "LEFT 2" "256"
+= error &164
+evaluate "\x22a\x22 LEFT" "256"
+= error &164
+evaluate "1 +* 2" "256"
+= error &164
+evaluate "\x22a\x22 \x22b\x22" "256"
+= error &164
+evaluate "(" "256"
+= error &164
+evaluate "1 = " "256"
+= error &164
+evaluate "STR" "256"
+= error &164
+evaluate "+" "256"
+= error &164
+evaluate "-" "256"
+= error &164
+evaluate "ZqP" "256"
+= error &168
+cli "Unset Zq*"
+= done said ""
+readargs "a/S" "-a" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/S" "" "64"
+= left 60 base &DF00 out "\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/a" "" "64"
+= error &1EA
+readargs "a/X" "x" "64"
+= left 58 base &DF00 out "\x04\xDF\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a//s" "x" "64"
+= left 58 base &DF00 out "\x04\xDF\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs " a, b" "-b x" "64"
+= left 54 base &DF00 out "\x00\x00\x00\x00\x08\xDF\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "no-wait/S" "-no" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E/G" "1+1" "64"
+= left 52 base &DF00 out "\x04\xDF\x00\x00\x00\x02\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/S/E" "-a" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/K/S" "-a" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "verbose/S,each/S" "-ve" "64"
+= error &1EA
+readargs "verbose/S,each/S" "-v" "64"
+= left 56 base &DF00 out "\xFF\xFF\xFF\x7F\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "verbose/S,each/S" "-e" "64"
+= left 56 base &DF00 out "\x00\x00\x00\x00\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "verbose/S,each/S" "-verb" "64"
+= error &1EA
+readargs "a/S,b/S" "-ab" "64"
+= error &1EA
+readargs "quiet/S,q/S" "-q" "64"
+= left 56 base &DF00 out "\x00\x00\x00\x00\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "quiet=q/S" "-q" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "quiet=q/S" "-quiet" "64"
+= left 60 base &DF00 out "\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "one/S,other/S" "-o" "64"
+= left 56 base &DF00 out "\xFF\xFF\xFF\x7F\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "one/S,other/S" "-ot" "64"
+= error &1EA
+readargs "x/S,xy/S" "-x" "64"
+= left 56 base &DF00 out "\xFF\xFF\xFF\x7F\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "x/S,xy/S" "-xy" "64"
+= left 56 base &DF00 out "\x00\x00\x00\x00\xFF\xFF\xFF\x7F\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "all/S,brief/S,output/K" "-ab" "64"
+= left 52 base &DF00 out "\xFF\xFF\xFF\x7F\xFF\xFF\xFF\x7F\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "all/S,brief/S,output/K" "-aofile" "64"
+= left 47 base &DF00 out "\xFF\xFF\xFF\x7F\x00\x00\x00\x00\x0C\xDF\x00\x00file\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "all/S,brief/S,output/K" "-aa" "64"
+= error &1EB
+readargs "all/S,brief/S,output/K" "-ax" "64"
+= error &1EA
+readargs "all/S,brief/S,output/K" "-a -b" "64"
+= left 52 base &DF00 out "\xFF\xFF\xFF\x7F\xFF\xFF\xFF\x7F\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "all/S,brief/S,output/K" "-ALL" "64"
+= left 52 base &DF00 out "\xFF\xFF\xFF\x7F\x00\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "output/K" "-ofile" "64"
+= left 55 base &DF00 out "\x04\xDF\x00\x00file\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "output/K" "-output=x" "64"
+= left 57 base &DF00 out "\x04\xDF\x00\x00=x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "output/K" "-output" "64"
+= error &1EA
+readargs "output/K" "-output -x" "64"
+= error &1EA
+readargs "output/K" "-o \x22-x\x22" "64"
+= left 57 base &DF00 out "\x04\xDF\x00\x00-x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs ",x" "- y" "64"
+= left 54 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00y\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "n/E" "(-3+6)" "64"
+= left 52 base &DF00 out "\x04\xDF\x00\x00\x00\x03\x00\x00\x00)\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "-x" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "-3" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "-x y" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "-x y" "64"
+= left 55 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "z -x" "64"
+= error &1EA
+readargs "a,b" "z -x y" "64"
+= error &1EA
+readargs "a/K" "-x" "64"
+= error &1EA
+readargs "a/K" "-x y" "64"
+= error &1EA
+readargs "a/S" "-x" "64"
+= error &1EA
+readargs "a" "-" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "-xyz" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "x -y" "64"
+= error &1EA
+readargs "a,b" "-x -y" "64"
+= left 55 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "b,a" "-x" "64"
+= left 55 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/A" "-x" "64"
+= left 59 base &DF00 out "\x04\xDF\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b/A" "-x" "64"
+= error &1EA
+readargs "a,b" "-b z -x" "64"
+= error &1EA
+readargs "a,b" " -x" "64"
+= left 55 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "-x" "8"
+= error &1E4
+readargs "a,b" "-x" "9"
+= left 0 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE"
+readargs "a,b" "x y" "64"
+= left 52 base &DF00 out "\x08\xDF\x00\x00\x0A\xDF\x00\x00x\x00y\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "x y z" "64"
+= error &1EA
+readargs "a/K,b" "x" "64"
+= left 54 base &DF00 out "\x00\x00\x00\x00\x08\xDF\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/S,b" "x" "64"
+= left 54 base &DF00 out "\x00\x00\x00\x00\x08\xDF\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "-b x y" "64"
+= left 52 base &DF00 out "\x0A\xDF\x00\x00\x08\xDF\x00\x00x\x00y\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "x -a y" "64"
+= error &1EB
+readargs "a" "-a x -a y" "64"
+= error &1EB
+readargs "from/A,to/A,quiet/S" "here there -q" "64"
+= left 41 base &DF00 out "\x0C\xDF\x00\x00\x11\xDF\x00\x00\xFF\xFF\xFF\x7Fhere\x00there\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "from/A,to/A,quiet/S" "-to there here" "64"
+= left 41 base &DF00 out "\x12\xDF\x00\x00\x0C\xDF\x00\x00\x00\x00\x00\x00there\x00here\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "from/A,to/A,quiet/S" "here" "64"
+= error &1EA
+readargs "a,b" "\x22x \x22\x22y\x22\x22 z\x22 w" "64"
+= left 46 base &DF00 out "\x08\xDF\x00\x00\x10\xDF\x00\x00x \x22y\x22 z\x00w\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "\x22ab\x22cd" "64"
+= left 50 base &DF00 out "\x08\xDF\x00\x00\x0B\xDF\x00\x00ab\x00cd\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a" "\x22open" "64"
+= error &FD
+readargs "a,b" "x\x09y" "64"
+= left 54 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "\x22-a\x22 x" "64"
+= left 51 base &DF00 out "\x08\xDF\x00\x00\x0B\xDF\x00\x00-a\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "\x22\x22" "64"
+= left 55 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b" "x\x00y" "64"
+= left 54 base &DF00 out "\x08\xDF\x00\x00\x00\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "File/A,TabExpand/S,n/E,g/G" "-n 5+1 -tabexpand name -g a|Mb" "64"
+= left 30 base &DF00 out "\x15\xDF\x00\x00\xFF\xFF\xFF\x7F\x10\xDF\x00\x00\x1A\xDF\x00\x00\x00\x06\x00\x00\x00name\x00\x03\x00a\x0Db\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "\x22str\x22" "64"
+= error &168
+readargs "e/E" "7" "64"
+= left 52 base &DF00 out "\x04\xDF\x00\x00\x00\x07\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G" "\x22\x22" "64"
+= left 58 base &DF00 out "\x04\xDF\x00\x00\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b,c" "p q r" "64"
+= left 46 base &DF00 out "\x0C\xDF\x00\x00\x0E\xDF\x00\x00\x10\xDF\x00\x00p\x00q\x00r\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b,c" "r q" "64"
+= left 48 base &DF00 out "\x0C\xDF\x00\x00\x0E\xDF\x00\x00\x00\x00\x00\x00r\x00q\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b/E" "1 2" "64"
+= left 40 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b" "1 x" "64"
+= left 46 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b/E" "x 1" "64"
+= left 46 base &DF00 out "\x08\xDF\x00\x00\x0A\xDF\x00\x00x\x00\x00\x01\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b/E,c" "1 2 x" "64"
+= left 34 base &DF00 out "\x0C\xDF\x00\x00\x11\xDF\x00\x00\x16\xDF\x00\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b" "1 x" "13"
+= error &1E4
+readargs "a/E,b" "1 x" "14"
+= error &1E4
+readargs "a/E,b" "1 x" "15"
+= error &1E4
+readargs "a/E,b" "1 x" "16"
+= error &1E4
+readargs "a/E,b" "1 x" "17"
+= error &1E4
+readargs "a/E,b" "1 x" "18"
+= left 0 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00x\x00\xEE\xEE\xEE\xEE"
+readargs "a/E,b" "1 x" "19"
+= left 1 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b" "1 x" "20"
+= left 2 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00x\x00\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b/E" "1 2" "18"
+= error &1E4
+readargs "a/E,b/E" "1 2" "19"
+= error &1E4
+readargs "a/E,b/E" "1 2" "20"
+= error &1E4
+readargs "a/E,b/E" "1 2" "21"
+= error &1E4
+readargs "a/E,b/E" "1 2" "22"
+= error &1E4
+readargs "a/E,b/E" "1 2" "23"
+= error &1E4
+readargs "a/E,b/E" "1 2" "24"
+= left 0 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b/E" "1 2" "25"
+= left 1 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a/E,b/E" "1 2" "26"
+= left 2 base &DF00 out "\x08\xDF\x00\x00\x0D\xDF\x00\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "12" "4"
+= error &1E4
+readargs "e/E" "12" "5"
+= error &1E4
+readargs "e/E" "12" "6"
+= error &1E4
+readargs "e/E" "12" "7"
+= error &1E4
+readargs "e/E" "12" "8"
+= error &1E4
+readargs "e/E" "12" "9"
+= error &1E4
+readargs "e/E" "12" "10"
+= error &1E4
+readargs "e/E" "12" "11"
+= error &1E4
+readargs "e/E" "12" "12"
+= left 0 base &DF00 out "\x04\xDF\x00\x00\x00\x0C\x00\x00\x00\xEE\xEE\xEE\xEE"
+readargs "e/E" "12" "13"
+= left 1 base &DF00 out "\x04\xDF\x00\x00\x00\x0C\x00\x00\x00\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "12" "14"
+= left 2 base &DF00 out "\x04\xDF\x00\x00\x00\x0C\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "12" "15"
+= left 3 base &DF00 out "\x04\xDF\x00\x00\x00\x0C\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "12" "16"
+= left 4 base &DF00 out "\x04\xDF\x00\x00\x00\x0C\x00\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "1+2+3+4+5+6" "10"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "11"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "12"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "13"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "14"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "15"
+= error &1E4
+readargs "e/E" "1+2+3+4+5+6" "16"
+= left 4 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE"
+readargs "e/E" "1+2+3+4+5+6" "17"
+= left 5 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE\xEE"
+readargs "e/E" "1+2+3+4+5+6" "18"
+= left 6 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE\xEE\xEE"
+readargs "e/E" "1+2+3+4+5+6" "19"
+= left 7 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE\xEE\xEE\xEE"
+readargs "e/E" "1+2+3+4+5+6" "20"
+= left 8 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "1+2+3+4+5+6" "21"
+= left 9 base &DF00 out "\x04\xDF\x00\x00\x00\x15\x00\x00\x00+4+5+6\x00\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "e/E" "\x22abc\x22" "10"
+= error &168
+readargs "e/E" "\x22abc\x22" "11"
+= error &168
+readargs "e/E" "\x22abc\x22" "12"
+= error &168
+readargs "e/E" "\x22abc\x22" "13"
+= error &168
+readargs "e/E" "\x22abc\x22" "14"
+= error &168
+readargs "e/E" "\x22abc\x22" "15"
+= error &168
+readargs "e/E" "\x22abc\x22" "16"
+= error &168
+readargs "g/G" "abc" "7"
+= error &1E4
+readargs "g/G" "abc" "8"
+= error &1E4
+readargs "g/G" "abc" "9"
+= error &1E4
+readargs "g/G" "abc" "10"
+= left 1 base &DF00 out "\x04\xDF\x00\x00\x03\x00abc\x00\xEE"
+readargs "g/G" "abc" "11"
+= left 2 base &DF00 out "\x04\xDF\x00\x00\x03\x00abc\x00\xEE\xEE"
+readargs "g/G" "abc" "12"
+= left 3 base &DF00 out "\x04\xDF\x00\x00\x03\x00abc\x00\xEE\xEE\xEE"
+readargs "g/G" "\x22\x22" "4"
+= error &1E4
+readargs "g/G" "\x22\x22" "5"
+= error &1E4
+readargs "g/G" "\x22\x22" "6"
+= error &1E4
+readargs "g/G" "\x22\x22" "7"
+= left 1 base &DF00 out "\x04\xDF\x00\x00\x00\x00\x00\xEE"
+readargs "g/G" "\x22\x22" "8"
+= left 2 base &DF00 out "\x04\xDF\x00\x00\x00\x00\x00\xEE\xEE"
+setvar "ZqA" "x" "1" "4"
+= type 4
+readargs "g/G" "<ZqA>" "5"
+= error &1E4
+readargs "g/G" "<ZqA>" "6"
+= error &1E4
+readargs "g/G" "<ZqA>" "7"
+= error &1E4
+readargs "g/G" "<ZqA>" "8"
+= error &1E4
+readargs "g/G" "<ZqA>" "9"
+= error &1E4
+readargs "g/G,a" "xy z" "64"
+= left 50 base &DF00 out "\x08\xDF\x00\x00\x0C\xDF\x00\x00\x02\x00xyz\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G,a" "<ZqA> z" "64"
+= left 51 base &DF00 out "\x08\xDF\x00\x00\x0B\xDF\x00\x00\x01\x00xz\x00\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,g/G" "z <ZqA>" "64"
+= left 51 base &DF00 out "\x08\xDF\x00\x00\x0A\xDF\x00\x00z\x00\x01\x00x\x00>\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "a,b,c" "" "9"
+= error &1E4
+readargs "a,b,c" "" "10"
+= error &1E4
+readargs "a,b,c" "" "11"
+= error &1E4
+readargs "a,b,c" "" "12"
+= left 0 base &DF00 out "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xEE"
+readargs "a,b,c" "" "13"
+= left 1 base &DF00 out "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xEE\xEE"
+readargs "a" "xyz" "6"
+= error &1E4
+readargs "a" "xyz" "7"
+= error &1E4
+readargs "a" "xyz" "8"
+= left 0 base &DF00 out "\x04\xDF\x00\x00xyz\x00\xEE"
+readargs "a" "xyz" "9"
+= left 1 base &DF00 out "\x04\xDF\x00\x00xyz\x00\xEE\xEE"
+readargs "a" "xyz" "10"
+= left 2 base &DF00 out "\x04\xDF\x00\x00xyz\x00\xEE\xEE\xEE"
+readargs "a" "xyz" "11"
+= left 3 base &DF00 out "\x04\xDF\x00\x00xyz\x00\xEE\xEE\xEE\xEE"
+readargs "g/G" "<ZqA>" "64"
+= left 57 base &DF00 out "\x04\xDF\x00\x00\x01\x00x\x00>\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G" "\x22\x22\x22a\x22\x22\x22" "64"
+= left 55 base &DF00 out "\x04\xDF\x00\x00\x03\x00\x22a\x22\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G" "\x22  a\x22" "64"
+= left 57 base &DF00 out "\x04\xDF\x00\x00\x01\x00a\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G" "  a" "64"
+= left 57 base &DF00 out "\x04\xDF\x00\x00\x01\x00a\x00\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE\xEE"
+readargs "g/G" "a|" "64"
+= error &FD
+cli "Unset Zq*"
+= done said ""
+substitute "\x22a b\x22 c" "<%0><%1>" "256" "&80000000"
+= length 11 out "<\x22a b\x22><c>\x0D\xEE"
+substitute "ab\x22c d\x22" "<%0><%1>" "256" "&80000000"
+= length 11 out "<ab\x22c><d\x22>\x0D\xEE"
+substitute "\x22a\x22\x22b\x22c" "<%0><%1><%2>" "256" "&80000000"
+= length 14 out "<\x22a\x22\x22b\x22><c><>\x0D\xEE"
+substitute "\x22open\x0DX Y" "<%0><%1>" "256" "&80000000"
+= length 12 out "<\x22open\x0D><X>\x0D\xEE"
+substitute "a\x09b c" "[%0][%1]" "256" "&80000000"
+= length 9 out "[a\x09b][c]\x0D\xEE"
+substitute "a b\x0A" "[%0][%1]" "256" "&80000000"
+= length 7 out "[a][b]\x0A\xEE"
+substitute "a b\x00" "[%0][%1]" "256" "&80000000"
+= length 7 out "[a][b]\x00\xEE"
+substitute "  one  \x22two three\x22  four " "[%*1]" "256" "0"
+= length 21 out "[\x22two three\x22  four ]\x0D\xEE"
+substitute "  one  \x22two three\x22  four " "[%*0]" "256" "0"
+= length 26 out "[one  \x22two three\x22  four ]\x0D\xEE"
+substitute "a b c" "x %*1 %0" "256" "0"
+= length 8 out "x b c a\x0D\xEE"
+substitute "a" "%*x %*" "256" "0"
+= length 8 out "%*x %*a\x0D\xEE"
+substitute "a b" "%%%9|" "256" "&80000000"
+= length 3 out "%|\x0D\xEE"
+substitute "a" "x%" "256" "&80000000"
+= length 3 out "x%\x0D\xEE"
+substitute "a b c" "foo %0" "256" "0"
+= length 9 out "foo ab c\x0D\xEE"
+substitute "a b c d" "x%2" "256" "0"
+= length 4 out "xcd\x0D\xEE"
+substitute "0 1 2 3 4 5 6 7 8 9  ten eleven" "%9:" "256" "0"
+= length 13 out "9:ten eleven\x0D\xEE"
+substitute "a b c" "none" "256" "0"
+= length 10 out "nonea b c\x0D\xEE"
+substitute "" "%0" "256" "0"
+= length 1 out "\x0D\xEE"
+substitute "  a   b  " "[%0][%1]" "256" "0"
+= length 7 out "[a][b]\x0D\xEE"
+substitute "a b" "\x22%0\x22" "256" "&80000000"
+= length 4 out "\x22a\x22\x0D\xEE"
+substitute "abc" "%0" "3" "&80000000"
+= error &1E4
+substitute "abc" "%0" "4" "&80000000"
+= error &1E4
+substitute "abc" "%0" "5" "&80000000"
+= length 4 out "abc\x0D\xEE"
+substitute "a b" "%0" "3" "0"
+= error &1E4
+substitute "a b" "%0" "4" "0"
+= length 3 out "ab\x0D\xEE"
+substitute "a b" "%0" "5" "0"
+= length 3 out "ab\x0D\xEE"
+setvar "ZqOb" "b" "1" "4"
+= type 4
+setvar "ZqOa" "a" "1" "4"
+= type 4
+setvar "ZqO_" "_" "1" "4"
+= type 4
+setvar "ZqO$" "$" "1" "4"
+= type 4
+setvar "ZqOA" "A" "1" "4"
+= type 4
+setvar "ZqO~" "~" "1" "4"
+= type 4
+setvar "ZqO\xE0" "agrave" "6" "4"
+= type 4
+setvar "ZqO1" "1" "1" "4"
+= type 4
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "$\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "1\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "A\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "b\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "_\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 1 type 0 out "~\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= length 6 type 0 out "agrave\xEE"
+setvar "ZqO*" "" "-1" "0"
+= type 0
+readvar "ZqO*" "64" "0"
+= error &124 length 0
+setvar "ZqO*" "" "-1" "0"
+= error &124
+readvar "ZqO*" "64" "0"
+= error &124 length 0
+setvar "ZqCaf\xE9" "1" "1" "4"
+= type 4
+readvar "ZQCAF\xC9" "64" "0"
+= length 1 type 0 out "1\xEE"
+setvar "ZqD\xF7" "2" "1" "4"
+= type 4
+readvar "ZqD\xD7" "64" "0"
+= error &124 length 0
+setvar "ZqE\xFF" "3" "1" "4"
+= type 4
+readvar "ZqE\xDF" "64" "0"
+= error &124 length 0
+readvar "ZqE\xFF" "64" "0"
+= length 1 type 0 out "3\xEE"
+setvar "ZqEdit$Dir" "a" "1" "4"
+= type 4
+setvar "ZQEDIT$DIR" "b" "1" "4"
+= type 4
+readvar "zqedit$dir" "64" "0"
+= length 1 type 0 out "b\xEE"
+setvar "ZqAlpha$Dir" "a" "1" "4"
+= type 4
+setvar "ZqZeta$Dir" "z" "1" "4"
+= type 4
+setvar "Zq*$Dir" "7" "1" "4"
+= type 4
+readvar "ZqAlpha$Dir" "64" "0"
+= length 1 type 0 out "7\xEE"
+readvar "ZqZeta$Dir" "64" "0"
+= length 1 type 0 out "z\xEE"
+setvar "ZqNoSuch*" "x" "1" "4"
+= error &121
+setvar "" "x" "1" "4"
+= error &121
+setvar "123" "x" "1" "4"
+= type 4
+readvar "123" "64" "0"
+= length 1 type 0 out "x\xEE"
+setvar "123" "" "-1" "0"
+= type 0
+setvar "Zq A" "x" "1" "4"
+= type 4
+readvar "Zq" "64" "0"
+= length 1 type 0 out "x\xEE"
+setvar "Zq" "" "-1" "0"
+= type 0
+setvar "ZqApp$Dir" "1" "1" "4"
+= type 4
+setvar "ZqApp$Path" "2" "1" "4"
+= type 4
+setvar "ZqApp$*" "" "-1" "0"
+= type 0
+readvar "ZqApp$Dir" "64" "0"
+= error &124 length 0
+readvar "ZqApp$Path" "64" "0"
+= length 1 type 0 out "2\xEE"
+setvar "ZqNoSuch" "" "-1" "0"
+= error &124
+setvar "ZqNoSuch*" "" "-1" "0"
+= error &124
+setvar "ZqT0" "\x22a b\x22 dropped" "13" "0"
+= type 0
+readvar "ZqT0" "64" "0"
+= length 3 type 0 out "a b\xEE"
+setvar "ZqX" "one" "3" "0"
+= type 0
+setvar "ZqX" "<ZqX><ZqX>" "10" "0"
+= type 0
+readvar "ZqX" "64" "0"
+= length 6 type 0 out "oneone\xEE"
+setvar "ZqBad" "a|" "2" "0"
+= error &FD
+readvar "ZqBad" "64" "0"
+= error &124 length 0
+setvar "ZqLen0" "abcdef" "3" "0"
+= type 0
+readvar "ZqLen0" "64" "0"
+= length 6 type 0 out "abcdef\xEE"
+setvar "ZqM3" "a\x09b" "3" "2"
+= error &120
+readvar "ZqM3" "64" "0"
+= error &124 length 0
+setvar "ZqM4" "abcdef" "3" "2"
+= type 2
+readvar "ZqM4" "64" "0"
+= length 6 type 2 out "abcdef\xEE"
+setvar "ZqM5" "ab\x0Acd" "5" "2"
+= type 2
+readvar "ZqM5" "64" "0"
+= length 2 type 2 out "ab\xEE"
+setvar "ZqE" "6*7" "3" "3"
+= type 1
+readvar "ZqE" "64" "0"
+= length 4 type 1 out "*\x00\x00\x00\xEE"
+readvar "ZqE" "64" "3"
+= length 2 type 0 out "42\xEE"
+setvar "ZqE2" "\x22a|Mb\x22" "6" "3"
+= type 4
+readvar "ZqE2" "64" "0"
+= length 4 type 0 out "a|Mb\xEE"
+setvar "ZqE3" "\x22ab\x22 + \x22cd\x22" "11" "3"
+= type 4
+readvar "ZqE3" "64" "0"
+= length 4 type 0 out "abcd\xEE"
+setvar "ZqE4" "1+" "2" "3"
+= error &164
+readvar "ZqE4" "64" "0"
+= error &124 length 0
+setvar "ZqL4" "ab\x00\x0Dcd" "6" "4"
+= type 4
+readvar "ZqL4" "64" "0"
+= length 6 type 0 out "ab\x00\x0Dcd\xEE"
+readvar "ZqL4" "64" "3"
+= length 6 type 0 out "ab\x00\x0Dcd\xEE"
+setvar "ZqN7" "\xF9\xFF\xFF\xFF" "4" "1"
+= type 1
+readvar "ZqN7" "64" "0"
+= length 4 type 1 out "\xF9\xFF\xFF\xFF\xEE"
+readvar "ZqN7" "64" "3"
+= length 2 type 0 out "-7\xEE"
+setvar "ZqMm" "  \x22<ZqN7>,|M\x22" "13" "2"
+= type 2
+readvar "ZqMm" "64" "0"
+= length 13 type 2 out "  \x22<ZqN7>,|M\x22\xEE"
+readvar "ZqMm" "64" "3"
+= length 4 type 2 out "-7,\x0D\x0D"
+setvar "ZqSn" "<ZqN7>" "7" "2"
+= type 2
+readvar "ZqSn" "2" "3"
+= error &1E4 length 2
+readvar "ZqSn" "3" "3"
+= length 2 type 2 out "-7\x0D"
+readvar "ZqSn" "1" "0"
+= error &1E4 length 1
+setvar "ZqLit" "abc" "3" "4"
+= type 4
+readvar "ZqLit" "2" "0"
+= error &1E4 length 2
+readvar "ZqLit" "3" "0"
+= length 3 type 0 out "abc"
+readvar "ZqLit" "-1" "0"
+= error &1E4 length -4
+readvar "ZqNoSuch" "64" "0"
+= error &124 length 0
+readvar "ZqNoSuch" "-1" "0"
+= error &124 length 0
+setvar "ZqT7" "x" "1" "7"
+= error &122
+setvar "ZqBig" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" "1000" "4"
+= type 4
+setvar "ZqHuge" "<ZqBig><ZqBig><ZqBig><ZqBig><ZqBig>" "35" "0"
+= type 0
+readvar "ZqHuge" "8" "0"
+= error &1E4 length 8
+setvar "ZqHuge2" "<ZqBig><ZqBig>" "14" "0"
+= type 0
+readvar "ZqHuge2" "8" "0"
+= error &1E4 length 8
+cli "Unset Zq*"
+= done said ""
+cli " * *Set ZqA5 1"
+= done said ""
+readvar "ZqA5" "64" "0"
+= length 1 type 0 out "1\xEE"
+cli " *| Set ZqA6 2"
+= done said ""
+readvar "ZqA6" "64" "0"
+= error &124 length 0
+cli "Set ZqA10   x  "
+= done said ""
+readvar "ZqA10" "64" "0"
+= length 3 type 0 out "x  \xEE"
+cli "set ZqA11 lower"
+= done said ""
+readvar "ZqA11" "64" "0"
+= length 5 type 0 out "lower\xEE"
+cli "SETMACRO ZqA12 <ZqA11>!"
+= done said ""
+readvar "ZqA12" "64" "0"
+= length 8 type 2 out "<ZqA11>!\xEE"
+readvar "ZqA12" "64" "3"
+= length 6 type 2 out "lower!\x0D"
+cli "Set ZqA13 \x22quoted value\x22 tail"
+= done said ""
+readvar "ZqA13" "64" "0"
+= length 12 type 0 out "quoted value\xEE"
+cli "Set ZqOnly"
+= error &DC said ""
+readvar "ZqOnly" "64" "0"
+= error &124 length 0
+cli "Set ZqA14 a|"
+= error &FD said ""
+readvar "ZqA14" "64" "0"
+= error &124 length 0
+cli "Set \x22ZqA15\x22 x"
+= done said ""
+readvar "\x22ZqA15\x22" "64" "0"
+= length 1 type 0 out "x\xEE"
+cli "Unset \x22ZqA15\x22"
+= done said ""
+readvar "\x22ZqA15\x22" "64" "0"
+= error &124 length 0
+setvar "ZqU1" "1" "1" "4"
+= type 4
+setvar "ZqU2" "2" "1" "4"
+= type 4
+cli "Unset ZqU1 ZqU2"
+= error &DC said ""
+readvar "ZqU1" "64" "0"
+= length 1 type 0 out "1\xEE"
+cli "Unset \x22ZqU1 ZqU2\x22"
+= done said ""
+readvar "ZqU1" "64" "0"
+= length 1 type 0 out "1\xEE"
+cli "Unset"
+= error &DC said ""
+cli "IconSprites"
+= error &DC said ""
+cli "IconSprites ZqNoSuchFile extra"
+= error &DC said ""
+cli "IconSprites ZqNoSuchFile extra more"
+= error &DC said ""
+obey "IconSprites\x0ASet ZqIc1 1\x0A" ""
+= error &DC said ""
+readvar "ZqIc1" "64" "0"
+= error &124 length 0
+setvar "ZqU3" "3" "1" "4"
+= type 4
+setvar "ZqU4" "4" "1" "4"
+= type 4
+cli "Unset ZqU*"
+= done said ""
+readvar "ZqU3" "64" "0"
+= error &124 length 0
+readvar "ZqU4" "64" "0"
+= error &124 length 0
+cli "%Set ZqAl2 1"
+= done said ""
+readvar "ZqAl2" "64" "0"
+= length 1 type 0 out "1\xEE"
+cli "Set ZqLn1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+= done said ""
+readvar "ZqLn1" "4" "0"
+= error &1E4 length 4
+cli "Set ZqLn2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+= done said ""
+readvar "ZqLn2" "4" "0"
+= error &1E4 length 4
+cli "Set ZqLn3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+= error &1E0 said ""
+readvar "ZqLn3" "4" "0"
+= error &124 length 0
+cli "If 1 Then Set ZqI1 y"
+= done said ""
+readvar "ZqI1" "64" "0"
+= length 1 type 0 out "y\xEE"
+cli "If 0 Then Set ZqI2 y"
+= done said ""
+readvar "ZqI2" "64" "0"
+= error &124 length 0
+cli "If 1 then Set ZqI3 y"
+= done said ""
+readvar "ZqI3" "64" "0"
+= length 1 type 0 out "y\xEE"
+cli "If 1 THEN Set ZqI4 y"
+= done said ""
+readvar "ZqI4" "64" "0"
+= length 1 type 0 out "y\xEE"
+cli "If 1 Thenx Set ZqI5 y"
+= error &DC said ""
+readvar "ZqI5" "64" "0"
+= error &124 length 0
+cli "If 1"
+= error &DC said ""
+cli "If \x22s\x22 Then Set ZqI6 y"
+= error &DC said ""
+readvar "ZqI6" "64" "0"
+= error &124 length 0
+cli "If \x22a Then b\x22=\x22\x22 Then Set ZqI7 y"
+= error &FD said ""
+readvar "ZqI7" "64" "0"
+= error &124 length 0
+cli "If 1 Then Set ZqI8 a Else"
+= done said ""
+readvar "ZqI8" "64" "0"
+= length 6 type 0 out "a Else\xEE"
+cli "If 1 Then Set ZqI9 \x22x Else y\x22 Else Set ZqI10 z"
+= error &FD said ""
+readvar "ZqI9" "64" "0"
+= error &124 length 0
+readvar "ZqI10" "64" "0"
+= error &124 length 0
+cli "If 0 Then Set ZqI11 a Else Set ZqI12 b"
+= done said ""
+readvar "ZqI11" "64" "0"
+= error &124 length 0
+readvar "ZqI12" "64" "0"
+= length 1 type 0 out "b\xEE"
+cli "If 0 Then Set ZqI13 a ELSE Set ZqI14 b"
+= done said ""
+readvar "ZqI14" "64" "0"
+= length 1 type 0 out "b\xEE"
+cli "If 2-2 Then Set ZqI15 a Else If 1 Then Set ZqI16 b"
+= done said ""
+readvar "ZqI16" "64" "0"
+= length 1 type 0 out "b\xEE"
+cli "If 1Then Set ZqI17 a"
+= error &DC said ""
+readvar "ZqI17" "64" "0"
+= error &124 length 0
+cli "If 1 Then  Set ZqI18 a"
+= done said ""
+readvar "ZqI18" "64" "0"
+= length 1 type 0 out "a\xEE"
+cli "If 1+ Then Set ZqI19 a"
+= error &164 said ""
+readvar "ZqI19" "64" "0"
+= error &124 length 0
+setvar "ZqBadM" "a|" "2" "2"
+= type 2
+cli "If <ZqBadM>=1 Then Set ZqI22 a"
+= error &168 said ""
+readvar "ZqI22" "64" "0"
+= error &124 length 0
+cli "If \x22<ZqBadM>\x22=\x22\x22 Then Set ZqI23 a"
+= done said ""
+readvar "ZqI23" "64" "0"
+= error &124 length 0
+cli "If 1/0 Then Set ZqI24 a"
+= error &169 said ""
+readvar "ZqI24" "64" "0"
+= error &124 length 0
+cli "If 1\x01 Then Set ZqI25 a"
+= error &DC said ""
+readvar "ZqI25" "64" "0"
+= error &124 length 0
+evaluate "\x22\x01\x22" "256"
+= error &FD
+cli "If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then If 1 Then Set ZqI21 deep"
+= done said ""
+readvar "ZqI21" "64" "0"
+= length 4 type 0 out "deep\xEE"
+obey "Set ZqA2 1\x0DSet ZqB2 2\x0A" ""
+= done said ""
+readvar "ZqA2" "64" "0"
+= length 1 type 0 out "1\xEE"
+readvar "ZqB2" "64" "0"
+= length 1 type 0 out "2\xEE"
+obey "Set ZqA3 1\x0ASet ZqB3 |\x0ASet ZqC3 3\x0A" ""
+= error &FD said ""
+readvar "ZqA3" "64" "0"
+= length 1 type 0 out "1\xEE"
+readvar "ZqC3" "64" "0"
+= error &124 length 0
+obey "Set ZqP4 [%1]\x0A" "a b c"
+= done said ""
+readvar "ZqP4" "64" "0"
+= length 3 type 0 out "[b]\xEE"
+obey "Set ZqP5 [%0][%*1]\x0A" "a \x22b c\x22 d"
+= done said ""
+readvar "ZqP5" "64" "0"
+= length 12 type 0 out "[a][\x22b c\x22 d]\xEE"
+obey "Set ZqD <Obey$Dir>\x0A" ""
+= done said ""
+readvar "ZqD" "64" "0"
+= length 8 type 0 out "HostFS:$\xEE"
+obey "| comment\x0A\x0ASet ZqE5 5\x0D\x0ASet ZqE6 6" ""
+= done said ""
+readvar "ZqE5" "64" "0"
+= length 1 type 0 out "5\xEE"
+readvar "ZqE6" "64" "0"
+= length 1 type 0 out "6\xEE"
+obey "Set ZqF1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x0ASet ZqG1 1\x0A" ""
+= done said ""
+readvar "ZqF1" "4" "0"
+= error &1E4 length 4
+readvar "ZqG1" "64" "0"
+= length 1 type 0 out "1\xEE"
+obey "Set ZqF2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x0ASet ZqG2 1\x0A" ""
+= error &1E4 said ""
+readvar "ZqF2" "4" "0"
+= error &124 length 0
+readvar "ZqG2" "64" "0"
+= error &124 length 0
+obey "Set ZqF3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\x0ASet ZqG3 1\x0A" ""
+= error &1E4 said ""
+readvar "ZqF3" "4" "0"
+= error &124 length 0
+readvar "ZqG3" "64" "0"
+= error &124 length 0
+obey "Set ZqN1 1\x00Set ZqN2 2\x0ASet ZqN3 3\x0A" ""
+= done said ""
+readvar "ZqN1" "64" "0"
+= length 1 type 0 out "1\xEE"
+readvar "ZqN2" "64" "0"
+= length 1 type 0 out "2\xEE"
+readvar "ZqN3" "64" "0"
+= length 1 type 0 out "3\xEE"
+obey "If 1 Then Set ZqH a|\x0ASet ZqH2 2\x0A" ""
+= error &FD said ""
+readvar "ZqH2" "64" "0"
+= error &124 length 0
+obey "Set ZqJ1 1\x0AUnset ZqJ1 ZqJ2\x0ASet ZqJ3 3\x0A" ""
+= error &DC said ""
+readvar "ZqJ3" "64" "0"
+= error &124 length 0
+cli "Unset Zq*"
+= done said ""
+sweep "Set" "SwQ 1" "32" "45" "*SwQ"
+= set 10001100000010
+sweep "Set" "SwQ 1" "47" "255" "*SwQ"
+= set 00000000000101010000000000000000000000000000010100000000000000000000000000000100100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+sweep "Set ZqSw" " 1" "32" "255" "ZqSw*"
+= set 11101111110111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+sweep "Set" "SwQ\x22 1" "32" "45" "*SwQ*"
+= set 10101100000010
+sweep "Set" "SwQ\x22 1" "47" "255" "*SwQ*"
+= set 00000000000101010000000000000000000000000000010100000000000000000000000000000100100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+readunsigned "10" "  42" "0" "0"
+= value 42 high 0 next 4
+readunsigned "10" "42x" "0" "0"
+= value 42 high 0 next 2
+readunsigned "16" "ff" "0" "0"
+= value 255 high 0 next 2
+readunsigned "2" "102" "0" "0"
+= value 2 high 0 next 2
+readunsigned "36" "zZ" "0" "0"
+= value 1295 high 0 next 2
+readunsigned "37" "12" "0" "0"
+= value 12 high 0 next 2
+readunsigned "0" "12" "0" "0"
+= value 12 high 0 next 2
+readunsigned "1" "12" "0" "0"
+= value 12 high 0 next 2
+readunsigned "&100" "12" "0" "0"
+= value 12 high 0 next 2
+readunsigned "10" "1_0" "0" "0"
+= error &16A
+readunsigned "10" "37_1" "0" "0"
+= error &16A
+readunsigned "10" "99999999999_1" "0" "0"
+= error &16C
+readunsigned "10" "2_102" "0" "0"
+= value 2 high 0 next 4
+readunsigned "10" "16_fF" "0" "0"
+= value 255 high 0 next 5
+readunsigned "10" "&" "0" "0"
+= error &16B
+readunsigned "10" "2_" "0" "0"
+= error &16B
+readunsigned "10" "8_9" "0" "0"
+= error &16B
+readunsigned "10" "" "0" "0"
+= error &16B
+readunsigned "10" " " "0" "0"
+= error &16B
+readunsigned "10" "4294967295" "0" "0"
+= value -1 high 0 next 10
+readunsigned "10" "4294967296" "0" "0"
+= error &16C
+readunsigned "10" "&FFFFFFFF" "0" "0"
+= value -1 high 0 next 9
+readunsigned "10" "&100000000" "0" "0"
+= error &16C
+readunsigned "&8000000A" "12x" "0" "0"
+= error &16B
+readunsigned "&8000000A" "12 x" "0" "0"
+= value 12 high 0 next 2
+readunsigned "&8000000A" "12" "0" "0"
+= value 12 high 0 next 2
+readunsigned "&8000000A" "12\x09" "0" "0"
+= value 12 high 0 next 2
+readunsigned "&4000000A" "255" "0" "0"
+= value 255 high 0 next 3
+readunsigned "&4000000A" "256" "0" "0"
+= error &16C
+readunsigned "&2000000A" "99" "99" "0"
+= value 99 high 0 next 2
+readunsigned "&2000000A" "100" "99" "0"
+= error &16C
+readunsigned "&6000000A" "200" "100" "0"
+= value 200 high 0 next 3
+readunsigned "&1000000A" "18446744073709551615" "0" "1"
+= value -1 high -1 next 20
+readunsigned "&1000000A" "18446744073709551616" "0" "1"
+= error &16C
+readunsigned "&1000000A" "4294967296" "0" "1"
+= value 0 high 1 next 10
+readunsigned "&1000000A" "4294967296" "0" "0"
+= error &16C
+readunsigned "&3000000A" "4294967296" "5" "1"
+= error &16C
+readunsigned "&3000000A" "4294967300" "4" "1"
+= error &16C
+setvar "ZqMe" "a<ZqMe>" "7" "2"
+= type 2
+gstrans "<ZqMe>" "0" "4096"
+= carry 0 next 7 stored 127 out "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x0D"
+cli "Unset Zq*"
+= done said ""

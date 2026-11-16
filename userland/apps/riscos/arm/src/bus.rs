@@ -26,6 +26,16 @@ impl Width {
             Self::Word => 4,
         }
     }
+
+    /// The bits of a value the access carries.
+    #[must_use]
+    pub const fn mask(self) -> u32 {
+        match self {
+            Self::Byte => 0xFF,
+            Self::Half => 0xFFFF,
+            Self::Word => u32::MAX,
+        }
+    }
 }
 
 /// Why the bus refused an access.
@@ -47,6 +57,10 @@ pub struct Fetch {
     /// Whether the word is on a host page, where a `UDF` calls the host
     /// rather than taking the undefined instruction exception.
     pub host: bool,
+    /// The page of memory the word is in, by number: the physical page where
+    /// the bus translates. The processor keeps its decodings by it, so each
+    /// task's code at a shared address keeps its own.
+    pub page: u32,
 }
 
 /// The memory a processor runs in.

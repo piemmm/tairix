@@ -9,6 +9,8 @@
 //! value is its bits read from the most significant down, so a split
 //! immediate such as `MOVW`'s `imm4:imm12` reads whole.
 
+use crate::reg::Reg;
+
 /// A field a pattern's letters name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Field {
@@ -57,9 +59,11 @@ pub(crate) enum Field {
     List,
     /// `p`: a coprocessor number.
     Cp,
-    /// `o`: a coprocessor's first opcode.
+    /// `o`: a coprocessor's first opcode; elsewhere a selector, such as
+    /// `VSEL`'s condition and T32 `IT`'s first condition.
     Opc1,
-    /// `q`: a coprocessor's second opcode.
+    /// `q`: a coprocessor's second opcode; elsewhere a selector, such as
+    /// T32 `IT`'s mask.
     Opc2,
     /// `N`: `CRn`.
     CRn,
@@ -73,11 +77,13 @@ pub(crate) enum Field {
     X,
     /// `Y`: a second halfword choice.
     Y,
-    /// `H`: `BLX`'s halfword offset bit.
+    /// `H`: `BLX`'s halfword offset bit; in T32 the `i` and `S` bits of
+    /// an immediate or a branch.
     H,
     /// `b`: a bitfield's least significant bit.
     Lsb,
-    /// `e`: a bitfield's most significant bit, or its width less one.
+    /// `e`: a bitfield's most significant bit, or its width less one; in
+    /// T32 also `MOVW`'s top four bits and a branch's high offset bits.
     Msb,
     /// `x`: an extension's rotation in bytes.
     Rotation,
@@ -115,6 +121,8 @@ pub(crate) enum Field {
 
 /// How many fields there are.
 pub(crate) const FIELDS: usize = Field::Align as usize + 1;
+// A layout's present fields are a bit each of a `u64`.
+const _: () = assert!(FIELDS <= 64);
 
 impl Field {
     const fn of(letter: u8) -> Option<Self> {
@@ -187,6 +195,8 @@ pub(crate) struct Layout {
     pub ignored: u32,
     /// Each field's bits, by [`Field`].
     pub fields: [u32; FIELDS],
+    /// The fields the pattern has, a bit each by [`Field`].
+    present: u64,
 }
 
 impl Layout {
@@ -210,6 +220,7 @@ impl Layout {
             should_bits: 0,
             ignored: 0,
             fields: [0; FIELDS],
+            present: 0,
         };
         let mut seen = 0u32;
         let mut n = 0;
@@ -235,7 +246,10 @@ impl Layout {
                 }
                 b'*' => layout.ignored |= bit,
                 _ => match Field::of(letter) {
-                    Some(field) => layout.fields[field as usize] |= bit,
+                    Some(field) => {
+                        layout.fields[field as usize] |= bit;
+                        layout.present |= 1 << field as u32;
+                    }
                     None => panic!("a pattern letter names no field"),
                 },
             }
@@ -249,6 +263,11 @@ impl Layout {
         self.fields[field as usize]
     }
 
+    /// Whether the pattern has `field`.
+    pub const fn has(&self, field: Field) -> bool {
+        self.field(field) != 0
+    }
+
     /// Whether `word` has this layout's fixed bits.
     pub const fn matches(&self, word: u32) -> bool {
         word & self.mask == self.bits
@@ -257,8 +276,11 @@ impl Layout {
     /// The fields of `word`.
     pub fn extract(&self, word: u32) -> Fields {
         let mut values = [0; FIELDS];
-        for (value, &mask) in values.iter_mut().zip(&self.fields) {
-            *value = gather(word, mask);
+        let mut present = self.present;
+        while present != 0 {
+            let field = present.trailing_zeros() as usize;
+            values[field] = gather(word, self.fields[field]);
+            present &= present - 1;
         }
         Fields(values)
     }
@@ -303,6 +325,9 @@ fn gather(word: u32, mask: u32) -> u32 {
 
 /// `value`'s low bits spread over `mask`, the most significant first.
 fn scatter(value: u32, mask: u32) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
     let low = mask.trailing_zeros();
     let run = mask >> low;
     if run & run.wrapping_add(1) == 0 {
@@ -334,6 +359,17 @@ impl Fields {
     /// `field`'s value.
     pub const fn get(&self, field: Field) -> u32 {
         self.0[field as usize]
+    }
+
+    /// `field`'s value as a register number.
+    pub const fn reg(&self, field: Field) -> Reg {
+        Reg::field(self.get(field))
+    }
+
+    /// `field`'s value narrowed to a byte: every field read so is at most
+    /// eight bits wide.
+    pub const fn byte(&self, field: Field) -> u8 {
+        self.get(field).to_le_bytes()[0]
     }
 
     /// Whether one-bit `field` is set.

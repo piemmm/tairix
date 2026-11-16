@@ -30,25 +30,46 @@ pub fn decode(word: u32, isa: Isa) -> Option<Instruction> {
 
 /// [`decode`], with whether the word was canonical.
 pub(crate) fn decode_detail(word: u32, isa: Isa) -> Option<Decoded> {
-    let field = word >> 28;
-    let unconditional_space = field == 0xF && !isa.has(Feature::ConditionNever);
-    table::rows((word >> 25) as usize & 7)
-        .filter(|row| {
-            row.layout.matches(word)
-                && isa.has(row.since)
-                && (row.unconditional() || !unconditional_space)
-                && !(row.kind.generic_coprocessor() && isa.claims_coprocessor(word >> 8))
-        })
-        .find_map(|row| {
-            let fields = row.layout.extract(word);
-            row.kind.build(&row.layout, &fields).map(|op| Decoded {
-                instruction: Instruction {
-                    cond: Condition::field(field),
-                    op,
-                },
-                canonical: word & row.layout.should_mask == row.layout.should_bits,
-            })
-        })
+    first_decoding(table::rows_matching(word), word, isa).map(|(_, instruction, canonical)| {
+        Decoded {
+            instruction,
+            canonical,
+        }
+    })
+}
+
+/// The generic coprocessor instruction `word` is, by A32's rows for them
+/// alone: the encodings T32's coprocessor space shares.
+pub(crate) fn decode_coprocessor(word: u32, isa: Isa) -> Option<Decoded> {
+    let rows = table::rows_matching(word).filter(|row| row.kind.generic_coprocessor());
+    first_decoding(rows, word, isa).map(|(_, instruction, canonical)| Decoded {
+        instruction,
+        canonical,
+    })
+}
+
+/// The first of `rows` a core with `isa` decodes `word` by: the row, what it
+/// built and whether the word's should-be bits held their values.
+fn first_decoding(
+    rows: impl Iterator<Item = &'static table::Row>,
+    word: u32,
+    isa: Isa,
+) -> Option<(&'static table::Row, Instruction, bool)> {
+    let unconditional_space = word >> 28 == 0xF && !isa.has(Feature::ConditionNever);
+    rows.filter(|row| {
+        isa.has(row.since)
+            && (row.unconditional() || !unconditional_space)
+            && !(row.kind.generic_coprocessor() && isa.claims_coprocessor(word >> 8))
+    })
+    .find_map(|row| {
+        let op = row.kind.build(&row.layout, &row.layout.extract(word))?;
+        let instruction = Instruction {
+            cond: Condition::field(word >> 28),
+            op,
+        };
+        let canonical = word & row.layout.should_mask == row.layout.should_bits;
+        Some((row, instruction, canonical))
+    })
 }
 
 /// A floating-point or Advanced SIMD decoding, for T32, whose encodings of
@@ -66,33 +87,36 @@ pub(crate) struct SimdFpDecoded {
 /// The floating-point or Advanced SIMD instruction the A32 `word` encodes on
 /// a core with `isa`; the other rows are not consulted.
 pub(crate) fn decode_simdfp(word: u32, isa: Isa) -> Option<SimdFpDecoded> {
-    let unconditional_space = word >> 28 == 0xF && !isa.has(Feature::ConditionNever);
-    table::rows((word >> 25) as usize & 7)
-        .filter(|row| {
-            matches!(row.kind, crate::encoding::form::Kind::SimdFp(_))
-                && row.layout.matches(word)
-                && isa.has(row.since)
-                && (row.unconditional() || !unconditional_space)
-        })
-        .find_map(|row| {
-            let fields = row.layout.extract(word);
-            row.kind
-                .build(&row.layout, &fields)
-                .map(|op| SimdFpDecoded {
-                    instruction: Instruction {
-                        cond: Condition::field(word >> 28),
-                        op,
-                    },
-                    canonical: word & row.layout.should_mask == row.layout.should_bits,
-                    outside: row.unconditional()
-                        && matches!(row.since, Feature::FpV8 | Feature::Crypto),
-                })
-        })
+    first_decoding(table::simdfp_matching(word), word, isa).map(|(row, instruction, canonical)| {
+        SimdFpDecoded {
+            instruction,
+            canonical,
+            outside: row.unconditional() && matches!(row.since, Feature::FpV8 | Feature::Crypto),
+        }
+    })
 }
 
 /// The encoding of `instruction`, which decodes back to it exactly; an
 /// unconditional instruction's condition is [`Condition::Nv`].
 pub fn encode(instruction: &Instruction) -> Result<u32, EncodeError> {
+    encode_among(instruction, decode)
+}
+
+/// The encoding of a generic coprocessor `instruction` that
+/// [`decode_coprocessor`] decodes back to it: T32's, where no unit claims the
+/// coprocessor space as A32's FPA does.
+pub(crate) fn encode_coprocessor(instruction: &Instruction) -> Result<u32, EncodeError> {
+    encode_among(instruction, |word, isa| {
+        decode_coprocessor(word, isa).map(|decoded| decoded.instruction)
+    })
+}
+
+/// The first encoding of `instruction` its rows give that `decode` reads back
+/// to it.
+fn encode_among(
+    instruction: &Instruction,
+    decode: impl Fn(u32, Isa) -> Option<Instruction>,
+) -> Result<u32, EncodeError> {
     let kind = instruction.op.kind();
     let mut fields = instruction.op.fields();
     fields.set(layout::Field::Cond, instruction.cond.bits());

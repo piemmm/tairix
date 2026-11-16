@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use super::json::{self, Json};
+use super::pinned::Pinned;
 use crate::Context;
 
 const ASSETS: &str = "lib/spirv/assets";
@@ -33,20 +34,15 @@ const TABLES: &str = "lib/spirv/src/tables.rs";
 /// The SPIRV-Headers release the assets are.
 const RELEASE: &str = "vulkan-sdk-1.4.363.0";
 
-struct Pinned {
-    file: &'static str,
-    sha256: &'static str,
-}
-
-const CORE: Pinned = Pinned {
+const CORE: Pinned<'static> = Pinned {
     file: "spirv.core.grammar.json",
     sha256: "c125a0fbf6730fde4625fef2618c4f7611ab42edf9b2ad5bb9291002b10bfad3",
 };
-const GLSL: Pinned = Pinned {
+const GLSL: Pinned<'static> = Pinned {
     file: "extinst.glsl.std.450.grammar.json",
     sha256: "5d72e48247569f9b77a17a849db624350abc9d26f7f72b153bbcf15c37238239",
 };
-const LICENSE: Pinned = Pinned {
+const LICENSE: Pinned<'static> = Pinned {
     file: "LICENSE",
     sha256: "ea43b1de38a6f90c488800d66dec1ed671e68cda530266bc96951fb5b6307613",
 };
@@ -105,20 +101,8 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 /// The asset `pinned`, once it hashes to its pin.
-fn read(root: &Path, pinned: &Pinned) -> Result<String, String> {
-    let path = root.join(ASSETS).join(pinned.file);
-    let bytes =
-        std::fs::read(&path).map_err(|e| format!("spirv: cannot read {}: {e}", path.display()))?;
-    let mut expected = [0; tairix_crypto::SHA256_OUTPUT_LEN];
-    if !tairix_util::hex::decode_into(pinned.sha256, &mut expected)
-        || tairix_crypto::sha256(&bytes) != expected
-    {
-        return Err(format!(
-            "spirv: {} does not hash to its pinned SHA-256",
-            path.display()
-        ));
-    }
-    String::from_utf8(bytes).map_err(|_| format!("spirv: {} is not UTF-8", path.display()))
+fn read(root: &Path, pinned: &Pinned<'_>) -> Result<String, String> {
+    pinned.read_text("spirv", &root.join(ASSETS))
 }
 
 fn field<'j>(value: &'j Json, key: &str, what: &str) -> Result<&'j Json, String> {

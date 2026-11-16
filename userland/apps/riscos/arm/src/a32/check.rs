@@ -5,8 +5,8 @@
 use crate::cond::Condition;
 use crate::encoding::check;
 use crate::instruction::{
-    BlockOp, CoIndex, CoRegisterOp, CoRegistersOp, DualOp, ExchangeOp, Index, Instruction, LongOp,
-    MultiplyOp, Offset, Op, Operand, Source, TransferOp,
+    BlockOp, CoIndex, DualOp, ExchangeOp, Index, Instruction, LongOp, MultiplyOp, Offset, Op,
+    Operand, TransferOp,
 };
 use crate::isa::{Feature, Isa};
 use crate::reg::Reg;
@@ -38,7 +38,6 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
                 || (shifted(operand) && (rn == PC || shifted_by_pc(operand)))
         }
         Op::Move { rd, operand, .. } => shifted(operand) && (rd == PC || shifted_by_pc(operand)),
-        Op::Wide { rd, .. } | Op::Status { rd, .. } => rd == PC,
         Op::Multiply {
             op, rd, rn, rm, ra, ..
         } => {
@@ -58,24 +57,22 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
             lo == PC || hi == PC || rn == PC || rm == PC || lo == hi || early_termination
         }
         Op::Arithmetic { op, rd, rn, rm } => {
-            let checksum = op.name().starts_with("CRC32");
-            rd == PC || rn == PC || rm == PC || (checksum && instruction.cond != Condition::Al)
+            rd == PC || rn == PC || rm == PC || (op.checksum() && instruction.cond != Condition::Al)
         }
-        Op::Parallel { rd, rn, rm, .. } | Op::Pack { rd, rn, rm, .. } => {
-            rd == PC || rn == PC || rm == PC
-        }
-        Op::Unary { rd, rm, .. } | Op::Extend { rd, rm, .. } | Op::Saturate { rd, rn: rm, .. } => {
-            rd == PC || rm == PC
-        }
-        Op::Bitfield {
-            op,
-            rd,
-            rn,
-            lsb,
-            top,
-        } => rd == PC || rn == Some(PC) || check::bitfield(op, lsb, top),
-        Op::StatusWrite { fields, source, .. } => fields == 0 || source == Source::Register(PC),
-        Op::Exchange { op, rm } => rm == PC && (op == ExchangeOp::Blx || isa.version() < 7),
+        Op::Wide { .. }
+        | Op::Status { .. }
+        | Op::Parallel { .. }
+        | Op::Pack { .. }
+        | Op::Unary { .. }
+        | Op::Extend { .. }
+        | Op::Saturate { .. }
+        | Op::Bitfield { .. }
+        | Op::StatusWrite { .. }
+        | Op::ReturnFromException { .. }
+        | Op::CoprocessorRegister { .. }
+        | Op::CoprocessorRegisters { .. } => check::shared(&instruction.op),
+        // Only BX may name the PC, and only from ARMv7.
+        Op::Exchange { op, rm } => rm == PC && (op != ExchangeOp::Bx || isa.version() < 7),
         Op::Transfer {
             op,
             rt,
@@ -132,14 +129,6 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
             interrupts,
             mode,
         } => check::change_state(imod, change_mode, interrupts, mode),
-        Op::ReturnFromException { rn, .. } => rn == PC,
-        Op::CoprocessorRegister { op, rt, .. } => {
-            rt == PC && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mcr2)
-        }
-        Op::CoprocessorRegisters { op, rt, rt2, .. } => {
-            let read = matches!(op, CoRegistersOp::Mrrc | CoRegistersOp::Mrrc2);
-            rt == PC || rt2 == PC || (read && rt == rt2)
-        }
         Op::CoprocessorTransfer { rn, index, .. } => {
             rn == PC && !matches!(index, CoIndex::Offset | CoIndex::Unindexed)
         }

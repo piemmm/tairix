@@ -13,9 +13,10 @@ use tairix_abi::Errno;
 use tairix_audio::live::{LiveStream, RtAudio};
 use tairix_fscopy::{DataCopy, Sparse};
 use tairix_openmicro::front::folder::{self, MOST_NAMES};
-use tairix_openmicro::front::media::Purpose;
+use tairix_openmicro::front::media::{self, Purpose};
 use tairix_openmicro::front::pacing::Ring;
-use tairix_openmicro::worker::protocol::{MAX_BULK, MAX_DISC, MAX_ROM, SAMPLE_RATE};
+use tairix_openmicro::machine::Model;
+use tairix_openmicro::worker::protocol::{MAX_BULK, MAX_CARTRIDGE, MAX_ROM, SAMPLE_RATE};
 use tairix_rt::work::Worker;
 use tairix_rt::{Dir, File};
 use tairix_util::defer::JobQueue;
@@ -110,7 +111,8 @@ pub enum FileJob {
         /// Its folder.
         folder: String,
     },
-    /// A blank disc or tape made in machine `id`'s folder, for `purpose`.
+    /// A blank disc or tape made in machine `id`'s folder, for `purpose` on
+    /// a machine of `model`.
     New {
         /// The machine.
         id: u32,
@@ -118,6 +120,8 @@ pub enum FileJob {
         folder: String,
         /// What it is to be.
         purpose: Purpose,
+        /// The machine's model, whose media it is.
+        model: Model,
     },
     /// The file `name` of machine `id`'s folder put in as `purpose`; where
     /// `digest` is given, only as the file of a medium the machine already
@@ -302,7 +306,8 @@ pub fn serve(held: &mut Held, job: &mut FileJob) -> FileDone {
             id,
             folder,
             purpose,
-        } => new_medium(held, *id, folder, *purpose),
+            model,
+        } => new_medium(held, *id, folder, (*purpose, *model)),
         FileJob::FromFolder {
             id,
             folder,
@@ -323,12 +328,14 @@ pub fn serve(held: &mut Held, job: &mut FileJob) -> FileDone {
     }
 }
 
-/// The most a file is read to for `purpose`.
-const fn most(purpose: Purpose) -> usize {
+/// The most file `name` is read to for `purpose`: a disc's own format's
+/// largest image, so one past it is refused as too large there.
+fn most(purpose: Purpose, name: &str) -> usize {
     match purpose {
-        Purpose::Disc(_) => MAX_DISC,
+        Purpose::Disc(_) => media::format_of(name).max_bytes(),
         Purpose::Rom(_) => MAX_ROM,
-        Purpose::Tape | Purpose::Snapshot => MAX_BULK,
+        Purpose::Cartridge => MAX_CARTRIDGE,
+        Purpose::Tape | Purpose::Snapshot | Purpose::Program => MAX_BULK,
     }
 }
 
@@ -342,7 +349,7 @@ fn keep(
     purpose: Purpose,
     of_folder: bool,
 ) -> FileDone {
-    let bytes = match read(&file, most(purpose)) {
+    let bytes = match read(&file, most(purpose, &name)) {
         Ok(bytes) => bytes,
         Err(why) => return FileDone::Failed(format!("{name} could not be read: {why}")),
     };
@@ -430,20 +437,24 @@ fn list(held: &Held, folder: &str) -> Result<Vec<String>, String> {
     names_of(&folder_dir(held, folder)?, true)
 }
 
-/// A blank disc or tape made afresh in `folder` for machine `id`, held as a
-/// medium.
-fn new_medium(held: &mut Held, id: u32, folder: &str, purpose: Purpose) -> FileDone {
+/// A blank disc or tape made afresh in `folder` for machine `id`, a
+/// `model`'s for `purpose`, held as a medium.
+fn new_medium(
+    held: &mut Held,
+    id: u32,
+    folder: &str,
+    (purpose, model): (Purpose, Model),
+) -> FileDone {
     let made = (|| {
+        let (stem, ending) = folder::blank_name(purpose, model)
+            .ok_or_else(|| String::from("only a disc or a tape is made blank"))?;
         let dir = folder_dir(held, folder)?;
         let taken = names_of(&dir, false)?;
-        let (stem, ending, bytes) = match purpose {
-            Purpose::Disc(_) => ("Disc", ".ssd", folder::blank_disc()),
-            _ => ("Tape", ".uef", folder::blank_tape()),
-        };
-        let name = folder::fresh(stem, ending, |candidate| {
+        let name = folder::fresh(stem, &format!(".{ending}"), |candidate| {
             taken.iter().any(|t| t == candidate)
         })
         .ok_or_else(|| format!("{MOST_NAMES} {stem}s are already there"))?;
+        let bytes = folder::blank_image(purpose, model, &name);
         let flags = OpenFlags::READ
             .union(OpenFlags::WRITE)
             .union(OpenFlags::EXCLUSIVE);
@@ -501,7 +512,7 @@ fn from_folder(
     let Some(digest) = digest else {
         return keep(held, id, (file, writable), name, purpose, true);
     };
-    match read(&file, most(purpose)) {
+    match read(&file, most(purpose, &name)) {
         Ok(bytes) if folder::digest(&bytes) == digest => FileDone::Rebound {
             id,
             purpose,

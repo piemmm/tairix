@@ -1,11 +1,13 @@
 //! The recorded corpus: every scenario parses and has exactly one fixture,
-//! every fixture a scenario, and each fixtures file is in the one format the
-//! reference harness writes. Replaying the scenarios on the kernel's own SWIs
-//! is the SWI layer's.
+//! every fixture a scenario and records just what its shows ask, and each
+//! fixtures file is in the one format the reference harness writes.
+//! Replaying the scenarios on the kernel's own SWIs is the SWI layer's.
 
 use std::path::Path;
 
-use tairix_riscos_kernel::corpus::{format_observations, parse_observations, parse_scenarios};
+use tairix_riscos_kernel::corpus::{
+    check_observation, format_observations, parse_observations, parse_scenarios,
+};
 
 #[test]
 fn every_scenario_has_its_fixture_and_every_fixture_its_scenario() {
@@ -32,17 +34,8 @@ fn every_scenario_has_its_fixture_and_every_fixture_its_scenario() {
             path.display()
         );
         for (scenario, fixture) in scenarios.iter().zip(&fixtures) {
-            let shows = scenario
-                .steps
-                .iter()
-                .filter(|step| matches!(step, tairix_riscos_kernel::corpus::Step::Show { .. }))
-                .count();
-            assert_eq!(
-                fixture.lines.len(),
-                shows,
-                "{}: a line per show",
-                scenario.name
-            );
+            check_observation(scenario, fixture)
+                .unwrap_or_else(|e| panic!("{}: its line {}: {}", scenario.name, e.line, e.reason));
         }
         let header: Vec<&str> = text
             .lines()

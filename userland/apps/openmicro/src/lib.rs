@@ -1,5 +1,6 @@
-//! `OpenMicro.app`: a BBC Micro Model B and an Acorn Electron with its Plus 1,
-//! cycle-exact, and the clean-room ROMs they run (`plans/BEEB.md`).
+//! `OpenMicro.app`: a BBC Micro Model B, an Acorn Electron with its Plus 1
+//! and a Commodore 64 with its 1541s, cycle-exact, and the clean-room ROMs
+//! they run (`plans/BEEB.md`, `plans/C64.md`).
 #![no_std]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

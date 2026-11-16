@@ -14,8 +14,9 @@ use tairix_machines::state::Bounds;
 use tairix_sandbox::wire::{Reader, WireError, Writer};
 
 use super::keys::Mapping;
+use crate::machine::c64::{sid, Standard};
 use crate::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
-use crate::machine::Model;
+use crate::machine::{Model, Timing};
 use crate::worker::protocol::{MAX_BULK, SLOTS};
 
 /// The prefix of every installed ROM image's blob.
@@ -53,15 +54,27 @@ pub enum Shipped {
     Dfs,
     /// The Plus 1's ROM.
     Plus1,
+    /// The Commodore 64's KERNAL.
+    C64Kernal,
+    /// The Commodore 64's BASIC.
+    C64Basic,
+    /// The Commodore 64's character ROM.
+    C64Character,
+    /// The 1541's DOS.
+    C1541Dos,
 }
 
 impl Shipped {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 9] = [
         Self::Mos,
         Self::ElectronOs,
         Self::Basic,
         Self::Dfs,
         Self::Plus1,
+        Self::C64Kernal,
+        Self::C64Basic,
+        Self::C64Character,
+        Self::C1541Dos,
     ];
 
     /// Its image, as `Run` carries it.
@@ -73,6 +86,10 @@ impl Shipped {
             Self::Basic => crate::firmware::BASIC_IMAGE,
             Self::Dfs => crate::firmware::DFS_IMAGE,
             Self::Plus1 => crate::firmware::PLUS1_IMAGE,
+            Self::C64Kernal => crate::firmware::C64_KERNAL_IMAGE,
+            Self::C64Basic => crate::firmware::C64_BASIC_IMAGE,
+            Self::C64Character => crate::firmware::C64_CHARACTER_IMAGE,
+            Self::C1541Dos => crate::firmware::C1541_DOS_IMAGE,
         }
     }
 
@@ -85,6 +102,10 @@ impl Shipped {
             Self::Basic => "TAIRiX BASIC",
             Self::Dfs => "TAIRiX DFS",
             Self::Plus1 => "OpenMOS Plus 1",
+            Self::C64Kernal => "OpenMicro 64 KERNAL",
+            Self::C64Basic => "OpenMicro 64 BASIC",
+            Self::C64Character => "OpenMicro 64 characters",
+            Self::C1541Dos => "OpenMicro DOS 1541",
         }
     }
 
@@ -171,7 +192,7 @@ impl Image {
     }
 }
 
-/// A ROM socket of either model.
+/// A ROM socket of any model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Socket {
     /// The Model B's OS.
@@ -186,6 +207,14 @@ pub enum Socket {
     Plus1,
     /// A Plus 1 cartridge ROM: the slot's two, then the other's.
     Cartridge(u8),
+    /// The Commodore 64's KERNAL.
+    Kernal,
+    /// The Commodore 64's BASIC.
+    C64Basic,
+    /// The Commodore 64's character ROM.
+    Character,
+    /// A 1541's DOS: device 8's, then device 9's.
+    Dos(u8),
 }
 
 const MODEL_B_OS: [Image; 1] = [Image::Shipped(Shipped::Mos)];
@@ -199,6 +228,10 @@ const ELECTRON_OS: [Image; 1] = [Image::Shipped(Shipped::ElectronOs)];
 const BASIC: [Image; 1] = [Image::Shipped(Shipped::Basic)];
 const PLUS1: [Image; 1] = [Image::Shipped(Shipped::Plus1)];
 const CARTRIDGE: [Image; 1] = [Image::Empty];
+const KERNAL: [Image; 1] = [Image::Shipped(Shipped::C64Kernal)];
+const C64_BASIC: [Image; 1] = [Image::Shipped(Shipped::C64Basic)];
+const CHARACTER: [Image; 1] = [Image::Shipped(Shipped::C64Character)];
+const DOS: [Image; 1] = [Image::Shipped(Shipped::C1541Dos)];
 
 impl Socket {
     /// What it may hold besides an image the user installed, in the order
@@ -212,6 +245,10 @@ impl Socket {
             Self::Basic => &BASIC,
             Self::Plus1 => &PLUS1,
             Self::Cartridge(_) => &CARTRIDGE,
+            Self::Kernal => &KERNAL,
+            Self::C64Basic => &C64_BASIC,
+            Self::Character => &CHARACTER,
+            Self::Dos(_) => &DOS,
         }
     }
 
@@ -227,12 +264,23 @@ impl Socket {
         match self {
             Self::ModelBOs | Self::ElectronOs => String::from("OS"),
             Self::Slot(slot) => format!("Slot {slot}"),
-            Self::Basic => String::from("BASIC"),
+            Self::Basic | Self::C64Basic => String::from("BASIC"),
             Self::Plus1 => String::from("Plus 1"),
             Self::Cartridge(n) => format!("Cartridge {}, ROM {}", n / 2 + 1, n % 2 + 1),
+            Self::Kernal => String::from("KERNAL"),
+            Self::Character => String::from("Characters"),
+            Self::Dos(n) => format!("Drive {}'s DOS", unit_number(n)),
         }
     }
 }
+
+/// The device number of a C64's drive `n`, from 0.
+fn unit_number(n: u8) -> u8 {
+    FIRST_UNIT.saturating_add(n)
+}
+
+/// A C64's first drive's device number.
+const FIRST_UNIT: u8 = 8;
 
 /// The Model B's start-up links: its screen mode, whether SHIFT-BREAK boots a
 /// disc, and its disc timings.
@@ -302,6 +350,22 @@ pub enum Fitting {
         /// The Plus 1.
         plus1: Option<Box<Plus1Fitting>>,
     },
+    /// A Commodore 64: its standard and SID, its ROMs, and the DOS of each
+    /// drive fitted, devices 8 and 9.
+    C64 {
+        /// The television standard.
+        standard: Standard,
+        /// The SID.
+        sid: sid::Model,
+        /// The KERNAL.
+        kernal: Image,
+        /// BASIC.
+        basic: Image,
+        /// The character generator.
+        character: Image,
+        /// Each drive's DOS, where the drive is fitted.
+        drives: [Option<Image>; 2],
+    },
 }
 
 impl Fitting {
@@ -334,25 +398,71 @@ impl Fitting {
         }
     }
 
+    /// A Commodore 64 of `standard` with `sid` and the first `drives` of
+    /// its two drives, its ROMs the clean-room ones.
+    #[must_use]
+    pub fn c64(standard: Standard, sid: sid::Model, drives: usize) -> Self {
+        Self::C64 {
+            standard,
+            sid,
+            kernal: Image::Shipped(Shipped::C64Kernal),
+            basic: Image::Shipped(Shipped::C64Basic),
+            character: Image::Shipped(Shipped::C64Character),
+            drives: core::array::from_fn(|n| {
+                (n < drives).then_some(Image::Shipped(Shipped::C1541Dos))
+            }),
+        }
+    }
+
     /// The model it is.
     #[must_use]
     pub const fn model(&self) -> Model {
         match self {
             Self::ModelB { .. } => Model::ModelB,
             Self::Electron { .. } => Model::Electron,
+            Self::C64 { .. } => Model::C64,
+        }
+    }
+
+    /// How the machine it builds keeps time.
+    #[must_use]
+    pub const fn timing(&self) -> Timing {
+        match self {
+            Self::ModelB { .. } | Self::Electron { .. } => Timing::ACORN,
+            Self::C64 { standard, .. } => standard.timing(),
+        }
+    }
+
+    /// Which of its two drives it has.
+    #[must_use]
+    pub const fn drives(&self) -> [bool; 2] {
+        match self {
+            Self::ModelB { .. } => [true; 2],
+            Self::Electron { .. } => [false; 2],
+            Self::C64 { drives, .. } => [drives[0].is_some(), drives[1].is_some()],
         }
     }
 
     /// Every socket it has and what each holds, in the order its settings
     /// list them: a Model B's slots from the highest down.
     pub fn sockets(&self) -> impl Iterator<Item = (Socket, &Image)> {
-        let (os, slots, electron) = match self {
-            Self::ModelB { os, slots, .. } => ((Socket::ModelBOs, os), Some(slots), None),
+        let (os, slots, electron, c64) = match self {
+            Self::ModelB { os, slots, .. } => {
+                (Some((Socket::ModelBOs, os)), Some(slots), None, None)
+            }
             Self::Electron { os, basic, plus1 } => (
-                (Socket::ElectronOs, os),
+                Some((Socket::ElectronOs, os)),
                 None,
                 Some((basic, plus1.as_deref())),
+                None,
             ),
+            Self::C64 {
+                kernal,
+                basic,
+                character,
+                drives,
+                ..
+            } => (None, None, None, Some(([kernal, basic, character], drives))),
         };
         let slots = slots.into_iter().flat_map(|slots| {
             (0..SLOTS)
@@ -371,7 +481,17 @@ impl Fitting {
             });
             core::iter::once((Socket::Basic, basic)).chain(plus1)
         });
-        core::iter::once(os).chain(slots).chain(electron)
+        let c64 = c64.into_iter().flat_map(|(roms, drives)| {
+            let dos = drives
+                .iter()
+                .zip(0u8..)
+                .filter_map(|(dos, n)| Some((Socket::Dos(n), dos.as_ref()?)));
+            [Socket::Kernal, Socket::C64Basic, Socket::Character]
+                .into_iter()
+                .zip(roms)
+                .chain(dos)
+        });
+        os.into_iter().chain(slots).chain(electron).chain(c64)
     }
 
     /// What `socket` holds, to change.
@@ -380,7 +500,8 @@ impl Fitting {
             (Self::ModelB { os, .. }, Socket::ModelBOs)
             | (Self::Electron { os, .. }, Socket::ElectronOs) => Some(os),
             (Self::ModelB { slots, .. }, Socket::Slot(slot)) => slots.get_mut(usize::from(slot)),
-            (Self::Electron { basic, .. }, Socket::Basic) => Some(basic),
+            (Self::Electron { basic, .. }, Socket::Basic)
+            | (Self::C64 { basic, .. }, Socket::C64Basic) => Some(basic),
             (Self::Electron { plus1, .. }, Socket::Plus1) => {
                 plus1.as_deref_mut().map(|p| &mut p.rom)
             }
@@ -389,6 +510,9 @@ impl Fitting {
                 .cartridges
                 .as_flattened_mut()
                 .get_mut(usize::from(n)),
+            (Self::C64 { kernal, .. }, Socket::Kernal) => Some(kernal),
+            (Self::C64 { character, .. }, Socket::Character) => Some(character),
+            (Self::C64 { drives, .. }, Socket::Dos(n)) => drives.get_mut(usize::from(n))?.as_mut(),
             _ => None,
         }
     }
@@ -397,7 +521,7 @@ impl Fitting {
     fn holds_well(&self) -> bool {
         let links = match self {
             Self::ModelB { links, .. } => links.within(),
-            Self::Electron { .. } => true,
+            Self::Electron { .. } | Self::C64 { .. } => true,
         };
         links
             && self
@@ -428,6 +552,26 @@ impl Fitting {
                     }
                 }
             }
+            Self::C64 {
+                standard,
+                sid,
+                kernal,
+                basic,
+                character,
+                drives,
+            } => {
+                w.u8(standard.number());
+                w.u8(sid.number());
+                for rom in [kernal, basic, character] {
+                    rom.put(w);
+                }
+                for dos in drives {
+                    w.u8(u8::from(dos.is_some()));
+                    if let Some(dos) = dos {
+                        dos.put(w);
+                    }
+                }
+            }
         }
     }
 
@@ -435,10 +579,14 @@ impl Fitting {
         let Some(model) = Model::from_number(r.u8()?) else {
             return Ok(None);
         };
+        if model == Model::C64 {
+            return Self::get_c64(r);
+        }
         let Some(os) = Image::get(r)? else {
             return Ok(None);
         };
         Ok(match model {
+            Model::C64 => None,
             Model::ModelB => {
                 let mut slots: Box<[Image; SLOTS]> =
                     Box::new(core::array::from_fn(|_| Image::Empty));
@@ -484,6 +632,82 @@ impl Fitting {
                 Some(Self::Electron { os, basic, plus1 })
             }
         })
+    }
+
+    /// A Commodore 64's fitting, after its model's number.
+    fn get_c64(r: &mut Reader<'_>) -> Result<Option<Self>, WireError> {
+        let (Some(standard), Some(sid)) = (
+            Standard::from_number(r.u8()?),
+            sid::Model::from_number(r.u8()?),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(kernal), Some(basic), Some(character)) =
+            (Image::get(r)?, Image::get(r)?, Image::get(r)?)
+        else {
+            return Ok(None);
+        };
+        let mut drives = [None, None];
+        for dos in &mut drives {
+            *dos = match r.u8()? {
+                0 => None,
+                1 => match Image::get(r)? {
+                    Some(image) => Some(image),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            };
+        }
+        Ok(Some(Self::C64 {
+            standard,
+            sid,
+            kernal,
+            basic,
+            character,
+            drives,
+        }))
+    }
+}
+
+/// Which of a C64's control ports the host's keypad plays a joystick in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Joystick {
+    /// Port 2, where most games read theirs.
+    #[default]
+    Port2,
+    /// Port 1.
+    Port1,
+    /// Neither: the keypad types.
+    Off,
+}
+
+impl Joystick {
+    /// Every choice, in the order a list offers them and a record numbers
+    /// them.
+    pub const ALL: [Self; 3] = [Self::Port2, Self::Port1, Self::Off];
+
+    /// The control port it plays in, 0 for port 1.
+    #[must_use]
+    pub const fn port(self) -> Option<u8> {
+        match self {
+            Self::Port2 => Some(1),
+            Self::Port1 => Some(0),
+            Self::Off => None,
+        }
+    }
+
+    /// What its choice is called.
+    #[must_use]
+    pub const fn called(self) -> &'static str {
+        match self {
+            Self::Port2 => "Port 2",
+            Self::Port1 => "Port 1",
+            Self::Off => "Off",
+        }
+    }
+
+    fn number(self) -> u8 {
+        crate::worker::protocol::position(&Self::ALL, &self)
     }
 }
 
@@ -549,6 +773,8 @@ pub struct Machine {
     pub scaling: Scaling,
     /// How host keys reach its keyboard.
     pub keyboard: Mapping,
+    /// Where a C64's keypad plays a joystick.
+    pub joystick: Joystick,
     /// Its sound's level, in thousandths.
     pub volume: u16,
     /// Whether a tape loads as fast as the machine can run.
@@ -573,6 +799,7 @@ impl Machine {
             tube: Tube::default(),
             scaling: Scaling::default(),
             keyboard: Mapping::default(),
+            joystick: Joystick::default(),
             volume: FULL_VOLUME,
             fast_tape: true,
             folder: None,
@@ -599,7 +826,7 @@ pub enum Invalid {
     Volume,
     /// Its folder, or a file of it, is not a name a folder holds.
     Folder,
-    /// A drive holds a disc on a model with no drives.
+    /// A drive holds a disc the machine has no drive for.
     Media,
 }
 
@@ -635,6 +862,7 @@ impl Kept for Machine {
             Mapping::Logical => 0,
             Mapping::Physical => 1,
         });
+        w.u8(self.joystick.number());
         w.u16(self.volume);
         w.u8(u8::from(self.fast_tape));
         match &self.folder {
@@ -665,6 +893,9 @@ impl Kept for Machine {
             1 => Mapping::Physical,
             _ => return Ok(None),
         };
+        let Some(&joystick) = Joystick::ALL.get(usize::from(r.u8()?)) else {
+            return Ok(None);
+        };
         let volume = r.u16()?;
         let fast_tape = match r.u8()? {
             0 => false,
@@ -684,6 +915,7 @@ impl Kept for Machine {
             tube,
             scaling,
             keyboard,
+            joystick,
             volume,
             fast_tape,
             folder,
@@ -709,7 +941,12 @@ impl Kept for Machine {
             || (self.folder.is_none() && media.clone().next().is_some())
         {
             Some(Invalid::Folder)
-        } else if !self.model().has_drives() && self.discs.iter().any(Option::is_some) {
+        } else if self
+            .discs
+            .iter()
+            .zip(self.fitting.drives())
+            .any(|(disc, fitted)| disc.is_some() && !fitted)
+        {
             Some(Invalid::Media)
         } else {
             None
@@ -752,6 +989,54 @@ pub fn describe_fitting(fitting: &Fitting) -> String {
                 ""
             }
         ),
+        Fitting::C64 { standard, sid, .. } => {
+            let drives = match fitting.drives() {
+                [false, false] => "",
+                [true, true] => " with two 1541s",
+                _ => " with a 1541",
+            };
+            format!(
+                "{} ({}, {} SID){drives}",
+                Model::C64.title(),
+                standard_called(*standard),
+                sid_called(*sid)
+            )
+        }
+    }
+}
+
+/// Each television standard's name, as a list offers them.
+pub const STANDARDS: [&str; 2] = [
+    standard_called(Standard::ALL[0]),
+    standard_called(Standard::ALL[1]),
+];
+/// Each SID's name, as a list offers them.
+pub const SIDS: [&str; 2] = [
+    sid_called(sid::Model::ALL[0]),
+    sid_called(sid::Model::ALL[1]),
+];
+/// Each keypad joystick's choice, as a list offers them.
+pub const JOYSTICKS: [&str; 3] = [
+    Joystick::ALL[0].called(),
+    Joystick::ALL[1].called(),
+    Joystick::ALL[2].called(),
+];
+
+/// What a television standard is called.
+#[must_use]
+pub const fn standard_called(standard: Standard) -> &'static str {
+    match standard {
+        Standard::Pal => "PAL",
+        Standard::Ntsc => "NTSC",
+    }
+}
+
+/// What a SID is called.
+#[must_use]
+pub const fn sid_called(sid: sid::Model) -> &'static str {
+    match sid {
+        sid::Model::Mos6581 => "6581",
+        sid::Model::Mos8580 => "8580",
     }
 }
 

@@ -8,7 +8,7 @@
 //! so its four sound buffers are one: buffer 4.
 
 use super::ws::{buffer, os, page2, var, vector};
-use crate::machine::Model;
+use super::Model;
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
 use crate::rom::os::event;
 pub use crate::rom::os::{buffer as number, PRINTER_BUSY};

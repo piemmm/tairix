@@ -1,7 +1,7 @@
 //! PRINT and BASIC's character output: COUNT, WIDTH, the `@%` fields, TAB
 //! and SPC, and numbers in decimal or hex.
 
-use tairix_bbcbasic::keyword::word;
+use tairix_openbasic::keyword::word;
 
 use super::decimal::{FORMAT, PLACES};
 use super::ws::{kind, page, zp as z};

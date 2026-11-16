@@ -5,12 +5,13 @@
 
 use core::cmp::Ordering;
 
-use super::arith::{self, flag, Exact, Mode, Parts, Rounding};
-use super::real::{
-    class, from_bcd, from_double, from_single, indefinite, Binary, Class, Real, BIAS, INDEFINITE,
-    INTEGER,
-};
-use super::{tag, timing, trans, Registers, Store, IEM, STATE_BYTES};
+use super::arith::{self, flag};
+use super::real::{class, from_bcd, from_double, from_single, indefinite, Class, INDEFINITE};
+use super::{tag, timing, Registers, Store, IEM, STATE_BYTES};
+use tairix_softfloat::exact;
+use tairix_softfloat::extended::{BIAS, INTEGER};
+use tairix_softfloat::{Binary, Extended};
+use tairix_softfloat::{Exact, Mode, Parts, Rounding};
 
 /// The size and kind of a memory operand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,15 +109,15 @@ pub(crate) enum Constant {
 impl Constant {
     /// The value, its significand truncated to 64 bits whatever the
     /// rounding mode, as the 8087 loads it.
-    const fn value(self) -> Real {
+    const fn value(self) -> Extended {
         match self {
-            Self::One => Real::ONE,
-            Self::Log2Ten => Real::new(false, 0x4000, 0xD49A_784B_CD1B_8AFE),
-            Self::Log2E => Real::new(false, 0x3FFF, 0xB8AA_3B29_5C17_F0BB),
-            Self::Pi => Real::new(false, 0x4000, 0xC90F_DAA2_2168_C234),
-            Self::Log10Two => Real::new(false, 0x3FFD, 0x9A20_9A84_FBCF_F798),
-            Self::LnTwo => Real::new(false, 0x3FFE, 0xB172_17F7_D1CF_79AB),
-            Self::Zero => Real::ZERO,
+            Self::One => Extended::ONE,
+            Self::Log2Ten => Extended::new(false, 0x4000, 0xD49A_784B_CD1B_8AFE),
+            Self::Log2E => Extended::new(false, 0x3FFF, 0xB8AA_3B29_5C17_F0BB),
+            Self::Pi => Extended::new(false, 0x4000, 0xC90F_DAA2_2168_C234),
+            Self::Log10Two => Extended::new(false, 0x3FFD, 0x9A20_9A84_FBCF_F798),
+            Self::LnTwo => Extended::new(false, 0x3FFE, 0xB172_17F7_D1CF_79AB),
+            Self::Zero => Extended::ZERO,
         }
     }
 }
@@ -541,7 +542,7 @@ enum Value {
     /// An infinity.
     Infinity(bool),
     /// A NaN.
-    Nan(Real),
+    Nan(Extended),
 }
 
 /// What kind of finite value.
@@ -556,7 +557,7 @@ enum Kind {
 
 impl Value {
     /// The value of `x` by its bits.
-    fn of(x: Real) -> Self {
+    fn of(x: Extended) -> Self {
         match class(x) {
             Class::Zero => Self::Zero(x.negative()),
             Class::Normal => Self::Finite(Parts::of(x), Kind::Normal),
@@ -583,7 +584,7 @@ impl Value {
 }
 
 /// The two-bit tag a value written to a register takes.
-const fn tag_of(x: Real) -> u16 {
+const fn tag_of(x: Extended) -> u16 {
     match class(x) {
         Class::Zero => tag::ZERO,
         Class::Normal | Class::Unnormal | Class::PseudoZero => tag::VALID,
@@ -607,13 +608,13 @@ impl Registers {
         }
     }
 
-    fn put(&mut self, i: u8, x: Real) {
+    fn put(&mut self, i: u8, x: Extended) {
         let physical = self.physical(i);
         self.data[physical] = x;
         self.set_tag(physical, tag_of(x));
     }
 
-    fn push(&mut self, x: Real) {
+    fn push(&mut self, x: Extended) {
         self.set_top(self.top().wrapping_sub(1));
         self.put(0, x);
     }
@@ -634,14 +635,11 @@ impl Registers {
 
     /// The rounding add, subtract, multiply, divide and square root take.
     fn rounding(&self) -> Rounding {
-        let bits = match (self.control >> 8) & 3 {
-            0 => 24,
-            2 => 53,
-            _ => 64,
-        };
-        Rounding {
-            mode: self.mode(),
-            bits,
+        let mode = self.mode();
+        match (self.control >> 8) & 3 {
+            0 => Rounding::of(Binary::SINGLE, mode),
+            2 => Rounding::of(Binary::DOUBLE, mode),
+            _ => Rounding::extended(mode),
         }
     }
 
@@ -673,12 +671,12 @@ mod cc {
 /// unmasked exception leaves it; and the flags raised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Outcome {
-    value: Option<Real>,
+    value: Option<Extended>,
     flags: u16,
 }
 
 impl Outcome {
-    const fn value(value: Real, flags: u16) -> Self {
+    const fn value(value: Extended, flags: u16) -> Self {
         Self {
             value: Some(value),
             flags,
@@ -704,7 +702,7 @@ impl Outcome {
 
 /// The NaN a masked invalid operation on `a` and `b` answers: the one with
 /// the larger significand.
-fn nan_of(a: Value, b: Value) -> Option<Real> {
+fn nan_of(a: Value, b: Value) -> Option<Extended> {
     match (a, b) {
         (Value::Nan(x), Value::Nan(y)) => Some(if (y.sig & !INTEGER) > (x.sig & !INTEGER) {
             y
@@ -759,15 +757,15 @@ fn add(regs: &Registers, a: Value, b: Value, subtract: bool) -> Outcome {
     match (a, b) {
         (Value::Infinity(x), Value::Infinity(_)) => {
             if regs.affine() && x == b_negative {
-                Outcome::value(Real::INFINITY.with_sign(x), flags)
+                Outcome::value(Extended::INFINITY.with_sign(x), flags)
             } else {
                 Outcome::invalid(regs, flags | flag::INVALID)
             }
         }
-        (Value::Infinity(x), _) => Outcome::value(Real::INFINITY.with_sign(x), flags),
-        (_, Value::Infinity(_)) => Outcome::value(Real::INFINITY.with_sign(b_negative), flags),
+        (Value::Infinity(x), _) => Outcome::value(Extended::INFINITY.with_sign(x), flags),
+        (_, Value::Infinity(_)) => Outcome::value(Extended::INFINITY.with_sign(b_negative), flags),
         (Value::Zero(x), Value::Zero(_)) => Outcome::value(
-            Real::ZERO.with_sign(zero_sum_sign(regs, x, b_negative)),
+            Extended::ZERO.with_sign(zero_sum_sign(regs, x, b_negative)),
             flags,
         ),
         (Value::Zero(_), Value::Finite(p, _)) => {
@@ -785,10 +783,10 @@ fn add(regs: &Registers, a: Value, b: Value, subtract: bool) -> Outcome {
             flags,
         ),
         (Value::Finite(p, _), Value::Finite(q, _)) => {
-            let sum = arith::add(p, q, subtract);
+            let sum = exact::add(p, q, subtract);
             if sum.is_zero() {
                 let sign = zero_sum_sign(regs, p.negative, b_negative);
-                return Outcome::value(Real::ZERO.with_sign(sign), flags);
+                return Outcome::value(Extended::ZERO.with_sign(sign), flags);
             }
             Outcome::rounded(arith::round(sum, regs.rounding(), regs.masks()), flags)
         }
@@ -807,15 +805,15 @@ fn multiply(regs: &Registers, a: Value, b: Value) -> Outcome {
             Outcome::invalid(regs, flags | flag::INVALID)
         }
         (Value::Infinity(_), _) | (_, Value::Infinity(_)) => {
-            Outcome::value(Real::INFINITY.with_sign(negative), flags)
+            Outcome::value(Extended::INFINITY.with_sign(negative), flags)
         }
         (Value::Zero(_), _) | (_, Value::Zero(_)) => {
-            Outcome::value(Real::ZERO.with_sign(negative), flags)
+            Outcome::value(Extended::ZERO.with_sign(negative), flags)
         }
         (Value::Finite(p, _), Value::Finite(q, _)) => {
-            let product = arith::multiply(p, q);
+            let product = exact::multiply(p, q);
             if product.is_zero() {
-                return Outcome::value(Real::ZERO.with_sign(negative), flags);
+                return Outcome::value(Extended::ZERO.with_sign(negative), flags);
             }
             Outcome::rounded(arith::round(product, regs.rounding(), regs.masks()), flags)
         }
@@ -839,23 +837,26 @@ fn divide(regs: &Registers, a: Value, b: Value) -> Outcome {
             Value::Zero(_) | Value::Finite(..),
             Value::Finite(_, Kind::Unnormal | Kind::PseudoZero | Kind::Denormal),
         ) => Outcome::invalid(regs, flags | flag::INVALID),
-        (Value::Infinity(_), _) => Outcome::value(Real::INFINITY.with_sign(negative), flags),
+        (Value::Infinity(_), _) => Outcome::value(Extended::INFINITY.with_sign(negative), flags),
         (_, Value::Infinity(_)) | (Value::Zero(_), _) => {
-            Outcome::value(Real::ZERO.with_sign(negative), flags)
+            Outcome::value(Extended::ZERO.with_sign(negative), flags)
         }
         (_, Value::Zero(_)) => {
             let flags = flags | flag::ZERO_DIVIDE;
             Outcome {
                 value: regs
                     .masked(flag::ZERO_DIVIDE)
-                    .then_some(Real::INFINITY.with_sign(negative)),
+                    .then_some(Extended::INFINITY.with_sign(negative)),
                 flags,
             }
         }
         (Value::Finite(p, _), Value::Finite(q, _)) => {
-            let quotient = arith::divide(p, q);
+            // A divisor with no significand is one the screen above refuses.
+            let Some(quotient) = exact::divide(p, q) else {
+                return Outcome::invalid(regs, flags | flag::INVALID);
+            };
             if quotient.is_zero() {
-                return Outcome::value(Real::ZERO.with_sign(negative), flags);
+                return Outcome::value(Extended::ZERO.with_sign(negative), flags);
             }
             Outcome::rounded(arith::round(quotient, regs.rounding(), regs.masks()), flags)
         }
@@ -954,11 +955,11 @@ fn load_value(format: Format, bytes: &[u8]) -> Value {
                 Value::of(x)
             }
         }
-        Format::Int16 => Value::of(Real::from_int(i64::from(word.cast_signed()))),
-        Format::Int32 => Value::of(Real::from_int(i64::from(int32.cast_signed()))),
-        Format::Int64 => Value::of(Real::from_int(int64.cast_signed())),
+        Format::Int16 => Value::of(Extended::from_int(i64::from(word.cast_signed()))),
+        Format::Int32 => Value::of(Extended::from_int(i64::from(int32.cast_signed()))),
+        Format::Int64 => Value::of(Extended::from_int(int64.cast_signed())),
         Format::Bcd => Value::of(from_bcd(raw)),
-        _ => Value::of(Real::from_bytes(raw)),
+        _ => Value::of(Extended::from_bytes(raw)),
     }
 }
 
@@ -1028,7 +1029,7 @@ pub(crate) fn execute(
                     *b = byte(operand, at + k);
                 }
                 let physical = regs.physical(n);
-                regs.data[physical] = Real::from_bytes(raw);
+                regs.data[physical] = Extended::from_bytes(raw);
             }
             0
         }
@@ -1159,7 +1160,7 @@ fn compare_into_codes_with(regs: &mut Registers, source: Value, pops: u8) -> u16
 
 /// Pushes `x` unless ST(7) holds something: then an invalid operation,
 /// the indefinite pushed where it is masked.
-fn push_checked(regs: &mut Registers, x: Real) -> u16 {
+fn push_checked(regs: &mut Registers, x: Extended) -> u16 {
     if !regs.empty(7) {
         if regs.masked(flag::INVALID) {
             regs.push(INDEFINITE);
@@ -1176,13 +1177,13 @@ fn load(regs: &mut Registers, format: Format, operand: &[u8]) -> u16 {
     let n = operand.len().min(10);
     raw[..n].copy_from_slice(&operand[..n]);
     let x = match (format, value) {
-        (Format::Extended, _) => Real::from_bytes(raw),
+        (Format::Extended, _) => Extended::from_bytes(raw),
         (_, Value::Finite(p, _)) => {
             let field = u16::try_from(p.exp + BIAS).unwrap_or(0);
-            Real::new(p.negative, field, p.sig)
+            Extended::new(p.negative, field, p.sig)
         }
-        (_, Value::Zero(negative)) => Real::ZERO.with_sign(negative),
-        (_, Value::Infinity(negative)) => Real::INFINITY.with_sign(negative),
+        (_, Value::Zero(negative)) => Extended::ZERO.with_sign(negative),
+        (_, Value::Infinity(negative)) => Extended::INFINITY.with_sign(negative),
         (_, Value::Nan(x)) => x,
         (_, Value::Empty) => INDEFINITE,
     };
@@ -1359,7 +1360,7 @@ fn store_binary(regs: &Registers, format: Format, value: Value) -> (Option<[u8; 
         Value::Infinity(negative) => (Some(binary.infinity(negative)), 0),
         Value::Nan(x) => {
             // The fraction's top bits, kept nonzero so the NaN stays one.
-            let fraction = match (x.sig & !INTEGER) >> (64 - binary.precision) {
+            let fraction = match (x.sig & !INTEGER) >> (64 - binary.precision()) {
                 0 => binary.quiet_bit(),
                 kept => kept,
             };
@@ -1394,7 +1395,7 @@ fn store_integer(regs: &Registers, format: Format, value: Value) -> (Option<[u8;
     match value {
         Value::Zero(_) => (Some(bytes_of(0)), 0),
         Value::Finite(p, Kind::Normal) => {
-            let (magnitude, inexact) = arith::to_integer(p, regs.mode());
+            let (magnitude, inexact) = exact::to_integer(p, regs.mode());
             let limit = if p.negative {
                 indefinite
             } else {
@@ -1432,7 +1433,7 @@ fn store_bcd(regs: &Registers, value: Value) -> (Option<[u8; 10]>, u16) {
     };
     let (negative, magnitude, flags) = match value {
         Value::Zero(negative) => (negative, 0, 0),
-        Value::Finite(p, Kind::Normal) => match arith::to_integer(p, regs.mode()) {
+        Value::Finite(p, Kind::Normal) => match exact::to_integer(p, regs.mode()) {
             (Some(m), inexact) if m <= MAX => {
                 (p.negative, m, if inexact { flag::PRECISION } else { 0 })
             }
@@ -1459,10 +1460,10 @@ fn square_root(regs: &Registers, a: Value) -> Outcome {
             value: regs.masked(flag::INVALID).then_some(x),
             flags: flag::INVALID,
         },
-        Value::Zero(negative) => Outcome::value(Real::ZERO.with_sign(negative), 0),
-        Value::Infinity(false) if regs.affine() => Outcome::value(Real::INFINITY, 0),
+        Value::Zero(negative) => Outcome::value(Extended::ZERO.with_sign(negative), 0),
+        Value::Infinity(false) if regs.affine() => Outcome::value(Extended::INFINITY, 0),
         Value::Finite(p, Kind::Normal) if !p.negative => Outcome::rounded(
-            arith::round(arith::square_root(p), regs.rounding(), regs.masks()),
+            arith::round(exact::square_root(p), regs.rounding(), regs.masks()),
             0,
         ),
         _ => Outcome::invalid(regs, flag::INVALID),
@@ -1476,18 +1477,18 @@ fn round_to_integer(regs: &Registers, a: Value) -> Outcome {
             value: regs.masked(flag::INVALID).then_some(x),
             flags: flag::INVALID,
         },
-        Value::Zero(negative) => Outcome::value(Real::ZERO.with_sign(negative), 0),
-        Value::Infinity(negative) => Outcome::value(Real::INFINITY.with_sign(negative), 0),
+        Value::Zero(negative) => Outcome::value(Extended::ZERO.with_sign(negative), 0),
+        Value::Infinity(negative) => Outcome::value(Extended::INFINITY.with_sign(negative), 0),
         // A pseudo-zero rounds as the zero it is worth.
         Value::Finite(p, _) => {
             let p = p.normalized();
-            if let (Some(m), inexact) = arith::to_integer(p, regs.mode()) {
+            if let (Some(m), inexact) = exact::to_integer(p, regs.mode()) {
                 let flags = if inexact { flag::PRECISION } else { 0 };
-                Outcome::value(Real::from_magnitude(p.negative, m), flags)
+                Outcome::value(Extended::from_magnitude(p.negative, m), flags)
             } else {
                 // Past 2^64 every value is an integer already.
                 let field = u16::try_from(p.exp + BIAS).unwrap_or(0);
-                Outcome::value(Real::new(p.negative, field, p.sig), 0)
+                Outcome::value(Extended::new(p.negative, field, p.sig), 0)
             }
         }
     }
@@ -1502,9 +1503,9 @@ fn scale(regs: &mut Registers) -> u16 {
                 Outcome::invalid(regs, flags | flag::INVALID)
             }
             (Value::Infinity(negative), _) => {
-                Outcome::value(Real::INFINITY.with_sign(negative), flags)
+                Outcome::value(Extended::INFINITY.with_sign(negative), flags)
             }
-            (Value::Zero(negative), _) => Outcome::value(Real::ZERO.with_sign(negative), flags),
+            (Value::Zero(negative), _) => Outcome::value(Extended::ZERO.with_sign(negative), flags),
             (Value::Finite(parts, _), _) => {
                 let power = match by {
                     Value::Finite(factor, _) => scale_factor(factor),
@@ -1622,14 +1623,14 @@ fn extract(regs: &mut Registers) -> u16 {
     }
     let (exponent, significand, flags) = match a {
         Value::Zero(negative) => (
-            Real::ZERO.with_sign(negative),
-            Real::ZERO.with_sign(negative),
+            Extended::ZERO.with_sign(negative),
+            Extended::ZERO.with_sign(negative),
             0,
         ),
         Value::Finite(_, _) => {
             let x = regs.data[regs.physical(0)];
-            let exponent = Real::from_int(i64::from(x.exponent()) - i64::from(BIAS));
-            let significand = Real::new(x.negative(), 0x3FFF, x.sig);
+            let exponent = Extended::from_int(i64::from(x.exponent()) - i64::from(BIAS));
+            let significand = Extended::new(x.negative(), 0x3FFF, x.sig);
             (exponent, significand, 0)
         }
         Value::Nan(x) => {
@@ -1664,17 +1665,20 @@ fn partial_tangent(regs: &mut Registers) -> u16 {
         return flag::INVALID;
     }
     let (y, x, flags) = match a {
-        Value::Zero(negative) => (Real::ZERO.with_sign(negative), Real::ONE, 0),
+        Value::Zero(negative) => (Extended::ZERO.with_sign(negative), Extended::ONE, 0),
         Value::Finite(p, _) if p.normalized().exp >= 63 => {
             // Out of the 80387's reach: C2 set, the operand left.
             regs.set_codes(cc::C2, cc::C2);
             return 0;
         }
         Value::Finite(p, _) => {
-            let rounded =
-                arith::round(trans::tan(p), Rounding::extended(regs.mode()), regs.masks());
+            let rounded = arith::round(
+                tairix_softfloat::elementary::tan(p),
+                Rounding::extended(regs.mode()),
+                regs.masks(),
+            );
             match rounded.value {
-                Some(y) => (y, Real::ONE, rounded.flags),
+                Some(y) => (y, Extended::ONE, rounded.flags),
                 None => return rounded.flags,
             }
         }

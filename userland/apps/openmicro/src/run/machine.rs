@@ -15,18 +15,21 @@ use tairix_crt::screen::{fit, Drawing, Picture, Scaling, DOT};
 use tairix_crt::Tube;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_machines::menu::{Effect, Followed};
-use tairix_openmicro::front::keys::{self, Keyboard, Mapping, Press};
+use tairix_openmicro::front::keys::{self, Keyboard, MachineKey, Mapping, Press, Stick};
+use tairix_openmicro::front::library::Joystick;
 use tairix_openmicro::front::media::{Disc, FileWork, Handover, Holding, Rack, Saving, Tape};
 use tairix_openmicro::front::menu::{Offered, Shown};
 use tairix_openmicro::front::pacing::{Next, Pacer};
-use tairix_openmicro::front::picture::{expand, palette};
+use tairix_openmicro::front::picture::{expand, palette_of};
 use tairix_openmicro::front::{events, LEAST_PICTURE, OPEN_PICTURE};
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
+use tairix_openmicro::machine::c64::joystick;
+use tairix_openmicro::machine::c64::keyboard::Keycap;
 use tairix_openmicro::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
-use tairix_openmicro::machine::{bbc, electron, Model, CLOCK};
+use tairix_openmicro::machine::{bbc, electron, LetterCase, Model};
 use tairix_openmicro::worker::protocol::{
-    session_bounds, Change, Input, Lights, Loaded, Media, ModelKey, Ran, Refusal as Refused, Reply,
-    Request, MAX_INPUTS, SHARE_BYTES,
+    session_bounds, Change, DeckKey, DiscFormat, Input, Lights, Loaded, Media, ModelKey, Ran,
+    Refusal as Refused, Reply, Request, MAX_INPUTS, SHARE_BYTES,
 };
 use tairix_openmicro::worker::Link;
 use tairix_raster::resample::Region as Target;
@@ -43,12 +46,12 @@ use crate::files::Speaker;
 use crate::program::{record, unwatch_sound, Client, APP_NAME};
 use crate::store::Images;
 
-/// The least a key is held, in cycles: long enough for two keyboard scans.
-const LEAST_HOLD: u64 = 50_000;
-/// Each palette slot's colour, made once.
-const PALETTE: [[u8; DOT]; 256] = palette();
-/// Cycles from one pasted character's key to the next's.
-const TYPE_GAP: u64 = 100_000;
+/// A control port's joystick lines.
+const STICK_LINES: usize = joystick::ALL.count_ones() as usize;
+
+/// The least a key is held, in the OS's keyboard scans, halves counted: two
+/// and a half, so two see it.
+const LEAST_HOLD_HALF_SCANS: u64 = 5;
 /// The most pasted text taken at once.
 const MOST_PASTE: usize = 4_096;
 
@@ -85,6 +88,30 @@ enum Owing {
 enum Keys {
     ModelB(Keyboard<bbc::keyboard::Key>),
     Electron(Keyboard<electron::keyboard::Key>),
+    // Boxed: its keycaps make its table of what each host key holds the
+    // largest by far.
+    C64(Box<Keyboard<Keycap>>),
+}
+
+/// `$body` with `$keyboard` bound to the model's keyboard and `$key` to
+/// the protocol's naming of its keys.
+macro_rules! each_keyboard {
+    ($keys:expr, $keyboard:ident, $key:ident => $body:expr) => {
+        match $keys {
+            Keys::ModelB($keyboard) => {
+                let $key = ModelKey::ModelB;
+                $body
+            }
+            Keys::Electron($keyboard) => {
+                let $key = ModelKey::Electron;
+                $body
+            }
+            Keys::C64($keyboard) => {
+                let $key = ModelKey::C64;
+                $body
+            }
+        }
+    };
 }
 
 fn changes<K: Copy>(presses: &[Press<K>], key: fn(K) -> ModelKey) -> Vec<Change> {
@@ -98,86 +125,56 @@ fn changes<K: Copy>(presses: &[Press<K>], key: fn(K) -> ModelKey) -> Vec<Change>
 }
 
 impl Keys {
-    const fn new(model: Model, mapping: Mapping) -> Self {
+    fn new(model: Model, mapping: Mapping) -> Self {
         match model {
             Model::ModelB => Self::ModelB(Keyboard::new(mapping)),
             Model::Electron => Self::Electron(Keyboard::new(mapping)),
+            Model::C64 => Self::C64(Box::new(Keyboard::new(mapping))),
         }
     }
 
     fn edge(&mut self, input: &tairix_abi::input::KeyInput) -> Vec<Change> {
-        match self {
-            Self::ModelB(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.edge(input, &mut out);
-                changes(&out, ModelKey::ModelB)
-            }
-            Self::Electron(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.edge(input, &mut out);
-                changes(&out, ModelKey::Electron)
-            }
-        }
+        each_keyboard!(self, keyboard, key => {
+            let mut out = Vec::new();
+            keyboard.edge(input, &mut out);
+            changes(&out, key)
+        })
     }
 
     fn release_all(&mut self) -> Vec<Change> {
-        match self {
-            Self::ModelB(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.release_all(&mut out);
-                changes(&out, ModelKey::ModelB)
-            }
-            Self::Electron(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.release_all(&mut out);
-                changes(&out, ModelKey::Electron)
-            }
-        }
+        each_keyboard!(self, keyboard, key => {
+            let mut out = Vec::new();
+            keyboard.release_all(&mut out);
+            changes(&out, key)
+        })
     }
 
     fn set_mapping(&mut self, mapping: Mapping) -> Vec<Change> {
-        match self {
-            Self::ModelB(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.set_mapping(mapping, &mut out);
-                changes(&out, ModelKey::ModelB)
-            }
-            Self::Electron(keyboard) => {
-                let mut out = Vec::new();
-                keyboard.set_mapping(mapping, &mut out);
-                changes(&out, ModelKey::Electron)
-            }
-        }
+        each_keyboard!(self, keyboard, key => {
+            let mut out = Vec::new();
+            keyboard.set_mapping(mapping, &mut out);
+            changes(&out, key)
+        })
     }
 
-    const fn mapping(&self) -> Mapping {
-        match self {
-            Self::ModelB(keyboard) => keyboard.mapping(),
-            Self::Electron(keyboard) => keyboard.mapping(),
-        }
+    fn mapping(&self) -> Mapping {
+        each_keyboard!(self, keyboard, _key => keyboard.mapping())
     }
 
     /// The key that types `ch` and SHIFT where it needs it.
-    fn typing(&self, ch: char, caps_lock: bool) -> Option<(ModelKey, ModelKey, bool)> {
-        match self {
-            Self::ModelB(_) => keys::typing::<bbc::keyboard::Key>(ch, caps_lock).map(|(k, s)| {
-                (
-                    ModelKey::ModelB(k),
-                    ModelKey::ModelB(bbc::keyboard::Key::SHIFT),
-                    s,
-                )
-            }),
-            Self::Electron(_) => {
-                keys::typing::<electron::keyboard::Key>(ch, caps_lock).map(|(k, s)| {
-                    (
-                        ModelKey::Electron(k),
-                        ModelKey::Electron(electron::keyboard::Key::SHIFT),
-                        s,
-                    )
-                })
-            }
-        }
+    fn typing(&self, ch: char, case: LetterCase) -> Option<(ModelKey, ModelKey, bool)> {
+        each_keyboard!(self, keyboard, key => typed_on(keyboard, (ch, case), key))
     }
+}
+
+/// The key `keyboard`'s machine types `ch` with, its letter keys typing as
+/// given, its SHIFT, and whether SHIFT goes with it.
+fn typed_on<K: MachineKey>(
+    _keyboard: &Keyboard<K>,
+    (ch, case): (char, LetterCase),
+    key: fn(K) -> ModelKey,
+) -> Option<(ModelKey, ModelKey, bool)> {
+    keys::typing::<K>(ch, case).map(|(typed, shifted)| (key(typed), key(K::SHIFT), shifted))
 }
 
 /// The number a key is counted under for its least hold.
@@ -185,6 +182,7 @@ const fn key_number(key: ModelKey) -> usize {
     match key {
         ModelKey::ModelB(key) => (key.number() & 0x7F) as usize,
         ModelKey::Electron(key) => key.number() as usize,
+        ModelKey::C64(keycap) => keycap.number() as usize,
     }
 }
 
@@ -212,6 +210,14 @@ pub enum Pending {
     RewindTape,
     /// RECORD down or up.
     RecordTape(bool),
+    /// A datasette key pressed.
+    Deck(DeckKey),
+    /// A cartridge plugged in from its image.
+    InsertCartridge(Vec<u8>),
+    /// The cartridge unplugged.
+    RemoveCartridge,
+    /// A program loaded into memory from its file.
+    LoadProgram(Vec<u8>),
     /// The machine off and on.
     PowerOn,
     /// The machine's snapshot taken.
@@ -224,12 +230,18 @@ pub enum Pending {
     Resume(Vec<u8>),
     /// The filed discs collected.
     CollectDiscs,
+    /// A drive's disc collected, filed or not, then offered to be saved as
+    /// the machine has it.
+    SaveDisc(PhysicalDrive),
 }
 
 impl Pending {
     /// Whether it puts a medium in.
     const fn puts_in(&self) -> bool {
-        matches!(self, Self::InsertDisc { .. } | Self::InsertTape(_))
+        matches!(
+            self,
+            Self::InsertDisc { .. } | Self::InsertTape(_) | Self::InsertCartridge(_)
+        )
     }
 
     /// The file of the medium it would have put in, let go with it.
@@ -307,8 +319,22 @@ pub struct MachineWindow {
     inputs: VecDeque<(u64, Change)>,
     timeline: u64,
     pressed_at: [u64; keys::KEY_NUMBERS],
+    /// Each control port's lines as last queued, and when each went down,
+    /// so a tap is held as long as a key's.
+    stick_queued: [u8; 2],
+    stick_pressed_at: [[u64; STICK_LINES]; 2],
     pacer: Pacer,
     keys: Keys,
+    /// The keypad as a C64's joystick, and the port it plays in.
+    stick: Stick,
+    joystick: Joystick,
+    /// Each slot's colour, as the model's canvas holds them.
+    palette: Box<[[u8; DOT]; 256]>,
+    /// The drives the machine has.
+    fitted: [bool; 2],
+    /// The cartridge image last plugged in, put back in a replacement
+    /// worker.
+    cartridge: Option<Vec<u8>>,
     images: Option<Box<Images>>,
     /// Its sound stream.
     pub sound: Option<Speaker>,
@@ -319,6 +345,8 @@ pub struct MachineWindow {
     /// The file a picker picked, held while its name is asked.
     pub picked: Option<(u64, bool)>,
     lights: Lights,
+    /// How its letter keys typed at the last slice's end.
+    case: LetterCase,
     drives: [bool; 2],
     loaded: Loaded,
     /// The menu up over its window.
@@ -413,15 +441,23 @@ impl MachineWindow {
             inputs: VecDeque::new(),
             timeline: 0,
             pressed_at: [0; keys::KEY_NUMBERS],
-            pacer: Pacer::new(),
+            stick_queued: [0; 2],
+            stick_pressed_at: [[0; STICK_LINES]; 2],
+            pacer: Pacer::new(machine.fitting.timing()),
             keys: Keys::new(model, machine.keyboard),
+            stick: Stick::new(),
+            joystick: machine.joystick,
+            palette: palette_of(model),
+            fitted: machine.fitting.drives(),
+            cartridge: None,
             images: None,
             sound: None,
             scratch: Vec::new(),
             slots: alloc::vec![0; CANVAS_WIDTH],
-            rack: Rack::new(),
+            rack: Rack::new(model),
             picked: None,
             lights: Lights::default(),
+            case: LetterCase::default(),
             drives: [false; 2],
             loaded: Loaded::default(),
             menu: None,
@@ -660,6 +696,8 @@ impl MachineWindow {
         }
         self.inputs.clear();
         self.pressed_at = [0; keys::KEY_NUMBERS];
+        self.stick_queued = [0; 2];
+        self.stick_pressed_at = [[0; STICK_LINES]; 2];
         self.loaded = Loaded::default();
     }
 
@@ -686,9 +724,11 @@ impl MachineWindow {
             })
         });
         let tape = self.rack.tape().cloned().map(Pending::InsertTape);
+        let cartridge = self.cartridge.clone().map(Pending::InsertCartridge);
         let build: Vec<Pending> = core::iter::once(Pending::Configure)
             .chain(discs)
             .chain(tape)
+            .chain(cartridge)
             .collect();
         self.ask_first(build);
     }
@@ -743,9 +783,15 @@ impl MachineWindow {
             },
             Reply::Refused(refusal) => self.refused(refusal, asked),
             Reply::Done => {
-                if matches!(asked, Some(Pending::Configure | Pending::PowerOn)) {
-                    self.running_from = Some(self.timeline);
-                    self.owe_whole();
+                match asked {
+                    Some(Pending::Configure | Pending::PowerOn) => {
+                        self.running_from = Some(self.timeline);
+                        self.owe_whole();
+                    }
+                    // Kept only once plugged in, as the worker then holds it.
+                    Some(Pending::InsertCartridge(image)) => self.cartridge = Some(image),
+                    Some(Pending::RemoveCartridge) => self.cartridge = None,
+                    _ => {}
                 }
                 Event::Nothing
             }
@@ -776,6 +822,9 @@ impl MachineWindow {
                 work.extend(tape.medium.map(FileWork::Forget));
                 "The tape could not be put in"
             }
+            // The worker refused before unplugging the one it holds.
+            Some(Pending::InsertCartridge(_)) => "The cartridge could not be plugged in",
+            Some(Pending::LoadProgram(_)) => "The program could not be loaded",
             Some(Pending::RestoreSnapshot(_)) => "The snapshot could not be restored",
             Some(Pending::Resume(_)) => "Its saved state could not be restored",
             Some(Pending::TakeSnapshot) => "The snapshot could not be taken",
@@ -801,7 +850,7 @@ impl MachineWindow {
                     .ok()
                     .and_then(|row| self.picture.screen_mut().row_mut(row));
                 if let Some(dots) = dots {
-                    expand(&PALETTE, &self.slots, dots);
+                    expand(&self.palette, &self.slots, dots);
                 }
             }
         }
@@ -831,9 +880,10 @@ impl MachineWindow {
             self.owe_strip();
         }
         self.loaded = ran.loaded;
+        self.case = ran.case;
         if self
             .running_from
-            .is_some_and(|from| self.timeline >= from + CLOCK)
+            .is_some_and(|from| self.timeline >= from + self.pacer.timing().clock())
         {
             self.running_from = None;
             record(events::MACHINE_RUNNING, events::MACHINE_RUNNING_MESSAGE);
@@ -858,6 +908,10 @@ impl MachineWindow {
             }
         }
         let resumed = matches!(asked, Some(Pending::Resume(_)));
+        let saving = match asked {
+            Some(Pending::SaveDisc(drive)) => Some(drive),
+            _ => None,
+        };
         let handover = match asked {
             Some(Pending::EjectDisc(drive)) => Handover::EjectDisc(drive),
             Some(Pending::InsertDisc { drive, disc, .. }) => Handover::InsertDisc(drive, disc),
@@ -868,9 +922,15 @@ impl MachineWindow {
         };
         if handover == Handover::Restore {
             self.owe_whole();
+            // A restored machine holds its snapshot's cartridge, if any, and
+            // not the one last plugged in, which a replacement must not get.
+            self.cartridge = None;
         }
         let mut work = Vec::new();
         self.rack.handed(media, handover, &mut work);
+        if let Some(saving) = saving.and_then(|drive| self.rack.disc_saving(drive)) {
+            self.rack.offer(saving);
+        }
         if resumed {
             Event::Resumed(work)
         } else {
@@ -879,16 +939,56 @@ impl MachineWindow {
     }
 
     /// The machine's changes for a host key edge, each at a cycle the
-    /// keyboard scan sees it.
+    /// keyboard scan sees it: on a C64 playing the keypad as a joystick, a
+    /// keypad key moves the stick.
     pub fn key(&mut self, input: &tairix_abi::input::KeyInput) {
+        if let Some(port) = self.stick_port() {
+            if let Some(lines) = self.stick.edge(input) {
+                self.press(&[Change::Joystick(port, lines)]);
+                return;
+            }
+        }
         let changes = self.keys.edge(input);
         self.press(&changes);
     }
 
     /// Every key let go: the window lost the focus.
     pub fn release_keys(&mut self) {
-        let changes = self.keys.release_all();
+        let mut changes = self.keys.release_all();
+        if let Some(port) = self.stick_port() {
+            changes.extend(
+                self.stick
+                    .release_all()
+                    .map(|lines| Change::Joystick(port, lines)),
+            );
+        }
         self.press(&changes);
+    }
+
+    /// The port a C64's keypad plays its joystick in, if it does.
+    fn stick_port(&self) -> Option<u8> {
+        (self.model == Model::C64)
+            .then(|| self.joystick.port())
+            .flatten()
+    }
+
+    /// Play the keypad as a joystick as `joystick` says from now on, the
+    /// stick let go first.
+    pub fn set_joystick(&mut self, joystick: Joystick) {
+        if joystick != self.joystick {
+            if let Some(port) = self.stick_port() {
+                if let Some(lines) = self.stick.release_all() {
+                    self.press(&[Change::Joystick(port, lines)]);
+                }
+            }
+            self.joystick = joystick;
+        }
+    }
+
+    /// The least a key is held, in the machine's cycles.
+    fn least_hold(&self) -> u64 {
+        self.pacer.timing().clock() * LEAST_HOLD_HALF_SCANS
+            / (2 * self.model.key_scans_per_second())
     }
 
     /// Map the keyboard by `mapping` from now on.
@@ -900,33 +1000,73 @@ impl MachineWindow {
     fn press(&mut self, changes: &[Change]) {
         let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
         let mut at = self.timeline.max(last);
+        let minimum = self.least_hold();
         for &change in changes {
-            if let Change::Key(key, down) = change {
-                let held = &mut self.pressed_at[key_number(key) % keys::KEY_NUMBERS];
-                if down {
-                    *held = at;
-                } else {
-                    at = at.max(*held + LEAST_HOLD);
+            match change {
+                Change::Key(key, down) => {
+                    let held = &mut self.pressed_at[key_number(key) % keys::KEY_NUMBERS];
+                    if down {
+                        *held = at;
+                    } else {
+                        at = at.max(*held + minimum);
+                    }
                 }
+                Change::Joystick(port, lines) => {
+                    let port = usize::from(port);
+                    if let (Some(queued), Some(pressed)) = (
+                        self.stick_queued.get_mut(port),
+                        self.stick_pressed_at.get_mut(port),
+                    ) {
+                        for (line, pressed_at) in pressed.iter_mut().enumerate() {
+                            let bit = 1 << line;
+                            match (*queued & bit != 0, lines & bit != 0) {
+                                (false, true) => *pressed_at = at,
+                                (true, false) => at = at.max(*pressed_at + minimum),
+                                _ => {}
+                            }
+                        }
+                        *queued = lines;
+                    }
+                }
+                _ => {}
             }
             self.inputs.push_back((at, change));
         }
     }
 
-    /// BREAK pressed and let go.
+    /// BREAK pressed and let go; on a C64, RESTORE.
     pub fn press_break(&mut self) {
-        self.press(&[Change::Break(true), Change::Break(false)]);
+        if self.model == Model::C64 {
+            let restore = ModelKey::C64(Keycap::Restore);
+            self.press(&[Change::Key(restore, true), Change::Key(restore, false)]);
+        } else {
+            self.press(&[Change::Break(true), Change::Break(false)]);
+        }
+    }
+
+    /// A cartridge plugged in from `image`, kept to put back in a
+    /// replacement worker.
+    pub fn insert_cartridge(&mut self, image: Vec<u8>) {
+        self.ask(Pending::InsertCartridge(image));
+    }
+
+    /// The cartridge unplugged.
+    pub fn remove_cartridge(&mut self) {
+        self.ask(Pending::RemoveCartridge);
     }
 
     /// `text` typed key by key, SHIFT as each character needs.
     pub fn type_text(&mut self, text: &str) {
         let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
         let mut at = self.timeline.max(last);
+        let hold = self.least_hold();
+        // As long up as down, so the scan sees each letter of a pair apart.
+        let gap = 2 * hold;
         for ch in text.chars().take(MOST_PASTE) {
-            let Some((key, shift, shifted)) = self.keys.typing(ch, self.lights.caps_lock) else {
+            let Some((key, shift, shifted)) = self.keys.typing(ch, self.case) else {
                 continue;
             };
-            let up = at + LEAST_HOLD;
+            let up = at + hold;
             if shifted {
                 self.inputs.push_back((at, Change::Key(shift, true)));
             }
@@ -935,7 +1075,7 @@ impl MachineWindow {
             if shifted {
                 self.inputs.push_back((up, Change::Key(shift, false)));
             }
-            at += TYPE_GAP;
+            at += gap;
         }
     }
 
@@ -998,10 +1138,13 @@ impl MachineWindow {
     pub fn shown(&self) -> Shown {
         Shown {
             model: self.model,
+            drives: self.fitted,
             discs: self.loaded.discs,
             images: PhysicalDrive::ALL.map(|drive| self.rack.disc(drive).is_some()),
             tape: self.loaded.tape,
             recording: self.loaded.recording,
+            playing: self.loaded.playing,
+            cartridge: self.loaded.cartridge,
             paused: self.pacer.paused(),
             speed: self.pacer.speed(),
             full_screen: self.full_screen,
@@ -1015,6 +1158,12 @@ impl MachineWindow {
     #[must_use]
     pub const fn recording(&self) -> bool {
         self.loaded.recording
+    }
+
+    /// The drives the machine has.
+    #[must_use]
+    pub const fn fitted(&self) -> [bool; 2] {
+        self.fitted
     }
 
     /// The window was resized, or left or took the whole screen.
@@ -1052,8 +1201,8 @@ impl MachineWindow {
     pub fn shut_down(&mut self, by: u64) -> Vec<FileWork> {
         let work = self.give_up_waiting();
         self.inputs.clear();
-        if self.model.has_drives() {
-            for drive in PhysicalDrive::ALL {
+        for drive in PhysicalDrive::ALL {
+            if self.fitted[drive.index()] {
                 self.ask(Pending::EjectDisc(drive));
             }
         }
@@ -1139,6 +1288,25 @@ impl MachineWindow {
                     let lamps = [("CAPS LOCK", lights.caps_lock), ("MOTOR", lights.motor)];
                     paint_strip(&mut self.surface, strip, looks, (lamps, &message));
                 }
+                Model::C64 => {
+                    let motor = ("MOTOR", lights.motor);
+                    let surface = &mut self.surface;
+                    match self.fitted {
+                        [true, true] => {
+                            let lamps = [motor, ("DRIVE 8", drives[0]), ("DRIVE 9", drives[1])];
+                            paint_strip(surface, strip, looks, (lamps, &message));
+                        }
+                        [true, false] => {
+                            let lamps = [motor, ("DRIVE 8", drives[0])];
+                            paint_strip(surface, strip, looks, (lamps, &message));
+                        }
+                        [false, true] => {
+                            let lamps = [motor, ("DRIVE 9", drives[1])];
+                            paint_strip(surface, strip, looks, (lamps, &message));
+                        }
+                        [false, false] => paint_strip(surface, strip, looks, ([motor], &message)),
+                    }
+                }
             }
         }
         self.owed.owe(&mode, Repaint::Reported, &self.damage);
@@ -1189,6 +1357,10 @@ fn request_of<'a>(
         Pending::EjectTape => Request::EjectTape,
         Pending::RewindTape => Request::RewindTape,
         Pending::RecordTape(on) => Request::RecordTape(*on),
+        Pending::Deck(key) => Request::Deck(*key),
+        Pending::InsertCartridge(image) => Request::InsertCartridge(image),
+        Pending::RemoveCartridge => Request::RemoveCartridge,
+        Pending::LoadProgram(image) => Request::LoadProgram(image),
         Pending::PowerOn => Request::PowerOn,
         Pending::TakeSnapshot | Pending::SuspendSnapshot => Request::TakeSnapshot,
         Pending::RestoreSnapshot(snapshot) | Pending::Resume(snapshot) => {
@@ -1196,8 +1368,14 @@ fn request_of<'a>(
         }
         Pending::CollectDiscs if collect.contains(&true) => Request::CollectDiscs(collect),
         Pending::CollectDiscs => return None,
+        Pending::SaveDisc(drive) => {
+            Request::CollectDiscs(PhysicalDrive::ALL.map(|other| other == *drive))
+        }
     })
 }
+
+/// Why a medium the machine has no drive, deck or port for is refused.
+pub const NOTHING_TO_TAKE_IT: &str = "The machine has nothing to take it.";
 
 /// What the user is told of `refusal`.
 const fn detail_of(refusal: Refused) -> &'static str {
@@ -1206,11 +1384,13 @@ const fn detail_of(refusal: Refused) -> &'static str {
         Refused::Rom => "A ROM image does not fit the machine.",
         Refused::Disc => "It is not a disc image the machine reads.",
         Refused::Tape => "It is not a tape image the machine reads.",
+        Refused::Cartridge => "It is not a cartridge the machine takes.",
+        Refused::Program => "It is not a program the machine loads.",
         Refused::Snapshot => "It is not a snapshot of this machine.",
         Refused::TooLarge => "It is too large.",
         Refused::Memory => "The machine ran out of memory.",
         Refused::Malformed => "The request was malformed.",
-        Refused::Model => "The machine has nothing to take it.",
+        Refused::Model => NOTHING_TO_TAKE_IT,
     }
 }
 
@@ -1219,8 +1399,11 @@ const fn detail_of(refusal: Refused) -> &'static str {
 pub fn save_formats(holding: Holding) -> tairix_abi::window_ipc::SaveFormats {
     let mut formats = tairix_abi::window_ipc::SaveFormats::ANY;
     let own = match holding {
-        Holding::Disc => tairix_browse::MediaType::AcornDfsDisc,
-        Holding::Tape => tairix_browse::MediaType::TapeUef,
+        Holding::Disc(DiscFormat::Acorn(_)) => tairix_browse::MediaType::AcornDfsDisc,
+        Holding::Disc(DiscFormat::D64) => tairix_browse::MediaType::CommodoreD64,
+        Holding::Disc(DiscFormat::G64) => tairix_browse::MediaType::CommodoreG64,
+        Holding::Tape(Model::ModelB | Model::Electron) => tairix_browse::MediaType::TapeUef,
+        Holding::Tape(Model::C64) => tairix_browse::MediaType::TapeTap,
         Holding::Snapshot => return formats,
     };
     let _ = formats.push(tairix_browse::media::save_format(own), true);

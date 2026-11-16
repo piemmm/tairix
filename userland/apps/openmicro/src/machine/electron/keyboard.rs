@@ -243,11 +243,6 @@ impl Keyboard {
         }
     }
 
-    /// Release every key.
-    pub fn release_all(&mut self) {
-        self.lines = [0; LINES];
-    }
-
     /// What a read of the paged window at `addr` sees: each line whose
     /// address bit is low, its keys down as ones in bits 0–3, the lines
     /// together.

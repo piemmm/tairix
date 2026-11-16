@@ -1,6 +1,9 @@
 use super::*;
+use crate::machine::c64::Standard;
+use crate::machine::CLOCK;
 
 const MS: u64 = 1_000_000;
+const ACORN: Timing = Timing::ACORN;
 
 const fn ring(queued: u32) -> Ring {
     Ring {
@@ -11,7 +14,7 @@ const fn ring(queued: u32) -> Ring {
 
 #[test]
 fn the_sound_keeps_the_ring_at_its_target() {
-    let mut pacer = Pacer::new();
+    let mut pacer = Pacer::new(ACORN);
     assert_eq!(
         pacer.next(0, Some(ring(0)), false),
         Next::Run {
@@ -37,9 +40,9 @@ fn the_sound_keeps_the_ring_at_its_target() {
 
 #[test]
 fn without_sound_a_slice_is_due_each_20_ms_of_the_clock() {
-    let mut pacer = Pacer::new();
+    let mut pacer = Pacer::new(ACORN);
     let run = Next::Run {
-        cycles: CLOCK_SLICE,
+        cycles: 40_000,
         sound: false,
     };
     assert_eq!(pacer.next(5 * MS, None, false), run);
@@ -62,7 +65,7 @@ fn without_sound_a_slice_is_due_each_20_ms_of_the_clock() {
 
 #[test]
 fn double_speed_runs_twice_as_much_by_the_clock() {
-    let mut pacer = Pacer::new();
+    let mut pacer = Pacer::new(ACORN);
     pacer.set_speed(Speed::Double);
     assert!(
         matches!(
@@ -77,10 +80,10 @@ fn double_speed_runs_twice_as_much_by_the_clock() {
 #[test]
 fn fastest_and_a_fast_tape_run_flat_out_and_pause_runs_nothing() {
     let fast = Next::Run {
-        cycles: FAST_SLICE,
+        cycles: 200_000,
         sound: false,
     };
-    let mut pacer = Pacer::new();
+    let mut pacer = Pacer::new(ACORN);
     assert_eq!(
         pacer.next(0, Some(ring(2_400)), true),
         fast,
@@ -96,19 +99,72 @@ fn fastest_and_a_fast_tape_run_flat_out_and_pause_runs_nothing() {
 
 #[test]
 fn sound_of_any_length_maps_to_a_slice() {
-    assert_eq!(cycles_for(48_000), 2_000_000, "a second");
-    assert_eq!(cycles_for(1), 42, "a frame, rounded up");
-    assert_eq!(cycles_for(u32::MAX), MAX_SLICE, "never past a slice");
+    assert_eq!(cycles_for(ACORN, 48_000), 2_000_000, "a second");
+    assert_eq!(cycles_for(ACORN, 1), 42, "a frame, rounded up");
+    assert_eq!(cycles_for(ACORN, u32::MAX), MAX_SLICE, "never past a slice");
+}
+
+#[test]
+fn a_commodore_64_is_paced_in_its_own_cycles() {
+    let (pal, ntsc) = (Standard::Pal.timing(), Standard::Ntsc.timing());
+    assert_eq!(cycles_for(pal, 48_000), 985_248, "a PAL second");
+    assert_eq!(cycles_for(ntsc, 48_000), 1_022_727, "an NTSC second");
+    assert_eq!(cycles_for(pal, 1), 21, "a frame, rounded up");
+    assert_eq!(cycles_for(ntsc, u32::MAX), 1_022_727, "never past a second");
+    let mut pacer = Pacer::new(pal);
+    assert_eq!(
+        pacer.next(0, None, false),
+        Next::Run {
+            cycles: 19_704,
+            sound: false
+        },
+        "20 ms of PAL cycles, rounded down"
+    );
+    assert_eq!(
+        pacer.next(MS, None, false),
+        Next::At(19_704 * NANOS / 985_248),
+        "due when those cycles have passed"
+    );
+    let mut pacer = Pacer::new(ntsc);
+    assert_eq!(pacer.timing(), ntsc);
+    assert_eq!(
+        pacer.next(MS, None, true),
+        Next::Run {
+            cycles: 102_272,
+            sound: false
+        },
+        "100 ms of NTSC cycles"
+    );
+}
+
+/// Every slice is due exactly when the machine time before it has passed,
+/// however unevenly a second of it divides.
+#[test]
+fn a_clock_whose_second_does_not_divide_keeps_its_pace() {
+    let timing = Standard::Pal.timing();
+    let mut pacer = Pacer::new(timing);
+    let (mut now, mut ran) = (0, 0u64);
+    for _ in 0..10_000 {
+        match pacer.next(now, None, false) {
+            Next::Run { cycles, .. } => {
+                assert_eq!(now, ran * NANOS / timing.clock(), "on time after {ran}");
+                ran += u64::from(cycles);
+            }
+            Next::At(at) => now = at,
+            Next::Wait => panic!("the clock always has a slice due"),
+        }
+    }
 }
 
 /// The regression: the pace was a whole run's cycles in nanoseconds, which
 /// overflowed after some hours, and every slice was then due at once.
 #[test]
 fn the_clock_keeps_its_pace_however_long_the_machine_runs() {
-    let mut pacer = Pacer::new();
+    let mut pacer = Pacer::new(ACORN);
     pacer.set_speed(Speed::Double);
-    let slice_ns = u64::from(CLOCK_SLICE) * NANOS / (2 * CLOCK);
-    let past_overflow = u64::MAX / NANOS / u64::from(CLOCK_SLICE) + 1_000;
+    let slice = u64::from(pacer.slice(CLOCK_SLICES));
+    let slice_ns = slice * NANOS / (2 * CLOCK);
+    let past_overflow = u64::MAX / NANOS / slice + 1_000;
     let (mut now, mut run) = (0, 0);
     while run < past_overflow {
         match pacer.next(now, None, false) {

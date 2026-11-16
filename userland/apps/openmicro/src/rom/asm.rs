@@ -38,6 +38,13 @@ use crate::cpu::ADDRESS_SPACE;
 
 /// The byte an unplaced part of an image holds: an erased EPROM's.
 pub const ERASED: u8 = 0xFF;
+/// Whether a read of `page` acts on no device where RAM fills the address
+/// space's lower half, as on the Acorn machines and the Commodore 64: the
+/// pages [`Asm::skip_over`]'s read may name unless [`Asm::with_quiet_pages`]
+/// says otherwise.
+const fn lower_half_ram(page: u8) -> bool {
+    page < 0x80
+}
 
 /// A place in the image, bound once; meaningful only to the [`Asm`] that
 /// made it.
@@ -367,6 +374,12 @@ pub enum AsmError {
         /// The pin's address.
         pin: u16,
     },
+    /// What [`Asm::skip_over`] skips is not one instruction of one or two
+    /// bytes, those bytes known, or two make an address beyond RAM.
+    SkipOperand {
+        /// The skipping `BIT`'s address.
+        at: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -446,6 +459,8 @@ pub struct Asm {
     later: Later,
     /// The rooms hops left free, filled from what is held once it all is.
     rooms: Vec<Range<usize>>,
+    /// The pages a read of acts on no device, on the machine the image runs.
+    quiet_page: fn(u8) -> bool,
     error: Option<AsmError>,
 }
 
@@ -583,6 +598,7 @@ impl Asm {
             pinning: false,
             later: Later(Vec::new()),
             rooms: Vec::new(),
+            quiet_page: lower_half_ram,
             error: None,
         };
         if !fits {
@@ -710,14 +726,37 @@ impl Asm {
     }
 
     /// Fill each room hops left, in address order, with the held tables
-    /// that fill the most of it.
+    /// that fill the most of it: only what is still free of it, as code
+    /// flowing since may have taken part.
     fn fill_rooms(&mut self) {
         let mut rooms = core::mem::take(&mut self.rooms);
         rooms.sort_by_key(|room| room.start);
         for room in rooms {
-            let chosen = fullest(&self.later.0, room.end - room.start);
-            self.fill_room(room.start, &chosen);
+            for free in self.free_runs(room) {
+                let chosen = fullest(&self.later.0, free.end - free.start);
+                self.fill_room(free.start, &chosen);
+            }
         }
+    }
+
+    /// The runs of `range` nothing has been placed in.
+    fn free_runs(&self, range: Range<usize>) -> Vec<Range<usize>> {
+        let mut runs = Vec::new();
+        let mut begun = None;
+        for at in range.clone() {
+            match (self.placed.get(at).copied().unwrap_or(true), begun) {
+                (false, None) => begun = Some(at),
+                (true, Some(start)) => {
+                    runs.push(start..at);
+                    begun = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(begin) = begun {
+            runs.push(begin..range.end);
+        }
+        runs
     }
 
     /// Place the held tables `chosen` picks, in the order they were held,
@@ -817,6 +856,50 @@ impl Asm {
         body(&mut measure);
         self.make_way(measure.offset, false);
         body(self);
+    }
+
+    /// Treat each run of bytes already placed from `start` to `end` as a pin
+    /// that code flowing later hops past, merged with the pins it meets; the
+    /// gaps between the runs stay free for that code.
+    pub fn claim(&mut self, start: u16, end: u16) {
+        let offset = |address: u16| usize::from(address.wrapping_sub(self.origin));
+        let (from, to) = (offset(start), offset(end));
+        let Some(placed) = self.placed.get(from..to).filter(|_| start >= self.origin) else {
+            self.fail(AsmError::OutsideImage { offset: to });
+            return;
+        };
+        let mut runs = Vec::new();
+        let mut begun = None;
+        for (at, &taken) in (from..).zip(placed) {
+            match (taken, begun) {
+                (true, None) => begun = Some(at),
+                (false, Some(start)) => {
+                    runs.push(start..at);
+                    begun = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(begin) = begun {
+            runs.push(begin..to);
+        }
+        for run in runs {
+            self.merge_pin(run);
+        }
+    }
+
+    /// `range` made a pin, merged with the pins it meets: they are sorted
+    /// and apart, so only the first and last met can widen it.
+    fn merge_pin(&mut self, mut range: Range<usize>) {
+        self.pins.retain(|pin| {
+            let apart = pin.end <= range.start || pin.start >= range.end;
+            if !apart {
+                range = range.start.min(pin.start)..range.end.max(pin.end);
+            }
+            apart
+        });
+        let place = self.pins.partition_point(|pin| pin.start < range.start);
+        self.pins.insert(place, range);
     }
 
     /// Place the code `body` emits at `address` now, ahead of the code that
@@ -1079,6 +1162,57 @@ impl Asm {
         self.put(0);
         self.runs_on = false;
         self.data_run = DataRun::Absent;
+    }
+
+    /// The image for a machine where a read of a page `quiet` holds acts on
+    /// no device, which [`Asm::skip_over`]'s reads keep to.
+    #[must_use]
+    pub fn with_quiet_pages(mut self, quiet: fn(u8) -> bool) -> Self {
+        self.quiet_page = quiet;
+        self
+    }
+
+    /// `BIT` with the instruction `body` places as its operand: code running
+    /// on into it reads past that instruction with no effect but on N, V
+    /// and Z, while a label bound in `body` enters it. The read is of the
+    /// address the instruction's bytes make, so those must be known: one
+    /// byte is a zero-page address, two must keep it to a quiet page.
+    pub fn skip_over(&mut self, body: impl FnOnce(&mut Self)) {
+        self.make_way(3, false);
+        let at = self.pc();
+        let Some(bit) = isa::encode(Mnemonic::Bit, Mode::Absolute) else {
+            self.fail(AsmError::NoEncoding {
+                at,
+                mnemonic: Mnemonic::Bit,
+                mode: Mode::Absolute,
+            });
+            return;
+        };
+        self.put(bit);
+        let start = self.offset;
+        body(self);
+        let known = !self
+            .fixups
+            .iter()
+            .any(|fixup| (start..self.offset).contains(&fixup.offset));
+        let quiet = self.quiet_page;
+        let mode = match self.offset - start {
+            1 => Some(Mode::ZeroPage),
+            2 => self
+                .image
+                .get(start + 1)
+                .is_some_and(|&page| quiet(page))
+                .then_some(Mode::Absolute),
+            _ => None,
+        };
+        let opcode = mode
+            .filter(|_| known)
+            .and_then(|mode| isa::encode(Mnemonic::Bit, mode));
+        match (opcode, self.image.get_mut(start - 1)) {
+            (Some(opcode), Some(bit)) => *bit = opcode,
+            _ => self.fail(AsmError::SkipOperand { at }),
+        }
+        self.certain = None;
     }
 
     /// `JSR target` with the text after it that the routine reads and

@@ -44,8 +44,6 @@ pub(super) struct Recorder {
     pub refuse_grow: Option<Refused>,
     /// The pages a grow handler names, from the first entry on.
     pub name_pages: Vec<u32>,
-    /// Whether a grow handler passes "RESV".
-    pub reserved: bool,
     /// The most a shrink handler allows.
     pub allow_shrink: Option<u32>,
     pub test_shrink: u32,
@@ -62,7 +60,50 @@ pub(super) struct Recorder {
     /// each try answered.
     pub remove_inside: Option<u32>,
     pub nested: Vec<Result<(), AreaError>>,
+    /// A sparse claim, area, base and size, a shrink handler makes from
+    /// inside itself.
+    pub claim_inside: Option<(u32, u32, u32)>,
+    /// An area a shrink handler removes, making a pool in its place.
+    pub replace_inside: Option<u32>,
+    /// The pool it made.
+    pub replacement: Option<u32>,
+    /// Whether each shrink test and each `Service_MemoryMoved` makes
+    /// another shrinkable area.
+    pub breed: bool,
+    /// Each `Service_PagesUnsafe` block.
+    pub announced: Vec<Vec<PageEntry>>,
+    /// Each `Service_PagesSafe` pair of blocks.
+    pub swapped: Vec<(Vec<PageEntry>, Vec<PageEntry>)>,
 }
+
+/// A shrinkable area of a page, for a guest to make from inside a handler.
+const CHILD: Create<'static> = Create {
+    number: None,
+    size: 0x1000,
+    base: None,
+    flags: AreaFlags::SHRINKABLE,
+    max: Some(0x1000),
+    handler: Some(0x03F0_0000),
+    workspace: None,
+    title: Some(b"Child"),
+    pool: 0,
+    caller: Bits::Bit32,
+};
+
+/// A pool of four slots and no window, for a guest to make from inside a
+/// handler.
+const POOL: Create<'static> = Create {
+    number: None,
+    size: 0,
+    base: None,
+    flags: AreaFlags::PMP | AreaFlags::NEEDS_SPECIFIC_PAGES,
+    max: Some(0),
+    handler: Some(0x03F0_0000),
+    workspace: None,
+    title: Some(b"Pool"),
+    pool: 4,
+    caller: Bits::Bit32,
+};
 
 impl Recorder {
     pub fn new() -> Self {
@@ -86,7 +127,7 @@ impl Guest for Recorder {
         block: &mut [PageEntry],
         bytes: u32,
         size: u32,
-    ) -> Result<Granted, Option<GuestError>> {
+    ) -> Result<(), Option<GuestError>> {
         self.calls.push(Call::PreGrow {
             bytes,
             size,
@@ -110,9 +151,7 @@ impl Guest for Recorder {
         for (entry, &page) in block.iter_mut().zip(&self.name_pages) {
             entry.page = Some(page);
         }
-        Ok(Granted {
-            reserved: self.reserved,
-        })
+        Ok(())
     }
 
     fn post_grow(
@@ -146,10 +185,23 @@ impl Guest for Recorder {
         if let Some((area, bytes)) = self.regrow.take() {
             let _ = memory.change_area(area, bytes, &mut Self::new());
         }
+        if let Some((area, base, size)) = self.claim_inside.take() {
+            let _ = memory.sparse_claim(area, base, size, &mut Self::new());
+        }
+        if let Some(area) = self.replace_inside.take() {
+            let _ = memory.remove_area(area, &mut Self::new());
+            self.replacement = memory
+                .create_area(&POOL, &mut Self::new())
+                .ok()
+                .map(|made| made.number);
+        }
     }
 
-    fn test_shrink(&mut self, _: &mut Memory, _: Handler, size: u32) -> u32 {
+    fn test_shrink(&mut self, memory: &mut Memory, _: Handler, size: u32) -> u32 {
         self.calls.push(Call::TestShrink { size });
+        if self.breed {
+            let _ = memory.create_area(&CHILD, &mut Self::new());
+        }
         self.test_shrink
     }
 
@@ -164,7 +216,15 @@ impl Guest for Recorder {
         Ok(())
     }
 
-    fn service(&mut self, _: &mut Memory, service: Service<'_>) -> bool {
+    fn service(&mut self, memory: &mut Memory, service: Service<'_>) -> bool {
+        match service {
+            Service::PagesUnsafe { pages } => self.announced.push(pages.to_vec()),
+            Service::PagesSafe { old, new } => self.swapped.push((old.to_vec(), new.to_vec())),
+            Service::MemoryMoved { .. } if self.breed => {
+                let _ = memory.create_area(&CHILD, &mut Self::new());
+            }
+            _ => {}
+        }
         self.calls.push(match service {
             Service::Memory { change, .. } => Call::Memory { change },
             Service::MemoryMoved { bytes, area } => Call::Moved { bytes, area },
@@ -199,13 +259,13 @@ pub(super) fn shared() -> Memory {
 }
 
 fn read(memory: &mut Memory, address: u32, privileged: bool) -> Result<u32, Abort> {
-    memory.mmu().read(address, Width::Word, privileged)
+    memory.bus().read(address, Width::Word, privileged)
 }
 
 #[test]
 fn every_session_has_zero_page_scratch_space_and_its_stacks() {
     let mut memory = shared();
-    let used = memory.mmu().used();
+    let used = memory.pages_in_use();
     assert_eq!(
         used,
         4 + 4 + 1 + 14,
@@ -213,7 +273,7 @@ fn every_session_has_zero_page_scratch_space_and_its_stacks() {
     );
     assert_eq!(memory.free_pages(), 64 * 256 - used, "a quarter of 256 MiB");
     memory
-        .mmu()
+        .bus()
         .write(HIGH_ZERO_PAGE + 0x10C, Width::Word, 7, true)
         .unwrap();
     assert_eq!(
@@ -222,12 +282,12 @@ fn every_session_has_zero_page_scratch_space_and_its_stacks() {
         "User mode reads it"
     );
     assert_eq!(
-        memory.mmu().write(HIGH_ZERO_PAGE, Width::Word, 0, false),
+        memory.bus().write(HIGH_ZERO_PAGE, Width::Word, 0, false),
         Err(Abort::Permission)
     );
     let svc = SHARED.stacks.supervisor.clone();
     memory
-        .mmu()
+        .bus()
         .write(svc.end - 4, Width::Word, 1, true)
         .unwrap();
     assert_eq!(
@@ -248,7 +308,7 @@ fn a_task_sees_the_low_pages_its_profile_has() {
     let old = memory.create_slot(Bits::Bit26).unwrap();
     let new = memory.create_slot(Bits::Bit32).unwrap();
     memory
-        .mmu()
+        .bus()
         .write(HIGH_ZERO_PAGE + 0x104, Width::Byte, 0x5A, true)
         .unwrap();
     memory.switch_slot(old).unwrap();
@@ -258,7 +318,7 @@ fn a_task_sees_the_low_pages_its_profile_has() {
         "zero page at zero, one frame with &FFFF0000's"
     );
     memory
-        .mmu()
+        .bus()
         .write(0x4000, Width::Word, 0x1234, true)
         .unwrap();
     memory.switch_slot(new).unwrap();
@@ -269,11 +329,11 @@ fn a_task_sees_the_low_pages_its_profile_has() {
     );
     assert_eq!(read(&mut memory, 0x10, false), Ok(0));
     assert_eq!(
-        memory.mmu().write(0, Width::Word, 0, true),
+        memory.bus().write(0, Width::Word, 0, true),
         Err(Abort::Permission)
     );
     assert_eq!(
-        memory.mmu().fetch(0, true).map(|_| ()),
+        memory.bus().fetch(0, true).map(|_| ()),
         Err(Abort::Permission),
         "nor run"
     );
@@ -295,11 +355,11 @@ fn host_code_is_read_only_and_runs_as_host_code() {
     let code = vec![0xE7F0_00F0, 0xE12F_FF1E];
     let address = memory.install_host(&code).unwrap();
     assert_eq!(address, SHARED.host.start);
-    let fetch = memory.mmu().fetch(address, false).unwrap();
+    let fetch = memory.bus().fetch(address, false).unwrap();
     assert!(fetch.host);
     assert_eq!(fetch.word, 0xE7F0_00F0);
     assert_eq!(
-        memory.mmu().write(address, Width::Word, 0, true),
+        memory.bus().write(address, Width::Word, 0, true),
         Err(Abort::Permission)
     );
     let next = memory.install_host(&vec![0; 2000]).unwrap();
@@ -336,7 +396,7 @@ fn a_slot_grows_and_shrinks_in_its_own_space() {
     assert_eq!(memory.slot_size(a), Some(0x3000), "whole pages");
     memory.switch_slot(a).unwrap();
     memory
-        .mmu()
+        .bus()
         .write(APPLICATION + 0x2FFC, Width::Word, 0xA, false)
         .unwrap();
     memory.switch_slot(b).unwrap();

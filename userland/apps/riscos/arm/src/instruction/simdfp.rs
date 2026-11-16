@@ -368,7 +368,7 @@ operations! {
 
 impl SimdImmediateOp {
     /// The operation `cmode`, the encoding's op bit above its four cmode
-    /// bits, selects; none for the one reserved value.
+    /// bits, selects; none for the one reserved value, `1 1111`.
     #[must_use]
     pub const fn of(cmode: u8) -> Option<Self> {
         let inverted = cmode & 0x10 != 0;
@@ -416,17 +416,17 @@ pub struct Structure {
 impl Structure {
     /// The registers the transfer names, in their list's order.
     #[must_use]
-    pub const fn registers(&self) -> u8 {
-        self.elements * self.parts
+    pub const fn registers(&self) -> u32 {
+        self.elements as u32 * self.parts as u32
     }
 
     /// The `index`th register of the list after the first.
     #[must_use]
-    pub const fn register(&self, index: u8) -> u8 {
+    pub const fn register(&self, index: u32) -> u32 {
         if self.parts > 1 {
             index
         } else {
-            index * self.spacing
+            index * self.spacing as u32
         }
     }
 }
@@ -703,7 +703,8 @@ pub enum SimdFp {
         op: SimdShiftOp,
         /// Unsigned lanes rather than signed, where the operation has both.
         unsigned: bool,
-        /// The operand's lanes' size: 8 << `size` bits.
+        /// The lanes' size, 8 << `size` bits: the operand's, but the
+        /// result's for a narrowing shift.
         size: u8,
         /// Quadword registers, where the result is neither long nor
         /// narrowed.

@@ -1,14 +1,17 @@
 //! FPATAN, F2XM1, FYL2X and FYL2XP1: their operands' special cases, which
-//! the 8087 leaves unchecked and the 80387 defines, the exact answers
-//! (a logarithm of a power of two, a power of two at an integer), and the
-//! rest computed by `trans` and rounded to 64 bits. None checks for a
-//! denormal operand, as the 8087's do not.
+//! the 8087 leaves unchecked and the 80387 defines, the exact answers (a
+//! logarithm of a power of two, a power of two at an integer), and the rest
+//! computed by `lib/softfloat`'s elementary functions and rounded to 64 bits.
+//! None checks for a denormal operand, as the 8087's do not.
 
-use super::super::arith::{self, flag, Exact, Parts, Rounding};
-use super::super::real::{Real, INTEGER};
-use super::super::trans;
+use super::super::arith::{self, flag};
 use super::super::Registers;
 use super::{screen, Outcome, Value};
+use tairix_softfloat::elementary;
+use tairix_softfloat::exact;
+use tairix_softfloat::extended::INTEGER;
+use tairix_softfloat::Extended;
+use tairix_softfloat::{Exact, Parts, Rounding};
 
 /// `x` rounded to 64 bits in the control word's mode.
 fn rounded(regs: &Registers, x: Exact) -> Outcome {
@@ -21,12 +24,12 @@ fn rounded(regs: &Registers, x: Exact) -> Outcome {
 /// An exact result, a power of two times `y`: k × y.
 fn times_integer(regs: &Registers, y: Parts, k: i64) -> Outcome {
     if k == 0 {
-        return Outcome::value(Real::ZERO.with_sign(y.negative), 0);
+        return Outcome::value(Extended::ZERO.with_sign(y.negative), 0);
     }
-    let factor = Parts::of(Real::from_int(k));
+    let factor = Parts::of(Extended::from_int(k));
     Outcome::rounded(
         arith::round(
-            arith::multiply(y, factor),
+            exact::multiply(y, factor),
             Rounding::extended(regs.mode()),
             regs.masks(),
         ),
@@ -42,16 +45,16 @@ fn power_of_two(p: Parts) -> Option<i32> {
 
 /// π × `quarters` / 4, rounded.
 fn quarter_pis(regs: &Registers, quarters: u32, negative: bool) -> Outcome {
-    let x = trans::quarter_pis(quarters);
+    let x = elementary::quarter_pis(quarters);
     rounded(regs, Exact { negative, ..x })
 }
 
 fn infinity(negative: bool) -> Outcome {
-    Outcome::value(Real::INFINITY.with_sign(negative), 0)
+    Outcome::value(Extended::INFINITY.with_sign(negative), 0)
 }
 
 fn zero(negative: bool) -> Outcome {
-    Outcome::value(Real::ZERO.with_sign(negative), 0)
+    Outcome::value(Extended::ZERO.with_sign(negative), 0)
 }
 
 /// FPATAN: the angle of (`x`, `y`).
@@ -79,7 +82,9 @@ pub(super) fn arctangent(regs: &Registers, y: Value, x: Value) -> Outcome {
             quarter_pis(regs, if negative { 3 } else { 1 }, sign)
         }
         (Value::Infinity(_), _) | (Value::Finite(..), Value::Zero(_)) => quarter_pis(regs, 2, sign),
-        (Value::Finite(rise, _), Value::Finite(run, _)) => rounded(regs, trans::atan2(rise, run)),
+        (Value::Finite(rise, _), Value::Finite(run, _)) => {
+            rounded(regs, elementary::atan2(rise, run))
+        }
         _ => Outcome::invalid(regs, flag::INVALID),
     }
 }
@@ -94,15 +99,15 @@ pub(super) fn two_power_minus_one(regs: &Registers, x: Value) -> Outcome {
         },
         Value::Zero(negative) => zero(negative),
         Value::Infinity(false) => infinity(false),
-        Value::Infinity(true) => Outcome::value(Real::ONE.with_sign(true), 0),
+        Value::Infinity(true) => Outcome::value(Extended::ONE.with_sign(true), 0),
         Value::Finite(p, _) => match small_integer(p) {
             // 2^n − 1 exactly.
             Some(n) => {
-                let one = Parts::of(Real::ONE);
+                let one = Parts::of(Extended::ONE);
                 let power = Parts { exp: n, ..one };
-                rounded_exact(regs, arith::add(power, one, true))
+                rounded_exact(regs, exact::add(power, one, true))
             }
-            None => rounded(regs, trans::exp2m1(p)),
+            None => rounded(regs, elementary::exp2m1(p)),
         },
     }
 }
@@ -110,7 +115,7 @@ pub(super) fn two_power_minus_one(regs: &Registers, x: Value) -> Outcome {
 /// An exact result rounded as one: no sticky bits below it.
 fn rounded_exact(regs: &Registers, x: Exact) -> Outcome {
     if x.is_zero() {
-        return zero(regs.mode() == arith::Mode::Down);
+        return zero(regs.mode() == tairix_softfloat::Mode::Down);
     }
     Outcome::rounded(
         arith::round(x, Rounding::extended(regs.mode()), regs.masks()),
@@ -153,7 +158,7 @@ pub(super) fn y_log2_x(regs: &Registers, y: Value, x: Value) -> Outcome {
         (Value::Finite(..), Value::Zero(_)) => Outcome {
             value: regs
                 .masked(flag::ZERO_DIVIDE)
-                .then_some(Real::INFINITY.with_sign(!sign)),
+                .then_some(Extended::INFINITY.with_sign(!sign)),
             flags: flag::ZERO_DIVIDE,
         },
         (_, Value::Infinity(false)) => infinity(sign),
@@ -164,7 +169,9 @@ pub(super) fn y_log2_x(regs: &Registers, y: Value, x: Value) -> Outcome {
                 (Value::Infinity(_), _) => infinity(sign != below_one),
                 (Value::Zero(_), _) => zero(sign != below_one),
                 (Value::Finite(scale, _), Some(k)) => times_integer(regs, scale, i64::from(k)),
-                (Value::Finite(scale, _), None) => rounded(regs, trans::y_log2_x(scale, argument)),
+                (Value::Finite(scale, _), None) => {
+                    rounded(regs, elementary::y_log2_x(scale, argument))
+                }
                 _ => Outcome::invalid(regs, flag::INVALID),
             }
         }
@@ -185,14 +192,14 @@ pub(super) fn y_log2_x_plus_1(regs: &Registers, y: Value, x: Value) -> Outcome {
         (_, Value::Zero(negative)) => zero(sign != negative),
         (_, Value::Infinity(false)) => infinity(sign),
         (_, Value::Finite(argument, _)) => {
-            let sum = arith::add(Parts::of(Real::ONE), argument, false);
+            let sum = exact::add(Parts::of(Extended::ONE), argument, false);
             if sum.negative || sum.is_zero() {
                 // 1 + x not positive: past the 80387's domain.
                 return match (y, sum.is_zero()) {
                     (Value::Finite(..), true) => Outcome {
                         value: regs
                             .masked(flag::ZERO_DIVIDE)
-                            .then_some(Real::INFINITY.with_sign(!sign)),
+                            .then_some(Extended::INFINITY.with_sign(!sign)),
                         flags: flag::ZERO_DIVIDE,
                     },
                     _ => Outcome::invalid(regs, flag::INVALID),
@@ -204,7 +211,7 @@ pub(super) fn y_log2_x_plus_1(regs: &Registers, y: Value, x: Value) -> Outcome {
                 (Value::Zero(_), _) => zero(sign != argument.negative),
                 (Value::Finite(scale, _), Some(k)) => times_integer(regs, scale, i64::from(k)),
                 (Value::Finite(scale, _), None) => {
-                    rounded(regs, trans::y_log2_1p_x(scale, argument))
+                    rounded(regs, elementary::y_log2_1p_x(scale, argument))
                 }
                 _ => Outcome::invalid(regs, flag::INVALID),
             }

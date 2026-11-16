@@ -1,4 +1,4 @@
-//! The tokeniser and lister against lib/bbcbasic's BASIC II: a typed line is
+//! The tokeniser and lister against lib/openbasic's BASIC II: a typed line is
 //! kept as the library tokenises it, and a program lists as it lists one.
 
 use alloc::collections::BTreeMap;
@@ -6,12 +6,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_bbcbasic::basic2::KEYWORDS;
-use tairix_bbcbasic::list::{Lister, Options};
-use tairix_bbcbasic::program::{self, Line};
-use tairix_bbcbasic::tokenise::{tokenise, Start};
-use tairix_bbcbasic::{lineref, Dialect};
 use tairix_fuzzseed::Prng;
+use tairix_openbasic::basic2::KEYWORDS;
+use tairix_openbasic::list::{Lister, Options};
+use tairix_openbasic::program::{self, Line};
+use tairix_openbasic::tokenise::{tokenise, Start};
+use tairix_openbasic::{lineref, Dialect};
 
 use super::super::editor::LISTING_LOOPS;
 use super::super::ws::zp as z;
@@ -32,9 +32,8 @@ fn program_of<S: AsRef<str>>(typed: &[S]) -> BTreeMap<u16, Vec<u8>> {
     let mut program = BTreeMap::new();
     for line in typed {
         let line = line.as_ref();
-        let bytes = tokenise(Dialect::BasicII, line.as_bytes(), Start::Line)
-            .expect("memory")
-            .bytes;
+        let mut bytes = Vec::new();
+        tokenise(Dialect::BasicII, line.as_bytes(), Start::Line, &mut bytes).expect("memory");
         let (reference, text) = bytes.split_at(1 + lineref::ENCODED);
         assert_eq!(reference[0], lineref::MARKER, "{line} is numbered");
         let number = lineref::decode(reference[1..].try_into().expect("its bytes"));
@@ -43,7 +42,7 @@ fn program_of<S: AsRef<str>>(typed: &[S]) -> BTreeMap<u16, Vec<u8>> {
         } else {
             let stored =
                 program::stored(Dialect::BasicII, text, Options::default()).expect("memory");
-            program.insert(number, stored);
+            program.insert(number, stored.into_owned());
         }
     }
     program

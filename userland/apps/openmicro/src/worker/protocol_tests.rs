@@ -2,7 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::machine::{bbc, electron};
+use crate::machine::{bbc, electron, LetterCase};
 
 fn round_trip(request: &Request<'_>) {
     assert_eq!(
@@ -38,7 +38,7 @@ fn every_request_survives_its_wire_form() {
         })),
         Request::InsertDisc {
             drive: PhysicalDrive::One,
-            format: ImageFormat::Dsd,
+            format: DiscFormat::Acorn(ImageFormat::Dsd),
             write_protected: true,
             image: &[1, 2, 3],
         },
@@ -100,11 +100,14 @@ fn every_reply_survives_its_wire_form() {
                 shift_lock: false,
                 motor: true,
             },
+            case: LetterCase::Capitals,
             drives: [false, true],
             loaded: Loaded {
                 discs: [true, false],
                 tape: true,
                 recording: true,
+                playing: true,
+                cartridge: false,
             },
         }),
         Reply::Snapshot(&[1, 2]),
@@ -112,13 +115,13 @@ fn every_reply_survives_its_wire_form() {
             discs: vec![
                 Written {
                     drive: PhysicalDrive::One,
-                    format: ImageFormat::Dsd,
+                    format: DiscFormat::Acorn(ImageFormat::Dsd),
                     image: &[5; 3],
                     lost: Some((1, LAST_TRACK)),
                 },
                 Written {
                     drive: PhysicalDrive::Zero,
-                    format: ImageFormat::Ssd,
+                    format: DiscFormat::Acorn(ImageFormat::Ssd),
                     image: &[],
                     lost: None,
                 },
@@ -147,6 +150,7 @@ fn a_ran_reply_says_which_rows_changed() {
         rows,
         sound: &[],
         lights: Lights::default(),
+        case: LetterCase::Small,
         drives: [false; 2],
         loaded: Loaded::default(),
     };
@@ -200,7 +204,23 @@ fn a_request_out_of_bounds_does_not_decode() {
     assert!(refused(&key(0, 0x0F)), "no Model B key numbered &0F");
     assert!(!refused(&key(1, 0)), "the Electron's first key");
     assert!(refused(&key(1, 56)), "past the Electron's keys");
-    assert!(refused(&key(2, 0)), "no third model");
+    assert!(!refused(&key(2, 0)), "the C64's first key");
+    assert!(!refused(&key(2, 64)), "RESTORE");
+    assert!(refused(&key(2, 65)), "past RESTORE");
+    assert!(refused(&key(3, 0)), "no fourth model");
+    let stick = |port: u8, lines: u8| {
+        let mut change = run(10, &[]);
+        change[6..8].copy_from_slice(&1u16.to_le_bytes());
+        change.extend_from_slice(&0u32.to_le_bytes());
+        change.extend_from_slice(&[4, port, lines]);
+        change
+    };
+    assert!(!refused(&stick(1, 0x1F)), "port 2, every line");
+    assert!(refused(&stick(2, 0)), "a third port");
+    assert!(refused(&stick(0, 0x20)), "a line past fire");
+    assert!(!refused(&[13, 2]), "STOP");
+    assert!(refused(&[13, 3]), "no fourth deck key");
+    assert!(!refused(&[15]), "the cartridge out");
 }
 
 #[test]
@@ -230,7 +250,23 @@ fn a_configure_out_of_bounds_does_not_decode() {
     image(&mut large, 4);
     large.push(0);
     assert!(refused(&large), "an OS past a ROM's size");
-    assert!(refused(&[1, 2]), "no third model");
+    assert!(refused(&[1, 3]), "no fourth model");
+    let c64 = |standard: u8, sid: u8, drive: u8| {
+        let mut bytes = vec![1, 2, standard, sid];
+        for len in [8, 8, 4] {
+            image(&mut bytes, len);
+        }
+        bytes.push(drive);
+        if drive == 1 {
+            image(&mut bytes, 16);
+        }
+        bytes.push(0);
+        bytes
+    };
+    assert!(!refused(&c64(1, 1, 1)), "NTSC, the 8580 and a drive");
+    assert!(refused(&c64(2, 0, 0)), "no third standard");
+    assert!(refused(&c64(0, 2, 0)), "no third SID");
+    assert!(refused(&c64(0, 0, 2)), "a drive flag of 2");
 }
 
 #[test]
@@ -248,15 +284,32 @@ fn a_reply_out_of_bounds_does_not_decode() {
     };
     assert!(Reply::decode(&ran(0xFF, &[0; 4], 7)).is_ok());
     assert!(Reply::decode(&ran(0, &[0; 3], 0)).is_err(), "half a sample");
-    assert!(Reply::decode(&ran(0, &[], 8)).is_err(), "a fourth light");
+    for (bits, case) in [
+        (0, LetterCase::Small),
+        (1, LetterCase::Capitals),
+        (2, LetterCase::CapitalsOnly),
+    ] {
+        assert!(
+            matches!(Reply::decode(&ran(0, &[], bits << 3)), Ok(Reply::Ran(slice)) if slice.case == case),
+            "{case:?}"
+        );
+    }
+    assert!(
+        Reply::decode(&ran(0, &[], 3 << 3)).is_err(),
+        "a fourth case"
+    );
+    assert!(
+        Reply::decode(&ran(0, &[], 0x20)).is_err(),
+        "a bit past the case"
+    );
     let mut loaded = ran(0, &[], 0);
-    *loaded.last_mut().unwrap() = 15;
+    *loaded.last_mut().unwrap() = 0x3F;
     assert!(
         Reply::decode(&loaded).is_ok(),
-        "both drives, the tape and RECORD"
+        "both drives, the tape, RECORD, PLAY and a cartridge"
     );
-    *loaded.last_mut().unwrap() = 16;
-    assert!(Reply::decode(&loaded).is_err(), "a bit past RECORD");
+    *loaded.last_mut().unwrap() = 0x40;
+    assert!(Reply::decode(&loaded).is_err(), "a bit past the cartridge");
     let samples: Vec<u8> = vec![0; (MAX_SAMPLES + 1) * SAMPLE_BYTES];
     assert!(
         Reply::decode(&ran(0, &samples, 0)).is_err(),
@@ -274,7 +327,7 @@ fn a_reply_out_of_bounds_does_not_decode() {
         "drive 0 twice"
     );
     assert!(
-        Reply::decode(&[4, 1, 0, 2, 0, 0, 0, 0, 0, 0]).is_err(),
+        Reply::decode(&[4, 1, 0, 4, 0, 0, 0, 0, 0, 0]).is_err(),
         "no such format"
     );
     assert!(
@@ -306,7 +359,8 @@ fn a_reply_out_of_bounds_does_not_decode() {
         Reply::decode(&single(largest + 1)).is_err(),
         "a single-sided image as large as a double-sided one"
     );
-    assert!(Reply::decode(&[5, 9]).is_err(), "no such refusal");
+    assert!(Reply::decode(&[5, 10]).is_ok(), "the last refusal");
+    assert!(Reply::decode(&[5, 11]).is_err(), "no such refusal");
     assert!(Reply::decode(&[1, 0]).is_err(), "a byte past the end");
 }
 
@@ -323,9 +377,9 @@ fn the_largest_message_is_both_drives_and_the_deck_taken_out_whole() {
     let tape = vec![0x55; MAX_BULK];
     let written = |drive| Written {
         drive,
-        format: ImageFormat::Dsd,
+        format: DiscFormat::G64,
         image: &disc,
-        lost: Some((1, LAST_TRACK)),
+        lost: None,
     };
     let reply = Reply::Media(Media {
         discs: vec![written(PhysicalDrive::Zero), written(PhysicalDrive::One)],
@@ -334,6 +388,34 @@ fn the_largest_message_is_both_drives_and_the_deck_taken_out_whole() {
     let encoded = reply.encode();
     assert_eq!(encoded.len(), MAX_MESSAGE);
     assert_eq!(Reply::decode(&encoded), Ok(reply));
+    let acorn = vec![0xE5; ImageFormat::Dsd.max_bytes()];
+    let lost = |drive| Written {
+        drive,
+        format: DiscFormat::Acorn(ImageFormat::Dsd),
+        image: &acorn,
+        lost: Some((1, LAST_TRACK)),
+    };
+    let reply = Reply::Media(Media {
+        discs: vec![lost(PhysicalDrive::Zero), lost(PhysicalDrive::One)],
+        tape: Some(&tape),
+    });
+    assert!(
+        reply.encode().len() < MAX_MESSAGE,
+        "two Acorn discs fit within it"
+    );
+    let lost_disk = Reply::Media(Media {
+        discs: vec![Written {
+            drive: PhysicalDrive::Zero,
+            format: DiscFormat::D64,
+            image: &[0; 4],
+            lost: Some((0, 0)),
+        }],
+        tape: None,
+    });
+    assert!(
+        Reply::decode(&lost_disk.encode()).is_err(),
+        "a 1541 disk loses no tracks"
+    );
     let rom = vec![0xEA; MAX_ROM];
     let configure = Request::Configure(Box::new(Configuration::ModelB {
         os: &rom,

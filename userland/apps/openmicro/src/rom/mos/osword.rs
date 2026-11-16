@@ -3,7 +3,7 @@
 
 use super::has_teletext;
 use super::ws::{os, page2, var, vdu, vector};
-use crate::machine::Model;
+use super::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
 
 const CALL_COUNT: u8 = 14;

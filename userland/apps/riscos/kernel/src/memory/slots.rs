@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_arm::mmu::{Access, Frame, Rights, Space, Table, PAGE_SIZE};
+use tairix_riscos_arm::mmu::{Access, Frame, Rights, Space, Table, PAGE_SIZE, TABLE_SPAN};
 
 use super::layout::APPLICATION;
 use super::{Holder, Memory, MemoryError};
@@ -19,6 +19,15 @@ const APPLICATION_ACCESS: Access = Access {
     privileged: Rights::ReadWrite,
     execute: true,
 };
+
+/// The top of an application space holding `bytes`, rounded up to whole
+/// pages, if it fits the address space.
+fn top_of(bytes: u32) -> Option<u32> {
+    bytes
+        .div_ceil(PAGE_SIZE)
+        .checked_mul(PAGE_SIZE)
+        .and_then(|size| size.checked_add(APPLICATION))
+}
 
 /// The addressing a task's program uses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -60,6 +69,8 @@ pub(super) struct Slots {
     /// The application-space limit `OS_DynamicArea` 26 sets: no slot's top
     /// passes it. None until first set: the layout's own.
     limit: Option<u32>,
+    /// The slots of 26-bit programs.
+    bit26: u32,
 }
 
 impl Slots {
@@ -69,6 +80,7 @@ impl Slots {
             current: None,
             generation: 0,
             limit: None,
+            bit26: 0,
         }
     }
 
@@ -86,12 +98,9 @@ impl Slots {
             .filter(|state| state.generation == slot.generation)
     }
 
-    /// Whether any slot's program uses `bits`.
-    pub(super) fn any(&self, bits: Bits) -> bool {
-        self.entries
-            .iter()
-            .flatten()
-            .any(|state| state.bits == bits)
+    /// Whether any slot's program is 26-bit.
+    pub(super) const fn any_26bit(&self) -> bool {
+        self.bit26 > 0
     }
 
     /// The highest top of any slot.
@@ -128,6 +137,12 @@ impl Memory {
             return Err(MemoryError::Not26Bit);
         }
         self.slots.entries.try_reserve(1)?;
+        let entries = &self.slots.entries;
+        let index = entries
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(entries.len());
+        let number = u32::try_from(index).map_err(|_| MemoryError::NoMemory)?;
         let space = self.mmu.create_space(APPLICATION)?;
         if let Err(error) = self.map_low(Table::Space(space), bits) {
             let _ = self.mmu.destroy_space(space);
@@ -136,22 +151,22 @@ impl Memory {
         let slots = &mut self.slots;
         let generation = slots.generation;
         slots.generation = generation.wrapping_add(1);
-        let state = State {
+        let state = Some(State {
             space,
             bits,
             generation,
             pages: Vec::new(),
             tables: 0,
-        };
-        let index = if let Some(index) = slots.entries.iter().position(Option::is_none) {
-            slots.entries[index] = Some(state);
-            index
-        } else {
-            slots.entries.push(Some(state));
-            slots.entries.len() - 1
-        };
+        });
+        match slots.entries.get_mut(index) {
+            Some(entry) => *entry = state,
+            None => slots.entries.push(state),
+        }
+        if bits == Bits::Bit26 {
+            slots.bit26 += 1;
+        }
         Ok(Slot {
-            index: u32::try_from(index).map_err(|_| MemoryError::NoMemory)?,
+            index: number,
             generation,
         })
     }
@@ -161,16 +176,21 @@ impl Memory {
         if self.slots.current == Some(slot) {
             return Err(MemoryError::Slot);
         }
+        let space = self.slots.state(slot).ok_or(MemoryError::Slot)?.space;
+        // The space goes first: refused, the slot is as it was.
+        self.mmu.destroy_space(space)?;
         let state = self
             .slots
             .entries
             .get_mut(slot.index as usize)
-            .and_then(|entry| entry.take_if(|state| state.generation == slot.generation))
+            .and_then(Option::take)
             .ok_or(MemoryError::Slot)?;
         for &frame in &state.pages {
             self.pages.free(frame);
         }
-        self.mmu.destroy_space(state.space)?;
+        if state.bits == Bits::Bit26 {
+            self.slots.bit26 -= 1;
+        }
         Ok(())
     }
 
@@ -244,14 +264,20 @@ impl Memory {
         )
     }
 
+    /// Whether a slot's application space may reach `bytes` under its
+    /// ceiling, the free pool aside.
+    pub(super) fn slot_may_reach(&self, slot: Slot, bytes: u32) -> bool {
+        let Some(state) = self.slots.state(slot) else {
+            return false;
+        };
+        let (ceiling, _) = self.slot_ceiling(state.bits);
+        top_of(bytes).is_some_and(|top| top <= ceiling)
+    }
+
     /// Sets a slot's size, rounded up to whole pages, wholly or not at all.
     pub fn set_slot_size(&mut self, slot: Slot, bytes: u32) -> Result<(), MemoryError> {
         let state = self.slots.state(slot).ok_or(MemoryError::Slot)?;
-        let pages = bytes.div_ceil(PAGE_SIZE);
-        let top = pages
-            .checked_mul(PAGE_SIZE)
-            .and_then(|size| size.checked_add(APPLICATION))
-            .ok_or(MemoryError::TooLarge)?;
+        let top = top_of(bytes).ok_or(MemoryError::TooLarge)?;
         let (bits, old, space) = (state.bits, state.top(), state.space);
         if top < old {
             self.shrink_slot(slot, (old - top) / PAGE_SIZE);
@@ -332,15 +358,16 @@ impl Memory {
     /// Reserves, or lets go of, a slot's tables so exactly those mapping
     /// below `top` are reserved, each once.
     fn reserve_slot_tables(&mut self, slot: Slot, top: u32) -> Result<(), MemoryError> {
-        const TABLE: u32 = 0x40_0000;
         let state = self.slots.state(slot).ok_or(MemoryError::Slot)?;
         let (space, have) = (state.space, state.tables);
-        let want = top.div_ceil(TABLE);
+        let want = top.div_ceil(TABLE_SPAN);
         let table = Table::Space(space);
         if want > have {
-            self.mmu.reserve(table, have * TABLE..want * TABLE)?;
+            self.mmu
+                .reserve(table, have * TABLE_SPAN..want * TABLE_SPAN)?;
         } else if want < have {
-            self.mmu.unreserve(table, want * TABLE..have * TABLE);
+            self.mmu
+                .unreserve(table, want * TABLE_SPAN..have * TABLE_SPAN);
         }
         if let Some(state) = self.slots.state_mut(slot) {
             state.tables = want;

@@ -697,3 +697,147 @@ fn a_hop_where_a_label_lies_is_a_jump_whatever_the_flags() {
     .unwrap();
     assert_eq!(image[..4], [0x18, 0x4C, 0x06, 0xC0], "JMP past the pin");
 }
+
+#[test]
+fn a_skip_over_reads_past_its_instruction_which_a_label_enters() {
+    let image = finished(|asm| {
+        asm.ldx(imm(1));
+        asm.skip_over(|asm| {
+            asm.here("second");
+            asm.ldx(imm(2));
+        });
+        asm.rts();
+    })
+    .unwrap();
+    assert_eq!(image[..6], [0xA2, 0x01, 0x2C, 0xA2, 0x02, 0x60]);
+}
+
+#[test]
+fn a_skip_over_of_one_byte_reads_zero_page() {
+    let image = finished(|asm| {
+        asm.sec();
+        asm.skip_over(|asm| {
+            asm.here("clear");
+            asm.clc();
+        });
+        asm.rts();
+    })
+    .unwrap();
+    assert_eq!(image[..4], [0x38, 0x24, 0x18, 0x60]);
+}
+
+#[test]
+fn a_skip_over_takes_one_known_instruction_that_cannot_read_a_device() {
+    for body in [
+        (|asm: &mut Asm| asm.ldx(imm(0xD4))) as fn(&mut Asm),
+        |asm| asm.lda(imm(0x80)),
+        |asm| asm.lda(abs(0x1234)),
+        |asm| asm.ldx(imm(lo("later"))),
+    ] {
+        let result = finished(|asm| {
+            asm.skip_over(body);
+            asm.here("later");
+            asm.rts();
+        });
+        assert!(
+            matches!(result, Err(AsmError::SkipOperand { .. })),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn a_skip_over_keeps_to_the_pages_its_machine_reads_quietly() {
+    let skipping = |quiet: fn(u8) -> bool| {
+        let mut asm = Asm::new(ORIGIN, 0x100).with_quiet_pages(quiet);
+        asm.skip_over(|asm| asm.stx(zp(0x38)));
+        asm.rts();
+        asm.finish().map(|_| ())
+    };
+    assert_eq!(skipping(|page| page < 0x80), Ok(()), "RAM at $3886");
+    assert!(
+        matches!(
+            skipping(crate::machine::c64::drive::quiet_read_page),
+            Err(AsmError::SkipOperand { .. })
+        ),
+        "a VIA's mirror at $3886 on the 1541"
+    );
+}
+
+#[test]
+fn the_1541_reads_quietly_from_all_but_its_vias_pages() {
+    use crate::machine::c64::drive::quiet_read_page;
+    let quiet: Vec<u8> = [0x00, 0x07, 0x17, 0x18, 0x1C, 0x20, 0x38, 0x58, 0x7F, 0x80]
+        .into_iter()
+        .filter(|&page| quiet_read_page(page))
+        .collect();
+    assert_eq!(quiet, [0x00, 0x07, 0x17, 0x20, 0x80]);
+}
+
+#[test]
+fn code_flowing_after_a_claim_hops_its_runs_and_fills_the_gap_between() {
+    let image = finished(|asm| {
+        asm.org(ORIGIN + 0x08);
+        asm.nop();
+        asm.nop();
+        asm.pin(ORIGIN + 0x10, |asm| asm.jmp(abs(ORIGIN)));
+        asm.claim(ORIGIN, ORIGIN + 0x11);
+        asm.org(ORIGIN + 0x04);
+        for _ in 0..5 {
+            asm.nop();
+        }
+        asm.rts();
+    })
+    .unwrap();
+    let [low, high] = (ORIGIN + 0x0A).to_le_bytes();
+    assert_eq!(image[4..8], [0xEA, 0x4C, low, high], "past the first run");
+    assert_eq!(image[0x0A..0x0D], [0xEA; 3], "into the gap");
+    let [low, high] = (ORIGIN + 0x13).to_le_bytes();
+    assert_eq!(
+        image[0x0D..0x10],
+        [0x4C, low, high],
+        "past the pin the claim met"
+    );
+    assert_eq!(image[0x13..0x15], [0xEA, 0x60]);
+}
+
+#[test]
+fn a_room_code_has_since_taken_part_of_takes_tables_only_in_what_is_left() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 0x0C, Asm::rts);
+        asm.rts();
+        asm.here("moved");
+        asm.bytes(&[1; 16]);
+        asm.org(ORIGIN + 0x01);
+        for _ in 0..4 {
+            asm.nop();
+        }
+        asm.later(|asm| {
+            asm.here("long");
+            asm.bytes(&[2; 9]);
+        });
+        asm.later(|asm| {
+            asm.here("short");
+            asm.bytes(&[3; 5]);
+        });
+        asm.org(ORIGIN + 0x30);
+        asm.place_later();
+    })
+    .unwrap();
+    assert_eq!(
+        image[0x0D..0x1D],
+        [1; 16],
+        "moved past the pin, leaving a room"
+    );
+    assert_eq!(
+        image[0x01..0x05],
+        [0xEA; 4],
+        "code since placed in the room"
+    );
+    assert_eq!(
+        image[0x05..0x0A],
+        [3; 5],
+        "the table that fits what is left"
+    );
+    assert_eq!(image[0x30..0x39], [2; 9], "the other placed after");
+}

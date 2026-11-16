@@ -84,41 +84,32 @@ impl Unit {
     }
 
     /// The value a store of `precision` converts `a` to, still in the
-    /// internal format; `None` where FPEmulator stores the first word as it
-    /// stands, a zero or an unnormalised `URD` result.
+    /// internal format.
     fn prepared(
         &mut self,
         precision: Precision,
         a: Internal,
         own_denormal: bool,
-    ) -> Result<Option<Internal>, Exception> {
-        if !a.uncommon() {
-            if !a.units() {
-                return Ok(None);
-            }
-            return self.narrowed(precision, a.reduced()).map(Some);
-        }
+    ) -> Result<Internal, Exception> {
         if a.special() {
             if a.infinite() {
-                return Ok(Some(a));
+                return Ok(a);
             }
-            return self.copy_nan(a, precision).map(Some);
+            return self.copy_nan(a, precision);
         }
         if a.is_zero() {
-            return Ok(Some(Internal::zero(a.negative())));
+            return Ok(Internal::zero(a.negative()));
         }
-        if own_denormal {
-            return Ok(Some(a));
+        if a.uncommon() && own_denormal {
+            return Ok(a);
         }
-        self.narrowed(precision, a.number()).map(Some)
+        self.narrowed(precision, a.number())
     }
 
     /// `STFS`.
     pub fn store_single(&mut self, a: Internal) -> Result<u32, Exception> {
         let own = a.units() && a.exponent() != 0x3C00;
-        let Some(v) = self.prepared(Precision::Single, a, own)? else {
-            return Ok(a.head);
-        };
+        let v = self.prepared(Precision::Single, a, own)?;
         let fraction = high(v.mantissa >> 8) & 0x7F_FFFF;
         let sign = v.head & SIGN;
         Ok(if v.units() && !v.uncommon() {
@@ -131,9 +122,7 @@ impl Unit {
     /// `STFD`.
     pub fn store_double(&mut self, a: Internal) -> Result<[u32; 2], Exception> {
         let own = a.units() && a.exponent() != 0x3F80;
-        let Some(v) = self.prepared(Precision::Double, a, own)? else {
-            return Ok([a.head, high(a.mantissa)]);
-        };
+        let v = self.prepared(Precision::Double, a, own)?;
         let high_fraction = high(v.mantissa >> 11) & 0xF_FFFF;
         let low_word = low(v.mantissa >> 11);
         let sign = v.head & SIGN;

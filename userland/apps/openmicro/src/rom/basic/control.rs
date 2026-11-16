@@ -6,8 +6,8 @@
 //! byte in two tables. A return point is the address of the character a
 //! statement ended at.
 
-use tairix_bbcbasic::keyword::word;
-use tairix_bbcbasic::lineref;
+use tairix_openbasic::keyword::word;
+use tairix_openbasic::lineref;
 
 use super::editor::{LINE_NUMBER, RECORD};
 use super::ws::{kind, page, place, zp as z};

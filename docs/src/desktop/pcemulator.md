@@ -288,8 +288,9 @@ differs from them decide.
   leaves a register its result with the exponent moved by 24 576 and refuses
   a memory store. An unmasked exception sets IR, and with interrupts enabled
   raises INT and holds BUSY until it is cleared.
-- **Transcendentals** are computed to 128 bits and rounded once: correctly
-  rounded unless the true value lies within 2^-120 of a boundary. Inside the
+- **Transcendentals** are `lib/softfloat`'s elementary functions, computed to
+  128 bits and rounded once: correctly rounded unless the true value lies
+  within 2^-120 of a boundary. Inside the
   operand ranges the data sheet gives, they answer as the 8087 documents —
   FPTAN its ratio as tan x over one; outside them, where its answer is
   undefined, as the 80387 does.
@@ -1220,8 +1221,8 @@ data sheet.
 
 The 8087's arithmetic is held to independent oracles: IEEE doubles and
 singles for sums, products, quotients and roots rounded to nearest at 53 and
-24 bits, reference rounding of exact 128-bit results at every precision and
-mode, square roots bracketing their radicands, and transcendentals at points
-computed to 80 digits and against the host's double functions across their
-ranges. `fuzz_fpu` runs hostile instruction streams over hostile state and
+24 bits through its own rounding, and transcendentals at points computed to 80
+digits and against the host's double functions across their ranges; the core
+it computes on is held to reference rounding at every precision and mode by
+`lib/softfloat`'s own tests. `fuzz_fpu` runs hostile instruction streams over hostile state and
 memory, and IEEE agreement through the whole instruction path.

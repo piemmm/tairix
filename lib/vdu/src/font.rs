@@ -12,7 +12,7 @@ pub type Glyph = [u8; 8];
 pub const FIRST: u8 = 32;
 
 /// A glyph as it is drawn here: each row eight pixels, `#` ink.
-type Art = [&'static str; 8];
+pub type Art = [&'static str; 8];
 
 /// Designs two characters share.
 #[rustfmt::skip]
@@ -491,10 +491,32 @@ pub static RISC_OS: [Glyph; 224] = glyphs(&ART);
 /// RISC OS's but for the pound sign at 96 and a hatched block at 127.
 pub static BBC: [Glyph; 96] = bbc();
 
+/// Character `code`'s glyph in RISC OS's arrangement, if it is drawn.
+#[must_use]
+pub const fn risc_os_glyph(code: u8) -> Option<&'static Glyph> {
+    within(&RISC_OS, code)
+}
+
+/// Character `code`'s glyph in the BBC's arrangement, if it is drawn.
+#[must_use]
+pub const fn bbc_glyph(code: u8) -> Option<&'static Glyph> {
+    within(&BBC, code)
+}
+
+const fn within(glyphs: &'static [Glyph], code: u8) -> Option<&'static Glyph> {
+    if code < FIRST || (code - FIRST) as usize >= glyphs.len() {
+        return None;
+    }
+    Some(&glyphs[(code - FIRST) as usize])
+}
+
+/// `art`'s glyph, for a table built as the program compiles.
+///
 /// # Panics
 ///
 /// At compile time, where a row is not eight pixels of `#` and `.`.
-const fn glyph(art: Art) -> Glyph {
+#[must_use]
+pub const fn draw(art: Art) -> Glyph {
     let mut glyph = [0; 8];
     let mut y = 0;
     while y < 8 {
@@ -519,7 +541,7 @@ const fn glyphs<const N: usize>(art: &[Art; N]) -> [Glyph; N] {
     let mut glyphs = [[0; 8]; N];
     let mut i = 0;
     while i < N {
-        glyphs[i] = glyph(art[i]);
+        glyphs[i] = draw(art[i]);
         i += 1;
     }
     glyphs
@@ -529,11 +551,11 @@ const fn bbc() -> [Glyph; 96] {
     let mut glyphs = [[0; 8]; 96];
     let mut i = 0;
     while i < 96 {
-        glyphs[i] = glyph(ART[i]);
+        glyphs[i] = draw(ART[i]);
         i += 1;
     }
-    glyphs[(b'`' - FIRST) as usize] = glyph(POUND);
-    glyphs[(127 - FIRST) as usize] = glyph(HATCHED);
+    glyphs[(b'`' - FIRST) as usize] = draw(POUND);
+    glyphs[(127 - FIRST) as usize] = draw(HATCHED);
     glyphs
 }
 

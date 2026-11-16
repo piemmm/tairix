@@ -5,7 +5,7 @@ use super::svia;
 use super::ws::{page2, var};
 use crate::machine::bbc::adc::{self, register};
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::{irq, reg};
+use crate::machine::via::{irq, reg};
 use crate::rom::asm::{abs, imm, Asm, RTS};
 use crate::rom::os::event;
 

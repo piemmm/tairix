@@ -20,54 +20,62 @@ struct Split {
 }
 
 /// `args` split as RISC OS splits it: at spaces, an argument opening with `"`
-/// running to its closing quote, `""` within it skipped, quotes kept.
+/// running to its closing quote, `""` within it skipped, quotes kept. A quote
+/// left open takes the CR, LF or NUL it meets as its own last byte, and the
+/// list goes on after it: only a terminator between arguments ends it.
 fn split(args: &[u8]) -> Split {
-    let end = args
-        .iter()
-        .position(|&b| is_terminator(b))
-        .unwrap_or(args.len());
-    let mut ranges = [(end, end); ARGUMENTS + 1];
+    let mut ranges = [(0, 0); ARGUMENTS + 1];
+    let mut found = 0;
     let mut at = 0;
-    for range in &mut ranges[..ARGUMENTS] {
-        while at < end && args[at] == b' ' {
-            at += 1;
+    loop {
+        at += args[at..].iter().take_while(|&&b| b == b' ').count();
+        if is_terminator(byte(args, at)) {
+            break;
         }
         let start = at;
-        if args.get(at) == Some(&b'"') && at < end {
+        if args[at] == b'"' {
             at += 1;
-            while at < end {
-                if args[at] == b'"' {
-                    if args.get(at + 1) == Some(&b'"') {
-                        at += 2;
-                        continue;
+            while at < args.len() {
+                let b = args[at];
+                at += 1;
+                if b == b'"' {
+                    if byte(args, at) != b'"' {
+                        break;
                     }
                     at += 1;
+                } else if is_terminator(b) {
                     break;
                 }
-                at += 1;
             }
         } else {
-            while at < end && args[at] != b' ' {
-                at += 1;
-            }
+            at += args[at..]
+                .iter()
+                .take_while(|&&b| b != b' ' && !is_terminator(b))
+                .count();
         }
-        *range = (start, at);
+        if let Some(range) = ranges.get_mut(found) {
+            *range = (start, at);
+        }
+        found += 1;
     }
-    while at < end && args[at] == b' ' {
-        at += 1;
+    for range in ranges.iter_mut().skip(found) {
+        *range = (at, at);
     }
-    ranges[ARGUMENTS] = (at, end);
+    // Past the tenth, the rest of the line.
+    if found > ARGUMENTS {
+        ranges[ARGUMENTS].1 = at;
+    }
     Split {
         ranges,
-        end,
-        terminator: byte(args, end),
+        end: at,
+        terminator: byte(args, at),
     }
 }
 
 /// `OS_SubstituteArgs32`: `template` with its references to `args` replaced,
 /// then, where `append` holds and no `%*n` appeared, the arguments past the
-/// highest it named; the result ends with the byte that ended `args`, and
-/// holds at most `limit` bytes.
+/// highest it named; the result ends with the byte that ended `args`. It
+/// leaves a byte of its buffer of `room` spare, as RISC OS 5 does.
 ///
 /// `%n` is the nth argument as written, `%*n` the rest of the line from it,
 /// `%%` a `%`; anything else after a `%` is itself.
@@ -75,8 +83,9 @@ pub fn substitute(
     args: &[u8],
     template: &[u8],
     append: bool,
-    limit: usize,
+    room: usize,
 ) -> Result<Vec<u8>, Error> {
+    let limit = room.checked_sub(1).ok_or(Error::BufferOverflow)?;
     let split = split(args);
     let mut out = Vec::new();
     let mut put = |bytes: &[u8]| -> Result<(), Error> {
@@ -92,11 +101,15 @@ pub fn substitute(
     let mut used = 0;
     let mut rest_taken = false;
     let mut at = 0;
-    while let Some(&b) = template.get(at) {
-        at += 1;
-        if b != b'%' {
-            put(&[b])?;
-            continue;
+    while at < template.len() {
+        let literal = template[at..]
+            .iter()
+            .position(|&b| b == b'%')
+            .unwrap_or(template.len() - at);
+        put(&template[at..at + literal])?;
+        at += literal + 1;
+        if at > template.len() {
+            break;
         }
         match template.get(at) {
             None => put(b"%")?,
@@ -182,9 +195,14 @@ mod tests {
         );
         assert_eq!(run(b"ab\"c d\"\r", b"<%0><%1>", false), b"<ab\"c><d\">\r");
         assert_eq!(
-            run(b"\"open\r", b"<%0><%1>", false),
-            b"<\"open><>\r",
-            "an unclosed quote ends with the line"
+            run(b"\"open\rX Y\r", b"<%0><%1>", false),
+            b"<\"open\r><X>\r",
+            "an open quote takes the terminator it meets, and the list goes on"
+        );
+        assert_eq!(
+            run(b"\"open", b"<%0>", false),
+            b"<\"open>\0",
+            "or ends with the text"
         );
     }
 
@@ -211,14 +229,19 @@ mod tests {
     }
 
     #[test]
-    fn a_result_past_its_limit_overflows() {
+    fn a_result_leaves_a_byte_of_its_room_spare() {
         assert_eq!(
-            substitute(b"abc\r", b"%0", false, 3),
+            substitute(b"abc\r", b"%0", false, 4),
             Err(Error::BufferOverflow)
         );
         assert_eq!(
-            substitute(b"abc\r", b"%0", false, 4).map(|o| o.len()),
+            substitute(b"abc\r", b"%0", false, 5).map(|o| o.len()),
             Ok(4)
+        );
+        assert_eq!(
+            substitute(b"\r", b"", false, 0),
+            Err(Error::BufferOverflow),
+            "no room even for the terminator"
         );
     }
 }

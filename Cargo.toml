@@ -111,7 +111,7 @@ members = [
     "lib/image",
     "lib/softfloat",
     "lib/obey",
-    "lib/bbcbasic",
+    "lib/openbasic",
     "lib/vdu",
     "lib/sound",
     "lib/soundtheme",
@@ -848,15 +848,21 @@ opt-level = 3
 [profile.dev.package.tairix-openmicro]
 opt-level = 3
 
-# The patience solver searches tens of thousands of positions after every
-# move and more for each hint and deal, so at `opt-level = 1` a debug image's
-# hints and winnable deals would measure the profile, not the search.
 # The emulated ARM runs tens of millions of guest instructions a second, each
 # one fetched, decoded through its page's slots and executed, so at
 # `opt-level = 1` a debug image would measure the profile, not the processor.
 [profile.dev.package.tairix-riscos-arm]
 opt-level = 3
 
+# The emulated x87, FPA, VFP and Advanced SIMD compute every floating-point
+# result here, so at `opt-level = 1` a debug image's arithmetic would measure
+# the profile, not the operations.
+[profile.dev.package.tairix-softfloat]
+opt-level = 3
+
+# The patience solver searches tens of thousands of positions after every
+# move and more for each hint and deal, so at `opt-level = 1` a debug image's
+# hints and winnable deals would measure the profile, not the search.
 [profile.dev.package.tairix-patience]
 opt-level = 3
 

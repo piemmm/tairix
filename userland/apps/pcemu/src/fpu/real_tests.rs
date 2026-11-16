@@ -3,21 +3,21 @@ use super::*;
 #[test]
 fn each_class_is_told_by_its_bits() {
     let cases = [
-        (Real::ZERO, Class::Zero),
-        (Real::ONE, Class::Normal),
+        (Extended::ZERO, Class::Zero),
+        (Extended::ONE, Class::Normal),
         (
-            Real::new(true, 0x3FFF, 0x4000_0000_0000_0000),
+            Extended::new(true, 0x3FFF, 0x4000_0000_0000_0000),
             Class::Unnormal,
         ),
-        (Real::new(false, 0x1234, 0), Class::PseudoZero),
-        (Real::new(false, 0, 1), Class::Denormal),
+        (Extended::new(false, 0x1234, 0), Class::PseudoZero),
+        (Extended::new(false, 0, 1), Class::Denormal),
         // A pseudo-denormal is a denormal: its exponent field is zero.
-        (Real::new(false, 0, INTEGER), Class::Denormal),
-        (Real::INFINITY, Class::Infinity),
+        (Extended::new(false, 0, INTEGER), Class::Denormal),
+        (Extended::INFINITY, Class::Infinity),
         // The 8087 reads the special exponent's fraction, not its integer
         // bit.
-        (Real::new(false, EXP_SPECIAL, 0), Class::Infinity),
-        (Real::new(false, EXP_SPECIAL, 1), Class::Nan),
+        (Extended::new(false, EXP_SPECIAL, 0), Class::Infinity),
+        (Extended::new(false, EXP_SPECIAL, 1), Class::Nan),
         (INDEFINITE, Class::Nan),
     ];
     for (x, want) in cases {
@@ -27,35 +27,38 @@ fn each_class_is_told_by_its_bits() {
 
 #[test]
 fn ten_bytes_hold_the_value_low_first() {
-    let x = Real::new(true, 0x4000, 0xC90F_DAA2_2168_C234);
+    let x = Extended::new(true, 0x4000, 0xC90F_DAA2_2168_C234);
     let bytes = x.to_bytes();
     assert_eq!(
         bytes,
         [0x34, 0xC2, 0x68, 0x21, 0xA2, 0xDA, 0x0F, 0xC9, 0x00, 0xC0]
     );
-    assert_eq!(Real::from_bytes(bytes), x);
+    assert_eq!(Extended::from_bytes(bytes), x);
 }
 
 #[test]
 fn integers_load_exactly() {
-    assert_eq!(Real::from_int(0), Real::ZERO);
-    assert_eq!(Real::from_int(1), Real::ONE);
+    assert_eq!(Extended::from_int(0), Extended::ZERO);
+    assert_eq!(Extended::from_int(1), Extended::ONE);
     assert_eq!(
-        Real::from_int(-3),
-        Real::new(true, 0x4000, 0xC000_0000_0000_0000)
+        Extended::from_int(-3),
+        Extended::new(true, 0x4000, 0xC000_0000_0000_0000)
     );
     assert_eq!(
-        Real::from_int(i64::MIN),
-        Real::new(true, 0x3FFF + 63, INTEGER)
+        Extended::from_int(i64::MIN),
+        Extended::new(true, 0x3FFF + 63, INTEGER)
     );
     assert_eq!(
-        Real::from_int(i64::MAX),
-        Real::new(false, 0x3FFF + 62, u64::MAX << 1)
+        Extended::from_int(i64::MAX),
+        Extended::new(false, 0x3FFF + 62, u64::MAX << 1)
     );
-    assert_eq!(Real::from_magnitude(true, 0), Real::ZERO.with_sign(true));
     assert_eq!(
-        Real::from_magnitude(false, u64::MAX),
-        Real::new(false, 0x3FFF + 63, u64::MAX)
+        Extended::from_magnitude(true, 0),
+        Extended::ZERO.with_sign(true)
+    );
+    assert_eq!(
+        Extended::from_magnitude(false, u64::MAX),
+        Extended::new(false, 0x3FFF + 63, u64::MAX)
     );
 }
 
@@ -63,16 +66,19 @@ fn integers_load_exactly() {
 fn packed_decimal_loads_its_eighteen_digits_and_sign() {
     // -123456789012345678.
     let bytes = [0x78, 0x56, 0x34, 0x12, 0x90, 0x78, 0x56, 0x34, 0x12, 0x80];
-    assert_eq!(from_bcd(bytes), Real::from_int(-123_456_789_012_345_678));
+    assert_eq!(
+        from_bcd(bytes),
+        Extended::from_int(-123_456_789_012_345_678)
+    );
     let mut negative_zero = [0u8; 10];
     negative_zero[9] = 0x80;
-    assert_eq!(from_bcd(negative_zero), Real::ZERO.with_sign(true));
+    assert_eq!(from_bcd(negative_zero), Extended::ZERO.with_sign(true));
     // A nibble past 9 counts its own value; the sign byte's pad is
     // ignored.
     let mut odd = [0u8; 10];
     odd[0] = 0x0F;
     odd[9] = 0x7F;
-    assert_eq!(from_bcd(odd), Real::from_int(15));
+    assert_eq!(from_bcd(odd), Extended::from_int(15));
 }
 
 #[test]
@@ -89,21 +95,21 @@ fn binary_reals_load_exactly_a_denormal_as_its_unnormal() {
     }
     let (x, denormal) = from_double(1);
     assert!(denormal);
-    assert_eq!(x, Real::new(false, 0x3FFF - 1022, 1 << 11));
+    assert_eq!(x, Extended::new(false, 0x3FFF - 1022, 1 << 11));
     assert_eq!(class(x), Class::Unnormal);
     let (x, denormal) = from_single(0x0040_0000);
     assert!(denormal);
-    assert_eq!(x, Real::new(false, 0x3FFF - 126, 1 << 62));
+    assert_eq!(x, Extended::new(false, 0x3FFF - 126, 1 << 62));
     let (x, denormal) = from_single(0x8000_0000);
     assert!(!denormal);
-    assert_eq!(x, Real::ZERO.with_sign(true));
+    assert_eq!(x, Extended::ZERO.with_sign(true));
     let (x, _) = from_single(0x7F80_0000);
-    assert_eq!(x, Real::INFINITY);
+    assert_eq!(x, Extended::INFINITY);
     // A NaN keeps its fraction at the top, integer bit set.
     let (x, _) = from_single(0xFFC0_0001);
     assert_eq!(
         x,
-        Real::new(true, EXP_SPECIAL, INTEGER | (1 << 62) | (1 << 40))
+        Extended::new(true, EXP_SPECIAL, INTEGER | (1 << 62) | (1 << 40))
     );
 }
 

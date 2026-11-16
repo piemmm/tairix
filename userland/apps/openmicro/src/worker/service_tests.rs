@@ -8,7 +8,8 @@ use super::*;
 use crate::machine::electron::keyboard::Key as ElectronKey;
 use crate::machine::Model;
 use crate::media::disc::ImageFormat;
-use crate::media::tape::Tone;
+use crate::media::tape::{Tape, Tone};
+use crate::worker::protocol::DiscFormat;
 use crate::worker::protocol::{Configuration, Reply, Request, Slot, MAX_SLICE, SLOTS};
 
 /// A tape holding nothing.
@@ -114,11 +115,7 @@ impl Rig {
         let mut recorded = Tape::default();
         recorded.push(Tone::High, 1000).expect("a tone");
         tape.record_over(0, &recorded).expect("recorded");
-        self.service
-            .machine
-            .as_mut()
-            .expect("a machine")
-            .insert_tape(tape);
+        self.model_b().insert_tape(tape);
     }
 
     /// Drive 0's disc replaced by one with a track written.
@@ -140,7 +137,7 @@ fn media(reply: &[u8]) -> Media<'_> {
 fn insert(image: &[u8]) -> Request<'_> {
     Request::InsertDisc {
         drive: PhysicalDrive::Zero,
-        format: ImageFormat::Ssd,
+        format: DiscFormat::Acorn(ImageFormat::Ssd),
         write_protected: false,
         image,
     }
@@ -324,7 +321,10 @@ fn a_written_disc_is_handed_over_whatever_takes_it_out() {
         "kept across a rebuild, and still unsaved when its drive was not asked for"
     );
     assert_eq!(collected.discs[0].drive, PhysicalDrive::Zero);
-    assert_eq!(collected.discs[0].format, ImageFormat::Ssd);
+    assert_eq!(
+        collected.discs[0].format,
+        DiscFormat::Acorn(ImageFormat::Ssd)
+    );
     assert_eq!(collected.tape, None);
     let image = collected.discs[0].image.to_vec();
     assert_eq!(
@@ -363,10 +363,9 @@ fn a_restore_hands_over_the_media_it_replaces() {
     let taken = media(&reply);
     assert_eq!(taken.discs.len(), 1, "the written disc");
     assert!(taken.tape.is_some(), "the recorded tape");
-    let disc_out = rig.model_b().disc(PhysicalDrive::Zero).is_none();
-    let machine = rig.service.machine.as_mut().expect("a machine");
+    let machine = rig.model_b();
     assert!(
-        disc_out && machine.tape().is_none(),
+        machine.disc(PhysicalDrive::Zero).is_none() && machine.tape().is_none(),
         "the snapshot's empty drives"
     );
 }
@@ -584,4 +583,280 @@ fn a_slices_sound_is_its_cycles_whatever_the_last_instruction_overruns_by() {
         delivered.abs_diff(exact) <= 2,
         "{delivered} samples for {exact}"
     );
+}
+
+mod commodore {
+    use super::*;
+    use crate::firmware::{
+        C1541_DOS_IMAGE, C64_BASIC_IMAGE, C64_CHARACTER_IMAGE, C64_KERNAL_IMAGE,
+    };
+    use crate::machine::c64::keyboard::Keycap;
+    use crate::machine::c64::{self, joystick, sid, Standard};
+    use crate::media::c1541::d64;
+    use crate::worker::protocol::{Change, DeckKey, ModelKey, Refusal};
+
+    const PAL_SECOND: u32 = 985_248;
+
+    fn configure(rig: &mut Rig, standard: Standard, drives: [bool; 2]) -> Vec<u8> {
+        rig.ask(&Request::Configure(Box::new(Configuration::C64 {
+            standard,
+            sid: sid::Model::Mos8580,
+            kernal: C64_KERNAL_IMAGE,
+            basic: C64_BASIC_IMAGE,
+            character: C64_CHARACTER_IMAGE,
+            drives: drives.map(|fitted| fitted.then_some(C1541_DOS_IMAGE)),
+        })))
+    }
+
+    fn rig(drives: [bool; 2]) -> Rig {
+        let mut rig = Rig::new();
+        let reply = configure(&mut rig, Standard::Pal, drives);
+        assert_eq!(Reply::decode(&reply), Ok(Reply::Done));
+        rig
+    }
+
+    fn machine(rig: &mut Rig) -> &mut c64::Machine {
+        match rig.service.machine.as_mut() {
+            Some(Machine::C64(machine)) => machine,
+            _ => panic!("a Commodore 64"),
+        }
+    }
+
+    fn refused(reply: &[u8]) -> Refusal {
+        match Reply::decode(reply) {
+            Ok(Reply::Refused(refusal)) => refusal,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    fn ran(reply: &[u8]) -> Ran<'_> {
+        match Reply::decode(reply) {
+            Ok(Reply::Ran(ran)) => ran,
+            other => panic!("not a slice: {other:?}"),
+        }
+    }
+
+    fn disk(format: DiscFormat, image: &[u8]) -> Request<'_> {
+        Request::InsertDisc {
+            drive: PhysicalDrive::Zero,
+            format,
+            write_protected: false,
+            image,
+        }
+    }
+
+    #[test]
+    fn a_commodore_runs_a_second_of_its_own_cycles_and_sounds_at_the_output_rate() {
+        let mut rig = rig([false; 2]);
+        let slice = ran(&rig.ask(&run(PAL_SECOND, true))).sound.len() / SAMPLE_BYTES;
+        assert!(
+            (47_500..=48_002).contains(&slice),
+            "a second's sound, the resampler's start aside: {slice}"
+        );
+        assert_eq!(
+            refused(&rig.ask(&run(PAL_SECOND + 1, false))),
+            Refusal::Model,
+            "past a second of its own"
+        );
+        let reply = rig.ask(&run(1000, false));
+        let lit = ran(&reply);
+        assert_eq!(
+            (lit.lights.caps_lock, lit.lights.shift_lock),
+            (false, false)
+        );
+    }
+
+    /// Past the resampler's start, an NTSC machine's slices carry exactly
+    /// the sound their cycles make, at a ratio no small denominator holds.
+    #[test]
+    fn an_ntsc_commodore_s_samples_are_its_cycles() {
+        let mut rig = Rig::new();
+        configure(&mut rig, Standard::Ntsc, [false; 2]);
+        let (warming, slices, cycles) = (100, 300, 997);
+        let mut samples = 0;
+        for slice in 0..warming + slices {
+            let length = ran(&rig.ask(&run(cycles, true))).sound.len() / SAMPLE_BYTES;
+            if slice >= warming {
+                samples += length;
+            }
+        }
+        let exact =
+            u64::from(cycles) * slices * u64::from(SAMPLE_RATE) / Standard::Ntsc.timing().clock();
+        let delivered = u64::try_from(samples).expect("a count");
+        assert!(
+            delivered.abs_diff(exact) <= 2,
+            "{delivered} samples for {exact}"
+        );
+    }
+
+    #[test]
+    fn a_commodore_s_drive_takes_its_disks_and_hands_back_one_written() {
+        let mut rig = rig([true, false]);
+        let image = d64::formatted(b"GAMES", *b"GA");
+        assert!(media(&rig.ask(&disk(DiscFormat::D64, &image)))
+            .discs
+            .is_empty());
+        assert_eq!(
+            refused(&rig.ask(&disk(DiscFormat::Acorn(ImageFormat::Ssd), &image))),
+            Refusal::Model,
+            "an Acorn's"
+        );
+        assert_eq!(
+            refused(&rig.ask(&disk(DiscFormat::D64, &image[1..]))),
+            Refusal::Disc
+        );
+        let unfitted = Request::InsertDisc {
+            drive: PhysicalDrive::One,
+            format: DiscFormat::D64,
+            write_protected: false,
+            image: &image,
+        };
+        assert_eq!(refused(&rig.ask(&unfitted)), Refusal::Model, "device 9");
+        let track = machine(&mut rig)
+            .drive_mut(c64::drive::Unit::Eight)
+            .and_then(c64::drive::Drive::disk_mut)
+            .and_then(|disk| disk.track_to_write(0, 3))
+            .expect("track 1");
+        let bit = track.bit(8 * 100);
+        track.set_bit(8 * 100, !bit);
+        let reply = rig.ask(&Request::CollectDiscs([true, false]));
+        let collected = media(&reply);
+        assert_eq!(collected.discs.len(), 1);
+        assert_eq!(
+            collected.discs[0].format,
+            DiscFormat::G64,
+            "no sector dump holds it now"
+        );
+        assert!(media(&rig.ask(&Request::CollectDiscs([true, false])))
+            .discs
+            .is_empty());
+        let reply = rig.ask(&run(1000, false));
+        assert_eq!(ran(&reply).loaded.discs, [true, false]);
+    }
+
+    #[test]
+    fn a_configure_leaving_a_disk_without_its_drive_is_refused() {
+        let mut rig = rig([true, false]);
+        let image = d64::formatted(b"KEEP", *b"KP");
+        rig.ask(&disk(DiscFormat::D64, &image));
+        let reply = configure(&mut rig, Standard::Pal, [false; 2]);
+        assert_eq!(refused(&reply), Refusal::Model);
+        assert!(
+            machine(&mut rig)
+                .drive(c64::drive::Unit::Eight)
+                .and_then(c64::drive::Drive::disk)
+                .is_some(),
+            "the disk still in its drive"
+        );
+        let reply = configure(&mut rig, Standard::Ntsc, [true, true]);
+        assert_eq!(Reply::decode(&reply), Ok(Reply::Done), "a drive kept");
+        assert_eq!(
+            ran(&rig.ask(&run(1_022_727, false))).cycles,
+            1_022_727,
+            "an NTSC second now"
+        );
+    }
+
+    #[test]
+    fn a_commodore_takes_its_tapes_deck_keys_cartridges_and_programs() {
+        let mut rig = rig([false; 2]);
+        let mut tap = Vec::from(&b"C64-TAPE-RAW"[..]);
+        tap.extend([1, 0, 0, 0, 1, 0, 0, 0, 0x30]);
+        assert!(media(&rig.ask(&Request::InsertTape(&tap))).tape.is_none());
+        assert_eq!(
+            refused(&rig.ask(&Request::InsertTape(BLANK_TAPE))),
+            Refusal::Tape
+        );
+        assert_eq!(
+            refused(&rig.ask(&Request::RecordTape(true))),
+            Refusal::Model
+        );
+        assert_eq!(
+            Reply::decode(&rig.ask(&Request::Deck(DeckKey::Play))),
+            Ok(Reply::Done)
+        );
+        assert!(ran(&rig.ask(&run(1000, false))).loaded.playing);
+        rig.ask(&Request::Deck(DeckKey::Stop));
+        assert!(!ran(&rig.ask(&run(1000, false))).loaded.playing);
+        let crt = crate::media::crt::tests::image(0, 0, 1, &[(0, 0x8000, &[0x55; 0x2000])]);
+        assert_eq!(
+            Reply::decode(&rig.ask(&Request::InsertCartridge(&crt))),
+            Ok(Reply::Done)
+        );
+        assert!(ran(&rig.ask(&run(1000, false))).loaded.cartridge);
+        assert_eq!(
+            refused(&rig.ask(&Request::InsertCartridge(&crt[1..]))),
+            Refusal::Cartridge
+        );
+        rig.ask(&Request::RemoveCartridge);
+        assert!(!ran(&rig.ask(&run(1000, false))).loaded.cartridge);
+        assert_eq!(
+            Reply::decode(&rig.ask(&Request::LoadProgram(&[0x00, 0xC0, 0xAB]))),
+            Ok(Reply::Done)
+        );
+        assert_eq!(machine(&mut rig).ram(0xC000), 0xAB);
+        assert_eq!(
+            refused(&rig.ask(&Request::LoadProgram(&[0x00]))),
+            Refusal::Program
+        );
+    }
+
+    #[test]
+    fn a_commodore_takes_its_own_keys_and_joysticks_and_no_break() {
+        let mut rig = rig([false; 2]);
+        let restore = Change::Key(ModelKey::C64(Keycap::Restore), true);
+        let stick = Change::Joystick(1, joystick::FIRE);
+        let at = |change| Input { at: 0, change };
+        assert!(matches!(
+            Reply::decode(&rig.run_with(alloc::vec![at(restore), at(stick)])),
+            Ok(Reply::Ran(_))
+        ));
+        assert_eq!(
+            refused(&rig.run_with(alloc::vec![at(Change::Break(true))])),
+            Refusal::Model
+        );
+        assert_eq!(
+            refused(&rig.run_with(alloc::vec![at(Change::Fire(1))])),
+            Refusal::Model
+        );
+        let mut model_b = Rig::configured();
+        assert_eq!(
+            refused(&model_b.run_with(alloc::vec![at(stick)])),
+            Refusal::Model,
+            "a Model B has no joystick port"
+        );
+    }
+
+    #[test]
+    fn a_restore_hands_back_the_written_disk_and_the_recorded_tape() {
+        let mut rig = rig([true, false]);
+        let image = d64::formatted(b"GAMES", *b"GA");
+        rig.ask(&disk(DiscFormat::D64, &image));
+        let mut tap = Vec::from(&b"C64-TAPE-RAW"[..]);
+        tap.extend([1, 0, 0, 0, 0, 0, 0, 0]);
+        rig.ask(&Request::InsertTape(&tap));
+        let reply = rig.ask(&Request::TakeSnapshot);
+        let snapshot = match Reply::decode(&reply) {
+            Ok(Reply::Snapshot(snapshot)) => snapshot.to_vec(),
+            other => panic!("no snapshot: {other:?}"),
+        };
+        let machine = machine(&mut rig);
+        let track = machine
+            .drive_mut(c64::drive::Unit::Eight)
+            .and_then(c64::drive::Drive::disk_mut)
+            .and_then(|disk| disk.track_to_write(0, 3))
+            .expect("track 1");
+        let last = track.len() - 1;
+        track.set_bit(last, false);
+        let mut recorded = crate::media::tap::decode(&tap).expect("a TAP");
+        recorded.record(0, &[0x180, 0x180]);
+        machine.insert_tape(recorded);
+        let reply = rig.ask(&Request::RestoreSnapshot(&snapshot));
+        let taken = media(&reply);
+        assert_eq!(taken.discs.len(), 1, "the written disk");
+        assert_eq!(taken.discs[0].format, DiscFormat::D64);
+        let tape =
+            crate::media::tap::decode(taken.tape.expect("the recorded tape")).expect("a TAP image");
+        assert_eq!(tape.pulses(), [0x180, 0x180]);
+    }
 }

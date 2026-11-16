@@ -1,7 +1,8 @@
-//! A machine's settings (`plans/BEEB.md` §5): a dialog window's client of its
-//! name, its ROMs — the Electron's Plus 1 with them — the Model B's start-up
-//! links, and its sound and tape loading. What is fitted is read-only unless
-//! the machine is off; the rest may change while it runs.
+//! A machine's settings (`plans/BEEB.md` §5, `plans/C64.md` §6): a dialog
+//! window's client of its name, its ROMs — the Electron's Plus 1 with them,
+//! and a C64's standard, SID and drives — the Model B's start-up links, a
+//! C64's keypad joystick, and its sound and tape loading. What is fitted is
+//! read-only unless the machine is off; the rest may change while it runs.
 //!
 //! A ROM socket's list ends with *Install an image…*, which the dialog does
 //! not answer: it says which socket is waiting, and the image installed is
@@ -22,7 +23,10 @@ use tairix_machines::Standing;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use super::library::{Fitting, Image, Machine, Socket, FULL_VOLUME};
+use super::library::{
+    Fitting, Image, Joystick, Machine, Shipped, Socket, FULL_VOLUME, JOYSTICKS, SIDS, STANDARDS,
+};
+use crate::machine::c64::{sid, Standard};
 
 /// The dialog's title, which the desktop's frame carries.
 pub const TITLE: &str = "Machine Settings";
@@ -39,6 +43,11 @@ mod at {
     pub const MACHINE: usize = 0;
     pub const NAME: usize = 0;
     pub const PLUS1: usize = 1;
+    pub const STANDARD: usize = 1;
+    pub const SID: usize = 2;
+    /// Device 8's drive, then device 9's.
+    pub const DRIVES: usize = 3;
+    pub const JOYSTICK: usize = 5;
     pub const ROMS: usize = 1;
     pub const LINKS: usize = 2;
     pub const MODE: usize = 0;
@@ -59,6 +68,8 @@ pub struct Choices {
     pub volume: u16,
     /// Whether a tape loads as fast as the machine can run.
     pub fast_tape: bool,
+    /// Where a C64's keypad plays a joystick.
+    pub joystick: Joystick,
 }
 
 /// What the dialog answers.
@@ -105,13 +116,23 @@ fn socket_row(socket: Socket, fitted: &Image, installed: &[String]) -> FieldRow 
 }
 
 /// Each ROM row's socket, what it shows and whether the machine has it: every
-/// socket it has, then an Electron's Plus 1 ones while it has none, as a
-/// fitted one would hold them, so the dialog keeps its height.
+/// socket it has, an Electron's Plus 1 ones while it has none and a C64's
+/// drives' while unfitted, as fitted ones would hold them, so the dialog
+/// keeps its height.
 fn rom_sockets(fitting: &Fitting) -> Vec<(Socket, Image, bool)> {
-    let mut rows: Vec<(Socket, Image, bool)> = fitting
-        .sockets()
-        .map(|(socket, image)| (socket, image.clone(), true))
-        .collect();
+    let present = |(socket, image): (Socket, &Image)| (socket, image.clone(), true);
+    if let Fitting::C64 { drives, .. } = fitting {
+        let roms = fitting
+            .sockets()
+            .filter(|(socket, _)| !matches!(socket, Socket::Dos(_)))
+            .map(present);
+        let dos = drives.iter().zip(0u8..).map(|(dos, n)| {
+            let shown = dos.clone().unwrap_or(Image::Shipped(Shipped::C1541Dos));
+            (Socket::Dos(n), shown, dos.is_some())
+        });
+        return roms.chain(dos).collect();
+    }
+    let mut rows: Vec<(Socket, Image, bool)> = fitting.sockets().map(present).collect();
     if let Fitting::Electron { plus1: None, .. } = fitting {
         let absent = Fitting::electron(true);
         let plus1 = absent
@@ -139,6 +160,76 @@ fn rom_rows(fitting: &Fitting, installed: &[String], locked: bool) -> Vec<FieldR
         .collect()
 }
 
+/// The MACHINE group's rows: the name, what the model is made with — an
+/// Electron's Plus 1, a C64's standard, SID and drives — and a C64's keypad
+/// joystick.
+fn machine_rows(choices: &Choices) -> Vec<FieldRow> {
+    let name = TextField::new()
+        .with_text(&choices.name)
+        .with_max_len(MAX_NAME);
+    let mut rows = vec![FieldRow::new("Name", FieldControl::Text(name))];
+    match &choices.fitting {
+        Fitting::ModelB { .. } => {}
+        Fitting::Electron { plus1, .. } => {
+            rows.push(FieldRow::toggle("Plus 1", plus1.is_some()));
+        }
+        Fitting::C64 {
+            standard,
+            sid,
+            drives,
+            ..
+        } => {
+            rows.push(FieldRow::choice(
+                "Standard",
+                &STANDARDS,
+                index_of(&Standard::ALL, standard),
+            ));
+            rows.push(FieldRow::choice(
+                "SID",
+                &SIDS,
+                index_of(&sid::Model::ALL, sid),
+            ));
+            rows.push(FieldRow::toggle("Drive 8", drives[0].is_some()));
+            rows.push(FieldRow::toggle("Drive 9", drives[1].is_some()));
+            rows.push(
+                FieldRow::choice(
+                    "Keypad joystick",
+                    &JOYSTICKS,
+                    index_of(&Joystick::ALL, &choices.joystick),
+                )
+                .with_description("The numeric keypad's arrows move it, 0 and 5 fire."),
+            );
+        }
+    }
+    rows
+}
+
+/// `column` with what is fitted disabled: the rows the model is made with,
+/// and a Model B's links.
+fn lock_fitting(column: &mut FieldColumn, fitting: &Fitting) {
+    let (fitted, links) = match fitting {
+        Fitting::ModelB { .. } => (0..0, true),
+        Fitting::Electron { .. } => (at::PLUS1..at::PLUS1 + 1, false),
+        Fitting::C64 { .. } => (at::STANDARD..at::JOYSTICK, false),
+    };
+    let groups = column.groups_mut();
+    if let Some(machine) = groups.get_mut(at::MACHINE) {
+        for row in machine
+            .rows_mut()
+            .iter_mut()
+            .take(fitted.end)
+            .skip(fitted.start)
+        {
+            row.set_state(ControlState::disabled());
+        }
+    }
+    if let Some(group) = groups.get_mut(at::LINKS).filter(|_| links) {
+        for row in group.rows_mut() {
+            row.set_state(ControlState::disabled());
+        }
+    }
+}
+
 impl Settings {
     /// The settings of `machine`, which stands as `standing` says, offering
     /// the `installed` images: what is fitted read-only unless it is off.
@@ -150,18 +241,13 @@ impl Settings {
             fitting: machine.fitting.clone(),
             volume: machine.volume,
             fast_tape: machine.fast_tape,
+            joystick: machine.joystick,
         };
-        let name = TextField::new()
-            .with_text(&choices.name)
-            .with_max_len(MAX_NAME);
-        let mut machine_rows = vec![FieldRow::new("Name", FieldControl::Text(name))];
-        let mut groups = Vec::new();
-        if let Fitting::Electron { plus1, .. } = &choices.fitting {
-            machine_rows.push(FieldRow::toggle("Plus 1", plus1.is_some()));
-        }
-        groups.push(FieldGroup::new("MACHINE", machine_rows));
         let roms = rom_rows(&choices.fitting, &installed, locked.is_some());
-        groups.push(FieldGroup::new("ROMS", roms));
+        let mut groups = vec![
+            FieldGroup::new("MACHINE", machine_rows(&choices)),
+            FieldGroup::new("ROMS", roms),
+        ];
         if let Fitting::ModelB { links, .. } = &choices.fitting {
             groups.push(FieldGroup::new(
                 "KEYBOARD LINKS",
@@ -182,16 +268,7 @@ impl Settings {
         ));
         let mut column = FieldColumn::new(groups);
         if locked.is_some() {
-            let model_b = matches!(choices.fitting, Fitting::ModelB { .. });
-            let groups = column.groups_mut();
-            if let Some(plus1) = groups[at::MACHINE].rows_mut().get_mut(at::PLUS1) {
-                plus1.set_state(ControlState::disabled());
-            }
-            if let Some(links) = groups.get_mut(at::LINKS).filter(|_| model_b) {
-                for row in links.rows_mut() {
-                    row.set_state(ControlState::disabled());
-                }
-            }
+            lock_fitting(&mut column, &choices.fitting);
         }
         let actions = vec![
             Button::labelled("Cancel"),
@@ -308,7 +385,17 @@ impl Settings {
                 self.choices.fast_tape = *on;
                 self.form.show_toggle((group, row), *on, looks, damage);
             }
+            (at::MACHINE, at::JOYSTICK, FieldAction::Selected { index })
+                if matches!(self.choices.fitting, Fitting::C64 { .. }) =>
+            {
+                if let Some(&joystick) = Joystick::ALL.get(*index) {
+                    self.choices.joystick = joystick;
+                }
+            }
             _ if self.locked.is_some() => {}
+            (at::MACHINE, row, action) if matches!(self.choices.fitting, Fitting::C64 { .. }) => {
+                self.refit_c64((row, action), looks, damage);
+            }
             (at::MACHINE, at::PLUS1, FieldAction::Set { on }) => {
                 if let Fitting::Electron { os, basic, .. } = &self.choices.fitting {
                     let mut fitting = Fitting::electron(*on);
@@ -339,6 +426,47 @@ impl Settings {
                         _ => {}
                     }
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// A C64's standard, SID or drive changed on row `row` of the machine's
+    /// rows.
+    fn refit_c64(
+        &mut self,
+        (row, action): (usize, &FieldAction),
+        looks: (Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        let Fitting::C64 {
+            standard,
+            sid,
+            drives,
+            ..
+        } = &mut self.choices.fitting
+        else {
+            return;
+        };
+        match (row, action) {
+            (at::STANDARD, FieldAction::Selected { index }) => {
+                if let Some(&chosen) = Standard::ALL.get(*index) {
+                    *standard = chosen;
+                }
+            }
+            (at::SID, FieldAction::Selected { index }) => {
+                if let Some(&chosen) = sid::Model::ALL.get(*index) {
+                    *sid = chosen;
+                }
+            }
+            (row, FieldAction::Set { on }) => {
+                let Some(dos) = row.checked_sub(at::DRIVES).and_then(|n| drives.get_mut(n)) else {
+                    return;
+                };
+                *dos = on.then(|| dos.clone().unwrap_or(Image::Shipped(Shipped::C1541Dos)));
+                self.form
+                    .show_toggle((at::MACHINE, row), *on, looks, damage);
+                self.relist(looks, damage);
             }
             _ => {}
         }
@@ -377,6 +505,13 @@ impl Settings {
         roms.adopt_focus(roms.focus());
         damage.add(place.bounds);
     }
+}
+
+/// `value`'s place among `all`, the first where it has none.
+fn index_of<T: PartialEq>(all: &[T], value: &T) -> usize {
+    all.iter()
+        .position(|candidate| candidate == value)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

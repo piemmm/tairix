@@ -298,16 +298,28 @@ fn urd_leaves_an_integer_unnormalised_and_nrm_finishes_it() {
 }
 
 #[test]
-fn rmf_is_the_remainder_of_the_quotient_rounded_to_even() {
-    let (remainder, raised) = dyadic(FpaDyadicOp::Rmf, E, NEAREST, SEVEN, TWO);
+fn an_unnormal_is_taken_at_its_value_anywhere_but_nrm() {
+    // 1 + 2^-20 with eight leading zeros, as only URD leaves a register.
+    let unnormal = Internal {
+        head: 0x3FFF + 8,
+        mantissa: 1 << 55 | 1 << 35,
+    }
+    .words();
+    let one_and_a_bit = [0x3FFF, 0x8000_0800, 0];
     assert_eq!(
-        (remainder, raised),
-        ([0x8000_3FFF, 0x8000_0000, 0], 0),
-        "7 - 2×4"
+        monadic(FpaMonadicOp::Mvf, Precision::Single, unnormal),
+        (one_and_a_bit, 0)
     );
-    let five = [0x4001, 0xA000_0000, 0];
-    let (remainder, _) = dyadic(FpaDyadicOp::Rmf, E, NEAREST, five, TWO);
-    assert_eq!(remainder, ONE, "5 - 2×2");
+    let mut fpa = fpa(&[(1, unnormal)], 0);
+    assert_eq!(fpa.store(Format::Single, 1), Ok([0x3F80_0008, 0, 0, 0]));
+    // 2.5 with a leading zero: rounded to even.
+    let two_and_a_half = [0x3FFF + 2, 0x5000_0000, 0];
+    assert_eq!(monadic(FpaMonadicOp::Rnd, E, two_and_a_half).0, TWO);
+    // A zero stays one whichever way RND rounds.
+    let mut fpa = self::fpa(&[(1, ZERO)], 0);
+    fpa.monadic(FpaMonadicOp::Rnd, E, Rounding::PlusInfinity, 0, F1)
+        .expect("no trap enabled");
+    assert_eq!(fpa.register(0).words(), ZERO);
 }
 
 #[test]
@@ -319,36 +331,323 @@ fn the_transcendental_functions_are_exact_where_their_values_are() {
         (FpaMonadicOp::Exp, ZERO, ONE),
         (FpaMonadicOp::Sin, ZERO, ZERO),
         (FpaMonadicOp::Cos, ZERO, ONE),
+        (FpaMonadicOp::Acs, ONE, ZERO),
         (FpaMonadicOp::Atn, ZERO, ZERO),
     ] {
         assert_eq!(monadic(op, E, argument), (expected, 0), "{op:?}");
     }
+    // Every power of ten an extended value holds.
+    let mut ten_to = 1u128;
+    for n in 1..=27u32 {
+        ten_to *= 10;
+        let lead = ten_to.ilog2();
+        let mantissa = u64::try_from(ten_to << (127 - lead) >> 64).expect("the top 64 bits");
+        let argument = Internal {
+            head: 0x3FFF + lead,
+            mantissa,
+        }
+        .words();
+        let (log, raised) = monadic(FpaMonadicOp::Log, E, argument);
+        let lead = n.ilog2();
+        assert_eq!(log, [0x3FFF + lead, n << (31 - lead), 0], "10^{n}");
+        assert_eq!(raised, 0, "10^{n}");
+    }
     let (power, raised) = dyadic(FpaDyadicOp::Pow, E, NEAREST, TWO, [0x4002, 0xA000_0000, 0]);
     assert_eq!((power, raised), ([0x4009, 0x8000_0000, 0], 0), "2^10");
-    // An infinity is taken as a number with its exponent: the angle is π/2.
-    let (angle, _) = monadic(FpaMonadicOp::Atn, E, INFINITY);
-    assert_eq!(angle[..2], [0x3FFF, 0xC90F_DAA2], "ATN of infinity");
+}
+
+#[test]
+fn a_transcendental_value_is_correctly_rounded() {
+    let inexact = Exception::Inexact.flag();
+    // π/4 is C90FDAA2 2168C234 C4C6…: to nearest, the last word rounds up,
+    // where FPEmulator's answer is a place below.
+    assert_eq!(
+        monadic(FpaMonadicOp::Atn, E, ONE),
+        ([0x3FFE, 0xC90F_DAA2, 0x2168_C235], inexact)
+    );
+    assert_eq!(
+        monadic(FpaMonadicOp::Atn, E, INFINITY),
+        ([0x3FFF, 0xC90F_DAA2, 0x2168_C235], inexact),
+        "ATN of an infinity: π/2"
+    );
     let (angle, _) = dyadic(FpaDyadicOp::Pol, E, NEAREST, ONE, INFINITY);
-    assert_eq!(angle[..2], [0x3FFF, 0xC90F_DAA2], "the point (1, infinity)");
+    assert_eq!(
+        angle,
+        [0x3FFF, 0xC90F_DAA2, 0x2168_C235],
+        "the point (1, infinity)"
+    );
 }
 
 #[test]
 fn the_transcendental_functions_refuse_what_has_no_value() {
     let invalid = Exception::InvalidOperation.flag();
-    assert_eq!(
-        monadic(FpaMonadicOp::Sin, E, INFINITY),
-        ([0x4000_7FFF, 0x4000_1100, 0], invalid),
-        "SIN of infinity, reason 17"
-    );
-    assert_eq!(
-        monadic(FpaMonadicOp::Log, E, [0x8000_3FFF, 0x8000_0000, 0]),
-        ([0x4000_7FFF, 0x4000_1800, 0], invalid),
-        "LOG of -1, reason 24, signed positive"
-    );
+    for (op, argument, nan, reason) in [
+        (FpaMonadicOp::Sin, INFINITY, 0x4000_7FFF, 17),
+        (FpaMonadicOp::Tan, INFINITY, 0x4000_7FFF, 19),
+        (FpaMonadicOp::Asn, INFINITY, 0x4000_7FFF, 21),
+        (FpaMonadicOp::Asn, TWO, 0xC000_7FFF, 20),
+        (FpaMonadicOp::Acs, TWO, 0x4000_7FFF, 20),
+        (
+            FpaMonadicOp::Log,
+            [0x8000_3FFF, 0x8000_0000, 0],
+            0x4000_7FFF,
+            24,
+        ),
+    ] {
+        assert_eq!(
+            monadic(op, E, argument),
+            ([nan, 0x4000_0000 | reason << 8, 0], invalid),
+            "{op:?} of {argument:08X?}: reason {reason}"
+        );
+    }
     assert_eq!(
         monadic(FpaMonadicOp::Log, E, ZERO),
         ([0xC000_7FFF, 0, 0], Exception::DivisionByZero.flag()),
         "LOG of 0: minus infinity"
+    );
+}
+
+#[test]
+fn sin_cos_and_tan_refuse_arguments_from_fpemulator_s_bounds() {
+    let invalid = Exception::InvalidOperation.flag();
+    // The least magnitudes FPEmulator refuses, found by bisection, and the
+    // value a place below each.
+    for (op, negative, exponent, refused, reason) in [
+        (
+            FpaMonadicOp::Sin,
+            false,
+            0x401F,
+            0xC90F_DAA1_5858_E793_u64,
+            16,
+        ),
+        (FpaMonadicOp::Sin, true, 0x401F, 0xC90F_DAA1_5858_E793, 16),
+        (FpaMonadicOp::Cos, true, 0x401F, 0xC90F_DAA0_8F49_0CF1, 16),
+        (FpaMonadicOp::Tan, false, 0x401E, 0xC90F_DAA1_5858_E793, 18),
+        (FpaMonadicOp::Tan, true, 0x401E, 0xC90F_DAA2_EA78_9CD8, 18),
+    ] {
+        let head = u32::from(negative) << 31 | exponent;
+        let at = |mantissa: u64| Internal { head, mantissa }.words();
+        let (result, raised) = monadic(op, E, at(refused));
+        let sign = if op == FpaMonadicOp::Tan && negative {
+            0xC000_7FFF
+        } else {
+            0x4000_7FFF
+        };
+        assert_eq!(
+            (result, raised),
+            ([sign, 0x4000_0000 | reason << 8, 0], invalid),
+            "{op:?} {negative}"
+        );
+        let (result, raised) = monadic(op, E, at(refused - 1));
+        assert_eq!(raised, Exception::Inexact.flag(), "{op:?} {negative} below");
+        assert_ne!(result[0] & 0x7FFF, 0x7FFF, "{op:?} {negative} below");
+    }
+}
+
+#[test]
+fn a_power_of_a_negative_number_or_an_infinity_takes_fpemulator_s_special_cases() {
+    let minus_two = [0x8000_4000, 0x8000_0000, 0];
+    let three = [0x4000, 0xC000_0000, 0];
+    let inexact = Exception::Inexact.flag();
+    let lost = Exception::Overflow.flag() | inexact;
+    let minus_zero = [0x8000_0000, 0, 0];
+    let minus_one = [0x8000_3FFF, 0x8000_0000, 0];
+    let minus_infinity = [0xC000_7FFF, 0, 0];
+    for (base, exponent, rounding, expected, why) in [
+        (
+            minus_two,
+            three,
+            NEAREST,
+            ([0x8000_4002, 0x8000_0000, 0], inexact),
+            "an odd power of a negative number is inexact",
+        ),
+        (
+            minus_two,
+            three,
+            Rounding::MinusInfinity,
+            ([0x8000_4002, 0x8000_0000, 1], inexact),
+            "as though bits lay below it",
+        ),
+        (
+            INFINITY,
+            TWO,
+            NEAREST,
+            (INFINITY, lost),
+            "infinity squared overflows",
+        ),
+        (
+            INFINITY,
+            TWO,
+            Rounding::Zero,
+            ([0x7FFE, 0xFFFF_FFFF, 0xFFFF_FFFF], lost),
+            "to the largest number",
+        ),
+        (
+            minus_infinity,
+            minus_one,
+            NEAREST,
+            (minus_zero, inexact),
+            "1/-infinity",
+        ),
+    ] {
+        assert_eq!(
+            dyadic(FpaDyadicOp::Pow, E, rounding, base, exponent),
+            expected,
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn a_power_of_zero_or_one_takes_fpemulator_s_special_cases() {
+    let minus_two = [0x8000_4000, 0x8000_0000, 0];
+    let zero_divide = Exception::DivisionByZero.flag();
+    let invalid = Exception::InvalidOperation.flag();
+    let minus_zero = [0x8000_0000, 0, 0];
+    let minus_one = [0x8000_3FFF, 0x8000_0000, 0];
+    let minus_infinity = [0xC000_7FFF, 0, 0];
+    for (base, exponent, rounding, expected, why) in [
+        (
+            minus_zero,
+            HALF,
+            NEAREST,
+            (minus_zero, 0),
+            "-0 to a power not an even integer",
+        ),
+        (
+            minus_zero,
+            minus_one,
+            NEAREST,
+            (minus_infinity, zero_divide),
+            "-0 to an odd negative power",
+        ),
+        (
+            minus_zero,
+            [0x8000_4000, 0x8000_0000, 0],
+            NEAREST,
+            (INFINITY, zero_divide),
+            "-0 to -2",
+        ),
+        (
+            ONE,
+            INFINITY,
+            NEAREST,
+            ([0x4000_7FFF, 0x4000_1B00, 0], invalid),
+            "1 to infinity, reason 27",
+        ),
+        (
+            minus_one,
+            INFINITY,
+            NEAREST,
+            ([0x4000_7FFF, 0x4000_1900, 0], invalid),
+            "-1 to infinity, reason 25",
+        ),
+        (
+            minus_two,
+            HALF,
+            NEAREST,
+            ([0x4000_7FFF, 0x4000_1900, 0], invalid),
+            "a negative number to a fraction",
+        ),
+        (
+            TWO,
+            minus_infinity,
+            NEAREST,
+            (ZERO, 0),
+            "2 to minus infinity",
+        ),
+        (ZERO, ZERO, NEAREST, (ONE, 0), "anything to zero"),
+    ] {
+        assert_eq!(
+            dyadic(FpaDyadicOp::Pow, E, rounding, base, exponent),
+            expected,
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn integer_powers_below_2_to_the_16_are_multiplied_out() {
+    let lost = Exception::Overflow.flag() | Exception::Inexact.flag();
+    // An infinity's overflow.
+    let below = [0x400E, 0xFFFE_0000, 0];
+    let at = [0x400F, 0x8000_0000, 0];
+    assert_eq!(
+        dyadic(FpaDyadicOp::Pow, E, NEAREST, INFINITY, below),
+        (INFINITY, lost),
+        "65535"
+    );
+    assert_eq!(
+        dyadic(FpaDyadicOp::Pow, E, NEAREST, INFINITY, at),
+        (INFINITY, 0),
+        "65536"
+    );
+    // RPW raises its second operand to the first.
+    assert_eq!(
+        dyadic(FpaDyadicOp::Rpw, E, NEAREST, [0x4002, 0xA000_0000, 0], TWO),
+        ([0x4009, 0x8000_0000, 0], 0),
+        "2^10"
+    );
+}
+
+#[test]
+fn a_polar_angle_takes_fpemulator_s_special_cases() {
+    let invalid = Exception::InvalidOperation.flag();
+    let inexact = Exception::Inexact.flag();
+    let minus_zero = [0x8000_0000, 0, 0];
+    let minus_one = [0x8000_3FFF, 0x8000_0000, 0];
+    for (x, y, expected, why) in [
+        (
+            ZERO,
+            minus_zero,
+            ([0x4000_7FFF, 0x4000_1600, 0], invalid),
+            "two zeros, reason 22",
+        ),
+        (
+            INFINITY,
+            [0xC000_7FFF, 0, 0],
+            ([0x4000_7FFF, 0x4000_1700, 0], invalid),
+            "two infinities, reason 23",
+        ),
+        (
+            minus_one,
+            minus_zero,
+            ([0x8000_4000, 0xC90F_DAA2, 0x2168_C235], inexact),
+            "(-1, -0): -π",
+        ),
+        (INFINITY, minus_zero, (minus_zero, 0), "(infinity, -0)"),
+        (ONE, minus_zero, (minus_zero, 0), "(1, -0)"),
+    ] {
+        assert_eq!(
+            dyadic(FpaDyadicOp::Pol, E, NEAREST, x, y),
+            expected,
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn rmf_is_the_remainder_of_the_quotient_rounded_to_even() {
+    let (remainder, raised) = dyadic(FpaDyadicOp::Rmf, E, NEAREST, SEVEN, TWO);
+    assert_eq!(
+        (remainder, raised),
+        ([0x8000_3FFF, 0x8000_0000, 0], 0),
+        "7 - 2×4"
+    );
+    let five = [0x4001, 0xA000_0000, 0];
+    let (remainder, _) = dyadic(FpaDyadicOp::Rmf, E, NEAREST, five, TWO);
+    assert_eq!(remainder, ONE, "5 - 2×2");
+    let (remainder, raised) = dyadic(
+        FpaDyadicOp::Rmf,
+        E,
+        NEAREST,
+        [0x8000_4000, 0x8000_0000, 0],
+        ONE,
+    );
+    assert_eq!(
+        (remainder, raised),
+        ([0x8000_0000, 0, 0], 0),
+        "-2 - 1×-2: the dividend's zero"
     );
 }
 
@@ -375,4 +674,128 @@ fn a_denormal_marker_with_no_fraction_is_taken_as_the_zero_it_is() {
             "reason 10"
         );
     }
+}
+
+#[test]
+fn packed_decimal_reads_a_digit_above_nine_at_its_face_value() {
+    let mut fpa = fpa(&[], 0);
+    fpa.load(Format::Packed, 0, [0x0000_000A, 0, 0, 0])
+        .expect("no trap enabled");
+    assert_eq!(
+        fpa.register(0).words(),
+        [0x3FFB, 0xCCCC_CCCC, 0xCCCC_CCCD],
+        "ten hundredths"
+    );
+    assert_eq!(flags(&fpa), Exception::Inexact.flag());
+}
+
+#[test]
+fn a_packed_exponent_past_fpemulator_s_bound_reads_as_an_infinity_or_a_nan() {
+    let load = |status, words| {
+        let mut fpa = fpa(&[], status);
+        fpa.load(Format::Packed, 0, words).expect("no trap enabled");
+        (fpa.register(0).words(), flags(&fpa))
+    };
+    let lost = Exception::Overflow.flag() | Exception::Inexact.flag();
+    assert_eq!(
+        load(0, [0x0FFD_9100, 0, 0, 0]),
+        (INFINITY, lost),
+        "16639: a number"
+    );
+    assert_eq!(
+        load(0, [0x0FFD_A100, 0, 0, 0]),
+        ([0x4000_7FFF, 0x2400_0016, 0xD674_E9BC], 0),
+        "16640: a NaN carrying 10^18"
+    );
+    assert_eq!(
+        load(0, [0x0FFD_A000, 0, 0, 0]),
+        (INFINITY, 0),
+        "no digits: an infinity"
+    );
+    assert_eq!(
+        load(fpsr::EP, [0x0FFE_6143, 0x1000_0000, 0, 0]),
+        (INFINITY, lost),
+        "16646143"
+    );
+    assert_eq!(
+        load(fpsr::EP, [0x0FFE_6144, 0x1000_0000, 0, 0]),
+        ([0x4000_7FFF, 0x0000_00FC, 0x295E_D058], 0),
+        "16646144"
+    );
+}
+
+#[test]
+fn a_nan_s_packed_payload_is_its_fraction_in_fpemulator_s_order() {
+    let store = |status, value| {
+        let mut fpa = fpa(&[(0, value)], status);
+        let words = fpa.store(Format::Packed, 0).expect("no trap enabled");
+        (words, flags(&fpa))
+    };
+    let nan = [0x4000_7FFF, 0x7FFF_FFFF, 0xFFFF_FFFF];
+    assert_eq!(
+        store(0, nan),
+        ([0x0FFF_FC61, 0x1686_0184, 0x2738_7903, 0], 0)
+    );
+    assert_eq!(
+        store(fpsr::EP, nan),
+        ([0x0FFF_FFFF, 0x8000_0461, 0x1686_0184, 0x2738_7903], 0)
+    );
+    // A signalling NaN is written quiet and signals nothing; a single
+    // infinity is written as a NaN.
+    let signalling = [0x4000_7FFF, 0x0000_0001, 0];
+    assert_eq!(
+        store(0, signalling),
+        ([0x0FFF_F800, 0x0008_7960, 0x9302_2208, 0], 0)
+    );
+    let single_infinity = [0x4000_407F, 0x8000_0000, 0];
+    assert_eq!(store(0, single_infinity), ([0x0FFF_F800, 0, 0, 0], 0));
+    // Loaded back, a payload keeps its bits; expanded, a quiet one gains
+    // 1013 × 2^52.
+    let mut fpa = fpa(&[], 0);
+    fpa.load(
+        Format::Packed,
+        0,
+        [0x0FFF_FC61, 0x1686_0184, 0x2738_7903, 0],
+    )
+    .expect("no trap enabled");
+    assert_eq!(fpa.register(0).words(), nan);
+    let mut fpa = self::fpa(&[], fpsr::EP);
+    fpa.load(Format::Packed, 0, [0x0FFF_FFFF, 0x8000_0000, 0, 1])
+        .expect("no trap enabled");
+    assert_eq!(
+        fpa.register(0).words(),
+        [0x4000_7FFF, 0x4000_0100, 0x0000_07EA]
+    );
+}
+
+#[test]
+fn a_packed_store_converts_exactly_and_rounds_to_nearest() {
+    let store = |status, value| {
+        let mut fpa = fpa(&[(0, value)], status);
+        let words = fpa.store(Format::Packed, 0).expect("no trap enabled");
+        (words, flags(&fpa))
+    };
+    let inexact = Exception::Inexact.flag();
+    let third = [0x3FFD, 0xAAAA_AAAA, 0xAAAA_AAAB];
+    assert_eq!(
+        store(0, third),
+        ([0x4000_1333, 0x3333_3333, 0x3333_3300, 0], inexact)
+    );
+    // 2^-16382 is 3.36210314311209350626…e-4932, where FPEmulator writes
+    // …349869.
+    let least_normal = [1, 0x8000_0000, 0];
+    assert_eq!(
+        store(fpsr::EP, least_normal),
+        (
+            [0x4000_4932, 0x3362_1031, 0x4311_2093, 0x5062_6000],
+            inexact
+        )
+    );
+    // 10^17 + 15 lies half way: to even.
+    let tie = Internal {
+        head: 0x4037,
+        mantissa: 100_000_000_000_000_015 << 7,
+    }
+    .words();
+    assert_eq!(store(0, tie), ([0x0001_7100, 0, 0x0000_0200, 0], inexact));
 }

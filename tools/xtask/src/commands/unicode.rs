@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use super::pinned::Pinned;
 use crate::Context;
 
 const ASSETS: &str = "lib/unicode/assets";
@@ -33,52 +34,46 @@ const LICENSE: &str = "LICENSE";
 /// The Unicode version the assets are.
 const VERSION: (u8, u8, u8) = (18, 0, 0);
 
-/// One committed asset and the SHA-256 it must hash to.
-struct Pinned {
-    file: &'static str,
-    sha256: &'static str,
-}
-
-const SCRIPTS: Pinned = Pinned {
+const SCRIPTS: Pinned<'static> = Pinned {
     file: "Scripts.txt",
     sha256: "0071fd81b6aeae25f6e8bce8efec3066a6476a91b49bdb2f52dc76e817862a6a",
 };
-const EXTENSIONS: Pinned = Pinned {
+const EXTENSIONS: Pinned<'static> = Pinned {
     file: "ScriptExtensions.txt",
     sha256: "5c9d34a922f687726f2a8bcf57d49f905987e51f1b21b58c95a00fbe255cec23",
 };
-const ALIASES: Pinned = Pinned {
+const ALIASES: Pinned<'static> = Pinned {
     file: "PropertyValueAliases.txt",
     sha256: "06c4c8eaf7b0bf34abe73b113da1215bd784ac254d4c223600b90267caa4bbbd",
 };
-const CATEGORIES: Pinned = Pinned {
+const CATEGORIES: Pinned<'static> = Pinned {
     file: "DerivedGeneralCategory.txt",
     sha256: "d6b151d2d40ee9b1876d26f417980f45ffae47b6055ccf7203cb31f07a030f94",
 };
-const CORE: Pinned = Pinned {
+const CORE: Pinned<'static> = Pinned {
     file: "DerivedCoreProperties.txt",
     sha256: "09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9",
 };
-const DATA: Pinned = Pinned {
+const DATA: Pinned<'static> = Pinned {
     file: "UnicodeData.txt",
     sha256: "0736451de439ae7baf1425136617da495e09ee5afbe6e394374db7009ea08950",
 };
-const EXCLUSIONS: Pinned = Pinned {
+const EXCLUSIONS: Pinned<'static> = Pinned {
     file: "CompositionExclusions.txt",
     sha256: "c759b100e9ae8960ae6b50fc5765950a7581fd9f30d4ef95f68f25a6d97e818e",
 };
-const CORRECTIONS: Pinned = Pinned {
+const CORRECTIONS: Pinned<'static> = Pinned {
     file: "NormalizationCorrections.txt",
     sha256: "b4f46d241e924c3803cb18c6a9224cadcee365bb24a2e1fbf33c2f4de955cd5d",
 };
 /// Read by `lib/unicode`'s conformance test alone; pinned here so the test
 /// holds the crate to the release its tables are.
-const NORMALIZATION_TEST: Pinned = Pinned {
+const NORMALIZATION_TEST: Pinned<'static> = Pinned {
     file: "NormalizationTest.txt",
     sha256: "25a50d816764b04abfb4a646d3eb2b2a803284c3873d9a06757b94fe4513dde3",
 };
 /// RFC 3454, stringprep: its tables are Unicode 3.2's, which stringprep pins.
-const STRINGPREP: Pinned = Pinned {
+const STRINGPREP: Pinned<'static> = Pinned {
     file: "rfc3454.txt",
     sha256: "eb722fa698fb7e8823b835d9fd263e4cdb8f1c7b0d234edf7f0e3bd2ccbb2c79",
 };
@@ -140,20 +135,8 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 /// The asset `pinned`, once it hashes to its pin.
-fn read(root: &Path, pinned: &Pinned) -> Result<String, String> {
-    let path = root.join(ASSETS).join(pinned.file);
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("unicode: cannot read {}: {e}", path.display()))?;
-    let mut expected = [0; tairix_crypto::SHA256_OUTPUT_LEN];
-    if !tairix_util::hex::decode_into(pinned.sha256, &mut expected)
-        || tairix_crypto::sha256(&bytes) != expected
-    {
-        return Err(format!(
-            "unicode: {} does not hash to its pinned SHA-256",
-            path.display()
-        ));
-    }
-    String::from_utf8(bytes).map_err(|_| format!("unicode: {} is not UTF-8", path.display()))
+fn read(root: &Path, pinned: &Pinned<'_>) -> Result<String, String> {
+    pinned.read_text("unicode", &root.join(ASSETS))
 }
 
 /// The data lines of a UCD file: comments stripped, blank lines skipped, each

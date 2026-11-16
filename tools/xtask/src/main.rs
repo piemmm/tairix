@@ -63,7 +63,9 @@
 //!   only, never CI — to import and vet the upstream databases)
 //! - `openmicro`    — holds the Open Micro emulator's 6502 to the external
 //!   `SingleStepTests` 65x02 suite (`--vectors <dir>`; `--write-sample` to
-//!   refresh the sample `userland/apps/openmicro` replays; developer-run only)
+//!   refresh the sample `userland/apps/openmicro` replays), rebuilds its
+//!   clean-room ROM images (`--write-roms`) and records its corpus from the
+//!   original ROMs a developer holds (`--reference <dir>`); developer-run only
 //! - `unicode`      — verifies the Unicode property tables in
 //!   `lib/unicode/src/tables.rs` against the pinned UCD snapshot in
 //!   `lib/unicode/assets/` (`--write` to regenerate)
@@ -707,20 +709,11 @@ pub(crate) fn elapsed_line(label: &str, ended: Ended, elapsed: Duration) -> Stri
     let how = match ended {
         Ended::Done => String::from("done"),
         Ended::Failed => String::from("FAILED"),
-        Ended::Interrupted(signal) => format!("INTERRUPTED by {}", signal_name(signal)),
+        Ended::Interrupted(signal) => {
+            format!("INTERRUPTED by {}", children::signal_name(signal))
+        }
     };
     format!("xtask: [{label}] {how} in {elapsed:?}\n")
-}
-
-/// `signal`'s name, for the terminating signals a run ends on.
-fn signal_name(signal: i32) -> String {
-    match signal {
-        libc::SIGINT => String::from("SIGINT"),
-        libc::SIGTERM => String::from("SIGTERM"),
-        libc::SIGHUP => String::from("SIGHUP"),
-        libc::SIGKILL => String::from("SIGKILL"),
-        other => format!("signal {other}"),
-    }
 }
 
 /// The floor `$TAIRIX_XTASK_TIMEOUT_SECS` raises every budget to, where the
@@ -809,6 +802,7 @@ fn is_workspace_root(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::WHILE_ITS_PARENT_RUNS;
 
     /// The regression: a step the run's end cut off was reported `FAILED`,
     /// which read as the step's own failure.
@@ -825,13 +819,7 @@ mod tests {
             "xtask: [s] done in 1s\n",
             "a step that got there"
         );
-        assert_eq!(signal_name(libc::SIGINT), "SIGINT");
-        assert_eq!(
-            signal_name(libc::SIGUSR1),
-            format!("signal {}", libc::SIGUSR1)
-        );
     }
-    use crate::process::WHILE_ITS_PARENT_RUNS;
 
     /// xtask keeps its own lint tables only to leave `missing_docs` out, so
     /// its clippy lints are the workspace's, line for line: a default the

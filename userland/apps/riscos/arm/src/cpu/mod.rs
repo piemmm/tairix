@@ -25,8 +25,12 @@ use crate::psr::{self, Bank, Mode};
 use crate::reg::Reg;
 use crate::t32::{self, Position};
 use crate::vfp::Vfp;
+use crate::word::low16;
 
 use memo::{Decoded, Memo, Thumb};
+
+/// R15, the register a transfer to which branches or writes the flags.
+const PC: Reg = Reg::PC;
 
 /// An exception.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -128,7 +132,8 @@ pub struct Run {
     /// Why it stopped.
     pub stop: Stop,
     /// Instructions executed, condition failed or passed, the stopping one
-    /// included when it executed.
+    /// included when it executed. A fetch that took a prefetch abort counts
+    /// as one, so a run of aborts ends at the budget too.
     pub executed: u64,
 }
 
@@ -227,7 +232,9 @@ impl Cpu {
     }
 
     /// Resets the processor: Supervisor mode, interrupts masked, at the
-    /// reset vector. Registers other than the PC and CPSR keep their
+    /// reset vector, with R14 and the SPSR of Supervisor mode written as an
+    /// exception's, CP15 and FPEXC at their reset values and the exclusive
+    /// monitor and event register clear. The other registers keep their
     /// values, as on hardware, and the interrupt lines stay as the devices
     /// driving them hold them.
     pub fn reset(&mut self) {
@@ -280,9 +287,9 @@ impl Cpu {
             }
         };
         let profile = self.profile;
-        let decoded = self
-            .memo
-            .decoded(pc, fetched.word, |word| Decoded::arm(word, profile));
+        let decoded = self.memo.decoded(fetched.page, pc, fetched.word, |word| {
+            Decoded::arm(word, profile)
+        });
         let flow = self.dispatch(bus, decoded, fetched.host);
         self.finish(flow)
     }
@@ -292,8 +299,8 @@ impl Cpu {
     fn step_thumb<B: Bus>(&mut self, bus: &mut B) -> Step {
         let pc = self.pc;
         self.it_written = false;
-        let halfwords = match self.fetch_thumb(bus, pc) {
-            Ok(halfwords) => halfwords,
+        let (halfwords, page) = match self.fetch_thumb(bus, pc) {
+            Ok(fetched) => fetched,
             Err((abort, address)) => {
                 self.prefetch_abort(Fault::Bus(abort), address, pc);
                 self.pc = self.next;
@@ -308,6 +315,7 @@ impl Cpu {
             Position::Outside
         };
         let decoded = self.thumb.decoded(
+            page,
             pc,
             Thumb {
                 halfwords,
@@ -324,22 +332,22 @@ impl Cpu {
     }
 
     /// The instruction at `pc` in Thumb state, its halfwords packed as
-    /// [`Thumb`] keys them, with `next` set past it; or the abort and the
-    /// address of the halfword the bus refused.
-    fn fetch_thumb<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<u32, (Abort, u32)> {
+    /// [`Thumb`] keys them, and the page of memory its first is in, with
+    /// `next` set past it; or the abort and the address of the halfword the
+    /// bus refused.
+    fn fetch_thumb<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<(u32, u32), (Abort, u32)> {
         let privileged = self.mode.privileged();
-        let word = bus
+        let fetched = bus
             .fetch(pc & !3, privileged)
-            .map_err(|abort| (abort, pc))?
-            .word;
-        let first = (word >> (8 * (pc & 2))) & 0xFFFF;
-        if !t32::is_wide(halfword(first)) {
+            .map_err(|abort| (abort, pc))?;
+        let first = (fetched.word >> (8 * (pc & 2))) & 0xFFFF;
+        if !t32::is_wide(low16(first)) {
             self.next = pc.wrapping_add(2);
-            return Ok(first);
+            return Ok((first, fetched.page));
         }
         self.next = pc.wrapping_add(4);
         let second = if pc & 2 == 0 {
-            word >> 16
+            fetched.word >> 16
         } else {
             let after = pc.wrapping_add(2);
             bus.fetch(after, privileged)
@@ -347,7 +355,7 @@ impl Cpu {
                 .word
                 & 0xFFFF
         };
-        Ok(first | (second << 16))
+        Ok((first | (second << 16), fetched.page))
     }
 
     /// Executes `decoded` if its condition holds, fetched from a host page
@@ -439,13 +447,15 @@ impl Cpu {
     }
 
     /// Replaces the processor's registers, the PSRs held to the bits the
-    /// profile has. The decoded pages are kept.
+    /// profile has, and the PC and IT state to what the CPSR's state can
+    /// hold. The decoded pages are kept.
     pub fn set_state(&mut self, state: &State) -> Result<(), BadState> {
         let mode = self.valid_mode(state.cpsr).ok_or(BadState::Mode)?;
         self.mode = mode;
         self.cpsr = state.cpsr & self.profile.psr;
         self.spsr = state.spsr.map(|spsr| spsr & self.profile.psr);
         self.pc = state.pc;
+        self.settle();
         let bank = mode.bank();
         self.r[..8].copy_from_slice(&state.user[..8]);
         if bank == Bank::Fiq {
@@ -479,11 +489,11 @@ impl Cpu {
     }
 
     /// Sets a register as the current mode sees it; R15 sets the address of
-    /// the next instruction.
+    /// the next instruction, as the current state can hold it.
     pub fn set_reg(&mut self, reg: Reg, value: u32) {
         match self.r.get_mut(reg.index()) {
             Some(slot) => *slot = value,
-            None => self.pc = value,
+            None => self.pc = self.aligned_pc(value),
         }
     }
 
@@ -517,13 +527,24 @@ impl Cpu {
         &mut self.vfp
     }
 
-    /// Replaces the CPSR, switching banks if its mode changes; refused if
-    /// it names a mode the profile does not have.
+    /// Replaces the CPSR, switching banks if its mode changes, and holds the
+    /// PC and IT state to what its state can hold; refused if it names a
+    /// mode the profile does not have.
     pub fn set_cpsr(&mut self, cpsr: u32) -> Result<(), BadState> {
         let mode = self.valid_mode(cpsr).ok_or(BadState::Mode)?;
         self.switch_mode(mode);
         self.cpsr = cpsr & self.profile.psr;
+        self.settle();
         Ok(())
+    }
+
+    /// Holds the PC and the IT state to what the CPSR's state can hold: no
+    /// IT state outside Thumb, nor a reserved one.
+    const fn settle(&mut self) {
+        if !restorable_itstate(self.cpsr) {
+            self.cpsr &= !(psr::IT_LOW | psr::IT_HIGH);
+        }
+        self.pc = self.aligned_pc(self.pc);
     }
 
     /// The current mode's SPSR; User and System mode have none.
@@ -625,17 +646,28 @@ impl Cpu {
             self.switch_mode(mode);
         }
         self.cpsr = cpsr;
-        self.it_written |= restore;
+        // Into a 26-bit mode, the next instruction is within its space.
+        self.next = self.aligned_pc(self.next);
+        if restore {
+            // An exception return is an event, as ARMv8's is.
+            self.it_written = true;
+            self.event = true;
+        }
     }
 
     /// Writes the 26-bit PSR bits R15's layout holds in `r15`: the flags in
     /// User mode, and I, F and the mode too in a privileged one.
+    /// Writes the flags a transfer to R15 carries: NZCV from `value`.
+    const fn set_nzcv(&mut self, value: u32) {
+        self.cpsr = (self.cpsr & !psr::NZCV) | (value & psr::NZCV);
+    }
+
     fn write_r15_psr(&mut self, r15: u32) {
-        let cpsr = if self.mode.privileged() {
-            psr::from_r15(self.cpsr, r15)
-        } else {
-            (self.cpsr & !psr::NZCV) | (r15 & psr::NZCV)
-        };
+        if !self.mode.privileged() {
+            self.set_nzcv(r15);
+            return;
+        }
+        let cpsr = psr::from_r15(self.cpsr, r15);
         if let Some(mode) = self.valid_mode(cpsr) {
             self.switch_mode(mode);
             self.cpsr = cpsr;
@@ -653,16 +685,21 @@ impl Cpu {
         true
     }
 
-    /// Restores the CPSR from the SPSR, as an exception return does; false
-    /// in a mode without one.
-    fn restore_cpsr(&mut self) -> bool {
-        match self.spsr() {
-            Some(spsr) => {
-                self.write_cpsr(spsr, u32::MAX, true);
-                true
-            }
-            None => false,
+    /// Restores the CPSR from `status`, as an exception return does; false
+    /// if refused, the undefined instruction exception taken, for naming a
+    /// mode the profile lacks.
+    fn restore(&mut self, status: u32) -> bool {
+        if self.valid_mode(status).is_none() && self.refuse() {
+            return false;
         }
+        self.write_cpsr(status, u32::MAX, true);
+        true
+    }
+
+    /// Restores the CPSR from the SPSR: none in a mode without one, else
+    /// whether it was restored or refused.
+    fn restore_cpsr(&mut self) -> Option<bool> {
+        self.spsr().map(|spsr| self.restore(spsr))
     }
 
     fn take(&mut self, exception: Exception, return_address: u32) {
@@ -776,12 +813,6 @@ const fn restorable_itstate(cpsr: u32) -> bool {
     // A condition with no block left to give it.
     let reserved = itstate != 0 && itstate.trailing_zeros() >= 4;
     !reserved && (cpsr & psr::T != 0 || itstate == 0)
-}
-
-/// The low halfword of `bits`.
-const fn halfword(bits: u32) -> u16 {
-    let bytes = bits.to_le_bytes();
-    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 /// What executing an instruction did.

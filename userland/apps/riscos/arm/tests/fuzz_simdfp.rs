@@ -20,11 +20,14 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_riscos_arm::bus::{Abort, Bus, Fetch, Width};
+use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::cpu::{Cpu, Exception, State, Stop};
-use tairix_riscos_arm::instruction::{Op, SimdFp};
+use tairix_riscos_arm::instruction::{Instruction, Op, Set, SimdFp, Structure, StructureLanes};
+use tairix_riscos_arm::isa::Isa;
+use tairix_riscos_arm::mmu::PAGE_BITS;
 use tairix_riscos_arm::profile::BIT32;
 use tairix_riscos_arm::psr::{self, Mode};
-use tairix_riscos_arm::t32::{self, Position};
+use tairix_riscos_arm::t32::{self, Position, Size};
 use tairix_riscos_arm::vfp::{fpexc, fpscr, System};
 use tairix_riscos_arm::{a32, reg::Reg};
 
@@ -73,6 +76,7 @@ impl Bus for Memory {
         Ok(Fetch {
             word: self.words[Self::index(address)?],
             host: false,
+            page: address >> PAGE_BITS,
         })
     }
 
@@ -90,9 +94,8 @@ impl Bus for Memory {
         let index = Self::index(address)?;
         let shift = 8 * (address & 3);
         let mask = match width {
-            Width::Byte => 0xFF << shift,
-            Width::Half => 0xFFFF << shift,
             Width::Word => u32::MAX,
+            narrow => narrow.mask() << shift,
         };
         self.words[index] = (self.words[index] & !mask) | ((value << shift) & mask);
         Ok(())
@@ -319,6 +322,166 @@ fn check_running(rng: &mut Prng) {
     assert!(finals[0] == finals[1], "{instruction:08X} ran differently");
 }
 
+/// `op` with its numbers redrawn from every byte, as an instruction a caller
+/// builds may hold them.
+#[expect(clippy::too_many_lines, reason = "one arm per form with numbers")]
+fn hostile(op: SimdFp, rng: &mut Prng) -> SimdFp {
+    let mut byte = || u8::try_from(rng.next_u32() & 0xFF).unwrap_or(0);
+    match op {
+        SimdFp::CoreScalar {
+            to_core,
+            unsigned,
+            rt,
+            ..
+        } => SimdFp::CoreScalar {
+            to_core,
+            unsigned,
+            rt,
+            size: byte(),
+            index: byte(),
+            d: byte(),
+        },
+        SimdFp::CoreDuplicate { q, rt, .. } => SimdFp::CoreDuplicate {
+            q,
+            rt,
+            size: byte(),
+            d: byte(),
+        },
+        SimdFp::Multiple {
+            load,
+            double,
+            rn,
+            mode,
+            writeback,
+            ..
+        } => SimdFp::Multiple {
+            load,
+            double,
+            rn,
+            mode,
+            writeback,
+            d: byte(),
+            words: byte(),
+        },
+        SimdFp::Three {
+            op, unsigned, q, ..
+        } => SimdFp::Three {
+            op,
+            unsigned,
+            q,
+            size: byte(),
+            d: byte(),
+            n: byte(),
+            m: byte(),
+        },
+        SimdFp::Long { op, unsigned, .. } => SimdFp::Long {
+            op,
+            unsigned,
+            size: byte(),
+            d: byte(),
+            n: byte(),
+            m: byte(),
+        },
+        SimdFp::ByScalar {
+            op, unsigned, q, ..
+        } => SimdFp::ByScalar {
+            op,
+            unsigned,
+            q,
+            size: byte(),
+            d: byte(),
+            n: byte(),
+            m: byte(),
+            index: byte(),
+        },
+        SimdFp::Shift {
+            op, unsigned, q, ..
+        } => SimdFp::Shift {
+            op,
+            unsigned,
+            q,
+            size: byte(),
+            d: byte(),
+            m: byte(),
+            amount: byte(),
+        },
+        SimdFp::Misc {
+            op, unsigned, q, ..
+        } => SimdFp::Misc {
+            op,
+            unsigned,
+            q,
+            size: byte(),
+            d: byte(),
+            m: byte(),
+        },
+        SimdFp::Extract { q, .. } => SimdFp::Extract {
+            q,
+            d: byte(),
+            n: byte(),
+            m: byte(),
+            start: byte(),
+        },
+        SimdFp::Table { extend, .. } => SimdFp::Table {
+            extend,
+            length: byte(),
+            d: byte(),
+            n: byte(),
+            m: byte(),
+        },
+        SimdFp::Duplicate { q, .. } => SimdFp::Duplicate {
+            q,
+            size: byte(),
+            d: byte(),
+            m: byte(),
+            index: byte(),
+        },
+        SimdFp::Structure {
+            load,
+            shape,
+            rn,
+            rm,
+            ..
+        } => SimdFp::Structure {
+            load,
+            rn,
+            rm,
+            d: byte(),
+            shape: Structure {
+                lanes: match shape.lanes {
+                    StructureLanes::One(_) => StructureLanes::One(byte()),
+                    lanes => lanes,
+                },
+                elements: byte(),
+                parts: byte(),
+                spacing: byte(),
+                size: byte(),
+                align: byte(),
+            },
+        },
+        other => other,
+    }
+}
+
+/// An instruction built with hostile numbers is encoded, given its text and
+/// judged without a panic: refused, or shown as unrepresentable.
+fn check_built(rng: &mut Prng) {
+    let thumb = rng.below(2) == 0;
+    let Some(op) = instruction_at(drawn_instruction(rng, thumb), thumb, 0) else {
+        return;
+    };
+    let built = Instruction {
+        cond: Condition::Al,
+        op: Op::SimdFp(hostile(op, rng)),
+    };
+    let _ = a32::encode(&built);
+    let _ = t32::encode(&built, Position::Outside, Size::Narrowest);
+    let _ = a32::unpredictable(&built, Isa::ALL);
+    for set in [Set::A32, Set::T32] {
+        assert!(!format!("{}", built.text(set, 0x8000)).is_empty());
+    }
+}
+
 #[test]
 fn any_floating_point_or_simd_instruction_runs_within_the_architecture() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -334,6 +497,7 @@ fn any_floating_point_or_simd_instruction_runs_within_the_architecture() {
             _ => {}
         }
         check_running(&mut rng);
+        check_built(&mut rng);
         iterations += 1;
     }
 }

@@ -1,5 +1,6 @@
-# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5, but for
-# a scenario marked `ours`, whose observation is this emulator's own.
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
 
 scenario unknown-reasons
 1 v=1 error=&00000180

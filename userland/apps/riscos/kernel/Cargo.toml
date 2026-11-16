@@ -1,6 +1,6 @@
 [package]
 name = "tairix-riscos-kernel"
-description = "The RISC OS emulator's kernel: the guest address space's two layouts, the memory policy that sizes a session, task slots switched in O(1) under the 26-bit window rule, and the dynamic-area manager with its handler protocol. no_std, forbids unsafe."
+description = "The RISC OS emulator's kernel: the guest address space's two layouts, the memory policy that sizes a session, task slots switched in O(1) under the 26-bit window rule, and the dynamic-area manager with its handler protocol, and the observation corpus it is held to. no_std, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

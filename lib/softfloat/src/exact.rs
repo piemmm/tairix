@@ -1,7 +1,7 @@
 //! Exact results: each operation's result held exactly over its operands'
 //! significands, then rounded once.
 //!
-//! An [`Exact`] keeps 62 bits below a 64-bit significand and a sticky bit for
+//! An [`Exact`] keeps 63 bits below a 64-bit significand and a sticky bit for
 //! anything further down, which is enough to round any sum, product, quotient
 //! or root correctly at every precision. The operations take unnormal
 //! operands as the 8087 and the FPA hold them — an integer bit clear above
@@ -56,7 +56,7 @@ impl Parts {
     /// exponent lowered to match; zero stays as it is.
     #[must_use]
     pub fn normalized(self) -> Self {
-        if self.sig == 0 {
+        if self.sig == 0 || self.normal() {
             return self;
         }
         let zeros = self.sig.leading_zeros();
@@ -171,7 +171,7 @@ impl Exact {
         if x.sig >> (POINT + 1) != 0 {
             x = x.shifted_right(1);
         }
-        if full && x.sig != 0 {
+        if full && x.sig != 0 && x.sig >> POINT == 0 {
             let zeros = x.sig.leading_zeros().saturating_sub(1);
             x.sig <<= zeros;
             x.exp = x.exp.saturating_sub(exponent_of(zeros));
@@ -192,11 +192,11 @@ impl Exact {
     /// fixed place.
     #[must_use]
     pub fn rounded(self, rounding: Rounding) -> RoundedSig {
-        let lsb = POINT + 1 - rounding.bits;
+        let lsb = POINT + 1 - rounding.bits();
         let below = self.sig & ((1 << lsb) - 1);
         let half = 1 << (lsb - 1);
         let inexact = below != 0 || self.sticky;
-        let up = match rounding.mode {
+        let up = match rounding.mode() {
             Mode::Nearest => {
                 below > half || (below == half && (self.sticky || (self.sig >> lsb) & 1 != 0))
             }
@@ -217,6 +217,54 @@ impl Exact {
             inexact,
         }
     }
+}
+
+/// The remainder of `a` by `b`, both normalized and nonzero, as IEEE 754
+/// defines it: exact, its magnitude at most half of `b`'s.
+#[must_use]
+pub fn remainder(a: Parts, b: Parts) -> Parts {
+    let gap = a.exp - b.exp;
+    if gap < -1 {
+        return a;
+    }
+    let divisor = u128::from(b.sig);
+    // `rest` stays below `divisor` and `odd` is the quotient's last bit.
+    let (mut rest, mut odd) = if gap == -1 {
+        (u128::from(a.sig), false)
+    } else {
+        (
+            u128::from(a.sig) % divisor,
+            (u128::from(a.sig) / divisor) & 1 != 0,
+        )
+    };
+    let mut left = gap.max(0);
+    while left > 0 {
+        let step = left.min(63);
+        let shifted = rest << u32::try_from(step).unwrap_or(63);
+        odd = (shifted / divisor) & 1 != 0;
+        rest = shifted % divisor;
+        left -= step;
+    }
+    // `rest` is at `b`'s scale, or at half of it where `a` is the smaller,
+    // so half of `b` is the divisor once or twice `rest`'s units.
+    let (scale, twice) = if gap == -1 {
+        (b.exp - 1, rest)
+    } else {
+        (b.exp, rest << 1)
+    };
+    let flip = twice > divisor || (twice == divisor && odd);
+    let magnitude = match (flip, gap == -1) {
+        (false, _) => rest,
+        (true, true) => (divisor << 1) - rest,
+        (true, false) => divisor - rest,
+    };
+    let negative = a.negative != flip;
+    Parts {
+        negative,
+        exp: scale,
+        sig: u64::try_from(magnitude).unwrap_or(u64::MAX),
+    }
+    .normalized()
 }
 
 /// `a + b`, or `a − b` where `subtract`, exactly. The result is normalized as
@@ -282,22 +330,28 @@ pub fn multiply(a: Parts, b: Parts) -> Exact {
     .normalized(false)
 }
 
-/// `a ÷ b` exactly, `b` normal: unnormal where `a` is.
+/// `a ÷ b` exactly, `b` normal: unnormal where `a` is. None where `b`'s
+/// significand is zero.
 #[must_use]
-pub fn divide(a: Parts, b: Parts) -> Exact {
+pub fn divide(a: Parts, b: Parts) -> Option<Exact> {
+    if b.sig == 0 {
+        return None;
+    }
     // sig × 2^127 / b.sig, two 64-bit steps of the long division.
     let divisor = u128::from(b.sig);
     let first = u128::from(a.sig) << 63;
     let (high, rest) = (first / divisor, first % divisor);
     let second = rest << 64;
     let (low, rest) = (second / divisor, second % divisor);
-    Exact {
-        negative: a.negative != b.negative,
-        exp: a.exp - b.exp - 1,
-        sig: (high << 64) | low,
-        sticky: rest != 0,
-    }
-    .normalized(false)
+    Some(
+        Exact {
+            negative: a.negative != b.negative,
+            exp: a.exp - b.exp - 1,
+            sig: (high << 64) | low,
+            sticky: rest != 0,
+        }
+        .normalized(false),
+    )
 }
 
 /// The square root of `a`, positive and normal, exactly.
@@ -311,7 +365,7 @@ pub fn square_root(a: Parts) -> Exact {
     } else {
         (u128::from(a.sig), a.exp - 63)
     };
-    let (root, rest) = isqrt_scaled(m, 34);
+    let (root, rest) = root_scaled(m);
     Exact {
         negative: false,
         exp: e / 2 - 34 + 126,
@@ -321,26 +375,16 @@ pub fn square_root(a: Parts) -> Exact {
     .normalized(true)
 }
 
-/// `⌊√(m × 4^places)⌋` for `m < 2^66`, and whether a remainder was left.
-fn isqrt_scaled(m: u128, places: u32) -> (u128, bool) {
-    let mut rest: u128 = 0;
-    let mut root: u128 = 0;
-    // Two bits of the radicand at a time, from the top of m's 66 bits.
-    for n in (0..33 + places).rev() {
-        let pair = if n >= places {
-            (m >> (2 * (n - places))) & 3
-        } else {
-            0
-        };
-        rest = (rest << 2) | pair;
-        let trial = (root << 2) | 1;
-        root <<= 1;
-        if rest >= trial {
-            rest -= trial;
-            root |= 1;
-        }
-    }
-    (root, rest != 0)
+/// `⌊√(m × 4^34)⌋` for `m < 2^66`, and whether a remainder was left.
+fn root_scaled(m: u128) -> (u128, bool) {
+    // The radicand is 64 × a, a = m × 4^31 within 128 bits: with √a = r + f,
+    // the root is 8r + d for the largest d below 8 that leaves no deficit.
+    let a = m << 62;
+    let r = a.isqrt();
+    let room = (a - r * r) << 6;
+    let taken = |d: u128| 16 * r * d + d * d;
+    let d = (0..8).rev().find(|&d| taken(d) <= room).unwrap_or(0);
+    (8 * r + d, room != taken(d))
 }
 
 /// `p`, normalized, rounded to an integer in `mode`: its magnitude, none past

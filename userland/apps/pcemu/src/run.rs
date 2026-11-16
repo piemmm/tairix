@@ -3016,7 +3016,7 @@ mod program {
             let Some(win) = &mut self.sheet else {
                 return;
             };
-            match win.event(event, looks) {
+            match win.event(&mut self.client, event, looks) {
                 SheetEvent::Nothing => {}
                 SheetEvent::Closed => self.close_sheet(),
                 SheetEvent::Answered(answer) => {
@@ -3031,9 +3031,9 @@ mod program {
                 SheetAnswer::New(assistance::Answer::Create {
                     model,
                     name,
-                    choice,
+                    choices,
                 }) => {
-                    if let Some((template, disk)) = assistant::chosen(model, choice) {
+                    if let Some((template, disk)) = assistant::chosen(model, &choices) {
                         self.create(template, &name, disk);
                     }
                 }

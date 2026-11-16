@@ -7,7 +7,7 @@ use tairix_util::fallible;
 
 use crate::expr::{evaluate, Answer};
 use crate::gstrans::{translated, Flags};
-use crate::number::Decimal;
+use crate::number::decimal;
 use crate::{is_terminator, name, Budget, Error};
 
 /// A variable's value, as the expansions read it.
@@ -56,19 +56,41 @@ impl Value {
 /// [`name::compare`]. A pattern matching several means the first in that
 /// order. Each pattern is a name as [`name::name`] cuts it.
 pub trait Variables {
-    /// The value of the first variable `pattern` matches, or `None`; an error
-    /// is a code variable's read entry's.
+    /// The value of the first variable `pattern` matches, or `None`; an
+    /// error is the host's, no memory for the value.
     fn lookup(&mut self, pattern: &[u8]) -> Result<Option<Value>, Error>;
+
+    /// Whether [`lookup`](Self::lookup) of `pattern` finds a value, without
+    /// copying it.
+    fn exists(&mut self, pattern: &[u8]) -> Result<bool, Error> {
+        Ok(self.lookup(pattern)?.is_some())
+    }
+
+    /// The references a lookup of `pattern` counts against a reading's
+    /// budget: one, or one for each variable a wildcard may examine.
+    fn cost(&self, pattern: &[u8]) -> usize {
+        let _ = pattern;
+        1
+    }
 
     /// `value` given to the first variable `pattern` matches, its spelling
     /// kept; or, where none does, to a new variable called `pattern`, which
-    /// must be [`name::is_creatable`]. A code variable is handed the value's
-    /// text instead.
+    /// must be [`name::is_creatable`].
     fn assign(&mut self, pattern: &[u8], value: Value) -> Result<(), Error>;
 
-    /// Every variable `pattern` matches deleted but code variables, which
-    /// only their own type deletes; how many.
-    fn delete(&mut self, pattern: &[u8]) -> Result<usize, Error>;
+    /// The first variable `pattern` matches deleted, as `OS_SetVarVal`
+    /// deletes one; whether there was one.
+    fn delete(&mut self, pattern: &[u8]) -> Result<bool, Error>;
+
+    /// Every variable `pattern` matches deleted, as `*Unset` deletes them;
+    /// how many.
+    fn unset(&mut self, pattern: &[u8]) -> Result<usize, Error> {
+        let mut deleted = 0;
+        while self.delete(pattern)? {
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
 }
 
 /// A value `OS_SetVarVal` is asked to set, by the type it gives it.
@@ -160,13 +182,11 @@ pub fn read_expanded(
     budget: &mut Budget,
     longest: usize,
 ) -> Result<Option<Vec<u8>>, Error> {
-    budget.spend()?;
+    budget.charge(vars.cost(pattern))?;
     let bytes = match vars.lookup(pattern)? {
         None => return Ok(None),
         Some(Value::String(bytes)) => bytes,
-        Some(Value::Number(n)) => {
-            fallible::copied(Decimal::of(n).as_bytes()).ok_or(Error::SystemHeapFull)?
-        }
+        Some(Value::Number(n)) => decimal(n)?,
         Some(Value::Macro(text)) => translated(&text, Flags::NONE, vars, budget, longest)?.0,
     };
     if bytes.len() > longest {
@@ -176,26 +196,30 @@ pub fn read_expanded(
 }
 
 /// Variables in host memory, bounded for text that cannot be trusted: no
-/// more than a fixed number of them, none longer than a fixed length.
+/// more than a fixed number of them, none longer than a fixed length and no
+/// name longer than another, which bounds what a wildcard's matching costs.
 #[derive(Debug)]
 pub struct Store {
     /// Sorted by [`name::compare`].
     entries: Vec<(Vec<u8>, Value)>,
     most: usize,
     longest: usize,
+    names: usize,
 }
 
 impl Store {
     /// An empty store with room for `most` variables, none longer than
-    /// `longest` bytes; `None` where that room is refused.
+    /// `longest` bytes nor named with more than `names`; `None` where that
+    /// room is refused.
     #[must_use]
-    pub fn with_room(most: usize, longest: usize) -> Option<Self> {
+    pub fn with_room(most: usize, longest: usize, names: usize) -> Option<Self> {
         let mut entries = Vec::new();
         entries.try_reserve_exact(most).ok()?;
         Some(Self {
             entries,
             most,
             longest,
+            names,
         })
     }
 
@@ -205,9 +229,18 @@ impl Store {
         self.longest
     }
 
+    /// Whether a wildcard `pattern` can match a name at all: none holds
+    /// more literal bytes than the bound on names.
+    fn may_match(&self, pattern: &[u8]) -> bool {
+        pattern.iter().filter(|&&b| b != b'*').count() <= self.names
+    }
+
     /// Where the first variable `pattern` matches is.
     fn position(&self, pattern: &[u8]) -> Option<usize> {
         if name::is_wild(pattern) {
+            if !self.may_match(pattern) {
+                return None;
+            }
             self.entries
                 .iter()
                 .position(|(name, _)| name::matches(pattern, name))
@@ -220,6 +253,19 @@ impl Store {
 }
 
 impl Variables for Store {
+    fn cost(&self, pattern: &[u8]) -> usize {
+        let pattern = name::name(pattern);
+        if name::is_wild(pattern) && self.may_match(pattern) {
+            self.entries.len().max(1)
+        } else {
+            1
+        }
+    }
+
+    fn exists(&mut self, pattern: &[u8]) -> Result<bool, Error> {
+        Ok(self.position(name::name(pattern)).is_some())
+    }
+
     fn lookup(&mut self, pattern: &[u8]) -> Result<Option<Value>, Error> {
         let Some(at) = self.position(name::name(pattern)) else {
             return Ok(None);
@@ -243,7 +289,7 @@ impl Variables for Store {
         if !name::is_creatable(pattern) {
             return Err(Error::BadVariableName);
         }
-        if self.entries.len() >= self.most || pattern.len() > self.longest {
+        if self.entries.len() >= self.most || pattern.len() > self.names {
             return Err(Error::NoRoomForVariable);
         }
         let at = self
@@ -256,7 +302,15 @@ impl Variables for Store {
         Ok(())
     }
 
-    fn delete(&mut self, pattern: &[u8]) -> Result<usize, Error> {
+    fn delete(&mut self, pattern: &[u8]) -> Result<bool, Error> {
+        let Some(at) = self.position(name::name(pattern)) else {
+            return Ok(false);
+        };
+        self.entries.remove(at);
+        Ok(true)
+    }
+
+    fn unset(&mut self, pattern: &[u8]) -> Result<usize, Error> {
         let pattern = name::name(pattern);
         let before = self.entries.len();
         self.entries

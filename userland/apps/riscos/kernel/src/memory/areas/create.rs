@@ -3,14 +3,14 @@
 use core::ops::Range;
 
 use tairix_collections::OrderedMap;
-use tairix_riscos_arm::mmu::{Table, PAGE_SIZE};
+use tairix_riscos_arm::mmu::{Access, Table, PAGE_SIZE};
 
 use super::super::guest::{Guest, Service};
 use super::super::layout::HIGH_ZERO_PAGE;
 use super::super::{Bits, Memory};
 use super::{
-    name_key, signature, AccessPrivilege, Area, AreaError, AreaFlags, Handler, Id, Shape, Title,
-    FREE_POOL, QUICK, SYSTEM, TITLE,
+    access_privilege, lower_copy, name_key, signature, Area, AreaError, AreaFlags, Handler, Id,
+    Key, Shape, Title, MOST_AREAS, QUICK, SYSTEM, TITLE,
 };
 
 /// The id a reservation carries when it is the kernel's own part of the
@@ -42,6 +42,17 @@ pub struct Create<'a> {
     pub caller: Bits,
 }
 
+/// An area's parts as made, before it is numbered and entered.
+struct Made {
+    max: u32,
+    base: u32,
+    flags: AreaFlags,
+    access: Access,
+    handler: Option<Handler>,
+    shape: Shape,
+    reserved: Range<u64>,
+}
+
 /// What `OS_DynamicArea` 0 made.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Created {
@@ -66,6 +77,21 @@ fn hex_title(number: u32) -> Title {
 /// A reservation's addresses as the MMU takes them.
 fn addresses(range: &Range<u64>) -> Range<u32> {
     u32::try_from(range.start).unwrap_or(u32::MAX)..u32::try_from(range.end).unwrap_or(u32::MAX)
+}
+
+/// The flags an area asked for with `flags` is made with: a sparse area is
+/// never doubly mapped, given particular pages or shrunk, and never dragged;
+/// a pool is never shrunk, its pages being its own to give back.
+const fn normalised(mut flags: AreaFlags) -> AreaFlags {
+    if flags.has(AreaFlags::SPARSE) {
+        flags.0 &=
+            !(AreaFlags::DOUBLY_MAPPED | AreaFlags::NEEDS_SPECIFIC_PAGES | AreaFlags::SHRINKABLE);
+        flags.0 |= AreaFlags::NOT_USER_DRAGGABLE;
+    }
+    if flags.has(AreaFlags::PMP) {
+        flags.0 &= !AreaFlags::SHRINKABLE;
+    }
+    flags
 }
 
 impl Memory {
@@ -99,19 +125,25 @@ impl Memory {
         if let Some(number) = self.areas.quick.pop() {
             return Ok(number);
         }
-        let mut number = self.areas.treacle.saturating_add(1).max(QUICK.end);
+        // No number a caller would read as negative is given out. The walk
+        // passes areas, of which there are at most `MOST_AREAS`.
+        let mut number = self.areas.probe_from.saturating_add(1).max(QUICK.end);
         while self.areas.numbers.get(&number).is_some() {
-            number = number.checked_add(1).ok_or(AreaError::CantAllocateArea)?;
+            number += 1;
+        }
+        if i32::try_from(number).is_err() {
+            return Err(AreaError::CantAllocateArea);
         }
         Ok(number)
     }
 
-    /// The most an area of `request` may reach: the clamps, then the
-    /// guest's RAM, rounded up to a page; at least its initial size.
-    fn area_max(&self, request: &Create<'_>) -> u32 {
+    /// The most an area of `request` made with `flags` may reach: the
+    /// clamps, then the guest's RAM, rounded up to a page; at least its
+    /// initial size.
+    fn area_max(&self, request: &Create<'_>, flags: AreaFlags) -> u32 {
         let clamps = self.areas.clamps;
         let asked = request.max.unwrap_or(u32::MAX);
-        let max = if AreaFlags(request.flags).has(AreaFlags::SPARSE) {
+        let max = if flags.has(AreaFlags::SPARSE) {
             asked.min(clamps.sparse).max(request.size)
         } else {
             let clamp = if request.max.is_none() {
@@ -187,11 +219,12 @@ impl Memory {
         Ok(())
     }
 
-    /// Refuses flags RISC OS 5 refuses, and an access privilege it lacks.
-    fn check_flags(request: &Create<'_>) -> Result<(), AreaError> {
+    /// Refuses flags RISC OS 5 refuses, and an access privilege it lacks;
+    /// the access the privilege grants.
+    fn check_flags(request: &Create<'_>) -> Result<Access, AreaError> {
         let flags = AreaFlags(request.flags);
         let privilege =
-            AccessPrivilege::of(flags.privilege()).ok_or(AreaError::BadDynamicAreaOptions)?;
+            access_privilege(flags.privilege()).ok_or(AreaError::BadDynamicAreaOptions)?;
         let exclusive = AreaFlags::DOUBLY_MAPPED
             | AreaFlags::NEEDS_SPECIFIC_PAGES
             | AreaFlags::SPARSE
@@ -209,16 +242,22 @@ impl Memory {
         if bad_pool || bad_double || bad_abort {
             return Err(AreaError::BadDynamicAreaOptions);
         }
-        Ok(())
+        Ok(privilege)
     }
 
-    /// The reservation of an area of `max` bytes: the caller's base, or one
-    /// placed for it; none for an area of no logical size.
-    fn reservation(&self, request: &Create<'_>, max: u32) -> Result<Range<u64>, AreaError> {
+    /// The reservation of an area of `max` bytes made with `flags`: the
+    /// caller's base, or one placed for it; none for an area of no logical
+    /// size.
+    fn reservation(
+        &self,
+        request: &Create<'_>,
+        flags: AreaFlags,
+        max: u32,
+    ) -> Result<Range<u64>, AreaError> {
         if max == 0 {
             return Ok(0..0);
         }
-        let doubly = AreaFlags(request.flags).has(AreaFlags::DOUBLY_MAPPED);
+        let doubly = flags.has(AreaFlags::DOUBLY_MAPPED);
         let span = u64::from(max) * if doubly { 2 } else { 1 };
         let start = match request.base {
             Some(base) => {
@@ -252,14 +291,24 @@ impl Memory {
         if let Some(number) = request.number {
             self.check_number(number)?;
         }
-        Self::check_flags(request)?;
+        let access = Self::check_flags(request)?;
+        if self.areas.count() >= MOST_AREAS {
+            return Err(AreaError::CantAllocateArea);
+        }
         // Its initial grow is a resize, which no other may interleave with.
         if request.size != 0 && self.areas.resizing {
             return Err(AreaError::NotAllMoved);
         }
-        let max = self.area_max(request);
-        let reserved = self.reservation(request, max)?;
-        let mut flags = AreaFlags(request.flags);
+        let flags = normalised(AreaFlags(request.flags));
+        let max = self.area_max(request, flags);
+        // An initial size past the most it may reach is refused as its grow
+        // would refuse it, before anything is reserved.
+        let size = request
+            .size
+            .checked_next_multiple_of(PAGE_SIZE)
+            .filter(|&size| size <= max)
+            .ok_or(AreaError::NotAllMoved)?;
+        let reserved = self.reservation(request, flags, max)?;
         let doubly = flags.has(AreaFlags::DOUBLY_MAPPED);
         let base = u32::try_from(if doubly {
             reserved.start + u64::from(max)
@@ -268,24 +317,17 @@ impl Memory {
         })
         .map_err(|_| AreaError::OverlappingAreas)?;
         let sparse = flags.has(AreaFlags::SPARSE);
-        let mut handler = request.handler.map(|code| Handler {
-            code,
-            workspace: request.workspace.unwrap_or(base),
-        });
-        if sparse {
-            flags.0 &= !(AreaFlags::DOUBLY_MAPPED
-                | AreaFlags::NEEDS_SPECIFIC_PAGES
-                | AreaFlags::SHRINKABLE);
-            flags.0 |= AreaFlags::NOT_USER_DRAGGABLE;
-            if !flags.has(AreaFlags::ABORTABLE) {
-                handler = None;
-            }
-        }
+        let handler = request
+            .handler
+            .map(|code| Handler {
+                code,
+                workspace: request.workspace.unwrap_or(base),
+            })
+            .filter(|_| !sparse || flags.has(AreaFlags::ABORTABLE));
         let shape = if flags.has(AreaFlags::PMP) {
-            Shape::Pmp(
-                super::pmp::Pool::new(request.pool.min(self.ceiling.pages()), base)
-                    .map_err(|_| AreaError::CantAllocateArea)?,
-            )
+            Shape::Pmp(super::pmp::Pool::new(
+                request.pool.min(self.ceiling.pages()),
+            ))
         } else {
             Shape::Pages(alloc::vec::Vec::new())
         };
@@ -294,8 +336,17 @@ impl Memory {
                 .reserve(Table::Global, addresses(&reserved))
                 .map_err(|_| AreaError::CantAllocateLevel2)?;
         }
-        let id = match self.link(request, max, base, flags, handler, shape, &reserved) {
-            Ok(id) => id,
+        let made = Made {
+            max,
+            base,
+            flags,
+            access,
+            handler,
+            shape,
+            reserved: reserved.clone(),
+        };
+        let key = match self.link(request, made) {
+            Ok(key) => key,
             Err(error) => {
                 if !reserved.is_empty() {
                     self.mmu.unreserve(Table::Global, addresses(&reserved));
@@ -303,27 +354,32 @@ impl Memory {
                 return Err(error);
             }
         };
-        let number = self.areas.area(id).map_or(0, |area| area.number);
-        if request.size != 0 {
-            if let Err(failure) =
-                self.grow_area(id, request.size.next_multiple_of(PAGE_SIZE), false, guest)
-            {
+        let number = self.areas.area_at(key).map_or(0, |area| area.number);
+        let undo = |memory: &mut Self, error: AreaError| {
+            // Guest code run on the way may have removed it already.
+            if memory.areas.area_at(key).is_some() {
+                memory.discard_pages(key.id);
+                memory.unlink(key.id);
+            }
+            Err(error)
+        };
+        if size != 0 {
+            if let Err(failure) = self.grow_area(key, size, false, guest) {
                 // The handler that refused is not asked again.
-                self.discard_pages(id);
-                self.unlink(id);
-                return Err(failure.error);
+                return undo(self, failure.error);
             }
         }
-        if sparse && self.make_sparse(id).is_err() {
-            self.discard_pages(id);
-            self.unlink(id);
-            return Err(AreaError::CantAllocateArea);
+        if self.areas.area_at(key).is_none() {
+            return Err(AreaError::BadDynamicArea);
         }
-        if flags.has(AreaFlags::SHRINKABLE)
-            && !sparse
-            && self.areas.shrinkable.try_reserve(1).is_ok()
-        {
-            self.areas.shrinkable.insert(0, id);
+        if sparse && self.make_sparse(key.id).is_err() {
+            return undo(self, AreaError::CantAllocateArea);
+        }
+        if flags.has(AreaFlags::SHRINKABLE) {
+            if self.areas.shrinkable.try_reserve(1).is_err() {
+                return undo(self, AreaError::CantAllocateArea);
+            }
+            self.areas.shrinkable.push(key.id);
         }
         guest.service(self, Service::DynamicAreaCreate { area: number });
         self.areas.note(number, signature::CREATED);
@@ -331,20 +387,7 @@ impl Memory {
     }
 
     /// Enters a new area in every table, numbered and titled.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one per field an area is made with"
-    )]
-    fn link(
-        &mut self,
-        request: &Create<'_>,
-        max: u32,
-        base: u32,
-        flags: AreaFlags,
-        handler: Option<Handler>,
-        shape: Shape,
-        reserved: &Range<u64>,
-    ) -> Result<Id, AreaError> {
+    fn link(&mut self, request: &Create<'_>, made: Made) -> Result<Key, AreaError> {
         let areas = &mut self.areas;
         areas
             .entries
@@ -391,12 +434,12 @@ impl Memory {
                     .map_err(|_| AreaError::CantAllocateArea)
             })
             .and_then(|_| {
-                if reserved.is_empty() {
+                if made.reserved.is_empty() {
                     Ok(())
                 } else {
                     areas
                         .reserved
-                        .insert(reserved.clone(), id)
+                        .insert(made.reserved.clone(), id)
                         .map_err(|_| AreaError::OverlappingAreas)
                 }
             });
@@ -412,21 +455,23 @@ impl Memory {
         let area = Area {
             number,
             title,
-            base,
-            max,
-            flags,
-            handler,
+            base: made.base,
+            max: made.max,
+            flags: made.flags,
+            access: made.access,
+            handler: made.handler,
             sequence,
-            shape,
+            reserved: made.reserved,
+            shape: made.shape,
         };
         match areas.entries.get_mut(id as usize) {
             Some(slot) => *slot = Some(area),
             None => areas.entries.push(Some(area)),
         }
         if number >= QUICK.end {
-            areas.treacle = areas.treacle.saturating_add(1);
+            areas.probe_from = areas.probe_from.saturating_add(1);
         }
-        Ok(id)
+        Ok(Key { id, sequence })
     }
 
     /// Takes an area out of every table, its number and its tables free.
@@ -439,7 +484,7 @@ impl Memory {
         else {
             return;
         };
-        let reserved = area.reserved();
+        let reserved = area.reserved.clone();
         if !reserved.is_empty() {
             self.mmu.unreserve(Table::Global, addresses(&reserved));
             if self
@@ -481,7 +526,7 @@ impl Memory {
             if doubly {
                 let _ = self
                     .mmu
-                    .unmap(Table::Global, base - count * PAGE_SIZE + index * PAGE_SIZE);
+                    .unmap(Table::Global, lower_copy(base, count, index));
             }
             self.pages.free(frame);
         }
@@ -521,21 +566,26 @@ impl Memory {
             return Err(AreaError::NotAllMoved);
         }
         let id = self.areas.id(number)?;
-        let area = self.areas.area(id).ok_or(AreaError::BadDynamicArea)?;
+        let key = self.areas.key(id).ok_or(AreaError::BadDynamicArea)?;
+        let area = self.areas.area_at(key).ok_or(AreaError::BadDynamicArea)?;
         let size = area.size();
         match &area.shape {
             Shape::Sparse { .. } => self.release_sparse(id),
             Shape::Pmp(_) => self.empty_pool(id)?,
             Shape::Pages(_) => {
-                if let Err(failure) = self.shrink_area(id, size, false, guest) {
-                    let restore = size.saturating_sub(self.areas.area(id).map_or(0, Area::size));
-                    let _ = self.grow_area(id, restore, false, guest);
+                if let Err(failure) = self.shrink_area(key, size, false, guest) {
+                    let restore =
+                        size.saturating_sub(self.areas.area_at(key).map_or(0, Area::size));
+                    let _ = self.grow_area(key, restore, false, guest);
                     return Err(failure.error);
                 }
                 // Its PostShrink handler may have grown it again: it stays,
-                // rather than its pages going with it.
-                if self.areas.area(id).is_some_and(|area| area.size() != 0) {
-                    return Err(AreaError::NotAllMoved);
+                // rather than its pages going with it. Or it may have
+                // removed it, and another area taken its id.
+                match self.areas.area_at(key) {
+                    Some(area) if area.size() != 0 => return Err(AreaError::NotAllMoved),
+                    Some(_) => {}
+                    None => return Ok(()),
                 }
             }
         }
@@ -555,7 +605,7 @@ impl Memory {
         let refused = |number: u32| {
             number <= SYSTEM || QUICK.contains(&number) || i32::try_from(number).is_err()
         };
-        if refused(old) || refused(new) || old == FREE_POOL {
+        if refused(old) || refused(new) {
             return Err(AreaError::IllegalRenumber);
         }
         let id = self.areas.id(old)?;

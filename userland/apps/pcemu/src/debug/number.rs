@@ -7,7 +7,8 @@ use alloc::string::String;
 
 use tairix_softfloat::{Decimal, Mode, Parts};
 
-use crate::fpu::real::{class, Class, Real};
+use crate::fpu::real::{class, Class};
+use tairix_softfloat::Extended;
 
 /// Significant digits shown.
 const SHOWN: u32 = 19;
@@ -15,7 +16,7 @@ const SHOWN: u32 = 19;
 /// `value` in decimal: `d.dddddddddddddddddd` and a four-digit exponent, a
 /// sign before a negative one; a zero, an infinity and a NaN by name.
 #[must_use]
-pub fn extended(value: Real) -> String {
+pub fn extended(value: Extended) -> String {
     let sign = if value.negative() { "-" } else { "" };
     match class(value) {
         Class::Zero | Class::PseudoZero => format!("{sign}0"),

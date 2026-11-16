@@ -1,22 +1,24 @@
-//! The machines: what every model shares — the clock, the memory map's
+//! The machines: what every model shares — its [`Timing`], the memory map's
 //! windows, ROM sockets, the canvas, the cassette and the bus monitor — and
-//! one module a model, the BBC Micro Model B in [`bbc`] and the Acorn
-//! Electron in [`electron`].
+//! one module a model, the BBC Micro Model B in [`bbc`], the Acorn Electron
+//! in [`electron`] and the Commodore 64 in [`c64`].
 //!
-//! Time is a count of 2 MHz cycles. Every CPU bus cycle advances it, and an
-//! access to a 1 MHz part stretches to the next coincident edge of the two
-//! clocks. A device is brought up to the current cycle before the CPU
-//! touches it, and a device whose outputs change of their own accord states
-//! the next cycle they will, so the interrupt lines are exact at every cycle
-//! the CPU samples them.
+//! Time is a count of the model's own cycles: the Acorn models' at 2 MHz,
+//! where an access to a 1 MHz part stretches to the next coincident edge of
+//! the two clocks. A device is brought up to the current cycle before the
+//! CPU touches it, and a device whose outputs change of their own accord
+//! states the next cycle they will, so the interrupt lines are exact at
+//! every cycle the CPU samples them.
 
 pub mod bbc;
+pub mod c64;
 pub mod canvas;
 pub mod cassette;
 pub mod electron;
 mod running;
+pub mod via;
 
-pub use running::Machine;
+pub use running::{BadTape, Machine};
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -67,6 +69,40 @@ const _: () = assert!(CLOCK.is_multiple_of(SOUND_RATE as u64));
 /// sound keeps running exactly past it; the samples are dropped.
 pub const AUDIO_CAPACITY: usize = SOUND_RATE as usize;
 
+/// How a machine keeps time: its cycles a second, and the cycles each sample
+/// of its sound spans. Neither is zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    clock: u64,
+    cycles_per_sample: u64,
+}
+
+impl Timing {
+    /// The Acorn models': [`CLOCK`], their sound at [`SOUND_RATE`].
+    pub const ACORN: Self = Self::of(CLOCK, CYCLES_PER_SAMPLE);
+
+    /// Built only in constants, where a zero fails the build.
+    const fn of(clock: u64, cycles_per_sample: u64) -> Self {
+        assert!(clock > 0 && cycles_per_sample > 0, "a timing counts time");
+        Self {
+            clock,
+            cycles_per_sample,
+        }
+    }
+
+    /// Cycles a second.
+    #[must_use]
+    pub const fn clock(self) -> u64 {
+        self.clock
+    }
+
+    /// Cycles a sample of its sound spans.
+    #[must_use]
+    pub const fn cycles_per_sample(self) -> u64 {
+        self.cycles_per_sample
+    }
+}
+
 /// Where the paged ROM window starts: RAM fills the addresses below it.
 pub const SIDEWAYS_BASE: u16 = 0x8000;
 
@@ -116,11 +152,13 @@ pub enum Model {
     ModelB,
     /// The Acorn Electron.
     Electron,
+    /// The Commodore 64.
+    C64,
 }
 
 impl Model {
     /// Every model, in the order a snapshot numbers them.
-    pub const ALL: [Self; 2] = [Self::ModelB, Self::Electron];
+    pub const ALL: [Self; 3] = [Self::ModelB, Self::Electron, Self::C64];
 
     /// Its number, as a snapshot and the worker's messages record it.
     #[must_use]
@@ -128,6 +166,7 @@ impl Model {
         match self {
             Self::ModelB => 0,
             Self::Electron => 1,
+            Self::C64 => 2,
         }
     }
 
@@ -143,16 +182,33 @@ impl Model {
         match self {
             Self::ModelB => "BBC Micro Model B",
             Self::Electron => "Acorn Electron",
+            Self::C64 => "Commodore 64",
         }
     }
 
-    /// Whether it has disc drives: the Model B's two, on its 8271.
+    /// How often a second its OS scans the keyboard: the MOS each
+    /// centisecond, the KERNAL each jiffy.
     #[must_use]
-    pub const fn has_drives(self) -> bool {
-        matches!(self, Self::ModelB)
+    pub const fn key_scans_per_second(self) -> u64 {
+        match self {
+            Self::ModelB | Self::Electron => 100,
+            Self::C64 => 60,
+        }
     }
 
-    /// Whether it has SHIFT LOCK, and its light.
+    /// Whether its deck has a PLAY key: a C64's datasette.
+    #[must_use]
+    pub const fn has_play_key(self) -> bool {
+        matches!(self, Self::C64)
+    }
+
+    /// Whether it has CAPS LOCK's light.
+    #[must_use]
+    pub const fn has_caps_lock(self) -> bool {
+        matches!(self, Self::ModelB | Self::Electron)
+    }
+
+    /// Whether it has SHIFT LOCK's light.
     #[must_use]
     pub const fn has_shift_lock(self) -> bool {
         matches!(self, Self::ModelB)
@@ -314,6 +370,21 @@ fn load_fitting<const N: usize>(
         };
     }
     Ok(slots)
+}
+
+/// How a machine's letter keys type letters now, which pasted text is typed
+/// by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LetterCase {
+    /// Small letters alone and capitals with SHIFT: CAPS LOCK off, or the
+    /// C64's lower-case set.
+    #[default]
+    Small,
+    /// Capitals alone and small letters with SHIFT: CAPS LOCK on.
+    Capitals,
+    /// Capitals alone, SHIFT making graphics: the C64's upper-case set, where
+    /// a small letter is typed as its capital.
+    CapitalsOnly,
 }
 
 /// One access to the memory-mapped I/O pages, as a bus monitor records it.

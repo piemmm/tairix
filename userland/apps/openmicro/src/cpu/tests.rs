@@ -7,13 +7,14 @@ use super::disasm::Instruction;
 use super::isa::{encode, Mnemonic, Mode, OPCODES};
 use super::{flag, Bus, Cpu, Registers, ADDRESS_SPACE, IRQ_VECTOR, NMI_VECTOR, RESET_VECTOR};
 
-/// Flat memory, a log of every cycle, and interrupt lines asserted over
-/// ranges of cycle counts (the count of cycles completed when sampled).
+/// Flat memory, a log of every cycle, and interrupt lines and SO asserted
+/// over ranges of cycle counts (the count of cycles completed when sampled).
 struct TestBus {
     memory: Box<[u8]>,
     log: Vec<(u16, u8, bool)>,
     irq: Range<usize>,
     nmi: Range<usize>,
+    so: Range<usize>,
 }
 
 impl TestBus {
@@ -23,6 +24,7 @@ impl TestBus {
             log: Vec::new(),
             irq: 0..0,
             nmi: 0..0,
+            so: 0..0,
         }
     }
 
@@ -58,6 +60,10 @@ impl Bus for TestBus {
 
     fn nmi(&self) -> bool {
         self.nmi.contains(&self.log.len())
+    }
+
+    fn so(&self) -> bool {
+        self.so.contains(&self.log.len())
     }
 }
 
@@ -299,6 +305,27 @@ fn an_irq_seen_on_a_page_crossing_branch_is_taken_after_it() {
     assert_eq!(cpu.pc, 0x0302);
     cpu.step(&mut bus);
     assert_eq!(cpu.pc, 0x4000);
+}
+
+/// The 1541 waits on a byte with `BVC *`, its byte-ready line on SO.
+#[test]
+fn so_falling_sets_v_once_however_long_it_is_held() {
+    let mut bus = TestBus::new();
+    bus.load(0x0200, &[0xB8, 0x50, 0xFE, 0xB8, 0xEA, 0xEA]);
+    // CLV takes two cycles and each taken BVC three: SO falls at the end of
+    // the fourth BVC.
+    bus.so = 14..usize::MAX;
+    let mut cpu = running_at(0x0200, false);
+    for _ in 0..5 {
+        cpu.step(&mut bus);
+    }
+    assert_eq!(cpu.pc, 0x0201, "the loop runs until SO falls");
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, 0x0203, "the falling edge set V");
+    for _ in 0..3 {
+        cpu.step(&mut bus);
+    }
+    assert!(!cpu.v, "a held line is one edge");
 }
 
 #[test]

@@ -67,7 +67,8 @@ impl Internal {
 
     /// One of the eight constants a data operation may name: 0, 1, 2, 3, 4,
     /// 5, 0.5 and 10.
-    pub(super) const fn constant(n: u8) -> Self {
+    #[must_use]
+    pub const fn constant(n: u8) -> Self {
         let (exponent, mantissa) = match n & 7 {
             0 => (0, 0),
             1 => (0x3FFF, 0x8000_0000),
@@ -102,6 +103,13 @@ impl Internal {
 
     pub(super) const fn fraction(self) -> u64 {
         self.mantissa & !UNITS
+    }
+
+    /// The finite value the register holds, as the arithmetic reads it;
+    /// `None` for an infinity or a NaN.
+    #[must_use]
+    pub fn value(self) -> Option<Parts> {
+        (!self.special()).then(|| self.number().parts())
     }
 
     /// Whether the arithmetic takes the value for a NaN or an infinity: an
@@ -238,14 +246,13 @@ pub(super) struct Rounded {
     pub direction: Direction,
 }
 
-/// `x` rounded at `bits` from its 64-bit window's top, as FPEmulator's round
-/// stage rounds: the place is fixed, so a mantissa without its units bit
-/// keeps fewer bits.
+/// `x` rounded at `bits` from its 64-bit window's top: the place is fixed, so
+/// a mantissa without its units bit keeps fewer bits, as `URD` leaves its
+/// integer.
 pub(super) fn round(x: Exact, bits: u32, rounding: Rounding) -> Rounded {
-    let r = x.rounded(Round {
-        mode: rounding.mode(),
-        bits,
-    });
+    // Every FPA precision keeps 24, 53 or 64 bits.
+    let round = Round::new(rounding.mode(), bits).unwrap_or(Round::extended(rounding.mode()));
+    let r = x.rounded(round);
     let kept = x.chopped() & keep_mask(bits);
     let direction = if !r.inexact {
         Direction::Exact

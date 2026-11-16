@@ -4,8 +4,10 @@
 //! `OS_ReadArgs` ([`readargs`]), all over a [`Variables`] store; and the
 //! reading of an Obey file as data, which runs no command ([`command`]).
 //!
-//! The behaviour is RISC OS 5's. Where its sources read past the end of a
-//! string, the string ends instead.
+//! The behaviour is RISC OS 5's, as its PRMs state it and as genuine RISC OS
+//! 5.30 answers what they leave unstated: `tests/riscos5.rs` holds the crate
+//! to every answer the reference harness recorded. Where RISC OS 5.30 never
+//! returns, the reading is refused instead.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -47,9 +49,13 @@ impl Budget {
         self.0
     }
 
-    /// One reference taken; `ExpansionTooComplex` where none is left.
-    fn spend(&mut self) -> Result<(), Error> {
-        self.0 = self.0.checked_sub(1).ok_or(Error::ExpansionTooComplex)?;
+    /// `references` taken at once; `ExpansionTooComplex` where fewer are
+    /// left, none then taken.
+    fn charge(&mut self, references: usize) -> Result<(), Error> {
+        self.0 = self
+            .0
+            .checked_sub(references)
+            .ok_or(Error::ExpansionTooComplex)?;
         Ok(())
     }
 }
@@ -63,4 +69,12 @@ fn byte(bytes: &[u8], at: usize) -> u8 {
 /// Whether `byte` ends a line: CR, LF or NUL.
 const fn is_terminator(byte: u8) -> bool {
     matches!(byte, 0 | 10 | 13)
+}
+
+/// `text` to its first CR, LF or NUL.
+fn line(text: &[u8]) -> &[u8] {
+    &text[..text
+        .iter()
+        .position(|&b| is_terminator(b))
+        .unwrap_or(text.len())]
 }

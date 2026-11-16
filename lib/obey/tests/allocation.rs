@@ -6,9 +6,11 @@
 //! result built a piece at a time grows by doubling, so its requests are
 //! logarithmic in its length, not one a piece.
 
-use tairix_fuzzseed::meter::{metered, refused_at_each, Metered};
+use tairix_fuzzseed::meter::{
+    metered, refused_at_each, refused_at_each_or_whole, refusing_above, Metered,
+};
 use tairix_obey::args::substitute;
-use tairix_obey::command::{read_only, Observer};
+use tairix_obey::command::{read_only, Context, Observer};
 use tairix_obey::expr::evaluate;
 use tairix_obey::readargs::read_args;
 use tairix_obey::vars::{set, Request};
@@ -21,7 +23,7 @@ static ALLOCATOR: Metered = Metered;
 /// A store holding a string and a macro that names it, made fallibly so a
 /// refusal while it is made is answered too.
 fn store() -> Result<Store, Error> {
-    let mut vars = Store::with_room(8, 256).ok_or(Error::SystemHeapFull)?;
+    let mut vars = Store::with_room(8, 256, 256).ok_or(Error::SystemHeapFull)?;
     let text = |bytes: &[u8]| fallible::copied(bytes).ok_or(Error::SystemHeapFull);
     vars.assign(b"A", Value::String(text(b"alpha")?))?;
     vars.assign(b"M", Value::Macro(text(b"<A>-<A>")?))?;
@@ -31,7 +33,7 @@ fn store() -> Result<Store, Error> {
 struct Ignored;
 
 impl Observer for Ignored {
-    fn icon_sprites(&mut self, _: &[u8], _: &mut Store, _: &mut Budget) {}
+    fn icon_sprites(&mut self, _: &[u8], _: &mut dyn Variables, _: &mut Budget) {}
 }
 
 #[test]
@@ -60,7 +62,7 @@ fn every_refusal_is_answered_as_a_full_heap() {
         },
         refused,
     );
-    refused_at_each(
+    refused_at_each_or_whole(
         || {
             let mut vars = store()?;
             set(
@@ -69,24 +71,48 @@ fn every_refusal_is_answered_as_a_full_heap() {
                 Request::String(b"<A> and <M>"),
                 256,
                 &mut Budget::new(16),
-            )
+            )?;
+            vars.lookup(b"New")
         },
         refused,
     );
-    refused_at_each(
+    refused_at_each_or_whole(
         || {
             let mut vars = store()?;
             let file = b"Set X 1\nIf 1 Then Set Y <X><M>\n";
-            read_only(
-                file,
-                b"$.Dir",
-                &mut vars,
-                &mut Ignored,
-                &mut Budget::new(16),
-            )
+            let longest = vars.longest();
+            let mut budget = Budget::new(16);
+            let mut cx = Context {
+                vars: &mut vars,
+                longest,
+                observer: &mut Ignored,
+                budget: &mut budget,
+            };
+            read_only(file, b"$.Dir", b"", &mut cx)?;
+            vars.lookup(b"Y")
         },
         refused,
     );
+}
+
+#[test]
+fn a_reference_whose_value_is_refused_is_an_error_never_nothing() {
+    let mut vars = Store::with_room(8, 1024, 64).expect("room");
+    vars.assign(b"A", Value::String([b'a'; 600].to_vec()))
+        .expect("room");
+    let answer = refusing_above(512, || {
+        set(
+            &mut vars,
+            b"P",
+            Request::String(b"x<A>y"),
+            1024,
+            &mut Budget::new(16),
+        )
+    });
+    assert_eq!(answer, Err(Error::SystemHeapFull));
+    assert_eq!(vars.lookup(b"P"), Ok(None), "nothing set");
+    let answer = refusing_above(512, || evaluate(b"A", &mut vars, &mut Budget::new(16)));
+    assert_eq!(answer, Err(Error::SystemHeapFull), "an operand too");
 }
 
 #[test]

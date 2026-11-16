@@ -1,12 +1,14 @@
 //! The host's keyboard as a machine's: each host key placed on the machine's
-//! key in its position, or typing the character it produces, for either
-//! model's keyboard.
+//! key in its position, or typing the character it produces, for each
+//! model's keyboard; and the numeric keypad as a C64's joystick.
 
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PhysicalKey};
 
-use crate::machine::{bbc, electron};
+use crate::machine::c64::joystick;
+use crate::machine::c64::keyboard::{Key as C64Key, Keycap};
+use crate::machine::{bbc, electron, LetterCase};
 
 /// How host keys reach a machine's keyboard.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,17 +228,22 @@ impl<K: MachineKey> Keyboard<K> {
     }
 }
 
-/// The key that types `ch` on a machine whose CAPS LOCK is as `caps_lock`
+/// The key that types `ch` on a machine whose letter keys type as `case`
 /// says, and whether SHIFT is held with it: what pasted text is typed with, a
 /// line ending as RETURN and `£` as its code.
 #[must_use]
-pub fn typing<K: MachineKey>(ch: char, caps_lock: bool) -> Option<(K, bool)> {
+pub fn typing<K: MachineKey>(ch: char, case: LetterCase) -> Option<(K, bool)> {
     match ch {
         '\n' => K::typing('\r'),
         '£' => K::typing('`'),
         ch if ch.is_ascii_alphabetic() => {
             let (key, _) = K::typing(ch.to_ascii_uppercase())?;
-            Some((key, ch.is_ascii_lowercase() == caps_lock))
+            let shifted = match case {
+                LetterCase::Small => ch.is_ascii_uppercase(),
+                LetterCase::Capitals => ch.is_ascii_lowercase(),
+                LetterCase::CapitalsOnly => false,
+            };
+            Some((key, shifted))
         }
         ch => K::typing(ch),
     }
@@ -486,6 +493,175 @@ impl MachineKey for electron::keyboard::Key {
             (key, electron::keyboard::Modifier::Shift) => Some((key, true)),
             (_, electron::keyboard::Modifier::Ctrl) => None,
         }
+    }
+}
+
+impl MachineKey for Keycap {
+    const SHIFT: Self = Self::Matrix(C64Key::LEFT_SHIFT);
+    const CTRL: Self = Self::Matrix(C64Key::CONTROL);
+    // The C64 has no CAPS LOCK; the host's, like its Alt, is the Commodore
+    // key.
+    const CAPS: (Self, Option<bool>) = (Self::Matrix(C64Key::COMMODORE), None);
+    const ALT: Option<Self> = Some(Self::Matrix(C64Key::COMMODORE));
+
+    fn number(self) -> u8 {
+        Self::number(self)
+    }
+
+    /// The key in `physical`'s place on a UK keyboard: RUN/STOP on Caps Lock
+    /// and Escape, the left arrow left of 1, CLR/HOME and the pound sign on
+    /// Home and Insert, RESTORE on F12, Pause and Page Up, and the cursor
+    /// keys and the second function of each function key as SHIFT gives
+    /// them.
+    fn placed(physical: PhysicalKey) -> Option<Held<Self>> {
+        let usage = physical.usage();
+        let shifted = |key| Some(Held::Key(Self::Matrix(key), Some(C64_SHIFTED)));
+        if let Some(ch) = letter_or_digit(usage) {
+            return Some(Held::Key(Self::Matrix(C64Key::typing(ch)?.0), None));
+        }
+        let key = match usage {
+            0x28 => C64Key::RETURN,
+            0x29 | 0x39 => C64Key::RUN_STOP,
+            0x2A | 0x4C => C64Key::DELETE,
+            0x2B => C64Key::CONTROL,
+            0x2C => C64Key::SPACE,
+            0x2D => C64Key::PLUS,
+            0x2E => C64Key::MINUS,
+            0x2F => C64Key::AT,
+            0x30 => C64Key::ASTERISK,
+            0x31 => C64Key::UP_ARROW,
+            0x32 => C64Key::EQUALS,
+            0x33 => C64Key::COLON,
+            0x34 => C64Key::SEMICOLON,
+            0x35 => C64Key::LEFT_ARROW,
+            0x36 => C64Key::COMMA,
+            0x37 => C64Key::PERIOD,
+            0x38 => C64Key::SLASH,
+            0x3A..=0x41 => {
+                let (key, shift) = c64_function(usize::from(usage - 0x3A) + 1)?;
+                return if shift {
+                    shifted(key)
+                } else {
+                    Some(Held::Key(Self::Matrix(key), None))
+                };
+            }
+            0x45 | 0x48 | 0x4B => return Some(Held::Key(Self::Restore, None)),
+            0x49 => C64Key::POUND,
+            0x4A => C64Key::HOME,
+            0x4F => C64Key::CURSOR_RIGHT,
+            0x50 => return shifted(C64Key::CURSOR_RIGHT),
+            0x51 => C64Key::CURSOR_DOWN,
+            0x52 => return shifted(C64Key::CURSOR_DOWN),
+            _ => return None,
+        };
+        Some(Held::Key(Self::Matrix(key), None))
+    }
+
+    /// The cursor keys, Insert and the even function keys as SHIFT gives
+    /// them on the C64's own keys; RESTORE on F12 and Page Up.
+    fn named(named: NamedKeyCode) -> Option<(Held<Self>, Option<bool>)> {
+        let (key, shift) = match named {
+            NamedKeyCode::Enter => (C64Key::RETURN, None),
+            NamedKeyCode::Escape => (C64Key::RUN_STOP, None),
+            NamedKeyCode::Backspace | NamedKeyCode::Delete => (C64Key::DELETE, Some(false)),
+            NamedKeyCode::Insert => (C64Key::DELETE, Some(true)),
+            NamedKeyCode::Tab => (C64Key::CONTROL, None),
+            NamedKeyCode::Home => (C64Key::HOME, None),
+            NamedKeyCode::Right => (C64Key::CURSOR_RIGHT, Some(false)),
+            NamedKeyCode::Left => (C64Key::CURSOR_RIGHT, Some(true)),
+            NamedKeyCode::Down => (C64Key::CURSOR_DOWN, Some(false)),
+            NamedKeyCode::Up => (C64Key::CURSOR_DOWN, Some(true)),
+            NamedKeyCode::F12 | NamedKeyCode::PageUp => {
+                return Some((Held::Key(Self::Restore, None), None));
+            }
+            named => {
+                let (key, shift) = c64_function(function_number(named)?)?;
+                (key, Some(shift))
+            }
+        };
+        Some((Held::Key(Self::Matrix(key), None), shift))
+    }
+
+    fn typing(ch: char) -> Option<(Self, bool)> {
+        C64Key::typing(ch).map(|(key, shifted)| (Self::Matrix(key), shifted))
+    }
+}
+
+/// The SHIFT a placed key holds beneath it for its key's second function:
+/// the right one, so the host's Shift keys, on the left one, are not undone.
+const C64_SHIFTED: Keycap = Keycap::Matrix(C64Key::RIGHT_SHIFT);
+
+/// The C64's key for host function key `number`, F1 being 1, and whether
+/// SHIFT goes with it: f1, f3, f5 and f7 the keys themselves, the even ones
+/// SHIFT with the odd before.
+fn c64_function(number: usize) -> Option<(C64Key, bool)> {
+    const KEYS: [C64Key; 4] = [C64Key::F1, C64Key::F3, C64Key::F5, C64Key::F7];
+    let at = number.checked_sub(1)?;
+    Some((*KEYS.get(at / 2)?, at % 2 == 1))
+}
+
+/// Keypad keys, by their usages from keypad 1: each a joystick's lines.
+const STICK: [(u16, u8); 10] = [
+    (0x59, joystick::DOWN | joystick::LEFT),
+    (0x5A, joystick::DOWN),
+    (0x5B, joystick::DOWN | joystick::RIGHT),
+    (0x5C, joystick::LEFT),
+    (0x5D, joystick::FIRE),
+    (0x5E, joystick::RIGHT),
+    (0x5F, joystick::UP | joystick::LEFT),
+    (0x60, joystick::UP),
+    (0x61, joystick::UP | joystick::RIGHT),
+    (0x62, joystick::FIRE),
+];
+
+/// The host's numeric keypad as a joystick: its arrows and their diagonals
+/// the stick, 5 and 0 the fire button.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stick {
+    /// The keypad keys held, a bit each in [`STICK`]'s order.
+    held: u16,
+}
+
+impl Stick {
+    /// A stick with nothing held.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { held: 0 }
+    }
+
+    /// The lines held after `input`, where it is a keypad key's edge;
+    /// `None` for another key, which the keyboard takes.
+    pub fn edge(&mut self, input: &KeyInput) -> Option<u8> {
+        let (physical, pressed) = match *input {
+            KeyInput::Pressed { physical, .. } => (physical, true),
+            KeyInput::Released { physical, .. } => (physical, false),
+        };
+        let at = STICK
+            .iter()
+            .position(|&(usage, _)| usage == physical.usage())?;
+        if pressed {
+            self.held |= 1 << at;
+        } else {
+            self.held &= !(1 << at);
+        }
+        Some(self.lines())
+    }
+
+    /// Every keypad key let go: the lines it held, now none, if any were.
+    pub fn release_all(&mut self) -> Option<u8> {
+        let held = self.lines() != 0;
+        self.held = 0;
+        held.then_some(0)
+    }
+
+    /// The lines the keys held hold.
+    #[must_use]
+    pub fn lines(self) -> u8 {
+        STICK
+            .iter()
+            .enumerate()
+            .filter(|&(at, _)| self.held & 1 << at != 0)
+            .fold(0, |lines, (_, &(_, held))| lines | held)
     }
 }
 

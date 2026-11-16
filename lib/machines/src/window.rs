@@ -505,8 +505,14 @@ impl<S: Sheet> SheetWindow<S> {
         }
     }
 
-    /// Take a delivered `event`: what it did.
-    pub fn event(&mut self, event: &WindowEvent, looks: (Scale, &Theme)) -> SheetEvent<S::Answer> {
+    /// Take a delivered `event`: what it did. A form whose extent the event
+    /// changed is sized again and drawn whole.
+    pub fn event(
+        &mut self,
+        client: &mut Client,
+        event: &WindowEvent,
+        looks: (Scale, &Theme),
+    ) -> SheetEvent<S::Answer> {
         let mut answer = None;
         let mut damage = Region::new();
         match *event {
@@ -516,6 +522,8 @@ impl<S: Sheet> SheetWindow<S> {
                 self.owed.owe_whole();
             }
             WindowEvent::RedrawRequested { .. } => self.owed.owe_whole(),
+            // A size deferred behind an earlier resize is asked again.
+            WindowEvent::Resized { .. } => self.relook(client, looks),
             _ => {
                 let at_ns = event_time(event);
                 let sheet = &mut self.sheet;
@@ -527,6 +535,9 @@ impl<S: Sheet> SheetWindow<S> {
             }
         }
         if !damage.is_empty() {
+            if self.refit(client, looks) {
+                damage = whole(&self.pane);
+            }
             self.paint(&damage, looks);
         }
         answer.map_or(SheetEvent::Nothing, SheetEvent::Answered)
@@ -553,12 +564,18 @@ impl<S: Sheet> SheetWindow<S> {
     /// The desktop's look or scale moved: the dialog sized again, and drawn
     /// whole where its size changed.
     pub fn relook(&mut self, client: &mut Client, looks: (Scale, &Theme)) {
-        let (width, height) = self.sheet.extent(looks.0, looks.1);
-        let mode = app::mode_for(width, height);
-        if self.pane.resize_with(client, &mode, &mut self.surface) != Fitted::Kept {
+        if self.refit(client, looks) {
             let damage = whole(&self.pane);
             self.paint(&damage, looks);
         }
+    }
+
+    /// Size the window to the form's extent, answering whether it took a new
+    /// size, which is drawn whole.
+    fn refit(&mut self, client: &mut Client, (scale, theme): (Scale, &Theme)) -> bool {
+        let (width, height) = self.sheet.extent(scale, theme);
+        let mode = app::mode_for(width, height);
+        self.pane.resize_with(client, &mode, &mut self.surface) == Fitted::Adopted
     }
 
     /// Close the dialog.

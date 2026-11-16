@@ -26,11 +26,11 @@
 
 use super::buffers::number;
 use super::ws::{buffer, os, page2, var};
+use super::Model;
 use super::{latch, svia};
 use crate::machine::bbc::latch as machine_latch;
-use crate::machine::bbc::via::reg;
 use crate::machine::electron::{control, sheila as ula};
-use crate::machine::Model;
+use crate::machine::via::reg;
 use crate::rom::asm::{abs, imm, lo, zp, Acc, Asm, RTS};
 use crate::rom::os::service;
 

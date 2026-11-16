@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_arm::bus::{Abort, Bus, Width};
 use tairix_riscos_arm::mmu::{
-    Access, Frame, FrameKind, Mmu, MmuError, Rights, Space, Table, Watcher, FRAME_WORDS, PAGE_SIZE,
-    WATCHERS,
+    Access, Frame, FrameKind, Mmu, MmuError, Rights, Space, Table, Watcher, FRAME_WORDS,
+    MOST_FRAMES, PAGE_SIZE, WATCHERS,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -327,9 +327,8 @@ impl Model {
         let frame = self.access(address, true, false, privileged)?;
         let shift = 8 * (address & 3);
         let mask = match width {
-            Width::Byte => 0xFF << shift,
-            Width::Half => 0xFFFF << shift,
             Width::Word => u32::MAX,
+            narrow => narrow.mask() << shift,
         };
         if let Some(model) = self.frames.get_mut(&frame) {
             let word = &mut model.words[(address % PAGE_SIZE / 4) as usize];
@@ -408,8 +407,13 @@ fn table_drawn(rng: &mut Prng, handles: &[Space]) -> Table {
     }
 }
 
+/// A frame number: mostly about the limit, now and then past any limit.
 fn frame_drawn(rng: &mut Prng) -> u32 {
-    below(rng, 20)
+    match rng.below(16) {
+        0 => *rng.pick(&[MOST_FRAMES - 1, MOST_FRAMES, 0x7FFF_FFFF, u32::MAX]),
+        1 => rng.next_u32(),
+        _ => below(rng, 20),
+    }
 }
 
 /// What one run reached, so a sweep can show it exercised more than refusals.

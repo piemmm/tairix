@@ -13,13 +13,15 @@ RISC OS's command-line machinery, pure and over a variable store:
 - **Arguments**: `OS_SubstituteArgs` (`args`), as aliases and Obey files take
   theirs, and `OS_ReadArgs` (`readargs`), with its buffer laid out as the call
   leaves it.
-- **Command lines** (`command`): `If`'s choice of command, and an Obey file
-  read as data, a read-only mode that runs no command.
+- **Command lines** (`command`): `If`'s choice of command, and a command line
+  or an Obey file read as data, a read-only mode that runs no command.
 
-The behaviour is RISC OS 5's. Where its sources read past the end of a string,
-the string ends instead. Errors are known by their RISC OS message tokens.
-Every allocation is fallible, and every reading of text is bounded by a
-`Budget` of variable references, however its macros nest.
+The behaviour is RISC OS 5's, as its PRMs state it and as genuine RISC OS 5.30
+answers what they leave unstated, each answer recorded by `cargo xtask riscos
+--reference` and replayed in `tests/riscos5.rs`. Where RISC OS 5.30 never
+returns, the reading is refused instead. Every allocation is fallible, and
+every reading of text is bounded by a `Budget` of variable references, however
+its macros nest.
 
 `no_std`, with no `unsafe`.
 

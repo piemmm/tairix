@@ -2,63 +2,53 @@
 //! list of physical pages and maps any of them anywhere in its window.
 //!
 //! A pool's pages are held whether mapped or not, so unmapping one never
-//! frees it; releasing it from its slot does.
+//! frees it; releasing it from its slot does. A page list costs nothing for
+//! its empty slots: only those holding a page are kept.
 
-use alloc::vec::Vec;
-
-use alloc::collections::TryReserveError;
+use tairix_collections::OrderedMap;
 use tairix_riscos_arm::mmu::{Access, Frame, FrameKind, Table, PAGE_SIZE};
 
 use super::super::guest::{Guest, Service};
 use super::super::{Holder, Memory};
-use super::{AccessPrivilege, AreaError, AreaFlags, Id, Shape};
+use super::change::named;
+use super::{access_privilege, AreaError, AreaFlags, Id, Shape};
 
 /// The page flags a logical op may set: the access privilege, the cache
 /// bits and policy, and unavailability.
 const LOGICAL_FLAGS: u32 = 0xF03F;
 /// A page claimed for its owner alone.
 const UNAVAILABLE: u32 = 1 << 15;
-/// Permission to make a reserved page unavailable.
-const RESERVED: u32 = 1 << 7;
 
 /// A pool's pages: its page list and where in its window each is mapped.
 pub(super) struct Pool {
-    /// Each slot's page and its flags, if it has one.
-    slots: Vec<Option<(Frame, u32)>>,
-    /// Where each slot's page is mapped, by window page index.
-    mapped_at: Vec<Option<u32>>,
-    /// The page each window page shows, by slot.
-    window: tairix_collections::OrderedMap<u32, u32>,
-    /// The end of the window ever mapped.
-    high_water: u32,
-    filled: u32,
+    /// Each filled slot's page and its flags.
+    slots: OrderedMap<u32, (Frame, u32)>,
+    /// Where each mapped slot's page is, by window page index.
+    mapped_at: OrderedMap<u32, u32>,
+    /// The slot each mapped window page shows.
+    window: OrderedMap<u32, u32>,
+    /// The slots its page list has, filled or not.
+    capacity: u32,
 }
 
 impl Pool {
-    pub(super) fn new(capacity: u32, base: u32) -> Result<Self, TryReserveError> {
-        let mut slots = Vec::new();
-        slots.try_reserve_exact(capacity as usize)?;
-        slots.resize(capacity as usize, None);
-        let mut mapped_at = Vec::new();
-        mapped_at.try_reserve_exact(capacity as usize)?;
-        mapped_at.resize(capacity as usize, None);
-        Ok(Self {
-            slots,
-            mapped_at,
-            window: tairix_collections::OrderedMap::new(),
-            high_water: base,
-            filled: 0,
-        })
+    pub(super) const fn new(capacity: u32) -> Self {
+        Self {
+            slots: OrderedMap::new(),
+            mapped_at: OrderedMap::new(),
+            window: OrderedMap::new(),
+            capacity,
+        }
     }
 
     /// The pages it owns.
-    pub(super) const fn pages(&self) -> u32 {
-        self.filled
+    pub(super) fn pages(&self) -> u32 {
+        u32::try_from(self.slots.len()).unwrap_or(u32::MAX)
     }
 
     /// The most its page list holds.
-    pub(super) fn capacity(&self) -> u32 {
-        u32::try_from(self.slots.len()).unwrap_or(u32::MAX)
+    pub(super) const fn capacity(&self) -> u32 {
+        self.capacity
     }
 
     /// The pages mapped in its window.
@@ -68,18 +58,18 @@ impl Pool {
 
     /// Where slot `slot`'s page is mapped, by window page index.
     pub(super) fn window_of(&self, slot: u32) -> Option<u32> {
-        *self.mapped_at.get(slot as usize)?
+        self.mapped_at.get(&slot).copied()
     }
 
     /// Puts `new` in slot `slot`, a replacement for its page.
     pub(super) fn replace(&mut self, slot: u32, new: Frame) {
-        if let Some(Some((page, _))) = self.slots.get_mut(slot as usize) {
+        if let Some((page, _)) = self.slots.get_mut(&slot) {
             *page = new;
         }
     }
 
     fn page(&self, slot: u32) -> Option<(Frame, u32)> {
-        *self.slots.get(slot as usize)?
+        self.slots.get(&slot).copied()
     }
 }
 
@@ -91,7 +81,7 @@ pub struct PhysicalOp {
     /// The page: -1 releases the slot's, -2 lets the kernel choose, any
     /// other takes that page.
     pub page: i32,
-    /// The flags: unavailability asked, and permission over a reservation.
+    /// The flags: unavailability asked.
     pub flags: u32,
 }
 
@@ -152,6 +142,7 @@ impl Memory {
             return Ok(());
         }
         let (capacity, before) = (pool.capacity(), pool.pages());
+        let key = self.areas.key(id).ok_or((AreaError::BadDynamicArea, 0))?;
         let mut claims = 0u32;
         let mut peak = 0u32;
         for (index, op) in ops.iter().enumerate() {
@@ -162,19 +153,19 @@ impl Memory {
             if op.page == -1 {
                 claims = claims.saturating_sub(1);
             } else {
-                claims += 1;
+                claims = claims.saturating_add(1);
                 peak = peak.max(claims);
             }
         }
-        if self.free_pages() < peak {
-            self.free_for(peak, Some(id), guest);
-            if self.free_pages() < peak {
-                let short = peak - self.free_pages();
-                let _ = self.shrink_application(short * PAGE_SIZE, guest);
-            }
-            if self.free_pages() < peak {
-                return Err((AreaError::NotAllMoved, 0));
-            }
+        // A claim of a slot already holding a page gives that page back
+        // first, so no list needs more new pages than there are empty slots.
+        let peak = peak.min(capacity.saturating_sub(before));
+        if self.free_pages() < peak && self.make_room(peak, Some(key), guest).is_err() {
+            return Err((AreaError::NotAllMoved, 0));
+        }
+        // Guest code ran making room: the pool may have gone.
+        if self.areas.area_at(key).is_none() {
+            return Err((AreaError::BadDynamicArea, 0));
         }
         let mut outcome = Ok(());
         for (index, op) in ops.iter().enumerate() {
@@ -190,7 +181,7 @@ impl Memory {
             self,
             Service::MemoryMoved {
                 bytes: moved,
-                area: i32::try_from(number).unwrap_or(-1),
+                area: named(number),
             },
         );
         outcome
@@ -206,7 +197,6 @@ impl Memory {
             return Err(AreaError::BadPageNumber);
         }
         let unavailable = op.flags & UNAVAILABLE != 0;
-        let permitted = op.flags & RESERVED != 0;
         let held = pool.page(op.slot);
         let keep = match (held, op.page) {
             (Some((page, _)), -2) => Some(page),
@@ -216,59 +206,62 @@ impl Memory {
             _ => None,
         };
         if let Some(page) = keep {
-            let record = self.pages.get(page.number());
-            if unavailable && record.reserved && !permitted {
-                return Err(AreaError::CantGetPhysicalMemory);
-            }
             if let Ok(record) = self.pages.get_mut(page.number()) {
                 record.unavailable = unavailable;
             }
             return Ok(());
         }
-        if let Some((page, _)) = held {
-            let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
-            if pool.mapped_at[op.slot as usize].is_some() {
-                return Err(AreaError::NotAllMoved);
-            }
-            pool.slots[op.slot as usize] = None;
-            pool.filled -= 1;
-            self.pages.free(page);
-            let _ = self.mmu.release(page);
+        let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
+        if held.is_some() && pool.mapped_at.get(&op.slot).is_some() {
+            return Err(AreaError::NotAllMoved);
         }
-        let frame = match op.page {
-            -1 => return Ok(()),
-            -2 => {
-                let mut from = Frame::new(0);
-                loop {
-                    let page = self.mmu.next_free(from).ok_or(AreaError::NotAllMoved)?;
-                    from = Frame::new(page.number() + 1);
-                    if !(unavailable && self.pages.get(page.number()).reserved) {
-                        self.mmu
-                            .allocate_at(page, FrameKind::Memory)
-                            .map_err(|_| AreaError::NotAllMoved)?;
-                        break page;
-                    }
-                }
-            }
+        // Whatever can refuse the claim is asked before the slot's old page
+        // goes, so a refusal changes nothing.
+        let wanted = match op.page {
+            -1 => None,
+            -2 => Some(
+                self.mmu
+                    .next_free(Frame::new(0))
+                    .ok_or(AreaError::NotAllMoved)?,
+            ),
             page => {
-                let page = Frame::new(u32::try_from(page).map_err(|_| AreaError::BadPageNumber)?);
-                let record = self.pages.get(page.number());
+                let page = u32::try_from(page).map_err(|_| AreaError::BadPageNumber)?;
+                let record = self.pages.get(page);
                 if record.unavailable || record.holder == Some(Holder::Kernel) {
                     return Err(AreaError::NotAllMoved);
                 }
-                if record.reserved && unavailable && !permitted {
-                    return Err(AreaError::CantGetPhysicalMemory);
-                }
-                if self.mmu.is_free(page) {
-                    self.mmu
-                        .allocate_at(page, FrameKind::Memory)
-                        .map_err(|_| AreaError::NotAllMoved)?;
-                } else {
-                    self.replace_page(page)?;
-                }
-                page
+                Some(Frame::new(page))
             }
         };
+        if let Some(frame) = wanted {
+            self.pages
+                .get_mut(frame.number())
+                .map_err(|_| AreaError::NotAllMoved)?;
+            self.pool_mut(id)
+                .ok_or(AreaError::BadDynamicArea)?
+                .slots
+                .try_reserve(1)
+                .map_err(|_| AreaError::NotAllMoved)?;
+        }
+        if let Some((page, _)) = held {
+            if let Some(pool) = self.pool_mut(id) {
+                pool.slots.remove(&op.slot);
+            }
+            self.pages.free(page);
+            let _ = self.mmu.release(page);
+        }
+        let Some(frame) = wanted else {
+            return Ok(());
+        };
+        // Only the host's own memory can fail these now; the old page, freed,
+        // is there for a replacement.
+        if self.mmu.is_free(frame) {
+            self.mmu
+                .allocate_at(frame, FrameKind::Memory)
+                .map_err(|_| AreaError::NotAllMoved)?;
+        } else {
+            self.replace_page(frame)?;
+        }
         if let Ok(record) = self.pages.get_mut(frame.number()) {
             record.holder = Some(Holder::Area {
                 area: id,
@@ -278,8 +271,8 @@ impl Memory {
         }
         let flags = area_flags | if unavailable { UNAVAILABLE } else { 0 };
         if let Some(pool) = self.pool_mut(id) {
-            pool.slots[op.slot as usize] = Some((frame, flags));
-            pool.filled += 1;
+            // Room was reserved for the entry above.
+            let _ = pool.slots.try_insert(op.slot, (frame, flags));
         }
         Ok(())
     }
@@ -313,7 +306,7 @@ impl Memory {
         let Some(slot) = op.slot else {
             if let Some(slot) = occupant {
                 pool.window.remove(&op.window);
-                pool.mapped_at[slot as usize] = None;
+                pool.mapped_at.remove(&slot);
                 let _ = self.mmu.unmap(Table::Global, address);
             }
             return Ok(());
@@ -321,36 +314,41 @@ impl Memory {
         let (frame, _) = pool.page(slot).ok_or(AreaError::BadPageNumber)?;
         let flags = op.flags & LOGICAL_FLAGS;
         let access: Access =
-            AccessPrivilege::of(flags & AreaFlags::PRIVILEGE).ok_or(AreaError::BadParameters)?;
-        let record = self.pages.get(frame.number());
-        if flags & UNAVAILABLE != 0 && record.reserved && op.flags & RESERVED == 0 {
-            return Err(AreaError::CantGetPhysicalMemory);
-        }
-        let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
-        let elsewhere = pool.mapped_at[slot as usize].filter(|&window| window != op.window);
+            access_privilege(flags & AreaFlags::PRIVILEGE).ok_or(AreaError::BadParameters)?;
+        // Room for both entries first, so nothing below can be half done.
+        pool.window
+            .try_reserve(1)
+            .and_then(|()| pool.mapped_at.try_reserve(1))
+            .map_err(|_| AreaError::NotAllMoved)?;
+        let elsewhere = pool
+            .mapped_at
+            .get(&slot)
+            .copied()
+            .filter(|&window| window != op.window);
         if let Some(window) = elsewhere {
             pool.window.remove(&window);
             let _ = self.mmu.unmap(Table::Global, base + window * PAGE_SIZE);
         }
         let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
         if let Some(other) = occupant.filter(|&other| other != slot) {
-            pool.mapped_at[other as usize] = None;
+            pool.mapped_at.remove(&other);
         }
         if occupant.is_some() {
             let _ = self.mmu.unmap(Table::Global, address);
         }
+        let mapped = self.mmu.map(Table::Global, address, frame, access);
         let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
-        pool.window
-            .try_insert(op.window, slot)
-            .map_err(|_| AreaError::NotAllMoved)?;
-        pool.mapped_at[slot as usize] = Some(op.window);
-        pool.high_water = pool.high_water.max(address + PAGE_SIZE);
-        if let Some(Some((_, page_flags))) = pool.slots.get_mut(slot as usize) {
+        if mapped.is_err() {
+            // Unmapped from where it was, and mapped nowhere.
+            pool.window.remove(&op.window);
+            pool.mapped_at.remove(&slot);
+            return Err(AreaError::CantAllocateLevel2);
+        }
+        let _ = pool.window.try_insert(op.window, slot);
+        let _ = pool.mapped_at.try_insert(slot, op.window);
+        if let Some((_, page_flags)) = pool.slots.get_mut(&slot) {
             *page_flags = (*page_flags & !LOGICAL_FLAGS) | flags;
         }
-        self.mmu
-            .map(Table::Global, address, frame, access)
-            .map_err(|_| AreaError::CantAllocateLevel2)?;
         if let Ok(record) = self.pages.get_mut(frame.number()) {
             record.unavailable = flags & UNAVAILABLE != 0;
         }
@@ -360,35 +358,20 @@ impl Memory {
     /// `OS_DynamicArea` 23: lengthens a pool's page list, or trims its empty
     /// slots from the end; the slots changed.
     pub fn pool_resize(&mut self, number: u32, change: i32) -> Result<u32, AreaError> {
-        let (id, pool) = self.pool(number)?;
-        let capacity = pool.capacity();
+        let (id, _) = self.pool(number)?;
         let ram = self.ceiling.pages();
         let pool = self.pool_mut(id).ok_or(AreaError::BadDynamicArea)?;
+        let capacity = pool.capacity;
         if change >= 0 {
             let added = change.unsigned_abs().min(ram.saturating_sub(capacity));
-            let len = (capacity + added) as usize;
-            pool.slots
-                .try_reserve(added as usize)
-                .map_err(|_| AreaError::BadDynamicArea)?;
-            pool.mapped_at
-                .try_reserve(added as usize)
-                .map_err(|_| AreaError::BadDynamicArea)?;
-            pool.slots.resize(len, None);
-            pool.mapped_at.resize(len, None);
+            pool.capacity += added;
             Ok(added)
         } else {
             let wanted = change.unsigned_abs().min(capacity);
-            let empty = pool
-                .slots
-                .iter()
-                .rev()
-                .take(wanted as usize)
-                .take_while(|slot| slot.is_none())
-                .count();
-            let len = pool.slots.len() - empty;
-            pool.slots.truncate(len);
-            pool.mapped_at.truncate(len);
-            Ok(u32::try_from(empty).unwrap_or(0))
+            let filled_to = pool.slots.last_key_value().map_or(0, |(&slot, _)| slot + 1);
+            let trimmed = wanted.min(capacity - filled_to.min(capacity));
+            pool.capacity -= trimmed;
+            Ok(trimmed)
         }
     }
 
@@ -448,23 +431,15 @@ impl Memory {
         let Some(pool) = self.pool_mut(id) else {
             return Err(AreaError::BadDynamicArea);
         };
-        let windows: Vec<u32> = pool.window.iter().map(|(&window, _)| window).collect();
-        let pages: Vec<Frame> = pool
-            .slots
-            .iter()
-            .flatten()
-            .map(|&(frame, _)| frame)
-            .collect();
-        pool.window = tairix_collections::OrderedMap::new();
-        pool.slots.iter_mut().for_each(|slot| *slot = None);
-        pool.mapped_at.iter_mut().for_each(|slot| *slot = None);
-        pool.filled = 0;
-        for window in windows {
-            let _ = self.mmu.unmap(Table::Global, base + window * PAGE_SIZE);
+        let window = core::mem::take(&mut pool.window);
+        let slots = core::mem::take(&mut pool.slots);
+        pool.mapped_at.clear();
+        for (&page, _) in &window {
+            let _ = self.mmu.unmap(Table::Global, base + page * PAGE_SIZE);
         }
-        for page in pages {
-            self.pages.free(page);
-            let _ = self.mmu.release(page);
+        for (_, &(frame, _)) in &slots {
+            self.pages.free(frame);
+            let _ = self.mmu.release(frame);
         }
         Ok(())
     }

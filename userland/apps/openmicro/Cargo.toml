@@ -56,7 +56,7 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # and the VDU codes and character set the MOS's are. The ROM sources are
 # host-only.
 [target.'cfg(not(target_os = "none"))'.dependencies]
-tairix-bbcbasic = { path = "../../../lib/bbcbasic", version = "=0.0.0" }
+tairix-openbasic = { path = "../../../lib/openbasic", version = "=0.0.0" }
 tairix-vdu = { path = "../../../lib/vdu", version = "=0.0.0" }
 
 # The package is both the host-tested machine and front-end model and the
@@ -100,6 +100,8 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["tes
 tairix-crc32 = { path = "../../../lib/crc32", version = "=0.0.0" }
 # The seeded PRNG and budgets the fuzz harnesses draw from.
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The content types the bundle's associations are named by.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

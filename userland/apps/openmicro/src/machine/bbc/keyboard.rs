@@ -258,13 +258,6 @@ impl Keyboard {
         }
     }
 
-    /// Release every key, leaving the links as they are.
-    pub fn release_all(&mut self) {
-        let options = self.startup_options();
-        self.columns = [0; 16];
-        self.set_startup_options(options);
-    }
-
     /// The startup options the links set, as OSBYTE &FF reports them after a
     /// hard BREAK: bit 0 is the link in column 9, bit 7 the one in column 2,
     /// and an open link reads as a set bit, so a keyboard with no link fitted
@@ -387,10 +380,6 @@ mod tests {
         keyboard.set_startup_options(0xF7);
         assert!(keyboard.scan(0x06));
         assert!(!keyboard.scan(0x05) && !keyboard.scan(0x07));
-        keyboard.set(Key::A, true);
-        keyboard.release_all();
-        assert!(!keyboard.scan(Key::A.number()));
-        assert_eq!(keyboard.startup_options(), 0xF7);
     }
 
     #[test]

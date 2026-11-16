@@ -13,7 +13,8 @@
 //! vectors the crate's tests replay, with a provenance record.
 //!
 //! Developer-run only: `<module>` is a developer's own copy of FPEmulator 4,
-//! squeezed or not. Its bytes never enter the tree; only its answers do.
+//! as RISC OS holds it in memory rather than squeezed. Its bytes never enter
+//! the tree; only its answers do.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -25,20 +26,27 @@ use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::cpu::{Cpu, State, Stop};
 use tairix_riscos_arm::fpa::{self, Exception, Format, Fpa, Internal, Precision, Rounding};
 use tairix_riscos_arm::instruction::{
-    CoIndex, FpaMultipleOp, FpaOperand, FpaRegisterOp, Index, Instruction, Offset, Op, TransferOp,
+    CallOp, CoIndex, FpaMultipleOp, FpaOperand, FpaRegisterOp, FpaTransferOp, Index, Instruction,
+    Offset, Op, TransferOp,
 };
 use tairix_riscos_arm::isa::Feature;
+use tairix_riscos_arm::mmu::PAGE_BITS;
 use tairix_riscos_arm::profile::{Profile, BIT32};
 use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::reg::Reg;
 use tairix_riscos_arm::vectors::{self, FpaCase, FpaState, Transfer, Vector};
+use tairix_softfloat::{Decimal, Packed};
 
 use crate::Context;
+
+mod accuracy;
+
+use accuracy::{Accepted, Difference, Left, Unheld};
 
 /// Where the sample and its record are committed.
 const SAMPLE_DIR: &str = "userland/apps/riscos/arm/tests/fpa";
 /// The sample's name.
-const SAMPLE: &str = "fpemulator.bin";
+const SAMPLE: &str = "fpemulator-vectors.bin";
 /// The cases run when `--cases` does not say.
 const CASES: usize = 20_000;
 /// The seed every run draws its cases from, so a sample is reproducible.
@@ -77,9 +85,19 @@ const CODE: u32 = 0x8000;
 const PREP: u32 = 0x5_0800;
 const OUT: u32 = 0x6_0000;
 const SCRATCH: u32 = 0x7_0000;
-const SCRATCH_WORDS: u32 = 0x240;
+/// A transfer's base lies this far into the scratch window, at one of so
+/// many words.
+const BASE: u32 = 0x400;
+const BASES: u32 = 128;
+/// The furthest a transfer reaches from its base: the largest offset, and an
+/// `LFM` of four registers.
+const REACH: u32 = 4 * 0xFF + 48;
+/// Every word a transfer from a drawn base reaches, so each case starts from
+/// the same memory and every word moved is compared.
+const SCRATCH_WORDS: u32 = (BASE + 4 * BASES + REACH).div_ceil(4);
+/// Likewise every word a PC-relative transfer reaches.
 const CODE_WINDOW: u32 = CODE - 0x400;
-const CODE_WORDS: u32 = 0x200;
+const CODE_WORDS: u32 = (0x400 + 8 + REACH).div_ceil(4);
 
 /// The SWIs this harness answers for itself, in the space no RISC OS SWI uses.
 const DONE: u32 = 0xF0_FFFE;
@@ -107,9 +125,23 @@ fn usage() -> String {
     "riscos-fpa: usage: cargo xtask riscos-fpa <module> [--cases <n>] [--write-sample]".to_string()
 }
 
-const fn swi(number: u32) -> u32 {
-    0xEF00_0000 | number
+fn swi(number: u32) -> Result<u32, String> {
+    encoded(Op::Call {
+        op: CallOp::Swi,
+        value: number,
+    })
 }
+
+/// The 32-bit profile without the FPA, so every FPA instruction traps to the
+/// module.
+static HOST: Profile = Profile {
+    name: "32-bit without the FPA",
+    isa: BIT32.isa.without(Feature::Fpa),
+    ..BIT32
+};
+
+/// The most a module may take: up to the heap above it.
+const MODULE_ROOM: usize = (HEAP - MODULE) as usize;
 
 /// The guest's memory.
 struct Memory {
@@ -168,6 +200,7 @@ impl Bus for Memory {
         Ok(Fetch {
             word: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
             host: false,
+            page: address >> PAGE_BITS,
         })
     }
 
@@ -223,16 +256,11 @@ impl Bus for Recording<'_> {
         privileged: bool,
     ) -> Result<(), Abort> {
         self.memory.write(address, width, value, privileged)?;
-        let mask = match width {
-            Width::Byte => 0xFF,
-            Width::Half => 0xFFFF,
-            Width::Word => u32::MAX,
-        };
         self.transfers.push(Transfer {
             write: true,
             width,
             address,
-            data: value & mask,
+            data: value & width.mask(),
         });
         Ok(())
     }
@@ -266,19 +294,30 @@ struct Fpe {
 }
 
 impl Fpe {
-    fn new(module: &[u8], host: &'static Profile) -> Result<Self, String> {
+    fn new(module: &[u8]) -> Result<Self, String> {
+        if module.len() > MODULE_ROOM {
+            return Err("riscos-fpa: the module does not fit below the guest's heap".into());
+        }
         let mut memory = Memory::new();
         memory.put(MODULE, module)?;
-        memory.set_word(RETURN, swi(RETURNED))?;
-        memory.set_word(PASS_ALONG, swi(UNCLAIMED))?;
+        memory.set_word(RETURN, swi(RETURNED)?)?;
+        memory.set_word(PASS_ALONG, swi(UNCLAIMED)?)?;
         for (n, offset) in (0..).zip([0u32, 8, 12, 16, 20, 24, 28]) {
-            memory.set_word(HIGH_BASE + offset, swi(VECTOR + n))?;
+            memory.set_word(HIGH_BASE + offset, swi(VECTOR + n)?)?;
         }
-        // `LDR PC,[PC,#&F4]`: the undefined vector loads its claimant.
-        memory.set_word(HIGH_BASE + 4, 0xE59F_F0F4)?;
+        // The undefined vector loads its claimant from `HANDLER`.
+        let claimant = encoded(Op::Transfer {
+            op: TransferOp::Ldr,
+            rt: Reg::PC,
+            rn: Reg::PC,
+            up: true,
+            offset: Offset::Immediate(0xF4),
+            index: Index::Offset,
+        })?;
+        memory.set_word(HIGH_BASE + 4, claimant)?;
         memory.set_word(HANDLER, PASS_ALONG)?;
         let mut fpe = Self {
-            cpu: Cpu::new(host, 64),
+            cpu: Cpu::new(&HOST, 64),
             memory,
             heap: HEAP,
             looked_up: None,
@@ -346,9 +385,14 @@ impl Fpe {
                 UNCLAIMED => return Ok(Outcome::Unclaimed),
                 OS_MODULE => match self.reg(0) {
                     6 => {
-                        let size = (self.reg(3) + 15) & !15;
+                        let end = self
+                            .reg(3)
+                            .checked_next_multiple_of(16)
+                            .and_then(|size| self.heap.checked_add(size)?.checked_add(16))
+                            .filter(|&end| usize::try_from(end).is_ok_and(|end| end <= LOW))
+                            .ok_or("riscos-fpa: the module claimed more than the guest's heap")?;
                         self.set_reg(2, self.heap);
-                        self.heap += size + 16;
+                        self.heap = end;
                         self.set_v(false)?;
                     }
                     7 => self.set_v(false)?,
@@ -478,7 +522,7 @@ fn place(memory: &mut Memory, code: &[u32]) -> Result<(), String> {
         memory.set_word(CODE + 4 * n, word)?;
     }
     let end = u32::try_from(code.len()).map_err(|_| "riscos-fpa: code too long")?;
-    memory.set_word(CODE + 4 * end, swi(DONE))
+    memory.set_word(CODE + 4 * end, swi(DONE)?)
 }
 
 fn encoded(op: Op) -> Result<u32, String> {
@@ -540,7 +584,7 @@ impl Native {
     fn new() -> Result<Self, String> {
         let mut memory = Memory::new();
         for (n, offset) in (0..).zip([0u32, 4, 8, 12, 16, 20, 24, 28]) {
-            memory.set_word(HIGH_BASE + offset, swi(VECTOR + n))?;
+            memory.set_word(HIGH_BASE + offset, swi(VECTOR + n)?)?;
         }
         Ok(Self {
             cpu: Cpu::new(&BIT32, 64),
@@ -753,8 +797,8 @@ fn case(class: usize, rng: &mut Prng) -> Option<Case> {
         *slot = rng.next_u32();
     }
     let rn = ((word >> 16) & 15) as usize;
+    let base = SCRATCH + BASE + 4 * small(rng, BASES as usize);
     if class >= 2 {
-        let base = SCRATCH + 0x400 + 4 * small(rng, 128);
         if rn < 15 {
             user[rn] = base;
             let bank = match mode {
@@ -786,13 +830,93 @@ fn case(class: usize, rng: &mut Prng) -> Option<Case> {
         cpsr: mode.bits() | small(rng, 16) << 28,
         spsr: [0; 5],
     };
+    let mut scratch: Vec<u32> = (0..SCRATCH_WORDS).map(|_| rng.next_u32()).collect();
+    let packed_load = matches!(
+        a32::decode(word, BIT32.isa).map(|i| i.op),
+        Some(Op::FpaTransfer {
+            op: FpaTransferOp::Ldf,
+            format: Format::Packed,
+            ..
+        })
+    );
+    if packed_load && rn < 15 {
+        let (at, _) = reach(word, base);
+        let expanded = fpa.fpsr & fpa::fpsr::EP != 0;
+        let words = packed_value(rng, expanded);
+        let slots = at
+            .checked_sub(SCRATCH)
+            .map(|offset| offset as usize / 4)
+            .and_then(|n| scratch.get_mut(n..n + words.len()));
+        if let (Some(slots), false) = (slots, words.is_empty()) {
+            slots.copy_from_slice(&words);
+        }
+    }
     Some(Case {
         word,
         mode,
         state,
         fpa,
-        scratch: (0..SCRATCH_WORDS).map(|_| rng.next_u32()).collect(),
+        scratch,
     })
+}
+
+/// A packed decimal value for a load to read, in the format the FPSR names:
+/// mostly a number the data sheet defines, now and then an infinity or a NaN,
+/// and otherwise none, leaving the drawn words and their digits above nine.
+fn packed_value(rng: &mut Prng, expanded: bool) -> Vec<u32> {
+    fn words<const W: usize>(p: Packed<W>) -> Vec<u32> {
+        p.to_words().map_or_else(Vec::new, |words| words.to_vec())
+    }
+    let negative = chance(rng, 2);
+    if chance(rng, 4) {
+        return Vec::new();
+    }
+    let (stored, digits, exponent_digits): (u32, u32, u32) =
+        if expanded { (21, 24, 7) } else { (17, 19, 4) };
+    let special = chance(rng, 6);
+    if special {
+        let marker = if chance(rng, 2) { 8u128 } else { 0 };
+        let payload = (0..digits - 1).fold(0u128, |n, _| n << 4 | u128::from(small(rng, 10)));
+        let digit = if chance(rng, 3) { 0 } else { payload };
+        let packed = |exponent| {
+            let digits = marker << (4 * (digits - 1)) | digit;
+            (exponent, digits)
+        };
+        let (exponent, digits) = packed((1u32 << (4 * exponent_digits)) - 1);
+        return if expanded {
+            words(Packed::<4> {
+                negative,
+                exponent_negative: chance(rng, 2),
+                exponent,
+                digits,
+            })
+        } else {
+            words(Packed::<3> {
+                negative,
+                exponent_negative: chance(rng, 2),
+                exponent,
+                digits,
+            })
+        };
+    }
+    let count = if chance(rng, 4) { digits } else { stored };
+    let significand = (1..count).fold(1 + u128::from(small(rng, 9)), |n, _| {
+        n * 10 + u128::from(small(rng, 10))
+    });
+    // Mostly within the extended range, now and then past it.
+    let reach = if chance(rng, 8) { 9_999 } else { 4_951 };
+    let place =
+        i32::try_from(small(rng, 2 * reach + 1)).unwrap_or(0) - i32::try_from(reach).unwrap_or(0);
+    let decimal = Decimal {
+        negative,
+        significand,
+        exponent: place - i32::try_from(count - 1).unwrap_or(0),
+    };
+    if expanded {
+        Packed::<4>::of(decimal).map_or_else(Vec::new, words)
+    } else {
+        Packed::<3>::of(decimal).map_or_else(Vec::new, words)
+    }
 }
 
 /// Fills the scratch and code windows with the case's memory.
@@ -852,31 +976,130 @@ fn exception_of(number: u32) -> Option<Exception> {
     .copied()
 }
 
-/// Runs `case` both ways: its vector where they agree, or what differed.
-fn compare(
-    fpe: &mut Fpe,
-    native: &mut Native,
-    case: &Case,
-) -> Result<Result<Vector, String>, String> {
-    fpe.prepare(&case.fpa)?;
-    let before = fpe.read_back()?;
-    fill(&mut fpe.memory, case)?;
-    for n in 0..17 {
-        fpe.memory.set_word(DUMP + 4 * n, 0xD0D0_D0D0)?;
-    }
-    let outcome = fpe.run(&[case.word], &case.state)?;
-    let fpe_state = fpe.cpu.state();
-    let dump = fpe.memory.words(DUMP, 17);
-    let fpe_windows = windows(&mut fpe.memory);
-    let fpe_after = fpe.read_back()?;
-    let fpe_ran = match outcome {
-        Outcome::Done => Ran::Done,
-        Outcome::Unclaimed => Ran::Undefined,
-        Outcome::Raised(number) => Ran::Trapped(
-            exception_of(number).ok_or_else(|| format!("riscos-fpa: error &{number:08X}"))?,
-        ),
-    };
+/// How a case's two runs compared.
+enum Compared {
+    /// The same in every respect: the vector.
+    Same(Box<Vector>),
+    /// Different, but where FPEmulator is no stricter reference.
+    Accepted(Accepted),
+    /// Different.
+    Differs(String),
+}
 
+/// Runs `case` natively, its FPSR's traps all disabled: the FPA's state after.
+fn untrapped(native: &mut Native, case: &Case, before: &FpaState) -> Result<FpaState, String> {
+    fill(&mut native.memory, case)?;
+    place(&mut native.memory, &[case.word])?;
+    native
+        .cpu
+        .set_state(&case.state)
+        .map_err(|e| format!("riscos-fpa: {e:?}"))?;
+    let mut free = *before;
+    free.fpsr &= !fpa::fpsr::ENABLES;
+    free.set(native.cpu.fpa_mut());
+    let mut bus = Recording {
+        memory: &mut native.memory,
+        transfers: Vec::new(),
+    };
+    native.cpu.run(&mut bus, 1);
+    Ok(FpaState::of(native.cpu.fpa()))
+}
+
+/// Runs a data operation of `case` under FPEmulator at extended precision,
+/// its FPSR's traps all disabled: the FPA's state after; `None` for any other
+/// instruction.
+fn extended(
+    fpe: &mut Fpe,
+    case: &Case,
+    instruction: &Instruction,
+) -> Result<Option<FpaState>, String> {
+    let op = match instruction.op {
+        Op::FpaMonadic {
+            op,
+            rounding,
+            fd,
+            fm,
+            ..
+        } => Op::FpaMonadic {
+            op,
+            precision: Precision::Extended,
+            rounding,
+            fd,
+            fm,
+        },
+        Op::FpaDyadic {
+            op,
+            rounding,
+            fd,
+            fn_,
+            fm,
+            ..
+        } => Op::FpaDyadic {
+            op,
+            precision: Precision::Extended,
+            rounding,
+            fd,
+            fn_,
+            fm,
+        },
+        _ => return Ok(None),
+    };
+    let word = a32::encode(&Instruction {
+        cond: instruction.cond,
+        op,
+    })
+    .map_err(|e| format!("riscos-fpa: {op:?}: {e:?}"))?;
+    let mut free = case.fpa;
+    free.fpsr &= !fpa::fpsr::ENABLES;
+    fpe.prepare(&free)?;
+    fill(&mut fpe.memory, case)?;
+    fpe.run(&[word], &case.state)?;
+    fpe.read_back().map(Some)
+}
+
+/// The windows' index of the word at `address`, if they watch it.
+fn window_index(address: u32) -> Option<usize> {
+    let word = |base: u32| address.checked_sub(base).map(|offset| offset as usize / 4);
+    if let Some(n) = word(SCRATCH).filter(|&n| n < SCRATCH_WORDS as usize) {
+        return Some(n);
+    }
+    let n = word(CODE_WINDOW).filter(|&n| n < CODE_WORDS as usize)?;
+    let skipped = usize::from(address >= CODE + 8) * 2;
+    (!(CODE..CODE + 8).contains(&address)).then(|| SCRATCH_WORDS as usize + n - skipped)
+}
+
+/// What a native run of a case left.
+struct NativeRun {
+    ran: Ran,
+    state: State,
+    fpa: FpaState,
+    windows: Vec<u32>,
+    transfers: Vec<Transfer>,
+}
+
+/// What FPEmulator's run of a case left.
+struct FpeRun {
+    ran: Ran,
+    state: State,
+    dump: Vec<u32>,
+    fpa: FpaState,
+    windows: Vec<u32>,
+    /// The words at the native run's transfers' addresses, before the read
+    /// back's code may overwrite one.
+    moved: Vec<u32>,
+}
+
+impl Ran {
+    const fn trap(self) -> Option<Exception> {
+        match self {
+            Self::Trapped(exception) => Some(exception),
+            Self::Done | Self::Undefined => None,
+        }
+    }
+}
+
+/// Runs `case` on the processor from the FPA state `before`.
+fn run_native(native: &mut Native, case: &Case, before: &FpaState) -> Result<NativeRun, String> {
     fill(&mut native.memory, case)?;
     place(&mut native.memory, &[case.word])?;
     native
@@ -890,46 +1113,104 @@ fn compare(
     };
     let stop = native.cpu.run(&mut bus, 1).stop;
     let transfers = bus.transfers;
-    let after = native.cpu.state();
-    let native_after = FpaState::of(native.cpu.fpa());
-    let native_windows = windows(&mut native.memory);
-    let native_ran = match stop {
+    let state = native.cpu.state();
+    let ran = match stop {
         Stop::FloatingPoint { exception } => Ran::Trapped(exception),
-        Stop::Budget if after.cpsr & psr::M == Mode::Undefined.bits() => Ran::Undefined,
+        Stop::Budget if state.cpsr & psr::M == Mode::Undefined.bits() => Ran::Undefined,
         Stop::Budget => Ran::Done,
         stop => return Err(format!("riscos-fpa: &{:08X} stopped {stop:?}", case.word)),
     };
+    Ok(NativeRun {
+        ran,
+        state,
+        fpa: FpaState::of(native.cpu.fpa()),
+        windows: windows(&mut native.memory),
+        transfers,
+    })
+}
 
+/// Runs `case` under FPEmulator, its state already prepared, reading memory
+/// back where the native run's `transfers` went.
+fn run_fpe(fpe: &mut Fpe, case: &Case, transfers: &[Transfer]) -> Result<FpeRun, String> {
+    fill(&mut fpe.memory, case)?;
+    for n in 0..17 {
+        fpe.memory.set_word(DUMP + 4 * n, 0xD0D0_D0D0)?;
+    }
+    let outcome = fpe.run(&[case.word], &case.state)?;
+    let state = fpe.cpu.state();
+    let dump = fpe.memory.words(DUMP, 17);
+    let windows = windows(&mut fpe.memory);
+    let moved = transfers
+        .iter()
+        .map(|t| fpe.memory.word(t.address))
+        .collect();
+    let fpa = fpe.read_back()?;
+    let ran = match outcome {
+        Outcome::Done => Ran::Done,
+        Outcome::Unclaimed => Ran::Undefined,
+        Outcome::Raised(number) => Ran::Trapped(
+            exception_of(number).ok_or_else(|| format!("riscos-fpa: error &{number:08X}"))?,
+        ),
+    };
+    Ok(FpeRun {
+        ran,
+        state,
+        dump,
+        fpa,
+        windows,
+        moved,
+    })
+}
+
+/// How the two runs differed, and whether everything but the FPA's state
+/// and the words the instruction moved agreed.
+fn differences(theirs: &FpeRun, ours: &NativeRun) -> (Vec<String>, bool) {
     let mut differences = Vec::new();
-    if fpe_ran != native_ran {
+    if theirs.ran != ours.ran {
         differences.push(format!(
-            "outcome: FPEmulator {fpe_ran:?}, native {native_ran:?}"
+            "outcome: FPEmulator {:?}, native {:?}",
+            theirs.ran, ours.ran
         ));
     }
-    if fpe_after != native_after {
+    if theirs.fpa != ours.fpa {
         differences.push(format!(
-            "FPA: FPEmulator {fpe_after:08X?}, native {native_after:08X?}"
+            "FPA: FPEmulator {:08X?}, native {:08X?}",
+            theirs.fpa, ours.fpa
         ));
     }
-    if let Some(n) = (0..fpe_windows.len()).find(|&n| fpe_windows[n] != native_windows[n]) {
+    let moved: Vec<usize> = ours
+        .transfers
+        .iter()
+        .filter_map(|t| window_index(t.address))
+        .collect();
+    let mut rest_same = true;
+    let (fpe, native) = (&theirs.windows, &ours.windows);
+    if let Some(n) = (0..fpe.len()).find(|&n| fpe[n] != native[n]) {
         differences.push(format!(
             "memory word {n} of the windows: FPEmulator &{:08X}, native &{:08X}",
-            fpe_windows[n], native_windows[n]
+            fpe[n], native[n]
         ));
+        rest_same &= (0..fpe.len()).all(|n| fpe[n] == native[n] || moved.contains(&n));
     }
-    match native_ran {
+    let after = &ours.state;
+    match ours.ran {
         // The harness's end SWI is one instruction further on.
-        Ran::Done if visible(&fpe_state) != visible(&after) || fpe_state.pc != after.pc + 4 => {
+        Ran::Done
+            if visible(&theirs.state) != visible(after) || theirs.state.pc != after.pc + 4 =>
+        {
+            rest_same = false;
             differences.push(format!(
                 "registers: FPEmulator {:08X?}, native {:08X?}",
-                visible(&fpe_state),
-                visible(&after)
+                visible(&theirs.state),
+                visible(after)
             ));
         }
         Ran::Trapped(_) => {
             let mut expected = after.user.to_vec();
             expected.push(after.pc);
+            let dump = &theirs.dump;
             if dump[..16] != expected[..] || dump[16] & 0xF000_001F != after.cpsr & 0xF000_001F {
+                rest_same = false;
                 differences.push(format!(
                     "exception dump: FPEmulator {dump:08X?}, native {expected:08X?} &{:08X}",
                     after.cpsr
@@ -938,151 +1219,65 @@ fn compare(
         }
         _ => {}
     }
-    if !differences.is_empty() {
-        return Ok(Err(differences.join("; ")));
-    }
-    Ok(Ok(Vector {
-        word: case.word,
-        before: case.state,
-        after,
-        psr: u32::MAX,
-        transfers,
-        fpa: Some(FpaCase {
-            before,
-            after: native_after,
-            trap: match native_ran {
-                Ran::Trapped(exception) => Some(exception),
-                Ran::Done | Ran::Undefined => None,
-            },
-        }),
-    }))
+    (differences, rest_same)
 }
 
-/// A squeezed module expanded, as the RISC OS kernel's module loader
-/// expands one: the initialisation offset's top bit marks it, and the
-/// squeezed data ends with its sizes and the two tables of common words.
-fn unsqueeze(data: &[u8]) -> Result<Vec<u8>, String> {
-    let word = |at: usize| -> Result<usize, String> {
-        data.get(at..at + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
-            .ok_or_else(malformed)
+/// Runs `case` both ways.
+fn compare(fpe: &mut Fpe, native: &mut Native, case: &Case) -> Result<Compared, String> {
+    fpe.prepare(&case.fpa)?;
+    let before = fpe.read_back()?;
+    let ours = run_native(native, case, &before)?;
+    let theirs = run_fpe(fpe, case, &ours.transfers)?;
+    let (differences, rest_same) = differences(&theirs, &ours);
+    if differences.is_empty() {
+        return Ok(Compared::Same(Box::new(Vector {
+            word: case.word,
+            before: case.state,
+            after: ours.state,
+            psr: u32::MAX,
+            transfers: ours.transfers,
+            fpa: Some(FpaCase {
+                before,
+                after: ours.fpa,
+                trap: ours.ran.trap(),
+            }),
+        })));
+    }
+    let Some(instruction) = a32::decode(case.word, BIT32.isa) else {
+        return Ok(Compared::Differs(differences.join("; ")));
     };
-    let end = word(4)? & 0x7FFF_FFFF;
-    let sizes = end.checked_sub(20).ok_or_else(malformed)?;
-    let [decoded, encoded, table, shorts, longs] =
-        [0, 4, 8, 12, 16].map(|offset| word(sizes + offset));
-    let (decoded, encoded, table) = (decoded?, encoded?, table?);
-    let table_start = sizes.checked_sub(table).ok_or_else(malformed)?;
-    let data_start = table_start.checked_sub(encoded).ok_or_else(malformed)?;
-    let mut at = table_start;
-    let tables = Tables {
-        short: common_words(data, &mut at, shorts?, 4)?,
-        long: common_words(data, &mut at, longs?, 3)?,
+    let difference = Difference {
+        op: &instruction.op,
+        before: &before,
+        fpe: Left {
+            trap: theirs.ran.trap(),
+            fpa: theirs.fpa,
+            moved: theirs.moved,
+        },
+        native: Left {
+            trap: ours.ran.trap(),
+            fpa: ours.fpa,
+            moved: ours.transfers.iter().map(|t| t.data).collect(),
+        },
+        rest_same,
     };
-    let mut out = vec![0; decoded];
-    let mut q = decoded;
-    let mut r = table_start;
-    while r > data_start {
-        let pair = back(data, &mut r)?;
-        let first = tables.word(data, usize::from(pair & 15), &mut r)?;
-        let second = tables.word(data, usize::from(pair >> 4), &mut r)?;
-        q = q.checked_sub(8).ok_or_else(malformed)?;
-        out[q..q + 4].copy_from_slice(&first.to_le_bytes());
-        out[q + 4..q + 8].copy_from_slice(&second.to_le_bytes());
-    }
-    if q == 0 {
-        Ok(out)
-    } else {
-        Err(malformed())
-    }
+    let accepted = accuracy::accepted(
+        &difference,
+        || untrapped(native, case, &before).ok(),
+        || extended(fpe, case, &instruction).ok().flatten(),
+    );
+    Ok(match accepted {
+        Some(accepted) => Compared::Accepted(accepted),
+        None => Compared::Differs(differences.join("; ")),
+    })
 }
 
-fn malformed() -> String {
-    "riscos-fpa: the squeezed module is malformed".to_string()
-}
-
-/// The byte before `r`, which the squeezed data is read back from.
-fn back(data: &[u8], r: &mut usize) -> Result<u8, String> {
-    *r = r.checked_sub(1).ok_or_else(malformed)?;
-    data.get(*r).copied().ok_or_else(malformed)
-}
-
-/// A squeezed module's two tables of common words.
-struct Tables {
-    short: Vec<u32>,
-    long: Vec<u32>,
-}
-
-impl Tables {
-    /// The word a nibble names: zero, four bytes spelled whole, a short
-    /// table entry by one more byte, or a long one's top three bytes by one
-    /// more and its low byte by another.
-    fn word(&self, data: &[u8], nibble: usize, r: &mut usize) -> Result<u32, String> {
-        const SHORT: usize = 9;
-        const LONG: usize = 2;
-        Ok(match nibble {
-            0 => 0,
-            1 => {
-                let mut value = 0;
-                for shift in [0, 8, 16, 24] {
-                    value |= u32::from(back(data, r)?) << shift;
-                }
-                value
-            }
-            n if n >= SHORT => *self
-                .short
-                .get((n - SHORT) << 8 | usize::from(back(data, r)?))
-                .ok_or_else(malformed)?,
-            n => {
-                let high = *self
-                    .long
-                    .get((n - LONG) << 8 | usize::from(back(data, r)?))
-                    .ok_or_else(malformed)?;
-                high << 8 | u32::from(back(data, r)?)
-            }
-        })
-    }
-}
-
-/// One of a squeezed module's tables of common words: each a delta from the
-/// last, short forms for small deltas, `bytes` long when spelled whole.
-fn common_words(data: &[u8], at: &mut usize, count: usize, bytes: u32) -> Result<Vec<u32>, String> {
-    let next = |at: &mut usize| -> Result<u32, String> {
-        let byte = data.get(*at).copied().ok_or_else(malformed)?;
-        *at += 1;
-        Ok(u32::from(byte))
-    };
-    let mut words = Vec::with_capacity(count);
-    let mut last = u32::MAX;
-    while words.len() < count {
-        let code = next(at)?;
-        let delta = match code {
-            0 => {
-                let mut value = 0;
-                for shift in (0..bytes).map(|n| 8 * n) {
-                    value |= next(at)? << shift;
-                }
-                value
-            }
-            1..=9 => {
-                for _ in 0..code {
-                    last = last.wrapping_add(1);
-                    words.push(last);
-                }
-                continue;
-            }
-            10..=91 => code - 10,
-            92..=173 => next(at)? | (code - 92) << 8,
-            _ => {
-                let low = next(at)?;
-                let high = next(at)?;
-                (code - 174) << 16 | high << 8 | low
-            }
-        };
-        last = last.wrapping_add(delta);
-        words.push(last);
-    }
-    Ok(words)
+/// The version number a module's help string gives after its title.
+fn version<'a>(help: &'a str, title: &str) -> Option<&'a str> {
+    let number = help.strip_prefix(title)?.split_whitespace().next()?;
+    (number.bytes().any(|b| b.is_ascii_digit())
+        && number.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+    .then_some(number)
 }
 
 /// The module's title and help string, from its header.
@@ -1123,47 +1318,53 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
     }
     let raw = std::fs::read(path).map_err(|e| format!("riscos-fpa: {path}: {e}"))?;
-    let squeezed = raw
+    if raw
         .get(4..8)
-        .is_some_and(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8000_0000 != 0);
-    let module = if squeezed {
-        unsqueeze(&raw)?
-    } else {
-        raw.clone()
-    };
-    let (title, help) = identity(&module)?;
+        .is_some_and(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x8000_0000 != 0)
+    {
+        return Err(format!(
+            "riscos-fpa: {path} is squeezed: give the harness the module as RISC OS holds it in memory"
+        ));
+    }
+    let (title, help) = identity(&raw)?;
     if title != "FPEmulator" {
         return Err(format!("riscos-fpa: {path} is {title}, not FPEmulator"));
     }
-    noteln!(
-        "xtask: [riscos-fpa] {help}{}",
-        if squeezed { ", unsqueezed" } else { "" }
-    );
-    let host: &'static Profile = Box::leak(Box::new(Profile {
-        name: "32-bit without the FPA",
-        isa: BIT32.isa.without(Feature::Fpa),
-        ..BIT32
-    }));
-    let mut fpe = Fpe::new(&module, host)?;
+    let version = version(&help, &title)
+        .ok_or("riscos-fpa: the module's help string gives no version number")?;
+    noteln!("xtask: [riscos-fpa] {help}");
+    let mut fpe = Fpe::new(&raw)?;
     let mut native = Native::new()?;
     let (tallies, skipped) = tally(&mut fpe, &mut native, cases)?;
     let mut table = String::new();
+    let mut unheld = [0; Unheld::ALL.len()];
     for (tally, &(name, _)) in tallies.iter().zip(&CLASSES) {
+        let not_held: usize = tally.unheld.iter().sum();
         noteln!(
-            "xtask: [riscos-fpa] {name}: {} cases, {} differ, {} trapped, {} undefined",
+            "xtask: [riscos-fpa] {name}: {} cases, {} differ, {} within FPEmulator's error, \
+             {not_held} not held, {} trapped, {} undefined",
             tally.ran,
             tally.failed,
+            tally.accurate,
             tally.trapped,
             tally.undefined
         );
         let _ = writeln!(
             table,
-            "| {name} | {} | {} | {} | {} |",
+            "| {name} | {} | {} | {not_held} | {} | {} | {} |",
             tally.ran,
+            tally.accurate,
             tally.trapped,
             tally.undefined,
             tally.sample.len()
         );
+        for (total, count) in unheld.iter_mut().zip(tally.unheld) {
+            *total += count;
+        }
+    }
+    let mut not_held = String::new();
+    for (why, count) in Unheld::ALL.iter().zip(unheld) {
+        let _ = writeln!(not_held, "- {}: {count}", why.reason());
     }
     let failures: usize = tallies.iter().map(|tally| tally.failed).sum();
     if failures != 0 {
@@ -1173,12 +1374,12 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
     if write {
         let record = Record {
-            help: &help,
-            squeezed,
+            version,
             digest: tairix_util::hex::encode(&tairix_crypto::sha256(&raw)),
             cases,
             skipped,
             table: &table,
+            not_held: &not_held,
         };
         let sample: Vec<Vector> = tallies.into_iter().flat_map(|tally| tally.sample).collect();
         write_sample(ctx, &record, &sample)?;
@@ -1191,6 +1392,10 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 struct Tally {
     ran: usize,
     failed: usize,
+    /// Within FPEmulator's error.
+    accurate: usize,
+    /// Not held to FPEmulator, by [`Unheld::ALL`]'s order.
+    unheld: [usize; Unheld::ALL.len()],
     trapped: usize,
     undefined: usize,
     sample: Vec<Vector>,
@@ -1211,17 +1416,22 @@ fn tally(fpe: &mut Fpe, native: &mut Native, cases: usize) -> Result<(Vec<Tally>
         };
         tally.ran += 1;
         match compare(fpe, native, &case)? {
-            Ok(vector) => {
+            Compared::Same(vector) => {
                 if matches!(vector.fpa, Some(FpaCase { trap: Some(_), .. })) {
                     tally.trapped += 1;
                 } else if vector.after.cpsr & psr::M == Mode::Undefined.bits() {
                     tally.undefined += 1;
                 }
                 if tally.sample.len() < CLASSES[class].1 {
-                    tally.sample.push(vector);
+                    tally.sample.push(*vector);
                 }
             }
-            Err(difference) => {
+            Compared::Accepted(Accepted::Accurate) => tally.accurate += 1,
+            Compared::Accepted(Accepted::Unheld(why)) => {
+                let n = Unheld::ALL.iter().position(|&w| w == why).unwrap_or(0);
+                tally.unheld[n] += 1;
+            }
+            Compared::Differs(difference) => {
                 tally.failed += 1;
                 if tally.failed <= REPORTED {
                     noteln!(
@@ -1239,12 +1449,12 @@ fn tally(fpe: &mut Fpe, native: &mut Native, cases: usize) -> Result<(Vec<Tally>
 
 /// What the sample's provenance file states.
 struct Record<'a> {
-    help: &'a str,
-    squeezed: bool,
+    version: &'a str,
     digest: String,
     cases: usize,
     skipped: usize,
     table: &'a str,
+    not_held: &'a str,
 }
 
 fn write_sample(ctx: &Context, record: &Record<'_>, sample: &[Vector]) -> Result<(), String> {
@@ -1257,31 +1467,34 @@ fn write_sample(ctx: &Context, record: &Record<'_>, sample: &[Vector]) -> Result
         "# FPA conformance vectors\n\n\
          Generated by `cargo xtask riscos-fpa <module> --write-sample`; never edit\n\
          by hand.\n\n\
-         Source: the answers of\n\n    {help}\n\n\
-         run as an opaque program on the emulator's own processor{squeezed}.\n\
-         The module file's SHA-256:\n\n    {digest}\n\n\
+         Source: the answers of FPEmulator {version}, run as an opaque program\n\
+         on the emulator's own processor. The module file's\n\
+         SHA-256:\n\n    {digest}\n\n\
          Each vector is an FPA instruction run natively by the processor: the\n\
-         registers, FPA state and memory the harness drew for it, and what the\n\
-         processor left. It is kept only where FPEmulator, given the same, left\n\
-         the same in every register, every word of memory, the FPA's registers\n\
-         and FPSR, and a trap's exception dump. FPEmulator's answers are only\n\
-         compared, so nothing of the module's is carried here.\n\n\
+         registers and memory the harness drew for it, the FPA state FPEmulator\n\
+         read back once the drawn one was loaded, and what the processor left.\n\
+         It is kept only where FPEmulator, given the same, left the same in\n\
+         every register, every word of memory, the FPA's registers and FPSR,\n\
+         and a trap's exception dump. Those answers are all it takes from\n\
+         FPEmulator: no byte of the module is carried here.\n\n\
+         The FPA rounds a transcendental value and a packed decimal conversion\n\
+         correctly, which FPEmulator does not: such a case agrees, but is not\n\
+         kept, where the two lie within FPEmulator's error. A case reading\n\
+         what FPEmulator mishandles or the data sheet leaves undefined is not\n\
+         held to FPEmulator; those that differed:\n\n{not_held}\n\
          `{SAMPLE}` is the `tairix_riscos_arm::vectors` encoding of the first\n\
          agreeing cases of each class, drawn from seed `{SEED:#X}` over {cases}\n\
          cases, {skipped} of them skipped as PC-relative stores over the\n\
-         instruction. Every case agreed when the sample was written.\n\n\
-         | Class | Cases | Trapped | Undefined | Sampled |\n|---|---|---|---|---|\n\
+         instruction. Every other case agreed when the sample was written.\n\n\
+         | Class | Cases | Within FPEmulator's error | Not held | Trapped | Undefined | Sampled |\n\
+         |---|---|---|---|---|---|---|\n\
          {table}",
-        help = record.help,
-        squeezed = if record.squeezed {
-            ",\nunsqueezed as the kernel's module loader does"
-        } else {
-            ""
-        },
+        version = record.version,
         digest = record.digest,
         cases = record.cases,
         skipped = record.skipped,
         table = record.table,
+        not_held = record.not_held,
     );
     std::fs::write(out.join("README.md"), readme)
         .map_err(|e| format!("riscos-fpa: README.md: {e}"))?;
@@ -1291,4 +1504,61 @@ fn write_sample(ctx: &Context, record: &Record<'_>, sample: &[Vector]) -> Result
         out.join(SAMPLE).display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tairix_riscos_arm::instruction::{Immediate, MoveOp, Operand};
+
+    #[test]
+    fn a_module_s_version_is_the_number_after_its_title() {
+        let version = |help| version(help, "FPEmulator");
+        assert_eq!(
+            version("FPEmulator 4.39 (30 Mar 2024) (1.13M)"),
+            Some("4.39")
+        );
+        assert_eq!(version("FPEmulator   4.10 (01 Jan 1999)"), Some("4.10"));
+        assert_eq!(version("FPEmulator (30 Mar 2024)"), None);
+        assert_eq!(version("FPEmulator ."), None);
+        assert_eq!(version("Other 4.39"), None);
+    }
+
+    #[test]
+    fn a_claim_past_the_guest_s_heap_is_refused() {
+        let ops = [
+            Op::Move {
+                op: MoveOp::Mvn,
+                s: false,
+                rd: Reg::field(3),
+                operand: Operand::Immediate(Immediate {
+                    value: 0,
+                    rotation: 0,
+                }),
+            },
+            Op::Move {
+                op: MoveOp::Mov,
+                s: false,
+                rd: Reg::field(0),
+                operand: Operand::Immediate(Immediate {
+                    value: 6,
+                    rotation: 0,
+                }),
+            },
+            Op::Call {
+                op: CallOp::Swi,
+                value: OS_MODULE,
+            },
+        ];
+        let mut module = vec![0; 0x20];
+        module[4..8].copy_from_slice(&0x20u32.to_le_bytes());
+        for op in ops {
+            module.extend(encoded(op).expect("an encodable instruction").to_le_bytes());
+        }
+        let refused = Fpe::new(&module).err().expect("a refused claim");
+        assert!(
+            refused.contains("claimed more than the guest's heap"),
+            "{refused}"
+        );
+    }
 }

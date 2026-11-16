@@ -349,3 +349,38 @@ fn reserved_room_is_counted_until_a_shrink_gives_it_back() {
         Some((40..42, 10))
     );
 }
+
+/// The highest gap that fits, found by walking every gap from the bottom.
+fn last_free_by_every_gap(map: &RangeMap<u64, u32>, within: Range<u64>, count: u64) -> Option<u64> {
+    let gap = map
+        .gaps(within)
+        .filter(|gap| gap.end - gap.start >= count)
+        .last()?;
+    (count > 0).then(|| gap.end - count)
+}
+
+#[test]
+fn last_free_walking_down_finds_what_every_gap_from_the_bottom_finds() {
+    let mut rng = tairix_fuzzseed::Prng::new(0x1A57_F4EE_0000_0001);
+    let mut below = |n: u64| rng.next_u64() % n;
+    for _ in 0..200 {
+        let mut map: RangeMap<u64, u32> = RangeMap::new();
+        for value in 0..24u32 {
+            let start = below(400);
+            if below(2) == 0 {
+                let _ = map.insert(start..start + 1 + below(30), value);
+            }
+        }
+        for _ in 0..50 {
+            let low = below(420);
+            let within = low..low + below(200);
+            let count = below(60);
+            assert_eq!(
+                map.last_free(within.clone(), count),
+                last_free_by_every_gap(&map, within.clone(), count),
+                "{:?} in {within:?} for {count}",
+                ranges(&map)
+            );
+        }
+    }
+}

@@ -17,9 +17,9 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_pcemu::cpu::bus::Escape;
-use tairix_pcemu::fpu::real::Real;
 use tairix_pcemu::fpu::{Fpu, Memory, Registers};
 use tairix_pcemu::snapshot::{In, Out, State};
+use tairix_softfloat::Extended;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 300;
@@ -72,7 +72,7 @@ fn random_registers(rng: &mut Prng) -> Registers {
             3 => 0x7FFE,
             _ => rng.next_u16() & 0x7FFF,
         };
-        *x = Real::new(rng.next_u8() & 1 == 1, exponent, rng.next_u64());
+        *x = Extended::new(rng.next_u8() & 1 == 1, exponent, rng.next_u64());
     }
     regs.tags = rng.next_u16();
     regs.control = rng.next_u16();

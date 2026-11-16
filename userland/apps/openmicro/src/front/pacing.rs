@@ -2,13 +2,13 @@
 //! while its sound is heard, by the clock while it is not, and as fast as the
 //! worker runs it when asked to or while a tape loads fast.
 
-use crate::machine::CLOCK;
+use crate::machine::Timing;
 use crate::worker::protocol::{MAX_SLICE, SAMPLE_RATE};
 
 /// How fast the machine runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Speed {
-    /// A BBC Micro's own speed, its sound heard.
+    /// The machine's own speed, its sound heard.
     #[default]
     Normal,
     /// Twice that, silent.
@@ -17,11 +17,12 @@ pub enum Speed {
     Fastest,
 }
 
-/// Machine time a clock-paced slice runs: 20 ms.
-pub const CLOCK_SLICE: u32 = 40_000;
-/// Machine time an unpaced slice runs: 100 ms, so each round trip carries
-/// enough to be worth it.
-pub const FAST_SLICE: u32 = 200_000;
+/// Slices a second of machine time is cut into while the clock paces it:
+/// 20 ms each.
+const CLOCK_SLICES: u64 = 50;
+/// Slices a second is cut into unpaced: 100 ms each, so each round trip
+/// carries enough to be worth it.
+const FAST_SLICES: u64 = 10;
 /// The least sound a slice tops the audio ring up by: 5 ms of it, so a ring
 /// drained a few frames at a time is not refilled a few frames at a time.
 const LEAST_FRAMES: u32 = 240;
@@ -65,22 +66,30 @@ struct Anchor {
 }
 
 /// The machine's pace.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pacer {
+    timing: Timing,
     speed: Speed,
     paused: bool,
     anchor: Option<Anchor>,
 }
 
 impl Pacer {
-    /// A machine running at its own speed.
+    /// A machine keeping `timing`, running at its own speed.
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(timing: Timing) -> Self {
         Self {
+            timing,
             speed: Speed::Normal,
             paused: false,
             anchor: None,
         }
+    }
+
+    /// The timing it paces.
+    #[must_use]
+    pub const fn timing(&self) -> Timing {
+        self.timing
     }
 
     /// How fast it runs.
@@ -117,7 +126,7 @@ impl Pacer {
         if self.speed == Speed::Fastest || hurried {
             self.anchor = None;
             return Next::Run {
-                cycles: FAST_SLICE,
+                cycles: self.slice(FAST_SLICES),
                 sound: false,
             };
         }
@@ -126,7 +135,7 @@ impl Pacer {
             let short = ring.target.saturating_sub(ring.queued);
             return if short > 0 && short >= LEAST_FRAMES.min(ring.target) {
                 Next::Run {
-                    cycles: cycles_for(short),
+                    cycles: cycles_for(self.timing, short),
                     sound: true,
                 }
             } else {
@@ -143,9 +152,10 @@ impl Pacer {
             .anchor
             .filter(|anchor| anchor.rate == rate)
             .unwrap_or(fresh);
+        let second = self.timing.clock() * rate;
         let due = anchor
             .at_ns
-            .saturating_add(anchor.cycles.saturating_mul(NANOS) / (CLOCK * rate));
+            .saturating_add(anchor.cycles.saturating_mul(NANOS) / second);
         if now_ns < due {
             self.anchor = Some(anchor);
             return Next::At(due);
@@ -157,25 +167,31 @@ impl Pacer {
         };
         // Whole seconds of machine time move into the anchor's instant, so
         // the cycles counted from it stay too few to overflow in nanoseconds.
-        let cycles = anchor.cycles + u64::from(CLOCK_SLICE);
-        let second = CLOCK * rate;
+        let slice = self.slice(CLOCK_SLICES);
+        let cycles = anchor.cycles + u64::from(slice);
         self.anchor = Some(Anchor {
             at_ns: anchor.at_ns + cycles / second * NANOS,
             cycles: cycles % second,
             rate,
         });
         Next::Run {
-            cycles: CLOCK_SLICE,
+            cycles: slice,
             sound: false,
         }
     }
+
+    /// A second of the machine's time cut into `slices`.
+    fn slice(&self, slices: u64) -> u32 {
+        u32::try_from(self.timing.clock() / slices).unwrap_or(MAX_SLICE)
+    }
 }
 
-/// The cycles that make `frames` frames of sound, at most a slice's.
-#[must_use]
-pub fn cycles_for(frames: u32) -> u32 {
-    let cycles = (u64::from(frames) * CLOCK).div_ceil(u64::from(SAMPLE_RATE));
-    u32::try_from(cycles).map_or(MAX_SLICE, |cycles| cycles.min(MAX_SLICE))
+/// The cycles of a machine keeping `timing` that make `frames` frames of
+/// sound, at most a second's.
+fn cycles_for(timing: Timing, frames: u32) -> u32 {
+    let clock = timing.clock();
+    let cycles = (u64::from(frames) * clock).div_ceil(u64::from(SAMPLE_RATE));
+    u32::try_from(cycles.min(clock)).unwrap_or(MAX_SLICE)
 }
 
 #[cfg(test)]

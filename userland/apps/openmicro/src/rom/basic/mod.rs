@@ -23,7 +23,7 @@ mod ws;
 #[cfg(test)]
 mod tests;
 
-use tairix_bbcbasic::keyword::Word;
+use tairix_openbasic::keyword::Word;
 
 use crate::machine::{ROM_SIZE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, byte, imm, lo, zp, Asm, AsmError, Image, RTS};

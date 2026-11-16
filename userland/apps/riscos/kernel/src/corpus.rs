@@ -19,6 +19,7 @@
 //! each flag, and `error=&N` whenever V is set, the error block's number in
 //! place of an R0 that points at it.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -256,8 +257,9 @@ fn step(
                 return Err(refused(line, "keep rN NAME"));
             };
             let target = register(target).ok_or(refused(line, "a register from r0 to r9"))?;
-            if !valid_name(name) {
-                return Err(refused(line, "a kept value's name"));
+            // `$NAME-N` takes the first `-` as the offset's sign.
+            if !valid_name(name) || name.contains('-') {
+                return Err(refused(line, "a kept value's name, letters, digits and _"));
             }
             kept.push((*name).to_string());
             Step::Keep {
@@ -360,6 +362,93 @@ pub fn parse_observations(text: &str) -> Result<Vec<Observation>, ParseError> {
     Ok(observations)
 }
 
+/// Refuses an observation that is not what its scenario's shows record: a
+/// line per `show`, each the ordinal of the call before it, then the show's
+/// registers and flags in its order, and the error number exactly when V was
+/// set, in place of R0.
+pub fn check_observation(scenario: &Scenario, observation: &Observation) -> Result<(), ParseError> {
+    let mut lines = observation.lines.iter().enumerate();
+    let mut call = 0;
+    for step in &scenario.steps {
+        match step {
+            Step::Call { .. } => call += 1,
+            Step::Keep { .. } => {}
+            Step::Show { registers, flags } => {
+                let (index, line) = lines
+                    .next()
+                    .ok_or(refused(observation.lines.len() + 1, "a line per show"))?;
+                check_shown(line, call, registers, flags)
+                    .map_err(|reason| refused(index + 1, reason))?;
+            }
+        }
+    }
+    match lines.next() {
+        Some((index, _)) => Err(refused(index + 1, "a line per show")),
+        None => Ok(()),
+    }
+}
+
+fn check_shown(
+    line: &str,
+    call: usize,
+    registers: &[u8],
+    flags: &[Flag],
+) -> Result<(), &'static str> {
+    let mut words: Vec<&str> = line.split(' ').collect();
+    if words.first().and_then(|word| word.parse::<usize>().ok()) != Some(call) {
+        return Err("a line starts with the ordinal of the call it shows");
+    }
+    let error = words.last().and_then(|word| word.strip_prefix("error="));
+    if let Some(number) = error {
+        if !is_word(number) {
+            return Err("an error number is a full word");
+        }
+        words.pop();
+    }
+    let failed = error.is_some();
+    let mut shown = words.iter().skip(1);
+    for &register in registers {
+        if register == 0 && failed {
+            continue;
+        }
+        let name = format!("r{register}=");
+        let value = shown
+            .next()
+            .and_then(|word| word.strip_prefix(name.as_str()));
+        if !value.is_some_and(is_word) {
+            return Err("each register shown, in order, a full word");
+        }
+    }
+    for &flag in flags {
+        let bit = shown
+            .next()
+            .and_then(|word| word.strip_prefix(flag.name()))
+            .and_then(|word| word.strip_prefix('='));
+        let set = match bit {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err("each flag shown, in order, 0 or 1"),
+        };
+        if flag == Flag::V && set != failed {
+            return Err("an error number exactly when V is set");
+        }
+    }
+    if shown.next().is_some() {
+        return Err("nothing but what the show asks");
+    }
+    Ok(())
+}
+
+/// A full word as the harness writes it: `&` and eight upper-case hex digits.
+fn is_word(text: &str) -> bool {
+    text.strip_prefix('&').is_some_and(|hex| {
+        hex.len() == 8
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+    })
+}
+
 /// A fixtures file: `header` as comments, then each observation.
 #[must_use]
 pub fn format_observations(header: &[&str], observations: &[Observation]) -> String {
@@ -456,6 +545,55 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn an_observation_is_held_to_its_scenarios_shows() {
+        let text = "scenario s\ncall X\nshow r0 r1 v c\ncall Y\nkeep r1 k\nshow\n";
+        let scenario = &parse_scenarios(text).unwrap()[0];
+        let observed = |lines: &[&str]| Observation {
+            name: "s".into(),
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+        };
+        for good in [
+            ["1 r0=&00000001 r1=&00000002 v=0 c=1", "2"],
+            [
+                "1 r1=&00000002 v=1 c=0 error=&000001C1",
+                "2 error=&00000105",
+            ],
+        ] {
+            assert_eq!(check_observation(scenario, &observed(&good)), Ok(()));
+        }
+        let shown = "1 r0=&00000001 r1=&00000002 v=0 c=1";
+        for (bad, line) in [
+            (vec![shown], 2),
+            (vec![shown, "2", "3"], 3),
+            (vec!["2 r0=&00000001 r1=&00000002 v=0 c=1", "2"], 1),
+            (vec!["1 r1=&00000002 r0=&00000001 v=0 c=1", "2"], 1),
+            (vec!["1 r0=&1 r1=&00000002 v=0 c=1", "2"], 1),
+            (vec!["1 r0=&0000000a r1=&00000002 v=0 c=1", "2"], 1),
+            (vec!["1 r0=&00000001 r1=&00000002 v=1 c=1", "2"], 1),
+            (vec!["1 r1=&00000002 v=0 c=1 error=&00000105", "2"], 1),
+            (vec!["1 r0=&00000001 r1=&00000002 v=0 c=2", "2"], 1),
+            (vec!["1 r0=&00000001 r1=&00000002 v=0 c=1 Unknown", "2"], 1),
+            (vec![shown, "2 error=&105"], 2),
+        ] {
+            assert_eq!(
+                check_observation(scenario, &observed(&bad)).map_err(|e| e.line),
+                Err(line),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_value_is_named_so_an_offset_can_follow_it() {
+        assert!(parse_scenarios("scenario s\ncall X\nkeep r1 base_1").is_ok());
+        assert_eq!(
+            parse_scenarios("scenario s\ncall X\nkeep r1 a-b").map_err(|e| e.line),
+            Err(3),
+            "$a-b-1 could not name it"
+        );
     }
 
     #[test]

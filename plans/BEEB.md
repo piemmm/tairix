@@ -75,7 +75,8 @@ Items are built in ledger order; each lands complete with its tests.
    behind the ULA, the ULA's display, sound, cassette, paging and
    interrupts, its keyboard, and optionally the Plus 1 with its printer port,
    analogue port and two cartridge slots; the Plus 3 and other expansions
-   are not emulated. A further micro is a further model of the same crate.
+   are not emulated. A further micro is a further model of the same crate:
+   the Commodore 64 is `plans/C64.md`.
 2. **The guest is hostile.** Guest code, ROM images, disc and tape images and
    snapshots are untrusted input. All of it is decoded and executed only in
    a machine worker, a `lib/sandbox` session worker holding no capability.
@@ -482,11 +483,11 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   &35F; MODE alone applies *TV's interlace to R8, and MODE 7 keeps the
   interlaced video teletext needs whatever *TV says.
 
-Deliberate divergences: the character set is this ROM's own design, `lib/vdu`'s
-BBC arrangement, so a glyph's pixels differ from MOS 1.20's; and &31A, the VDU driver's scratch for
-the last addressed pixel's line, is not reproduced for a line clipped at its
-start or the extra plot of an open line, which MOS 1.20 takes from other
-points of its own drawing order. The 16 KiB image has no room for the rest:
+Deliberate divergences: the character set is this ROM's own design,
+`lib/vdu`'s BBC arrangement, so a glyph's pixels differ from MOS 1.20's; and
+&31A, the VDU driver's scratch for the last addressed pixel's line, is not
+reproduced for a line clipped at its start or the extra plot of an open line,
+which MOS 1.20 takes from other points of its own drawing order. The 16 KiB image has no room for the rest:
 MOS 1.20 writes a silenced channel's attenuation twice more and steps a
 finished release's pitch twice while silent, which nothing hears; the
 two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
@@ -591,21 +592,24 @@ run:
 - Reals are five bytes: an exponent offset by &80, then the mantissa most
   significant first, its top bit the sign; zero is all zeros.
 
-The keyword table and every token value are `lib/bbcbasic`'s BASIC II ones,
-which the builder emits; the two tokenisers and listers are tested against
-each other on the emulated machine. The modules: `ws` (the workspace map),
-`crunch` (tokenising), `list` (detokenising, LISTO and line numbers),
+The keyword table and every token value are `lib/openbasic`'s BASIC II ones,
+which the builder emits; the two tokenisers and listers are tested against each
+other on the emulated machine. LISTO's loop indent counts open FOR and REPEAT
+loops in a byte each, and a NEXT or UNTIL closes one whenever any is open,
+however many: that past &80 open loops genuine BASIC II does the same is not
+yet observed (`plans/OPEN-DEFECTS.md` D1978). The modules: `ws` (the workspace
+map), `crunch` (tokenising), `list` (detokenising, LISTO and line numbers),
 `editor` (the prompt, lines, AUTO, DELETE, RENUMBER, LIST, SAVE, LOAD and
 CHAIN), `exec` (the statement loop and assignment), `control` (IF, the loops,
 GOTO, GOSUB, ON and TRACE), `procs` (PROC, FN and LOCAL), `expr` (the
-operators), `func` (the functions), `vars` (variables, arrays, the heap and
-the BASIC stack), `io` (PRINT, INPUT and READ), `files` (the channels),
-`system` (the MOS statements, CALL and the pseudo-variables), `float` (the
-five-byte arithmetic), `decimal` (reading and writing decimal), `trans` (the
+operators), `func` (the functions), `vars` (variables, arrays, the heap and the
+BASIC stack), `io` (PRINT, INPUT and READ), `files` (the channels), `system`
+(the MOS statements, CALL and the pseudo-variables), `float` (the five-byte
+arithmetic), `decimal` (reading and writing decimal), `trans` (the
 transcendental functions and RND), `assembler` and `errors`. Each part is
 tested on the emulated machine with the clean-room MOS, typing programs and
-comparing the screen and workspace with what BASIC II produced, recorded
-beside the tests in `rom::basic::tests`.
+comparing the screen and workspace with what BASIC II produced, recorded beside
+the tests in `rom::basic::tests`.
 
 Behaviour pinned by observation, each with its test:
 
@@ -997,25 +1001,28 @@ to the windows, the sessions, the audio streams and the store.
   VDU output and documented workspace, against expectations from the manuals
   and from the recorded corpus; the Electron's OS and the Plus 1 ROM against
   the Electron Advanced User Guide's.
-- **Reference harness.** The corpus is `tests/corpus/`: each group a
+- **Reference harness.** A corpus is a directory of groups, each a
   `.scenarios` file, scenarios of discs and scripted keys in the format
   `tairix_openmicro::scenario` reads, and a `.fixtures` file of what each
-  left — its screen's rows and the SHA-256 of each disc it checks. The build
-  lists every scenario as a test of `tests/corpus.rs`, which replays it
-  against the clean-room ROMs. `cargo xtask openmicro --reference <dir>` runs
-  the corpus against the original ROMs a developer holds in `<dir>`, outside
-  the tree, and rewrites the fixtures from them, the clean-room ROMs' own
-  names put in; a scenario marked `ours` keeps the fixture that states this
+  left — its screen's rows and the SHA-256 of each disc it checks. The Model
+  B's corpus is `tests/corpus/`, the Commodore 64's `tests/corpus/c64/`
+  (`plans/C64.md` §6); the build lists every scenario as a test of
+  `tests/corpus.rs` or `tests/c64_corpus.rs`, which replays it against the
+  clean-room ROMs. `cargo xtask openmicro --reference <dir>` runs each corpus
+  whose original ROMs a developer holds in `<dir>`, outside the tree, against
+  them, and rewrites its fixtures from them, the clean-room ROMs' own names
+  put in; a scenario marked `ours` keeps the fixture that states this
   machine's own behaviour. It refuses to write anything when an observation's
   text, or the bytes its rows write in hexadecimal, carries twelve bytes in a
   row of an original ROM that no clean-room ROM holds and the clean-room ROMs
-  do not show for the same scenario. The corpus is the Model B's; the
-  Electron's ROMs are held to the Guide by their own tests.
+  do not show for the same scenario. The Electron's ROMs are held to the
+  Guide by their own tests.
 - **Fuzzing.** Every decoder of untrusted bytes has a registered harness:
-  `fuzz_media` the disc and tape images, `fuzz_snapshot` snapshots of either
-  model and hostile guest code on either, `fuzz_worker` the protocol in both
-  directions, the worker's service and the owner's client, and the library's
-  record and state blobs in `lib/machines`.
+  `fuzz_media` every model's disc, tape, cartridge and program images,
+  `fuzz_snapshot` snapshots of every model and hostile guest code on each,
+  `fuzz_worker` the protocol in both directions, the worker's service and the
+  owner's client, and the library's record and state blobs in
+  `lib/machines`.
 - **QEMU.** `tests/integration/openmicro_qemu_aarch64`: the desktop launches
   `OpenMicro.app` from the program library; once the library is read, the
   first run's Model B is started from its card's menu in the library window,

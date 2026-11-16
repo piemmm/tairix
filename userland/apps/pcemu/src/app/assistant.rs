@@ -24,6 +24,18 @@ const DISKS: [&str; 2] = ["A new 30 MB hard disk", "None"];
 /// The disk choice that makes one.
 const A_NEW_DISK: usize = 0;
 
+/// A machine with a controller's one choice: whether a disk is made.
+const WITH_CONTROLLER: [Choice; 1] = [Choice::Offered {
+    label: "Hard disk",
+    choices: &DISKS,
+}];
+/// A machine without one's, which cannot change.
+const WITHOUT_CONTROLLER: [Choice; 1] = [Choice::Fixed {
+    label: "Hard disk",
+    shown: "None",
+    why: "This machine has no hard disk controller.",
+}];
+
 /// What each of [`TEMPLATES`] is offered with: a hard disk to choose where it
 /// has a controller to drive one.
 fn offers() -> Vec<Offer> {
@@ -31,17 +43,10 @@ fn offers() -> Vec<Offer> {
         .iter()
         .map(|&(template, label)| Offer {
             label,
-            choice: if template.config().fixed.is_some() {
-                Choice::Offered {
-                    label: "Hard disk",
-                    choices: &DISKS,
-                }
+            choices: if template.config().fixed.is_some() {
+                &WITH_CONTROLLER
             } else {
-                Choice::Fixed {
-                    label: "Hard disk",
-                    shown: "None",
-                    why: "This machine has no hard disk controller.",
-                }
+                &WITHOUT_CONTROLLER
             },
         })
         .collect()
@@ -54,15 +59,15 @@ pub fn assistant(names: Vec<String>) -> Assistant {
 }
 
 /// The template an answer to make offer `model` names, and whether a hard
-/// disk is made for it with further `choice`.
+/// disk is made for it with further `choices`.
 #[must_use]
-pub fn chosen(model: usize, choice: Option<usize>) -> Option<(Template, bool)> {
+pub fn chosen(model: usize, choices: &[Option<usize>]) -> Option<(Template, bool)> {
     let &(template, _) = TEMPLATES.get(model)?;
-    Some((template, choice == Some(A_NEW_DISK)))
+    Some((template, choices.first() == Some(&Some(A_NEW_DISK))))
 }
 
-fn describe(model: usize, choice: Option<usize>) -> String {
-    chosen(model, choice).map_or_else(String::new, |(template, disk)| {
+fn describe(model: usize, choices: &[Option<usize>]) -> String {
+    chosen(model, choices).map_or_else(String::new, |(template, disk)| {
         describe_config(&template.config(), usize::from(disk))
     })
 }

@@ -1,4 +1,6 @@
-//! The decoded instructions, kept per guest page.
+//! The decoded instructions, kept per page of the memory they were fetched
+//! from: the physical page where the bus translates, so each task's code at a
+//! shared address keeps its own decodings across task switches.
 //!
 //! A slot holds the bits it was decoded from beside the decoding, and is
 //! used only while the bits fetched there still match: an instruction fetch
@@ -12,11 +14,10 @@ use alloc::vec::Vec;
 use crate::a32;
 use crate::cond::Condition;
 use crate::instruction::Instruction;
+use crate::mmu::PAGE_BITS;
 use crate::profile::{Profile, Unpredictable};
 use crate::t32::{self, Position};
-
-/// The page size the memo keys on.
-const PAGE_SHIFT: u32 = 12;
+use crate::word::low16;
 
 /// What an instruction does on the profile.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,11 +74,7 @@ pub(super) struct Thumb {
 
 impl Thumb {
     const fn split(self) -> [u16; 2] {
-        let bytes = self.halfwords.to_le_bytes();
-        [
-            u16::from_le_bytes([bytes[0], bytes[1]]),
-            u16::from_le_bytes([bytes[2], bytes[3]]),
-        ]
+        [low16(self.halfwords), low16(self.halfwords >> 16)]
     }
 }
 
@@ -98,7 +95,7 @@ pub(super) struct Memo<K, const SHIFT: u32> {
 
 impl<K: Copy + PartialEq, const SHIFT: u32> Memo<K, SHIFT> {
     /// Instruction slots in a page.
-    const SLOTS: usize = 1 << (PAGE_SHIFT - SHIFT);
+    const SLOTS: usize = 1 << (PAGE_BITS - SHIFT);
 
     /// A memo holding at most `pages` decoded pages, rounded down to a power
     /// of two, whose zero key `zero` decodes as `decoded`; zero pages holds
@@ -119,15 +116,16 @@ impl<K: Copy + PartialEq, const SHIFT: u32> Memo<K, SHIFT> {
         }
     }
 
-    /// The decoding of `key`, fetched at `address`, made by `decode` when the
-    /// slot does not hold it.
+    /// The decoding of `key`, fetched at `address` from page `page` of
+    /// memory, made by `decode` when the slot does not hold it.
     pub(super) fn decoded(
         &mut self,
+        page: u32,
         address: u32,
         key: K,
         decode: impl FnOnce(K) -> Decoded,
     ) -> Decoded {
-        let Some(slots) = self.place(address >> PAGE_SHIFT) else {
+        let Some(slots) = self.place(page) else {
             return decode(key);
         };
         let slot = &mut slots[(address as usize >> SHIFT) & (Self::SLOTS - 1)];
@@ -167,5 +165,26 @@ impl<K: Copy + PartialEq, const SHIFT: u32> Memo<K, SHIFT> {
             .flatten()
             .map(|slots| core::mem::size_of_val(&**slots))
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::BIT32;
+
+    #[test]
+    fn code_at_one_address_in_two_pages_keeps_both_decodings() {
+        let mut memo: Memo<u32, 2> = Memo::new(4, 0, Decoded::arm(0, &BIT32));
+        let mut decodes = 0;
+        for _ in 0..3 {
+            for (page, word) in [(1, 0xE3A0_0001), (2, 0xE3A0_0002)] {
+                memo.decoded(page, 0x8000, word, |word| {
+                    decodes += 1;
+                    Decoded::arm(word, &BIT32)
+                });
+            }
+        }
+        assert_eq!(decodes, 2, "each task's decoded once");
     }
 }

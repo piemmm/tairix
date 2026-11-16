@@ -1,3 +1,4 @@
+use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_riscos_arm::bus::{Abort, Bus, Width};
@@ -25,12 +26,12 @@ fn request(size: u32, max: u32) -> Create<'static> {
 }
 
 fn word(memory: &mut Memory, address: u32) -> Result<u32, Abort> {
-    memory.mmu().read(address, Width::Word, true)
+    memory.bus().read(address, Width::Word, true)
 }
 
 fn store(memory: &mut Memory, address: u32, value: u32) {
     memory
-        .mmu()
+        .bus()
         .write(address, Width::Word, value, true)
         .unwrap();
 }
@@ -499,7 +500,7 @@ fn a_handler_names_its_pages_and_another_holders_are_replaced_with_their_content
         .unwrap();
     store(&mut memory, other.base, 0xFEED);
     let (frame, _) = memory
-        .mmu()
+        .mmu
         .lookup(tairix_riscos_arm::mmu::Table::Global, other.base)
         .unwrap();
     let specific = Create {
@@ -514,7 +515,7 @@ fn a_handler_names_its_pages_and_another_holders_are_replaced_with_their_content
         Ok(0x1000)
     );
     let (taken, _) = memory
-        .mmu()
+        .mmu
         .lookup(tairix_riscos_arm::mmu::Table::Global, made.base)
         .unwrap();
     assert_eq!(taken, frame, "the page it named");
@@ -1079,4 +1080,583 @@ fn risc_os_5s_layout_places_areas_past_its_heaps_or_below_a_lowered_limit() {
         below.base, 0x0800_0000,
         "between the lowered limit and the RMA"
     );
+}
+
+/// A session whose free pool runs short: a quarter of 4 MiB.
+fn small() -> Memory {
+    Memory::new(&SHARED, Ceiling::derive(4 * 1024 * 1024)).unwrap()
+}
+
+fn named(number: u32) -> i32 {
+    i32::try_from(number).unwrap()
+}
+
+/// A shrinkable area with a handler.
+fn cache(size: u32) -> Create<'static> {
+    Create {
+        flags: AreaFlags::SHRINKABLE,
+        ..request(size, 0x10_0000)
+    }
+}
+
+fn pages_of(memory: &Memory, number: u32) -> u32 {
+    memory.area_info(number).unwrap().size / 0x1000
+}
+
+/// Every page the areas account for: a pool's held pages, any other's
+/// mapped ones.
+fn held_by_areas(memory: &Memory) -> u32 {
+    let mut held = 0;
+    let mut after = None;
+    while let Ok(Some(number)) = memory.enumerate_areas(after) {
+        after = Some(number);
+        if number != FREE_POOL {
+            let info = memory.area_info(number).unwrap();
+            held += info.pool.map_or(info.size / 0x1000, |(pages, _)| pages);
+        }
+    }
+    held
+}
+
+fn frame_at(memory: &Memory, address: u32) -> Option<u32> {
+    memory
+        .mmu
+        .lookup(Table::Global, address)
+        .map(|(frame, _)| frame.number())
+}
+
+#[test]
+fn an_initial_size_past_any_maximum_is_refused_before_anything_is_reserved() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let free = memory.free_pages();
+    for (size, max, flags) in [
+        (u32::MAX, None, 0),
+        (0xFFFF_F001, Some(0x10_0000), 0),
+        (0x0410_0000, None, 0),
+        (u32::MAX, None, AreaFlags::SPARSE),
+    ] {
+        let huge = Create {
+            flags,
+            max,
+            ..request(size, 0)
+        };
+        assert_eq!(
+            memory.create_area(&huge, &mut guest),
+            Err(AreaError::NotAllMoved),
+            "{size:#x}"
+        );
+    }
+    assert!(guest.take().is_empty(), "no handler or service asked");
+    assert_eq!(memory.free_pages(), free);
+    assert_eq!(memory.enumerate_areas(None), Ok(Some(FREE_POOL)));
+    let made = memory.create_area(&request(0, 0x1000), &mut guest).unwrap();
+    assert_eq!(
+        (made.number, made.base),
+        (0x100, layout::WINDOW_TOP),
+        "no number or address space kept"
+    );
+}
+
+#[test]
+fn a_grow_is_held_to_its_maximum_however_its_room_was_made() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    memory.create_area(&cache(0x4_0000), &mut guest).unwrap();
+    memory.create_area(&cache(0x4_0000), &mut guest).unwrap();
+    let max = (memory.free_pages() + 16) * 0x1000;
+    let grower = memory.create_area(&request(0, max), &mut guest).unwrap();
+    guest.regrow = Some((named(grower.number), 0x1000));
+    assert_eq!(
+        memory.change_area(named(grower.number), named(max), &mut guest),
+        Err(Failure {
+            error: AreaError::NotAllMoved,
+            moved: 0
+        })
+    );
+    assert!(guest.regrow.is_none(), "a cache's handler grew it first");
+    assert_eq!(pages_of(&memory, grower.number), 1, "by that page alone");
+}
+
+#[test]
+fn a_sparse_claim_maps_around_a_page_claimed_while_it_made_room() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    let kernel = memory.pages_in_use();
+    memory.create_area(&cache(0x4_0000), &mut guest).unwrap();
+    memory.create_area(&cache(0x4_0000), &mut guest).unwrap();
+    let sparse = Create {
+        flags: AreaFlags::SPARSE,
+        ..request(0, 0x10_0000)
+    };
+    let sparse = memory.create_area(&sparse, &mut guest).unwrap();
+    let filler = (memory.free_pages() - 2) * 0x1000;
+    memory
+        .create_area(&request(filler, filler), &mut guest)
+        .unwrap();
+    guest.claim_inside = Some((sparse.number, sparse.base + 0x2000, 0x1000));
+    memory
+        .sparse_claim(sparse.number, sparse.base, 0x4000, &mut guest)
+        .unwrap();
+    assert!(guest.claim_inside.is_none(), "a cache's handler claimed it");
+    assert_eq!(pages_of(&memory, sparse.number), 4);
+    assert_eq!(
+        memory.pages_in_use(),
+        kernel + held_by_areas(&memory),
+        "no page lost"
+    );
+}
+
+#[test]
+fn an_area_its_handler_removes_and_replaces_leaves_the_replacement_whole() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let free = memory.free_pages();
+    let made = memory
+        .create_area(&request(0x2000, 0x10_0000), &mut guest)
+        .unwrap();
+    guest.replace_inside = Some(made.number);
+    assert_eq!(memory.remove_area(made.number, &mut guest), Ok(()));
+    let pool = guest.replacement.unwrap();
+    assert_eq!(pool, made.number, "its number given out again");
+    memory
+        .pool_physical(pool, &[physical(0, -2, 0)], &mut guest)
+        .unwrap();
+    assert_eq!(memory.area_info(pool).unwrap().pool, Some((1, 4)));
+    memory.remove_area(pool, &mut guest).unwrap();
+    assert_eq!(memory.free_pages(), free, "every page back");
+}
+
+#[test]
+fn a_pool_list_of_any_length_needs_room_only_for_its_empty_slots() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    let made = pool(&mut memory, &mut guest);
+    let free = memory.free_pages();
+    let ops = vec![physical(0, -2, 0); (1 << 20) + 1];
+    assert_eq!(memory.pool_physical(made.number, &ops, &mut guest), Ok(()));
+    assert_eq!(memory.free_pages(), free - 1, "one page, kept thereafter");
+}
+
+#[test]
+fn a_refused_pool_claim_keeps_the_slots_page() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let made = pool(&mut memory, &mut guest);
+    memory
+        .pool_physical(made.number, &[physical(0, -2, 0)], &mut guest)
+        .unwrap();
+    let mut held = [PageQuery {
+        slot: Some(0),
+        ..PageQuery::default()
+    }];
+    memory.pool_query(made.number, &mut held).unwrap();
+    let free = memory.free_pages();
+    for (page, refusal) in [(-3, AreaError::BadPageNumber), (0, AreaError::NotAllMoved)] {
+        assert_eq!(
+            memory.pool_physical(made.number, &[physical(0, page, 0)], &mut guest),
+            Err((refusal, 0)),
+            "page {page}"
+        );
+    }
+    let mut now = [PageQuery {
+        slot: Some(0),
+        ..PageQuery::default()
+    }];
+    memory.pool_query(made.number, &mut now).unwrap();
+    assert_eq!(now[0].page, held[0].page, "still its page");
+    assert_eq!(memory.free_pages(), free);
+}
+
+#[test]
+fn a_sparse_area_asked_to_be_doubly_mapped_is_mapped_once_and_gives_its_space_back() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let both = Create {
+        flags: AreaFlags::SPARSE | AreaFlags::DOUBLY_MAPPED | AreaFlags::NOT_CACHEABLE,
+        ..request(0, 0x10_0000)
+    };
+    let first = memory.create_area(&both, &mut guest).unwrap();
+    let flags = memory.area_info(first.number).unwrap().flags;
+    assert_eq!(flags & AreaFlags::DOUBLY_MAPPED, 0);
+    assert_eq!(first.base, layout::WINDOW_TOP, "one copy's space reserved");
+    memory.remove_area(first.number, &mut guest).unwrap();
+    let again = memory.create_area(&both, &mut guest).unwrap();
+    assert_eq!(again.base, first.base, "and all of it given back");
+}
+
+#[test]
+fn a_pool_is_never_shrinkable() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let asked = Create {
+        flags: AreaFlags::PMP | AreaFlags::NEEDS_SPECIFIC_PAGES | AreaFlags::SHRINKABLE,
+        pool: 4,
+        ..request(0, 0x4000)
+    };
+    let made = memory.create_area(&asked, &mut guest).unwrap();
+    let flags = memory.area_info(made.number).unwrap().flags;
+    assert_eq!(flags & AreaFlags::SHRINKABLE, 0);
+    memory
+        .pool_physical(made.number, &[physical(0, -2, 0)], &mut guest)
+        .unwrap();
+    memory
+        .pool_logical(made.number, &[logical(0, Some(0), 0)])
+        .unwrap();
+    guest.take();
+    let free = memory.free_pages();
+    assert_eq!(
+        memory.free_area_pages(None, &mut guest),
+        Ok(free),
+        "its mapped page is not there to take"
+    );
+    assert!(guest.take().is_empty(), "nor is its handler asked");
+}
+
+#[test]
+fn a_walk_of_the_shrinkable_areas_ends_however_many_their_handlers_make() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    memory.create_area(&cache(0x2000), &mut guest).unwrap();
+    guest.take();
+    guest.breed = true;
+    guest.test_shrink = 0x1000;
+    let free = memory.free_pages();
+    assert_eq!(memory.free_area_pages(None, &mut guest), Ok(free + 1));
+    assert_eq!(
+        memory.areas.count(),
+        2,
+        "only the area there when it began was asked"
+    );
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    memory.create_area(&cache(0x4_0000), &mut guest).unwrap();
+    let want = (memory.free_pages() + 0x40) * 0x1000;
+    let grower = memory.create_area(&request(0, want), &mut guest).unwrap();
+    guest.take();
+    guest.breed = true;
+    assert_eq!(
+        memory.change_area(named(grower.number), named(want), &mut guest),
+        Err(Failure {
+            error: AreaError::NotAllMoved,
+            moved: 0
+        }),
+        "the page its child took is short"
+    );
+    assert_eq!(
+        memory.areas.count(),
+        3,
+        "only the area there when it began was shrunk"
+    );
+}
+
+#[test]
+fn room_application_space_cannot_cover_is_not_taken_from_it() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    let slot = memory.create_slot(Bits::Bit32).unwrap();
+    memory.switch_slot(slot).unwrap();
+    memory
+        .change_area(named(FREE_POOL), -0x2000, &mut guest)
+        .unwrap();
+    let sparse = Create {
+        flags: AreaFlags::SPARSE,
+        ..request(0, 0x10_0000)
+    };
+    let sparse = memory.create_area(&sparse, &mut guest).unwrap();
+    let made = pool(&mut memory, &mut guest);
+    let grower = memory.create_area(&request(0, 0x4000), &mut guest).unwrap();
+    let filler = (memory.free_pages() - 1) * 0x1000;
+    memory
+        .create_area(&request(filler, filler), &mut guest)
+        .unwrap();
+    assert_eq!(
+        memory.sparse_claim(sparse.number, sparse.base, 0x4000, &mut guest),
+        Err(AreaError::NotAllMoved)
+    );
+    let claims = [0, 1, 2, 3].map(|slot| physical(slot, -2, 0));
+    assert_eq!(
+        memory.pool_physical(made.number, &claims, &mut guest),
+        Err((AreaError::NotAllMoved, 0))
+    );
+    assert_eq!(
+        memory.change_area(named(grower.number), 0x4000, &mut guest),
+        Err(Failure {
+            error: AreaError::NotAllMoved,
+            moved: 0
+        })
+    );
+    assert_eq!(
+        memory.slot_size(slot),
+        Some(0x2000),
+        "two pages short of four"
+    );
+}
+
+#[test]
+fn a_slot_grow_past_what_the_slot_may_reach_shrinks_nothing() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    let slot = memory.create_slot(Bits::Bit26).unwrap();
+    memory.switch_slot(slot).unwrap();
+    let unasked = Create {
+        handler: None,
+        ..cache(0x8_0000)
+    };
+    let cached = memory.create_area(&unasked, &mut guest).unwrap();
+    assert_eq!(
+        memory.change_area(named(FREE_POOL), -0x01C0_0000, &mut guest),
+        Err(Failure {
+            error: AreaError::NotAllMoved,
+            moved: 0
+        }),
+        "a 26-bit slot's 28 MiB less its first 32 KiB"
+    );
+    assert_eq!(pages_of(&memory, cached.number), 0x80);
+}
+
+#[test]
+fn a_grow_refused_by_application_space_says_why() {
+    let mut memory = small();
+    let mut guest = Recorder::new();
+    let slot = memory.create_slot(Bits::Bit32).unwrap();
+    memory.switch_slot(slot).unwrap();
+    memory
+        .change_area(named(FREE_POOL), -0x4000, &mut guest)
+        .unwrap();
+    let want = (memory.free_pages() + 1) * 0x1000;
+    let grower = memory.create_area(&request(0, want), &mut guest).unwrap();
+    guest.claim_service = true;
+    assert_eq!(
+        memory.change_area(named(grower.number), named(want), &mut guest),
+        Err(Failure {
+            error: AreaError::ApplicationInUse,
+            moved: 0
+        })
+    );
+    assert_eq!(memory.slot_size(slot), Some(0x4000));
+}
+
+#[test]
+fn only_pages_another_holds_are_announced_each_paired_with_its_replacement() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let other = memory
+        .create_area(&request(0x2000, 0x2000), &mut guest)
+        .unwrap();
+    let held = [other.base, other.base + 0x1000].map(|address| frame_at(&memory, address).unwrap());
+    let free = memory.mmu.next_free(Frame::new(0)).unwrap().number();
+    let specific = Create {
+        flags: AreaFlags::NEEDS_SPECIFIC_PAGES,
+        ..request(0, 0x10_0000)
+    };
+    let made = memory.create_area(&specific, &mut guest).unwrap();
+    guest.name_pages = Vec::from([held[1], free, held[0]]);
+    assert_eq!(
+        memory.change_area(named(made.number), 0x3000, &mut guest),
+        Ok(0x3000)
+    );
+    let entry = |page: u32, logical: u32| PageEntry {
+        page: Some(page),
+        logical,
+        physical: page * 0x1000,
+    };
+    let before = Vec::from([
+        entry(held[1], other.base + 0x1000),
+        entry(held[0], other.base),
+    ]);
+    assert_eq!(guest.announced, core::slice::from_ref(&before));
+    assert_eq!(guest.swapped.len(), 1);
+    let (old, new) = &guest.swapped[0];
+    assert_eq!(old, &before);
+    assert_eq!(new.len(), 2);
+    for (old, new) in old.iter().zip(new) {
+        assert_eq!(new.logical, old.logical, "where the page was");
+        assert_eq!(frame_at(&memory, new.logical), new.page);
+        assert!(!guest.name_pages.contains(&new.page.unwrap()), "none named");
+    }
+    let mine = [0, 0x1000, 0x2000].map(|offset| frame_at(&memory, made.base + offset).unwrap());
+    assert_eq!(mine, [held[1], free, held[0]], "each where it was named");
+}
+
+#[test]
+fn a_grow_whose_mapping_fails_leaves_the_area_and_the_free_pool_as_they_were() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let made = memory
+        .create_area(&request(0x1000, 0x10_0000), &mut guest)
+        .unwrap();
+    store(&mut memory, made.base, 0x55);
+    let squatter = memory.mmu.allocate(FrameKind::Memory).unwrap();
+    memory
+        .mmu
+        .map(
+            Table::Global,
+            made.base + 0x2000,
+            squatter,
+            made_access(&memory, made.base),
+        )
+        .unwrap();
+    let free = memory.free_pages();
+    assert_eq!(
+        memory.change_area(named(made.number), 0x3000, &mut guest),
+        Err(Failure {
+            error: AreaError::NotAllMoved,
+            moved: 0
+        })
+    );
+    assert_eq!(pages_of(&memory, made.number), 1);
+    assert_eq!(memory.free_pages(), free, "every page it took given back");
+    assert_eq!(word(&mut memory, made.base), Ok(0x55));
+    assert_eq!(
+        word(&mut memory, made.base + 0x1000),
+        Err(Abort::Translation),
+        "the page mapped before the failure undone"
+    );
+    let twice = Create {
+        flags: AreaFlags::DOUBLY_MAPPED | AreaFlags::NOT_CACHEABLE,
+        ..request(0x1000, 0x10_0000)
+    };
+    let twice = memory.create_area(&twice, &mut guest).unwrap();
+    store(&mut memory, twice.base, 0x66);
+    memory
+        .mmu
+        .map(
+            Table::Global,
+            twice.base + 0x1000,
+            squatter,
+            made_access(&memory, twice.base),
+        )
+        .unwrap();
+    assert!(memory
+        .change_area(named(twice.number), 0x1000, &mut guest)
+        .is_err());
+    assert_eq!(
+        word(&mut memory, twice.base - 0x1000),
+        Ok(0x66),
+        "its first copy moved back up"
+    );
+    assert_eq!(
+        word(&mut memory, twice.base - 0x2000),
+        Err(Abort::Translation)
+    );
+}
+
+/// The access an area's page at `address` is mapped with.
+fn made_access(memory: &Memory, address: u32) -> Access {
+    memory.mmu.lookup(Table::Global, address).unwrap().1
+}
+
+#[test]
+fn a_dma_areas_handler_is_shown_the_pages_chosen_and_may_refuse_them() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let dma = Create {
+        flags: AreaFlags::NEEDS_DMA,
+        ..request(0, 0x10_0000)
+    };
+    let made = memory.create_area(&dma, &mut guest).unwrap();
+    guest.take();
+    assert_eq!(
+        memory.change_area(named(made.number), 0x2000, &mut guest),
+        Ok(0x2000)
+    );
+    let calls = guest.take();
+    assert!(
+        calls.contains(&Call::PreGrow {
+            bytes: 0x2000,
+            size: 0,
+            block: 2
+        }),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, Call::Unsafe(_) | Call::Fiq(_))),
+        "free pages need no announcing"
+    );
+    guest.refuse_grow = Some(Refused::Silently);
+    let free = memory.free_pages();
+    assert!(memory
+        .change_area(named(made.number), 0x1000, &mut guest)
+        .is_err());
+    assert_eq!(memory.free_pages(), free);
+    assert_eq!(pages_of(&memory, made.number), 2);
+}
+
+#[test]
+fn a_replaced_page_carries_its_watches() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let other = memory
+        .create_area(&request(0x1000, 0x1000), &mut guest)
+        .unwrap();
+    let frame = Frame::new(frame_at(&memory, other.base).unwrap());
+    let watcher = tairix_riscos_arm::mmu::Watcher::new(0).unwrap();
+    memory.mmu.watch(frame, 1, watcher).unwrap();
+    memory.mmu.take_written(watcher, |_, _| {});
+    let specific = Create {
+        flags: AreaFlags::NEEDS_SPECIFIC_PAGES,
+        ..request(0, 0x10_0000)
+    };
+    let made = memory.create_area(&specific, &mut guest).unwrap();
+    guest.name_pages = Vec::from([frame.number()]);
+    memory
+        .change_area(named(made.number), 0x1000, &mut guest)
+        .unwrap();
+    let mut written = Vec::new();
+    memory
+        .mmu
+        .take_written(watcher, |frame, granules| written.push((frame, granules)));
+    let replacement = Frame::new(frame_at(&memory, other.base).unwrap());
+    assert_eq!(written, [(replacement, 1)], "its contents changed frame");
+    store(&mut memory, other.base, 1);
+    written.clear();
+    memory
+        .mmu
+        .take_written(watcher, |frame, granules| written.push((frame, granules)));
+    assert_eq!(written, [(replacement, 1)], "and stores to it are seen");
+}
+
+#[test]
+fn numbers_past_those_a_caller_reads_as_positive_are_never_given_out() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    memory.areas.quick.clear();
+    memory.areas.probe_from = 0x7FFF_FFFE;
+    let made = memory.create_area(&request(0, 0), &mut guest).unwrap();
+    assert_eq!(made.number, 0x7FFF_FFFF);
+    assert_eq!(
+        memory.create_area(&request(0, 0), &mut guest),
+        Err(AreaError::CantAllocateArea)
+    );
+}
+
+#[test]
+fn a_change_asked_from_an_interrupt_calls_no_service() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let made = memory.create_area(&request(0, 0x1000), &mut guest).unwrap();
+    guest.take();
+    guest.interrupt = true;
+    assert!(memory
+        .change_area(named(made.number), 0x1000, &mut guest)
+        .is_err());
+    assert!(guest.take().is_empty());
+}
+
+#[test]
+fn the_areas_one_session_may_hold_are_bounded() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    for _ in 0..super::MOST_AREAS {
+        memory.create_area(&request(0, 0), &mut guest).unwrap();
+    }
+    assert_eq!(
+        memory.create_area(&request(0, 0), &mut guest),
+        Err(AreaError::CantAllocateArea)
+    );
+    memory.remove_area(0x100, &mut guest).unwrap();
+    assert!(memory.create_area(&request(0, 0), &mut guest).is_ok());
 }

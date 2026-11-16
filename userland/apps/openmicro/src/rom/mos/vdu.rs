@@ -9,14 +9,14 @@
 use tairix_vdu::code::Control;
 
 use super::ws::{os, page2, var, vdu, vdu_zp};
+use super::Model;
 use super::{has_teletext, return_in_teletext, svia, DELETE};
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::reg;
 use crate::machine::electron::control;
 use crate::machine::electron::sheila as ula;
 use crate::machine::electron::video::{register_bits, SETS};
-use crate::machine::Model;
+use crate::machine::via::reg;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 
 /// Status byte bits.

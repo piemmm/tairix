@@ -21,6 +21,7 @@ use tairix_riscos_arm::bus::{Abort, Bus, Fetch, Width};
 use tairix_riscos_arm::cpu::{Cpu, State, Stop};
 use tairix_riscos_arm::fpa::{fpsr, Exception, Format, Fpa, Internal, Precision, Rounding};
 use tairix_riscos_arm::instruction::{FpaCompareOp, FpaDyadicOp, FpaMonadicOp, FpaOperand};
+use tairix_riscos_arm::mmu::PAGE_BITS;
 use tairix_riscos_arm::profile::{Profile, BIT26, BIT32};
 use tairix_riscos_arm::psr::Mode;
 
@@ -173,7 +174,11 @@ struct Memory {
 impl Bus for Memory {
     fn fetch(&mut self, address: u32, _privileged: bool) -> Result<Fetch, Abort> {
         let word = self.read(address & !3, Width::Word, true)?;
-        Ok(Fetch { word, host: false })
+        Ok(Fetch {
+            word,
+            host: false,
+            page: address >> PAGE_BITS,
+        })
     }
 
     fn read(&mut self, address: u32, width: Width, _privileged: bool) -> Result<u32, Abort> {
@@ -198,9 +203,8 @@ impl Bus for Memory {
         let slot = self.words.get_mut(index).ok_or(Abort::Translation)?;
         let shift = 8 * (address & 3);
         let mask = match width {
-            Width::Byte => 0xFF << shift,
-            Width::Half => 0xFFFF << shift,
             Width::Word => u32::MAX,
+            narrow => narrow.mask() << shift,
         };
         *slot = (*slot & !mask) | ((value << shift) & mask);
         Ok(())

@@ -6,9 +6,9 @@
 //! ROMs, then to the filing system.
 
 use super::ws::{os, page2, var, vector};
+use super::Model;
 use super::{copy, DELETE};
 use crate::cpu::STACK_PAGE;
-use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
 use crate::rom::os::{fsc, service, CR};
 

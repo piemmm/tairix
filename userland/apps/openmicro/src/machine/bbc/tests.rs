@@ -246,7 +246,7 @@ fn a_restored_printer_acknowledge_at_the_top_of_time_is_refused() {
 /// byte never reached the printer.
 #[test]
 fn two_bytes_strobed_in_quick_succession_both_reach_the_printer() {
-    use super::via::reg;
+    use crate::machine::via::reg;
     let mut machine = Machine::new(&os_with(&[])).expect("a 16 KiB OS");
     let board = &mut machine.board;
     board.io_write(user_via(reg::DDRA), 0xFF);
@@ -271,7 +271,7 @@ fn two_bytes_strobed_in_quick_succession_both_reach_the_printer() {
 /// itself otherwise.
 #[test]
 fn a_snapshot_taken_as_the_printer_acknowledges_restores_exactly() {
-    use super::via::reg;
+    use crate::machine::via::reg;
     let os = os_with(&[]);
     let mut machine = Machine::new(&os).expect("a 16 KiB OS");
     machine.board.io_write(user_via(reg::DDRA), 0xFF);
@@ -302,7 +302,7 @@ fn break_holds_the_chips_on_its_line_in_reset_while_it_is_down() {
     run_program(&mut machine, code.len());
     machine
         .board
-        .io_write(user_via(super::via::reg::IER), 0x80 | 0x02);
+        .io_write(user_via(crate::machine::via::reg::IER), 0x80 | 0x02);
     assert!(machine.drive_active(PhysicalDrive::Zero));
     machine.set_break(true);
     assert!(!machine.drive_active(PhysicalDrive::Zero), "held in reset");
@@ -431,22 +431,6 @@ fn the_machine_hands_out_the_rows_its_picture_changed() {
         0,
         "a still picture"
     );
-}
-
-#[test]
-fn releasing_every_key_lifts_each_one_held() {
-    use super::keyboard::Key;
-    let mut machine = Machine::new(&os_with(&[])).expect("a 16 KiB OS");
-    for key in [Key::A, Key::SHIFT, Key::RETURN] {
-        machine.set_key(key, true);
-    }
-    let down =
-        |machine: &Machine, key: Key| machine.board.keyboard.scan((key.row() << 4) | key.column());
-    assert!(down(&machine, Key::A));
-    machine.release_keys();
-    assert!([Key::A, Key::SHIFT, Key::RETURN]
-        .iter()
-        .all(|&key| !down(&machine, key)));
 }
 
 #[test]

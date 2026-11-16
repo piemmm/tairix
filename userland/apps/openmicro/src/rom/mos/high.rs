@@ -3,9 +3,9 @@
 //! processor's vectors, each at its documented address.
 
 use super::ws::{os, page_d, vector};
+use super::Model;
 use super::{page, Held};
-use crate::cpu::STACK_PAGE;
-use crate::machine::Model;
+use crate::cpu::{NMI_VECTOR, STACK_PAGE};
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm};
 use crate::rom::os::{entry, CR, EXTENDED_ENTRIES};
 
@@ -142,7 +142,7 @@ fn entry_points(a: &mut Asm) {
     a.org(entry::OSWRCH);
     a.here("oswrch");
     a.jmp(abs(vector::WRCH).ind());
-    a.org(0xFFFA);
+    a.org(NMI_VECTOR);
     a.word(page_d::NMI);
     a.word("reset");
     a.word("irq_entry");

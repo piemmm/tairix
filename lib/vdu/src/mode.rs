@@ -7,20 +7,22 @@
 pub struct Flags(u16);
 
 impl Flags {
+    /// None.
+    pub const NONE: Self = Self(0);
     /// Text only: no graphics, and no sprite may be in it.
-    pub const NON_GRAPHIC: u16 = 1;
+    pub const NON_GRAPHIC: Self = Self(1);
     /// Teletext.
-    pub const TELETEXT: u16 = 1 << 1;
+    pub const TELETEXT: Self = Self(1 << 1);
     /// A gap between text rows.
-    pub const GAP: u16 = 1 << 2;
+    pub const GAP: Self = Self(1 << 2);
     /// The BBC's gaps, which its text modes 3 and 6 have.
-    pub const BBC_GAP: u16 = 1 << 3;
+    pub const BBC_GAP: Self = Self(1 << 3);
     /// A high-resolution monochrome mode.
-    pub const HI_RES_MONO: u16 = 1 << 4;
+    pub const HI_RES_MONO: Self = Self(1 << 4);
     /// Characters twice their height.
-    pub const DOUBLE_VERTICAL: u16 = 1 << 5;
+    pub const DOUBLE_VERTICAL: Self = Self(1 << 5);
     /// A full palette, each of its colours its own.
-    pub const FULL_PALETTE: u16 = 1 << 7;
+    pub const FULL_PALETTE: Self = Self(1 << 7);
 
     /// The flags `bits` hold.
     #[must_use]
@@ -34,10 +36,16 @@ impl Flags {
         self.0
     }
 
-    /// Whether `flag` is among them.
+    /// These and `other`.
     #[must_use]
-    pub const fn has(self, flag: u16) -> bool {
-        self.0 & flag != 0
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every flag of `flags` is among them.
+    #[must_use]
+    pub const fn has(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
     }
 }
 
@@ -84,60 +92,60 @@ impl Mode {
 /// Each numbered mode, by its number.
 #[rustfmt::skip]
 pub static MODES: [Mode; 54] = [
-    /*  0 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::new(0) },
-    /*  1 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::new(0) },
-    /*  2 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 2, log2_bpc: 3, ncolour: 15, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::new(0) },
-    /*  3 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 1, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::new(Flags::NON_GRAPHIC | Flags::GAP | Flags::BBC_GAP) },
-    /*  4 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 0, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::new(0) },
-    /*  5 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 1, log2_bpc: 2, ncolour: 3, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::new(0) },
-    /*  6 */ Mode { width: 320, height: 250, columns: 40, rows: 25, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::new(Flags::NON_GRAPHIC | Flags::GAP | Flags::BBC_GAP) },
-    /*  7 */ Mode { width: 640, height: 500, columns: 40, rows: 25, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 255, line_length: 640, screen_size: 655_360, y_shift: 5, flags: Flags::new(Flags::NON_GRAPHIC | Flags::TELETEXT | Flags::GAP | Flags::DOUBLE_VERTICAL | Flags::FULL_PALETTE) },
-    /*  8 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::new(0) },
-    /*  9 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::new(0) },
-    /* 10 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 3, log2_bpc: 4, ncolour: 63, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::new(0) },
-    /* 11 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::new(Flags::GAP) },
-    /* 12 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::new(0) },
-    /* 13 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::new(0) },
-    /* 14 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::new(Flags::GAP) },
-    /* 15 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 163_840, y_shift: 7, flags: Flags::new(0) },
-    /* 16 */ Mode { width: 1056, height: 256, columns: 132, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 528, screen_size: 135_168, y_shift: 0, flags: Flags::new(0) },
-    /* 17 */ Mode { width: 1056, height: 250, columns: 132, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 528, screen_size: 135_168, y_shift: 0, flags: Flags::new(Flags::GAP) },
-    /* 18 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 40_960, y_shift: 4, flags: Flags::new(0) },
-    /* 19 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 81_920, y_shift: 5, flags: Flags::new(0) },
-    /* 20 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 163_840, y_shift: 6, flags: Flags::new(0) },
-    /* 21 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 327_680, y_shift: 7, flags: Flags::new(0) },
-    /* 22 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 0, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 384, screen_size: 110_592, y_shift: 0, flags: Flags::new(0) },
-    /* 23 */ Mode { width: 1152, height: 896, columns: 144, rows: 56, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 144, screen_size: 129_024, y_shift: 0, flags: Flags::new(Flags::HI_RES_MONO | Flags::DOUBLE_VERTICAL) },
-    /* 24 */ Mode { width: 1056, height: 256, columns: 132, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 1056, screen_size: 270_336, y_shift: 0, flags: Flags::new(0) },
-    /* 25 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 38_400, y_shift: 4, flags: Flags::new(0) },
-    /* 26 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 76_800, y_shift: 5, flags: Flags::new(0) },
-    /* 27 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 153_600, y_shift: 6, flags: Flags::new(0) },
-    /* 28 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 307_200, y_shift: 7, flags: Flags::new(0) },
-    /* 29 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 100, screen_size: 60_000, y_shift: 0, flags: Flags::new(0) },
-    /* 30 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 200, screen_size: 120_000, y_shift: 0, flags: Flags::new(0) },
-    /* 31 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 400, screen_size: 240_000, y_shift: 0, flags: Flags::new(0) },
-    /* 32 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 800, screen_size: 480_000, y_shift: 0, flags: Flags::new(0) },
-    /* 33 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 96, screen_size: 27_648, y_shift: 0, flags: Flags::new(0) },
-    /* 34 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 192, screen_size: 55_296, y_shift: 0, flags: Flags::new(0) },
-    /* 35 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 384, screen_size: 110_592, y_shift: 0, flags: Flags::new(0) },
-    /* 36 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 768, screen_size: 221_184, y_shift: 0, flags: Flags::new(0) },
-    /* 37 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 112, screen_size: 39_424, y_shift: 0, flags: Flags::new(0) },
-    /* 38 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 224, screen_size: 78_848, y_shift: 0, flags: Flags::new(0) },
-    /* 39 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 448, screen_size: 157_696, y_shift: 0, flags: Flags::new(0) },
-    /* 40 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 896, screen_size: 315_392, y_shift: 0, flags: Flags::new(0) },
-    /* 41 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 28_160, y_shift: 0, flags: Flags::new(0) },
-    /* 42 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 56_320, y_shift: 0, flags: Flags::new(0) },
-    /* 43 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 112_640, y_shift: 0, flags: Flags::new(0) },
-    /* 44 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 16_000, y_shift: 0, flags: Flags::new(0) },
-    /* 45 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 32_000, y_shift: 0, flags: Flags::new(0) },
-    /* 46 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 64_000, y_shift: 0, flags: Flags::new(0) },
-    /* 47 */ Mode { width: 360, height: 480, columns: 45, rows: 60, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 360, screen_size: 172_800, y_shift: 0, flags: Flags::new(0) },
-    /* 48 */ Mode { width: 320, height: 480, columns: 40, rows: 60, x_eig: 2, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 76_800, y_shift: 0, flags: Flags::new(0) },
-    /* 49 */ Mode { width: 320, height: 480, columns: 40, rows: 60, x_eig: 2, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 153_600, y_shift: 0, flags: Flags::new(0) },
-    /* 50 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 40, screen_size: 9_600, y_shift: 0, flags: Flags::new(0) },
-    /* 51 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 80, screen_size: 19_200, y_shift: 0, flags: Flags::new(0) },
-    /* 52 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 38_400, y_shift: 0, flags: Flags::new(0) },
-    /* 53 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 76_800, y_shift: 0, flags: Flags::new(0) },
+    /*  0 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
+    /*  1 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
+    /*  2 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 2, log2_bpc: 3, ncolour: 15, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NONE },
+    /*  3 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 1, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NON_GRAPHIC.union(Flags::GAP).union(Flags::BBC_GAP) },
+    /*  4 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 0, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
+    /*  5 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 1, log2_bpc: 2, ncolour: 3, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
+    /*  6 */ Mode { width: 320, height: 250, columns: 40, rows: 25, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NON_GRAPHIC.union(Flags::GAP).union(Flags::BBC_GAP) },
+    /*  7 */ Mode { width: 640, height: 500, columns: 40, rows: 25, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 255, line_length: 640, screen_size: 655_360, y_shift: 5, flags: Flags::NON_GRAPHIC.union(Flags::TELETEXT).union(Flags::GAP).union(Flags::DOUBLE_VERTICAL).union(Flags::FULL_PALETTE) },
+    /*  8 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NONE },
+    /*  9 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NONE },
+    /* 10 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 3, log2_bpc: 4, ncolour: 63, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::NONE },
+    /* 11 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::GAP },
+    /* 12 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::NONE },
+    /* 13 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::NONE },
+    /* 14 */ Mode { width: 640, height: 250, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::GAP },
+    /* 15 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 163_840, y_shift: 7, flags: Flags::NONE },
+    /* 16 */ Mode { width: 1056, height: 256, columns: 132, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 528, screen_size: 135_168, y_shift: 0, flags: Flags::NONE },
+    /* 17 */ Mode { width: 1056, height: 250, columns: 132, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 528, screen_size: 135_168, y_shift: 0, flags: Flags::GAP },
+    /* 18 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 40_960, y_shift: 4, flags: Flags::NONE },
+    /* 19 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 81_920, y_shift: 5, flags: Flags::NONE },
+    /* 20 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 163_840, y_shift: 6, flags: Flags::NONE },
+    /* 21 */ Mode { width: 640, height: 512, columns: 80, rows: 64, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 327_680, y_shift: 7, flags: Flags::NONE },
+    /* 22 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 0, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 384, screen_size: 110_592, y_shift: 0, flags: Flags::NONE },
+    /* 23 */ Mode { width: 1152, height: 896, columns: 144, rows: 56, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 144, screen_size: 129_024, y_shift: 0, flags: Flags::HI_RES_MONO.union(Flags::DOUBLE_VERTICAL) },
+    /* 24 */ Mode { width: 1056, height: 256, columns: 132, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 1056, screen_size: 270_336, y_shift: 0, flags: Flags::NONE },
+    /* 25 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 38_400, y_shift: 4, flags: Flags::NONE },
+    /* 26 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 76_800, y_shift: 5, flags: Flags::NONE },
+    /* 27 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 153_600, y_shift: 6, flags: Flags::NONE },
+    /* 28 */ Mode { width: 640, height: 480, columns: 80, rows: 60, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 640, screen_size: 307_200, y_shift: 7, flags: Flags::NONE },
+    /* 29 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 100, screen_size: 60_000, y_shift: 0, flags: Flags::NONE },
+    /* 30 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 200, screen_size: 120_000, y_shift: 0, flags: Flags::NONE },
+    /* 31 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 400, screen_size: 240_000, y_shift: 0, flags: Flags::NONE },
+    /* 32 */ Mode { width: 800, height: 600, columns: 100, rows: 75, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 800, screen_size: 480_000, y_shift: 0, flags: Flags::NONE },
+    /* 33 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 96, screen_size: 27_648, y_shift: 0, flags: Flags::NONE },
+    /* 34 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 192, screen_size: 55_296, y_shift: 0, flags: Flags::NONE },
+    /* 35 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 384, screen_size: 110_592, y_shift: 0, flags: Flags::NONE },
+    /* 36 */ Mode { width: 768, height: 288, columns: 96, rows: 36, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 768, screen_size: 221_184, y_shift: 0, flags: Flags::NONE },
+    /* 37 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 112, screen_size: 39_424, y_shift: 0, flags: Flags::NONE },
+    /* 38 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 224, screen_size: 78_848, y_shift: 0, flags: Flags::NONE },
+    /* 39 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 448, screen_size: 157_696, y_shift: 0, flags: Flags::NONE },
+    /* 40 */ Mode { width: 896, height: 352, columns: 112, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 896, screen_size: 315_392, y_shift: 0, flags: Flags::NONE },
+    /* 41 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 28_160, y_shift: 0, flags: Flags::NONE },
+    /* 42 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 56_320, y_shift: 0, flags: Flags::NONE },
+    /* 43 */ Mode { width: 640, height: 352, columns: 80, rows: 44, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 112_640, y_shift: 0, flags: Flags::NONE },
+    /* 44 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 80, screen_size: 16_000, y_shift: 0, flags: Flags::NONE },
+    /* 45 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 32_000, y_shift: 0, flags: Flags::NONE },
+    /* 46 */ Mode { width: 640, height: 200, columns: 80, rows: 25, x_eig: 1, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 64_000, y_shift: 0, flags: Flags::NONE },
+    /* 47 */ Mode { width: 360, height: 480, columns: 45, rows: 60, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 360, screen_size: 172_800, y_shift: 0, flags: Flags::NONE },
+    /* 48 */ Mode { width: 320, height: 480, columns: 40, rows: 60, x_eig: 2, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 76_800, y_shift: 0, flags: Flags::NONE },
+    /* 49 */ Mode { width: 320, height: 480, columns: 40, rows: 60, x_eig: 2, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 153_600, y_shift: 0, flags: Flags::NONE },
+    /* 50 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 0, log2_bpc: 0, ncolour: 1, line_length: 40, screen_size: 9_600, y_shift: 0, flags: Flags::NONE },
+    /* 51 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 80, screen_size: 19_200, y_shift: 0, flags: Flags::NONE },
+    /* 52 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 38_400, y_shift: 0, flags: Flags::NONE },
+    /* 53 */ Mode { width: 320, height: 240, columns: 40, rows: 30, x_eig: 2, y_eig: 2, log2_bpp: 3, log2_bpc: 3, ncolour: 63, line_length: 320, screen_size: 76_800, y_shift: 0, flags: Flags::NONE },
 ];
 
 /// The mode numbered `number`; `None` past RISC OS 5's own, which only the

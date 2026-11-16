@@ -1,6 +1,12 @@
-//! The canvas's slots as the dots of a straight RGBA8 frame.
+//! The canvas's slots as the dots of a straight RGBA8 frame, as each model's
+//! canvas holds them.
+
+use alloc::boxed::Box;
 
 use tairix_crt::screen::DOT;
+
+use crate::machine::c64::palette::{self as c64_palette, Luma};
+use crate::machine::Model;
 
 /// A slot's colour: its foreground over its background by its coverage, in
 /// thirds, each of the eight colours bit 0 red, bit 1 green and bit 2 blue.
@@ -22,9 +28,25 @@ const fn channel(foreground: u8, background: u8, coverage: u8, bit: u8) -> u8 {
     thirds * 85
 }
 
-/// Every slot's colour, by its byte.
+/// Every slot's colour, by its byte, as `model`'s canvas holds them: an
+/// Acorn's slots mix two of its eight colours by their coverage, a C64's
+/// name one of the VIC-II's sixteen.
 #[must_use]
-pub const fn palette() -> [[u8; DOT]; 256] {
+pub fn palette_of(model: Model) -> Box<[[u8; DOT]; 256]> {
+    match model {
+        Model::ModelB | Model::Electron => Box::new(palette()),
+        Model::C64 => {
+            let colours = c64_palette::palette(Luma::Later);
+            Box::new(core::array::from_fn(|slot| {
+                let [red, green, blue] = colours[slot % colours.len()];
+                [red, green, blue, 0xFF]
+            }))
+        }
+    }
+}
+
+/// Every Acorn slot's colour, by its byte.
+const fn palette() -> [[u8; DOT]; 256] {
     let mut table = [[0; DOT]; 256];
     let mut slot: u8 = 0;
     loop {
@@ -67,6 +89,16 @@ mod tests {
             [0, 170, 170, 255],
             "two thirds cyan"
         );
+    }
+
+    #[test]
+    fn a_commodore_s_slots_are_its_sixteen_colours() {
+        let table = palette_of(Model::C64);
+        assert_eq!(table[0], [0, 0, 0, 0xFF], "black");
+        assert_eq!(table[1], [0xFF, 0xFF, 0xFF, 0xFF], "white");
+        let colours = c64_palette::palette(Luma::Later);
+        assert_eq!(table[6][..3], colours[6], "blue");
+        assert_eq!(*palette_of(Model::ModelB), palette(), "an Acorn's mix");
     }
 
     #[test]

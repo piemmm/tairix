@@ -15,7 +15,7 @@ use super::library::Socket;
 use crate::machine::bbc::fdc::PhysicalDrive;
 use crate::machine::Model;
 use crate::media::disc::ImageFormat;
-use crate::worker::protocol::{Media, Written};
+use crate::worker::protocol::{DiscFormat, Media, Written};
 
 /// A disc in a drive. One with no file is write-protected, so the machine
 /// holds nothing of it the record lacks.
@@ -23,8 +23,8 @@ use crate::worker::protocol::{Media, Written};
 pub struct Disc {
     /// The file's name.
     pub name: String,
-    /// How its image lays its sides out.
-    pub format: ImageFormat,
+    /// How its image holds the disc.
+    pub format: DiscFormat,
     /// The file it is written back to, while it may be written.
     pub medium: Option<u32>,
     /// Whether the file is of the machine's folder, which the machine keeps
@@ -58,29 +58,75 @@ pub enum Purpose {
     Snapshot,
     /// A ROM image to install for a socket.
     Rom(Socket),
+    /// A C64 cartridge to plug in.
+    Cartridge,
+    /// A C64 program to load into memory.
+    Program,
 }
 
 impl Purpose {
-    /// What a file named `name` is to a `model` by its extension, a disc
-    /// going to drive 0; `None` for an image the model has nothing to take.
+    /// What a file named `name` is to a `model` fitted with `drives`, by its
+    /// extension as [`Purpose::of_extension`] has it.
     #[must_use]
-    pub fn of(name: &str, model: Model) -> Option<Self> {
-        match extension(name)?.as_str() {
-            "ssd" | "dsd" if model.has_drives() => Some(Self::Disc(PhysicalDrive::Zero)),
-            "uef" | "csw" => Some(Self::Tape),
+    pub fn of(name: &str, model: Model, drives: [bool; 2]) -> Option<Self> {
+        Self::of_extension(&extension(name)?, model, drives)
+    }
+
+    /// What a file of lower-case `extension` is to a `model` fitted with
+    /// `drives`, a disc going to the first drive fitted; `None` for an image
+    /// the machine has nothing to take.
+    #[must_use]
+    pub fn of_extension(extension: &str, model: Model, drives: [bool; 2]) -> Option<Self> {
+        let disc = PhysicalDrive::ALL
+            .into_iter()
+            .find(|drive| drives[drive.index()]);
+        match (model, extension) {
+            (Model::ModelB | Model::Electron, "uef" | "csw") | (Model::C64, "tap") => {
+                Some(Self::Tape)
+            }
+            (Model::ModelB, "ssd" | "dsd") | (Model::C64, "d64" | "g64") => disc.map(Self::Disc),
+            (Model::C64, "crt") => Some(Self::Cartridge),
+            (Model::C64, "prg" | "t64") => Some(Self::Program),
             _ => None,
         }
     }
 }
 
-/// How a disc image named `name` lays its sides out, by its extension.
+/// How a disc image named `name` holds its disc, by its extension.
 #[must_use]
-pub fn format_of(name: &str) -> ImageFormat {
-    if extension(name).is_some_and(|extension| extension == "dsd") {
-        ImageFormat::Dsd
-    } else {
-        ImageFormat::Ssd
+pub fn format_of(name: &str) -> DiscFormat {
+    match extension(name).as_deref() {
+        Some("dsd") => DiscFormat::Acorn(ImageFormat::Dsd),
+        Some("d64") => DiscFormat::D64,
+        Some("g64") => DiscFormat::G64,
+        _ => DiscFormat::Acorn(ImageFormat::Ssd),
     }
+}
+
+/// The ending a disc image of `format` is named with.
+#[must_use]
+pub const fn disc_ending(format: DiscFormat) -> &'static str {
+    match format {
+        DiscFormat::Acorn(ImageFormat::Ssd) => "ssd",
+        DiscFormat::Acorn(ImageFormat::Dsd) => "dsd",
+        DiscFormat::D64 => "d64",
+        DiscFormat::G64 => "g64",
+    }
+}
+
+/// The ending a tape `model` records is saved with.
+#[must_use]
+pub const fn tape_ending(model: Model) -> &'static str {
+    match model {
+        Model::ModelB | Model::Electron => "uef",
+        Model::C64 => "tap",
+    }
+}
+
+/// `name` with its ending made `ending`.
+fn renamed(name: &str, ending: &str) -> String {
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    format!("{stem}.{ending}")
 }
 
 fn extension(name: &str) -> Option<String> {
@@ -90,10 +136,10 @@ fn extension(name: &str) -> Option<String> {
 /// What a save holds, which decides the formats its picker offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holding {
-    /// A disc image.
-    Disc,
-    /// A UEF tape image.
-    Tape,
+    /// A disc image of this format.
+    Disc(DiscFormat),
+    /// A tape image as this model's tapes are saved.
+    Tape(Model),
     /// A snapshot of the machine.
     Snapshot,
 }
@@ -150,8 +196,10 @@ pub enum Chosen {
 }
 
 /// The records of the media, the picker, and the saves waiting for it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Rack {
+    /// The model whose media they are.
+    model: Model,
     discs: [Option<Disc>; 2],
     tape: Option<Tape>,
     choosing: Option<Chosen>,
@@ -159,16 +207,33 @@ pub struct Rack {
 }
 
 impl Rack {
-    /// Nothing recorded, no picker open.
+    /// Nothing recorded for a `model`'s machine, no picker open.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new(model: Model) -> Self {
+        Self {
+            model,
+            discs: [None, None],
+            tape: None,
+            choosing: None,
+            saves: VecDeque::new(),
+        }
     }
 
     /// The disc recorded in `drive`.
     #[must_use]
     pub const fn disc(&self, drive: PhysicalDrive) -> Option<&Disc> {
         self.discs[drive.index()].as_ref()
+    }
+
+    /// The save of `drive`'s disc as its record stands, which a collect of
+    /// the drive brings up to the machine's.
+    #[must_use]
+    pub fn disc_saving(&self, drive: PhysicalDrive) -> Option<Saving> {
+        self.disc(drive).map(|disc| Saving {
+            suggested: disc.name.clone(),
+            holding: Holding::Disc(disc.format),
+            bytes: disc.image.clone(),
+        })
     }
 
     /// The tape recorded in the deck.
@@ -187,10 +252,12 @@ impl Rack {
     }
 
     /// What the machine handed over for `handover`: each written disc back
-    /// to its file or, taken out with none, offered to be saved; a recorded
-    /// tape back to the UEF file it came from, else offered as one. The
-    /// records then follow the handover, each file let go once its last
-    /// write is asked for; the work is pushed onto `work` in order.
+    /// to its file or, taken out with none, offered to be saved — and offered
+    /// whenever its file's format can no longer hold it, the file let go; a
+    /// recorded tape back to the file of the model's tape format it came
+    /// from, else offered as one. The records then follow the handover, each
+    /// file let go once its last write is asked for; the work is pushed onto
+    /// `work` in order.
     pub fn handed(&mut self, media: &Media<'_>, handover: Handover, work: &mut Vec<FileWork>) {
         let taking_out = handover != Handover::Collect;
         for written in &media.discs {
@@ -222,47 +289,55 @@ impl Rack {
     }
 
     fn written_disc(&mut self, written: &Written<'_>, taking_out: bool, work: &mut Vec<FileWork>) {
-        let held = self.discs[written.drive.index()].as_mut();
-        if let Some((disc, medium)) = held.and_then(|disc| disc.medium.map(|medium| (disc, medium)))
-        {
+        let mut offered = taking_out;
+        if let Some(disc) = self.discs[written.drive.index()].as_mut() {
             disc.image = written.image.to_vec();
-            work.push(FileWork::WriteBack {
-                medium,
-                bytes: written.image.to_vec(),
-            });
-        } else if taking_out {
+            if disc.format == written.format {
+                if let Some(medium) = disc.medium {
+                    work.push(FileWork::WriteBack {
+                        medium,
+                        bytes: written.image.to_vec(),
+                    });
+                    return;
+                }
+            } else {
+                // A 1541 disk no sector dump holds any longer: its file cannot
+                // take it, so it is let go and the disk offered as it is now.
+                work.extend(disc.medium.take().map(FileWork::Forget));
+                disc.name = renamed(&disc.name, disc_ending(written.format));
+                disc.format = written.format;
+                offered = true;
+            }
+        }
+        if offered {
             let suggested = self.discs[written.drive.index()].as_ref().map_or_else(
                 || String::from(unnamed_disc(written.format)),
                 |disc| disc.name.clone(),
             );
             self.offer(Saving {
                 suggested,
-                holding: Holding::Disc,
+                holding: Holding::Disc(written.format),
                 bytes: written.image.to_vec(),
             });
         }
     }
 
     fn recorded_tape(&mut self, old: Option<&Tape>, image: &[u8], work: &mut Vec<FileWork>) {
-        let uef = old.and_then(|tape| {
+        let ending = tape_ending(self.model);
+        let filed = old.and_then(|tape| {
             tape.medium
-                .filter(|_| extension(&tape.name).is_some_and(|extension| extension == "uef"))
+                .filter(|_| extension(&tape.name).is_some_and(|extension| extension == ending))
         });
-        if let Some(medium) = uef {
+        if let Some(medium) = filed {
             work.push(FileWork::WriteBack {
                 medium,
                 bytes: image.to_vec(),
             });
             return;
         }
-        let stem = old.map_or("Tape", |tape| {
-            tape.name
-                .rsplit_once('.')
-                .map_or(tape.name.as_str(), |(stem, _)| stem)
-        });
         self.offer(Saving {
-            suggested: format!("{stem}.uef"),
-            holding: Holding::Tape,
+            suggested: renamed(old.map_or("Tape", |tape| tape.name.as_str()), ending),
+            holding: Holding::Tape(self.model),
             bytes: image.to_vec(),
         });
     }
@@ -351,10 +426,12 @@ impl Rack {
 
 /// The name a disc no file named is suggested under.
 #[must_use]
-pub const fn unnamed_disc(format: ImageFormat) -> &'static str {
+pub const fn unnamed_disc(format: DiscFormat) -> &'static str {
     match format {
-        ImageFormat::Ssd => "Disc.ssd",
-        ImageFormat::Dsd => "Disc.dsd",
+        DiscFormat::Acorn(ImageFormat::Ssd) => "Disc.ssd",
+        DiscFormat::Acorn(ImageFormat::Dsd) => "Disc.dsd",
+        DiscFormat::D64 => "Disk.d64",
+        DiscFormat::G64 => "Disk.g64",
     }
 }
 

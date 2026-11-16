@@ -600,12 +600,6 @@ impl Machine {
         self.board.keyboard.set(key, down);
     }
 
-    /// Release every key: what the keyboard is left with when the window
-    /// loses focus mid-press.
-    pub fn release_keys(&mut self) {
-        self.board.keyboard.release_all();
-    }
-
     /// Press or release BREAK, which holds the CPU in reset and restarts it
     /// as it is released. The ULA keeps its state, so the OS tells BREAK from
     /// power-on by its power-on bit.

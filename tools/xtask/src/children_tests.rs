@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use tairix_qemu::Launch;
 
 use super::{
-    announce_or_die, mask, send_signal, send_signal_to_group, signal_child, spawn_clean, supervise,
-    Children, Live, Starting, TERMINATING,
+    announce_or_die, mask, send_signal, send_signal_to_group, signal_child, signal_name,
+    spawn_clean, supervise, terminating, Children, Live, Starting,
 };
 use crate::process::{answered, answering, ended_by, within, Lines, MINUTE, WHILE_ITS_PARENT_RUNS};
 use crate::tests::{fill, first_line, running, this_test, with_a_grandchild, NO_ANSWER};
@@ -752,7 +752,7 @@ fn signal_helper() {
     let mode = std::env::var(HELPER_MODE).unwrap_or_else(|_| RELEASED.to_owned());
     // Its harness's threads keep the block they started with, so none of
     // them can take a signal; this one starts as xtask's main does.
-    mask(libc::SIG_UNBLOCK, &TERMINATING).expect("unblocked");
+    mask(libc::SIG_UNBLOCK, &terminating()).expect("unblocked");
     // A run that ends of a quit leaves no core of this process: no core file
     // where cores go to files, and on Linux, where they may go to a program
     // that ignores that limit, none at all.
@@ -827,7 +827,7 @@ fn helper(
     // Whatever this test's runner ignored, as a shell's background job
     // ignores SIGINT, the helper starts as a terminal would leave it, but for
     // what the test asks it to ignore.
-    let mut actions: Vec<_> = TERMINATING
+    let mut actions: Vec<_> = terminating()
         .iter()
         .map(|&signal| (signal, libc::SIG_DFL))
         .collect();
@@ -835,7 +835,7 @@ fn helper(
     disposed(&mut cmd, actions);
     // The child inherits the spawning thread's mask.
     let mut helper = std::thread::spawn(move || {
-        mask(libc::SIG_BLOCK, &TERMINATING).expect("blocked");
+        mask(libc::SIG_BLOCK, &terminating()).expect("blocked");
         cmd.spawn().expect("the helper spawns")
     })
     .join()
@@ -1022,7 +1022,7 @@ fn unstartable_helper() {
     if std::env::var_os(UNSTARTABLE).is_none() {
         return;
     }
-    mask(libc::SIG_UNBLOCK, &TERMINATING).expect("unblocked");
+    mask(libc::SIG_UNBLOCK, &terminating()).expect("unblocked");
     let children = Arc::new(Children::default());
     let refused = supervise(
         &children,
@@ -1087,5 +1087,18 @@ fn what_tools_qemu_notes_is_a_line_of_its_own() {
         String::from_utf8_lossy(&output.stderr)
             .contains("tairix-qemu: a note\nxtask: the next line\n"),
         "{output:?}"
+    );
+}
+
+#[test]
+fn every_signal_a_run_ends_on_is_named() {
+    assert_eq!(signal_name(libc::SIGINT), "SIGINT");
+    assert_eq!(signal_name(libc::SIGQUIT), "SIGQUIT");
+    for signal in terminating() {
+        assert!(signal_name(signal).starts_with("SIG"), "{signal}");
+    }
+    assert_eq!(
+        signal_name(libc::SIGUSR1),
+        format!("signal {}", libc::SIGUSR1)
     );
 }

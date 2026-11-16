@@ -116,9 +116,15 @@ impl Canvas {
     /// A black canvas.
     #[must_use]
     pub fn new() -> Self {
+        Self::filled(BLACK)
+    }
+
+    /// A canvas of nothing but `slot`: black in a model's own encoding.
+    #[must_use]
+    pub fn filled(slot: u8) -> Self {
         Self {
-            drawing: vec![BLACK; SLOTS],
-            shown: vec![BLACK; SLOTS],
+            drawing: vec![slot; SLOTS],
+            shown: vec![slot; SLOTS],
             touched: DirtyRows::new(),
             dirty: DirtyRows::new(),
             frames: 0,

@@ -15,13 +15,13 @@
 use super::buffers::{number, PRINTER_BUSY};
 use super::vdu::status;
 use super::ws::{os, var, vdu_zp, vector};
+use super::Model;
 use super::{uvia, DELETE};
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::acia::{control, status as acia_status};
 use crate::machine::bbc::serial;
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::{irq, reg};
-use crate::machine::Model;
+use crate::machine::via::{irq, reg};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
 use crate::rom::os::{printer, service};
 

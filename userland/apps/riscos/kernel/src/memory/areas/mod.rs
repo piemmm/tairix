@@ -6,6 +6,11 @@
 //! takes and answers typed values. Where RISC OS 5 leaves a case unguarded —
 //! a system area removed or renumbered over, a negative number made — the
 //! manager refuses it.
+//!
+//! Handlers and service calls run guest code that may call these SWIs again,
+//! so whatever was checked before one runs is checked again after it: an
+//! area is followed by its id and the sequence it was made at, which no area
+//! made later shares.
 
 mod change;
 mod create;
@@ -34,6 +39,9 @@ const SYSTEM: u32 = 7;
 const QUICK: Range<u32> = 0x100..0x200;
 /// The longest title kept, as RISC OS keeps them.
 pub const TITLE: usize = 31;
+/// The most areas a session holds at once: a fixed bound on the host memory
+/// a guest's area records take, far past what RISC OS software makes.
+const MOST_AREAS: usize = 4096;
 
 /// Area flags, as `OS_DynamicArea` 0 takes them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -100,18 +108,12 @@ const fn privilege(user: Rights, privileged: Rights, execute: bool) -> Access {
 }
 
 /// What access privilege `number` grants, if there is one.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct AccessPrivilege;
-
-impl AccessPrivilege {
-    /// The access privilege numbered `number`.
-    #[must_use]
-    pub const fn of(number: u32) -> Option<Access> {
-        if (number as usize) < PRIVILEGES.len() {
-            Some(PRIVILEGES[number as usize])
-        } else {
-            None
-        }
+#[must_use]
+pub const fn access_privilege(number: u32) -> Option<Access> {
+    if (number as usize) < PRIVILEGES.len() {
+        Some(PRIVILEGES[number as usize])
+    } else {
+        None
     }
 }
 
@@ -259,9 +261,13 @@ pub struct Area {
     base: u32,
     max: u32,
     flags: AreaFlags,
+    /// The access its pages are mapped with, from its flags' privilege.
+    access: Access,
     handler: Option<Handler>,
-    /// Its place in the order the areas were made.
+    /// Its place in the order the areas were made: no two areas share one.
     sequence: u64,
+    /// The addresses it reserves, as reserved.
+    reserved: Range<u64>,
     shape: Shape,
 }
 
@@ -280,33 +286,23 @@ impl Area {
         self.flags.has(AreaFlags::DOUBLY_MAPPED)
     }
 
-    /// The addresses it reserves.
-    const fn reserved(&self) -> Range<u64> {
-        let base = self.base as u64;
-        let max = self.max as u64;
+    /// Where its page `index` lies, and its first copy's for a doubly mapped
+    /// area.
+    fn addresses(&self, index: u32) -> (u32, Option<u32>) {
+        let upper = self.base + index * PAGE_SIZE;
         if self.doubly() {
-            base - max..base + max
+            let count = self.size() / PAGE_SIZE;
+            (upper, Some(lower_copy(self.base, count, index)))
         } else {
-            base..base + max
+            (upper, None)
         }
     }
+}
 
-    /// Where its page `index` lies, and its second copy's for a doubly
-    /// mapped area.
-    fn addresses(&self, index: u32) -> [Option<u32>; 2] {
-        let offset = index * PAGE_SIZE;
-        if self.doubly() {
-            let size = self.size();
-            [Some(self.base - size + offset), Some(self.base + offset)]
-        } else {
-            [Some(self.base + offset), None]
-        }
-    }
-
-    /// The access its pages are mapped with.
-    fn access(&self) -> Access {
-        AccessPrivilege::of(self.flags.privilege()).unwrap_or(PRIVILEGES[2])
-    }
+/// Where page `index` of a doubly mapped area based at `base` and `count`
+/// pages long has its first copy: below the base by the area's size.
+const fn lower_copy(base: u32, count: u32, index: u32) -> u32 {
+    base - count * PAGE_SIZE + index * PAGE_SIZE
 }
 
 /// An area's details (`OS_DynamicArea` 2, 7, 24 and 28).
@@ -367,8 +363,17 @@ mod signature {
     pub const RENUMBERED: u32 = 1 << 3;
 }
 
-/// An area's identity while it lives, whatever it is renumbered to.
+/// An area's identity while it lives, whatever it is renumbered to; another
+/// area may have it once it is gone.
 pub(super) type Id = u32;
+
+/// An area as an operation follows it across guest code: its id, and the
+/// sequence it was made at, which no other area shares.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Key {
+    id: Id,
+    sequence: u64,
+}
 
 /// Every dynamic area.
 pub(super) struct Areas {
@@ -385,9 +390,10 @@ pub(super) struct Areas {
     reserved: RangeMap<u64, Id>,
     /// Quick numbers free, the next to give out last.
     quick: Vec<u32>,
-    /// The highest number past the quick ones given out by probing.
-    treacle: u32,
-    /// Shrinkable areas, the most recently made first.
+    /// Where probing for a number past the quick ones starts, less one: one
+    /// further for each area made with a number past them.
+    probe_from: u32,
+    /// Shrinkable areas, in the order they were made.
     shrinkable: Vec<Id>,
     clamps: Clamps,
     changes: Changes,
@@ -405,7 +411,7 @@ impl Areas {
             names: OrderedMap::new(),
             reserved: RangeMap::new(),
             quick: (QUICK.start..QUICK.end).rev().collect(),
-            treacle: QUICK.end - 1,
+            probe_from: QUICK.end - 1,
             shrinkable: Vec::new(),
             clamps: Clamps {
                 unbounded: u32::MAX,
@@ -449,6 +455,42 @@ impl Areas {
 
     fn area_mut(&mut self, id: Id) -> Option<&mut Area> {
         self.entries.get_mut(id as usize)?.as_mut()
+    }
+
+    /// Area `id`'s key, if it lives.
+    fn key(&self, id: Id) -> Option<Key> {
+        self.area(id).map(|area| Key {
+            id,
+            sequence: area.sequence,
+        })
+    }
+
+    /// The area `key` follows, if it still lives.
+    fn area_at(&self, key: Key) -> Option<&Area> {
+        self.area(key.id)
+            .filter(|area| area.sequence == key.sequence)
+    }
+
+    fn area_at_mut(&mut self, key: Key) -> Option<&mut Area> {
+        self.area_mut(key.id)
+            .filter(|area| area.sequence == key.sequence)
+    }
+
+    /// The shrinkable areas as they stand, the most recently made first,
+    /// each with its sequence: a walk that runs guest code between steps
+    /// visits these and no others, so it ends.
+    fn shrinkable_now(&self) -> Vec<Key> {
+        let mut now = Vec::new();
+        if now.try_reserve_exact(self.shrinkable.len()).is_err() {
+            return now;
+        }
+        now.extend(self.shrinkable.iter().rev().filter_map(|&id| self.key(id)));
+        now
+    }
+
+    /// The areas live now.
+    fn count(&self) -> usize {
+        self.numbers.len()
     }
 
     /// Records a change to `number`, as the Task Manager counts them: only
@@ -662,13 +704,11 @@ impl Memory {
             }
         }
         let mut pages = self.free_pages();
-        let mut index = 0;
-        while let Some(&id) = self.areas.shrinkable.get(index) {
-            index += 1;
-            let Some(area) = self.areas.area(id) else {
+        for key in self.areas.shrinkable_now() {
+            let Some(area) = self.areas.area_at(key) else {
                 continue;
             };
-            if Some(area.number) == excluding {
+            if Some(area.number) == excluding || !matches!(area.shape, Shape::Pages(_)) {
                 continue;
             }
             let (size, handler) = (area.size(), area.handler);

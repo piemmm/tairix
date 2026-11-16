@@ -20,12 +20,12 @@
 //! block again, 1 to raise it.
 
 use super::ws::{buffer, cfs, fs, os, var, vector};
+use super::Model;
 use super::{page, Held};
 use crate::machine::bbc::acia::{control, status};
 use crate::machine::bbc::serial;
 use crate::machine::bbc::sheila;
 use crate::machine::electron::{control as ula_control, irq as ula_irq, sheila as ula};
-use crate::machine::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
 use crate::rom::os::{filing_system, fsc, osbyte, service, CR};
 

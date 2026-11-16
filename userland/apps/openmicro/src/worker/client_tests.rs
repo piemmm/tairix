@@ -3,9 +3,11 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 
 use super::*;
+use crate::machine::c64::{sid, Standard};
+use crate::machine::LetterCase;
 use crate::media::disc::ImageFormat;
 use crate::worker::protocol::{
-    Configuration, Lights, Loaded, Media, Ran, Refusal, Slot, Written, ROW_MAP, SLOTS,
+    Configuration, DiscFormat, Lights, Loaded, Media, Ran, Refusal, Slot, Written, ROW_MAP, SLOTS,
 };
 
 fn sent(client: &mut MachineClient, request: &Request<'_>) {
@@ -26,6 +28,14 @@ fn configure(model: Model) -> Request<'static> {
             basic: &[],
             plus1: None,
         },
+        Model::C64 => Configuration::C64 {
+            standard: Standard::Pal,
+            sid: sid::Model::Mos6581,
+            kernal: &[],
+            basic: &[],
+            character: &[],
+            drives: [Some(&[]), None],
+        },
     }))
 }
 
@@ -37,12 +47,22 @@ fn configured(model: Model) -> MachineClient {
     client
 }
 
+/// The case CAPS LOCK makes, which every model's keyboard may report.
+const fn case_by(lights: Lights) -> LetterCase {
+    if lights.caps_lock {
+        LetterCase::Capitals
+    } else {
+        LetterCase::Small
+    }
+}
+
 fn ran_lit(cycles: u32, sound: &[u8], lights: Lights, drives: [bool; 2]) -> Vec<u8> {
     Reply::Ran(Ran {
         cycles,
         rows: [0; ROW_MAP],
         sound,
         lights,
+        case: case_by(lights),
         drives,
         loaded: Loaded {
             discs: drives,
@@ -172,7 +192,7 @@ fn media(drives: &[PhysicalDrive], tape: bool) -> Vec<u8> {
             .iter()
             .map(|&drive| Written {
                 drive,
-                format: ImageFormat::Ssd,
+                format: DiscFormat::Acorn(ImageFormat::Ssd),
                 image: &[1, 2],
                 lost: None,
             })
@@ -269,4 +289,179 @@ fn the_model_is_the_last_configure_the_worker_took_and_a_restart_forgets_it() {
         client.answer(&ran(40_000, &[])).is_err(),
         "no model since the restart"
     );
+}
+
+/// A slice's reply with these lamps, drive lights and media.
+fn ran_holding(
+    cycles: u32,
+    sound: &[u8],
+    (lights, drives, loaded): (Lights, [bool; 2], Loaded),
+) -> Vec<u8> {
+    Reply::Ran(Ran {
+        cycles,
+        rows: [0; ROW_MAP],
+        sound,
+        lights,
+        case: case_by(lights),
+        drives,
+        loaded,
+    })
+    .encode()
+}
+
+/// A written disc of `format` from `drive`.
+fn disc_of(drive: PhysicalDrive, format: DiscFormat) -> Vec<u8> {
+    Reply::Media(Media {
+        discs: alloc::vec![Written {
+            drive,
+            format,
+            image: &[1, 2],
+            lost: None,
+        }],
+        tape: None,
+    })
+    .encode()
+}
+
+#[test]
+fn a_commodore_s_answers_are_believed_only_with_its_own_lamps_and_media() {
+    let motor = Lights {
+        motor: true,
+        ..Lights::default()
+    };
+    let loaded = |discs, playing, cartridge| Loaded {
+        discs,
+        playing,
+        cartridge,
+        ..Loaded::default()
+    };
+    let mut client = configured(Model::C64);
+    let mut believed = |reply: &[u8]| {
+        sent(&mut client, &RUN);
+        client.answer(reply).is_ok()
+    };
+    assert!(believed(&ran_holding(
+        40_000,
+        &[],
+        (motor, [true, false], loaded([true, false], true, true))
+    )));
+    let caps = Lights {
+        caps_lock: true,
+        ..motor
+    };
+    assert!(
+        !believed(&ran_holding(
+            40_000,
+            &[],
+            (caps, [false; 2], Loaded::default())
+        )),
+        "no CAPS LOCK light"
+    );
+    assert!(
+        !believed(&ran_holding(
+            40_000,
+            &[],
+            (motor, [false, true], Loaded::default())
+        )),
+        "device 9's light, unfitted"
+    );
+    assert!(
+        !believed(&ran_holding(
+            40_000,
+            &[],
+            (motor, [false; 2], loaded([false, true], false, false))
+        )),
+        "a disk in device 9"
+    );
+    let mut model_b = configured(Model::ModelB);
+    for held in [
+        loaded([false; 2], true, false),
+        loaded([false; 2], false, true),
+    ] {
+        sent(&mut model_b, &RUN);
+        assert!(
+            model_b
+                .answer(&ran_holding(40_000, &[], (motor, [false; 2], held)))
+                .is_err(),
+            "PLAY and a cartridge are a C64's"
+        );
+    }
+    let (zero, one) = (PhysicalDrive::Zero, PhysicalDrive::One);
+    for (drive, format, ok) in [
+        (zero, DiscFormat::D64, true),
+        (zero, DiscFormat::G64, true),
+        (zero, DiscFormat::Acorn(ImageFormat::Ssd), false),
+        (one, DiscFormat::D64, false),
+    ] {
+        sent(&mut client, &Request::RestoreSnapshot(&[]));
+        assert_eq!(
+            client.answer(&disc_of(drive, format)).is_ok(),
+            ok,
+            "{drive:?} {format:?}"
+        );
+    }
+}
+
+#[test]
+fn a_commodore_s_sound_is_bounded_by_its_own_second() {
+    let pal_second = u32::try_from(Standard::Pal.clock()).expect("a slice");
+    let second = Request::Run {
+        cycles: pal_second,
+        sound: true,
+        inputs: Vec::new(),
+    };
+    let sound = alloc::vec![0; 48_002 * SAMPLE_BYTES];
+    let mut c64 = configured(Model::C64);
+    sent(&mut c64, &second);
+    assert!(
+        c64.answer(&ran(pal_second, &sound)).is_ok(),
+        "a PAL second's"
+    );
+    let mut model_b = configured(Model::ModelB);
+    sent(&mut model_b, &second);
+    assert!(
+        model_b.answer(&ran(pal_second, &sound)).is_err(),
+        "half a second of a Model B's"
+    );
+}
+
+#[test]
+fn a_letter_case_is_believed_only_as_the_model_s_keyboard_makes_it() {
+    let cased = |lights, case| {
+        Reply::Ran(Ran {
+            cycles: 40_000,
+            rows: [0; ROW_MAP],
+            sound: &[],
+            lights,
+            case,
+            drives: [false; 2],
+            loaded: Loaded::default(),
+        })
+        .encode()
+    };
+    let (unlit, caps) = (
+        Lights::default(),
+        Lights {
+            caps_lock: true,
+            ..Lights::default()
+        },
+    );
+    for (model, lights, case, believed) in [
+        (Model::ModelB, caps, LetterCase::Capitals, true),
+        (Model::ModelB, caps, LetterCase::Small, false),
+        (Model::ModelB, unlit, LetterCase::Small, true),
+        (Model::ModelB, unlit, LetterCase::Capitals, false),
+        (Model::Electron, unlit, LetterCase::CapitalsOnly, false),
+        (Model::C64, unlit, LetterCase::Small, true),
+        (Model::C64, unlit, LetterCase::CapitalsOnly, true),
+        (Model::C64, unlit, LetterCase::Capitals, false),
+    ] {
+        let mut client = configured(model);
+        sent(&mut client, &RUN);
+        assert_eq!(
+            client.answer(&cased(lights, case)).is_ok(),
+            believed,
+            "{model:?}, {case:?}"
+        );
+    }
 }

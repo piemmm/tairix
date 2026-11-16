@@ -4,13 +4,13 @@
 //! VSYNC's flashing, and the hardware setup reset performs.
 
 use super::ws::{os, page2, var, vector};
+use super::Model;
 use super::{latch, page, svia, uvia, Held};
 use crate::cpu::STACK_PAGE;
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::bbc::sheila;
-use crate::machine::bbc::via::{irq, reg};
 use crate::machine::electron::{irq as ula_irq, paging, sheila as ula};
-use crate::machine::Model;
+use crate::machine::via::{irq, reg};
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
 use crate::rom::os::{event, service};
 

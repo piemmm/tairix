@@ -4,6 +4,14 @@
 
 /// An operation enum: each variant's mnemonic, and every variant in order.
 macro_rules! operations {
+    (all $(#[$meta:meta])* $name:ident { $($variant:ident = $text:literal,)* }) => {
+        operations! { $(#[$meta])* $name { $($variant = $text,)* } }
+
+        impl $name {
+            /// Every operation of the form.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+        }
+    };
     ($(#[$meta:meta])* $name:ident { $($variant:ident = $text:literal,)* }) => {
         $(#[$meta])*
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -12,9 +20,6 @@ macro_rules! operations {
         }
 
         impl $name {
-            /// Every operation of the form.
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
-
             /// The mnemonic.
             #[must_use]
             pub const fn name(self) -> &'static str {
@@ -48,9 +53,9 @@ pub enum Set {
 pub enum EncodeError {
     /// An operand is too large for its field.
     Range,
-    /// No encoding holds the operands as given: a value only another
-    /// instruction's encoding spells, or a combination the instruction
-    /// does not have.
+    /// No encoding holds the operands as given: a branch offset misaligned
+    /// for the instruction, a value only another instruction's encoding
+    /// spells, or a combination the instruction does not have.
     Unencodable,
 }
 

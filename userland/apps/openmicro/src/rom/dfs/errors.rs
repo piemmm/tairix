@@ -2,12 +2,13 @@
 //! raised there, since the language that reports it pages this ROM out
 //! before it reads the message.
 
+use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, imm, zp, Acc, Asm};
 
 use super::ws::zp as z;
 
 /// Where a raised error is built: a BRK, its number, its message, a zero.
-const AT: u16 = 0x0100;
+const AT: u16 = STACK_PAGE;
 
 /// Each error's routine, number and message, as DFS 1.20 gives them.
 const ERRORS: [(&str, u8, &str); 20] = [

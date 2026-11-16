@@ -8,7 +8,7 @@ use super::*;
 use crate::fpu::real::{from_double, INDEFINITE};
 
 fn shown(exponent: u16, sig: u64) -> String {
-    extended(Real::new(false, exponent, sig))
+    extended(Extended::new(false, exponent, sig))
 }
 
 /// The values the reference worked out exactly with 6000-digit decimal
@@ -67,16 +67,23 @@ fn rounding_up_from_all_nines_carries_into_the_next_power() {
 #[test]
 fn signs_and_the_values_with_no_digits_are_named() {
     assert_eq!(
-        extended(Real::new(true, 0x3FFF, 1 << 63)),
+        extended(Extended::new(true, 0x3FFF, 1 << 63)),
         "-1.000000000000000000E+0000"
     );
-    assert_eq!(extended(Real::ZERO), "0");
-    assert_eq!(extended(Real::new(true, 0, 0)), "-0");
-    assert_eq!(extended(Real::new(false, 0x1234, 0)), "0", "a pseudo-zero");
-    assert_eq!(extended(Real::INFINITY), "Infinity");
-    assert_eq!(extended(Real::INFINITY.with_sign(true)), "-Infinity");
+    assert_eq!(extended(Extended::ZERO), "0");
+    assert_eq!(extended(Extended::new(true, 0, 0)), "-0");
+    assert_eq!(
+        extended(Extended::new(false, 0x1234, 0)),
+        "0",
+        "a pseudo-zero"
+    );
+    assert_eq!(extended(Extended::INFINITY), "Infinity");
+    assert_eq!(extended(Extended::INFINITY.with_sign(true)), "-Infinity");
     assert_eq!(extended(INDEFINITE), "-NaN");
-    for value in [Real::new(true, 0x7FFE, u64::MAX), Real::new(true, 0, 1)] {
+    for value in [
+        Extended::new(true, 0x7FFE, u64::MAX),
+        Extended::new(true, 0, 1),
+    ] {
         assert!(extended(value).len() <= super::super::MOST_VALUE);
     }
 }

@@ -456,3 +456,10 @@ const ENCODINGS: [[Option<u8>; MODES]; MNEMONICS] = {
 pub const fn encode(mnemonic: Mnemonic, mode: Mode) -> Option<u8> {
     ENCODINGS[mnemonic as usize][mode as usize]
 }
+
+/// `JMP`'s absolute opcode, which code built into memory jumps with.
+pub const JMP_ABSOLUTE: u8 = 0x4C;
+const _: () = assert!(matches!(
+    encode(Mnemonic::Jmp, Mode::Absolute),
+    Some(JMP_ABSOLUTE)
+));

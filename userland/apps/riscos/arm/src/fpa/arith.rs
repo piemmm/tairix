@@ -1,11 +1,13 @@
-//! The data operations, as FPEmulator's arithmetic routines compute them.
+//! The data operations: `lib/softfloat`'s arithmetic, with FPEmulator's
+//! choices where the data sheet leaves one, observed black-box.
 
-use tairix_softfloat::{exact, Exact};
+use tairix_softfloat::exact::{self, Exact, Parts};
 
 use super::internal::{
     denormalise, exponent_field, keep_mask, round, sign, Direction, Internal, Number, Rounded,
     BIAS, EXPONENT, QUIET, SIGN, UNCOMMON, UNITS,
 };
+use super::trans::Function;
 use super::{fpsr, Exception, Precision, Rounding};
 use crate::instruction::{FpaCompareOp, FpaDyadicOp, FpaMonadicOp};
 
@@ -31,7 +33,6 @@ pub(super) enum Reason {
     PolarOfInfinities = 23,
     LogOfNegative = 24,
     NegativeToPower = 25,
-    ZeroToNonPositive = 26,
     BadInfinitePower = 27,
 }
 
@@ -41,6 +42,16 @@ pub(super) enum Reason {
 pub(super) enum Value {
     Final(Internal),
     Exact(Exact),
+}
+
+/// A nonzero value past every precision's exponent range, above it or
+/// below, for the round stage to overflow or underflow.
+pub(super) fn beyond_range(negative: bool, above: bool) -> Value {
+    Value::Exact(Exact::of(Parts {
+        negative,
+        exp: if above { 1 << 16 } else { -(1 << 16) },
+        sig: UNITS,
+    }))
 }
 
 /// How a NaN copied to another precision is converted.
@@ -295,15 +306,15 @@ impl Unit {
             FpaMonadicOp::Sqt => self.square_root(a)?,
             FpaMonadicOp::Urd => self.unnormalised_round(a)?,
             FpaMonadicOp::Nrm => self.normalise(a)?,
-            FpaMonadicOp::Log
-            | FpaMonadicOp::Lgn
-            | FpaMonadicOp::Exp
-            | FpaMonadicOp::Sin
-            | FpaMonadicOp::Cos
-            | FpaMonadicOp::Tan
-            | FpaMonadicOp::Asn
-            | FpaMonadicOp::Acs
-            | FpaMonadicOp::Atn => self.transcendental(op, a)?,
+            FpaMonadicOp::Log => self.transcendental(Function::Log, a)?,
+            FpaMonadicOp::Lgn => self.transcendental(Function::Lgn, a)?,
+            FpaMonadicOp::Exp => self.transcendental(Function::Exp, a)?,
+            FpaMonadicOp::Sin => self.transcendental(Function::Sin, a)?,
+            FpaMonadicOp::Cos => self.transcendental(Function::Cos, a)?,
+            FpaMonadicOp::Tan => self.transcendental(Function::Tan, a)?,
+            FpaMonadicOp::Asn => self.transcendental(Function::Asn, a)?,
+            FpaMonadicOp::Acs => self.transcendental(Function::Acs, a)?,
+            FpaMonadicOp::Atn => self.transcendental(Function::Atn, a)?,
         };
         self.finish(value)
     }
@@ -355,9 +366,8 @@ impl Unit {
         Ok(Value::Exact(sum))
     }
 
-    /// The sign FPEmulator gives `∞ − ∞`'s NaN: meant to be set when
-    /// rounding toward minus infinity, it is computed from the rounding
-    /// field's top bit and the precision's low one.
+    /// The sign of `∞ − ∞`'s NaN: set when rounding toward minus infinity or
+    /// zero at single or extended precision, as FPEmulator sets it.
     fn magnitude_subtraction_sign(&self) -> bool {
         matches!(self.rounding, Rounding::MinusInfinity | Rounding::Zero)
             && self.precision != Precision::Double
@@ -431,26 +441,22 @@ impl Unit {
             }));
         }
         let (dividend, divisor) = if reverse { (b, a) } else { (a, b) };
-        if dividend.is_zero() || divisor.is_zero() {
-            if !divisor.is_zero() {
-                return Ok(Value::Final(Internal::zero(negative)));
-            }
-            if !dividend.is_zero() {
-                self.raise(Exception::DivisionByZero)?;
-                return Ok(Value::Final(Internal::infinity(negative)));
-            }
+        if dividend.is_zero() && divisor.is_zero() {
             return self.invalid(Reason::ZeroDividedByZero, negative);
         }
+        if dividend.is_zero() {
+            return Ok(Value::Final(Internal::zero(negative)));
+        }
         let (x, y) = (dividend.number(), divisor.number());
-        Ok(Value::Exact(exact::divide(x.parts(), y.parts())))
+        if let Some(quotient) = exact::divide(x.parts(), y.parts()).filter(|_| !divisor.is_zero()) {
+            return Ok(Value::Exact(quotient));
+        }
+        self.raise(Exception::DivisionByZero)?;
+        Ok(Value::Final(Internal::infinity(negative)))
     }
 
-    /// `RMF`: FPEmulator's remainder, by a loop that reflects the partial
-    /// remainder about the divisor. It normalises only the divisor: its test
-    /// for the dividend reads the divisor's units bit. A dividend smaller
-    /// than half an uncommon divisor returns through the link register that
-    /// normalising the divisor overwrote, re-entering the routine; the passes
-    /// that follow are reproduced here.
+    /// `RMF`: the IEEE remainder, `a − n × b` for the integer `n` nearest
+    /// `a ÷ b`, ties to the even one.
     fn remainder(&mut self, a: Internal, b: Internal) -> Result<Value, Exception> {
         if a.special() || b.special() {
             if a.special() && b.special() {
@@ -476,51 +482,12 @@ impl Unit {
         if a.is_zero() {
             return Ok(Value::Final(Internal::zero(a.negative())));
         }
-        let (x, y) = (a.reduced(), b.reduced());
-        let reentered = (a.uncommon() || b.uncommon()) && y.mantissa & UNITS == 0;
-        let y = if reentered { y.normalised() } else { y };
-        let mut exponent = y.exponent - 1;
-        let mut steps = x.exponent - exponent;
-        if steps < 0 {
-            if !reentered {
-                return Ok(Value::Exact(x.exact()));
-            }
-            // Re-entered with the dividend's exponent, then with zero.
-            exponent = x.exponent - 1;
-            steps = -exponent;
-            if steps < 0 {
-                exponent = -1;
-                steps = 1;
-            }
-        }
-        let divisor = y.mantissa;
-        let mut partial = x.mantissa;
-        let mut negative = x.negative;
-        for step in 0..=steps {
-            let top = if step == 0 {
-                0
-            } else {
-                let top = partial >> 63;
-                partial <<= 1;
-                top
-            };
-            if u128::from(divisor) < (u128::from(top) << 64 | u128::from(partial)) {
-                partial = divisor.wrapping_add(divisor).wrapping_sub(partial);
-                negative = !negative;
-            }
-        }
-        if partial == 0 {
+        let (x, y) = (a.number(), b.number());
+        let rest = exact::remainder(x.parts(), y.parts());
+        if rest.is_zero() {
             return Ok(Value::Final(Internal::zero(x.negative)));
         }
-        Ok(Value::Exact(
-            Number {
-                negative,
-                exponent,
-                mantissa: partial,
-            }
-            .normalised()
-            .exact(),
-        ))
+        Ok(Value::Exact(Exact::of(rest)))
     }
 
     fn square_root(&mut self, a: Internal) -> Result<Value, Exception> {
@@ -559,7 +526,7 @@ impl Unit {
         if !a.uncommon() {
             let x = Number {
                 negative: signed(a.negative()),
-                ..a.reduced()
+                ..a.number()
             };
             return Ok(Value::Exact(x.exact()));
         }
@@ -628,32 +595,18 @@ impl Unit {
         }))
     }
 
-    /// `RND`: rounded to an integer in the instruction's mode. FPEmulator
-    /// gives the round stage a mantissa standing just below or just above the
-    /// integer chosen, so the precision's own rounding lands on it, or on the
-    /// value nearest where the integer has more bits than the precision.
+    /// `RND`: rounded to an integer in the instruction's mode, and where the
+    /// precision's values lie further apart than one, to one of those as
+    /// though straight from the operand: the integer's mantissa is handed on
+    /// just short of it, on the operand's side.
     fn round_integral(&mut self, a: Internal) -> Result<Value, Exception> {
         if a.special() {
             return self.standard_special(a);
         }
-        let x = if a.uncommon() {
-            if a.is_zero() {
-                return Ok(Value::Exact(
-                    Number {
-                        negative: a.negative(),
-                        exponent: 0,
-                        mantissa: 0,
-                    }
-                    .exact(),
-                ));
-            }
-            a.number()
-        } else {
-            if !a.units() {
-                return Ok(Value::Exact(a.reduced().exact()));
-            }
-            a.reduced()
-        };
+        if a.is_zero() {
+            return Ok(Value::Final(Internal::zero(a.negative())));
+        }
+        let x = a.number();
         let point = BIAS + 63;
         let Ok(places) = u32::try_from(point - x.exponent) else {
             return Ok(Value::Exact(x.exact()));
@@ -793,9 +746,8 @@ impl Unit {
 
 /// A NaN in the precision `to`: its fraction cut to the precision and, for
 /// single or double, its units bit set. Converted to extended, its lowest
-/// bit is cleared from a single NaN and set from a double one: FPEmulator
-/// means to do so only when the NE bit is clear, but tests a bit of the
-/// instruction that is always clear.
+/// bit is cleared from a single NaN and set from a double one, whatever the
+/// NE bit.
 pub(super) fn convert_nan(nan: Internal, to: Precision) -> Internal {
     let keep = nan.head & (SIGN | UNCOMMON);
     match to {
@@ -821,12 +773,8 @@ pub(super) fn convert_nan(nan: Internal, to: Precision) -> Internal {
     }
 }
 
-/// The first operand of a remainder by infinity: itself, an uncommon number
-/// normalised.
+/// The first operand of a remainder by infinity: itself, at its value.
 fn first_operand(a: Internal) -> Value {
-    if !a.uncommon() {
-        return Value::Exact(a.reduced().exact());
-    }
     if a.is_zero() {
         return Value::Final(Internal::zero(a.negative()));
     }

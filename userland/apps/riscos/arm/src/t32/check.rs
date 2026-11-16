@@ -10,8 +10,8 @@ use crate::cond::Condition;
 use crate::encoding::check;
 use crate::encoding::layout::Field;
 use crate::instruction::{
-    BlockOp, CoIndex, CoRegisterOp, CoRegistersOp, CoTransferOp, CompareOp, DataOp, DualOp,
-    ExchangeOp, Index, Instruction, Offset, Op, Operand, Source, TransferOp,
+    BlockOp, CoIndex, CoTransferOp, CompareOp, DataOp, DualOp, ExchangeOp, Index, Instruction,
+    Offset, Op, Operand, TransferOp,
 };
 use crate::reg::Reg;
 
@@ -21,7 +21,7 @@ const PC: Reg = Reg::PC;
 /// stands.
 pub(super) fn unpredictable(row: &Row, instruction: &Instruction, position: Position) -> bool {
     let op = &instruction.op;
-    placed(row, op, position)
+    placed(row.outside, op, position)
         || if row.wide {
             wide(row, op)
         } else {
@@ -30,13 +30,13 @@ pub(super) fn unpredictable(row: &Row, instruction: &Instruction, position: Posi
 }
 
 /// The rules of the IT block: a condition no `IT` gives, an encoding
-/// forbidden in a block, and a write to the PC before a block's last
-/// instruction.
-fn placed(row: &Row, op: &Op, position: Position) -> bool {
+/// forbidden in a block (`outside`), and a write to the PC before a block's
+/// last instruction.
+pub(super) fn placed(outside: bool, op: &Op, position: Position) -> bool {
     match position {
         Position::Outside => false,
-        Position::Inside(cond) => cond == Condition::Nv || row.outside || writes_pc(op),
-        Position::Last(cond) => cond == Condition::Nv || row.outside,
+        Position::Inside(cond) => cond == Condition::Nv || outside || writes_pc(op),
+        Position::Last(cond) => cond == Condition::Nv || outside,
     }
 }
 
@@ -56,6 +56,19 @@ const fn writes_pc(op: &Op) -> bool {
         | Op::TableBranch { .. }
         | Op::ReturnFromException { .. } => true,
         _ => false,
+    }
+}
+
+/// Whether a T32 coprocessor instruction is UNPREDICTABLE: a core register
+/// its shared rules forbid, a store from the PC, or a literal load but at an
+/// offset.
+pub(super) fn coprocessor(op: &Op) -> bool {
+    match *op {
+        Op::CoprocessorTransfer { op, rn, index, .. } => {
+            let store = matches!(op, CoTransferOp::Stc | CoTransferOp::Stc2);
+            rn == PC && (store || index != CoIndex::Offset)
+        }
+        _ => check::shared(op),
     }
 }
 
@@ -99,11 +112,14 @@ fn narrow(row: &Row, op: &Op) -> bool {
     }
 }
 
-fn operand_pc(operand: Operand) -> bool {
+/// Whether an operand names the PC, or is a modified immediate the
+/// architecture leaves UNPREDICTABLE.
+fn operand_unpredictable(operand: Operand) -> bool {
     match operand {
         Operand::Register { rm, .. } => rm == PC,
         Operand::Shifted { rm, rs, .. } => rm == PC || rs == PC,
-        Operand::Immediate(_) | Operand::Expanded(_) | Operand::Literal(_) => false,
+        Operand::Expanded(immediate) => immediate.unpredictable(),
+        Operand::Immediate(_) | Operand::Literal(_) => false,
     }
 }
 
@@ -125,29 +141,31 @@ fn wide(row: &Row, op: &Op) -> bool {
                 Shape::Data { rd, rn, .. } => (rd == form::Rd::Field, rn == form::Rn::Field),
                 _ => (true, true),
             };
-            (destination_field && rd == PC) || (operand_field && rn == PC) || operand_pc(operand)
+            (destination_field && rd == PC)
+                || (operand_field && rn == PC)
+                || operand_unpredictable(operand)
         }
-        Op::Compare { rn, operand, .. } => rn == PC || operand_pc(operand),
-        Op::Move { rd, operand, .. } => rd == PC || operand_pc(operand),
-        Op::Wide { rd, .. } | Op::Status { rd, .. } => rd == PC,
+        Op::Compare { rn, operand, .. } => rn == PC || operand_unpredictable(operand),
+        Op::Move { rd, operand, .. } => rd == PC || operand_unpredictable(operand),
         Op::Multiply { rd, rn, rm, ra, .. } => rd == PC || rn == PC || rm == PC || ra == Some(PC),
         Op::MultiplyLong { lo, hi, rn, rm, .. } => {
             lo == PC || hi == PC || rn == PC || rm == PC || lo == hi
         }
-        Op::Parallel { rd, rn, rm, .. }
-        | Op::Arithmetic { rd, rn, rm, .. }
-        | Op::Pack { rd, rn, rm, .. } => rd == PC || rn == PC || rm == PC,
-        Op::Unary { rd, rm, .. } | Op::Extend { rd, rm, .. } | Op::Saturate { rd, rn: rm, .. } => {
-            rd == PC || rm == PC
-        }
-        Op::Bitfield {
-            op,
-            rd,
-            rn,
-            lsb,
-            top,
-        } => rd == PC || rn == Some(PC) || check::bitfield(op, lsb, top),
-        Op::StatusWrite { fields, source, .. } => fields == 0 || source == Source::Register(PC),
+        Op::Arithmetic { rd, rn, rm, .. } => rd == PC || rn == PC || rm == PC,
+        Op::Wide { .. }
+        | Op::Status { .. }
+        | Op::Parallel { .. }
+        | Op::Pack { .. }
+        | Op::Unary { .. }
+        | Op::Extend { .. }
+        | Op::Saturate { .. }
+        | Op::Bitfield { .. }
+        | Op::StatusWrite { .. }
+        | Op::ReturnFromException { .. } => check::shared(op),
+        Op::Coprocessor { .. }
+        | Op::CoprocessorRegister { .. }
+        | Op::CoprocessorRegisters { .. }
+        | Op::CoprocessorTransfer { .. } => coprocessor(op),
         Op::Exchange { rm, .. } | Op::TableBranch { rm, .. } => rm == PC,
         Op::Transfer {
             op,
@@ -206,19 +224,6 @@ fn wide(row: &Row, op: &Op) -> bool {
             interrupts,
             mode,
         } => check::change_state(imod, change_mode, interrupts, mode),
-        Op::ReturnFromException { rn, .. } => rn == PC,
-        Op::CoprocessorRegister { op, rt, .. } => {
-            rt == PC && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mcr2)
-        }
-        Op::CoprocessorRegisters { op, rt, rt2, .. } => {
-            let read = matches!(op, CoRegistersOp::Mrrc | CoRegistersOp::Mrrc2);
-            rt == PC || rt2 == PC || (read && rt == rt2)
-        }
-        // A store from the PC, and any literal load but at an offset.
-        Op::CoprocessorTransfer { op, rn, index, .. } => {
-            let store = matches!(op, CoTransferOp::Stc | CoTransferOp::Stc2);
-            rn == PC && (store || index != CoIndex::Offset)
-        }
         Op::Branch { .. }
         | Op::CompareBranch { .. }
         | Op::IfThen { .. }
@@ -229,7 +234,6 @@ fn wide(row: &Row, op: &Op) -> bool {
         | Op::Swap { .. }
         | Op::SetEndian { .. }
         | Op::SaveState { .. }
-        | Op::Coprocessor { .. }
         | Op::FpaDyadic { .. }
         | Op::FpaMonadic { .. }
         | Op::FpaRegister { .. }

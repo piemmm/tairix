@@ -1,5 +1,7 @@
 //! How a result is rounded: the direction, and the significand bits kept.
 
+use crate::binary::Binary;
+
 /// IEEE 754's five rounding directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -53,16 +55,46 @@ impl Mode {
 /// integer bit counted — 24, 53 or 64 for the three formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rounding {
-    /// The direction.
-    pub mode: Mode,
-    /// Significand bits kept, from 1 to 64.
-    pub bits: u32,
+    mode: Mode,
+    bits: u32,
 }
 
 impl Rounding {
+    /// `mode` keeping `bits` significand bits, the integer bit counted; none
+    /// outside 1 to 64.
+    #[must_use]
+    pub const fn new(mode: Mode, bits: u32) -> Option<Self> {
+        if bits >= 1 && bits <= 64 {
+            Some(Self { mode, bits })
+        } else {
+            None
+        }
+    }
+
     /// Double-extended precision in `mode`.
     #[must_use]
     pub const fn extended(mode: Mode) -> Self {
         Self { mode, bits: 64 }
+    }
+
+    /// `format`'s precision in `mode`.
+    #[must_use]
+    pub const fn of(format: Binary, mode: Mode) -> Self {
+        Self {
+            mode,
+            bits: format.precision(),
+        }
+    }
+
+    /// The direction.
+    #[must_use]
+    pub const fn mode(self) -> Mode {
+        self.mode
+    }
+
+    /// Significand bits kept, from 1 to 64.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.bits
     }
 }

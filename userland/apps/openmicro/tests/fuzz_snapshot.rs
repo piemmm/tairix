@@ -1,5 +1,6 @@
 //! Deterministic fuzz harness for machine snapshots, and for the machines
-//! under hostile guest code: the Model B, and the Electron with its Plus 1.
+//! under hostile guest code: the Model B, the Electron with its Plus 1, and
+//! the Commodore 64 with a drive and a cartridge.
 //!
 //! A snapshot is a stranger's file and a guest program a stranger's code.
 //! The invariants:
@@ -23,13 +24,18 @@
 use std::ops::Range;
 
 use tairix_fuzzseed::Prng;
+use tairix_openmicro::firmware::C1541_DOS_IMAGE;
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
+use tairix_openmicro::machine::c64::drive::Unit;
+use tairix_openmicro::machine::c64::memory::{BASIC_BYTES, CHARACTER_BYTES, KERNAL_BYTES};
+use tairix_openmicro::machine::c64::{self, joystick, sid, Standard, PADDLE_CHANNELS};
 use tairix_openmicro::machine::electron::{CARTRIDGE_ROMS, PLUS1_ROM};
 use tairix_openmicro::machine::{
     bbc, electron, Machine, Model, ANALOGUE_CHANNELS, IO_BASE, IO_END, ROM_SIZE,
 };
+use tairix_openmicro::media::c1541::d64;
+use tairix_openmicro::media::crt;
 use tairix_openmicro::media::disc::{Disc, ImageFormat, TRACK_BYTES};
-use tairix_openmicro::media::tape::Tape;
 use tairix_openmicro::snapshot::{self, Writer};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -50,22 +56,44 @@ const MODEL_B_DEVICES: &[(u16, u16)] = &[
 /// The Electron's: the ULA, which answers throughout SHEILA, and the Plus
 /// 1's ports.
 const ELECTRON_DEVICES: &[(u16, u16)] = &[(0xFE00, 16), (0xFEF0, 16), (0xFC70, 3)];
-/// Where the program's interrupt handlers return from.
-const RTI_AT: usize = 0x3F00;
+/// The C64's: the VIC-II, the SID, colour RAM, both CIAs, the expansion
+/// port's I/O, and the 6510's own port, which banks the program away.
+const C64_DEVICES: &[(u16, u16)] = &[
+    (0xD000, 0x2F),
+    (0xD400, 0x1D),
+    (0xD800, 0x400),
+    (0xDC00, 16),
+    (0xDD00, 16),
+    (0xDE00, 0x200),
+    (0x0000, 2),
+];
+/// Where the program's interrupt handlers return from, from its ROM's end.
+const RTI_FROM_END: usize = 0x100;
 
 /// An OS ROM that reads and writes `model`'s device registers at random,
-/// for ever.
+/// for ever: a C64's KERNAL.
 fn program(rng: &mut Prng, model: Model) -> Vec<u8> {
-    let devices = match model {
-        Model::ModelB => MODEL_B_DEVICES,
-        Model::Electron => ELECTRON_DEVICES,
+    let (devices, io, base, size) = match model {
+        Model::ModelB => (
+            MODEL_B_DEVICES,
+            (IO_BASE, IO_END - IO_BASE),
+            0xC000u16,
+            ROM_SIZE,
+        ),
+        Model::Electron => (
+            ELECTRON_DEVICES,
+            (IO_BASE, IO_END - IO_BASE),
+            0xC000,
+            ROM_SIZE,
+        ),
+        Model::C64 => (C64_DEVICES, (0xD000, 0x1000), 0xE000, KERNAL_BYTES),
     };
-    let mut rom = vec![0xEA; ROM_SIZE];
+    let mut rom = vec![0xEA; size];
     let mut code = vec![0x78];
     for _ in 0..ACCESSES {
         // Now and then any address of the I/O pages, so every decode is met.
         let (base, count) = if rng.below(8) == 0 {
-            (IO_BASE, IO_END - IO_BASE)
+            io
         } else {
             *rng.pick(devices)
         };
@@ -80,18 +108,21 @@ fn program(rng: &mut Prng, model: Model) -> Vec<u8> {
     if rng.below(2) == 0 {
         code.push(0x58);
     }
-    code.extend_from_slice(&[0x4C, 0x01, 0xC0]);
+    let [low, high] = (base + 1).to_le_bytes();
+    code.extend_from_slice(&[0x4C, low, high]);
     rom[..code.len()].copy_from_slice(&code);
-    rom[RTI_AT] = 0x40;
-    let handler = (0xC000 + u16::try_from(RTI_AT).expect("in the ROM")).to_le_bytes();
-    for vector in [0x3FFA, 0x3FFE] {
+    let rti = size - RTI_FROM_END;
+    rom[rti] = 0x40;
+    let handler = (base + u16::try_from(rti).expect("in the ROM")).to_le_bytes();
+    for vector in [size - 6, size - 2] {
         rom[vector..vector + 2].copy_from_slice(&handler);
     }
-    rom[0x3FFC..0x3FFE].copy_from_slice(&[0x00, 0xC0]);
+    rom[size - 4..size - 2].copy_from_slice(&base.to_le_bytes());
     rom
 }
 
-fn uef(rng: &mut Prng) -> Tape {
+/// An Acorn tape: a UEF of carrier and data.
+fn uef(rng: &mut Prng) -> Vec<u8> {
     let mut out = b"UEF File!\0\x0A\x00".to_vec();
     for _ in 0..4 {
         let mut chunk = |id: u16, body: &[u8]| {
@@ -103,7 +134,36 @@ fn uef(rng: &mut Prng) -> Tape {
         let len = 1 + rng.at_most(64);
         chunk(0x0100, &rng.noise(len));
     }
-    Tape::decode(&out).expect("a well-formed UEF")
+    out
+}
+
+/// A C64 tape: a TAP of pulses drawn at random.
+fn tap_image(rng: &mut Prng) -> Vec<u8> {
+    let len = rng.at_most(256);
+    let pulses: Vec<u8> = (0..len).map(|_| 1 + rng.next_u8() % 255).collect();
+    let mut out = b"C64-TAPE-RAW".to_vec();
+    out.extend_from_slice(&[1, 0, 0, 0]);
+    out.extend_from_slice(&u32::try_from(pulses.len()).expect("small").to_le_bytes());
+    out.extend_from_slice(&pulses);
+    out
+}
+
+/// A generic 8K cartridge of `bytes`.
+fn cartridge(bytes: &[u8]) -> crt::Crt {
+    let mut image = b"C64 CARTRIDGE   ".to_vec();
+    image.extend_from_slice(&0x40u32.to_be_bytes());
+    image.extend_from_slice(&[1, 0, 0, 0, 0, 1]);
+    image.resize(0x40, 0);
+    image.extend_from_slice(b"CHIP");
+    image.extend_from_slice(
+        &u32::try_from(0x10 + bytes.len())
+            .expect("small")
+            .to_be_bytes(),
+    );
+    image.extend_from_slice(&[0, 0, 0, 0, 0x80, 0x00]);
+    image.extend_from_slice(&u16::try_from(bytes.len()).expect("a chip").to_be_bytes());
+    image.extend_from_slice(bytes);
+    crt::decode(&image).expect("a generic cartridge")
 }
 
 /// The machine the snapshots are restored onto: the program; on the Model B
@@ -129,6 +189,22 @@ fn fitted(model: Model, os: &[u8]) -> Machine {
                 .expect("a cartridge");
             Machine::Electron(Box::new(machine))
         }
+        Model::C64 => {
+            let config = c64::Config {
+                standard: Standard::Pal,
+                sid: sid::Model::Mos6581,
+            };
+            let roms = c64::Roms {
+                basic: &[0x60; BASIC_BYTES],
+                kernal: os,
+                character: &[0x3C; CHARACTER_BYTES],
+            };
+            let mut machine = c64::Machine::new(config, roms).expect("the ROMs fit");
+            machine
+                .fit_drive(Unit::Eight, C1541_DOS_IMAGE)
+                .expect("the DOS fits");
+            Machine::C64(Box::new(machine))
+        }
     }
 }
 
@@ -136,11 +212,17 @@ fn fitted(model: Model, os: &[u8]) -> Machine {
 /// Model B the pen out.
 fn running(rng: &mut Prng, model: Model, os: &[u8]) -> Machine {
     let mut machine = fitted(model, os);
-    machine.insert_tape(uef(rng));
-    machine.set_tape_record(rng.below(2) == 0);
+    let record = rng.below(2) == 0;
     let channel = rng.below(ANALOGUE_CHANNELS);
     match &mut machine {
+        Machine::ModelB(_) | Machine::Electron(_) => {
+            machine.insert_tape(&uef(rng)).expect("a well-formed UEF");
+        }
+        Machine::C64(_) => machine.insert_tape(&tap_image(rng)).expect("a TAP"),
+    }
+    match &mut machine {
         Machine::ModelB(machine) => {
+            machine.set_tape_record(record);
             let len = rng.at_most(40 * TRACK_BYTES);
             if let Ok(disc) = Disc::decode(&rng.noise(len), ImageFormat::Dsd, rng.below(2) == 0) {
                 machine.insert_disc(*rng.pick(&PhysicalDrive::ALL), disc);
@@ -153,11 +235,32 @@ fn running(rng: &mut Prng, model: Model, os: &[u8]) -> Machine {
             machine.set_light_pen(Some((rng.below(896), rng.below(600))));
         }
         Machine::Electron(machine) => {
+            machine.set_tape_record(record);
             for _ in 0..rng.below(3) {
                 machine.set_key(*rng.pick(electron::keyboard::Key::ALL), true);
             }
             machine.set_analogue(channel, rng.next_u16());
             machine.set_fire_buttons(rng.next_u8());
+        }
+        Machine::C64(machine) => {
+            if rng.below(3) == 0 {
+                let len = 1 + rng.at_most(0x1FFF);
+                let _ = machine.insert_cartridge(&cartridge(&rng.noise(len)));
+            }
+            let mut image = d64::formatted(b"FUZZ", *b"FZ");
+            let at = rng.below(image.len());
+            image[at] = rng.next_u8();
+            let disk = d64::decode(&image).expect("a D64");
+            if let Some(drive) = machine.drive_mut(Unit::Eight) {
+                drive.insert(disk);
+            }
+            machine.press_play(record);
+            for _ in 0..rng.below(3) {
+                machine.set_key(*rng.pick(&c64::keyboard::Key::ALL), true);
+            }
+            machine.set_restore(rng.below(4) == 0);
+            machine.set_joystick(rng.below(2), rng.next_u8() & joystick::ALL);
+            machine.set_paddle(rng.below(PADDLE_CHANNELS), rng.next_u8());
         }
     }
     machine.run_until(u64::try_from(10_000 + rng.below(300_000)).expect("small"));

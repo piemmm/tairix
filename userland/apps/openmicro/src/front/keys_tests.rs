@@ -287,23 +287,48 @@ fn losing_the_focus_or_the_mapping_lets_every_key_go() {
 }
 
 #[test]
-fn pasted_text_takes_shift_from_its_case_and_the_machines_caps_lock() {
+fn pasted_text_takes_shift_from_its_case_and_the_machines() {
     assert_eq!(
-        typing::<Key>('a', true),
+        typing::<Key>('a', LetterCase::Capitals),
         Some((Key::A, true)),
         "CAPS LOCK on, SHIFT for lower case"
     );
-    assert_eq!(typing::<Key>('A', true), Some((Key::A, false)));
-    assert_eq!(typing::<Key>('a', false), Some((Key::A, false)));
-    assert_eq!(typing::<Key>('A', false), Some((Key::A, true)));
     assert_eq!(
-        typing::<Key>('\n', true),
+        typing::<Key>('A', LetterCase::Capitals),
+        Some((Key::A, false))
+    );
+    assert_eq!(typing::<Key>('a', LetterCase::Small), Some((Key::A, false)));
+    assert_eq!(typing::<Key>('A', LetterCase::Small), Some((Key::A, true)));
+    let letter = Keycap::Matrix(C64Key::A);
+    assert_eq!(
+        typing::<Keycap>('A', LetterCase::CapitalsOnly),
+        Some((letter, false)),
+        "the C64's upper-case set, where SHIFT makes a graphic"
+    );
+    assert_eq!(
+        typing::<Keycap>('a', LetterCase::CapitalsOnly),
+        Some((letter, false)),
+        "a small letter typed as its capital"
+    );
+    assert_eq!(
+        typing::<Keycap>('A', LetterCase::Small),
+        Some((letter, true)),
+        "the C64's lower-case set"
+    );
+    assert_eq!(
+        typing::<Key>('\n', LetterCase::Capitals),
         Some((Key::RETURN, false)),
         "a line ends with RETURN"
     );
-    assert_eq!(typing::<Key>('"', true), Some((Key::DIGIT_2, true)));
-    assert_eq!(typing::<Key>('£', true), Some((Key::UNDERSCORE, true)));
-    assert_eq!(typing::<Key>('é', true), None);
+    assert_eq!(
+        typing::<Key>('"', LetterCase::Capitals),
+        Some((Key::DIGIT_2, true))
+    );
+    assert_eq!(
+        typing::<Key>('£', LetterCase::Capitals),
+        Some((Key::UNDERSCORE, true))
+    );
+    assert_eq!(typing::<Key>('é', LetterCase::Capitals), None);
 }
 
 /// The Electron's FUNC is the host's Alt either way, a function key is FUNC
@@ -353,6 +378,113 @@ fn the_electrons_func_rides_on_alt_and_its_soft_keys_on_the_function_keys() {
         [pressed(EKey::COPY)],
         "COPY on End"
     );
-    assert_eq!(typing::<EKey>('a', true), Some((EKey::A, true)));
-    assert_eq!(typing::<EKey>('*', true), Some((EKey::COLON, true)));
+    assert_eq!(
+        typing::<EKey>('a', LetterCase::Capitals),
+        Some((EKey::A, true))
+    );
+    assert_eq!(
+        typing::<EKey>('*', LetterCase::Capitals),
+        Some((EKey::COLON, true))
+    );
+}
+
+type C64Keyboard = super::Keyboard<Keycap>;
+type C64Press = super::Press<Keycap>;
+
+const fn c64(key: C64Key, down: bool) -> C64Press {
+    C64Press::Key(Keycap::Matrix(key), down)
+}
+
+#[test]
+fn a_c64_types_logically_with_shifted_keys_its_own() {
+    let mut keyboard = C64Keyboard::new(Mapping::Logical);
+    assert_eq!(
+        presses(
+            &mut keyboard,
+            &[(LEFT_SHIFT, None, true), (0x1F, Some(ch('"')), true)]
+        ),
+        [c64(C64Key::LEFT_SHIFT, true), c64(C64Key::DIGIT_2, true)],
+        "a quote is SHIFT and 2"
+    );
+    let mut keyboard = C64Keyboard::new(Mapping::Logical);
+    assert_eq!(
+        presses(
+            &mut keyboard,
+            &[
+                (0x52, Some(named(NamedKeyCode::Up)), true),
+                (0x52, Some(named(NamedKeyCode::Up)), false)
+            ]
+        ),
+        [
+            c64(C64Key::LEFT_SHIFT, true),
+            c64(C64Key::CURSOR_DOWN, true),
+            c64(C64Key::CURSOR_DOWN, false),
+            c64(C64Key::LEFT_SHIFT, false)
+        ],
+        "up is SHIFT with the cursor-down key"
+    );
+    assert_eq!(
+        presses(
+            &mut keyboard,
+            &[(0x45, Some(named(NamedKeyCode::F12)), true)]
+        ),
+        [C64Press::Key(Keycap::Restore, true)],
+        "F12 is RESTORE"
+    );
+    assert_eq!(
+        presses(
+            &mut keyboard,
+            &[(0x3B, Some(named(NamedKeyCode::F2)), true)]
+        ),
+        [c64(C64Key::LEFT_SHIFT, true), c64(C64Key::F1, true)],
+        "f2 is SHIFT with f1"
+    );
+}
+
+#[test]
+fn a_c64_key_in_place_takes_the_position_its_own_has() {
+    let mut keyboard = C64Keyboard::new(Mapping::Physical);
+    assert_eq!(
+        presses(&mut keyboard, &[(0x39, None, true), (0x39, None, false)]),
+        [c64(C64Key::RUN_STOP, true), c64(C64Key::RUN_STOP, false)],
+        "RUN/STOP where Caps Lock is"
+    );
+    assert_eq!(
+        presses(&mut keyboard, &[(0x52, None, true)]),
+        [
+            c64(C64Key::RIGHT_SHIFT, true),
+            c64(C64Key::CURSOR_DOWN, true)
+        ],
+        "up holds the right SHIFT, leaving the host's Shift its left"
+    );
+    assert_eq!(
+        presses(&mut keyboard, &[(0x2F, None, true)]),
+        [c64(C64Key::AT, true)]
+    );
+}
+
+#[test]
+fn the_keypad_is_a_joystick_and_lets_every_other_key_by() {
+    let mut stick = Stick::new();
+    let pad = |usage, pressed| edge(usage, None, pressed);
+    assert_eq!(stick.edge(&pad(0x60, true)), Some(joystick::UP));
+    assert_eq!(
+        stick.edge(&pad(0x5E, true)),
+        Some(joystick::UP | joystick::RIGHT)
+    );
+    assert_eq!(
+        stick.edge(&pad(0x62, true)),
+        Some(joystick::UP | joystick::RIGHT | joystick::FIRE)
+    );
+    assert_eq!(
+        stick.edge(&pad(0x60, false)),
+        Some(joystick::RIGHT | joystick::FIRE)
+    );
+    assert_eq!(
+        stick.edge(&pad(0x04, true)),
+        None,
+        "a letter is the keyboard's"
+    );
+    assert_eq!(stick.release_all(), Some(0));
+    assert_eq!(stick.release_all(), None, "nothing left held");
 }

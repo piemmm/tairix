@@ -1,0 +1,26 @@
+# The KERNAL's start and BASIC V2's statements, functions and errors, as the
+# originals answer them (plans/C64.md §6).
+
+scenario power_on
+script wait:0.5
+
+scenario arithmetic
+script type:PRINT 1+2*3,7/2,-0.5:PRINT 2^10,10/3\n;wait:0.5
+
+scenario functions
+script type:PRINT INT(-2.5),ABS(-3),SGN(-4),SQR(16):PRINT ASC("A"),CHR$(66)\n;wait:0.5
+
+scenario strings
+script type:A$="TAPE":B$=A$+"DECK":PRINT LEFT$(B$,3),LEN(B$),MID$(B$,4,3),RIGHT$(B$,2)\n;wait:0.5
+
+scenario errors
+script type:PRINT 1/0\n;type:GOTO 100\n;type:PRINT X(11)\n;type:PRINT "A"+1\n;wait:0.5
+
+scenario program
+script type:10 FOR I=1 TO 3:PRINT I*I:NEXT\n;type:20 PRINT "DONE"\n;type:LIST\n;type:RUN\n;wait:0.5
+
+scenario gosub_and_data
+script type:10 READ A,B$:GOSUB 30:END\n;type:20 DATA 42,"ANSWER"\n;type:30 PRINT B$,A:RETURN\n;type:RUN\n;wait:0.5
+
+scenario free_memory
+script type:PRINT FRE(0)+65536\n;wait:0.5

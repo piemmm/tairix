@@ -151,7 +151,7 @@ macro_rules! monadic {
 }
 
 /// Rows whose bits 27 to 25 are `001`: Advanced SIMD data processing.
-pub(super) static GROUP_001: &[Row] = &[
+pub(super) const GROUP_001: &[Row] = &[
     simd("1111 001i 1D00 0iii DDDD CCCC 0QX1 iiii", K::Immediate),
     shift!(Vshr, "U", "0000", "LQM1"),
     shift!(Vsra, "U", "0001", "LQM1"),
@@ -337,7 +337,7 @@ pub(super) static GROUP_001: &[Row] = &[
 
 /// Rows whose bits 27 to 25 are `010`: Advanced SIMD's element and structure
 /// transfers.
-pub(super) static GROUP_010: &[Row] = &[
+pub(super) const GROUP_010: &[Row] = &[
     simd("1111 0100 1DL0 nnnn DDDD 11zz vvXA mmmm", K::StructureAll),
     simd("1111 0100 1DL0 nnnn DDDD vvzz AAAA mmmm", K::StructureLane),
     simd(
@@ -348,7 +348,7 @@ pub(super) static GROUP_010: &[Row] = &[
 
 /// Rows whose bits 27 to 25 are `110`: the 64-bit transfers, loads and
 /// stores.
-pub(super) static GROUP_110: &[Row] = &[
+pub(super) const GROUP_110: &[Row] = &[
     vfp("cccc 1100 010L TTTT tttt 101v 00M1 MMMM", K::CorePair),
     vfp("cccc 1101 UD0L nnnn DDDD 101v iiii iiii", K::Transfer),
     vfp("cccc 110P UDWL nnnn DDDD 101v iiii iiii", K::Multiple),
@@ -356,7 +356,7 @@ pub(super) static GROUP_110: &[Row] = &[
 
 /// Rows whose bits 27 to 25 are `111`: VFP data processing, ARMv8's
 /// unconditional additions and the transfers to and from core registers.
-pub(super) static GROUP_111: &[Row] = &[
+pub(super) const GROUP_111: &[Row] = &[
     dyadic!(vfp, "cccc", Vmla, "0D00", "0"),
     dyadic!(vfp, "cccc", Vmls, "0D00", "1"),
     dyadic!(vfp, "cccc", Vnmls, "0D01", "0"),

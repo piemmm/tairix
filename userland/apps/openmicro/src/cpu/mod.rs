@@ -27,6 +27,11 @@ pub trait Bus {
     fn irq(&self) -> bool;
     /// Whether NMI is asserted at the end of the cycle just performed.
     fn nmi(&self) -> bool;
+    /// Whether SO is held low at the end of the cycle just performed: its
+    /// falling edge sets V. Unwired, it stays high.
+    fn so(&self) -> bool {
+        false
+    }
 }
 
 /// Bits of the processor status register.
@@ -103,6 +108,8 @@ pub struct CpuState {
     pub nmi_samples: [bool; 2],
     /// Unmasked IRQ as sampled at the last cycle and the one before.
     pub irq_samples: [bool; 2],
+    /// SO held low at the last sampled cycle.
+    pub so_line: bool,
 }
 
 /// The processor.
@@ -132,6 +139,7 @@ pub struct Cpu {
     nmi_prev: bool,
     irq_now: bool,
     irq_prev: bool,
+    so_line: bool,
 }
 
 impl Default for Cpu {
@@ -166,6 +174,7 @@ impl Cpu {
             nmi_prev: false,
             irq_now: false,
             irq_prev: false,
+            so_line: false,
         }
     }
 
@@ -254,6 +263,7 @@ impl Cpu {
             nmi_latched: self.nmi_latched,
             nmi_samples: [self.nmi_now, self.nmi_prev],
             irq_samples: [self.irq_now, self.irq_prev],
+            so_line: self.so_line,
         }
     }
 
@@ -267,6 +277,7 @@ impl Cpu {
         self.nmi_latched = state.nmi_latched;
         [self.nmi_now, self.nmi_prev] = state.nmi_samples;
         [self.irq_now, self.irq_prev] = state.irq_samples;
+        self.so_line = state.so_line;
     }
 
     /// The status register as it is pushed by an interrupt: `U` set, `B` clear.
@@ -302,7 +313,7 @@ impl Cpu {
         self.c = p & flag::C != 0;
     }
 
-    /// Latch the interrupt lines at the end of a cycle.
+    /// Latch the interrupt lines and SO at the end of a cycle.
     fn sample<B: Bus>(&mut self, bus: &B) {
         let line = bus.nmi();
         self.nmi_latched |= line && !self.nmi_line;
@@ -311,6 +322,9 @@ impl Cpu {
         self.nmi_now = self.nmi_latched;
         self.irq_prev = self.irq_now;
         self.irq_now = bus.irq() && !self.i;
+        let so = bus.so();
+        self.v |= so && !self.so_line;
+        self.so_line = so;
     }
 
     fn read<B: Bus>(&mut self, bus: &mut B, addr: u16) -> u8 {
@@ -563,4 +577,5 @@ crate::snapshot::fields!(CpuState {
     nmi_latched,
     nmi_samples,
     irq_samples,
+    so_line,
 });

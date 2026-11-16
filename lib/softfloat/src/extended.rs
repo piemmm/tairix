@@ -107,34 +107,4 @@ impl Extended {
             sig: u64::from_le_bytes(sig),
         }
     }
-
-    /// The three words the FPA keeps the value in, in memory, lowest address
-    /// first: the sign in bit 31 and the exponent in bits 14 to 0, then the
-    /// significand's high word, its integer bit the top, then its low word.
-    #[must_use]
-    pub const fn to_fpa_words(self) -> [u32; 3] {
-        let sign = (self.sign_exp as u32 & 0x8000) << 16;
-        let exponent = self.exponent() as u32;
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "each word takes its half of the significand"
-        )]
-        let (high, low) = ((self.sig >> 32) as u32, self.sig as u32);
-        [sign | exponent, high, low]
-    }
-
-    /// The value three words of FPA memory hold. The FPA ignores bits 30 to
-    /// 15 of the first word, so they say nothing of the value.
-    #[must_use]
-    pub const fn from_fpa_words([head, high, low]: [u32; 3]) -> Self {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the sign and exponent are the low sixteen bits once placed"
-        )]
-        let sign_exp = ((head >> 16) & 0x8000 | head & 0x7FFF) as u16;
-        Self {
-            sign_exp,
-            sig: (high as u64) << 32 | low as u64,
-        }
-    }
 }

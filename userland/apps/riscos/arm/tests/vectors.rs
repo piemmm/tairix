@@ -25,7 +25,7 @@ const SAMPLES: [(&[u8], &Profile, usize); 3] = [
         &BIT32,
         23 * 128,
     ),
-    (include_bytes!("fpa/fpemulator.bin"), &BIT32, 2200),
+    (include_bytes!("fpa/fpemulator-vectors.bin"), &BIT32, 2200),
 ];
 
 fn sample(bytes: &[u8]) -> Vec<Vector> {
@@ -112,5 +112,12 @@ fn the_runner_reports_a_wrong_register_and_a_wrong_transfer() {
             check(profile, &transferring),
             Err(Mismatch::Transfer { .. })
         ));
+        let mut unloadable = vectors[0].clone();
+        unloadable.before.cpsr = (unloadable.before.cpsr & !0x1F) | 0x15;
+        assert_eq!(
+            check(profile, &unloadable),
+            Err(Mismatch::Unloadable(Box::new(unloadable.before))),
+            "a mode no profile has"
+        );
     }
 }

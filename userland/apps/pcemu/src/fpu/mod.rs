@@ -13,12 +13,11 @@ pub mod arith;
 pub(crate) mod exec;
 pub mod real;
 mod timing;
-mod trans;
 
 use crate::cpu::bus::Escape;
 use crate::snapshot::{state, In, Out, State, Torn};
 use exec::Insn;
-use real::Real;
+use tairix_softfloat::Extended;
 
 /// The two-bit tags the tag word holds for each physical register.
 pub mod tag {
@@ -52,7 +51,7 @@ pub const STATE_BYTES: usize = 94;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Registers {
     /// The physical data registers.
-    pub data: [Real; 8],
+    pub data: [Extended; 8],
     /// Each physical register's tag, register 0's in the low two bits.
     pub tags: u16,
     /// The control word.
@@ -70,7 +69,7 @@ pub struct Registers {
 impl Default for Registers {
     fn default() -> Self {
         Self {
-            data: [Real::ZERO; 8],
+            data: [Extended::ZERO; 8],
             tags: 0xFFFF,
             control: CONTROL_INIT,
             status: 0,
@@ -366,7 +365,7 @@ impl Fpu {
     }
 }
 
-impl State for Real {
+impl State for Extended {
     fn save(&self, out: &mut Out) {
         self.sign_exp.save(out);
         self.sig.save(out);

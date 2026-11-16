@@ -3,6 +3,7 @@
 //! the picture copied out of the share.
 
 use tairix_log::DiscardSink;
+use tairix_openmicro::machine::LetterCase;
 use tairix_openmicro::worker::protocol::{
     session_bounds, Configuration, Lights, Loaded, Ran, Reply, Request, Slot, ROW_MAP, SHARE_BYTES,
     SLOTS,
@@ -97,6 +98,7 @@ impl SessionService for Liar {
             rows: [0; ROW_MAP],
             sound: &[],
             lights: Lights::default(),
+            case: LetterCase::default(),
             drives: [false; 2],
             loaded: Loaded::default(),
         };

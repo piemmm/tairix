@@ -1,0 +1,98 @@
+# Recorded by `cargo xtask openmicro --reference` from KERNAL 3, BASIC V2 and 1541 DOS 2.6,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario error_channel_at_power_on
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 OPEN15,8,15:INPUT#15,A,B$,C,D:CLOSE15
+row 20 PRINT A,C,D:PRINT B$
+row RUN
+row  73        0         0
+row OPENMICRO DOS 1541
+row READY.
+
+scenario directory_of_a_blank_disk
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row LOAD"$",8
+row SEARCHING FOR $
+row LOADING
+row READY.
+row LIST
+row 0 "BLANK           " 00 2A
+row 664 BLOCKS FREE.
+row READY.
+
+scenario save_and_load_a_program
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 PRINT "SAVED"
+row SAVE"PROG",8
+row SAVING PROG
+row READY.
+row NEW
+row READY.
+row LOAD"PROG",8
+row SEARCHING FOR PROG
+row LOADING
+row READY.
+row RUN
+row SAVED
+row READY.
+disc 0 3728a5d008650826f459631e49638cb32a1ce3881275f6cdb7a119bee48af9db
+
+scenario a_sequential_file_written_and_read
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 OPEN2,8,2,"DATA,S,W":PRINT#2,"ONE":CL
+row OSE2
+row 20 OPEN2,8,2,"DATA,S,R":INPUT#2,A$:CLOSE
+row 2:PRINT A$
+row RUN
+row ONE
+row READY.
+disc 0 893d63629d9c3fbaaa5a4b82c494ed3d73b217026c6f384efcdda62b93c79b7a
+
+scenario scratch_and_rename
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row SAVE"OLD",8
+row SAVING OLD
+row READY.
+row OPEN15,8,15,"R0:NEW=OLD":CLOSE15
+row READY.
+row 10 OPEN15,8,15,"S0:NEW":INPUT#15,A,B$,C:
+row PRINT A,B$,C:CLOSE15
+row RUN
+row  1        FILES SCRATCHED      1
+row READY.
+disc 0 4bfe4940c83f78c8cc04edb653cf6e202b8661d2408ea66f3c70849c50bf4196
+
+scenario the_bus_calls_keep_x_and_y
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 POKE 780,8:POKE 781,123:POKE 782,1:SY
+row S 65457:A=PEEK(781):G=PEEK(782)
+row 20 POKE 780,111:POKE 781,124:POKE 782,2:
+row SYS 65427:B=PEEK(781):H=PEEK(782)
+row 30 POKE 781,125:POKE 782,3:SYS 65454:C=P
+row EEK(781):I=PEEK(782)
+row 40 POKE 780,8:POKE 781,126:POKE 782,4:SY
+row S 65460:D=PEEK(781):J=PEEK(782)
+row 50 POKE 780,111:POKE 781,127:POKE 782,5:
+row SYS 65430:E=PEEK(781):K=PEEK(782)
+row 60 POKE 781,128:POKE 782,6:SYS 65451:F=P
+row EEK(781):L=PEEK(782)
+row 70 PRINT A,B,C:PRINT D,E,F:PRINT G,H,I:P
+row RINT J,K,L
+row RUN
+row  123       124       125
+row  126       127       128
+row  1         2         3
+row  4         5         6
+row READY.

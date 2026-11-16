@@ -9,10 +9,10 @@
 //! TIME, *TV, the user flag and the printer's ignored character.
 
 use super::ws::{os, page2, page_d, var, vdu, vector};
+use super::Model;
 use super::{page, svia, Held, VECTOR_DEFAULTS};
-use crate::machine::bbc::via::reg;
 use crate::machine::electron::{irq as ula_irq, sheila as ula, LOCKED_ROMS};
-use crate::machine::Model;
+use crate::machine::via::reg;
 use crate::machine::SIDEWAYS_BASE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Addr, Asm};
 use crate::rom::os::{header, rom_type, service};

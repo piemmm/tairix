@@ -1,0 +1,88 @@
+# Recorded by `cargo xtask openmicro --reference` from KERNAL 3, BASIC V2 and 1541 DOS 2.6,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario power_on
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+
+scenario arithmetic
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT 1+2*3,7/2,-0.5:PRINT 2^10,10/3
+row  7         3.5      -.5
+row  1024      3.33333333
+row READY.
+
+scenario functions
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT INT(-2.5),ABS(-3),SGN(-4),SQR(16):
+row PRINT ASC("A"),CHR$(66)
+row -3         3        -1         4
+row  65       B
+row READY.
+
+scenario strings
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row A$="TAPE":B$=A$+"DECK":PRINT LEFT$(B$,3)
+row ,LEN(B$),MID$(B$,4,3),RIGHT$(B$,2)
+row TAP        8        EDE       CK
+row READY.
+
+scenario errors
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT 1/0
+row ?DIVISION BY ZERO  ERROR
+row READY.
+row GOTO 100
+row ?UNDEF'D STATEMENT  ERROR
+row READY.
+row PRINT X(11)
+row ?BAD SUBSCRIPT  ERROR
+row READY.
+row PRINT "A"+1
+row ?TYPE MISMATCH  ERROR
+row READY.
+
+scenario program
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 FOR I=1 TO 3:PRINT I*I:NEXT
+row 20 PRINT "DONE"
+row LIST
+row 10 FOR I=1 TO 3:PRINT I*I:NEXT
+row 20 PRINT "DONE"
+row READY.
+row RUN
+row  1
+row  4
+row  9
+row DONE
+row READY.
+
+scenario gosub_and_data
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row 10 READ A,B$:GOSUB 30:END
+row 20 DATA 42,"ANSWER"
+row 30 PRINT B$,A:RETURN
+row RUN
+row ANSWER     42
+row READY.
+
+scenario free_memory
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT FRE(0)+65536
+row  38909
+row READY.

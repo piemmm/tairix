@@ -15,7 +15,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use tairix_bbcbasic::keyword::word;
+use tairix_openbasic::keyword::word;
 
 use super::ws::{kind, page, zp as z};
 use crate::cpu::isa::{encode, Mnemonic, Mode, OPCODES};
@@ -82,8 +82,8 @@ const PSEUDO: [&str; 2] = ["OPT", "EQU"];
 const EQU_KINDS: [(u8, u8); 4] = [(b'B', 1), (b'W', 2), (b'D', 4), (b'S', 0)];
 /// The tokens a mnemonic can be spelt with: ORA is OR's and an A.
 const TOKENS: [(u8, &str); 3] = [
-    (word::AND.token, "AND"),
-    (word::EOR.token, "EOR"),
+    (word::AND.token, word::AND.name),
+    (word::EOR.token, word::EOR.name),
     (word::OR.token, "ORA"),
 ];
 /// Where a listed statement's text starts, a continued line of bytes'

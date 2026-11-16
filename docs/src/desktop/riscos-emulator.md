@@ -47,6 +47,10 @@ and Cryptographic Extension encoding through ARMv8-A's AArch32 additions (see
   `AL`, so `t32` decodes and encodes them through `a32`'s rows, under the
   condition its `IT` block gives. ARMv8's unconditional additions and the
   Cryptographic Extension are UNPREDICTABLE in a block, as Arm defines them.
+- Its generic coprocessor forms are A32's with the condition `AL`, or
+  unconditional, so `t32` decodes and encodes them through `a32`'s generic
+  coprocessor rows alone, the FPA's rows aside, as Thumb has no FPA, and holds
+  them to its own rule for a PC base.
 
 From the tables:
 
@@ -96,7 +100,11 @@ are two:
 | VFP and Advanced SIMD | none | VFPv4 with 32 doublewords and VFPv2's short vectors, Advanced SIMD, ARMv8's floating-point additions, the Cryptographic Extension |
 
 Both take exceptions in the 32-bit modes and restore an aborted instruction's
-base, as the SA-110 does.
+base, as the SA-110 does. On the 26-bit profile an `STM` that writes back a
+base it lists after its first register stores the written-back base, as the
+ARM6 and ARM7 data sheets give it. On the 32-bit profile a mode it lacks,
+named by `MSR` or by an exception return's SPSR, is refused as the
+UNPREDICTABLE it is.
 
 ### The programmer's models
 
@@ -129,13 +137,20 @@ when the first ends one. A run stops for:
 - the budget;
 - a `SWI`, which the session performs or enters through `Cpu::enter`;
 - a `UDF` on a host page in ARM state, which calls the host;
-- `WFI` or `WFE` with nothing to wake it;
+- `WFI` or `WFE` with nothing to wake it: an exception return is an event, as
+  `SEV` and `Cpu::signal_event` are;
 - an FPA instruction meeting an exception whose trap the FPSR enables, past
   it, for the session to raise FPEmulator's error;
 - a CP15 register the processor does not model, before it executes.
 
 An A32 instruction in the unconditional space executes; its condition field
 means never only where the profile's architecture says so.
+
+A state the host sets (`set_state`, `set_reg` of R15, `set_cpsr`) is held to
+one the processor could hold: the PC aligned for the state the CPSR selects,
+within the 26-bit address space in a 26-bit mode, and no IT state outside
+Thumb nor a reserved one. A switch into a 26-bit mode holds the next
+instruction within that space too.
 
 ### IT blocks
 
@@ -187,25 +202,46 @@ profile's instruction set has them, the fault and thread registers.
 ### The FPA
 
 RISC OS 5 has no FPA hardware: FPEmulator, the module that takes FPA
-instructions at the undefined instruction trap, defines every result its
-software sees, so `fpa` computes FPEmulator 4's. `fpa::Fpa` is the state,
-eight registers and the FPSR, and its operations; the processor runs FPA
-instructions through it.
+instructions at the undefined instruction trap, defines what its software
+sees, so `fpa` answers as FPEmulator 4 does. Each rule comes from the FPA10
+and ARM7500FE data sheets, or from FPEmulator observed black-box by
+`cargo xtask riscos-fpa`; where FPEmulator is inexact, `fpa` rounds
+correctly. `fpa::Fpa` is the state, eight registers and the FPSR, and its
+operations; the processor runs FPA instructions through it.
 
 - **Registers** hold FPEmulator's internal format, `fpa::Internal`, the three
   words `SFM` stores. A single or double denormal, infinity or NaN keeps its
   own precision's form until an operation converts it; `URD` leaves an
   integer unnormalised for `NRM`.
 - **Arithmetic** is `lib/softfloat`'s, rounded at the instruction's precision
-  in its rounding mode; the "fast" `FML`, `FDV` and `FRD` are FPEmulator's.
+  in its rounding mode. `FML` multiplies its operands' top 32 mantissa bits
+  alone; `FDV` and `FRD` divide in full. `RMF` is IEEE 754's remainder.
   Underflow is tiny after rounding and flagged where denormalising loses
   bits; overflow gives the extended infinity, or the precision's largest
   number where the rounding mode rounds away from that infinity. An invalid
-  operation's NaN is an
-  extended quiet NaN carrying its reason in the mantissa.
-- **The transcendental functions**, `SIN` to `POL`, run FPEmulator's own
-  algorithms: each a sequence of FPA operations on an FPA of its own with
-  traps disabled, over its constants, so each result is its bits.
+  operation's NaN is an extended quiet NaN carrying its reason in the
+  mantissa.
+- **The transcendental functions**, `LOG` to `POL`, answer their value
+  correctly rounded, from `lib/softfloat`'s elementary functions, where
+  FPEmulator's lies a few places off. What has no value is FPEmulator's: each
+  refusal's reason and sign, the bounds past which `SIN`, `COS` and `TAN`
+  refuse an argument (`SIN` from (2^31 − ½)π, `COS` from (2^31 − 1)π, `TAN`
+  from (2^31 − ½)π/2 and a place past −(2^31 + ½)π/2), the exact cases (`LOG`
+  of 10^n, `LGN` and `LOG` of one, `ACS` of one) and the flags the special
+  cases raise. An odd integer power of a negative number below 2^16 rounds as
+  though bits lay below it, an infinity to such a power overflows, and the
+  angle of (+∞, y) is a zero flagged inexact, as FPEmulator answers.
+- **Packed decimal** is the data sheet's two formats through `lib/softfloat`'s
+  `Packed`. A load reads the value exactly and rounds it to nearest; a store
+  writes the digits the format guarantees, 17 or 21, correctly rounded, and
+  the rest zero. What the data sheet leaves undefined is FPEmulator's: a
+  digit above nine counts at its face value; an exponent from 16 640 (16 646
+  144 expanded) at face value reads as an infinity or a NaN; a NaN's payload
+  is its fraction's 62 bits taken as bits 10 to 0, 39 to 11 and 61 to 40,
+  written as a decimal integer behind a quiet mark, and an expanded quiet
+  NaN's load adds 1013 × 2^52 to it. A single or double infinity stores as a
+  NaN without a payload, and a signalling NaN stores quiet, signalling
+  nothing.
 - **An enabled trap** writes nothing but the flags of exceptions raised before
   it: the destination, memory and a store's base stay as they were. A load
   writes its base back before converting, as FPEmulator's does, so a trapped
@@ -344,11 +380,30 @@ FPEmulator 4, run as an opaque program on the processor itself: the 32-bit
 profile without the FPA, so each FPA instruction traps to the module, with
 the SWIs its initialisation and error path call answered. Each case, a random
 FPA instruction from a random caller mode over random registers, FPA state
-and memory, runs under the module and natively, and must leave the same
+and memory (a packed load mostly reading a packed value the data sheet
+defines), runs under the module and natively, and must leave the same
 registers (or the same exception dump, for a trap), memory, FPA registers
-and FPSR. `--write-sample` writes 2,200 agreeing cases as vectors carrying
-the FPA's state before and after, which the crate's test replays; the
-module's bytes are never written, only the processor's own runs that
+and FPSR. A case may differ only where FPEmulator is the less accurate:
+
+- a transcendental value within FPEmulator's error: 16 places, twice the
+  places the function magnifies its arguments' last place into, and a place
+  of the precision, which that error can carry a result across;
+- a packed load within 256 places of the FPA's, and a packed store whose
+  FPA digits round the value correctly while FPEmulator's lie within half a
+  digit and 256 places of it, FPEmulator perhaps flagging or trapping on an
+  inexact conversion the FPA's exact one is not. FPEmulator's packed
+  conversions stray by up to some 150 places at the ends of the exponent
+  range, measured over 400 000 of them.
+
+A case FPEmulator is no reference for is not held to it, and the harness
+counts those that differed: a transcendental of an unnormal, or of or to a
+value in the denormal range, which FPEmulator leaves unnormalised or as
+garbage, flagging no underflow (`SIN` of an extended denormal is an
+infinity); a remainder of an uncommon operand, which it misreads; and a packed
+load of a digit above nine, which the data sheet leaves undefined.
+`--write-sample` writes 2,200 cases that agreed in every bit as vectors
+carrying the FPA's state before and after, which the crate's test replays;
+the module's bytes are never written, only the processor's own runs that
 FPEmulator matched. The 26-bit builds need RISC OS 3's kernel around them,
 which the harness does not model.
 
@@ -421,17 +476,26 @@ memory pools.
 
 The manager calls the rest of the kernel through one seam: each handler call,
 service call and upcall is made with the address space consistent, and may
-itself make memory calls. A resize in progress refuses any other, as RISC OS's
-does. Where RISC OS 5 leaves a case unguarded the manager refuses it: a
+itself make memory calls. A resize refuses any other while its handler decides
+and its pages move, as RISC OS's does. Guest code runs at other points too —
+while room is made, after a resize, in a service call — so whatever was checked
+before it runs is checked again after, and an area is followed by its id and
+the sequence it was made at: one removed and replaced meanwhile is never taken
+for it. Where RISC OS 5 leaves a case unguarded the manager refuses it: a
 negative number, a system number made, renumbered onto or removed, an access
-privilege it lacks, and an area its handler grows again while it is removed,
-which stays rather than leaking its pages. The SWIs' registers, and the page
-blocks and titles a handler or caller reads, are the kernel's to marshal.
+privilege it lacks, an initial size past the area's maximum, and an area its
+handler grows again while it is removed, which stays rather than leaking its
+pages. A sparse area is never doubly mapped, given particular pages or shrunk,
+and a pool is never shrunk, whatever their flags ask. A session holds at most
+4096 areas. The SWIs' registers, and the page blocks and titles a handler or
+caller reads, are the kernel's to marshal.
 
 `fuzz_areas` runs random slot, area, sparse and pool calls with hostile
-arguments, under handlers that answer at random and call back in, holding
-that every page in use is accounted for and every page an area reports reads
-back at its address.
+arguments, under handlers that answer at random and call back in, resizing,
+removing, replacing and making areas. It holds that every page in use is
+accounted for, every page an area reports reads back at its address, no area
+passes its maximum or meets another, and every area's number is one a caller
+reads as positive.
 
 ## The reference harness
 
@@ -445,23 +509,43 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   calls, and what to record: registers, and only the flags the SWI defines,
   since the rest are its caller's. A scenario records nothing that depends on
   what else the machine holds, such as an area's number or base.
-- **The harness** is a BASIC V program tokenised with `lib/bbcbasic`, with a
-  `!Boot` that runs it. It writes each `show` as one line: the call's
+- **The harness** is a BASIC V program tokenised with `lib/openbasic`, with a
+  `!Boot` that runs it, never written over a `!Boot` of the machine's own and
+  removed with the harness once the recording is taken. It writes each `show`
+  as one line: the call's
   ordinal, `rN=&XXXXXXXX` for each register, `F=0` or `F=1` for each flag,
-  and `error=&N` whenever V is set. Errors are recorded by number, never
-  their text.
-- **Running.** Where `<dir>` holds RPCEmu, it runs headless and the command
-  waits on a named pipe, which the harness opens once it is done. Otherwise
-  the harness is left in `hostfs/`; boot the machine from it and run the
-  command again to import what it recorded.
+  and `error=&N` whenever V is set. After the scenarios it runs `lib/obey`'s
+  cases (`lib/obey/tests/riscos5/cases.txt`), each a call or a command, and
+  writes each answer beside its case in `answers.txt` for the crate's replay;
+  the kinds and the answers' form are documented in
+  `tools/xtask/src/commands/riscos/obey.rs`. Errors are recorded by number,
+  never their text.
+- **BASIC V.** Before the harness, the `!Boot` has BASIC V type
+  `lib/openbasic`'s programs (`lib/openbasic/tests/riscos5/programs.txt`),
+  saving and listing each. What BASIC made of every line and listing goes to
+  `answers.txt` beside them, for the crate's replay
+  (`tools/xtask/src/commands/riscos/basic.rs`). A calibration program gives
+  each message BASIC prints, and every later one is recorded by the kind it
+  matches, never as its text.
+- **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the
+  command's own children, until the harness opens a named pipe once it is
+  done, the emulator exits, or five minutes pass. Otherwise the harness is
+  left in `hostfs/`; boot the machine from it and run the command again to
+  import what it recorded.
 - **Importing.** Each observation becomes its scenario's fixture, except for
   a scenario marked `ours`, whose fixture states this emulator's own
   behaviour. A recording is refused whole if it carries twelve bytes in a
-  row of a ROM image that the corpus's own files do not hold.
+  row of a ROM image in `roms/` that the corpus's own files do not hold: in
+  its text, in the words a step shows in consecutive registers, or in the
+  bytes the machine wrote into a `lib/obey` case's buffer. A run mostly of
+  `&00`, spaces and `&FF` is a small value or a listing's layout any ROM
+  holds, not its content, and is not counted.
+- **Provenance.** Each file the harness writes opens with the RISC OS version
+  it ran on and each ROM image's SHA-256.
 
-The corpus was recorded from RISC OS Open's RISC OS 5.30 for IOMD under
-RPCEmu 0.9.5. `locate-the-compatibility-page` is `ours`: the IOMD build keeps
-zero page at zero, while the 32-bit profile, RISC OS 5's on ARMv7, has the
-compatibility page there. A crate test holds every scenario to one fixture in
+The corpus was recorded under RPCEmu 0.9.5, whose machine runs RISC OS's IOMD
+build. `locate-the-compatibility-page` is `ours`: that build keeps zero page
+at zero, while the 32-bit profile, RISC OS 5's on ARMv7, has the compatibility
+page there. A crate test holds every scenario to one fixture in
 the harness's format. Replaying the scenarios on the kernel comes with its
 SWIs.

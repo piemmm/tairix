@@ -130,7 +130,8 @@ impl<const W: usize> Packed<W> {
 }
 
 /// `n` in binary-coded decimal, its last digit lowest.
-fn bcd(mut n: u128) -> u128 {
+#[must_use]
+pub fn bcd(mut n: u128) -> u128 {
     let mut nibbles = 0;
     let mut shift = 0;
     while n != 0 {

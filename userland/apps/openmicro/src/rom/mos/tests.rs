@@ -1630,7 +1630,7 @@ fn openout_while_spooling_takes_over_the_cassette_channel() {
 /// write that repeats a channel's attenuation left out.
 fn chip_writes(body: impl FnOnce(&mut Asm), centiseconds: u64) -> Vec<(u64, u8)> {
     use crate::machine::bbc::sheila::SYSTEM_VIA;
-    use crate::machine::bbc::via::reg;
+    use crate::machine::via::reg;
     const READY: u16 = 0x0072;
     const FRAMES: u16 = 0x0073;
     const CENTISECOND: u64 = 20_000;

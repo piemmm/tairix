@@ -2,11 +2,11 @@
 //! holds, how the chip classes it, and the integer, BCD and binary memory
 //! formats it loads exactly.
 
-pub use tairix_softfloat::extended::{BIAS, EXP_MAX, EXP_SPECIAL, INTEGER};
-pub use tairix_softfloat::{Binary, Extended as Real, Unpacked};
+use tairix_softfloat::extended::{BIAS, EXP_SPECIAL, INTEGER};
+use tairix_softfloat::{Binary, Extended, Unpacked};
 
 /// The real indefinite: the NaN a masked invalid operation answers.
-pub const INDEFINITE: Real = Real::new(true, EXP_SPECIAL, 0xC000_0000_0000_0000);
+pub const INDEFINITE: Extended = Extended::new(true, EXP_SPECIAL, 0xC000_0000_0000_0000);
 
 /// How the 8087 classes the bits of a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +30,7 @@ pub enum Class {
 
 /// The class of `x`'s bits.
 #[must_use]
-pub const fn class(x: Real) -> Class {
+pub const fn class(x: Extended) -> Class {
     match x.exponent() {
         EXP_SPECIAL if x.sig & !INTEGER == 0 => Class::Infinity,
         EXP_SPECIAL => Class::Nan,
@@ -45,7 +45,7 @@ pub const fn class(x: Real) -> Class {
 /// The value 18 packed BCD digits and a sign byte hold. A nibble above 9
 /// counts its own value, which the 8087 leaves undefined.
 #[must_use]
-pub fn from_bcd(bytes: [u8; 10]) -> Real {
+pub fn from_bcd(bytes: [u8; 10]) -> Extended {
     let mut n: u64 = 0;
     for &byte in bytes[..9].iter().rev() {
         n = n * 100 + u64::from(byte >> 4) * 10 + u64::from(byte & 0x0F);
@@ -53,35 +53,41 @@ pub fn from_bcd(bytes: [u8; 10]) -> Real {
     // Eighteen digits of at most 15 are below 2^63, so the magnitude is
     // exact as a positive integer.
     let magnitude = i64::try_from(n).unwrap_or(i64::MAX);
-    Real::from_int(magnitude).with_sign(bytes[9] & 0x80 != 0)
+    Extended::from_int(magnitude).with_sign(bytes[9] & 0x80 != 0)
 }
 
 /// The value a short real holds, and whether it was a denormal, which the
 /// 8087 loads as the equivalent unnormal.
 #[must_use]
-pub fn from_single(bits: u32) -> (Real, bool) {
+pub fn from_single(bits: u32) -> (Extended, bool) {
     from_binary(u64::from(bits), Binary::SINGLE)
 }
 
 /// The value a long real holds, and whether it was a denormal.
 #[must_use]
-pub fn from_double(bits: u64) -> (Real, bool) {
+pub fn from_double(bits: u64) -> (Extended, bool) {
     from_binary(bits, Binary::DOUBLE)
 }
 
 /// The temporary real `bits` of `format` load as: exactly, a NaN keeping its
 /// fraction below the integer bit and a denormal its least exponent.
-fn from_binary(bits: u64, format: Binary) -> (Real, bool) {
+fn from_binary(bits: u64, format: Binary) -> (Extended, bool) {
     match format.unpack(bits) {
-        Unpacked::Zero { negative } => (Real::new(negative, 0, 0), false),
-        Unpacked::Infinity { negative } => (Real::new(negative, EXP_SPECIAL, INTEGER), false),
+        Unpacked::Zero { negative } => (Extended::new(negative, 0, 0), false),
+        Unpacked::Infinity { negative } => (Extended::new(negative, EXP_SPECIAL, INTEGER), false),
         Unpacked::Nan {
             negative, fraction, ..
-        } => (Real::new(negative, EXP_SPECIAL, INTEGER | fraction), false),
+        } => (
+            Extended::new(negative, EXP_SPECIAL, INTEGER | fraction),
+            false,
+        ),
         Unpacked::Finite { parts, subnormal } => {
             // Every exponent of either format is well inside temporary real's.
             let exponent = u16::try_from(parts.exp + BIAS).unwrap_or(0);
-            (Real::new(parts.negative, exponent, parts.sig), subnormal)
+            (
+                Extended::new(parts.negative, exponent, parts.sig),
+                subnormal,
+            )
         }
     }
 }

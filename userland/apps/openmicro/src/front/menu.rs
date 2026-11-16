@@ -39,11 +39,21 @@ pub enum Command {
     NewTape,
     /// Wind the tape back.
     RewindTape,
-    /// Press or release RECORD.
+    /// Press or release RECORD; on a C64's datasette, press it with PLAY.
     Record,
+    /// Press a C64's datasette's PLAY.
+    Play,
+    /// Press a C64's datasette's STOP.
+    Stop,
     /// Take the tape out.
     EjectTape,
-    /// Press BREAK.
+    /// Pick a cartridge image to plug in.
+    InsertCartridge,
+    /// Unplug the cartridge.
+    RemoveCartridge,
+    /// Pick a program to load into memory.
+    LoadProgram,
+    /// Press BREAK; on a C64, RESTORE.
     Break,
     /// Switch the machine off and on.
     Reset,
@@ -75,7 +85,7 @@ pub enum Command {
 
 /// Every command a row of fixed id is: its id is [`FIRST_ID`] plus its place
 /// here.
-const COMMANDS: [Command; 30] = [
+const COMMANDS: [Command; 35] = [
     Command::InsertDisc(PhysicalDrive::Zero),
     Command::NewDisc(PhysicalDrive::Zero),
     Command::EjectDisc(PhysicalDrive::Zero),
@@ -88,7 +98,12 @@ const COMMANDS: [Command; 30] = [
     Command::NewTape,
     Command::RewindTape,
     Command::Record,
+    Command::Play,
+    Command::Stop,
     Command::EjectTape,
+    Command::InsertCartridge,
+    Command::RemoveCartridge,
+    Command::LoadProgram,
     Command::Break,
     Command::Reset,
     Command::Pause,
@@ -152,13 +167,16 @@ pub struct Offered {
 }
 
 /// What the menu shows of the machine and its window.
-// Each flag is one row's mark, independent of the others, so they are a flat
-// record rather than a state machine.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one row's mark, independent of the others"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shown {
-    /// The model, which decides whether there are drives.
+    /// The model, which names the drives and decides the deck's keys.
     pub model: Model,
+    /// Which drives it has.
+    pub drives: [bool; 2],
     /// Whether each drive holds a disc.
     pub discs: [bool; 2],
     /// Whether each drive's disc image is held, to be saved as a file.
@@ -167,6 +185,10 @@ pub struct Shown {
     pub tape: bool,
     /// Whether RECORD is down.
     pub recording: bool,
+    /// Whether a C64 datasette's PLAY is down.
+    pub playing: bool,
+    /// Whether a C64 has a cartridge plugged in.
+    pub cartridge: bool,
     /// Whether the machine is paused.
     pub paused: bool,
     /// How fast it runs.
@@ -362,18 +384,48 @@ fn offer(
     }
 }
 
+/// What a model's drives' rows call them and their media: a Commodore's
+/// disks are spelled so.
+struct DriveWords {
+    drives: [&'static str; 2],
+    insert: &'static str,
+    new: &'static str,
+    save: &'static str,
+    unheld: &'static str,
+}
+
+const fn drive_words(model: Model) -> DriveWords {
+    match model {
+        Model::ModelB | Model::Electron => DriveWords {
+            drives: ["Drive 0", "Drive 1"],
+            insert: "Insert Disc\u{2026}",
+            new: "New Disc",
+            save: "Save Disc As\u{2026}",
+            unheld: "The drive holds no disc of its own",
+        },
+        Model::C64 => DriveWords {
+            drives: ["Drive 8", "Drive 9"],
+            insert: "Insert Disk\u{2026}",
+            new: "New Disk",
+            save: "Save Disk As\u{2026}",
+            unheld: "The drive holds no disk of its own",
+        },
+    }
+}
+
 /// A drive's submenu.
 fn push_drive(
     menu: &mut AppMenu,
-    (drive, label): (PhysicalDrive, &str),
+    drive: PhysicalDrive,
     shown: &Shown,
     offered: &Offered,
 ) -> Result<(), Errno> {
     let index = drive.index();
-    let at = submenu(menu, label, AppMenuSymbol::Drive)?;
+    let words = drive_words(shown.model);
+    let at = submenu(menu, words.drives[index], AppMenuSymbol::Drive)?;
     let insert = (
         Command::InsertDisc(drive),
-        "Insert Disc\u{2026}",
+        words.insert,
         AppMenuSymbol::Open,
     );
     menu.push_under(offer(insert, Acts::Elsewhere, None)?, at)?;
@@ -383,19 +435,15 @@ fn push_drive(
     let no_folder = (!offered.reachable).then_some(NO_FOLDER);
     let new = (
         Command::NewDisc(drive),
-        "New Disc",
+        words.new,
         AppMenuSymbol::NewDocument,
     );
     menu.push_under(offer(new, Acts::Elsewhere, no_folder)?, at)?;
     let empty = (!shown.discs[index]).then_some("The drive is empty");
     let eject = (Command::EjectDisc(drive), "Eject", AppMenuSymbol::Drive);
     menu.push_under(offer(eject, Acts::InPlace, empty)?, at)?;
-    let unheld = (!shown.images[index]).then_some("The drive holds no disc of its own");
-    let save = (
-        Command::SaveDisc(drive),
-        "Save Disc As\u{2026}",
-        AppMenuSymbol::SaveAs,
-    );
+    let unheld = (!shown.images[index]).then_some(words.unheld);
+    let save = (Command::SaveDisc(drive), words.save, AppMenuSymbol::SaveAs);
     menu.push_under(offer(save, Acts::Elsewhere, unheld)?, at)
 }
 
@@ -415,32 +463,91 @@ fn push_tape(menu: &mut AppMenu, shown: &Shown, offered: &Offered) -> Result<(),
     let no_tape = (!shown.tape).then_some(NO_TAPE);
     let rewind = (Command::RewindTape, "Rewind", AppMenuSymbol::Previous);
     menu.push_under(offer(rewind, Acts::InPlace, no_tape)?, at)?;
-    let record = if shown.tape {
-        let mark = (AppMenuMark::Check, shown.recording);
-        ticked(Command::Record, "Record", AppMenuSymbol::Play, mark)?
+    let deck: &[(Command, &str, AppMenuSymbol, bool)] = if shown.model.has_play_key() {
+        &[
+            (
+                Command::Play,
+                "Play",
+                AppMenuSymbol::Play,
+                shown.playing && !shown.recording,
+            ),
+            (
+                Command::Record,
+                "Record",
+                AppMenuSymbol::Play,
+                shown.recording,
+            ),
+            (Command::Stop, "Stop", AppMenuSymbol::Pause, !shown.playing),
+        ]
     } else {
-        unavailable(Command::Record, "Record", AppMenuSymbol::Play, NO_TAPE)?
+        &[(
+            Command::Record,
+            "Record",
+            AppMenuSymbol::Play,
+            shown.recording,
+        )]
     };
-    menu.push_under(record, at)?;
+    for &(command, label, symbol, on) in deck {
+        let key = if shown.tape {
+            ticked(command, label, symbol, (AppMenuMark::Check, on))?
+        } else {
+            unavailable(command, label, symbol, NO_TAPE)?
+        };
+        menu.push_under(key, at)?;
+    }
     let eject = (Command::EjectTape, "Eject Tape", AppMenuSymbol::Drive);
     menu.push_under(offer(eject, Acts::InPlace, no_tape)?, at)
 }
 
-/// The drives' rows, where the model has drives, and the deck's.
+/// A C64's expansion port and the programs it loads straight into memory.
+fn push_cartridge(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
+    let at = submenu(menu, "Cartridge", AppMenuSymbol::Drive)?;
+    let insert = (
+        Command::InsertCartridge,
+        "Insert Cartridge\u{2026}",
+        AppMenuSymbol::Open,
+    );
+    menu.push_under(offer(insert, Acts::Elsewhere, None)?, at)?;
+    let none = (!shown.cartridge).then_some("No cartridge is plugged in");
+    let remove = (
+        Command::RemoveCartridge,
+        "Remove Cartridge",
+        AppMenuSymbol::Drive,
+    );
+    menu.push_under(offer(remove, Acts::InPlace, none)?, at)?;
+    menu.push(row(
+        Command::LoadProgram,
+        "Load Program\u{2026}",
+        AppMenuSymbol::Open,
+        Acts::Elsewhere,
+    )?)
+}
+
+/// The rows of each drive the machine has, the deck's, and a C64's
+/// cartridge and programs.
 fn push_media(menu: &mut AppMenu, shown: &Shown, offered: &Offered) -> Result<(), Errno> {
-    if shown.model.has_drives() {
-        for drive in PhysicalDrive::ALL.into_iter().zip(["Drive 0", "Drive 1"]) {
+    for drive in PhysicalDrive::ALL {
+        if shown.drives[drive.index()] {
             push_drive(menu, drive, shown, offered)?;
         }
     }
-    push_tape(menu, shown, offered)
+    push_tape(menu, shown, offered)?;
+    if shown.model == Model::C64 {
+        push_cartridge(menu, shown)?;
+    }
+    Ok(())
 }
 
 /// The rows that drive the machine and say how it is shown and typed at.
 fn push_machine(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
+    let interrupt = if shown.model == Model::C64 {
+        "RESTORE"
+    } else {
+        "BREAK"
+    };
     menu.push(row(
         Command::Break,
-        "BREAK",
+        interrupt,
         AppMenuSymbol::Refresh,
         Acts::InPlace,
     )?)?;

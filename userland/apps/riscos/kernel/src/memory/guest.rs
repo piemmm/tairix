@@ -79,14 +79,6 @@ pub enum Service<'a> {
     ReleaseFiq,
 }
 
-/// What a grow handler said yes with: whether it passed `"RESV"`, allowing
-/// pages its program reserved.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Granted {
-    /// It passed `"RESV"`.
-    pub reserved: bool,
-}
-
 /// The rest of the kernel, as the address space sees it.
 pub trait Guest {
     /// `PreGrow`: `bytes` are about to be added to an area of `size`. A
@@ -99,7 +91,7 @@ pub trait Guest {
         block: &mut [PageEntry],
         bytes: u32,
         size: u32,
-    ) -> Result<Granted, Option<GuestError>>;
+    ) -> Result<(), Option<GuestError>>;
 
     /// `PostGrow`: `bytes` were added, making `size`.
     fn post_grow(

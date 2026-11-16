@@ -110,13 +110,12 @@ pub(super) enum Branch {
 impl Branch {
     /// The offsets the shape holds: its least and greatest, and the multiple
     /// they are of.
-    const fn range(self) -> (i32, i32, i32) {
+    const fn range(self) -> (i32, i32) {
         match self {
-            Self::Cond8 => (-(1 << 8), (1 << 8) - 2, 2),
-            Self::Imm11 => (-(1 << 11), (1 << 11) - 2, 2),
-            Self::Cond20 => (-(1 << 20), (1 << 20) - 2, 2),
-            Self::Imm24 => (-(1 << 24), (1 << 24) - 2, 2),
-            Self::Blx => (-(1 << 24), (1 << 24) - 4, 4),
+            Self::Cond8 => (-(1 << 8), (1 << 8) - 2),
+            Self::Imm11 => (-(1 << 11), (1 << 11) - 2),
+            Self::Cond20 => (-(1 << 20), (1 << 20) - 2),
+            Self::Imm24 | Self::Blx => (-(1 << 24), (1 << 24) - 2),
         }
     }
 
@@ -166,14 +165,6 @@ pub(super) enum Shape {
     /// A reserved memory hint, which behaves as `NOP` whatever its fields
     /// hold.
     Nop,
-}
-
-fn reg(f: &Fields, field: Field) -> Reg {
-    Reg::field(f.get(field))
-}
-
-fn has(layout: &Layout, field: Field) -> bool {
-    layout.field(field) != 0
 }
 
 /// `i:imm3:imm8` from `H`, `k` and `i`; each absent field is zero.
@@ -249,7 +240,7 @@ const fn lanes_field(lanes: Lanes) -> u32 {
 
 fn base(base: Base, f: &Fields) -> Reg {
     match base {
-        Base::Field => reg(f, Field::Rn),
+        Base::Field => f.reg(Field::Rn),
         Base::Pc => Reg::PC,
         Base::Sp => Reg::SP,
     }
@@ -258,9 +249,9 @@ fn base(base: Base, f: &Fields) -> Reg {
 /// A transfer's or preload's offset: Rm shifted left, or the immediate
 /// scaled left.
 fn offset(layout: &Layout, f: &Fields, scale: u8) -> Option<Offset> {
-    Some(if has(layout, Field::Rm) {
+    Some(if layout.has(Field::Rm) {
         Offset::Register {
-            rm: reg(f, Field::Rm),
+            rm: f.reg(Field::Rm),
             shift: Shift::Lsl(u8::try_from(f.get(Field::Amount)).ok()?),
         }
     } else {
@@ -279,7 +270,7 @@ pub(super) fn build(
     f: &Fields,
     in_it: bool,
 ) -> Option<Op> {
-    let r = |field| reg(f, field);
+    let r = |field| f.reg(field);
     Some(match shape {
         Shape::Common => kind.build(layout, f)?,
         Shape::Data {
@@ -396,9 +387,9 @@ pub(super) fn build(
                 op,
                 rt: r(Field::Rt),
                 rn,
-                up: !has(layout, Field::U) || f.bit(Field::U),
+                up: !layout.has(Field::U) || f.bit(Field::U),
                 offset: offset(layout, f, scale)?,
-                index: if has(layout, Field::P) {
+                index: if layout.has(Field::P) {
                     index(f)?
                 } else {
                     Index::Offset
@@ -430,7 +421,7 @@ pub(super) fn build(
             };
             Op::Exclusive {
                 op,
-                rd: has(layout, Field::Rd).then(|| r(Field::Rd)),
+                rd: layout.has(Field::Rd).then(|| r(Field::Rd)),
                 rt: r(Field::Rt),
                 rt2: None,
                 rn: r(Field::Rn),
@@ -729,13 +720,15 @@ fn set_operand(f: &mut Fields, layout: &Layout, source: Source, operand: Operand
             };
             if value & ((1 << scale) - 1) != 0 {
                 f.set(Field::Imm, u32::MAX);
-            } else if has(layout, Field::H) {
+            } else if layout.has(Field::H) {
                 set_split(f, value >> scale);
             } else {
                 f.set(Field::Imm, value >> scale);
             }
         }
-        Operand::Immediate(_) => f.set(Field::Imm, u32::MAX),
+        // A32's rotated immediate: no T32 row holds it, so whatever is
+        // deposited decodes to another operand and is refused as unencodable.
+        Operand::Immediate(_) => {}
     }
 }
 
@@ -786,11 +779,13 @@ fn set_scaled(f: &mut Fields, field: Field, value: u32, scale: u8) {
 }
 
 fn set_branch(f: &mut Fields, branch: Branch, offset: i32) {
-    let (least, greatest, multiple) = branch.range();
-    if offset < least || offset > greatest || offset % multiple != 0 {
+    let (least, greatest) = branch.range();
+    if offset < least || offset > greatest {
         f.set(Field::Imm, u32::MAX);
         return;
     }
+    // A misaligned offset loses its low bits here, so the word decodes to
+    // another branch and is refused as unencodable.
     let bits = offset.cast_unsigned();
     let sign = bits >> 31;
     match branch {

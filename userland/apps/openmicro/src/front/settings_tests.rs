@@ -8,6 +8,7 @@ use tairix_theme::Theme;
 
 use super::*;
 use crate::front::library::{Shipped, Socket};
+use crate::machine::c64::{sid, Standard};
 
 fn machine(fitting: Fitting) -> Machine {
     Machine::new(1, String::from("Test"), fitting)
@@ -208,4 +209,83 @@ fn every_installed_image_is_offered_by_every_socket() {
         Some(&missing),
         "the image it holds even if the store has lost it"
     );
+}
+
+#[test]
+fn a_commodore_s_standard_sid_and_drives_change_while_it_is_off() {
+    tairix_font::install_test_transport();
+    let fitting = Fitting::c64(Standard::Pal, sid::Model::Mos6581, 1);
+    let mut settings = Settings::new(&machine(fitting.clone()), Standing::Off, Vec::new());
+    let dos9 = row_of(&fitting, Socket::Dos(1));
+    assert!(!enabled(&settings, (at::ROMS, dos9)), "device 9 not fitted");
+    act(
+        &mut settings,
+        (at::MACHINE, at::STANDARD),
+        FieldAction::Selected { index: 1 },
+    );
+    act(
+        &mut settings,
+        (at::MACHINE, at::SID),
+        FieldAction::Selected { index: 1 },
+    );
+    act(
+        &mut settings,
+        (at::MACHINE, at::DRIVES + 1),
+        FieldAction::Set { on: true },
+    );
+    act(
+        &mut settings,
+        (at::MACHINE, at::DRIVES),
+        FieldAction::Set { on: false },
+    );
+    assert_eq!(
+        settings.choices().fitting,
+        Fitting::C64 {
+            standard: Standard::Ntsc,
+            sid: sid::Model::Mos8580,
+            kernal: Image::Shipped(Shipped::C64Kernal),
+            basic: Image::Shipped(Shipped::C64Basic),
+            character: Image::Shipped(Shipped::C64Character),
+            drives: [None, Some(Image::Shipped(Shipped::C1541Dos))],
+        }
+    );
+    assert!(enabled(&settings, (at::ROMS, dos9)), "device 9 fitted now");
+    assert!(!enabled(
+        &settings,
+        (at::ROMS, row_of(&fitting, Socket::Dos(0)))
+    ));
+    act(
+        &mut settings,
+        (at::MACHINE, at::JOYSTICK),
+        FieldAction::Selected { index: 2 },
+    );
+    assert_eq!(settings.choices().joystick, Joystick::Off);
+}
+
+#[test]
+fn a_running_commodore_s_joystick_changes_but_its_fitting_does_not() {
+    tairix_font::install_test_transport();
+    let fitting = Fitting::c64(Standard::Pal, sid::Model::Mos6581, 1);
+    let mut settings = Settings::new(&machine(fitting.clone()), Standing::Running, Vec::new());
+    for row in [at::STANDARD, at::SID, at::DRIVES, at::DRIVES + 1] {
+        assert!(!enabled(&settings, (at::MACHINE, row)), "row {row}");
+    }
+    assert!(enabled(&settings, (at::MACHINE, at::JOYSTICK)));
+    act(
+        &mut settings,
+        (at::MACHINE, at::STANDARD),
+        FieldAction::Selected { index: 1 },
+    );
+    act(
+        &mut settings,
+        (at::MACHINE, at::DRIVES + 1),
+        FieldAction::Set { on: true },
+    );
+    assert_eq!(settings.choices().fitting, fitting, "what is fitted stands");
+    act(
+        &mut settings,
+        (at::MACHINE, at::JOYSTICK),
+        FieldAction::Selected { index: 1 },
+    );
+    assert_eq!(settings.choices().joystick, Joystick::Port1);
 }

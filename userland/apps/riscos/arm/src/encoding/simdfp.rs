@@ -50,11 +50,6 @@ pub(crate) enum SimdFpKind {
     StructureAll,
 }
 
-/// A field of at most eight bits.
-fn byte(f: &Fields, field: Field) -> u8 {
-    f.get(field).to_le_bytes()[0]
-}
-
 /// `D:Vd` as `Vd:D`: a double's number field as a single's number.
 const fn single_of(value: u8) -> u8 {
     (value & 15) << 1 | value >> 4
@@ -66,7 +61,7 @@ const fn double_of(value: u8) -> u8 {
 }
 
 fn reg_d(f: &Fields, double: bool) -> u8 {
-    let value = byte(f, Field::CRd);
+    let value = f.byte(Field::CRd);
     if double {
         value
     } else {
@@ -75,7 +70,7 @@ fn reg_d(f: &Fields, double: bool) -> u8 {
 }
 
 fn reg_n(f: &Fields, double: bool) -> u8 {
-    let value = byte(f, Field::CRn);
+    let value = f.byte(Field::CRn);
     if double {
         double_of(value)
     } else {
@@ -84,7 +79,7 @@ fn reg_n(f: &Fields, double: bool) -> u8 {
 }
 
 fn reg_m(f: &Fields, double: bool) -> u8 {
-    let value = byte(f, Field::CRm);
+    let value = f.byte(Field::CRm);
     if double {
         value
     } else {
@@ -149,7 +144,7 @@ impl SimdFpKind {
                 m: reg_m(f, double),
             },
             Self::Select => SimdFp::Select {
-                cond: SELECTED[usize::from(byte(f, Field::Opc1) & 3)],
+                cond: SELECTED[usize::from(f.byte(Field::Opc1) & 3)],
                 double,
                 d: reg_d(f, double),
                 n: reg_n(f, double),
@@ -204,7 +199,7 @@ impl SimdFpKind {
             Self::Fixed => {
                 let word = f.bit(Field::X);
                 let size: u8 = if word { 32 } else { 16 };
-                let encoded = byte(f, Field::Imm) << 1 | byte(f, Field::Y);
+                let encoded = f.byte(Field::Imm) << 1 | f.byte(Field::Y);
                 SimdFp::Fixed {
                     to_fixed: f.bit(Field::Opc1),
                     unsigned: f.bit(Field::U),
@@ -218,7 +213,7 @@ impl SimdFpKind {
             Self::MoveImmediate => SimdFp::MoveImmediate {
                 double,
                 d: reg_d(f, double),
-                imm: byte(f, Field::Imm),
+                imm: f.byte(Field::Imm),
             },
             Self::CoreSingle => SimdFp::CoreSingle {
                 to_core: f.bit(Field::L),
@@ -233,7 +228,7 @@ impl SimdFpKind {
                 rt2: Reg::field(f.get(Field::Rt2)),
             },
             Self::CoreScalar { to_core } => {
-                let selector = byte(f, Field::Opc1) << 2 | byte(f, Field::Opc2);
+                let selector = f.byte(Field::Opc1) << 2 | f.byte(Field::Opc2);
                 let unsigned = to_core && f.bit(Field::U);
                 let (size, index) = match selector {
                     s if s & 0b1000 != 0 => (0, s & 7),
@@ -270,7 +265,7 @@ impl SimdFpKind {
             }
             Self::System => {
                 let read = f.bit(Field::L);
-                let register = System::of(byte(f, Field::CRn))?;
+                let register = System::of(f.byte(Field::CRn))?;
                 if !read && !matches!(register, System::Fpsid | System::Fpscr | System::Fpexc) {
                     return None;
                 }
@@ -286,7 +281,7 @@ impl SimdFpKind {
                 d: reg_d(f, double),
                 rn: Reg::field(f.get(Field::Rn)),
                 up: f.bit(Field::U),
-                offset: byte(f, Field::Imm),
+                offset: f.byte(Field::Imm),
             },
             Self::Multiple => {
                 let (p, up, writeback) = (f.bit(Field::P), f.bit(Field::U), f.bit(Field::W));
@@ -302,7 +297,7 @@ impl SimdFpKind {
                     rn: Reg::field(f.get(Field::Rn)),
                     mode: BlockMode::of(p, up),
                     writeback,
-                    words: byte(f, Field::Imm),
+                    words: f.byte(Field::Imm),
                 }
             }
             Self::Three(op) => three(op, layout, f)?,
@@ -311,7 +306,7 @@ impl SimdFpKind {
             Self::Shift(op) => shift(op, layout, f)?,
             Self::Misc(op) => misc(op, layout, f)?,
             Self::Immediate => {
-                let cmode = byte(f, Field::X) << 4 | byte(f, Field::Cmode);
+                let cmode = f.byte(Field::X) << 4 | f.byte(Field::Cmode);
                 let d = reg_d(f, true);
                 SimdImmediateOp::of(cmode)?;
                 if quad && !even(&[d]) {
@@ -321,12 +316,12 @@ impl SimdFpKind {
                     cmode,
                     q: quad,
                     d,
-                    imm: byte(f, Field::Imm),
+                    imm: f.byte(Field::Imm),
                 }
             }
             Self::Extract => {
                 let (d, n, m) = (reg_d(f, true), reg_n(f, true), reg_m(f, true));
-                let start = byte(f, Field::Imm);
+                let start = f.byte(Field::Imm);
                 if quad && !even(&[d, n, m]) || !quad && start >= 8 {
                     return None;
                 }
@@ -340,13 +335,13 @@ impl SimdFpKind {
             }
             Self::Table => SimdFp::Table {
                 extend: f.bit(Field::X),
-                length: byte(f, Field::Count) + 1,
+                length: f.byte(Field::Count) + 1,
                 d: reg_d(f, true),
                 n: reg_n(f, true),
                 m: reg_m(f, true),
             },
             Self::Duplicate => {
-                let selector = byte(f, Field::Imm);
+                let selector = f.byte(Field::Imm);
                 let (size, index) = match selector {
                     s if s & 1 != 0 => (0, s >> 1),
                     s if s & 0b10 != 0 => (1, s >> 2),
@@ -395,9 +390,9 @@ const fn alignment(align: u8) -> u8 {
 
 /// `VLDn` and `VSTn` of multiple structures, by the type field.
 fn structure_multiple(f: &Fields) -> Option<Structure> {
-    let size = byte(f, Field::Precision);
-    let align = byte(f, Field::Align);
-    let (elements, parts, spacing) = match byte(f, Field::Opc1) {
+    let size = f.byte(Field::Precision);
+    let align = f.byte(Field::Align);
+    let (elements, parts, spacing) = match f.byte(Field::Opc1) {
         0b0111 if align & 2 == 0 => (1, 1, 1),
         0b1010 if align != 3 => (1, 2, 1),
         0b0110 if align & 2 == 0 => (1, 3, 1),
@@ -433,9 +428,9 @@ fn structure_multiple(f: &Fields) -> Option<Structure> {
 /// `VLDn` and `VSTn` of one structure to one lane, from the size and the
 /// index and alignment field.
 fn structure_lane(f: &Fields) -> Option<Structure> {
-    let size = byte(f, Field::Precision);
-    let elements = byte(f, Field::Count) + 1;
-    let field = byte(f, Field::Align);
+    let size = f.byte(Field::Precision);
+    let elements = f.byte(Field::Count) + 1;
+    let field = f.byte(Field::Align);
     let low = field & 3;
     let (index, spacing, align) = match (elements, size) {
         (1 | 3, 0) if field & 1 == 0 => (field >> 1, 1, 1),
@@ -481,8 +476,8 @@ fn structure_lane(f: &Fields) -> Option<Structure> {
 
 /// `VLDn` of one structure to all lanes.
 fn structure_all(f: &Fields) -> Option<Structure> {
-    let size = byte(f, Field::Precision);
-    let elements = byte(f, Field::Count) + 1;
+    let size = f.byte(Field::Precision);
+    let elements = f.byte(Field::Count) + 1;
     let t = f.bit(Field::X);
     let aligned = f.bit(Field::Align);
     let ebytes = 1u8 << (size & 3);
@@ -559,7 +554,7 @@ fn three(op: SimdThreeOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
     }
     let size = match fixed_size(op) {
         Some(size) => size,
-        None => byte(f, Field::Precision),
+        None => f.byte(Field::Precision),
     };
     let sizes_allowed = match op {
         O::Vqadd | O::Vqsub | O::Vshl | O::Vqshl | O::Vrshl | O::Vqrshl | O::Vadd | O::Vsub => true,
@@ -595,7 +590,7 @@ fn long(op: SimdLongOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
     let size = match op {
         O::Vmullp => 0,
         O::Vmullp64 => 2,
-        _ => byte(f, Field::Precision),
+        _ => f.byte(Field::Precision),
     };
     let registers_allowed = match op.width() {
         Width::Long => even(&[d]),
@@ -617,9 +612,9 @@ fn long(op: SimdLongOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
 }
 
 fn by_scalar(op: SimdScalarOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
-    let size = byte(f, Field::Precision);
+    let size = f.byte(Field::Precision);
     let (d, n) = (reg_d(f, true), reg_n(f, true));
-    let scalar = byte(f, Field::CRm);
+    let scalar = f.byte(Field::CRm);
     let (m, index) = if size == 1 {
         (scalar & 7, scalar >> 3)
     } else {
@@ -666,9 +661,9 @@ fn shift(op: SimdShiftOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
     use SimdShiftOp as O;
     // VMOVL's row holds only imm6's top three bits: the size alone.
     let imm6 = if op == O::Vmovl {
-        byte(f, Field::Imm) << 3
+        f.byte(Field::Imm) << 3
     } else {
-        byte(f, Field::Imm)
+        f.byte(Field::Imm)
     };
     let q = f.bit(Field::Q);
     let (d, m) = (reg_d(f, true), reg_m(f, true));
@@ -706,7 +701,7 @@ fn shift(op: SimdShiftOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
 
 fn misc(op: SimdMiscOp, layout: &Layout, f: &Fields) -> Option<SimdFp> {
     use SimdMiscOp as O;
-    let size = byte(f, Field::Precision);
+    let size = f.byte(Field::Precision);
     let quadword = layout.field(Field::Q) != 0;
     let (d, m) = (reg_d(f, true), reg_m(f, true));
     let crypto = matches!(
@@ -1150,6 +1145,9 @@ fn set_lanes(f: &mut Fields, unsigned: bool, size: u8, q: bool) {
 /// `L` and `imm6` for a shift of `amount` on lanes of 8 << `size` bits.
 fn shift_fields(op: SimdShiftOp, size: u8, amount: u8) -> (bool, u32) {
     use SimdShiftOp as O;
+    if size > 3 {
+        return (false, OUT_OF_RANGE);
+    }
     let esize = 8u32 << size;
     let amount = u32::from(amount);
     let long = size == 3;

@@ -66,6 +66,7 @@ mod program {
     use tairix_openmicro::front::{events, folder, media};
     use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
     use tairix_openmicro::machine::Model;
+    use tairix_openmicro::worker::protocol::DeckKey;
     use tairix_openmicro::worker::MachineService;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::{File, LogSink};
@@ -928,7 +929,7 @@ mod program {
             let Some(win) = &mut self.sheet else {
                 return;
             };
-            match win.event(event, looks) {
+            match win.event(&mut self.client, event, looks) {
                 SheetEvent::Nothing => self.pick_rom(),
                 SheetEvent::Closed => self.close_sheet(),
                 SheetEvent::Answered(answer) => {
@@ -1037,9 +1038,9 @@ mod program {
                 SheetAnswer::New(assistance::Answer::Create {
                     model,
                     name,
-                    choice,
+                    choices,
                 }) => {
-                    if let Some((fitting, disc)) = offers::chosen(model, choice) {
+                    if let Some((fitting, disc)) = offers::chosen(model, &choices) {
                         self.create(fitting, &name, disc);
                     }
                 }
@@ -1066,6 +1067,7 @@ mod program {
             machine.name.clone_from(&choices.name);
             machine.volume = choices.volume;
             machine.fast_tape = choices.fast_tape;
+            machine.joystick = choices.joystick;
             if let Err(err) = self.library.replace(machine) {
                 self.refuse(
                     "The settings could not be applied",
@@ -1077,6 +1079,7 @@ mod program {
                 let window = &mut self.machines[n];
                 window.volume = choices.volume;
                 window.fast_tape = choices.fast_tape;
+                window.set_joystick(choices.joystick);
                 if window.name != choices.name {
                     window.rename(&mut self.client, &choices.name);
                 }
@@ -1387,7 +1390,7 @@ mod program {
             if !self.documents_reachable(MediaOwed::Insert(id)) {
                 return;
             }
-            let model = machine.model();
+            let fitted = machine.fitting.drives();
             let purposes = PhysicalDrive::ALL
                 .iter()
                 .zip(&machine.discs)
@@ -1397,7 +1400,7 @@ mod program {
                 let Some(held) = held else {
                     continue;
                 };
-                if matches!(purpose, Purpose::Disc(_)) && !model.has_drives() {
+                if matches!(purpose, Purpose::Disc(drive) if !fitted[drive.index()]) {
                     continue;
                 }
                 let job = FileJob::FromFolder {
@@ -1657,7 +1660,8 @@ mod program {
                 FileDone::FolderMade { id, folder } => self.folder_made(id, folder),
                 FileDone::Listed { id, names } => {
                     if let (Some(n), Ok(names)) = (self.index(id), names) {
-                        self.machines[n].offered = folder::offered(&names);
+                        let window = &mut self.machines[n];
+                        window.offered = folder::offered(&names, window.model, window.fitted());
                     }
                 }
                 FileDone::FolderCopied { to, folder } => match folder {
@@ -1739,7 +1743,7 @@ mod program {
                     let empty = running.is_none_or(|window| {
                         !window.shown().discs[0] && window.rack.disc(PhysicalDrive::Zero).is_none()
                     });
-                    (machine.model().has_drives() && machine.discs[0].is_none() && empty)
+                    (machine.fitting.drives()[0] && machine.discs[0].is_none() && empty)
                         .then_some(Purpose::Disc(PhysicalDrive::Zero))
                 }
                 None => None,
@@ -1749,6 +1753,7 @@ mod program {
                     id,
                     folder,
                     purpose,
+                    model: machine.model(),
                 },
                 None if running.is_some() => FileJob::List { id, folder },
                 None => return,
@@ -1778,7 +1783,10 @@ mod program {
                     self.remember(id, |machine| match purpose {
                         Purpose::Disc(drive) => machine.discs[drive.index()] = held,
                         Purpose::Tape => machine.tape = held,
-                        Purpose::Snapshot | Purpose::Rom(_) => {}
+                        Purpose::Snapshot
+                        | Purpose::Rom(_)
+                        | Purpose::Cartridge
+                        | Purpose::Program => {}
                     });
                 }
                 if let Some(medium) = medium {
@@ -1810,6 +1818,8 @@ mod program {
                     image: bytes,
                 })),
                 Purpose::Snapshot => window.ask(Pending::RestoreSnapshot(bytes)),
+                Purpose::Cartridge => window.insert_cartridge(bytes),
+                Purpose::Program => window.ask(Pending::LoadProgram(bytes)),
                 Purpose::Rom(_) => {}
             }
             if of_folder {
@@ -1853,7 +1863,9 @@ mod program {
                         of_folder: true,
                         image,
                     }),
-                    Purpose::Snapshot | Purpose::Rom(_) => false,
+                    Purpose::Snapshot | Purpose::Rom(_) | Purpose::Cartridge | Purpose::Program => {
+                        false
+                    }
                 }
             });
             if !adopted {
@@ -2228,26 +2240,24 @@ mod program {
                 }
                 Command::NewDisc(drive) => self.new_medium(n, Purpose::Disc(drive)),
                 Command::EjectDisc(drive) => self.machines[n].ask(Pending::EjectDisc(drive)),
-                Command::SaveDisc(drive) => {
-                    if let Some(disc) = self.machines[n].rack.disc(drive) {
-                        let saving = Saving {
-                            suggested: disc.name.clone(),
-                            holding: Holding::Disc,
-                            bytes: disc.image.clone(),
-                        };
-                        self.machines[n].offer(saving);
-                        self.next_save(n);
-                    }
-                }
+                Command::SaveDisc(drive) => self.machines[n].ask(Pending::SaveDisc(drive)),
                 Command::InsertTape => self.pick_open(n, Purpose::Tape),
                 Command::FolderTape(at) => self.insert_from_folder(n, Purpose::Tape, at),
                 Command::NewTape => self.new_medium(n, Purpose::Tape),
                 Command::RewindTape => self.machines[n].ask(Pending::RewindTape),
+                Command::Record if self.machines[n].model.has_play_key() => {
+                    self.machines[n].ask(Pending::Deck(DeckKey::Record));
+                }
                 Command::Record => {
                     let on = !self.machines[n].recording();
                     self.machines[n].ask(Pending::RecordTape(on));
                 }
+                Command::Play => self.machines[n].ask(Pending::Deck(DeckKey::Play)),
+                Command::Stop => self.machines[n].ask(Pending::Deck(DeckKey::Stop)),
                 Command::EjectTape => self.machines[n].ask(Pending::EjectTape),
+                Command::InsertCartridge => self.pick_open(n, Purpose::Cartridge),
+                Command::RemoveCartridge => self.machines[n].remove_cartridge(),
+                Command::LoadProgram => self.pick_open(n, Purpose::Program),
                 Command::Break => self.machines[n].press_break(),
                 Command::Reset => self.machines[n].ask(Pending::PowerOn),
                 Command::Pause => self.machines[n].toggle_pause(),
@@ -2335,6 +2345,7 @@ mod program {
                         id,
                         folder,
                         purpose,
+                        model: self.machines[n].model,
                     },
                     "It could not be made",
                 );
@@ -2352,12 +2363,18 @@ mod program {
         /// had the keyboard last where it takes it, else to the first machine
         /// of the library that does, started for it.
         fn handed(&mut self, handed: Handed) {
-            let takes = |model: Model| Purpose::of(&handed.name, model).is_some();
+            let takes = |model: Model, drives: [bool; 2]| {
+                Purpose::of(&handed.name, model, drives).is_some()
+            };
             let running = self
                 .focused
                 .and_then(|id| self.index(id))
-                .filter(|&n| takes(self.machines[n].model))
-                .or_else(|| self.machines.iter().position(|window| takes(window.model)));
+                .filter(|&n| takes(self.machines[n].model, self.machines[n].fitted()))
+                .or_else(|| {
+                    self.machines
+                        .iter()
+                        .position(|window| takes(window.model, window.fitted()))
+                });
             if let Some(n) = running {
                 self.give(n, handed);
                 return;
@@ -2366,7 +2383,10 @@ mod program {
                 .library
                 .machines()
                 .iter()
-                .find(|machine| takes(machine.model()) && self.standing(machine.id).startable())
+                .find(|machine| {
+                    takes(machine.model(), machine.fitting.drives())
+                        && self.standing(machine.id).startable()
+                })
                 .map(|machine| machine.id);
             let Some(id) = at_rest else {
                 let name = handed.name.clone();
@@ -2385,11 +2405,15 @@ mod program {
             }
         }
 
-        /// `handed` given to machine window `n`.
+        /// `handed` given to machine window `n`, refused over it where the
+        /// machine has nothing to take it.
         fn give(&mut self, n: usize, handed: Handed) {
             let window = &self.machines[n];
-            let Some(purpose) = Purpose::of(&handed.name, window.model) else {
+            let Some(purpose) = Purpose::of(&handed.name, window.model, window.fitted()) else {
+                let owner = Some(window.window_id());
+                let headline = format!("\u{201c}{}\u{201d} could not be used", handed.name);
                 handed.drop_file();
+                self.refuse_over(owner, &headline, machine::NOTHING_TO_TAKE_IT);
                 return;
             };
             let id = window.id;
@@ -2678,20 +2702,24 @@ mod program {
                     }
                 }
                 Answer::OfferedFile(offer) => {
-                    let ours = offer
+                    let target = self
+                        .machines
+                        .iter()
+                        .find(|window| window.window_id() == offer.window_id);
+                    let taken = offer
                         .media
                         .as_deref()
                         .ok()
                         .and_then(MediaType::from_media_str)
-                        .is_some_and(|media| {
-                            matches!(
-                                media,
-                                MediaType::AcornDfsDisc | MediaType::TapeUef | MediaType::TapeCsw
-                            )
+                        .and_then(tairix_browse::media::named_extension)
+                        .zip(target)
+                        .is_some_and(|(extension, window)| {
+                            Purpose::of_extension(extension, window.model, window.fitted())
+                                .is_some()
                         });
                     let _ = self
                         .client
-                        .answer_file_offer(offer.window_id, offer.serial, ours);
+                        .answer_file_offer(offer.window_id, offer.serial, taken);
                 }
                 Answer::OpenTarget(Ok(Some(target))) => self.opened(target),
                 Answer::OpenTarget(Err(err)) => {

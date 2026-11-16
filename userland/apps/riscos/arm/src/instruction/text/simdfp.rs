@@ -191,6 +191,15 @@ const fn misc_typing(op: SimdMiscOp) -> Typing {
 }
 
 /// A register list: `{S0}`, `{D0-D3}`.
+/// `base` bits widened `size` times over: a lane's width. A size past any
+/// lane's gives nothing.
+const fn bits(base: u32, size: u8) -> u32 {
+    match base.checked_shl(size as u32) {
+        Some(bits) => bits,
+        None => 0,
+    }
+}
+
 fn list(out: &mut Buffer, double: bool, first: u8, count: u8) -> fmt::Result {
     let last = first.saturating_add(count.saturating_sub(1));
     let bank = if double { 'D' } else { 'S' };
@@ -260,14 +269,14 @@ fn structure_list(out: &mut Buffer, d: u8, shape: crate::instruction::Structure)
     let registers = shape.registers();
     let whole = shape.lanes == StructureLanes::Multiple;
     if whole && (shape.parts > 1 || shape.spacing == 1) {
-        return list(out, true, d, registers);
+        return list(out, true, d, u8::try_from(registers).unwrap_or(u8::MAX));
     }
     out.push("{")?;
     for index in 0..registers {
         if index > 0 {
             out.push(",")?;
         }
-        write!(out, "D{}", d + shape.register(index))?;
+        write!(out, "D{}", u32::from(d) + shape.register(index))?;
         match shape.lanes {
             StructureLanes::Multiple => {}
             StructureLanes::All => out.push("[]")?,
@@ -491,7 +500,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         } => {
             m.push("VMOV")?;
             m.push(c)?;
-            let bits = 8u32 << size;
+            let bits = bits(8, size);
             if to_core && size < 2 {
                 data_type(m, Typing::Signed, unsigned, bits)?;
             } else {
@@ -506,7 +515,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         SimdFp::CoreDuplicate { size, q, d, rt } => {
             m.push("VDUP")?;
             m.push(c)?;
-            write!(m, ".{}", 8u32 << size)?;
+            write!(m, ".{}", bits(8, size))?;
             write!(operands, "{},{rt}", Vector { q, d })?;
         }
         SimdFp::System { read, register, rt } => {
@@ -590,7 +599,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
             let copy = op == SimdThreeOp::Vorr && n == rm;
             m.push(if copy { "VMOV" } else { op.name() })?;
             m.push(c)?;
-            data_type(m, three_typing(op), unsigned, 8 << size)?;
+            data_type(m, three_typing(op), unsigned, bits(8, size))?;
             let reg = |d| Vector { q, d };
             // A shift by register names the value before the shifts.
             let by_register = matches!(
@@ -617,8 +626,8 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
             m.push(c)?;
             let bits = match op {
                 SimdLongOp::Vmullp64 => 64,
-                _ if op.width() == Width::Narrow => 16 << size,
-                _ => 8 << size,
+                _ if op.width() == Width::Narrow => bits(16, size),
+                _ => bits(8, size),
             };
             data_type(m, long_typing(op), unsigned, bits)?;
             match op.width() {
@@ -639,7 +648,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         } => {
             m.push(op.name())?;
             m.push(c)?;
-            data_type(m, scalar_typing(op), unsigned, 8 << size)?;
+            data_type(m, scalar_typing(op), unsigned, bits(8, size))?;
             let (dest, first) = if op.long() {
                 (qq(d), dq(n))
             } else {
@@ -668,7 +677,11 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
                     m.push(".F32")?;
                 }
                 _ => {
-                    let bits = if op.narrow() { 16 << size } else { 8 << size };
+                    let bits = if op.narrow() {
+                        bits(16, size)
+                    } else {
+                        bits(8, size)
+                    };
                     data_type(m, shift_typing(op), unsigned, bits)?;
                 }
             }
@@ -738,7 +751,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         } => {
             m.push("VDUP")?;
             m.push(c)?;
-            write!(m, ".{}", 8u32 << size)?;
+            write!(m, ".{}", bits(8, size))?;
             write!(operands, "{},D{rm}[{index}]", Vector { q, d })?;
         }
         SimdFp::Structure {
@@ -750,7 +763,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         } => {
             write!(m, "{}{}", if load { "VLD" } else { "VST" }, shape.elements)?;
             m.push(c)?;
-            write!(m, ".{}", 8u32 << shape.size)?;
+            write!(m, ".{}", bits(8, shape.size))?;
             structure_list(operands, d, shape)?;
             write!(operands, ",[{rn}")?;
             if shape.align > 1 {
@@ -796,9 +809,9 @@ fn misc(
         }
         O::Vrecpe | O::Vrsqrte => m.push(".U32")?,
         O::Vmovn | O::Vqmovun | O::Vqmovn => {
-            data_type(m, misc_typing(op), unsigned, 16 << size)?;
+            data_type(m, misc_typing(op), unsigned, bits(16, size))?;
         }
-        _ => data_type(m, misc_typing(op), unsigned, 8 << size)?,
+        _ => data_type(m, misc_typing(op), unsigned, bits(8, size))?,
     }
     let reg = |d| Vector { q, d };
     match op {
@@ -806,7 +819,7 @@ fn misc(
             write!(operands, "{},{}", dq(d), qq(rm))
         }
         O::VcvtFromHalf => write!(operands, "{},{}", qq(d), dq(rm)),
-        O::Vshll => write!(operands, "{},{},#{}", qq(d), dq(rm), 8 << size),
+        O::Vshll => write!(operands, "{},{},#{}", qq(d), dq(rm), bits(8, size)),
         O::Vcgt0
         | O::Vcge0
         | O::Vceq0

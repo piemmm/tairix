@@ -157,6 +157,33 @@ fn zero_and_a_digit_count_out_of_range_are_answered() {
         ..one
     };
     assert_eq!(Decimal::of(beyond, 5, Mode::Nearest), None);
+    let least = Parts {
+        exp: LEAST_EXP,
+        ..one
+    };
+    assert_eq!(
+        Decimal::of(least, 5, Mode::Nearest),
+        Some((
+            Decimal {
+                negative: false,
+                significand: 18_226,
+                exponent: -4955,
+            },
+            true
+        )),
+        "the FPA's least denormal, 2^-16446"
+    );
+    assert_eq!(
+        Decimal::of(
+            Parts {
+                exp: LEAST_EXP - 1,
+                ..one
+            },
+            5,
+            Mode::Nearest
+        ),
+        None
+    );
 }
 
 fn round_to(format: Binary, x: Exact) -> u64 {
@@ -266,9 +293,10 @@ fn the_range_s_bounds_are_where_double_extended_ends() {
     // not.
     assert!(bits(4933) > 16_384);
     assert!(bits(4932) <= 16_384);
-    // 10^−4951 is below 2^−16446, half the least subnormal; 10^−4950 is not.
-    assert!(bits(4951) > 16_446);
-    assert!(bits(4950) <= 16_446);
+    // 10^−4952 is below 2^−16447, half the FPA's least denormal; 10^−4951
+    // is not.
+    assert!(bits(4952) > 16_447);
+    assert!(bits(4951) <= 16_447);
     let one = |exponent: i32| {
         Decimal {
             negative: false,
@@ -279,8 +307,8 @@ fn the_range_s_bounds_are_where_double_extended_ends() {
     };
     assert_eq!(one(4933), Err(Beyond::Above));
     assert!(one(4932).is_ok());
-    assert_eq!(one(-4952), Err(Beyond::Below));
-    assert!(one(-4951).is_ok());
+    assert_eq!(one(-4953), Err(Beyond::Below));
+    assert!(one(-4952).is_ok());
     let many = Decimal {
         negative: true,
         significand: 10u128.pow(37),

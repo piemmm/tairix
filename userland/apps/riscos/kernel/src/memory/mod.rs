@@ -14,15 +14,16 @@ pub mod policy;
 mod slots;
 
 use tairix_collections::TryReserveError;
+use tairix_riscos_arm::bus::Bus;
 use tairix_riscos_arm::mmu::{
     Access, Frame, FrameKind, Mmu, MmuError, Rights, Table, FRAME_WORDS, PAGE_SIZE,
 };
 
 pub use areas::{
-    AccessPrivilege, AreaError, AreaFlags, Clamps, Create, Created, Failure, Handler, Info,
+    access_privilege, AreaError, AreaFlags, Clamps, Create, Created, Failure, Handler, Info,
     Located, LogicalOp, PageQuery, PhysicalOp, Read, FREE_POOL, TITLE,
 };
-pub use guest::{Granted, Guest, GuestError, PageEntry, Service};
+pub use guest::{Guest, GuestError, PageEntry, Service};
 use layout::{Layout, COMPATIBILITY, HIGH_ZERO_PAGE, SCRATCH, ZERO_PAGE_SIZE};
 use policy::Ceiling;
 pub use slots::{Bits, Slot};
@@ -110,20 +111,18 @@ enum Holder {
     Area { area: areas::Id, index: u32 },
 }
 
-/// A physical page's record: who holds it, and its RISC OS page flags.
+/// A physical page's record: who holds it, and whether it is claimed for its
+/// holder alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Record {
     holder: Option<Holder>,
     /// Exclusively claimed: no handler or physical op may take it.
     unavailable: bool,
-    /// Reserved for whoever reserved it, whoever holds it now.
-    reserved: bool,
 }
 
 const UNHELD: Record = Record {
     holder: None,
     unavailable: false,
-    reserved: false,
 };
 
 /// Every page's record, by number.
@@ -150,11 +149,10 @@ impl Pages {
         Ok(())
     }
 
-    /// The page is free again: only a reservation outlives its holder.
+    /// The page is free again.
     fn free(&mut self, page: Frame) {
         if let Some(record) = self.records.get_mut(page.number() as usize) {
-            record.holder = None;
-            record.unavailable = false;
+            *record = UNHELD;
         }
     }
 }
@@ -254,8 +252,9 @@ impl Memory {
         self.layout
     }
 
-    /// The MMU the processor runs through.
-    pub const fn mmu(&mut self) -> &mut Mmu {
+    /// The bus the processor runs through: the address space as the guest
+    /// sees it, its mappings the kernel's alone to change.
+    pub fn bus(&mut self) -> &mut impl Bus {
         &mut self.mmu
     }
 
@@ -263,6 +262,12 @@ impl Memory {
     #[must_use]
     pub const fn ram(&self) -> u64 {
         self.ceiling.bytes()
+    }
+
+    /// The pages in use: every page any part of the address space holds.
+    #[must_use]
+    pub const fn pages_in_use(&self) -> u32 {
+        self.mmu.used()
     }
 
     /// The free pool, in pages: the ceiling less every page in use.
@@ -327,6 +332,7 @@ impl Memory {
             if let Some(target) = self.mmu.words_mut(frame) {
                 target[..chunk.len()].copy_from_slice(chunk);
             }
+            // A reserved, never-mapped page read-only: mapping cannot fail.
             let _ = self.mmu.map(Table::Global, page, frame, HOST);
             let _ = self.mmu.release(frame);
         }
@@ -347,7 +353,7 @@ impl Memory {
     /// Whether any 26-bit code is resident: a 26-bit task or module.
     #[must_use]
     pub fn resident_26bit(&self) -> bool {
-        self.modules_26bit > 0 || self.slots.any(Bits::Bit26)
+        self.modules_26bit > 0 || self.slots.any_26bit()
     }
 
     /// Maps the low pages a task of `bits` sees: zero page and ScratchSpace

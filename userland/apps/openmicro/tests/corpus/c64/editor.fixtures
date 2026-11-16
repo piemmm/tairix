@@ -1,0 +1,38 @@
+# Recorded by `cargo xtask openmicro --reference` from KERNAL 3, BASIC V2 and 1541 DOS 2.6,
+# but for a scenario marked `ours`, whose observation is this machine's own.
+
+scenario delete_and_return
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT "ABCD"
+row ABCD
+row READY.
+
+scenario cursor_up_and_over
+row     **** OPENMICRO 64 BASIC V2 ****
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT 19345
+row  19345
+row READY.
+
+scenario quote_mode
+row B
+row     **** OPENMICRO 64 BASIC V2 ****
+row READY.
+row  64K RAM SYSTEM  38911 BASIC BYTES FREE
+row READY.
+row PRINT "A]SB"
+row A
+
+scenario clear_screen
+row PRINT "KEPT"
+row KEPT
+row READY.
+
+scenario run_stop_and_restore
+row READY.
+row PRINT "AGAIN"
+row AGAIN
+row READY.

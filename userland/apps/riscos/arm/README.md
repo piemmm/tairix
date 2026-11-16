@@ -3,7 +3,7 @@
 The RISC OS emulator's ARM processor: the A32 and T32 encoding tables, the
 decoders, encoders and assembler's text derived from them, the 26-bit and
 32-bit programmer's models with Thumb state and `IT` blocks, the two profiles,
-architectural exceptions, the FPA as FPEmulator computes it, VFP, Advanced
+architectural exceptions, the FPA as FPEmulator answers, VFP, Advanced
 SIMD and the Cryptographic Extension through ARMv8-A's AArch32 additions, and
 the guest MMU. It knows nothing of RISC OS. The design and its staging are
 `plans/RISCOS-EMULATOR.md` §2; the description is
@@ -20,8 +20,9 @@ Stability: `experimental`.
 - `cpu` — the processor: registers and banks, the step loop, the decoded
   pages, exceptions, the FPA's and the VFP and Advanced SIMD instructions,
   and why a run stops.
-- `fpa` — the FPA: FPEmulator's internal format, its arithmetic and
-  transcendental functions, the transfers' conversions, the FPSR and traps.
+- `fpa` — the FPA: FPEmulator's internal format, the arithmetic, the
+  transcendental functions correctly rounded, the transfers' conversions,
+  packed decimal among them, the FPSR and traps.
 - `vfp` — VFP and Advanced SIMD: the register file, the FPSCR, FPEXC and
   the identification registers; the floating-point unit over `lib/softfloat`
   with ARM's rules; the integer lane arithmetic; and the Cryptographic

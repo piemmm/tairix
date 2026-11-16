@@ -20,31 +20,34 @@ fn enter_makes_the_turbo_xt_with_a_disk_under_the_name_offered() {
     let Some(Answer::Create {
         model,
         name,
-        choice,
+        choices,
     }) = answer
     else {
         panic!("created: {answer:?}");
     };
     assert_eq!(name, "Turbo XT");
-    assert_eq!(chosen(model, choice), Some((Template::TurboXt, true)));
+    assert_eq!(chosen(model, &choices), Some((Template::TurboXt, true)));
 }
 
 #[test]
 fn only_a_machine_with_a_controller_is_offered_a_disk() {
     for (offer, (template, label)) in offers().iter().zip(TEMPLATES) {
         assert_eq!(offer.label, label);
-        let offered = matches!(offer.choice, Choice::Offered { .. });
+        let offered = matches!(offer.choices, [Choice::Offered { .. }]);
         assert_eq!(offered, template.config().fixed.is_some(), "{label}");
     }
-    assert!(matches!(offers()[0].choice, Choice::Fixed { .. }), "the PC");
-    assert_eq!(chosen(0, None), Some((Template::IbmPc, false)));
-    assert_eq!(chosen(1, Some(1)), Some((Template::IbmXt, false)));
-    assert_eq!(chosen(TEMPLATES.len(), Some(0)), None);
+    assert!(
+        matches!(offers()[0].choices, [Choice::Fixed { .. }]),
+        "the PC"
+    );
+    assert_eq!(chosen(0, &[None]), Some((Template::IbmPc, false)));
+    assert_eq!(chosen(1, &[Some(1)]), Some((Template::IbmXt, false)));
+    assert_eq!(chosen(TEMPLATES.len(), &[Some(0)]), None);
 }
 
 #[test]
 fn the_description_counts_the_disk_chosen() {
-    assert!(describe(1, Some(A_NEW_DISK)).ends_with("1 hard disk \u{b7} AdLib"));
-    assert!(!describe(1, Some(1)).contains("hard disk"));
-    assert!(describe(9, None).is_empty());
+    assert!(describe(1, &[Some(A_NEW_DISK)]).ends_with("1 hard disk \u{b7} AdLib"));
+    assert!(!describe(1, &[Some(1)]).contains("hard disk"));
+    assert!(describe(9, &[None]).is_empty());
 }

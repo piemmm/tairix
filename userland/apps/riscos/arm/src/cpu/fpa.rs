@@ -11,16 +11,14 @@
 //! abort inside itself.
 
 use super::memory::Access;
-use super::{Cpu, Flow, Stop};
+use super::{Cpu, Flow, Stop, PC};
 use crate::bus::{Bus, Width};
 use crate::fpa::{Exception, Format, Fpa, Precision, Rounding};
 use crate::instruction::{
     CoIndex, FpaCompareOp, FpaMultipleOp, FpaOperand, FpaRegisterOp, FpaTransferOp,
 };
-use crate::psr::{self, Mode};
+use crate::psr::Mode;
 use crate::reg::Reg;
-
-const PC: Reg = Reg::PC;
 
 /// The words `LFM` and `SFM` move for each register: its internal format.
 const MULTIPLE_WORDS: usize = 3;
@@ -133,7 +131,7 @@ impl Cpu {
         }
         match self.r.get_mut(rd.index()) {
             Some(slot) => *slot = value,
-            None => self.cpsr = (self.cpsr & !psr::NZCV) | (value & psr::NZCV),
+            None => self.set_nzcv(value),
         }
     }
 

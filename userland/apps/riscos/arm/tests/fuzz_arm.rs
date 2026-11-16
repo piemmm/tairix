@@ -24,6 +24,9 @@ use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::cpu::{Cpu, State};
 use tairix_riscos_arm::instruction::Set;
 use tairix_riscos_arm::isa::{Feature, Isa};
+use tairix_riscos_arm::mmu::{
+    Access, FrameKind, Mmu, Rights, Table, Watcher, GRANULE_SIZE, PAGE_BITS, PAGE_SIZE,
+};
 use tairix_riscos_arm::profile::{Profile, BIT26, BIT32};
 use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::t32::{self, Encoding, Position, Size};
@@ -76,6 +79,7 @@ impl Bus for Memory {
         Ok(Fetch {
             word: self.words[index],
             host: self.host[page],
+            page: address >> PAGE_BITS,
         })
     }
 
@@ -103,9 +107,8 @@ impl Bus for Memory {
         let index = Self::index(address).ok_or(Abort::Translation)?;
         let shift = 8 * (address & 3);
         let mask = match width {
-            Width::Byte => 0xFF << shift,
-            Width::Half => 0xFFFF << shift,
             Width::Word => u32::MAX,
+            narrow => narrow.mask() << shift,
         };
         self.words[index] = (self.words[index] & !mask) | ((value << shift) & mask);
         Ok(())
@@ -304,6 +307,75 @@ fn check_running(rng: &mut Prng, profile: &'static Profile) {
     }
 }
 
+/// A program run over the guest MMU: a page of code and data, a watched
+/// one, one that refuses User writes and a host page, the rest unmapped.
+/// A host page is never written, and every granule stored into in the
+/// watched page is reported.
+fn check_running_over_the_mmu(rng: &mut Prng, profile: &'static Profile) {
+    let mut mmu = Mmu::new(16).expect("an MMU");
+    let thumb_code = rng.below(2) == 0;
+    let mut frames = Vec::new();
+    for page in 0..4u32 {
+        let kind = if page == 3 {
+            FrameKind::Host
+        } else {
+            FrameKind::Memory
+        };
+        let frame = mmu.allocate(kind).expect("a frame");
+        for word in mmu.words_mut(frame).expect("its words").iter_mut() {
+            *word = if thumb_code {
+                drawn_halfwords(rng)
+            } else {
+                drawn_word(rng)
+            };
+        }
+        let (user, privileged) = match page {
+            2 => (Rights::Read, Rights::ReadWrite),
+            3 => (Rights::Read, Rights::Read),
+            _ => (Rights::ReadWrite, Rights::ReadWrite),
+        };
+        let access = Access {
+            user,
+            privileged,
+            execute: true,
+        };
+        mmu.map(Table::Global, page << PAGE_BITS, frame, access)
+            .expect("mapped");
+        mmu.release(frame).expect("held");
+        frames.push(frame);
+    }
+    let (target, host) = (frames[1], frames[3]);
+    let watcher = Watcher::new(0).expect("a watcher");
+    mmu.watch(target, u16::MAX, watcher).expect("watched");
+    let before = mmu.words(target).copied().expect("the watched page");
+    let host_words = mmu.words(host).copied();
+    let mut cpu = Cpu::new(profile, 2);
+    cpu.set_state(&drawn_state(rng, profile))
+        .expect("a mode the profile has");
+    for _ in 0..4 {
+        let _ = cpu.run(&mut mmu, STEPS);
+    }
+    assert_eq!(mmu.words(host).copied(), host_words, "a host page written");
+    let mut reported = 0u16;
+    mmu.take_written(watcher, |frame, granules| {
+        if frame == target {
+            reported |= granules;
+        }
+    });
+    let after = mmu.words(target).copied().expect("the watched page");
+    let per_granule = (GRANULE_SIZE / 4) as usize;
+    for granule in 0..PAGE_SIZE / GRANULE_SIZE {
+        let span = granule as usize * per_granule..(granule as usize + 1) * per_granule;
+        if after[span.clone()] != before[span] {
+            assert_ne!(
+                reported & (1 << granule),
+                0,
+                "granule {granule} stored, unreported"
+            );
+        }
+    }
+}
+
 #[test]
 fn any_word_decodes_encodes_and_runs_within_the_architecture() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -320,6 +392,8 @@ fn any_word_decodes_encodes_and_runs_within_the_architecture() {
         }
         check_running(&mut rng, &BIT26);
         check_running(&mut rng, &BIT32);
+        check_running_over_the_mmu(&mut rng, &BIT26);
+        check_running_over_the_mmu(&mut rng, &BIT32);
         iteration += 1;
         match deadline {
             None if iteration >= SMOKE_ITERATIONS => break,
