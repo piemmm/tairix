@@ -494,6 +494,9 @@ fn point(a: &mut Asm) {
         a.asl(zp(vdu_zp::TEMP));
         a.rol(zp(vdu_zp::TEMP + 1));
     }
+    // Graphics halve the table for any map type but the first.
+    a.lda(abs(vdu::MAP_TYPE));
+    a.cmp(imm(1));
     a.jsr("row_add");
     a.pla();
     a.and(imm(7));
@@ -1515,33 +1518,30 @@ fn vdu5_cell(a: &mut Asm) {
     a.bne("vdu5_row_bits");
     a.lda(zp(vdu_zp::TEMP + 4).ind_y());
     a.here("vdu5_row_bits");
+    // A row ends at its last set bit, x then put back.
+    let (pixel, plotted, row_end, next_row) = (a.local(), a.local(), a.local(), a.local());
+    a.beq(next_row);
     a.sta(abs(GLYPH_BITS));
     for offset in 0..2 {
         a.lda(abs(PX + offset));
         a.pha();
     }
-    a.ldx(imm(8));
-    a.here("vdu5_pixel");
+    a.bind(pixel);
     a.asl(abs(GLYPH_BITS));
-    a.bcc("vdu5_skip");
-    a.txa();
-    a.pha();
+    a.bcc(plotted);
     a.jsr("plot_pixel");
-    a.pla();
-    a.tax();
-    a.here("vdu5_skip");
-    a.txa();
-    a.pha();
+    a.bind(plotted);
+    a.lda(abs(GLYPH_BITS));
+    a.beq(row_end);
     a.ldx(imm(1));
     a.jsr("step_px");
-    a.pla();
-    a.tax();
-    a.dex();
-    a.bne("vdu5_pixel");
+    a.jmp(pixel);
+    a.bind(row_end);
     a.pla();
     a.sta(abs(PX + 1));
     a.pla();
     a.sta(abs(PX));
+    a.bind(next_row);
     a.ldx(imm(0xFF));
     a.jsr("step_py");
     a.ldy(abs(GLYPH_ROW));

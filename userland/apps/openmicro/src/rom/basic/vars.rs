@@ -306,13 +306,7 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.pha();
     a.jsr("expr_integer");
     a.stx(zp(z::OP));
-    let counted = a.local();
-    for byte in 0..3 {
-        a.inc(zp(z::IAC + byte));
-        a.bne(counted);
-    }
-    a.inc(zp(z::IAC + 3));
-    a.bind(counted);
+    a.jsr("int_plus_one");
     a.lda(zp(z::IAC + 3));
     a.ora(zp(z::IAC + 2));
     a.bne(near_bad);

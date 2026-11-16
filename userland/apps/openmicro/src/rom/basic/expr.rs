@@ -38,10 +38,10 @@ pub fn emit(a: &mut Asm) {
     coercions(a);
 }
 
-/// One operator step of a level: the left operand pushed, the right
-/// evaluated by `next`, then `combine` called with the left's kind in A,
-/// the right's in Y and the operator in X; the step after loops to `again`.
-fn step(a: &mut Asm, next: &'static str, combine: &'static str, again: &'static str) {
+/// One operator of a level: the left operand pushed, the right evaluated by
+/// `next`, then `combine` called with the left's kind in A, the right's in Y
+/// and the operator in X, which then holds the character after the right.
+fn operate(a: &mut Asm, next: &'static str, combine: &'static str) {
     a.stx(zp(z::OP));
     a.jsr("push_value");
     a.pha();
@@ -55,6 +55,11 @@ fn step(a: &mut Asm, next: &'static str, combine: &'static str, again: &'static 
     a.pla();
     a.jsr(combine);
     a.ldx(zp(z::OP));
+}
+
+/// [`operate`], then the level's next operator, looked for at `again`.
+fn step(a: &mut Asm, next: &'static str, combine: &'static str, again: &'static str) {
+    operate(a, next, combine);
     a.jmp(again);
 }
 
@@ -80,10 +85,11 @@ fn levels(a: &mut Asm) {
     step(a, "level_compare", "logical", "and_next");
 
     // The comparisons: the outcomes that make each true travel as its
-    // operator; a compound operator's characters are adjacent.
+    // operator; a compound operator's characters are adjacent. A level holds
+    // one comparison, and one after it is its caller's, as BASIC II leaves
+    // it: `IF A<B =C` returns C from a function.
     a.here("level_compare");
     a.jsr("level_add");
-    a.here("compare_next");
     let (equal, less, compare) = (a.local(), a.local(), a.local());
     a.cpx(imm(b'='));
     a.beq(equal);
@@ -105,7 +111,8 @@ fn levels(a: &mut Asm) {
     a.ldy(imm(0));
     a.bind(compare);
     a.jsr("compound");
-    step(a, "level_add", "compare_values", "compare_next");
+    operate(a, "level_add", "compare_values");
+    a.rts();
 
     // A compound operator: X gains EQUAL, or GREATER for `<>`, if the next
     // character is Y, which is then passed; A kept.
@@ -766,14 +773,25 @@ fn factor(a: &mut Asm) {
     a.jmp("factor_done");
     a.bind(found);
     a.jsr("load_variable");
-    // A variable may be followed by ? or !, an address and an offset.
+    // A variable may be followed by ? or !, an address and an offset, with
+    // no space between: BASIC II reads `D% ?1` as D% and a second item.
     a.sta(zp(z::TYPE));
-    a.jsr("next_a");
-    a.cmp(imm(b'?'));
+    a.ldy(zp(z::OFFSET_A));
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.sty(zp(z::OFFSET_A));
     let (binary, plain) = (a.local(), a.local());
+    a.cmp(imm(b'?'));
     a.beq(binary);
     a.cmp(imm(b'!'));
+    a.beq(binary);
+    a.cmp(imm(b' '));
     a.bne(plain);
+    a.jsr("next_a");
+    a.bind(plain);
+    a.tax();
+    a.lda(zp(z::TYPE));
+    a.rts();
     a.bind(binary);
     a.pha();
     a.lda(zp(z::TYPE));
@@ -791,10 +809,6 @@ fn factor(a: &mut Asm) {
     a.bind(typed);
     a.tya();
     a.jmp("load_at_iac");
-    a.bind(plain);
-    a.tax();
-    a.lda(zp(z::TYPE));
-    a.rts();
 }
 
 fn factors(a: &mut Asm) {

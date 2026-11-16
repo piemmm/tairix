@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 530 open, 1437 closed, 1967 total.
+**closed**, and a partial fix stays **open**. 532 open, 1439 closed, 1971 total.
 
-### Open (530)
+### Open (532)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -558,8 +558,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1981 | `lib/vdu` gives mode 7 a screen size of 655 360 bytes, 640 by 1024, where every other mode's is its line length by its height; the test holds only a lower bound | needs `OS_ReadModeVariable` observed on RISC OS 5.30, then the value pinned exactly |
 | D1983 | the RISC OS kernel's dynamic areas follow the PRMs where observation is wanting: `Service_MemoryMoved` issued with interrupts as they stand, `OS_DynamicArea 1`'s order of handler call and removal, reason 2's bit 7, a pool's rounding, and where the active object's boundary lies | needs scenarios recorded on genuine RISC OS 5 by `cargo xtask riscos --reference` |
 | D1984 | `cargo xtask pcemu-vectors` pins each suite's revision, its `*.MOO.gz` files and the licence it copies, but not each suite's `metadata.json`, whose classifications decide what is kept, nor the 8086 and V20 suites' own `LICENSE` bytes beyond requiring them to be the MIT text: no digest of either was ever recorded | needs a fresh import at the pinned revisions to record the digests, then pinning them |
+| D1986 | OpenMicro's MOS has its own code where *Flat Out* (Mushroom Software) calls MOS 1.20's at &CD07 and &E9F8 and reads its mode tables at &C3FF–&C45F to set a mode itself, so the game, run on the clean-room ROMs, ends waiting for a byte from the cassette | blocked as BB31 is: the MOS has no room for more of MOS 1.20's internals at their addresses |
+| D1987 | OpenMicro's BASIC runs simple statements a fifth to a quarter slower than BASIC II — an empty integer FOR loop 427 cycles a pass to 353, `N%=N%+1` 1,590 to 1,290, a false `IF A%=9` 1,590 to 1,250 — so a program pacing itself against TIME runs out of it: *Mine Sweeper* lays its board in the 18 seconds its countdown shows on BASIC II, and on these ROMs the countdown passes zero first and its digit indexes `A$(-1)`, Subscript at line 2720 | needs a speed pass over the statement loop, NEXT, assignment and the expression levels, in a BASIC image with 9 bytes free |
 
-### Closed (1437)
+### Closed (1439)
 
 | ID | Subject |
 |---|---|

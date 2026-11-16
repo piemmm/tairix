@@ -1455,23 +1455,28 @@ fn key_gather(a: &mut Asm) {
 
 /// OSWORD 0: a line read into the caller's buffer, with DELETE, CTRL-U and
 /// copy editing; its length, less the CR, returned in Y, and C set if Escape
-/// ended it.
+/// ended it. As in MOS 1.20 it reads with interrupts enabled, so an EXEC
+/// file's disc reads lose no clock ticks; its block is copied first, since
+/// an interrupt routine's OS call may change the call registers.
 fn line_input(a: &mut Asm) {
+    // The block: the buffer's address to &E8, the limits after it to theirs.
     a.here("osword_0");
-    a.ldy(imm(0));
+    a.ldy(imm(4));
+    let (copy, pointer, copied) = (a.here_local(), a.local(), a.local());
     a.lda(zp(os::CALL_X).ind_y());
-    a.sta(zp(os::LINE_BUFFER));
-    a.iny();
-    a.lda(zp(os::CALL_X).ind_y());
-    a.sta(zp(os::LINE_BUFFER + 1));
-    for offset in 0..3u8 {
-        a.iny();
-        a.lda(zp(os::CALL_X).ind_y());
-        a.sta(abs(page2::LINE_LIMITS + u16::from(offset)));
-    }
+    a.cpy(imm(2));
+    a.bcc(pointer);
+    a.sta(abs(page2::LINE_LIMITS - 2).y());
+    a.bcs(copied);
+    a.bind(pointer);
+    a.sta(abs(os::LINE_BUFFER).y());
+    a.bind(copied);
+    a.dey();
+    a.bpl(copy);
+    a.cli();
     a.lda(imm(0));
     a.sta(abs(var::PAGED_LINES));
-    a.ldy(imm(0));
+    a.tay();
     a.here("line_next");
     a.jsr("osrdch");
     a.bcs("line_escape");
@@ -1496,14 +1501,12 @@ fn line_input(a: &mut Asm) {
     a.jmp("line_next");
     a.here("line_full");
     a.lda(imm(7));
-    a.jsr("oswrch");
-    a.jmp("line_next");
+    a.bne("line_echo");
     a.here("line_delete");
     a.cpy(imm(0));
     a.beq("line_next");
     a.dey();
-    a.jsr("oswrch");
-    a.jmp("line_next");
+    a.jmp("line_echo");
     a.here("line_cancel");
     a.cpy(imm(0));
     a.beq("line_next");
@@ -1518,9 +1521,16 @@ fn line_input(a: &mut Asm) {
     a.bcc("line_close");
     a.here("line_escape");
     a.sec();
+    // Masked again before the results go to the call registers the
+    // dispatcher returns, which no interrupt routine's call can then
+    // overwrite: A and X zero, as MOS 1.20 returns them, and Y the length.
     a.here("line_close");
-    a.php();
+    a.sei();
     a.sty(zp(os::CALL_Y));
+    a.lda(imm(0));
+    a.sta(zp(os::CALL_A));
+    a.sta(zp(os::CALL_X));
+    a.php();
     a.jsr("edit_end");
     a.plp();
     a.rts();

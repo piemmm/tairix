@@ -57,3 +57,36 @@ script type:NEW\n;type:10 DEF PROCF(C%):SOUND &11,-15,100,200:SOUND 1,-15,100,20
 # *FX15 with X non-zero and *FX21 leave Y 0, which Galaforce 2's loader times an INKEY by.
 scenario a_single_buffer_flush_leaves_y_zero
 script type:CLS:A%=15:X%=1:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=0:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=4:Y%=&55:PRINT ~USR&FFF4\n;wait:0.5
+
+# With bit 1 of the VDU status byte set the cursor wraps to the window's opposite edge instead of scrolling, as Sudoku Solver sets it to fill the screen's last cell.
+scenario scrolling_disabled_wraps_the_cursor
+script type:NEW\n;type:10 CLS:VDU 84,79,80:?&D0=?&D0 OR 2:VDU 31,0,24:FOR J%=1 TO 40:VDU 88:NEXT:A=POS:B=VPOS:VDU 89,8,8:C=POS:D=VPOS:VDU 11:E=VPOS\n;type:20 VDU 28,5,20,30,10,31,25,10,90:F=POS:G=VPOS:VDU 8:H=POS:I=VPOS:?&D0=?&D0 AND &FD:VDU 26,31,0,12:PRINT A,B,C,D,E,F,G,H,I\n;type:30 REPEAT:UNTIL 0\n;type:RUN\n;wait:1
+
+# MODE ends paged mode and keeps scrolling disabled.
+scenario mode_ends_paged_mode_and_keeps_scrolling_disabled
+script type:CLS:VDU 14:MODE 7:A%=?&D0:?&D0=2:MODE 7:B%=?&D0:?&D0=0:PRINT ~A%,~B%\n;wait:0.5
+
+# An event's routine may use &FC and leave the interrupted program's A whole, as Citadel Revenge's VSYNC routine stores the event there.
+scenario an_event_routine_using_fc_leaves_the_interrupted_a
+script type:NEW\n;type:10 FOR I%=0 TO 2 STEP 2:P%=&900:[OPT I%\n;type:20 .H STA &FC:LDA #&55:STA &FC:RTS\n;type:30 .M LDA #&AA:LDX #0:LDY #0:STY &74\n;type:40 .L CMP #&AA:BNE O:DEX:BNE L:DEY:BNE L:INC &74:LDY &74:CPY #4:BEQ O:LDY #0:BEQ L\n;type:50 .O STA &70:RTS:]:NEXT\n;type:60 ?&220=H MOD 256:?&221=H DIV 256:*FX14,4\n;type:70 CALL M:*FX13,4\n;type:80 PRINT ~?&70,?&74\n;type:CLS:RUN\n;wait:3
+
+# OSWORD 0 reads with interrupts enabled, as MOS 1.20's does, so lines read from an EXEC file lose no clock ticks while the disc turns.
+scenario osword_0_reads_with_interrupts_enabled
+discs blank80
+script type:NEW\n;type:10 F%=OPENOUT"T":FOR L%=1 TO 40:FOR I%=1 TO 30:BPUT#F%,65:NEXT:BPUT#F%,13:NEXT:CLOSE#F%\n;type:20 ?&A00=0:?&A01=&B:?&A02=200:?&A03=32:?&A04=255\n;type:30 P%=&900:[OPT0:SEI:LDA #30:STA &72:.L LDX #0:LDY #&A:LDA #0:JSR &FFF1:DEC &72:BNE L:CLI:RTS:]\n;type:40 *EXEC T\n;type:50 T=TIME:CALL &900:*EXEC\n;type:60 CLS:PRINT TIME-T>20\n;type:RUN\n;wait:20
+
+# OSBYTE &81 takes any Y with its top bit set as a scan, as Search For The Lost Orb's INKEY with Y &FE does, and a timed read that runs out leaves X as given.
+scenario osbyte_129_scans_for_any_negative_y_and_keeps_x_timed_out
+script type:NEW\n;type:10 P%=&900:[OPT0:LDA #&81:LDX &70:LDY &71:JSR &FFF4:STX &72:STY &73:PHP:PLA:STA &74:RTS:]\n;type:20 FOR I%=0 TO 5:READ X%,Y%:?&70=X%:?&71=Y%:CALL &900:PRINT STR$~?&72+" "+STR$~?&73+" "+STR$(?&74 AND 1):NEXT\n;type:30 DATA 0,&FE,0,&80,&9E,&C0,&80,&FE,10,0,&2A,0\n;type:CLS:RUN\n;wait:2
+
+# The row table at &E0 is read halved, rounding up, for the 320-byte rows: text halves it when the map type at &356 has bit 1 set and graphics for any map type but the first, so Escape From Jail's own table of 512-byte steps lays its 256-byte rows.
+scenario the_row_table_is_read_halved_for_the_320_byte_rows
+script type:NEW\n;type:10 MODE 4:VDU 23,224,255,255,255,255,255,255,255,255\n;type:20 FOR I%=0 TO 31:J%=I%*1001:?(&900+I%*2)=J% DIV 256:?(&901+I%*2)=J% MOD 256:NEXT\n;type:30 ?&E0=0:?&E1=9:VDU 31,0,1,224:A%=?(HIMEM+501)\n;type:40 ?&356=1:VDU 31,0,2,224:B%=?(HIMEM+2002)\n;type:50 PLOT 69,0,1023-4*24:C%=?(HIMEM+1502)\n;type:60 ?&356=0:PLOT 69,0,1023-4*32:D%=?(HIMEM+4004)\n;type:70 MODE 0:E%=?&E0+256*?&E1:MODE 5:F%=?&E0+256*?&E1:MODE 6:G%=?&E0+256*?&E1\n;type:80 MODE 7:PRINT ~A%,~B%,~C%,~D%\n;type:90 PRINT E%=F%,F%=G%,~E%\n;type:RUN\n;wait:3
+
+# A glyph is drawn as (row OR &D2) EOR &D3, &D3 the foreground inverted and &D2 that EOR the background, as MOS 1.20 draws it, so masks a program clears draw white on black, as Escape From Jail's loader leaves them.
+scenario text_is_drawn_through_its_or_then_eor_mask
+script type:NEW\n;type:10 MODE 4:VDU 23,224,&F0,&F0,&F0,&F0,&F0,&F0,&F0,&F0\n;type:20 ?&D2=0:?&D3=0:VDU 31,0,0,224:A%=?HIMEM\n;type:30 ?&D2=&0F:?&D3=&3C:VDU 31,0,0,224:B%=?HIMEM\n;type:40 COLOUR 0:COLOUR 129:C%=?&D2+256*?&D3\n;type:50 MODE 1:?&D2=&0F:?&D3=&3C:VDU 31,0,0,224:D%=?HIMEM+256*?(HIMEM+8)\n;type:60 COLOUR 1:COLOUR 131:E%=?&D2+256*?&D3\n;type:70 MODE 2:COLOUR 9:COLOUR 134:F%=?&D2+256*?&D3\n;type:80 MODE 7:PRINT ~A%,~B%,~C%,~D%\n;type:90 PRINT ~E%,~F%\n;type:RUN\n;wait:3
+
+# An OSBYTE returns its own number in A though a call it makes through OSBYTE rewrites &EF, as *TAPE from the DFS does while the DFS closes its files, and as Neuzone's start-up calls it.
+scenario osbyte_keeps_its_number_in_a_across_a_nested_call
+script type:NEW\n;type:10 P%=&900:[OPT0:LDA &70:LDX #0:LDY #0:JSR &FFF4:STA &73:RTS:]\n;type:20 ?&70=&8C:CALL &900:A%=?&73:B%=?&EF\n;type:30 *DISC\n;type:40 ?&70=&8D:CALL &900:PRINT ~A%,~B%,~?&73,~?&EF\n;type:CLS:RUN\n;wait:2

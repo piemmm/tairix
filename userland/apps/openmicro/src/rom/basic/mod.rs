@@ -48,6 +48,9 @@ pub(crate) const SAVED_EXEC: u16 = 0x8023;
 /// machine at any error, as BASIC II's code there does.
 const ERROR_ENTRY: u16 = 0xB402;
 const ERROR_FREEZE: u16 = 0xB433;
+/// Where BASIC II's RND takes its argument from IAC, which software calls
+/// for a random whole number from 1 to n.
+const RND_ARGUMENT: u16 = 0xAF12;
 
 /// Build the BASIC image.
 ///
@@ -62,6 +65,7 @@ pub fn build() -> Result<Image, AsmError> {
         let halt = a.here_local();
         a.jmp(halt);
     });
+    a.pin_entry(RND_ARGUMENT, "rnd_argument", trans::random);
     header(&mut a);
     text(&mut a);
     editor::emit(&mut a);

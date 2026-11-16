@@ -532,6 +532,28 @@ fn a_fill_walks_its_line_rather_than_addressing_each_pixel() {
     assert!(filling < 3_000_000, "64 lines filled in {filling} cycles");
 }
 
+/// The regression: VDU 5 stepped across all eight pixels of every row of a
+/// cell, lit or not, some seven thousand cycles a blank cell where MOS 1.20
+/// takes 2,049; a row now ends at its last lit pixel.
+#[test]
+fn a_vdu_5_cell_spends_nothing_on_its_unlit_pixels() {
+    const CELLS: u64 = 64;
+    let cycles = |cell: &[u8]| {
+        let mut vdu = alloc::vec![22, 5, 5];
+        for _ in 0..CELLS {
+            vdu.extend_from_slice(cell);
+        }
+        let mut machine = boot(&vdu, &[]);
+        while machine.peek(DONE) != DONE_MARK {
+            assert!(machine.cycles() < BUDGET, "the language ran to its end");
+            machine.run_until(machine.cycles() + 64);
+        }
+        machine.cycles()
+    };
+    let blank = (cycles(&[b' ', 8]) - cycles(&[8])) / CELLS;
+    assert!(blank < 2_049, "a blank cell in {blank} cycles");
+}
+
 #[test]
 fn vdu_29_moves_the_origin_under_the_cursor_and_vdu_26_restores_them() {
     let mut vdu = alloc::vec![22, 4];

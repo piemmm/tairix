@@ -280,7 +280,8 @@ fn input(a: &mut Asm) {
 }
 
 /// OSEVEN: event Y, if enabled, through EVNTV with A the event and Y the
-/// value A held; C set if the event is disabled.
+/// value A held; C set if the event is disabled. The interrupted program's A
+/// at &FC is kept, as MOS 1.20 keeps it from a routine that uses &FC.
 fn events(a: &mut Asm) {
     a.here("oseven");
     a.php();
@@ -292,8 +293,12 @@ fn events(a: &mut Asm) {
     a.pla();
     a.tay();
     a.pha();
+    a.lda(zp(os::IRQ_A));
+    a.pha();
     a.lda(zp(os::SCRATCH));
     a.jsr("oseven_vector");
+    a.pla();
+    a.sta(zp(os::IRQ_A));
     a.pla();
     a.plp();
     a.clc();

@@ -65,3 +65,83 @@ row Bad DIM
 row >A=TOP:DIM B 10:P.B>=A
 row         -1
 row >
+
+scenario a_comparison_leaves_a_second_to_what_follows
+row ABLONG
+row >PRINT 1=1=1
+row         -1
+row No such variable
+row >A=1<2=3
+row Syntax error
+row >IF 1<2 =5
+row No FN
+row >IF 2>1 >0 PRINT "Y"
+row Syntax error
+row >
+
+scenario a_statement_follows_the_assembler_s_close
+row X
+row >P%=&900:[OPT0:RTS:] A=5:PRINT A
+row          5
+row >P%=&900:[OPT0:RTS:]*FX0
+row OS 1.20
+row >P%=&900:[OPT0:RTS:]=1
+row No FN
+row >P%=&900:[OPT0:RTS:]]PRINT "V"
+row Syntax error
+row >
+
+scenario input_prompts_take_tab_and_spc
+row           5
+row >INPUT SPC(5)"A"G
+row      A1
+row >INPUT "F"TAB(30)L
+row F                             6
+row >INPUT M,TAB(2)N
+row ?7
+row   8
+row >PRINT B,G,L,M,N
+row          5         1         6         7
+row          8
+row >
+
+scenario rnd_takes_its_argument_from_iac_at_basic_ii_s_address
+row >RUN
+row          4        40  800067FC
+row         63        40  800067FC
+row       FC68        40  800067FC
+row          1        FF  800067FC
+row          0        FF  FFFFFFF9
+row   FFFFFFFB        40  FFFFFFFB
+row >
+
+scenario an_error_drops_the_open_loops_and_procs_before_on_error_runs
+row         18        60         0         0
+row          0
+row          5         7         1        -1
+row >
+
+scenario a_program_reaching_past_himem_is_found_whole
+row >OLD
+row >PRINT TOP-PAGE
+row No room
+row >RUN
+row A
+row B
+row C
+row >
+
+scenario a_binary_indirection_follows_its_name_directly
+row >PRINT D%?1,F?1
+row          9         9
+row >IF E% ?&70=3:PRINT "T"
+row T
+row >PRINT ?&70
+row          3
+row >X=E% ?1
+row Syntax error
+row >PRINT F ?&71
+row       6402         0
+row >E% ?1=5
+row Mistake
+row >

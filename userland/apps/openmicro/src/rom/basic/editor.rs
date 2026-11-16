@@ -251,8 +251,9 @@ fn program(a: &mut Asm) {
     a.jmp("clear_variables");
 
     // TOP from the records at PAGE, each stepped over by its length until
-    // the end marker, and checked to start with a CR and to end below
-    // HIMEM. A record that does not leaves TOP at it and, as BASIC II does,
+    // the end marker and checked to start with a CR; HIMEM bounds nothing,
+    // as a program loaded over the screen's memory runs once MODE moves it.
+    // A record that does not leaves TOP at it and, as BASIC II does,
     // reports Bad program as a message, ERR untouched, and returns to the
     // prompt; a length of zero, which would never step on, is one.
     a.here("find_top");
@@ -270,8 +271,6 @@ fn program(a: &mut Asm) {
     a.lda(zp(z::TOP).ind_y());
     a.beq(bad);
     a.jsr("pointer_add");
-    a.lda(zp(z::TOP + 1));
-    a.cmp(zp(z::HIMEM + 1));
     a.bcc(record);
     a.bind(bad);
     a.jsr("print_newline");

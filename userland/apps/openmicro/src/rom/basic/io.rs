@@ -17,8 +17,8 @@ const AT_STR: u16 = page::RESIDENT + 3;
 const GOES_ON: u16 = z::STATEMENT;
 
 pub fn emit(a: &mut Asm) {
-    let tab = printing(a);
-    print_tab(a, tab);
+    printing(a);
+    print_tab(a);
     output(a);
     numbers(a);
     items(a);
@@ -264,9 +264,9 @@ fn restoring(a: &mut Asm) {
 }
 
 fn input(a: &mut Asm) -> Label {
-    // INPUT [LINE] ["prompt"[,;']] v[, ...]: the line read on the BASIC
-    // stack, its items to the variables; another line asked for when one
-    // runs out.
+    // INPUT [LINE] [prompts] v[, ...], a prompt a string, TAB or SPC and
+    // `,` `;` or `'` between: the line read on the BASIC stack, its items to
+    // the variables; another line asked for when one runs out.
     a.here("statement_input");
     a.jsr("next_a");
     a.dec(zp(z::OFFSET_A));
@@ -294,6 +294,7 @@ fn input(a: &mut Asm) -> Label {
     let (next, finished) = (a.here_local(), a.local());
     a.jsr("next_a");
     let (prompt, separator, newline, variable) = (a.local(), a.local(), a.local(), a.local());
+    let (tab, spc, quiet) = (a.local(), a.local(), a.local());
     a.cmp(imm(b'"'));
     a.beq(prompt);
     a.cmp(imm(b','));
@@ -302,13 +303,24 @@ fn input(a: &mut Asm) -> Label {
     a.beq(separator);
     a.cmp(imm(b'\''));
     a.beq(newline);
+    a.cmp(imm(word::TAB.token));
+    a.beq(tab);
+    a.cmp(imm(word::SPC.token));
+    a.beq(spc);
     a.jsr("ends_statement");
     a.beq(finished);
     a.jmp(variable);
+    a.bind(tab);
+    a.jsr("print_tab");
+    a.jmp(quiet);
+    a.bind(spc);
+    a.jsr("print_spc");
+    a.jmp(quiet);
     a.bind(prompt);
     a.jsr("factor_string");
     a.jsr("print_buffer");
     a.dec(zp(z::OFFSET_A));
+    a.bind(quiet);
     a.lda(imm(0));
     a.sta(zp(ASK));
     a.beq(next);
@@ -429,7 +441,7 @@ fn input_items(a: &mut Asm, next: Label) {
     a.jmp(next);
 }
 
-fn printing(a: &mut Asm) -> Label {
+fn printing(a: &mut Asm) {
     // PRINT: each item right in its field unless after `;`, `~` making
     // the next numbers hex until a separator, `,` to the next field, `'` a
     // new line, and a new line at the end unless it ends with `;`.
@@ -450,8 +462,7 @@ fn printing(a: &mut Asm) -> Label {
     a.sta(zp(GOES_ON));
     a.here("print_next");
     a.jsr("next_a");
-    let (ended, semicolon, comma, quote, tilde, tab, spc) = (
-        a.local(),
+    let (ended, semicolon, comma, quote, tilde, spc) = (
         a.local(),
         a.local(),
         a.local(),
@@ -475,7 +486,8 @@ fn printing(a: &mut Asm) -> Label {
     a.cmp(imm(word::TAB.token));
     let item = a.local();
     a.bne(item);
-    a.jmp(tab);
+    a.jsr("print_tab");
+    a.jmp("print_item");
     a.bind(item);
     a.dec(zp(z::OFFSET_A));
     a.jsr("expr");
@@ -516,18 +528,14 @@ fn printing(a: &mut Asm) -> Label {
     a.sta(zp(z::HEX));
     a.jmp("print_item");
     a.bind(spc);
-    a.jsr("factor_integer");
-    a.dec(zp(z::OFFSET_A));
-    a.ldx(zp(z::IAC));
-    a.jsr("print_spaces");
+    a.jsr("print_spc");
     a.jmp("print_item");
-    tab
 }
 
-fn print_tab(a: &mut Asm, tab: Label) {
+fn print_tab(a: &mut Asm) {
     // TAB(x): to column x, on a new line if past it; TAB(x,y) moves the
-    // cursor.
-    a.bind(tab);
+    // cursor. PRINT's and INPUT's, the token read.
+    a.here("print_tab");
     a.jsr("expr_integer");
     a.cpx(imm(b','));
     let column = a.local();
@@ -541,8 +549,7 @@ fn print_tab(a: &mut Asm, tab: Label) {
     a.pla();
     a.jsr(entry::OSWRCH);
     a.lda(zp(z::IAC));
-    a.jsr(entry::OSWRCH);
-    a.jmp("print_item");
+    a.jmp(abs(entry::OSWRCH));
     a.bind(column);
     a.jsr("closing_bracket");
     a.lda(zp(z::IAC));
@@ -554,8 +561,14 @@ fn print_tab(a: &mut Asm, tab: Label) {
     a.lda(zp(z::IAC));
     a.bind(reached);
     a.tax();
-    a.jsr("print_spaces");
-    a.jmp("print_item");
+    a.jmp("print_spaces");
+
+    // SPC n: n spaces, the token read.
+    a.here("print_spc");
+    a.jsr("factor_integer");
+    a.dec(zp(z::OFFSET_A));
+    a.ldx(zp(z::IAC));
+    a.jmp("print_spaces");
 
     // X the character after an expression: Missing ) unless a `)`.
     a.here("closing_bracket");

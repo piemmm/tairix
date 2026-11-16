@@ -72,7 +72,10 @@ pub fn emit(a: &mut Asm) {
     a.jsr("current_line");
     a.stx(zp(z::ERL));
     a.sty(zp(z::ERL + 1));
-    // ON ERROR's statements run unless the error is fatal.
+    // ON ERROR's statements run unless the error is fatal, with every loop,
+    // PROC and FN the error left behind dropped and READ from the first
+    // DATA, as BASIC II runs them.
+    a.jsr("clear_stacks");
     a.ldy(imm(0));
     a.lda(zp(ERROR_POINTER).ind_y());
     let reported = a.local();

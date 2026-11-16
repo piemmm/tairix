@@ -232,8 +232,12 @@ its documented workspace at the documented addresses, and its vectors'
 defaults at MOS 1.20's addresses, so software that sets a vector back to its
 original value still reaches the routine. The internals software reads at
 MOS 1.20's addresses lie there too: the default vector table at &D940, the
-row table at &C375, and the MODE routine at &CB1D. It is written from the
-published manuals and from genuine ROMs observed only as opaque programs;
+row table at &C375, and the MODE routine at &CB1D. The workspace drives the
+drivers as it drives MOS 1.20's, so a program that sets out a mode by writing
+it is drawn alike: the row table at &E0 is read halved for the 320-byte rows,
+and text is drawn through its masks at &D2 and &D3 as an OR then an EOR. It
+is written from the published manuals and from genuine ROMs observed only as
+opaque programs;
 no original ROM's code is read, and no genuine ROM byte enters the tree.
 
 Its screen memory, sound chip writes and documented results match MOS 1.20's
@@ -242,9 +246,10 @@ design, [`lib/vdu`](../lib/vdu.md)'s BBC arrangement; it does not reproduce
 &31A for a clipped line's start, some private keyboard and sound workspace, or
 redundant writes to a silenced sound channel; and, with no room left in 16 KiB,
 a whole-screen clear takes twice MOS 1.20's time, a horizontal line fill three
-times, VDU 5 a third longer and lines a quarter longer, where text output,
-scrolling and triangles are within a few percent of it. The behaviour pinned
-against MOS 1.20 is listed in the ROMs section of `plans/BEEB.md`.
+times, a lit VDU 5 pixel and a line a quarter longer, where text output,
+scrolling and triangles are within a few percent of it and a VDU 5 cell's
+unlit pixels cost nothing. The behaviour pinned against MOS 1.20 is listed in
+the ROMs section of `plans/BEEB.md`.
 
 `tairix_openmicro::rom::basic::build` assembles BBC BASIC: the whole BASIC II
 language — every keyword and the tokenised program format, the line editor
@@ -255,9 +260,13 @@ and the file channels through the MOS — in BASIC II's workspace: zero page
 &00–&6F, the resident integers at &400, the variable catalogue from &480, the
 stacks of page 5, the string buffer at &600 and the input buffer at &700. Its
 error handler is entered at BASIC II's &B402, and &B433, where software
-points BRKV to stop the machine at any error, stops it as BASIC II does. It
-is written from the published guides and from BASIC II observed running, by
-the same rules as the MOS. Its keywords and token values are
+points BRKV to stop the machine at any error, stops it as BASIC II does. A
+call to &AF12 with n in the integer accumulator at &2A returns RND(n), as
+games calling BASIC II there for a random choice expect. An error drops the
+loops, PROCs and FNs it left open and starts READ from the first DATA before
+ON ERROR's statements run, as BASIC II's does. It is written from the
+published guides and from BASIC II observed running, by the same rules as
+the MOS. Its keywords and token values are
 [`lib/openbasic`](../lib/openbasic.md)'s BASIC II tables, and its tokeniser and
 lister are tested against that library's on the emulated machine.
 
@@ -266,11 +275,13 @@ same input: every real it computes has BASIC II's bits, and a string is given
 BASIC II's room as it grows. Where it differs on purpose: its copyright
 message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
-astray; a byte (`?`) as a PROC or FN parameter is neither kept nor put back,
-where BASIC II's damages the program; and, in 16 KiB, it is slower than
-BASIC II, loops taking from 2% to 11% longer, 30% where an integer FOR adds
-integers, and the functions within a tenth, while TAN and small whole powers
-are faster.
+astray; and a byte (`?`) as a PROC or FN parameter is neither kept nor put
+back, where BASIC II's damages the program. It is also slower than BASIC II,
+a known defect: a simple statement takes a fifth to a quarter longer, a PROC
+call 13%, an array element 7% and the functions within a tenth, while TAN and
+small whole powers are faster, so a program that paces itself against TIME
+can run out of it; and a long line with many names takes up to twice as long
+to enter.
 
 `tairix_openmicro::rom::dfs::build` assembles the DFS: the whole Acorn DFS 1.20
 interface over the 8271 — the catalogue format, every `*` command, OSFILE,

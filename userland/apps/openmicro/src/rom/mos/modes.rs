@@ -193,11 +193,11 @@ const fn row_bytes(mode: &Mode) -> u16 {
     mode.columns as u16 * mode.bytes_per_character as u16
 }
 
-/// The row multiplication table of `mode`'s row length.
+/// The row multiplication table of `mode`'s row length: the 320-byte rows
+/// read the 640-byte table halved.
 const fn rows_table(mode: &Mode) -> &'static str {
     match row_bytes(mode) {
-        640 => "rows_640",
-        320 => "rows_320",
+        640 | 320 => "rows_640",
         _ => "rows_40",
     }
 }
@@ -284,8 +284,8 @@ pub fn emit(a: &mut Asm, model: Model) {
     }
     // The Model B's 640-byte table is pinned by `pin_rows_640`.
     let tables: &[(&str, u16, u16)] = match model {
-        Model::ModelB => &[("rows_320", 320, 32), ("rows_40", 40, 25)],
-        Model::Electron => &[("rows_640", 640, 32), ("rows_320", 320, 32)],
+        Model::ModelB => &[("rows_40", 40, 25)],
+        Model::Electron => &[("rows_640", 640, 32)],
     };
     for &(name, width, count) in tables {
         a.later(move |a| rows(a, name, width, count));

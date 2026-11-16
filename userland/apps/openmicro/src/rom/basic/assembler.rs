@@ -252,7 +252,8 @@ fn statements(a: &mut Asm) {
     a.cmp(imm(b']'));
     let assembling = a.local();
     a.bne(assembling);
-    a.jmp("statement_done");
+    // A statement may follow `]` directly, as `]NEXT` does in Bombhunt.
+    a.jmp("statement");
     a.bind(assembling);
     // The statement's start, on the stack until it is listed.
     a.dey();

@@ -387,7 +387,8 @@ lower case, TAB 0, ESCAPE &1B and the two locks 1 and 2. It announces itself as 
 original prints its maker's name; the reference harness puts that in the
 originals' observations (§7).
 
-Behaviour pinned by observation, each with its test in `rom::mos::tests`:
+Behaviour pinned by observation, each with its test in `rom::mos::tests` or
+its scenario in the corpus:
 
 - A line is drawn from whichever end comes first along its longer axis, so
   both directions plot the same points; a diagonal is drawn from the target
@@ -399,6 +400,13 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   the origin and both cursors. A fill's run makes its start the previous point
   and its end the cursor, scaled back from pixels; a fill that fills nothing
   leaves the target a line up, its high byte unchanged, as the previous point.
+- The row table at &E0 holds each row's offset high byte first, read whole for
+  the 20K map type and halved, rounding up, for the 320-byte rows: text halves
+  it when the map type at &356 has bit 1 set, graphics for any map type but 0,
+  so modes 0–6 share the 640-byte table at &C375, as MOS 1.20's do.
+- A glyph is drawn as (row OR &D2) EOR &D3 in every mode, COLOUR setting &D3
+  to the foreground inverted and &D2 to that EOR the background, so masks a
+  program clears draw white on black.
 - VDU 5 keeps its cursor in pixels: cursor controls 8–13, 30 and DEL move it a
   cell, a step that leaves the window wraps to the cell at its other edge and
   an x wrap carries y a line, and DEL fills the cell in the background colour
@@ -421,9 +429,13 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
 - GSREAD keeps spaces inside quotes, leaves Y at the next word after a
   string's end, and refuses `|` before the CR as Bad string.
 - An OSBYTE or OSWORD nothing takes is refused: X &FF, N and V set, C clear,
-  Y kept but 0 for an OSBYTE below &75. OSWORD &E0 on goes to USERV. INKEY
-  (-256) is &FF. OSWORD 0 returns the line's length in Y; OSWORD 5 and 6
-  leave the interrupt flag as they found it.
+  Y kept but 0 for an OSBYTE below &75. OSWORD &E0 on goes to USERV. OSBYTE
+  &81 takes any Y with its top bit set as Y &FF, so INKEY(-256) is &FF, and a
+  timed read that runs out leaves X as given. OSWORD 0 returns the line's
+  length in Y, and A and X zero; OSWORD 5 and 6 leave the interrupt flag as
+  they found it. An OSBYTE returns its number in A even when a call it makes
+  through OSBYTE, as *TAPE's does while the DFS closes its files, rewrites
+  &EF.
 - Entering a language leaves the error pointer at its copyright string, so a
   REPORT before any error prints it; a hard reset keeps the RTI at &D00.
 - The cassette's OSARGS and OSFIND keep X and Y. OPENOUT's prompt ends its
@@ -467,8 +479,12 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   open is File not found.
 - OSBYTE and OSWORD run with interrupts disabled and return with the
   caller's interrupt state; a call that waits (INKEY, *FX19, a full printer
-  or RS423 buffer, SOUND on a full queue, the line input) lets interrupts in
-  between its tests, keeping &FC and the call registers &EF–&F1 across them.
+  or RS423 buffer, SOUND on a full queue) lets interrupts in between its
+  tests, keeping &FC and the call registers &EF–&F1 across them. OSWORD 0
+  reads its line with interrupts enabled, as MOS 1.20's does, so an EXEC
+  file's disc reads lose no clock ticks, and masks them again before it
+  leaves its results. An event's routine may use &FC: OSEVEN keeps the
+  interrupted program's A across it.
 - OSBYTE &9B writes the physical colour inverted, as the ULA takes it, and
   keeps it at &249; MODE and VDU 20 write each logical colour's entries, the
   highest colour first and each colour's lowest entry first, and VDU 19 only
@@ -481,7 +497,11 @@ Behaviour pinned by observation, each with its test in `rom::mos::tests`:
   registers from R11 down, then the screen's start once. MODE and VDU 23,0
   move R7 by *TV's shift and one more, and keep R10 as the cursor's shape at
   &35F; MODE alone applies *TV's interlace to R8, and MODE 7 keeps the
-  interlaced video teletext needs whatever *TV says.
+  interlaced video teletext needs whatever *TV says. MODE ends paged mode
+  and keeps scrolling disabled.
+- With bit 1 of the VDU status byte set, as software sets it to fill a
+  window's last cell, the cursor wraps to the window's opposite edge instead
+  of scrolling it, as the copy cursor does.
 
 Deliberate divergences: the character set is this ROM's own design,
 `lib/vdu`'s BBC arrangement, so a glyph's pixels differ from MOS 1.20's; and
@@ -496,9 +516,10 @@ buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
 ROM's own; and, against MOS 1.20's speed with BASIC II driving each, text
 output, scrolling and triangles are within a few percent and a window's
 clear is a tenth faster, but a whole-screen clear in MODE 0 takes twice as
-long, a horizontal line fill three times, VDU 5 a third longer and lines a
-quarter longer, and the scan while a key is held takes 11% of the machine to
-its 7.5%. A fill finds its run by stepping one pixel's address and mask
+long, a horizontal line fill three times, a lit VDU 5 pixel a quarter longer
+though an unlit one costs nothing, lines a quarter longer and an INKEY of
+one key 30% longer, and the scan while a key is held takes 11% of the
+machine to its 7.5%. A fill finds its run by stepping one pixel's address and mask
 along its line, then plots it as a span; reaching MOS 1.20's speed would take
 a byte at a time.
 
@@ -565,8 +586,9 @@ page &00–&6F, the resident integers at &0400, the variable catalogue from
 &0480, the control stacks of page &05, the string buffer at &0600 and the
 input buffer at &0700. BRKV is BASIC II's &B402, which jumps to the error
 handler; &B433, which software sets BRKV to so any error stops the machine,
-stops it with interrupts masked, as BASIC II's code there is observed to.
-The one image runs on both machines.
+stops it with interrupts masked, as BASIC II's code there is observed to,
+and &AF12 takes RND's argument from IAC, which games call for a random whole
+number from 1 to n. The one image runs on both machines.
 
 BASIC is written afresh in `rom::basic`, laid out as BASIC II is. Workspace
 facts, taken from the published guides and confirmed by observing BASIC II
@@ -645,14 +667,36 @@ Behaviour pinned by observation, each with its test:
   several with no point or exponent that fit in sixteen bits, is an integer
   at once, the several gathered as the tokeniser gathers a line number;
   anything else is read through the forty-bit mantissa.
+- A level of the expression holds one comparison and leaves a second to what
+  follows it, so a function's `IF A<B =C` returns C, `A=1<2=3` is a Syntax
+  error and `PRINT 1=1=1` prints -1 and then finds no variable `=1`.
+- A statement may follow the assembler's `]` directly; a second `]` is a
+  Syntax error.
+- INPUT takes TAB(x), TAB(x,y) and SPC among its prompts as PRINT does, each
+  a prompt that asks no question.
+- An error drops every FOR, REPEAT, GOSUB, PROC and FN it left open, empties
+  the BASIC stack and starts READ from the first DATA before ON ERROR's
+  statements run, so a handler may change MODE; LOCAL values and parameters
+  keep the values they had.
+- &AF12 is RND's dispatch on an argument already in IAC, as BASIC II's is:
+  RND(n)'s result and type, and its seed left as RND(n) leaves it.
+- TOP is found from the program's records alone, HIMEM bounding nothing, so a
+  program loaded over the screen's memory runs once MODE moves HIMEM above
+  it.
+- A variable takes `?` or `!` after it only with no space between: `PRINT F
+  ?1` prints F and then `?1`, and `IF E% ?&70=3` tests E% and runs the store.
 
 Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
-placed after that code, where BASIC II's bytes go astray; a byte formal is
-neither kept nor restored, where BASIC II's damages the program; and, in 16
-KiB, against BASIC II's speed loops take from 2% to 11% longer, 30% where
-an integer FOR adds integers, and the functions up to a tenth longer, while
-TAN and small whole powers are faster.
+placed after that code, where BASIC II's bytes go astray; and a byte formal
+is neither kept nor restored, where BASIC II's damages the program. Where it
+differs as a defect (D1987): in 16 KiB a simple statement takes a fifth to a
+quarter longer than BASIC II's (an empty integer FOR loop 21%, `N%=N%+1`
+23%, a false `IF A%=9` 25%), a PROC call 13%, an array element 7% and the
+functions up to a tenth longer, while TAN and small whole powers are faster,
+so a program pacing itself against TIME can run out of it; and its tokeniser
+looks for a keyword from the table's start at each word, so a long line with
+many names takes up to twice as long to enter.
 
 **DFS.** The Acorn DFS 1.20 interface over the 8271: the catalogue format,
 every `*` command, OSFILE, OSFIND, OSGBPB, OSARGS, OSBGET and OSBPUT on up to

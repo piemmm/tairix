@@ -88,3 +88,46 @@ row   3000000F
 row   30000015
 row   30000415
 row >
+
+scenario scrolling_disabled_wraps_the_cursor
+row YOP
+row          0         0        39        24
+row         23         0         0        25
+row         10
+row                               Z
+row XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+scenario mode_ends_paged_mode_and_keeps_scrolling_disabled
+row          0         2
+row >
+
+scenario an_event_routine_using_fc_leaves_the_interrupted_a
+row         AA         4
+row >
+
+scenario osword_0_reads_with_interrupts_enabled
+row         -1
+row >
+
+scenario osbyte_129_scans_for_any_negative_y_and_keeps_x_timed_out
+row FF FF 1
+row FF FF 1
+row 0 0 0
+row 0 0 0
+row A FF 1
+row 2A FF 1
+row >
+
+scenario the_row_table_is_read_halved_for_the_320_byte_rows
+row         FF        FF        80        80
+row         -1        -1      C375
+row >
+
+scenario text_is_drawn_through_its_or_then_eor_mask
+row         F0        C3      FF00      33C3
+row       F00F      3C00
+row >
+
+scenario osbyte_keeps_its_number_in_a_across_a_nested_call
+row         8C        77        8D        77
+row >

@@ -930,6 +930,27 @@ impl Asm {
         self.pending = pending;
     }
 
+    /// [`Asm::pin`] `body` with its label `entry` at `address`, the code
+    /// before the label ahead of it: an entry point inside a routine.
+    pub fn pin_entry(&mut self, address: u16, entry: &'static str, body: impl Fn(&mut Self)) {
+        let mut measure = Self::new(self.origin, self.image.len());
+        body(&mut measure);
+        let lead = measure
+            .names
+            .get(entry)
+            .and_then(|label| measure.labels.get(label.0))
+            .and_then(|slot| slot.address)
+            .map(|at| at.wrapping_sub(self.origin));
+        let Some(lead) = lead else {
+            self.fail(AsmError::Unbound { name: entry });
+            return;
+        };
+        match address.checked_sub(lead) {
+            Some(start) => self.pin(start, body),
+            None => self.fail(AsmError::AddressRange { at: address }),
+        }
+    }
+
     /// Where something of `len` bytes from `start` can go: there, or past
     /// each pin it would meet.
     fn clear_of_pins(&self, start: usize, len: usize) -> usize {

@@ -164,7 +164,6 @@ pub fn emit(a: &mut Asm) {
     trigonometry(a);
     arctangent(a);
     scaling(a);
-    random(a);
 }
 
 fn constants(a: &mut Asm) {
@@ -771,7 +770,8 @@ const SEED_TAP: u16 = z::SEED + 2;
 /// The seed's fifth byte when it is set from an integer.
 const SEED_FILL: u8 = 0x40;
 
-fn random(a: &mut Asm) {
+/// RND, its dispatch on the argument in IAC at `rnd_argument`.
+pub(super) fn random(a: &mut Asm) {
     // RND: the seed's low four bytes after a step. RND(n): n < 0 seeds
     // and returns n; 0 the current seed as a fraction; 1 a step's
     // fraction; above, a step's fraction times n, whole, plus one.
@@ -793,6 +793,7 @@ fn random(a: &mut Asm) {
     a.inc(zp(z::OFFSET_A));
     a.jsr("expr_integer");
     a.jsr("closing_bracket");
+    a.here("rnd_argument");
     a.lda(zp(z::IAC + 3));
     a.bpl(positive);
     a.ldx(imm(3));
@@ -824,15 +825,13 @@ fn random(a: &mut Asm) {
     a.jsr("fac_from_int");
     a.jsr("fac_multiply");
     a.jsr("int_from_fac");
-    a.inc(zp(z::IAC));
-    let done = a.local();
-    a.bne(done);
-    a.inc(zp(z::IAC + 1));
-    a.bne(done);
-    a.inc(zp(z::IAC + 2));
-    a.bne(done);
+    // IAC one more, an integer, which DIM's sizes share.
+    a.here("int_plus_one");
+    for byte in 0..3 {
+        a.inc(zp(z::IAC + byte));
+        a.bne(integer);
+    }
     a.inc(zp(z::IAC + 3));
-    a.bind(done);
     a.bind(integer);
     a.lda(imm(kind::INTEGER));
     a.rts();

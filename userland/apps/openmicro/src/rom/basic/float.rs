@@ -725,15 +725,11 @@ fn shifted_bytes(a: &mut Asm, bytes: u16) {
     a.asl(Acc);
 }
 
-/// FAC2's mantissa = FAC's shifted down `bits` bits; C the last bit out.
+/// FAC2's mantissa = FAC's shifted down `bits` bits; C the last bit out and
+/// X kept, which the decimal rounding counts in across ×10 and ÷10.
 fn shifted_bits(a: &mut Asm, bits: u8) {
-    for i in 0..5 {
-        a.lda(zp(FAC.m(i)));
-        a.sta(zp(FAC2.m(i)));
-    }
-    for _ in 0..bits {
-        shift_right(a, FAC2);
-    }
+    a.ldy(imm(bits));
+    a.jsr("fac2_shifted");
 }
 
 fn tens(a: &mut Asm) {
@@ -776,4 +772,16 @@ fn tens(a: &mut Asm) {
     }
     shifted_bytes(a, 4);
     a.jmp("fac_add_carry");
+
+    // FAC2's mantissa = FAC's shifted down Y bits, Y at least one.
+    a.here("fac2_shifted");
+    for i in 0..5 {
+        a.lda(zp(FAC.m(i)));
+        a.sta(zp(FAC2.m(i)));
+    }
+    let shift = a.here_local();
+    shift_right(a, FAC2);
+    a.dey();
+    a.bne(shift);
+    a.rts();
 }
