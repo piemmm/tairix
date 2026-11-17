@@ -113,6 +113,66 @@ fn the_header_names_basic_ii() {
 }
 
 #[test]
+fn the_pins_lie_past_every_routine_a_program_runs() {
+    // Code flowing into a pin hops over it, which a loop would pay each time.
+    let image = build().expect("BASIC assembles");
+    let editor = image.symbol("cold").expect("the editor is placed");
+    for routine in [
+        "statement",
+        "statement_next",
+        "call_routine",
+        "statement_vdu",
+        "channel",
+        "print_next",
+        "expr",
+        "factor_token",
+        "find_name",
+        "fac_multiply",
+        "read_number",
+        "rnd_argument",
+    ] {
+        let at = image.symbol(routine).expect("the routine is placed");
+        assert!(
+            at < editor,
+            "{routine} at &{at:04X} lies past the editor at &{editor:04X}"
+        );
+    }
+    for pin in [
+        super::RND_ARGUMENT,
+        super::RND_NEXT,
+        super::ERROR_ENTRY,
+        super::ERROR_FREEZE,
+    ] {
+        assert!(
+            editor <= pin,
+            "the pin at &{pin:04X} lies before the editor at &{editor:04X}"
+        );
+    }
+}
+
+/// The regression: integer statements took a fifth to a quarter longer
+/// than BASIC II's, so a program pacing itself against TIME, as Mine
+/// Sweeper's setup does, ran out of it. BASIC II takes this loop 282
+/// centiseconds.
+#[test]
+fn an_integer_loop_keeps_basic_ii_s_pace() {
+    let screen = after(
+        &[
+            "10 B%=5:C%=3:TIME=0:FORK%=1TO2000:A%=B%+C%:IFA%=9C%=1",
+            "20 NEXT:PRINTTIME",
+            "RUN",
+        ],
+        400,
+    );
+    let taken: u32 = screen
+        .iter()
+        .rev()
+        .find_map(|row| row.trim().parse().ok())
+        .expect("the loop prints its time");
+    assert!(taken <= 282, "the loop took {taken} centiseconds");
+}
+
+#[test]
 fn it_starts_at_the_prompt() {
     let machine = basic();
     let screen = mode7_text(&machine);

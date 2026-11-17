@@ -532,16 +532,17 @@ fn a_fill_walks_its_line_rather_than_addressing_each_pixel() {
     assert!(filling < 3_000_000, "64 lines filled in {filling} cycles");
 }
 
-/// The regression: VDU 5 stepped across all eight pixels of every row of a
-/// cell, lit or not, some seven thousand cycles a blank cell where MOS 1.20
-/// takes 2,049; a row now ends at its last lit pixel.
-#[test]
-fn a_vdu_5_cell_spends_nothing_on_its_unlit_pixels() {
+/// The cycles one VDU 5 `cell` takes in MODE 5 after `setup`, beyond the
+/// step back each cell ends with: the mean of 64.
+fn vdu_5_cell_cycles(setup: &[u8], cell: &[u8]) -> u64 {
     const CELLS: u64 = 64;
     let cycles = |cell: &[u8]| {
-        let mut vdu = alloc::vec![22, 5, 5];
+        let mut vdu = alloc::vec![22, 5];
+        vdu.extend_from_slice(setup);
+        vdu.push(5);
         for _ in 0..CELLS {
             vdu.extend_from_slice(cell);
+            vdu.push(8);
         }
         let mut machine = boot(&vdu, &[]);
         while machine.peek(DONE) != DONE_MARK {
@@ -550,8 +551,28 @@ fn a_vdu_5_cell_spends_nothing_on_its_unlit_pixels() {
         }
         machine.cycles()
     };
-    let blank = (cycles(&[b' ', 8]) - cycles(&[8])) / CELLS;
+    (cycles(cell) - cycles(&[])) / CELLS
+}
+
+/// The regression: VDU 5 stepped across all eight pixels of every row of a
+/// cell, lit or not, some seven thousand cycles a blank cell where MOS 1.20
+/// takes 2,049; a row now ends at its last lit pixel.
+#[test]
+fn a_vdu_5_cell_spends_nothing_on_its_unlit_pixels() {
+    let blank = vdu_5_cell_cycles(&[], b" ");
     assert!(blank < 2_049, "a blank cell in {blank} cycles");
+}
+
+/// The regression: each lit VDU 5 pixel was clipped, addressed and plotted
+/// on its own, some 34,000 cycles a solid cell where MOS 1.20 takes some
+/// 26,000; a row now addresses its first pixel inside the window and steps
+/// along to the rest.
+#[test]
+fn a_vdu_5_cell_steps_along_its_rows_lit_pixels() {
+    let mut setup = alloc::vec![23, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+    setup.extend(plot(4, 640, 512));
+    let solid = vdu_5_cell_cycles(&setup, &[255]);
+    assert!(solid < 26_000, "a solid cell in {solid} cycles");
 }
 
 #[test]
@@ -633,6 +654,36 @@ fn vdu_5_moves_the_graphics_cursor_a_cell_wrapping_at_the_window() {
             word(&machine, vdu::GRAPHICS_CURSOR + 2),
         );
         assert_eq!(cursor, end, "from {start:?} by {codes:?}");
+    }
+}
+
+#[test]
+fn vdu_5_clips_a_cell_at_both_window_edges_and_steps_across_its_bytes() {
+    // In MODE 5, four pixels a byte: a solid cell from pixel 47 in a window
+    // of pixels 50 to 52, then one from pixel 61 across a byte's edge.
+    let mut vdu = alloc::vec![22, 5, 23, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+    let window = |left: i16, right: i16| {
+        let mut bytes = alloc::vec![24];
+        for coordinate in [left, 0, right, 1023] {
+            bytes.extend(coordinate.to_le_bytes());
+        }
+        bytes
+    };
+    vdu.extend(window(50 * 8, 52 * 8 + 7));
+    vdu.extend(plot(4, 47 * 8, 200 * 4));
+    vdu.extend([5, 255, 4, 26]);
+    vdu.extend(plot(4, 61 * 8, 150 * 4));
+    vdu.extend([5, 255, 4]);
+    let machine = run(&vdu, &[]);
+    for y in 193..=200 {
+        assert_eq!(
+            lit_row(&machine, 5, y),
+            (50..=52).collect(),
+            "clipped line {y}"
+        );
+    }
+    for y in 143..=150 {
+        assert_eq!(lit_row(&machine, 5, y), (61..=68).collect(), "line {y}");
     }
 }
 

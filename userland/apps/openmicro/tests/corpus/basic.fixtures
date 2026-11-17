@@ -115,6 +115,16 @@ row          0        FF  FFFFFFF9
 row   FFFFFFFB        40  FFFFFFFB
 row >
 
+scenario rnd_leaves_its_next_integer_in_iac_at_basic_ii_s_address
+row >RUN
+row   657FFDA1  657FFDA1  31000D40
+row   8A7FFB4A  8A7FFB4A  31000D40
+row   2F7FF913  2F7FF913  31000D40
+row   547FF69D  547FF69D  31000D40
+row   F97FF446  F97FF446  31000D40
+row   1E7FF22F  1E7FF22F  31000D40
+row >
+
 scenario an_error_drops_the_open_loops_and_procs_before_on_error_runs
 row         18        60         0         0
 row          0

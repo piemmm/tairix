@@ -514,12 +514,13 @@ two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
 1.20 keeps for rollover, auto-repeat and sound (&2CA–&2CE, the sound
 buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
 ROM's own; and, against MOS 1.20's speed with BASIC II driving each, text
-output, scrolling and triangles are within a few percent and a window's
-clear is a tenth faster, but a whole-screen clear in MODE 0 takes twice as
-long, a horizontal line fill three times, a lit VDU 5 pixel a quarter longer
-though an unlit one costs nothing, lines a quarter longer and an INKEY of
+output, scrolling and triangles are within a few percent, a window's clear
+is a tenth faster and a VDU 5 cell a fifth faster, its unlit pixels costing
+nothing, but a whole-screen clear in MODE 0 takes twice as long, a
+horizontal line fill three times, lines a quarter longer and an INKEY of
 one key 30% longer, and the scan while a key is held takes 11% of the
-machine to its 7.5%. A fill finds its run by stepping one pixel's address and mask
+machine to its 7.5%. A VDU 5 row addresses its first pixel inside the
+window and steps its address and mask along to the rest. A fill finds its run by stepping one pixel's address and mask
 along its line, then plots it as a span; reaching MOS 1.20's speed would take
 a byte at a time.
 
@@ -587,8 +588,15 @@ page &00–&6F, the resident integers at &0400, the variable catalogue from
 input buffer at &0700. BRKV is BASIC II's &B402, which jumps to the error
 handler; &B433, which software sets BRKV to so any error stops the machine,
 stops it with interrupts masked, as BASIC II's code there is observed to,
-and &AF12 takes RND's argument from IAC, which games call for a random whole
-number from 1 to n. The one image runs on both machines.
+&AF12 takes RND's argument from IAC, which games call for a random whole
+number from 1 to n, and &AF51 leaves RND's next integer in IAC, which games
+call for a random byte. The one image runs on both machines. The routines a
+program runs come first, the editor, tokeniser, LIST and assembler after
+them, so those four addresses fall where no loop pays a hop over them. An
+expression is parsed by precedence in one loop; an operator's integer left
+operand waits on the 6502 stack, which a call copies and restores, any
+other on the BASIC stack, and names, the commonest statement and factor,
+are dispatched first.
 
 BASIC is written afresh in `rom::basic`, laid out as BASIC II is. Workspace
 facts, taken from the published guides and confirmed by observing BASIC II
@@ -667,9 +675,12 @@ Behaviour pinned by observation, each with its test:
   several with no point or exponent that fit in sixteen bits, is an integer
   at once, the several gathered as the tokeniser gathers a line number;
   anything else is read through the forty-bit mantissa.
-- A level of the expression holds one comparison and leaves a second to what
-  follows it, so a function's `IF A<B =C` returns C, `A=1<2=3` is a Syntax
+- A comparison after a comparison, AND, OR or EOR at the same depth ends the
+  expression, so a function's `IF A<B =C` returns C, `A=1<2=3` is a Syntax
   error and `PRINT 1=1=1` prints -1 and then finds no variable `=1`.
+- An operator's left operand needs room on the BASIC stack, where BASIC II
+  keeps it, even where it is kept elsewhere: `PRINT TOP-PAGE` with a program
+  reaching past HIMEM is No room.
 - A statement may follow the assembler's `]` directly; a second `]` is a
   Syntax error.
 - INPUT takes TAB(x), TAB(x,y) and SPC among its prompts as PRINT does, each
@@ -680,6 +691,8 @@ Behaviour pinned by observation, each with its test:
   keep the values they had.
 - &AF12 is RND's dispatch on an argument already in IAC, as BASIC II's is:
   RND(n)'s result and type, and its seed left as RND(n) leaves it.
+- &AF51 steps the seed and leaves RND's integer in IAC, with A the integer
+  type, X &0D, Y 0 and the flags as BASIC II's leaves them.
 - TOP is found from the program's records alone, HIMEM bounding nothing, so a
   program loaded over the screen's memory runs once MODE moves HIMEM above
   it.
@@ -690,13 +703,17 @@ Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
 placed after that code, where BASIC II's bytes go astray; and a byte formal
 is neither kept nor restored, where BASIC II's damages the program. Where it
-differs as a defect (D1987): in 16 KiB a simple statement takes a fifth to a
-quarter longer than BASIC II's (an empty integer FOR loop 21%, `N%=N%+1`
-23%, a false `IF A%=9` 25%), a PROC call 13%, an array element 7% and the
-functions up to a tenth longer, while TAN and small whole powers are faster,
-so a program pacing itself against TIME can run out of it; and its tokeniser
-looks for a keyword from the table's start at each word, so a long line with
-many names takes up to twice as long to enter.
+differs as a defect (D1987): a statement over the resident integers, such as
+`A%=B%+C%`, an array element and a FOR's set-up take less time than BASIC
+II's, as does a VDU 5 cell, so *Mine Sweeper* lays its board inside its
+countdown, but in 16 KiB with no room left a PROC call takes 58% longer,
+REPEAT 77%, a false `IF A%=9` a third, an empty FOR loop's NEXT 17%, a GOSUB,
+`A$="X"`, integer `*` and DIV, and `FOR T=1 TO 1` 16 to 22%, `SCORE%=SCORE%+1`
+and `A=B+1` 10 to 13% and the functions up to a tenth, while TAN and small
+whole powers are faster, so a program pacing itself against TIME with these
+can still run out of it; and its tokeniser looks for a keyword from the
+table's start at each word, so a long line with many names takes up to twice
+as long to enter.
 
 **DFS.** The Acorn DFS 1.20 interface over the 8271: the catalogue format,
 every `*` command, OSFILE, OSFIND, OSGBPB, OSARGS, OSBGET and OSBPUT on up to

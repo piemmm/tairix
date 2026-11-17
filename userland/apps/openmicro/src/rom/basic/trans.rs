@@ -164,6 +164,7 @@ pub fn emit(a: &mut Asm) {
     trigonometry(a);
     arctangent(a);
     scaling(a);
+    random(a);
 }
 
 fn constants(a: &mut Asm) {
@@ -771,7 +772,7 @@ const SEED_TAP: u16 = z::SEED + 2;
 const SEED_FILL: u8 = 0x40;
 
 /// RND, its dispatch on the argument in IAC at `rnd_argument`.
-pub(super) fn random(a: &mut Asm) {
+fn random(a: &mut Asm) {
     // RND: the seed's low four bytes after a step. RND(n): n < 0 seeds
     // and returns n; 0 the current seed as a fraction; 1 a step's
     // fraction; above, a step's fraction times n, whole, plus one.
@@ -781,6 +782,7 @@ pub(super) fn random(a: &mut Asm) {
     a.cmp(imm(b'('));
     let (argument, positive, fraction, integer) = (a.local(), a.local(), a.local(), a.local());
     a.beq(argument);
+    a.here("rnd_next");
     a.jsr("rnd_step");
     a.ldx(imm(3));
     let copy = a.here_local();
@@ -788,7 +790,9 @@ pub(super) fn random(a: &mut Asm) {
     a.sta(zp(z::IAC).x());
     a.dex();
     a.bpl(copy);
-    a.bmi(integer);
+    // X the seed's address, as BASIC II's leaves it there.
+    a.ldx(imm(lo(z::SEED)));
+    a.bne(integer);
     a.bind(argument);
     a.inc(zp(z::OFFSET_A));
     a.jsr("expr_integer");

@@ -475,45 +475,6 @@ fn code_running_on_hops_over_a_pin_with_a_jump() {
 }
 
 #[test]
-fn a_pinned_entry_lies_at_its_address_the_code_before_it_ahead() {
-    let mut asm = Asm::new(ORIGIN, 0x100);
-    asm.pin_entry(ORIGIN + 0x10, "inner", |asm| {
-        asm.here("outer");
-        asm.lda(imm(1));
-        asm.here("inner");
-        asm.rts();
-    });
-    for _ in 0..0x10 {
-        asm.nop();
-    }
-    let image = asm.finish().unwrap();
-    assert_eq!(image.symbol("outer"), Some(ORIGIN + 0x0E));
-    assert_eq!(image.symbol("inner"), Some(ORIGIN + 0x10));
-    assert_eq!(image.bytes[0x0E..0x11], [0xA9, 0x01, 0x60]);
-    assert_eq!(image.bytes[0x0B..0x0E], [0x4C, 0x11, 0xC0], "the hop");
-}
-
-#[test]
-fn a_pinned_entry_unbound_or_placed_before_the_image_is_refused() {
-    let lead = |asm: &mut Asm| {
-        asm.lda(imm(1));
-        asm.here("inner");
-        asm.rts();
-    };
-    assert_eq!(
-        finished(|asm| asm.pin_entry(ORIGIN + 4, "absent", lead)),
-        Err(AsmError::Unbound { name: "absent" })
-    );
-    assert_eq!(
-        finished(|asm| asm.pin_entry(ORIGIN + 1, "inner", lead)),
-        Err(AsmError::OutsideImage { offset: 0xFFFF })
-    );
-    let mut low = Asm::new(0, 0x100);
-    low.pin_entry(1, "inner", lead);
-    assert_eq!(low.finish(), Err(AsmError::AddressRange { at: 1 }));
-}
-
-#[test]
 fn after_a_jump_or_data_the_flow_resumes_past_a_pin_with_its_labels() {
     let mut asm = Asm::new(ORIGIN, 0x100);
     asm.pin(ORIGIN + 6, Asm::rts);

@@ -36,6 +36,10 @@ script type:CLS:INPUT TAB(10,5)""B\n;wait:0.3;type:5\n;wait:0.3;type:INPUT SPC(5
 scenario rnd_takes_its_argument_from_iac_at_basic_ii_s_address
 script type:NEW\n;type:10 FOR I%=1 TO 6:READ N%:X=RND(-7):!&70=N%:CALL &900\n;type:20 A%=!&78:B%=?&74:C%=!&0D:PRINT ~A%,~B%,~C%:NEXT\n;type:30 DATA 4,100,65536,1,0,-5\n;type:CLS:P%=&900:[OPT0:LDA&70:STA&2A:LDA&71:STA&2B:LDA&72:STA&2C:LDA&73:STA&2D:JSR&AF12:STA&74:LDX#3:.L LDA&2A,X:STA&78,X:DEX:BPL L:RTS:]\n;wait:0.3;type:RUN\n;wait:1
 
+# BASIC II's RND with no argument leaves the next random integer in IAC at &AF51, which Plig calls for a random byte: the integer and the seed come back as RND's, and A, X, Y and the flags as BASIC II leaves them.
+scenario rnd_leaves_its_next_integer_in_iac_at_basic_ii_s_address
+script type:NEW\n;type:10 FOR I%=1 TO 6:X=RND(-I%*37-1):CALL &900:CALL &900\n;type:20 PRINT ~!&78,~!&0D,~!&74:NEXT\n;type:CLS:P%=&900:[OPT0:JSR&AF51:PHP:STA&74:STX&75:STY&76:PLA:STA&77:LDX#3:.L LDA&2A,X:STA&78,X:DEX:BPL L:RTS:]\n;wait:0.3;type:RUN\n;wait:1
+
 # An error drops every FOR, REPEAT, GOSUB, PROC and FN it left open and starts READ from the first DATA before ON ERROR's statements run, so a handler may change MODE after an error inside a PROC, as Trivia Quiz's does.
 scenario an_error_drops_the_open_loops_and_procs_before_on_error_runs
 script type:NEW\n;type:10 ON ERROR GOTO 100\n;type:20 A%=0:FOR I=1 TO 3:REPEAT:GOSUB 40:UNTIL FALSE\n;type:30 END\n;type:40 A%=A%+1:IF A%=2 PROCX(5)\n;type:50 RETURN\n;type:60 DEF PROCX(L):LOCAL Q:Q=7:READ B,C:X=1/0\n;type:70 DATA 1,2,3\n;type:100 MODE 7:READ D:PRINT ERR,ERL,?&24,?&25,?&26\n;type:110 PRINT L,Q,D,(!4 AND &FFFF)=(!6 AND &FFFF)\n;type:RUN\n;wait:1

@@ -49,8 +49,10 @@ pub(crate) const SAVED_EXEC: u16 = 0x8023;
 const ERROR_ENTRY: u16 = 0xB402;
 const ERROR_FREEZE: u16 = 0xB433;
 /// Where BASIC II's RND takes its argument from IAC, which software calls
-/// for a random whole number from 1 to n.
+/// for a random whole number from 1 to n, and where its RND with none leaves
+/// the next random integer in IAC, which software calls for a random byte.
 const RND_ARGUMENT: u16 = 0xAF12;
+const RND_NEXT: u16 = 0xAF51;
 
 /// Build the BASIC image.
 ///
@@ -65,12 +67,12 @@ pub fn build() -> Result<Image, AsmError> {
         let halt = a.here_local();
         a.jmp(halt);
     });
-    a.pin_entry(RND_ARGUMENT, "rnd_argument", trans::random);
+    a.pin(RND_ARGUMENT, |a| a.jmp("rnd_argument"));
+    a.pin(RND_NEXT, |a| a.jmp("rnd_next"));
     header(&mut a);
     text(&mut a);
-    editor::emit(&mut a);
-    crunch::emit(&mut a);
-    list::emit(&mut a);
+    // What runs a program first, so the pins fall among the editor's and
+    // the assembler's routines, where hopping over one costs no loop.
     exec::emit(&mut a);
     control::emit(&mut a);
     procs::emit(&mut a);
@@ -83,6 +85,9 @@ pub fn build() -> Result<Image, AsmError> {
     float::emit(&mut a);
     decimal::emit(&mut a);
     trans::emit(&mut a);
+    editor::emit(&mut a);
+    crunch::emit(&mut a);
+    list::emit(&mut a);
     assembler::emit(&mut a);
     errors::emit(&mut a);
     a.place_later();
@@ -133,6 +138,12 @@ fn text(a: &mut Asm) {
     a.cmp(imm(b' '));
     a.beq(again);
     a.sty(zp(z::OFFSET_A));
+    a.rts();
+
+    // The next character as `next_a` reads it, Z set if it is a comma.
+    a.here("next_comma");
+    a.jsr("next_a");
+    a.cmp(imm(b','));
     a.rts();
 
     // The message X bytes into the messages, to its zero.

@@ -1518,23 +1518,40 @@ fn vdu5_cell(a: &mut Asm) {
     a.bne("vdu5_row_bits");
     a.lda(zp(vdu_zp::TEMP + 4).ind_y());
     a.here("vdu5_row_bits");
-    // A row ends at its last set bit, x then put back.
-    let (pixel, plotted, row_end, next_row) = (a.local(), a.local(), a.local(), a.local());
+    // A row ends at its last set bit, x then put back. Its first pixel
+    // inside the window is addressed, the rest stepped to, a mask of none
+    // meaning none is addressed yet.
+    let (pixel, plotted, stepped, row_end, next_row) =
+        (a.local(), a.local(), a.local(), a.local(), a.local());
     a.beq(next_row);
     a.sta(abs(GLYPH_BITS));
     for offset in 0..2 {
         a.lda(abs(PX + offset));
         a.pha();
     }
+    a.lda(imm(0));
+    a.sta(zp(vdu_zp::PIXEL_MASK));
     a.bind(pixel);
     a.asl(abs(GLYPH_BITS));
     a.bcc(plotted);
-    a.jsr("plot_pixel");
+    a.jsr("pixel_inside");
+    a.bcc(plotted);
+    a.lda(zp(vdu_zp::PIXEL_MASK));
+    let addressed = a.local();
+    a.bne(addressed);
+    a.jsr("pixel_address");
+    a.bind(addressed);
+    a.jsr("plot_cell");
     a.bind(plotted);
     a.lda(abs(GLYPH_BITS));
     a.beq(row_end);
     a.ldx(imm(1));
     a.jsr("step_px");
+    a.lda(zp(vdu_zp::PIXEL_MASK));
+    a.beq(stepped);
+    a.ldx(imm(1));
+    a.jsr("cell_step_x");
+    a.bind(stepped);
     a.jmp(pixel);
     a.bind(row_end);
     a.pla();

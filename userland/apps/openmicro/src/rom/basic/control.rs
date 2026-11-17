@@ -477,8 +477,7 @@ fn next_real(a: &mut Asm, real: Label, carry_on: Label, finished: Label) {
     a.bind(finished);
     a.lda(zp(ENTRY));
     a.sta(zp(z::FORS));
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let ended = a.local();
     a.bne(ended);
     a.jmp("statement_next");

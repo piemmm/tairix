@@ -488,11 +488,7 @@ fn locals(a: &mut Asm) {
     // and type pushed; VAR and VTYPE its location. A byte, as in BASIC II,
     // is neither kept nor, after, put back.
     a.here("make_local");
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.lda(zp(z::VTYPE));
     a.beq(RTS);
     a.lda(zp(z::VAR + 1));

@@ -340,8 +340,7 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.ldx(zp(z::OP));
     a.dec(zp(z::OFFSET_A));
     a.here("dim_next");
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne("dim_end");
     a.jmp("statement_dim");
     a.here("dim_end");
@@ -446,15 +445,30 @@ fn sizing(a: &mut Asm) {
     a.lda(zp(OFFSET));
     a.ora(zp(OFFSET + 1));
     a.beq(RTS);
+    // Each multiplier bit from its highest one takes a step; a high byte of
+    // zero is passed at once, and the zeros above that one only shifted out.
     a.ldy(imm(16));
-    let bit = a.here_local();
+    a.lda(zp(OFFSET + 1));
+    let lead = a.local();
+    a.bne(lead);
+    a.ldy(imm(8));
+    a.lda(zp(OFFSET));
+    a.sta(zp(OFFSET + 1));
+    a.bind(lead);
+    let (bit, add, skip) = (a.local(), a.local(), a.local());
+    a.asl(zp(OFFSET));
+    a.rol(zp(OFFSET + 1));
+    a.bcs(add);
+    a.dey();
+    a.bne(lead);
+    a.bind(bit);
     a.asl(zp(TO));
     a.rol(zp(TO + 1));
     a.rol(zp(TO + 2));
     a.asl(zp(OFFSET));
     a.rol(zp(OFFSET + 1));
-    let skip = a.local();
     a.bcc(skip);
+    a.bind(add);
     a.clc();
     a.lda(zp(TO));
     a.adc(zp(SIZE));
@@ -481,22 +495,21 @@ fn names(a: &mut Asm) {
     // NAME_TYPE its type. C set: no such name, VAR the entry to link a new
     // one from. The pointer is left past the name in both.
     a.here("find_name");
+    let named = a.label("find_named");
+    // A resident integer, @% to Z%, at &400 + 4n.
     a.ldy(zp(z::OFFSET_A));
     a.lda(zp(z::TEXT_A).ind_y());
     a.cmp(imm(b'Z' + 1));
-    let general = a.local();
-    a.bcs(general);
+    a.bcs(named);
     a.tax();
     a.iny();
     a.lda(zp(z::TEXT_A).ind_y());
     a.cmp(imm(b'%'));
-    let general_x = a.local();
-    a.bne(general_x);
+    a.bne(named);
     a.iny();
     a.lda(zp(z::TEXT_A).ind_y());
     a.cmp(imm(b'('));
-    a.beq(general_x);
-    // A resident integer, @% to Z%, at &400 + 4n.
+    a.beq(named);
     a.sty(zp(z::OFFSET_A));
     a.txa();
     a.asl(Acc);
@@ -509,10 +522,11 @@ fn names(a: &mut Asm) {
     a.sta(zp(NAME_TYPE));
     a.clc();
     a.rts();
-    a.bind(general_x);
-    a.txa();
-    a.bind(general);
-    // The initial's list head at &400 + 2 × initial.
+    // A name that is not a resident integer's: its initial's list head at
+    // &400 + 2 × initial.
+    a.bind(named);
+    a.ldy(zp(z::OFFSET_A));
+    a.lda(zp(z::TEXT_A).ind_y());
     a.asl(Acc);
     a.sta(zp(z::VAR));
     a.lda(imm(hi(page::CATALOGUE)));
@@ -616,8 +630,14 @@ fn lookup(a: &mut Asm) {
     // not made.
     a.here("variable");
     a.jsr("find_name");
-    let found = a.local();
+    let (found, absent) = (a.local(), a.local());
     a.bcc(found);
+    a.bcs(absent);
+    // The same for a name known not to be a resident integer's.
+    a.here("variable_named");
+    a.jsr("find_named");
+    a.bcc(found);
+    a.bind(absent);
     a.lda(zp(NAME_TYPE));
     a.and(imm(ARRAY));
     let not_array = a.local();
@@ -847,18 +867,15 @@ fn storing(a: &mut Asm) {
     a.bpl(integer);
     a.jsr("int_from_fac");
     a.bind(integer);
-    a.ldx(imm(4));
     a.ldy(zp(z::VTYPE));
     let byte = a.local();
     a.beq(byte);
-    a.ldy(imm(0));
-    let copy = a.here_local();
-    a.lda(abs(z::IAC).y());
-    a.sta(zp(z::VAR).ind_y());
-    a.iny();
-    a.dex();
-    a.bne(copy);
-    a.rts();
+    a.ldy(imm(3));
+    for i in (1..4).rev() {
+        a.lda(zp(z::IAC + i));
+        a.sta(zp(z::VAR).ind_y());
+        a.dey();
+    }
     a.bind(byte);
     a.lda(zp(z::IAC));
     a.sta(zp(z::VAR).ind_y());

@@ -360,7 +360,6 @@ fn clearing(a: &mut Asm) {
     a.bcs("find_line_past");
     a.ldy(imm(3));
     a.lda(zp(RECORD).ind_y());
-    a.clc();
     a.adc(zp(RECORD));
     a.sta(zp(RECORD));
     a.bcc("find_line_record");
@@ -549,8 +548,7 @@ fn listing(a: &mut Asm) -> Label {
     a.stx(zp(FIRST));
     a.sty(zp(FIRST + 1));
     a.bind(ranged);
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let ended = a.local();
     a.bne(ended);
     a.jsr("last_argument");
@@ -617,8 +615,7 @@ fn deleting(a: &mut Asm, syntax: Label) {
     a.bcs(syntax);
     a.stx(zp(LINE_NUMBER));
     a.sty(zp(LINE_NUMBER + 1));
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(syntax);
     a.jsr("last_argument");
     a.bcs(syntax);
@@ -718,8 +715,7 @@ fn numbering(a: &mut Asm) -> Label {
     a.here("step_argument");
     a.lda(imm(DEFAULT_STEP));
     a.sta(zp(STEP));
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let given = a.local();
     a.beq(given);
     a.dec(zp(z::OFFSET_A));

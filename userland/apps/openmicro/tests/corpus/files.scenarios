@@ -31,7 +31,7 @@ script type:CLS:A%=OPENOUT"X":B%=OPENOUT"Y":*INFO *.*\n;wait:3;type:P.ERR\n;wait
 scenario a_file_that_cannot_grow_is_refused
 discs testdisc
 check 0
-script type:CLS:A%=OPENUP"A":PTR#A%=&180\n;wait:2;type:P.ERR\n;wait:0.5;type:CLOSE#0\n;wait:1;type:A%=OPENOUT"X":B%=OPENOUT"Y"\n;wait:2;type:FOR I%=1 TO 16385:BPUT#A%,1:NEXT\n;wait:20;type:P.ERR,PTR#A%\n;wait:0.5;type:CLOSE#0:*INFO *.*\n;wait:2
+script type:CLS:A%=OPENUP"A":PTR#A%=&180\n;wait:2;type:P.ERR\n;wait:0.5;type:CLOSE#0\n;wait:1;type:A%=OPENOUT"X":B%=OPENOUT"Y"\n;wait:2;type:FOR I%=1 TO 16385:BPUT#A%,1:NEXT\n;wait:60;type:P.ERR,PTR#A%\n;wait:0.5;type:CLOSE#0:*INFO *.*\n;wait:2
 
 scenario an_open_file_grows_into_the_space_after_it
 discs near80

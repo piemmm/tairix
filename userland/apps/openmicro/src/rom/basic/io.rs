@@ -174,8 +174,7 @@ fn reading(a: &mut Asm) {
     a.sta(zp(z::VAR));
     a.txa();
     a.jsr("store_variable");
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.beq("statement_read");
     a.tax();
     a.jmp("statement_done_x");
@@ -338,11 +337,7 @@ fn input(a: &mut Asm) -> Label {
     a.jmp("statement_done_x");
     a.bind(variable);
     a.dec(zp(z::OFFSET_A));
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.lda(zp(z::VAR));
     a.pha();
     a.lda(zp(z::VAR + 1));

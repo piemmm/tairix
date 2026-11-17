@@ -133,8 +133,7 @@ fn records(a: &mut Asm) {
     a.tya();
     a.pha();
     let (item, done) = (a.here_local(), a.local());
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(done);
     a.jsr("expr");
     a.stx(zp(z::OP));
@@ -199,14 +198,9 @@ fn inputs(a: &mut Asm) {
     a.tya();
     a.pha();
     let (item, done) = (a.here_local(), a.local());
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(done);
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.pla();
     a.pha();
     a.tay();
