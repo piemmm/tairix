@@ -18,7 +18,7 @@ script type:MODE 2:A%=?&249:VDU 19,1,2,0,0,0:B%=?&249:*FX155,133\n;wait:0.5;type
 scenario mode_and_vdu_19_write_the_palette_a_colour_at_a_time
 script type:MODE 1:A%=?&249:VDU 19,2,4,0,0,0:B%=?&249:MODE 4:C%=?&249:VDU 19,1,3,0,0,0:D%=?&249:MODE 7:P.~A%,~B%,~C%,~D%\n;wait:0.5
 
-# VDUV has VDU 23 with C set and A its first parameter, and a PLOT the MOS does not draw with C clear and A its number: any PLOT in the teletext mode.
+# VDUV has VDU 23 with C set and A its first parameter, and a PLOT the MOS does not draw with C clear and A its number: any PLOT in a text mode.
 scenario vduv_takes_vdu_23_with_c_set_and_plot_with_c_clear
 script type:CLS:P%=&900:[OPT 0:PHP:STA &71:PLA:STA &70:RTS:]:?&226=0:?&227=9\n;wait:0.5;type:VDU 23,28,1,2,3,4,5,6,7,8:A%=?&70 AND 1:B%=?&71:VDU 25,200,1,0,2,0:C%=?&70 AND 1:D%=?&71:?&71=0:VDU 25,4,1,0,2,0:E%=?&71\n;wait:0.5;type:MODE 4:?&71=0:VDU 25,4,1,0,2,0:F%=?&71:VDU 25,200,1,0,2,0:G%=?&70 AND 1:H%=?&71\n;wait:0.5;type:MODE 7:P.A%,~B%,C%,~D%,~E%,~F%,G%,~H%\n;wait:0.5
 
@@ -57,3 +57,76 @@ script type:NEW\n;type:10 DEF PROCF(C%):SOUND &11,-15,100,200:SOUND 1,-15,100,20
 # *FX15 with X non-zero and *FX21 leave Y 0, which Galaforce 2's loader times an INKEY by.
 scenario a_single_buffer_flush_leaves_y_zero
 script type:CLS:A%=15:X%=1:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=0:Y%=&55:PRINT ~USR&FFF4:A%=21:X%=4:Y%=&55:PRINT ~USR&FFF4\n;wait:0.5
+
+# With bit 1 of the VDU status byte set the cursor wraps to the window's opposite edge instead of scrolling, as Sudoku Solver sets it to fill the screen's last cell.
+scenario scrolling_disabled_wraps_the_cursor
+script type:NEW\n;type:10 CLS:VDU 84,79,80:?&D0=?&D0 OR 2:VDU 31,0,24:FOR J%=1 TO 40:VDU 88:NEXT:A=POS:B=VPOS:VDU 89,8,8:C=POS:D=VPOS:VDU 11:E=VPOS\n;type:20 VDU 28,5,20,30,10,31,25,10,90:F=POS:G=VPOS:VDU 8:H=POS:I=VPOS:?&D0=?&D0 AND &FD:VDU 26,31,0,12:PRINT A,B,C,D,E,F,G,H,I\n;type:30 REPEAT:UNTIL 0\n;type:RUN\n;wait:1
+
+# MODE ends paged mode and keeps scrolling disabled.
+scenario mode_ends_paged_mode_and_keeps_scrolling_disabled
+script type:CLS:VDU 14:MODE 7:A%=?&D0:?&D0=2:MODE 7:B%=?&D0:?&D0=0:PRINT ~A%,~B%\n;wait:0.5
+
+# An event's routine may use &FC and leave the interrupted program's A whole, as Citadel Revenge's VSYNC routine stores the event there.
+scenario an_event_routine_using_fc_leaves_the_interrupted_a
+script type:NEW\n;type:10 FOR I%=0 TO 2 STEP 2:P%=&900:[OPT I%\n;type:20 .H STA &FC:LDA #&55:STA &FC:RTS\n;type:30 .M LDA #&AA:LDX #0:LDY #0:STY &74\n;type:40 .L CMP #&AA:BNE O:DEX:BNE L:DEY:BNE L:INC &74:LDY &74:CPY #4:BEQ O:LDY #0:BEQ L\n;type:50 .O STA &70:RTS:]:NEXT\n;type:60 ?&220=H MOD 256:?&221=H DIV 256:*FX14,4\n;type:70 CALL M:*FX13,4\n;type:80 PRINT ~?&70,?&74\n;type:CLS:RUN\n;wait:3
+
+# OSWORD 0 reads with interrupts enabled, as MOS 1.20's does, so lines read from an EXEC file lose no clock ticks while the disc turns.
+scenario osword_0_reads_with_interrupts_enabled
+discs blank80
+script type:NEW\n;type:10 F%=OPENOUT"T":FOR L%=1 TO 40:FOR I%=1 TO 30:BPUT#F%,65:NEXT:BPUT#F%,13:NEXT:CLOSE#F%\n;type:20 ?&A00=0:?&A01=&B:?&A02=200:?&A03=32:?&A04=255\n;type:30 P%=&900:[OPT0:SEI:LDA #30:STA &72:.L LDX #0:LDY #&A:LDA #0:JSR &FFF1:DEC &72:BNE L:CLI:RTS:]\n;type:40 *EXEC T\n;type:50 T=TIME:CALL &900:*EXEC\n;type:60 CLS:PRINT TIME-T>20\n;type:RUN\n;wait:20
+
+# OSBYTE &81 takes any Y with its top bit set as a scan, as Search For The Lost Orb's INKEY with Y &FE does, and a timed read that runs out leaves X as given.
+scenario osbyte_129_scans_for_any_negative_y_and_keeps_x_timed_out
+script type:NEW\n;type:10 P%=&900:[OPT0:LDA #&81:LDX &70:LDY &71:JSR &FFF4:STX &72:STY &73:PHP:PLA:STA &74:RTS:]\n;type:20 FOR I%=0 TO 5:READ X%,Y%:?&70=X%:?&71=Y%:CALL &900:PRINT STR$~?&72+" "+STR$~?&73+" "+STR$(?&74 AND 1):NEXT\n;type:30 DATA 0,&FE,0,&80,&9E,&C0,&80,&FE,10,0,&2A,0\n;type:CLS:RUN\n;wait:2
+
+# The row table at &E0 is read halved, rounding up, for the 320-byte rows: text halves it when the map type at &356 has bit 1 set and graphics for any map type but the first, so Escape From Jail's own table of 512-byte steps lays its 256-byte rows.
+scenario the_row_table_is_read_halved_for_the_320_byte_rows
+script type:NEW\n;type:10 MODE 4:VDU 23,224,255,255,255,255,255,255,255,255\n;type:20 FOR I%=0 TO 31:J%=I%*1001:?(&900+I%*2)=J% DIV 256:?(&901+I%*2)=J% MOD 256:NEXT\n;type:30 ?&E0=0:?&E1=9:VDU 31,0,1,224:A%=?(HIMEM+501)\n;type:40 ?&356=1:VDU 31,0,2,224:B%=?(HIMEM+2002)\n;type:50 PLOT 69,0,1023-4*24:C%=?(HIMEM+1502)\n;type:60 ?&356=0:PLOT 69,0,1023-4*32:D%=?(HIMEM+4004)\n;type:70 MODE 0:E%=?&E0+256*?&E1:MODE 5:F%=?&E0+256*?&E1:MODE 6:G%=?&E0+256*?&E1\n;type:80 MODE 7:PRINT ~A%,~B%,~C%,~D%\n;type:90 PRINT E%=F%,F%=G%,~E%\n;type:RUN\n;wait:3
+
+# A glyph is drawn as (row OR &D2) EOR &D3, &D3 the foreground inverted and &D2 that EOR the background, as MOS 1.20 draws it, so masks a program clears draw white on black, as Escape From Jail's loader leaves them.
+scenario text_is_drawn_through_its_or_then_eor_mask
+script type:NEW\n;type:10 MODE 4:VDU 23,224,&F0,&F0,&F0,&F0,&F0,&F0,&F0,&F0\n;type:20 ?&D2=0:?&D3=0:VDU 31,0,0,224:A%=?HIMEM\n;type:30 ?&D2=&0F:?&D3=&3C:VDU 31,0,0,224:B%=?HIMEM\n;type:40 COLOUR 0:COLOUR 129:C%=?&D2+256*?&D3\n;type:50 MODE 1:?&D2=&0F:?&D3=&3C:VDU 31,0,0,224:D%=?HIMEM+256*?(HIMEM+8)\n;type:60 COLOUR 1:COLOUR 131:E%=?&D2+256*?&D3\n;type:70 MODE 2:COLOUR 9:COLOUR 134:F%=?&D2+256*?&D3\n;type:80 MODE 7:PRINT ~A%,~B%,~C%,~D%\n;type:90 PRINT ~E%,~F%\n;type:RUN\n;wait:3
+
+# An OSBYTE returns its own number in A though a call it makes through OSBYTE rewrites &EF, as *TAPE from the DFS does while the DFS closes its files, and as Neuzone's start-up calls it.
+scenario osbyte_keeps_its_number_in_a_across_a_nested_call
+script type:NEW\n;type:10 P%=&900:[OPT0:LDA &70:LDX #0:LDY #0:JSR &FFF4:STA &73:RTS:]\n;type:20 ?&70=&8C:CALL &900:A%=?&73:B%=?&EF\n;type:30 *DISC\n;type:40 ?&70=&8D:CALL &900:PRINT ~A%,~B%,~?&73,~?&EF\n;type:CLS:RUN\n;wait:2
+
+# A text mode draws no graphics: its PLOT goes to VDUV with C clear, CLG and VDU 5 do nothing, VDU 24 and VDU 29 set the windows from x over 16, and &360 to &363 hold its colours and 0 for its pixels a byte.
+scenario a_text_mode_draws_no_graphics
+script type:NEW\n;type:10 P%=&900:[OPT 0:PHP:STA &71:PLA:STA &70:RTS:]:?&226=0:?&227=9:A$=""\n;type:20 FOR N%=0 TO 2:MODE 3-3*(N%=1)-4*(N%=2):B%=HIMEM:?B%=&5A:VDU 29,64,0,32,0:VDU 24,16,0,8,0,128,2,0,2\n;type:30 PLOT 69,0,1020:A$=A$+STR$~(?&71+256*(?&70 AND 1))+" ":CLG:VDU 5:A$=A$+STR$~(?B%+256*?&D0)+" ":VDU 4\n;type:40 A$=A$+STR$~!&300+" "+STR$~!&304+" "+STR$~!&360+" ":NEXT:MODE 7:PRINT A$\n;type:RUN\n;wait:3
+
+# A text mode's POINT reads bit 0 of one byte for two points across, x over 16; the teletext mode's is 0 inside the graphics window and -1 outside it.
+scenario point_in_a_text_mode_reads_bit_0
+script type:CLS:A$=""\n;wait:0.3;type:MODE 3:?&4000=1:?&4008=&80:?&4010=&FF:FOR I%=0 TO 5:A$=A$+STR$POINT(I%*16,1023)+" ":NEXT:?&4000=&80:A$=A$+STR$POINT(0,1023)+" "+STR$POINT(-1,1023)+" "+STR$POINT(1279,1023)+" "+STR$POINT(1280,1023)+" "\n;wait:1;type:MODE 6:?&6000=1:A$=A$+STR$POINT(0,1023)+" "+STR$POINT(16,1023)+" "+STR$POINT(32,1023)+" "\n;wait:1;type:MODE 7:VDU 24,0,0,0,0,127,2,255,1:A$=A$+STR$POINT(0,0)+" "+STR$POINT(640,0)+" "+STR$POINT(639,511)+" "+STR$POINT(0,512):P.A$\n;wait:0.5
+
+# VDU 20 in the teletext mode sets its colours to 0 and its text background to a space, and leaves the palette and the text masks.
+scenario vdu_20_in_the_teletext_mode_sets_its_colours
+script type:MODE 1:VDU 19,1,4,0,0,0:COLOUR 129\n;wait:0.5;type:MODE 7:FOR I%=&357 TO &35C:?I%=&55:NEXT:?&D2=&AA:?&D3=&BB:VDU 20:A$="":FOR I%=&357 TO &35C:A$=A$+STR$~?I%+" ":NEXT:P.A$+STR$~?&D2+" "+STR$~?&D3+" "+STR$~?&370\n;wait:0.5
+
+# OSBYTE &87 reads the character at the cursor in every mode, a text mode's bytes holding one pixel a bit.
+scenario osbyte_135_reads_a_character_in_every_mode
+script type:CLS:A$=""\n;wait:0.3;type:FOR M%=0 TO 7:MODE M%:PRINT "AZ":VDU 31,0,0:A%=&87:B%=(USR(&FFF4) AND &FF00) DIV 256:VDU 31,1,0:A$=A$+CHR$B%+CHR$((USR(&FFF4) AND &FF00) DIV 256)+" ":NEXT\n;wait:3;type:MODE 7:P.A$\n;wait:0.5
+
+# MODE sets &357 to &35C and &35F to &363: a text mode's pixels a byte less one is 0, and the teletext mode's colours are 0 but for a space as its text background.
+scenario mode_sets_its_colour_and_pixel_variables
+script type:NEW\n;type:10 DIM R$(7):FOR M%=0 TO 7:MODE M%:FOR I%=0 TO 12:A%=&A0:X%=&57+I%:V%=(USR(&FFF4) AND &FF00) DIV 256\n;type:20 IF I%<6 OR I%>7 R$(M%)=R$(M%)+STR$~V%+" "\n;type:30 NEXT:NEXT:MODE 7:FOR M%=0 TO 7:PRINT R$(M%):NEXT\n;type:RUN\n;wait:3
+
+# VDU 19 in the teletext mode writes all sixteen ULA entries for colour 0, every logical colour being 0, so &249 keeps the last, entry 15's.
+scenario vdu_19_in_the_teletext_mode_writes_every_entry
+script type:MODE 7:VDU 19,0,5,0,0,0:A%=?&249:VDU 19,1,3,0,0,0:P.~A%,~?&249,~?&36F\n;wait:0.5
+
+# The reset and interrupt vectors name MOS 1.20's entries, which Bounty Bob Strikes Back reads to know the OS by; a BRK still raises its error through the interrupt entry.
+scenario the_reset_and_interrupt_vectors_name_mos_1_20_s_entries
+script type:CLS:P.~?&FFFC+256*?&FFFD,~?&FFFE+256*?&FFFF\n;wait:0.5;type:P%=&900:[OPT 0:BRK:EQUB 7:EQUS "SEVENS":BRK:]:CALL &900\n;wait:0.5
+
+# A point's mask is picked by its place in its byte whatever &362 and &363 hold, so PLOT and POINT ignore them; a line and a horizontal fill take the next byte's mask from them.
+scenario a_point_s_mask_is_its_place_in_its_byte
+script type:NEW\n;type:10 MODE 1:?&362=&FF:?&363=&FF:PLOT 69,4,1020:A$=STR$~?&3000+" "+STR$POINT(4,1020)\n;type:20 MOVE 4,1016:DRAW 24,1016:A$=A$+" "+STR$~?&3001+" "+STR$~?&3009\n;type:30 VDU 24,4,0,0,0,24,0,255,3:PLOT 77,8,1012:A$=A$+" "+STR$~?&3002+" "+STR$~?&300A\n;type:40 ?&362=&88:?&363=&11:MODE 7:PRINT A$\n;type:RUN\n;wait:2
+
+# OSBYTE 16 and 17 take at most the four channels; *FX17,0 converts with nothing kept, and *FX16,0 lets the channels below the one converting finish, channel 1 last.
+scenario osbyte_16_and_17_take_at_most_four_channels
+script type:NEW\n;type:10 A%=16:X%=9:CALL &FFF4:A$=STR$?&24D:A%=16:X%=2:A$=A$+" "+STR$((USR(&FFF4) AND &FF00) DIV 256)\n;type:20 *FX16,0\n;type:30 T%=TIME:REPEAT UNTIL TIME>T%+20:A%=17:X%=9:CALL &FFF4:A$=A$+" "+STR$?&24C\n;type:40 T%=TIME:REPEAT UNTIL TIME>T%+20:*FX17,0\n;type:50 A$=A$+" "+STR$?&24C+" "+STR$?&2BE:T%=TIME:REPEAT UNTIL TIME>T%+20:A$=A$+" "+STR$?&2BE+" "+STR$~(?&FEC0 AND 15)\n;type:60 *FX16,4\n;type:70 T%=TIME:REPEAT UNTIL TIME>T%+3:*FX16,0\n;type:80 T%=TIME:REPEAT UNTIL TIME>T%+20:PRINT A$+" "+STR$?&24C+" "+STR$?&24D+" "+STR$?&2BE\n;type:RUN\n;wait:3
+
+# A graphics mode's PLOT hands VDUV its code with the cursor at &310 moved and the target's pixel at &320, and 96 to 127 make it the current point at &324 too, as a graphics extension reads them; a text mode's moves nothing.
+scenario vduv_is_handed_a_plot_with_its_cursor_and_pixel_set
+script type:NEW\n;type:10 DIM B$(1):FOR Q=0 TO 2 STEP 2:P%=&900:[OPT Q:PHP:PHA:LDX #23:.L LDA &310,X:STA &3000,X:DEX:BPL L:PLA:PLP:RTS:]:NEXT:?&226=0:?&227=9\n;type:20 FOR N%=0 TO 1:MODE 1+6*N%:VDU 29,40,0,20,0:FOR K%=0 TO 2:READ C%:!&310=&80008:!&314=&10001:!&324=&20002:PLOT C%,303,405\n;type:30 B$(N%)=B$(N%)+STR$~!&3000+" "+STR$~!&3004+" "+STR$~!&3010+" "+STR$~!&3014+" ":NEXT:RESTORE:NEXT\n;type:40 DATA 32,96,200\n;type:50 MODE 7:PRINT B$(0):PRINT B$(1)\n;type:RUN\n;wait:3

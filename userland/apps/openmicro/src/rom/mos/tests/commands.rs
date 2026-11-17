@@ -1,8 +1,9 @@
 //! The command line's dealings with the filing system and the ROMs.
 
 use super::{claim, oscli, program, run_rom, var, DONE, DONE_MARK};
+use crate::machine::SIDEWAYS_BASE;
 use crate::rom::asm::{abs, hi, imm, lo, zp};
-use crate::rom::os::entry::OSASCI;
+use crate::rom::os::entry::{GSINIT, GSREAD, OSASCI};
 use crate::rom::os::vector::{BRK, FIND, FSC};
 use crate::rom::os::{fsc, service, ERROR_POINTER};
 use crate::scenario::mode7_text;
@@ -45,6 +46,50 @@ fn the_filing_system_hears_of_each_command_before_it_runs() {
     assert_eq!(machine.peek(HEARD), 2);
     assert_eq!((machine.peek(SETTINGS), machine.peek(SETTINGS + 1)), (0, 1));
     assert_eq!(machine.peek(var::CURSOR_EDITING), 2);
+}
+
+/// The regression: a command no ROM claimed reached FSCV at the offset
+/// OSCLI had kept in &E4, which a ROM's GSINIT reuses, so the DFS's own
+/// commands failed Bad name; MOS 1.20 passes the command's start however a
+/// ROM's look at it left &E4 and Y.
+#[test]
+fn a_command_no_rom_claims_reaches_the_filing_system_at_its_start() {
+    const OLD: u16 = 0x0076;
+    const PASSED: u16 = 0x0074;
+    let rom = program(Some("service"), |a| {
+        claim(a, FSC, "fsc", OLD);
+        oscli(a, " *THING ONE");
+        a.jmp("ran");
+        a.here("fsc");
+        a.cmp(imm(fsc::COMMAND));
+        let other = a.local();
+        a.bne(other);
+        a.stx(zp(PASSED));
+        a.sty(zp(PASSED + 1));
+        a.rts();
+        a.bind(other);
+        a.jmp(abs(OLD).ind());
+        a.here("service");
+        a.cmp(imm(service::COMMAND));
+        a.bne("unclaimed");
+        a.pha();
+        a.clc();
+        a.jsr(GSINIT);
+        a.jsr(GSREAD);
+        a.pla();
+        a.here("unclaimed");
+        a.rts();
+        a.here("ran");
+    });
+    let command = b"THING ONE\r";
+    let start = rom
+        .windows(command.len())
+        .position(|bytes| bytes == command)
+        .and_then(|offset| u16::try_from(offset).ok())
+        .map(|offset| SIDEWAYS_BASE + offset);
+    let machine = run_rom(&rom);
+    let passed = u16::from_le_bytes([machine.peek(PASSED), machine.peek(PASSED + 1)]);
+    assert_eq!(Some(passed), start);
 }
 
 /// The regression: *HELP showed the MOS's version before offering the ROMs

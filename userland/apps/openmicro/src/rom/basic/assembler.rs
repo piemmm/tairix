@@ -252,7 +252,8 @@ fn statements(a: &mut Asm) {
     a.cmp(imm(b']'));
     let assembling = a.local();
     a.bne(assembling);
-    a.jmp("statement_done");
+    // A statement may follow `]` directly, as `]NEXT` does in Bombhunt.
+    a.jmp("statement");
     a.bind(assembling);
     // The statement's start, on the stack until it is listed.
     a.dey();
@@ -269,6 +270,12 @@ fn statements(a: &mut Asm) {
     a.bcc(named);
     a.jmp("err_syntax");
     a.bind(named);
+    a.jsr("iac_from_p");
+    a.jsr("store_variable");
+    a.jmp(labels);
+
+    // IAC = P%.
+    a.here("iac_from_p");
     a.ldx(imm(3));
     let copy = a.here_local();
     a.lda(abs(P_PERCENT).x());
@@ -276,8 +283,7 @@ fn statements(a: &mut Asm) {
     a.dex();
     a.bpl(copy);
     a.lda(imm(kind::INTEGER));
-    a.jsr("store_variable");
-    a.jmp(labels);
+    a.rts();
     // A comment, nothing, or an instruction; then whatever is left of the
     // statement passed over.
     a.bind(not_label);
@@ -597,8 +603,7 @@ fn operand_modes(a: &mut Asm, not_branch: Label) -> (Label, Label, Label) {
     a.jsr("asm_operand");
     a.lda(zp(z::IAC + 1));
     a.bne(byte_error);
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let bracket = a.local();
     a.bne(bracket);
     a.jsr("next_a");
@@ -612,8 +617,7 @@ fn operand_modes(a: &mut Asm, not_branch: Label) -> (Label, Label, Label) {
     a.bind(bracket);
     a.cmp(imm(b')'));
     a.bne(index_error);
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(index_error);
     a.jsr("next_a");
     a.cmp(imm(b'Y'));
@@ -669,8 +673,7 @@ fn address(a: &mut Asm, expression: Label, byte_error: Label, index_error: Label
     window(a);
     a.and(imm(INDEXED));
     a.beq(plain);
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(unread);
     a.jsr("next_a");
     a.sec();

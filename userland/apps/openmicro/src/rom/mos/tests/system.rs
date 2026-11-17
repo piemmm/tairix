@@ -61,7 +61,7 @@ fn each_mode_sets_the_screen_size_as_mos_1_20_does() {
 
 /// The regression: the 640-byte row table lay wherever it was built, low
 /// byte first, where software reads MOS 1.20's at &C375, high byte first;
-/// &E0 names it in modes 0 to 3.
+/// &E0 names it in modes 0 to 6, the 320-byte modes reading it halved.
 #[test]
 fn the_640_byte_row_table_lies_where_mos_1_20_s_does() {
     let image = model_b().expect("the MOS assembles");
@@ -70,29 +70,23 @@ fn the_640_byte_row_table_lies_where_mos_1_20_s_does() {
         let [low, high] = (row * 640).to_le_bytes();
         assert_eq!(image.bytes[at..at + 2], [high, low], "row {row}");
     }
-    for mode in 0..4 {
+    for mode in 0..7 {
         let machine = run(&[22, mode], &[]);
         let pointer = u16::from_le_bytes([machine.peek(0xE0), machine.peek(0xE1)]);
         assert_eq!(pointer, ROWS_640, "mode {mode}");
     }
 }
 
-/// Each mode's &E0 table holds its rows' offsets high byte first.
+/// Mode 7's &E0 table holds its rows' offsets high byte first.
 #[test]
-fn every_mode_s_row_table_is_high_byte_first() {
+fn the_teletext_row_table_is_high_byte_first() {
     let image = model_b().expect("the MOS assembles");
-    for (mode, row_bytes, rows) in [(4u8, 320u16, 32u16), (6, 320, 25), (7, 40, 25)] {
-        let machine = run(&[22, mode], &[]);
-        let table = u16::from_le_bytes([machine.peek(0xE0), machine.peek(0xE1)]);
-        for row in 0..rows {
-            let at = usize::from(table - 0xC000 + 2 * row);
-            let entry = [image.bytes[at], image.bytes[at + 1]];
-            assert_eq!(
-                u16::from_be_bytes(entry),
-                row * row_bytes,
-                "mode {mode} row {row}"
-            );
-        }
+    let machine = run(&[22, 7], &[]);
+    let table = u16::from_le_bytes([machine.peek(0xE0), machine.peek(0xE1)]);
+    for row in 0u16..25 {
+        let at = usize::from(table - 0xC000 + 2 * row);
+        let entry = [image.bytes[at], image.bytes[at + 1]];
+        assert_eq!(u16::from_be_bytes(entry), row * 40, "row {row}");
     }
 }
 
@@ -433,7 +427,7 @@ fn interfering_event(a: &mut Asm) {
 /// The regression: an OS call waiting for an interrupt let interrupt
 /// routines in with nothing kept, so their own calls overwrote the call
 /// registers it returns: OSWORD 0, waiting for each key, gave back A and X
-/// as an interrupt routine's OSBYTE left them.
+/// as an interrupt routine's OSBYTE left them, not MOS 1.20's A and X zero.
 #[test]
 fn osword_0_keeps_its_registers_while_interrupt_routines_make_calls() {
     const OLD: u16 = 0x0076;
@@ -467,11 +461,7 @@ fn osword_0_keeps_its_registers_while_interrupt_routines_make_calls() {
     type_text(&mut machine, "HELLO\r").expect("typed");
     finish(&mut machine, BUDGET);
     let [call, block, length, flags] = recorded(&machine, RESULT);
-    assert_eq!(
-        (call, block),
-        (0, BLOCK.to_le_bytes()[0]),
-        "A and X as given"
-    );
+    assert_eq!((call, block), (0, 0), "A and X zero");
     assert_eq!(length, 5, "Y, the line's length");
     assert_eq!(flags & super::CARRY, 0, "no Escape");
     let line: Vec<u8> = (0..6).map(|i| machine.peek(LINE + i)).collect();

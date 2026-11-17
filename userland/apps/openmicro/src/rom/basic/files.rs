@@ -5,13 +5,14 @@
 
 use super::float::PACKED;
 use super::ws::{kind, page, zp as z};
-use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
-use crate::rom::os::{entry, osbyte, CR};
+use crate::rom::asm::{abs, imm, lo, zp, Asm};
+use crate::rom::os::{entry, osbyte};
 
 const OSARGS_READ_PTR: u8 = 0;
 const OSARGS_WRITE_PTR: u8 = 1;
 const OSARGS_EXTENT: u8 = 2;
-/// A real's packed bytes while they are written or read.
+/// A real's packed bytes while they are written or read: the first
+/// temporary, which `temp_0_store` and `temp_0_load` work on.
 const PACKED_AT: u16 = page::TEMPS;
 
 pub fn emit(a: &mut Asm) {
@@ -48,12 +49,8 @@ fn channels(a: &mut Asm) {
     a.bind(open);
     a.pha();
     a.jsr("arg_string");
-    a.ldy(zp(z::STRING_LENGTH));
-    a.lda(imm(CR));
-    a.sta(abs(page::STRING).y());
+    a.jsr("string_cr");
     a.pla();
-    a.ldx(imm(lo(page::STRING)));
-    a.ldy(imm(hi(page::STRING)));
     a.jsr(entry::OSFIND);
     a.jmp("return_a");
 
@@ -133,8 +130,7 @@ fn records(a: &mut Asm) {
     a.tya();
     a.pha();
     let (item, done) = (a.here_local(), a.local());
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(done);
     a.jsr("expr");
     a.stx(zp(z::OP));
@@ -156,11 +152,7 @@ fn records(a: &mut Asm) {
     a.beq(sent);
     a.bind(real);
     a.jsr(entry::OSBPUT);
-    a.lda(imm(lo(PACKED_AT)));
-    a.sta(zp(z::VAR));
-    a.lda(imm(hi(PACKED_AT)));
-    a.sta(zp(z::VAR + 1));
-    a.jsr("fac_store");
+    a.jsr("temp_0_store");
     a.pla();
     a.pha();
     a.tay();
@@ -199,14 +191,9 @@ fn inputs(a: &mut Asm) {
     a.tya();
     a.pha();
     let (item, done) = (a.here_local(), a.local());
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(done);
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.pla();
     a.pha();
     a.tay();
@@ -234,11 +221,7 @@ fn inputs(a: &mut Asm) {
     a.sta(abs(PACKED_AT - 1).x());
     a.dex();
     a.bne(byte);
-    a.lda(imm(lo(PACKED_AT)));
-    a.sta(zp(z::VAR));
-    a.lda(imm(hi(PACKED_AT)));
-    a.sta(zp(z::VAR + 1));
-    a.jsr("fac_load");
+    a.jsr("temp_0_load");
     a.pla();
     a.sta(zp(z::VAR + 1));
     a.pla();

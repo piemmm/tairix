@@ -5,7 +5,7 @@ use tairix_openbasic::basic2;
 use tairix_openbasic::keyword::{word, Word, PSEUDO_LHS};
 
 use super::ws::{page, zp as z};
-use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
+use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Acc, Asm, RTS};
 use crate::rom::os::{entry, CR, ESCAPE_FLAG};
 
 /// The token of the first statement, the first command too.
@@ -97,6 +97,11 @@ const STATEMENTS: [&str; 0x100 - FIRST_STATEMENT as usize] = {
     handlers
 };
 
+/// Page 4, where the resident integers are, is also an integer location's
+/// type: one load sets both.
+const RESIDENT_PAGE: u8 = super::ws::place::INTEGER;
+const _: () = assert!(page::RESIDENT >> 8 == RESIDENT_PAGE as u16);
+
 pub fn emit(a: &mut Asm) {
     looping(a);
     running(a);
@@ -141,7 +146,13 @@ fn looping(a: &mut Asm) {
     // What may follow a statement: another, the line's end, or an ELSE the
     // statement before it has passed.
     a.here("statement_done");
-    a.jsr("next_a");
+    a.ldy(zp(z::OFFSET_A));
+    let space = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(space);
+    a.sty(zp(z::OFFSET_A));
     a.tax();
     a.here("statement_done_x");
     a.cpx(imm(b':'));
@@ -201,14 +212,19 @@ fn running(a: &mut Asm) {
     a.sta(zp(z::OFFSET_A));
     a.fall_into("statement");
 
-    // The statement at the statement pointer.
+    // The statement at the statement pointer, its first character read as
+    // `next_a` reads it.
     a.here("statement");
     a.bit(zp(ESCAPE_FLAG));
-    let going = a.local();
-    a.bpl(going);
-    a.jmp("escaped");
-    a.bind(going);
-    a.jsr("next_a");
+    let escaped = a.local();
+    a.bmi(escaped);
+    a.ldy(zp(z::OFFSET_A));
+    let space = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(space);
+    a.sty(zp(z::OFFSET_A));
     a.cmp(imm(FIRST_STATEMENT));
     let other = a.local();
     a.bcc(other);
@@ -219,23 +235,33 @@ fn running(a: &mut Asm) {
     a.lda(abs("statement_low").x());
     a.pha();
     a.rts();
+    a.bind(escaped);
+    a.jmp("escaped");
+    // An assignment to a name, the commonest, looked for first.
     a.bind(other);
+    let (low, high, assigning, assigned) = (a.local(), a.local(), a.local(), a.local());
+    a.cmp(imm(b'A'));
+    a.bcc(low);
+    a.cmp(imm(b'Z' + 1));
+    a.bcs(high);
+    // A letter always starts a location.
+    a.jsr("lvalue_letter");
+    a.bcc(assigned);
+    a.bind(high);
+    // A true IF whose statements are none ends where its ELSE part begins.
+    a.cmp(imm(word::ELSE.token));
+    a.beq("skip_line");
+    a.cmp(imm(b'['));
+    a.bne(assigning);
+    a.jmp("statement_assemble");
+    a.bind(low);
     a.cmp(imm(b':'));
     a.beq("statement");
     a.cmp(imm(CR));
     a.beq("end_of_line");
-    // A true IF whose statements are none ends where its ELSE part begins.
-    a.cmp(imm(word::ELSE.token));
-    a.beq("skip_line");
     a.cmp(imm(b'*'));
     a.beq("statement_star");
-    a.cmp(imm(b'['));
-    let not_assembly = a.local();
-    a.bne(not_assembly);
-    a.jmp("statement_assemble");
-    a.bind(not_assembly);
     a.cmp(imm(b'='));
-    let assigning = a.local();
     a.bne(assigning);
     a.jmp("statement_return_value");
     a.bind(assigning);
@@ -246,7 +272,9 @@ fn running(a: &mut Asm) {
     a.here("assignment");
     a.here("statement_let");
     a.jsr("lvalue");
-    a.bcs("statement_syntax");
+    let none = a.local();
+    a.bcs(none);
+    a.bind(assigned);
     a.lda(zp(z::VAR));
     a.pha();
     a.lda(zp(z::VAR + 1));
@@ -270,7 +298,11 @@ fn running(a: &mut Asm) {
     a.jmp("statement_ended");
     a.bind(mistake);
     a.jmp("err_mistake");
+    a.bind(none);
+    a.jmp("err_syntax");
+}
 
+fn statements(a: &mut Asm) {
     // *command: the rest of the line, from the star, to OSCLI.
     a.here("statement_star");
     a.jsr("return_point");
@@ -282,9 +314,7 @@ fn running(a: &mut Asm) {
     a.dex();
     a.jsr(entry::OSCLI);
     a.jmp("skip_line");
-}
 
-fn statements(a: &mut Asm) {
     // RUN: the variables cleared, then the program from its first record.
     // A program that does not start with a CR is a Syntax error before any
     // line, as BASIC II finds its first line's end there.
@@ -302,13 +332,53 @@ fn statements(a: &mut Asm) {
     a.lda(imm(hi(page::INPUT)));
     a.sta(zp(z::TEXT_A + 1));
     a.jmp("err_syntax");
+    lvalues(a);
+}
 
-    // A location at the statement pointer, made if a variable is absent:
-    // ?, ! or $ and a factor, or a variable and any ? or ! after it. C set
-    // if there is none; `@` alone is none.
+/// A location at the statement pointer, made if a variable is absent: ?, !
+/// or $ and a factor, or a variable and any ? or ! after it. C set if there
+/// is none; `@` alone is none.
+fn lvalues(a: &mut Asm) {
     a.here("lvalue");
     a.jsr("next_a");
-    let (indirect, name, none, at) = (a.local(), a.local(), a.local(), a.local());
+    let (low, high, none, named, lowercase, found, after_name, indirect, binary) = (
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+        a.local(),
+    );
+    a.cmp(imm(b'A'));
+    a.bcc(low);
+    a.cmp(imm(b'Z' + 1));
+    a.bcs(high);
+    // A name from its initial, @ to Z, the pointer past it: a resident
+    // integer found at once.
+    a.here("lvalue_letter");
+    a.asl(Acc);
+    a.asl(Acc);
+    a.tax();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.cmp(imm(b'%'));
+    a.bne(named);
+    a.iny();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.cmp(imm(b'('));
+    a.beq(named);
+    a.sty(zp(z::OFFSET_A));
+    a.stx(zp(z::VAR));
+    a.ldx(imm(RESIDENT_PAGE));
+    a.stx(zp(z::VAR + 1));
+    a.stx(zp(z::VTYPE));
+    a.jmp(after_name);
+    a.bind(high);
+    a.jsr("is_name");
+    a.bcs(lowercase);
+    a.bind(low);
     a.ldx(imm(super::ws::place::BYTE));
     a.cmp(imm(b'?'));
     a.beq(indirect);
@@ -319,11 +389,7 @@ fn statements(a: &mut Asm) {
     a.cmp(imm(b'$'));
     a.beq(indirect);
     a.cmp(imm(b'@'));
-    a.beq(at);
-    a.cmp(imm(b'9' + 1));
-    a.bcc(none);
-    a.jsr("is_name");
-    a.bcs(name);
+    a.beq("lvalue_letter");
     a.bind(none);
     a.sec();
     a.rts();
@@ -341,22 +407,21 @@ fn statements(a: &mut Asm) {
     a.sta(zp(z::VAR + 1));
     a.clc();
     a.rts();
-    a.bind(at);
-    a.lda(zp(z::TEXT_A).ind_y());
-    a.cmp(imm(b'%'));
-    a.bne(none);
-    a.bind(name);
+    // X the initial's resident offset, none for `@`.
+    a.bind(named);
+    a.txa();
+    a.beq(none);
+    a.bind(lowercase);
     a.dec(zp(z::OFFSET_A));
-    a.jsr("variable");
-    let found = a.local();
+    a.jsr("variable_named");
     a.bcc(found);
     a.jsr("create_variable");
     a.bind(found);
     a.ldy(zp(z::OFFSET_A));
     a.lda(zp(z::TEXT_A).ind_y());
+    a.bind(after_name);
     a.ldx(imm(super::ws::place::BYTE));
     a.cmp(imm(b'?'));
-    let binary = a.local();
     a.beq(binary);
     a.ldx(imm(super::ws::place::INTEGER));
     a.cmp(imm(b'!'));
@@ -368,13 +433,15 @@ fn statements(a: &mut Asm) {
     a.txa();
     a.pha();
     a.jsr("load_variable");
-    a.jsr("make_integer");
-    a.jsr("push_value");
-    a.jsr("factor_integer");
-    a.jsr("pop_int");
-    a.jsr("int_add");
+    a.jsr("plus_offset");
     a.pla();
     a.jmp("lvalue_at_iac");
+
+    // A location at the statement pointer; Mistake if there is none.
+    a.here("location");
+    a.jsr("lvalue");
+    a.bcc(RTS);
+    a.jmp("err_mistake");
 }
 
 /// Each handler's address less one, as RTS takes it.

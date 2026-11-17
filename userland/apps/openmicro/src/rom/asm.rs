@@ -1140,28 +1140,65 @@ impl Asm {
     /// `BRK` and the block its handler reads after it: the error's number,
     /// its message and a zero, placed whole, with nothing running on past it.
     pub fn error(&mut self, number: u8, message: &str) {
+        let Some(brk) = self.error_opcode(message) else {
+            return;
+        };
+        self.make_way(message.len() + 3, true);
+        self.put_error(brk, number, message);
+        self.put(0);
+        self.runs_on = false;
+        self.data_run = DataRun::Absent;
+    }
+
+    /// Error blocks one after another, each at its label, placed whole: a
+    /// block's `BRK` is also the zero that ends the message before it.
+    pub fn error_run(&mut self, blocks: &[(&'static str, u8, &str)]) {
+        let mut opcode = None;
+        for &(_, _, message) in blocks {
+            opcode = self.error_opcode(message);
+        }
+        let Some(brk) = opcode else {
+            return;
+        };
+        let len: usize = blocks
+            .iter()
+            .map(|&(_, _, message)| message.len() + 2)
+            .sum();
+        self.make_way(len + 1, true);
+        for &(label, number, message) in blocks {
+            self.here(label);
+            self.put_error(brk, number, message);
+        }
+        self.put(0);
+        self.runs_on = false;
+        self.data_run = DataRun::Absent;
+    }
+
+    /// The `BRK` opcode, `message` refused unless it is ASCII.
+    fn error_opcode(&mut self, message: &str) -> Option<u8> {
         if !message.is_ascii() {
             let at = self.pc();
             self.fail(AsmError::NotAscii { at });
         }
-        let Some(brk) = isa::encode(Mnemonic::Brk, Mode::Implied) else {
+        let brk = isa::encode(Mnemonic::Brk, Mode::Implied);
+        if brk.is_none() {
             let at = self.pc();
             self.fail(AsmError::NoEncoding {
                 at,
                 mnemonic: Mnemonic::Brk,
                 mode: Mode::Implied,
             });
-            return;
-        };
-        self.make_way(message.len() + 3, true);
+        }
+        brk
+    }
+
+    /// `BRK`, the error's number and its message, unterminated.
+    fn put_error(&mut self, brk: u8, number: u8, message: &str) {
         self.put(brk);
         self.put(number);
         for &byte in message.as_bytes() {
             self.put(byte);
         }
-        self.put(0);
-        self.runs_on = false;
-        self.data_run = DataRun::Absent;
     }
 
     /// The image for a machine where a read of a page `quiet` holds acts on

@@ -242,11 +242,7 @@ fn calls(a: &mut Asm) {
     let (more, made) = (a.here_local(), a.local());
     a.cpx(imm(b','));
     a.bne(made);
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.pla();
     a.tay();
     a.lda(zp(z::VAR));

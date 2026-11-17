@@ -16,15 +16,13 @@ use super::float::PACKED;
 use super::vars::{FROM, NAME_END, S_LENGTH, TNAME};
 use super::ws::{kind, page, zp as z};
 use crate::cpu::STACK_PAGE;
-use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, Label, RTS};
+use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, Label, RTS};
 
-/// A frame's fields from its lowest byte, then the 6502 stack's length
-/// and bytes.
-const F_OFFSET: u8 = 1;
-const F_TEXT: u8 = 2;
-const F_BASE: u8 = 4;
-const F_LENGTH: u8 = 6;
-const F_BYTES: u8 = 7;
+/// A frame from its lowest byte: what it keeps of page zero, then the 6502
+/// stack's length and bytes.
+const FRAME: [u16; 6] = [KIND, z::OFFSET_A, z::TEXT_A, z::TEXT_A + 1, BASE, BASE + 1];
+const F_LENGTH: u8 = byte(FRAME.len());
+const F_BYTES: u8 = F_LENGTH + 1;
 /// A local's record: its type, address, then value.
 const L_ADDRESS: u8 = 1;
 const L_VALUE: u8 = 3;
@@ -68,39 +66,34 @@ fn finding(a: &mut Asm) -> (Label, Label) {
     a.stx(zp(z::VAR));
     a.lda(imm(hi(page::PROC_LIST)));
     a.sta(zp(z::VAR + 1));
-    a.ldy(zp(z::OFFSET_A));
-    a.dey();
-    let letters = a.here_local();
-    a.iny();
-    a.lda(zp(z::TEXT_A).ind_y());
-    a.jsr("is_name");
-    a.bcs(letters);
-    a.tya();
-    a.sec();
-    a.sbc(zp(z::OFFSET_A));
-    a.clc();
-    a.adc(imm(2));
-    a.sta(zp(NAME_END));
+    // The name read through TNAME as an entry holds it, its length unknown
+    // until a comparison ends it: TNAME is TEXT_A plus OFFSET_A less two,
+    // which is below 0 for a name typed at the prompt.
+    a.ldx(imm(0));
+    a.stx(zp(NAME_END));
     a.lda(zp(z::OFFSET_A));
-    a.sty(zp(z::OFFSET_A));
+    a.sec();
+    a.sbc(imm(2));
+    let positive = a.local();
+    a.bcs(positive);
+    a.dex();
+    a.bind(positive);
     a.clc();
     a.adc(zp(z::TEXT_A));
     a.sta(zp(TNAME));
-    a.lda(zp(z::TEXT_A + 1));
-    a.adc(imm(0));
+    a.txa();
+    a.adc(zp(z::TEXT_A + 1));
     a.sta(zp(TNAME + 1));
-    a.lda(zp(TNAME));
-    a.sec();
-    a.sbc(imm(2));
-    a.sta(zp(TNAME));
-    let same = a.local();
-    a.bcs(same);
-    a.dec(zp(TNAME + 1));
-    a.bind(same);
-    a.jsr("search_list");
     let (search, found) = (a.local(), a.local());
+    let listed_next = a.here_local();
+    a.jsr("search_list");
     a.bcs(search);
-    a.ldy(imm(0));
+    // An entry naming only the start of the name is not it.
+    a.lda(zp(TNAME).ind_y());
+    a.jsr("is_name");
+    a.bcs(listed_next);
+    past_name(a);
+    a.iny();
     a.lda(zp(z::VAR).ind_y());
     a.sta(zp(z::TEXT_B));
     a.iny();
@@ -109,6 +102,15 @@ fn finding(a: &mut Asm) -> (Label, Label) {
     a.pla();
     a.rts();
     (search, found)
+}
+
+/// The statement pointer past the name whose zero, in an entry's terms, Y
+/// is; C clear.
+fn past_name(a: &mut Asm) {
+    a.tya();
+    a.adc(zp(z::OFFSET_A));
+    a.sbc(imm(1));
+    a.sta(zp(z::OFFSET_A));
 }
 
 fn definition_search(a: &mut Asm, search: Label, found: Label) {
@@ -151,15 +153,16 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
     a.sta(zp(DEFINED + 1));
     a.ldy(imm(2));
     let (compare, ended) = (a.here_local(), a.local());
-    a.cpy(zp(NAME_END));
-    a.beq(ended);
     a.lda(zp(DEFINED).ind_y());
+    a.jsr("is_name");
+    a.bcc(ended);
     a.cmp(zp(TNAME).ind_y());
     a.bne(next_line);
     a.iny();
     a.bne(compare);
+    // The definition's name ended: the call's must end with it.
     a.bind(ended);
-    a.lda(zp(DEFINED).ind_y());
+    a.lda(zp(TNAME).ind_y());
     a.jsr("is_name");
     a.bcc(found);
     a.bind(next_line);
@@ -173,6 +176,8 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
     a.jmp(line);
     // Found: the address after the name, kept in a new list entry.
     a.bind(found);
+    a.sty(zp(NAME_END));
+    past_name(a);
     a.tya();
     a.clc();
     a.adc(zp(DEFINED));
@@ -207,24 +212,37 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
 }
 
 fn calling(a: &mut Asm) {
-    // PROC name[(actuals)].
-    a.here("statement_proc");
-    a.lda(imm(word::PROC.token));
-    a.jsr("call_routine");
-    a.jmp("statement_done");
-
-    // FN name[(actuals)], its value as any function's.
+    // FN name[(actuals)], its value as any function's: leaving it returns
+    // to the factor's end, so its frame keeps no return address of its own.
     a.here("fn_fn");
     a.lda(imm(word::FN.token));
-    a.jsr("call_routine");
-    a.lda(zp(z::TYPE));
-    a.rts();
+    a.bne("call_routine");
+
+    // PROC name[(actuals)]: its frame keeps no return address, as ENDPROC
+    // goes on to the statement after it.
+    a.here("statement_proc");
+    a.lda(imm(word::PROC.token));
+    a.fall_into("call_routine");
 
     // The call of the PROC or FN whose token is A. The kind, definition,
     // stack and count wait on the 6502 stack while the actuals are found.
     a.here("call_routine");
     a.pha();
     a.jsr("find_definition");
+    a.jsr("next_a");
+    a.cmp(imm(b'('));
+    let (actuals, kind_kept) = (a.local(), a.local());
+    a.beq(actuals);
+    // No actuals: nothing on the BASIC stack is the call's.
+    a.dec(zp(z::OFFSET_A));
+    a.lda(zp(z::STACK));
+    a.sta(zp(BASE));
+    a.lda(zp(z::STACK + 1));
+    a.sta(zp(BASE + 1));
+    a.lda(imm(0));
+    a.sta(zp(COUNT));
+    a.beq(kind_kept);
+    a.bind(actuals);
     a.lda(zp(z::TEXT_B));
     a.pha();
     a.lda(zp(z::TEXT_B + 1));
@@ -235,10 +253,6 @@ fn calling(a: &mut Asm) {
     a.pha();
     a.lda(imm(0));
     a.pha();
-    a.jsr("next_a");
-    a.cmp(imm(b'('));
-    let (none, found) = (a.local(), a.local());
-    a.bne(none);
     let actual = a.here_local();
     a.jsr("expr");
     a.stx(zp(z::OP));
@@ -258,10 +272,6 @@ fn calling(a: &mut Asm) {
     a.cpx(imm(b','));
     a.beq(actual);
     a.jsr("closing_bracket");
-    a.jmp(found);
-    a.bind(none);
-    a.dec(zp(z::OFFSET_A));
-    a.bind(found);
     a.pla();
     a.sta(zp(COUNT));
     a.pla();
@@ -272,12 +282,13 @@ fn calling(a: &mut Asm) {
     a.sta(zp(z::TEXT_B + 1));
     a.pla();
     a.sta(zp(z::TEXT_B));
-    a.pla();
-    a.sta(zp(KIND));
     a.lda(zp(z::STACK));
     a.sta(zp(WALK));
     a.lda(zp(z::STACK + 1));
     a.sta(zp(WALK + 1));
+    a.bind(kind_kept);
+    a.pla();
+    a.sta(zp(KIND));
 }
 
 fn call_frame(a: &mut Asm) {
@@ -298,15 +309,8 @@ fn call_frame(a: &mut Asm) {
     a.ldy(imm(F_LENGTH));
     a.pla();
     a.sta(zp(z::STACK).ind_y());
-    for (field, from) in [
-        (0, KIND),
-        (F_OFFSET, z::OFFSET_A),
-        (F_TEXT, z::TEXT_A),
-        (F_TEXT + 1, z::TEXT_A + 1),
-        (F_BASE, BASE),
-        (F_BASE + 1, BASE + 1),
-    ] {
-        a.ldy(imm(field));
+    for from in FRAME.into_iter().rev() {
+        a.dey();
         a.lda(zp(from));
         a.sta(zp(z::STACK).ind_y());
     }
@@ -332,11 +336,15 @@ fn call_frame(a: &mut Asm) {
     a.sta(zp(z::OFFSET_A));
     a.jsr("next_a");
     a.cmp(imm(b'('));
-    let (formals, mismatch) = (a.local(), a.local());
+    let (formals, mismatch, body) = (a.local(), a.local(), a.local());
     a.beq(formals);
-    a.dec(zp(z::OFFSET_A));
-    a.lda(zp(COUNT));
+    a.ldx(zp(COUNT));
     a.bne(mismatch);
+    // A body after a colon starts past it.
+    a.cmp(imm(b':'));
+    a.beq(body);
+    a.dec(zp(z::OFFSET_A));
+    a.bind(body);
     a.jmp("statement");
     a.bind(mismatch);
     a.jmp("err_arguments");
@@ -488,11 +496,7 @@ fn locals(a: &mut Asm) {
     // and type pushed; VAR and VTYPE its location. A byte, as in BASIC II,
     // is neither kept nor, after, put back.
     a.here("make_local");
-    a.jsr("lvalue");
-    let located = a.local();
-    a.bcc(located);
-    a.jmp("err_mistake");
-    a.bind(located);
+    a.jsr("location");
     a.lda(zp(z::VTYPE));
     a.beq(RTS);
     a.lda(zp(z::VAR + 1));
@@ -583,7 +587,7 @@ fn leaving(a: &mut Asm) {
     // ENDPROC: leaving a PROC.
     a.here("statement_endproc");
     a.lda(imm(word::PROC.token));
-    a.jmp("leave");
+    a.bne("leave");
 
     // `=` in an FN: its value, then leaving it.
     a.here("statement_return_value");
@@ -622,24 +626,18 @@ fn leaving(a: &mut Asm) {
     a.bind(right);
     a.pla();
     a.sta(zp(z::STRING_LENGTH));
-    for (field, to) in [
-        (F_OFFSET, z::OFFSET_A),
-        (F_TEXT, z::TEXT_A),
-        (F_TEXT + 1, z::TEXT_A + 1),
-        (F_BASE, BASE),
-        (F_BASE + 1, BASE + 1),
-    ] {
-        a.ldy(imm(field));
+    a.ldy(imm(1));
+    for to in &FRAME[1..] {
         a.lda(zp(z::STACK).ind_y());
-        a.sta(zp(to));
+        a.sta(zp(*to));
+        a.iny();
     }
     // The 6502 stack's pointer from the length kept, and its bytes back.
-    a.ldy(imm(F_LENGTH));
     a.lda(zp(z::STACK).ind_y());
     a.eor(imm(STACK_TOP));
     a.tax();
     a.txs();
-    a.ldy(imm(F_BYTES));
+    a.iny();
     let (back, restored) = (a.here_local(), a.local());
     a.cpx(imm(STACK_TOP));
     a.beq(restored);
@@ -653,6 +651,14 @@ fn leaving(a: &mut Asm) {
     a.sta(zp(z::STACK));
     a.lda(zp(BASE + 1));
     a.sta(zp(z::STACK + 1));
+    // A PROC goes on to the statement after its call, an FN back into its
+    // expression.
+    a.lda(zp(KIND));
+    a.cmp(imm(word::PROC.token));
+    let function = a.local();
+    a.bne(function);
+    a.jmp("statement_done");
+    a.bind(function);
     a.lda(zp(z::TYPE));
     a.rts();
 }

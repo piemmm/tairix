@@ -252,7 +252,7 @@ fn rom_scan(a: &mut Asm, model: Model) {
 
 /// Offer service call A, with Y its parameter, to each ROM with a service
 /// entry from 15 down until one claims it by returning A zero. Returns A
-/// zero if claimed, Y as the ROMs leave it; the ROM paged in is kept.
+/// and X zero if claimed, Y as the ROMs leave it; the ROM paged in is kept.
 fn service_call(a: &mut Asm, model: Model) {
     a.here("service_call");
     a.tax();
@@ -408,6 +408,15 @@ pub(super) const VECTOR_DEFAULTS_AT: u16 = 0xD940;
 /// The Model B's `vector_defaults` at MOS 1.20's address.
 pub(super) fn pin_vector_defaults(a: &mut Asm) {
     a.pin(VECTOR_DEFAULTS_AT, |a| vector_defaults(a, Model::ModelB));
+}
+
+/// Where MOS 1.20's reset entry lies: software reads its address from &FFFC
+/// to know the OS by.
+pub(super) const ENTRY: u16 = 0xD9CD;
+
+/// The Model B's reset entry at MOS 1.20's address.
+pub(super) fn pin_entry(a: &mut Asm) {
+    a.pin(ENTRY, |a| a.jmp("reset"));
 }
 
 /// The vectors' defaults, then the OSBYTE settings to &27F, every reset

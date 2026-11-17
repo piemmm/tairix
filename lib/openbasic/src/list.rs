@@ -18,6 +18,8 @@ impl Options {
     pub const FOR_LOOPS: u8 = 1 << 1;
     /// BASIC II: lines inside a `REPEAT` loop indented two spaces a loop.
     pub const REPEAT_LOOPS: u8 = 1 << 2;
+    /// BASIC II's kinds of loop, in the order a listing counts them.
+    pub const LOOPS: [u8; 2] = [Self::FOR_LOOPS, Self::REPEAT_LOOPS];
     /// BASIC V: lines inside a structure indented two spaces a level.
     pub const INDENT: u8 = 1 << 1;
     /// BASIC V: each statement on a line of its own.
@@ -40,9 +42,13 @@ impl Options {
 
 const QUOTE: u8 = b'"';
 
+/// The deepest indent before a line's text: BASIC II's two kinds of loop at
+/// 127 each, one more of a kind listing as one space.
+const DEEPEST_INDENT: usize = Options::LOOPS.len() * 2 * 127;
+
 /// The most a line lists as besides its text: its number's room, a space,
 /// the deepest indent and the new line.
-pub const MOST_LISTED_BEFORE: usize = 5 + 1 + 255 + 1;
+pub const MOST_LISTED_BEFORE: usize = 5 + 1 + DEEPEST_INDENT + 1;
 
 /// The most one byte of a line's text lists as: under LISTO 4 a colon that
 /// splits the statement, the new line, the number's room, a space and the
@@ -108,12 +114,19 @@ fn basic2(
     out: &mut Out<'_>,
 ) -> Result<(), Error> {
     out.number(number, true)?;
-    let counted = |at: usize, option| if options.has(option) { loops[at] } else { 0 };
-    // Summed and doubled in a byte, the space shifted in below, as the ROM
-    // does.
-    let open = counted(0, Options::FOR_LOOPS).wrapping_add(counted(1, Options::REPEAT_LOOPS));
-    let indent = (open << 1) | u8::from(options.has(Options::SPACE));
-    out.spaces(usize::from(indent))?;
+    out.spaces(usize::from(options.has(Options::SPACE)))?;
+    // Two spaces a loop of each kind shown, but one for 128 or more: BASIC
+    // II is seen to print them so.
+    for (&open, option) in loops.iter().zip(Options::LOOPS) {
+        if options.has(option) {
+            let indent = if open < 0x80 {
+                usize::from(open) * 2
+            } else {
+                1
+            };
+            out.spaces(indent)?;
+        }
+    }
     let mut at = 0;
     while let Some(&b) = text.get(at) {
         at += 1;

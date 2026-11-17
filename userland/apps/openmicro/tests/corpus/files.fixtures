@@ -114,7 +114,17 @@ row        191
 row >CLOSE_0
 row >A%=OPENOUT"X":B%=OPENOUT"Y"
 row >FOR I%=1 TO 16385:BPUT_A%,1:NEXT
-disc 0 b9be624b864ba4d4f0087ca13422f6f5922c89077c524c35b668389bf5ed0870
+row Can't extend
+row >P.ERR,PTR_A%
+row        191     16384
+row >CLOSE_0:*INFO *.*
+row $.Y           000000 000000 000000 048
+row $.X           000000 000000 004000 008
+row $.LONGNAM     FF1900 FF8023 000345 004
+row B.FILE        003000 003010 000100 003
+row $.A           001900 001900 000100 002
+row >
+disc 0 2ecbf1696fc205351c4773d06237b9880d17e1a28c3209e3bd74246d8056e697
 
 scenario an_open_file_grows_into_the_space_after_it
 row Disk full

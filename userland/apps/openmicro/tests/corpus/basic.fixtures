@@ -65,3 +65,172 @@ row Bad DIM
 row >A=TOP:DIM B 10:P.B>=A
 row         -1
 row >
+
+scenario a_comparison_leaves_a_second_to_what_follows
+row ABLONG
+row >PRINT 1=1=1
+row         -1
+row No such variable
+row >A=1<2=3
+row Syntax error
+row >IF 1<2 =5
+row No FN
+row >IF 2>1 >0 PRINT "Y"
+row Syntax error
+row >
+
+scenario a_statement_follows_the_assembler_s_close
+row X
+row >P%=&900:[OPT0:RTS:] A=5:PRINT A
+row          5
+row >P%=&900:[OPT0:RTS:]*FX0
+row OS 1.20
+row >P%=&900:[OPT0:RTS:]=1
+row No FN
+row >P%=&900:[OPT0:RTS:]]PRINT "V"
+row Syntax error
+row >
+
+scenario input_prompts_take_tab_and_spc
+row           5
+row >INPUT SPC(5)"A"G
+row      A1
+row >INPUT "F"TAB(30)L
+row F                             6
+row >INPUT M,TAB(2)N
+row ?7
+row   8
+row >PRINT B,G,L,M,N
+row          5         1         6         7
+row          8
+row >
+
+scenario rnd_takes_its_argument_from_iac_at_basic_ii_s_address
+row >RUN
+row          4        40  800067FC
+row         63        40  800067FC
+row       FC68        40  800067FC
+row          1        FF  800067FC
+row          0        FF  FFFFFFF9
+row   FFFFFFFB        40  FFFFFFFB
+row >
+
+scenario rnd_leaves_its_next_integer_in_iac_at_basic_ii_s_address
+row >RUN
+row   657FFDA1  657FFDA1  31000D40
+row   8A7FFB4A  8A7FFB4A  31000D40
+row   2F7FF913  2F7FF913  31000D40
+row   547FF69D  547FF69D  31000D40
+row   F97FF446  F97FF446  31000D40
+row   1E7FF22F  1E7FF22F  31000D40
+row >
+
+scenario an_error_drops_the_open_loops_and_procs_before_on_error_runs
+row         18        60         0         0
+row          0
+row          5         7         1        -1
+row >
+
+scenario a_program_reaching_past_himem_is_found_whole
+row >OLD
+row >PRINT TOP-PAGE
+row No room
+row >RUN
+row A
+row B
+row C
+row >
+
+scenario a_binary_indirection_follows_its_name_directly
+row >PRINT D%?1,F?1
+row          9         9
+row >IF E% ?&70=3:PRINT "T"
+row T
+row >PRINT ?&70
+row          3
+row >X=E% ?1
+row Syntax error
+row >PRINT F ?&71
+row       6402         0
+row >E% ?1=5
+row Mistake
+row >
+
+scenario procedures_are_found_by_their_whole_names
+row AB A ABC A AB
+row         20       300        40        11
+row          5
+row LP L
+row         29
+row >PROCAB:PROCABC:PRINT FNXY(1)
+row AB ABC        100
+row >
+
+scenario integer_division_keeps_its_signs_at_every_size
+row          1        -1        -1         1
+row >PRINT 1000 DIV 7,100000 DIV 3,&7FFFFFFF
+row  DIV 2,0 DIV 5
+row        142     333331.07374182E9
+row          0
+row >PRINT 255 DIV 1,256 DIV 1,65535 DIV 255
+row ,&1000000 DIV 3
+row        255       256       257   5592405
+row >PRINT &FFFFFF DIV 16,-&7FFFFFFF DIV 3,7
+row  DIV 7,6 DIV 7
+row    1048575-715827882         1         0
+row >PRINT 5 MOD 3,-5 MOD 3,5 MOD -3,100000
+row MOD 7
+row          2        -2         2         5
+row >PRINT &1234567 MOD 1000,0 MOD 9,&10000
+row DIV &100,&FFFF DIV &FFFF
+row        743         0       256         1
+row >
+
+scenario integer_products_of_every_size
+row         15        15         0         0
+row >PRINT 255*255,255*65535,65535*255,-5*3
+row      65025  16711425  16711425       -15
+row >PRINT 5*-3,-5*-3,256*256,65535*65535
+row        -15        15     655364.29483622
+row E9
+row >PRINT -255*-255,200*300,300*200,65536*2
+row      65025     60000     60000    131072
+row >PRINT 40*1000,-128*127,32767*2,46341*46
+row 341
+row      40000    -16256     655342.14748828
+row E9
+row >
+
+scenario reals_wait_as_left_operands
+row       3.75      1.25     3.125         2
+row       6.25       5.5       5.5      -0.5
+row          0        -1        -1         0
+row          0         3         3         1
+row      11.25 -24.21875
+row        5.5     28.75   3628800
+row          0        -1         0         0
+row          6
+row >
+
+scenario integers_made_reals_keep_their_values
+row        255       257
+row       4095      4097
+row      65535     65537
+row    1048575   1048577
+row   16777215  16777217
+row  268435455 268435457
+row >PRINT 255+0.5,256-0.5,65535+0.5,-255-0.
+row 5
+row      255.5     255.5   65535.5    -255.5
+row >A%=1:FOR K%=1 TO 30:A%=A%*2:NEXT:X=A%:Y
+row =-A%:PRINT X,Y,X-1
+row 1.07374182E9        -1.07374182E9
+row 1.07374182E9
+row >FOR I=0.1 TO 1 STEP 0.3:PRINT I,:NEXT:P
+row RINT
+row        0.1
+row        0.4
+row        0.7
+row          1
+row >S=0:FOR I%=0 TO 300:X=I%:S=S+X*X:NEXT:P
+row RINT S

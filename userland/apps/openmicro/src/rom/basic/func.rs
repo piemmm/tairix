@@ -155,7 +155,8 @@ fn arguments(a: &mut Asm) {
     a.beq(RTS);
     a.jmp("err_missing_comma");
 
-    // Results in IAC as an integer: TRUE; A sign-extended; FALSE; A; YA.
+    // Results in IAC as an integer: TRUE; A sign-extended; FALSE; A; XA;
+    // YA.
     a.here("fn_true");
     a.lda(imm(0xFF));
     a.here("return_signed");
@@ -169,10 +170,14 @@ fn arguments(a: &mut Asm) {
     a.here("fn_false");
     a.lda(imm(0));
     a.here("return_a");
-    a.ldy(imm(0));
-    a.here("return_ya");
+    a.ldx(imm(0));
+    a.here("return_xa");
+    a.stx(zp(z::IAC + 1));
+    a.skip_over(|a| {
+        a.here("return_ya");
+        a.sty(zp(z::IAC + 1));
+    });
     a.sta(zp(z::IAC));
-    a.sty(zp(z::IAC + 1));
     a.lda(imm(0));
     a.bind(fill);
     a.sta(zp(z::IAC + 2));
@@ -391,8 +396,7 @@ fn devices(a: &mut Asm) {
     a.pha();
     a.lda(zp(z::IAC + 1));
     a.pha();
-    a.jsr("expr_integer");
-    a.jsr("closing_bracket");
+    a.jsr("integer_bracketed");
     // The block at IAC: x, then y, then the colour.
     a.ldx(imm(1));
     let byte = a.here_local();
@@ -666,8 +670,7 @@ fn searching(a: &mut Asm) {
     let started = a.local();
     a.bne(started);
     a.jsr("push_value");
-    a.jsr("expr_integer");
-    a.jsr("closing_bracket");
+    a.jsr("integer_bracketed");
     // The sought string, stacked above the searched one, to the buffer.
     a.ldy(imm(0));
     a.lda(zp(z::STACK).ind_y());

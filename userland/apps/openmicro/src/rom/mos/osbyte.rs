@@ -166,9 +166,15 @@ fn dispatch(a: &mut Asm, model: Model) {
     a.bcc("osbyte_unrecognised");
     a.sbc(imm(HIGH_FIRST - low_calls(model)));
     a.here("osbyte_low");
-    // The call returns here with X and Y set, C as it leaves it.
-    a.jsr("osbyte_call");
+    // The call returns here with X and Y set, C as it leaves it, and A the
+    // call's number from the stack, as MOS 1.20 keeps it, since a call the
+    // routine makes through OSBYTE rewrites the call registers.
+    a.tax();
     a.lda(zp(os::CALL_A));
+    a.pha();
+    a.txa();
+    a.jsr("osbyte_call");
+    a.pla();
     a.clv();
     a.rts();
     a.here("osbyte_call");
@@ -182,8 +188,10 @@ fn dispatch(a: &mut Asm, model: Model) {
     a.lda(zp(os::CALL_A));
     a.rts();
 
-    // A call the tables hold no routine for, met inside the dispatch.
+    // A call the tables hold no routine for, met inside the dispatch, its
+    // return and the call's number dropped.
     a.here("osbyte_unknown");
+    a.pla();
     a.pla();
     a.pla();
 
@@ -523,7 +531,14 @@ fn timing(a: &mut Asm, model: Model) {
     a.rts();
 
     if model == Model::ModelB {
+        // At most the channels there are, as MOS 1.20 takes it.
         a.here("osbyte_16");
+        a.cpx(imm(page2::ADC_CHANNELS + 1));
+        let channels = a.local();
+        a.bcc(channels);
+        a.ldx(imm(page2::ADC_CHANNELS));
+        a.stx(zp(os::CALL_X));
+        a.bind(channels);
         a.lda(imm(0xBD));
         a.jsr("osbyte_write_variable");
         a.txa();
@@ -619,13 +634,14 @@ fn timing(a: &mut Asm, model: Model) {
 
 /// Input: INKEY.
 fn input(a: &mut Asm, model: Model) {
-    // &81: Y &FF with X zero reads the OS's version; with X's top bit set it
-    // tests key X EOR &FF, and without it, as MOS 1.20 has it, is TRUE while
-    // no key from key X EOR &7F on is down. Otherwise a character within
-    // X + 256 Y centiseconds.
+    // &81: Y negative, as MOS 1.20 takes any Y with its top bit set, with X
+    // zero reads the OS's version; with X's top bit set it tests key X EOR
+    // &FF, and without it, as MOS 1.20 has it, is TRUE while no key from key
+    // X EOR &7F on is down. Otherwise a character within X + 256 Y
+    // centiseconds.
     a.here("osbyte_inkey");
-    a.cpy(imm(0xFF));
-    a.bne("osbyte_inkey_timed");
+    a.tya();
+    a.bpl("osbyte_inkey_timed");
     // INKEY(-256): MOS 1.20's identity is &FF as a key held is, Electron OS
     // 1.00's 1.
     a.txa();
@@ -674,6 +690,8 @@ fn input(a: &mut Asm, model: Model) {
     a.lda(abs(page2::INKEY_COUNT));
     a.ora(abs(page2::INKEY_COUNT + 1));
     a.bne("osbyte_inkey_wait");
+    // Timed out: X as it was given, as MOS 1.20 leaves it.
+    a.ldx(zp(os::CALL_X));
     a.ldy(imm(0xFF));
     a.sec();
     a.rts();

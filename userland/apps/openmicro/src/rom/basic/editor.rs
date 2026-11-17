@@ -251,8 +251,9 @@ fn program(a: &mut Asm) {
     a.jmp("clear_variables");
 
     // TOP from the records at PAGE, each stepped over by its length until
-    // the end marker, and checked to start with a CR and to end below
-    // HIMEM. A record that does not leaves TOP at it and, as BASIC II does,
+    // the end marker and checked to start with a CR; HIMEM bounds nothing,
+    // as a program loaded over the screen's memory runs once MODE moves it.
+    // A record that does not leaves TOP at it and, as BASIC II does,
     // reports Bad program as a message, ERR untouched, and returns to the
     // prompt; a length of zero, which would never step on, is one.
     a.here("find_top");
@@ -270,8 +271,6 @@ fn program(a: &mut Asm) {
     a.lda(zp(z::TOP).ind_y());
     a.beq(bad);
     a.jsr("pointer_add");
-    a.lda(zp(z::TOP + 1));
-    a.cmp(zp(z::HIMEM + 1));
     a.bcc(record);
     a.bind(bad);
     a.jsr("print_newline");
@@ -339,7 +338,7 @@ fn clearing(a: &mut Asm) {
     // The DATA pointer at the program's start.
     a.here("restore_data");
     a.ldx(imm(lo(z::DATA)));
-    a.jmp("page_pointer");
+    a.bne("page_pointer");
 
     // The record of the first line numbered at least LINE_NUMBER, or the
     // program's end: Z set if it is that line.
@@ -361,7 +360,6 @@ fn clearing(a: &mut Asm) {
     a.bcs("find_line_past");
     a.ldy(imm(3));
     a.lda(zp(RECORD).ind_y());
-    a.clc();
     a.adc(zp(RECORD));
     a.sta(zp(RECORD));
     a.bcc("find_line_record");
@@ -550,8 +548,7 @@ fn listing(a: &mut Asm) -> Label {
     a.stx(zp(FIRST));
     a.sty(zp(FIRST + 1));
     a.bind(ranged);
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let ended = a.local();
     a.bne(ended);
     a.jsr("last_argument");
@@ -618,8 +615,7 @@ fn deleting(a: &mut Asm, syntax: Label) {
     a.bcs(syntax);
     a.stx(zp(LINE_NUMBER));
     a.sty(zp(LINE_NUMBER + 1));
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     a.bne(syntax);
     a.jsr("last_argument");
     a.bcs(syntax);
@@ -719,8 +715,7 @@ fn numbering(a: &mut Asm) -> Label {
     a.here("step_argument");
     a.lda(imm(DEFAULT_STEP));
     a.sta(zp(STEP));
-    a.jsr("next_a");
-    a.cmp(imm(b','));
+    a.jsr("next_comma");
     let given = a.local();
     a.beq(given);
     a.dec(zp(z::OFFSET_A));
@@ -936,9 +931,7 @@ fn files(a: &mut Asm) {
     a.here("file_block");
     a.jsr("expr_string");
     a.dec(zp(z::OFFSET_A));
-    a.ldy(zp(z::STRING_LENGTH));
-    a.lda(imm(CR));
-    a.sta(abs(page::STRING).y());
+    a.jsr("string_cr");
     a.ldx(imm(FILE_BLOCK_LENGTH - 1));
     a.lda(imm(0xFF));
     let fill = a.here_local();

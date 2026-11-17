@@ -1857,8 +1857,5 @@ fn errors(a: &mut Asm) {
             a.byte(hi(record));
         }
     });
-    for (record, number, text) in error::BLOCK_ERRORS {
-        a.here(record);
-        a.error(number, text);
-    }
+    a.error_run(&error::BLOCK_ERRORS);
 }

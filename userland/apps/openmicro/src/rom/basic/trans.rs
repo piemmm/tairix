@@ -52,7 +52,12 @@ const TEMPORARY_ROUTINES: [(&str, &[(u16, &str)]); 3] = [
     ),
     (
         "fac_load",
-        &[(1, "temp_1_load"), (2, "temp_2_load"), (3, "temp_3_load")],
+        &[
+            (0, "temp_0_load"),
+            (1, "temp_1_load"),
+            (2, "temp_2_load"),
+            (3, "temp_3_load"),
+        ],
     ),
 ];
 /// Newton's steps to a square root.
@@ -188,6 +193,10 @@ fn constants(a: &mut Asm) {
     a.here("fac_constant");
     a.jsr("constant_at");
     a.jmp("fac_load");
+    // FAC + the constant X bytes into the table.
+    a.here("plus_constant");
+    a.jsr("fac2_constant");
+    a.jmp("fac_add");
     a.here("constant_at");
     a.txa();
     a.clc();
@@ -218,15 +227,17 @@ fn temp(a: &mut Asm, n: u16, operation: &'static str) {
 
 fn temporaries(a: &mut Asm) {
     for (operation, routines) in TEMPORARY_ROUTINES {
-        let set = a.local();
         for (i, &(n, name)) in routines.iter().enumerate() {
-            a.here(name);
-            a.lda(imm(lo(page::TEMPS + n * u16::from(PACKED))));
-            if i + 1 < routines.len() {
-                a.bne(set);
+            let address = |a: &mut Asm| {
+                a.here(name);
+                a.lda(imm((page::TEMPS + n * u16::from(PACKED)).to_le_bytes()[0]));
+            };
+            if i == 0 {
+                address(a);
+            } else {
+                a.skip_over(address);
             }
         }
-        a.bind(set);
         a.jsr("temp_at");
         a.jmp(operation);
     }
@@ -264,8 +275,7 @@ fn continued_fraction(a: &mut Asm) {
     a.adc(imm(PACKED));
     a.sta(zp(TABLE));
     a.tax();
-    a.jsr("fac2_constant");
-    a.jsr("fac_add");
+    a.jsr("plus_constant");
     a.dec(zp(COUNT));
     a.bne(step);
     a.rts();
@@ -712,8 +722,7 @@ fn arctangent(a: &mut Asm) {
     a.bind(small);
     temp(a, 2, "fac_store");
     a.ldx(imm(MINUS_HALF));
-    a.jsr("fac2_constant");
-    a.jsr("fac_add");
+    a.jsr("plus_constant");
     a.ldx(imm(ARCTANGENT_AT));
     a.ldy(imm(steps(&ARCTANGENT)));
     a.jsr("continued_fraction");
@@ -731,11 +740,9 @@ fn arctangent(a: &mut Asm) {
     // FAC = a quarter turn less FAC, the quarter turn in its two parts.
     a.here("half_pi_less");
     a.ldx(imm(HALF_PI_HIGH));
-    a.jsr("fac2_constant");
-    a.jsr("fac_add");
+    a.jsr("plus_constant");
     a.ldx(imm(HALF_PI_LOW));
-    a.jsr("fac2_constant");
-    a.jsr("fac_add");
+    a.jsr("plus_constant");
     a.jmp("fac_negate");
 }
 
@@ -771,6 +778,7 @@ const SEED_TAP: u16 = z::SEED + 2;
 /// The seed's fifth byte when it is set from an integer.
 const SEED_FILL: u8 = 0x40;
 
+/// RND, its dispatch on the argument in IAC at `rnd_argument`.
 fn random(a: &mut Asm) {
     // RND: the seed's low four bytes after a step. RND(n): n < 0 seeds
     // and returns n; 0 the current seed as a fraction; 1 a step's
@@ -781,6 +789,7 @@ fn random(a: &mut Asm) {
     a.cmp(imm(b'('));
     let (argument, positive, fraction, integer) = (a.local(), a.local(), a.local(), a.local());
     a.beq(argument);
+    a.here("rnd_next");
     a.jsr("rnd_step");
     a.ldx(imm(3));
     let copy = a.here_local();
@@ -788,11 +797,13 @@ fn random(a: &mut Asm) {
     a.sta(zp(z::IAC).x());
     a.dex();
     a.bpl(copy);
-    a.bmi(integer);
+    // X the seed's address, as BASIC II's leaves it there.
+    a.ldx(imm(lo(z::SEED)));
+    a.bne(integer);
     a.bind(argument);
     a.inc(zp(z::OFFSET_A));
-    a.jsr("expr_integer");
-    a.jsr("closing_bracket");
+    a.jsr("integer_bracketed");
+    a.here("rnd_argument");
     a.lda(zp(z::IAC + 3));
     a.bpl(positive);
     a.ldx(imm(3));
@@ -824,15 +835,13 @@ fn random(a: &mut Asm) {
     a.jsr("fac_from_int");
     a.jsr("fac_multiply");
     a.jsr("int_from_fac");
-    a.inc(zp(z::IAC));
-    let done = a.local();
-    a.bne(done);
-    a.inc(zp(z::IAC + 1));
-    a.bne(done);
-    a.inc(zp(z::IAC + 2));
-    a.bne(done);
+    // IAC one more, an integer, which DIM's sizes share.
+    a.here("int_plus_one");
+    for byte in 0..3 {
+        a.inc(zp(z::IAC + byte));
+        a.bne(integer);
+    }
     a.inc(zp(z::IAC + 3));
-    a.bind(done);
     a.bind(integer);
     a.lda(imm(kind::INTEGER));
     a.rts();

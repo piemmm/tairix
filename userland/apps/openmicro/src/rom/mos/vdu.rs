@@ -22,6 +22,9 @@ use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 /// Status byte bits.
 pub mod status {
     pub const PRINTER: u8 = 0x01;
+    /// Set by software to fill a window's last cell: the cursor wraps to the
+    /// window's opposite edge instead of scrolling it.
+    pub const SCROLL_DISABLED: u8 = 0x02;
     pub const PAGED: u8 = 0x04;
     pub const WINDOWED: u8 = 0x08;
     pub const GRAPHICS_CURSOR: u8 = 0x20;
@@ -97,7 +100,7 @@ const CURSOR_FLASH: u8 = 0x10;
 
 pub fn emit(a: &mut Asm, model: Model) {
     queue(a);
-    simple_controls(a, model);
+    simple_controls(a);
     printing(a, model);
     cursor(a);
     vdu_cursor_update(a, model);
@@ -192,7 +195,7 @@ fn queue(a: &mut Asm) {
     a.jmp(abs(vdu::JUMP).ind());
 }
 
-fn simple_controls(a: &mut Asm, model: Model) {
+fn simple_controls(a: &mut Asm) {
     a.here("vdu_1");
     a.lda(abs(QUEUE_LAST));
     a.jmp("printer_send");
@@ -235,11 +238,7 @@ fn simple_controls(a: &mut Asm, model: Model) {
     a.sta(zp(vdu_zp::STATUS));
     a.rts();
     a.here("vdu_5");
-    return_in_teletext(a, model);
-    a.lda(abs(vdu::MODE));
-    a.cmp(imm(3));
-    a.beq(RTS);
-    a.cmp(imm(6));
+    a.lda(abs(vdu::PIXELS_PER_BYTE));
     a.beq(RTS);
     a.jsr("vdu_cursor_hide");
     a.lda(imm(status::GRAPHICS_CURSOR));
@@ -345,7 +344,7 @@ fn vdu_draw_glyph(a: &mut Asm) {
     a.bcs("draw_16");
     a.here("draw_2");
     a.lda(zp(GLYPH).ind_y());
-    a.and(zp(vdu_zp::TEXT_OR));
+    a.ora(zp(vdu_zp::TEXT_OR));
     a.eor(zp(vdu_zp::TEXT_EOR));
     a.sta(zp(vdu_zp::CURSOR_LINE).ind_y());
     a.dey();
@@ -366,14 +365,14 @@ fn vdu_draw_glyph(a: &mut Asm) {
     }
     a.tax();
     a.lda(abs("expand_4").x());
-    a.and(zp(vdu_zp::TEXT_OR));
+    a.ora(zp(vdu_zp::TEXT_OR));
     a.eor(zp(vdu_zp::TEXT_EOR));
     a.sta(zp(vdu_zp::CURSOR_LINE).ind_y());
     a.pla();
     a.and(imm(0x0F));
     a.tax();
     a.lda(abs("expand_4").x());
-    a.and(zp(vdu_zp::TEXT_OR));
+    a.ora(zp(vdu_zp::TEXT_OR));
     a.eor(zp(vdu_zp::TEXT_EOR));
     a.sta(zp(vdu_zp::TEMP).ind_y());
     a.dey();
@@ -404,7 +403,7 @@ fn vdu_draw_glyph(a: &mut Asm) {
     a.asl(Acc);
     a.sta(abs(vdu::SCRATCH).y());
     a.lda(abs("expand_2").x());
-    a.and(zp(vdu_zp::TEXT_OR));
+    a.ora(zp(vdu_zp::TEXT_OR));
     a.eor(zp(vdu_zp::TEXT_EOR));
     a.sta(zp(vdu_zp::TEMP).ind_y());
     a.dey();
@@ -468,11 +467,10 @@ fn cursor(a: &mut Asm) {
     a.ldx(imm(0));
     a.beq("cursor_forward");
     a.here("vdu_9_wrap");
-    a.lda(abs(vdu::TEXT_LEFT));
-    a.sta(abs(vdu::CURSOR_X));
-    a.jsr("vdu_cursor_update");
+    a.jsr("vdu_13");
 
-    // Down one, a row on; off the bottom the window scrolls.
+    // Down one, a row on; off the bottom the window scrolls, or with
+    // scrolling disabled the cursor goes to its top.
     a.here("vdu_10");
     a.jsr("vdu_paging");
     a.ldx(abs(vdu::CURSOR_Y));
@@ -505,17 +503,16 @@ fn cursor(a: &mut Asm) {
     a.jsr("vdu_scroll_down");
     a.jmp("vdu_cursor_update");
 
-    a.here("vdu_13");
-    a.lda(abs(vdu::TEXT_LEFT));
-    a.sta(abs(vdu::CURSOR_X));
-    a.jmp("vdu_cursor_update");
-
-    a.here("vdu_30");
-    a.lda(abs(vdu::TEXT_LEFT));
-    a.sta(abs(vdu::CURSOR_X));
-    a.lda(abs(vdu::TEXT_TOP));
-    a.sta(abs(vdu::CURSOR_Y));
-    a.jmp("vdu_cursor_update");
+    // Held for a room a pin leaves, as the MOS has none in its flow to spare.
+    a.later(|a| {
+        a.here("vdu_30");
+        a.lda(abs(vdu::TEXT_TOP));
+        a.sta(abs(vdu::CURSOR_Y));
+        a.here("vdu_13");
+        a.lda(abs(vdu::TEXT_LEFT));
+        a.sta(abs(vdu::CURSOR_X));
+        a.jmp("vdu_cursor_update");
+    });
 
     // TAB(x, y) within the window, ignored outside it.
     a.here("vdu_31");
@@ -540,18 +537,36 @@ fn cursor(a: &mut Asm) {
     a.sta(abs(vdu::CURSOR_Y));
 }
 
-/// (&DA) += the row table's entry Y bytes in, its high byte first.
+/// (&DA) += the row table's entry Y bytes in, its high byte first; with C
+/// set, the entry halved and rounded up, as MOS 1.20 reads its 640-byte
+/// table for the 320-byte rows.
 fn row_add(a: &mut Asm) {
     a.here("row_add");
+    let halved = a.local();
+    a.bcs(halved);
     a.iny();
     a.lda(zp(vdu_zp::TEMP));
-    a.clc();
     a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
     a.sta(zp(vdu_zp::TEMP));
     a.dey();
     a.lda(zp(vdu_zp::TEMP + 1));
     a.adc(zp(vdu_zp::ROW_TABLE).ind_y());
     a.sta(zp(vdu_zp::TEMP + 1));
+    a.rts();
+    a.bind(halved);
+    a.lda(zp(vdu_zp::ROW_TABLE).ind_y());
+    a.lsr(Acc);
+    a.pha();
+    a.iny();
+    a.lda(zp(vdu_zp::ROW_TABLE).ind_y());
+    // The bit shifted out is the carry into the sum.
+    a.ror(Acc);
+    a.adc(zp(vdu_zp::TEMP));
+    a.sta(zp(vdu_zp::TEMP));
+    a.pla();
+    a.adc(zp(vdu_zp::TEMP + 1));
+    a.sta(zp(vdu_zp::TEMP + 1));
+    a.dey();
     a.rts();
 }
 
@@ -604,6 +619,10 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.tya();
     a.asl(Acc);
     a.tay();
+    // Text halves the table for a map type with bit 1 set.
+    a.lda(abs(vdu::MAP_TYPE));
+    a.lsr(Acc);
+    a.lsr(Acc);
     a.jsr("row_add");
     a.lda(abs(vdu::SCREEN_START));
     a.ldx(abs(vdu::SCREEN_START + 1));
@@ -743,11 +762,18 @@ fn vdu_cursor_hide(a: &mut Asm, model: Model) {
 }
 
 /// Scrolling the window a line: the whole screen by moving where the 6845
-/// or the Electron's ULA starts, a window by copying its rows.
+/// or the Electron's ULA starts, a window by copying its rows. With
+/// scrolling disabled the cursor wraps to the window's other edge instead,
+/// as the copy cursor does.
 fn scrolling(a: &mut Asm, model: Model) {
     a.here("vdu_scroll_up");
     a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(status::WINDOWED));
+    a.lsr(Acc);
+    a.lsr(Acc);
+    a.bcc("vdu_scroll_up_enabled");
+    a.jmp("edit_down_wrap");
+    a.here("vdu_scroll_up_enabled");
+    a.and(imm(status::WINDOWED >> 2));
     a.bne("scroll_window_up");
     a.lda(abs(vdu::SCREEN_START));
     a.clc();
@@ -761,7 +787,12 @@ fn scrolling(a: &mut Asm, model: Model) {
 
     a.here("vdu_scroll_down");
     a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(status::WINDOWED));
+    a.lsr(Acc);
+    a.lsr(Acc);
+    a.bcc("vdu_scroll_down_enabled");
+    a.jmp("edit_up_wrap");
+    a.here("vdu_scroll_down_enabled");
+    a.and(imm(status::WINDOWED >> 2));
     a.bne("scroll_window_down");
     a.lda(abs(vdu::SCREEN_START));
     a.sec();
@@ -818,19 +849,10 @@ fn scrolling(a: &mut Asm, model: Model) {
     a.jsr("background_byte");
     a.jmp("run_fill");
 
-    // The byte a cleared cell holds: a space in mode 7.
+    // The byte a cleared cell holds, a space in mode 7, as VDU 20 sets it.
     a.here("background_byte");
-    if has_teletext(model) {
-        a.lda(abs(vdu::COLOURS));
-        a.beq("background_teletext");
-    }
     a.lda(abs(vdu::TEXT_BACKGROUND));
     a.rts();
-    if has_teletext(model) {
-        a.here("background_teletext");
-        a.lda(imm(b' '));
-        a.rts();
-    }
 }
 
 /// Copy row Y's window bytes into the row pushed on the stack before the
@@ -1061,13 +1083,14 @@ fn colours(a: &mut Asm, model: Model) {
     a.jsr("colour_byte");
     a.sta(abs(vdu::TEXT_BACKGROUND));
 
-    // The masks a glyph's pixels are drawn through.
+    // The masks a glyph's pixels are drawn through, as MOS 1.20 sets them:
+    // a set pixel is the EOR mask inverted, a clear one the two masks EORed.
     a.here("text_masks");
     a.lda(abs(vdu::TEXT_FOREGROUND));
+    a.eor(imm(0xFF));
+    a.sta(zp(vdu_zp::TEXT_EOR));
     a.eor(abs(vdu::TEXT_BACKGROUND));
     a.sta(zp(vdu_zp::TEXT_OR));
-    a.lda(abs(vdu::TEXT_BACKGROUND));
-    a.sta(zp(vdu_zp::TEXT_EOR));
     a.rts();
 
     a.here("vdu_18");
@@ -1119,6 +1142,11 @@ fn ula_palette(a: &mut Asm) {
     a.here("ula_palette_entry");
     a.tya();
     a.ldx(abs(vdu::COLOURS));
+    // Each of the teletext mode's entries is colour 0's.
+    let colours = a.local();
+    a.bne(colours);
+    a.txa();
+    a.bind(colours);
     a.cpx(imm(1));
     a.bne("ula_palette_not_2");
     a.lsr(Acc);
@@ -1241,12 +1269,28 @@ fn electron_palette(a: &mut Asm) {
 /// VDU 20 and the mode's palette.
 fn vdu_20(a: &mut Asm, model: Model) {
     // VDU 20: white on black text and graphics, plotting outright, and the
-    // mode's own palette.
+    // mode's own palette. Mode 7's colours are 0 but for a space as the text
+    // background, and MOS 1.20 leaves its palette and text masks.
     a.here("vdu_20");
+    a.lda(imm(7));
+    a.jsr("colour_byte");
+    a.sta(abs(vdu::TEXT_FOREGROUND));
+    a.sta(abs(vdu::GRAPHICS_FOREGROUND));
+    a.lda(imm(0));
+    a.sta(abs(vdu::GRAPHICS_BACKGROUND));
+    a.sta(abs(vdu::FOREGROUND_ACTION));
+    a.sta(abs(vdu::BACKGROUND_ACTION));
     a.ldx(abs(vdu::COLOURS));
     if has_teletext(model) {
-        a.beq(RTS);
+        let bitmap = a.local();
+        a.bne(bitmap);
+        a.lda(imm(b' '));
+        a.sta(abs(vdu::TEXT_BACKGROUND));
+        a.rts();
+        a.bind(bitmap);
     }
+    a.sta(abs(vdu::TEXT_BACKGROUND));
+    a.jsr("text_masks");
     a.ldy(abs(vdu::COLOURS));
     a.here("vdu_20_palette");
     a.lda(abs("default_palette_2").y());
@@ -1260,17 +1304,6 @@ fn vdu_20(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::PALETTE).y());
     a.dey();
     a.bpl("vdu_20_palette");
-    // White: colour 7, or the mode's highest where it has fewer.
-    a.lda(imm(7));
-    a.jsr("colour_byte");
-    a.sta(abs(vdu::TEXT_FOREGROUND));
-    a.sta(abs(vdu::GRAPHICS_FOREGROUND));
-    a.lda(imm(0));
-    a.sta(abs(vdu::TEXT_BACKGROUND));
-    a.sta(abs(vdu::GRAPHICS_BACKGROUND));
-    a.sta(abs(vdu::FOREGROUND_ACTION));
-    a.sta(abs(vdu::BACKGROUND_ACTION));
-    a.jsr("text_masks");
     a.jmp("ula_palette");
 }
 
@@ -1465,8 +1498,9 @@ fn mode(a: &mut Asm, model: Model) {
         a.lda(imm(0x7F));
         a.sta(abs(vdu::TELETEXT_CURSOR));
     }
+    // MOS 1.20's MODE ends paged mode and keeps scrolling disabled.
     a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(status::PRINTER | status::PAGED));
+    a.and(imm(status::PRINTER | status::SCROLL_DISABLED));
     a.sta(zp(vdu_zp::STATUS));
     a.jsr("vdu_20");
     a.jsr("vdu_26");
@@ -1519,27 +1553,22 @@ fn model_b_mode(a: &mut Asm) {
     a.bpl("vdu_22_crtc");
 }
 
-/// The colour masks of the left and right pixels of a byte.
+/// The colour masks of the left and right pixels of a byte, a text mode's
+/// mode 0's: the first and last of its byte's run in `pixel_mask_table`.
 fn pixel_masks(a: &mut Asm) {
     a.here("pixel_masks");
-    a.lda(abs(vdu::PIXELS_PER_BYTE));
-    a.cmp(imm(3));
-    a.beq("pixel_masks_4");
-    a.cmp(imm(1));
-    a.bne("pixel_masks_8");
-    a.lda(imm(0xAA));
-    a.ldx(imm(0x55));
-    a.bne("pixel_masks_set");
-    a.here("pixel_masks_4");
-    a.lda(imm(0x88));
-    a.ldx(imm(0x11));
-    a.bne("pixel_masks_set");
-    a.here("pixel_masks_8");
-    a.lda(imm(0x80));
-    a.ldx(imm(0x01));
-    a.here("pixel_masks_set");
+    a.ldx(abs(vdu::PIXELS_PER_BYTE));
+    let graphics = a.local();
+    a.bne(graphics);
+    a.ldx(imm(super::modes::EIGHT_PIXELS));
+    a.bind(graphics);
+    a.lda(abs("pixel_mask_table").x());
     a.sta(abs(vdu::LEFT_MASK));
-    a.stx(abs(vdu::RIGHT_MASK));
+    a.txa();
+    a.asl(Acc);
+    a.tax();
+    a.lda(abs("pixel_mask_table").x());
+    a.sta(abs(vdu::RIGHT_MASK));
     a.rts();
 }
 

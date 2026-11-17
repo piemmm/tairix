@@ -89,16 +89,6 @@ fn add40(a: &mut Asm, to: Real, from: u16) {
     }
 }
 
-/// The exponent's sixteen bits less one.
-fn decrement_exp(a: &mut Asm) {
-    a.lda(zp(FAC.exp()));
-    let low = a.local();
-    a.bne(low);
-    a.dec(zp(FAC.over()));
-    a.bind(low);
-    a.dec(zp(FAC.exp()));
-}
-
 fn moves(a: &mut Asm) {
     a.here("fac_zero");
     a.lda(imm(0));
@@ -372,16 +362,16 @@ fn normalising(a: &mut Asm) {
     // exponent then checked: below 0 is zero, over 255 Too big. An
     // exponent of 0 stays, though a real packed with one reads as zero.
     a.here("fac_normalise");
-    let (check, bits) = (a.local(), a.local());
-    let bytes = a.here_local();
+    let (check, bits, zero) = (a.local(), a.local(), a.local());
     a.lda(zp(FAC.m(0)));
     a.bmi(check);
     a.bne(bits);
     for i in 1..5 {
         a.ora(zp(FAC.m(i)));
     }
-    let zero = a.local();
     a.beq(zero);
+    // A zero top byte moved out whole, until the top byte is not zero.
+    let bytes = a.here_local();
     for i in 0..4 {
         a.ldx(zp(FAC.m(i + 1)));
         a.stx(zp(FAC.m(i)));
@@ -392,17 +382,51 @@ fn normalising(a: &mut Asm) {
     a.sec();
     a.sbc(imm(8));
     a.sta(zp(FAC.exp()));
-    a.bcs(bytes);
+    let low = a.local();
+    a.bcs(low);
     a.dec(zp(FAC.over()));
-    a.jmp(bytes);
+    a.bind(low);
+    a.lda(zp(FAC.m(0)));
+    a.beq(bytes);
+    a.bmi(check);
+    // Then bit by bit, the top byte in A, the exponent taken down by the
+    // count once. A byte step leaves the rounding byte 0; with the bytes
+    // between 0 too, as for most integers, the top byte shifts alone.
+    let (shift, wide, normal) = (a.local(), a.local(), a.local());
+    a.ldx(imm(0));
+    a.tay();
+    a.lda(zp(FAC.m(1)));
+    a.ora(zp(FAC.m(2)));
+    a.ora(zp(FAC.m(3)));
+    a.bne(wide);
+    a.tya();
+    let narrow = a.here_local();
+    a.inx();
+    a.asl(Acc);
+    a.bpl(narrow);
+    a.bmi(normal);
+    a.bind(wide);
+    a.tya();
+    a.bne(shift);
     a.bind(bits);
-    let shift = a.here_local();
-    decrement_exp(a);
+    a.ldx(imm(0));
+    a.bind(shift);
+    a.inx();
     a.asl(zp(FAC.m(4)));
-    for i in (0..4).rev() {
+    for i in (1..4).rev() {
         a.rol(zp(FAC.m(i)));
     }
+    a.rol(Acc);
     a.bpl(shift);
+    a.bind(normal);
+    a.sta(zp(FAC.m(0)));
+    a.txa();
+    a.eor(imm(0xFF));
+    a.sec();
+    a.adc(zp(FAC.exp()));
+    a.sta(zp(FAC.exp()));
+    a.bcs(check);
+    a.dec(zp(FAC.over()));
     a.bind(check);
     a.lda(zp(FAC.over()));
     a.bmi(zero);
@@ -725,15 +749,11 @@ fn shifted_bytes(a: &mut Asm, bytes: u16) {
     a.asl(Acc);
 }
 
-/// FAC2's mantissa = FAC's shifted down `bits` bits; C the last bit out.
+/// FAC2's mantissa = FAC's shifted down `bits` bits; C the last bit out and
+/// X kept, which the decimal rounding counts in across ×10 and ÷10.
 fn shifted_bits(a: &mut Asm, bits: u8) {
-    for i in 0..5 {
-        a.lda(zp(FAC.m(i)));
-        a.sta(zp(FAC2.m(i)));
-    }
-    for _ in 0..bits {
-        shift_right(a, FAC2);
-    }
+    a.ldy(imm(bits));
+    a.jsr("fac2_shifted");
 }
 
 fn tens(a: &mut Asm) {
@@ -776,4 +796,16 @@ fn tens(a: &mut Asm) {
     }
     shifted_bytes(a, 4);
     a.jmp("fac_add_carry");
+
+    // FAC2's mantissa = FAC's shifted down Y bits, Y at least one.
+    a.here("fac2_shifted");
+    for i in 0..5 {
+        a.lda(zp(FAC.m(i)));
+        a.sta(zp(FAC2.m(i)));
+    }
+    let shift = a.here_local();
+    shift_right(a, FAC2);
+    a.dey();
+    a.bne(shift);
+    a.rts();
 }

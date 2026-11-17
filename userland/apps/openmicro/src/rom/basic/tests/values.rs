@@ -1,7 +1,11 @@
 //! Values: indirection, the operators, strings and their functions, and
 //! arrays.
 
-use super::assert_screen;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use super::{after, assert_screen};
 
 #[test]
 fn indirection_string_comparison_and_hex() {
@@ -277,5 +281,45 @@ fn a_fixed_string_without_a_cr_in_256_bytes_is_empty() {
             "       255",
             ">",
         ],
+    );
+}
+
+/// `name` plus a bracketed right operand, `depth` operators deep.
+fn nested(name: &str, depth: usize) -> String {
+    let mut expression = name.to_string();
+    for _ in 0..depth {
+        expression = format!("{name}+({expression})");
+    }
+    expression
+}
+
+/// The regression: an expression nested past the 6502 stack's room wrapped
+/// the stack, sixteen integer levels reading garbage as a name and
+/// twenty-one real ones stopping the machine; past twelve integer levels or
+/// sixteen real it is No room.
+#[test]
+fn an_expression_nested_past_the_6502_stack_is_no_room() {
+    let screen = after(
+        &[
+            "CLS",
+            &format!("I%=1:PRINT {}", nested("I%", 12)),
+            &format!("PRINT {}", nested("I%", 16)),
+            &format!("X=1:PRINT {}", nested("X", 16)),
+            &format!("X=1:PRINT {}", nested("X", 21)),
+        ],
+        200,
+    );
+    let shown: Vec<&str> = screen
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| row.parse::<u32>().is_ok() || *row == "No room")
+        .collect();
+    assert_eq!(shown, ["13", "No room", "17", "No room"]);
+    assert_eq!(
+        screen
+            .iter()
+            .rfind(|row| !row.trim().is_empty())
+            .map(String::as_str),
+        Some(">")
     );
 }
