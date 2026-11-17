@@ -196,6 +196,8 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
     if model == Model::ModelB {
         vector_entries(&mut a);
         reset::pin_vector_defaults(&mut a);
+        reset::pin_entry(&mut a);
+        irq::pin_entry(&mut a);
         modes::pin_rows_640(&mut a);
         vdu::pin_mode(&mut a);
     }
@@ -220,7 +222,7 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
     graphics::emit(&mut a, model);
     modes::emit(&mut a, model);
     osbyte::emit(&mut a, model);
-    osword::emit(&mut a, model);
+    osword::emit(&mut a);
     cli::emit(&mut a, model);
     serial::emit(&mut a, model);
     sound::emit(&mut a, model);

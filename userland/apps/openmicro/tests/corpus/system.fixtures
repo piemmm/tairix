@@ -131,3 +131,79 @@ row >
 scenario osbyte_keeps_its_number_in_a_across_a_nested_call
 row         8C        77        8D        77
 row >
+
+scenario a_text_mode_draws_no_graphics
+row 45 5A A0005 88002C 1800001 45 5A A0005 8
+row 8002C 1800001 45 5A A0005 88002C 1800000
+row >
+
+scenario point_in_a_text_mode_reads_bit_0
+row 1 1 0 0 1 1 0 -1 0 -1 1 1 0 0 -1 0 -1
+row >
+
+scenario vdu_20_in_the_teletext_mode_sets_its_colours
+row 0 20 0 0 0 0 AA BB 4
+row >
+
+scenario osbyte_135_reads_a_character_in_every_mode
+row AZ AZ AZ AZ AZ AZ AZ AZ
+row >
+
+scenario mode_sets_its_colour_and_pixel_variables
+row FF 0 FF 0 0 0 67 1 7 80 1
+row FF 0 FF 0 0 0 67 3 3 88 11
+row 3F 0 3F 0 0 0 67 F 1 AA 55
+row FF 0 FF 0 0 0 67 1 0 80 1
+row FF 0 FF 0 0 0 67 1 7 80 1
+row FF 0 FF 0 0 0 67 3 3 88 11
+row FF 0 FF 0 0 0 67 1 0 80 1
+row 0 20 0 0 0 0 72 0 0 80 1
+row >
+
+scenario vdu_19_in_the_teletext_mode_writes_every_entry
+row         F2        F4         3
+row >
+
+scenario the_reset_and_interrupt_vectors_name_mos_1_20_s_entries
+row       D9CD      DC1C
+row >P%=&900:[OPT 0:BRK:EQUB 7:EQUS "SEVENS"
+row :BRK:]:CALL &900
+row SEVENS
+row >
+
+scenario a_point_s_mask_is_its_place_in_its_byte
+row 44 3 77 FF 77 FF
+row >
+
+scenario osbyte_16_and_17_take_at_most_four_channels
+row TAIRiX DFS
+row BASIC
+row >NEW
+row >10 A%=16:X%=9:CALL &FFF4:A$=STR$?&24D:A
+row %=16:X%=2:A$=A$+" "+STR$((USR(&FFF4) AND
+row  &FF00) DIV 256)
+row >20 *FX16,0
+row >30 T%=TIME:REPEAT UNTIL TIME>T%+20:A%=1
+row 7:X%=9:CALL &FFF4:A$=A$+" "+STR$?&24C
+row >40 T%=TIME:REPEAT UNTIL TIME>T%+20:*FX1
+row 7,0
+row >50 A$=A$+" "+STR$?&24C+" "+STR$?&2BE:T%
+row =TIME:REPEAT UNTIL TIME>T%+20:A$=A$+" "+
+row STR$?&2BE+" "+STR$~(?&FEC0 AND 15)
+row >60 *FX16,4
+row >70 T%=TIME:REPEAT UNTIL TIME>T%+3:*FX16
+row ,0
+row >80 T%=TIME:REPEAT UNTIL TIME>T%+20:PRIN
+row T A$+" "+STR$?&24C+" "+STR$?&24D+" "+STR
+row $?&2BE
+row >RUN
+row 4 4 4 0 0 0 7 0 0 1
+row >
+
+scenario vduv_is_handed_a_plot_with_its_cursor_and_pixel_set
+row 19D0137 10001 6C0057 20002 19D0137 10001
+row  6C0057 6C0057 19D0137 10001 6C0057 2000
+row 2
+row 80008 10001 195012F 20002 80008 10001 19
+row 5012F 20002 80008 10001 195012F 20002
+row >

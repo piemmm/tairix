@@ -18,11 +18,9 @@ pub(super) const LINE: u16 = z::SCRATCH + 9;
 /// The number being converted, and its five digits.
 const NUMBER: u16 = LINE + 2;
 const DIGITS: u16 = NUMBER + 2;
-/// The loops a listing is inside, FOR's and REPEAT's, and a line's indent.
-const OPEN_FORS: u16 = LISTING_LOOPS;
-const OPEN_REPEATS: u16 = OPEN_FORS + 1;
-const INDENT: u16 = OPEN_REPEATS + 1;
-/// LISTO's space after the number is its bit 0, shifted out.
+/// The loops a listing is inside, one count for each of `Options::LOOPS`.
+const OPEN_LOOPS: u16 = LISTING_LOOPS;
+/// LISTO's space after the number is its bit 0, the one space it counts.
 const _: () = assert!(Options::SPACE == 1);
 
 /// The powers of ten each digit is counted in.
@@ -47,28 +45,32 @@ fn lines(a: &mut Asm) {
     a.lda(zp(LINE).ind_y());
     a.tay();
     a.jsr("print_line_number");
-    let (no_for, no_repeat) = (a.local(), a.local());
     a.lda(zp(z::LISTO));
-    a.and(imm(Options::FOR_LOOPS));
-    a.beq(no_for);
-    a.lda(zp(OPEN_FORS));
-    a.bind(no_for);
-    a.sta(zp(INDENT));
-    a.lda(zp(z::LISTO));
-    a.and(imm(Options::REPEAT_LOOPS));
-    a.beq(no_repeat);
-    a.lda(zp(OPEN_REPEATS));
-    a.bind(no_repeat);
-    a.clc();
-    a.adc(zp(INDENT));
-    // Two spaces a loop, and LISTO's one.
-    a.pha();
-    a.lda(zp(z::LISTO));
-    a.lsr(Acc);
-    a.pla();
-    a.rol(Acc);
+    a.and(imm(Options::SPACE));
     a.tax();
     a.jsr("print_spaces");
+    // Each kind of loop shown: two spaces a loop, but one for 128 or more,
+    // as BASIC II prints them, so the indent may pass 255.
+    let (kind, shown, few) = (a.local(), a.local(), a.local());
+    a.ldy(imm(byte(Options::LOOPS.len()) - 1));
+    a.bind(kind);
+    a.lda(zp(z::LISTO));
+    a.and(abs("listing_loop_options").y());
+    a.beq(shown);
+    a.lda(abs(OPEN_LOOPS).y());
+    a.asl(Acc);
+    a.bcc(few);
+    a.lda(imm(1));
+    a.bind(few);
+    a.tax();
+    a.jsr("print_spaces");
+    a.bind(shown);
+    a.dey();
+    a.bpl(kind);
+    a.later(|a| {
+        a.here("listing_loop_options");
+        a.bytes(&Options::LOOPS);
+    });
     a.ldy(imm(byte(program::HEADER)));
     a.here("list_text");
     a.lda(zp(LINE).ind_y());
@@ -95,13 +97,13 @@ fn lines(a: &mut Asm) {
     a.cmp(imm(word::UNTIL.token));
     a.bne(counted);
     a.bind(close);
-    a.ldy(zp(OPEN_FORS).x());
+    a.ldy(zp(OPEN_LOOPS).x());
     a.beq(counted);
-    a.dec(zp(OPEN_FORS).x());
+    a.dec(zp(OPEN_LOOPS).x());
     // C is set: both ways in compared equal.
     a.bcs(counted);
     a.bind(open);
-    a.inc(zp(OPEN_FORS).x());
+    a.inc(zp(OPEN_LOOPS).x());
     a.bind(counted);
     a.jsr("print_token");
     a.ldy(zp(z::SCRATCH + 8));

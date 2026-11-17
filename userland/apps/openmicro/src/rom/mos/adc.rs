@@ -21,32 +21,35 @@ pub fn emit(a: &mut Asm) {
 }
 
 fn conversions(a: &mut Asm) {
-    // From the highest channel OSBYTE 16 selects; none for zero.
+    // From the highest channel OSBYTE 16 selects; with none, those below the
+    // one converting still finish, as MOS 1.20's do.
     a.here("adc_init");
     a.here("adc_restart");
     a.lda(abs(var::ADC_MAXIMUM));
-    a.sta(abs(var::ADC_CHANNEL));
     a.beq(RTS);
+    a.sta(abs(var::ADC_CHANNEL));
+    // The channel less one and the resolution, unmasked, as MOS 1.20 writes
+    // them for channel 0 too: in the four bits the chip reads, EOR adds 8.
     a.here("adc_start");
     a.ldx(abs(var::ADC_CHANNEL));
     a.dex();
     a.txa();
-    a.and(imm(adc::CHANNEL));
     a.ldx(abs(var::ADC_TYPE));
     a.cpx(imm(EIGHT_BIT));
     a.beq("adc_start_resolution");
-    a.ora(imm(adc::TEN_BIT));
+    a.eor(imm(adc::TEN_BIT));
     a.here("adc_start_resolution");
     a.sta(abs(STATUS));
     a.rts();
 
-    // OSBYTE 17: channel X at once, ADVAL(0)'s channel clear until it is
-    // done.
+    // OSBYTE 17: channel X at once, at most the last, ADVAL(0)'s channel
+    // clear until it is done; channel 0's result is kept nowhere.
     a.here("adc_force");
-    a.txa();
-    a.beq(RTS);
-    a.cmp(imm(page2::ADC_CHANNELS + 1));
-    a.bcs(RTS);
+    a.cpx(imm(page2::ADC_CHANNELS + 1));
+    let channel = a.local();
+    a.bcc(channel);
+    a.ldx(imm(page2::ADC_CHANNELS));
+    a.bind(channel);
     a.stx(abs(var::ADC_CHANNEL));
     a.lda(imm(0));
     a.sta(abs(page2::ADC_LAST));

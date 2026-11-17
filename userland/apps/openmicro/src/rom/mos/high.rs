@@ -33,7 +33,7 @@ pub fn emit(a: &mut Asm, model: Model) {
     a.org(DEFAULTS_DESCRIPTOR);
     a.byte(2 * vector::COUNT);
     a.word("vector_defaults");
-    entry_points(a);
+    entry_points(a, model);
 }
 
 /// Page in the ROM the extended vector names and enter its routine with the
@@ -97,7 +97,7 @@ fn extended_vector(a: &mut Asm, model: Model) {
 }
 
 /// The documented OS entry points, each placed at its address.
-fn entry_points(a: &mut Asm) {
+fn entry_points(a: &mut Asm, model: Model) {
     let routines = [
         ("osrdrm_entry", "osrdrm"),
         ("vduchr_entry", "vduchr"),
@@ -144,6 +144,9 @@ fn entry_points(a: &mut Asm) {
     a.jmp(abs(vector::WRCH).ind());
     a.org(NMI_VECTOR);
     a.word(page_d::NMI);
-    a.word("reset");
+    match model {
+        Model::ModelB => a.word(super::reset::ENTRY),
+        Model::Electron => a.word("reset"),
+    }
     a.word("irq_entry");
 }

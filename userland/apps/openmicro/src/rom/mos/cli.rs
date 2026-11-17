@@ -127,12 +127,17 @@ fn oscli(a: &mut Asm) {
     a.inx();
     a.lda(abs("command_names").x());
     a.bne("oscli_command");
-    // None of the MOS's: the ROMs', then the filing system's.
+    // None of the MOS's: the ROMs', then the filing system's. A ROM's GSINIT
+    // reuses &E4, so the command's offset waits on the stack.
     a.ldy(zp(os::GS_QUOTE));
+    a.tya();
+    a.pha();
     a.lda(imm(service::COMMAND));
     a.jsr("service_call");
+    a.pla();
+    a.tay();
+    a.txa();
     a.beq(RTS);
-    a.ldy(zp(os::GS_QUOTE));
     a.jsr("text_address");
     a.lda(imm(fsc::COMMAND));
     a.jmp(abs(vector::FSC).ind());

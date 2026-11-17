@@ -21,11 +21,32 @@ struct Mode {
     ula: u8,
     /// Pixels a byte holds.
     pixels_per_byte: u8,
-    /// The graphics window's last pixel across; 79 in the text modes, as
-    /// MOS 1.20 sets it.
-    last_pixel: u16,
-    /// The right shift taking an external x to a pixel.
-    x_shift: u8,
+    /// Whether it draws graphics: MOS 1.20's text modes set &361 to 0, and
+    /// its PLOT, CLG and VDU 5 then do nothing.
+    graphics: bool,
+}
+
+/// External x's width.
+const EXTERNAL_WIDTH: u16 = 1280;
+/// The points across a text mode, external x over 16, as MOS 1.20 scales it.
+const TEXT_POINTS: u16 = 80;
+
+/// Points across: a character is eight pixels wide in each graphics mode.
+const fn points_across(mode: &Mode) -> u16 {
+    if mode.graphics {
+        mode.columns as u16 * 8
+    } else {
+        TEXT_POINTS
+    }
+}
+
+/// The right shift taking an external x to a point.
+const fn x_shift(mode: &Mode) -> u8 {
+    let mut shift = 0;
+    while EXTERNAL_WIDTH >> shift > points_across(mode) {
+        shift += 1;
+    }
+    shift
 }
 
 const MODES: [Mode; 8] = [
@@ -38,8 +59,7 @@ const MODES: [Mode; 8] = [
         map_type: 0,
         ula: 0x9C,
         pixels_per_byte: 8,
-        last_pixel: 639,
-        x_shift: 1,
+        graphics: true,
     },
     Mode {
         bytes_per_character: 16,
@@ -50,8 +70,7 @@ const MODES: [Mode; 8] = [
         map_type: 0,
         ula: 0xD8,
         pixels_per_byte: 4,
-        last_pixel: 319,
-        x_shift: 2,
+        graphics: true,
     },
     Mode {
         bytes_per_character: 32,
@@ -62,8 +81,7 @@ const MODES: [Mode; 8] = [
         map_type: 0,
         ula: 0xF4,
         pixels_per_byte: 2,
-        last_pixel: 159,
-        x_shift: 3,
+        graphics: true,
     },
     Mode {
         bytes_per_character: 8,
@@ -74,8 +92,7 @@ const MODES: [Mode; 8] = [
         map_type: 1,
         ula: 0x9C,
         pixels_per_byte: 8,
-        last_pixel: 79,
-        x_shift: 1,
+        graphics: false,
     },
     Mode {
         bytes_per_character: 8,
@@ -86,8 +103,7 @@ const MODES: [Mode; 8] = [
         map_type: 2,
         ula: 0x88,
         pixels_per_byte: 8,
-        last_pixel: 319,
-        x_shift: 2,
+        graphics: true,
     },
     Mode {
         bytes_per_character: 16,
@@ -98,8 +114,7 @@ const MODES: [Mode; 8] = [
         map_type: 2,
         ula: 0xC4,
         pixels_per_byte: 4,
-        last_pixel: 159,
-        x_shift: 3,
+        graphics: true,
     },
     Mode {
         bytes_per_character: 8,
@@ -110,8 +125,7 @@ const MODES: [Mode; 8] = [
         map_type: 3,
         ula: 0x88,
         pixels_per_byte: 8,
-        last_pixel: 79,
-        x_shift: 1,
+        graphics: false,
     },
     Mode {
         bytes_per_character: 1,
@@ -122,10 +136,20 @@ const MODES: [Mode; 8] = [
         map_type: 4,
         ula: 0x4B,
         pixels_per_byte: 1,
-        last_pixel: 79,
-        x_shift: 1,
+        graphics: false,
     },
 ];
+
+/// Each pixel's mask in its byte, at its byte's pixels less one, as &361 holds
+/// it, plus its place across: a text mode's one place, whose bit 0 is what
+/// MOS 1.20's POINT reads, then two, four and eight pixels a byte.
+const PIXEL_MASKS: [u8; 15] = [
+    0x01, 0xAA, 0x55, 0x88, 0x44, 0x22, 0x11, 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01,
+];
+/// &361 for eight pixels a byte: where mode 0's masks start, which MOS 1.20
+/// gives the text modes too.
+pub(super) const EIGHT_PIXELS: u8 = 7;
+const _: () = assert!(PIXEL_MASKS[EIGHT_PIXELS as usize] == 0x80);
 
 /// The last of the 6845's registers MODE sets, from 0.
 pub(super) const LAST_CRTC_REGISTER: u8 = 11;
@@ -252,10 +276,24 @@ pub fn emit(a: &mut Asm, model: Model) {
             }
         }),
     }
-    table(a, "mode_pixels", |m| m.pixels_per_byte - 1);
-    table(a, "mode_width_low", |m| m.last_pixel.to_le_bytes()[0]);
-    table(a, "mode_width_high", |m| m.last_pixel.to_le_bytes()[1]);
-    table(a, "mode_x_shift", |m| m.x_shift);
+    table(a, "mode_pixels", |m| {
+        if m.graphics {
+            m.pixels_per_byte - 1
+        } else {
+            0
+        }
+    });
+    table(a, "mode_width_low", |m| {
+        (points_across(m) - 1).to_le_bytes()[0]
+    });
+    table(a, "mode_width_high", |m| {
+        (points_across(m) - 1).to_le_bytes()[1]
+    });
+    table(a, "mode_x_shift", x_shift);
+    a.later(|a| {
+        a.here("pixel_mask_table");
+        a.bytes(&PIXEL_MASKS);
+    });
     table(a, "mode_colours", |m| match m.pixels_per_byte {
         8 => 1,
         4 => 3,

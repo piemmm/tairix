@@ -34,8 +34,17 @@ const USER_PCR: u8 = 0x0E;
 const FIRST_LINK: u8 = 0x02;
 const LAST_LINK: u8 = 0x09;
 
+/// Where MOS 1.20's IRQ and BRK entry lies: software reads its address from
+/// &FFFE to know the OS by.
+pub(super) const ENTRY: u16 = 0xDC1C;
+
+/// The interrupt and BRK handling; the Model B's entry is pinned by
+/// `pin_entry`.
 pub fn emit(a: &mut Asm, model: Model) {
-    entry(a, model);
+    if model == Model::Electron {
+        entry(a, model);
+    }
+    brk_entry(a, model);
     match model {
         Model::ModelB => handler(a),
         Model::Electron => electron_handler(a),
@@ -75,18 +84,38 @@ fn window(a: &mut Asm) {
     a.rts();
 }
 
-/// The IRQ and BRK entry: an IRQ goes on through IRQ1V; a BRK, its error at
-/// (&FD), is offered to the ROMs, then given to BRKV with the language paged
-/// in.
+/// The Model B's IRQ and BRK entry at MOS 1.20's address, so an interrupt
+/// takes no hop on its way in.
+pub(super) fn pin_entry(a: &mut Asm) {
+    a.pin(ENTRY, |a| entry(a, Model::ModelB));
+}
+
+/// The IRQ and BRK entry: an IRQ goes on through IRQ1V, a BRK to
+/// `brk_entry`, which the Model B's has no room for before its BRKV default.
 fn entry(a: &mut Asm, model: Model) {
     a.here("irq_entry");
     a.sta(zp(os::IRQ_A));
     a.pla();
     a.pha();
     a.and(imm(0x10));
-    a.bne("brk_entry");
-    a.jmp(abs(vector::IRQ1).ind());
+    match model {
+        Model::ModelB => {
+            let brk = a.local();
+            a.bne(brk);
+            a.jmp(abs(vector::IRQ1).ind());
+            a.bind(brk);
+            a.jmp("brk_entry");
+        }
+        Model::Electron => {
+            a.bne("brk_entry");
+            a.jmp(abs(vector::IRQ1).ind());
+        }
+    }
+}
 
+/// A BRK: its error at (&FD) is offered to the ROMs, then given to BRKV with
+/// the language paged in.
+fn brk_entry(a: &mut Asm, model: Model) {
     a.here("brk_entry");
     a.txa();
     a.pha();

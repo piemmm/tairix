@@ -232,7 +232,9 @@ its documented workspace at the documented addresses, and its vectors'
 defaults at MOS 1.20's addresses, so software that sets a vector back to its
 original value still reaches the routine. The internals software reads at
 MOS 1.20's addresses lie there too: the default vector table at &D940, the
-row table at &C375, and the MODE routine at &CB1D. The workspace drives the
+row table at &C375, the MODE routine at &CB1D, and the reset and interrupt
+entries at &D9CD and &DC1C the processor's vectors name, which software reads
+to know the OS by. The workspace drives the
 drivers as it drives MOS 1.20's, so a program that sets out a mode by writing
 it is drawn alike: the row table at &E0 is read halved for the 320-byte rows,
 and text is drawn through its masks at &D2 and &D3 as an OR then an EOR. It
@@ -245,10 +247,10 @@ for the same input. Where it differs on purpose: its character set is its own
 design, [`lib/vdu`](../lib/vdu.md)'s BBC arrangement; it does not reproduce
 &31A for a clipped line's start, some private keyboard and sound workspace, or
 redundant writes to a silenced sound channel; and, with no room left in 16 KiB,
-a whole-screen clear takes twice MOS 1.20's time, a horizontal line fill three
-times and a line a quarter longer, where text output, scrolling and triangles
-are within a few percent of it, a VDU 5 cell takes a fifth less and its unlit
-pixels cost nothing. The behaviour pinned against MOS 1.20 is listed in
+a whole-screen clear takes twice MOS 1.20's time, a horizontal line fill two
+and a half times and a line a fifth longer, where text output, scrolling,
+triangles and POINT are within a few percent of it, a VDU 5 cell takes a
+fifth less and its unlit pixels cost nothing. The behaviour pinned against MOS 1.20 is listed in
 the ROMs section of `plans/BEEB.md`.
 
 `tairix_openmicro::rom::basic::build` assembles BBC BASIC: the whole BASIC II

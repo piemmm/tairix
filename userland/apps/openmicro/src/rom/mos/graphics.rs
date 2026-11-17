@@ -10,9 +10,9 @@
 
 use tairix_vdu::code::{self, Operation};
 
+use super::copy;
 use super::ws::{buffer, var, vdu, vdu_zp, vector};
 use super::Model;
-use super::{copy, has_teletext, return_in_teletext};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 
 /// Where a queued command's last parameter lands.
@@ -83,21 +83,21 @@ const FONT_DEFAULT_FLAGS: u8 = 0x0F;
 const EXPLODABLE: u8 = 6;
 const EXPLOSION: [u8; EXPLODABLE as usize] = [5, 6, 7, 1, 2, 3];
 pub fn emit(a: &mut Asm, model: Model) {
-    origin_and_window(a, model);
-    plot(a, model);
+    origin_and_window(a);
+    plot(a);
     point(a);
     a.whole(line);
     edge_room(a);
     fills(a);
     triangle(a);
     spans(a);
-    clg(a, model);
+    clg(a);
     text_at_graphics_cursor(a);
     vdu_23(a, model);
     read_pixel(a);
 }
 
-fn origin_and_window(a: &mut Asm, model: Model) {
+fn origin_and_window(a: &mut Asm) {
     // VDU 29, x, y: the origin moves under the cursor, which keeps its pixel.
     a.here("vdu_29");
     copy(
@@ -130,7 +130,6 @@ fn origin_and_window(a: &mut Asm, model: Model) {
     // VDU 24, left, bottom, right, top: from the origin, refused unless it
     // lies on the screen the right way up.
     a.here("vdu_24");
-    return_in_teletext(a, model);
     let points = const {
         [
             variable_offset(QUEUE_LAST - 7),
@@ -264,24 +263,14 @@ fn external_to_internal(a: &mut Asm) {
 }
 
 /// PLOT k, x, y; VDUV has the rest with k in A and C clear, and every PLOT
-/// in the teletext mode.
-fn plot(a: &mut Asm, model: Model) {
+/// in a text mode. In a graphics mode the cursor and the target's pixel at
+/// &320 are set first for any code, and 96 to 127 make the target the point
+/// a PLOT leaves, as MOS 1.20 hands them to a graphics extension.
+fn plot(a: &mut Asm) {
     a.here("vdu_25");
     a.lda(abs(PLOT_CODE));
-    if has_teletext(model) {
-        a.ldx(abs(vdu::COLOURS));
-        a.beq("plot_unrecognised");
-    }
-    a.cmp(imm(96));
-    a.bcs("plot_unrecognised");
-    a.cmp(imm(32));
-    a.bcc("plot_recognised");
-    a.cmp(imm(64));
-    a.bcs("plot_recognised");
-    a.here("plot_unrecognised");
-    a.clc();
-    a.jmp(abs(vector::VDU).ind());
-    a.here("plot_recognised");
+    a.ldx(abs(vdu::PIXELS_PER_BYTE));
+    a.beq("plot_unrecognised");
     // Relative coordinates add to the cursor's.
     a.and(imm(4));
     a.bne("plot_absolute");
@@ -305,6 +294,23 @@ fn plot(a: &mut Asm, model: Model) {
     // The target, internal, at &320.
     a.ldx(imm(const { variable_offset(vdu::PLOT_POINT) }));
     a.jsr("point_store");
+    a.lda(abs(PLOT_CODE));
+    a.cmp(imm(96));
+    a.bcs("plot_extended");
+    a.cmp(imm(32));
+    a.bcc("plot_recognised");
+    a.cmp(imm(64));
+    a.bcs("plot_recognised");
+    a.here("plot_unrecognised");
+    a.clc();
+    a.jmp(abs(vector::VDU).ind());
+    a.here("plot_extended");
+    a.cmp(imm(128));
+    a.bcs("plot_unrecognised");
+    copy(a, &[(vdu::PLOT_POINT, &[vdu::GRAPHICS_INTERNAL])], 4);
+    a.lda(abs(PLOT_CODE));
+    a.bpl("plot_unrecognised");
+    a.here("plot_recognised");
     a.jsr("plot_masks");
     a.lda(abs(PLOT_CODE));
     a.and(imm(3));
@@ -510,17 +516,14 @@ fn point(a: &mut Asm) {
     a.sta(zp(vdu_zp::GRAPHICS_CELL));
     a.lda(zp(vdu_zp::TEMP + 1));
     a.sta(zp(vdu_zp::GRAPHICS_CELL + 1));
-    // The mask: the left pixel's, moved across by x within its byte.
+    // The mask, by the pixel's place across its byte: MOS 1.20's ignores
+    // &362 and &363.
     a.lda(abs(PX));
     a.and(abs(vdu::PIXELS_PER_BYTE));
+    a.clc();
+    a.adc(abs(vdu::PIXELS_PER_BYTE));
     a.tax();
-    a.lda(abs(vdu::LEFT_MASK));
-    a.here("pixel_mask_move");
-    a.dex();
-    a.bmi("pixel_mask_done");
-    a.lsr(Acc);
-    a.bne("pixel_mask_move");
-    a.here("pixel_mask_done");
+    a.lda(abs("pixel_mask_table").x());
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.rts();
 }
@@ -798,15 +801,15 @@ fn line_draw(a: &mut Asm) {
 }
 
 /// The pixel left or right, X -1 or 1: the mask moves along its byte, or
-/// on to the next byte's end.
+/// on to the next byte's end. A byte's end pixel has its end bit set in every
+/// mode; the next byte's mask is &362 or &363, as MOS 1.20's is.
 fn cell_step_x(a: &mut Asm) {
     a.here("cell_step_x");
     a.lda(zp(vdu_zp::PIXEL_MASK));
     a.cpx(imm(1));
     a.bne("cell_step_left");
-    a.cmp(abs(vdu::RIGHT_MASK));
-    a.beq("cell_step_right_byte");
     a.lsr(Acc);
+    a.bcs("cell_step_right_byte");
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.rts();
     a.here("cell_step_right_byte");
@@ -816,9 +819,8 @@ fn cell_step_x(a: &mut Asm) {
     a.ldy(imm(0));
     a.beq("cell_add");
     a.here("cell_step_left");
-    a.cmp(abs(vdu::LEFT_MASK));
-    a.beq("cell_step_left_byte");
     a.asl(Acc);
+    a.bcs("cell_step_left_byte");
     a.sta(zp(vdu_zp::PIXEL_MASK));
     a.rts();
     a.here("cell_step_left_byte");
@@ -1415,9 +1417,10 @@ fn span_plot(a: &mut Asm) {
 
 /// CLG: the graphics window in the background colour and action, a line at
 /// a time from its top down, as MOS 1.20 wipes it.
-fn clg(a: &mut Asm, model: Model) {
+fn clg(a: &mut Asm) {
     a.here("vdu_16");
-    return_in_teletext(a, model);
+    a.lda(abs(vdu::PIXELS_PER_BYTE));
+    a.beq(RTS);
     a.lda(abs(vdu::GRAPHICS_BACKGROUND));
     a.ldx(abs(vdu::BACKGROUND_ACTION));
     a.jsr("action_masks");
@@ -1789,6 +1792,8 @@ fn read_pixel(a: &mut Asm) {
     a.here("read_pixel_next");
     a.dex();
     a.bne("read_pixel_bit");
+    // The teletext mode's pixels are colour 0.
     a.lda(zp(vdu_zp::TEMP + 1));
+    a.and(abs(vdu::COLOURS));
     a.rts();
 }

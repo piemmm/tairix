@@ -60,7 +60,7 @@ grants), `plans/OPENFILE.md` OF12 (the subtree grant), `plans/APPDATA.md`
 | BB28 | The library front end: the library window, the assistant, each machine's settings, several machines each in its window, suspend, resume and shut down, the icon-bar lifetime | done |
 | BB29 | Machine folders: discs and tapes made for a machine, kept with it in the user's files | done |
 | BB30 | The bundle again: the icon, help in every locale, the docs page; the fuzz harnesses; the QEMU vertical through the library | done |
-| BB31 | The Model B's reset and interrupt entries at MOS 1.20's &D9CD and &DC1C, which software reads from &FFFC to know the OS by (*Bounty Bob Strikes Back* refuses any other) | blocked: the MOS's 15 free bytes are too few for the two pins and the hops round them, and the line code they land in is one unsplittable block |
+| BB31 | The Model B's reset and interrupt entries at MOS 1.20's &D9CD and &DC1C, which software reads from &FFFC to know the OS by (*Bounty Bob Strikes Back* refuses any other) | done |
 
 Items are built in ledger order; each lands complete with its tests.
 
@@ -381,7 +381,10 @@ nothing return at &FFA6; the table itself lies at MOS 1.20's &D940, where
 software copies it to page 2 itself. Other internals software reads at their
 addresses are kept there: the 640-byte row table at &C375, high byte first;
 the MODE routine at &CB1D, the mode in A, whose clear starts at &CBF0, so a
-copy that ends there runs; and the key translation table OSBYTE &AC and &AD
+copy that ends there runs; the reset and interrupt entries at &D9CD and
+&DC1C, which the processor's vectors name and *Bounty Bob Strikes Back*
+reads to know the OS by, the interrupt entry whole as far as its jump to the
+BRK path; and the key translation table OSBYTE &AC and &AD
 give, indexed by internal key number, ten codes in each sixteen: letters in
 lower case, TAB 0, ESCAPE &1B and the two locks 1 and 2. It announces itself as `OpenMOS Micro`, where the
 original prints its maker's name; the reference harness puts that in the
@@ -395,6 +398,9 @@ its scenario in the corpus:
   unless it rises to the right. The dot pattern starts at that end and runs on
   through clipped points. An open line (PLOT 8–15, 24–31) plots its target
   once more, which only an inverting action shows.
+- A point's mask is its place in its byte, whatever &362 and &363 hold; a
+  line's step finds a byte's end by the bit its mask shifts out and takes the
+  next byte's mask from &362 or &363, as MOS 1.20's does.
 - The external graphics cursor keeps the coordinates a PLOT was given; VDU 29
   keeps the cursor's pixel and recomputes its external form, and VDU 26 clears
   the origin and both cursors. A fill's run makes its start the previous point
@@ -411,6 +417,13 @@ its scenario in the corpus:
   cell, a step that leaves the window wraps to the cell at its other edge and
   an x wrap carries y a line, and DEL fills the cell in the background colour
   whatever the action. VDU 31 still moves the text cursor.
+- The text modes 3, 6 and 7 draw no graphics: &361 is 0, so PLOT goes to
+  VDUV and CLG and VDU 5 do nothing, while VDU 24 and VDU 29 set the windows
+  with x over 16, 80 points across. POINT reads bit 0 of one byte for two
+  points, mode 7's 0 inside the window. VDU 20 in mode 7 sets its colours to
+  0 and its text background to a space, leaving the palette and the text
+  masks, and VDU 19 writes all sixteen ULA entries, each colour 0's. OSBYTE
+  &87 reads a cell by the bytes its rows span, not by &361.
 - The keyboard interrupts on CA2 while no key is down; the interrupt stands
   down and sets the semaphore at &242, and once every key is up the tick arms
   it again only if the semaphore is still set. OSBYTE 178 is that semaphore.
@@ -474,9 +487,10 @@ its scenario in the corpus:
   keys act as they go down and never repeat, and each scan of the keyboard
   records SHIFT and CTRL in status bits 3 and 6. An input zone set to zero
   ignores its codes.
-- OSCLI calls FSCV with A=8 before each command; *HELP offers the ROMs the
-  call before showing its version; *EXEC of a file the filing system cannot
-  open is File not found.
+- OSCLI calls FSCV with A=8 before each command, and passes a command no
+  ROM claims to FSCV 3 at the command's start however a ROM's GSINIT left
+  &E4 and Y; *HELP offers the ROMs the call before showing its version;
+  *EXEC of a file the filing system cannot open is File not found.
 - OSBYTE and OSWORD run with interrupts disabled and return with the
   caller's interrupt state; a call that waits (INKEY, *FX19, a full printer
   or RS423 buffer, SOUND on a full queue) lets interrupts in between its
@@ -491,8 +505,14 @@ its scenario in the corpus:
   its own colour's; the palette's working values are on the stack, so a VDU
   19 or 20 from an interrupt routine leaves a character being drawn its
   address. Flushing a sound queue silences the note it plays.
+- OSBYTE 16 and 17 take at most four channels. OSBYTE 17 with 0 starts the
+  conversion MOS 1.20 starts for it, channel less one plus the resolution
+  unmasked, and keeps its result nowhere; OSBYTE 16 with 0 lets the channels
+  below the one converting finish, channel 1 last.
 - VDUV takes VDU 23 with C set and A its first parameter, and a PLOT the MOS
-  does not draw, or any PLOT in MODE 7, with C clear and A its code.
+  does not draw, or any PLOT in a text mode, with C clear and A its code. In a
+  graphics mode the cursor at &310 has moved and the target's pixel is at &320
+  first, and for 96 to 127 at &324 too, the previous point kept.
 - MODE writes the latch's screen-size bits for each mode, then the 6845's
   registers from R11 down, then the screen's start once. MODE and VDU 23,0
   move R7 by *TV's shift and one more, and keep R10 as the cursor's shape at
@@ -626,9 +646,9 @@ run:
 The keyword table and every token value are `lib/openbasic`'s BASIC II ones,
 which the builder emits; the two tokenisers and listers are tested against each
 other on the emulated machine. LISTO's loop indent counts open FOR and REPEAT
-loops in a byte each, and a NEXT or UNTIL closes one whenever any is open,
-however many: that past &80 open loops genuine BASIC II does the same is not
-yet observed (`plans/OPEN-DEFECTS.md` D1978). The modules: `ws` (the workspace
+loops in a byte each, a NEXT or UNTIL closing one whenever any is open, and
+prints two spaces a loop of each kind, but one for 128 or more of a kind, as
+BASIC II is seen to. The modules: `ws` (the workspace
 map), `crunch` (tokenising), `list` (detokenising, LISTO and line numbers),
 `editor` (the prompt, lines, AUTO, DELETE, RENUMBER, LIST, SAVE, LOAD and
 CHAIN), `exec` (the statement loop and assignment), `control` (IF, the loops,

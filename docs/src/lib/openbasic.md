@@ -98,9 +98,9 @@ BASIC II puts the number in five columns, then:
   before the line.
 
 The loops are counted a byte each, a closing keyword with none open closing
-none, and their indent is summed and doubled in a byte, as the ROM does. A byte
-with its top bit set lists as a keyword wherever it stands, inside a string
-too.
+none, and each kind's indent is printed in full, but a single space for 128 or
+more of that kind open, as BASIC II is seen to print it. A byte with its top
+bit set lists as a keyword wherever it stands, inside a string too.
 
 BASIC V gives:
 

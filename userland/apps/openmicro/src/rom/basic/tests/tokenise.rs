@@ -249,6 +249,33 @@ fn a_drawn_program_is_kept_and_listed_as_the_library_does() {
     }
 }
 
+/// The regression: LISTO's indent was the loops summed and doubled in a
+/// byte, where BASIC II prints each kind's in full, but one space for 128 or
+/// more of a kind.
+#[test]
+fn listo_s_indent_is_each_loop_kind_s_in_full() {
+    let run = |keyword: &str, count: usize| {
+        format!("{keyword}{}", format!(":{keyword}").repeat(count - 1))
+    };
+    let (fors, repeats) = (run("FOR", 57), run("REPEAT", 33));
+    let program = [
+        format!("10{fors}"),
+        format!("20{fors}"),
+        format!("30{repeats}"),
+        format!("40{repeats}"),
+        String::from("50X"),
+        format!("60{fors}"),
+        String::from("70X"),
+    ];
+    let mut lines: Vec<&str> = program.iter().map(String::as_str).collect();
+    lines.extend(["LISTO 6", "CLS", "LIST"]);
+    let screen = after(&lines, 300);
+    let shown = from(&screen, &screen[0]);
+    let mut expected = listed(&program_of(&program), 6);
+    expected.push(String::from(">"));
+    assert_eq!(shown, expected[expected.len() - shown.len()..]);
+}
+
 /// The regression: a NEXT or UNTIL with more than 128 of its loops open
 /// left the count as it was, its decrement undone, where one is closed.
 #[test]

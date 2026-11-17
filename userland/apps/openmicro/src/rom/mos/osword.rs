@@ -1,9 +1,7 @@
 //! OSWORD: calls 0 to 13 on the parameter block at XY, &E0 and above to
 //! USERV, and the rest offered to the ROMs.
 
-use super::has_teletext;
 use super::ws::{os, page2, var, vdu, vector};
-use super::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
 
 const CALL_COUNT: u8 = 14;
@@ -28,7 +26,7 @@ const CALLS: [&str; CALL_COUNT as usize] = [
 /// The first call passed to USERV.
 const USER_FIRST: u8 = 0xE0;
 
-pub fn emit(a: &mut Asm, model: Model) {
+pub fn emit(a: &mut Asm) {
     a.here("osword_dispatch");
     a.cmp(imm(CALL_COUNT));
     a.bcs("osword_unrecognised");
@@ -69,7 +67,7 @@ pub fn emit(a: &mut Asm, model: Model) {
 
     clocks(a);
     memory(a);
-    graphics(a, model);
+    graphics(a);
     a.later(|a| {
         a.here("osword_low");
         for call in CALLS {
@@ -157,7 +155,7 @@ fn memory(a: &mut Asm) {
 }
 
 /// POINT, character definitions, the palette and the graphics cursors.
-fn graphics(a: &mut Asm, model: Model) {
+fn graphics(a: &mut Asm) {
     a.here("osword_read_pixel");
     a.ldy(imm(3));
     a.here("osword_read_pixel_point");
@@ -165,18 +163,8 @@ fn graphics(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::SCRATCH).y());
     a.dey();
     a.bpl("osword_read_pixel_point");
-    if has_teletext(model) {
-        a.lda(abs(vdu::COLOURS));
-        a.beq("osword_pixel_none");
-    }
     a.jsr("external_to_internal");
     a.jsr("read_pixel");
-    if has_teletext(model) {
-        a.jmp("osword_pixel_store");
-        a.here("osword_pixel_none");
-        a.lda(imm(0xFF));
-    }
-    a.here("osword_pixel_store");
     a.ldy(imm(4));
     a.sta(zp(os::CALL_X).ind_y());
     a.rts();

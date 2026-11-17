@@ -136,20 +136,56 @@ fn indent_after(lister: &mut Lister, lines: &[&[u8]]) -> usize {
     out.iter().skip(5).take_while(|&&b| b == b' ').count()
 }
 
+/// Observed of BASIC II through the reference harness.
 #[test]
-fn basic_ii_counts_its_loops_in_a_byte_and_doubles_them_in_one() {
+fn basic_ii_indents_two_spaces_a_loop_but_one_for_128_or_more_of_a_kind() {
     let fors = |n| [word::FOR.token].repeat(n);
-    let mut lister = Lister::new(Dialect::BasicII, Options::new(Options::FOR_LOOPS));
+    let repeats = |n| [word::REPEAT.token].repeat(n);
+    let both = Options::new(Options::FOR_LOOPS | Options::REPEAT_LOOPS);
+    let mut lister = Lister::new(Dialect::BasicII, both);
+    assert_eq!(
+        indent_after(&mut lister, &[&fors(129), &[word::NEXT.token; 2]]),
+        254,
+        "127 open"
+    );
+    let mut lister = Lister::new(Dialect::BasicII, both);
     assert_eq!(
         indent_after(&mut lister, &[&fors(171), &[word::NEXT.token; 2]]),
-        82,
+        1,
         "169 open"
     );
-    let mut lister = Lister::new(Dialect::BasicII, Options::new(Options::FOR_LOOPS));
+    let mut lister = Lister::new(Dialect::BasicII, both);
+    assert_eq!(
+        indent_after(&mut lister, &[&fors(100), &repeats(40)]),
+        280,
+        "each kind in full"
+    );
+    let mut lister = Lister::new(Dialect::BasicII, both);
+    assert_eq!(
+        indent_after(&mut lister, &[&fors(130), &repeats(10)]),
+        21,
+        "one for the 130"
+    );
+    let mut lister = Lister::new(
+        Dialect::BasicII,
+        Options::new(Options::SPACE | Options::FOR_LOOPS | Options::REPEAT_LOOPS),
+    );
+    let mut out = Vec::new();
+    for line in [fors(127), repeats(127)] {
+        lister.line(1, &line, &mut out).unwrap();
+    }
+    out.clear();
+    lister.line(65535, b"X", &mut out).unwrap();
+    assert_eq!(
+        out.len(),
+        MOST_LISTED_BEFORE + 1,
+        "the deepest line, at its bound"
+    );
+    let mut lister = Lister::new(Dialect::BasicII, both);
     assert_eq!(
         indent_after(&mut lister, &[&fors(250), &fors(50)]),
         88,
-        "300 open, 44 counted"
+        "300 open, 44 counted in a byte"
     );
     let mut lister = Lister::new(
         Dialect::BasicII,

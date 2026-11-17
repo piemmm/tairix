@@ -531,7 +531,14 @@ fn timing(a: &mut Asm, model: Model) {
     a.rts();
 
     if model == Model::ModelB {
+        // At most the channels there are, as MOS 1.20 takes it.
         a.here("osbyte_16");
+        a.cpx(imm(page2::ADC_CHANNELS + 1));
+        let channels = a.local();
+        a.bcc(channels);
+        a.ldx(imm(page2::ADC_CHANNELS));
+        a.stx(zp(os::CALL_X));
+        a.bind(channels);
         a.lda(imm(0xBD));
         a.jsr("osbyte_write_variable");
         a.txa();
