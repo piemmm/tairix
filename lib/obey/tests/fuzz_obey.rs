@@ -20,7 +20,7 @@ use tairix_obey::args::substitute;
 use tairix_obey::command::{read_only, Context, Observer};
 use tairix_obey::expr::{evaluate, MOST_STRING};
 use tairix_obey::gstrans::{gstrans, Flags};
-use tairix_obey::readargs::read_args;
+use tairix_obey::readargs::{read_args, Arg};
 use tairix_obey::vars::read_expanded;
 use tairix_obey::{Answer, Budget, Error, Store, Value, Variables};
 
@@ -186,7 +186,7 @@ fn hostile_everything(rng: &mut Prng) {
         read_args(&template, &args, vars, budget, 0x8000, capacity)
     }) {
         assert!(read.buffer.len() <= capacity);
-        assert_eq!(read.left, capacity - used(&read.args, &read.buffer));
+        assert_eq!(read.left, capacity - used(&read.args, &read.buffer, 0x8000));
     }
 
     let len = rng.below(200);
@@ -202,20 +202,28 @@ fn hostile_everything(rng: &mut Prng) {
     });
 }
 
-/// The bytes a reading's buffer counts as used: all of it but a final `/G`
-/// value's terminator.
-fn used(args: &[tairix_obey::readargs::Arg], buffer: &[u8]) -> usize {
-    let last = args
-        .iter()
-        .filter_map(|arg| match arg {
-            tairix_obey::readargs::Arg::Translated(at) => Some(at.end),
-            _ => None,
+/// The bytes a reading's buffer counts as used: its address words, then up
+/// to the end of the value laid last, an `/E` value found by its word. What
+/// follows that value — a `/G` value's terminator, what is left of the text
+/// an `/E` or `/G` value was copied from — is written but not counted.
+fn used(args: &[Arg], buffer: &[u8], base: u32) -> usize {
+    args.iter()
+        .enumerate()
+        .filter_map(|(entry, arg)| match arg {
+            Arg::Text(at) => Some(at.end + 1),
+            Arg::Translated(at) => Some(at.end),
+            Arg::Evaluated(answer) => {
+                let word = buffer.get(entry * 4..entry * 4 + 4)?;
+                let address = u32::from_le_bytes(word.try_into().ok()?);
+                let start = usize::try_from(address.checked_sub(base)?).ok()?;
+                Some(match answer {
+                    Answer::Integer(_) => start + 8,
+                    Answer::String(bytes) => start + 3 + bytes.len(),
+                })
+            }
+            Arg::Absent | Arg::Switch => None,
         })
-        .max();
-    match last {
-        Some(end) if end == buffer.len() - 1 => buffer.len() - 1,
-        _ => buffer.len(),
-    }
+        .fold(args.len() * 4, usize::max)
 }
 
 /// `bytes` written in GSTrans's escapes, so that GSTrans reads them back.
@@ -277,6 +285,25 @@ fn arithmetic_agrees(rng: &mut Prng) {
         Ok(Answer::Integer(value)),
         "{text}"
     );
+}
+
+/// Regression: a `/G` value GSTrans makes shorter than its text leaves the
+/// text's tail in the buffer, and the room left counts none of it.
+#[test]
+fn a_translation_shorter_than_its_text_leaves_its_tail_uncounted() {
+    let mut store = Store::with_room(16, 256, NAMES).unwrap();
+    store
+        .assign(&long_name(0), Value::String(b"x".to_vec()))
+        .unwrap();
+    let mut vars = Counted { store, examined: 0 };
+    let read = within(&mut vars, 64, |vars, budget| {
+        read_args(b"a/G", b"+=><Long*>", vars, budget, 0x8000, 47)
+    })
+    .unwrap();
+    assert_eq!(read.args, [Arg::Translated(6..10)]);
+    assert!(read.buffer.len() > 11, "the text's tail stays");
+    assert_eq!(read.left, 37);
+    assert_eq!(read.left, 47 - used(&read.args, &read.buffer, 0x8000));
 }
 
 #[test]

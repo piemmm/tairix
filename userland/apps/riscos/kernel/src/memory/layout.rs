@@ -5,9 +5,8 @@
 //! code, so everything such code can be handed lies below 64 MiB: the RMA,
 //! the system heap, the stacks and the host pages at the top of that window,
 //! the areas 26-bit callers make below them, and application space under
-//! those. The other is RISC OS 5's own, for a session whose program is
-//! 32-bit: application space to 512 MiB and everything shared above it, and
-//! 26-bit code refused.
+//! those. The other is for a session whose program is 32-bit: application
+//! space to 512 MiB and everything shared above it, and 26-bit code refused.
 
 use core::ops::Range;
 
@@ -22,8 +21,8 @@ pub const ZERO_PAGE_SIZE: u32 = 0x4000;
 pub const HIGH_ZERO_PAGE: u32 = 0xFFFF_0000;
 /// ScratchSpace, the workspace modules borrow while a call lasts.
 pub const SCRATCH: Range<u32> = 0x4000..0x8000;
-/// The 32-bit profile's page at zero, which reads as RISC OS 5's
-/// compatibility page does and is never written.
+/// The 32-bit profile's page at zero: read-only, so a pointer through null
+/// finds nothing it may change.
 pub const COMPATIBILITY: Range<u32> = 0..0x1000;
 
 /// Each processor mode's stack: where it lies, its top being where it
@@ -98,9 +97,7 @@ pub static SHARED: Layout = Layout {
     areas: WINDOW_TOP..0xFA00_0000,
 };
 
-/// RISC OS 5's own layout, for a session whose program declares 32-bit:
-/// its addresses, so software that peeks where RISC OS 5 keeps things finds
-/// them there.
+/// The layout for a session whose program declares 32-bit.
 pub static RISC_OS_5: Layout = Layout {
     admits_26bit: false,
     top_26bit: 0,

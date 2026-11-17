@@ -1,0 +1,479 @@
+# SWI names: every name of the kernel's own the emulator knows, given to
+# OS_SWINumberFromString, and a few numbers back through
+# OS_SWINumberToString, each name it writes read back to its number;
+# numbers and lengths recorded, never a name.
+
+scenario swi-names-0
+call XOS_SWINumberFromString r1="OS_WriteC"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteS"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Write0"
+show r0 v
+call XOS_SWINumberFromString r1="OS_NewLine"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadC"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CLI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Byte"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Word"
+show r0 v
+call XOS_SWINumberFromString r1="OS_File"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Args"
+show r0 v
+call XOS_SWINumberFromString r1="OS_BGet"
+show r0 v
+call XOS_SWINumberFromString r1="OS_BPut"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GBPB"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Find"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadLine"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Control"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GetEnv"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Exit"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetEnv"
+show r0 v
+call XOS_SWINumberFromString r1="OS_IntOn"
+show r0 v
+call XOS_SWINumberFromString r1="OS_IntOff"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallBack"
+show r0 v
+call XOS_SWINumberFromString r1="OS_EnterOS"
+show r0 v
+call XOS_SWINumberFromString r1="OS_BreakPt"
+show r0 v
+call XOS_SWINumberFromString r1="OS_BreakCtrl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_UnusedSWI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_UpdateMEMC"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetCallBack"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Mouse"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Heap"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Module"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Claim"
+show r0 v
+
+scenario swi-names-1
+call XOS_SWINumberFromString r1="OS_Release"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadUnsigned"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GenerateEvent"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadVarVal"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetVarVal"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GSInit"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GSRead"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GSTrans"
+show r0 v
+call XOS_SWINumberFromString r1="OS_BinaryToDecimal"
+show r0 v
+call XOS_SWINumberFromString r1="OS_FSControl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ChangeDynamicArea"
+show r0 v
+call XOS_SWINumberFromString r1="OS_GenerateError"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadEscapeState"
+show r0 v
+call XOS_SWINumberFromString r1="OS_EvaluateExpression"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SpriteOp"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadPalette"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ServiceCall"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadVduVariables"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadPoint"
+show r0 v
+call XOS_SWINumberFromString r1="OS_UpCall"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallAVector"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadModeVariable"
+show r0 v
+call XOS_SWINumberFromString r1="OS_RemoveCursors"
+show r0 v
+call XOS_SWINumberFromString r1="OS_RestoreCursors"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SWINumberToString"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SWINumberFromString"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ValidateAddress"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallAfter"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallEvery"
+show r0 v
+call XOS_SWINumberFromString r1="OS_RemoveTickerEvent"
+show r0 v
+call XOS_SWINumberFromString r1="OS_InstallKeyHandler"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CheckModeValid"
+show r0 v
+
+scenario swi-names-2
+call XOS_SWINumberFromString r1="OS_ChangeEnvironment"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ClaimScreenMemory"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadMonotonicTime"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SubstituteArgs"
+show r0 v
+call XOS_SWINumberFromString r1="OS_PrettyPrint"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Plot"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteN"
+show r0 v
+call XOS_SWINumberFromString r1="OS_AddToVector"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteEnv"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadArgs"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadRAMFsLimits"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ClaimDeviceVector"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReleaseDeviceVector"
+show r0 v
+call XOS_SWINumberFromString r1="OS_DelinkApplication"
+show r0 v
+call XOS_SWINumberFromString r1="OS_RelinkApplication"
+show r0 v
+call XOS_SWINumberFromString r1="OS_HeapSort"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ExitAndDie"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadMemMapInfo"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadMemMapEntries"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetMemMapEntries"
+show r0 v
+call XOS_SWINumberFromString r1="OS_AddCallBack"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadDefaultHandler"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetECFOrigin"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SerialOp"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadSysInfo"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Confirm"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ChangedBox"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CRC"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadDynamicArea"
+show r0 v
+call XOS_SWINumberFromString r1="OS_PrintChar"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ChangeRedirection"
+show r0 v
+call XOS_SWINumberFromString r1="OS_RemoveCallBack"
+show r0 v
+
+scenario swi-names-3
+call XOS_SWINumberFromString r1="OS_FindMemMapEntries"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SetColour"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ClaimSWI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReleaseSWI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Pointer"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ScreenMode"
+show r0 v
+call XOS_SWINumberFromString r1="OS_DynamicArea"
+show r0 v
+call XOS_SWINumberFromString r1="OS_AbortTrap"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Memory"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ClaimProcessorVector"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Reset"
+show r0 v
+call XOS_SWINumberFromString r1="OS_MMUControl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ResyncTime"
+show r0 v
+call XOS_SWINumberFromString r1="OS_PlatformFeatures"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SynchroniseCodeAreas"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallASWI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_AMBControl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_CallASWIR12"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SpecialControl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_EnterUSR32"
+show r0 v
+call XOS_SWINumberFromString r1="OS_EnterUSR26"
+show r0 v
+call XOS_SWINumberFromString r1="OS_VIDCDivider"
+show r0 v
+call XOS_SWINumberFromString r1="OS_NVMemory"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ClaimOSSWI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_TaskControl"
+show r0 v
+call XOS_SWINumberFromString r1="OS_DeviceDriver"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Hardware"
+show r0 v
+call XOS_SWINumberFromString r1="OS_IICOp"
+show r0 v
+call XOS_SWINumberFromString r1="OS_LeaveOS"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ReadLine32"
+show r0 v
+call XOS_SWINumberFromString r1="OS_SubstituteArgs32"
+show r0 v
+call XOS_SWINumberFromString r1="OS_HeapSort32"
+show r0 v
+
+scenario swi-names-conversions
+call XOS_SWINumberFromString r1="OS_ConvertHex1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertHex2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertHex4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertHex6"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertHex8"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertCardinal1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertCardinal2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertCardinal3"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertCardinal4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertInteger1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertInteger2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertInteger3"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertInteger4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertBinary1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertBinary2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertBinary3"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertBinary4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedCardinal1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedCardinal2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedCardinal3"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedCardinal4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedInteger1"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedInteger2"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedInteger3"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertSpacedInteger4"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertFixedNetStation"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertNetStation"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertFixedFileSize"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertFileSize"
+show r0 v
+call XOS_SWINumberFromString r1="OS_ConvertVariform"
+show r0 v
+
+scenario swi-names-forms
+call XOS_SWINumberFromString r1="XOS_WriteC"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteI"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteI+65"
+show r0 v
+call XOS_SWINumberFromString r1="XOS_WriteI+&41"
+show r0 v
+call XOS_SWINumberFromString r1="OS_Nothing"
+show r0 v
+call XOS_SWINumberFromString r1="os_writec"
+show r0 v
+call XOS_SWINumberFromString r1="OS_WriteC "
+show r0 v
+block buf 32
+call XOS_SWINumberToString r0=&0 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&20000 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&100 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&141 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&1FF r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&2FF r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&FF r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&3FFFF r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberFromString r1=$buf
+show r0 v
+call XOS_SWINumberToString r0=&41 r1=$buf r2=3
+show r2 $buf:4 v
+
+scenario swi-numbers-at-the-top-of-the-range
+block buf 32
+call XOS_SWINumberToString r0=&F00000 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberToString r0=&F00001 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberToString r0=&F00002 r1=$buf r2=32
+show r2 $buf:4 v
+call XOS_SWINumberToString r0=&F20000 r1=$buf r2=32
+show r2 $buf:4 v
+
+# A buffer too small: what R0 points at.
+scenario swi-number-to-string-overflow
+block small 8
+call XOS_SWINumberToString r0=1 r1=$small r2=2
+show v r2 r0:4
+
+# The Territory Manager's names past the PRM's: their lengths, and each
+# read back; a numbered name is read in decimal.
+scenario territory-swi-names
+block b 64
+call XOS_SWINumberToString r0=&43062 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43063 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43064 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43065 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43066 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43067 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43068 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43069 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306A r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306B r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306C r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306D r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306E r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&4306F r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43070 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43071 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43072 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43073 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43074 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43075 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43076 r1=$b r2=48
+show r2 v
+call XOS_SWINumberToString r0=&43077 r1=$b r2=48
+show r2 v
+call XOS_SWINumberFromString r1="Territory_IME"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_DaylightRules"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved1"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved9"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved10"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved17"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_ConvertTextToString"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Select"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_DaylightSaving"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_56"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_63"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_3F"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_64"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved0"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_Reserved18"
+show r0 v
+call XOS_SWINumberFromString r1="Territory_ConvertTimeFormats"
+show r0 v

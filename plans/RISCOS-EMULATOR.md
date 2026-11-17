@@ -47,11 +47,11 @@ an application's own documents folder, the reference harness);
 | RO12 | VFP and Advanced SIMD, through ARMv8-A's AArch32 additions | done |
 | RO13 | The guest address space: pages and permissions, aborts, task slots, the 26-bit window, dynamic areas, host pages, write tracking, the memory policy | done |
 | RO14 | The reference harness and the recorded observation corpus | done |
-| RO15 | The kernel: SWI dispatch and errors, vectors, services, events, callbacks and tickers, heaps, system variables, `OS_Byte` and `OS_Word`, environment handlers, and the kernel's remaining SWIs | planned |
-| RO16 | Modules: the built-in inventory and its versions, guest modules in either mode, instances, `RMEnsure` and replacement | planned |
-| RO17 | The command line: `OS_CLI`, Obey and Exec, each executable type's run action, every built-in module's `*` commands, the boot utilities | planned |
-| RO18 | Territory, International, MessageTrans, ResourceFS and the built-in resources | planned |
-| RO19 | FileSwitch and HostFS: the SWIs, the session's discs, the documents folder as the shared session's own disc with `!Boot`, Choices and the boot sequence, names and metadata, confinement, the RAM discs | planned |
+| RO15 | The kernel: SWI dispatch and errors, vectors, services, events, callbacks and tickers, heaps, system variables, `OS_Byte` and `OS_Word`, environment handlers, and the kernel's remaining SWIs | done |
+| RO16 | Modules: the built-in inventory and its versions, guest modules in either mode, instances, `RMEnsure` and replacement | done |
+| RO17 | The command line: `OS_CLI` through `CliV` with its aliases, prefixes and redirection, and the kernel's `*` commands — output and variables, files through FileSwitch's SWIs, `*Help`, `*Configure`, `*Status` and the Supervisor | done |
+| RO18 | Territory, International, MessageTrans's SWIs with their file blocks in guest memory, ResourceFS and the built-in resources, the key handler and InternationalKeyboard | done |
+| RO19 | FileSwitch and HostFS: the SWIs, the session's discs, the documents folder as the shared session's own disc with `!Boot`, Choices and the boot sequence, names and metadata, confinement, the RAM discs; `*Obey`, `*Run` and each executable type's run action, the boot utilities, MessageTrans reading files | planned |
 | RO20 | BBC BASIC V and VI: workspace in guest memory, the language, numbers, the machine interface, the assembler, errors, the editor | planned |
 | RO21 | The VDU drivers: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory | planned |
 | RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
@@ -117,10 +117,10 @@ run of items is finished.
    - A program that touches what no built tier models stops, and the front end
      names the chip and the register.
 2. **One RISC OS: RISC OS 5's interface, with 26-bit compatibility.**
-   - The kernel and every built-in module follow the current RISC OS 5
-     release's documented interface. That release is fixed when RO15 lands,
-     and each module records its version. It is a superset of earlier
-     releases' interface for system-friendly software.
+   - The kernel and every built-in module follow RISC OS 5.30's documented
+     interface, the release RO14's corpus was recorded from, and each module
+     records its version. It is a superset of earlier releases' interface
+     for system-friendly software.
    - A 26-bit application or module runs with the processor in a 26-bit mode
      and gets the conventions RISC OS 3 and 4 gave it: the combined PC/PSR,
      flag preservation across SWIs, a slot of at most 28 MiB, and everything
@@ -151,13 +151,19 @@ run of items is finished.
      read for behaviour, structure layouts and documented constants; no code
      is copied;
    - black-box observation of genuine RISC OS run as an opaque program
-     (RO14).
+     (RO14);
+   - the RISC OS Open wiki's documentation, for facts only, each taken for
+     the RISC OS version its page describes. Its text is never copied, and a
+     page drawn from RISC OS's own sources — one naming a file of them as its
+     source — is not relied on.
 
    Nothing else is read: leaked or unlicensed sources (the `RiscOS_371` tree
    included), sources under a licence the tree's is not compatible with —
    RISC OS 5's Apache-2.0 sources among them — disassemblies, and annotated
    ROM listings. Genuine ROM, module, font or message-file bytes never enter
-   the tree, a fixture or a build.
+   the tree, a fixture or a build. What a running RISC OS reports through a
+   documented interface — a ROM module's title and version as `OS_Module`
+   lists them — is observation, recorded as numbers wherever it can be.
 5. **Host calls.** The kernel and the built-in modules are Rust, entered from
    guest code at a trap. There are two kinds of trap:
    - a SWI the dispatcher owns;
@@ -516,6 +522,11 @@ is fuzzed.
     lets the guest write a host frame.
   - A range's tables can be reserved, so a multi-page change never fails
     halfway; an area's whole reservation and a slot's reach are reserved.
+  - **Reserved pages** (`OS_Memory` 23) stay free until something that knows
+    takes them: an area's pre-grow handler only by answering `RESV`, a
+    physical memory pool only by its flag; `OS_Memory` 12 recommends past
+    them. A free page carries the free pool's flags, as RISC OS 5's does, the
+    pool being a physical memory pool.
 - **Two layouts**, chosen when a session starts:
   - **The shared session** admits 26-bit code. Everything a 26-bit context
     can be handed a pointer to lies below 64 MiB: the host pages, the
@@ -531,9 +542,11 @@ is fuzzed.
     with RISC OS's error (RO16, RO32 choose the session).
 - **The low 32 KiB** holds only the workspace software is known to read on
   the profile's RISC OS. A 26-bit task sees zero page at zero, the same
-  frames as zero page at `&FFFF0000`; a 32-bit task sees RISC OS 5's
-  read-only compatibility page there. Both see ScratchSpace at `&4000`. The
-  rest aborts.
+  frames as zero page at `&FFFF0000`. A 32-bit task sees a read-only
+  compatibility page there, as RISC OS 5 on ARMv7 has one: the processor
+  vectors, a warning that a string read through a null pointer reads, and
+  zeros. `OS_Memory` 20 removes and restores it for every 32-bit task at
+  once. Both see ScratchSpace at `&4000`. The rest aborts.
 - **Task slots.** Application space begins at `&8000` and is per task, a
   space of its own. A task switch swaps one pointer, so it costs O(1)
   whatever the slot's size. Translations survive switches because they are
@@ -581,8 +594,14 @@ is fuzzed.
   caller's flags unless the SWI documents otherwise.
 - **The rest of the dispatcher.** `OS_CallASWI`, `OS_CallASWIR12`,
   `OS_SWINumberToString` and `OS_SWINumberFromString` are complete.
-- **Unknown SWIs.** A SWI no module provides is RISC OS's "SWI not known"
-  error.
+- **Unknown SWIs.** A SWI no module provides goes to `UKSWIV`, whose
+  default gives RISC OS's "SWI not known" error.
+- **Waiting.** A program's own SWI that waits for input, having run no guest
+  code, unwinds with the processor back at it and is performed again when
+  input comes, carrying on from a continuation the kernel keeps (a timed
+  read's deadline, a line's characters). Any other wait blocks in the host,
+  and the processor takes the clock's interrupts meanwhile, as RISC OS's
+  waiting SWIs enable them; callbacks wait for the SWI to return.
 - **No partial modules.** A module is either provided whole or absent (§4.3).
   It is never partly provided.
 
@@ -592,10 +611,11 @@ is fuzzed.
   WrchV, RdchV, ByteV, WordV, FileV, ArgsV, FindV, GBPBV, FSCV, UpCallV,
   EventV, TickerV, KeyV, InsV, RemV, CnpV, MouseV, SpriteV, DrawV, ColourV,
   PaletteV, SerialV and the rest the PRMs list.
-  - Claimants run in claim order.
+  - The most recent claimant runs first, as the PRM orders them.
   - The default claimant is a host-page entry into Rust.
-- **Service calls.** Each one goes to every module's service handler. Where
-  the module declares a service table, the call goes through it.
+- **Service calls.** Each one goes to every module's service handler in the
+  module chain's order, as the PRM walks them; a built-in takes only the
+  services it lists.
 - **Events.** `OS_Byte` 13 and 14, delivered through EventV.
 - **Callbacks.** Transient and permanent callbacks run only at callback-safe
   points.
@@ -622,16 +642,30 @@ is fuzzed.
   - **ELF (`&E1F`).** It runs exactly as on RISC OS, through the guest's own
     `!SharedLibs` when present. Otherwise it gets the error RISC OS gives. No
     ELF loader is built in.
-- **The module inventory** (RO16). It classifies every module in the RISC OS 5
-  ROM as one of:
+- **The module inventory** (RO16). It classifies every module in RISC OS
+  5.30's ROM — the IOMD build the corpus was recorded on, its titles and
+  versions as `OS_Module` 20 lists them on that running machine, which the
+  corpus's `rom-modules` reference records and a test holds the table to —
+  as one of:
   - **provided** (complete), with the version whose interface it implements;
   - **absent**: hardware drivers (podules, IDE, SCSI, USB, PS/2, IIC, SDIO,
     serial and parallel ports, Econet and its filing systems, CMOS) and modules
-    only those serve;
-  - **bridged**: provided, with its outside effect relayed to the desktop.
+    only those serve; the ROM's own applications (`!Edit`, `!Draw`, `!Paint`,
+    `!Alarm`, `!Chars`, `!Help`), whose places TAIRiX's applications take;
+    the network modules beyond the Internet module and Resolver (ShareFS,
+    LanManFS, Freeway, DHCP, MbufManager), shares reaching a session through
+    FileSwitch over TAIRiX's own; and DOSFS, TAIRiX reading DOS media;
+  - **bridged**: provided, with its outside effect relayed to the desktop —
+    among them the desktop utilities TAIRiX has its own of: the Filer and its
+    helpers, Pinboard, the Task Manager, DisplayManager and the screen
+    blankers. FileCore is provided, under RamFS.
 
-  The inventory is a table in the crate, documented on the docs page. An
-  absent module is invisible to `OS_Module`, `RMEnsure` and SWI lookup.
+  The inventory is a table in the crate, documented on the docs page; a
+  provided or bridged module is present once its item lands. An absent
+  module is invisible to `OS_Module`, `RMEnsure` and SWI lookup. A provided
+  module is the kernel crate's `Builtin` seam: Rust behind a module image in
+  the host pages. The other crates pass theirs to the session in
+  `Config::modules`, each matched by its title to its row.
 - **Guest modules** may be loaded in either mode, with instances
   (`Module%Instance`), the full initialise, finalise and service protocol,
   `*` commands, help, SWIs and message files.
@@ -674,43 +708,119 @@ is fuzzed.
     `OS_PrettyPrint`, `OS_Confirm`.
   - **Time and RAM discs:** `OS_ReadMonotonicTime`, `OS_ResyncTime`,
     `OS_ReadRAMFsLimits`.
-- **Privileged calls.** Those that would reach hardware (`OS_Hardware`,
-  `OS_ClaimDeviceVector`, `OS_ClaimProcessorVector`, `OS_MMUControl`,
-  `OS_IICOp`) answer the error RISC OS 5 gives for a missing device or an
-  unsupported reason.
+- **RISC OS 5's additions**, re-derived from the RISC OS Open wiki and held
+  to the reference machine's answers:
+  - `OS_Memory` 12 recommends free contiguous pages at an alignment, within a
+    physical range when one is given; 19 hands a DMA transfer's regions to
+    the caller's functions, joined where they run on and marked for a bounce
+    buffer where a write leaves part of a cache line; 20 is §3's
+    compatibility page; 23 reserves pages (§3); 64 converts pages with wide
+    addresses.
+  - `OS_Heap` 7 and 8 claim aligned blocks: the alignment a power of two or
+    none, the boundary a power of two no smaller than the block or the
+    alignment. A refused claim of any reason leaves R2 zero.
+  - `OS_AMBControl` serves RISC OS's own use: reason 9 has nothing to do, and
+    every other reason is refused as unknown.
+  - `OS_ReadLine` ignores a 32-bit caller's flags and returns R0 without
+    them. `OS_PrettyPrint` expands from the kernel's dictionary, the PRM's
+    table with token 22 empty, the byte after an escape the escape's own
+    even where it is zero, which brings in R2's string.
+- **Privileged calls.** `OS_ClaimProcessorVector` claims the processor
+  vectors but FIQ's, `OS_AbortTrap`'s traps answering behind its claimants,
+  for translation and permission faults alone, each claimant covering an
+  access asked before it is declined;
+  `OS_MMUControl` keeps the control register's soft copy and gives the
+  `ARMop` routines, cache maintenance having nothing to do. Those that would
+  reach hardware answer as RISC OS 5 does without it: `OS_Hardware` has no
+  HAL entry and keeps the device table modules add to, `OS_ClaimDeviceVector`
+  has no device and `OS_IICOp` no bus.
 
-### 4.6 Territory, messages, resources (RO18)
+### 4.6 Territory, messages, resources, the keyboard (RO18)
 
-- The Territory Manager and its territory follow the TAIRiX locale. They
-  provide dates and numbers, the alphabet and its tables, collation, and time
-  zones through `lib/tz`.
-- MessageTrans is complete, with file blocks in guest memory. ResourceFS holds
-  the built-in resources:
+- The Territory Manager and its territory follow the TAIRiX locale. The
+  session's zone (`Config::zone`, from `lib/tz`) gives the UK territory its
+  standard and summer readings, and a CMOS reset the locale's standard offset
+  and whether its summer time is in force. They provide the PRM's territory
+  interface — dates and numbers, the alphabet and its tables, collation —
+  with RISC OS 5's observed answers where the two differ (the unknown-SWI
+  number, collation's flags and numeric runs, carried ordinals).
+- **Daylight saving** is RISC OS 5's interface, re-derived from the RISC OS
+  Open wiki and the reference machine. The Manager's `Territory_DaylightSaving`
+  keeps the state in CMOS, in force and kept by the rules, and asks the
+  territory's `Territory_DaylightRules` entry for a year's bounds, so a guest
+  territory's rules are its own; it never fails a question, and any refusal of
+  bounds is its own error. The UK territory's rules are the session's zone's:
+  daylight saving is in force wherever the zone's offset differs from its
+  standard offset, in the years 1968 to 2099 genuine RISC OS 5's rules cover.
+  Kept by the rules, it changes over at a year's bounds and at each new year,
+  and every change is announced by `Service_TimeZoneChanged`.
+- `Territory_ConvertTimeFormats` converts between ordinals and five-byte
+  times and between local time and UTC, by the territory's time zone and
+  either daylight saving as asked, its rules, or an adjustment in
+  centiseconds; a local time is read as standard time to ask the rules, as
+  RISC OS 5's is. RISC OS 5.30 reads its name though it writes the SWI as a
+  number; the emulator names it both ways.
+- `Territory_IME` gives no input method. `Territory_Select` and `*Territory`
+  make a loaded territory current and issue `Service_TerritoryStarted`,
+  setting nothing else up; CMOS keeps the configured one.
+- MessageTrans is complete, with file blocks in guest memory; it reads a file
+  FileSwitch serves once FileSwitch is in (RO19), and ResourceFS's own
+  directly. Its matching, substitution and search order are the PRM's, held
+  to RISC OS 5's recorded answers; an escape is expanded from a dictionary as
+  RISC OS 5's is, from the emulator's own, which is empty. Where RISC OS's copies are unbounded — a lookup into no room, an
+  error into less than its number and a terminator, menus past their buffer —
+  nothing is written past the caller's room and "Buffer overflow" is the
+  answer; the room MakeMenus reports left is RISC OS's.
+- ResourceFS keeps the registered blocks and their files; its filing system,
+  `Resources:` through FileSwitch, arrives with FileSwitch (RO19). The
+  Messages module holds the built-in resources:
   - each module's message file, authored in the tree;
-  - the Wimp's file-type sprites, drawn at RISC OS's sizes from the TAIRiX
-    file-type masters, so a Save box shows the desktop's own pictures;
-  - the system font (`lib/vdu`).
+  - the Wimp's file-type sprites, `Wimp.Sprites22`, drawn at RISC OS's sizes
+    from the TAIRiX file-type masters by `cargo xtask riscos --write-sprites`
+    and held to them by the `riscos-sprites` gate, so a Save box shows the
+    desktop's own pictures. They are sixteen-bit colour with an alpha mask at
+    90 dots an inch, at that one resolution: the 26-bit layout's host pages
+    are a megabyte, and RISC OS plots a sprite by its own resolution.
+- The system font is not a resource. RISC OS keeps it in the kernel and
+  International's tables, and so does the emulator: International defines an
+  alphabet's characters from `lib/vdu`'s glyphs, which draw every character of
+  every alphabet.
+- The keyboard is RISC OS's key-handler protocol behind `KeyV`'s default, and
+  InternationalKeyboard with TAIRiX's own layout for each of RISC OS's
+  keyboards, drawn from each country's standard layout with its own Alt
+  layer. None is taken from RISC OS's layout files. A dead key's accent is
+  composed by Unicode's canonical composition.
 
-  Error numbers are RISC OS's, and their texts are the documented messages.
+  Error numbers are genuine RISC OS 5's where it was recorded giving them;
+  a condition it never reports takes the lowest number of the PRM's range
+  for its family that no recorded error uses. Their texts and the message
+  files' tokens are the emulator's own words, the PRM's where it gives one.
 
-## 5. The command line and scripts (RO17)
+## 5. The command line and scripts (RO17, RO19)
 
-- **`OS_CLI` resolution** follows RISC OS's order:
+- **`OS_CLI` resolution** (RO17) follows RISC OS's order:
   1. `Alias$…` aliases, unless a `%` before the command skips them;
   2. the modules' command tables;
   3. a file found on `Run$Path`, run by type through `Alias$@RunType_XXX`.
 
   An unknown command is therefore the "not found" error the `Run$Path` fallback
   gives.
-- **Run actions** for every executable type: Absolute, Utility, Module (by
-  `RMRun`), BASIC, Obey, TaskObey, Command (`*Exec`), TaskExec and Desktop.
-- **Obey.** The `Obey$Dir` scope, the `%0`–`%9` and `%*n` parameters, and the
-  options. Exec and TaskExec are provided too, with TaskObey and TaskExec
-  running in TaskWindows (RO48).
-- **Commands.** Every `*` command of every built-in module. Also every command
-  the RISC OS boot sequence's utilities provide, since applications rely on
-  them: `IfThere`, `AddApp`, `X`, `Repeat` and their kin. They are first-party,
+- **Run actions** (RO19) for every executable type: Absolute, Utility, Module
+  (by `RMRun`), BASIC, Obey, TaskObey, Command (`*Exec`), TaskExec and Desktop.
+- **Obey** (RO19). The `Obey$Dir` scope, the `%0`–`%9` and `%*n` parameters,
+  and the options; `*Obey` reads its file through FileSwitch and runs it with
+  `lib/obey`'s reading. Exec and TaskExec are provided too, with TaskObey and
+  TaskExec running in TaskWindows (RO48).
+- **Commands.** Every `*` command of every built-in module, each arriving with
+  its module; the kernel's own are RO17's. Also every command the RISC OS boot
+  sequence's utilities provide (RO19), since applications rely on them:
+  `IfThere`, `AddApp`, `X`, `Repeat` and their kin. They are first-party,
   found on `Run$Path` as they are on RISC OS.
+- **Input during work.** The keyboard is the interrupt's work, so Escape
+  reaches the kernel while a program reads nothing, and a command that runs
+  as long as its work takes the interrupt due at each step. A command reading
+  lines waits in place rather than being performed again, so it keeps what it
+  has done.
 
 ## 6. Filing (RO19)
 
@@ -730,6 +840,14 @@ is fuzzed.
 
   ResourceFS is `Resources:`. A disc's name is its root's folder name, made
   unique within the session.
+- **Its corpus.** The scenarios that need a filing system join the corpus
+  with FileSwitch, holding what genuine RISC OS 5 was recorded giving through
+  a file of type `&123` registered with ResourceFS: `*Load` with no
+  `@LoadType` for it `&409`, `*Dump` past its end `&B7`, `*RMLoad` of it
+  `&100`, input redirection from a file never registered `&D6`; `*L.` and
+  `*Lo.` naming `*Load`, `*Li.` `*List` and `*T.` `*TV`, `*D.` refused with
+  `&113`; and `OS_File` 5 on a ROM resource reading the stamp
+  `&5B56B17646`.
 - **The user's own RISC OS disc.** The documents folder is where the user keeps
   RISC OS applications and files, and it holds `!Boot` as RISC OS 5 lays it
   out:
@@ -844,12 +962,28 @@ is fuzzed.
   - Screen banks: `OS_Byte` 112 and 113.
   - Screen memory for direct writers is in guest memory (§3). There is no
     VIDC (decision 1).
+  - The current monitor type, started from the configured one, is the VDU
+    drivers': `*Configure MonitorType` sets it as it writes CMOS, and
+    `OS_ReadSysInfo` 1 reads it, where without VDU drivers both stand on CMOS
+    alone. The VDU status `OS_Byte` 117 reads is theirs too.
 - **The VDU stream.**
   - Every code 0–31 and 127 with its parameter count from `lib/vdu`, VDU 23
     and its sub-codes, text and graphics windows, origins, the text and
     graphics cursors, paged mode, and output through WrchV.
-  - Colours: `COLOUR`, `GCOL`, `TINT`, `OS_SetColour`, ECF patterns.
+  - Colours: `COLOUR`, `GCOL`, `TINT`, `OS_SetColour`, ECF patterns. The
+    patterns lie where `OS_ReadSysInfo` 6's items 72, 73, 83 and 84 put them
+    on RISC OS 5, zero page's `&1480`, `&14C0`, `&11FC` and `&11F8`, since
+    software that reads them there writes them there.
   - Characters: the system font, with characters redefinable.
+  - Cursor editing: with `OS_Byte` 4's default state the arrow keys enter
+    copy-cursor editing in `OS_ReadC`, Copy reading the character under the
+    second cursor, until a carriage return reaches the VDU, as the PRM's
+    character input chapter sets out.
+  - `VDU 1,n` reaches the printer even where the printer is otherwise
+    disabled, as `OS_Byte` 3's printer bits leave it.
+  - `OS_WriteN`, with the VDU the only stream, writes straight to the VDU
+    drivers rather than through WrchV a character at a time, as the PRM
+    says; with another stream active it goes through WrchV.
 - **`OS_Plot`.** Every plot code, each pixel rule pinned by recorded
   observation:
   - moves and dotted lines with their end rules; points;
@@ -1594,8 +1728,9 @@ that request could produce.
   1. It writes the harness program, a BASIC V program built with
      `lib/openbasic`, and a `!Boot` that runs it, into `<dir>`'s `hostfs/`.
   2. The program runs the corpus scenarios on a genuine RISC OS and records
-     what each left: registers, the flags the SWI defines, and errors by
-     number. Where `<dir>` holds RPCEmu running RISC OS Open's ROM, the
+     what each left: registers, the flags the SWI defines, errors by number,
+     and memory in the blocks a scenario makes, a register or pointer shown
+     against a block's address since the two machines place blocks apart. Where `<dir>` holds RPCEmu running RISC OS Open's ROM, the
      command runs it headless until the harness is done; on a machine a
      developer holds, the developer boots it from `hostfs/` and runs the
      command again.
@@ -1603,7 +1738,9 @@ that request could produce.
      kind that names the machine, once one joins, has the emulator's own
      names put in.
   4. A scenario marked `ours` keeps the fixture that states the emulator's own
-     behaviour.
+     behaviour. One marked `reference` reads the machine itself, the ROM's
+     module list among them: it is recorded and never replayed, a test of its
+     own holding the emulator's record of the machine to it.
   5. Before the scenarios, BASIC V types `lib/openbasic`'s programs, then saves
      and lists each; after them, the harness runs `lib/obey`'s cases. Each
      crate's answers are written beside its cases, and its replay holds it to
@@ -1612,8 +1749,9 @@ that request could produce.
   Every file the import writes names the RISC OS version and each ROM image's
   SHA-256. The import refuses a recording carrying twelve bytes in a row of a
   ROM image that the corpus's own files do not hold, in its text, in the words
-  a step shows in consecutive registers or in the bytes a `lib/obey` case's
-  buffer was given, but for a run mostly of `&00`, spaces and `&FF`
+  a step shows in consecutive registers or in the bytes a scenario's memory or
+  a `lib/obey` case's buffer was given, but for a run mostly of `&00`, spaces
+  and `&FF`
   (`plans/BEEB.md` §7). A message BASIC prints is recorded by the kind a
   calibration line shows it to be, never as its text. The SWI layer (RO15)
   replays the corpus on the kernel; screens and files join the scenarios as

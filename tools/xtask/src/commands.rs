@@ -340,7 +340,8 @@ impl Command {
             }
             Command::Riscos => {
                 "Record the RISC OS emulator's corpus on a developer's genuine RISC OS \
-                 (`--reference <dir>`; developer-run only)."
+                 (`--reference <dir>`; developer-run only), or draw its file-type sprites \
+                 from the icon masters (`--write-sprites`)."
             }
             Command::RiscosFpa => {
                 "Hold the RISC OS emulator's FPA to a developer's own FPEmulator module \
@@ -1711,6 +1712,9 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     // The Open Micro emulator's clean-room ROMs, each rebuilt and compared
     // byte for byte.
     ("openmicro-roms", openmicro::check_roms),
+    // The RISC OS emulator's file-type sprites, redrawn from the icon masters
+    // and compared byte for byte.
+    ("riscos-sprites", riscos::check_sprites),
     // Exhaustively model-check the capability + IPC state machine.
     ("model-check", |_| run_model_check(&[])),
 ];

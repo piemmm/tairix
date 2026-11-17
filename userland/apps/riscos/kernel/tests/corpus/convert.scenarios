@@ -1,0 +1,249 @@
+# The OS_Convert family, OS_BinaryToDecimal: what each writes into its
+# buffer, where it leaves R0 to R2, and how it refuses.
+
+scenario convert-hex
+block buf 16
+call XOS_ConvertHex1 r0=&1234ABCD r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:3 v
+call XOS_ConvertHex2 r0=&1234ABCD r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:3 v
+call XOS_ConvertHex4 r0=&1234ABCD r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:5 v
+call XOS_ConvertHex6 r0=&1234ABCD r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:7 v
+call XOS_ConvertHex8 r0=&1234ABCD r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:9 v
+
+scenario convert-cardinal
+block buf 16
+call XOS_ConvertCardinal1 r0=&1FF r1=$buf r2=16
+show r0-buf r1-buf r2 $buf:4 v
+call XOS_ConvertCardinal2 r0=&12345 r1=$buf r2=16
+show r1-buf r2 $buf:6 v
+call XOS_ConvertCardinal3 r0=&FFFFFFFF r1=$buf r2=16
+show r1-buf r2 $buf:9 v
+call XOS_ConvertCardinal4 r0=&FFFFFFFF r1=$buf r2=16
+show r1-buf r2 $buf:11 v
+call XOS_ConvertCardinal4 r0=0 r1=$buf r2=16
+show r1-buf r2 $buf:2 v
+
+scenario convert-integer
+block buf 16
+call XOS_ConvertInteger1 r0=&FF r1=$buf r2=16
+show r1-buf r2 $buf:3 v
+call XOS_ConvertInteger2 r0=&18000 r1=$buf r2=16
+show r1-buf r2 $buf:7 v
+call XOS_ConvertInteger3 r0=&7FFFFF r1=$buf r2=16
+show r1-buf r2 $buf:8 v
+call XOS_ConvertInteger4 r0=&80000000 r1=$buf r2=16
+show r1-buf r2 $buf:12 v
+call XOS_ConvertInteger4 r0=-1 r1=$buf r2=16
+show r1-buf r2 $buf:3 v
+
+scenario convert-binary
+block buf 40
+call XOS_ConvertBinary1 r0=&105 r1=$buf r2=40
+show r1-buf r2 $buf:9 v
+call XOS_ConvertBinary2 r0=&8001 r1=$buf r2=40
+show r1-buf r2 $buf:17 v
+call XOS_ConvertBinary4 r0=&80000001 r1=$buf r2=40
+show r1-buf r2 $buf:33 v
+
+scenario convert-spaced
+block buf 24
+call XOS_ConvertSpacedCardinal4 r0=1234567 r1=$buf r2=24
+show r1-buf r2 $buf:10 v
+call XOS_ConvertSpacedCardinal2 r0=999 r1=$buf r2=24
+show r1-buf r2 $buf:4 v
+call XOS_ConvertSpacedCardinal2 r0=1000 r1=$buf r2=24
+show r1-buf r2 $buf:6 v
+call XOS_ConvertSpacedInteger4 r0=-1234567 r1=$buf r2=24
+show r1-buf r2 $buf:11 v
+call XOS_ConvertSpacedInteger1 r0=&80 r1=$buf r2=24
+show r1-buf r2 $buf:5 v
+
+scenario convert-net-station
+block buf 16
+block station 8
+write $station w=5 w=0
+call XOS_ConvertNetStation r0=$station r1=$buf r2=16
+show r1-buf r2 $buf:2 v
+call XOS_ConvertFixedNetStation r0=$station r1=$buf r2=16
+show r1-buf r2 $buf:8 v
+write $station w=5 w=12
+call XOS_ConvertNetStation r0=$station r1=$buf r2=16
+show r1-buf r2 $buf:5 v
+call XOS_ConvertFixedNetStation r0=$station r1=$buf r2=16
+show r1-buf r2 $buf:8 v
+write $station w=0 w=12
+call XOS_ConvertNetStation r0=$station r1=$buf r2=16
+show v
+write $station w=256 w=0
+call XOS_ConvertNetStation r0=$station r1=$buf r2=16
+show v
+write $station w=5 w=256
+call XOS_ConvertNetStation r0=$station r1=$buf r2=16
+show v
+
+scenario convert-file-size
+block buf 24
+call XOS_ConvertFileSize r0=0 r1=$buf r2=24
+show r1-buf r2 $buf:8 v
+call XOS_ConvertFileSize r0=1 r1=$buf r2=24
+show r1-buf r2 $buf:7 v
+call XOS_ConvertFileSize r0=4095 r1=$buf r2=24
+show r1-buf r2 $buf:11 v
+call XOS_ConvertFileSize r0=4096 r1=$buf r2=24
+show r1-buf r2 $buf:8 v
+call XOS_ConvertFileSize r0=1536 r1=$buf r2=24
+show r1-buf r2 $buf:11 v
+call XOS_ConvertFileSize r0=&FFFFFFFF r1=$buf r2=24
+show r1-buf r2 $buf:8 v
+call XOS_ConvertFixedFileSize r0=1 r1=$buf r2=24
+show r1-buf r2 $buf:12 v
+call XOS_ConvertFixedFileSize r0=4096 r1=$buf r2=24
+show r1-buf r2 $buf:12 v
+call XOS_ConvertFixedFileSize r0=&FFFFFFFF r1=$buf r2=24
+show r1-buf r2 $buf:12 v
+
+scenario convert-overflow
+block buf 8
+call XOS_ConvertHex4 r0=&ABCD r1=$buf r2=4
+show r1-buf r2 $buf:5 v
+call XOS_ConvertHex4 r0=&ABCD r1=$buf r2=5
+show r0-buf r1-buf r2 $buf:5 v
+call XOS_ConvertCardinal4 r0=12345 r1=$buf r2=0
+show r1-buf r2 v
+
+scenario convert-overflow-partly
+block buf 8
+call XOS_ConvertHex4 r0=&ABCD r1=$buf r2=2
+show r1-buf r2 $buf:5 v
+block two 8
+call XOS_ConvertHex4 r0=&ABCD r1=$two r2=1
+show r1-two r2 $two:5 v
+block three 8
+call XOS_ConvertCardinal4 r0=12345 r1=$three r2=3
+show r1-three r2 $three:6 v
+block four 8
+call XOS_ConvertNetStation r0=$four r1=$four r2=1
+show r1-four r2 v
+block five 8
+call XOS_ConvertFileSize r0=4096 r1=$five r2=3
+show r1-five r2 $five:8 v
+block six 16
+block value 4
+write $value w=&04030201
+call XOS_ConvertVariform r0=$value r1=$six r2=3 r3=4 r4=1
+show r1-six r2 $six:9 v
+
+scenario convert-variform-measure
+block value 16
+write $value w=&04030201 w=&08070605 w=&0C0B0A09 w=&100F0E0D
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=2 r4=0
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=8 r4=0
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=1
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=1 r4=1
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=2
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=1 r4=3
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=4
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=6
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=8
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=9
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=10
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=6 r4=11
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=16 r4=12
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=16 r4=15
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=&80000000 r3=4 r4=0
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=16
+show v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=4 r4=14
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=9 r4=1
+show v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=16 r4=13
+show r2 v
+call XOS_ConvertVariform r0=$value r1=0 r2=-1 r3=3 r4=12
+show v
+
+scenario convert-variform-rest
+block buf 64
+block value 16
+write $value w=&FFFFFF85 w=0 w=0 w=&0100FE80
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=1 r4=5
+show r1-buf r2 $buf:5 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=7
+show r1-buf r2 $buf:5 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=8 r4=9
+show r1-buf r2 $buf:12 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=3 r4=14
+show r1-buf r2 $buf:4 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=16 r4=12
+show r1-buf r2 $buf:24 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=16 r4=13
+show r1-buf r2 $buf:40 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=12
+show r1-buf r2 $buf:12 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=3 r4=12
+show v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=15 r4=15
+show v
+
+scenario convert-variform
+block buf 64
+block value 16
+write $value w=&04030201 w=&08070605 w=&0C0B0A09 w=&100F0E0D
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=0
+show r0-buf r1-buf r2 $buf:5 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=14
+show r1-buf r2 $buf:5 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=2 r4=1
+show r1-buf r2 $buf:5 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=1 r4=2
+show r1-buf r2 $buf:2 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=1 r4=3
+show r1-buf r2 $buf:9 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=4
+show r1-buf r2 $buf:12 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=6
+show r1-buf r2 $buf:12 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=8
+show r1-buf r2 $buf:12 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=10
+show r1-buf r2 $buf:8 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=6 r4=11
+show r1-buf r2 $buf:18 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=16 r4=12
+show r1-buf r2 $buf:40 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=16 r4=15
+show r1-buf r2 $buf:37 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=-1 r3=4 r4=0
+show r2 v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=4 r4=16
+show v
+call XOS_ConvertVariform r0=$value r1=$buf r2=64 r3=9 r4=1
+show v
+
+scenario binary-to-decimal
+block buf 16
+call XOS_BinaryToDecimal r0=-1234 r1=$buf r2=16
+show r1-buf r2 $buf:6 v
+call XOS_BinaryToDecimal r0=0 r1=$buf r2=16
+show r2 $buf:2 v
+call XOS_BinaryToDecimal r0=123456 r1=$buf r2=3
+show r1-buf r2 $buf:4 v

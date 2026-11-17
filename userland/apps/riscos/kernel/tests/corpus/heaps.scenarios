@@ -1,0 +1,250 @@
+# OS_Heap on a heap in a block of the corpus's own: each reason, what the
+# heap's own words become, and each refusal. Blocks are shown as offsets
+# into the heap, which genuine RISC OS and the emulator place apart.
+
+scenario heap-made-and-described
+block heap 512
+call XOS_Heap r0=0 r1=$heap r3=512
+show v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+show $heap:16 v
+call XOS_Heap r0=0 r1=$heap r3=20
+show v
+call XOS_Heap r0=1 r1=$heap
+show v
+
+scenario heap-blocks-claimed-and-freed
+block heap 512
+call XOS_Heap r0=0 r1=$heap r3=512
+show v
+call XOS_Heap r0=2 r1=$heap r3=16
+show r2-heap v
+keep r2 first
+call XOS_Heap r0=2 r1=$heap r3=30
+show r2-heap v
+keep r2 second
+call XOS_Heap r0=2 r1=$heap r3=1
+show r2-heap v
+keep r2 third
+call XOS_Heap r0=6 r1=$heap r2=$second
+show r3 v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+show $heap:64 v
+call XOS_Heap r0=3 r1=$heap r2=$first
+show v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+show $heap:32 v
+call XOS_Heap r0=2 r1=$heap r3=8
+show r2-heap v
+call XOS_Heap r0=3 r1=$heap r2=$third
+show v
+call XOS_Heap r0=3 r1=$heap r2=$second
+show v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+show $heap:32 v
+
+scenario heap-block-extended
+block heap 512
+call XOS_Heap r0=0 r1=$heap r3=512
+show v
+call XOS_Heap r0=2 r1=$heap r3=16
+keep r2 first
+call XOS_Heap r0=2 r1=$heap r3=16
+keep r2 second
+call XOS_Heap r0=4 r1=$heap r2=$second r3=20
+show r2-heap v
+keep r2 second
+call XOS_Heap r0=6 r1=$heap r2=$second
+show r3 v
+call XOS_Heap r0=4 r1=$heap r2=$second r3=-8
+show r2-heap v
+call XOS_Heap r0=6 r1=$heap r2=$second
+show r3 v
+call XOS_Heap r0=4 r1=$heap r2=$first r3=40
+show r2-heap v
+call XOS_Heap r0=4 r1=$heap r2=$second r3=-1000
+show r2 v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+
+scenario heap-extended
+block heap 512
+call XOS_Heap r0=0 r1=$heap r3=256
+show v
+call XOS_Heap r0=5 r1=$heap r3=64
+show r3 v
+call XOS_Heap r0=1 r1=$heap
+show r2 r3 v
+call XOS_Heap r0=5 r1=$heap r3=-32
+show r3 v
+call XOS_Heap r0=2 r1=$heap r3=200
+show r2-heap v
+call XOS_Heap r0=5 r1=$heap r3=-200
+show r3 v
+show $heap:16 v
+
+scenario heap-refusals
+block heap 256
+block other 64
+call XOS_Heap r0=0 r1=$heap r3=256
+show v
+call XOS_Heap r0=1 r1=$other
+show v
+call XOS_Heap r0=2 r1=$heap r3=1000
+show r2 v
+call XOS_Heap r0=3 r1=$heap r2=$heap+&40
+show v
+call XOS_Heap r0=6 r1=$heap r2=$heap+&40
+show v
+call XOS_Heap r0=9 r1=$heap
+show v
+call XOS_Heap r0=2 r1=$heap r3=0
+show r2 v
+write $heap+&4 w=&10000
+call XOS_Heap r0=1 r1=$heap
+show v
+
+# OS_Heap 8's aligned claims: an alignment a power of two or none, and a
+# boundary a power of two no smaller than the block or the alignment; a
+# claim refused leaves R2 zero.
+scenario heap-aligned-claims
+block h 4096
+call XOS_Heap r0=0 r1=$h r3=4096
+show v
+call XOS_Heap r0=8 r1=$h r2=64 r3=100 r4=0 r5=0
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=256 r3=200 r4=0 r5=0
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=16 r3=100 r4=128 r5=0
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=64 r3=50 r4=0 r5=32
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=3 r3=16 r4=0 r5=0
+show r2 r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=16 r3=100 r4=64 r5=0
+show r2 r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=0 r3=24 r4=0 r5=0
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=16 r3=24 r4=0 r5=0
+show r2-h r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=4096 r3=8 r4=0 r5=0
+show r2 r3 r4 r5 v
+call XOS_Heap r0=8 r1=$h r2=8 r3=8 r4=24 r5=0
+show r2 r3 r4 r5 v
+call XOS_Heap r0=7 r1=$h r2=64 r3=100 r4=0
+show v
+call XOS_Heap r0=7 r1=$h r2=3 r3=16 r4=0
+show r2 v
+call XOS_Heap r0=2 r1=$h r2=77 r3=8000
+show r2 v
+call XOS_Heap r0=9 r1=$h
+show v
+
+# Each alignment and boundary in a heap of its own: the block's size, or
+# the refusal.
+scenario heap-aligned-shapes
+block h0 1024
+call XOS_Heap r0=0 r1=$h0 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h0 r2=1 r3=16 r4=0 r5=0
+show r3 r4 r5 v
+keep r2 p0
+call XOS_Heap r0=6 r1=$h0 r2=$p0
+show r3 v
+block h1 1024
+call XOS_Heap r0=0 r1=$h1 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h1 r2=2 r3=16 r4=0 r5=0
+show r3 r4 r5 v
+keep r2 p1
+call XOS_Heap r0=6 r1=$h1 r2=$p1
+show r3 v
+block h2 1024
+call XOS_Heap r0=0 r1=$h2 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h2 r2=3 r3=16 r4=0 r5=0
+show r2 r3 r4 r5 v
+block h3 1024
+call XOS_Heap r0=0 r1=$h3 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h3 r2=5 r3=16 r4=0 r5=0
+show r2 r3 r4 r5 v
+block h4 1024
+call XOS_Heap r0=0 r1=$h4 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h4 r2=6 r3=16 r4=0 r5=0
+show r2 r3 r4 r5 v
+block h5 1024
+call XOS_Heap r0=0 r1=$h5 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h5 r2=0 r3=16 r4=0 r5=0
+show r3 r4 r5 v
+keep r2 p5
+call XOS_Heap r0=6 r1=$h5 r2=$p5
+show r3 v
+block h6 1024
+call XOS_Heap r0=0 r1=$h6 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h6 r2=8 r3=32 r4=32 r5=0
+show r3 r4 r5 v
+keep r2 p6
+call XOS_Heap r0=6 r1=$h6 r2=$p6
+show r3 v
+block h7 1024
+call XOS_Heap r0=0 r1=$h7 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h7 r2=8 r3=32 r4=16 r5=0
+show r2 r3 r4 r5 v
+block h8 1024
+call XOS_Heap r0=0 r1=$h8 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h8 r2=8 r3=33 r4=64 r5=0
+show r3 r4 r5 v
+keep r2 p8
+call XOS_Heap r0=6 r1=$h8 r2=$p8
+show r3 v
+block h9 1024
+call XOS_Heap r0=0 r1=$h9 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h9 r2=8 r3=40 r4=48 r5=0
+show r2 r3 r4 r5 v
+block h10 1024
+call XOS_Heap r0=0 r1=$h10 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h10 r2=4 r3=16 r4=4096 r5=0
+show r3 r4 r5 v
+keep r2 p10
+call XOS_Heap r0=6 r1=$h10 r2=$p10
+show r3 v
+block h11 1024
+call XOS_Heap r0=0 r1=$h11 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h11 r2=0 r3=16 r4=16 r5=0
+show r3 r4 r5 v
+keep r2 p11
+call XOS_Heap r0=6 r1=$h11 r2=$p11
+show r3 v
+block h12 1024
+call XOS_Heap r0=0 r1=$h12 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h12 r2=64 r3=16 r4=32 r5=0
+show r2 r3 r4 r5 v
+block h13 1024
+call XOS_Heap r0=0 r1=$h13 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h13 r2=16 r3=8 r4=8 r5=0
+show r2 r3 r4 r5 v
+block h14 1024
+call XOS_Heap r0=0 r1=$h14 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h14 r2=256 r3=16 r4=64 r5=0
+show r2 r3 r4 r5 v
+block h15 1024
+call XOS_Heap r0=0 r1=$h15 r3=1024
+show v
+call XOS_Heap r0=8 r1=$h15 r2=16 r3=4 r4=4 r5=0
+show r2 r3 r4 r5 v

@@ -44,6 +44,8 @@ pub(super) struct Recorder {
     pub refuse_grow: Option<Refused>,
     /// The pages a grow handler names, from the first entry on.
     pub name_pages: Vec<u32>,
+    /// Whether a grow handler answers "RESV", taking reserved pages.
+    pub take_reserved: bool,
     /// The most a shrink handler allows.
     pub allow_shrink: Option<u32>,
     pub test_shrink: u32,
@@ -127,7 +129,7 @@ impl Guest for Recorder {
         block: &mut [PageEntry],
         bytes: u32,
         size: u32,
-    ) -> Result<(), Option<GuestError>> {
+    ) -> Result<Allowed, Option<GuestError>> {
         self.calls.push(Call::PreGrow {
             bytes,
             size,
@@ -151,7 +153,9 @@ impl Guest for Recorder {
         for (entry, &page) in block.iter_mut().zip(&self.name_pages) {
             entry.page = Some(page);
         }
-        Ok(())
+        Ok(Allowed {
+            reserved: self.take_reserved,
+        })
     }
 
     fn post_grow(
@@ -323,11 +327,11 @@ fn a_task_sees_the_low_pages_its_profile_has() {
         .unwrap();
     memory.switch_slot(new).unwrap();
     assert_eq!(
-        read(&mut memory, 0, false),
-        Ok(0xFDFD_FDFD),
-        "the compatibility page"
+        read(&mut memory, 0x20, false),
+        Ok(u32::from_le_bytes(*b"A pr")),
+        "the compatibility page's warning"
     );
-    assert_eq!(read(&mut memory, 0x10, false), Ok(0));
+    assert_eq!(read(&mut memory, 0x104, false), Ok(0), "a quiet variable");
     assert_eq!(
         memory.bus().write(0, Width::Word, 0, true),
         Err(Abort::Permission)
@@ -347,6 +351,34 @@ fn a_task_sees_the_low_pages_its_profile_has() {
         Ok(0x1234),
         "one ScratchSpace for both"
     );
+}
+
+#[test]
+fn the_compatibility_page_comes_and_goes_for_every_32bit_task_at_once() {
+    let mut memory = shared();
+    let old = memory.create_slot(Bits::Bit26).unwrap();
+    let first = memory.create_slot(Bits::Bit32).unwrap();
+    memory.mirror_vectors(&[0xE59F_F3F8; 8]);
+    memory.switch_slot(first).unwrap();
+    assert_eq!(read(&mut memory, 0, false), Ok(0xE59F_F3F8), "a vector");
+    memory.set_compatibility_page(false).unwrap();
+    assert!(!memory.compatibility_page());
+    assert_eq!(read(&mut memory, 0, false), Err(Abort::Translation));
+    let second = memory.create_slot(Bits::Bit32).unwrap();
+    memory.switch_slot(second).unwrap();
+    assert_eq!(
+        read(&mut memory, 0, false),
+        Err(Abort::Translation),
+        "a task made while it is hidden has none"
+    );
+    memory.switch_slot(old).unwrap();
+    assert_eq!(read(&mut memory, 0, true), Ok(0), "26-bit zero page stays");
+    memory.set_compatibility_page(true).unwrap();
+    memory.set_compatibility_page(true).unwrap();
+    for slot in [first, second] {
+        memory.switch_slot(slot).unwrap();
+        assert_eq!(read(&mut memory, 0, false), Ok(0xE59F_F3F8));
+    }
 }
 
 #[test]

@@ -38,3 +38,5 @@ pub mod t32;
 pub mod vectors;
 pub mod vfp;
 mod word;
+
+pub use cp15::SplitCache;

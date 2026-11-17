@@ -1,0 +1,1966 @@
+# The Territory Manager and the UK territory (plans/RISCOS-EMULATOR.md
+# §4.6): what the calls the PRM documents answer, in the UK's time zone.
+# A text the guest writes is never recorded: Territory_Collate compares it
+# in the guest with the one expected, and only its answer is kept.
+
+scenario territory-number-and-existence
+call XTerritory_Number
+show r0 v
+call XTerritory_Exists r0=1
+show z v
+call XTerritory_Exists r0=7
+show z v
+call XTerritory_Exists r0=0
+show z v
+call XTerritory_Exists r0=99
+show z v
+
+scenario territory-numbers-named
+block name0 32
+call XTerritory_NumberToName r0=0 r1=$name0 r2=32
+show v
+block name1 32
+call XTerritory_NumberToName r0=1 r1=$name1 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name1 r2="UK" r3=0
+show r0 v
+block name2 32
+call XTerritory_NumberToName r0=2 r1=$name2 r2=32
+show v
+block name3 32
+call XTerritory_NumberToName r0=3 r1=$name3 r2=32
+show v
+block name4 32
+call XTerritory_NumberToName r0=4 r1=$name4 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name4 r2="Italy" r3=0
+show r0 v
+block name5 32
+call XTerritory_NumberToName r0=5 r1=$name5 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name5 r2="Spain" r3=0
+show r0 v
+block name6 32
+call XTerritory_NumberToName r0=6 r1=$name6 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name6 r2="France" r3=0
+show r0 v
+block name7 32
+call XTerritory_NumberToName r0=7 r1=$name7 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name7 r2="Germany" r3=0
+show r0 v
+block name8 32
+call XTerritory_NumberToName r0=8 r1=$name8 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name8 r2="Portugal" r3=0
+show r0 v
+block name9 32
+call XTerritory_NumberToName r0=9 r1=$name9 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name9 r2="Esperanto" r3=0
+show r0 v
+block name10 32
+call XTerritory_NumberToName r0=10 r1=$name10 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name10 r2="Greece" r3=0
+show r0 v
+block name11 32
+call XTerritory_NumberToName r0=11 r1=$name11 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name11 r2="Sweden" r3=0
+show r0 v
+block name12 32
+call XTerritory_NumberToName r0=12 r1=$name12 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name12 r2="Finland" r3=0
+show r0 v
+block name13 32
+call XTerritory_NumberToName r0=13 r1=$name13 r2=32
+show v
+block name14 32
+call XTerritory_NumberToName r0=14 r1=$name14 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name14 r2="Denmark" r3=0
+show r0 v
+block name15 32
+call XTerritory_NumberToName r0=15 r1=$name15 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name15 r2="Norway" r3=0
+show r0 v
+block name16 32
+call XTerritory_NumberToName r0=16 r1=$name16 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name16 r2="Iceland" r3=0
+show r0 v
+block name17 32
+call XTerritory_NumberToName r0=17 r1=$name17 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name17 r2="Canada1" r3=0
+show r0 v
+block name18 32
+call XTerritory_NumberToName r0=18 r1=$name18 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name18 r2="Canada2" r3=0
+show r0 v
+block name19 32
+call XTerritory_NumberToName r0=19 r1=$name19 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name19 r2="Canada" r3=0
+show r0 v
+block name20 32
+call XTerritory_NumberToName r0=20 r1=$name20 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name20 r2="Turkey" r3=0
+show r0 v
+block name21 32
+call XTerritory_NumberToName r0=21 r1=$name21 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name21 r2="Arabic" r3=0
+show r0 v
+block name22 32
+call XTerritory_NumberToName r0=22 r1=$name22 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name22 r2="Ireland" r3=0
+show r0 v
+block name23 32
+call XTerritory_NumberToName r0=23 r1=$name23 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name23 r2="Hong Kong" r3=0
+show r0 v
+block name24 32
+call XTerritory_NumberToName r0=24 r1=$name24 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name24 r2="Russia" r3=0
+show r0 v
+block name25 32
+call XTerritory_NumberToName r0=25 r1=$name25 r2=32
+show v
+block name26 32
+call XTerritory_NumberToName r0=26 r1=$name26 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name26 r2="Israel" r3=0
+show r0 v
+block name27 32
+call XTerritory_NumberToName r0=27 r1=$name27 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name27 r2="Mexico" r3=0
+show r0 v
+block name28 32
+call XTerritory_NumberToName r0=28 r1=$name28 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name28 r2="Latin America" r3=0
+show r0 v
+block name29 32
+call XTerritory_NumberToName r0=29 r1=$name29 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name29 r2="Australia" r3=0
+show r0 v
+block name30 32
+call XTerritory_NumberToName r0=30 r1=$name30 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name30 r2="Austria" r3=0
+show r0 v
+block name31 32
+call XTerritory_NumberToName r0=31 r1=$name31 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name31 r2="Belgium" r3=0
+show r0 v
+block name32 32
+call XTerritory_NumberToName r0=32 r1=$name32 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name32 r2="Japan" r3=0
+show r0 v
+block name33 32
+call XTerritory_NumberToName r0=33 r1=$name33 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name33 r2="Middle East" r3=0
+show r0 v
+block name34 32
+call XTerritory_NumberToName r0=34 r1=$name34 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name34 r2="Netherlands" r3=0
+show r0 v
+block name35 32
+call XTerritory_NumberToName r0=35 r1=$name35 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name35 r2="Switzerland" r3=0
+show r0 v
+block name36 32
+call XTerritory_NumberToName r0=36 r1=$name36 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name36 r2="Wales" r3=0
+show r0 v
+block name37 32
+call XTerritory_NumberToName r0=37 r1=$name37 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name37 r2="Maori" r3=0
+show r0 v
+block name38 32
+call XTerritory_NumberToName r0=38 r1=$name38 r2=32
+show v
+block name39 32
+call XTerritory_NumberToName r0=39 r1=$name39 r2=32
+show v
+block name40 32
+call XTerritory_NumberToName r0=40 r1=$name40 r2=32
+show v
+block name41 32
+call XTerritory_NumberToName r0=41 r1=$name41 r2=32
+show v
+block name42 32
+call XTerritory_NumberToName r0=42 r1=$name42 r2=32
+show v
+block name43 32
+call XTerritory_NumberToName r0=43 r1=$name43 r2=32
+show v
+block name44 32
+call XTerritory_NumberToName r0=44 r1=$name44 r2=32
+show v
+block name45 32
+call XTerritory_NumberToName r0=45 r1=$name45 r2=32
+show v
+block name46 32
+call XTerritory_NumberToName r0=46 r1=$name46 r2=32
+show v
+block name47 32
+call XTerritory_NumberToName r0=47 r1=$name47 r2=32
+show v
+block name48 32
+call XTerritory_NumberToName r0=48 r1=$name48 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name48 r2="USA" r3=0
+show r0 v
+block name49 32
+call XTerritory_NumberToName r0=49 r1=$name49 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name49 r2="Wales2" r3=0
+show r0 v
+block name50 32
+call XTerritory_NumberToName r0=50 r1=$name50 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name50 r2="China" r3=0
+show r0 v
+block name51 32
+call XTerritory_NumberToName r0=51 r1=$name51 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name51 r2="Brazil" r3=0
+show r0 v
+block name52 32
+call XTerritory_NumberToName r0=52 r1=$name52 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name52 r2="South Africa" r3=0
+show r0 v
+block name53 32
+call XTerritory_NumberToName r0=53 r1=$name53 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name53 r2="Korea" r3=0
+show r0 v
+block name54 32
+call XTerritory_NumberToName r0=54 r1=$name54 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name54 r2="Taiwan" r3=0
+show r0 v
+block name55 32
+call XTerritory_NumberToName r0=55 r1=$name55 r2=32
+show v
+block name56 32
+call XTerritory_NumberToName r0=56 r1=$name56 r2=32
+show v
+block name57 32
+call XTerritory_NumberToName r0=57 r1=$name57 r2=32
+show v
+block name58 32
+call XTerritory_NumberToName r0=58 r1=$name58 r2=32
+show v
+block name59 32
+call XTerritory_NumberToName r0=59 r1=$name59 r2=32
+show v
+block name60 32
+call XTerritory_NumberToName r0=60 r1=$name60 r2=32
+show v
+block name61 32
+call XTerritory_NumberToName r0=61 r1=$name61 r2=32
+show v
+block name62 32
+call XTerritory_NumberToName r0=62 r1=$name62 r2=32
+show v
+block name63 32
+call XTerritory_NumberToName r0=63 r1=$name63 r2=32
+show v
+block name64 32
+call XTerritory_NumberToName r0=64 r1=$name64 r2=32
+show v
+block name65 32
+call XTerritory_NumberToName r0=65 r1=$name65 r2=32
+show v
+block name66 32
+call XTerritory_NumberToName r0=66 r1=$name66 r2=32
+show v
+block name67 32
+call XTerritory_NumberToName r0=67 r1=$name67 r2=32
+show v
+block name68 32
+call XTerritory_NumberToName r0=68 r1=$name68 r2=32
+show v
+block name69 32
+call XTerritory_NumberToName r0=69 r1=$name69 r2=32
+show v
+block name70 32
+call XTerritory_NumberToName r0=70 r1=$name70 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name70 r2="UK (Dvorak)" r3=0
+show r0 v
+block name71 32
+call XTerritory_NumberToName r0=71 r1=$name71 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name71 r2="USA (Dvorak)" r3=0
+show r0 v
+block name72 32
+call XTerritory_NumberToName r0=72 r1=$name72 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$name72 r2="UK (Colemak)" r3=0
+show r0 v
+block name73 32
+call XTerritory_NumberToName r0=73 r1=$name73 r2=32
+show v
+block name74 32
+call XTerritory_NumberToName r0=74 r1=$name74 r2=32
+show v
+block name75 32
+call XTerritory_NumberToName r0=75 r1=$name75 r2=32
+show v
+block name76 32
+call XTerritory_NumberToName r0=76 r1=$name76 r2=32
+show v
+block name77 32
+call XTerritory_NumberToName r0=77 r1=$name77 r2=32
+show v
+block name78 32
+call XTerritory_NumberToName r0=78 r1=$name78 r2=32
+show v
+block name79 32
+call XTerritory_NumberToName r0=79 r1=$name79 r2=32
+show v
+block name80 32
+call XTerritory_NumberToName r0=80 r1=$name80 r2=32
+show v
+block name81 32
+call XTerritory_NumberToName r0=81 r1=$name81 r2=32
+show v
+block name82 32
+call XTerritory_NumberToName r0=82 r1=$name82 r2=32
+show v
+block name83 32
+call XTerritory_NumberToName r0=83 r1=$name83 r2=32
+show v
+block name84 32
+call XTerritory_NumberToName r0=84 r1=$name84 r2=32
+show v
+block name85 32
+call XTerritory_NumberToName r0=85 r1=$name85 r2=32
+show v
+block name86 32
+call XTerritory_NumberToName r0=86 r1=$name86 r2=32
+show v
+block name87 32
+call XTerritory_NumberToName r0=87 r1=$name87 r2=32
+show v
+block name88 32
+call XTerritory_NumberToName r0=88 r1=$name88 r2=32
+show v
+block name89 32
+call XTerritory_NumberToName r0=89 r1=$name89 r2=32
+show v
+block name90 32
+call XTerritory_NumberToName r0=90 r1=$name90 r2=32
+show v
+block name91 32
+call XTerritory_NumberToName r0=91 r1=$name91 r2=32
+show v
+block name92 32
+call XTerritory_NumberToName r0=92 r1=$name92 r2=32
+show v
+block name93 32
+call XTerritory_NumberToName r0=93 r1=$name93 r2=32
+show v
+block name94 32
+call XTerritory_NumberToName r0=94 r1=$name94 r2=32
+show v
+block name95 32
+call XTerritory_NumberToName r0=95 r1=$name95 r2=32
+show v
+block name96 32
+call XTerritory_NumberToName r0=96 r1=$name96 r2=32
+show v
+block name97 32
+call XTerritory_NumberToName r0=97 r1=$name97 r2=32
+show v
+block name98 32
+call XTerritory_NumberToName r0=98 r1=$name98 r2=32
+show v
+block name99 32
+call XTerritory_NumberToName r0=99 r1=$name99 r2=32
+show v
+
+scenario territory-name-room
+block room 8
+call XTerritory_NumberToName r0=1 r1=$room r2=0
+show v
+call XTerritory_NumberToName r0=1 r1=$room r2=1
+show v
+call XTerritory_NumberToName r0=1 r1=$room r2=2
+show v
+call XTerritory_NumberToName r0=1 r1=$room r2=3
+show v
+
+scenario territory-alphabets-named
+block alpha99 32
+call XTerritory_AlphabetNumberToName r0=99 r1=$alpha99 r2=32
+show v
+block alpha100 32
+call XTerritory_AlphabetNumberToName r0=100 r1=$alpha100 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha100 r2="BFont" r3=0
+show r0 v
+block alpha101 32
+call XTerritory_AlphabetNumberToName r0=101 r1=$alpha101 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha101 r2="Latin1" r3=0
+show r0 v
+block alpha102 32
+call XTerritory_AlphabetNumberToName r0=102 r1=$alpha102 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha102 r2="Latin2" r3=0
+show r0 v
+block alpha103 32
+call XTerritory_AlphabetNumberToName r0=103 r1=$alpha103 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha103 r2="Latin3" r3=0
+show r0 v
+block alpha104 32
+call XTerritory_AlphabetNumberToName r0=104 r1=$alpha104 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha104 r2="Latin4" r3=0
+show r0 v
+block alpha105 32
+call XTerritory_AlphabetNumberToName r0=105 r1=$alpha105 r2=32
+show v
+block alpha106 32
+call XTerritory_AlphabetNumberToName r0=106 r1=$alpha106 r2=32
+show v
+block alpha107 32
+call XTerritory_AlphabetNumberToName r0=107 r1=$alpha107 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha107 r2="Greek" r3=0
+show r0 v
+block alpha108 32
+call XTerritory_AlphabetNumberToName r0=108 r1=$alpha108 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha108 r2="Hebrew" r3=0
+show r0 v
+block alpha109 32
+call XTerritory_AlphabetNumberToName r0=109 r1=$alpha109 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha109 r2="Latin5" r3=0
+show r0 v
+block alpha110 32
+call XTerritory_AlphabetNumberToName r0=110 r1=$alpha110 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha110 r2="Welsh" r3=0
+show r0 v
+block alpha111 32
+call XTerritory_AlphabetNumberToName r0=111 r1=$alpha111 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha111 r2="UTF-8" r3=0
+show r0 v
+block alpha112 32
+call XTerritory_AlphabetNumberToName r0=112 r1=$alpha112 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha112 r2="Latin9" r3=0
+show r0 v
+block alpha113 32
+call XTerritory_AlphabetNumberToName r0=113 r1=$alpha113 r2=32
+show v
+call XTerritory_Collate r0=-1 r1=$alpha113 r2="Latin6" r3=0
+show r0 v
+block alpha114 32
+call XTerritory_AlphabetNumberToName r0=114 r1=$alpha114 r2=32
+show v
+block alpha115 32
+call XTerritory_AlphabetNumberToName r0=115 r1=$alpha115 r2=32
+show v
+block alpha116 32
+call XTerritory_AlphabetNumberToName r0=116 r1=$alpha116 r2=32
+show v
+block alpha117 32
+call XTerritory_AlphabetNumberToName r0=117 r1=$alpha117 r2=32
+show v
+block alpha118 32
+call XTerritory_AlphabetNumberToName r0=118 r1=$alpha118 r2=32
+show v
+block alpha119 32
+call XTerritory_AlphabetNumberToName r0=119 r1=$alpha119 r2=32
+show v
+block alpha120 32
+call XTerritory_AlphabetNumberToName r0=120 r1=$alpha120 r2=32
+show v
+block alpha121 32
+call XTerritory_AlphabetNumberToName r0=121 r1=$alpha121 r2=32
+show v
+block alpha122 32
+call XTerritory_AlphabetNumberToName r0=122 r1=$alpha122 r2=32
+show v
+block alpha123 32
+call XTerritory_AlphabetNumberToName r0=123 r1=$alpha123 r2=32
+show v
+block alpha124 32
+call XTerritory_AlphabetNumberToName r0=124 r1=$alpha124 r2=32
+show v
+block alpha125 32
+call XTerritory_AlphabetNumberToName r0=125 r1=$alpha125 r2=32
+show v
+block alpha126 32
+call XTerritory_AlphabetNumberToName r0=126 r1=$alpha126 r2=32
+show v
+block alpha127 32
+call XTerritory_AlphabetNumberToName r0=127 r1=$alpha127 r2=32
+show v
+
+scenario territory-names-read-as-numbers
+call XTerritory_NameToNumber r0=-1 r1="UK"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="uk"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Uk"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Germany"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="GERMANY"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="germ"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Ger."
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="G."
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="U."
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="UKs"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Nowhere"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1=""
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1=" UK"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="UK "
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Canada1"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Hong Kong"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="LatinAm"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Wales"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="USA"
+show r0 v
+call XTerritory_NameToNumber r0=-1 r1="Australia"
+show r0 v
+call XTerritory_NameToNumber r0=99 r1="UK"
+show v
+
+scenario territory-time-zones
+call XTerritory_ReadTimeZones r0=-1
+show r2 r3 v
+keep r0 standard
+keep r1 summer
+call XTerritory_Collate r0=-1 r1=$standard r2="GMT" r3=0
+show r0 v
+call XTerritory_Collate r0=-1 r1=$summer r2="BST" r3=0
+show r0 v
+call XTerritory_ReadTimeZones r0=99
+show v
+call XTerritory_ReadCurrentTimeZone
+show r1 v
+keep r0 current
+call XTerritory_Collate r0=-1 r1=$current r2="GMT" r3=0
+show r0 v
+
+scenario territory-alphabet-and-direction
+call XTerritory_Alphabet r0=-1
+show r0 v
+call XTerritory_Alphabet r0=1
+show r0 v
+call XTerritory_AlphabetIdentifier r0=-1
+show v
+keep r0 identifier
+call XTerritory_Collate r0=-1 r1=$identifier r2="Latin1" r3=0
+show r0 v
+call XTerritory_WriteDirection r0=-1
+show r0 v
+call XTerritory_Alphabet r0=99
+show v
+
+scenario territory-symbols
+call XTerritory_ReadSymbols r0=-1 r1=0
+show v
+keep r0 symbol0
+call XTerritory_Collate r0=-1 r1=$symbol0 r2="." r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=1
+show v
+keep r0 symbol1
+call XTerritory_Collate r0=-1 r1=$symbol1 r2="," r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=2
+show v
+keep r0 group2
+block expect2 4
+write $expect2 b=&03 b=&00
+call XTerritory_Collate r0=-1 r1=$group2 r2=$expect2 r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=3
+show v
+keep r0 symbol3
+call XTerritory_Collate r0=-1 r1=$symbol3 r2="GBP " r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=4
+show v
+keep r0 symbol4
+block pound4 4
+write $pound4 b=&A3 b=&00
+call XTerritory_Collate r0=-1 r1=$symbol4 r2=$pound4 r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=5
+show v
+keep r0 symbol5
+call XTerritory_Collate r0=-1 r1=$symbol5 r2="." r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=6
+show v
+keep r0 symbol6
+call XTerritory_Collate r0=-1 r1=$symbol6 r2="," r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=7
+show v
+keep r0 group7
+block expect7 4
+write $expect7 b=&03 b=&00
+call XTerritory_Collate r0=-1 r1=$group7 r2=$expect7 r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=8
+show v
+keep r0 symbol8
+call XTerritory_Collate r0=-1 r1=$symbol8 r2="" r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=9
+show v
+keep r0 symbol9
+call XTerritory_Collate r0=-1 r1=$symbol9 r2="-" r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=10
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=11
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=12
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=13
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=14
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=15
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=16
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=17
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=18
+show v
+keep r0 symbol18
+call XTerritory_Collate r0=-1 r1=$symbol18 r2="," r3=0
+show r0 v
+call XTerritory_ReadSymbols r0=-1 r1=19
+show v
+
+scenario territory-calendar
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block calendar 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when r2=$calendar
+show v $calendar:48
+block when20242 8
+write $when20242 b=&00 b=&F7 b=&7C b=&30 b=&5B
+block calendar20242 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when20242 r2=$calendar20242
+show v $calendar20242+8:8
+block when20232 8
+write $when20232 b=&00 b=&D9 b=&84 b=&74 b=&5A
+block calendar20232 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when20232 r2=$calendar20232
+show v $calendar20232+8:8
+block when21002 8
+write $when21002 b=&00 b=&C1 b=&EE b=&07 b=&93
+block calendar21002 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when21002 r2=$calendar21002
+show v $calendar21002+8:8
+block when20002 8
+write $when20002 b=&00 b=&23 b=&23 b=&8E b=&49
+block calendar20002 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when20002 r2=$calendar20002
+show v $calendar20002+8:8
+block when202412 8
+write $when202412 b=&00 b=&17 b=&0B b=&CD b=&5B
+block calendar202412 48
+call XTerritory_ReadCalendarInformation r0=-1 r1=$when202412 r2=$calendar202412
+show v $calendar202412+8:8
+
+scenario territory-dates-in-digits
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block format0 64
+write $format0 s="%CS.%SE.%MI.%12.%24.%WN.%DY.%MN.%CE.%YR.%WK.%DN" b=0
+block out0 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out0 r3=64 r4=$format0
+show r0-out0 r1-out0 r2 r3-format0 v
+show $out0:36
+block format1 64
+write $format1 s="%ZCS.%ZSE.%ZMI.%Z12.%Z24.%ZWN.%ZDY.%ZMN.%ZCE.%ZYR.%ZWK.%ZDN" b=0
+block out1 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out1 r3=64 r4=$format1
+show r0-out1 r1-out1 r2 r3-format1 v
+show $out1:30
+block format2 64
+write $format2 s="%dy/%mn/%ce%yr %zdy" b=0
+block out2 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out2 r3=64 r4=$format2
+show r0-out2 r1-out2 r2 r3-format2 v
+show $out2:13
+block format3 64
+write $format3 s="a%0b" b=0
+block out3 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out3 r3=64 r4=$format3
+show r0-out3 r1-out3 r2 r3-format3 v
+show $out3:4
+block format4 64
+write $format4 s="100%%" b=0
+block out4 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out4 r3=64 r4=$format4
+show r0-out4 r1-out4 r2 r3-format4 v
+show $out4:5
+block format5 64
+write $format5 s="%24:%MI" b=0
+block out5 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out5 r3=6 r4=$format5
+show r0-out5 r1-out5 r2 r3-format5 v
+show $out5:6
+block format6 64
+write $format6 s="plain" b=0
+block out6 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out6 r3=64 r4=$format6
+show r0-out6 r1-out6 r2 r3-format6 v
+show $out6:6
+block format7 64
+write $format7 s="" b=0
+block out7 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out7 r3=64 r4=$format7
+show r0-out7 r1-out7 r2 r3-format7 v
+show $out7:1
+
+scenario territory-dates-refused
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block format8 64
+write $format8 s="%QQ" b=0
+block out8 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out8 r3=64 r4=$format8
+show v
+block format9 64
+write $format9 s="%" b=0
+block out9 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out9 r3=64 r4=$format9
+show v
+block format10 64
+write $format10 s="%Z" b=0
+block out10 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out10 r3=64 r4=$format10
+show v
+block format11 64
+write $format11 s="%ZQ" b=0
+block out11 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out11 r3=64 r4=$format11
+show v
+block format12 64
+write $format12 s="%24:%MI" b=0
+block out12 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out12 r3=5 r4=$format12
+show v
+block format13 64
+write $format13 s="%24:%MI" b=0
+block out13 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out13 r3=0 r4=$format13
+show v
+block format14 64
+write $format14 s="" b=0
+block out14 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out14 r3=0 r4=$format14
+show v
+block format15 64
+write $format15 s="%WE" b=0
+block out15 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out15 r3=3 r4=$format15
+show v
+
+scenario territory-dates-in-words
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block format16 64
+write $format16 s="%WE %W3 %MO %M3 %ST %AM %PM %TZ" b=0
+block out16 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out16 r3=64 r4=$format16
+show r0-out16 r1-out16 r2 r3-format16 v
+call XTerritory_Collate r0=-1 r1=$out16 r2="Tuesday Tue March Mar th pm pm GMT" r3=0
+show r0 v
+block format17 64
+write $format17 s="%we %w3 %mo %m3 %st %am %pm %tz" b=0
+block out17 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$when r2=$out17 r3=64 r4=$format17
+show r0-out17 r1-out17 r2 r3-format17 v
+call XTerritory_Collate r0=-1 r1=$out17 r2="Tuesday Tue March Mar th pm pm GMT" r3=0
+show r0 v
+block day1 8
+write $day1 b=&40 b=&0C b=&D3 b=&1B b=&5B
+block format18 64
+write $format18 s="%DY%ST %ZDY%ST" b=0
+block out18 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day1 r2=$out18 r3=64 r4=$format18
+show r0-out18 r1-out18 r2 r3-format18 v
+call XTerritory_Collate r0=-1 r1=$out18 r2="01st 1st" r3=0
+show r0 v
+block day2 8
+write $day2 b=&40 b=&E2 b=&56 b=&1C b=&5B
+block format19 64
+write $format19 s="%DY%ST %ZDY%ST" b=0
+block out19 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day2 r2=$out19 r3=64 r4=$format19
+show r0-out19 r1-out19 r2 r3-format19 v
+call XTerritory_Collate r0=-1 r1=$out19 r2="02nd 2nd" r3=0
+show r0 v
+block day3 8
+write $day3 b=&40 b=&B8 b=&DA b=&1C b=&5B
+block format20 64
+write $format20 s="%DY%ST %ZDY%ST" b=0
+block out20 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day3 r2=$out20 r3=64 r4=$format20
+show r0-out20 r1-out20 r2 r3-format20 v
+call XTerritory_Collate r0=-1 r1=$out20 r2="03rd 3rd" r3=0
+show r0 v
+block day4 8
+write $day4 b=&40 b=&8E b=&5E b=&1D b=&5B
+block format21 64
+write $format21 s="%DY%ST %ZDY%ST" b=0
+block out21 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day4 r2=$out21 r3=64 r4=$format21
+show r0-out21 r1-out21 r2 r3-format21 v
+call XTerritory_Collate r0=-1 r1=$out21 r2="04th 4th" r3=0
+show r0 v
+block day11 8
+write $day11 b=&40 b=&68 b=&F9 b=&20 b=&5B
+block format22 64
+write $format22 s="%DY%ST %ZDY%ST" b=0
+block out22 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day11 r2=$out22 r3=64 r4=$format22
+show r0-out22 r1-out22 r2 r3-format22 v
+call XTerritory_Collate r0=-1 r1=$out22 r2="11th 11th" r3=0
+show r0 v
+block day12 8
+write $day12 b=&40 b=&3E b=&7D b=&21 b=&5B
+block format23 64
+write $format23 s="%DY%ST %ZDY%ST" b=0
+block out23 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day12 r2=$out23 r3=64 r4=$format23
+show r0-out23 r1-out23 r2 r3-format23 v
+call XTerritory_Collate r0=-1 r1=$out23 r2="12th 12th" r3=0
+show r0 v
+block day13 8
+write $day13 b=&40 b=&14 b=&01 b=&22 b=&5B
+block format24 64
+write $format24 s="%DY%ST %ZDY%ST" b=0
+block out24 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day13 r2=$out24 r3=64 r4=$format24
+show r0-out24 r1-out24 r2 r3-format24 v
+call XTerritory_Collate r0=-1 r1=$out24 r2="13th 13th" r3=0
+show r0 v
+block day21 8
+write $day21 b=&40 b=&C4 b=&1F b=&26 b=&5B
+block format25 64
+write $format25 s="%DY%ST %ZDY%ST" b=0
+block out25 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day21 r2=$out25 r3=64 r4=$format25
+show r0-out25 r1-out25 r2 r3-format25 v
+call XTerritory_Collate r0=-1 r1=$out25 r2="21st 21st" r3=0
+show r0 v
+block day22 8
+write $day22 b=&40 b=&9A b=&A3 b=&26 b=&5B
+block format26 64
+write $format26 s="%DY%ST %ZDY%ST" b=0
+block out26 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day22 r2=$out26 r3=64 r4=$format26
+show r0-out26 r1-out26 r2 r3-format26 v
+call XTerritory_Collate r0=-1 r1=$out26 r2="22nd 22nd" r3=0
+show r0 v
+block day23 8
+write $day23 b=&40 b=&70 b=&27 b=&27 b=&5B
+block format27 64
+write $format27 s="%DY%ST %ZDY%ST" b=0
+block out27 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day23 r2=$out27 r3=64 r4=$format27
+show r0-out27 r1-out27 r2 r3-format27 v
+call XTerritory_Collate r0=-1 r1=$out27 r2="23rd 23rd" r3=0
+show r0 v
+block day24 8
+write $day24 b=&40 b=&46 b=&AB b=&27 b=&5B
+block format28 64
+write $format28 s="%DY%ST %ZDY%ST" b=0
+block out28 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day24 r2=$out28 r3=64 r4=$format28
+show r0-out28 r1-out28 r2 r3-format28 v
+call XTerritory_Collate r0=-1 r1=$out28 r2="24th 24th" r3=0
+show r0 v
+block day31 8
+write $day31 b=&40 b=&20 b=&46 b=&2B b=&5B
+block format29 64
+write $format29 s="%DY%ST %ZDY%ST" b=0
+block out29 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$day31 r2=$out29 r3=64 r4=$format29
+show r0-out29 r1-out29 r2 r3-format29 v
+call XTerritory_Collate r0=-1 r1=$out29 r2="31st 31st" r3=0
+show r0 v
+block hour030 8
+write $hour030 b=&20 b=&5B b=&A4 b=&1B b=&5B
+block format30 64
+write $format30 s="%12 %AM %24" b=0
+block out30 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$hour030 r2=$out30 r3=64 r4=$format30
+show r0-out30 r1-out30 r2 r3-format30 v
+call XTerritory_Collate r0=-1 r1=$out30 r2="12 am 00" r3=0
+show r0 v
+block hour1159 8
+write $hour1159 b=&90 b=&6F b=&E3 b=&1B b=&5B
+block format31 64
+write $format31 s="%12 %AM %24" b=0
+block out31 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$hour1159 r2=$out31 r3=64 r4=$format31
+show r0-out31 r1-out31 r2 r3-format31 v
+call XTerritory_Collate r0=-1 r1=$out31 r2="11 am 11" r3=0
+show r0 v
+block hour120 8
+write $hour120 b=&00 b=&87 b=&E3 b=&1B b=&5B
+block format32 64
+write $format32 s="%12 %AM %24" b=0
+block out32 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$hour120 r2=$out32 r3=64 r4=$format32
+show r0-out32 r1-out32 r2 r3-format32 v
+call XTerritory_Collate r0=-1 r1=$out32 r2="12 pm 12" r3=0
+show r0 v
+block hour2359 8
+write $hour2359 b=&90 b=&5A b=&25 b=&1C b=&5B
+block format33 64
+write $format33 s="%12 %AM %24" b=0
+block out33 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$hour2359 r2=$out33 r3=64 r4=$format33
+show r0-out33 r1-out33 r2 r3-format33 v
+call XTerritory_Collate r0=-1 r1=$out33 r2="11 pm 23" r3=0
+show r0 v
+block year202411 8
+write $year202411 b=&00 b=&87 b=&E3 b=&1B b=&5B
+block format34 64
+write $format34 s="%WE %WK %DN" b=0
+block out34 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$year202411 r2=$out34 r3=64 r4=$format34
+show r0-out34 r1-out34 r2 r3-format34 v
+call XTerritory_Collate r0=-1 r1=$out34 r2="Monday 01 001" r3=0
+show r0 v
+block year202311 8
+write $year202311 b=&00 b=&69 b=&EB b=&5F b=&5A
+block format35 64
+write $format35 s="%WE %WK %DN" b=0
+block out35 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$year202311 r2=$out35 r3=64 r4=$format35
+show r0-out35 r1-out35 r2 r3-format35 v
+call XTerritory_Collate r0=-1 r1=$out35 r2="Sunday 52 001" r3=0
+show r0 v
+block year20201231 8
+write $year20201231 b=&00 b=&57 b=&77 b=&E7 b=&58
+block format36 64
+write $format36 s="%WE %WK %DN" b=0
+block out36 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$year20201231 r2=$out36 r3=64 r4=$format36
+show r0-out36 r1-out36 r2 r3-format36 v
+call XTerritory_Collate r0=-1 r1=$out36 r2="Thursday 53 366" r3=0
+show r0 v
+block year202113 8
+write $year202113 b=&00 b=&D9 b=&02 b=&E9 b=&58
+block format37 64
+write $format37 s="%WE %WK %DN" b=0
+block out37 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$year202113 r2=$out37 r3=64 r4=$format37
+show r0-out37 r1-out37 r2 r3-format37 v
+call XTerritory_Collate r0=-1 r1=$out37 r2="Sunday 53 003" r3=0
+show r0 v
+block year19991231 8
+write $year19991231 b=&00 b=&DD b=&05 b=&79 b=&49
+block format38 64
+write $format38 s="%WE %WK %DN" b=0
+block out38 64
+call XTerritory_ConvertDateAndTime r0=-1 r1=$year19991231 r2=$out38 r3=64 r4=$format38
+show r0-out38 r1-out38 r2 r3-format38 v
+call XTerritory_Collate r0=-1 r1=$out38 r2="Friday 52 365" r3=0
+show r0 v
+
+scenario territory-standard-formats
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block ConvertStandardDateAndTime 64
+call XTerritory_ConvertStandardDateAndTime r0=-1 r1=$when r2=$ConvertStandardDateAndTime r3=64
+show r0-ConvertStandardDateAndTime r1-ConvertStandardDateAndTime r2 v
+call XTerritory_Collate r0=-1 r1=$ConvertStandardDateAndTime r2="13:07:09 05-Mar-2024" r3=0
+show r0 v
+block ConvertStandardDate 64
+call XTerritory_ConvertStandardDate r0=-1 r1=$when r2=$ConvertStandardDate r3=64
+show r0-ConvertStandardDate r1-ConvertStandardDate r2 v
+call XTerritory_Collate r0=-1 r1=$ConvertStandardDate r2="05-Mar-2024" r3=0
+show r0 v
+block ConvertStandardTime 64
+call XTerritory_ConvertStandardTime r0=-1 r1=$when r2=$ConvertStandardTime r3=64
+show r0-ConvertStandardTime r1-ConvertStandardTime r2 v
+call XTerritory_Collate r0=-1 r1=$ConvertStandardTime r2="13:07:09" r3=0
+show r0 v
+block small 8
+call XTerritory_ConvertStandardTime r0=-1 r1=$when r2=$small r3=8
+show v
+
+scenario territory-ordinals
+block when 8
+write $when b=&FE b=&2C b=&DF b=&3C b=&5B
+block local 40
+call XTerritory_ConvertTimeToOrdinals r0=-1 r1=$when r2=$local
+show v $local:36
+block utc 40
+call XTerritory_ConvertTimeToUTCOrdinals r1=$when r2=$utc
+show v $utc:36
+block epoch 8
+write $epoch b=&00 b=&00 b=&00 b=&00 b=&00
+block epochords 40
+call XTerritory_ConvertTimeToOrdinals r0=-1 r1=$epoch r2=$epochords
+show v $epochords:36
+block last 8
+write $last b=&FF b=&FF b=&FF b=&FF b=&FF
+block lastords 40
+call XTerritory_ConvertTimeToOrdinals r0=-1 r1=$last r2=$lastords
+show v $lastords:36
+block leap 8
+write $leap b=&FF b=&EF b=&2D b=&98 b=&49
+block leapords 40
+call XTerritory_ConvertTimeToOrdinals r0=-1 r1=$leap r2=$leapords
+show v $leapords:36
+block century 8
+write $century b=&00 b=&B8 b=&75 b=&11 b=&93
+block centuryords 40
+call XTerritory_ConvertTimeToOrdinals r0=-1 r1=$century r2=$centuryords
+show v $centuryords:36
+
+scenario territory-ordinals-to-time
+block plain 28
+write $plain w=&2A w=&9 w=&7 w=&D w=&5 w=&3 w=&7E8
+block plaintime 8
+write $plaintime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$plaintime r2=$plain
+show v $plaintime:5
+block dayzero 28
+write $dayzero w=&0 w=&0 w=&0 w=&C w=&0 w=&3 w=&7E8
+block dayzerotime 8
+write $dayzerotime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$dayzerotime r2=$dayzero
+show v $dayzerotime:5
+block bigsecond 28
+write $bigsecond w=&0 w=&3D w=&0 w=&C w=&5 w=&3 w=&7E8
+block bigsecondtime 8
+write $bigsecondtime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$bigsecondtime r2=$bigsecond
+show v $bigsecondtime:5
+block bigminute 28
+write $bigminute w=&0 w=&0 w=&4B w=&C w=&5 w=&3 w=&7E8
+block bigminutetime 8
+write $bigminutetime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$bigminutetime r2=$bigminute
+show v $bigminutetime:5
+block bighour 28
+write $bighour w=&0 w=&0 w=&0 w=&19 w=&5 w=&3 w=&7E8
+block bighourtime 8
+write $bighourtime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$bighourtime r2=$bighour
+show v $bighourtime:5
+block bigcs 28
+write $bigcs w=&96 w=&0 w=&0 w=&C w=&5 w=&3 w=&7E8
+block bigcstime 8
+write $bigcstime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$bigcstime r2=$bigcs
+show v $bigcstime:5
+block feb30 28
+write $feb30 w=&0 w=&0 w=&0 w=&C w=&1E w=&2 w=&7E7
+block feb30time 8
+write $feb30time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$feb30time r2=$feb30
+show v $feb30time:5
+block day32 28
+write $day32 w=&0 w=&0 w=&0 w=&C w=&20 w=&1 w=&7E8
+block day32time 8
+write $day32time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$day32time r2=$day32
+show v $day32time:5
+block month13 28
+write $month13 w=&0 w=&0 w=&0 w=&C w=&5 w=&D w=&7E8
+block month13time 8
+write $month13time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$month13time r2=$month13
+show v $month13time:5
+block y1899 28
+write $y1899 w=&0 w=&0 w=&0 w=&C w=&1F w=&C w=&76B
+block y1899time 8
+write $y1899time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$y1899time r2=$y1899
+show v $y1899time:5
+block y1900 28
+write $y1900 w=&0 w=&0 w=&0 w=&0 w=&1 w=&1 w=&76C
+block y1900time 8
+write $y1900time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$y1900time r2=$y1900
+show v $y1900time:5
+block y2248 28
+write $y2248 w=&0 w=&0 w=&0 w=&0 w=&1 w=&1 w=&8C8
+block y2248time 8
+write $y2248time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$y2248time r2=$y2248
+show v $y2248time:5
+block y2300 28
+write $y2300 w=&0 w=&0 w=&0 w=&0 w=&1 w=&1 w=&8FC
+block y2300time 8
+write $y2300time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$y2300time r2=$y2300
+show v $y2300time:5
+block y2301 28
+write $y2301 w=&0 w=&0 w=&0 w=&0 w=&1 w=&1 w=&8FD
+block y2301time 8
+write $y2301time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$y2301time r2=$y2301
+show v $y2301time:5
+block negsecond 28
+write $negsecond w=&0 w=&FFFFFFFF w=&0 w=&C w=&5 w=&3 w=&7E8
+block negsecondtime 8
+write $negsecondtime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$negsecondtime r2=$negsecond
+show v $negsecondtime:5
+block negday 28
+write $negday w=&0 w=&0 w=&0 w=&C w=&FFFFFFFF w=&3 w=&7E8
+block negdaytime 8
+write $negdaytime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$negdaytime r2=$negday
+show v $negdaytime:5
+block neghour 28
+write $neghour w=&0 w=&0 w=&0 w=&FFFFFFFF w=&5 w=&3 w=&7E8
+block neghourtime 8
+write $neghourtime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$neghourtime r2=$neghour
+show v $neghourtime:5
+block bigday 28
+write $bigday w=&0 w=&0 w=&0 w=&C w=&190 w=&1 w=&7E8
+block bigdaytime 8
+write $bigdaytime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$bigdaytime r2=$bigday
+show v $bigdaytime:5
+block negmonth 28
+write $negmonth w=&0 w=&0 w=&0 w=&C w=&5 w=&FFFFFFFF w=&7E8
+block negmonthtime 8
+write $negmonthtime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$negmonthtime r2=$negmonth
+show v $negmonthtime:5
+block dec31 28
+write $dec31 w=&63 w=&3B w=&3B w=&17 w=&1F w=&C w=&8C7
+block dec31time 8
+write $dec31time b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$dec31time r2=$dec31
+show v $dec31time:5
+
+scenario territory-ordinals-month-nought ours
+block monthzero 28
+write $monthzero w=&0 w=&0 w=&0 w=&C w=&5 w=&0 w=&7E8
+block monthzerotime 8
+write $monthzerotime b=&EE b=&EE b=&EE b=&EE b=&EE
+call XTerritory_ConvertOrdinalsToTime r0=-1 r1=$monthzerotime r2=$monthzero
+show v $monthzerotime:5
+
+scenario territory-strings-read-as-ordinals
+block read0 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:09" r3=$read0
+show v $read0:28
+block read1 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="1:2:3" r3=$read1
+show v $read1:28
+block read2 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="25:00:00" r3=$read2
+show v $read2:28
+block read3 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:60:00" r3=$read3
+show v $read3:28
+block read4 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07" r3=$read4
+show v $read4:28
+block read5 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="x" r3=$read5
+show v $read5:28
+block read6 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="" r3=$read6
+show v $read6:28
+block read7 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 05-Mar-2024" r3=$read7
+show v $read7:28
+block read8 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="05-Mar-2024" r3=$read8
+show v $read8:28
+block read9 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 5-mar-2024" r3=$read9
+show v $read9:28
+block read10 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 05-March-2024" r3=$read10
+show v $read10:28
+block read11 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 29-Feb-2023" r3=$read11
+show v $read11:28
+block read12 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 29-Feb-2024" r3=$read12
+show v $read12:28
+block read13 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 32-Jan-2024" r3=$read13
+show v $read13:28
+block read14 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 05-Xyz-2024" r3=$read14
+show v $read14:28
+block read15 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue, 05-Mar-1899" r3=$read15
+show v $read15:28
+block read16 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 05-Mar-2024.13:07:09" r3=$read16
+show v $read16:28
+block read17 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 05-Mar-2024 13:07:09" r3=$read17
+show v $read17:28
+block read18 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="05-Mar-2024.13:07:09" r3=$read18
+show v $read18:28
+block read19 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=4 r2="13:07:09" r3=$read19
+show v $read19:28
+block read20 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=0 r2="13:07:09" r3=$read20
+show v $read20:28
+block read21 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-00" r3=$read21
+show v $read21:28
+block read22 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-65" r3=$read22
+show v $read22:28
+block read23 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-66" r3=$read23
+show v $read23:28
+block read24 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="1-Jan-66" r3=$read24
+show v $read24:28
+block read25 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="25-Jan-66" r3=$read25
+show v $read25:28
+block read26 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="26-Jan-66" r3=$read26
+show v $read26:28
+block read27 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-67" r3=$read27
+show v $read27:28
+block read28 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-99" r3=$read28
+show v $read28:28
+block read29 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-1" r3=$read29
+show v $read29:28
+block read30 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-123" r3=$read30
+show v $read30:28
+block read31 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Mar-12345" r3=$read31
+show v $read31:28
+block read32 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-1900" r3=$read32
+show v $read32:28
+block read33 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-2000" r3=$read33
+show v $read33:28
+block read34 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-2100" r3=$read34
+show v $read34:28
+block read35 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-2300" r3=$read35
+show v $read35:28
+block read36 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-2400" r3=$read36
+show v $read36:28
+block read37 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-1896" r3=$read37
+show v $read37:28
+block read38 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="29-Feb-1800" r3=$read38
+show v $read38:28
+block read39 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="28-Feb-1800" r3=$read39
+show v $read39:28
+block read40 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="00-Mar-2024" r3=$read40
+show v $read40:28
+block read41 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Ma-2024" r3=$read41
+show v $read41:28
+block read42 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-M-2024" r3=$read42
+show v $read42:28
+block read43 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-MAR-2024" r3=$read43
+show v $read43:28
+block read44 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Marc-2024" r3=$read44
+show v $read44:28
+block read45 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5-Marx-2024" r3=$read45
+show v $read45:28
+block read46 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5 Mar 2024" r3=$read46
+show v $read46:28
+block read47 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="5Mar2024" r3=$read47
+show v $read47:28
+block read48 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tue 05-Mar-2024" r3=$read48
+show v $read48:28
+block read49 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2="Tuesday, 05-Mar-2024" r3=$read49
+show v $read49:28
+block read50 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=2 r2=",05-Mar-2024" r3=$read50
+show v $read50:28
+block read51 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:60" r3=$read51
+show v $read51:28
+block read52 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:61" r3=$read52
+show v $read52:28
+block read53 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:62" r3=$read53
+show v $read53:28
+block read54 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13 07 09" r3=$read54
+show v $read54:28
+block read55 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:09:" r3=$read55
+show v $read55:28
+block read56 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2=" 13:07:09" r3=$read56
+show v $read56:28
+block read57 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13::07:09" r3=$read57
+show v $read57:28
+block read58 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="1:2" r3=$read58
+show v $read58:28
+block read59 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="130709" r3=$read59
+show v $read59:28
+block read60 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="13:07:09x" r3=$read60
+show v $read60:28
+block read61 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="-1:00:00" r3=$read61
+show v $read61:28
+block read62 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=1 r2="+1:00:00" r3=$read62
+show v $read62:28
+block read63 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 05-Mar-2024.25:00:00" r3=$read63
+show v $read63:28
+block read64 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 32-Mar-2024.13:07:09" r3=$read64
+show v $read64:28
+block read65 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 05-Mar-2024" r3=$read65
+show v $read65:28
+block read66 32
+call XTerritory_ConvertTimeStringToOrdinals r0=-1 r1=3 r2="Tue, 05-Mar-2024." r3=$read66
+show v $read66:28
+
+scenario territory-collation
+call XTerritory_Collate r0=-1 r1="abc" r2="abd" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="abc" r2="abc" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="abd" r2="abc" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="abc" r2="ABC" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="abc" r2="ABC" r3=1
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="ABC" r2="abc" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a" r2="" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="" r2="" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="abc" r2="abcd" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="Zebra" r2="apple" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="Zebra" r2="apple" r3=1
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a10" r2="a9" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a10" r2="a9" r3=4
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a 1" r2="a1" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a-b" r2="ab" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="1" r2="a" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="A" r2="a" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a" r2="A" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="a" r2="B" r3=0
+show r0 n z c v
+call XTerritory_Collate r0=-1 r1="[" r2="a" r3=0
+show r0 n z c v
+block left0 4
+write $left0 b=&65 b=&00
+block right0 4
+write $right0 b=&E9 b=&00
+call XTerritory_Collate r0=-1 r1=$left0 r2=$right0 r3=0
+show r0 n z c v
+block left1 4
+write $left1 b=&65 b=&00
+block right1 4
+write $right1 b=&E9 b=&00
+call XTerritory_Collate r0=-1 r1=$left1 r2=$right1 r3=2
+show r0 n z c v
+block left2 4
+write $left2 b=&C9 b=&00
+block right2 4
+write $right2 b=&E9 b=&00
+call XTerritory_Collate r0=-1 r1=$left2 r2=$right2 r3=1
+show r0 n z c v
+block left3 4
+write $left3 b=&C9 b=&00
+block right3 4
+write $right3 b=&E9 b=&00
+call XTerritory_Collate r0=-1 r1=$left3 r2=$right3 r3=3
+show r0 n z c v
+block left4 4
+write $left4 b=&E9 b=&00
+block right4 4
+write $right4 b=&66 b=&00
+call XTerritory_Collate r0=-1 r1=$left4 r2=$right4 r3=0
+show r0 n z c v
+block left5 4
+write $left5 b=&DF b=&00
+block right5 4
+write $right5 b=&73 b=&73 b=&00
+call XTerritory_Collate r0=-1 r1=$left5 r2=$right5 r3=0
+show r0 n z c v
+block left6 4
+write $left6 b=&E6 b=&00
+block right6 4
+write $right6 b=&61 b=&65 b=&00
+call XTerritory_Collate r0=-1 r1=$left6 r2=$right6 r3=0
+show r0 n z c v
+block left7 4
+write $left7 b=&9A b=&00
+block right7 4
+write $right7 b=&9B b=&00
+call XTerritory_Collate r0=-1 r1=$left7 r2=$right7 r3=1
+show r0 n z c v
+
+scenario territory-transformed-lengths
+call XTerritory_TransformString r0=-1 r1=0 r2="" r3=0
+show r0 v
+call XTerritory_TransformString r0=-1 r1=0 r2="a" r3=0
+show r0 v
+call XTerritory_TransformString r0=-1 r1=0 r2="abc" r3=0
+show r0 v
+call XTerritory_TransformString r0=-1 r1=0 r2="ABC" r3=0
+show r0 v
+call XTerritory_TransformString r0=-1 r1=0 r2="Zebra crossing" r3=0
+show r0 v
+block into 64
+call XTerritory_TransformString r0=-1 r1=$into r2="abc" r3=2
+show r0 v
+
+scenario territory-select-alphabet
+call XOS_Byte r0=71 r1=102
+show r1 v
+call XOS_Byte r0=71 r1=127
+show r1 v
+call XTerritory_SelectAlphabet r0=-1
+show r0 v
+call XOS_Byte r0=71 r1=127
+show r1 v
+call XTerritory_SelectAlphabet r0=99
+show v
+
+scenario territory-properties-refused
+call XTerritory_CharacterPropertyTable r0=-1 r1=0
+show v
+call XTerritory_CharacterPropertyTable r0=-1 r1=10
+show v
+call XTerritory_CharacterPropertyTable r0=-1 r1=11
+show v
+call XTerritory_CharacterPropertyTable r0=-1 r1=99
+show v
+
+scenario territory-reserved-swis-by-number
+block swi0 16
+write $swi0 w=&E92D4000 w=&EF063064 w=&E8BD4000 w=&E8BD8000
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_Claim r0=&21 r1=$swi0 r2=0
+show v
+call XOS_CallAVector r0=-1 r1=0 r2=0 r3=0 r9=&21
+show v
+call XOS_Release r0=&21 r1=$swi0 r2=0
+show v
+block swi1 16
+write $swi1 w=&E92D4000 w=&EF063074 w=&E8BD4000 w=&E8BD8000
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_Claim r0=&21 r1=$swi1 r2=0
+show v
+call XOS_CallAVector r0=-1 r1=0 r2=0 r3=0 r9=&21
+show v
+call XOS_Release r0=&21 r1=$swi1 r2=0
+show v
+
+scenario territory-text-to-string
+call XTerritory_ConvertTextToString r0=1 r1=2 r2=3 r3=4 r4=5 r5=6 r6=7 r7=8 r8=9 r9=10
+show r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 v
+
+# The configured territory as CMOS keeps it, and the territory in use.
+scenario territory-in-cmos
+call XOS_Byte r0=161 r1=24
+show r2
+call XTerritory_Number
+show r0 v
+
+# Daylight saving (plans/RISCOS-EMULATOR.md §4.6): each year's bounds as
+# Territory_DaylightSaving 5 gives them for the UK, in the years RISC OS 5
+# has rules for and outside them; a refusal writes nothing.
+scenario daylight-saving-bounds
+block s 8
+block en 8
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=2024 r4=$s r5=$en
+show r0 r1 r2 r3 $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1967 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1968 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1969 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1971 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1972 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1980 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=2099 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=2100 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=1900 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=0 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=0 r3=65535 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=1 r1=5 r2=0 r3=2024 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=99 r1=5 r2=0 r3=2024 r4=$s r5=$en
+show $s:5 $en:5 v
+write $s b=0 b=0 b=0 b=0 b=0
+write $en b=0 b=0 b=0 b=0 b=0
+call XTerritory_DaylightSaving r0=-1 r1=5 r2=1 r3=2024 r4=$s r5=$en
+show $s:5 $en:5 v
+
+# Whether daylight saving is in force at a five-byte time and at UTC
+# ordinals; a question never fails, whatever it names.
+scenario daylight-saving-in-force
+block tm 8
+block ord 40
+write $tm b=&40 b=&F6 b=&E2 b=&0E b=&32
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&C0 b=&F2 b=&ED b=&0E b=&32
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&00 b=&8E b=&0E b=&D0 b=&92
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&80 b=&8A b=&19 b=&D0 b=&92
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&00 b=&73 b=&A5 b=&97 b=&31
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&00 b=&9F b=&8B b=&50 b=&93
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&00 b=&03 b=&1E b=&75 b=&1E
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+write $tm b=&00 b=&AB b=&9D b=&79 b=&5B
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=0 r3=$tm
+show r0 v
+call XTerritory_DaylightSaving r0=-1 r1=4 r2=1 r3=$tm
+show r0 v
+call XTerritory_DaylightSaving r0=99 r1=4 r2=0 r3=$tm
+show r0 v
+write $ord w=0 w=0 w=30 w=1 w=27 w=10 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=30 w=0 w=27 w=10 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=31 w=6 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=1 w=19 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=1 w=13 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=1 w=0 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=-1 w=7 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=1 w=7 w=1899
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+write $ord w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=0 r3=$ord r4=9 r5=9
+show r0 r1 r2 r4 r5 v
+call XTerritory_DaylightSaving r0=-1 r1=3 r2=1 r3=$ord
+show r0 v
+call XTerritory_DaylightSaving r0=99 r1=3 r2=0 r3=$ord
+show r0 v
+
+# The settings: read for the current territory alone, and support for
+# the rules asked of any.
+scenario daylight-saving-state
+call XTerritory_DaylightSaving r0=-1 r1=0 r2=9 r3=9
+show r0 r1 r2 r3 v
+call XTerritory_DaylightSaving r0=1 r1=0
+show r0 v
+call XTerritory_DaylightSaving r0=99 r1=0
+show v
+call XTerritory_DaylightSaving r0=99 r1=1 r2=0
+show v
+call XTerritory_DaylightSaving r0=-1 r1=2 r2=9 r3=9
+show r0 r1 r2 r3 v
+call XTerritory_DaylightSaving r0=99 r1=2
+show r0 v
+call XTerritory_DaylightSaving r0=-1 r1=6
+show v
+
+# The UK territory's own rules, which the Manager asks: R0 left holding
+# the end's low word, and the years, time zones and reasons it has none for.
+scenario daylight-rules
+block s 8
+block en 8
+call XTerritory_DaylightRules r0=-1 r1=0 r2=7 r3=7 r4=7 r5=7
+show r0 r1 r2 r3 r4 r5 v
+call XTerritory_DaylightRules r0=1 r1=1 r2=0 r3=1968 r4=$s r5=$en
+show r0 r1 r2 r3 $s:5 $en:5 v
+call XTerritory_DaylightRules r0=1 r1=1 r2=0 r3=2024 r4=$s r5=$en
+show r0 r1 r2 r3 $s:5 $en:5 v
+call XTerritory_DaylightRules r0=1 r1=1 r2=0 r3=2099 r4=$s r5=$en
+show r0 r1 r2 r3 $s:5 $en:5 v
+call XTerritory_DaylightRules r0=-1 r1=1 r2=0 r3=1967 r4=$s r5=$en
+show v
+call XTerritory_DaylightRules r0=-1 r1=1 r2=0 r3=2100 r4=$s r5=$en
+show v
+call XTerritory_DaylightRules r0=-1 r1=1 r2=0 r3=-1 r4=$s r5=$en
+show v
+call XTerritory_DaylightRules r0=-1 r1=1 r2=1 r3=2024 r4=$s r5=$en
+show v
+call XTerritory_DaylightRules r0=-1 r1=2
+show v
+call XTerritory_DaylightRules r0=-1 r1=3
+show v
+call XTerritory_DaylightRules r0=-1 r1=-1
+show v
+call XTerritory_DaylightRules r0=0 r1=0
+show v
+call XTerritory_DaylightRules r0=99 r1=0
+show v
+
+# Territory_IME, Territory_Select, which takes only a territory loaded
+# and leaves the current one as it is, and two of the reserved SWIs.
+scenario territory-ime-and-select
+call XTerritory_IME r0=-1 r1=5 r2=6
+show r0 r1 r2 v
+call XTerritory_IME r0=1
+show r0 v
+call XTerritory_IME r0=0
+show v
+call XTerritory_IME r0=99
+show v
+call XTerritory_Select r0=99
+show v
+call XTerritory_Select r0=0
+show v
+call XTerritory_Select r0=-1
+show v
+call XTerritory_Select r0=1 r1=5 r2=6 r3=7
+show r0 r1 r2 r3 v
+call XTerritory_Number
+show r0 v
+call XTerritory_Reserved1 r0=-1
+show v
+call XTerritory_Reserved17 r0=1
+show v
+
+# Territory_ConvertTimeFormats, which RISC OS 5.30 provides but does not
+# name, called by number from a ByteV claimant: R0 and R4 from the
+# block's end, R3 from OS_Byte's R1, the time at +&40 converted into
+# +&60, and the error's number and V at +&88.
+scenario convert-time-formats
+block code 160
+write $code w=&E350005A w=&11A0F00E w=&E92D007E w=&E1A03001 w=&E59F0078 w=&E59F4078 w=&E28F1020 w=&E28F203C w=&EF063078 w=&73A05000 w=&63A05001 w=&65900000 w=&E58F0050 w=&E58F5050 w=&E8BD007E w=&E49DF004
+call XOS_SynchroniseCodeAreas r0=1 r1=$code r2=$code+&3C
+call XOS_Claim r0=6 r1=$code r2=0
+show v
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&302 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&10102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=15 w=1 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&50102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=1960
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=1960
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&60102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=360000
+call XOS_Byte r0=&5A r1=&80102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=-1
+call XOS_Byte r0=&5A r1=&80102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=360000
+call XOS_Byte r0=&5A r1=&90102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=13 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40300 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=30 w=1 w=31 w=3 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40300 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=30 w=1 w=27 w=10 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40300 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=360000
+call XOS_Byte r0=&5A r1=&80300 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 b=&00 b=&AB b=&9D b=&79 b=&5B b=0 b=0 b=0
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&40003 r2=0
+show $code+&60:36 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&202 r2=0
+show $code+&60:36 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 b=&00 b=&AB b=&9D b=&79 b=&5B b=0 b=0 b=0
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&10201 r2=0
+show $code+&60:36 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&402 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&100302 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&C0102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=99 w=0
+call XOS_Byte r0=&5A r1=&40102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=99 w=0
+call XOS_Byte r0=&5A r1=&302 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=99 w=0
+call XOS_Byte r0=&5A r1=&80102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=1
+call XOS_Byte r0=&5A r1=&102 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=7 w=2024
+write $code+&90 w=-1 w=7
+call XOS_Byte r0=&5A r1=&302 r2=0
+show $code+&60:5 $code+&88:8
+write $code+&60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+write $code+&88 w=0 w=0
+write $code+&40 w=0 w=0 w=0 w=12 w=1 w=13 w=2024
+write $code+&90 w=-1 w=0
+call XOS_Byte r0=&5A r1=&302 r2=0
+show $code+&60:5 $code+&88:8
+call XOS_Release r0=6 r1=$code r2=0
+show v
+
+# *Territory names the current territory, written through a WrchV
+# claimant, and selects one by name or number.
+scenario territory-command
+block cap 40
+write $cap w=&E92D0006 w=&E89C0006 w=&E1510002 w=&328C2008 w=&37C20001 w=&32811001 w=&358C1000 w=&E8BD0006 w=&E49DF004
+call XOS_SynchroniseCodeAreas r0=1 r1=$cap r2=$cap+&20
+block kc 64
+write $kc w=0 w=40
+call XOS_Claim r0=3 r1=$cap r2=$kc
+call XOS_CLI r0="Territory"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc
+show $kc:4 $kc+8:8
+call XOS_CLI r0="Territory UK"
+show v
+call XOS_CLI r0="Territory 1"
+show v
+call XOS_CLI r0="Territory 99"
+show v
+call XOS_CLI r0="Territory Nowhere"
+show v
+call XOS_CLI r0="Territory UK extra"
+show v
+call XTerritory_Number
+show r0 v

@@ -10,14 +10,15 @@ use alloc::vec::Vec;
 
 use tairix_riscos_arm::mmu::{Frame, FrameKind, Table, PAGE_SIZE};
 
-use super::super::guest::{Guest, PageEntry, Service};
+use super::super::guest::{Allowed, Guest, PageEntry, Service};
 use super::super::layout::APPLICATION;
 use super::super::{Holder, Memory};
 use super::{
     lower_copy, signature, Area, AreaError, AreaFlags, Failure, Handler, Id, Key, Shape, FREE_POOL,
 };
 
-/// The most pages one grow handler call names: RISC OS's page block.
+/// The most pages one grow handler call names: a larger grow runs in steps of
+/// this many, as the PRM describes, so a step's page block stays small.
 pub(super) const CHUNK: u32 = 63;
 
 /// Where a page lives, for a replacement to move it from.
@@ -93,8 +94,8 @@ impl Memory {
                 _ => Some(key),
             }
         };
-        // Rounded up to a page, so a shrink shrinks by less; RISC OS's
-        // overflow near the top turns into a shrink, and does here too.
+        // Rounded up to a page, so a shrink shrinks by less, and a grow that
+        // overflows near the top wraps into a shrink.
         let page = (PAGE_SIZE - 1).cast_signed();
         let rounded = bytes.wrapping_add(page) & !page;
         if rounded == 0 {
@@ -627,16 +628,19 @@ impl Memory {
         if dma {
             self.pick_pages(block)?;
         }
-        if let Some(handler) = handler {
-            guest
+        let allowed = match handler {
+            Some(handler) => guest
                 .pre_grow(self, handler, block, bytes, size)
-                .map_err(AreaError::refused)?;
-        }
+                .map_err(AreaError::refused)?,
+            None => Allowed::default(),
+        };
         let named = !dma && block.first().is_some_and(|entry| entry.page.is_some());
         if !dma && !named {
             self.pick_pages(block)?;
         }
-        if let Err(error) = self.claim_pages(id, size / PAGE_SIZE, block, named, guest) {
+        let reserved_ok = !named || allowed.reserved;
+        if let Err(error) = self.claim_pages(id, size / PAGE_SIZE, block, named, reserved_ok, guest)
+        {
             if let Some(handler) = handler {
                 guest.post_grow(self, handler, &[], 0, size);
             }
@@ -662,8 +666,14 @@ impl Memory {
     }
 
     /// The pages a block names for area `id`. A page the area may not take,
-    /// or named twice, refuses the whole block.
-    fn wanted_pages(&self, id: Id, block: &[PageEntry]) -> Result<Wanted, AreaError> {
+    /// or named twice, refuses the whole block; so does a reserved page
+    /// unless `reserved_ok`.
+    fn wanted_pages(
+        &self,
+        id: Id,
+        block: &[PageEntry],
+        reserved_ok: bool,
+    ) -> Result<Wanted, AreaError> {
         let mut wanted: Vec<(Frame, Option<usize>)> = Vec::new();
         wanted
             .try_reserve(block.len())
@@ -676,6 +686,9 @@ impl Memory {
             let page = entry.page.ok_or(AreaError::CantGetPhysicalMemory)?;
             let frame = Frame::new(page);
             let record = self.pages.get(page);
+            if record.reserved && !reserved_ok && page < self.ceiling.pages() {
+                return Err(AreaError::PageReserved);
+            }
             let kernel = record.holder == Some(Holder::Kernel);
             let ours = matches!(record.holder, Some(Holder::Area { area, .. }) if area == id);
             let unheld_in_use = record.holder.is_none() && !self.mmu.is_free(frame);
@@ -714,12 +727,13 @@ impl Memory {
         first: u32,
         block: &[PageEntry],
         named: bool,
+        reserved_ok: bool,
         guest: &mut G,
     ) -> Result<(), AreaError> {
         let Wanted {
             pages: wanted,
             moving,
-        } = self.wanted_pages(id, block)?;
+        } = self.wanted_pages(id, block, reserved_ok)?;
         // Every page's record is made before any moves.
         if let Some(highest) = wanted.iter().map(|&(frame, _)| frame.number()).max() {
             self.pages

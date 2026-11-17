@@ -38,6 +38,22 @@ pub(crate) enum Fault {
     Debug,
 }
 
+/// One level of a processor's caches: separate instruction and data caches,
+/// each of `size` bytes in lines of `line`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SplitCache {
+    /// Each cache's size, in bytes.
+    pub size: u32,
+    /// Each cache's line, in bytes.
+    pub line: u32,
+}
+
+/// The SA-110's caches, as its data sheet gives them.
+const SA110_L1: SplitCache = SplitCache {
+    size: 16 * 1024,
+    line: 32,
+};
+
 /// The SA-110's identity: Digital's part `A10`, revision T.
 const SA110_ID: u32 = 0x4401_A104;
 /// The SA-110's control register as RISC OS 3.7 runs it: the MMU, the
@@ -50,8 +66,21 @@ const SA110_CACHE_BITS: u32 = 1 << 2 | 1 << 3 | 1 << 12;
 /// An ARMv7 implementer of zero, reserved for software, with the CPUID
 /// identification scheme: a processor that is no particular silicon.
 const ARMV7_ID: u32 = 0x000F_0000;
-/// The cache type: 64-byte lines and reservation granule, VIPT.
-const ARMV7_CACHE_TYPE: u32 = 0x8444_C004;
+/// The ARMv7 profile's level 1 caches, of four ways each.
+const ARMV7_L1: SplitCache = SplitCache {
+    size: 32 * 1024,
+    line: 64,
+};
+const ARMV7_L1_WAYS: u32 = 4;
+/// `log2` of [`ARMV7_L1`]'s line in words, as the ID registers count it.
+const ARMV7_LINE_WORDS: u32 = ARMV7_L1.line.trailing_zeros() - 2;
+/// The cache type: the ARMv7 format with PIPT instruction caches, and the
+/// level 1 line as the smallest line, reservation and write-back granule.
+const ARMV7_CACHE_TYPE: u32 = 0x8000_C000
+    | ARMV7_LINE_WORDS << 24
+    | ARMV7_LINE_WORDS << 20
+    | ARMV7_LINE_WORDS << 16
+    | ARMV7_LINE_WORDS;
 /// A uniprocessor in the multiprocessing extensions' format.
 const ARMV7_MULTIPROCESSOR: u32 = 0xC000_0000;
 /// The control register as RISC OS 5 runs it: the MMU, alignment faults,
@@ -61,8 +90,12 @@ const ARMV7_CONTROL: u32 = 0x00C5_387F;
 const ARMV7_CACHE_BITS: u32 = 1 << 2 | 1 << 11 | 1 << 12;
 /// The control register's CP15 barrier enable.
 const ARMV7_CP15_BARRIERS: u32 = 1 << 5;
-/// A level 1 cache of 32 KiB, four ways, 64-byte lines.
-const ARMV7_CACHE_SIZE: u32 = 0x700F_E01A;
+/// Either level 1 cache's size register: write-back, read- and
+/// write-allocate, [`ARMV7_L1`]'s sets, ways and line.
+const ARMV7_CACHE_SIZE: u32 = 0x7 << 28
+    | (ARMV7_L1.size / (ARMV7_L1_WAYS * ARMV7_L1.line) - 1) << 13
+    | (ARMV7_L1_WAYS - 1) << 3
+    | (ARMV7_LINE_WORDS - 2);
 /// Separate level 1 instruction and data caches, the points of coherency
 /// and unification at level 1.
 const ARMV7_CACHE_LEVELS: u32 = 0x0920_0003;
@@ -162,6 +195,15 @@ impl Cp15 {
         }
     }
 
+    /// The caches at `level`, from zero; none past the last.
+    pub(crate) const fn cache(&self, level: u32) -> Option<SplitCache> {
+        match (self.system, level) {
+            (System::Sa110, 0) => Some(SA110_L1),
+            (System::Armv7, 0) => Some(ARMV7_L1),
+            _ => None,
+        }
+    }
+
     /// CPACR's two-bit access field for coprocessor `cp`: none, privileged
     /// only, reserved, or full.
     pub(crate) const fn coprocessor_access(&self, cp: u32) -> u32 {
@@ -176,6 +218,11 @@ impl Cp15 {
                 _ => 0,
             };
         self.data_address = address;
+    }
+
+    /// The last data abort's fault status and address.
+    pub(crate) const fn last_data_fault(&self) -> (u32, u32) {
+        (self.data_status, self.data_address)
     }
 
     /// Records a prefetch abort at `address`. The SA-110 records none.
@@ -363,6 +410,29 @@ mod tests {
         assert_eq!(cp15.read([0, 0, 2, 0], true), Outcome::Done(0x0214_1110));
         let sa110 = Cp15::new(System::Sa110, BIT26.isa);
         assert_eq!(sa110.read([0, 0, 0, 0], true), Outcome::Done(SA110_ID));
+    }
+
+    #[test]
+    fn the_cache_registers_describe_the_profile_s_caches() {
+        let cp15 = Cp15::new(System::Armv7, BIT32.isa);
+        assert_eq!(cp15.read([0, 0, 0, 1], true), Outcome::Done(0x8444_C004));
+        assert_eq!(cp15.read([1, 0, 0, 0], true), Outcome::Done(0x700F_E01A));
+        assert_eq!(
+            cp15.cache(0),
+            Some(SplitCache {
+                size: 32 * 1024,
+                line: 64
+            })
+        );
+        assert_eq!(cp15.cache(1), None);
+        let sa110 = Cp15::new(System::Sa110, BIT26.isa);
+        assert_eq!(
+            sa110.cache(0),
+            Some(SplitCache {
+                size: 16 * 1024,
+                line: 32
+            })
+        );
     }
 
     #[test]

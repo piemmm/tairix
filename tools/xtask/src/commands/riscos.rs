@@ -1,5 +1,6 @@
 //! `cargo xtask riscos --reference <dir>`: the RISC OS emulator's reference
-//! harness (`plans/RISCOS-EMULATOR.md` §17).
+//! harness (`plans/RISCOS-EMULATOR.md` §17). `--write-sprites` draws the
+//! Wimp's file-type sprites its ResourceFS holds ([`sprites`]).
 //!
 //! `<dir>` is a genuine RISC OS a developer holds, laid out as RPCEmu lays
 //! its own out: `roms/` the ROM images, `hostfs/` the directory the machine
@@ -11,9 +12,10 @@
 //! done: the harness ends by opening `Done`, which here is a named pipe the
 //! command waits on. Otherwise the harness is left for the developer to run,
 //! and a later run imports what it recorded. Each recorded observation
-//! becomes its scenario's fixture, but for a scenario marked `ours`, and each
-//! crate's answers go beside its cases, every file naming the RISC OS version
-//! and each ROM image's SHA-256.
+//! becomes its scenario's fixture; a scenario marked `ours`, whose fixture
+//! is the emulator's own, is not run, so nothing it does to genuine RISC OS
+//! can stop the run. Each crate's answers go beside its cases, every file
+//! naming the RISC OS version and each ROM image's SHA-256.
 //!
 //! No fixture may carry the ROM's bytes: a run of [`ROM_RUN`] bytes of a ROM
 //! image in what was recorded refuses the whole recording, unless the
@@ -31,8 +33,8 @@ use tairix_openbasic::program::{self, Line};
 use tairix_openbasic::tokenise::{tokenise, Start};
 use tairix_openbasic::Dialect;
 use tairix_riscos_kernel::corpus::{
-    check_observation, format_observations, parse_observations, parse_scenarios, Observation,
-    Scenario, Step, Value, REGISTERS,
+    check_observation, format_observations, parse_observations, parse_scenarios, At, Item, Kind,
+    Observation, Scenario, Step, Value, REGISTERS, UNWRITTEN,
 };
 
 use crate::commands::rom_runs::{runs, windows, Runs, ROM_RUN};
@@ -40,6 +42,9 @@ use crate::Context;
 
 mod basic;
 mod obey;
+mod sprites;
+
+pub use sprites::check as check_sprites;
 
 /// Where each crate keeps its corpus, from the workspace's root.
 const CORPUS: &str = "userland/apps/riscos/kernel/tests/corpus";
@@ -49,6 +54,8 @@ const EMULATOR: &str = "rpcemu-recompiler";
 const DEADLINE: Duration = Duration::from_secs(300);
 /// What each fixtures file's header says after its provenance.
 const OURS: &str = "A scenario marked `ours` holds this emulator's own observation.";
+const REFERENCE: &str =
+    "A scenario marked `reference` reads the machine itself and is never replayed.";
 /// How the harness records the RISC OS version it ran on: the version times
 /// a hundred follows.
 const VERSION: &str = "# version ";
@@ -57,15 +64,16 @@ const VARIABLES: [&str; REGISTERS as usize] =
     ["A%", "B%", "C%", "D%", "E%", "F%", "G%", "H%", "I%", "J%"];
 
 pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
-    let usage = "riscos: usage: cargo xtask riscos --reference <dir>";
+    let usage = "riscos: usage: cargo xtask riscos --reference <dir> | --write-sprites";
     let args: Vec<&str> = args
         .iter()
         .map(|a| a.to_str().ok_or(usage))
         .collect::<Result<_, _>>()?;
-    let ["--reference", dir] = args.as_slice() else {
-        return Err(usage.into());
-    };
-    reference(ctx, Path::new(dir))
+    match args.as_slice() {
+        ["--reference", dir] => reference(ctx, Path::new(dir)),
+        ["--write-sprites"] => sprites::write(ctx),
+        _ => Err(usage.into()),
+    }
 }
 
 /// A corpus group: its scenarios, their source and its fixtures file.
@@ -168,11 +176,12 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
         listed.as_bytes().to_vec(),
     ];
     streams.extend(register_streams(&observed));
+    streams.extend(memory_streams(&observed));
     streams.extend(obey::written(&answers));
     streams.extend(quoted(&listed));
     refuse_rom_runs(&images, &streams, &held)?;
     let mut header: Vec<&str> = provenance.iter().map(String::as_str).collect();
-    header.push(OURS);
+    header.extend([OURS, REFERENCE]);
     for group in &groups {
         write_fixtures(group, &observations, &header)?;
     }
@@ -320,7 +329,8 @@ fn remove_found<'a>(hostfs: &Path, names: impl IntoIterator<Item = &'a str>) -> 
     Ok(())
 }
 
-/// The harness as BASIC V's tokenised program.
+/// The harness as BASIC V's tokenised program: every scenario but those
+/// marked `ours`.
 fn harness_program<'a>(
     scenarios: impl IntoIterator<Item = &'a Scenario>,
 ) -> Result<Vec<u8>, String> {
@@ -332,7 +342,10 @@ fn harness_program<'a>(
             "SYS\"OS_Module\",18,\"UtilityModule\" TO ,,,V%:BPUT#O%,\"{VERSION}\"+STR$(INT(VAL(FNv(V%+V%!&14))*100+0.5))"
         ),
     ];
-    for scenario in scenarios {
+    for scenario in scenarios
+        .into_iter()
+        .filter(|scenario| scenario.kind != Kind::Ours)
+    {
         scenario_lines(scenario, &mut text)?;
     }
     text.push(obey::run());
@@ -341,9 +354,15 @@ fn harness_program<'a>(
         "DEF PROCdone:LOCAL D%:D%=OPENOUT\"HostFS:$.Done\":CLOSE#D%:ENDPROC".into(),
         "DEF FNh(N%)=\"&\"+RIGHT$(\"0000000\"+STR$~N%,8)".into(),
         "DEF FNr(R$,N%,F%)=\" \"+R$+\"=\"+FNh(N%)".into(),
-        "DEF FNz(N%,F%):IF F% AND 1 THEN=\"\" ELSE=FNr(\"r0\",N%,F%)".into(),
+        // An item an error leaves undefined, `S%` set, gives way to it.
+        "DEF FNq(R$,N%,F%,S%):IF S% AND F% AND 1 THEN=\"\" ELSE=FNr(R$,N%,F%)".into(),
         "DEF FNg(F%,B%,N$)=\" \"+N$+\"=\"+STR$(F% DIV B% AND 1)".into(),
         "DEF FNe(N%,F%):IF F% AND 1 THEN=\" error=\"+FNh(!N%) ELSE=\"\"".into(),
+        "DEF FNw(K$,M%,B%,F%,S%):IF S% AND F% AND 1 THEN=\"\" ELSE=\" \"+K$+\"=\"+FNh(!M%-B%)"
+            .into(),
+        "DEF FNb(K$,M%,L%,F%,S%):LOCAL Q%,T$:IF S% AND F% AND 1 THEN=\"\"".into(),
+        "T$=\" \"+K$+\"=\":FOR Q%=0 TO L%-1:T$+=RIGHT$(\"0\"+STR$~(M%?Q%),2):NEXT:=T$".into(),
+        format!("DEF PROCfill(M%,L%):LOCAL Q%:FOR Q%=0 TO L%-1:M%?Q%=&{UNWRITTEN:X}:NEXT:ENDPROC"),
         // The version a module's help string gives after its name's tab.
         "DEF FNv(V%):LOCAL V$:WHILE ?V%>=32:V%+=1:ENDWHILE:IF ?V%<>9 THEN =\"\"".into(),
         "V%+=1:WHILE ?V%>=32 AND LEN V$<20:V$+=CHR$?V%:V%+=1:ENDWHILE:=V$".into(),
@@ -361,9 +380,11 @@ fn harness_program<'a>(
         .map_err(|e| format!("riscos: the harness line {line:?}: {e:?}"))?;
         tokenised.push(bytes);
     }
+    // Numbered from one, since nothing refers to a line by number: a corpus
+    // fills more of BASIC's 65279 lines than tens would leave it.
     let lines = tokenised
         .iter()
-        .zip((10..).step_by(10))
+        .zip(1..)
         .map(|(text, number)| Line { number, text });
     program::image(lines).map_err(|e| format!("riscos: the harness: {e:?}"))
 }
@@ -385,6 +406,73 @@ fn expression(value: &Value, kept: &[&str]) -> Result<String, String> {
             }
         }
     })
+}
+
+/// The bytes a `write` puts down on one harness line, a line holding a
+/// tokenised statement of BASIC's at most.
+const WRITTEN_PER_LINE: usize = 16;
+
+/// The BASIC variable kept value `name` is held in, entering it among
+/// `kept` if it is new.
+fn kept_variable<'s>(kept: &mut Vec<&'s str>, name: &'s str) -> String {
+    let index = kept.iter().position(|k| *k == name).unwrap_or_else(|| {
+        kept.push(name);
+        kept.len() - 1
+    });
+    format!("K{index}%")
+}
+
+/// The `BPUT` that records `item` of a show, without its line's end.
+fn shown_statement(item: &Item, kept: &[&str]) -> Result<String, String> {
+    let s0 = u8::from(item.undefined_after_error());
+    let key = item.key();
+    Ok(match item {
+        Item::Register(register) => {
+            let variable = VARIABLES[*register as usize];
+            format!("BPUT#O%,FNq(\"{key}\",{variable},Z%,{s0});")
+        }
+        Item::Relative { register, from } => {
+            let variable = VARIABLES[*register as usize];
+            let base = expression(
+                &Value::Kept {
+                    name: from.clone(),
+                    offset: 0,
+                },
+                kept,
+            )?;
+            format!("BPUT#O%,FNq(\"{key}\",{variable}-{base},Z%,{s0});")
+        }
+        Item::Flag(flag) => format!("BPUT#O%,FNg(Z%,{},\"{}\");", flag.bit(), flag.name()),
+        Item::Bytes { at, length } => {
+            let address = address(at, kept)?;
+            format!("BPUT#O%,FNb(\"{key}\",{address},{length},Z%,{s0});")
+        }
+        Item::Pointer { at, from } => {
+            let address = address(at, kept)?;
+            let base = expression(
+                &Value::Kept {
+                    name: from.clone(),
+                    offset: 0,
+                },
+                kept,
+            )?;
+            format!("BPUT#O%,FNw(\"{key}\",{address},{base},Z%,{s0});")
+        }
+    })
+}
+
+/// A BASIC expression for where a shown item is.
+fn address(at: &At, kept: &[&str]) -> Result<String, String> {
+    match at {
+        At::Register(register) => Ok(VARIABLES[*register as usize].to_string()),
+        At::Kept { name, offset } => expression(
+            &Value::Kept {
+                name: name.clone(),
+                offset: *offset,
+            },
+            kept,
+        ),
+    }
 }
 
 fn scenario_lines(scenario: &Scenario, text: &mut Vec<String>) -> Result<(), String> {
@@ -409,27 +497,32 @@ fn scenario_lines(scenario: &Scenario, text: &mut Vec<String>) -> Result<(), Str
                 ));
             }
             Step::Keep { register, name } => {
-                if !kept.contains(&name.as_str()) {
-                    kept.push(name);
-                }
-                let index = kept.iter().position(|k| k == name).unwrap_or(0);
-                text.push(format!("K{index}%={}", VARIABLES[*register as usize]));
+                let variable = kept_variable(&mut kept, name);
+                text.push(format!("{variable}={}", VARIABLES[*register as usize]));
             }
-            Step::Show { registers, flags } => {
-                let mut line = format!("BPUT#O%,\"{call}\"");
-                for &register in registers {
-                    let variable = VARIABLES[register as usize];
-                    if register == 0 {
-                        let _ = write!(line, "+FNz({variable},Z%)");
-                    } else {
-                        let _ = write!(line, "+FNr(\"r{register}\",{variable},Z%)");
+            Step::Block { name, size } => {
+                let variable = kept_variable(&mut kept, name);
+                text.push(format!(
+                    "DIM {variable} {}:PROCfill({variable},{size})",
+                    size - 1
+                ));
+            }
+            Step::Write { at, bytes } => {
+                let address = expression(at, &kept)?;
+                for (part, chunk) in bytes.chunks(WRITTEN_PER_LINE).enumerate() {
+                    let mut line = format!("X%={address}");
+                    for (index, byte) in chunk.iter().enumerate() {
+                        let _ = write!(line, ":X%?{}=&{byte:X}", part * WRITTEN_PER_LINE + index);
                     }
+                    text.push(line);
                 }
-                for flag in flags {
-                    let _ = write!(line, "+FNg(Z%,{},\"{}\")", flag.bit(), flag.name());
+            }
+            Step::Show { items } => {
+                text.push(format!("BPUT#O%,\"{call}\";"));
+                for item in items {
+                    text.push(shown_statement(item, &kept)?);
                 }
-                line.push_str("+FNe(A%,Z%)");
-                text.push(line);
+                text.push("BPUT#O%,FNe(A%,Z%)".into());
             }
         }
     }
@@ -596,6 +689,34 @@ fn register_streams(observed: &str) -> Vec<Vec<u8>> {
     streams
 }
 
+/// The bytes the machine wrote into the memory each recorded step shows: an
+/// item's bytes parted wherever one was left [`UNWRITTEN`].
+fn memory_streams(observed: &str) -> Vec<Vec<u8>> {
+    observed
+        .lines()
+        .flat_map(|line| line.split(' '))
+        .filter_map(|token| {
+            let (key, hex) = token.split_once('=')?;
+            key.contains(':').then_some(())?;
+            hex.as_bytes()
+                .chunks(2)
+                .map(|pair| {
+                    std::str::from_utf8(pair)
+                        .ok()
+                        .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                })
+                .collect::<Option<Vec<u8>>>()
+        })
+        .flat_map(|bytes| {
+            bytes
+                .split(|&b| b == UNWRITTEN)
+                .filter(|part| !part.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// A token `rN=&XXXXXXXX`: its register and word.
 fn register_word(token: &str) -> Option<(u8, u32)> {
     let (name, digits) = token.split_once("=&")?;
@@ -651,7 +772,11 @@ fn write_fixtures(
     };
     let mut fixtures = Vec::with_capacity(group.scenarios.len());
     for scenario in &group.scenarios {
-        let source = if scenario.ours { &old } else { observations };
+        let source = if scenario.kind == Kind::Ours {
+            &old
+        } else {
+            observations
+        };
         let fixture = source
             .iter()
             .find(|o| o.name == scenario.name)
@@ -809,7 +934,7 @@ mod tests {
     #[test]
     fn the_harness_tokenises_and_every_scenario_step_becomes_a_line() {
         let scenarios = parse_scenarios(
-            "scenario one\ncall XOS_DynamicArea r0=0 r1=-1 r8=\"Corpus\"\nkeep r1 area\ncall XOS_DynamicArea r0=2 r1=$area+&10\nshow r0 r2 v\n",
+            "scenario one\ncall XOS_DynamicArea r0=0 r1=-1 r8=\"Corpus\"\nkeep r1 area\ncall XOS_DynamicArea r0=2 r1=$area+&10\nshow r0 r2 v\nblock buffer 8\nwrite $buffer+1 w=&04030201 b=5 s=\"ab\"\ncall XOS_ConvertHex2 r0=&41 r1=$buffer r2=8\nshow r0-buffer r1-area $buffer+&1:3 r0:2\n",
         )
         .unwrap();
         let mut text = Vec::new();
@@ -821,7 +946,32 @@ mod tests {
                 "SYS\"XOS_DynamicArea\",&0,&FFFFFFFF,0,0,0,0,0,0,\"Corpus\" TO A%,B%,C%,D%,E%,F%,G%,H%,I%,J%;Z%",
                 "K0%=B%",
                 "SYS\"XOS_DynamicArea\",&2,K0%+&10 TO A%,B%,C%,D%,E%,F%,G%,H%,I%,J%;Z%",
-                "BPUT#O%,\"2\"+FNz(A%,Z%)+FNr(\"r2\",C%,Z%)+FNg(Z%,1,\"v\")+FNe(A%,Z%)",
+                "BPUT#O%,\"2\";",
+                "BPUT#O%,FNq(\"r0\",A%,Z%,1);",
+                "BPUT#O%,FNq(\"r2\",C%,Z%,0);",
+                "BPUT#O%,FNg(Z%,1,\"v\");",
+                "BPUT#O%,FNe(A%,Z%)",
+                "DIM K1% 7:PROCfill(K1%,8)",
+                "X%=K1%+&1:X%?0=&1:X%?1=&2:X%?2=&3:X%?3=&4:X%?4=&5:X%?5=&61:X%?6=&62",
+                "SYS\"XOS_ConvertHex2\",&41,K1%,&8 TO A%,B%,C%,D%,E%,F%,G%,H%,I%,J%;Z%",
+                "BPUT#O%,\"3\";",
+                "BPUT#O%,FNq(\"r0-buffer\",A%-K1%,Z%,1);",
+                "BPUT#O%,FNq(\"r1-area\",B%-K0%,Z%,0);",
+                "BPUT#O%,FNb(\"$buffer+&1:3\",K1%+&1,3,Z%,0);",
+                "BPUT#O%,FNb(\"r0:2\",A%,2,Z%,1);",
+                "BPUT#O%,FNe(A%,Z%)",
+            ]
+        );
+        let pointed =
+            parse_scenarios("scenario two\nblock out 8\ncall X\nshow $out+&4@out r2@out\n")
+                .unwrap();
+        let mut text = Vec::new();
+        scenario_lines(&pointed[0], &mut text).unwrap();
+        assert_eq!(
+            text[4..6],
+            [
+                "BPUT#O%,FNw(\"$out+&4@out\",K0%+&4,K0%,Z%,0);",
+                "BPUT#O%,FNw(\"r2@out\",C%,K0%,Z%,1);",
             ]
         );
         let image = harness_program(&scenarios).unwrap();
@@ -831,10 +981,48 @@ mod tests {
         );
     }
 
-    /// The streams of `recorded`: its text and its registers' bytes.
+    #[test]
+    fn a_scenario_whose_fixture_is_ours_is_left_out_of_the_harness() {
+        let scenarios = parse_scenarios(
+            "scenario theirs\ncall X\nshow v\nscenario mine ours\ncall Y\nshow v\n",
+        )
+        .unwrap();
+        let image = harness_program(&scenarios).unwrap();
+        let holds = |name: &[u8]| image.windows(name.len()).any(|w| w == name);
+        assert!(holds(b"scenario theirs"));
+        assert!(!holds(b"scenario mine"), "never run on genuine RISC OS");
+    }
+
+    #[test]
+    fn a_write_longer_than_a_line_holds_runs_on_to_the_next() {
+        let bytes = (0..20).fold(String::new(), |mut text, n| {
+            let _ = write!(text, " b={n}");
+            text
+        });
+        let scenarios =
+            parse_scenarios(&format!("scenario long\nblock b 32\nwrite $b{bytes}\n")).unwrap();
+        let mut text = Vec::new();
+        scenario_lines(&scenarios[0], &mut text).unwrap();
+        assert_eq!(text.len(), 4, "the scenario, the block and two lines");
+        assert!(text[3].starts_with("X%=K0%:X%?16=&10:"), "{}", text[3]);
+    }
+
+    #[test]
+    fn shown_memory_is_what_lies_between_the_unwritten_bytes() {
+        assert_eq!(
+            memory_streams(
+                "1 r0=&04030201 $b+&4:3=414243 v=0\n2 r1:6=0D0AEEEE00EE error=&000001E4\n"
+            ),
+            [b"ABC".to_vec(), vec![13, 10], vec![0]]
+        );
+    }
+
+    /// The streams of `recorded`: its text, its registers' bytes and the
+    /// memory it shows.
     fn streams(recorded: &str) -> Vec<Vec<u8>> {
         let mut streams = vec![recorded.as_bytes().to_vec()];
         streams.extend(register_streams(recorded));
+        streams.extend(memory_streams(recorded));
         streams
     }
 

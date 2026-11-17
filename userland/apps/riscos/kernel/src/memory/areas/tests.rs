@@ -78,6 +78,7 @@ fn an_area_is_made_grown_and_answered_for() {
     assert_eq!(
         info.handler,
         Some(Handler {
+            bits: Bits::Bit32,
             code: HANDLER,
             workspace: made.base
         }),
@@ -1659,4 +1660,135 @@ fn the_areas_one_session_may_hold_are_bounded() {
     );
     memory.remove_area(0x100, &mut guest).unwrap();
     assert!(memory.create_area(&request(0, 0), &mut guest).is_ok());
+}
+
+#[test]
+fn reserved_pages_are_marked_kept_through_use_and_refused_twice() {
+    let mut memory = shared();
+    let page = memory
+        .contiguous_free(2, 0, 0, u64::from(u32::MAX))
+        .unwrap();
+    assert_eq!(memory.reserve_pages(page, 2, true), Ok(()));
+    assert_eq!(
+        memory.page_map(page).map(|(_, flags)| flags & RESERVED),
+        Some(RESERVED)
+    );
+    assert_eq!(
+        memory.reserve_pages(page + 1, 1, true),
+        Err(ReserveError::Reserved),
+        "one of them is reserved"
+    );
+    assert_eq!(
+        memory.contiguous_free(1, 0, 0, u64::from(u32::MAX)),
+        Some(page + 2),
+        "never recommended"
+    );
+    assert_eq!(
+        memory.reserve_pages(page, 0, true),
+        Ok(()),
+        "an empty range"
+    );
+    let past = memory.ceiling_pages();
+    assert_eq!(
+        memory.reserve_pages(past, 1, true),
+        Err(ReserveError::Range)
+    );
+    assert_eq!(
+        memory.reserve_pages(u32::MAX, 2, false),
+        Err(ReserveError::Range)
+    );
+    assert_eq!(memory.reserve_pages(page, 2, false), Ok(()));
+    assert_eq!(
+        memory.reserve_pages(page, 2, false),
+        Ok(()),
+        "released twice"
+    );
+    assert!(!memory.page_reserved(page));
+}
+
+#[test]
+fn a_recommendation_keeps_to_its_alignment_and_physical_range() {
+    let memory = shared();
+    let any = u64::from(u32::MAX);
+    let aligned = memory.contiguous_free(1, 20, 0, any).unwrap();
+    assert_eq!(aligned % 256, 0, "a megabyte boundary");
+    let from = memory.contiguous_free(3, 0, 0x40_0000, any).unwrap();
+    assert!(from >= 0x400, "at or past 4 MiB");
+    assert_eq!(
+        memory.contiguous_free(1, 0, 0x40_0000, 0x40_0FFE),
+        None,
+        "no whole page lies in the range"
+    );
+    assert_eq!(
+        memory.contiguous_free(1, 0, 0x40_0000, 0x40_0FFF),
+        Some(0x400)
+    );
+    assert_eq!(
+        memory.contiguous_free(1, 0, 1 << 32, u64::MAX),
+        None,
+        "no page past 4 GiB"
+    );
+}
+
+#[test]
+fn a_reserved_page_is_taken_only_by_a_handler_saying_so_and_locked_only_knowingly() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let page = memory
+        .contiguous_free(1, 0, 0, u64::from(u32::MAX))
+        .unwrap();
+    memory.reserve_pages(page, 1, true).unwrap();
+    let specific = Create {
+        flags: AreaFlags::NEEDS_SPECIFIC_PAGES,
+        ..request(0, 0x10_0000)
+    };
+    let made = memory.create_area(&specific, &mut guest).unwrap();
+    guest.name_pages = Vec::from([page]);
+    let number = i32::try_from(made.number).unwrap();
+    assert_eq!(
+        memory.change_area(number, 0x1000, &mut guest),
+        Err(Failure {
+            error: AreaError::PageReserved,
+            moved: 0
+        })
+    );
+    guest.take_reserved = true;
+    assert_eq!(memory.change_area(number, 0x1000, &mut guest), Ok(0x1000));
+    memory.change_area(number, -0x1000, &mut guest).unwrap();
+    memory.remove_area(made.number, &mut guest).unwrap();
+    assert!(
+        memory.page_reserved(page),
+        "the reservation outlasts the claim"
+    );
+    let pool = pool(&mut memory, &mut guest);
+    let named = i32::try_from(page).unwrap();
+    assert_eq!(
+        memory.pool_physical(pool.number, &[physical(0, named, 1 << 15)], &mut guest),
+        Err((AreaError::PageReserved, 0)),
+        "a lock not knowing it is reserved"
+    );
+    let lock = 1 << 15 | RESERVED;
+    memory
+        .pool_physical(pool.number, &[physical(0, named, lock)], &mut guest)
+        .unwrap();
+    memory
+        .pool_physical(pool.number, &[physical(0, -1, 0)], &mut guest)
+        .unwrap();
+    memory
+        .pool_physical(pool.number, &[physical(1, named, 0)], &mut guest)
+        .unwrap();
+    memory
+        .pool_physical(pool.number, &[physical(2, -2, 0)], &mut guest)
+        .unwrap();
+    let mut queries = [PageQuery {
+        slot: Some(2),
+        ..PageQuery::default()
+    }];
+    memory.pool_query(pool.number, &mut queries).unwrap();
+    assert!(
+        queries[0]
+            .page
+            .is_some_and(|chosen| !memory.page_reserved(chosen)),
+        "a page the kernel chooses is one no one reserved"
+    );
 }

@@ -1,0 +1,249 @@
+# MessageTrans (plans/RISCOS-EMULATOR.md §4.6) on a message file the
+# scenario registers with ResourceFS: how a token is matched, where a
+# value ends, what a lookup substitutes, and the order it searches in.
+# What a lookup finds is recorded by its length, never its text.
+
+scenario msgtrans-lookups-by-length
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+block out 64
+call XMessageTrans_Lookup r0=$desc r1="Plain" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="A#B" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="#Comment" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Cr" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Nul" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Pct" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="TokX" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Tok" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Alt1" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Alt2" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Next" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Line" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Last" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Missing:dflt" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Escape:Mine" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Plain:dflt" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Nowhere" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Par" r2=$out r3=64 r4="zzz"
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Par" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Pct" r2=0
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Plain" r2=$out r3=2
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="Plain" r2=$out r3=0
+show v
+block tok 8
+write $tok s="Plain" b=0
+call XMessageTrans_Lookup r0=$desc r1=$tok r2=0
+show r1-tok r3 v
+call XMessageTrans_GSLookup r0=$desc r1=$tok r2=0
+show r1-tok r3 v
+call XMessageTrans_GSLookup r0=$desc r1=$tok r2=$out r3=64
+show r1-tok r3 v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+
+scenario msgtrans-escapes ours
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+block out 64
+call XMessageTrans_Lookup r0=$desc r1="Esc" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="EscSpace" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="EscLine" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="EscEsc" r2=$out r3=64
+show r3 v
+call XMessageTrans_Lookup r0=$desc r1="EscHigh" r2=$out r3=64
+show r3 v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+
+scenario msgtrans-tokens-enumerated
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+block name 32
+call XMessageTrans_EnumerateTokens r0=$desc r1="P*" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="P*" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="*a*" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="*a*" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="Alt?" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="Alt?" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="T*" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="T*" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="*" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="*" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="?" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="?" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_EnumerateTokens r0=$desc r1="Q*" r2=$name r3=32 r4=0
+show r3 v
+keep r4 next
+call XMessageTrans_EnumerateTokens r0=$desc r1="Q*" r2=$name r3=32 r4=$next
+show r3 v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+
+scenario msgtrans-menus
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+block def 32
+write $def+0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&0 b=&7 b=&2 b=&7 b=&0 b=&2C b=&0 b=&50 b=&63 b=&74 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&7 b=&0
+block menu256 256
+call XMessageTrans_MakeMenus r0=$desc r1=$def r2=$menu256 r3=256
+show r2-menu256 r3 v
+block menu52 256
+call XMessageTrans_MakeMenus r0=$desc r1=$def r2=$menu52 r3=52
+show r2-menu52 r3 v
+block menu51 256
+call XMessageTrans_MakeMenus r0=$desc r1=$def r2=$menu51 r3=51
+show r2-menu51 r3 v
+block menu28 256
+call XMessageTrans_MakeMenus r0=$desc r1=$def r2=$menu28 r3=28
+show r2-menu28 r3 v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+
+scenario msgtrans-open-twice
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+call XMessageTrans_CloseFile r0=$desc
+show v
+
+scenario msgtrans-error-lookup
+block files 220
+write $files+0 b=&D4 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&AF b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&73 b=&67 b=&0 b=&0 b=&0
+write $files+32 b=&B3 b=&0 b=&0 b=&0 b=&50 b=&6C b=&61 b=&69 b=&6E b=&3A b=&61 b=&62 b=&63 b=&A b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1 b=&62 b=&A b=&45 b=&73 b=&63 b=&53 b=&70 b=&61 b=&63 b=&65 b=&3A
+write $files+64 b=&61 b=&1B b=&20 b=&62 b=&A b=&45 b=&73 b=&63 b=&4C b=&69 b=&6E b=&65 b=&3A b=&61 b=&1B b=&A b=&62 b=&A b=&45 b=&73 b=&63 b=&45 b=&73 b=&63 b=&3A b=&61 b=&1B b=&1B b=&62 b=&A b=&45 b=&73
+write $files+96 b=&63 b=&48 b=&69 b=&67 b=&68 b=&3A b=&61 b=&1B b=&FF b=&62 b=&A b=&41 b=&23 b=&42 b=&3A b=&68 b=&61 b=&73 b=&68 b=&A b=&23 b=&43 b=&6F b=&6D b=&6D b=&65 b=&6E b=&74 b=&3A b=&6E b=&6F b=&A
+write $files+128 b=&43 b=&72 b=&3A b=&78 b=&D b=&79 b=&A b=&4E b=&75 b=&6C b=&3A b=&78 b=&0 b=&79 b=&A b=&50 b=&63 b=&74 b=&3A b=&31 b=&30 b=&30 b=&25 b=&25 b=&A b=&50 b=&61 b=&72 b=&3A b=&3C b=&25 b=&30
+write $files+160 b=&3E b=&A b=&54 b=&6F b=&6B b=&3F b=&3A b=&77 b=&69 b=&6C b=&64 b=&A b=&41 b=&6C b=&74 b=&31 b=&2F b=&41 b=&6C b=&74 b=&32 b=&3A b=&61 b=&6C b=&74 b=&73 b=&A b=&4E b=&65 b=&78 b=&74 b=&A
+write $files+192 b=&4C b=&69 b=&6E b=&65 b=&3A b=&73 b=&70 b=&6C b=&69 b=&74 b=&A b=&4C b=&61 b=&73 b=&74 b=&3A b=&65 b=&6E b=&64 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+block desc 20
+block filebuf 512
+call XMessageTrans_OpenFile r0=$desc r1="Resources:$.TairixMsg" r2=$filebuf
+show v
+block err 64
+write $err w=&1234 s="Plain" b=0
+call XMessageTrans_ErrorLookup r0=$err r1=$desc r2=0
+show v
+block into 64
+call XMessageTrans_ErrorLookup r0=$err r1=$desc r2=$into r3=64
+show r0-into v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v

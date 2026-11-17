@@ -1,0 +1,156 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario event-counts-from-start
+1 r1=&00000000 v=0
+2 r1=&00000001 v=0
+3 r1=&00000000 v=0
+4 r1=&00000001 v=0
+5 r1=&00000000 v=0
+6 r1=&00000001 v=0
+7 r1=&00000000 v=0
+8 r1=&00000001 v=0
+9 r1=&00000000 v=0
+10 r1=&00000001 v=0
+11 r1=&00000000 v=0
+12 r1=&00000001 v=0
+13 r1=&00000000 v=0
+14 r1=&00000001 v=0
+15 r1=&00000000 v=0
+16 r1=&00000001 v=0
+17 r1=&00000000 v=0
+18 r1=&00000001 v=0
+19 r1=&00000000 v=0
+20 r1=&00000001 v=0
+21 r1=&00000000 v=0
+22 r1=&00000001 v=0
+23 r1=&00000000 v=0
+24 r1=&00000001 v=0
+25 r1=&00000000 v=0
+26 r1=&00000001 v=0
+27 r1=&00000000 v=0
+28 r1=&00000001 v=0
+29 r1=&00000000 v=0
+30 r1=&00000001 v=0
+31 r1=&00000000 v=0
+32 r1=&00000001 v=0
+33 r1=&00000000 v=0
+34 r1=&00000001 v=0
+35 r1=&00000000 v=0
+36 r1=&00000001 v=0
+37 r1=&00000000 v=0
+38 r1=&00000001 v=0
+39 r1=&00000000 v=0
+40 r1=&00000001 v=0
+41 r1=&00000000 v=0
+42 r1=&00000001 v=0
+43 r1=&00000000 v=0
+44 r1=&00000001 v=0
+45 r1=&00000000 v=0
+46 r1=&00000001 v=0
+47 r1=&00000000 v=0
+48 r1=&00000001 v=0
+49 r1=&00000000 v=0
+50 r1=&00000001 v=0
+51 r1=&00000000 v=0
+52 r1=&00000001 v=0
+53 r1=&00000000 v=0
+54 r1=&00000001 v=0
+55 r1=&000000FF v=0
+56 r1=&000000FF v=0
+57 r1=&000000FF v=0
+58 r1=&000000FF v=0
+59 r1=&000000FF v=0
+60 r1=&000000FF v=0
+61 r1=&000000FF v=0
+62 r1=&000000FF v=0
+63 r1=&000000FF v=0
+64 r1=&000000FF v=0
+65 r1=&000000FF v=0
+66 r1=&000000FF v=0
+67 r1=&000000FF v=0
+68 r1=&000000FF v=0
+69 r1=&000000FF v=0
+70 r1=&000000FF v=0
+71 r1=&000000FF v=0
+72 r1=&000000FF v=0
+73 r1=&000000FF v=0
+74 r1=&000000FF v=0
+
+scenario event-disabled-at-zero
+1 r1=&00000000 v=0
+2 r1=&000000FF v=0
+3 r1=&000000FF v=0
+4 r1=&000000FF v=0
+
+scenario timed-call-intervals
+2 v=1 error=&000001E5
+3 v=0
+4 v=0
+5 v=0
+6 v=0
+7 v=0
+8 v=0
+9 v=0
+10 v=0
+11 v=0
+12 v=1 error=&000001E5
+13 v=0
+14 v=1 error=&000001E5
+15 v=0
+16 v=1 error=&000001E5
+17 v=0
+18 v=0
+19 v=0
+20 v=0
+21 v=0
+22 v=0
+23 v=0
+24 v=1 error=&000001E5
+25 v=0
+26 v=1 error=&000001E5
+27 v=0
+28 v=0
+
+scenario delink-and-relink
+2 v=0
+3 v=0
+4 r1=&00000024 v=0 $buf:4=21000000 $buf+&4@code=&00000004 $buf+&8:4=22220000 $buf+&C:4=21000000 $buf+&10@code=&00000000 $buf+&14:4=11110000 $buf+&18:4=FFFFFFFF
+5 v=0
+6 v=0
+7 v=0
+8 v=0
+9 r1=&00000009 v=1 $small13:16=FFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEE error=&000001E4
+10 r1=&00000030 v=0 $rest13:4=21000000 $rest13+&4@code=&00000000 $rest13+&8:4=33330000 $rest13+&C:4=FFFFFFFF
+11 v=0
+12 v=0
+13 v=0
+14 v=0
+15 r1=&00000008 v=1 $small12:16=FFFFFFFFEEEEEEEEEEEEEEEEEEEEEEEE error=&000001E4
+16 r1=&00000030 v=0 $rest12:4=21000000 $rest12+&4@code=&00000000 $rest12+&8:4=33330000 $rest12+&C:4=FFFFFFFF
+17 v=0
+18 v=0
+19 v=0
+20 r1=&FFFFFFFD v=1 $small1:16=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE error=&000001E4
+21 r1=&00000030 v=0 $rest1:4=21000000 $rest1+&4@code=&00000000 $rest1+&8:4=33330000 $rest1+&C:4=FFFFFFFF
+22 v=0
+23 v=0
+24 v=0
+25 r1=&FFFFFFFC v=1 $small0:16=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE error=&000001E4
+26 r1=&00000030 v=0 $rest0:4=21000000 $rest0+&4@code=&00000000 $rest0+&8:4=33330000 $rest0+&C:4=FFFFFFFF
+27 v=0
+28 v=0
+
+scenario vector-numbers-claimed
+1 v=0
+2 v=0
+3 v=0
+4 v=0
+5 v=0
+6 v=0
+7 v=1 error=&000001A0
+8 v=1 error=&000001A1
+9 v=1 error=&000001A0
+10 v=1 error=&000001A1

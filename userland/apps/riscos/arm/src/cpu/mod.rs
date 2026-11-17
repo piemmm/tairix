@@ -547,6 +547,11 @@ impl Cpu {
         self.pc = self.aligned_pc(self.pc);
     }
 
+    /// Replaces the condition flags N, Z, C and V with `flags`' own.
+    pub const fn set_nzcv(&mut self, flags: u32) {
+        self.cpsr = (self.cpsr & !psr::NZCV) | (flags & psr::NZCV);
+    }
+
     /// The current mode's SPSR; User and System mode have none.
     #[must_use]
     pub fn spsr(&self) -> Option<u32> {
@@ -558,6 +563,32 @@ impl Cpu {
     pub fn enter(&mut self, exception: Exception, return_address: u32) {
         self.take(exception, return_address);
         self.pc = self.next;
+    }
+
+    /// The system control register `opc1, CRn, CRm, opc2` as a privileged
+    /// `MRC` reads it, if the processor has it: how an operating system
+    /// learns the processor from its ID registers.
+    #[must_use]
+    pub fn system_register(&self, register: [u8; 4]) -> Option<u32> {
+        match self.cp15.read(register, true) {
+            crate::cp15::Outcome::Done(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The processor's caches at `level`, from zero, as its programmers'
+    /// model describes them; none past the last.
+    #[must_use]
+    pub const fn cache(&self, level: u32) -> Option<crate::SplitCache> {
+        self.cp15.cache(level)
+    }
+
+    /// The last data abort's fault status and address, as the system control
+    /// coprocessor records them: what an abort handler reads to find the
+    /// access that failed.
+    #[must_use]
+    pub const fn data_fault(&self) -> (u32, u32) {
+        self.cp15.last_data_fault()
     }
 
     /// Asserts or releases the interrupt line.
@@ -657,11 +688,6 @@ impl Cpu {
 
     /// Writes the 26-bit PSR bits R15's layout holds in `r15`: the flags in
     /// User mode, and I, F and the mode too in a privileged one.
-    /// Writes the flags a transfer to R15 carries: NZCV from `value`.
-    const fn set_nzcv(&mut self, value: u32) {
-        self.cpsr = (self.cpsr & !psr::NZCV) | (value & psr::NZCV);
-    }
-
     fn write_r15_psr(&mut self, r15: u32) {
         if !self.mode.privileged() {
             self.set_nzcv(r15);

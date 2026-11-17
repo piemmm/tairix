@@ -1,0 +1,47 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario gstrans-whole
+1 r0-text=&0000000A r2=&00000005 $buf:6=610D6241630D c=0 v=0
+2 r0-text=&00000004 r2=&00000003 $buf:6=610D6241630D c=1 v=0
+3 r0-text=&0000000A r2=&00000005 $buf:9=610D6241630DEEEEEE c=0 v=0
+4 r0-text=&0000000A r2=&00000005 $buf:6=610D6241630D c=0 v=0
+
+scenario gstrans-refused
+1 v=1 error=&000000FD
+2 r0-text=&00000006 r2=&00000005 $buf:6=3C6F6F70730D c=0 v=0
+
+scenario gsinit-and-gsread
+1 r0-text=&00000002 r1=&0000007C z=0 v=0
+2 r0-text=&00000004 r1=&0000000D c=0 v=0
+3 r0-text=&00000005 r1=&00000078 c=0 v=0
+4 r0-text=&00000006 r1=&00000020 c=0 v=0
+5 r0-text=&00000007 r1=&0000000D c=1 v=0
+6 r0-text=&00000002 r1=&0000007C z=0 v=0
+
+scenario evaluate-expression
+1 r1=&00000000 r2=&00000007 v=0
+2 r1-buf=&00000000 r2=&00000004 $buf:5=61626364EE v=0
+3 r2=&00000003 $buf:5=61626364EE v=1 error=&000001E4
+4 v=1 error=&00000169
+5 v=1 error=&00000162
+
+scenario read-unsigned
+1 r1-text=&00000003 r2=&0000001F v=0
+2 r1-text=&00000005 r2=&00000005 v=0
+3 v=1 error=&0000016B
+4 v=1 error=&0000016C
+5 v=1 error=&0000016C
+6 r1-text=&00000003 r2=&0000012C v=0
+7 v=1 error=&0000016B
+
+scenario substitute-args
+1 r2=&00000011 $out:20=7874776F796F6E657A6F6E652074776F0DEEEEEE v=0
+2 r2=&00000004 $out:8=7874776F796F6E65 v=1 error=&000001E4
+
+scenario read-args
+1 r3=&00000027 $out@out=&0000000C $out+&4:4=FFFFFF7F $out+&8@out=&00000011 $out+&C:12=66696C6500000C000000EEEE v=0
+2 v=1 error=&000001E4
+3 v=1 error=&000001EB

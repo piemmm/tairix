@@ -16,13 +16,10 @@ use tairix_obey::gstrans::{gstrans, Flags, Read, Reader};
 use tairix_obey::number::{read_unsigned, Reading};
 use tairix_obey::readargs::read_args;
 use tairix_obey::vars::{read_expanded, set, Kind, Request};
-use tairix_obey::{Answer, Budget, Error, Store, Value, Variables};
+use tairix_obey::{Answer, Budget, Error, Store, Value, Variables, UNWRITTEN};
 
 const CASES: &str = include_str!("riscos5/cases.txt");
 const ANSWERS: &str = include_str!("riscos5/answers.txt");
-
-/// What the machine leaves in each byte of a buffer it does not write.
-const UNWRITTEN: u8 = 0xEE;
 
 /// Where the machine's Obey files were.
 const OBEY_DIR: &[u8] = b"HostFS:$";

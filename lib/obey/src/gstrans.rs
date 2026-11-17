@@ -84,6 +84,16 @@ enum Reference {
     Expanded,
 }
 
+/// A reading's progress, given up between `OS_GSRead` calls by a caller that
+/// cannot keep the reader itself: where it is in its text, and the values it
+/// is part way through delivering.
+pub struct Progress {
+    at: usize,
+    quoted: bool,
+    first: u8,
+    frames: Vec<Frame>,
+}
+
 /// A string being read: begun as `OS_GSInit` begins it, and continued, one
 /// character a call, as `OS_GSRead` continues it.
 pub struct Reader<'t> {
@@ -110,6 +120,31 @@ impl<'t> Reader<'t> {
             quoted,
             first,
             frames: Vec::new(),
+        }
+    }
+
+    /// The reading's progress, given up so a later call can resume it.
+    #[must_use]
+    pub fn into_progress(self) -> Progress {
+        Progress {
+            at: self.at,
+            quoted: self.quoted,
+            first: self.first,
+            frames: self.frames,
+        }
+    }
+
+    /// A reading of `text` under `flags` resumed from `progress`, which a
+    /// reading of the same text and flags gave up.
+    #[must_use]
+    pub fn resume(text: &'t [u8], flags: Flags, progress: Progress) -> Self {
+        Self {
+            text,
+            at: progress.at.min(text.len() + 1),
+            flags,
+            quoted: progress.quoted,
+            first: progress.first,
+            frames: progress.frames,
         }
     }
 

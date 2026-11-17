@@ -1,0 +1,169 @@
+# The filing SWIs given a name in a directory that does not exist and a
+# handle never opened: what genuine RISC OS answers, which is what the
+# filing vectors answer where no filing system claims them. What makes an
+# object is left out: where the directory is missing, the machine's own
+# filing system gives its error, not FileSwitch.
+
+scenario no-object-by-name
+call XOS_File r0=1 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=2 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=3 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=4 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=9 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=12 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=14 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=16 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=18 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=24 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=255 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show v
+call XOS_File r0=5 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=6 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=13 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=15 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=17 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=20 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=21 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=22 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=23 r1="TairixNoDir.TairixNoFile" r2=0 r3=0 r4=0 r5=0
+show r0 v
+call XOS_File r0=25 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_File r0=26 r1="TairixNoDir.TairixNoFile"
+show v
+
+scenario made-errors
+call XOS_File r0=19 r1="TairixX" r2=&0
+show v
+call XOS_File r0=19 r1="TairixX" r2=&1
+show v
+call XOS_File r0=19 r1="TairixX" r2=&2
+show v
+call XOS_File r0=19 r1="TairixX" r2=&3
+show v
+call XOS_File r0=19 r1="TairixX" r2=&100
+show v
+call XOS_File r0=19 r1="TairixX" r2=&7
+show v
+
+scenario no-object-to-open
+call XOS_Find r0=&40 r1="TairixNoDir.TairixNoFile"
+show r0 v
+call XOS_Find r0=&C0 r1="TairixNoDir.TairixNoFile"
+show r0 v
+call XOS_Find r0=&43 r1="TairixNoDir.TairixNoFile"
+show r0 v
+call XOS_Find r0=&48 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&4C r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&C8 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&CC r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&80 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&88 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&10 r1="TairixNoDir.TairixNoFile"
+show v
+call XOS_Find r0=&3F r1="TairixNoDir.TairixNoFile"
+show v
+
+scenario no-handle-open
+call XOS_BGet r1=250
+show v
+call XOS_BPut r0=65 r1=250
+show v
+call XOS_Args r0=0 r1=250
+show v
+call XOS_Args r0=1 r1=250
+show v
+call XOS_Args r0=2 r1=250
+show v
+call XOS_Args r0=5 r1=250
+show v
+call XOS_Args r0=255 r1=250
+show v
+call XOS_Args r0=254 r1=250
+show r0 v
+call XOS_Args r0=100 r1=250
+show v
+call XOS_Find r0=0 r1=250
+show v
+call XOS_GBPB r0=1 r1=250 r2=0 r3=4
+show v
+call XOS_GBPB r0=4 r1=250 r2=0 r3=4
+show v
+call XOS_GBPB r0=9 r1="TairixNoDir" r2=0 r3=1 r4=0 r5=64 r6=0
+show v
+call XOS_GBPB r0=100 r1=250
+show v
+call XOS_FSControl r0=21 r1=250
+show r1 r2 v
+
+scenario no-object-to-control
+call XOS_FSControl r0=0 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=1 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=4 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=5 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=6 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=7 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=8 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=9 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=25 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=26 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=26 r1="TairixNoDir.TairixNoFile" r2="TairixNoDir.TairixTo" r3=0
+show v
+call XOS_FSControl r0=26 r1="TairixNoDir.TairixNoFile" r2="TairixNoDir.TairixTo" r3=&80
+show v
+call XOS_FSControl r0=32 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=55 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=56 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=57 r1="TairixNoDir.TairixNoFile" r2=0 r3=0
+show v
+call XOS_FSControl r0=14 r1="TairixNoFS"
+show v
+call XOS_FSControl r0=13 r1="TairixNoFS"
+show r2 v
+call XOS_FSControl r0=29
+show v
+call XOS_FSControl r0=59
+show v
+call XOS_FSControl r0=60
+show v
+call XOS_FSControl r0=255
+show v
+call XOS_CLI r0="TairixNoSuchCommand"
+show v

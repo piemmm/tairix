@@ -103,6 +103,20 @@ impl Slots {
         self.bit26 > 0
     }
 
+    /// The spaces of the slots whose programs are of `bits`.
+    pub(super) fn spaces(&self, bits: Bits) -> Result<Vec<Space>, MemoryError> {
+        let mut spaces = Vec::new();
+        spaces.try_reserve_exact(self.entries.len())?;
+        spaces.extend(
+            self.entries
+                .iter()
+                .flatten()
+                .filter(|state| state.bits == bits)
+                .map(|state| state.space),
+        );
+        Ok(spaces)
+    }
+
     /// The highest top of any slot.
     pub(super) fn highest_top(&self) -> u32 {
         self.entries

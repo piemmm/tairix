@@ -1,0 +1,976 @@
+# The kernel's SWIs whose answers depend only on what they are given: CRCs,
+# sorting, the access privileges by number, errors handed back, calls made
+# through a vector, and the refusals of the vector and environment calls.
+
+scenario crc
+block data 16
+write $data s="123456789"
+call XOS_CRC r0=0 r1=$data r2=$data+&9 r3=1
+show r0 v
+call XOS_CRC r0=&FFFF r1=$data r2=$data+&9 r3=1
+show r0 v
+call XOS_CRC r0=0 r1=$data r2=$data+&8 r3=2
+show r0 v
+call XOS_CRC r0=0 r1=$data r2=$data r3=1
+show r0 v
+
+scenario heap-sort-integers
+block list 32
+write $list w=5 w=-3 w=12 w=0 w=-3 w=7
+call XOS_HeapSort r0=6 r1=$list r2=0
+show $list:24 v
+write $list w=5 w=&80000000 w=12 w=0 w=-3 w=7
+call XOS_HeapSort r0=6 r1=$list r2=1
+show $list:24 v
+
+scenario access-privileges
+# The privileges every RISC OS 5 core has; the ARMv7 profile has more,
+# which the IOMD machine the corpus is recorded on lacks.
+call XOS_Memory r0=17 r1=0
+show r1 r2 v
+call XOS_Memory r0=17 r1=1
+show r1 r2 v
+call XOS_Memory r0=17 r1=2
+show r1 r2 v
+call XOS_Memory r0=17 r1=3
+show r1 r2 v
+call XOS_Memory r0=18 r1=&3F r2=&3F
+show r0 r2 v
+call XOS_Memory r0=18 r1=&4 r2=&3F
+show r0 r2 v
+call XOS_Memory r0=18 r1=&40 r2=&40
+show v
+
+scenario memory-reasons-and-flags
+# Which reasons read or ignore the flags above the reason, and which refuse
+# them, given a block where any writes one: reason 7 writes the physical
+# memory arrangement table, 64 KiB on the reference machine.
+block blk 65536
+call XOS_Memory r0=&106 r1=$blk r2=0
+show v
+call XOS_Memory r0=&107 r1=$blk r2=0
+show v
+call XOS_Memory r0=&108 r1=$blk r2=0
+show v
+call XOS_Memory r0=&109 r1=$blk r2=0
+show v
+call XOS_Memory r0=&10A r1=$blk r2=0
+show v
+call XOS_Memory r0=&10C r1=$blk r2=0
+show v
+call XOS_Memory r0=&10D r1=$blk r2=0
+show v
+call XOS_Memory r0=&10F r1=$blk r2=0
+show v
+call XOS_Memory r0=&110 r1=$blk r2=0
+show v
+call XOS_Memory r0=&111 r1=$blk r2=0
+show v
+call XOS_Memory r0=&112 r1=$blk r2=0
+show v
+call XOS_Memory r0=&114 r1=$blk r2=0
+show v
+call XOS_Memory r0=&115 r1=$blk r2=0
+show v
+call XOS_Memory r0=&118 r1=$blk r2=0
+show v
+call XOS_Memory r0=&141 r1=$blk r2=0
+show v
+call XOS_Memory r0=8 r1=$blk r2=0
+show v
+call XOS_Memory r0=16 r1=$blk r2=0
+show v
+call XOS_Memory r0=64 r1=$blk r2=0
+show v
+call XOS_Memory r0=25 r1=0
+show v
+call XOS_Memory r0=30 r1=0
+show v
+call XOS_Memory r0=&FF r1=0
+show v
+call XOS_Memory r0=20 r1=2
+show v
+
+scenario compatibility-page-state ours
+# The IOMD build keeps zero page at zero and so has no compatibility page;
+# the 32-bit profile has one, which a program may remove and restore.
+call XOS_Memory r0=20 r1=0
+show r1 v
+call XOS_Memory r0=20 r1=-1
+show r1 v
+call XOS_Memory r0=20 r1=1
+show r1 v
+call XOS_Memory r0=20 r1=-1
+show r1 v
+
+scenario generate-error
+block err 16
+write $err w=&1234 s="Ours" b=0
+call XOS_GenerateError r0=$err
+show r0-err v
+call XOS_ReadEscapeState
+show c v
+
+scenario call-a-vector
+call XOS_CallAVector r0=1 r1=&3C r2=0 r9=6
+show r1 v
+call XOS_Byte r0=1 r1=0
+show r1 v
+
+scenario unclaimed-calls
+call XOS_ServiceCall r1=&7FFF r2=&12
+show r1 r2 v
+call XOS_UpCall r0=&7FFF r1=&34
+show r0 r1 v
+
+scenario vector-refusals
+call XOS_Claim r0=&3F r1=&8000 r2=0
+show v
+call XOS_Claim r0=&100 r1=&8000 r2=0
+show v
+call XOS_Release r0=6 r1=&8000 r2=&1234
+show v
+call XOS_AddToVector r0=&FFFF r1=&8000 r2=0
+show v
+
+scenario environment-refusals
+call XOS_ChangeEnvironment r0=20 r1=0 r2=0 r3=0
+show v
+call XOS_ReadDefaultHandler r0=20
+show v
+
+scenario cmos-size
+call XOS_NVMemory r0=0
+show r1 v
+
+scenario read-sys-info-display
+call XOS_ReadSysInfo r0=1
+show r0 r1 r2 v
+
+# The machine's controllers are none the PRM lists, so unspecified, and it
+# has no machine ID.
+scenario read-sys-info-chips ours
+call XOS_ReadSysInfo r0=2
+show r0 r1 r2 r3 r4 v
+
+# The system heap's and RMA's bases, and application space's limit.
+scenario kernel-area-bases
+call XOS_DynamicArea r0=2 r1=0
+show r3 v
+call XOS_DynamicArea r0=2 r1=1
+show r3 v
+call XOS_ReadDynamicArea r0=-1
+show r0 r2 v
+
+# What a CMOS reset writes where the kernel reads a setting; nothing for
+# the station number and the checksum.
+scenario cmos-reset-values
+call XOS_NVMemory r0=6 r1=&00
+show r2
+call XOS_NVMemory r0=6 r1=&0A
+show r2
+call XOS_NVMemory r0=6 r1=&0B
+show r2
+call XOS_NVMemory r0=6 r1=&0C
+show r2
+call XOS_NVMemory r0=6 r1=&0D
+show r2
+call XOS_NVMemory r0=6 r1=&0E
+show r2
+call XOS_NVMemory r0=6 r1=&0F
+show r2
+call XOS_NVMemory r0=6 r1=&10
+show r2
+call XOS_NVMemory r0=6 r1=&1D
+show r2
+call XOS_NVMemory r0=6 r1=&81
+show r2
+call XOS_NVMemory r0=6 r1=&84
+show r2
+call XOS_NVMemory r0=6 r1=&86
+show r2
+call XOS_NVMemory r0=6 r1=&91
+show r2
+call XOS_NVMemory r0=6 r1=&94
+show r2
+call XOS_NVMemory r0=6 r1=&C2
+show r2
+call XOS_NVMemory r0=6 r1=&C3
+show r2
+call XOS_NVMemory r0=6 r1=&EF
+show r2
+
+# The station number is not written by OS_Byte 162.
+scenario cmos-station-kept
+call XOS_Byte r0=161 r1=0
+keep r2 station
+call XOS_Byte r0=162 r1=0 r2=&7B
+call XOS_Byte r0=161 r1=0
+show r2-station
+call XOS_Byte r0=162 r1=0 r2=$station
+
+# OS_UnusedSWI given the handler there is and an R12 of its own.
+scenario unused-swi-workspace
+call XOS_ChangeEnvironment r0=12 r1=0 r2=0 r3=0
+keep r1 handler
+keep r2 workspace
+call XOS_UnusedSWI r0=$handler r2=&1234
+show v
+call XOS_ChangeEnvironment r0=12 r1=0 r2=0 r3=0
+show r1-handler r2 v
+call XOS_ChangeEnvironment r0=12 r1=$handler r2=$workspace r3=0
+show v
+
+# OS_Memory 9 reads controllers it has none of, and OS_Memory 10 turns
+# the free pool's lock on and off.
+scenario memory-9-and-10
+call XOS_Memory r0=9 r1=&0
+show v
+call XOS_Memory r0=9 r1=&1
+show v
+call XOS_Memory r0=9 r1=&100
+show v
+call XOS_Memory r0=9 r1=&101
+show v
+call XOS_Memory r0=9 r1=&200
+show v
+call XOS_Memory r0=9 r1=&201
+show v
+call XOS_Memory r0=9 r1=&300
+show v
+call XOS_Memory r0=9 r1=&301
+show v
+call XOS_Memory r0=9 r1=&400
+show v
+call XOS_Memory r0=9 r1=&401
+show v
+call XOS_Memory r0=9 r1=&500
+show v
+call XOS_Memory r0=9 r1=&501
+show v
+call XOS_Memory r0=9 r1=&600
+show v
+call XOS_Memory r0=9 r1=&601
+show v
+call XOS_Memory r0=9 r1=&700
+show v
+call XOS_Memory r0=9 r1=&701
+show v
+call XOS_Memory r0=9 r1=&800
+show v
+call XOS_Memory r0=9 r1=&801
+show v
+call XOS_Memory r0=9 r1=&900
+show v
+call XOS_Memory r0=9 r1=&901
+show v
+call XOS_Memory r0=9 r1=&2000
+show v
+call XOS_Memory r0=9 r1=&2001
+show v
+call XOS_Memory r0=9 r1=&2100
+show v
+call XOS_Memory r0=9 r1=&2101
+show v
+call XOS_Memory r0=9 r1=&2200
+show v
+call XOS_Memory r0=9 r1=&2201
+show v
+call XOS_Memory r0=9 r1=&FF00
+show v
+call XOS_Memory r0=9 r1=&FF01
+show v
+call XOS_Memory r0=10 r1=1
+show r1 v
+call XOS_Memory r0=10 r1=1
+show r1 v
+call XOS_Memory r0=10 r1=0
+show r1 v
+call XOS_Memory r0=10 r1=0
+show r1 v
+call XOS_Memory r0=&10A r1=1
+show r1 v
+call XOS_Memory r0=&10A r1=0
+show r1 v
+call XOS_Memory r0=&20A r1=0
+show v
+call XOS_Memory r0=10 r1=2
+show r1 v
+call XOS_Memory r0=10 r1=0
+show r1 v
+call XOS_Memory r0=25 r1=&300
+show v
+
+# OS_Memory 12 recommends pages and OS_Memory 23 reserves them: the
+# recommendation passes the pages reserved; all released at the end.
+scenario memory-12-and-23
+call XOS_Memory r0=12 r1=4096 r2=0
+show v
+call XOS_Memory r0=12 r1=4096 r2=20
+show v
+call XOS_Memory r0=12 r1=&10000000 r2=0
+show v
+call XOS_Memory r0=&40C r1=4096 r2=0
+show v
+call XOS_Memory r0=&10C r1=4096 r2=0
+show v
+call XOS_Memory r0=&20C r1=4096 r2=0 r4=0 r5=0 r6=-1 r7=0
+show v
+call XOS_Memory r0=&20C r1=4096 r2=0 r4=&FFFFF000 r5=0 r6=-1 r7=0
+show v
+call XOS_Memory r0=&20C r1=4096 r2=0 r4=0 r5=1 r6=-1 r7=1
+show v
+call XOS_Memory r0=12 r1=8192 r2=0
+show v
+keep r3 page
+call XOS_Memory r0=23 r1=$page r2=2
+show v
+call XOS_Memory r0=23 r1=$page r2=1
+show v
+call XOS_Memory r0=12 r1=8192 r2=0
+show r3-page v
+call XOS_Memory r0=23 r1=$page+1 r2=1
+show v
+call XOS_Memory r0=&117 r1=$page r2=2
+show v
+call XOS_Memory r0=&117 r1=$page r2=2
+show v
+call XOS_Memory r0=&217 r1=$page r2=1
+show v
+call XOS_Memory r0=23 r1=&FFFFFF r2=1
+show v
+call XOS_Memory r0=23 r1=$page r2=0
+show v
+call XOS_Memory r0=23 r1=$page r2=&7FFFFFFF
+show v
+call XOS_Memory r0=&117 r1=$page r2=1
+show v
+
+# OS_Memory 19 hands a DMA transfer's regions to its driver: joined
+# where they run on, marked where a write leaves part of a cache line.
+scenario memory-19-dma
+block infn 20
+write $infn w=&E8B90003 w=&E080000C w=&E3A02000 w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$infn r2=$infn+&C
+block outfn 16
+write $outfn w=&E040000C w=&E8A9000D w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$outfn r2=$outfn+&8
+block data 8192
+block inl 64
+write $inl w=0 w=16 w=16 w=16 w=64 w=8 w=4096 w=100 w=0 w=0
+block outl 96
+call XOS_Memory r0=19 r1=$data r2=$inl r3=$infn r4=$outl r5=$outfn
+show r2-inl r4-outl v
+show $outl:48
+block inl2 32
+write $inl2 w=0 w=16 w=0 w=0
+block outl2 32
+call XOS_Memory r0=&213 r1=$data r2=$inl2 r3=$infn r4=$outl2 r5=$outfn
+show r2-inl2 r4-outl2 v
+show $outl2:12
+call XOS_Memory r0=&613 r1=$data r2=$inl2 r3=$infn r4=$outl2 r5=0
+show r2-inl2 r4-outl2 v
+call XOS_Memory r0=&1013 r1=$data r2=$inl2 r3=$infn r4=$outl2 r5=$outfn
+show v
+block inl3 32
+write $inl3 w=0 w=0
+block outl3 32
+call XOS_Memory r0=19 r1=$data r2=$inl3 r3=$infn r4=$outl3 r5=$outfn
+show r2-inl3 r4-outl3 v
+
+# OS_Memory 0 and 64 converting pages: a page past the last refused
+# after those before it are converted, and the flags refused.
+scenario memory-0-conversions
+block pb 32
+write $pb w=0 w=&EEEEEEEE w=&EEEEEEEE w=&FFFFFF w=&EEEEEEEE w=&EEEEEEEE
+call XOS_Memory r0=&2100 r1=$pb r2=2
+show v $pb+&14:4
+block pw 48
+write $pw w=0 w=&EEEEEEEE w=&12345678 w=&EEEEEEEE w=&EEEEEEEE
+call XOS_Memory r0=&40 r1=$pw r2=1
+show v
+call XOS_Memory r0=&10140 r1=$pw r2=1
+show v
+block pz 16
+write $pz w=0 w=0 w=0
+call XOS_Memory r0=&900 r1=$pz r2=1
+show v
+call XOS_Memory r0=&100 r1=$pz r2=0
+show v
+call XOS_Memory r0=0 r1=$pz r2=1
+show v
+
+# OS_ReadSysInfo 12, 13 and 9: the identity strings' lengths, and those
+# there are none of. The platform's name and the ROM footer are the
+# machine's own, and the build date lies in a kernel buffer genuine RISC OS
+# 5 reuses, so what a recording runs before it changes it.
+scenario read-sys-info-strings
+call XOS_ReadSysInfo r0=12 r1=0 r2=&22222222 r3=&33333333 r4=&44444444
+show r0 r1 r2 r3 r4 v
+call XOS_ReadSysInfo r0=13 r1=0 r2=&22222222 r3=&33333333 r4=&44444444
+show r0 r1 r2 r3 r4 v
+call XOS_ReadSysInfo r0=16 r1=0 r2=&22222222 r3=&33333333 r4=&44444444
+show v
+call XOS_ReadSysInfo r0=99 r1=0 r2=&22222222 r3=&33333333 r4=&44444444
+show v
+call XOS_ReadSysInfo r0=9 r1=0
+show v
+keep r0 s
+block g0 72
+call XOS_GSTrans r0=$s r1=$g0 r2=64
+show r2 v
+call XOS_ReadSysInfo r0=9 r1=6
+show v
+keep r0 s
+block g6 72
+call XOS_GSTrans r0=$s r1=$g6 r2=64
+show r2 v
+call XOS_ReadSysInfo r0=9 r1=1
+show r0 v
+call XOS_ReadSysInfo r0=9 r1=3
+show r0 v
+call XOS_ReadSysInfo r0=9 r1=4
+show r0 v
+call XOS_ReadSysInfo r0=9 r1=5
+show r0 v
+call XOS_ReadSysInfo r0=9 r1=8
+show r0 v
+call XOS_ReadSysInfo r0=9 r1=9
+show r0 v
+
+# OS_Hardware's devices: one added, found by type and version newest
+# first, added again in its own place, removed twice. The count from the
+# oldest is the machine's own.
+scenario hal-devices
+block dev 64
+write $dev w=&0001FFFE w=0 w=&00030000 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=-1 w=0 w=0 w=0
+call XOS_Hardware r0=$dev r8=2
+show v
+call XOS_Hardware r0=&0002FFFE r1=0 r8=4
+show r1 v
+call XOS_Hardware r0=&0002FFFE r1=0 r8=5
+show r1 v
+call XOS_Hardware r0=&0004FFFE r1=0 r8=4
+show r1 r2-dev v
+call XOS_Hardware r0=&0004FFFE r1=0 r8=5
+show r2-dev v
+call XOS_Hardware r0=&0001FFFE r1=0 r8=4
+show r1 v
+call XOS_Hardware r0=&0001FFFE r1=0 r8=5
+show r1 v
+call XOS_Hardware r0=&0003FFFE r1=0 r8=4
+show r1 r2-dev v
+call XOS_Hardware r0=&0003FFFE r1=0 r8=5
+show r2-dev v
+call XOS_Hardware r0=&FFFFFFFE r1=0 r8=4
+show r1 r2-dev v
+call XOS_Hardware r0=&FFFFFFFE r1=0 r8=5
+show r2-dev v
+call XOS_Hardware r0=$dev r8=2
+show v
+call XOS_Hardware r0=&0004FFFE r1=0 r8=4
+show r1 r2-dev v
+keep r1 next
+call XOS_Hardware r0=&0004FFFE r1=$next r8=4
+show r1 v
+call XOS_Hardware r0=$dev r8=3
+show v
+call XOS_Hardware r0=$dev r8=3
+show v
+call XOS_Hardware r0=&0004FFFE r1=0 r8=4
+show r1 v
+call XOS_Hardware r8=&106
+show v
+
+# OS_ClaimProcessorVector refuses the FIQ vector and a vector past the
+# last, and a release naming a routine not current.
+scenario processor-vectors
+block pv 8
+write $pv w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$pv r2=$pv+&0
+call XOS_ClaimProcessorVector r0=&107 r1=$pv
+show v
+call XOS_ClaimProcessorVector r0=&108 r1=$pv
+show v
+call XOS_ClaimProcessorVector r0=&200 r1=$pv
+show v
+call XOS_ClaimProcessorVector r0=1 r1=$pv r2=$pv
+show v
+
+# OS_PrettyPrint's kernel dictionary: each token's expansion written
+# through a WrchV claimant, recorded as its length and CRC; an escape and
+# zero brings in R2's string.
+scenario pretty-print-dictionary
+block cap 40
+write $cap w=&E92D0006 w=&E89C0006 w=&E1510002 w=&328C2008 w=&37C20001 w=&32811001 w=&358C1000 w=&E8BD0006 w=&E49DF004
+call XOS_SynchroniseCodeAreas r0=1 r1=$cap r2=$cap+&20
+block kt0 8
+write $kt0 b=13 b=27 b=0 b=0
+block kc0 176
+write $kc0 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc0
+call XOS_PrettyPrint r0=$kt0 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc0
+call XOS_CRC r0=0 r1=$kc0+8 r2=$kc0+&A8 r3=1
+show r0 $kc0:4
+block kt1 8
+write $kt1 b=13 b=27 b=1 b=0
+block kc1 176
+write $kc1 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc1
+call XOS_PrettyPrint r0=$kt1 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc1
+call XOS_CRC r0=0 r1=$kc1+8 r2=$kc1+&A8 r3=1
+show r0 $kc1:4
+block kt2 8
+write $kt2 b=13 b=27 b=2 b=0
+block kc2 176
+write $kc2 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc2
+call XOS_PrettyPrint r0=$kt2 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc2
+call XOS_CRC r0=0 r1=$kc2+8 r2=$kc2+&A8 r3=1
+show r0 $kc2:4
+block kt3 8
+write $kt3 b=13 b=27 b=3 b=0
+block kc3 176
+write $kc3 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc3
+call XOS_PrettyPrint r0=$kt3 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc3
+call XOS_CRC r0=0 r1=$kc3+8 r2=$kc3+&A8 r3=1
+show r0 $kc3:4
+block kt4 8
+write $kt4 b=13 b=27 b=4 b=0
+block kc4 176
+write $kc4 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc4
+call XOS_PrettyPrint r0=$kt4 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc4
+call XOS_CRC r0=0 r1=$kc4+8 r2=$kc4+&A8 r3=1
+show r0 $kc4:4
+block kt5 8
+write $kt5 b=13 b=27 b=5 b=0
+block kc5 176
+write $kc5 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc5
+call XOS_PrettyPrint r0=$kt5 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc5
+call XOS_CRC r0=0 r1=$kc5+8 r2=$kc5+&A8 r3=1
+show r0 $kc5:4
+block kt6 8
+write $kt6 b=13 b=27 b=6 b=0
+block kc6 176
+write $kc6 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc6
+call XOS_PrettyPrint r0=$kt6 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc6
+call XOS_CRC r0=0 r1=$kc6+8 r2=$kc6+&A8 r3=1
+show r0 $kc6:4
+block kt7 8
+write $kt7 b=13 b=27 b=7 b=0
+block kc7 176
+write $kc7 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc7
+call XOS_PrettyPrint r0=$kt7 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc7
+call XOS_CRC r0=0 r1=$kc7+8 r2=$kc7+&A8 r3=1
+show r0 $kc7:4
+block kt8 8
+write $kt8 b=13 b=27 b=8 b=0
+block kc8 176
+write $kc8 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc8
+call XOS_PrettyPrint r0=$kt8 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc8
+call XOS_CRC r0=0 r1=$kc8+8 r2=$kc8+&A8 r3=1
+show r0 $kc8:4
+block kt9 8
+write $kt9 b=13 b=27 b=9 b=0
+block kc9 176
+write $kc9 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc9
+call XOS_PrettyPrint r0=$kt9 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc9
+call XOS_CRC r0=0 r1=$kc9+8 r2=$kc9+&A8 r3=1
+show r0 $kc9:4
+block kt10 8
+write $kt10 b=13 b=27 b=10 b=0
+block kc10 176
+write $kc10 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc10
+call XOS_PrettyPrint r0=$kt10 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc10
+call XOS_CRC r0=0 r1=$kc10+8 r2=$kc10+&A8 r3=1
+show r0 $kc10:4
+block kt11 8
+write $kt11 b=13 b=27 b=11 b=0
+block kc11 176
+write $kc11 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc11
+call XOS_PrettyPrint r0=$kt11 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc11
+call XOS_CRC r0=0 r1=$kc11+8 r2=$kc11+&A8 r3=1
+show r0 $kc11:4
+block kt12 8
+write $kt12 b=13 b=27 b=12 b=0
+block kc12 176
+write $kc12 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc12
+call XOS_PrettyPrint r0=$kt12 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc12
+call XOS_CRC r0=0 r1=$kc12+8 r2=$kc12+&A8 r3=1
+show r0 $kc12:4
+block kt13 8
+write $kt13 b=13 b=27 b=13 b=0
+block kc13 176
+write $kc13 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc13
+call XOS_PrettyPrint r0=$kt13 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc13
+call XOS_CRC r0=0 r1=$kc13+8 r2=$kc13+&A8 r3=1
+show r0 $kc13:4
+block kt14 8
+write $kt14 b=13 b=27 b=14 b=0
+block kc14 176
+write $kc14 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc14
+call XOS_PrettyPrint r0=$kt14 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc14
+call XOS_CRC r0=0 r1=$kc14+8 r2=$kc14+&A8 r3=1
+show r0 $kc14:4
+block kt15 8
+write $kt15 b=13 b=27 b=15 b=0
+block kc15 176
+write $kc15 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc15
+call XOS_PrettyPrint r0=$kt15 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc15
+call XOS_CRC r0=0 r1=$kc15+8 r2=$kc15+&A8 r3=1
+show r0 $kc15:4
+block kt16 8
+write $kt16 b=13 b=27 b=16 b=0
+block kc16 176
+write $kc16 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc16
+call XOS_PrettyPrint r0=$kt16 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc16
+call XOS_CRC r0=0 r1=$kc16+8 r2=$kc16+&A8 r3=1
+show r0 $kc16:4
+block kt17 8
+write $kt17 b=13 b=27 b=17 b=0
+block kc17 176
+write $kc17 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc17
+call XOS_PrettyPrint r0=$kt17 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc17
+call XOS_CRC r0=0 r1=$kc17+8 r2=$kc17+&A8 r3=1
+show r0 $kc17:4
+block kt18 8
+write $kt18 b=13 b=27 b=18 b=0
+block kc18 176
+write $kc18 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc18
+call XOS_PrettyPrint r0=$kt18 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc18
+call XOS_CRC r0=0 r1=$kc18+8 r2=$kc18+&A8 r3=1
+show r0 $kc18:4
+block kt19 8
+write $kt19 b=13 b=27 b=19 b=0
+block kc19 176
+write $kc19 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc19
+call XOS_PrettyPrint r0=$kt19 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc19
+call XOS_CRC r0=0 r1=$kc19+8 r2=$kc19+&A8 r3=1
+show r0 $kc19:4
+block kt20 8
+write $kt20 b=13 b=27 b=20 b=0
+block kc20 176
+write $kc20 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc20
+call XOS_PrettyPrint r0=$kt20 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc20
+call XOS_CRC r0=0 r1=$kc20+8 r2=$kc20+&A8 r3=1
+show r0 $kc20:4
+block kt21 8
+write $kt21 b=13 b=27 b=21 b=0
+block kc21 176
+write $kc21 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc21
+call XOS_PrettyPrint r0=$kt21 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc21
+call XOS_CRC r0=0 r1=$kc21+8 r2=$kc21+&A8 r3=1
+show r0 $kc21:4
+block kt22 8
+write $kt22 b=13 b=27 b=22 b=0
+block kc22 176
+write $kc22 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc22
+call XOS_PrettyPrint r0=$kt22 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc22
+call XOS_CRC r0=0 r1=$kc22+8 r2=$kc22+&A8 r3=1
+show r0 $kc22:4
+block kt23 8
+write $kt23 b=13 b=27 b=23 b=0
+block kc23 176
+write $kc23 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc23
+call XOS_PrettyPrint r0=$kt23 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc23
+call XOS_CRC r0=0 r1=$kc23+8 r2=$kc23+&A8 r3=1
+show r0 $kc23:4
+block kt24 8
+write $kt24 b=13 b=27 b=24 b=0
+block kc24 176
+write $kc24 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc24
+call XOS_PrettyPrint r0=$kt24 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc24
+call XOS_CRC r0=0 r1=$kc24+8 r2=$kc24+&A8 r3=1
+show r0 $kc24:4
+block kt25 8
+write $kt25 b=13 b=27 b=25 b=0
+block kc25 176
+write $kc25 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc25
+call XOS_PrettyPrint r0=$kt25 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc25
+call XOS_CRC r0=0 r1=$kc25+8 r2=$kc25+&A8 r3=1
+show r0 $kc25:4
+block kt26 8
+write $kt26 b=13 b=27 b=26 b=0
+block kc26 176
+write $kc26 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc26
+call XOS_PrettyPrint r0=$kt26 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc26
+call XOS_CRC r0=0 r1=$kc26+8 r2=$kc26+&A8 r3=1
+show r0 $kc26:4
+block kt27 8
+write $kt27 b=13 b=27 b=27 b=0
+block kc27 176
+write $kc27 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc27
+call XOS_PrettyPrint r0=$kt27 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc27
+call XOS_CRC r0=0 r1=$kc27+8 r2=$kc27+&A8 r3=1
+show r0 $kc27:4
+block kt28 8
+write $kt28 b=13 b=27 b=28 b=0
+block kc28 176
+write $kc28 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc28
+call XOS_PrettyPrint r0=$kt28 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc28
+call XOS_CRC r0=0 r1=$kc28+8 r2=$kc28+&A8 r3=1
+show r0 $kc28:4
+block kt29 8
+write $kt29 b=13 b=27 b=29 b=0
+block kc29 176
+write $kc29 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc29
+call XOS_PrettyPrint r0=$kt29 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc29
+call XOS_CRC r0=0 r1=$kc29+8 r2=$kc29+&A8 r3=1
+show r0 $kc29:4
+block kt30 8
+write $kt30 b=13 b=27 b=30 b=0
+block kc30 176
+write $kc30 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc30
+call XOS_PrettyPrint r0=$kt30 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc30
+call XOS_CRC r0=0 r1=$kc30+8 r2=$kc30+&A8 r3=1
+show r0 $kc30:4
+block kt31 8
+write $kt31 b=13 b=27 b=31 b=0
+block kc31 176
+write $kc31 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc31
+call XOS_PrettyPrint r0=$kt31 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc31
+call XOS_CRC r0=0 r1=$kc31+8 r2=$kc31+&A8 r3=1
+show r0 $kc31:4
+block kt32 8
+write $kt32 b=13 b=27 b=32 b=0
+block kc32 176
+write $kc32 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc32
+call XOS_PrettyPrint r0=$kt32 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc32
+call XOS_CRC r0=0 r1=$kc32+8 r2=$kc32+&A8 r3=1
+show r0 $kc32:4
+block kt33 8
+write $kt33 b=13 b=27 b=33 b=0
+block kc33 176
+write $kc33 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc33
+call XOS_PrettyPrint r0=$kt33 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc33
+call XOS_CRC r0=0 r1=$kc33+8 r2=$kc33+&A8 r3=1
+show r0 $kc33:4
+block kt34 8
+write $kt34 b=13 b=27 b=34 b=0
+block kc34 176
+write $kc34 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc34
+call XOS_PrettyPrint r0=$kt34 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc34
+call XOS_CRC r0=0 r1=$kc34+8 r2=$kc34+&A8 r3=1
+show r0 $kc34:4
+block kt35 8
+write $kt35 b=13 b=27 b=35 b=0
+block kc35 176
+write $kc35 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc35
+call XOS_PrettyPrint r0=$kt35 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc35
+call XOS_CRC r0=0 r1=$kc35+8 r2=$kc35+&A8 r3=1
+show r0 $kc35:4
+block kt36 8
+write $kt36 b=13 b=27 b=36 b=0
+block kc36 176
+write $kc36 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc36
+call XOS_PrettyPrint r0=$kt36 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc36
+call XOS_CRC r0=0 r1=$kc36+8 r2=$kc36+&A8 r3=1
+show r0 $kc36:4
+block kt37 8
+write $kt37 b=13 b=27 b=37 b=0
+block kc37 176
+write $kc37 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc37
+call XOS_PrettyPrint r0=$kt37 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc37
+call XOS_CRC r0=0 r1=$kc37+8 r2=$kc37+&A8 r3=1
+show r0 $kc37:4
+block kt38 8
+write $kt38 b=13 b=27 b=38 b=0
+block kc38 176
+write $kc38 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc38
+call XOS_PrettyPrint r0=$kt38 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc38
+call XOS_CRC r0=0 r1=$kc38+8 r2=$kc38+&A8 r3=1
+show r0 $kc38:4
+block kt39 8
+write $kt39 b=13 b=27 b=39 b=0
+block kc39 176
+write $kc39 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc39
+call XOS_PrettyPrint r0=$kt39 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc39
+call XOS_CRC r0=0 r1=$kc39+8 r2=$kc39+&A8 r3=1
+show r0 $kc39:4
+block kt40 8
+write $kt40 b=13 b=27 b=40 b=0
+block kc40 176
+write $kc40 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc40
+call XOS_PrettyPrint r0=$kt40 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc40
+call XOS_CRC r0=0 r1=$kc40+8 r2=$kc40+&A8 r3=1
+show r0 $kc40:4
+block kt41 8
+write $kt41 b=13 b=27 b=41 b=0
+block kc41 176
+write $kc41 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc41
+call XOS_PrettyPrint r0=$kt41 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc41
+call XOS_CRC r0=0 r1=$kc41+8 r2=$kc41+&A8 r3=1
+show r0 $kc41:4
+block kt42 8
+write $kt42 b=13 b=27 b=42 b=0
+block kc42 176
+write $kc42 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc42
+call XOS_PrettyPrint r0=$kt42 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc42
+call XOS_CRC r0=0 r1=$kc42+8 r2=$kc42+&A8 r3=1
+show r0 $kc42:4
+block kt43 8
+write $kt43 b=13 b=27 b=43 b=0
+block kc43 176
+write $kc43 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc43
+call XOS_PrettyPrint r0=$kt43 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc43
+call XOS_CRC r0=0 r1=$kc43+8 r2=$kc43+&A8 r3=1
+show r0 $kc43:4
+block kt44 8
+write $kt44 b=13 b=27 b=44 b=0
+block kc44 176
+write $kc44 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc44
+call XOS_PrettyPrint r0=$kt44 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc44
+call XOS_CRC r0=0 r1=$kc44+8 r2=$kc44+&A8 r3=1
+show r0 $kc44:4
+block kt45 8
+write $kt45 b=13 b=27 b=45 b=0
+block kc45 176
+write $kc45 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc45
+call XOS_PrettyPrint r0=$kt45 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc45
+call XOS_CRC r0=0 r1=$kc45+8 r2=$kc45+&A8 r3=1
+show r0 $kc45:4
+block kt255 8
+write $kt255 b=13 b=27 b=255 b=0
+block kc255 176
+write $kc255 w=0 w=160
+call XOS_Claim r0=3 r1=$cap r2=$kc255
+call XOS_PrettyPrint r0=$kt255 r1=0 r2="Xy"
+show v
+call XOS_Release r0=3 r1=$cap r2=$kc255
+call XOS_CRC r0=0 r1=$kc255+8 r2=$kc255+&A8 r3=1
+show r0 $kc255:4

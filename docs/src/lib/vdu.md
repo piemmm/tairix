@@ -55,9 +55,20 @@ under a two-row accent. An accented capital is a five-row capital of its own
 under the same accents: O is flat at top and bottom and U at its foot, so each
 stays distinct from its small letter.
 
+`font::glyph_of` finds a character's glyph wherever it is: in RISC OS's
+arrangement, or among the other characters RISC OS's alphabets hold —
+Latin's other accented letters, Greek, Cyrillic and Hebrew — which the RISC
+OS emulator's International draws each alphabet from. Each accent and each
+letter beneath one is drawn once and composed: an accented letter is its
+accent over a letter's lower six rows, a letter with a mark below has it in
+the descender row, and a Greek capital's tonos stands at its left.
+
 The designs are TAIRiX's own: OpenMicro's for 32 to 126, and new ones in the
-same style for the rest. No RISC OS font is used. A test holds that no two
-characters share a picture except the pairs drawn alike on purpose:
+same style for the rest. No RISC OS font is used. Past RISC OS's arrangement,
+a letter several scripts share is one picture — Latin A, Greek Alpha and
+Cyrillic A — as is a mark with two code points, and a test holds that nothing
+else there is drawn alike. Within it, a test holds that no two characters
+share a picture except the pairs drawn alike on purpose:
 
 - the space and the no-break space;
 - `"` and `”`, and `'` and `’`;

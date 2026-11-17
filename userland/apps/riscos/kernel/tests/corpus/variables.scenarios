@@ -1,0 +1,148 @@
+# System variables through OS_SetVarVal and OS_ReadVarVal: what each type
+# stores and reads back, buffers too short and probes, wildcards through
+# the context, deletion and refusals. Every name begins Tairix so none
+# meets the machine's own, and every scenario deletes what it made.
+
+scenario variable-string
+block buf 32
+call XOS_SetVarVal r0="TairixS" r1="hello" r2=5 r3=0 r4=0
+show r4 v
+call XOS_ReadVarVal r0="TairixS" r1=$buf r2=32 r3=0 r4=0
+show r2 r4 $buf:6 v
+call XOS_SetVarVal r0="TairixS" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-string-gstrans
+block buf 32
+call XOS_SetVarVal r0="TairixG" r1="<13>a|Mb" r2=8 r3=0 r4=0
+show r4 v
+call XOS_ReadVarVal r0="TairixG" r1=$buf r2=32 r3=0 r4=0
+show r2 r4 $buf:6 v
+call XOS_SetVarVal r0="TairixG" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-read-short-and-probe
+block buf 8
+call XOS_SetVarVal r0="TairixP" r1="abcdefgh" r2=8 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="TairixP" r1=$buf r2=3 r3=0 r4=0
+show r2 r4 $buf:8 v
+call XOS_ReadVarVal r0="TairixP" r1=$buf r2=-1 r3=0 r4=0
+show r2 v
+call XOS_ReadVarVal r0="TairixP" r1=$buf r2=8 r3=0 r4=0
+show r2 r4 $buf:8 v
+call XOS_SetVarVal r0="TairixP" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-not-found
+block buf 8
+call XOS_ReadVarVal r0="TairixNone" r1=$buf r2=8 r3=0 r4=0
+show r2 $buf:4 v
+call XOS_ReadVarVal r0="TairixNone" r1=$buf r2=-1 r3=0 r4=0
+show r2 v
+call XOS_SetVarVal r0="TairixNone" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-number
+block buf 16
+block value 4
+write $value w=-42
+call XOS_SetVarVal r0="TairixN" r1=$value r2=4 r3=0 r4=1
+show r4 v
+call XOS_ReadVarVal r0="TairixN" r1=$buf r2=16 r3=0 r4=0
+show r2 r4 $buf:5 v
+call XOS_ReadVarVal r0="TairixN" r1=$buf r2=16 r3=0 r4=3
+show r2 r4 $buf:5 v
+call XOS_SetVarVal r0="TairixN" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-macro
+block buf 32
+call XOS_SetVarVal r0="TairixM" r1="m<TairixM2>n" r2=12 r3=0 r4=2
+show r4 v
+call XOS_SetVarVal r0="TairixM2" r1="xy" r2=2 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="TairixM" r1=$buf r2=32 r3=0 r4=0
+show r2 r4 $buf:13 v
+call XOS_ReadVarVal r0="TairixM" r1=$buf r2=32 r3=0 r4=3
+show r2 r4 $buf:6 v
+call XOS_SetVarVal r0="TairixM" r1=0 r2=-1 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixM2" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-expanded
+block buf 16
+call XOS_SetVarVal r0="TairixE" r1="6*7" r2=3 r3=0 r4=3
+show r4 v
+call XOS_ReadVarVal r0="TairixE" r1=$buf r2=16 r3=0 r4=0
+show r2 r4 $buf:4 v
+block text 16
+write $text b=&22 s="ab" b=&22 s="+" b=&22 s="c" b=&22 b=0
+call XOS_SetVarVal r0="TairixE" r1=$text r2=8 r3=0 r4=3
+show r4 v
+call XOS_ReadVarVal r0="TairixE" r1=$buf r2=16 r3=0 r4=0
+show r2 r4 $buf:4 v
+call XOS_SetVarVal r0="TairixE" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-literal
+block buf 16
+block value 8
+write $value s="a<b>" b=13 s="cd"
+call XOS_SetVarVal r0="TairixL" r1=$value r2=7 r3=0 r4=4
+show r4 v
+call XOS_ReadVarVal r0="TairixL" r1=$buf r2=16 r3=0 r4=0
+show r2 r4 $buf:8 v
+call XOS_SetVarVal r0="TairixL" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-wildcards-and-context
+block buf 16
+call XOS_SetVarVal r0="TairixW1" r1="one" r2=3 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixW2" r1="two" r2=3 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="TairixW*" r1=$buf r2=16 r3=0 r4=0
+show r2 $buf:4 v
+keep r3 first
+call XOS_ReadVarVal r0="TairixW*" r1=$buf r2=16 r3=$first r4=0
+show r2 $buf:4 v
+keep r3 second
+call XOS_ReadVarVal r0="TairixW*" r1=$buf r2=16 r3=$second r4=0
+show r2 v
+call XOS_ReadVarVal r0="TairixW#" r1=$buf r2=16 r3=0 r4=0
+show r2 $buf:4 v
+call XOS_SetVarVal r0="TairixW*" r1=0 r2=-1 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixW*" r1=0 r2=-1 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixW*" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-name-ends-at-a-space
+block buf 16
+call XOS_SetVarVal r0="TairixSp ignored" r1="v" r2=1 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="TairixSp" r1=$buf r2=16 r3=0 r4=0
+show r2 $buf:2 v
+call XOS_SetVarVal r0="TairixSp" r1=0 r2=-1 r3=0 r4=0
+show v
+
+scenario variable-refusals
+call XOS_SetVarVal r0="TairixT" r1="v" r2=1 r3=0 r4=5
+show v
+call XOS_SetVarVal r0="TairixT" r1="v" r2=1 r3=0 r4=&FF
+show v
+call XOS_SetVarVal r0="" r1="v" r2=1 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="Tairix*" r1="v" r2=1 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixT" r1="<oops" r2=5 r3=0 r4=0
+show v
+call XOS_SetVarVal r0="TairixT" r1="|<" r2=2 r3=0 r4=2
+show v
+call XOS_SetVarVal r0="TairixT" r1="1+" r2=2 r3=0 r4=3
+show v
+call XOS_ReadVarVal r0="TairixT" r1=0 r2=-1 r3=0 r4=0
+show r2 v

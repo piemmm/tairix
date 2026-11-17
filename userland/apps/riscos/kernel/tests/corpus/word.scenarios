@@ -1,0 +1,36 @@
+# OS_Word: the reasons whose answers a program's own input decides. The
+# clocks run between calls, so a clock written and read back is shown from
+# its second byte up: a count of 2.56 seconds.
+
+scenario word-bcd-to-string
+block clock 32
+write $clock b=2 b=&99 b=&12 b=&31 b=&05 b=&23 b=&59 b=&58
+call XOS_Word r0=14 r1=$clock
+show $clock:25 v
+write $clock b=2 b=&26 b=&02 b=&28 b=&07 b=&01 b=&02 b=&03
+call XOS_Word r0=14 r1=$clock
+show $clock:25 v
+write $clock b=2 b=&69 b=&07 b=&20 b=&01 b=&20 b=&17 b=&40
+call XOS_Word r0=14 r1=$clock
+show $clock:25 v
+
+scenario word-system-clock
+block time 8
+write $time b=0 b=0 b=&10 b=0 b=0
+call XOS_Word r0=2 r1=$time
+show v
+call XOS_Word r0=1 r1=$time
+show $time+&1:4 v
+
+scenario word-interval-timer
+block time 8
+write $time b=0 b=0 b=&20 b=0 b=0
+call XOS_Word r0=4 r1=$time
+show v
+call XOS_Word r0=3 r1=$time
+show $time+&1:4 v
+
+scenario word-unknown
+block blk 8
+call XOS_Word r0=100 r1=$blk r2=7
+show r0 r1-blk r2 $blk:4 v

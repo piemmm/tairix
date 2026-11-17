@@ -1,6 +1,7 @@
 # Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
 # the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
 # A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
 
 scenario unknown-reasons
 1 v=1 error=&00000180
@@ -68,3 +69,70 @@ scenario a-pool-is-made-empty
 1 v=0
 2 r2=&00000000 r4=&00100100 r5=&00004000 r6=&00000000 r7=&00000004 v=0
 3 v=0
+
+scenario area-reasons-past-the-prm
+1 r1=&20000000 v=0
+2 r1=&FFFFFFFF r2=&FFFFFFFF r3=&FFFFF000 v=0
+3 r1=&FFFFFFFF r2=&FFFFFFFF r3=&FFFFF000 v=0
+4 r1=&FFFFFFFF r2=&FFFFFFFF r3=&FFFFFFFF v=0
+5 v=1 error=&000001EA
+6 v=1 error=&000001EA
+7 v=0
+8 v=0
+9 v=1 error=&00000180
+10 v=1 error=&00000180
+11 v=1 error=&00000180
+12 v=1 error=&00000180
+13 v=1 error=&00000180
+14 v=1 error=&00000180
+15 v=1 error=&00000180
+16 v=1 error=&00000180
+17 v=1 error=&00000180
+
+scenario physical-memory-pool
+2 r5=&00010000 r9=&00000004 v=0
+3 r2=&00000000 r3-base=&00000000 r4=&00100100 r5=&00010000 r6=&00000000 r7=&00000004 v=0
+4 r1-pmp=&00000000 r2=&00000000 r4=&00100100 r5=&00004000 v=0
+5 r0=&00000000 r1-pmp=&00000000 v=0
+6 r2-pl=&00000018 r3=&00000000 v=0
+7 r2=&00000000 r6=&00000002 r7=&00000004 v=0
+8 $q:4=00000000 $q+&8:8=FFFFFFFF00000000 $q+&10:4=01000000 $q+&18:8=FFFFFFFF00800000 $q+&20:4=07000000 $q+&24:4=FFFFFFFF $q+&28:8=FFFFFFFF00000000 v=1 error=&000001D1
+9 r2-m=&00000018 r3=&00000000 v=0
+10 r2=&00002000 r6=&00000002 v=0
+11 $q:4=00000000 $q+&8:8=0000000000000000 $q+&10:4=01000000 $q+&18:8=0300000001000000 $q+&20:4=FFFFFFFF $q+&28:8=0100000000000000 v=0
+12 r0-base=&00000000 r1=&00002000 r2=&00004000 v=0
+13 r2-pl=&00000000 r3=&00000001 v=1 error=&000001C1
+14 r2-m=&00000018 r3=&00000000 v=0
+15 r2-pl=&00000018 r3=&00000000 v=0
+16 r2=&00000002 v=0
+17 r2=&00000003 v=0
+18 r6=&00000000 r7=&00000005 v=0
+19 r1=&00000000 v=0
+20 r2-m=&00000000 r3=&00000001 v=1 error=&000001D1
+21 v=0
+22 v=1 error=&000001D0
+23 v=1 error=&000001D0
+24 v=1 error=&000001D0
+
+scenario reserved-pages
+3 v=0
+4 v=0
+5 r1=&00000000 v=1 error=&000001CA
+6 v=0
+6 $pm1+&8:4=B2001000
+7 v=0
+8 v=0
+9 r1=&00001000 v=0
+10 v=0
+10 $pm2+&8:4=80800000
+11 v=0
+12 v=0
+13 r3=&00000001 v=1 error=&000001CA
+14 r3=&00000000 v=0
+15 $q+&4@pg=&00000000 $q+&C:4=00800000 v=0
+16 r3=&00000000 v=0
+17 $q+&4@pg=&00000000 $q+&C:4=00000000 v=0
+18 r3=&00000000 v=0
+19 $q+&4@pg=&00000000 $q+&C:4=00000000 v=0
+21 v=0
+22 v=0

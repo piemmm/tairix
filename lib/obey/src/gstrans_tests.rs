@@ -260,3 +260,34 @@ fn a_wildcard_reference_costs_a_reference_for_each_variable_it_may_examine() {
         Err(Error::ExpansionTooComplex)
     );
 }
+
+#[test]
+fn a_reading_given_up_and_resumed_reads_on_as_if_never_stopped() {
+    let mut vars = vars();
+    let text = b"\"<Greet> and more\"";
+    let mut whole = Vec::new();
+    let mut budget = Budget::new(64);
+    let mut reader = Reader::new(text, Flags::NONE);
+    while let Ok(Read::Char(c)) = reader.read(&mut vars, &mut budget) {
+        whole.push(c);
+    }
+    let mut stepped = Vec::new();
+    let mut budget = Budget::new(64);
+    let mut progress = Reader::new(text, Flags::NONE).into_progress();
+    loop {
+        let mut reader = Reader::resume(text, Flags::NONE, progress);
+        match reader.read(&mut vars, &mut budget) {
+            Ok(Read::Char(c)) => stepped.push(c),
+            _ => break,
+        }
+        progress = reader.into_progress();
+    }
+    assert_eq!(stepped, whole);
+    assert_eq!(
+        whole
+            .iter()
+            .map(|&c| u8::try_from(c).expect("a byte"))
+            .collect::<Vec<_>>(),
+        b"Hi Fred\n and more"
+    );
+}

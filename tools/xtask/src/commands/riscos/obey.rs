@@ -29,7 +29,11 @@
 //!   left a variable the pattern matches, which is then unset.
 //!
 //! An error answers `error &E`, by number, never its text; `gstrans` goes on
-//! `stored R2 out B` and `readvar` `length R2`.
+//! `stored R2 out B` and `readvar` `length R2`. Each buffer is filled with
+//! the corpus's [`UNWRITTEN`] before a call, so that the bytes a call writes
+//! stand apart from those it leaves.
+
+use tairix_riscos_kernel::corpus::UNWRITTEN;
 
 /// The cases, from the workspace's root.
 pub(super) const CASES: &str = "lib/obey/tests/riscos5/cases.txt";
@@ -41,9 +45,6 @@ pub(super) const STAGED: &str = "Cases";
 pub(super) const RECORDED: &str = "Answers";
 /// Every file the probe leaves in HostFS, as its listing names them.
 pub(super) const LEFT: [&str; 4] = [STAGED, RECORDED, "ObeyFile", "Spooled"];
-/// What the probe fills each buffer with before a call, so that the bytes a
-/// call writes stand apart from those it leaves.
-const UNWRITTEN: u8 = 0xEE;
 
 /// The statements the harness runs the cases by.
 pub(super) fn run() -> String {

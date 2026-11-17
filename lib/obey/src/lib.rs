@@ -30,6 +30,10 @@ pub use expr::Answer;
 pub use gstrans::Flags;
 pub use vars::{Store, Value, Variables};
 
+/// The byte the reference harness fills a buffer with before a call, so the
+/// bytes the call writes stand apart from those it leaves.
+pub const UNWRITTEN: u8 = 0xEE;
+
 /// The variable references a reading may still expand: a fixed bound on the
 /// work a hostile string can ask for, however its macros nest. RISC OS sets
 /// none, so a caller running trusted text gives a generous one.

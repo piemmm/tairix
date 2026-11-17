@@ -1,0 +1,73 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario byte-version
+1 r1=&00000006 r2=&00000000 v=0
+2 r1=&000000AA r2=&00000000 v=0
+3 v=1 error=&000000F7
+
+scenario byte-user-flag
+2 r1=&0000005A v=0
+3 r1=&000000A5 v=0
+
+scenario byte-variables-read-and-write
+2 r1=&00000012 v=0
+3 r1=&00000012 v=0
+4 r1=&000000F2 v=0
+5 v=0
+
+scenario byte-escape-character
+2 v=0
+3 r1=&0000001B v=0
+4 v=0
+
+scenario byte-events
+2 r1=&000000FF v=0
+3 r1=&000000FF v=0
+4 r1=&000000FF v=0
+5 r1=&000000FF v=0
+
+scenario byte-keyboard-scan
+1 r1=&000000FF r2=&20000000 c=1 v=0
+2 r1=&000000FF r2=&20000000 c=1 v=0
+3 r1=&00000000 r2=&00000000 c=0 v=0
+4 r1=&00000000 r2=&00000000 v=0
+5 r1=&000000FF r2=&000000FF c=1 v=0
+
+scenario byte-buffers
+1 v=0
+2 c=0 v=0
+3 c=0 v=0
+4 r2=&00000041 c=0 v=0
+5 r2=&00000041 c=0 v=0
+6 r2=&00000042 c=0 v=0
+7 c=1 v=0
+8 c=1 v=0
+9 c=0 v=0
+10 v=0
+11 c=1 v=0
+
+scenario byte-adval-buffers
+1 v=0
+2 r1=&00000000 r2=&00000000 v=0
+3 v=0
+4 r1=&00000001 r2=&00000000 v=0
+5 v=0
+
+scenario byte-escape-state
+1 v=0
+2 r1=&00000000 v=0
+
+scenario byte-unknown
+1 r1=&00000001 r2=&00000000 v=1 error=&000000FE
+2 r1=&00000001 r2=&00000000 v=1 error=&000000FE
+
+scenario byte-keyboard-reset-and-handler-service
+1 r1=&00000000 r2=&00000000 v=0
+2 r1=&00000000 v=0
+
+scenario byte-variable-table
+1 r1=&000000FA r2=&00000008 v=0
+2 r1=&00000008 v=0

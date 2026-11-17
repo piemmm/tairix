@@ -441,11 +441,13 @@ A session is made with one of two layouts.
 
 Both have zero page at `&FFFF0000`, holding the vectors the 32-bit profile
 takes, and ScratchSpace at `&4000`. A 26-bit task also sees zero page at zero,
-the same frames, as RISC OS 3 and 4 had it. A 32-bit task sees at zero RISC OS
-5's compatibility page instead: read-only, never run, four words of
-`&FDFDFDFD` and then zeros, so a pointer read through null faults where it is
-next used. The rest of a 32-bit task's low 32 KiB aborts. Each stack has an
-unmapped page below it.
+the same frames, as RISC OS 3 and 4 had it. A 32-bit task sees a
+compatibility page at zero instead, as RISC OS 5 on ARMv7 has one: read-only
+and never run, it holds a copy of the processor vectors, at `&20` a warning
+that a string read through a null pointer reads, and zeros. `OS_Memory` 20
+removes it from every 32-bit task at once and restores it, answering the state
+it leaves; a 26-bit caller is told there is none. The rest of a 32-bit task's
+low 32 KiB aborts. Each stack has an unmapped page below it.
 
 ### The memory policy
 
@@ -474,6 +476,15 @@ naming their pages in chunks of 63 (a page another holder has is replaced
 with a copy of its contents), doubly mapped areas, sparse areas, and physical
 memory pools.
 
+`OS_Memory` 23 reserves physical pages, `&1CA` refusing a page reserved
+already. A reserved page stays free until something that knows takes it: an
+area's pre-grow handler that names it only by answering `RESV`, and a pool
+that locks it only with the reserved flag; both are refused with `&1CA`
+otherwise, and `OS_Memory` 12 recommends past it. `OS_ReadMemMapEntries`
+marks a reserved page with bit 7, and a free page carries the free pool's
+flags, the pool being a physical memory pool of pages neither cacheable nor
+bufferable, as RISC OS 5's is.
+
 The manager calls the rest of the kernel through one seam: each handler call,
 service call and upcall is made with the address space consistent, and may
 itself make memory calls. A resize refuses any other while its handler decides
@@ -497,6 +508,596 @@ accounted for, every page an area reports reads back at its address, no area
 passes its maximum or meets another, and every area's number is one a caller
 reads as positive.
 
+## The kernel
+
+The rest of `tairix-riscos-kernel` is RISC OS 5's kernel, its SWIs performed
+in Rust over the guest's own memory, so a program sees its structures — heap
+blocks, variable nodes, vector claims, error blocks — where RISC OS keeps
+them. Its texts come from its message file, `resources/Kernel/Messages`,
+authored as RISC OS documents them and read through MessageTrans once
+MessageTrans has opened it; before then, and while MessageTrans is gone, the
+kernel uses the same texts compiled in.
+
+### The core
+
+A `Kernel` owns the address space and a `World` of the rest; `Os` is the view
+every SWI and built-in module works through. The `Host` trait is all the
+kernel asks of its session: a monotonic clock in centiseconds, the real time,
+input events, a word between slices of work, and a wait until input or a
+deadline. Given the same host answers the kernel runs the same.
+
+- **Running.** `Kernel::run` runs the guest for an instruction budget. A SWI
+  stops the processor and is performed in place; the kernel's routines on
+  the host pages — vector defaults, handlers, the exception entries — are
+  each one `UDF` it recognises.
+- **Calls into the guest.** A claimant, handler, ticker or callback is called
+  in the mode RISC OS calls it in, returning through a host-page address; a
+  26-bit callee is given a return address carrying the PSR. Calls nest to a
+  bound, past which the supervisor stack overflows.
+- **Unwinding.** A transfer of control (an exit, an error handler entered, an
+  exception), a wait, the host's stop and the program's end unwind to the
+  outermost run as values; nothing is lost on the way.
+- **Interrupts.** The clock asserts the interrupt line when it moves on,
+  checked at the start of each run and between slices; the processor takes it
+  where its mask allows, and the kernel's handler does what RISC OS's does:
+  the keyboard's input, `MetroGnome`, the interval timer, `TickerV`, the timed
+  calls, `UnthreadV`. A key therefore reaches the kernel, Escape included,
+  while a program reads nothing.
+  Work is never polled: an idle guest's `WFI` waits on the host until the next
+  deadline.
+- **Waiting for input.** A program's own SWI that finds nothing to read, has
+  run no guest code and is not one the kernel performs for another, unwinds
+  with the processor back at it and is performed again when input comes,
+  carrying on from what it had done — a timed read keeps its deadline, a line
+  read keeps its characters. Deeper, the host waits in place, so a command
+  reading lines keeps what it has done, and the processor takes the
+  interrupts the clock raises meanwhile, as RISC OS's waiting SWIs enable
+  them. No callback runs while a SWI waits.
+
+### SWIs and errors
+
+A SWI's results come back with V clear, N, Z and C as it set them. An error
+comes back with V set and R0 at its block if the SWI's X bit is set;
+otherwise it is offered as `Service_Error`, then to `ErrorV`, whose default
+enters the error handler. A block that cannot be one is replaced with "SWI &n
+returned an invalid error pointer", but for `XOS_GenerateError`'s. A SWI below
+`&200` the kernel has not is "SWI &n not known"; above, no module having it,
+it goes to `UKSWIV`. `OS_CallASWI` and `OS_CallASWIR12` perform the SWI they
+carry, its X bit deciding; a chain of them stops after sixteen. Errors are
+written into a ring of sixteen 256-byte buffers in the system heap, so a block
+survives the next few errors.
+
+An error's number is the one genuine RISC OS 5 was recorded giving. A
+condition it was never seen to report — it faults, or does not check — takes
+the lowest number in the PRM's range for its family that no recorded error
+uses; a call with no range of its own reuses the recorded error of the same
+meaning, so `OS_AMBControl`'s unknown reason is the heap's "No such reason
+code", as genuine RISC OS 5's `OS_NVMemory` gives.
+
+### Vectors, the environment and callbacks
+
+- **Vectors.** Ninety-six chains, the newest claimant first, each ending at
+  the kernel's default. `OS_Claim` removes identical claims, `OS_AddToVector`
+  keeps them, `OS_Release` removes the newest; each claim holds a system heap
+  node. A claimant may release itself, or others, while it is called.
+- **The environment.** Seventeen handlers with RISC OS's defaults;
+  `OS_ChangeEnvironment` never sets one to zero. `OS_Exit` takes a return
+  code beside `ABEX`, checked against `Sys$RCLimit`; the default exit handler
+  ends the program. The default error handler prints the error as RISC OS
+  does and ends it.
+- **Callbacks.** Transient callbacks run newest first on the way back to User
+  mode with interrupts enabled; an error postpones them once, so its caller
+  reads its block first.
+- **Events.** `OS_GenerateEvent` reaches `EventV` for an event enabled by
+  `OS_Byte` 14, and always for numbers from 32.
+
+### Memory SWIs
+
+`OS_Heap` is RISC OS 5's heap manager in guest memory: first fit, blocks
+split from the top, every link and size checked before it is followed, an
+overwritten heap reported rather than walked. An aligned claim (reasons 7 and
+8) takes an alignment that is a power of two or none and a boundary that is a
+power of two no smaller than the block or the alignment, and any claim
+refused leaves R2 zero, as RISC OS 5's does. The system heap and the RMA are
+dynamic areas the kernel grows when a claim does not fit. `OS_Memory`,
+`OS_ReadMemMapInfo`, `OS_FindMemMapEntries` and `OS_ValidateAddress` answer
+from the address space. `OS_Memory` 12 recommends free contiguous pages at an
+alignment and, where the flags give one, within a physical range; 19 hands a
+DMA transfer's regions to the caller's input and output functions, joining
+what runs on and marking for a bounce buffer the partial cache lines a write
+leaves; 20 is the compatibility page's; 23 reserves pages; 64 converts pages
+with wide addresses. `OS_AMBControl` is RISC OS 5's Wimp's own call, which
+no program is to use, and the emulator's Wimp keeps its tasks' memory itself:
+reason 9 succeeds and changes nothing, as genuine RISC OS 5 answers a program,
+and any other reason is refused as unknown, where genuine RISC OS 5 hangs or
+faults.
+
+### Variables, input and output
+
+- **System variables** are RISC OS's nodes in the system heap, kept in name
+  order: strings GSTrans'd on the way in, numbers, macros, expressions, and
+  code variables whose entries are called. Wildcards and the context walk them
+  as `*Show` does.
+- **Input** is RISC OS's buffers, filled from the host's events: characters,
+  key transitions through `KeyV` and the key handler (the keyboard, below),
+  and the pointer, with escape, soft keys, `*Exec` and input redirection.
+  `OS_ReadLine` reads through `OS_ReadC`, storing, deleting and echoing as
+  RISC OS's does. It keeps RISC OS 3 and 4's flags in R0 for a 26-bit caller,
+  and ignores a 32-bit caller's, returning R0 without them, as RISC OS 5
+  does.
+- **Output** goes through `WrchV` to the spool file, the serial stream, the
+  VDU drivers and the printer as `OS_Byte` 3 selects.
+
+### OS_Byte, OS_Word and CMOS
+
+The `OS_Byte` reasons the PRM documents, the variables under RISC OS's rule
+in zero page at `&08FA` plus their number, where `OS_Byte` 166 and 167 say
+and genuine RISC OS 5 keeps them; the reasons the kernel does not know passed
+to modules as `Service_UKByte` and otherwise refused. `OS_Word` likewise, an
+unknown one, 23 among them, passed on as `Service_UKWord` without error. CMOS
+is 256 bytes by logical address, with its checksum. A reset gives the
+settings the kernel's own keywords and start-up read genuine RISC OS 5's
+reset values, but for the filing system (HostFS), the country (the UK) and
+the monitor type and sync (automatic, the display being a window), and zeroes
+the rest, the settings of modules the emulator does not provide among them.
+`OS_NVMemory` 7, which sets the station number given a passphrase, accepts
+none.
+
+### Information, conversions and text
+
+`OS_ReadSysInfo` and `OS_PlatformFeatures` describe a HAL machine whose
+processor features are read from its ID registers. The number conversions,
+`OS_ConvertVariform`, `OS_ReadUnsigned`, `OS_EvaluateExpression`, GSTrans,
+`OS_SubstituteArgs` and `OS_ReadArgs` are RISC OS's. `OS_HeapSort` runs
+Knuth's algorithm H step for step as RISC OS does, so equal keys, and every
+comparison a guest routine sees, match; it moves sorted blocks a cycle at a
+time through the temporary slot. `OS_CRC`, `OS_PrettyPrint` and `OS_Confirm`
+complete the set. `OS_CRC` carries all 32 bits of R0 as RISC OS 5's register
+does, so a start past 16 bits shifts down into the result. `OS_PrettyPrint`
+expands a caller's dictionary, or with R1 zero the kernel's own: the PRM's
+table, token 22 empty as RISC OS 5's is, held in the host pages where a
+program may read it. The byte after an escape is the escape's own even where
+it is zero, which brings in R2's string.
+
+### Resources and messages
+
+- **ResourceFS** keeps RISC OS 5's blocks of files, registered newest first,
+  each entry's offsets and lengths checked before they are followed. A name is
+  matched without regard to case through the territory's upper-case table,
+  from a sorted index built when it is first wanted; a directory is any name
+  before a full stop. Its services and `UpCall` are RISC OS's. Its filing
+  system — `Resources:` through FileSwitch — arrives with FileSwitch (RO19).
+- **The Messages module** lays every built-in's files, and those no one module
+  owns, into one block in the host pages, stamped as genuine RISC OS 5.30's
+  ROM files are, and registers it as it starts and again whenever ResourceFS does. Among them are the Wimp's
+  file-type sprites, `Wimp.Sprites22`: each type the content-type registry
+  knows, and the untyped file, drawn from the TAIRiX desktop's own icon master
+  at RISC OS's sizes — `file_xxx` 34 pixels square, `small_xxx` 18, at 90 dots
+  an inch, in sixteen-bit colour with an alpha mask. RISC OS plots a sprite by
+  its own resolution, so one file serves every mode; it fits the 26-bit
+  layout's megabyte of host pages, where 32-bit pixels at both resolutions
+  would not. `cargo xtask riscos --write-sprites` draws it, and the
+  `riscos-sprites` gate holds the committed file to the masters.
+- **MessageTrans** keeps descriptors in guest memory, a file held in place in
+  ResourceFS or copied into the RMA or the caller's buffer, and an index for a
+  large file. Tokens match as the PRM sets out — `?` wildcards, alternatives
+  by `/` or on following lines, a comment only at a line's start, a value
+  running to its line feed — then the global file, then the caller's default;
+  `%0` to `%3` and `%%` are substituted. An escape and the byte after it are
+  expanded from a dictionary as RISC OS 5's are, from one of the emulator's
+  own, which is empty, since RISC OS 5's words are not carried. Errors go into
+  the PRM's ten foreground and two interrupt buffers, used in turn. A file held in place is found
+  again when ResourceFS changes, and its holders are told when it goes; a file
+  outside ResourceFS is read through FileSwitch's SWIs (RO19). Where RISC OS's
+  copies are unbounded — a lookup into no room, an error into less than its
+  number and a terminator, menus past their buffer — nothing is written past
+  the room the caller gave, and "Buffer overflow" is the answer. A SWI of its
+  chunk past its table is error &110, as the other modules' are.
+
+### Territories and International
+
+- **The Territory Manager** registers territories, each a table of the PRM's
+  43 entries, and passes each territory SWI to the one it names with R0 to
+  R9, the entry's index in R11. Once the current territory is registered it
+  selects that territory's keyboard handler and defines its alphabet through
+  `Service_International` 5, as the PRM's set-up does; `Territory_SelectAlphabet`
+  defines the alphabet too, leaving `OS_Byte` 71's number as it was, as RISC
+  OS 5 does. The time zone in force is the CMOS's standard offset and
+  daylight saving bit: the current territory's zone where its standard offset
+  is the CMOS's, a zone of the Manager's own naming otherwise. It answers
+  `*Territories` and `*Configure`'s `Territory`, `DST`, `NoDST` and `TimeZone`,
+  and takes the territory's own zone names as `DST` and `NoDST`. A SWI no
+  territory answers, a table's reserved entries among them, is error &1E8,
+  RISC OS 5's number where the PRM gives &43040. Its SWIs past the PRM's are
+  named as RISC OS 5.30's are: `Territory_IME`, `Territory_DaylightRules`,
+  `Territory_Reserved1` to `Territory_Reserved17`, `Territory_Select`,
+  `Territory_DaylightSaving` and `Territory_ConvertTimeFormats`.
+- **Daylight saving.** `Territory_DaylightSaving` reads and sets the state in
+  CMOS — in force, bit 7 of &DC, and kept by the rules, bit 0 of &10, as
+  `*Configure DST`, `NoDST` and `AutoDST` set it — and answers whether
+  daylight saving is in force at a time and a year's bounds by asking the
+  territory's `Territory_DaylightRules` entry, so a guest territory's rules
+  are its own. A question about a time never fails; a refused year is &197.
+  The UK territory's rules are the session's zone's, in force wherever its
+  offset differs from its standard offset, for the years 1968 to 2099 genuine
+  RISC OS 5's rules cover; it refuses another year or time zone with &AC2.
+  Kept by the rules, daylight saving changes over on the clock at a year's
+  bounds and at each new year, and at start-up, each change announced by
+  `Service_TimeZoneChanged`.
+- **Conversions and selection.** `Territory_ConvertTimeFormats` converts
+  between local and UTC ordinals and five-byte times by the territory's time
+  zone and daylight saving as asked, as its rules say, or by an adjustment in
+  centiseconds; it reads a local time as standard time to ask the rules, as
+  RISC OS 5 does, and refuses an unknown form or flag with &1E8, another time
+  zone with &196 and ordinals naming no time with &195. RISC OS 5.30 finds its
+  name but writes the SWI as a number; the emulator names it both ways.
+  `Territory_IME` gives no input method. `Territory_Select` and `*Territory`
+  make a loaded territory current and issue `Service_TerritoryStarted`, setting
+  nothing else up; `*Territory` alone names the current territory.
+- **The UK territory** has RISC OS's names, formats and tables, as recorded
+  from RISC OS 5, and the session's time zone, `Config::zone`, from `lib/tz`:
+  its standard and summer names and offsets. A CMOS reset takes the locale's
+  standard offset and whether its summer time is in force. A zone without
+  summer time gives a summer reading an hour ahead under its own name.
+  Collation is three passes — letters, then accents, then case, case weighed
+  on the unaccented letters where accents are ignored — with its ligatures,
+  and runs of digits as numbers where R3's bit 2 asks, as RISC OS 5's does.
+  Ordinals carry a field past its range into the next; a time string is read
+  writing each of the time's fields as it is read, so a refused one leaves
+  those before it.
+- **International** answers for the countries, alphabets and keyboards —
+  their names and numbers, each country's alphabet and ISO 3166 code, as
+  recorded from RISC OS 5 — and for each alphabet's characters, as a table of
+  code points: ISO 8859's upper halves, with the PRM's Table D characters at
+  &80 to &9F for Latin2 to Latin4, and Latin2's there, less those already
+  held, for the alphabets past the PRM's. A code an alphabet leaves out keeps
+  its previous definition, as the PRM says. It redefines the
+  system font for an alphabet from `lib/vdu`'s glyphs, which draw every
+  character of every alphabet, those past Latin1 composed from shared accents
+  and letters. `OS_Byte` 70 and 71 and `*Alphabet`, `*Alphabets`,
+  `*Country`, `*Countries`, `*Keyboard` and `*Configure Country` reach it.
+
+### The keyboard
+
+- **The kernel's part** is RISC OS's key-handler protocol behind `KeyV`'s
+  default: the handler's tables read, bounded, at each use; two keys rolled
+  over; the first code at once, since the session's keyboard reports clean
+  transitions and needs no debounce, then repeats at `OS_Byte` 11 and 12's
+  delay and rate on the clock's deadline; the status, the LEDs as the PRM
+  numbers them, Break's and the mouse buttons' exits; and `INKEY` and the key
+  scans through the handler's internal-key table. The session's keyboard
+  arrives as a PC's, `Service_KeyHandler` telling the modules, as it does
+  again after `OS_InstallKeyHandler`.
+- **InternationalKeyboard** installs a handler whose tables are in its
+  workspace for programs to read, its special keys' code Rust. Its layouts are
+  TAIRiX's own, one for each keyboard RISC OS's has — the UK's, Europe's,
+  Greece's, Russia's, Israel's, Turkey's, Latin America's, Japan's, Korea's,
+  Taiwan's, Dvorak's and Colemak's — each drawn from its country's standard
+  with an Alt layer; any other keyboard has the UK's. A dead key's accent is
+  composed with the next character by Unicode's canonical composition, the
+  space after it giving the accent alone. Caps Lock pairs a letter with its
+  shifted capital, so Turkish keeps its dotted and dotless i. Ctrl gives the
+  control code of the key's Latin letter or `@[\]^_`, whatever the layer, or
+  a digit's value. A character is
+  given in the alphabet selected, through its table, or as UTF-8. Alt with the
+  keypad types a character by its decimal number, as the PRM's Table D says;
+  Alt, Ctrl and F1 select the UK keyboard, F2 the configured one, and F12 the
+  country whose international dialling code Alt and the keypad then type.
+  Shift Enable reverses Shift only while Caps Lock is on, and the next key
+  down or up shows on the LEDs the locks `OS_Byte` 202 wrote, as the PRM sets
+  out.
+
+### Exceptions
+
+An exception with no claimant enters its environment handler, whose default
+raises an error naming the address. `OS_AbortTrap` traps answer the loads and
+stores an aborting instruction makes in their range, the instruction replayed
+against them, for translation and permission faults only, as RISC OS 5's do:
+every trap and abortable area covering an access is asked in turn before it is
+declined, an area's handler given its allocated end in R5, and an instruction
+fetch or an exclusive access is offered as a request to map the page rather
+than replayed. `OS_ClaimProcessorVector` claims and releases the processor
+vectors, refusing the FIQ vector and one past the last with &1A0 and a release
+naming a routine not current with &1A1.
+
+### Modules
+
+The module chain is RISC OS 5's: modules in the order they were linked, each
+with its incarnations, the preferred first. Every incarnation has a node in the
+system heap holding its private word and then its postfix, so R12 + 4 is its
+postfix, as on RISC OS. `OS_Module` performs every reason RISC OS 5 has, and
+`OS_ExitAndDie` kills a module on its way out.
+
+- **Built-in modules** are Rust behind a module image in the host pages:
+  header, title, help string, command table, SWI decoding table and flags, the
+  images one ROM chain. Each entry jumps to a host routine that enters the
+  module's Rust, so a copy, as `*RMFaster` makes one, enters the same Rust; the
+  kernel itself calls a built-in's Rust directly. A session's built-ins are the
+  kernel's own and those its other crates pass in `Config::modules`, each a
+  provided module of the inventory. They start at reset in ROM order, but for
+  those CMOS unplugs. The `UtilityModule` comes first: it holds the module
+  commands and `ARM_IMB` and `ARM_IMBRange`, and cannot be killed.
+- **Guest modules** come from a file (`OS_Module` 0 and 1), from memory (10 and
+  11) or through a Podule manager the guest itself provides (17). A module that
+  declares itself 32-bit is checked as RISC OS 5 checks one. One that does not
+  is a 26-bit module, admitted only where 26-bit code is, with a header as short
+  as RISC OS 2 allowed. A squeezed module is expanded into the RMA as it is
+  first initialised, from a file or from memory alike, and the expanded header
+  is checked again.
+- **Squeezed modules** are expanded as genuine RISC OS 5.30 is observed to
+  expand them (`tests/corpus/squeeze.scenarios`). The module keeps its header
+  whole, its initialisation word's top bit set and the rest its squeezed
+  length; five words end that length — the expanded size, the bytes of codes
+  and of tables, and the entries of the short and the long table of common
+  words. The tables, read forwards, hold each entry as a delta from the last;
+  the codes, read backwards from the tables, give each pair of words by a
+  byte's two nibbles — zero, four bytes, a long-table entry above a low byte,
+  or a short-table entry — filling the module from its end. A length past the
+  module given is refused with &101, as RISC OS refuses it, and codes that
+  stop short of the expanded size make the module, as RISC OS's do. What RISC
+  OS hangs or faults on — a trailer off its word, an expanded size no multiple
+  of eight, codes or tables reaching past their bytes — is refused with &10E.
+- **Replacement.** A module whose title another already has kills that one first
+  and takes its place in the chain. A bridge — the kernel, and the modules the
+  guest reaches the desktop through — cannot be replaced: loading over one is
+  refused with "Module … refuses to be replaced", number &103.
+- **Initialisation and finalisation** follow RISC OS 5's protocol:
+  `Service_ModulePreInit` for a module in RAM; R10 the environment, R11 the
+  incarnations it has or its hardware base, R12 the private word;
+  `Service_ModulePostInit` and `Service_ModulePostFinal` afterwards, R3 zero for
+  the base incarnation. Finalisation is always fatal. It is refused while the
+  current active object lies in the module's code or its workspace, and a module
+  that refuses runs on as it was.
+- **Services** go down their number's chain first: the incarnations whose
+  module's service table lists it, R1 the number or, where the table asks, its
+  place in the table. Then they go to the modules with no table. Each chain is
+  in the order its incarnations registered. The walk finds each handler
+  afresh, so a handler that kills or loads modules leaves it sound, and one that
+  registered after the call began waits for the next call. The kernel keeps
+  RISC OS's part in claiming FIQ. While the exit handler is the default,
+  `Service_NewApplication` returns every handler to its default.
+- **SWIs** of a chunk go to the module that registered it last, if that module
+  has an incarnation, and otherwise to `UKSWIV`. Their names come from the
+  module's decoding table, its decoding code or its title.
+- **Commands.** `*Modules`, `*ROMModules`, `*RMLoad`, `*RMRun`, `*RMKill`,
+  `*RMReInit`, `*RMClear`, `*RMTidy`, `*RMFaster`, `*RMEnsure`, `*Unplug` and
+  `*RMInsert` are the `UtilityModule`'s, among the kernel's commands (the
+  command line, below).
+
+Where RISC OS 5's module handler leaks or fails, the emulator does what the
+handler means to do:
+
+- a failed load or initialisation frees everything it claimed;
+- the base incarnation can be renamed, and so a new incarnation of a ROM module
+  that is not active can be made;
+- a module with no help string is too old for `*RMEnsure`;
+- the service chains are walked soundly whatever a handler changes;
+- an incarnation that initialised but cannot be recorded for want of memory is
+  finalised again.
+
+#### The inventory
+
+The inventory lists every module of RISC OS 5.30's ROM for IOMD, in the ROM's
+order, with its version, as `OS_Module` 20 reads them on RISC OS 5, which
+makes a module's place its chunk number and names its unplug bit in CMOS. The
+corpus's `rom-modules` reference scenario records that listing from the
+running machine — each version, and each title's length and CRC — and a test
+holds the table to it. A
+provided or bridged module is present once its item lands. No lookup finds an
+absent one. Every built-in's help string carries the date its ROM files are stamped
+with.
+
+| Module | Version | Held | Item |
+|---|---|---|---|
+| UtilityModule | 5.30 | bridged | RO15-RO17 |
+| Podule | 1.72 | absent | — |
+| FileSwitch | 2.92 | bridged | RO19 |
+| ResourceFS | 0.26 | provided | RO18 |
+| TerritoryManager | 0.58 | provided | RO18 |
+| Messages | 1.12 | provided | RO18 |
+| MessageTrans | 0.49 | provided | RO18 |
+| UK | 0.64 | provided | RO18 |
+| WindowManager | 5.87 | bridged | RO39-RO44 |
+| TaskManager | 1.54 | bridged | RO39 |
+| Desktop | 2.77 | provided | RO39 |
+| SharedCLibrary | 6.23 | provided | RO26 |
+| ScreenModes | 0.74 | provided | RO21 |
+| VIDC20Video | 0.09 | absent | — |
+| Mouse | 0.11 | absent | — |
+| PS2Driver | 0.40 | absent | — |
+| ADFSFiler | 1.16 | absent | — |
+| BASIC | 1.85 | provided | RO20 |
+| BASIC64 | 1.85 | provided | RO20 |
+| BlendTable | 0.02 | provided | RO22 |
+| BufferManager | 0.39 | provided | RO26 |
+| ColourTrans | 1.97 | provided | RO23 |
+| Debugger | 2.08 | provided | RO30 |
+| DeviceFS | 0.73 | provided | RO26 |
+| DisplayManager | 0.44 | bridged | RO43 |
+| DMAManager | 0.23 | absent | — |
+| DragASprite | 0.21 | provided | RO42 |
+| DragAnObject | 0.10 | provided | RO42 |
+| Draw | 1.22 | provided | RO24 |
+| BBCEconet | 0.20 | absent | — |
+| FileCore | 3.78 | provided | RO19 |
+| ADFS | 3.56 | absent | — |
+| RamFS | 2.33 | provided | RO19 |
+| Filer | 2.49 | bridged | RO39 |
+| FilerSWIs | 0.05 | bridged | RO39 |
+| FSLock | 1.26 | absent | — |
+| FontManager | 3.80 | bridged | RO25 |
+| FPEmulator | 4.39 | provided | RO26 |
+| Free | 0.42 | provided | RO26 |
+| Hourglass | 2.19 | bridged | RO26 |
+| IIC | 0.18 | absent | — |
+| International | 1.70 | provided | RO18 |
+| InternationalKeyboard | 1.00 | provided | RO18 |
+| InverseTable | 0.18 | provided | RO23 |
+| Joystick | 0.29 | absent | — |
+| NetFS | 6.00 | absent | — |
+| NetFiler | 0.87 | absent | — |
+| NetPrint | 5.61 | absent | — |
+| NetStatus | 2.09 | absent | — |
+| Obey | 0.41 | provided | RO19 |
+| ParallelDeviceDriver | 0.79 | absent | — |
+| Pinboard | 1.07 | bridged | RO39 |
+| PipeFS | 0.25 | provided | RO26 |
+| RAMFSFiler | 0.41 | bridged | RO39 |
+| ResourceFiler | 0.20 | bridged | RO39 |
+| ROMFonts | 0.78 | provided | RO25 |
+| RTC | 0.02 | absent | — |
+| ScreenBlanker | 2.34 | bridged | RO43 |
+| ScrSaver | 0.14 | bridged | RO43 |
+| SerialDeviceDriver | 0.48 | absent | — |
+| SerialDeviceSupport | 0.26 | absent | — |
+| SerialMouse | 0.10 | absent | — |
+| ShellCLI | 0.39 | bridged | RO48 |
+| SoundDMA | 1.72 | bridged | RO29 |
+| SoundChannels | 1.43 | provided | RO29 |
+| SoundScheduler | 1.34 | provided | RO29 |
+| SpriteExtend | 1.86 | provided | RO22 |
+| SpriteUtils | 1.13 | provided | RO22 |
+| Squash | 0.31 | provided | RO26 |
+| SuperSample | 0.16 | provided | RO25 |
+| SystemDevices | 1.34 | provided | RO26 |
+| TaskWindow | 0.85 | provided | RO48 |
+| WindowUtils | 2.53 | provided | RO45 |
+| FilterManager | 0.30 | provided | RO39 |
+| WaveSynth | 1.25 | provided | RO29 |
+| StringLib | 1.20 | provided | RO29 |
+| Percussion | 1.19 | provided | RO29 |
+| SharedSound | 1.20 | provided | RO29 |
+| Filer_Action | 0.64 | bridged | RO39 |
+| DOSFS | 1.15 | absent | — |
+| ColourPicker | 0.59 | provided | RO45 |
+| DrawFile | 1.62 | provided | RO24 |
+| BootCommands | 1.53 | provided | RO17 |
+| WindowScroll | 0.02 | provided | RO40 |
+| MbufManager | 0.30 | absent | — |
+| Internet | 5.67 | bridged | RO46.1 |
+| Resolver | 0.74 | provided | RO46.1 |
+| Net | 6.27 | absent | — |
+| BootNet | 0.97 | absent | — |
+| Freeway | 0.42 | absent | — |
+| ShareFS | 3.62 | absent | — |
+| MimeMap | 0.19 | provided | RO26 |
+| LanManFS | 2.70 | absent | — |
+| DHCP | 0.27 | absent | — |
+| !Edit | 1.75 | absent | — |
+| !Draw | 1.46 | absent | — |
+| !Paint | 2.54 | absent | — |
+| !Alarm | 2.96 | absent | — |
+| !Chars | 2.06 | absent | — |
+| !Help | 3.27 | absent | — |
+| Toolbox | 1.60 | provided | RO45 |
+| Window | 1.81 | provided | RO45 |
+| ToolAction | 0.38 | provided | RO45 |
+| Menu | 0.42 | provided | RO45 |
+| Iconbar | 1.23 | provided | RO45 |
+| ColourDbox | 0.23 | provided | RO45 |
+| ColourMenu | 0.23 | provided | RO45 |
+| DCS | 1.14 | provided | RO45 |
+| FileInfo | 0.21 | provided | RO45 |
+| FontDbox | 0.19 | provided | RO45 |
+| FontMenu | 0.26 | provided | RO45 |
+| PrintDbox | 0.18 | provided | RO45 |
+| ProgInfo | 0.19 | provided | RO45 |
+| SaveAs | 0.21 | provided | RO45 |
+| Scale | 0.18 | provided | RO45 |
+| TextGadgets | 0.45 | provided | RO45 |
+| CDFSDriver | 2.42 | absent | — |
+| CDFSSoftATAPI | 1.44 | absent | — |
+| CDFS | 2.63 | absent | — |
+| CDFSFiler | 2.53 | absent | — |
+| UnSqueezeAIF | 0.10 | provided | RO17 |
+
+### The command line
+
+`OS_CLI` is RISC OS 5's interpreter, through `CliV`.
+
+- **A line** loses its leading spaces and `*`s; `|` starts a comment; past
+  1023 characters it is "Too long". The first `{ < file }`, `{ > file }` or
+  `{ >> file }` group redirects the line's input or output while it runs, and a
+  write the file refuses ends the redirection with the filing system's error.
+- **Prefixes.** A filing system's prefix is the filing system's to set for the
+  line. `module:`, `MODULE#module:` and `-module-` run a command in that module
+  alone. `/` runs a file, `%` skips the aliases, and `.` alone catalogues.
+- **Resolution** is RISC OS's order: an alias; the kernel's commands, then each
+  module's in the order their commands came (an abbreviation in chain order),
+  the old numbered commands such as `*FX0` among them; the current and the
+  secondary filing systems' commands; a module answering `Service_UKCommand`;
+  and last, the filing system running a file.
+- **Aliases** are `Alias$` variables: an exact name, or an abbreviation of the
+  first alias in name order, the value's lines run with the parameters
+  `OS_SubstituteArgs32` substitutes.
+- **Parameters** are counted as RISC OS counts them, a quoted one with its
+  spaces, and those a table's map names are GSTrans'd first. A count outside
+  the command's range gives its syntax message, or a module's answer to
+  `Service_SyntaxError`.
+- **Bounds.** Nesting stops 32 deep with "No room on supervisor stack".
+  Aliases and maps are expanded into RISC OS's ring of sixteen 1 KiB buffers;
+  a line whose buffer was handed out again while it ran ends "Expansion too
+  complex". An error is made only to be returned, so an expansion's own never
+  takes the ring buffer of the error on its way out.
+
+The kernel's commands are the `UtilityModule`'s, each reaching the kernel
+through its SWIs as RISC OS's do. Their output is laid out as RISC OS lays it
+out; their help is the emulator's own wording.
+
+- **Output and variables:** `*Echo`, `*Error`, `*Eval`, `*Show` (paged, a value
+  longer than its buffer read again whole), `*Set`, `*SetMacro`, `*SetEval`,
+  `*Unset` (code variables passed by, as RISC OS passes them), `*Key`, `*IF` and
+  `*Time`.
+- **Files:** `*Type`, `*List` and `*Print`, each byte shown as GSTrans reads it
+  back in the configured `DumpFormat`; `*Dump`; `*Build` and `*Append`;
+  `*Load`, `*Save`, `*Create`, `*Delete`, `*Remove` and `*Close`; `*Exec`,
+  `*Spool` and `*SpoolOn` — each through the filing system's SWIs.
+- **The machine:** `*FX`, `*TV`, `*Opt`, `*GO`, `*Quit`, `*Ignore`, `*Shadow`,
+  `*Cache`, `*ChangeDynamicArea` and the module commands.
+- **`*Help`** gives each table entry and module title the keywords name (`.`
+  names everything) and the kernel's topics `Commands`, `FileCommands`,
+  `Configure` and `Modules`, unless a module answers `Service_Help`.
+- **`*Configure` and `*Status`** keep the kernel's 34 keywords in CMOS in the
+  PRM's fields — `Num` and `NoNum` in a bit it reserves, where genuine RISC OS
+  5 keeps them — alphabetically, each followed by its opposites, so an
+  abbreviation names the first it matches. Any other keyword goes to the
+  modules' configuration keywords, then to `Service_UKConfig` or
+  `Service_UKStatus`.
+- **`*GOS`** enters the Supervisor: a prompt, `CLI$Prompt` or `*`, at which each
+  line typed is run until a command starts another application.
+
+A command that runs for as long as its work does takes the interrupt due at
+each step, as RISC OS takes one in a command, so Escape stops a listing.
+
+The interpreter and commands do what they mean to: a `-module-` prefix names a
+module; nesting is bounded, where an alias that runs itself brings genuine
+RISC OS 5 down; `*TV` alone and an `ELSE` ending a line work; a module's configuration keyword is matched as a
+command is; a negative `MouseStep` is stored; `MonitorType EDID` and `Ignore`
+refuse what follows them; a refused `*Configure` changes nothing; and a listing
+turns paged mode off however it ends.
+
+### Testing
+
+Each subsystem's tests run guest code and SWIs on a booted kernel with a host
+whose clock and input they set. The file commands are tested against a
+filing system of one file built from vector claimants. `fuzz_swis` performs random SWIs with hostile
+registers — pointers into application space, at the top of memory, nowhere,
+misaligned — and runs random guest code salted with SWIs, holding that every
+refusal is a value, nothing runs for ever and the kernel still answers.
+`fuzz_modules` links module images with random headers, service tables and
+squeezed data, and performs `OS_Module`'s reasons, service calls and the
+module SWIs on them, holding the same. `fuzz_squeeze` expands the corpus's
+squeezed modules mutated, and noise carrying a squeezed length, under random
+bounds, holding that every refusal is a value and every expansion whole pairs
+of words within its trailer's size and the bound. `fuzz_cli` gives `OS_CLI` random lines:
+the kernel's commands and their abbreviations with hostile parameters, aliases
+with random templates, prefixes, redirection, GSTrans escapes and overlong
+lines, holding the same and that the interpreter runs the next line.
+`fuzz_international` gives MessageTrans hostile message files and ResourceFS
+blocks through every call, the Territory Manager hostile strings, times and
+formats, and the key handler random key sequences in every layout and
+alphabet, holding the same and that nothing is written past a call's room.
+
 ## The reference harness
 
 `cargo xtask riscos --reference <dir>` records the corpus in
@@ -506,14 +1107,19 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
 `*Configure Boot`).
 
 - **Scenarios** are SWI calls with their registers, values kept from earlier
-  calls, and what to record: registers, and only the flags the SWI defines,
-  since the rest are its caller's. A scenario records nothing that depends on
-  what else the machine holds, such as an area's number or base.
+  calls, blocks of memory made for them (every byte &EE until written) and
+  bytes written into those, and what to record: registers, only the flags the
+  SWI defines, since the rest are its caller's, a register less a kept
+  address, bytes of memory at a kept address or a register's, and a word
+  there less a kept address — a pointer into a block. A scenario records
+  nothing that depends on what else the machine holds, such as an area's
+  number or a block's address, and memory at a register only where the call
+  succeeded. The format is documented in the kernel's `corpus` module.
 - **The harness** is a BASIC V program tokenised with `lib/openbasic`, with a
   `!Boot` that runs it, never written over a `!Boot` of the machine's own and
   removed with the harness once the recording is taken. It writes each `show`
-  as one line: the call's
-  ordinal, `rN=&XXXXXXXX` for each register, `F=0` or `F=1` for each flag,
+  as one line: the call's ordinal, each item as `KEY=VALUE` — a register,
+  difference or pointer as `&XXXXXXXX`, a flag as `0` or `1`, bytes as hex —
   and `error=&N` whenever V is set. After the scenarios it runs `lib/obey`'s
   cases (`lib/obey/tests/riscos5/cases.txt`), each a call or a command, and
   writes each answer beside its case in `answers.txt` for the crate's replay;
@@ -532,20 +1138,36 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   done, the emulator exits, or five minutes pass. Otherwise the harness is
   left in `hostfs/`; boot the machine from it and run the command again to
   import what it recorded.
-- **Importing.** Each observation becomes its scenario's fixture, except for
-  a scenario marked `ours`, whose fixture states this emulator's own
-  behaviour. A recording is refused whole if it carries twelve bytes in a
+- **Importing.** Each observation becomes its scenario's fixture. A scenario
+  marked `ours`, whose fixture states this emulator's own behaviour, is left
+  out of the harness, so nothing it would do to genuine RISC OS stops a run.
+  One marked `reference` reads the machine itself: it is recorded and never
+  replayed, a test of its own holding what the emulator records of the
+  machine to it. A recording is refused whole if it carries twelve bytes in a
   row of a ROM image in `roms/` that the corpus's own files do not hold: in
   its text, in the words a step shows in consecutive registers, or in the
-  bytes the machine wrote into a `lib/obey` case's buffer. A run mostly of
+  bytes the machine wrote into a scenario's memory or a `lib/obey` case's
+  buffer — what lies between the bytes left &EE. A run mostly of
   `&00`, spaces and `&FF` is a small value or a listing's layout any ROM
   holds, not its content, and is not counted.
 - **Provenance.** Each file the harness writes opens with the RISC OS version
   it ran on and each ROM image's SHA-256.
+- **Texts.** A text the guest produces from RISC OS's own message files or
+  tables is never recorded: a scenario compares it in the guest, with
+  `Territory_Collate` against the text the emulator expects, or records its
+  length, and only that answer is kept. A scenario that needs a SWI by number
+  issues it from a vector's claimant written into its own block.
 
 The corpus was recorded under RPCEmu 0.9.5, whose machine runs RISC OS's IOMD
-build. `locate-the-compatibility-page` is `ours`: that build keeps zero page
-at zero, while the 32-bit profile, RISC OS 5's on ARMv7, has the compatibility
-page there. A crate test holds every scenario to one fixture in
-the harness's format. Replaying the scenarios on the kernel comes with its
-SWIs.
+build. `locate-the-compatibility-page` and `compatibility-page-state` are
+`ours`: that build keeps zero page at zero, readable from User mode, while
+the 32-bit profile has a compatibility page there; and the access privileges
+past the four every core has are the ARMv7 profile's, which that build lacks,
+so the corpus holds only those four. `squeeze-length-past-the-end` is `ours`
+too: genuine RISC OS 5 reads past the copy it makes of that module, and
+recorded alone it refuses it as this does, but after other scenarios it
+faults on whatever lies beyond. The replay runs in the UK's time, as the
+reference machine's territory does. A crate test holds every scenario to one
+fixture in the harness's format, and another replays every scenario on the
+kernel's own SWIs, the names resolved by its `OS_SWINumberFromString`, and
+holds what each leaves to its fixture.

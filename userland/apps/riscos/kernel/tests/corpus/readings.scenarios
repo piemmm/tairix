@@ -1,0 +1,109 @@
+# The readings of text the kernel's SWIs make through lib/obey: GSTrans and
+# its stepwise form, expressions, unsigned numbers, argument substitution and
+# templates — where each leaves its registers and what it writes.
+
+scenario gstrans-whole
+block buf 16
+block text 16
+write $text s="a|Mb<65>c" b=13
+call XOS_GSTrans r0=$text r1=$buf r2=16
+show r0-text r2 $buf:6 c v
+call XOS_GSTrans r0=$text r1=$buf r2=3
+show r0-text r2 $buf:6 c v
+call XOS_GSTrans r0=$text r1=$buf r2=&80000010
+show r0-text r2 $buf:9 c v
+call XOS_GSTrans r0=$text r1=$buf r2=&20000010
+show r0-text r2 $buf:6 c v
+
+scenario gstrans-refused
+block buf 16
+block text 8
+write $text s="a|" b=13
+call XOS_GSTrans r0=$text r1=$buf r2=16
+show v
+write $text s="<oops" b=13
+call XOS_GSTrans r0=$text r1=$buf r2=16
+show r0-text r2 $buf:6 c v
+
+scenario gsinit-and-gsread
+block text 16
+write $text s="  |Mx " b=13
+call XOS_GSInit r0=$text r2=0
+show r0-text r1 z v
+keep r0 at
+keep r2 state
+call XOS_GSRead r0=$at r2=$state
+show r0-text r1 c v
+keep r0 at
+keep r2 state
+call XOS_GSRead r0=$at r2=$state
+show r0-text r1 c v
+keep r0 at
+keep r2 state
+call XOS_GSRead r0=$at r2=$state
+show r0-text r1 c v
+keep r0 at
+keep r2 state
+call XOS_GSRead r0=$at r2=$state
+show r0-text r1 c v
+call XOS_GSInit r0=$text r2=&20000000
+show r0-text r1 z v
+
+scenario evaluate-expression
+block buf 16
+call XOS_EvaluateExpression r0="1+2*3" r1=$buf r2=16
+show r1 r2 v
+block text 16
+write $text b=&22 s="ab" b=&22 s="+" b=&22 s="cd" b=&22 b=0
+call XOS_EvaluateExpression r0=$text r1=$buf r2=16
+show r1-buf r2 $buf:5 v
+call XOS_EvaluateExpression r0=$text r1=$buf r2=3
+show r2 $buf:5 v
+call XOS_EvaluateExpression r0="1/0" r1=$buf r2=16
+show v
+call XOS_EvaluateExpression r0="(1" r1=$buf r2=16
+show v
+
+scenario read-unsigned
+block text 16
+write $text s="&1F " b=0
+call XOS_ReadUnsigned r0=10 r1=$text
+show r1-text r2 v
+write $text s="2_101x" b=0
+call XOS_ReadUnsigned r0=10 r1=$text
+show r1-text r2 v
+call XOS_ReadUnsigned r0=&80000000 r1=$text
+show v
+write $text s="300" b=0
+call XOS_ReadUnsigned r0=&4000000A r1=$text
+show v
+call XOS_ReadUnsigned r0=&2000000A r1=$text r2=299
+show v
+call XOS_ReadUnsigned r0=&2000000A r1=$text r2=300
+show r1-text r2 v
+write $text s="zz" b=0
+call XOS_ReadUnsigned r0=10 r1=$text
+show v
+
+scenario substitute-args
+block out 32
+block args 16
+write $args s="one two" b=13
+block line 16
+write $line s="x%1y%0z%*0" b=13
+call XOS_SubstituteArgs r0=$args r1=$out r2=32 r3=$line r4=10
+show r2 $out:20 v
+call XOS_SubstituteArgs r0=$args r1=$out r2=4 r3=$line r4=10
+show r2 $out:8 v
+
+scenario read-args
+block out 64
+block args 32
+write $args s="file -q 12" b=13
+call XOS_ReadArgs r0="name/A,q/S,n/E" r1=$args r2=$out r3=64
+show r3 $out@out $out+&4:4 $out+&8@out $out+&C:12 v
+call XOS_ReadArgs r0="name/A,q/S,n/E" r1=$args r2=$out r3=8
+show v
+write $args s="-q -q" b=13
+call XOS_ReadArgs r0="name/A,q/S" r1=$args r2=$out r3=64
+show v

@@ -1,0 +1,205 @@
+# Errors the kernel and its modules give, by number, where a call can
+# raise one safely: the module SWIs' refusals, the commands' and the
+# device vectors'.
+
+scenario errors-of-modules
+block notmod 64
+write $notmod w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_Module r0=11 r1=$notmod r2=56
+show v
+call XOS_Module r0=12 r1=0 r2=99
+show v
+call XOS_CLI r0="Unplug TairixNoSuchModule"
+show v
+call XOS_CLI r0="RMEnsure UtilityModule 99.00"
+show v
+call XOS_CLI r0="RMEnsure TairixNoSuchModule 1.00"
+show v
+
+# RISC OS 5 refuses a new incarnation with no postfix by whatever each
+# module's own workspace makes of it — &103, &124, &185 — where the emulator
+# refuses it as missing its postfix.
+scenario errors-of-a-missing-postfix ours
+call XOS_Module r0=14 r1="UtilityModule%"
+show v
+call XOS_Module r0=14 r1="MessageTrans%"
+show v
+
+scenario errors-of-international
+call XOS_CLI r0="Alphabet TairixNowhere"
+show v
+call XOS_CLI r0="Keyboard TairixNowhere"
+show v
+call XOS_CLI r0="Country TairixNowhere"
+show v
+call XOS_CLI r0="Configure Country TairixNowhere"
+show v
+
+scenario errors-of-the-device-vectors
+block code 8
+write $code w=&E1A0F00E
+call XOS_ClaimDeviceVector r0=99 r1=$code r2=0
+show v
+call XOS_ReleaseDeviceVector r0=99 r1=$code r2=0
+show v
+call XOS_ReleaseDeviceVector r0=3 r1=$code r2=&5555
+show v
+
+scenario errors-of-read-sys-info
+call XOS_ReadSysInfo r0=99
+show v
+call XOS_ReadSysInfo r0=1000
+show v
+call XOS_Byte r0=0 r1=99
+show r1 v
+
+scenario errors-of-the-key-command
+call XOS_CLI r0="Key 16 x"
+show v
+call XOS_CLI r0="Key -1 x"
+show v
+
+scenario errors-of-resourcefs
+block files 48
+write $files+0 b=&28 b=&0 b=&0 b=&0 b=&0 b=&FF b=&FF b=&FF b=&0 b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&45 b=&72 b=&72 b=&0 b=&0 b=&0
+write $files+32 b=&6 b=&0 b=&0 b=&0 b=&78 b=&A b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XResourceFS_RegisterFiles r0=$files
+show v
+call XResourceFS_RegisterFiles r0=$files
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+call XResourceFS_DeregisterFiles r0=$files
+show v
+
+scenario errors-of-memory
+block heap 256
+call XOS_Heap r0=0 r1=$heap r3=256
+show v
+call XOS_Heap r0=5 r1=$heap r3=&10000000
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=4096 r3=&12345 r4=&80 r5=&100000 r6=0 r7=0 r8="TairixMis"
+show v
+keep r1 area
+call XOS_DynamicArea r0=1 r1=$area
+show v
+
+# A return code is only its number: past what a word holds it is nought.
+scenario errors-of-variables
+block long 320
+write $long+0 s="1111111111111111111111111111111111111111111111111111111111111111"
+write $long+64 s="1111111111111111111111111111111111111111111111111111111111111111"
+write $long+128 s="1111111111111111111111111111111111111111111111111111111111111111"
+write $long+192 s="1111111111111111111111111111111111111111111111111111111111111111"
+write $long+256 s="1111111111111111111111111111111111111111111111111111111111111111"
+block buf 40
+call XOS_SetVarVal r0="Sys$ReturnCode" r1=$long r2=300 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="Sys$ReturnCode" r1=$buf r2=40 r3=0 r4=3
+show r2 r4 $buf:12 v
+call XOS_SetVarVal r0="Sys$ReturnCode" r1="99999999999" r2=11 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="Sys$ReturnCode" r1=$buf r2=40 r3=0 r4=3
+show r2 r4 $buf:12 v
+call XOS_SetVarVal r0="Sys$ReturnCode" r1="12x" r2=3 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="Sys$ReturnCode" r1=$buf r2=40 r3=0 r4=3
+show r2 r4 $buf:12 v
+call XOS_SetVarVal r0="Sys$ReturnCode" r1="-5" r2=2 r3=0 r4=0
+show v
+call XOS_ReadVarVal r0="Sys$ReturnCode" r1=$buf r2=40 r3=0 r4=3
+show r2 r4 $buf:12 v
+call XOS_SetVarVal r0="Sys$ReturnCode" r1="0" r2=1 r3=0 r4=0
+show v
+
+# The kernel's own calls' refusals, where genuine RISC OS 5 gives one.
+scenario errors-of-platform-calls
+call XOS_PlatformFeatures r0=99
+show v
+call XOS_Hardware r8=99
+show v
+call XOS_Hardware r8=1 r9=&FFFF
+show v
+block handler 64
+write $handler w=0 w=&80000000 w=0 w=0 w=0 w=0 w=0 w=0 w=2 w=0
+call XOS_ReadSysInfo r0=13 r1=$handler
+show r0 v
+write $handler+32 w=0
+call XOS_ReadSysInfo r0=13 r1=$handler
+show r0 v
+
+scenario errors-of-memory-calls
+call XOS_Memory r0=12 r1=&40000000
+show v
+block page 12
+write $page w=&FFFFFF w=0 w=0
+call XOS_Memory r0=&1100 r1=$page r2=1
+show v
+call XOS_DynamicArea r0=2 r1=1
+keep r3 rma
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=$rma r4=&80 r5=&100000 r6=0 r7=0 r8="TairixOverlap"
+show v
+keep r1 overlap
+call XOS_DynamicArea r0=1 r1=$overlap
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&80 r5=&7FF00000 r6=0 r7=0 r8="TairixHugeA"
+show v
+keep r1 hugea
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&80 r5=&7FF00000 r6=0 r7=0 r8="TairixHugeB"
+show v
+keep r1 hugeb
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&80 r5=&7FF00000 r6=0 r7=0 r8="TairixHugeC"
+show v
+keep r1 hugec
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&80 r5=&7FF00000 r6=0 r7=0 r8="TairixHugeD"
+show v
+keep r1 huged
+call XOS_DynamicArea r0=1 r1=$huged
+show v
+call XOS_DynamicArea r0=1 r1=$hugec
+show v
+call XOS_DynamicArea r0=1 r1=$hugeb
+show v
+call XOS_DynamicArea r0=1 r1=$hugea
+show v
+
+scenario errors-of-nvmemory
+call XOS_NVMemory r0=1 r1=999
+show v
+block nv 32
+call XOS_NVMemory r0=3 r1=250 r2=$nv r3=20
+show v
+call XOS_NVMemory r0=6 r1=999
+show r2 v
+call XOS_NVMemory r0=7 r1="x" r2=0
+show v
+call XOS_NVMemory r0=99
+show v
+
+scenario errors-of-module-calls
+call XOS_Module r0=24 r3=64 r4=3
+show v
+call XOS_Module r0=15 r1="MessageTrans%Base" r2="Base"
+show v
+
+# UpCall 256 claimed with R0 nought, the claimant marking that it ran.
+scenario errors-of-a-refused-start
+block up 32
+write $up w=&E3500C01 w=&058F000C w=&03A00000 w=&049DF004 w=&E1A0F00E w=0 w=0 w=0
+call XOS_Claim r0=&1D r1=$up r2=0
+show v
+call XOS_FSControl r0=2 r1="" r2=&8000 r3="TairixApp"
+show v $up+24:4
+call XOS_Release r0=&1D r1=$up r2=0
+show v
+
+# A ByteV claimant answering OS_Byte 0 with an error pointer into zero page.
+scenario errors-of-a-bad-error-pointer
+block bad 32
+write $bad w=&E351005A w=&11A0F00E w=&E3A00C01 w=&E328F201 w=&E49DF004
+call XOS_Claim r0=6 r1=$bad r2=0
+show v
+call XOS_Byte r0=0 r1=&5A
+show r0 v
+call XOS_Release r0=6 r1=$bad r2=0
+show v

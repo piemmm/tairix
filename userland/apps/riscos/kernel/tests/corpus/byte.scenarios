@@ -1,0 +1,126 @@
+# OS_Byte: the reasons a program reads machine state through, each set to a
+# known value before it is read where the machine's configuration would
+# otherwise decide it, and put back after. No CMOS byte is written.
+
+scenario byte-version
+call XOS_Byte r0=0 r1=1
+show r1 r2 v
+call XOS_Byte r0=129 r1=0 r2=&FF
+show r1 r2 v
+call XOS_Byte r0=0 r1=0
+show v
+
+scenario byte-user-flag
+call XOS_Byte r0=1 r1=&5A
+keep r1 was
+call XOS_Byte r0=1 r1=&A5
+show r1 v
+call XOS_Byte r0=1 r1=$was
+show r1 v
+
+scenario byte-variables-read-and-write
+call XOS_Byte r0=&F1 r1=&12 r2=0
+keep r1 was
+call XOS_Byte r0=&F1 r1=0 r2=&FF
+show r1 v
+call XOS_Byte r0=&F1 r1=&F0 r2=&0F
+show r1 v
+call XOS_Byte r0=&F1 r1=0 r2=&FF
+show r1 v
+call XOS_Byte r0=&F1 r1=$was r2=0
+show v
+
+scenario byte-escape-character
+call XOS_Byte r0=&DC r1=0 r2=&FF
+keep r1 was
+call XOS_Byte r0=&DC r1=&1B r2=0
+show v
+call XOS_Byte r0=&DC r1=0 r2=&FF
+show r1 v
+call XOS_Byte r0=&DC r1=$was r2=0
+show v
+
+scenario byte-events
+call XOS_Byte r0=13 r1=9
+keep r1 was
+call XOS_Byte r0=14 r1=9
+show r1 v
+call XOS_Byte r0=14 r1=9
+show r1 v
+call XOS_Byte r0=13 r1=9
+show r1 v
+call XOS_Byte r0=13 r1=9
+show r1 v
+
+scenario byte-keyboard-scan
+call XOS_Byte r0=121 r1=0
+show r1 r2 c v
+call XOS_Byte r0=122
+show r1 r2 c v
+call XOS_Byte r0=121 r1=&80 r2=&1234
+show r1 r2 c v
+call XOS_Byte r0=129 r1=&FF r2=&FF
+show r1 r2 v
+call XOS_Byte r0=129 r1=0 r2=0
+show r1 r2 c v
+
+scenario byte-buffers
+call XOS_Byte r0=21 r1=0
+show v
+call XOS_Byte r0=138 r1=0 r2=65
+show c v
+call XOS_Byte r0=138 r1=0 r2=66
+show c v
+call XOS_Byte r0=152 r1=0
+show r2 c v
+call XOS_Byte r0=145 r1=0
+show r2 c v
+call XOS_Byte r0=145 r1=0
+show r2 c v
+call XOS_Byte r0=145 r1=0
+show c v
+call XOS_Byte r0=152 r1=0
+show c v
+call XOS_Byte r0=153 r1=0 r2=67
+show c v
+call XOS_Byte r0=15 r1=1
+show v
+call XOS_Byte r0=145 r1=0
+show c v
+
+scenario byte-adval-buffers
+call XOS_Byte r0=21 r1=0
+show v
+call XOS_Byte r0=128 r1=&FF
+show r1 r2 v
+call XOS_Byte r0=138 r1=0 r2=65
+show v
+call XOS_Byte r0=128 r1=&FF
+show r1 r2 v
+call XOS_Byte r0=21 r1=0
+show v
+
+scenario byte-escape-state
+call XOS_Byte r0=124
+show v
+call XOS_Byte r0=126
+show r1 v
+
+scenario byte-unknown
+call XOS_Byte r0=&50 r1=1 r2=2
+show r1 r2 v
+call XOS_Byte r0=&69 r1=1 r2=2
+show r1 r2 v
+
+scenario byte-keyboard-reset-and-handler-service
+call XOS_Byte r0=12 r1=0
+show r1 r2 v
+call XOS_ServiceCall r1=&44 r2=2
+show r1 v
+
+# Where the variables are: two bytes, variable n at their address plus n.
+scenario byte-variable-table
+call XOS_Byte r0=166 r1=0 r2=255
+show r1 r2 v
+call XOS_Byte r0=167 r1=0 r2=255
+show r1 v

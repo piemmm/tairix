@@ -1,0 +1,20 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario word-bcd-to-string
+1 $clock:25=4672692C33312044656320313939392E32333A35393A35380D v=0
+2 $clock:25=53756E2C32382046656220313932362E30313A30323A30330D v=0
+3 $clock:25=53756E2C3230204A756C20313936392E32303A31373A34300D v=0
+
+scenario word-system-clock
+1 v=0
+2 $time+&1:4=00100000 v=0
+
+scenario word-interval-timer
+1 v=0
+2 $time+&1:4=00200000 v=0
+
+scenario word-unknown
+1 r0=&00000064 r1-blk=&00000000 r2=&00000007 $blk:4=EEEEEEEE v=0

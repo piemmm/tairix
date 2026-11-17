@@ -1,0 +1,9 @@
+# International's messages, in the emulator's own words.
+UnknownAlphabetName:No alphabet has that name
+UnknownKeyboardName:No keyboard has that name
+UnknownCountryName:No country has that name
+UnnamedEntry:Unnamed
+ConfigureCountrySyntax:Country    <country_name>
+CountryKeyword:Country
+AlphabetsHeading:Alphabets
+CountriesHeading:Countries

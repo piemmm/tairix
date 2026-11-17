@@ -1,0 +1,100 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario errors-of-modules
+1 v=1 error=&0000010E
+2 v=1 error=&00000109
+3 v=1 error=&00000106
+4 v=1 error=&0000010F
+5 v=1 error=&00000102
+
+scenario errors-of-a-missing-postfix
+1 v=1 error=&0000010A
+2 v=1 error=&0000010A
+
+scenario errors-of-international
+1 v=1 error=&00000640
+2 v=1 error=&00000642
+3 v=1 error=&00000641
+4 v=1 error=&00000641
+
+scenario errors-of-the-device-vectors
+1 v=1 error=&000001A2
+2 v=1 error=&000001A2
+3 v=1 error=&000001A3
+
+scenario errors-of-read-sys-info
+1 v=1 error=&000001EC
+2 v=1 error=&000001EC
+3 r1=&00000006 v=0
+
+scenario errors-of-the-key-command
+1 v=1 error=&000000FB
+2 v=1 error=&000000FB
+
+scenario errors-of-resourcefs
+1 v=0
+2 v=1 error=&00012E00
+3 v=0
+4 v=1 error=&00012E01
+
+scenario errors-of-memory
+1 v=0
+2 v=1 error=&00000186
+3 v=1 error=&000001C5
+4 v=1 error=&00000105
+
+scenario errors-of-variables
+1 v=0
+2 r2=&00000001 r4=&00000000 $buf:12=30EEEEEEEEEEEEEEEEEEEEEE v=0
+3 v=0
+4 r2=&00000001 r4=&00000000 $buf:12=30EEEEEEEEEEEEEEEEEEEEEE v=0
+5 v=0
+6 r2=&00000002 r4=&00000000 $buf:12=3132EEEEEEEEEEEEEEEEEEEE v=0
+7 v=1 error=&000001E2
+8 r2=&00000002 r4=&00000000 $buf:12=2D35EEEEEEEEEEEEEEEEEEEE v=0
+9 v=0
+
+scenario errors-of-platform-calls
+1 v=1 error=&000001F0
+2 v=1 error=&00000C60
+3 v=1 error=&00000C61
+4 v=1 error=&000001F4
+5 r0=&00000001 v=0
+
+scenario errors-of-memory-calls
+1 v=1 error=&000001D2
+2 v=1 error=&000000FC
+4 v=1 error=&000001C6
+5 v=1 error=&00000105
+6 v=0
+7 v=0
+8 v=0
+9 v=0
+10 v=0
+11 v=0
+12 v=0
+13 v=0
+
+scenario errors-of-nvmemory
+1 v=1 error=&00000410
+2 v=1 error=&00000410
+3 r2=&FFFFFFFF v=0
+4 v=1 error=&00000411
+5 v=1 error=&00000180
+
+scenario errors-of-module-calls
+1 v=1 error=&00000117
+2 v=1 error=&0000010B
+
+scenario errors-of-a-refused-start
+1 v=0
+2 v=1 $up+&18:4=00010000 error=&00000600
+3 v=0
+
+scenario errors-of-a-bad-error-pointer
+1 v=0
+2 v=1 error=&00000116
+3 v=0

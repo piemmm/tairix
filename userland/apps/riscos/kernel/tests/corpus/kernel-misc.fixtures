@@ -1,0 +1,333 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario crc
+1 r0=&0000BB3D v=0
+2 r0=&00004B37 v=0
+3 r0=&000075A8 v=0
+4 r0=&00000000 v=0
+
+scenario heap-sort-integers
+1 $list:24=0000000005000000070000000C000000FDFFFFFFFDFFFFFF v=0
+2 $list:24=00000080FDFFFFFF0000000005000000070000000C000000 v=0
+
+scenario access-privileges
+1 r1=&00000000 r2=&0000003F v=0
+2 r1=&00000001 r2=&0000003D v=0
+3 r1=&00000002 r2=&00000038 v=0
+4 r1=&00000003 r2=&0000002D v=0
+5 r0=&00000000 r2=&0000003F v=0
+6 r2=&0000003F v=1 error=&000001D4
+7 v=1 error=&000001EA
+
+scenario memory-reasons-and-flags
+1 v=0
+2 v=0
+3 v=0
+4 v=0
+5 v=1 error=&00000180
+6 v=0
+7 v=1 error=&000001D3
+8 v=0
+9 v=0
+10 v=1 error=&000001EA
+11 v=1 error=&000001EA
+12 v=1 error=&000001EA
+13 v=1 error=&000001D3
+14 v=1 error=&000001EA
+15 v=1 error=&000001EA
+16 v=1 error=&000001EA
+17 v=1 error=&000001EA
+18 v=1 error=&000001EA
+19 v=1 error=&00000180
+20 v=1 error=&00000180
+21 v=1 error=&00000180
+22 v=1 error=&000001EA
+
+scenario compatibility-page-state
+1 r1=&00000000 v=0
+2 r1=&00000000 v=0
+3 r1=&00000001 v=0
+4 r1=&00000001 v=0
+
+scenario generate-error
+1 v=1 error=&00001234
+2 c=0 v=0
+
+scenario call-a-vector
+1 r1=&00000000 v=0
+2 r1=&0000003C v=0
+
+scenario unclaimed-calls
+1 r1=&00007FFF r2=&00000012 v=0
+2 r0=&00007FFF r1=&00000034 v=0
+
+scenario vector-refusals
+1 v=0
+2 v=1 error=&000001A0
+3 v=1 error=&000001A1
+4 v=1 error=&000001A0
+
+scenario environment-refusals
+1 v=1 error=&000001B0
+2 v=0
+
+scenario cmos-size
+1 r1=&00000100 v=0
+
+scenario read-sys-info-display
+1 r0=&0000001C r1=&00000003 r2=&00000000 v=0
+
+scenario read-sys-info-chips
+1 r0=&FFFFFF00 r1=&00000000 r2=&00000000 r3=&00000000 r4=&00000000 v=0
+
+scenario kernel-area-bases
+1 r3=&30000000 v=0
+2 r3=&20000000 v=0
+3 r0=&00008000 r2=&1FFF8000 v=0
+
+scenario cmos-reset-values
+1 r2=&FFFFFFFF
+2 r2=&00000010
+3 r2=&00000054
+4 r2=&00000020
+5 r2=&00000008
+6 r2=&0000000A
+7 r2=&0000002C
+8 r2=&00000090
+9 r2=&00000000
+10 r2=&00000014
+11 r2=&000000A4
+12 r2=&00000040
+13 r2=&00000008
+14 r2=&000000F0
+15 r2=&00000002
+16 r2=&00000054
+17 r2=&FFFFFFFF
+
+scenario cmos-station-kept
+3 r2-station=&00000000
+
+scenario unused-swi-workspace
+2 v=0
+3 r1-handler=&00000000 r2=&00001234 v=0
+4 v=0
+
+scenario memory-9-and-10
+1 v=0
+2 v=0
+3 v=0
+4 v=0
+5 v=0
+6 v=0
+7 v=0
+8 v=0
+9 v=0
+10 v=0
+11 v=0
+12 v=0
+13 v=0
+14 v=0
+15 v=0
+16 v=0
+17 v=0
+18 v=0
+19 v=0
+20 v=0
+21 v=0
+22 v=0
+23 v=0
+24 v=0
+25 v=0
+26 v=0
+27 v=0
+28 v=0
+29 r1=&00000001 v=1 error=&00000180
+30 r1=&00000001 v=1 error=&00000180
+31 r1=&00000000 v=1 error=&00000180
+32 r1=&00000000 v=1 error=&00000180
+33 r1=&00000001 v=1 error=&00000180
+34 r1=&00000000 v=1 error=&00000180
+35 v=1 error=&00000180
+36 r1=&00000002 v=1 error=&00000180
+37 r1=&00000000 v=1 error=&00000180
+38 v=1 error=&00000180
+
+scenario memory-12-and-23
+1 v=0
+2 v=0
+3 v=1 error=&000001D2
+4 v=0
+5 v=0
+6 v=0
+7 v=1 error=&000001D2
+8 v=1 error=&000001D2
+9 v=0
+10 v=0
+11 v=1 error=&000001CA
+12 r3-page=&00000002 v=0
+13 v=1 error=&000001CA
+14 v=0
+15 v=0
+16 v=0
+17 v=1 error=&000001EA
+18 v=0
+19 v=1 error=&000001EA
+20 v=0
+
+scenario memory-19-dma
+3 r2-inl=&00000028 r4-outl=&00000024 v=0
+3 $outl:48=000000002000000000000000400000000800000000000000001000006400000000000000EEEEEEEEEEEEEEEEEEEEEEEE
+4 r2-inl2=&00000010 r4-outl2=&0000000C v=0
+4 $outl2:12=000000001000000001000000
+5 r2-inl2=&00000010 r4-outl2=&00000000 v=0
+6 v=1 error=&000001EA
+7 r2-inl3=&00000008 r4-outl3=&00000000 v=0
+
+scenario memory-0-conversions
+1 v=1 $pb+&14:4=EEEEEEEE error=&000000FC
+2 v=1 error=&000001EA
+3 v=1 error=&000001EA
+4 v=0
+5 v=1 error=&000001EA
+6 v=1 error=&000001EA
+
+scenario read-sys-info-strings
+1 r0=&00000000 r1=&00000000 r2=&22222222 r3=&33333333 r4=&44444444 v=0
+2 r0=&00000001 r1=&00000000 r2=&22222222 r3=&33333333 r4=&44444444 v=0
+3 v=1 error=&000001EC
+4 v=1 error=&000001EC
+5 v=0
+6 r2=&0000000C v=0
+7 v=0
+8 r2=&0000000C v=0
+9 r0=&00000000 v=0
+10 r0=&00000000 v=0
+11 r0=&00000000 v=0
+12 r0=&00000000 v=0
+13 r0=&00000000 v=0
+14 r0=&00000000 v=0
+
+scenario hal-devices
+1 v=0
+2 r1=&FFFFFFFF v=0
+3 r1=&FFFFFFFF v=0
+4 r1=&00000001 r2-dev=&00000000 v=0
+5 r2-dev=&00000000 v=0
+6 r1=&FFFFFFFF v=0
+7 r1=&FFFFFFFF v=0
+8 r1=&00000001 r2-dev=&00000000 v=0
+9 r2-dev=&00000000 v=0
+10 r1=&00000001 r2-dev=&00000000 v=0
+11 r2-dev=&00000000 v=0
+12 v=0
+13 r1=&00000001 r2-dev=&00000000 v=0
+14 r1=&FFFFFFFF v=0
+15 v=0
+16 v=0
+17 r1=&FFFFFFFF v=0
+18 v=1 error=&00000C60
+
+scenario processor-vectors
+2 v=1 error=&000001A0
+3 v=1 error=&000001A0
+4 v=1 error=&000001A1
+5 v=1 error=&000001A1
+
+scenario pretty-print-dictionary
+3 v=0
+5 r0=&0000C19C $kc0:4=04000000
+7 v=0
+9 r0=&0000D35B $kc1:4=0D000000
+11 v=0
+13 r0=&0000213C $kc2:4=05000000
+15 v=0
+17 r0=&0000A322 $kc3:4=0A000000
+19 v=0
+21 r0=&00003D3E $kc4:4=0F000000
+23 v=0
+25 r0=&00003946 $kc5:4=09000000
+27 v=0
+29 r0=&00006167 $kc6:4=3C000000
+31 v=0
+33 r0=&0000ED07 $kc7:4=06000000
+35 v=0
+37 r0=&00006350 $kc8:4=09000000
+39 v=0
+41 r0=&00002E42 $kc9:4=06000000
+43 v=0
+45 r0=&00000E6B $kc10:4=0C000000
+47 v=0
+49 r0=&00004D63 $kc11:4=06000000
+51 v=0
+53 r0=&000092DD $kc12:4=08000000
+55 v=0
+57 r0=&00004E46 $kc13:4=08000000
+59 v=0
+61 r0=&00001E52 $kc14:4=0F000000
+63 v=0
+65 r0=&000041E2 $kc15:4=31000000
+67 v=0
+69 r0=&00004F1F $kc16:4=05000000
+71 v=0
+73 r0=&0000954D $kc17:4=14000000
+75 v=0
+77 r0=&0000264E $kc18:4=33000000
+79 v=0
+81 r0=&0000E8AD $kc19:4=0A000000
+83 v=0
+85 r0=&000009D5 $kc20:4=1C000000
+87 v=0
+89 r0=&00004508 $kc21:4=33000000
+91 v=0
+93 r0=&000062A5 $kc22:4=02000000
+95 v=0
+97 r0=&0000D860 $kc23:4=41000000
+99 v=0
+101 r0=&000071CA $kc24:4=36000000
+103 v=0
+105 r0=&00007AD4 $kc25:4=28000000
+107 v=0
+109 r0=&000067BE $kc26:4=08000000
+111 v=0
+113 r0=&0000C323 $kc27:4=18000000
+115 v=0
+117 r0=&00002976 $kc28:4=08000000
+119 v=0
+121 r0=&00000A6D $kc29:4=0B000000
+123 v=0
+125 r0=&000083D5 $kc30:4=0F000000
+127 v=0
+129 r0=&0000F83A $kc31:4=08000000
+131 v=0
+133 r0=&0000E044 $kc32:4=0A000000
+135 v=0
+137 r0=&0000C242 $kc33:4=0C000000
+139 v=0
+141 r0=&0000AC79 $kc34:4=07000000
+143 v=0
+145 r0=&00004615 $kc35:4=09000000
+147 v=0
+149 r0=&0000E5E4 $kc36:4=0B000000
+151 v=0
+153 r0=&0000AED9 $kc37:4=08000000
+155 v=0
+157 r0=&00006E08 $kc38:4=05000000
+159 v=0
+161 r0=&00002773 $kc39:4=06000000
+163 v=0
+165 r0=&00005662 $kc40:4=04000000
+167 v=0
+169 r0=&000091FD $kc41:4=04000000
+171 v=0
+173 r0=&000062A5 $kc42:4=02000000
+175 v=0
+177 r0=&000062A5 $kc43:4=02000000
+179 v=0
+181 r0=&000062A5 $kc44:4=02000000
+183 v=0
+185 r0=&000062A5 $kc45:4=02000000
+187 v=0
+189 r0=&000062A5 $kc255:4=02000000

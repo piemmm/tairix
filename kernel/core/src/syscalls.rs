@@ -35516,12 +35516,16 @@ mod tests {
     fn a_copy_meeting_a_lost_page_ends_the_process_as_a_fault() {
         let _g = crate::procsignal::running_kill_test_lock();
         let (_producer, sink, h, caps) = anon_copy_fixture(Arc::new(TestArch::with_cpus(1)), 1);
+        // A thread of process 2 no other test runs as: the gates are shared by
+        // every test, and those calling as thread 2 tear its gate down, as here.
+        let thread = 0x00c0_ffd4;
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(thread),
             caps: &caps,
         };
+        crate::procsignal::clear_kill_gate(thread);
+        crate::procsignal::install_gate(thread, ProcessId(2)).expect("a gate installs");
         crate::procsignal::clear_kill_gate(2);
-        crate::procsignal::install_gate(2, ProcessId(2)).expect("a gate installs");
         let kills = || {
             sink.snapshot()
                 .into_iter()
@@ -35533,23 +35537,23 @@ mod tests {
             h.copy_refused(&ctx, ANON_BASE, false, Unbacked::NoMemory),
             Errno::OutOfMemory
         );
-        assert!(!crate::procsignal::kill_pending(2));
+        assert!(!crate::procsignal::kill_pending(thread));
         assert_eq!(kills(), 0);
 
         assert_eq!(
             h.copy_refused(&ctx, ANON_BASE, true, Unbacked::Lost),
             Errno::MediumError
         );
-        assert!(crate::procsignal::kill_pending(2), "the death is owed");
+        assert!(crate::procsignal::kill_pending(thread), "the death is owed");
         assert_eq!(kills(), 1);
         assert_eq!(
-            crate::procsignal::take_owed_kill(2),
+            crate::procsignal::take_owed_kill(thread),
             Some(crate::procsignal::DeferredTeardown::Exit {
                 process: ProcessId(2),
                 status: tairix_abi::FAULT_EXIT_STATUS,
             })
         );
-        crate::procsignal::clear_kill_gate(2);
+        crate::procsignal::clear_kill_gate(thread);
     }
 
     /// A fault no resolver could back ends the process as a fault of its own,

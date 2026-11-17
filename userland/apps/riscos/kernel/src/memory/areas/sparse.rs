@@ -254,8 +254,8 @@ impl Memory {
         Ok(())
     }
 
-    /// Ends a sparse claim or release as RISC OS does: one more service
-    /// with nothing moved, and the change noted.
+    /// Ends a sparse claim or release: one more service with nothing moved,
+    /// and the change noted.
     fn finish_sparse<G: Guest + ?Sized>(&mut self, number: u32, guest: &mut G) {
         guest.service(
             self,

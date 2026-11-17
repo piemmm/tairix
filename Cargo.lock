@@ -4641,10 +4641,17 @@ dependencies = [
 name = "tairix-riscos-kernel"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-collections",
  "tairix-fuzzseed",
  "tairix-inline",
+ "tairix-obey",
  "tairix-riscos-arm",
+ "tairix-tz",
+ "tairix-tzcompile",
+ "tairix-unicode",
+ "tairix-util",
+ "tairix-vdu",
 ]
 
 [[package]]

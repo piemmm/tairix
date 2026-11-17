@@ -1,0 +1,882 @@
+# International (plans/RISCOS-EMULATOR.md §4.6): each country's alphabet,
+# the countries' and alphabets' names, by length and in the guest by
+# Territory_Collate against the PRM's, and the alphabets OS_Byte 71
+# selects.
+
+scenario international-countries-and-alphabets
+call XOS_ServiceCall r1=&43 r2=4 r3=0 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=1 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=2 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=3 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=4 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=5 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=6 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=7 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=8 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=9 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=10 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=11 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=12 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=13 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=14 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=15 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=16 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=17 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=18 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=19 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=20 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=21 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=22 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=23 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=24 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=25 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=26 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=27 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=28 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=29 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=30 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=31 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=32 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=33 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=34 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=35 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=36 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=37 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=38 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=39 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=40 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=41 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=42 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=43 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=44 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=45 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=46 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=47 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=48 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=49 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=50 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=51 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=52 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=53 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=54 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=55 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=56 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=57 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=58 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=59 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=60 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=61 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=62 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=63 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=64 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=65 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=66 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=67 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=68 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=69 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=70 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=71 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=72 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=73 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=74 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=75 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=76 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=77 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=78 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=79 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=80 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=81 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=82 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=83 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=84 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=85 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=86 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=87 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=88 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=89 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=90 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=91 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=92 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=93 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=94 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=95 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=96 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=97 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=98 r4=&EEEE
+show r1 r4 v
+call XOS_ServiceCall r1=&43 r2=4 r3=99 r4=&EEEE
+show r1 r4 v
+block cn0 32
+write $cn0 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=0 r4=$cn0 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn0 r2="Default" r3=0
+show r0 v
+block cn1 32
+write $cn1 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=1 r4=$cn1 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn1 r2="UK" r3=0
+show r0 v
+block cn2 32
+write $cn2 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=2 r4=$cn2 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn2 r2="Master" r3=0
+show r0 v
+block cn3 32
+write $cn3 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=3 r4=$cn3 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn3 r2="Compact" r3=0
+show r0 v
+block cn4 32
+write $cn4 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=4 r4=$cn4 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn4 r2="Italy" r3=0
+show r0 v
+block cn5 32
+write $cn5 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=5 r4=$cn5 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn5 r2="Spain" r3=0
+show r0 v
+block cn6 32
+write $cn6 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=6 r4=$cn6 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn6 r2="France" r3=0
+show r0 v
+block cn7 32
+write $cn7 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=7 r4=$cn7 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn7 r2="Germany" r3=0
+show r0 v
+block cn8 32
+write $cn8 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=8 r4=$cn8 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn8 r2="Portugal" r3=0
+show r0 v
+block cn9 32
+write $cn9 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=9 r4=$cn9 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn9 r2="Esperanto" r3=0
+show r0 v
+block cn10 32
+write $cn10 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=10 r4=$cn10 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn10 r2="Greece" r3=0
+show r0 v
+block cn11 32
+write $cn11 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=11 r4=$cn11 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn11 r2="Sweden" r3=0
+show r0 v
+block cn12 32
+write $cn12 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=12 r4=$cn12 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn12 r2="Finland" r3=0
+show r0 v
+block cn13 32
+write $cn13 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=13 r4=$cn13 r5=31
+show r1 r5 v
+block cn14 32
+write $cn14 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=14 r4=$cn14 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn14 r2="Denmark" r3=0
+show r0 v
+block cn15 32
+write $cn15 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=15 r4=$cn15 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn15 r2="Norway" r3=0
+show r0 v
+block cn16 32
+write $cn16 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=16 r4=$cn16 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn16 r2="Iceland" r3=0
+show r0 v
+block cn17 32
+write $cn17 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=17 r4=$cn17 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn17 r2="Canada1" r3=0
+show r0 v
+block cn18 32
+write $cn18 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=18 r4=$cn18 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn18 r2="Canada2" r3=0
+show r0 v
+block cn19 32
+write $cn19 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=19 r4=$cn19 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn19 r2="Canada" r3=0
+show r0 v
+block cn20 32
+write $cn20 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=20 r4=$cn20 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn20 r2="Turkey" r3=0
+show r0 v
+block cn21 32
+write $cn21 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=21 r4=$cn21 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn21 r2="Arabic" r3=0
+show r0 v
+block cn22 32
+write $cn22 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=22 r4=$cn22 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn22 r2="Ireland" r3=0
+show r0 v
+block cn23 32
+write $cn23 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=23 r4=$cn23 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn23 r2="HongKong" r3=0
+show r0 v
+block cn24 32
+write $cn24 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=24 r4=$cn24 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn24 r2="Russia" r3=0
+show r0 v
+block cn25 32
+write $cn25 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=25 r4=$cn25 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn25 r2="Russia2" r3=0
+show r0 v
+block cn26 32
+write $cn26 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=26 r4=$cn26 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn26 r2="Israel" r3=0
+show r0 v
+block cn27 32
+write $cn27 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=27 r4=$cn27 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn27 r2="Mexico" r3=0
+show r0 v
+block cn28 32
+write $cn28 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=28 r4=$cn28 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn28 r2="LatinAm" r3=0
+show r0 v
+block cn29 32
+write $cn29 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=29 r4=$cn29 r5=31
+show r1 r5 v
+block cn30 32
+write $cn30 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=30 r4=$cn30 r5=31
+show r1 r5 v
+block cn31 32
+write $cn31 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=31 r4=$cn31 r5=31
+show r1 r5 v
+block cn32 32
+write $cn32 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=32 r4=$cn32 r5=31
+show r1 r5 v
+block cn33 32
+write $cn33 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=33 r4=$cn33 r5=31
+show r1 r5 v
+block cn34 32
+write $cn34 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=34 r4=$cn34 r5=31
+show r1 r5 v
+block cn35 32
+write $cn35 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=35 r4=$cn35 r5=31
+show r1 r5 v
+block cn36 32
+write $cn36 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=36 r4=$cn36 r5=31
+show r1 r5 v
+block cn37 32
+write $cn37 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=37 r4=$cn37 r5=31
+show r1 r5 v
+block cn38 32
+write $cn38 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=38 r4=$cn38 r5=31
+show r1 r5 v
+block cn39 32
+write $cn39 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=39 r4=$cn39 r5=31
+show r1 r5 v
+block cn40 32
+write $cn40 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=40 r4=$cn40 r5=31
+show r1 r5 v
+block cn41 32
+write $cn41 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=41 r4=$cn41 r5=31
+show r1 r5 v
+block cn42 32
+write $cn42 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=42 r4=$cn42 r5=31
+show r1 r5 v
+block cn43 32
+write $cn43 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=43 r4=$cn43 r5=31
+show r1 r5 v
+block cn44 32
+write $cn44 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=44 r4=$cn44 r5=31
+show r1 r5 v
+block cn45 32
+write $cn45 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=45 r4=$cn45 r5=31
+show r1 r5 v
+block cn46 32
+write $cn46 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=46 r4=$cn46 r5=31
+show r1 r5 v
+block cn47 32
+write $cn47 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=47 r4=$cn47 r5=31
+show r1 r5 v
+block cn48 32
+write $cn48 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=48 r4=$cn48 r5=31
+show r1 r5 v
+block cn49 32
+write $cn49 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=49 r4=$cn49 r5=31
+show r1 r5 v
+block cn50 32
+write $cn50 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=50 r4=$cn50 r5=31
+show r1 r5 v
+block cn51 32
+write $cn51 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=51 r4=$cn51 r5=31
+show r1 r5 v
+block cn52 32
+write $cn52 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=52 r4=$cn52 r5=31
+show r1 r5 v
+block cn53 32
+write $cn53 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=53 r4=$cn53 r5=31
+show r1 r5 v
+block cn54 32
+write $cn54 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=54 r4=$cn54 r5=31
+show r1 r5 v
+block cn55 32
+write $cn55 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=55 r4=$cn55 r5=31
+show r1 r5 v
+block cn56 32
+write $cn56 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=56 r4=$cn56 r5=31
+show r1 r5 v
+block cn57 32
+write $cn57 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=57 r4=$cn57 r5=31
+show r1 r5 v
+block cn58 32
+write $cn58 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=58 r4=$cn58 r5=31
+show r1 r5 v
+block cn59 32
+write $cn59 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=59 r4=$cn59 r5=31
+show r1 r5 v
+block cn60 32
+write $cn60 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=60 r4=$cn60 r5=31
+show r1 r5 v
+block cn61 32
+write $cn61 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=61 r4=$cn61 r5=31
+show r1 r5 v
+block cn62 32
+write $cn62 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=62 r4=$cn62 r5=31
+show r1 r5 v
+block cn63 32
+write $cn63 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=63 r4=$cn63 r5=31
+show r1 r5 v
+block cn64 32
+write $cn64 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=64 r4=$cn64 r5=31
+show r1 r5 v
+block cn65 32
+write $cn65 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=65 r4=$cn65 r5=31
+show r1 r5 v
+block cn66 32
+write $cn66 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=66 r4=$cn66 r5=31
+show r1 r5 v
+block cn67 32
+write $cn67 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=67 r4=$cn67 r5=31
+show r1 r5 v
+block cn68 32
+write $cn68 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=68 r4=$cn68 r5=31
+show r1 r5 v
+block cn69 32
+write $cn69 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=69 r4=$cn69 r5=31
+show r1 r5 v
+block cn70 32
+write $cn70 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=70 r4=$cn70 r5=31
+show r1 r5 v
+block cn71 32
+write $cn71 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=71 r4=$cn71 r5=31
+show r1 r5 v
+block cn72 32
+write $cn72 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=72 r4=$cn72 r5=31
+show r1 r5 v
+block cn73 32
+write $cn73 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=73 r4=$cn73 r5=31
+show r1 r5 v
+block cn74 32
+write $cn74 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=74 r4=$cn74 r5=31
+show r1 r5 v
+block cn75 32
+write $cn75 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=75 r4=$cn75 r5=31
+show r1 r5 v
+block cn76 32
+write $cn76 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=76 r4=$cn76 r5=31
+show r1 r5 v
+block cn77 32
+write $cn77 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=77 r4=$cn77 r5=31
+show r1 r5 v
+block cn78 32
+write $cn78 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=78 r4=$cn78 r5=31
+show r1 r5 v
+block cn79 32
+write $cn79 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=79 r4=$cn79 r5=31
+show r1 r5 v
+block cn80 32
+write $cn80 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=80 r4=$cn80 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn80 r2="ISO1" r3=0
+show r0 v
+block cn81 32
+write $cn81 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=81 r4=$cn81 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn81 r2="ISO2" r3=0
+show r0 v
+block cn82 32
+write $cn82 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=82 r4=$cn82 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn82 r2="ISO3" r3=0
+show r0 v
+block cn83 32
+write $cn83 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=83 r4=$cn83 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$cn83 r2="ISO4" r3=0
+show r0 v
+block cn84 32
+write $cn84 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=84 r4=$cn84 r5=31
+show r1 r5 v
+block cn85 32
+write $cn85 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=85 r4=$cn85 r5=31
+show r1 r5 v
+block cn86 32
+write $cn86 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=86 r4=$cn86 r5=31
+show r1 r5 v
+block cn87 32
+write $cn87 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=87 r4=$cn87 r5=31
+show r1 r5 v
+block cn88 32
+write $cn88 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=88 r4=$cn88 r5=31
+show r1 r5 v
+block cn89 32
+write $cn89 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=89 r4=$cn89 r5=31
+show r1 r5 v
+block cn90 32
+write $cn90 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=90 r4=$cn90 r5=31
+show r1 r5 v
+block cn91 32
+write $cn91 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=91 r4=$cn91 r5=31
+show r1 r5 v
+block cn92 32
+write $cn92 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=92 r4=$cn92 r5=31
+show r1 r5 v
+block cn93 32
+write $cn93 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=93 r4=$cn93 r5=31
+show r1 r5 v
+block cn94 32
+write $cn94 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=94 r4=$cn94 r5=31
+show r1 r5 v
+block cn95 32
+write $cn95 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=95 r4=$cn95 r5=31
+show r1 r5 v
+block cn96 32
+write $cn96 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=96 r4=$cn96 r5=31
+show r1 r5 v
+block cn97 32
+write $cn97 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=97 r4=$cn97 r5=31
+show r1 r5 v
+block cn98 32
+write $cn98 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=98 r4=$cn98 r5=31
+show r1 r5 v
+block cn99 32
+write $cn99 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=2 r3=99 r4=$cn99 r5=31
+show r1 r5 v
+block an99 32
+write $an99 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=99 r4=$an99 r5=31
+show r1 r5 v
+block an100 32
+write $an100 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=100 r4=$an100 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an100 r2="BFont" r3=0
+show r0 v
+block an101 32
+write $an101 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=101 r4=$an101 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an101 r2="Latin1" r3=0
+show r0 v
+block an102 32
+write $an102 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=102 r4=$an102 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an102 r2="Latin2" r3=0
+show r0 v
+block an103 32
+write $an103 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=103 r4=$an103 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an103 r2="Latin3" r3=0
+show r0 v
+block an104 32
+write $an104 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=104 r4=$an104 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an104 r2="Latin4" r3=0
+show r0 v
+block an105 32
+write $an105 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=105 r4=$an105 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an105 r2="Cyrillic" r3=0
+show r0 v
+block an106 32
+write $an106 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=106 r4=$an106 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an106 r2="Arabic" r3=0
+show r0 v
+block an107 32
+write $an107 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=107 r4=$an107 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an107 r2="Greek" r3=0
+show r0 v
+block an108 32
+write $an108 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=108 r4=$an108 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an108 r2="Hebrew" r3=0
+show r0 v
+block an109 32
+write $an109 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=109 r4=$an109 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an109 r2="Latin5" r3=0
+show r0 v
+block an110 32
+write $an110 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=110 r4=$an110 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an110 r2="Welsh" r3=0
+show r0 v
+block an111 32
+write $an111 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=111 r4=$an111 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an111 r2="UTF8" r3=0
+show r0 v
+block an112 32
+write $an112 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=112 r4=$an112 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an112 r2="Latin9" r3=0
+show r0 v
+block an113 32
+write $an113 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=113 r4=$an113 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an113 r2="Latin6" r3=0
+show r0 v
+block an114 32
+write $an114 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=114 r4=$an114 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an114 r2="Latin7" r3=0
+show r0 v
+block an115 32
+write $an115 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=115 r4=$an115 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an115 r2="Latin8" r3=0
+show r0 v
+block an116 32
+write $an116 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=116 r4=$an116 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an116 r2="Latin10" r3=0
+show r0 v
+block an117 32
+write $an117 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=117 r4=$an117 r5=31
+show r1 r5 v
+block an118 32
+write $an118 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=118 r4=$an118 r5=31
+show r1 r5 v
+block an119 32
+write $an119 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=119 r4=$an119 r5=31
+show r1 r5 v
+block an120 32
+write $an120 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=120 r4=$an120 r5=31
+show r1 r5 v
+call XTerritory_Collate r0=-1 r1=$an120 r2="Cyrillic2" r3=0
+show r0 v
+block an121 32
+write $an121 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=121 r4=$an121 r5=31
+show r1 r5 v
+block an122 32
+write $an122 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=122 r4=$an122 r5=31
+show r1 r5 v
+block an123 32
+write $an123 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=123 r4=$an123 r5=31
+show r1 r5 v
+block an124 32
+write $an124 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=124 r4=$an124 r5=31
+show r1 r5 v
+block an125 32
+write $an125 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=125 r4=$an125 r5=31
+show r1 r5 v
+block an126 32
+write $an126 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=126 r4=$an126 r5=31
+show r1 r5 v
+block an127 32
+write $an127 w=0 w=0 w=0 w=0 w=0 w=0 w=0 w=0
+call XOS_ServiceCall r1=&43 r2=3 r3=127 r4=$an127 r5=31
+show r1 r5 v
+call XOS_Byte r0=71 r1=99
+show r1 v
+call XOS_Byte r0=71 r1=100
+show r1 v
+call XOS_Byte r0=71 r1=101
+show r1 v
+call XOS_Byte r0=71 r1=102
+show r1 v
+call XOS_Byte r0=71 r1=103
+show r1 v
+call XOS_Byte r0=71 r1=104
+show r1 v
+call XOS_Byte r0=71 r1=105
+show r1 v
+call XOS_Byte r0=71 r1=106
+show r1 v
+call XOS_Byte r0=71 r1=107
+show r1 v
+call XOS_Byte r0=71 r1=108
+show r1 v
+call XOS_Byte r0=71 r1=109
+show r1 v
+call XOS_Byte r0=71 r1=110
+show r1 v
+call XOS_Byte r0=71 r1=111
+show r1 v
+call XOS_Byte r0=71 r1=112
+show r1 v
+call XOS_Byte r0=71 r1=113
+show r1 v
+call XOS_Byte r0=71 r1=114
+show r1 v
+call XOS_Byte r0=71 r1=115
+show r1 v
+call XOS_Byte r0=71 r1=116
+show r1 v
+call XOS_Byte r0=71 r1=117
+show r1 v
+call XOS_Byte r0=71 r1=118
+show r1 v
+call XOS_Byte r0=71 r1=119
+show r1 v
+call XOS_Byte r0=71 r1=120
+show r1 v
+call XOS_Byte r0=71 r1=121
+show r1 v
+call XOS_Byte r0=71 r1=122
+show r1 v
+call XOS_Byte r0=71 r1=123
+show r1 v
+call XOS_Byte r0=71 r1=124
+show r1 v
+call XOS_Byte r0=71 r1=125
+show r1 v
+call XOS_Byte r0=71 r1=126
+show r1 v
+call XOS_Byte r0=71 r1=127
+show r1 v
+call XOS_Byte r0=71 r1=101
+show v

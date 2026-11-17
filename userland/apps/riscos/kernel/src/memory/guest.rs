@@ -79,6 +79,14 @@ pub enum Service<'a> {
     ReleaseFiq,
 }
 
+/// What a `PreGrow` handler allowed beyond the grow itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Allowed {
+    /// It answered "RESV": the pages it names may be ones `OS_Memory` 23
+    /// reserved.
+    pub reserved: bool,
+}
+
 /// The rest of the kernel, as the address space sees it.
 pub trait Guest {
     /// `PreGrow`: `bytes` are about to be added to an area of `size`. A
@@ -91,7 +99,7 @@ pub trait Guest {
         block: &mut [PageEntry],
         bytes: u32,
         size: u32,
-    ) -> Result<(), Option<GuestError>>;
+    ) -> Result<Allowed, Option<GuestError>>;
 
     /// `PostGrow`: `bytes` were added, making `size`.
     fn post_grow(

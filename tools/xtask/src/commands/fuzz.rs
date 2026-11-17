@@ -170,6 +170,31 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/riscos/kernel address space: random slot, dynamic-area, sparse and pool calls with hostile arguments under handlers that answer at random and call back in; every page in use stays accounted for and every reported page mapped",
     },
     Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_cli",
+        description: "userland/apps/riscos/kernel command line: random lines through OS_CLI — the kernel's commands and abbreviations with hostile parameters, aliases with random templates, prefixes, redirection groups, GSTrans escapes, conditionals and overlong lines; every refusal a value, nothing endless past the host's word, the interpreter left to run the next line",
+    },
+    Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_international",
+        description: "userland/apps/riscos/kernel international surfaces: hostile message files and ResourceFS blocks through every MessageTrans call, the Territory Manager's conversions, collation and symbols over hostile strings, times and formats, and key sequences through the key handler in every keyboard's layout and alphabet; every refusal a value, nothing written past a call's room, the kernel still answering",
+    },
+    Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_modules",
+        description: "userland/apps/riscos/kernel module chain: module images with random headers, entries, service tables, decoding tables and squeezed data linked through OS_Module, then random reasons, service calls and module SWIs; nothing endless, the kernel answering, the chain walking to its end",
+    },
+    Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_squeeze",
+        description: "userland/apps/riscos/kernel squeezed-module expander: the corpus's squeezed modules mutated, and noise carrying a squeezed length, expanded under random bounds; every refusal a value, every expansion whole pairs of words within its trailer's size and the bound, the same each time",
+    },
+    Target {
+        package: "tairix-riscos-kernel",
+        test: "fuzz_swis",
+        description: "userland/apps/riscos/kernel SWIs: random SWIs with hostile registers (pointers into application space, at the top of memory, nowhere, misaligned) and random guest code salted with SWIs; every refusal a value, nothing endless past the host's word, the kernel still answering",
+    },
+    Target {
         package: "tairix-softfloat",
         test: "fuzz_decimal",
         description: "lib/softfloat decimal conversion and the FPA's packed decimal: any value and any words, their brackets and round trips",

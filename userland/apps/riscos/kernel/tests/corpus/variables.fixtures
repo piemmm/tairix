@@ -1,0 +1,78 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario variable-string
+1 r4=&00000000 v=0
+2 r2=&00000005 r4=&00000000 $buf:6=68656C6C6FEE v=0
+3 v=0
+
+scenario variable-string-gstrans
+1 r4=&00000000 v=0
+2 r2=&00000004 r4=&00000000 $buf:6=0D610D62EEEE v=0
+3 v=0
+
+scenario variable-read-short-and-probe
+1 v=0
+2 r2=&00000003 r4=&00000000 $buf:8=616263EEEEEEEEEE v=1 error=&000001E4
+3 r2=&FFFFFFF7 v=1 error=&000001E4
+4 r2=&00000008 r4=&00000000 $buf:8=6162636465666768 v=0
+5 v=0
+
+scenario variable-not-found
+1 r2=&00000000 $buf:4=EEEEEEEE v=1 error=&00000124
+2 r2=&00000000 v=1 error=&00000124
+3 v=1 error=&00000124
+
+scenario variable-number
+1 r4=&00000001 v=0
+2 r2=&00000004 r4=&00000001 $buf:5=D6FFFFFFEE v=0
+3 r2=&00000003 r4=&00000000 $buf:5=2D3432FFEE v=0
+4 v=0
+
+scenario variable-macro
+1 r4=&00000002 v=0
+2 v=0
+3 r2=&0000000C r4=&00000002 $buf:13=6D3C5461697269784D323E6EEE v=0
+4 r2=&00000004 r4=&00000002 $buf:6=6D78796E0072 v=0
+5 v=0
+6 v=0
+
+scenario variable-expanded
+1 r4=&00000001 v=0
+2 r2=&00000004 r4=&00000001 $buf:4=2A000000 v=0
+3 r4=&00000004 v=0
+4 r2=&00000003 r4=&00000000 $buf:4=61626300 v=0
+5 v=0
+
+scenario variable-literal
+1 r4=&00000004 v=0
+2 r2=&00000007 r4=&00000000 $buf:8=613C623E0D6364EE v=0
+3 v=0
+
+scenario variable-wildcards-and-context
+1 v=0
+2 v=0
+3 r2=&00000003 $buf:4=6F6E65EE v=0
+4 r2=&00000003 $buf:4=74776FEE v=0
+5 r2=&00000000 v=1 error=&00000124
+6 r2=&00000003 $buf:4=6F6E65EE v=0
+7 v=0
+8 v=0
+9 v=1 error=&00000124
+
+scenario variable-name-ends-at-a-space
+1 v=0
+2 r2=&00000001 $buf:2=76EE v=0
+3 v=0
+
+scenario variable-refusals
+1 v=1 error=&00000122
+2 v=1 error=&00000122
+3 v=1 error=&00000121
+4 v=1 error=&00000121
+5 v=0
+6 v=0
+7 v=1 error=&00000164
+8 r2=&FFFFFFFD v=1 error=&000001E4

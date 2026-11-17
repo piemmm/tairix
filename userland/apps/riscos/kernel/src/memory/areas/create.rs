@@ -64,7 +64,7 @@ pub struct Created {
     pub max: u32,
 }
 
-/// The title RISC OS gives an area made with none: its number in hex.
+/// The title an area made with none takes: its number in hex.
 fn hex_title(number: u32) -> Title {
     let mut title = Title::new();
     for shift in (0..8).rev() {
@@ -154,7 +154,8 @@ impl Memory {
             let ram = u32::try_from(self.ceiling.bytes()).unwrap_or(u32::MAX);
             asked.min(clamp).max(request.size).min(ram)
         };
-        // Past the last page's start it wraps to nothing, as RISC OS's does.
+        // Past the last page's start, rounding up wraps it to nothing, which
+        // no area's size fits.
         max.checked_next_multiple_of(PAGE_SIZE).unwrap_or(0)
     }
 
@@ -233,8 +234,8 @@ impl Memory {
             && (flags.0 & exclusive != AreaFlags::NEEDS_SPECIFIC_PAGES
                 || request.size != 0
                 || request.handler.is_none());
-        // RISC OS 5 maps a cacheable area twice only where neither copy may
-        // be run.
+        // A cacheable area mapped twice may not be run, as genuine RISC OS 5
+        // refuses it.
         let bad_double = flags.has(AreaFlags::DOUBLY_MAPPED)
             && !flags.has(AreaFlags::NOT_CACHEABLE)
             && privilege.execute;
@@ -322,6 +323,7 @@ impl Memory {
             .map(|code| Handler {
                 code,
                 workspace: request.workspace.unwrap_or(base),
+                bits: request.caller,
             })
             .filter(|_| !sparse || flags.has(AreaFlags::ABORTABLE));
         let shape = if flags.has(AreaFlags::PMP) {
@@ -384,6 +386,81 @@ impl Memory {
         guest.service(self, Service::DynamicAreaCreate { area: number });
         self.areas.note(number, signature::CREATED);
         Ok(Created { number, base, max })
+    }
+
+    /// Makes one of the kernel's own areas — the system heap or the RMA —
+    /// numbered `number` over `range`, which the layout keeps for it, grown
+    /// to `size` with `handler` called as for any grow.
+    pub fn create_system_area<G: Guest + ?Sized>(
+        &mut self,
+        number: u32,
+        range: Range<u32>,
+        title: &[u8],
+        handler: Handler,
+        size: u32,
+        guest: &mut G,
+    ) -> Result<(), AreaError> {
+        let max = range.end - range.start;
+        let flags = AreaFlags(AreaFlags::NOT_USER_DRAGGABLE);
+        let request = Create {
+            number: Some(number),
+            size,
+            base: Some(range.start),
+            flags: flags.0,
+            max: Some(max),
+            handler: Some(handler.code),
+            workspace: Some(handler.workspace),
+            title: Some(title),
+            pool: 0,
+            caller: handler.bits,
+        };
+        let access = Self::check_flags(&request)?;
+        let size = size
+            .checked_next_multiple_of(PAGE_SIZE)
+            .filter(|&size| size <= max)
+            .ok_or(AreaError::NotAllMoved)?;
+        let reserved = u64::from(range.start)..u64::from(range.end);
+        self.areas
+            .reserved
+            .try_reserve(1)
+            .map_err(|_| AreaError::CantAllocateArea)?;
+        self.mmu
+            .reserve(Table::Global, range.clone())
+            .map_err(|_| AreaError::CantAllocateLevel2)?;
+        let kept = self
+            .areas
+            .reserved
+            .get(reserved.start)
+            .is_some_and(|(_, &owner)| owner == KERNEL);
+        if kept {
+            self.areas.reserved.remove(reserved.start);
+        }
+        let made = Made {
+            max,
+            base: range.start,
+            flags,
+            access,
+            handler: Some(handler),
+            shape: Shape::Pages(alloc::vec::Vec::new()),
+            reserved: reserved.clone(),
+        };
+        let key = match self.link(&request, made) {
+            Ok(key) => key,
+            Err(error) => {
+                self.mmu.unreserve(Table::Global, range);
+                if kept {
+                    // Room was made and the range vacated above, so the
+                    // layout's hold is given back without fail.
+                    let _ = self.areas.reserved.insert(reserved, KERNEL);
+                }
+                return Err(error);
+            }
+        };
+        if size != 0 {
+            self.grow_area(key, size, false, guest)
+                .map_err(|failure| failure.error)?;
+        }
+        Ok(())
     }
 
     /// Enters a new area in every table, numbered and titled.

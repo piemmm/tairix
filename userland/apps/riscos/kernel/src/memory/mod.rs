@@ -8,31 +8,34 @@
 //! take them.
 
 mod areas;
+pub mod check;
 mod guest;
 pub mod layout;
+mod map;
 pub mod policy;
 mod slots;
 
 use tairix_collections::TryReserveError;
 use tairix_riscos_arm::bus::Bus;
 use tairix_riscos_arm::mmu::{
-    Access, Frame, FrameKind, Mmu, MmuError, Rights, Table, FRAME_WORDS, PAGE_SIZE,
+    Access, Frame, FrameKind, Mmu, MmuError, Rights, Space, Table, FRAME_WORDS, PAGE_SIZE,
 };
 
 pub use areas::{
     access_privilege, AreaError, AreaFlags, Clamps, Create, Created, Failure, Handler, Info,
     Located, LogicalOp, PageQuery, PhysicalOp, Read, FREE_POOL, TITLE,
 };
-pub use guest::{Guest, GuestError, PageEntry, Service};
+pub(crate) use areas::{CANT_GET_PHYSICAL, PAGE_RESERVED};
+pub use guest::{Allowed, Guest, GuestError, PageEntry, Service};
 use layout::{Layout, COMPATIBILITY, HIGH_ZERO_PAGE, SCRATCH, ZERO_PAGE_SIZE};
+pub use map::{find_access_privilege, privilege_rights, rights_bits, ReserveError, RESERVED};
 use policy::Ceiling;
 pub use slots::{Bits, Slot};
 
 /// Pages zero page and ScratchSpace each take.
 const LOW_PAGES: usize = (ZERO_PAGE_SIZE / PAGE_SIZE) as usize;
 
-/// Zero page and ScratchSpace: User mode reads them, as RISC OS 5's flags
-/// for them say.
+/// Zero page and ScratchSpace: User mode reads them.
 const WORKSPACE: Access = Access {
     user: Rights::Read,
     privileged: Rights::ReadWrite,
@@ -56,10 +59,13 @@ const HOST: Access = Access {
     privileged: Rights::Read,
     execute: true,
 };
-/// What the compatibility page holds first, as RISC OS 5's does: words that
-/// are neither valid addresses nor valid instructions, so a pointer read
-/// through null faults at its next use. The rest of the page is zero.
-const COMPATIBILITY_MARK: [u32; 4] = [0xFDFD_FDFD; 4];
+/// The compatibility page's warning, after its copies of the processor
+/// vectors, so a string read through null shows it. The rest of the page is
+/// zero: the quiescent value of every zero page variable.
+const NULL_WARNING: &[u8] =
+    b"A program has read through a null pointer: there is no data at address zero.\0";
+/// Where the warning starts: past the processor vectors' slots.
+const NULL_WARNING_AT: usize = 0x20;
 
 /// Why the address space refused.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -118,11 +124,15 @@ struct Record {
     holder: Option<Holder>,
     /// Exclusively claimed: no handler or physical op may take it.
     unavailable: bool,
+    /// Reserved by `OS_Memory` 23 for its owner's later claim; it outlasts
+    /// whoever holds the page meanwhile.
+    reserved: bool,
 }
 
 const UNHELD: Record = Record {
     holder: None,
     unavailable: false,
+    reserved: false,
 };
 
 /// Every page's record, by number.
@@ -149,10 +159,13 @@ impl Pages {
         Ok(())
     }
 
-    /// The page is free again.
+    /// The page is free again; a reservation stays.
     fn free(&mut self, page: Frame) {
         if let Some(record) = self.records.get_mut(page.number() as usize) {
-            *record = UNHELD;
+            *record = Record {
+                reserved: record.reserved,
+                ..UNHELD
+            };
         }
     }
 }
@@ -187,6 +200,8 @@ pub struct Memory {
     zero_page: [Frame; LOW_PAGES],
     scratch: [Frame; LOW_PAGES],
     compatibility: Frame,
+    /// Whether 32-bit tasks see the compatibility page (`OS_Memory` 20).
+    compatibility_on: bool,
     /// Where the next host page goes.
     host_next: u32,
     pages: Pages,
@@ -220,7 +235,14 @@ impl Memory {
         }
         let compatibility = kernel_page(&mut mmu, &mut pages)?;
         if let Some(words) = mmu.words_mut(compatibility) {
-            words[..COMPATIBILITY_MARK.len()].copy_from_slice(&COMPATIBILITY_MARK);
+            for (word, chunk) in words[NULL_WARNING_AT / 4..]
+                .iter_mut()
+                .zip(NULL_WARNING.chunks(4))
+            {
+                let mut bytes = [0; 4];
+                bytes[..chunk.len()].copy_from_slice(chunk);
+                *word = u32::from_le_bytes(bytes);
+            }
         }
         for stack in layout.stacks.all() {
             for address in stack.clone().step_by(PAGE_SIZE as usize) {
@@ -236,6 +258,7 @@ impl Memory {
             zero_page,
             scratch,
             compatibility,
+            compatibility_on: true,
             host_next: layout.host.start,
             pages,
             slots: slots::Slots::new(),
@@ -256,6 +279,29 @@ impl Memory {
     /// sees it, its mappings the kernel's alone to change.
     pub fn bus(&mut self) -> &mut impl Bus {
         &mut self.mmu
+    }
+
+    /// The frame showing `address` and the address's offset in it, if a
+    /// privileged mode may read it, or write it when `write`: how the SWIs
+    /// reach guest memory a page at a time.
+    pub(crate) fn privileged_page(&self, address: u32, write: bool) -> Option<(Frame, usize)> {
+        let (frame, access) = self.mmu.lookup(self.mmu.table_of(address), address)?;
+        let allowed = match access.privileged {
+            Rights::None => false,
+            Rights::Read => !write,
+            Rights::ReadWrite => true,
+        };
+        allowed.then_some((frame, (address % PAGE_SIZE) as usize))
+    }
+
+    /// `frame`'s words, as the SWIs read them.
+    pub(crate) fn frame_words(&self, frame: Frame) -> Option<&[u32; FRAME_WORDS]> {
+        self.mmu.words(frame)
+    }
+
+    /// `frame`'s words, for the SWIs to write; whatever watches them is told.
+    pub(crate) fn frame_words_mut(&mut self, frame: Frame) -> Option<&mut [u32; FRAME_WORDS]> {
+        self.mmu.words_mut(frame)
     }
 
     /// The RAM the guest has: the ceiling.
@@ -287,6 +333,51 @@ impl Memory {
     #[must_use]
     pub const fn zero_page(&self) -> &[Frame; LOW_PAGES] {
         &self.zero_page
+    }
+
+    /// Copies the processor vectors into the compatibility page's first
+    /// words, so reading them through null finds what the vectors hold.
+    pub(crate) fn mirror_vectors(&mut self, vectors: &[u32]) {
+        if let Some(words) = self.mmu.words_mut(self.compatibility) {
+            let count = vectors.len().min(NULL_WARNING_AT / 4);
+            words[..count].copy_from_slice(&vectors[..count]);
+        }
+    }
+
+    /// Whether 32-bit tasks see the compatibility page at zero.
+    #[must_use]
+    pub const fn compatibility_page(&self) -> bool {
+        self.compatibility_on
+    }
+
+    /// Shows or hides the compatibility page in every 32-bit task's space:
+    /// all of them change, or none does.
+    pub fn set_compatibility_page(&mut self, on: bool) -> Result<(), MemoryError> {
+        if on == self.compatibility_on {
+            return Ok(());
+        }
+        let spaces = self.slots.spaces(Bits::Bit32)?;
+        for (done, &space) in spaces.iter().enumerate() {
+            if let Err(error) = self.show_compatibility(space, on) {
+                for &changed in &spaces[..done] {
+                    let _ = self.show_compatibility(changed, !on);
+                }
+                return Err(error);
+            }
+        }
+        self.compatibility_on = on;
+        Ok(())
+    }
+
+    fn show_compatibility(&mut self, space: Space, on: bool) -> Result<(), MemoryError> {
+        let table = Table::Space(space);
+        if on {
+            self.mmu
+                .map(table, COMPATIBILITY.start, self.compatibility, COMPATIBLE)?;
+        } else {
+            self.mmu.unmap(table, COMPATIBILITY.start)?;
+        }
+        Ok(())
     }
 
     /// Installs `code` in the next host pages, returning its address. Host
@@ -368,7 +459,7 @@ impl Memory {
             {
                 self.mmu.map(table, address, frame, WORKSPACE)?;
             }
-        } else {
+        } else if self.compatibility_on {
             self.mmu
                 .map(table, COMPATIBILITY.start, self.compatibility, COMPATIBLE)?;
         }

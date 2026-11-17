@@ -1,0 +1,92 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario msgtrans-lookups-by-length
+1 v=0
+2 v=0
+3 r3=&00000003 v=0
+4 r3=&00000040 v=1 error=&00000AC2
+5 r3=&00000040 v=1 error=&00000AC2
+6 r3=&00000001 v=0
+7 r3=&00000001 v=0
+8 r3=&00000004 v=0
+9 r3=&00000004 v=0
+10 r3=&00000040 v=1 error=&00000AC2
+11 r3=&00000004 v=0
+12 r3=&00000004 v=0
+13 r3=&00000005 v=0
+14 r3=&00000005 v=0
+15 r3=&00000040 v=1 error=&00000AC2
+16 r3=&00000004 v=0
+17 r3=&00000004 v=0
+18 r3=&00000003 v=0
+19 r3=&00000040 v=1 error=&00000AC2
+20 r3=&00000005 v=0
+21 r3=&00000004 v=0
+22 r3=&00000005 v=0
+23 r3=&00000001 v=0
+24 v=0
+25 r1-tok=&00000005 r3=&00000003 v=0
+26 r1-tok=&00000005 r3=&00000003 v=0
+27 r1-tok=&00000000 r3=&00000003 v=0
+28 v=0
+29 v=0
+
+scenario msgtrans-escapes
+1 v=0
+2 v=0
+3 r3=&00000002 v=0
+4 r3=&00000002 v=0
+5 r3=&00000002 v=0
+6 r3=&00000002 v=0
+7 r3=&00000002 v=0
+8 v=0
+9 v=0
+
+scenario msgtrans-tokens-enumerated
+1 v=0
+2 v=0
+3 r3=&00000005 v=0
+4 r3=&00000003 v=0
+5 r3=&00000020 v=1 error=&00000AC0
+6 r3=&00000020 v=1 error=&00000AC0
+7 r3=&00000004 v=0
+8 r3=&00000004 v=0
+9 r3=&00000004 v=0
+10 r3=&00000020 v=0
+11 r3=&00000005 v=0
+12 r3=&00000003 v=0
+13 r3=&00000001 v=0
+14 r3=&00000001 v=0
+15 r3=&00000020 v=0
+16 r3=&00000020 v=0
+17 v=0
+18 v=0
+
+scenario msgtrans-menus
+1 v=0
+2 v=0
+3 r2-menu256=&00000034 r3=&000000E4 v=0
+4 r2-menu52=&00000034 r3=&00000018 v=0
+5 r2-menu51=&0000001C r3=&00000017 v=1 error=&000002C1
+6 r2-menu28=&0000001C r3=&00000000 v=1 error=&000002C1
+7 v=0
+8 v=0
+
+scenario msgtrans-open-twice
+1 v=0
+2 v=0
+3 v=0
+4 v=0
+5 v=0
+6 v=0
+
+scenario msgtrans-error-lookup
+1 v=0
+2 v=0
+3 v=1 error=&00001234
+4 v=1 error=&00001234
+5 v=0
+6 v=0

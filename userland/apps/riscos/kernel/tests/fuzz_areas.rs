@@ -25,8 +25,8 @@ use tairix_riscos_arm::bus::{Bus, Width};
 use tairix_riscos_kernel::memory::layout::{RISC_OS_5, SHARED};
 use tairix_riscos_kernel::memory::policy::Ceiling;
 use tairix_riscos_kernel::memory::{
-    AreaFlags, Bits, Create, Guest, GuestError, Handler, Info, LogicalOp, Memory, PageEntry,
-    PageQuery, PhysicalOp, Service, Slot, FREE_POOL,
+    Allowed, AreaFlags, Bits, Create, Guest, GuestError, Handler, Info, LogicalOp, Memory,
+    PageEntry, PageQuery, PhysicalOp, Service, Slot, FREE_POOL,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -72,7 +72,7 @@ impl Hostile {
             (Some(target), true) => Some(target),
             _ => (!self.areas.is_empty()).then(|| *self.rng.pick(&self.areas)),
         };
-        match (self.rng.below(7), area) {
+        match (self.rng.below(8), area) {
             (0 | 1, Some(area)) => {
                 let bytes = if self.chance(2) {
                     drawn_change(&mut self.rng)
@@ -83,6 +83,11 @@ impl Hostile {
             }
             (2, Some(area)) => {
                 let _ = memory.remove_area(area, self);
+            }
+            (7, _) => {
+                let first = u32::try_from(self.rng.below(600)).unwrap_or(0);
+                let count = u32::try_from(self.rng.below(8)).unwrap_or(0);
+                let _ = memory.reserve_pages(first, count, self.chance(2));
             }
             (6, Some(area)) => {
                 // Removed, and a pool holding a page made in its place.
@@ -129,7 +134,7 @@ impl Guest for Hostile {
         block: &mut [PageEntry],
         _: u32,
         _: u32,
-    ) -> Result<(), Option<GuestError>> {
+    ) -> Result<Allowed, Option<GuestError>> {
         if self.chance(8) {
             return Err(if self.chance(2) {
                 None
@@ -142,7 +147,9 @@ impl Guest for Hostile {
                 entry.page = Some(u32::try_from(self.rng.below(600)).unwrap_or(0));
             }
         }
-        Ok(())
+        Ok(Allowed {
+            reserved: self.chance(2),
+        })
     }
 
     fn post_grow(&mut self, memory: &mut Memory, _: Handler, _: &[PageEntry], _: u32, _: u32) {
@@ -323,7 +330,7 @@ fn drawn_physical(rng: &mut Prng) -> Vec<PhysicalOp> {
         .map(|_| PhysicalOp {
             slot: u32::try_from(rng.below(10)).unwrap_or(0),
             page: *rng.pick(&[-1, -2, -3, 30, 200, 599, 100_000, i32::MIN]),
-            flags: if rng.below(2) == 0 { 1 << 15 } else { 0 },
+            flags: *rng.pick(&[0, 1 << 15, 1 << 7, 1 << 15 | 1 << 7]),
         })
         .collect()
 }

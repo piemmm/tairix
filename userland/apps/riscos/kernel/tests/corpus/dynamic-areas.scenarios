@@ -121,3 +121,181 @@ call XOS_DynamicArea r0=24 r1=$area
 show r2 r4 r5 r6 r7 v
 call XOS_DynamicArea r0=1 r1=$area
 show v
+
+# The reasons RISC OS 5 adds past the PRM's: the ones it answers and the
+# ones it refuses.
+scenario area-reasons-past-the-prm
+call XOS_DynamicArea r0=26 r1=0
+show r1 v
+call XOS_DynamicArea r0=8 r1=0 r2=0 r3=0
+show r1 r2 r3 v
+call XOS_DynamicArea r0=8 r1=0 r2=0 r3=-1
+show r1 r2 r3 v
+call XOS_DynamicArea r0=8 r1=0 r2=0 r3=0
+show r1 r2 r3 v
+call XOS_DynamicArea r0=26 r1=&1000
+show v
+call XOS_DynamicArea r0=26 r1=&FFFF0000
+show v
+call XOS_DynamicArea r0=5 r1=-1
+show v
+call XOS_DynamicArea r0=27 r1=-1
+show v
+call XOS_DynamicArea r0=11 r1=-1
+show v
+call XOS_DynamicArea r0=12 r1=-1
+show v
+call XOS_DynamicArea r0=13 r1=-1
+show v
+call XOS_DynamicArea r0=14 r1=-1
+show v
+call XOS_DynamicArea r0=15 r1=-1
+show v
+call XOS_DynamicArea r0=16 r1=-1
+show v
+call XOS_DynamicArea r0=17 r1=-1
+show v
+call XOS_DynamicArea r0=18 r1=-1
+show v
+call XOS_DynamicArea r0=19 r1=-1
+show v
+
+# A physical memory pool: made, its pages claimed, mapped, read back,
+# unmapped and released, and the pools RISC OS 5 refuses to make.
+scenario physical-memory-pool
+block handler 8
+write $handler w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$handler r2=$handler+&0
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100100 r5=&10000 r6=$handler r7=0 r8="TairixPMP" r9=4
+show r5 r9 v
+keep r1 pmp
+keep r3 base
+call XOS_DynamicArea r0=24 r1=$pmp
+show r2 r3-base r4 r5 r6 r7 v
+call XOS_DynamicArea r0=2 r1=$pmp
+show r1-pmp r2 r4 r5 v
+call XOS_DynamicArea r0=20 r1=$base
+show r0 r1-pmp v
+block pl 48
+write $pl w=0 w=-2 w=0 w=1 w=-2 w=&8000
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=2
+show r2-pl r3 v
+call XOS_DynamicArea r0=24 r1=$pmp
+show r2 r6 r7 v
+block q 48
+write $q w=0 w=-1 w=-1 w=0 w=1 w=-1 w=-1 w=0 w=7 w=-1 w=-1 w=0
+call XOS_DynamicArea r0=25 r1=$pmp r2=$q r3=3
+show $q:4 $q+&8:8 $q+&10:4 $q+&18:8 $q+&20:4 $q+&24:4 $q+&28:8 v
+block m 48
+write $m w=0 w=0 w=0 w=3 w=1 w=&81
+call XOS_DynamicArea r0=22 r1=$pmp r2=$m r3=2
+show r2-m r3 v
+call XOS_DynamicArea r0=24 r1=$pmp
+show r2 r6 v
+write $q w=0 w=-1 w=-1 w=0 w=-1 w=-1 w=3 w=0 w=-1 w=-1 w=1 w=0
+call XOS_DynamicArea r0=25 r1=$pmp r2=$q r3=3
+show $q:4 $q+&8:8 $q+&10:4 $q+&18:8 $q+&20:4 $q+&28:8 v
+call XOS_ReadDynamicArea r0=$pmp
+show r0-base r1 r2 v
+write $pl w=0 w=-1 w=0
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+show r2-pl r3 v
+write $m w=0 w=-1 w=0 w=3 w=-1 w=0
+call XOS_DynamicArea r0=22 r1=$pmp r2=$m r3=2
+show r2-m r3 v
+write $pl w=0 w=-1 w=0 w=1 w=-1 w=0
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=2
+show r2-pl r3 v
+call XOS_DynamicArea r0=23 r1=$pmp r2=-2
+show r2 v
+call XOS_DynamicArea r0=23 r1=$pmp r2=3
+show r2 v
+call XOS_DynamicArea r0=24 r1=$pmp
+show r6 r7 v
+call XOS_ChangeDynamicArea r0=$pmp r1=4096
+show r1 v
+write $m w=0 w=2 w=0
+call XOS_DynamicArea r0=22 r1=$pmp r2=$m r3=1
+show r2-m r3 v
+call XOS_DynamicArea r0=1 r1=$pmp
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100000 r5=&10000 r6=$handler r7=0 r8="TairixBadPMP" r9=4
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=4096 r3=-1 r4=&100100 r5=&10000 r6=$handler r7=0 r8="TairixBadPMP" r9=4
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100100 r5=&10000 r6=0 r7=0 r8="TairixBadPMP" r9=4
+show v
+
+# OS_Memory 23's reserved pages: a handler naming one without the RESV
+# word refused it, with the word given it, a pool locking one only when
+# it says it knows; released at the end.
+scenario reserved-pages
+block spec 36
+write $spec w=&E3500000 w=&11A0F00E w=&E92D0010 w=&E59C4000 w=&E5814000 w=&E59C0004 w=&E8BD0010 w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$spec r2=$spec+&1C
+block plain 8
+write $plain w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=1 r1=$plain r2=$plain+&0
+block ws1 8
+write $ws1 w=15000 w=0
+block ws2 8
+write $ws2 w=15000 w=&56534552
+call XOS_Memory r0=23 r1=15000 r2=1
+show v
+keep r1 pg
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100 r5=&10000 r6=$spec r7=$ws1 r8="TairixSpec1"
+show v
+keep r1 a1
+call XOS_ChangeDynamicArea r0=$a1 r1=4096
+show r1 v
+block pm1 16
+write $pm1 w=15000 w=0 w=0
+call XOS_ReadMemMapEntries r0=$pm1
+show v
+show $pm1+&8:4
+call XOS_DynamicArea r0=1 r1=$a1
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100 r5=&10000 r6=$spec r7=$ws2 r8="TairixSpec2"
+show v
+keep r1 a2
+call XOS_ChangeDynamicArea r0=$a2 r1=4096
+show r1 v
+block pm2 16
+write $pm2 w=15000 w=0 w=0
+call XOS_ReadMemMapEntries r0=$pm2
+show v
+show $pm2+&8:4
+call XOS_DynamicArea r0=1 r1=$a2
+show v
+call XOS_DynamicArea r0=0 r1=-1 r2=0 r3=-1 r4=&100100 r5=&10000 r6=$plain r7=0 r8="TairixPMP2" r9=4
+show v
+keep r1 pmp
+block pl 16
+write $pl w=0 w=15000 w=&8000
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+show r3 v
+write $pl w=0 w=15000 w=&8080
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+show r3 v
+block q 16
+write $q w=0 w=-1 w=-1 w=0
+call XOS_DynamicArea r0=25 r1=$pmp r2=$q r3=1
+show $q+&4@pg $q+&C:4 v
+write $pl w=0 w=-2 w=0
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+show r3 v
+write $q w=0 w=-1 w=-1 w=0
+call XOS_DynamicArea r0=25 r1=$pmp r2=$q r3=1
+show $q+&4@pg $q+&C:4 v
+write $pl w=0 w=15000 w=0
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+show r3 v
+write $q w=0 w=-1 w=-1 w=0
+call XOS_DynamicArea r0=25 r1=$pmp r2=$q r3=1
+show $q+&4@pg $q+&C:4 v
+write $pl w=0 w=-1 w=0
+call XOS_DynamicArea r0=21 r1=$pmp r2=$pl r3=1
+call XOS_DynamicArea r0=1 r1=$pmp
+show v
+call XOS_Memory r0=&117 r1=15000 r2=1
+show v

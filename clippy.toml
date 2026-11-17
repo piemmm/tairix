@@ -40,6 +40,13 @@ doc-valid-idents = [
     # emulator of it, as RISC OS names them.
     "ScratchSpace",
     "HostFS",
+    # RISC OS's modules and its name for a keyboard's Alt Gr, as RISC OS names
+    # them.
+    "ResourceFS",
+    "MessageTrans",
+    "FileSwitch",
+    "InternationalKeyboard",
+    "AltGr",
     "RiscPC",
     "RPCEmu",
     "RISC-V",

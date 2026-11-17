@@ -1,0 +1,315 @@
+# Events, timed calls and vector delinking (plans/RISCOS-EMULATOR.md §4.2):
+# each event's enable count as the machine starts it, a disable at zero, the
+# intervals OS_CallAfter and OS_CallEvery take, and the buffer
+# OS_DelinkApplication writes.
+
+scenario event-counts-from-start
+call XOS_Byte r0=14 r1=0
+show r1 v
+call XOS_Byte r0=13 r1=0
+show r1 v
+call XOS_Byte r0=14 r1=1
+show r1 v
+call XOS_Byte r0=13 r1=1
+show r1 v
+call XOS_Byte r0=14 r1=2
+show r1 v
+call XOS_Byte r0=13 r1=2
+show r1 v
+call XOS_Byte r0=14 r1=3
+show r1 v
+call XOS_Byte r0=13 r1=3
+show r1 v
+call XOS_Byte r0=14 r1=4
+show r1 v
+call XOS_Byte r0=13 r1=4
+show r1 v
+call XOS_Byte r0=14 r1=5
+show r1 v
+call XOS_Byte r0=13 r1=5
+show r1 v
+call XOS_Byte r0=14 r1=6
+show r1 v
+call XOS_Byte r0=13 r1=6
+show r1 v
+call XOS_Byte r0=14 r1=7
+show r1 v
+call XOS_Byte r0=13 r1=7
+show r1 v
+call XOS_Byte r0=14 r1=8
+show r1 v
+call XOS_Byte r0=13 r1=8
+show r1 v
+call XOS_Byte r0=14 r1=12
+show r1 v
+call XOS_Byte r0=13 r1=12
+show r1 v
+call XOS_Byte r0=14 r1=13
+show r1 v
+call XOS_Byte r0=13 r1=13
+show r1 v
+call XOS_Byte r0=14 r1=14
+show r1 v
+call XOS_Byte r0=13 r1=14
+show r1 v
+call XOS_Byte r0=14 r1=15
+show r1 v
+call XOS_Byte r0=13 r1=15
+show r1 v
+call XOS_Byte r0=14 r1=16
+show r1 v
+call XOS_Byte r0=13 r1=16
+show r1 v
+call XOS_Byte r0=14 r1=17
+show r1 v
+call XOS_Byte r0=13 r1=17
+show r1 v
+call XOS_Byte r0=14 r1=18
+show r1 v
+call XOS_Byte r0=13 r1=18
+show r1 v
+call XOS_Byte r0=14 r1=20
+show r1 v
+call XOS_Byte r0=13 r1=20
+show r1 v
+call XOS_Byte r0=14 r1=22
+show r1 v
+call XOS_Byte r0=13 r1=22
+show r1 v
+call XOS_Byte r0=14 r1=23
+show r1 v
+call XOS_Byte r0=13 r1=23
+show r1 v
+call XOS_Byte r0=14 r1=24
+show r1 v
+call XOS_Byte r0=13 r1=24
+show r1 v
+call XOS_Byte r0=14 r1=25
+show r1 v
+call XOS_Byte r0=13 r1=25
+show r1 v
+call XOS_Byte r0=14 r1=26
+show r1 v
+call XOS_Byte r0=13 r1=26
+show r1 v
+call XOS_Byte r0=14 r1=27
+show r1 v
+call XOS_Byte r0=13 r1=27
+show r1 v
+call XOS_Byte r0=14 r1=28
+show r1 v
+call XOS_Byte r0=13 r1=28
+show r1 v
+call XOS_Byte r0=14 r1=29
+show r1 v
+call XOS_Byte r0=13 r1=29
+show r1 v
+call XOS_Byte r0=14 r1=30
+show r1 v
+call XOS_Byte r0=13 r1=30
+show r1 v
+call XOS_Byte r0=14 r1=31
+show r1 v
+call XOS_Byte r0=13 r1=31
+show r1 v
+call XOS_Byte r0=14 r1=32
+show r1 v
+call XOS_Byte r0=13 r1=32
+show r1 v
+call XOS_Byte r0=14 r1=33
+show r1 v
+call XOS_Byte r0=13 r1=33
+show r1 v
+call XOS_Byte r0=14 r1=34
+show r1 v
+call XOS_Byte r0=13 r1=34
+show r1 v
+call XOS_Byte r0=14 r1=35
+show r1 v
+call XOS_Byte r0=13 r1=35
+show r1 v
+call XOS_Byte r0=14 r1=36
+show r1 v
+call XOS_Byte r0=13 r1=36
+show r1 v
+call XOS_Byte r0=14 r1=37
+show r1 v
+call XOS_Byte r0=13 r1=37
+show r1 v
+call XOS_Byte r0=14 r1=38
+show r1 v
+call XOS_Byte r0=13 r1=38
+show r1 v
+call XOS_Byte r0=14 r1=39
+show r1 v
+call XOS_Byte r0=13 r1=39
+show r1 v
+call XOS_Byte r0=14 r1=40
+show r1 v
+call XOS_Byte r0=13 r1=40
+show r1 v
+call XOS_Byte r0=14 r1=255
+show r1 v
+call XOS_Byte r0=13 r1=255
+show r1 v
+
+scenario event-disabled-at-zero
+call XOS_Byte r0=13 r1=3
+show r1 v
+call XOS_Byte r0=13 r1=3
+show r1 v
+call XOS_Byte r0=14 r1=3
+show r1 v
+call XOS_Byte r0=13 r1=3
+show r1 v
+
+scenario timed-call-intervals
+block code 16
+write $code w=&E1A0F00E w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_CallAfter r0=0 r1=$code r2=1
+show v
+call XOS_RemoveTickerEvent r0=$code r1=1
+show v
+call XOS_CallAfter r0=1 r1=$code r2=2
+show v
+call XOS_RemoveTickerEvent r0=$code r1=2
+show v
+call XOS_CallAfter r0=&7FFFFFFF r1=$code r2=3
+show v
+call XOS_RemoveTickerEvent r0=$code r1=3
+show v
+call XOS_CallAfter r0=&80000000 r1=$code r2=4
+show v
+call XOS_RemoveTickerEvent r0=$code r1=4
+show v
+call XOS_CallAfter r0=&FFFFFBFF r1=$code r2=5
+show v
+call XOS_RemoveTickerEvent r0=$code r1=5
+show v
+call XOS_CallAfter r0=&FFFFFC00 r1=$code r2=6
+show v
+call XOS_RemoveTickerEvent r0=$code r1=6
+show v
+call XOS_CallAfter r0=&FFFFFFFF r1=$code r2=7
+show v
+call XOS_RemoveTickerEvent r0=$code r1=7
+show v
+call XOS_CallEvery r0=0 r1=$code r2=8
+show v
+call XOS_RemoveTickerEvent r0=$code r1=8
+show v
+call XOS_CallEvery r0=1 r1=$code r2=9
+show v
+call XOS_RemoveTickerEvent r0=$code r1=9
+show v
+call XOS_CallEvery r0=&7FFFFFFF r1=$code r2=10
+show v
+call XOS_RemoveTickerEvent r0=$code r1=10
+show v
+call XOS_CallEvery r0=&FFFFFBFF r1=$code r2=11
+show v
+call XOS_RemoveTickerEvent r0=$code r1=11
+show v
+call XOS_CallEvery r0=&FFFFFC00 r1=$code r2=12
+show v
+call XOS_RemoveTickerEvent r0=$code r1=12
+show v
+call XOS_CallEvery r0=&FFFFFFFF r1=$code r2=13
+show v
+call XOS_RemoveTickerEvent r0=$code r1=13
+show v
+call XOS_RemoveTickerEvent r0=$code r1=99
+show v
+
+scenario delink-and-relink
+block code 16
+write $code w=&E1A0F00E w=&E1A0F00E
+call XOS_SynchroniseCodeAreas r0=0
+block buf 64
+call XOS_Claim r0=&21 r1=$code r2=&1111
+show v
+call XOS_Claim r0=&21 r1=$code+4 r2=&2222
+show v
+call XOS_DelinkApplication r0=$buf r1=64
+show r1 v $buf:4 $buf+4@code $buf+8:4 $buf+12:4 $buf+16@code $buf+20:4 $buf+24:4
+call XOS_RelinkApplication r0=$buf
+show v
+call XOS_Release r0=&21 r1=$code r2=&1111
+show v
+call XOS_Release r0=&21 r1=$code+4 r2=&2222
+show v
+call XOS_Claim r0=&21 r1=$code r2=&3333
+show v
+block small13 16
+call XOS_DelinkApplication r0=$small13 r1=13
+show r1 v $small13:16
+block rest13 64
+call XOS_DelinkApplication r0=$rest13 r1=64
+show r1 v $rest13:4 $rest13+4@code $rest13+8:4 $rest13+12:4
+call XOS_RelinkApplication r0=$small13
+show v
+call XOS_RelinkApplication r0=$rest13
+show v
+call XOS_Release r0=&21 r1=$code r2=&3333
+show v
+call XOS_Claim r0=&21 r1=$code r2=&3333
+show v
+block small12 16
+call XOS_DelinkApplication r0=$small12 r1=12
+show r1 v $small12:16
+block rest12 64
+call XOS_DelinkApplication r0=$rest12 r1=64
+show r1 v $rest12:4 $rest12+4@code $rest12+8:4 $rest12+12:4
+call XOS_RelinkApplication r0=$rest12
+show v
+call XOS_Release r0=&21 r1=$code r2=&3333
+show v
+call XOS_Claim r0=&21 r1=$code r2=&3333
+show v
+block small1 16
+call XOS_DelinkApplication r0=$small1 r1=1
+show r1 v $small1:16
+block rest1 64
+call XOS_DelinkApplication r0=$rest1 r1=64
+show r1 v $rest1:4 $rest1+4@code $rest1+8:4 $rest1+12:4
+call XOS_RelinkApplication r0=$rest1
+show v
+call XOS_Release r0=&21 r1=$code r2=&3333
+show v
+call XOS_Claim r0=&21 r1=$code r2=&3333
+show v
+block small0 16
+call XOS_DelinkApplication r0=$small0 r1=0
+show r1 v $small0:16
+block rest0 64
+call XOS_DelinkApplication r0=$rest0 r1=64
+show r1 v $rest0:4 $rest0+4@code $rest0+8:4 $rest0+12:4
+call XOS_RelinkApplication r0=$rest0
+show v
+call XOS_Release r0=&21 r1=$code r2=&3333
+show v
+
+scenario vector-numbers-claimed
+block code 16
+write $code w=&E1A0F00E
+call XOS_Claim r0=&2F r1=$code r2=&4444
+show v
+call XOS_Release r0=&2F r1=$code r2=&4444
+show v
+call XOS_Claim r0=&3F r1=$code r2=&4444
+show v
+call XOS_Release r0=&3F r1=$code r2=&4444
+show v
+call XOS_Claim r0=&5F r1=$code r2=&4444
+show v
+call XOS_Release r0=&5F r1=$code r2=&4444
+show v
+call XOS_Claim r0=&60 r1=$code r2=&4444
+show v
+call XOS_Release r0=&60 r1=$code r2=&4444
+show v
+call XOS_Claim r0=&FF r1=$code r2=&4444
+show v
+call XOS_Release r0=&FF r1=$code r2=&4444
+show v

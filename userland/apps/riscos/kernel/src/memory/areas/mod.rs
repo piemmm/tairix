@@ -1,11 +1,10 @@
 //! Dynamic areas (`plans/RISCOS-EMULATOR.md` §3): `OS_DynamicArea` whole,
-//! `OS_ChangeDynamicArea` and `OS_ReadDynamicArea`, as RISC OS 5 defines
-//! them, with application space and the free pool as its levers.
+//! `OS_ChangeDynamicArea` and `OS_ReadDynamicArea`, with application space
+//! and the free pool as their levers.
 //!
 //! The SWIs' registers are the kernel's to read and write; here each reason
-//! takes and answers typed values. Where RISC OS 5 leaves a case unguarded —
-//! a system area removed or renumbered over, a negative number made — the
-//! manager refuses it.
+//! takes and answers typed values. A system area removed or renumbered over,
+//! and a negative number made, are refused.
 //!
 //! Handlers and service calls run guest code that may call these SWIs again,
 //! so whatever was checked before one runs is checked again after it: an
@@ -33,11 +32,15 @@ pub use pmp::{LogicalOp, PageQuery, PhysicalOp};
 /// The free pool's number: the lever that moves memory to and from
 /// application space.
 pub const FREE_POOL: u32 = 6;
+/// The free pool's flags, which its pages carry: a physical memory pool,
+/// neither cacheable nor bufferable, and read-write to privileged code only.
+pub const FREE_POOL_FLAGS: u32 =
+    AreaFlags::PMP | AreaFlags::NOT_CACHEABLE | AreaFlags::NOT_BUFFERABLE | 2;
 /// Area numbers up to this are the system's own.
 const SYSTEM: u32 = 7;
 /// The numbers handed out first, most recently freed first.
 const QUICK: Range<u32> = 0x100..0x200;
-/// The longest title kept, as RISC OS keeps them.
+/// The longest title kept; a longer one is cut.
 pub const TITLE: usize = 31;
 /// The most areas a session holds at once: a fixed bound on the host memory
 /// a guest's area records take, far past what RISC OS software makes.
@@ -84,8 +87,8 @@ impl AreaFlags {
     }
 }
 
-/// RISC OS 5's access privileges by number, as its short-descriptor table
-/// grants them: what User mode and the privileged modes may do.
+/// The access privileges by number, as a short-descriptor table grants them:
+/// what User mode and the privileged modes may do.
 const PRIVILEGES: [Access; 10] = [
     privilege(Rights::ReadWrite, Rights::ReadWrite, true),
     privilege(Rights::Read, Rights::ReadWrite, true),
@@ -124,41 +127,48 @@ pub struct Handler {
     pub code: u32,
     /// The value it is given in R12.
     pub workspace: u32,
+    /// The profile its code runs under: that of the code that made the
+    /// area.
+    pub bits: Bits,
 }
 
 /// Why a dynamic-area call failed: RISC OS's error, by number.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AreaError {
-    /// "Unknown dynamic area".
+    /// "No such dynamic area".
     BadDynamicArea,
-    /// "Can't, application running": application space holds the current
-    /// active object.
+    /// "The running application occupies that memory": application space
+    /// holds the current active object.
     Application,
-    /// "Unable to move memory".
+    /// "Unable to move the memory asked for".
     NotAllMoved,
-    /// "Memory in use": a module refused application space's change.
+    /// "Memory in use": a module refused application
+    /// space's change.
     ApplicationInUse,
-    /// "Dynamic area already exists".
+    /// "That dynamic area exists already".
     AreaAlreadyExists,
-    /// "Area not on page boundary".
+    /// "Area base address is not page-aligned".
     AreaNotOnPageBoundary,
-    /// "Overlapping areas".
+    /// "The area would overlap another".
     OverlappingAreas,
-    /// "Can't allocate area".
+    /// "No logical address space left for the area".
     CantAllocateArea,
-    /// "Can't allocate level 2 page tables".
+    /// "No memory for the area's page tables".
     CantAllocateLevel2,
-    /// "Can't get physical memory".
+    /// "The physical pages asked for are not free".
     CantGetPhysicalMemory,
-    /// "Bad dynamic area options".
+    /// "Those dynamic area options are not allowed".
     BadDynamicAreaOptions,
-    /// "Bad page number".
+    /// "Page number out of range".
     BadPageNumber,
-    /// "Bad address".
+    /// "A page asked for is reserved": a claim that may not take a page
+    /// `OS_Memory` 23 reserved.
+    PageReserved,
+    /// "Invalid address".
     BadAddress,
-    /// "Bad parameters".
+    /// "Invalid parameters".
     BadParameters,
-    /// "Illegal dynamic area renumber", RISC OS's unnumbered error.
+    /// "That dynamic area cannot be renumbered", RISC OS's unnumbered error.
     IllegalRenumber,
     /// "Invalid `OS_DynamicArea` sparse claim/release", unnumbered.
     InvalidSparse,
@@ -166,27 +176,48 @@ pub enum AreaError {
     Guest(GuestError),
 }
 
+/// "A page asked for is reserved", which `OS_Memory` 23 gives too.
+pub(crate) const PAGE_RESERVED: crate::error::Error = crate::error::Error {
+    number: 0x1CA,
+    token: "PageReserved",
+};
+
+/// "The physical pages asked for are not free", which `OS_Memory` gives too.
+pub(crate) const CANT_GET_PHYSICAL: crate::error::Error = crate::error::Error {
+    number: 0x1C8,
+    token: "PhysicalPagesUnavailable",
+};
+
 impl AreaError {
-    /// The error's number; zero for RISC OS's unnumbered ones, none for a
-    /// handler's own.
+    /// The error's number and the token its text is found under in the
+    /// kernel's message file; the number zero for RISC OS's unnumbered ones,
+    /// none for a handler's own.
     #[must_use]
-    pub const fn number(self) -> Option<u32> {
+    pub const fn number_and_token(self) -> Option<(u32, &'static str)> {
         Some(match self {
-            Self::BadDynamicArea => 0x105,
-            Self::Application => 0x1C0,
-            Self::NotAllMoved => 0x1C1,
-            Self::ApplicationInUse => 0x1C2,
-            Self::AreaAlreadyExists => 0x1C4,
-            Self::AreaNotOnPageBoundary => 0x1C5,
-            Self::OverlappingAreas => 0x1C6,
-            Self::CantAllocateArea => 0x1C7,
-            Self::CantAllocateLevel2 => 0x1C8,
-            Self::CantGetPhysicalMemory => 0x1CA,
-            Self::BadDynamicAreaOptions => 0x1D0,
-            Self::BadPageNumber => 0x1D1,
-            Self::BadAddress => 0xFC,
-            Self::BadParameters => 0x1EA,
-            Self::IllegalRenumber | Self::InvalidSparse => 0,
+            Self::BadDynamicArea => (0x105, "NoSuchDynamicArea"),
+            Self::Application => (0x1C0, "ApplicationSpaceOccupied"),
+            Self::NotAllMoved => (0x1C1, "MemoryNotMoved"),
+            Self::ApplicationInUse => (0x1C2, "ApplicationSpaceInUse"),
+            Self::AreaAlreadyExists => (0x1C4, "DynamicAreaExists"),
+            Self::AreaNotOnPageBoundary => (0x1C5, "AreaBaseMisaligned"),
+            Self::OverlappingAreas => (0x1C6, "AreasOverlap"),
+            Self::CantAllocateArea => (0x1C3, "NoAddressSpaceForArea"),
+            Self::CantAllocateLevel2 => (0x1C7, "NoPageTablesForArea"),
+            Self::CantGetPhysicalMemory => (CANT_GET_PHYSICAL.number, CANT_GET_PHYSICAL.token),
+            Self::BadDynamicAreaOptions => (0x1D0, "InvalidAreaOptions"),
+            Self::BadPageNumber => (0x1D1, "PageNumberOutOfRange"),
+            Self::PageReserved => (PAGE_RESERVED.number, PAGE_RESERVED.token),
+            Self::BadAddress => (
+                crate::error::BAD_ADDRESS.number,
+                crate::error::BAD_ADDRESS.token,
+            ),
+            Self::BadParameters => {
+                let error = crate::error::obey_error(tairix_obey::Error::BadParameters);
+                (error.number, error.token)
+            }
+            Self::IllegalRenumber => (0, "AreaRenumberRefused"),
+            Self::InvalidSparse => (0, "BadSparseOperation"),
             Self::Guest(_) => return None,
         })
     }
@@ -493,8 +524,8 @@ impl Areas {
         self.numbers.len()
     }
 
-    /// Records a change to `number`, as the Task Manager counts them: only
-    /// areas past the system's.
+    /// Records a change to `number`: only areas past the system's are
+    /// counted.
     fn note(&mut self, number: u32, what: u32) {
         if number <= SYSTEM {
             return;
@@ -553,7 +584,7 @@ impl Memory {
             number: FREE_POOL,
             size: 0,
             base: 0,
-            flags: AreaFlags::PMP | AreaFlags::NOT_CACHEABLE | AreaFlags::NOT_BUFFERABLE | 2,
+            flags: FREE_POOL_FLAGS,
             max: 0,
             handler: None,
             title: b"Free pool",
@@ -720,6 +751,38 @@ impl Memory {
             pages = pages.saturating_add(bytes / PAGE_SIZE);
         }
         Ok(pages)
+    }
+
+    /// Where page `index` of area `id` is mapped — a pool's slot `index` —
+    /// and the page flags the area gives it; none for a pool page not
+    /// mapped.
+    pub(super) fn area_page_place(&self, id: Id, index: u32) -> Option<(u32, u32)> {
+        let area = self.areas.area(id)?;
+        let flags = area.flags.0 & AreaFlags::PAGE_BITS;
+        let logical = match &area.shape {
+            Shape::Pages(_) => area.addresses(index).0,
+            Shape::Sparse { .. } => area.base + index * PAGE_SIZE,
+            Shape::Pmp(pool) => area.base + pool.window_of(index)? * PAGE_SIZE,
+        };
+        Some((logical, flags))
+    }
+
+    /// Where the run of pages an area maps alike from `address` ends: the
+    /// end of its mapped part for an area laid out from its base, none for
+    /// one whose pages lie where they were claimed.
+    pub(super) fn area_run(&self, address: u32) -> Option<u32> {
+        let (_, &id) = self.areas.reserved.covering(u64::from(address))?;
+        let area = self.areas.area(id)?;
+        let Shape::Pages(_) = area.shape else {
+            return None;
+        };
+        let size = area.size();
+        let (start, end) = if area.doubly() {
+            (area.base - size, area.base + size)
+        } else {
+            (area.base, area.base + size)
+        };
+        (start..end).contains(&address).then_some(end)
     }
 
     /// Whether `address` lies in an abortable area: the address of its

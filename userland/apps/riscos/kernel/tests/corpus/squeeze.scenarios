@@ -1,0 +1,130 @@
+# Squeezed modules (plans/RISCOS-EMULATOR.md §4.3): what genuine RISC OS
+# makes of each, inserted from memory and read back. Every module is the
+# corpus's own: no code, a title, and words for the codes to carry.
+# A squeezed module keeps its header whole, its trailer on a word.
+
+scenario squeeze-plain
+# An unsqueezed module, as it was given.
+block mod 80
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&38 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&53 b=&71 b=&7A b=&50 b=&6C b=&61 b=&69 b=&6E
+write $mod+64 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=72
+show v
+call XOS_Module r0=18 r1="SqzPlain"
+keep r3 base
+show $base:64 $base+&40:8 v
+call XOS_Module r0=4 r1="SqzPlain"
+show v
+
+scenario squeeze-whole-words
+# Words spelled whole, four bytes each, and zero words.
+block mod 148
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&8C b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&44 b=&33 b=&22 b=&11 b=&88 b=&77 b=&66 b=&55
+write $mod+64 b=&53 b=&71 b=&7A b=&57 b=&68 b=&6F b=&6C b=&65 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0
+write $mod+96 b=&0 b=&34 b=&11 b=&55 b=&66 b=&77 b=&88 b=&11 b=&22 b=&33 b=&44 b=&11 b=&65 b=&6C b=&6F b=&68 b=&57 b=&7A b=&71 b=&53 b=&11 b=&0 b=&0 b=&0 b=&50 b=&0 b=&0 b=&0 b=&26 b=&0 b=&0 b=&0
+write $mod+128 b=&2 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=140
+show v
+call XOS_Module r0=18 r1="SqzWhole"
+keep r3 base
+show $base:64 $base+&40:16 v
+call XOS_Module r0=4 r1="SqzWhole"
+show v
+
+scenario squeeze-short-table
+# Words from the table of common words by one byte.
+block mod 180
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&AC b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&50 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&44 b=&33 b=&22 b=&11 b=&88 b=&77 b=&66 b=&55
+write $mod+64 b=&44 b=&33 b=&22 b=&11 b=&88 b=&77 b=&66 b=&55 b=&44 b=&33 b=&22 b=&11 b=&CC b=&BB b=&AA b=&99 b=&53 b=&71 b=&7A b=&53 b=&68 b=&6F b=&72 b=&74 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+96 b=&0 b=&0 b=&0 b=&0 b=&0 b=&50 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&34 b=&11 b=&1 b=&0 b=&99 b=&1 b=&0 b=&99 b=&2 b=&0 b=&99 b=&74 b=&72 b=&6F b=&68
+write $mod+128 b=&53 b=&7A b=&71 b=&53 b=&11 b=&0 b=&0 b=&45 b=&33 b=&22 b=&11 b=&0 b=&44 b=&44 b=&44 b=&44 b=&0 b=&44 b=&44 b=&44 b=&44 b=&0 b=&0 b=&0 b=&60 b=&0 b=&0 b=&0 b=&26 b=&0 b=&0 b=&0
+write $mod+160 b=&12 b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=172
+show v
+call XOS_Module r0=18 r1="SqzShort"
+keep r3 base
+show $base:64 $base+&40:32 v
+call XOS_Module r0=4 r1="SqzShort"
+show v
+
+scenario squeeze-long-table
+# Words from the table of common top three bytes, and a low byte.
+block mod 152
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&90 b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&48 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&12 b=&CD b=&AB b=&0 b=&34 b=&CD b=&AB b=&0
+write $mod+64 b=&56 b=&3 b=&2 b=&1 b=&78 b=&CD b=&AB b=&0 b=&53 b=&71 b=&7A b=&4C b=&6F b=&6E b=&67 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&48 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0
+write $mod+96 b=&0 b=&34 b=&11 b=&34 b=&0 b=&12 b=&0 b=&22 b=&78 b=&0 b=&56 b=&1 b=&22 b=&0 b=&67 b=&6E b=&6F b=&4C b=&7A b=&71 b=&53 b=&11 b=&AE b=&CE b=&AB b=&AE b=&36 b=&56 b=&50 b=&0 b=&0 b=&0
+write $mod+128 b=&26 b=&0 b=&0 b=&0 b=&6 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=144
+show v
+call XOS_Module r0=18 r1="SqzLong"
+keep r3 base
+show $base:64 $base+&40:16 v
+call XOS_Module r0=4 r1="SqzLong"
+show v
+
+scenario squeeze-table-deltas
+# A table's entries as deltas: whole, a run, small, a byte more, two more.
+block mod 180
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&AC b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&54 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&5 b=&0 b=&0 b=&0 b=&6 b=&0 b=&0 b=&0
+write $mod+64 b=&7 b=&0 b=&0 b=&0 b=&40 b=&0 b=&0 b=&0 b=&40 b=&12 b=&0 b=&0 b=&40 b=&12 b=&35 b=&0 b=&34 b=&12 b=&0 b=&7F b=&53 b=&71 b=&7A b=&44 b=&65 b=&6C b=&74 b=&61 b=&0 b=&0 b=&0 b=&0
+write $mod+96 b=&0 b=&0 b=&0 b=&0 b=&0 b=&54 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&34 b=&11 b=&1 b=&0 b=&99 b=&3 b=&2 b=&99 b=&5 b=&4 b=&99 b=&44 b=&7A b=&71 b=&53
+write $mod+128 b=&6 b=&19 b=&61 b=&74 b=&6C b=&65 b=&1 b=&0 b=&6 b=&0 b=&0 b=&0 b=&2 b=&43 b=&6E b=&0 b=&E3 b=&0 b=&0 b=&0 b=&F4 b=&FF b=&CA b=&7E b=&60 b=&0 b=&0 b=&0 b=&27 b=&0 b=&0 b=&0
+write $mod+160 b=&11 b=&0 b=&0 b=&0 b=&7 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=172
+show v
+call XOS_Module r0=18 r1="SqzDelta"
+keep r3 base
+show $base:64 $base+&40:32 v
+call XOS_Module r0=4 r1="SqzDelta"
+show v
+
+scenario squeeze-codes-short-of-the-size
+# An expanded size the codes stop short of: the module is what they make.
+block mod 152
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&90 b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0
+write $mod+64 b=&53 b=&71 b=&7A b=&53 b=&68 b=&6F b=&72 b=&74 b=&32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0
+write $mod+96 b=&0 b=&34 b=&11 b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0 b=&1 b=&11 b=&74 b=&72 b=&6F b=&68 b=&53 b=&7A b=&71 b=&53 b=&11 b=&0 b=&0 b=&0 b=&32 b=&1 b=&0 b=&0 b=&58 b=&0 b=&0 b=&0
+write $mod+128 b=&2A b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=144
+show v
+call XOS_Module r0=18 r1="SqzShort2"
+keep r3 base
+show $base:64 $base+&40:16 v
+call XOS_Module r0=4 r1="SqzShort2"
+show v
+
+scenario squeeze-header-not-kept
+# Codes straight after the length: no header to check.
+block mod 76
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&44 b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&34 b=&11 b=&0 b=&0 b=&0 b=&2 b=&0
+write $mod+32 b=&0 b=&0 b=&1 b=&11 b=&0 b=&65 b=&72 b=&61 b=&42 b=&7A b=&71 b=&53 b=&11 b=&0 b=&0 b=&0 b=&48 b=&0 b=&0 b=&0 b=&25 b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+64 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=68
+show v
+call XOS_Module r0=18 r1="SqzBare"
+show v
+call XOS_Module r0=4 r1="SqzBare"
+show v
+
+# A length past the module's end. Genuine RISC OS 5 reads past the copy it
+# makes in the RMA: recorded alone it refuses it with &101, as this does, but
+# after other scenarios it faults on whatever lies beyond.
+scenario squeeze-length-past-the-end ours
+block mod 140
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&C4 b=&0 b=&0 b=&80 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&2 b=&0 b=&0 b=&0
+write $mod+64 b=&53 b=&71 b=&7A b=&42 b=&61 b=&72 b=&65 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&40 b=&1 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&34 b=&11 b=&0 b=&0 b=&0 b=&2 b=&0
+write $mod+96 b=&0 b=&0 b=&1 b=&11 b=&0 b=&65 b=&72 b=&61 b=&42 b=&7A b=&71 b=&53 b=&11 b=&0 b=&0 b=&0 b=&48 b=&0 b=&0 b=&0 b=&25 b=&0 b=&0 b=&0 b=&3 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+128 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=132
+show v
+call XOS_Module r0=18 r1="SqzBare"
+show v
+call XOS_Module r0=4 r1="SqzBare"
+show v

@@ -1,8 +1,11 @@
 //! The 8×8 system character set, drawn for TAIRiX: a glyph for each character
-//! from 32 to 255 in RISC OS's arrangement, and the BBC Micro's arrangement of
-//! 32 to 127 made from the same designs. Each glyph is eight rows of eight
-//! pixels, its strokes two pixels wide, its capitals seven rows tall, its small
+//! from 32 to 255 in RISC OS's arrangement, the BBC Micro's arrangement of
+//! 32 to 127 made from the same designs, and the other characters RISC OS's
+//! alphabets hold ([`glyph_of`]). Each glyph is eight rows of eight pixels,
+//! its strokes two pixels wide, its capitals seven rows tall, its small
 //! letters five with a row below for descenders.
+
+mod extended;
 
 /// A character's picture: its rows from the top, each byte's top bit its
 /// leftmost pixel.
@@ -25,6 +28,9 @@ const APOSTROPHE: Art = ["...##...", "...##...", "..##....", "........", "......
 const QUOTE: Art = ["..##.##.", "..##.##.", "..#..#..", "........", "........", "........", "........", "........"];
 #[rustfmt::skip]
 const POUND: Art = ["...###..", "..##.##.", "..##....", ".#####..", "..##....", "..##..#.", ".######.", "........"];
+/// A code RISC OS leaves unassigned: its picture is its number, drawn by
+/// [`number`].
+const UNASSIGNED: Art = SPACE;
 /// The BBC's 127, where RISC OS's is solid.
 #[rustfmt::skip]
 const HATCHED: Art = ["#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#"];
@@ -233,23 +239,23 @@ static ART: [Art; 224] = [
     // 130 ŵ
     ["...##...", ".##..##.", "##...##.", "##.#.##.", "##.#.##.", "#######.", ".##.##..", "........"],
     // 131 unassigned, shown as its number
-    ["........", "###.###.", "#.#...#.", "###..##.", "#.#...#.", "###.###.", "........", "........"],
+    UNASSIGNED,
     // 132 unassigned, shown as its number
-    ["........", "###.#.#.", "#.#.#.#.", "###.###.", "#.#...#.", "###...#.", "........", "........"],
+    UNASSIGNED,
     // 133 Ŷ
     ["...##...", ".##..##.", ".##..##.", ".##..##.", "..####..", "...##...", "...##...", "........"],
     // 134 ŷ
     ["...##...", ".##..##.", ".##..##.", ".##..##.", ".##..##.", "..#####.", ".....##.", "..####.."],
     // 135 unassigned, shown as its number
-    ["........", "###.###.", "#.#...#.", "###..#..", "#.#..#..", "###..#..", "........", "........"],
+    UNASSIGNED,
     // 136 unassigned, shown as its number
-    ["........", "###.###.", "#.#.#.#.", "###.###.", "#.#.#.#.", "###.###.", "........", "........"],
+    UNASSIGNED,
     // 137 unassigned, shown as its number
-    ["........", "###.###.", "#.#.#.#.", "###.###.", "#.#...#.", "###.###.", "........", "........"],
+    UNASSIGNED,
     // 138 unassigned, shown as its number
-    ["........", "###..#..", "#.#.#.#.", "###.###.", "#.#.#.#.", "###.#.#.", "........", "........"],
+    UNASSIGNED,
     // 139 unassigned, shown as its number
-    ["........", "###.##..", "#.#.#.#.", "###.##..", "#.#.#.#.", "###.##..", "........", "........"],
+    UNASSIGNED,
     // 140 …
     ["........", "........", "........", "........", "........", "........", "##.##.##", "........"],
     // 141 ™
@@ -485,7 +491,128 @@ static ART: [Art; 224] = [
 ];
 
 /// RISC OS's arrangement, from [`FIRST`] to 255.
-pub static RISC_OS: [Glyph; 224] = glyphs(&ART);
+pub static RISC_OS: [Glyph; 224] = risc_os();
+
+/// The character each code from 128 of RISC OS's arrangement is: ISO 8859-1
+/// from 160, RISC OS's own below; none for a code RISC OS leaves
+/// unassigned, which shows its number.
+pub static RISC_OS_UPPER: [Option<char>; 128] = {
+    const OWN: [Option<char>; 32] = [
+        Some('\u{20AC}'),
+        Some('\u{0174}'),
+        Some('\u{0175}'),
+        None,
+        None,
+        Some('\u{0176}'),
+        Some('\u{0177}'),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some('\u{2026}'),
+        Some('\u{2122}'),
+        Some('\u{2030}'),
+        Some('\u{2022}'),
+        Some('\u{2018}'),
+        Some('\u{2019}'),
+        Some('\u{2039}'),
+        Some('\u{203A}'),
+        Some('\u{201C}'),
+        Some('\u{201D}'),
+        Some('\u{201E}'),
+        Some('\u{2013}'),
+        Some('\u{2014}'),
+        Some('\u{2212}'),
+        Some('\u{0152}'),
+        Some('\u{0153}'),
+        Some('\u{2020}'),
+        Some('\u{2021}'),
+        Some('\u{FB01}'),
+        Some('\u{FB02}'),
+    ];
+    let mut upper = [None; 128];
+    let mut i = 0;
+    let mut code = 0x80;
+    while i < 128 {
+        upper[i] = if i < 32 { OWN[i] } else { char::from_u32(code) };
+        i += 1;
+        code += 1;
+    }
+    upper
+};
+
+/// The full block, which RISC OS's 127 shows.
+const FULL_BLOCK: char = '\u{2588}';
+
+/// The glyph `character` has in the system character set, if it has one:
+/// RISC OS's arrangement's, or one of the other characters RISC OS's
+/// alphabets hold — Latin's other letters, Greek, Cyrillic and Hebrew.
+#[must_use]
+pub fn glyph_of(character: char) -> Option<Glyph> {
+    let code = match character {
+        ' '..='~' => u8::try_from(character).ok(),
+        FULL_BLOCK => Some(127),
+        _ => RISC_OS_UPPER
+            .iter()
+            .position(|&c| c == Some(character))
+            .and_then(|upper| u8::try_from(0x80 + upper).ok()),
+    };
+    match code {
+        Some(code) => risc_os_glyph(code).copied(),
+        None => extended::glyph_of(character),
+    }
+}
+
+/// Each hexadecimal digit three pixels wide and five tall, a row's pixels
+/// in its low three bits.
+const DIGITS: [[u8; 5]; 16] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b011, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b010, 0b010, 0b010],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
+    [0b010, 0b101, 0b111, 0b101, 0b101],
+    [0b110, 0b101, 0b110, 0b101, 0b110],
+    [0b011, 0b100, 0b100, 0b100, 0b011],
+    [0b110, 0b101, 0b101, 0b101, 0b110],
+    [0b111, 0b100, 0b110, 0b100, 0b111],
+    [0b111, 0b100, 0b110, 0b100, 0b100],
+];
+
+/// `code`'s number in hexadecimal, its two digits side by side, as RISC
+/// OS's unassigned characters show theirs.
+#[must_use]
+pub const fn number(code: u8) -> Glyph {
+    let (high, low) = (DIGITS[(code >> 4) as usize], DIGITS[(code & 0xF) as usize]);
+    let mut glyph = [0; 8];
+    let mut row = 0;
+    while row < 5 {
+        glyph[row + 1] = (high[row] << 5) | (low[row] << 1);
+        row += 1;
+    }
+    glyph
+}
+
+/// RISC OS's arrangement: each code's drawing, an unassigned one's number.
+const fn risc_os() -> [Glyph; 224] {
+    let mut glyphs = glyphs(&ART);
+    let mut i = 0;
+    let mut code = 128;
+    while i < 128 {
+        if RISC_OS_UPPER[i].is_none() {
+            glyphs[128 - FIRST as usize + i] = number(code);
+        }
+        i += 1;
+        code = code.wrapping_add(1);
+    }
+    glyphs
+}
 
 /// The BBC Micro's and the Electron's arrangement, from [`FIRST`] to 127:
 /// RISC OS's but for the pound sign at 96 and a hatched block at 127.

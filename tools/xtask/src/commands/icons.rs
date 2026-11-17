@@ -27,7 +27,7 @@ use masters::{Draw, MASTERS};
 use text::Fonts;
 
 /// Where the masters are committed.
-const ASSETS: &str = "lib/icon/assets";
+pub(crate) const ASSETS: &str = "lib/icon/assets";
 
 /// Where `--sheets` renders the contact sheet.
 const SHEET: &str = "images/icon-sheet.png";

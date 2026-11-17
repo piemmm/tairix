@@ -513,10 +513,16 @@ fn an_aborted_transfer_restores_its_base() {
     let state = cpu.state();
     assert_eq!(state.user[0], UNMAPPED - 4, "the base as it was");
     assert_eq!(state.user[1], 0, "the first register not loaded");
+    assert_eq!(cpu.data_fault(), (0b0111, UNMAPPED), "a translation fault");
     let mut unprivileged = processor(&BIT32, Mode::Supervisor, 0x8004);
     unprivileged.set_reg(r(1), READ_ONLY);
     run(&mut unprivileged, &mut ram, 1);
     assert_eq!(unprivileged.mode(), Mode::Abort, "STRT is a User access");
+    assert_eq!(
+        unprivileged.data_fault(),
+        (1 << 11 | 0b1111, READ_ONLY),
+        "a write's permission fault"
+    );
     assert_eq!(
         ram.accesses.last(),
         Some(&(READ_ONLY, Width::Word, true, false))
@@ -1688,4 +1694,22 @@ fn a_26_bit_stm_listing_its_base_after_the_first_stores_the_written_back_base() 
             profile.name
         );
     }
+}
+
+#[test]
+fn the_id_registers_read_as_a_privileged_mrc_reads_them() {
+    let v7 = processor(&BIT32, Mode::Supervisor, 0x8000);
+    let main_id = v7.system_register([0, 0, 0, 0]);
+    assert_eq!(main_id, Some(0x000F_0000), "no particular silicon");
+    assert!(v7.system_register([0, 0, 2, 0]).is_some(), "ID_ISAR0");
+    let sa110 = processor(&BIT26, Mode::Supervisor26, 0x8000);
+    assert_eq!(
+        sa110.system_register([0, 0, 0, 0]).map(|id| id >> 24),
+        Some(0x44)
+    );
+    assert_eq!(
+        sa110.system_register([0, 0, 2, 0]),
+        sa110.system_register([0, 0, 0, 0]),
+        "ARMv4 has no ISARs: the SA-110 reads its ID whatever CRm says"
+    );
 }

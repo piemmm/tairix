@@ -9,7 +9,7 @@ use tairix_collections::OrderedMap;
 use tairix_riscos_arm::mmu::{Access, Frame, FrameKind, Table, PAGE_SIZE};
 
 use super::super::guest::{Guest, Service};
-use super::super::{Holder, Memory};
+use super::super::{Holder, Memory, Record, RESERVED};
 use super::change::named;
 use super::{access_privilege, AreaError, AreaFlags, Id, Shape};
 
@@ -197,6 +197,9 @@ impl Memory {
             return Err(AreaError::BadPageNumber);
         }
         let unavailable = op.flags & UNAVAILABLE != 0;
+        // Locking a reserved page says it knows the page is reserved.
+        let lock_refused =
+            |record: Record| unavailable && record.reserved && op.flags & RESERVED == 0;
         let held = pool.page(op.slot);
         let keep = match (held, op.page) {
             (Some((page, _)), -2) => Some(page),
@@ -206,6 +209,9 @@ impl Memory {
             _ => None,
         };
         if let Some(page) = keep {
+            if lock_refused(self.pages.get(page.number())) {
+                return Err(AreaError::PageReserved);
+            }
             if let Ok(record) = self.pages.get_mut(page.number()) {
                 record.unavailable = unavailable;
             }
@@ -219,14 +225,13 @@ impl Memory {
         // goes, so a refusal changes nothing.
         let wanted = match op.page {
             -1 => None,
-            -2 => Some(
-                self.mmu
-                    .next_free(Frame::new(0))
-                    .ok_or(AreaError::NotAllMoved)?,
-            ),
+            -2 => Some(self.free_unreserved().ok_or(AreaError::NotAllMoved)?),
             page => {
                 let page = u32::try_from(page).map_err(|_| AreaError::BadPageNumber)?;
                 let record = self.pages.get(page);
+                if lock_refused(record) {
+                    return Err(AreaError::PageReserved);
+                }
                 if record.unavailable || record.holder == Some(Holder::Kernel) {
                     return Err(AreaError::NotAllMoved);
                 }
@@ -275,6 +280,19 @@ impl Memory {
             let _ = pool.slots.try_insert(op.slot, (frame, flags));
         }
         Ok(())
+    }
+
+    /// The lowest free page no one reserved, for a claim that lets the
+    /// kernel choose.
+    fn free_unreserved(&self) -> Option<Frame> {
+        let mut from = Frame::new(0);
+        loop {
+            let frame = self.mmu.next_free(from)?;
+            if !self.pages.get(frame.number()).reserved {
+                return Some(frame);
+            }
+            from = Frame::new(frame.number().checked_add(1)?);
+        }
     }
 
     /// `OS_DynamicArea` 22: maps and unmaps a pool's pages in its window,

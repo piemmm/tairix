@@ -1,0 +1,1436 @@
+# Modules (plans/RISCOS-EMULATOR.md §4.3): images of the corpus's own,
+# with no code, inserted from memory, looked up, enumerated, replaced and
+# killed; the RMA's blocks claimed, extended and freed; and refusals.
+
+scenario module-insert-look-up-and-kill
+block mod 80
+write $mod+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $mod+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&11 b=&11 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $mod+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&41 b=&0 b=&0
+call XOS_Module r0=11 r1=$mod r2=72
+show v
+call XOS_Module r0=18 r1="TairixModA"
+show r2 r4 v
+keep r3 base
+show $base+&10:4 v
+call XOS_Module r0=18 r1="tairixmoda"
+show r2 v
+call XOS_Module r0=18 r1="TairixModA%Base"
+show r2 v
+call XOS_Module r0=18 r1="TairixModA%Other"
+show v
+call XOS_Module r0=4 r1="TairixModA"
+show v
+call XOS_Module r0=18 r1="TairixModA"
+show v
+call XOS_Module r0=4 r1="TairixModA"
+show v
+
+scenario module-replaced-by-its-title
+block one 80
+write $one+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $one+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&22 b=&22 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $one+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&42 b=&0 b=&0
+call XOS_Module r0=11 r1=$one r2=72
+show v
+block two 80
+write $two+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $two+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&33 b=&33 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $two+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&42 b=&0 b=&0
+call XOS_Module r0=11 r1=$two r2=72
+show v
+call XOS_Module r0=18 r1="TairixModB"
+keep r3 base
+show $base+&38:4 v
+call XOS_Module r0=4 r1="TairixModB"
+show v
+
+scenario module-header-refusals
+block titlefar 80
+write $titlefar+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&F0 b=&FF b=&7 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $titlefar+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&6F
+write $titlefar+64 b=&64 b=&43 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$titlefar r2=72
+show v
+block titlenone 80
+write $titlenone+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $titlenone+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&6F
+write $titlenone+64 b=&64 b=&44 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$titlenone r2=72
+show v
+block noflags 80
+write $noflags+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&38 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $noflags+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72 b=&69 b=&78 b=&4D b=&6F
+write $noflags+64 b=&64 b=&45 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$noflags r2=72
+show v
+call XOS_Module r0=11 r1=0 r2=0
+show v
+
+scenario module-rma-blocks
+call XOS_Module r0=6 r3=64
+show v
+keep r2 block
+call XOS_Module r0=13 r2=$block r3=32
+show v
+keep r2 block
+call XOS_Module r0=7 r2=$block
+show v
+call XOS_Module r0=7 r2=$block
+show v
+call XOS_Module r0=6 r3=0
+show v
+call XOS_Module r0=6 r3=&7FFFFFF0
+show v
+
+scenario module-reasons-refused
+call XOS_Module r0=&FF
+show v
+call XOS_Module r0=12 r1=&7FFF r2=0
+show v
+call XOS_Module r0=4 r1=""
+show v
+
+scenario module-header-fields-implausible
+block chunk 80
+write $chunk+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&45 b=&23 b=&1 b=&0
+write $chunk+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $chunk+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&46 b=&0 b=&0
+call XOS_Module r0=11 r1=$chunk r2=72
+show v
+call XOS_Module r0=4 r1="TairixModF"
+show v
+block handler 80
+write $handler+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&C0 b=&FF b=&F b=&0
+write $handler+32 b=&0 b=&10 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $handler+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&47 b=&0 b=&0
+call XOS_Module r0=11 r1=$handler r2=72
+show v
+call XOS_Module r0=4 r1="TairixModG"
+show v
+block unaligned 80
+write $unaligned+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&C0 b=&FF b=&F b=&0
+write $unaligned+32 b=&38 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $unaligned+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&48 b=&0 b=&0
+call XOS_Module r0=11 r1=$unaligned r2=72
+show v
+call XOS_Module r0=4 r1="TairixModH"
+show v
+block messages 80
+write $messages+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $messages+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3D b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $messages+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&49 b=&0 b=&0
+call XOS_Module r0=11 r1=$messages r2=72
+show v
+call XOS_Module r0=4 r1="TairixModI"
+show v
+block msgfar 80
+write $msgfar+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $msgfar+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&4 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $msgfar+64 b=&69 b=&78 b=&4D b=&6F b=&64 b=&4A b=&0 b=&0
+call XOS_Module r0=11 r1=$msgfar r2=72
+show v
+call XOS_Module r0=4 r1="TairixModJ"
+show v
+
+scenario module-title-with-a-postfix-mark
+block pct 80
+write $pct+0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&3C b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0
+write $pct+32 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&0 b=&34 b=&0 b=&0 b=&0 b=&1 b=&0 b=&0 b=&0 b=&55 b=&55 b=&0 b=&0 b=&54 b=&61 b=&69 b=&72
+write $pct+64 b=&69 b=&78 b=&25 b=&4B b=&0 b=&0 b=&0 b=&0
+call XOS_Module r0=11 r1=$pct r2=72
+show v
+
+scenario module-tidy
+call XOS_Module r0=8
+show v
+
+# A module's SWIs past its table: each chunk's last, which none fills,
+# issued by number from a vector's claimant. RISC OS 5's MessageTrans
+# aborts on its own, so it is not asked.
+scenario module-swis-past-their-tables
+block swi0 16
+write $swi0 w=&E92D4000 w=&EF06307F w=&E8BD4000 w=&E8BD8000
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_Claim r0=&21 r1=$swi0 r2=0
+show v
+call XOS_CallAVector r0=0 r1=0 r2=0 r3=0 r9=&21
+show v
+call XOS_Release r0=&21 r1=$swi0 r2=0
+show v
+block swi1 16
+write $swi1 w=&E92D4000 w=&EF061B7F w=&E8BD4000 w=&E8BD8000
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_Claim r0=&21 r1=$swi1 r2=0
+show v
+call XOS_CallAVector r0=0 r1=0 r2=0 r3=0 r9=&21
+show v
+call XOS_Release r0=&21 r1=$swi1 r2=0
+show v
+block swi2 16
+write $swi2 w=&E92D4000 w=&EFF2003F w=&E8BD4000 w=&E8BD8000
+call XOS_SynchroniseCodeAreas r0=0
+call XOS_Claim r0=&21 r1=$swi2 r2=0
+show v
+call XOS_CallAVector r0=0 r1=0 r2=0 r3=0 r9=&21
+show v
+call XOS_Release r0=&21 r1=$swi2 r2=0
+show v
+
+# A section past the last: the reference machine's expansion card keeps
+# a count past the system ROM from running out.
+scenario rom-module-enumeration-ends
+call XOS_Module r0=19 r1=0 r2=99
+show v
+call XOS_Module r0=20 r1=0 r2=99
+show v
+
+# OS_Module 21 to 25, which RISC OS 5 adds.
+scenario module-reasons-21-to-25
+call XOS_Module r0=21 r1=-1
+show v
+call XOS_Module r0=21 r1=0
+show v
+call XOS_Module r0=21 r1=1
+show v
+call XOS_Module r0=21 r1=-2
+show v
+call XOS_Module r0=22 r1=0 r2=0
+show r1 r2 v
+call XOS_Module r0=23 r1=0 r2=0
+show v
+call XOS_Module r0=24 r3=100 r4=256
+show v
+keep r2 al
+call XOS_Module r0=7 r2=$al
+show v
+call XOS_Module r0=24 r3=100 r4=3
+show v
+call XOS_Module r0=25
+show v
+
+# Every module of the ROM as OS_Module 20 lists it, read for the
+# inventory: its version, its title's length, and the CRC of its title,
+# its terminator and the block's &EE bytes to forty. The machine's own,
+# so held against the inventory rather than replayed.
+scenario rom-modules reference
+call XOS_Module r0=20 r1=0 r2=-1
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t0 48
+call XOS_GSTrans r0=$t r1=$t0 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t0 r2=$t0+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t1 48
+call XOS_GSTrans r0=$t r1=$t1 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t1 r2=$t1+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t2 48
+call XOS_GSTrans r0=$t r1=$t2 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t2 r2=$t2+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t3 48
+call XOS_GSTrans r0=$t r1=$t3 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t3 r2=$t3+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t4 48
+call XOS_GSTrans r0=$t r1=$t4 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t4 r2=$t4+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t5 48
+call XOS_GSTrans r0=$t r1=$t5 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t5 r2=$t5+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t6 48
+call XOS_GSTrans r0=$t r1=$t6 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t6 r2=$t6+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t7 48
+call XOS_GSTrans r0=$t r1=$t7 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t7 r2=$t7+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t8 48
+call XOS_GSTrans r0=$t r1=$t8 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t8 r2=$t8+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t9 48
+call XOS_GSTrans r0=$t r1=$t9 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t9 r2=$t9+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t10 48
+call XOS_GSTrans r0=$t r1=$t10 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t10 r2=$t10+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t11 48
+call XOS_GSTrans r0=$t r1=$t11 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t11 r2=$t11+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t12 48
+call XOS_GSTrans r0=$t r1=$t12 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t12 r2=$t12+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t13 48
+call XOS_GSTrans r0=$t r1=$t13 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t13 r2=$t13+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t14 48
+call XOS_GSTrans r0=$t r1=$t14 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t14 r2=$t14+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t15 48
+call XOS_GSTrans r0=$t r1=$t15 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t15 r2=$t15+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t16 48
+call XOS_GSTrans r0=$t r1=$t16 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t16 r2=$t16+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t17 48
+call XOS_GSTrans r0=$t r1=$t17 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t17 r2=$t17+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t18 48
+call XOS_GSTrans r0=$t r1=$t18 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t18 r2=$t18+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t19 48
+call XOS_GSTrans r0=$t r1=$t19 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t19 r2=$t19+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t20 48
+call XOS_GSTrans r0=$t r1=$t20 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t20 r2=$t20+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t21 48
+call XOS_GSTrans r0=$t r1=$t21 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t21 r2=$t21+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t22 48
+call XOS_GSTrans r0=$t r1=$t22 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t22 r2=$t22+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t23 48
+call XOS_GSTrans r0=$t r1=$t23 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t23 r2=$t23+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t24 48
+call XOS_GSTrans r0=$t r1=$t24 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t24 r2=$t24+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t25 48
+call XOS_GSTrans r0=$t r1=$t25 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t25 r2=$t25+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t26 48
+call XOS_GSTrans r0=$t r1=$t26 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t26 r2=$t26+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t27 48
+call XOS_GSTrans r0=$t r1=$t27 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t27 r2=$t27+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t28 48
+call XOS_GSTrans r0=$t r1=$t28 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t28 r2=$t28+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t29 48
+call XOS_GSTrans r0=$t r1=$t29 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t29 r2=$t29+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t30 48
+call XOS_GSTrans r0=$t r1=$t30 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t30 r2=$t30+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t31 48
+call XOS_GSTrans r0=$t r1=$t31 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t31 r2=$t31+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t32 48
+call XOS_GSTrans r0=$t r1=$t32 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t32 r2=$t32+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t33 48
+call XOS_GSTrans r0=$t r1=$t33 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t33 r2=$t33+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t34 48
+call XOS_GSTrans r0=$t r1=$t34 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t34 r2=$t34+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t35 48
+call XOS_GSTrans r0=$t r1=$t35 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t35 r2=$t35+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t36 48
+call XOS_GSTrans r0=$t r1=$t36 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t36 r2=$t36+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t37 48
+call XOS_GSTrans r0=$t r1=$t37 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t37 r2=$t37+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t38 48
+call XOS_GSTrans r0=$t r1=$t38 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t38 r2=$t38+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t39 48
+call XOS_GSTrans r0=$t r1=$t39 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t39 r2=$t39+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t40 48
+call XOS_GSTrans r0=$t r1=$t40 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t40 r2=$t40+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t41 48
+call XOS_GSTrans r0=$t r1=$t41 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t41 r2=$t41+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t42 48
+call XOS_GSTrans r0=$t r1=$t42 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t42 r2=$t42+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t43 48
+call XOS_GSTrans r0=$t r1=$t43 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t43 r2=$t43+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t44 48
+call XOS_GSTrans r0=$t r1=$t44 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t44 r2=$t44+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t45 48
+call XOS_GSTrans r0=$t r1=$t45 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t45 r2=$t45+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t46 48
+call XOS_GSTrans r0=$t r1=$t46 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t46 r2=$t46+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t47 48
+call XOS_GSTrans r0=$t r1=$t47 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t47 r2=$t47+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t48 48
+call XOS_GSTrans r0=$t r1=$t48 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t48 r2=$t48+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t49 48
+call XOS_GSTrans r0=$t r1=$t49 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t49 r2=$t49+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t50 48
+call XOS_GSTrans r0=$t r1=$t50 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t50 r2=$t50+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t51 48
+call XOS_GSTrans r0=$t r1=$t51 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t51 r2=$t51+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t52 48
+call XOS_GSTrans r0=$t r1=$t52 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t52 r2=$t52+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t53 48
+call XOS_GSTrans r0=$t r1=$t53 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t53 r2=$t53+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t54 48
+call XOS_GSTrans r0=$t r1=$t54 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t54 r2=$t54+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t55 48
+call XOS_GSTrans r0=$t r1=$t55 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t55 r2=$t55+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t56 48
+call XOS_GSTrans r0=$t r1=$t56 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t56 r2=$t56+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t57 48
+call XOS_GSTrans r0=$t r1=$t57 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t57 r2=$t57+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t58 48
+call XOS_GSTrans r0=$t r1=$t58 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t58 r2=$t58+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t59 48
+call XOS_GSTrans r0=$t r1=$t59 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t59 r2=$t59+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t60 48
+call XOS_GSTrans r0=$t r1=$t60 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t60 r2=$t60+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t61 48
+call XOS_GSTrans r0=$t r1=$t61 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t61 r2=$t61+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t62 48
+call XOS_GSTrans r0=$t r1=$t62 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t62 r2=$t62+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t63 48
+call XOS_GSTrans r0=$t r1=$t63 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t63 r2=$t63+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t64 48
+call XOS_GSTrans r0=$t r1=$t64 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t64 r2=$t64+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t65 48
+call XOS_GSTrans r0=$t r1=$t65 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t65 r2=$t65+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t66 48
+call XOS_GSTrans r0=$t r1=$t66 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t66 r2=$t66+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t67 48
+call XOS_GSTrans r0=$t r1=$t67 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t67 r2=$t67+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t68 48
+call XOS_GSTrans r0=$t r1=$t68 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t68 r2=$t68+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t69 48
+call XOS_GSTrans r0=$t r1=$t69 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t69 r2=$t69+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t70 48
+call XOS_GSTrans r0=$t r1=$t70 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t70 r2=$t70+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t71 48
+call XOS_GSTrans r0=$t r1=$t71 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t71 r2=$t71+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t72 48
+call XOS_GSTrans r0=$t r1=$t72 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t72 r2=$t72+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t73 48
+call XOS_GSTrans r0=$t r1=$t73 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t73 r2=$t73+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t74 48
+call XOS_GSTrans r0=$t r1=$t74 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t74 r2=$t74+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t75 48
+call XOS_GSTrans r0=$t r1=$t75 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t75 r2=$t75+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t76 48
+call XOS_GSTrans r0=$t r1=$t76 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t76 r2=$t76+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t77 48
+call XOS_GSTrans r0=$t r1=$t77 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t77 r2=$t77+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t78 48
+call XOS_GSTrans r0=$t r1=$t78 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t78 r2=$t78+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t79 48
+call XOS_GSTrans r0=$t r1=$t79 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t79 r2=$t79+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t80 48
+call XOS_GSTrans r0=$t r1=$t80 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t80 r2=$t80+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t81 48
+call XOS_GSTrans r0=$t r1=$t81 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t81 r2=$t81+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t82 48
+call XOS_GSTrans r0=$t r1=$t82 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t82 r2=$t82+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t83 48
+call XOS_GSTrans r0=$t r1=$t83 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t83 r2=$t83+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t84 48
+call XOS_GSTrans r0=$t r1=$t84 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t84 r2=$t84+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t85 48
+call XOS_GSTrans r0=$t r1=$t85 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t85 r2=$t85+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t86 48
+call XOS_GSTrans r0=$t r1=$t86 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t86 r2=$t86+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t87 48
+call XOS_GSTrans r0=$t r1=$t87 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t87 r2=$t87+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t88 48
+call XOS_GSTrans r0=$t r1=$t88 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t88 r2=$t88+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t89 48
+call XOS_GSTrans r0=$t r1=$t89 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t89 r2=$t89+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t90 48
+call XOS_GSTrans r0=$t r1=$t90 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t90 r2=$t90+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t91 48
+call XOS_GSTrans r0=$t r1=$t91 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t91 r2=$t91+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t92 48
+call XOS_GSTrans r0=$t r1=$t92 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t92 r2=$t92+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t93 48
+call XOS_GSTrans r0=$t r1=$t93 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t93 r2=$t93+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t94 48
+call XOS_GSTrans r0=$t r1=$t94 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t94 r2=$t94+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t95 48
+call XOS_GSTrans r0=$t r1=$t95 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t95 r2=$t95+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t96 48
+call XOS_GSTrans r0=$t r1=$t96 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t96 r2=$t96+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t97 48
+call XOS_GSTrans r0=$t r1=$t97 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t97 r2=$t97+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t98 48
+call XOS_GSTrans r0=$t r1=$t98 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t98 r2=$t98+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t99 48
+call XOS_GSTrans r0=$t r1=$t99 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t99 r2=$t99+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t100 48
+call XOS_GSTrans r0=$t r1=$t100 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t100 r2=$t100+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t101 48
+call XOS_GSTrans r0=$t r1=$t101 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t101 r2=$t101+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t102 48
+call XOS_GSTrans r0=$t r1=$t102 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t102 r2=$t102+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t103 48
+call XOS_GSTrans r0=$t r1=$t103 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t103 r2=$t103+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t104 48
+call XOS_GSTrans r0=$t r1=$t104 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t104 r2=$t104+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t105 48
+call XOS_GSTrans r0=$t r1=$t105 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t105 r2=$t105+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t106 48
+call XOS_GSTrans r0=$t r1=$t106 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t106 r2=$t106+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t107 48
+call XOS_GSTrans r0=$t r1=$t107 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t107 r2=$t107+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t108 48
+call XOS_GSTrans r0=$t r1=$t108 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t108 r2=$t108+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t109 48
+call XOS_GSTrans r0=$t r1=$t109 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t109 r2=$t109+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t110 48
+call XOS_GSTrans r0=$t r1=$t110 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t110 r2=$t110+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t111 48
+call XOS_GSTrans r0=$t r1=$t111 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t111 r2=$t111+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t112 48
+call XOS_GSTrans r0=$t r1=$t112 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t112 r2=$t112+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t113 48
+call XOS_GSTrans r0=$t r1=$t113 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t113 r2=$t113+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t114 48
+call XOS_GSTrans r0=$t r1=$t114 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t114 r2=$t114+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t115 48
+call XOS_GSTrans r0=$t r1=$t115 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t115 r2=$t115+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t116 48
+call XOS_GSTrans r0=$t r1=$t116 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t116 r2=$t116+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t117 48
+call XOS_GSTrans r0=$t r1=$t117 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t117 r2=$t117+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t118 48
+call XOS_GSTrans r0=$t r1=$t118 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t118 r2=$t118+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t119 48
+call XOS_GSTrans r0=$t r1=$t119 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t119 r2=$t119+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t120 48
+call XOS_GSTrans r0=$t r1=$t120 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t120 r2=$t120+&28 r3=1
+show r0
+call XOS_Module r0=20 r1=$n r2=$s
+show r1 r2 r4 r5 r6 v
+keep r1 n
+keep r2 s
+keep r3 t
+block t121 48
+call XOS_GSTrans r0=$t r1=$t121 r2=40
+show r2 v
+call XOS_CRC r0=0 r1=$t121 r2=$t121+&28 r3=1
+show r0
