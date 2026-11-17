@@ -6,7 +6,7 @@ use super::latch;
 use super::Model;
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::electron::control;
-use crate::rom::asm::{hi, lo, Asm, Byte};
+use crate::rom::asm::{byte, lo, Asm};
 
 /// What one mode is.
 struct Mode {
@@ -190,13 +190,126 @@ const LATCH: [[u8; 2]; 5] = {
 };
 
 /// Where MOS 1.20's table of 640-byte row offsets lies; software reads it
-/// there.
+/// there, and a mode set copied from MOS 1.20 points &E0 into its page.
 pub const ROWS_640: u16 = 0xC375;
+/// Where a mode set copied from MOS 1.20 reads the mode tables: the Model
+/// B's lie there in MOS 1.20's order, each sharing the bytes its neighbour
+/// ends with.
+const MODE_TABLES: u16 = 0xC3F7;
+const PIXEL_TABLES: u16 = 0xC43A;
+const MAP_TABLES: u16 = 0xC44B;
 
-/// The Model B's 640-byte row table, at the address software reads it from.
-pub fn pin_rows_640(a: &mut Asm) {
-    a.pin(ROWS_640, |a| rows(a, "rows_640", 640, 32));
+/// A memory map type's kind of row, as such a mode set finds it: 2 for 640
+/// bytes, 1 for 320, 0 for 40, each the high byte of its rows' length.
+pub(super) const fn row_kind(map_type: u8) -> u8 {
+    ((map_type + 2) ^ 7) >> 1
 }
+const ROW_LENGTHS: [u16; 3] = [40, 320, 640];
+const _: () = {
+    let mut i = 0;
+    while i < MODES.len() {
+        let kind = row_kind(MODES[i].map_type) as usize;
+        assert!(row_bytes(&MODES[i]) == ROW_LENGTHS[kind]);
+        assert!(ROW_LENGTHS[kind] >> 8 == byte(kind) as u16);
+        i += 1;
+    }
+};
+
+/// A field of each mode, or of each memory map type's first mode.
+#[derive(Clone, Copy)]
+enum Field {
+    Ula,
+    BytesPerCharacter,
+    Colours,
+    Pixels,
+    MapType,
+    Size,
+    Screen,
+}
+
+const fn field(mode: &Mode, field: Field) -> u8 {
+    match field {
+        Field::Ula => mode.ula,
+        Field::BytesPerCharacter => mode.bytes_per_character,
+        // Logical colours less one, as &360 holds them.
+        Field::Colours => match mode.pixels_per_byte {
+            8 => 1,
+            4 => 3,
+            2 => 15,
+            _ => 0,
+        },
+        Field::Pixels => {
+            if mode.graphics {
+                mode.pixels_per_byte - 1
+            } else {
+                0
+            }
+        }
+        Field::MapType => mode.map_type,
+        Field::Size => mode.size,
+        Field::Screen => mode.screen,
+    }
+}
+
+const fn column(of: Field) -> [u8; MODES.len()] {
+    let mut table = [0; MODES.len()];
+    let mut i = 0;
+    while i < MODES.len() {
+        table[i] = field(&MODES[i], of);
+        i += 1;
+    }
+    table
+}
+
+const MAP_TYPES: usize = CRTC.len();
+
+const fn map_column(of: Field) -> [u8; MAP_TYPES] {
+    let mut table = [0; MAP_TYPES];
+    let mut map_type = 0;
+    while map_type < MAP_TYPES {
+        let mut i = 0;
+        while MODES[i].map_type as usize != map_type {
+            i += 1;
+        }
+        table[map_type] = field(&MODES[i], of);
+        map_type += 1;
+    }
+    table
+}
+
+const ULA: [u8; MODES.len()] = column(Field::Ula);
+const BYTES_PER_CHARACTER: [u8; MODES.len()] = column(Field::BytesPerCharacter);
+const COLOURS: [u8; MODES.len()] = column(Field::Colours);
+const PIXELS: [u8; MODES.len()] = column(Field::Pixels);
+const MAP_TYPE: [u8; MODES.len()] = column(Field::MapType);
+const MAP_SIZE: [u8; MAP_TYPES] = map_column(Field::Size);
+const MAP_SCREEN: [u8; MAP_TYPES] = map_column(Field::Screen);
+const _: () = assert!(
+    BYTES_PER_CHARACTER[7] == PIXEL_MASKS[0]
+        && PIXEL_MASKS[14] == COLOURS[0]
+        && PIXELS[6] == MAP_TYPE[0]
+        && PIXELS[7] == MAP_TYPE[1]
+        && LATCH[4][1] == LATCH[0][0]
+);
+
+/// The 6845 register set each memory map type starts at in
+/// `crtc_registers`, at its last register: MODE writes them downwards.
+const MAP_CRTC: [u8; MAP_TYPES] = {
+    let mut table = [0; MAP_TYPES];
+    let mut map_type = 0;
+    while map_type < MAP_TYPES {
+        table[map_type] = byte(map_type) * (LAST_CRTC_REGISTER + 1) + LAST_CRTC_REGISTER;
+        map_type += 1;
+    }
+    table
+};
+
+/// Each kind of row's length, low byte.
+const ROW_LOW: [u8; 3] = [
+    ROW_LENGTHS[0].to_le_bytes()[0],
+    ROW_LENGTHS[1].to_le_bytes()[0],
+    ROW_LENGTHS[2].to_le_bytes()[0],
+];
 
 /// A row multiplication table: each row's offset, high byte first, as the
 /// pointer at &E0 names it.
@@ -209,6 +322,15 @@ fn rows(a: &mut Asm, name: &'static str, width: u16, count: u16) {
     }
 }
 
+/// The row multiplication table each kind of row reads, `forty` the
+/// 40-byte rows': the 320-byte rows read the 640-byte table halved.
+fn row_tables(a: &mut Asm, forty: &'static str) {
+    a.here("row_table_low");
+    for name in [forty, "rows_640", "rows_640"] {
+        a.byte(lo(name));
+    }
+}
+
 /// The modes the Electron has: all but the teletext mode.
 const ELECTRON_MODES: usize = 7;
 
@@ -217,16 +339,60 @@ const fn row_bytes(mode: &Mode) -> u16 {
     mode.columns as u16 * mode.bytes_per_character as u16
 }
 
-/// The row multiplication table of `mode`'s row length: the 320-byte rows
-/// read the 640-byte table halved.
-const fn rows_table(mode: &Mode) -> &'static str {
-    match row_bytes(mode) {
-        640 | 320 => "rows_640",
-        _ => "rows_40",
-    }
+/// The Model B's mode tables at MOS 1.20's addresses: its two row tables in
+/// one page, then the tables by mode and by memory map type.
+pub fn pin_tables(a: &mut Asm) {
+    a.pin(ROWS_640, |a| {
+        rows(a, "rows_640", 640, 32);
+        rows(a, "rows_40", 40, 25);
+    });
+    // Each table but the last ends at the next's first byte.
+    a.pin(MODE_TABLES, |a| {
+        a.here("mode_ula");
+        a.bytes(&ULA);
+        a.here("mode_bytes_per_character");
+        a.bytes(&BYTES_PER_CHARACTER[..7]);
+        a.here("pixel_mask_table");
+        a.bytes(&PIXEL_MASKS[..14]);
+        a.here("mode_colours");
+        a.bytes(&COLOURS);
+    });
+    a.pin(PIXEL_TABLES, |a| {
+        a.here("mode_pixels");
+        a.bytes(&PIXELS[..6]);
+        a.here("mode_map_type");
+        a.bytes(&MAP_TYPE);
+    });
+    a.pin(MAP_TABLES, |a| {
+        a.here("latch_second");
+        for bits in &LATCH[..4] {
+            a.byte(bits[1]);
+        }
+        a.here("latch_first");
+        for bits in &LATCH {
+            a.byte(bits[0]);
+        }
+        // Where MOS 1.20 keeps each type's screen clear, which such a mode
+        // set copies into &35D: this MOS sets &35D for each VDU code itself.
+        a.fill(MAP_TYPES, 0);
+        a.here("map_size");
+        a.bytes(&MAP_SIZE);
+        a.here("map_screen");
+        a.bytes(&MAP_SCREEN);
+        a.here("row_low");
+        a.bytes(&ROW_LOW);
+        row_tables(a, "rows_40");
+        a.here("map_crtc");
+        a.bytes(&MAP_CRTC);
+        a.here("crtc_registers");
+        for set in &CRTC {
+            a.bytes(set);
+        }
+    });
 }
 
-/// Emit the per-mode tables the VDU drivers index by MODE.
+/// Emit the mode tables the Model B does not pin; the Electron holds them
+/// all.
 pub fn emit(a: &mut Asm, model: Model) {
     let present = match model {
         Model::ModelB => &MODES[..],
@@ -240,49 +406,8 @@ pub fn emit(a: &mut Asm, model: Model) {
             }
         });
     };
-    // What follows from the memory map type, an entry a type, from the
-    // first mode of each.
-    let map_table = |a: &mut Asm, name: &'static str, field: fn(&Mode) -> Byte| {
-        a.later(move |a| {
-            a.here(name);
-            for map_type in 0u8.. {
-                match present.iter().find(|mode| mode.map_type == map_type) {
-                    Some(mode) => a.byte(field(mode)),
-                    None => break,
-                }
-            }
-        });
-    };
-    table(a, "mode_bytes_per_character", |m| m.bytes_per_character);
     table(a, "mode_right", |m| m.columns - 1);
     table(a, "mode_bottom", |m| m.rows - 1);
-    table(a, "mode_screen", |m| m.screen);
-    map_table(a, "map_size", |m| m.size.into());
-    table(a, "mode_map_type", |m| m.map_type);
-    match model {
-        Model::ModelB => {
-            table(a, "mode_ula", |m| m.ula);
-            // The type's last register in `crtc_registers`: MODE writes them
-            // downwards.
-            map_table(a, "map_crtc", |m| {
-                (m.map_type * (LAST_CRTC_REGISTER + 1) + LAST_CRTC_REGISTER).into()
-            });
-        }
-        Model::Electron => a.later(move |a| {
-            // `&FE07`'s mode field.
-            a.here("mode_ula");
-            for (number, _) in (0u8..).zip(present) {
-                a.byte(number << control::MODE.trailing_zeros());
-            }
-        }),
-    }
-    table(a, "mode_pixels", |m| {
-        if m.graphics {
-            m.pixels_per_byte - 1
-        } else {
-            0
-        }
-    });
     table(a, "mode_width_low", |m| {
         (points_across(m) - 1).to_le_bytes()[0]
     });
@@ -290,42 +415,36 @@ pub fn emit(a: &mut Asm, model: Model) {
         (points_across(m) - 1).to_le_bytes()[1]
     });
     table(a, "mode_x_shift", x_shift);
-    a.later(|a| {
-        a.here("pixel_mask_table");
-        a.bytes(&PIXEL_MASKS);
-    });
-    table(a, "mode_colours", |m| match m.pixels_per_byte {
-        8 => 1,
-        4 => 3,
-        2 => 15,
-        _ => 0,
-    });
-    // Bytes per row, low and high.
-    map_table(a, "map_row_low", |m| row_bytes(m).to_le_bytes()[0].into());
-    map_table(a, "map_row_high", |m| row_bytes(m).to_le_bytes()[1].into());
-    // The row multiplication table each type uses.
-    map_table(a, "map_rows_table", |m| lo(rows_table(m)));
-    map_table(a, "map_rows_table_high", |m| hi(rows_table(m)));
     if model == Model::ModelB {
-        a.later(|a| {
-            a.here("crtc_registers");
-            for set in &CRTC {
-                a.bytes(set);
-            }
-        });
-        a.later(|a| {
-            a.here("latch_size");
-            for bits in &LATCH {
-                a.bytes(bits);
-            }
-        });
+        return;
     }
-    // The Model B's 640-byte table is pinned by `pin_rows_640`.
-    let tables: &[(&str, u16, u16)] = match model {
-        Model::ModelB => &[("rows_40", 40, 25)],
-        Model::Electron => &[("rows_640", 640, 32)],
+    let held = |a: &mut Asm, name: &'static str, bytes: &'static [u8]| {
+        a.later(move |a| {
+            a.here(name);
+            a.bytes(bytes);
+        });
     };
-    for &(name, width, count) in tables {
-        a.later(move |a| rows(a, name, width, count));
-    }
+    held(
+        a,
+        "mode_bytes_per_character",
+        &BYTES_PER_CHARACTER[..ELECTRON_MODES],
+    );
+    held(a, "mode_colours", &COLOURS[..ELECTRON_MODES]);
+    held(a, "mode_pixels", &PIXELS[..ELECTRON_MODES]);
+    held(a, "mode_map_type", &MAP_TYPE[..ELECTRON_MODES]);
+    held(a, "pixel_mask_table", &PIXEL_MASKS);
+    let electron_maps = usize::from(MAP_TYPE[ELECTRON_MODES - 1]) + 1;
+    held(a, "map_size", &MAP_SIZE[..electron_maps]);
+    held(a, "map_screen", &MAP_SCREEN[..electron_maps]);
+    held(a, "row_low", &ROW_LOW);
+    // The Electron has no 40-byte rows to read.
+    a.later(|a| row_tables(a, "rows_640"));
+    a.later(|a| {
+        // `&FE07`'s mode field.
+        a.here("mode_ula");
+        for number in 0..byte(ELECTRON_MODES) {
+            a.byte(number << control::MODE.trailing_zeros());
+        }
+    });
+    a.later(|a| rows(a, "rows_640", 640, 32));
 }

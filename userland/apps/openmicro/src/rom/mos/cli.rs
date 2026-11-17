@@ -117,8 +117,8 @@ fn oscli(a: &mut Asm) {
     a.pha();
     a.lda(abs(sym("command_names") + 1).x());
     a.pha();
-    a.jsr("skip_spaces");
-    a.rts();
+    // Its return runs the command.
+    a.jmp("skip_spaces");
     a.here("oscli_next_command");
     a.lda(abs("command_names").x());
     a.inx();
@@ -155,49 +155,49 @@ fn oscli(a: &mut Asm) {
 }
 
 fn commands(a: &mut Asm, model: Model) {
+    // FSCV's reason A with the text's address.
+    const _: () = assert!(fsc::CAT != 0);
     a.here("star_cat");
-    a.jsr("text_address");
     a.lda(imm(fsc::CAT));
-    a.jmp(abs(vector::FSC).ind());
-
+    a.bne("star_fsc");
     a.here("star_run");
-    a.jsr("text_address");
     a.lda(imm(fsc::SLASH));
+    a.here("star_fsc");
+    a.pha();
+    a.jsr("text_address");
+    a.pla();
     a.jmp(abs(vector::FSC).ind());
 
     a.here("star_code");
     a.jsr("read_two");
-    a.lda(imm(0));
-    a.jmp(abs(vector::USER).ind());
+    a.jmp("osbyte_code");
 
     a.here("star_line");
     a.jsr("text_address");
     a.lda(imm(1));
     a.jmp(abs(vector::USER).ind());
 
+    // OSBYTE A with up to two numbers.
     a.here("star_motor");
-    a.jsr("read_two");
     a.lda(imm(0x89));
-    a.jmp("osbyte");
-
+    a.bne("star_osbyte");
     a.here("star_opt");
-    a.jsr("read_two");
     a.lda(imm(0x8B));
+    a.bne("star_osbyte");
+    a.here("star_tape");
+    a.lda(imm(0x8C));
+    a.bne("star_osbyte");
+    a.here("star_tv");
+    a.lda(imm(0x90));
+    a.here("star_osbyte");
+    a.pha();
+    a.jsr("read_two");
+    a.pla();
+    a.here("star_osbyte_call");
     a.jmp("osbyte");
-
     a.here("star_rom");
     a.lda(imm(0x8D));
-    a.jmp("osbyte");
-
-    a.here("star_tape");
-    a.jsr("read_two");
-    a.lda(imm(0x8C));
-    a.jmp("osbyte");
-
-    a.here("star_tv");
-    a.jsr("read_two");
-    a.lda(imm(0x90));
-    a.jmp("osbyte");
+    a.bne("star_osbyte_call");
 
     // The ROMs are told of the topic, Y at it past the word and its spaces.
     // The ROMs answer first, then the OS names itself, as MOS 1.20 and
@@ -276,7 +276,7 @@ fn commands(a: &mut Asm, model: Model) {
 fn files(a: &mut Asm) {
     // Between the commands and the files, so both reach it.
     a.here("bad_command");
-    a.error(0xFE, "Bad command");
+    a.error(0xFE, b"Bad command");
 
     // *LOAD name [address]: to its own address unless one is given.
     a.here("star_load");
@@ -447,7 +447,7 @@ fn gs(a: &mut Asm) {
     a.sec();
     a.rts();
     a.here("gsread_bad");
-    a.error(0xFD, "Bad string");
+    a.error(0xFD, b"Bad string");
     a.here("gsread_not_end");
     a.cmp(imm(b' '));
     a.bne("gsread_not_space");

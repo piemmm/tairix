@@ -207,3 +207,45 @@ row >
 scenario osword_7f_reads_a_special_register
 row         C1
 row >
+
+scenario mos_1_20_s_crtc_and_cursor_routines_lie_at_its_addresses
+row   31000041
+row >A%=&67:X%=3:Y%=10:R%=USR(&C95E):PRINT ~
+row R%,~?&35F:A%=&72:Y%=10:CALL&C95E
+row   330A0367        67
+row >A%=&22:X%=3:Y%=7:R%=USR(&C95E):PRINT ~R
+row %:A%=&1A:Y%=7:CALL&C95E
+row   B0070323
+row >A%=&12:X%=&34:Y%=14:R%=USR(&CA2B):PRINT
+row  ~R%
+row   310F3412
+row >X%=?&D8:A%=?&D9:Y%=5:R%=USR(&C9F6):PRIN
+row T ~R%,~!&D8 AND &FFFF,~!&34A AND &FFFF
+row   310FE029      7DEA      7DF4
+row >
+
+scenario mos_1_20_s_latch_ula_font_and_reset_routines_lie_at_its_addresses
+row          0        24        39         0
+row >A%=4:X%=5:Y%=6:R%=USR(&E9F8):PRINT ~R%
+row   30060504
+row >?&252=7:?&253=9:A%=&4B:X%=1:Y%=2:R%=USR
+row (&EA00):F%=?&251:G%=?&248:?&252=25:?&253
+row =25:PRINT ~R%,F%,~G%
+row   30020109         9        4B
+row >*FX20,1
+row >X%=0:CALL&CD07:PRINT ~?&367,~?&368,~?&3
+row 6E
+row          F         C         C
+row >CALL&C839:PRINT ~?&357,~?&358,~?&359,~?
+row &35A,~?&35B,~?&35C
+row          0        20         0         0
+row          0         0
+row >
+
+scenario the_ula_s_control_register_restarts_the_flash
+row         4B
+row >?&252=7:?&253=9:?&251=1:A%=154:X%=&4B:C
+row ALL&FFF4:F%=?&251:G%=?&248:?&252=25:?&25
+row 3=25:PRINT F%,~G%
+row          9        4B
+row >

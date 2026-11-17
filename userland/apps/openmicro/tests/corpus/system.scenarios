@@ -123,6 +123,14 @@ script type:CLS:P.~?&FFFC+256*?&FFFD,~?&FFFE+256*?&FFFF\n;wait:0.5;type:P%=&900:
 scenario a_point_s_mask_is_its_place_in_its_byte
 script type:NEW\n;type:10 MODE 1:?&362=&FF:?&363=&FF:PLOT 69,4,1020:A$=STR$~?&3000+" "+STR$POINT(4,1020)\n;type:20 MOVE 4,1016:DRAW 24,1016:A$=A$+" "+STR$~?&3001+" "+STR$~?&3009\n;type:30 VDU 24,4,0,0,0,24,0,255,3:PLOT 77,8,1012:A$=A$+" "+STR$~?&3002+" "+STR$~?&300A\n;type:40 ?&362=&88:?&363=&11:MODE 7:PRINT A$\n;type:RUN\n;wait:2
 
+# A triangle's or CLG's span takes its end masks the other way round from a fill's: a left end partway along a byte, when the span crosses bytes, from &363 shifted back to its pixel, and the right end and a span within one byte by their pixels' places.
+scenario a_triangle_s_and_clg_s_span_ends_run_from_the_right
+script type:NEW\n;type:10 DIM R%(40):J%=0:FOR K%=1 TO 12:READ M%,T%,X%,Y%:MODE M%:GCOL 0,15:GCOL 0,128-15*(T%=1):?&362=&C3:?&363=&10\n;type:20 IF T%=0 THEN MOVE X%,1020:MOVE Y%,1020:PLOT 85,X%,1020\n;type:30 IF T%=1 THEN VDU 24,X%,0,0,0,Y%,0,255,3:CLG\n;type:40 IF T%=2 THEN VDU 24,X%,0,0,0,Y%,0,255,3:PLOT 77,X%,1020\n;type:50 FOR I%=0 TO 2:R%(J%)=?(&3008+8*I%):J%=J%+1:NEXT:NEXT\n;type:60 MODE 7:FOR I%=0 TO J%-1:A$=A$+STR$~R%(I%)+" ":NEXT:PRINT A$\n;type:70 DATA 1,0,20,40,1,0,16,36,1,0,28,32,1,0,24,52,1,0,20,24,0,0,18,40,2,0,24,32\n;type:80 DATA 1,1,24,36,1,1,16,44,1,1,20,28,1,2,20,40,1,0,40,20\n;type:RUN\n;wait:6
+
+# A horizontal line fill's right end byte takes &362's mask shifted right to its pixel, ending where a bit falls off the byte as stepping a pixel along does.
+scenario a_fill_s_right_end_stops_where_its_mask_leaves_the_byte
+script type:NEW\n;type:10 FOR K%=1 TO 4:READ M%,W%,N%,V%:MODE M%:GCOL 0,15:FOR Q%=0 TO N%-1:?&362=V%:VDU 24,W%*N%,0,0,0,W%*(2*N%+Q%),0,255,3:PLOT 77,W%*N%,1020:A$=A$+STR$~?&3010+" ":CLS:NEXT:NEXT\n;type:20 MODE 7:PRINT A$\n;type:30 DATA 1,4,4,&C3,1,4,4,&06,0,2,8,&24,2,8,2,&41\n;type:RUN\n;wait:6
+
 # OSBYTE 16 and 17 take at most the four channels; *FX17,0 converts with nothing kept, and *FX16,0 lets the channels below the one converting finish, channel 1 last.
 scenario osbyte_16_and_17_take_at_most_four_channels
 script type:NEW\n;type:10 A%=16:X%=9:CALL &FFF4:A$=STR$?&24D:A%=16:X%=2:A$=A$+" "+STR$((USR(&FFF4) AND &FF00) DIV 256)\n;type:20 *FX16,0\n;type:30 T%=TIME:REPEAT UNTIL TIME>T%+20:A%=17:X%=9:CALL &FFF4:A$=A$+" "+STR$?&24C\n;type:40 T%=TIME:REPEAT UNTIL TIME>T%+20:*FX17,0\n;type:50 A$=A$+" "+STR$?&24C+" "+STR$?&2BE:T%=TIME:REPEAT UNTIL TIME>T%+20:A$=A$+" "+STR$?&2BE+" "+STR$~(?&FEC0 AND 15)\n;type:60 *FX16,4\n;type:70 T%=TIME:REPEAT UNTIL TIME>T%+3:*FX16,0\n;type:80 T%=TIME:REPEAT UNTIL TIME>T%+20:PRINT A$+" "+STR$?&24C+" "+STR$?&24D+" "+STR$?&2BE\n;type:RUN\n;wait:3

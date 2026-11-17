@@ -448,7 +448,7 @@ fn electron_hardware(a: &mut Asm) {
     a.jmp("keyboard_leds");
 }
 
-/// Reset's setup of the VIAs, the 6850, the serial ULA and the ADC, and
+/// Reset's setup of the VIAs, the 6850, the serial ULA and the ADC, then
 /// the startup links read into OSBYTE &FF's variable.
 fn hardware(a: &mut Asm) {
     a.here("hardware_init");
@@ -486,7 +486,8 @@ fn hardware(a: &mut Asm) {
     a.sta(abs(uvia(reg::DDRA)));
     a.jsr("serial_init");
     a.jsr("adc_init");
-    a.jmp("keyboard_leds");
+    a.jsr("keyboard_leds");
+    a.fall_into("read_links");
 
     a.here("read_links");
     a.lda(imm(0));

@@ -30,6 +30,8 @@ pub fn emit(a: &mut Asm, model: Model) {
     read_pixels(a);
 }
 
+const _: () = assert!(status::EDITING == 0x40);
+
 fn output(a: &mut Asm, model: Model) {
     a.here("vduchr");
     a.here("vdu_write");
@@ -41,22 +43,20 @@ fn output(a: &mut Asm, model: Model) {
         a.jmp("cursor_restore");
         a.here("vdu_write_body");
     }
-    // VDU output, at the input position while editing.
-    a.pha();
-    a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(status::EDITING));
-    a.bne("vdu_write_editing");
-    a.pla();
+    // VDU output, at the input position while editing: BIT reads the
+    // editing bit into V and keeps the character in A.
+    a.bit(zp(vdu_zp::STATUS));
+    a.bvs("vdu_write_editing");
     a.jmp("vdu_write_core");
     a.here("vdu_write_editing");
+    a.pha();
     a.jsr("edit_mark");
     a.jsr("edit_exchange");
     a.pla();
     a.jsr("vdu_write_core");
     // A MODE or the like ends editing with the cursor where output left it.
-    a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(status::EDITING));
-    a.beq(RTS);
+    a.bit(zp(vdu_zp::STATUS));
+    a.bvc(RTS);
     a.jsr("edit_exchange");
     a.jmp("edit_mark");
 

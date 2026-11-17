@@ -12,6 +12,7 @@
 
 use tairix_openbasic::keyword::word;
 
+use super::editor::LENGTH_AT;
 use super::float::PACKED;
 use super::vars::{FROM, NAME_END, S_LENGTH, TNAME};
 use super::ws::{kind, page, zp as z};
@@ -20,7 +21,15 @@ use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, Label, RTS};
 
 /// A frame from its lowest byte: what it keeps of page zero, then the 6502
 /// stack's length and bytes.
-const FRAME: [u16; 6] = [KIND, z::OFFSET_A, z::TEXT_A, z::TEXT_A + 1, BASE, BASE + 1];
+const FRAME: [u16; 7] = [
+    KIND,
+    z::OFFSET_A,
+    z::TEXT_A,
+    z::TEXT_A + 1,
+    BASE,
+    BASE + 1,
+    z::BORROWED,
+];
 const F_LENGTH: u8 = byte(FRAME.len());
 const F_BYTES: u8 = F_LENGTH + 1;
 /// A local's record: its type, address, then value.
@@ -166,7 +175,7 @@ fn definition_search(a: &mut Asm, search: Label, found: Label) {
     a.jsr("is_name");
     a.bcc(found);
     a.bind(next_line);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(z::TEXT_B).ind_y());
     a.clc();
     a.adc(zp(z::TEXT_B));
@@ -316,13 +325,15 @@ fn call_frame(a: &mut Asm) {
     }
     a.ldy(imm(F_BYTES));
     a.ldx(zp(z::OP));
-    let (copy, copied) = (a.here_local(), a.local());
+    let copied = a.local();
     a.cpx(imm(STACK_TOP));
     a.beq(copied);
     a.inx();
+    let copy = a.here_local();
     a.lda(abs(STACK_PAGE).x());
     a.sta(zp(z::STACK).ind_y());
     a.iny();
+    a.inx();
     a.bne(copy);
     a.bind(copied);
     a.ldx(imm(STACK_TOP));
@@ -332,8 +343,10 @@ fn call_frame(a: &mut Asm) {
     a.sta(zp(z::TEXT_A));
     a.lda(zp(z::TEXT_B + 1));
     a.sta(zp(z::TEXT_A + 1));
+    // The frame keeps any borrow mark; the body's statements are its own.
     a.lda(imm(0));
     a.sta(zp(z::OFFSET_A));
+    a.sta(zp(z::BORROWED));
     a.jsr("next_a");
     a.cmp(imm(b'('));
     let (formals, mismatch, body) = (a.local(), a.local(), a.local());
@@ -366,10 +379,10 @@ fn call_frame(a: &mut Asm) {
     a.lda(zp(COUNT));
     a.bne(mismatch);
     // The actuals from the lowest, the last formal's first.
-    let (bind, bound) = (a.here_local(), a.local());
+    let bind = a.here_local();
     a.tsx();
     a.cpx(imm(STACK_TOP));
-    a.beq(bound);
+    a.beq(body);
     a.pla();
     a.sta(zp(LOCATION_TYPE));
     a.pla();
@@ -385,8 +398,6 @@ fn call_frame(a: &mut Asm) {
     a.stx(zp(z::VTYPE));
     a.jsr("store_variable");
     a.jmp(bind);
-    a.bind(bound);
-    a.jmp("statement");
 }
 
 fn actuals(a: &mut Asm) {
@@ -473,8 +484,7 @@ fn locals(a: &mut Asm) {
     a.jsr("next_a");
     a.cmp(imm(b','));
     a.beq(next);
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
 
     // C clear if the stack's top is a local's record or a frame; A its
     // first byte.
@@ -638,13 +648,15 @@ fn leaving(a: &mut Asm) {
     a.tax();
     a.txs();
     a.iny();
-    let (back, restored) = (a.here_local(), a.local());
+    let restored = a.local();
     a.cpx(imm(STACK_TOP));
     a.beq(restored);
     a.inx();
+    let back = a.here_local();
     a.lda(zp(z::STACK).ind_y());
     a.sta(abs(STACK_PAGE).x());
     a.iny();
+    a.inx();
     a.bne(back);
     a.bind(restored);
     a.lda(zp(BASE));

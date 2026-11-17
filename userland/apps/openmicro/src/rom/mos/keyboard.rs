@@ -254,8 +254,8 @@ pub fn emit(a: &mut Asm, model: Model) {
         Model::Electron => electron_translate(a),
     }
     leds(a, model);
-    rdch(a, model);
-    soft_keys(a);
+    a.whole(|a| rdch(a, model));
+    a.whole(soft_keys);
     if model == Model::Electron {
         firm_keys(a);
     }
@@ -1419,8 +1419,8 @@ fn key_gather(a: &mut Asm) {
     a.cpx(imm(KEY_LIMIT));
     a.bne("key_gather");
     a.error_run(&[
-        ("key_bad", 0xFB, "Bad key"),
-        ("key_in_use", 0xFA, "Key in use"),
+        ("key_bad", 0xFB, b"Bad key"),
+        ("key_in_use", 0xFA, b"Key in use"),
     ]);
     a.here("key_gathered");
     a.ldy(imm(0));
@@ -1536,6 +1536,8 @@ fn line_input(a: &mut Asm) {
     a.rts();
 }
 
+const _: () = assert!(super::vdu::status::EDITING == 0x40);
+
 /// Copy editing: the cursor keys move the copy cursor away from the input
 /// position, and COPY reads the character under it as input.
 fn editing(a: &mut Asm) {
@@ -1544,13 +1546,13 @@ fn editing(a: &mut Asm) {
     a.here("edit_key");
     a.cmp(imm(COPY));
     a.beq("edit_copy");
+    // BIT reads the editing bit into V, keeping the key in A.
+    a.bit(zp(vdu_zp::STATUS));
+    a.bvs("edit_moving");
     a.pha();
-    a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(super::vdu::status::EDITING));
-    a.bne("edit_moving");
     a.jsr("edit_begin");
-    a.here("edit_moving");
     a.pla();
+    a.here("edit_moving");
     a.cmp(imm(0x8C));
     a.bne("edit_not_left");
     a.jsr("edit_back");
@@ -1573,9 +1575,8 @@ fn editing(a: &mut Asm) {
     a.rts();
 
     a.here("edit_copy");
-    a.lda(zp(vdu_zp::STATUS));
-    a.and(imm(super::vdu::status::EDITING));
-    a.beq("edit_nothing");
+    a.bit(zp(vdu_zp::STATUS));
+    a.bvc("edit_nothing");
     a.ldx(abs(vdu::CURSOR_X));
     a.ldy(abs(vdu::CURSOR_Y));
     a.jsr("read_character");

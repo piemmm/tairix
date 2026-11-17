@@ -10,6 +10,7 @@
 use tairix_openbasic::keyword::word;
 
 use super::float::FAC;
+use super::vars::LENGTH;
 use super::ws::{kind, page, place, zp as z};
 use crate::cpu::STACK_PAGE;
 use crate::rom::asm::byte;
@@ -23,17 +24,16 @@ const GREATER: u8 = 4;
 
 /// The left operand's kind while the pair is made numbers.
 const LEFT: u16 = z::INT_WORK + 3;
+/// The precedence a right operand is parsed from, and after a parse the one
+/// it was from; the operation that uses LEFT starts only once it is read.
+const PARSED: u16 = LEFT;
 
 pub fn emit(a: &mut Asm) {
-    let (compare, refused, low_taken) = levels(a);
-    comparing(a, compare, refused, low_taken);
-    right_operand(a);
+    levels(a);
     operands(a);
-    arithmetic(a);
-    bitwise(a);
+    operations(a);
     integers(a);
     dividing(a);
-    comparisons(a);
     strings(a);
     factor(a);
     factors(a);
@@ -44,13 +44,17 @@ pub fn emit(a: &mut Asm) {
 /// The operators' precedences, OR and EOR's the lowest. A parse takes each
 /// operator from its lowest precedence on, and an operator's right operand
 /// is parsed from the precedence above its own, so operators of a
-/// precedence combine left to right.
+/// precedence combine left to right. Bit 6 sets those above the comparisons
+/// apart, so BIT on the precedence a right operand was parsed from tells
+/// which operations its operator is among.
 const OR_EOR: u8 = 1;
 const AND: u8 = 2;
 const COMPARING: u8 = 3;
-const ADDING: u8 = 4;
-const MULTIPLYING: u8 = 5;
-const RAISING: u8 = 6;
+const ARITHMETIC_BIT: u8 = 0x40;
+const ADDING: u8 = ARITHMETIC_BIT;
+const MULTIPLYING: u8 = ADDING + 1;
+const RAISING: u8 = MULTIPLYING + 1;
+const _: () = assert!(COMPARING + 1 < ARITHMETIC_BIT && RAISING + 1 < 2 * ARITHMETIC_BIT);
 
 /// The precedences of `*` to `/` by character, none for `,` and `.`.
 const ARITHMETIC_FIRST: u8 = b'*';
@@ -83,14 +87,12 @@ const _: () = {
     }
 };
 
-/// The parse's loop; the comparisons' path, the refusal of an operator and
-/// the return after a low operator are given back for [`comparing`].
-fn levels(a: &mut Asm) -> (Label, Label, Label) {
+/// The parse's loop: an operand, then each operator after it that the
+/// parse's precedence takes, with its right operand and its operation.
+fn levels(a: &mut Asm) {
     let (next, end, arithmetic, comparison, raising) =
         (a.local(), a.local(), a.local(), a.local(), a.local());
-    let (found, refused, above, add, compare) =
-        (a.local(), a.local(), a.local(), a.local(), a.local());
-    let (low_taken, high_taken, taken) = (a.local(), a.local(), a.local());
+    let (found, refused, compare, right) = (a.local(), a.local(), a.local(), a.local());
 
     // An expression from the lowest precedence, or from A's for `expr_at`,
     // which waits on the stack. Y is set once a comparison or a logical
@@ -102,14 +104,6 @@ fn levels(a: &mut Asm) -> (Label, Label, Label) {
     a.pha();
     a.jsr("factor");
     a.ldy(imm(0));
-    a.beq(next);
-    a.bind(low_taken);
-    a.ldy(imm(1));
-    a.bne(taken);
-    a.bind(high_taken);
-    a.ldy(imm(0));
-    a.bind(taken);
-    a.ldx(zp(z::OP));
     // The operator X, if it is one, after an operand of kind A.
     a.bind(next);
     a.cpx(imm(b'*'));
@@ -135,8 +129,10 @@ fn levels(a: &mut Asm) -> (Label, Label, Label) {
     a.bind(end);
     a.tay();
     a.pla();
+    a.sta(zp(PARSED));
     a.tya();
     a.rts();
+    comparing(a, compare, refused, right);
     a.bind(arithmetic);
     a.sta(zp(z::TYPE));
     a.lda(abs(sym("operator_arithmetic") + -i32::from(ARITHMETIC_FIRST)).x());
@@ -156,35 +152,15 @@ fn levels(a: &mut Asm) -> (Label, Label, Label) {
     a.tsx();
     a.cmp(abs(STACK_PAGE + 1).x());
     a.bcc(refused);
-    a.cmp(imm(ADDING));
-    a.beq(add);
-    a.bcs(above);
     a.cmp(imm(COMPARING));
     a.beq(compare);
-    a.jsr("right_operand");
-    a.jsr("logical");
-    a.jmp(low_taken);
-    a.bind(add);
-    a.jsr("right_operand");
-    a.jsr("add_values");
-    a.jmp(high_taken);
-    a.bind(above);
-    a.cmp(imm(MULTIPLYING));
-    let raise = a.local();
-    a.bne(raise);
-    a.jsr("right_operand");
-    a.jsr("multiply_values");
-    a.jmp(high_taken);
-    a.bind(raise);
-    a.jsr("right_operand");
-    a.jsr("power_values");
-    a.jmp(high_taken);
-    (compare, refused, low_taken)
+    a.bind(right);
+    right_operand(a, next, end);
 }
 
 /// A comparison, the outcomes that make it true its operator; a compound
 /// operator's characters are adjacent, and `<=` passes a `>` after it.
-fn comparing(a: &mut Asm, compare: Label, refused: Label, low_taken: Label) {
+fn comparing(a: &mut Asm, compare: Label, refused: Label, right: Label) {
     a.bind(compare);
     a.tya();
     a.bne(refused);
@@ -220,10 +196,9 @@ fn comparing(a: &mut Asm, compare: Label, refused: Label, low_taken: Label) {
     a.inc(zp(z::OFFSET_A));
     a.bind(outcome);
     a.stx(zp(z::OP));
+    a.tsx();
     a.lda(imm(COMPARING));
-    a.jsr("right_operand");
-    a.jsr("compare_values");
-    a.jmp(low_taken);
+    a.bne(right);
 }
 
 /// The 6502 stack a right operand's level may take below its entry: its own
@@ -232,23 +207,33 @@ fn comparing(a: &mut Asm, compare: Label, refused: Label, low_taken: Label) {
 /// wrap the stack, so it is No room.
 const OPERAND_ROOM: u8 = 39 + 23;
 
-/// The right operand of the operator OP, whose precedence is A, while the
-/// left is kept: an integer on the 6502 stack, which a call copies and
-/// restores, any other on the BASIC stack. Then A the left's kind, X the
-/// operator, Y the right's kind, an integer left in IAC2, and OP the
-/// character after the right.
-fn right_operand(a: &mut Asm) {
-    a.here("right_operand");
-    let (stacked, kept, full, roomy) = (a.local(), a.local(), a.local(), a.local());
-    a.tsx();
+/// The 6502 stack below which an integer left operand waits on the BASIC
+/// stack, as BASIC II keeps every one: nested deeply, a level then takes no
+/// more of the 6502 stack than BASIC II's.
+const FAST_ROOM: u8 = 200;
+/// The kind a left operand is stacked as for an integer on the BASIC stack.
+const DEEP_INTEGER: u8 = kind::INTEGER | 1;
+
+/// The right operand of the operator OP, whose precedence is A, X the stack
+/// pointer, while the left waits: an integer on the 6502 stack while it has
+/// room, which a call copies and restores, any other on the BASIC stack.
+/// Then the operation, and the parse goes on.
+fn right_operand(a: &mut Asm, next: Label, end: Label) {
+    let (stacked, kept, full, roomy, deep) =
+        (a.local(), a.local(), a.local(), a.local(), a.local());
+    let (other, popped, high) = (a.local(), a.local(), a.local());
+    let general = a.local();
+    let join = [a.local(), a.local(), a.local()];
     a.cpx(imm(OPERAND_ROOM));
     a.bcc(full);
     a.clc();
     a.adc(imm(1));
-    a.sta(zp(LEFT));
+    a.sta(zp(PARSED));
     a.lda(zp(z::TYPE));
     a.cmp(imm(kind::INTEGER));
     a.bne(stacked);
+    a.cpx(imm(FAST_ROOM));
+    a.bcc(deep);
     // No room unless the BASIC stack could take it, as BASIC II stacks it.
     a.lda(zp(z::STACK));
     a.sec();
@@ -262,6 +247,7 @@ fn right_operand(a: &mut Asm) {
     a.bcs(roomy);
     a.bind(full);
     a.jmp("err_no_room");
+    string_joined(a, join, next, end);
     a.bind(roomy);
     for i in (0..4).rev() {
         a.lda(zp(z::IAC + i));
@@ -269,32 +255,111 @@ fn right_operand(a: &mut Asm) {
     }
     a.lda(imm(kind::INTEGER));
     a.bne(kept);
+    a.bind(deep);
+    a.jsr("push_value");
+    a.lda(imm(DEEP_INTEGER));
+    a.bne(kept);
     a.bind(stacked);
+    a.bcs(general);
+    a.ldx(zp(z::OP));
+    a.cpx(imm(b'+'));
+    a.bne(general);
+    string_plus(a, join);
+    a.bind(general);
     a.jsr("push_value");
     a.bind(kept);
     a.pha();
     a.lda(zp(z::OP));
     a.pha();
-    a.lda(zp(LEFT));
+    a.lda(zp(PARSED));
     a.jsr("expr_at");
     a.stx(zp(z::OP));
-    a.tay();
     a.pla();
     a.tax();
     a.pla();
     a.cmp(imm(kind::INTEGER));
-    a.bne(RTS);
+    a.bne(other);
     for i in 0..4 {
         a.pla();
         a.sta(zp(z::IAC2 + i));
     }
     a.lda(imm(kind::INTEGER));
-    a.rts();
+    // The precedence's flags, kept through the operation, tell whether it
+    // was a comparison or a logical operator.
+    a.bind(popped);
+    a.bit(zp(PARSED));
+    a.php();
+    a.jsr("operate");
+    a.plp();
+    a.ldy(imm(0));
+    a.bvs(high);
+    a.iny();
+    a.bind(high);
+    a.ldx(zp(z::OP));
+    a.jmp(next);
+    a.bind(other);
+    a.cmp(imm(DEEP_INTEGER));
+    a.bne(popped);
+    a.sty(zp(z::TYPE));
+    a.jsr("pop_int");
+    a.ldy(zp(z::TYPE));
+    a.lda(imm(kind::INTEGER));
+    a.bne(popped);
 
     a.here("operator_arithmetic");
     a.bytes(&ARITHMETIC);
     a.here("operator_words");
     a.bytes(&WORDS);
+}
+
+/// A quoted right operand written after the string, then what follows a
+/// join: another `+` taken as this one was, and multiplication's operators
+/// ending the expression, as BASIC II's do. A, the string's kind, is what
+/// `end` returns.
+fn string_joined(a: &mut Asm, [literal, joined, again]: [Label; 3], next: Label, end: Label) {
+    let ended = a.local();
+    a.bind(literal);
+    a.ldx(zp(z::STRING_LENGTH));
+    a.jsr("factor_string_at");
+    a.bind(joined);
+    a.cpx(imm(b'+'));
+    a.beq(again);
+    for operator in [b'*', b'/', word::DIV.token, word::MOD.token] {
+        a.cpx(imm(operator));
+        a.beq(ended);
+    }
+    a.ldy(imm(0));
+    a.jmp(next);
+    a.bind(ended);
+    a.jmp(end);
+}
+
+/// A string's `+`, from `again` in a chain: its right operand a factor and
+/// no `^`, as BASIC II's is, a quoted one written in place and any other
+/// stacked and joined.
+fn string_plus(a: &mut Asm, [literal, joined, again]: [Label; 3]) {
+    let mismatch = a.local();
+    a.bind(again);
+    a.ldy(zp(z::OFFSET_A));
+    let spaces = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(spaces);
+    a.cmp(imm(b'"'));
+    a.beq(literal);
+    a.jsr("push_string");
+    a.jsr("factor");
+    a.tay();
+    a.bne(mismatch);
+    a.cpx(imm(b'^'));
+    a.beq(mismatch);
+    a.stx(zp(z::OP));
+    a.jsr("concatenate");
+    a.ldx(zp(z::OP));
+    a.jmp(joined);
+    a.bind(mismatch);
+    a.jmp("err_type_mismatch");
 }
 
 fn operands(a: &mut Asm) {
@@ -355,114 +420,9 @@ fn operands(a: &mut Asm) {
     a.jmp("fac_swap");
 }
 
-fn arithmetic(a: &mut Asm) {
-    // + and -, X the operator: strings join, numbers add.
-    a.here("add_values");
-    a.cpx(imm(b'-'));
-    let subtract = a.local();
-    a.beq(subtract);
-    a.tax();
-    let (numbers, mismatch) = (a.local(), a.local());
-    a.bne(numbers);
-    a.tya();
-    a.bne(mismatch);
-    a.jmp("concatenate");
-    a.bind(mismatch);
-    a.jmp("err_type_mismatch");
-    a.bind(numbers);
-    a.jsr("numeric_pair");
-    let real = a.local();
-    a.bcs(real);
-    // IAC = IAC2 + IAC, A its kind.
-    a.here("int_add");
-    a.clc();
-    for i in 0..4 {
-        a.lda(zp(z::IAC2 + i));
-        a.adc(zp(z::IAC + i));
-        a.sta(zp(z::IAC + i));
-    }
-    a.lda(imm(kind::INTEGER));
-    a.rts();
-    a.bind(real);
-    a.jsr("fac_add");
-    a.lda(imm(kind::REAL));
-    a.rts();
-    a.bind(subtract);
-    a.jsr("numeric_pair");
-    let real = a.local();
-    a.bcs(real);
-    a.sec();
-    for i in 0..4 {
-        a.lda(zp(z::IAC2 + i));
-        a.sbc(zp(z::IAC + i));
-        a.sta(zp(z::IAC + i));
-    }
-    a.lda(imm(kind::INTEGER));
-    a.rts();
-    a.bind(real);
-    a.jsr("fac_subtract");
-    a.lda(imm(kind::REAL));
-    a.rts();
-
-    // *, /, DIV and MOD, X the operator.
-    a.here("multiply_values");
-    a.cpx(imm(word::DIV.token));
-    let integer_division = a.local();
-    a.beq(integer_division);
-    a.cpx(imm(word::MOD.token));
-    a.beq(integer_division);
-    a.cpx(imm(b'/'));
-    let divide = a.local();
-    a.beq(divide);
-    a.jsr("numeric_pair");
-    let real = a.local();
-    a.bcs(real);
-    a.jmp("int_multiply");
-    a.bind(real);
-    a.jsr("fac_multiply");
-    a.lda(imm(kind::REAL));
-    a.rts();
-    a.bind(divide);
-    a.jsr("numeric_pair");
-    let reals = a.local();
-    a.bcs(reals);
-    a.jsr("ints_to_reals");
-    a.bind(reals);
-    a.jsr("fac_divide");
-    a.lda(imm(kind::REAL));
-    a.rts();
-    a.bind(integer_division);
-    a.jsr("integer_pair");
-    a.txa();
-    a.pha();
-    a.jsr("int_divide");
-    a.pla();
-    a.cmp(imm(word::MOD.token));
-    let quotient = a.local();
-    a.bne(quotient);
-    a.ldx(imm(3));
-    let remainder = a.here_local();
-    a.lda(zp(z::INT_WORK).x());
-    a.sta(zp(z::IAC).x());
-    a.dex();
-    a.bpl(remainder);
-    a.bind(quotient);
-    a.lda(imm(kind::INTEGER));
-    a.rts();
-
-    // ^: a real raised to a real, by the functions' EXP and LN.
-    a.here("power_values");
-    a.jsr("numeric_pair");
-    let reals = a.local();
-    a.bcs(reals);
-    a.jsr("ints_to_reals");
-    a.bind(reals);
-    a.jmp("fac_power");
-}
-
-fn bitwise(a: &mut Asm) {
-    // AND, OR and EOR on integers, X the operator.
-    a.here("logical");
+/// AND, OR and EOR on integers, at `logic`.
+fn logical(a: &mut Asm, logic: Label) {
+    a.bind(logic);
     a.jsr("integer_pair");
     let (or, eor) = (a.local(), a.local());
     a.cpx(imm(word::OR.token));
@@ -487,6 +447,196 @@ fn bitwise(a: &mut Asm) {
         a.lda(imm(kind::INTEGER));
         a.rts();
     }
+}
+
+/// The operation a right operand was found for. `operate` takes the
+/// operator in X, A the left's kind and Y the right's, an integer left in
+/// IAC2, and V set for an operator above the comparisons; a comparison's X
+/// is the outcomes that make it true.
+fn operations(a: &mut Asm) {
+    let (logic, arith, mismatch) = (a.local(), a.local(), a.local());
+    logical(a, logic);
+
+    a.here("operate");
+    a.bvs(arith);
+    a.cpx(imm((LESS | EQUAL | GREATER) + 1));
+    a.bcs(logic);
+    // A comparison: TRUE or FALSE.
+    a.stx(zp(z::INT_WORK + 2));
+    a.tax();
+    let (numbers, decide) = (a.local(), a.local());
+    a.bne(numbers);
+    a.tya();
+    a.bne(mismatch);
+    a.jmp("compare_strings");
+    a.bind(numbers);
+    a.jsr("numeric_pair");
+    let real = a.local();
+    a.bcs(real);
+    // Integers: the difference's sign with overflow corrected, the lower
+    // bytes of the difference gathered in IAC to tell equal.
+    a.sec();
+    a.lda(zp(z::IAC2));
+    a.sbc(zp(z::IAC));
+    a.sta(zp(z::IAC));
+    for i in 1..3 {
+        a.lda(zp(z::IAC2 + i));
+        a.sbc(zp(z::IAC + i));
+        a.ora(zp(z::IAC));
+        a.sta(zp(z::IAC));
+    }
+    a.lda(zp(z::IAC2 + 3));
+    a.sbc(zp(z::IAC + 3));
+    let signed = a.local();
+    a.bvc(signed);
+    a.eor(imm(0x80));
+    a.ora(imm(1));
+    a.bne(decide);
+    a.bind(signed);
+    a.bmi(decide);
+    a.ora(zp(z::IAC));
+    a.beq(decide);
+    a.lda(imm(1));
+    a.bne(decide);
+    a.bind(real);
+    a.jsr("fac_compare");
+    // A's sign as an outcome bit, tested against the operator's.
+    a.here("decide");
+    a.bind(decide);
+    a.ldx(imm(EQUAL));
+    let outcome = a.local();
+    a.tay();
+    a.beq(outcome);
+    a.ldx(imm(LESS));
+    a.tya();
+    a.bmi(outcome);
+    a.ldx(imm(GREATER));
+    a.bind(outcome);
+    a.txa();
+    a.and(zp(z::INT_WORK + 2));
+    let truth = a.local();
+    a.beq(truth);
+    a.lda(imm(0xFF));
+    a.bind(truth);
+    for i in 0..4 {
+        a.sta(zp(z::IAC + i));
+    }
+    a.lda(imm(kind::INTEGER));
+    a.rts();
+    a.bind(mismatch);
+    a.jmp("err_type_mismatch");
+
+    a.bind(arith);
+    let (add, subtract, multiply, divide, power) =
+        (a.local(), a.local(), a.local(), a.local(), a.local());
+    a.cpx(imm(b'+'));
+    a.beq(add);
+    a.cpx(imm(b'-'));
+    a.beq(subtract);
+    a.cpx(imm(b'*'));
+    a.beq(multiply);
+    a.cpx(imm(b'/'));
+    a.beq(divide);
+    a.cpx(imm(b'^'));
+    a.beq(power);
+    // DIV and MOD.
+    a.jsr("integer_pair");
+    a.txa();
+    a.pha();
+    a.jsr("int_divide");
+    a.pla();
+    a.cmp(imm(word::MOD.token));
+    let quotient = a.local();
+    a.bne(quotient);
+    a.ldx(imm(3));
+    let remainder = a.here_local();
+    a.lda(zp(z::INT_WORK).x());
+    a.sta(zp(z::IAC).x());
+    a.dex();
+    a.bpl(remainder);
+    a.bind(quotient);
+    a.lda(imm(kind::INTEGER));
+    a.rts();
+    arithmetic(a, [add, subtract, multiply, divide, power], mismatch);
+}
+
+/// The arithmetic operators' bodies, at the labels their dispatch takes.
+fn arithmetic(a: &mut Asm, operators: [Label; 5], mismatch: Label) {
+    let [add, subtract, multiply, divide, power] = operators;
+    // A real raised to a real, by the functions' EXP and LN.
+    a.bind(power);
+    a.jsr("numeric_pair");
+    let reals = a.local();
+    a.bcs(reals);
+    a.jsr("ints_to_reals");
+    a.bind(reals);
+    a.jmp("fac_power");
+
+    a.bind(multiply);
+    a.jsr("numeric_pair");
+    let real = a.local();
+    a.bcs(real);
+    a.jmp("int_multiply");
+    a.bind(real);
+    a.here("real_product");
+    a.jsr("fac_multiply");
+    a.lda(imm(kind::REAL));
+    a.rts();
+
+    a.bind(divide);
+    a.jsr("numeric_pair");
+    let reals = a.local();
+    a.bcs(reals);
+    a.jsr("ints_to_reals");
+    a.bind(reals);
+    a.here("real_quotient");
+    a.jsr("fac_divide");
+    a.lda(imm(kind::REAL));
+    a.rts();
+
+    // Strings join; numbers add.
+    a.bind(add);
+    a.tax();
+    let numbers = a.local();
+    a.bne(numbers);
+    a.tya();
+    a.bne(mismatch);
+    a.jmp("concatenate");
+    a.bind(numbers);
+    a.jsr("numeric_pair");
+    let real = a.local();
+    a.bcs(real);
+    // IAC = IAC2 + IAC, A its kind.
+    a.here("int_add");
+    a.clc();
+    for i in 0..4 {
+        a.lda(zp(z::IAC2 + i));
+        a.adc(zp(z::IAC + i));
+        a.sta(zp(z::IAC + i));
+    }
+    a.lda(imm(kind::INTEGER));
+    a.rts();
+    a.bind(real);
+    a.jsr("fac_add");
+    a.lda(imm(kind::REAL));
+    a.rts();
+
+    a.bind(subtract);
+    a.jsr("numeric_pair");
+    let real = a.local();
+    a.bcs(real);
+    a.sec();
+    for i in 0..4 {
+        a.lda(zp(z::IAC2 + i));
+        a.sbc(zp(z::IAC + i));
+        a.sta(zp(z::IAC + i));
+    }
+    a.lda(imm(kind::INTEGER));
+    a.rts();
+    a.bind(real);
+    a.jsr("fac_subtract");
+    a.lda(imm(kind::REAL));
+    a.rts();
 
     // Both operands integers, IAC2 the left, either made one from a real;
     // X kept.
@@ -707,122 +857,58 @@ fn dividing(a: &mut Asm) {
     a.jmp("int_negate_x");
 }
 
-fn comparisons(a: &mut Asm) {
-    // A comparison, X its true outcomes: TRUE or FALSE.
-    a.here("compare_values");
-    a.stx(zp(z::INT_WORK + 2));
-    a.tax();
-    let (numbers, decide, mismatch) = (a.local(), a.local(), a.local());
-    a.bne(numbers);
-    a.tya();
-    a.bne(mismatch);
-    a.jmp("compare_strings");
-    a.bind(mismatch);
-    a.jmp("err_type_mismatch");
-    a.bind(numbers);
-    a.jsr("numeric_pair");
-    let real = a.local();
-    a.bcs(real);
-    // Integers: the difference's sign with overflow corrected, the lower
-    // bytes of the difference gathered in IAC to tell equal.
-    a.sec();
-    a.lda(zp(z::IAC2));
-    a.sbc(zp(z::IAC));
-    a.sta(zp(z::IAC));
-    for i in 1..3 {
-        a.lda(zp(z::IAC2 + i));
-        a.sbc(zp(z::IAC + i));
-        a.ora(zp(z::IAC));
-        a.sta(zp(z::IAC));
-    }
-    a.lda(zp(z::IAC2 + 3));
-    a.sbc(zp(z::IAC + 3));
-    let signed = a.local();
-    a.bvc(signed);
-    a.eor(imm(0x80));
-    a.ora(imm(1));
-    a.bne(decide);
-    a.bind(signed);
-    a.bmi(decide);
-    a.ora(zp(z::IAC));
-    a.beq(decide);
-    a.lda(imm(1));
-    a.bne(decide);
-    a.bind(real);
-    a.jsr("fac_compare");
-    // A's sign as an outcome bit, tested against the operator's.
-    a.here("decide");
-    a.bind(decide);
-    a.ldx(imm(EQUAL));
-    let outcome = a.local();
-    a.tay();
-    a.beq(outcome);
-    a.ldx(imm(LESS));
-    a.tya();
-    a.bmi(outcome);
-    a.ldx(imm(GREATER));
-    a.bind(outcome);
-    a.txa();
-    a.and(zp(z::INT_WORK + 2));
-    let truth = a.local();
-    a.beq(truth);
-    a.lda(imm(0xFF));
-    a.bind(truth);
-    for i in 0..4 {
-        a.sta(zp(z::IAC + i));
-    }
-    a.lda(imm(kind::INTEGER));
-    a.rts();
-}
-
-fn strings(a: &mut Asm) {
-    // The stacked string joined by the buffer's: String too long past 255.
+/// The stacked string joined by the buffer's, Y 0: String too long past 255.
+/// The buffer's string moves up past the stacked one's length, from its
+/// end, X the joined length; then the stacked one is copied before it. An
+/// empty stacked string leaves the buffer's as it is.
+fn join(a: &mut Asm) {
     a.here("concatenate");
-    a.ldy(imm(0));
+    let (joined, raised, too_long) = (a.local(), a.local(), a.local());
     a.lda(zp(z::STACK).ind_y());
-    a.sta(zp(super::vars::LENGTH));
+    a.sta(zp(LENGTH));
+    a.beq(joined);
     a.clc();
     a.adc(zp(z::STRING_LENGTH));
-    let fits = a.local();
-    a.bcc(fits);
-    a.jmp("err_string_too_long");
-    a.bind(fits);
+    a.bcs(too_long);
     a.pha();
     a.ldy(zp(z::STRING_LENGTH));
-    let (raise, raised) = (a.here_local(), a.local());
     a.beq(raised);
-    a.dey();
-    a.tya();
-    a.clc();
-    a.adc(zp(super::vars::LENGTH));
     a.tax();
-    a.lda(abs(page::STRING).y());
-    a.sta(abs(page::STRING).x());
-    a.tya();
-    a.jmp(raise);
+    let raise = a.here_local();
+    a.lda(abs(page::STRING - 1).y());
+    a.sta(abs(page::STRING - 1).x());
+    a.dex();
+    a.dey();
+    a.bne(raise);
     a.bind(raised);
-    a.ldy(zp(super::vars::LENGTH));
-    let (copy, copied) = (a.here_local(), a.local());
-    a.beq(copied);
+    a.ldy(zp(LENGTH));
+    let copy = a.here_local();
     a.lda(zp(z::STACK).ind_y());
     a.sta(abs(page::STRING - 1).y());
     a.dey();
-    a.jmp(copy);
-    a.bind(copied);
+    a.bne(copy);
     a.pla();
     a.sta(zp(z::STRING_LENGTH));
-    a.jsr("pop_string");
+    a.bind(joined);
+    a.lda(zp(LENGTH));
+    a.jsr("string_release");
     a.lda(imm(kind::STRING));
     a.rts();
+    a.bind(too_long);
+    a.jmp("err_string_too_long");
+}
+
+fn strings(a: &mut Asm) {
+    join(a);
 
     // The stacked string against the buffer's, character by character,
     // then by length.
     a.here("compare_strings");
     a.ldy(imm(0));
     a.lda(zp(z::STACK).ind_y());
-    a.sta(zp(super::vars::LENGTH));
+    a.sta(zp(LENGTH));
     let (byte, differ, lengths) = (a.here_local(), a.local(), a.local());
-    a.cpy(zp(super::vars::LENGTH));
+    a.cpy(zp(LENGTH));
     a.beq(lengths);
     a.cpy(zp(z::STRING_LENGTH));
     a.beq(lengths);
@@ -842,7 +928,7 @@ fn strings(a: &mut Asm) {
     a.pla();
     a.jmp("decide");
     a.bind(lengths);
-    a.lda(zp(super::vars::LENGTH));
+    a.lda(zp(LENGTH));
     a.cmp(zp(z::STRING_LENGTH));
     a.bne(differ);
     a.lda(imm(0));
@@ -853,8 +939,19 @@ fn factor(a: &mut Asm) {
     // A factor: a number, a string, a bracketed expression, a unary
     // operator and its factor, an indirection, a variable, or a function;
     // a name, the commonest, looked for first.
+    // After a unary sign a quoted string is No such variable, as BASIC II
+    // has it; any other factor is read.
+    a.here("factor_signed");
+    a.ldy(zp(z::OFFSET_A));
+    let spaces = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(spaces);
+    a.cmp(imm(b'"'));
+    a.beq("factor_unknown");
     a.here("factor");
-    a.jsr("next_a");
+    super::next_character(a);
     let (below, name, named, symbol, token) =
         (a.local(), a.local(), a.local(), a.local(), a.local());
     a.cmp(imm(b'A'));
@@ -873,6 +970,7 @@ fn factor(a: &mut Asm) {
     a.beq(dispatch);
     a.dex();
     a.bpl(search);
+    a.here("factor_unknown");
     a.jmp("err_no_such_variable");
     a.bind(dispatch);
     a.lda(abs("factor_high").x());
@@ -881,7 +979,7 @@ fn factor(a: &mut Asm) {
     a.pha();
     a.rts();
     a.bind(token);
-    a.jmp("factor_token");
+    super::func::function_token(a);
     a.bind(below);
     a.cmp(imm(b'@'));
     a.beq(name);
@@ -926,12 +1024,9 @@ fn factor_name(a: &mut Asm, name: Label, named: Label) {
     a.bcc(found);
     // The assembler with OPT's errors off takes it as P%.
     a.bit(zp(z::ASM_QUIET));
-    let quiet = a.local();
-    a.bmi(quiet);
-    a.jmp("err_no_such_variable");
-    a.bind(quiet);
+    a.bpl("factor_unknown");
     a.jsr("iac_from_p");
-    a.jmp("factor_done");
+    a.bne("factor_done");
     a.bind(found);
     a.jsr("load_variable");
     a.ldy(zp(z::OFFSET_A));
@@ -954,7 +1049,10 @@ fn factor_name(a: &mut Asm, name: Label, named: Label) {
     a.tax();
     a.lda(zp(z::TYPE));
     a.rts();
+    // A string variable takes no indirection: BASIC II ends it there.
     a.bind(binary);
+    a.ldx(zp(z::TYPE));
+    a.beq(plain);
     a.pha();
     a.lda(zp(z::TYPE));
     a.jsr("plus_offset");
@@ -973,7 +1071,7 @@ fn factors(a: &mut Asm) {
     // The character after a factor read into X; A its kind.
     a.here("factor_done");
     a.sta(zp(z::TYPE));
-    a.jsr("next_a");
+    super::next_character(a);
     a.tax();
     a.lda(zp(z::TYPE));
     a.rts();
@@ -985,7 +1083,7 @@ fn factors(a: &mut Asm) {
     a.jmp("err_missing_bracket");
 
     a.here("factor_minus");
-    a.jsr("factor");
+    a.jsr("factor_signed");
     a.tay();
     let string = a.local();
     a.beq(string);
@@ -1008,9 +1106,11 @@ fn factors(a: &mut Asm) {
     a.bind(string);
     a.jmp("err_type_mismatch");
 
-    // A quoted string, "" inside it a quote.
+    // A quoted string, "" inside it a quote; from `factor_string_at`, after
+    // the buffer's first X characters.
     a.here("factor_string");
     a.ldx(imm(0));
+    a.here("factor_string_at");
     let (character, closed, unclosed) = (a.here_local(), a.local(), a.local());
     a.lda(zp(z::TEXT_A).ind_y());
     a.cmp(imm(CR));
@@ -1027,6 +1127,7 @@ fn factors(a: &mut Asm) {
     a.sta(abs(page::STRING).x());
     a.inx();
     a.bne(character);
+    a.jmp("err_string_too_long");
     a.bind(unclosed);
     a.jmp("err_missing_quote");
     a.bind(ended);
@@ -1120,7 +1221,7 @@ fn indirections(a: &mut Asm) {
 /// The factors known by their first character, and their routines; the
 /// commonest last, as the search starts there.
 const FACTORS: [(u8, &str); 9] = [
-    (b'+', "factor"),
+    (b'+', "factor_signed"),
     (b'$', "factor_text"),
     (b'.', "factor_number"),
     (b'!', "factor_word"),
@@ -1168,6 +1269,8 @@ fn coercions(a: &mut Asm) {
     a.jsr("expr");
     a.jmp("make_integer");
 
+    a.here("arg_real");
+    a.jsr("arg_factor");
     // The value of kind A made a real in FAC; X kept.
     a.here("make_real");
     a.tay();
@@ -1183,7 +1286,6 @@ fn coercions(a: &mut Asm) {
 
     a.here("expr_string");
     a.jsr("expr");
-    a.tay();
     a.beq(RTS);
     a.jmp("err_type_mismatch");
 }

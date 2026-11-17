@@ -175,6 +175,17 @@ scenario a_point_s_mask_is_its_place_in_its_byte
 row 44 3 77 FF 77 FF
 row >
 
+scenario a_triangle_s_and_clg_s_span_ends_run_from_the_right
+row 70 EE 0 FF CC 0 10 88 0 30 FF CC 66 0 0
+row F0 F8 0 10 AA 0 30 CC 0 FF FF 0 77 0 0 7
+row 7 C3 0 70 EE 0
+row >
+
+scenario a_fill_s_right_end_stops_where_its_mask_leaves_the_byte
+row C3 C3 C3 C3 6 7 7 7 24 36 3F 3F 3F 3F 3F
+row  3F 41 41
+row >
+
 scenario osbyte_16_and_17_take_at_most_four_channels
 row TAIRiX DFS
 row BASIC

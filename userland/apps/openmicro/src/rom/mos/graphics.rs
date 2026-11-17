@@ -51,6 +51,9 @@ const CORNERS: u16 = vdu::SCRATCH + 11;
 const SPAN_LEFT: u16 = vdu::QUEUE;
 const SPAN_RIGHT: u16 = vdu::QUEUE + 1;
 const SPAN_BYTES: u16 = vdu::QUEUE + 2;
+/// Bit 7 set through a triangle or CLG, whose spans are masked otherwise
+/// than a fill's, in a temporary none of them takes.
+const SPAN_KIND: u16 = vdu_zp::TEMP + 3;
 /// A triangle's two edges, each its x, remainder, 2dx and 2dy: the long
 /// one in the line workspace, the short one at a span's end; then its
 /// corners, rising.
@@ -947,6 +950,7 @@ fn fills(a: &mut Asm) {
     a.jsr("fill_scan");
     a.jsr("fill_cursor");
     a.jsr("target_point");
+    a.lsr(zp(SPAN_KIND));
     a.jmp("span_ordered");
 
     // Nothing filled: the previous point is the target a line up, carried
@@ -1046,6 +1050,8 @@ fn fills(a: &mut Asm) {
 /// time between its edges.
 fn triangle(a: &mut Asm) {
     a.here("plot_triangle");
+    a.sec();
+    a.ror(zp(SPAN_KIND));
     // Corners: the previous point, the cursor and the target, then in
     // order of height.
     copy(
@@ -1319,22 +1325,25 @@ fn spans(a: &mut Asm) {
     span_plot(a);
 }
 
-/// The right end's mask: its byte's pixels up to its own.
+/// The end bytes' masks and the bytes across, as MOS 1.20 builds them. A
+/// fill's right end runs from &362 to its pixel, or to where a bit falls off
+/// the byte, and its left end from its pixel on. A triangle's or CLG's span
+/// runs by its pixels' places, but for a left end partway along a byte when
+/// it spans bytes, which runs from &363 back to the pixel.
 fn span_masks(a: &mut Asm) {
+    a.lda(abs(vdu::LEFT_MASK));
+    a.bit(zp(SPAN_KIND));
+    a.bpl("span_right_start");
+    a.ldy(abs(vdu::PIXELS_PER_BYTE));
+    a.lda(abs("pixel_mask_table").y());
+    a.here("span_right_start");
+    a.sta(zp(vdu_zp::PIXEL_MASK));
     a.lda(abs(PX));
     a.and(abs(vdu::PIXELS_PER_BYTE));
-    a.tax();
-    a.lda(abs(vdu::LEFT_MASK));
-    a.sta(zp(vdu_zp::TEMP + 3));
-    a.lda(imm(0));
-    a.here("span_right_mask");
-    a.ora(zp(vdu_zp::TEMP + 3));
-    a.lsr(zp(vdu_zp::TEMP + 3));
-    a.dex();
-    a.bpl("span_right_mask");
+    a.tay();
+    span_mask(a);
     a.sta(abs(SPAN_RIGHT));
-    // The left end's byte, then its mask: its own pixel, which addressing it
-    // gives, and those after it in its byte.
+    // The left end's byte, and its pixel's mask.
     a.lda(abs(PX));
     a.sta(zp(vdu_zp::TEMP + 4));
     a.lda(abs(PX + 1));
@@ -1344,26 +1353,17 @@ fn span_masks(a: &mut Asm) {
         a.sta(abs(PX + offset));
     }
     a.jsr("pixel_address");
-    a.lda(zp(vdu_zp::PIXEL_MASK));
-    a.sta(zp(vdu_zp::TEMP + 3));
     a.lda(abs(X1));
     a.and(abs(vdu::PIXELS_PER_BYTE));
     a.eor(abs(vdu::PIXELS_PER_BYTE));
-    a.tax();
-    a.lda(imm(0));
-    a.here("span_left_mask");
-    a.ora(zp(vdu_zp::TEMP + 3));
-    a.lsr(zp(vdu_zp::TEMP + 3));
-    a.dex();
-    a.bpl("span_left_mask");
-    a.sta(abs(SPAN_LEFT));
+    a.tay();
     // Bytes across from the left end's to the right end's.
     a.ldx(abs(vdu::PIXELS_PER_BYTE));
     a.here("span_count_divide");
-    for value in [vdu_zp::TEMP + 4, PX] {
-        a.lsr(abs(value + 1));
-        a.ror(abs(value));
-    }
+    a.lsr(zp(vdu_zp::TEMP + 5));
+    a.ror(zp(vdu_zp::TEMP + 4));
+    a.lsr(abs(PX + 1));
+    a.ror(abs(PX));
     a.txa();
     a.lsr(Acc);
     a.tax();
@@ -1372,6 +1372,41 @@ fn span_masks(a: &mut Asm) {
     a.sec();
     a.sbc(abs(PX));
     a.sta(abs(SPAN_BYTES));
+    // Y is the pixels after the left end's in its byte.
+    a.beq("span_left_place");
+    a.bit(zp(SPAN_KIND));
+    a.bpl("span_left_place");
+    a.cpy(abs(vdu::PIXELS_PER_BYTE));
+    a.beq("span_left_place");
+    a.lda(imm(0));
+    a.here("span_left_back");
+    a.asl(Acc);
+    a.ora(abs(vdu::RIGHT_MASK));
+    a.dey();
+    a.bpl("span_left_back");
+    a.bmi("span_left_set");
+    a.here("span_left_place");
+    span_mask(a);
+    a.here("span_left_set");
+    a.sta(abs(SPAN_LEFT));
+}
+
+/// A, the masks of Y + 1 pixels on from the one &D1 masks, ending where a
+/// bit would fall off the byte, as stepping a pixel right finds its end.
+/// Emitted at each end, where a call would cost a span 12 cycles.
+fn span_mask(a: &mut Asm) {
+    let (ended, done) = (a.local(), a.local());
+    a.lda(imm(0));
+    let next = a.here_local();
+    a.lsr(Acc);
+    a.bcs(ended);
+    a.ora(zp(vdu_zp::PIXEL_MASK));
+    a.dey();
+    a.bpl(next);
+    a.bmi(done);
+    a.bind(ended);
+    a.rol(Acc);
+    a.bind(done);
 }
 
 /// Plot: one byte under both masks, or the left, whole bytes, the right.
@@ -1421,6 +1456,8 @@ fn clg(a: &mut Asm) {
     a.here("vdu_16");
     a.lda(abs(vdu::PIXELS_PER_BYTE));
     a.beq(RTS);
+    a.sec();
+    a.ror(zp(SPAN_KIND));
     a.lda(abs(vdu::GRAPHICS_BACKGROUND));
     a.ldx(abs(vdu::BACKGROUND_ACTION));
     a.jsr("action_masks");
@@ -1505,7 +1542,7 @@ fn text_at_graphics_cursor(a: &mut Asm) {
     a.jsr("action_masks");
     a.lda(imm(0xFF));
     vdu5_cell(a);
-    vdu5_step(a);
+    a.whole(vdu5_step);
 }
 
 /// The cell at the cursor: the glyph at (&DE)'s pixels, or every pixel
@@ -1644,7 +1681,7 @@ fn vdu_23(a: &mut Asm, model: Model) {
     // VDU 23, 0, register, value.
     match model {
         Model::ModelB => {
-            a.ldx(abs(QUEUE_LAST - 7));
+            a.ldy(abs(QUEUE_LAST - 7));
             a.lda(abs(QUEUE_LAST - 6));
             a.jmp("crtc_write");
         }
@@ -1706,6 +1743,15 @@ fn vdu_23(a: &mut Asm, model: Model) {
     a.adc(imm(hi("font")));
     a.rts();
     font_explode(a);
+}
+
+/// Where MOS 1.20's OSBYTE 20 takes the zones to explode in X: a mode set
+/// copied from MOS 1.20 calls it with X 0 to implode the font.
+const FONT_EXPLODE: u16 = 0xCD07;
+
+/// The Model B's OSBYTE 20 entry at MOS 1.20's address for it.
+pub fn pin_font_explode(a: &mut Asm) {
+    a.pin(FONT_EXPLODE, |a| a.jmp("font_explode"));
 }
 
 /// OSBYTE 20: every zone back on page &C, 128–255's in RAM there; then

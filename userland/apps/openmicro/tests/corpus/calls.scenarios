@@ -81,3 +81,15 @@ script type:CLS:?&90A=&EE:?&A00=&EE:?&900=0:!&901=&A00:?&905=3:?&906=&53:?&907=1
 scenario osword_7f_reads_a_special_register
 discs testdisc
 script type:*CAT\n;wait:1;type:CLS:?&900=0:!&901=&A00:?&905=1:?&906=&3D:?&907=&17:A%=&7F:X%=0:Y%=9:CALL&FFF1:P.~?&908\n;wait:1
+
+# MOS 1.20's VDU routines a mode set of a program's own calls, as Flat Out's does, lie at MOS 1.20's addresses with its registers: the VDU status and'ed with A, a 6845 register set from A, R7 moved by *TV and R10 kept, a pair set from A and X, and the cursor set from XA.
+scenario mos_1_20_s_crtc_and_cursor_routines_lie_at_its_addresses
+script type:CLS:?&70=?&D0:?&D0=&41:A%=&43:C%=1:R%=USR(&C5A8):?&D0=?&70:PRINT ~R%\n;wait:0.3;type:A%=&67:X%=3:Y%=10:R%=USR(&C95E):PRINT ~R%,~?&35F:A%=&72:Y%=10:CALL&C95E\n;wait:0.3;type:A%=&22:X%=3:Y%=7:R%=USR(&C95E):PRINT ~R%:A%=&1A:Y%=7:CALL&C95E\n;wait:0.3;type:A%=&12:X%=&34:Y%=14:R%=USR(&CA2B):PRINT ~R%\n;wait:0.3;type:X%=?&D8:A%=?&D9:Y%=5:R%=USR(&C9F6):PRINT ~R%,~!&D8 AND &FFFF,~!&34A AND &FFFF\n;wait:0.3
+
+# The same mode set's latch write, its video ULA write that restarts the flash, the font imploded by OSBYTE 20's entry, VDU 20 and VDU 26, each at MOS 1.20's address.
+scenario mos_1_20_s_latch_ula_font_and_reset_routines_lie_at_its_addresses
+script type:CLS:VDU28,5,20,30,5:CALL&C9BD:PRINT ?&308,?&309,?&30A,?&30B\n;wait:0.3;type:A%=4:X%=5:Y%=6:R%=USR(&E9F8):PRINT ~R%\n;wait:0.3;type:?&252=7:?&253=9:A%=&4B:X%=1:Y%=2:R%=USR(&EA00):F%=?&251:G%=?&248:?&252=25:?&253=25:PRINT ~R%,F%,~G%\n;wait:0.3;type:*FX20,1\n;wait:0.3;type:X%=0:CALL&CD07:PRINT ~?&367,~?&368,~?&36E\n;wait:0.3;type:CALL&C839:PRINT ~?&357,~?&358,~?&359,~?&35A,~?&35B,~?&35C\n;wait:0.3
+
+# MODE and OSBYTE &9A set the video ULA's control register and restart the flash from its space state, as MOS 1.20 does, so a flash then waits its whole period.
+scenario the_ula_s_control_register_restarts_the_flash
+script type:?&252=7:?&253=9:?&251=1:MODE7:G%=?&248:?&252=25:?&253=25:PRINT ~G%\n;wait:0.5;type:?&252=7:?&253=9:?&251=1:A%=154:X%=&4B:CALL&FFF4:F%=?&251:G%=?&248:?&252=25:?&253=25:PRINT F%,~G%\n;wait:0.3

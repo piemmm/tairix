@@ -40,8 +40,7 @@ fn vdu(a: &mut Asm) {
     a.txa();
     a.jmp(value);
     a.bind(ended);
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
 
     // MODE: the screen's new start becomes HIMEM, the BASIC stack empty;
     // Bad MODE where it would meet the variables or a call is in progress.

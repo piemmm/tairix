@@ -293,19 +293,18 @@ fn nested(name: &str, depth: usize) -> String {
     expression
 }
 
-/// The regression: an expression nested past the 6502 stack's room wrapped
-/// the stack, sixteen integer levels reading garbage as a name and
-/// twenty-one real ones stopping the machine; past twelve integer levels or
-/// sixteen real it is No room.
+/// The regressions: an expression nested past the 6502 stack's room wrapped
+/// the stack, and one nested as deep as BASIC II evaluates, 17 integer
+/// levels or 16 real, was No room.
 #[test]
-fn an_expression_nested_past_the_6502_stack_is_no_room() {
+fn an_expression_nests_as_deep_as_basic_iis_and_past_the_stack_is_no_room() {
     let screen = after(
         &[
             "CLS",
-            &format!("I%=1:PRINT {}", nested("I%", 12)),
-            &format!("PRINT {}", nested("I%", 16)),
+            &format!("I%=1:PRINT {}", nested("I%", 17)),
+            &format!("PRINT {}", nested("I%", 30)),
             &format!("X=1:PRINT {}", nested("X", 16)),
-            &format!("X=1:PRINT {}", nested("X", 21)),
+            &format!("PRINT {}", nested("X", 30)),
         ],
         200,
     );
@@ -314,12 +313,191 @@ fn an_expression_nested_past_the_6502_stack_is_no_room() {
         .map(|row| row.trim())
         .filter(|row| row.parse::<u32>().is_ok() || *row == "No room")
         .collect();
-    assert_eq!(shown, ["13", "No room", "17", "No room"]);
+    assert_eq!(shown, ["18", "No room", "17", "No room"]);
     assert_eq!(
         screen
             .iter()
             .rfind(|row| !row.trim().is_empty())
             .map(String::as_str),
         Some(">")
+    );
+}
+
+/// A string `+` takes its right operand at `^`'s precedence, and after a join
+/// `*`, `/`, DIV and MOD end the expression, as BASIC II's do.
+#[test]
+fn an_operator_of_multiplication_s_precedence_ends_a_string_join() {
+    assert_screen(
+        &[
+            "PRINT \"A\"+\"B\" * 2",
+            "PRINT \"A\"+\"B\" DIV 2",
+            "PRINT \"A\"+\"B\" MOD 2",
+            "PRINT \"A\"+\"B\"/2",
+            "PRINT \"A\"+\"B\"^2",
+            "PRINT \"A\"+\"B\"-\"C\"",
+        ],
+        60,
+        &[
+            ">PRINT \"A\"+\"B\" * 2",
+            "AB",
+            "No such variable",
+            ">PRINT \"A\"+\"B\" DIV 2",
+            "AB",
+            "No such variable",
+            ">PRINT \"A\"+\"B\" MOD 2",
+            "AB",
+            "No such variable",
+            ">PRINT \"A\"+\"B\"/2",
+            "AB",
+            "No such variable",
+            ">PRINT \"A\"+\"B\"^2",
+            "",
+            "Type mismatch",
+            ">PRINT \"A\"+\"B\"-\"C\"",
+            "",
+            "Type mismatch",
+            ">",
+        ],
+    );
+}
+
+/// A unary `+` or `-` refuses a string literal as No such variable, though
+/// it takes a string variable, as BASIC II's does.
+#[test]
+fn a_unary_sign_takes_no_string_literal() {
+    assert_screen(
+        &[
+            "PRINT +\"B\"",
+            "PRINT -\"B\"",
+            "A$=\"Q\":PRINT +A$",
+            "PRINT -A$",
+            "PRINT \"A\"++\"B\"",
+            "PRINT - \"B\"",
+        ],
+        60,
+        &[
+            ">PRINT +\"B\"",
+            "",
+            "No such variable",
+            ">PRINT -\"B\"",
+            "",
+            "No such variable",
+            ">A$=\"Q\":PRINT +A$",
+            "Q",
+            ">PRINT -A$",
+            "",
+            "Type mismatch",
+            ">PRINT \"A\"++\"B\"",
+            "",
+            "No such variable",
+            ">PRINT - \"B\"",
+            "",
+            "No such variable",
+            ">",
+        ],
+    );
+}
+
+/// A literal joins a string in place: to 255 characters, then String too
+/// long.
+#[test]
+fn a_literal_joined_to_a_string_is_written_after_it() {
+    assert_screen(
+        &[
+            "A$=STRING$(250,\"X\"):B$=A$+\"12345\":PRINT LEN B$",
+            "B$=A$+\"123456\"",
+            "PRINT \"A\"+\"\"\"B\";LEFT$(\"AB\"+\"CD\",3);\"Q\" + \"R\" +\"S\"",
+            "B$=\"HE\":C$=\"LLO\":PRINT B$+\"Y\"+C$;B$+C$+B$",
+            "PRINT \"\"+\"\";\"A\"+\"\"",
+        ],
+        60,
+        &[
+            ">A$=STRING$(250,\"X\"):B$=A$+\"12345\":PRINT",
+            " LEN B$",
+            "       255",
+            ">B$=A$+\"123456\"",
+            "",
+            "String too long",
+            ">PRINT \"A\"+\"\"\"B\";LEFT$(\"AB\"+\"CD\",3);\"Q\"",
+            "+ \"R\" +\"S\"",
+            "A\"BABCQRS",
+            ">B$=\"HE\":C$=\"LLO\":PRINT B$+\"Y\"+C$;B$+C$+",
+            "B$",
+            "HEYLLOHELLOHE",
+            ">PRINT \"\"+\"\";\"A\"+\"\"",
+            "A",
+            ">",
+        ],
+    );
+}
+
+/// A string variable ends where `?` or `!` follows, as BASIC II has it: in a
+/// PRINT list that is an item of its own, after an assignment Syntax error.
+#[test]
+fn a_string_variable_takes_no_indirection_after_it() {
+    assert_screen(
+        &[
+            "B$=\"HELLO\":PRINT B$?1",
+            "PRINT \"A\"+B$?1",
+            "PRINT B$!&70;B$",
+            "X$=B$?1",
+            "B%=1:PRINT B%?1",
+        ],
+        60,
+        &[
+            ">B$=\"HELLO\":PRINT B$?1",
+            "HELLO        14",
+            ">PRINT \"A\"+B$?1",
+            "AHELLO        14",
+            ">PRINT B$!&70;B$",
+            "HELLO         0HELLO",
+            ">X$=B$?1",
+            "",
+            "Syntax error",
+            ">B%=1:PRINT B%?1",
+            "        23",
+            ">",
+        ],
+    );
+}
+
+/// An assignment whose value the statement does not end at is a Syntax
+/// error with the variable as it was.
+#[test]
+fn an_assignment_stores_nothing_unless_its_statement_ends() {
+    assert_screen(
+        &[
+            "A=1",
+            "A=2 Q",
+            "PRINT A",
+            "A$=\"X\"",
+            "A$=\"Y\" Q",
+            "PRINT A$",
+            "A%=1",
+            "A%=2 Q",
+            "PRINT A%",
+        ],
+        60,
+        &[
+            ">A=1",
+            ">A=2 Q",
+            "",
+            "Syntax error",
+            ">PRINT A",
+            "         1",
+            ">A$=\"X\"",
+            ">A$=\"Y\" Q",
+            "",
+            "Syntax error",
+            ">PRINT A$",
+            "X",
+            ">A%=1",
+            ">A%=2 Q",
+            "",
+            "Syntax error",
+            ">PRINT A%",
+            "         1",
+            ">",
+        ],
     );
 }

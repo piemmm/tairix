@@ -335,6 +335,8 @@ fn model_b_parallel(a: &mut Asm) {
     a.rts();
 }
 
+const _: () = assert!(control::TRANSMIT_INTERRUPT != 0 && control::NOT_READY != 0);
+
 /// RS423's half of the 6850: its output and input buffers, and the
 /// transmitter control bits, kept in the OSBYTE &9C copy and written to the
 /// chip only while RS423 has it: the serial ULA set for RS423 and the
@@ -356,13 +358,9 @@ fn rs423(a: &mut Asm) {
     a.pha();
     a.jsr("rs423_room");
     a.lda(imm(control::TRANSMIT_INTERRUPT));
-    a.bcs("rs423_wake_set");
+    a.bcs("rs423_lines_set");
     a.lda(imm(control::NOT_READY));
-    a.here("rs423_wake_set");
-    a.jsr("rs423_transmitter");
-    a.pla();
-    a.tax();
-    a.rts();
+    a.bne("rs423_lines_set");
 
     // RS423's input changed: RTS high while it has less room than OSBYTE
     // &CB's extent, and low again once it has. X is kept.
@@ -374,8 +372,7 @@ fn rs423(a: &mut Asm) {
     a.jsr("rs423_room");
     a.bcs("rs423_lines_room");
     a.lda(imm(control::NOT_READY));
-    a.jsr("rs423_transmitter");
-    a.jmp("rs423_lines_done");
+    a.bne("rs423_lines_set");
     a.here("rs423_lines_room");
     a.lda(abs(var::ACIA_CONTROL));
     a.and(imm(control::TRANSMIT));
@@ -385,6 +382,7 @@ fn rs423(a: &mut Asm) {
     a.lda(imm(control::TRANSMIT_INTERRUPT));
     a.bcs("rs423_lines_set");
     a.lda(imm(control::READY));
+    // The two `bne`s to here are always taken.
     a.here("rs423_lines_set");
     a.jsr("rs423_transmitter");
     a.here("rs423_lines_done");
@@ -424,6 +422,8 @@ fn rs423(a: &mut Asm) {
     rs423_transmitter(a);
 }
 
+const _: () = assert!(serial::RS423 == 0x40);
+
 /// The transmitter control bits A into the copy, and the chip if RS423
 /// has it.
 fn rs423_transmitter(a: &mut Asm) {
@@ -445,9 +445,9 @@ fn rs423_transmitter(a: &mut Asm) {
     a.here("rs423_chip");
     a.bit(zp(os::CFS_CRITICAL));
     a.bmi(RTS);
-    a.lda(abs(var::SERIAL_ULA));
-    a.and(imm(serial::RS423));
-    a.beq(RTS);
+    // BIT reads the serial ULA's RS423 bit into V.
+    a.bit(abs(var::SERIAL_ULA));
+    a.bvc(RTS);
     // The 6850's control register from its copy at &250.
     a.here("acia_control");
     a.lda(abs(var::ACIA_CONTROL));

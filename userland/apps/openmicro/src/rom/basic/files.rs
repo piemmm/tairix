@@ -168,17 +168,19 @@ fn records(a: &mut Asm) {
     a.lda(zp(z::STRING_LENGTH));
     a.jsr(entry::OSBPUT);
     a.ldx(zp(z::STRING_LENGTH));
-    let text = a.here_local();
     a.beq(sent);
+    // OSBPUT and OSBGET keep X.
+    let text = a.here_local();
     a.lda(abs(page::STRING - 1).x());
     a.jsr(entry::OSBPUT);
     a.dex();
-    a.jmp(text);
+    a.bne(text);
     a.bind(sent);
     a.ldx(zp(z::OP));
     a.dec(zp(z::OFFSET_A));
-    a.jmp(item);
+    a.bne(item);
     a.bind(done);
+    a.here("file_items_done");
     a.tax();
     a.pla();
     a.jmp("statement_done_x");
@@ -190,9 +192,9 @@ fn inputs(a: &mut Asm) {
     a.jsr("channel");
     a.tya();
     a.pha();
-    let (item, done) = (a.here_local(), a.local());
+    let item = a.here_local();
     a.jsr("next_comma");
-    a.bne(done);
+    a.bne("file_items_done");
     a.jsr("location");
     a.pla();
     a.pha();
@@ -232,20 +234,16 @@ fn inputs(a: &mut Asm) {
     a.jsr(entry::OSBGET);
     a.sta(zp(z::STRING_LENGTH));
     a.tax();
-    let text = a.here_local();
     let texted = a.local();
     a.beq(texted);
+    let text = a.here_local();
     a.jsr(entry::OSBGET);
     a.sta(abs(page::STRING - 1).x());
     a.dex();
-    a.jmp(text);
+    a.bne(text);
     a.bind(texted);
     a.lda(imm(kind::STRING));
     a.bind(fetched);
     a.jsr("store_variable");
     a.jmp(item);
-    a.bind(done);
-    a.tax();
-    a.pla();
-    a.jmp("statement_done_x");
 }

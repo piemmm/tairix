@@ -106,7 +106,7 @@ pub fn emit(a: &mut Asm, model: Model) {
     vdu_cursor_update(a, model);
     vdu_cursor_hide(a, model);
     match model {
-        Model::ModelB => a.later(crtc_write),
+        Model::ModelB => {}
         Model::Electron => electron_cursor(a),
     }
     scrolling(a, model);
@@ -118,6 +118,9 @@ pub fn emit(a: &mut Asm, model: Model) {
         Model::Electron => electron_palette(a),
     }
     vdu_20(a, model);
+    if model == Model::Electron {
+        vdu_26(a);
+    }
     windows(a);
     modes(a, model);
     tables(a, model);
@@ -577,19 +580,9 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.ldx(abs(vdu::CURSOR_X));
     a.ldy(abs(vdu::CURSOR_Y));
     a.jsr("cell_address");
-    a.here("cursor_set");
-    a.lda(zp(vdu_zp::TEMP));
-    a.sta(zp(vdu_zp::CURSOR_LINE));
-    a.sta(abs(vdu::CURSOR_ADDRESS));
-    a.lda(zp(vdu_zp::TEMP + 1));
-    a.sta(zp(vdu_zp::CURSOR_LINE + 1));
-    a.sta(abs(vdu::CURSOR_ADDRESS + 1));
     match model {
-        Model::ModelB => {
-            a.lda(imm(14));
-            a.bne("crtc_address");
-        }
-        Model::Electron => a.rts(),
+        Model::ModelB => a.jmp("cursor_set"),
+        Model::Electron => cursor_set(a, model),
     }
 
     // (&DA) = the address of row Y's window, &DE its width in bytes.
@@ -643,24 +636,42 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     a.rts();
 
     row_add(a);
+}
 
-    if model == Model::Electron {
-        return;
-    }
-    // Point 6845 register pair A, A+1 at the screen address (&DA): an
-    // address over 8 in the bitmap modes, less the bias in mode 7.
-    a.here("crtc_address");
-    a.pha();
-    a.lda(abs(vdu::COLOURS));
-    a.bne("crtc_address_bitmap");
+/// The cursor's address (&DA) into &D8 and &34A, and on the Model B the
+/// 6845's cursor.
+fn cursor_set(a: &mut Asm, model: Model) {
+    a.here("cursor_set");
     a.lda(zp(vdu_zp::TEMP));
-    a.sec();
-    a.sbc(imm(TELETEXT_BIAS.to_le_bytes()[0]));
-    a.tax();
+    a.sta(zp(vdu_zp::CURSOR_LINE));
+    a.sta(abs(vdu::CURSOR_ADDRESS));
     a.lda(zp(vdu_zp::TEMP + 1));
-    a.sbc(imm(TELETEXT_BIAS.to_le_bytes()[1]));
-    a.jmp("crtc_address_write");
-    a.here("crtc_address_bitmap");
+    a.sta(zp(vdu_zp::CURSOR_LINE + 1));
+    a.sta(abs(vdu::CURSOR_ADDRESS + 1));
+    match model {
+        Model::ModelB => {
+            a.ldy(imm(14));
+            a.bne("crtc_address");
+        }
+        Model::Electron => a.rts(),
+    }
+}
+
+/// 6845 registers Y and Y+1 set to A and X; then `crtc_address` points the
+/// pair Y, Y+1 at the screen address (&DA): an address over 8 in the bitmap
+/// modes, less the bias in mode 7.
+fn crtc_pair(a: &mut Asm) {
+    a.here("crtc_pair");
+    a.sty(abs(CRTC_ADDRESS));
+    a.sta(abs(CRTC_DATA));
+    a.iny();
+    a.sty(abs(CRTC_ADDRESS));
+    a.stx(abs(CRTC_DATA));
+    a.rts();
+    a.here("crtc_address");
+    let teletext = a.local();
+    a.lda(abs(vdu::COLOURS));
+    a.beq(teletext);
     a.lda(zp(vdu_zp::TEMP + 1));
     a.sta(zp(vdu_zp::TEMP + 3));
     a.lda(zp(vdu_zp::TEMP));
@@ -670,33 +681,33 @@ fn vdu_cursor_update(a: &mut Asm, model: Model) {
     }
     a.tax();
     a.lda(zp(vdu_zp::TEMP + 3));
-    a.here("crtc_address_write");
-    a.tay();
-    a.pla();
-    a.sta(abs(CRTC_ADDRESS));
-    a.sty(abs(CRTC_DATA));
-    a.clc();
-    a.adc(imm(1));
-    a.sta(abs(CRTC_ADDRESS));
-    a.stx(abs(CRTC_DATA));
-    a.rts();
+    // A screen address over 8 is below &1000.
+    a.bpl("crtc_pair");
+    a.bind(teletext);
+    a.lda(zp(vdu_zp::TEMP));
+    a.sec();
+    a.sbc(imm(TELETEXT_BIAS.to_le_bytes()[0]));
+    a.tax();
+    a.lda(zp(vdu_zp::TEMP + 1));
+    a.sbc(imm(TELETEXT_BIAS.to_le_bytes()[1]));
+    a.jmp("crtc_pair");
 }
 
-/// 6845 register X set to A as MODE and VDU 23,0 set them: R7 moved by
+/// 6845 register Y set to A as MODE and VDU 23,0 set them: R7 moved by
 /// *TV's shift and one more, as MOS 1.20 is seen to, and R10 kept as the
 /// cursor's shape. `crtc_register` writes A as it is.
 fn crtc_write(a: &mut Asm) {
     a.here("crtc_write");
-    a.cpx(imm(7));
+    a.cpy(imm(7));
     a.bne("crtc_not_sync");
     // The compare leaves C set: the one more.
     a.adc(abs(super::ws::page2::TV_SHIFT));
     a.here("crtc_not_sync");
-    a.cpx(imm(10));
+    a.cpy(imm(10));
     a.bne("crtc_register");
     a.sta(abs(vdu::CURSOR_START));
     a.here("crtc_register");
-    a.stx(abs(CRTC_ADDRESS));
+    a.sty(abs(CRTC_ADDRESS));
     a.sta(abs(CRTC_DATA));
     a.rts();
 }
@@ -712,7 +723,7 @@ fn vdu_cursor_hide(a: &mut Asm, model: Model) {
             a.here("vdu_cursor_show");
             a.lda(abs(vdu::CURSOR_START));
             a.here("vdu_cursor_set");
-            a.ldx(imm(10));
+            a.ldy(imm(10));
             a.jmp("crtc_register");
         }
         Model::Electron => {
@@ -890,7 +901,7 @@ fn screen_start(a: &mut Asm, model: Model) {
     a.sta(zp(vdu_zp::TEMP));
     match model {
         Model::ModelB => {
-            a.lda(imm(12));
+            a.ldy(imm(12));
             a.jmp("crtc_address");
         }
         Model::Electron => {
@@ -1038,9 +1049,12 @@ fn clearing(a: &mut Asm) {
     a.sta(zp(vdu_zp::TEMP + 1));
     a.jsr("background_byte");
     a.ldy(imm(0));
+    // Four bytes a pass: a page divides by four.
     a.here("cls_screen_byte");
-    a.sta(zp(vdu_zp::TEMP).ind_y());
-    a.iny();
+    for _ in 0..4 {
+        a.sta(zp(vdu_zp::TEMP).ind_y());
+        a.iny();
+    }
     a.bne("cls_screen_byte");
     a.inc(zp(vdu_zp::TEMP + 1));
     a.bpl("cls_screen_byte");
@@ -1307,9 +1321,8 @@ fn vdu_20(a: &mut Asm, model: Model) {
     a.jmp("ula_palette");
 }
 
-/// The text and graphics windows.
-fn windows(a: &mut Asm) {
-    // VDU 26: the windows, the origin and both cursors back to their defaults.
+/// VDU 26: the windows, the origin and both cursors back to their defaults.
+fn vdu_26(a: &mut Asm) {
     a.here("vdu_26");
     a.lda(imm(0));
     a.ldx(imm(3));
@@ -1337,7 +1350,10 @@ fn windows(a: &mut Asm) {
     a.jsr("graphics_window_default");
     a.jsr("window_width");
     a.jmp("vdu_30");
+}
 
+/// The text and graphics windows.
+fn windows(a: &mut Asm) {
     // VDU 28, left, bottom, right, top: refused unless it fits the screen
     // the right way up.
     a.here("vdu_28");
@@ -1407,6 +1423,58 @@ fn windows(a: &mut Asm) {
     a.rts();
 }
 
+/// Where MOS 1.20's routines lie that a mode set copied from MOS 1.20 calls,
+/// each with MOS 1.20's registers: A and'ed with the VDU status, VDU 20,
+/// 6845 register Y set to A, VDU 26, the cursor set to address XA, 6845
+/// registers Y and Y+1 set to A and X, a latch write, and the video ULA's
+/// control register set to A with the flash restarted.
+const STATUS_AND: u16 = 0xC5A8;
+const VDU_20: u16 = 0xC839;
+const CRTC_WRITE: u16 = 0xC95E;
+const VDU_26: u16 = 0xC9BD;
+const CURSOR_SET: u16 = 0xC9F6;
+const CRTC_PAIR: u16 = 0xCA2B;
+const LATCH_WRITE: u16 = 0xE9F8;
+const ULA_WRITE: u16 = 0xEA00;
+
+/// The Model B's entries at MOS 1.20's addresses for them: the routine
+/// itself, or a jump to it where it does not fit before the next.
+pub fn pin_entries(a: &mut Asm) {
+    a.pin(STATUS_AND, |a| {
+        a.and(zp(vdu_zp::STATUS));
+        a.rts();
+    });
+    a.pin(VDU_20, |a| a.jmp("vdu_20"));
+    a.pin(CRTC_WRITE, crtc_write);
+    a.pin(VDU_26, vdu_26);
+    a.pin(CURSOR_SET, |a| {
+        a.stx(zp(vdu_zp::TEMP));
+        a.sta(zp(vdu_zp::TEMP + 1));
+        cursor_set(a, Model::ModelB);
+    });
+    a.pin(CRTC_PAIR, crtc_pair);
+    a.pin(LATCH_WRITE, |a| {
+        a.sta(abs(svia(reg::ORB)));
+        a.rts();
+        a.room(usize::from(ULA_WRITE - LATCH_WRITE - 5));
+        // OSBYTE &9A: MOS 1.20 restarts the flash from its space state.
+        a.here("osbyte_ula_control");
+        a.txa();
+        ula_write(a);
+    });
+}
+
+/// The video ULA's control register set to A, the flash restarted from its
+/// space state, as MOS 1.20's MODE and OSBYTE &9A restart it.
+fn ula_write(a: &mut Asm) {
+    a.here("ula_write");
+    a.sta(abs(var::ULA_CONTROL));
+    a.sta(abs(sheila::VIDEO_CONTROL));
+    a.lda(abs(var::FLASH_MARK + 1));
+    a.sta(abs(var::FLASH_COUNT));
+    a.rts();
+}
+
 /// Where MOS 1.20's MODE routine takes the mode in A, and where it starts to
 /// clear the screen: software calls the first, and runs a copy of the
 /// routine ended there with an RTS to set a mode and keep the screen.
@@ -1461,20 +1529,27 @@ fn mode(a: &mut Asm, model: Model) {
     a.sta(abs(vdu::COLOURS));
     a.lda(abs("mode_pixels").x());
     a.sta(abs(vdu::PIXELS_PER_BYTE));
-    a.lda(abs("mode_screen").x());
-    a.sta(abs(vdu::SCREEN_BOTTOM));
     a.lda(abs("mode_map_type").x());
     a.sta(abs(vdu::MAP_TYPE));
     a.tay();
+    a.lda(abs("map_screen").y());
+    a.sta(abs(vdu::SCREEN_BOTTOM));
     a.lda(abs("map_size").y());
     a.sta(abs(vdu::SCREEN_SIZE));
-    a.lda(abs("map_row_low").y());
+    // The kind of row, also its length's high byte, as `modes::row_kind`.
+    a.tya();
+    a.clc();
+    a.adc(imm(2));
+    a.eor(imm(7));
+    a.lsr(Acc);
+    a.tay();
+    a.lda(abs("row_low").y());
     a.sta(abs(vdu::BYTES_PER_ROW));
-    a.lda(abs("map_row_high").y());
-    a.sta(abs(vdu::BYTES_PER_ROW + 1));
-    a.lda(abs("map_rows_table").y());
+    a.sty(abs(vdu::BYTES_PER_ROW + 1));
+    a.lda(abs("row_table_low").y());
     a.sta(zp(vdu_zp::ROW_TABLE));
-    a.lda(abs("map_rows_table_high").y());
+    // Every row table lies in the page of the 640-byte one.
+    a.lda(imm(hi("rows_640")));
     a.sta(zp(vdu_zp::ROW_TABLE + 1));
     match model {
         Model::ModelB => model_b_mode(a),
@@ -1518,24 +1593,20 @@ fn mode(a: &mut Asm, model: Model) {
 /// 6845's registers from the last down, as MOS 1.20 writes them.
 fn model_b_mode(a: &mut Asm) {
     a.lda(abs("mode_ula").x());
-    a.sta(abs(var::ULA_CONTROL));
-    a.sta(abs(sheila::VIDEO_CONTROL));
+    a.jsr("ula_write");
     a.jsr("pixel_masks");
     // The latch's two screen-size bits.
-    a.lda(abs(vdu::MAP_TYPE));
-    a.asl(Acc);
-    a.tay();
-    a.lda(abs("latch_size").y());
+    a.ldy(abs(vdu::MAP_TYPE));
+    a.lda(abs("latch_first").y());
     a.sta(abs(svia(reg::ORB)));
-    a.lda(abs(crate::rom::asm::sym("latch_size") + 1).y());
+    a.lda(abs("latch_second").y());
     a.sta(abs(svia(reg::ORB)));
     // *TV's interlace applies to MODE's R8 alone.
-    a.ldx(abs(vdu::MAP_TYPE));
-    a.ldy(abs("map_crtc").x());
-    a.ldx(imm(super::modes::LAST_CRTC_REGISTER));
+    a.ldx(abs("map_crtc").y());
+    a.ldy(imm(super::modes::LAST_CRTC_REGISTER));
     a.here("vdu_22_crtc");
-    a.lda(abs("crtc_registers").y());
-    a.cpx(imm(8));
+    a.lda(abs("crtc_registers").x());
+    a.cpy(imm(8));
     a.bne("vdu_22_register");
     a.pha();
     a.lda(abs(super::ws::page2::TV_INTERLACE));
@@ -1548,8 +1619,8 @@ fn model_b_mode(a: &mut Asm) {
     a.and(imm(0xFE));
     a.here("vdu_22_register");
     a.jsr("crtc_write");
-    a.dey();
     a.dex();
+    a.dey();
     a.bpl("vdu_22_crtc");
 }
 

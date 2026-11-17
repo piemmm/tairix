@@ -84,7 +84,6 @@ const FROM_OFFSET: u16 = z::INT_WORK;
 const _: () = assert!(z::LOMEM == 0 && kind::STRING == 0);
 
 pub fn emit(a: &mut Asm) {
-    dispatch(a);
     arguments(a);
     numeric(a);
     machine(a);
@@ -97,15 +96,12 @@ pub fn emit(a: &mut Asm) {
     table(a);
 }
 
-fn dispatch(a: &mut Asm) {
-    // A function token at a factor's start: its routine, returning to the
-    // factor's end. Any other token there names no variable.
-    a.here("factor_token");
-    a.sec();
+/// The function token A names, with C set, called with its result going on
+/// through `factor_done`; any other token is No such variable.
+pub(super) fn function_token(a: &mut Asm) {
     a.sbc(imm(FIRST));
     a.cmp(imm(byte(FUNCTIONS.len())));
-    let none = a.local();
-    a.bcs(none);
+    a.bcs("factor_unknown");
     a.tax();
     a.lda(imm(hi(sym("factor_done") + -1)));
     a.pha();
@@ -116,8 +112,6 @@ fn dispatch(a: &mut Asm) {
     a.lda(abs("function_low").x());
     a.pha();
     a.rts();
-    a.bind(none);
-    a.jmp("err_no_such_variable");
 }
 
 fn arguments(a: &mut Asm) {
@@ -132,10 +126,6 @@ fn arguments(a: &mut Asm) {
     a.here("arg_integer");
     a.jsr("arg_factor");
     a.jmp("make_integer");
-
-    a.here("arg_real");
-    a.jsr("arg_factor");
-    a.jmp("make_real");
 
     a.here("arg_string");
     a.jsr("arg_factor");
@@ -497,12 +487,7 @@ fn strings(a: &mut Asm) {
     a.jsr("arg_string");
     // The string buffer's number, as VAL reads it.
     a.here("val_buffer");
-    a.lda(zp(z::OFFSET_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A + 1));
-    a.pha();
+    super::borrow_text(a);
     a.jsr("string_cr");
     a.stx(zp(z::TEXT_A));
     a.sty(zp(z::TEXT_A + 1));
@@ -537,12 +522,7 @@ fn strings(a: &mut Asm) {
     a.bind(real);
     a.jsr("fac_negate");
     a.bind(positive);
-    a.pla();
-    a.sta(zp(z::TEXT_A + 1));
-    a.pla();
-    a.sta(zp(z::TEXT_A));
-    a.pla();
-    a.sta(zp(z::OFFSET_A));
+    super::return_text(a);
     a.lda(zp(z::TYPE));
     a.rts();
 }
@@ -747,12 +727,7 @@ fn evaluating(a: &mut Asm) {
     a.inc(zp(z::STRING_LENGTH));
     a.lda(imm(kind::STRING));
     a.jsr("push_value");
-    a.lda(zp(z::OFFSET_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A + 1));
-    a.pha();
+    super::borrow_text(a);
     a.lda(zp(z::STACK));
     a.clc();
     a.adc(imm(1));
@@ -763,13 +738,7 @@ fn evaluating(a: &mut Asm) {
     a.lda(imm(0));
     a.sta(zp(z::OFFSET_A));
     a.jsr("expr");
-    a.tay();
-    a.pla();
-    a.sta(zp(z::TEXT_A + 1));
-    a.pla();
-    a.sta(zp(z::TEXT_A));
-    a.pla();
-    a.sta(zp(z::OFFSET_A));
+    super::return_text(a);
     a.tya();
     a.pha();
     a.jsr("pop_string");

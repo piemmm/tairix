@@ -46,8 +46,8 @@ const INTEGER_EXP: u8 = 0xA0;
 
 /// The multiplier or divisor.
 const WORK: u16 = z::FP_WORK;
-/// The quotient bits a division finds.
-const QUOTIENT_BITS: u8 = 39;
+/// The mantissa bytes a division's quotient fills, all but its last bit.
+const QUOTIENT_BYTES: u8 = 5;
 /// Whether converting to an integer dropped a fraction.
 pub const FRACTION: u16 = z::INT_WORK;
 
@@ -69,13 +69,6 @@ fn shift_right(a: &mut Asm, r: Real) {
     a.lsr(zp(r.m(0)));
     for i in 1..5 {
         a.ror(zp(r.m(i)));
-    }
-}
-
-fn rotate_left(a: &mut Asm, r: Real) {
-    a.rol(zp(r.m(4)));
-    for i in (0..4).rev() {
-        a.rol(zp(r.m(i)));
     }
 }
 
@@ -242,6 +235,8 @@ fn packing(a: &mut Asm) {
     a.rts();
 }
 
+const _: () = assert!(INTEGER_EXP != 0);
+
 fn integers(a: &mut Asm) {
     // FAC = IAC, unsigned or signed; normalising keeps the sign.
     a.here("fac_from_unsigned");
@@ -268,7 +263,7 @@ fn integers(a: &mut Asm) {
     }
     a.lda(imm(INTEGER_EXP));
     a.sta(zp(FAC.exp()));
-    a.jmp("fac_normalise");
+    a.bne("fac_normalise");
 }
 
 fn to_integer(a: &mut Asm) {
@@ -590,7 +585,7 @@ fn multiplying(a: &mut Asm, zero: Label) {
     a.dex();
     a.bpl(take);
     a.sta(zp(FAC.m(4)));
-    a.ldx(imm(0));
+    a.tax();
     let byte = a.here_local();
     a.ldy(imm(8));
     let bit = a.here_local();
@@ -649,10 +644,16 @@ fn dividing(a: &mut Asm, zero: Label) {
     a.sta(zp(WORK).x());
     a.dex();
     a.bpl(take);
-    a.ldx(imm(QUOTIENT_BITS));
+    // Each quotient bit rotates into its own byte of FAC behind a marker bit,
+    // which leaves the byte when it is full. The fortieth is found and then
+    // cleared.
+    a.inx();
+    a.lda(imm(1));
+    a.sta(zp(FAC.m(0)));
     a.clc();
     let step = a.here_local();
-    let (subtract, decided, shift) = (a.local(), a.local(), a.local());
+    let (subtract, decided, shift, more, done) =
+        (a.local(), a.local(), a.local(), a.local(), a.local());
     a.bcs(subtract);
     for i in 0..4 {
         a.lda(zp(FAC2.m(i)));
@@ -672,15 +673,22 @@ fn dividing(a: &mut Asm, zero: Label) {
     }
     a.sec();
     a.bind(shift);
-    rotate_left(a, FAC);
+    a.rol(zp(FAC.m(0)).x());
+    a.bcc(more);
+    a.inx();
+    a.cpx(imm(QUOTIENT_BYTES));
+    a.beq(done);
+    a.lda(imm(1));
+    a.sta(zp(FAC.m(0)).x());
+    a.bind(more);
     a.asl(zp(FAC2.m(3)));
     for i in (0..3).rev() {
         a.rol(zp(FAC2.m(i)));
     }
-    a.dex();
-    a.bne(step);
-    a.clc();
-    rotate_left(a, FAC);
+    a.jmp(step);
+    a.bind(done);
+    a.lsr(zp(FAC.m(4)));
+    a.asl(zp(FAC.m(4)));
     a.jmp("fac_finish");
 }
 

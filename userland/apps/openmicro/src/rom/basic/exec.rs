@@ -136,8 +136,7 @@ fn looping(a: &mut Asm) {
     a.ldy(zp(z::OFFSET_A));
     a.dey();
     a.lda(zp(z::TEXT_A).ind_y());
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
 
     a.here("statement_report");
     a.jsr("report");
@@ -153,6 +152,7 @@ fn looping(a: &mut Asm) {
     a.cmp(imm(b' '));
     a.beq(space);
     a.sty(zp(z::OFFSET_A));
+    a.here("statement_done_a");
     a.tax();
     a.here("statement_done_x");
     a.cpx(imm(b':'));
@@ -272,8 +272,7 @@ fn running(a: &mut Asm) {
     a.here("assignment");
     a.here("statement_let");
     a.jsr("lvalue");
-    let none = a.local();
-    a.bcs(none);
+    a.bcs("syntax_error");
     a.bind(assigned);
     a.lda(zp(z::VAR));
     a.pha();
@@ -286,7 +285,15 @@ fn running(a: &mut Asm) {
     let mistake = a.local();
     a.bne(mistake);
     a.jsr("expr");
-    a.tay();
+    // BASIC II stores nothing unless the statement ends with the value.
+    let ends = a.local();
+    a.cpx(imm(CR));
+    a.beq(ends);
+    a.cpx(imm(b':'));
+    a.beq(ends);
+    a.cpx(imm(word::ELSE.token));
+    a.bne("syntax_error");
+    a.bind(ends);
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pla();
@@ -298,8 +305,6 @@ fn running(a: &mut Asm) {
     a.jmp("statement_ended");
     a.bind(mistake);
     a.jmp("err_mistake");
-    a.bind(none);
-    a.jmp("err_syntax");
 }
 
 fn statements(a: &mut Asm) {
@@ -331,6 +336,7 @@ fn statements(a: &mut Asm) {
     a.bind(unstarted);
     a.lda(imm(hi(page::INPUT)));
     a.sta(zp(z::TEXT_A + 1));
+    a.here("syntax_error");
     a.jmp("err_syntax");
     lvalues(a);
 }

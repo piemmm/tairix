@@ -125,7 +125,7 @@ fn the_pins_lie_past_every_routine_a_program_runs() {
         "channel",
         "print_next",
         "expr",
-        "factor_token",
+        "factor",
         "find_name",
         "fac_multiply",
         "read_number",

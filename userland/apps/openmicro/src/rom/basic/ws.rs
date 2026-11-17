@@ -33,6 +33,10 @@ pub mod zp {
     pub const PAGE: u16 = 0x18;
     /// A second text pointer: a definition's, or an item's being read.
     pub const TEXT_B: u16 = 0x19;
+    /// Where on the 6502 stack the outermost EVAL, READ item or VAL under
+    /// way keeps the statement's pointer, or 0: an error there is at the
+    /// statement's line.
+    pub const BORROWED: u16 = 0x1B;
     /// Where READ takes its next item.
     pub const DATA: u16 = 0x1C;
     /// COUNT: characters printed since the last new line.

@@ -319,9 +319,7 @@ fn power(a: &mut Asm) {
     a.jsr("fac_multiply");
     a.jsr("fac_exp");
     temp(a, 3, "fac2_load");
-    a.jsr("fac_multiply");
-    a.lda(imm(kind::REAL));
-    a.rts();
+    a.jmp("real_product");
 }
 
 fn whole_powers(a: &mut Asm) {
@@ -600,9 +598,7 @@ fn trigonometry(a: &mut Asm) {
     a.jsr("quadrant");
     a.jsr("fac_to_fac2");
     temp(a, 2, "fac_load");
-    a.jsr("fac_divide");
-    a.lda(imm(kind::REAL));
-    a.rts();
+    a.jmp("real_quotient");
 
     // FAC = the sine of the argument less n quarter turns, n its quarter
     // turns to the nearest and QUADRANT n's low byte; the angle at temp_0,
@@ -761,9 +757,7 @@ fn scaling(a: &mut Asm) {
     a.tax();
     a.here("times_constant");
     a.jsr("fac2_constant");
-    a.jsr("fac_multiply");
-    a.lda(imm(kind::REAL));
-    a.rts();
+    a.jmp("real_product");
 
     a.here("fn_pi");
     a.ldx(imm(PI));

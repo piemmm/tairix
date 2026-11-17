@@ -126,11 +126,32 @@ fn header(a: &mut Asm) {
     a.jmp("cold");
 }
 
-/// Reading program text through the two pointers.
-fn text(a: &mut Asm) {
-    // A = the next character at the statement pointer that is not a space,
-    // the pointer past it and Y its offset.
-    a.here("next_a");
+/// The statement pointer kept on the 6502 stack while text elsewhere is read
+/// through it, the outermost keeping marked; A and X used, Y kept.
+fn borrow_text(a: &mut Asm) {
+    for at in [z::OFFSET_A, z::TEXT_A, z::TEXT_A + 1, z::BORROWED] {
+        a.lda(zp(at));
+        a.pha();
+    }
+    let marked = a.local();
+    a.bne(marked);
+    a.tsx();
+    a.stx(zp(z::BORROWED));
+    a.bind(marked);
+}
+
+/// The statement pointer `borrow_text` kept, back; A used.
+fn return_text(a: &mut Asm) {
+    for at in [z::BORROWED, z::TEXT_A + 1, z::TEXT_A, z::OFFSET_A] {
+        a.pla();
+        a.sta(zp(at));
+    }
+}
+
+/// A = the next character at the statement pointer that is not a space,
+/// the pointer past it and Y its offset: `next_a`'s body, which the factor's
+/// reads take in line.
+fn next_character(a: &mut Asm) {
     a.ldy(zp(z::OFFSET_A));
     let again = a.here_local();
     a.lda(zp(z::TEXT_A).ind_y());
@@ -138,6 +159,12 @@ fn text(a: &mut Asm) {
     a.cmp(imm(b' '));
     a.beq(again);
     a.sty(zp(z::OFFSET_A));
+}
+
+/// Reading program text through the two pointers.
+fn text(a: &mut Asm) {
+    a.here("next_a");
+    next_character(a);
     a.rts();
 
     // The next character as `next_a` reads it, Z set if it is a comma.

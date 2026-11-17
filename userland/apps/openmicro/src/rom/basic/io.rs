@@ -129,15 +129,14 @@ fn reading(a: &mut Asm) {
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pha();
-    let (string, stored) = (a.local(), a.local());
-    a.bmi(string);
+    let (number, stored) = (a.local(), a.local());
+    a.bpl(number);
+    a.jsr("raw_item");
+    a.lda(imm(kind::STRING));
+    a.beq(stored);
     // A number: the item evaluated where it lies.
-    a.lda(zp(z::OFFSET_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A));
-    a.pha();
-    a.lda(zp(z::TEXT_A + 1));
-    a.pha();
+    a.bind(number);
+    super::borrow_text(a);
     a.lda(zp(ITEM));
     a.sta(zp(z::TEXT_A));
     a.lda(zp(ITEM + 1));
@@ -151,21 +150,12 @@ fn reading(a: &mut Asm) {
     a.sta(zp(ITEM));
     a.lda(zp(z::TEXT_A + 1));
     a.sta(zp(ITEM + 1));
-    a.jsr("data_past");
-    a.pla();
-    a.sta(zp(z::TEXT_A + 1));
-    a.pla();
-    a.sta(zp(z::TEXT_A));
-    a.pla();
-    a.sta(zp(z::OFFSET_A));
+    super::return_text(a);
     a.lda(zp(z::TYPE));
-    a.jmp(stored);
-    a.bind(string);
-    a.jsr("raw_item");
-    a.jsr("data_past");
-    a.lda(imm(kind::STRING));
+    // Y and ITEM the item's end either way; X kept.
     a.bind(stored);
     a.tax();
+    a.jsr("data_past");
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pla();
@@ -176,8 +166,7 @@ fn reading(a: &mut Asm) {
     a.jsr("store_variable");
     a.jsr("next_comma");
     a.beq("statement_read");
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
     a.bind(mistake);
     a.jmp("err_mistake");
 }
@@ -205,9 +194,7 @@ fn data(a: &mut Asm) {
     a.lda(zp(ITEM).ind_y());
     a.cmp(imm(b','));
     let (record, found) = (a.local(), a.local());
-    a.bne(record);
-    a.iny();
-    a.rts();
+    a.beq(found);
     // A record from its CR: Out of DATA at the program's end, else its
     // DATA token's next character, else the next record.
     a.bind(record);
@@ -246,8 +233,9 @@ fn restoring(a: &mut Asm) {
     a.jsr("ends_statement");
     let at_line = a.local();
     a.bne(at_line);
+    let done = a.local();
     a.jsr("restore_data");
-    a.jmp("statement_done");
+    a.beq(done);
     a.bind(at_line);
     a.jsr("line_target");
     a.jsr("find_line");
@@ -259,6 +247,7 @@ fn restoring(a: &mut Asm) {
     a.sta(zp(z::DATA));
     a.lda(zp(super::editor::RECORD + 1));
     a.sta(zp(z::DATA + 1));
+    a.bind(done);
     a.jmp("statement_done");
 }
 
@@ -379,15 +368,7 @@ fn input_items(a: &mut Asm, next: Label) {
     a.sta(zp(ASK));
     a.ldx(imm(lo(LINE_BLOCK)));
     a.ldy(imm(hi(LINE_BLOCK)));
-    a.lda(imm(0));
-    a.jsr(entry::OSWORD);
-    let read = a.local();
-    a.bcc(read);
-    a.jmp("escaped");
-    a.bind(read);
-    a.lda(imm(0));
-    a.sta(zp(z::COUNT));
-    a.tay();
+    a.jsr("read_line_quiet");
     a.bind(have);
     // The item: the whole line for LINE, else up to a comma.
     a.bit(zp(WHOLE));
@@ -488,17 +469,13 @@ fn printing(a: &mut Asm) {
     a.jsr("expr");
     a.dec(zp(z::OFFSET_A));
     a.jsr("print_value");
-    a.jmp("print_item");
+    a.beq("print_item");
     a.bind(ended);
     a.tax();
     a.bit(zp(GOES_ON));
     let done = a.local();
     a.bmi(done);
-    a.txa();
-    a.pha();
     a.jsr("print_newline");
-    a.pla();
-    a.tax();
     a.bind(done);
     a.jmp("statement_done_x");
     a.bind(semicolon);
@@ -508,23 +485,20 @@ fn printing(a: &mut Asm) {
     a.lda(imm(0xFF));
     a.sta(zp(GOES_ON));
     a.bne("print_next");
+    // The print routines all return Z set.
     a.bind(comma);
     a.jsr("print_field");
-    a.lda(abs(AT_WIDTH));
-    a.sta(zp(z::FIELD));
-    a.lda(imm(0));
-    a.sta(zp(z::HEX));
-    a.jmp("print_item");
+    a.beq(screen);
     a.bind(quote);
     a.jsr("print_newline");
-    a.jmp("print_item");
+    a.beq("print_item");
     a.bind(tilde);
     a.lda(imm(0xFF));
     a.sta(zp(z::HEX));
-    a.jmp("print_item");
+    a.bne("print_item");
     a.bind(spc);
     a.jsr("print_spc");
-    a.jmp("print_item");
+    a.beq("print_item");
 }
 
 fn print_tab(a: &mut Asm) {

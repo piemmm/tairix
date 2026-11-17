@@ -183,6 +183,8 @@ fn dispatch(a: &mut Asm, model: Model) {
     a.pha();
     a.lda(abs("osbyte_low_table").x());
     a.pha();
+    // The call's registers, as OSBYTE's and OSWORD's routines take them.
+    a.here("call_registers");
     a.ldx(zp(os::CALL_X));
     a.ldy(zp(os::CALL_Y));
     a.lda(zp(os::CALL_A));
@@ -277,8 +279,8 @@ fn simple(a: &mut Asm, model: Model) {
     a.error(
         0xF7,
         match model {
-            Model::ModelB => "OS 1.20",
-            Model::Electron => "OS 1.00",
+            Model::ModelB => b"OS 1.20",
+            Model::Electron => b"OS 1.00",
         },
     );
     a.here("osbyte_version");
@@ -345,7 +347,9 @@ fn simple(a: &mut Asm, model: Model) {
         a.here("osbyte_himem_mode_known");
     }
     a.tax();
-    a.ldy(abs("mode_screen").x());
+    a.lda(abs("mode_map_type").x());
+    a.tax();
+    a.ldy(abs("map_screen").x());
     a.ldx(imm(0));
     a.rts();
     osbyte_cursor_position(a, model);
@@ -707,11 +711,6 @@ fn input(a: &mut Asm, model: Model) {
 /// ROMs and the filing system's calls.
 fn machine(a: &mut Asm, model: Model) {
     if model == Model::ModelB {
-        a.here("osbyte_ula_control");
-        a.stx(abs(var::ULA_CONTROL));
-        a.stx(abs(sheila::VIDEO_CONTROL));
-        a.rts();
-
         // &9B: X is a logical colour and a physical, which the ULA takes
         // inverted, as the copy keeps it.
         a.here("osbyte_ula_palette");
@@ -736,15 +735,18 @@ fn machine(a: &mut Asm, model: Model) {
         ("osbyte_read_sheila", sheila::SHEILA, false),
         ("osbyte_write_sheila", sheila::SHEILA, true),
     ] {
-        a.here(name);
-        if write {
-            a.tya();
-            a.sta(abs(page).x());
-        } else {
-            a.lda(abs(page).x());
-            a.tay();
-        }
-        a.rts();
+        // Placed in what room the pins leave, as nothing runs into them.
+        a.later(move |a| {
+            a.here(name);
+            if write {
+                a.tya();
+                a.sta(abs(page).x());
+            } else {
+                a.lda(abs(page).x());
+                a.tay();
+            }
+            a.rts();
+        });
     }
 
     a.here("osbyte_service");
@@ -759,7 +761,7 @@ fn machine(a: &mut Asm, model: Model) {
     a.beq("osbyte_not_language");
     a.jmp("enter_language");
     a.here("osbyte_not_language");
-    a.error(0xF9, "This is not a language");
+    a.error(0xF9, b"This is not a language");
 
     a.here("osbyte_code");
     a.lda(imm(0));

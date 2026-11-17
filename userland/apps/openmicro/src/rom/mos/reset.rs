@@ -14,7 +14,7 @@ use super::{page, svia, Held, VECTOR_DEFAULTS};
 use crate::machine::electron::{irq as ula_irq, sheila as ula, LOCKED_ROMS};
 use crate::machine::via::reg;
 use crate::machine::SIDEWAYS_BASE;
-use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Addr, Asm};
+use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Addr, Asm, RTS};
 use crate::rom::os::{header, rom_type, service};
 
 /// The page the OS's high-water mark starts from.
@@ -125,11 +125,7 @@ fn reset(a: &mut Asm, model: Model) {
     a.here("reset_settings_done");
     a.stx(abs(var::LAST_BREAK));
     a.jsr("hardware_init");
-    if model == Model::ModelB {
-        a.jsr("read_links");
-    }
     a.jsr("rom_scan");
-    a.jsr("claim_workspace");
     a.jsr("buffers_flush_all");
     a.jsr("cfs_init");
     a.jsr("sound_init");
@@ -144,7 +140,7 @@ fn reset(a: &mut Asm, model: Model) {
     a.sec();
     a.jsr("break_intercept");
     a.jmp("boot_and_enter");
-    banner(a, model);
+    a.whole(|a| banner(a, model));
 }
 
 /// The BREAK intercept *FX247 sets, and the machine's name.
@@ -164,7 +160,7 @@ fn banner(a: &mut Asm, model: Model) {
     // original's.
     a.here("print_banner");
     a.bit(abs(var::STARTUP));
-    a.bpl("print_banner_none");
+    a.bpl(RTS);
     let (name, memory) = match model {
         Model::ModelB => ("\nOpenMOS Micro ", "32K\x07"),
         Model::Electron => ("\nOpenMOS Electron", "\x07"),
@@ -180,8 +176,6 @@ fn banner(a: &mut Asm, model: Model) {
     }
     a.jsr("osnewl");
     a.jmp("osnewl");
-    a.here("print_banner_none");
-    a.rts();
 }
 
 /// Zero every page of RAM but the stack, keeping X; then put back the NMI's
@@ -212,7 +206,8 @@ fn clear_memory(a: &mut Asm) {
 }
 
 /// Build the ROM type table: a ROM is one whose copyright pointer finds
-/// "\0(C)"; BASIC is the highest with no service entry.
+/// "\0(C)"; BASIC is the highest with no service entry. Then the ROMs'
+/// workspace claims.
 fn rom_scan(a: &mut Asm, model: Model) {
     a.here("rom_scan");
     a.lda(imm(0xFF));
@@ -245,9 +240,20 @@ fn rom_scan(a: &mut Asm, model: Model) {
     a.here("rom_scan_done");
     a.dex();
     a.bpl("rom_scan_next");
+    // Then absolute and private workspace above &0E00, the high-water mark
+    // after.
+    a.lda(imm(service::ABSOLUTE_WORKSPACE));
+    a.ldy(imm(OSHWM_START));
+    a.jsr("service_call");
+    a.lda(imm(service::PRIVATE_WORKSPACE));
+    a.jsr("service_call");
+    a.sty(abs(var::PRIMARY_OSHWM));
+    a.sty(abs(var::OSHWM));
     a.rts();
-    a.here("copyright_signature");
-    a.bytes(b"\0(C)");
+    a.later(|a| {
+        a.here("copyright_signature");
+        a.bytes(b"\0(C)");
+    });
 }
 
 /// Offer service call A, with Y its parameter, to each ROM with a service
@@ -281,17 +287,6 @@ fn service_call(a: &mut Asm, model: Model) {
     a.pla();
     page(a, model, Held::A);
     a.txa();
-    a.rts();
-
-    // Absolute then private workspace above &0E00, the high-water mark after.
-    a.here("claim_workspace");
-    a.lda(imm(service::ABSOLUTE_WORKSPACE));
-    a.ldy(imm(OSHWM_START));
-    a.jsr("service_call");
-    a.lda(imm(service::PRIVATE_WORKSPACE));
-    a.jsr("service_call");
-    a.sty(abs(var::PRIMARY_OSHWM));
-    a.sty(abs(var::OSHWM));
     a.rts();
 }
 
@@ -339,7 +334,7 @@ fn boot_and_enter(a: &mut Asm, model: Model) {
         a.ldx(abs(var::BASIC_ROM));
         a.bpl("enter_found_language");
     }
-    a.error(0, "Language?");
+    a.error(0, b"Language?");
     a.here("enter_found_language");
     a.stx(abs(var::LANGUAGE));
     a.here("enter_kept_language");

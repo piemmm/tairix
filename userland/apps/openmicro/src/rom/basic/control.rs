@@ -59,9 +59,10 @@ fn lines(a: &mut Asm) {
     a.jsr("decode_reference");
     a.stx(zp(LINE_NUMBER));
     a.sty(zp(LINE_NUMBER + 1));
+    a.here("past_reference");
     a.lda(zp(z::OFFSET_A));
     a.clc();
-    a.adc(imm(3));
+    a.adc(imm(super::crunch::REFERENCE - 1));
     a.sta(zp(z::OFFSET_A));
     a.rts();
     a.bind(expression);
@@ -155,9 +156,6 @@ fn returns(a: &mut Asm) {
     a.here("resume_statement");
     a.jsr("resume_pointer");
     a.jmp("statement");
-    a.here("resume_at");
-    a.jsr("resume_pointer");
-    a.jmp("statement_done");
     a.here("resume_pointer");
     a.stx(zp(z::TEXT_A));
     a.sty(zp(z::TEXT_A + 1));
@@ -194,7 +192,8 @@ fn returns(a: &mut Asm) {
     a.ldx(abs(GOSUB_LOW).y());
     a.lda(abs(GOSUB_HIGH).y());
     a.tay();
-    a.jmp("resume_at");
+    a.jsr("resume_pointer");
+    a.jmp("statement_done");
 
     // REPEAT: its return point kept, then the statement after it.
     a.here("statement_repeat");
@@ -298,8 +297,10 @@ fn loops(a: &mut Asm) {
     let (stepped, given) = (a.local(), a.local());
     a.beq(stepped);
     a.stx(zp(z::OP));
-    a.jsr("int_one");
-    a.jmp(given);
+    a.jsr("int_zero");
+    a.inc(zp(z::IAC));
+    a.lda(imm(kind::INTEGER));
+    a.bne(given);
     a.bind(stepped);
     a.jsr("expr");
     a.stx(zp(z::OP));
@@ -357,12 +358,6 @@ fn for_entries(a: &mut Asm) {
     a.lda(zp(z::TYPE));
     a.jsr("store_variable");
     a.ldx(zp(ENTRY));
-    a.rts();
-
-    a.here("int_one");
-    a.jsr("int_zero");
-    a.inc(zp(z::IAC));
-    a.lda(imm(kind::INTEGER));
     a.rts();
 }
 
@@ -497,8 +492,7 @@ fn next_real(a: &mut Asm, real: Label, carry_on: Label, finished: Label) {
     a.bne(ended);
     a.jmp("statement_next");
     a.bind(ended);
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
     a.bind(carry_on);
     a.ldx(zp(ENTRY));
     a.ldy(abs(page::STACKS + FOR_RETURN + 1).x());
@@ -522,7 +516,6 @@ fn conditions(a: &mut Asm) {
     // character after it.
     a.here("condition");
     a.jsr("expr");
-    a.tay();
     let real = a.local();
     a.bmi(real);
     a.bne("condition_integer");
@@ -599,7 +592,7 @@ fn on(a: &mut Asm) {
     a.pha();
     // The count down from n through the list; past its end, or out of
     // range, the ELSE part if there is one.
-    let (item, chosen, range, skip, else_part, missing) = (
+    let (item, chosen, small, skip, else_part, missing) = (
         a.local(),
         a.local(),
         a.local(),
@@ -607,12 +600,16 @@ fn on(a: &mut Asm) {
         a.local(),
         a.local(),
     );
+    // Out of range counts from 0, which a line has too few commas to reach.
+    a.ldx(zp(z::IAC));
     a.lda(zp(z::IAC + 1));
     a.ora(zp(z::IAC + 2));
     a.ora(zp(z::IAC + 3));
-    a.bne(range);
-    a.ldx(zp(z::IAC));
-    a.beq(range);
+    a.beq(small);
+    a.ldx(imm(0));
+    a.bind(small);
+    a.txa();
+    a.beq(skip);
     a.bind(item);
     a.dex();
     a.beq(chosen);
@@ -628,15 +625,6 @@ fn on(a: &mut Asm) {
     a.bne(skip);
     a.bind(missing);
     a.jmp("err_on_range");
-    a.bind(range);
-    a.jsr("next_a");
-    a.cmp(imm(word::ELSE.token));
-    a.beq(else_part);
-    a.cmp(imm(CR));
-    a.beq(missing);
-    a.cmp(imm(b':'));
-    a.bne(range);
-    a.beq(missing);
     a.bind(else_part);
     a.pla();
     a.jmp("branch_part");

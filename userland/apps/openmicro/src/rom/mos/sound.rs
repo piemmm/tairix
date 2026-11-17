@@ -290,6 +290,7 @@ fn commands(a: &mut Asm, model: Model) {
     a.here("sound_buffer");
     a.ldy(imm(0));
     a.lda(zp(os::CALL_X).ind_y());
+    a.here("sound_channel_buffer");
     a.and(imm(3));
     a.ora(imm(number::SOUND));
     a.tax();
@@ -346,10 +347,7 @@ fn bell(a: &mut Asm, model: Model) {
     a.rts();
     a.here("bell_buffer");
     a.lda(abs(var::BELL_CHANNEL));
-    a.and(imm(3));
-    a.ora(imm(number::SOUND));
-    a.tax();
-    a.rts();
+    a.jmp("sound_channel_buffer");
 
     // A sound queue flushed: its note stops, the chip silenced at the next
     // tick. X is kept.
@@ -540,6 +538,8 @@ fn synchronising(a: &mut Asm) {
     a.rts();
 }
 
+const _: () = assert!(phase::SUSTAIN != 0);
+
 /// Taking a note from channel X's queue.
 fn starting(a: &mut Asm, model: Model) {
     // Start the note at the head of channel X's queue, C clear, unless
@@ -604,6 +604,7 @@ fn starting(a: &mut Asm, model: Model) {
     a.lda(abs(field::ENVELOPE).x());
     a.bmi("sound_start_silence");
     a.lda(imm(phase::RELEASE));
+    a.here("sound_start_phase");
     a.sta(abs(field::PHASE).x());
     a.clc();
     a.rts();
@@ -627,9 +628,7 @@ fn starting(a: &mut Asm, model: Model) {
     a.lda(imm(0xFF));
     a.sta(abs(field::ENVELOPE).x());
     a.lda(imm(phase::SUSTAIN));
-    a.sta(abs(field::PHASE).x());
-    a.clc();
-    a.rts();
+    a.bne("sound_start_phase");
 
     a.here("sound_start_envelope");
     a.asl(Acc);

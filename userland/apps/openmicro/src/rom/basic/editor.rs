@@ -56,6 +56,8 @@ const _: () =
     assert!(AT_DEFAULT >> 16 == 0 && OSFILE_SAVE == 0 && page::STRING.trailing_zeros() >= 8);
 /// A record's bytes before its text.
 const HEADER: u8 = byte(program::HEADER);
+/// A record's length byte, the last of its header.
+pub(super) const LENGTH_AT: u8 = HEADER - 1;
 /// A typed line's text lies after its number's reference just as a record's
 /// lies after its header, so one offset reads both.
 const _: () = assert!(HEADER == REFERENCE);
@@ -145,10 +147,12 @@ fn prompt(a: &mut Asm) {
     a.ldx(imm(0xFF));
     a.txs();
     a.jsr("clear_stacks");
-    // From here an error is in a typed line, not the program.
+    // From here an error is in a typed line, not the program, and ON ERROR
+    // is BASIC II's own report again.
     a.lda(imm(0));
     a.sta(zp(z::OFFSET_A));
     a.sta(zp(z::TEXT_A));
+    a.sta(zp(z::ON_ERROR + 1));
     a.lda(imm(hi(page::INPUT)));
     a.sta(zp(z::TEXT_A + 1));
     a.lda(imm(b'>'));
@@ -267,7 +271,7 @@ fn program(a: &mut Asm) {
     a.iny();
     a.lda(zp(z::TOP).ind_y());
     a.bmi(end);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(z::TOP).ind_y());
     a.beq(bad);
     a.jsr("pointer_add");
@@ -340,33 +344,55 @@ fn clearing(a: &mut Asm) {
     a.ldx(imm(lo(z::DATA)));
     a.bne("page_pointer");
 
+    finding(a);
+}
+
+/// A line's record by its number, and the number of the line being run.
+fn finding(a: &mut Asm) {
     // The record of the first line numbered at least LINE_NUMBER, or the
-    // program's end: Z set if it is that line.
+    // program's end: Z set if it is that line. Y walks the records' length
+    // bytes from a page in RECORD, adding each length; SOURCE, two bytes
+    // lower, reads each number. A line in an earlier 256 is passed on its
+    // high byte alone.
     a.here("find_line");
     a.lda(imm(0));
     a.sta(zp(RECORD));
-    a.lda(zp(z::PAGE));
-    a.sta(zp(RECORD + 1));
-    a.here("find_line_record");
-    a.ldy(imm(1));
-    a.lda(zp(RECORD).ind_y());
+    a.lda(imm(0xFE));
+    a.sta(zp(SOURCE));
+    a.ldx(zp(z::PAGE));
+    a.stx(zp(RECORD + 1));
+    a.dex();
+    a.stx(zp(SOURCE + 1));
+    a.ldy(imm(LENGTH_AT));
+    let (record, before, ended) = (a.here_local(), a.local(), a.local());
+    a.lda(zp(SOURCE).ind_y());
     a.cmp(zp(LINE_NUMBER + 1));
-    a.bne("find_line_high");
+    a.bcc(before);
+    a.bne(ended);
     a.iny();
-    a.lda(zp(RECORD).ind_y());
+    a.lda(zp(SOURCE).ind_y());
+    a.dey();
     a.cmp(zp(LINE_NUMBER));
-    a.beq(RTS);
-    a.here("find_line_high");
-    a.bcs("find_line_past");
-    a.ldy(imm(3));
-    a.lda(zp(RECORD).ind_y());
-    a.adc(zp(RECORD));
-    a.sta(zp(RECORD));
-    a.bcc("find_line_record");
+    a.bcs(ended);
+    a.bind(before);
+    a.tya();
+    a.adc(zp(RECORD).ind_y());
+    a.tay();
+    a.bcc(record);
     a.inc(zp(RECORD + 1));
-    a.bne("find_line_record");
-    a.here("find_line_past");
-    a.lda(imm(1));
+    a.inc(zp(SOURCE + 1));
+    a.bcs(record);
+    a.bind(ended);
+    a.php();
+    a.tya();
+    a.sec();
+    a.sbc(imm(LENGTH_AT));
+    a.sta(zp(RECORD));
+    let kept = a.local();
+    a.bcs(kept);
+    a.dec(zp(RECORD + 1));
+    a.bind(kept);
+    a.plp();
     a.rts();
 
     // The number of the line holding the statement pointer's last
@@ -388,7 +414,7 @@ fn clearing(a: &mut Asm) {
     a.ldy(imm(1));
     a.lda(zp(RECORD).ind_y());
     a.bmi(here);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(RECORD).ind_y());
     a.sec();
     a.adc(zp(RECORD));
@@ -398,7 +424,7 @@ fn clearing(a: &mut Asm) {
     a.cpx(zp(SOURCE));
     a.sbc(zp(SOURCE + 1));
     a.bcs(here);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(RECORD).ind_y());
     a.ldx(imm(lo(RECORD)));
     a.jsr("pointer_add");
@@ -418,7 +444,7 @@ fn moves(a: &mut Asm) {
     // The record at RECORD taken out: the program above it moved down,
     // TOP with it, which also marks where the moving ends.
     a.here("delete_record");
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(RECORD).ind_y());
     a.tax();
     a.lda(zp(RECORD));
@@ -499,6 +525,7 @@ fn listing(a: &mut Asm) -> Label {
     // Y 0 after.
     a.here("read_line");
     a.jsr("print_char");
+    a.here("read_line_quiet");
     a.lda(imm(0));
     a.jsr(entry::OSWORD);
     a.bcs("escaped");
@@ -591,7 +618,7 @@ fn listing(a: &mut Asm) -> Label {
     a.bcc(before);
     a.jsr("list_line");
     a.bind(before);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(LINE).ind_y());
     a.ldx(imm(lo(LINE)));
     a.jsr("pointer_add");
@@ -654,11 +681,7 @@ fn deleting(a: &mut Asm, syntax: Label) {
     a.lda(zp(z::TEXT_A + 1));
     a.sta(zp(LINE + 1));
     a.jsr("decode_reference");
-    a.lda(zp(z::OFFSET_A));
-    a.clc();
-    a.adc(imm(REFERENCE - 1));
-    a.sta(zp(z::OFFSET_A));
-    a.rts();
+    a.jmp("past_reference");
 }
 
 /// The step's Silly, which RENUMBER shares.
@@ -824,7 +847,7 @@ fn records(a: &mut Asm) {
     // RECORD on to the next record and GIVEN to its number; then as
     // first_record.
     a.here("next_record");
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(RECORD).ind_y());
     a.ldx(imm(lo(RECORD)));
     a.jsr("pointer_add");
@@ -886,7 +909,7 @@ fn records(a: &mut Asm) {
     a.clc();
     a.rts();
     a.bind(below);
-    a.ldy(imm(3));
+    a.ldy(imm(LENGTH_AT));
     a.lda(zp(SOURCE).ind_y());
     a.ldx(imm(lo(SOURCE)));
     a.jsr("pointer_add");

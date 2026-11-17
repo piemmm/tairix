@@ -586,7 +586,7 @@ fn a_call_with_its_text_and_an_error_block_are_placed_whole() {
         asm.pin(ORIGIN + 8, Asm::rts);
         asm.nop();
         asm.call_with_text(0x1234u16, &["A", "B"]);
-        asm.error(0x11, "E");
+        asm.error(0x11, b"E");
     })
     .unwrap();
     assert_eq!(image[..4], [0xEA, 0x4C, 0x09, 0xC0], "a hop over the pin");
@@ -599,11 +599,21 @@ fn a_call_with_its_text_and_an_error_block_are_placed_whole() {
 }
 
 #[test]
+fn an_error_message_may_hold_a_token_but_not_a_zero() {
+    let image = finished(|asm| asm.error(0x26, &[b'N', b'o', b' ', 0xE4])).unwrap();
+    assert_eq!(image[..7], [0x00, 0x26, b'N', b'o', b' ', 0xE4, 0]);
+    assert_eq!(
+        finished(|asm| asm.error(0x11, b"A\0B")),
+        Err(AsmError::ZeroInMessage { at: ORIGIN })
+    );
+}
+
+#[test]
 fn a_run_of_error_blocks_shares_each_message_end_with_the_next_brk() {
     let image = finished(|asm| {
         asm.pin(ORIGIN + 4, Asm::rts);
         asm.nop();
-        asm.error_run(&[("first", 0x11, "A"), ("second", 0x22, "BC")]);
+        asm.error_run(&[("first", 0x11, b"A"), ("second", 0x22, b"BC")]);
         asm.jmp("first");
         asm.jmp("second");
     })

@@ -32,10 +32,7 @@ pub fn emit(a: &mut Asm) {
     a.bcs("osword_unrecognised");
     a.jsr("osword_call");
     a.here("osword_return");
-    a.ldx(zp(os::CALL_X));
-    a.ldy(zp(os::CALL_Y));
-    a.lda(zp(os::CALL_A));
-    a.rts();
+    a.jmp("call_registers");
     a.here("osword_unrecognised");
     a.cmp(imm(USER_FIRST));
     a.bcs("osword_user");
@@ -128,9 +125,7 @@ fn memory(a: &mut Asm) {
     a.here("osword_read_memory");
     a.jsr("osword_address");
     a.lda(zp(os::SCRATCH).ind_y());
-    a.ldy(imm(4));
-    a.sta(zp(os::CALL_X).ind_y());
-    a.rts();
+    a.jmp("osword_result");
 
     a.here("osword_write_memory");
     a.ldy(imm(4));
@@ -165,6 +160,8 @@ fn graphics(a: &mut Asm) {
     a.bpl("osword_read_pixel_point");
     a.jsr("external_to_internal");
     a.jsr("read_pixel");
+    // A into the block's result byte.
+    a.here("osword_result");
     a.ldy(imm(4));
     a.sta(zp(os::CALL_X).ind_y());
     a.rts();

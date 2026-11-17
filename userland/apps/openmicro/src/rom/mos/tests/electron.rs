@@ -11,11 +11,19 @@ use crate::machine::electron::{control, sheila as ula};
 use crate::media::tape::Tape;
 use crate::rom::harness::{electron, last_number, press, screen, shows, type_text, wait};
 
+/// The cursor flashes with TIME, so the prompt is sampled across a flash.
 #[test]
 fn the_electron_starts_with_its_own_name_then_basic() {
-    let (machine, os) = electron();
-    let lines = screen(&machine, &os);
-    assert_eq!(&lines[..6], ["", "OpenMOS Electron", "", "BASIC", "", ">_"]);
+    let (mut machine, os) = electron();
+    let mut shown = false;
+    for _ in 0..4 {
+        let lines = screen(&machine, &os);
+        assert_eq!(&lines[..5], ["", "OpenMOS Electron", "", "BASIC", ""]);
+        assert!(lines[5] == ">_" || lines[5] == ">", "{:?}", lines[5]);
+        shown |= lines[5] == ">_";
+        wait(&mut machine, 10);
+    }
+    assert!(shown, "the prompt's cursor shows within a flash");
     assert_eq!(machine.peek(vdu::MODE), 6, "it starts in MODE 6");
     assert!(machine.caps_lock_led(), "with CAPS LOCK on");
 }

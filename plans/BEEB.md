@@ -379,9 +379,17 @@ OSWRCH, OSRDCH, BRK, IRQ2 and tape OSFILE, OSARGS and FSC defaults are
 placed whole at theirs, the rest jump from theirs, and the vectors that do
 nothing return at &FFA6; the table itself lies at MOS 1.20's &D940, where
 software copies it to page 2 itself. Other internals software reads at their
-addresses are kept there: the 640-byte row table at &C375, high byte first;
-the MODE routine at &CB1D, the mode in A, whose clear starts at &CBF0, so a
-copy that ends there runs; the reset and interrupt entries at &D9CD and
+addresses are kept there: the 640-byte row table at &C375, high byte first,
+and the 40-byte one after it in the same page; the mode tables a mode set of
+a program's own reads, as *Flat Out*'s does, from &C3F7 to &C4A9 in MOS
+1.20's order, each sharing its neighbour's last byte; the MODE routine at
+&CB1D, the mode in A, whose clear starts at &CBF0, so a copy that ends there
+runs; the routines such a mode set calls, each with MOS 1.20's registers as
+observed through it — the VDU status and'ed with A at &C5A8, VDU 20 at
+&C839, 6845 register Y set to A at &C95E, VDU 26 at &C9BD, the cursor set
+to address XA at &C9F6, 6845 registers Y and Y+1 set to A and X at &CA2B,
+OSBYTE 20 at &CD07, a latch write at &E9F8 and the video ULA's control
+register at &EA00, which restarts the flash as MODE and OSBYTE &9A do; the reset and interrupt entries at &D9CD and
 &DC1C, which the processor's vectors name and *Bounty Bob Strikes Back*
 reads to know the OS by, the interrupt entry whole as far as its jump to the
 BRK path; and the key translation table OSBYTE &AC and &AD
@@ -401,6 +409,12 @@ its scenario in the corpus:
 - A point's mask is its place in its byte, whatever &362 and &363 hold; a
   line's step finds a byte's end by the bit its mask shifts out and takes the
   next byte's mask from &362 or &363, as MOS 1.20's does.
+- A horizontal line fill's right end takes &362's mask shifted on to its
+  pixel, ending where a bit falls off the byte as a line's step does. A
+  triangle's or CLG's span takes its ends the other way round: a left end
+  partway along a byte, when the span crosses bytes, from &363 shifted back to
+  its pixel, and the right end and a span within one byte by their pixels'
+  places, as MOS 1.20's do.
 - The external graphics cursor keeps the coordinates a PLOT was given; VDU 29
   keeps the cursor's pixel and recomputes its external form, and VDU 26 clears
   the origin and both cursors. A fill's run makes its start the previous point
@@ -536,9 +550,9 @@ buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
 ROM's own; and, against MOS 1.20's speed with BASIC II driving each, text
 output, scrolling and triangles are within a few percent, a window's clear
 is a tenth faster and a VDU 5 cell a fifth faster, its unlit pixels costing
-nothing, but a whole-screen clear in MODE 0 takes twice as long, a
-horizontal line fill three times, lines a quarter longer and an INKEY of
-one key 30% longer, and the scan while a key is held takes 11% of the
+nothing, but a whole-screen clear takes 1.7 times as long, a horizontal
+line fill two and a half times, lines a fifth longer and an INKEY of one
+key 30% longer, and the scan while a key is held takes 11% of the
 machine to its 7.5%. A VDU 5 row addresses its first pixel inside the
 window and steps its address and mask along to the rest. A fill finds its run by stepping one pixel's address and mask
 along its line, then plots it as a span; reaching MOS 1.20's speed would take
@@ -723,22 +737,19 @@ Behaviour pinned by observation, each with its test:
 Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
 placed after that code, where BASIC II's bytes go astray; and a byte formal
-is neither kept nor restored, where BASIC II's damages the program. Where it
-differs as a defect (D1987): statements over the resident integers such as
-`A%=B%+C%`, integer `*` and DIV, real products, a FOR over a real, array
-elements, FN calls, PROC calls with a long name or actuals and a VDU 5 cell
-take no more than 3% longer than BASIC II's, most less, so *Mine Sweeper*
-lays its board inside its countdown; but in 16 KiB with no room left REPEAT
-takes 73% longer, a false `IF A%=9` 28%, a string's assignment or join 14 to
-37%, a GOSUB 18%, an IF with AND 18%, a PROC call with a one-letter name and
-no actuals 12%, TRUE 19%, a real sum 3 to 13%, `SCORE%=SCORE%+1` 10% and the
-functions up to a tenth, while TAN and small whole powers are faster, so a
-program pacing itself against TIME with these can still run out of it. Its
-frames and its evaluator's levels keep what its own code holds, so it runs
-out of room at other depths than BASIC II's (D1988): an FN taking a real
-recurses 3% less deep, and an expression nested past 12 integer operators,
-or 16 real, is No room, where BASIC II's goes to 16 or 17 and then wraps its
-stack. And its tokeniser looks for a keyword from the table's start at each
+is neither kept nor restored, where BASIC II's damages the program.
+Measured with their separators or alone on their lines, as a program runs
+them, its statements are as fast as BASIC II's or faster, so *Mine Sweeper*
+lays its board inside its countdown: a quoted string joins a string in
+place, a quarter to a third faster than BASIC II's, and any other is stacked
+and joined, a chain of them looping without the operator dispatch, as fast
+as BASIC II's or faster. An operator's level keeps no return address,
+its operation following from the precedence its right operand was parsed
+from, and below 200 bytes of 6502 stack an integer left operand waits on the
+BASIC stack as BASIC II's does, so an expression nests 18 integer levels and
+20 real before No room, where BASIC II's evaluates 17 and 16 before its
+stack wraps, and an FN's level takes no more of the BASIC stack than BASIC
+II's. And its tokeniser looks for a keyword from the table's start at each
 word, so a long line with many names takes up to twice as long to enter.
 
 **DFS.** The Acorn DFS 1.20 interface over the 8271: the catalogue format,

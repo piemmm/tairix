@@ -348,6 +348,11 @@ pub enum AsmError {
         /// Where it starts.
         at: u16,
     },
+    /// An error message holding a zero, which ends it there.
+    ZeroInMessage {
+        /// Where its block starts.
+        at: u16,
+    },
     /// A branch to an `RTS` had none within its reach.
     NoReturnInReach {
         /// The branch's address.
@@ -1139,7 +1144,7 @@ impl Asm {
 
     /// `BRK` and the block its handler reads after it: the error's number,
     /// its message and a zero, placed whole, with nothing running on past it.
-    pub fn error(&mut self, number: u8, message: &str) {
+    pub fn error(&mut self, number: u8, message: &[u8]) {
         let Some(brk) = self.error_opcode(message) else {
             return;
         };
@@ -1152,7 +1157,7 @@ impl Asm {
 
     /// Error blocks one after another, each at its label, placed whole: a
     /// block's `BRK` is also the zero that ends the message before it.
-    pub fn error_run(&mut self, blocks: &[(&'static str, u8, &str)]) {
+    pub fn error_run(&mut self, blocks: &[(&'static str, u8, &[u8])]) {
         let mut opcode = None;
         for &(_, _, message) in blocks {
             opcode = self.error_opcode(message);
@@ -1174,11 +1179,11 @@ impl Asm {
         self.data_run = DataRun::Absent;
     }
 
-    /// The `BRK` opcode, `message` refused unless it is ASCII.
-    fn error_opcode(&mut self, message: &str) -> Option<u8> {
-        if !message.is_ascii() {
+    /// The `BRK` opcode, `message` refused if a zero would end it early.
+    fn error_opcode(&mut self, message: &[u8]) -> Option<u8> {
+        if message.contains(&0) {
             let at = self.pc();
-            self.fail(AsmError::NotAscii { at });
+            self.fail(AsmError::ZeroInMessage { at });
         }
         let brk = isa::encode(Mnemonic::Brk, Mode::Implied);
         if brk.is_none() {
@@ -1193,10 +1198,10 @@ impl Asm {
     }
 
     /// `BRK`, the error's number and its message, unterminated.
-    fn put_error(&mut self, brk: u8, number: u8, message: &str) {
+    fn put_error(&mut self, brk: u8, number: u8, message: &[u8]) {
         self.put(brk);
         self.put(number);
-        for &byte in message.as_bytes() {
+        for &byte in message {
             self.put(byte);
         }
     }

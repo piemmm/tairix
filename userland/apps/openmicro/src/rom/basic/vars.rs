@@ -340,8 +340,7 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.bne("dim_end");
     a.jmp("statement_dim");
     a.here("dim_end");
-    a.tax();
-    a.jmp("statement_done_x");
+    a.jmp("statement_done_a");
 }
 
 fn dim_room(a: &mut Asm) {
@@ -373,7 +372,7 @@ fn dim_room(a: &mut Asm) {
     a.jmp("err_dim_space");
 
     // The bytes of an array of DIMS dimensions whose sizes are stacked:
-    // the dimension byte, two per size, and each element; DIM space past
+    // the dimension byte, two per size, and each element; Bad DIM past
     // sixteen bits. XA the count.
     a.here("array_bytes");
     a.lda(imm(1));
@@ -420,16 +419,16 @@ fn dim_room(a: &mut Asm) {
     a.bcc(RTS);
     a.inx();
     a.bne(RTS);
-    a.jmp("err_dim_space");
+    a.jmp("err_bad_dim");
 }
 
 fn sizing(a: &mut Asm) {
-    // OFFSET × SIZE, DIM space past sixteen bits.
+    // OFFSET × SIZE, Bad DIM past sixteen bits, as BASIC II has it.
     a.here("times_size_checked");
     a.jsr("times_size");
     a.lda(zp(TO + 2));
     a.beq(RTS);
-    a.jmp("err_dim_space");
+    a.jmp("err_bad_dim");
 
     // OFFSET × SIZE in OFFSET, sixteen bits, past them in TO + 2; an
     // element's first subscript has nothing to multiply.
@@ -486,6 +485,8 @@ fn sizing(a: &mut Asm) {
     a.rts();
 }
 
+const _: () = assert!((page::RESIDENT >> 8) as u8 == place::INTEGER);
+
 fn names(a: &mut Asm) {
     // The name at the statement pointer. C clear: VAR its value, VTYPE and
     // NAME_TYPE its type. C set: no such name, VAR the entry to link a new
@@ -511,9 +512,9 @@ fn names(a: &mut Asm) {
     a.asl(Acc);
     a.asl(Acc);
     a.sta(zp(z::VAR));
+    // Page 4's high byte is the integer type's.
     a.lda(imm(hi(page::RESIDENT)));
     a.sta(zp(z::VAR + 1));
-    a.lda(imm(place::INTEGER));
     a.sta(zp(z::VTYPE));
     a.sta(zp(NAME_TYPE));
     a.clc();
@@ -651,7 +652,7 @@ fn lookup(a: &mut Asm) {
     a.lda(zp(NAME_TYPE));
     a.and(imm(ARRAY));
     a.beq(RTS);
-    a.jmp("array_element");
+    a.fall_into("array_element");
 }
 
 fn creating(a: &mut Asm) {
@@ -818,13 +819,14 @@ fn loading(a: &mut Asm) {
     a.lda(zp(z::VAR).ind_y());
     a.sta(zp(z::STRING_LENGTH));
     a.tay();
-    let (copy, copied) = (a.here_local(), a.local());
+    let copied = a.local();
     a.beq(copied);
+    let copy = a.here_local();
     a.dey();
     a.lda(zp(FROM).ind_y());
     a.sta(abs(page::STRING).y());
     a.tya();
-    a.jmp(copy);
+    a.bne(copy);
     a.bind(copied);
     a.lda(imm(kind::STRING));
     a.rts();
@@ -977,13 +979,14 @@ fn string_stores(a: &mut Asm) {
     // STRING_LENGTH bytes from FROM copied to TO.
     a.here("store_text");
     a.ldy(zp(z::STRING_LENGTH));
-    let text = a.here_local();
     a.beq(RTS);
+    let text = a.here_local();
     a.dey();
     a.lda(zp(FROM).ind_y());
     a.sta(zp(TO).ind_y());
     a.tya();
-    a.jmp(text);
+    a.bne(text);
+    a.rts();
 }
 
 fn stack(a: &mut Asm) {
@@ -1013,32 +1016,34 @@ fn stack(a: &mut Asm) {
     a.lda(imm(kind::INTEGER));
     a.rts();
     a.bind(string);
+    a.here("push_string");
     a.lda(zp(z::STRING_LENGTH));
     a.clc();
     a.jsr("stack_claim");
     a.ldy(imm(0));
     a.lda(zp(z::STRING_LENGTH));
     a.sta(zp(z::STACK).ind_y());
-    let (text, done) = (a.here_local(), a.local());
-    a.cpy(zp(z::STRING_LENGTH));
+    // Each character at the place one past its own, after the length.
+    a.tay();
+    let done = a.local();
     a.beq(done);
-    a.lda(abs(page::STRING).y());
-    a.iny();
+    let text = a.here_local();
+    a.lda(abs(page::STRING - 1).y());
     a.sta(zp(z::STACK).ind_y());
+    a.dey();
     a.bne(text);
     a.bind(done);
     a.lda(imm(kind::STRING));
     a.rts();
 
-    // The BASIC stack down A bytes, one more with C clear; No room if that
-    // meets the heap.
+    // The BASIC stack down A bytes, one more with C clear, by adding A's
+    // complement and C; No room if that meets the heap.
     a.here("stack_claim");
-    a.sta(zp(LENGTH));
-    a.lda(zp(z::STACK));
-    a.sbc(zp(LENGTH));
+    a.eor(imm(0xFF));
+    a.adc(zp(z::STACK));
     a.tay();
     a.lda(zp(z::STACK + 1));
-    a.sbc(imm(0));
+    a.adc(imm(0xFF));
     let full = a.local();
     a.bcc(full);
     a.tax();
@@ -1086,10 +1091,12 @@ fn stack(a: &mut Asm) {
     a.sta(zp(z::VAR + 1));
     a.rts();
 
-    // The string on the BASIC stack dropped.
+    // The string on the BASIC stack dropped; from `string_release`, A
+    // its length.
     a.here("pop_string");
     a.ldy(imm(0));
     a.lda(zp(z::STACK).ind_y());
+    a.here("string_release");
     a.sec();
     a.adc(imm(0));
     a.bcc("stack_release");

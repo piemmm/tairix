@@ -43,6 +43,14 @@ mod option {
     pub const LONG: u8 = 0x04;
     pub const RESPONSE: u8 = 0x03;
     pub const ABORT: u8 = 0x01;
+    /// The nibble in force is kept in the high half of its byte, so BIT
+    /// reads messages into N and long messages into V.
+    pub const IN_FORCE_SHIFT: u32 = 4;
+    pub const MESSAGES_IN_FORCE: u8 = MESSAGES << IN_FORCE_SHIFT;
+    pub const LONG_IN_FORCE: u8 = LONG << IN_FORCE_SHIFT;
+    pub const RESPONSE_IN_FORCE: u8 = RESPONSE << IN_FORCE_SHIFT;
+    pub const ABORT_IN_FORCE: u8 = ABORT << IN_FORCE_SHIFT;
+    const _: () = assert!(MESSAGES_IN_FORCE == 0x80 && LONG_IN_FORCE == 0x40);
     /// Both nibbles as every reset and *OPT 0 leave them: LOAD and SAVE
     /// with short messages, reporting errors and looking again; sequential
     /// access quiet, raising them.
@@ -163,11 +171,12 @@ mod z {
 }
 
 /// MODE's bits.
+/// Bits 7 and 6, which BIT reads into N and V.
 mod mode {
     /// Into memory at the address the caller gave rather than the file's.
-    pub const GIVEN_ADDRESS: u8 = 0x01;
+    pub const GIVEN_ADDRESS: u8 = 0x40;
     /// The file is being run, so a locked one may load.
-    pub const RUN: u8 = 0x20;
+    pub const RUN: u8 = 0x80;
 }
 
 mod error {
@@ -181,11 +190,11 @@ mod error {
     pub const EOF: u8 = 0xDF;
     pub const ESCAPE: u8 = 0x11;
     /// The block errors, from Data? on, each raised by its own BRK.
-    pub const BLOCK_ERRORS: [(&str, u8, &str); 4] = [
-        ("cfs_error_data", DATA, "Data?"),
-        ("cfs_error_header", HEADER, "Header?"),
-        ("cfs_error_block", BLOCK, "Block?"),
-        ("cfs_error_file", FILE, "File?"),
+    pub const BLOCK_ERRORS: [(&str, u8, &[u8]); 4] = [
+        ("cfs_error_data", DATA, b"Data?"),
+        ("cfs_error_header", HEADER, b"Header?"),
+        ("cfs_error_block", BLOCK, b"Block?"),
+        ("cfs_error_file", FILE, b"File?"),
     ];
 }
 
@@ -282,9 +291,7 @@ fn vectors(a: &mut Asm, model: Model) {
     a.sta(zp(os::CFS_OPTIONS));
     a.lda(imm(DEFAULT_GAP));
     a.sta(abs(cfs::GAP));
-    a.lda(imm(0));
-    a.sta(zp(os::CFS_STATUS));
-    a.rts();
+    a.fall_into("cfs_shut_down");
     a.later(|a| {
         a.here("cfs_fsc_low");
         for routine in FSC_ROUTINES {
@@ -297,14 +304,14 @@ fn vectors(a: &mut Asm, model: Model) {
             a.byte(hi(sym(routine) + -1));
         }
     });
-    a.here("cfs_handles");
-    a.ldx(imm(INPUT_HANDLE));
-    a.ldy(imm(OUTPUT_HANDLE));
-    a.rts();
     // Another filing system takes over: the files are forgotten.
     a.here("cfs_shut_down");
     a.lda(imm(0));
     a.sta(zp(os::CFS_STATUS));
+    a.rts();
+    a.here("cfs_handles");
+    a.ldx(imm(INPUT_HANDLE));
+    a.ldy(imm(OUTPUT_HANDLE));
     a.rts();
 
     // OSBYTE &89: the motor relay, X non-zero to close it.
@@ -404,7 +411,7 @@ fn select_tape(a: &mut Asm, model: Model) {
     a.sta(zp(os::CFS_OPTIONS));
     a.rts();
     a.here("cfs_opt_bad");
-    a.error(0xCB, "Bad option");
+    a.error(0xCB, b"Bad option");
     // What *OPT 1 and 2 leave of &E3, and the bits each Y sets.
     a.later(|a| {
         a.here("cfs_opt_keep");
@@ -492,16 +499,14 @@ fn cfs_load(a: &mut Asm) {
     a.lda(abs(cfs::HEADER + header::FLAG));
     a.and(imm(flag::LOCKED));
     a.beq("cfs_load_unlocked");
-    a.lda(zp(z::MODE));
-    a.and(imm(mode::RUN));
-    a.bne("cfs_load_unlocked");
+    a.bit(zp(z::MODE));
+    a.bmi("cfs_load_unlocked");
     a.jsr("cfs_read_off");
-    a.error(error::LOCKED, "Locked");
+    a.error(error::LOCKED, b"Locked");
     a.here("cfs_load_unlocked");
     a.jsr("cfs_loading");
-    a.lda(zp(z::MODE));
-    a.and(imm(mode::GIVEN_ADDRESS));
-    a.bne("cfs_load_data");
+    a.bit(zp(z::MODE));
+    a.bvs("cfs_load_data");
     a.ldx(imm(3));
     let next = a.here_local();
     a.lda(abs(cfs::HEADER + header::LOAD).x());
@@ -596,7 +601,7 @@ fn cfs_catalogue(a: &mut Asm) {
     a.here("cfs_catalogue");
     a.jsr("cfs_options_file");
     a.lda(zp(z::OPTIONS));
-    a.ora(imm(option::MESSAGES));
+    a.ora(imm(option::MESSAGES_IN_FORCE));
     a.sta(zp(z::OPTIONS));
     a.tsx();
     a.stx(zp(z::STACK));
@@ -617,10 +622,7 @@ fn cfs_catalogue(a: &mut Asm) {
     a.here("cfs_catalogue_end");
     a.ldx(zp(z::STACK));
     a.txs();
-    a.lda(zp(os::CFS_STATUS));
-    a.and(imm(!state::CATALOGUE));
-    a.sta(zp(os::CFS_STATUS));
-    a.rts();
+    a.jmp("cfs_catalogue_clear");
 }
 
 /// OSFIND, OSBGET, OSBPUT and EOF.
@@ -748,7 +750,7 @@ fn cfs_bget(a: &mut Asm) {
     a.sec();
     a.rts();
     a.here("cfs_eof_error");
-    a.error(error::EOF, "EOF");
+    a.error(error::EOF, b"EOF");
 
     // Y names the file open to read, or a Channel error.
     a.here("cfs_input_open");
@@ -759,7 +761,7 @@ fn cfs_bget(a: &mut Asm) {
     a.beq("cfs_channel");
     a.rts();
     a.here("cfs_channel");
-    a.error(error::CHANNEL, "Channel");
+    a.error(error::CHANNEL, b"Channel");
 
     // C set if the open file has nothing more to read; otherwise the
     // buffer holds its next byte, the next block read if need be.
@@ -794,8 +796,11 @@ fn cfs_bget_block(a: &mut Asm) {
     a.sta(zp(z::EXPECT));
     a.lda(abs(cfs::BGET_BLOCK + 1));
     a.sta(zp(z::EXPECT + 1));
+    // The sequential options, moved into the high half they are kept in.
     a.lda(zp(os::CFS_OPTIONS));
-    a.and(imm(0x0F));
+    for _ in 0..option::IN_FORCE_SHIFT {
+        a.asl(Acc);
+    }
     a.jsr("cfs_options_set");
     a.lda(imm(0));
     a.sta(zp(z::MODE));
@@ -878,8 +883,11 @@ fn cfs_bput_flush(a: &mut Asm) {
     a.sta(zp(z::ADDRESS));
     a.lda(imm(hi(BPUT_BUFFER)));
     a.sta(zp(z::ADDRESS + 1));
+    // The sequential options, moved into the high half they are kept in.
     a.lda(zp(os::CFS_OPTIONS));
-    a.and(imm(0x0F));
+    for _ in 0..option::IN_FORCE_SHIFT {
+        a.asl(Acc);
+    }
     a.sta(zp(z::OPTIONS));
     a.jsr("cfs_write_on");
     a.lda(imm(PAUSED_LEADER));
@@ -964,7 +972,7 @@ fn names(a: &mut Asm) {
     a.sta(abs(cfs::SEARCH_NAME).x());
     a.rts();
     a.here("cfs_name_bad");
-    a.error(0xCC, "Bad filename");
+    a.error(0xCC, b"Bad filename");
 
     // The name searched for as the header of the file being written.
     a.here("cfs_output_name");
@@ -1025,11 +1033,10 @@ fn names(a: &mut Asm) {
     // *CAT.
     a.here("cfs_options_file");
     a.lda(zp(os::CFS_OPTIONS));
-    for _ in 0..4 {
-        a.lsr(Acc);
-    }
+    a.and(imm(0xF0));
     a.here("cfs_options_set");
     a.sta(zp(z::OPTIONS));
+    a.here("cfs_catalogue_clear");
     a.lda(zp(os::CFS_STATUS));
     a.and(imm(!state::CATALOGUE));
     a.sta(zp(os::CFS_STATUS));
@@ -1084,9 +1091,8 @@ fn blocks(a: &mut Asm) {
     a.jsr("cfs_show_read");
     a.lda(abs(cfs::HEADER + header::FLAG));
     a.bpl("cfs_find_passed");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq("cfs_find_passed");
+    a.bit(zp(z::OPTIONS));
+    a.bpl("cfs_find_passed");
     a.jsr("osnewl");
     a.here("cfs_find_passed");
     a.sec();
@@ -1204,13 +1210,15 @@ fn transfers(a: &mut Asm, model: Model) {
     a.jmp("cfs_byte");
 
     // COUNT = the header's length; Z set if it is empty.
-    a.here("cfs_count_from_header");
-    a.lda(abs(cfs::HEADER + header::LENGTH));
-    a.sta(zp(z::COUNT));
-    a.lda(abs(cfs::HEADER + header::LENGTH + 1));
-    a.sta(zp(z::COUNT + 1));
-    a.ora(zp(z::COUNT));
-    a.rts();
+    a.later(|a| {
+        a.here("cfs_count_from_header");
+        a.lda(abs(cfs::HEADER + header::LENGTH));
+        a.sta(zp(z::COUNT));
+        a.lda(abs(cfs::HEADER + header::LENGTH + 1));
+        a.sta(zp(z::COUNT + 1));
+        a.ora(zp(z::COUNT));
+        a.rts();
+    });
 
     // One byte moved: Y and POINTER on, COUNT down; Z set when it is done.
     a.here("cfs_count_one");
@@ -1227,24 +1235,28 @@ fn transfers(a: &mut Asm, model: Model) {
     a.ora(zp(z::COUNT + 1));
     a.rts();
 
-    a.here("cfs_pointer_from_address");
-    a.lda(zp(z::ADDRESS));
-    a.sta(zp(z::POINTER));
-    a.lda(zp(z::ADDRESS + 1));
-    a.sta(zp(z::POINTER + 1));
-    a.ldy(imm(0));
-    a.rts();
+    a.later(|a| {
+        a.here("cfs_pointer_from_address");
+        a.lda(zp(z::ADDRESS));
+        a.sta(zp(z::POINTER));
+        a.lda(zp(z::ADDRESS + 1));
+        a.sta(zp(z::POINTER + 1));
+        a.ldy(imm(0));
+        a.rts();
+    });
 
     // ADDRESS = where the data moved to: POINTER plus Y.
-    a.here("cfs_address_from_pointer");
-    a.tya();
-    a.clc();
-    a.adc(zp(z::POINTER));
-    a.sta(zp(z::ADDRESS));
-    a.lda(zp(z::POINTER + 1));
-    a.adc(imm(0));
-    a.sta(zp(z::ADDRESS + 1));
-    a.rts();
+    a.later(|a| {
+        a.here("cfs_address_from_pointer");
+        a.tya();
+        a.clc();
+        a.adc(zp(z::POINTER));
+        a.sta(zp(z::ADDRESS));
+        a.lda(zp(z::POINTER + 1));
+        a.adc(imm(0));
+        a.sta(zp(z::ADDRESS + 1));
+        a.rts();
+    });
     cfs_write_block(a, model);
     cfs_crc_add(a);
 }
@@ -1346,23 +1358,10 @@ fn cfs_write_block(a: &mut Asm, model: Model) {
         }
     }
     a.rts();
-
-    a.here("cfs_crc_start");
-    a.lda(imm(0));
-    a.sta(zp(z::CRC_HIGH));
-    a.sta(zp(z::CRC_LOW));
-    a.rts();
-
-    // A from the device and into the CRC. Y is kept.
-    a.here("cfs_byte_crc");
-    a.jsr("cfs_byte");
-    a.pha();
-    a.jsr("cfs_crc_add");
-    a.pla();
-    a.rts();
 }
 
-/// The CRC-16/XMODEM with A added. Y is kept.
+/// The CRC-16/XMODEM with A added, Y kept; its start, and a byte read into
+/// it.
 fn cfs_crc_add(a: &mut Asm) {
     a.here("cfs_crc_add");
     a.eor(zp(z::CRC_HIGH));
@@ -1382,6 +1381,24 @@ fn cfs_crc_add(a: &mut Asm) {
     a.dex();
     a.bne("cfs_crc_bit");
     a.rts();
+
+    a.later(|a| {
+        a.here("cfs_crc_start");
+        a.lda(imm(0));
+        a.sta(zp(z::CRC_HIGH));
+        a.sta(zp(z::CRC_LOW));
+        a.rts();
+    });
+
+    // A from the device and into the CRC. Y is kept.
+    a.later(|a| {
+        a.here("cfs_byte_crc");
+        a.jsr("cfs_byte");
+        a.pha();
+        a.jsr("cfs_crc_add");
+        a.pla();
+        a.rts();
+    });
 }
 
 /// The cassette and the ROMs as sources, and the tape as a sink.
@@ -1410,7 +1427,7 @@ fn devices(a: &mut Asm, model: Model) {
     a.rts();
     a.here("cfs_escape");
     a.jsr("cfs_read_off");
-    a.error(error::ESCAPE, "Escape");
+    a.error(error::ESCAPE, b"Escape");
 
     // The current ROM's next byte; a ROM that gives none passes to the next.
     // Past every ROM's, *CAT is done and anything else did not find its
@@ -1443,7 +1460,7 @@ fn devices(a: &mut Asm, model: Model) {
     a.beq("file_not_found");
     a.jmp("cfs_catalogue_end");
     a.here("file_not_found");
-    a.error(error::NOT_FOUND, "File not found");
+    a.error(error::NOT_FOUND, b"File not found");
 
     // From the ROM &F5 counts to, the first that answers service call 13,
     // and so has data.
@@ -1569,9 +1586,8 @@ fn tones(a: &mut Asm, model: Model) {
     // "RECORD then RETURN" with the motor running, when messages are on;
     // the RETURN, or an Escape.
     a.here("cfs_record");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq(RTS);
+    a.bit(zp(z::OPTIONS));
+    a.bpl(RTS);
     match model {
         Model::ModelB => {
             a.lda(abs(var::SERIAL_ULA));
@@ -1658,16 +1674,14 @@ fn osrdrm(a: &mut Asm, model: Model) {
 /// What the filing system tells the user.
 fn messages(a: &mut Asm) {
     a.here("cfs_searching");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq(RTS);
+    a.bit(zp(z::OPTIONS));
+    a.bpl(RTS);
     a.call_with_text("print_inline", &["Searching"]);
     a.jmp("osnewl");
 
     a.here("cfs_loading");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq(RTS);
+    a.bit(zp(z::OPTIONS));
+    a.bpl(RTS);
     a.jsr("osnewl");
     a.call_with_text("print_inline", &["Loading"]);
     a.jmp("osnewl");
@@ -1689,11 +1703,8 @@ fn cfs_show_read(a: &mut Asm) {
     a.ldy(imm(hi(cfs::BPUT_HEADER)));
     a.clc();
     a.here("cfs_show");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.bne("cfs_show_on");
-    a.rts();
-    a.here("cfs_show_on");
+    a.bit(zp(z::OPTIONS));
+    a.bpl(RTS);
     a.stx(zp(z::SHOWN));
     a.sty(zp(z::SHOWN + 1));
     a.bcc("cfs_show_line");
@@ -1741,9 +1752,8 @@ fn cfs_show_read(a: &mut Asm) {
     a.ldy(imm(lo(header::LENGTH)));
     a.lda(zp(z::SHOWN).ind_y());
     a.jsr("print_hex");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::LONG));
-    a.beq(RTS);
+    a.bit(zp(z::OPTIONS));
+    a.bvc(RTS);
     a.ldx(imm(4));
     a.ldy(imm(lo(header::LOAD + 3)));
     a.jsr("cfs_show_address");
@@ -1770,9 +1780,8 @@ fn cfs_show_read(a: &mut Asm) {
 /// motor stopped either way.
 fn cfs_finished(a: &mut Asm) {
     a.here("cfs_finished");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq("cfs_finished_off");
+    a.bit(zp(z::OPTIONS));
+    a.bpl("cfs_finished_off");
     a.lda(imm(0x07));
     a.jsr("oswrch");
     a.jsr("osnewl");
@@ -1805,16 +1814,15 @@ fn errors(a: &mut Asm) {
     a.here("cfs_error");
     a.sta(zp(z::ERROR));
     a.lda(zp(z::OPTIONS));
-    a.and(imm(option::RESPONSE));
+    a.and(imm(option::RESPONSE_IN_FORCE));
     a.bne("cfs_error_reported");
     a.clc();
     a.rts();
     a.here("cfs_error_reported");
-    a.and(imm(option::ABORT));
+    a.and(imm(option::ABORT_IN_FORCE));
     a.bne("cfs_error_raise");
-    a.lda(zp(z::OPTIONS));
-    a.and(imm(option::MESSAGES));
-    a.beq("cfs_error_again");
+    a.bit(zp(z::OPTIONS));
+    a.bpl("cfs_error_again");
     a.jsr("osnewl");
     a.jsr("cfs_error_record");
     a.ldy(imm(2));

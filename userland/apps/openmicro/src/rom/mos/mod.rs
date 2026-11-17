@@ -198,8 +198,10 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
         reset::pin_vector_defaults(&mut a);
         reset::pin_entry(&mut a);
         irq::pin_entry(&mut a);
-        modes::pin_rows_640(&mut a);
+        modes::pin_tables(&mut a);
         vdu::pin_mode(&mut a);
+        vdu::pin_entries(&mut a);
+        graphics::pin_font_explode(&mut a);
     }
     font::emit(&mut a);
     if model == Model::Electron {

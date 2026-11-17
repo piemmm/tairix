@@ -1,7 +1,9 @@
 //! Control: loops, conditions, subroutines, procedures and functions,
 //! DATA, and ON ERROR.
 
-use super::{assert_screen, assert_screen_from};
+use alloc::vec::Vec;
+
+use super::{after, assert_screen, assert_screen_from};
 
 #[test]
 fn read_takes_data_as_it_is_written() {
@@ -208,6 +210,38 @@ fn procedures_bind_parameters_and_locals() {
             ">",
         ],
     );
+}
+
+/// The regression: a level of an FN recursing with a real argument took
+/// more of the BASIC stack than BASIC II's, which takes 39 bytes, and 37
+/// with an integer, so it ran out of room shallower.
+#[test]
+fn a_recursing_function_takes_no_more_room_a_level_than_basic_iis() {
+    let screen = after(
+        &[
+            "10 D%=0:PRINT FNR(1.5):D%=0:PRINT FNI(1)",
+            "20 PRINT \"R\";(S%-T%)/10;\" I\";(U%-V%)/10",
+            "30 END",
+            "40 DEF FNR(N):D%=D%+1:IF D%=10 S%=!4 AND &FFFF",
+            "50 IF D%=20 T%=!4 AND &FFFF:=0",
+            "60 =N+FNR(N+0.5)",
+            "70 DEF FNI(N%):D%=D%+1:IF D%=10 U%=!4 AND &FFFF",
+            "80 IF D%=20 V%=!4 AND &FFFF:=0",
+            "90 =N%+FNI(N%+1)",
+            "RUN",
+        ],
+        100,
+    );
+    let row = screen
+        .iter()
+        .find(|row| row.starts_with('R'))
+        .expect("the bytes a level are printed");
+    let bytes: Vec<u32> = row
+        .split(['R', 'I'])
+        .filter_map(|field| field.trim().parse().ok())
+        .collect();
+    assert_eq!(bytes.len(), 2, "{row}");
+    assert!(bytes[0] <= 39 && bytes[1] <= 37, "{row}");
 }
 
 #[test]
@@ -434,6 +468,62 @@ fn data_starts_again_at_each_typed_line_and_at_clear() {
             ">READ A%,B%:PRINT A%;B%",
             "         12",
             ">",
+        ],
+    );
+}
+
+/// EVAL, a READ item and VAL evaluate text away from the statement, and an
+/// error there is the statement's line, or none typed; an FN's body is its
+/// own line.
+#[test]
+fn an_error_in_text_borrowed_from_a_statement_is_at_the_statement_s_line() {
+    assert_screen(
+        &[
+            "X=EVAL(\"1/0\")",
+            "PRINT VAL(\"1E99\")",
+            "5 N%=0",
+            "10 ON ERROR PRINT ERL;:N%=N%+1:ON N% GOTO 30,40,50,60,70",
+            "20 X=EVAL(\"1/0\")",
+            "30 READ Q",
+            "40 X=EVAL(\"FNA\")",
+            "50 X=FNB",
+            "60 X=FNC",
+            "70 END",
+            "100 DEF FNA=1/0",
+            "110 DEF FNB=EVAL(\"1/0\")",
+            "120 DEF FNC:READ R:=R",
+            "200 DATA 1/0",
+            "RUN",
+            "200 DATA EVAL(\"1/0\")",
+            "RUN",
+        ],
+        100,
+        &[
+            ">X=EVAL(\"1/0\")",
+            "",
+            "Division by zero",
+            ">PRINT VAL(\"1E99\")",
+            "",
+            "Too big",
+            ">5 N%=0",
+            ">10 ON ERROR PRINT ERL;:N%=N%+1:ON N% GO",
+            "TO 30,40,50,60,70",
+            ">20 X=EVAL(\"1/0\")",
+            ">30 READ Q",
+            ">40 X=EVAL(\"FNA\")",
+            ">50 X=FNB",
+            ">60 X=FNC",
+            ">70 END",
+            ">100 DEF FNA=1/0",
+            ">110 DEF FNB=EVAL(\"1/0\")",
+            ">120 DEF FNC:READ R:=R",
+            ">200 DATA 1/0",
+            ">RUN",
+            "        20        30       100       110",
+            "       120>200 DATA EVAL(\"1/0\")",
+            ">RUN",
+            "        20        30       100       110",
+            "       120>",
         ],
     );
 }

@@ -232,9 +232,14 @@ its documented workspace at the documented addresses, and its vectors'
 defaults at MOS 1.20's addresses, so software that sets a vector back to its
 original value still reaches the routine. The internals software reads at
 MOS 1.20's addresses lie there too: the default vector table at &D940, the
-row table at &C375, the MODE routine at &CB1D, and the reset and interrupt
-entries at &D9CD and &DC1C the processor's vectors name, which software reads
-to know the OS by. The workspace drives the
+row tables at &C375, the mode tables from &C3F7 to &C4A9 in MOS 1.20's
+order, the MODE routine at &CB1D, the routines a program setting a mode
+itself calls — the VDU status and'ed at &C5A8, VDU 20 at &C839, a 6845
+register at &C95E, VDU 26 at &C9BD, the cursor at &C9F6, a 6845 register
+pair at &CA2B, OSBYTE 20 at &CD07, the latch at &E9F8 and the video ULA at
+&EA00, each with MOS 1.20's registers — and the reset and interrupt entries
+at &D9CD and &DC1C the processor's vectors name, which software reads to
+know the OS by. The workspace drives the
 drivers as it drives MOS 1.20's, so a program that sets out a mode by writing
 it is drawn alike: the row table at &E0 is read halved for the 320-byte rows,
 and text is drawn through its masks at &D2 and &D3 as an OR then an EOR. It
@@ -247,8 +252,8 @@ for the same input. Where it differs on purpose: its character set is its own
 design, [`lib/vdu`](../lib/vdu.md)'s BBC arrangement; it does not reproduce
 &31A for a clipped line's start, some private keyboard and sound workspace, or
 redundant writes to a silenced sound channel; and, with no room left in 16 KiB,
-a whole-screen clear takes twice MOS 1.20's time, a horizontal line fill two
-and a half times and a line a fifth longer, where text output, scrolling,
+a whole-screen clear takes 1.7 times MOS 1.20's time, a horizontal line fill
+two and a half times and a line a fifth longer, where text output, scrolling,
 triangles and POINT are within a few percent of it, a VDU 5 cell takes a
 fifth less and its unlit pixels cost nothing. The behaviour pinned against MOS 1.20 is listed in
 the ROMs section of `plans/BEEB.md`.
@@ -279,19 +284,14 @@ BASIC II's room as it grows. Where it differs on purpose: its copyright
 message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
 astray; and a byte (`?`) as a PROC or FN parameter is neither kept nor put
-back, where BASIC II's damages the program. Statements over the resident
-integers A% to Z%, such as `A%=B%+C%`, integer `*` and DIV, real products, a
-FOR over a real, array elements, FN calls and PROC calls with a long name or
-actuals take no more than 3% longer than BASIC II's, most less, but some
-statements are still slower, a known defect: REPEAT takes 73% longer, a false
-IF 28%, a string's assignment or join 14 to 37%, a GOSUB 18%, an IF with AND
-18%, a PROC call with a one-letter name and no actuals 12%, TRUE 19%, a real
-sum 3 to 13%, `SCORE%=SCORE%+1` 10% and the functions up to a tenth, while TAN
-and small whole powers are faster, so a program that paces itself against
-TIME with these can run out of it. It runs out of room at other depths than
-BASIC II's, another known defect: a recursive FN taking a real stops 3% less
-deep, and an expression nested past 12 integer operators, or 16 real, is No
-room, where BASIC II's goes to 16 or 17 before its stack wraps. A long line
+back, where BASIC II's damages the program. Measured as a program runs
+them, with their separators or alone on their lines, its statements are as
+fast as BASIC II's or faster — REPEAT, a false IF, TRUE, a GOSUB's line
+search, real division, the functions and string joins among them, a quoted
+string joining a quarter to a third faster. An expression nests 18
+integer levels and 20 real before it is No room, where BASIC II's evaluates
+17 and 16 before its stack wraps, and an FN's level takes no more of the
+BASIC stack than BASIC II's. A long line
 with many names takes up to twice as long to enter.
 
 `tairix_openmicro::rom::dfs::build` assembles the DFS: the whole Acorn DFS 1.20

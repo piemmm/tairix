@@ -376,9 +376,9 @@ fn mnemonic(a: &mut Asm, tables: &Tables) -> (Label, Label, Label) {
     a.cmp(imm(0x80));
     a.bcs(token);
     a.dec(zp(z::OFFSET_A));
-    a.lda(imm(0));
-    a.sta(zp(PACKED));
-    a.sta(zp(PACKED + 1));
+    // Three letters shift fifteen bits in: of what PACKED held, only its bit
+    // 0 stays, as bit 15.
+    a.asl(zp(PACKED));
     a.ldx(imm(3));
     let letter = a.here_local();
     a.ldy(zp(z::OFFSET_A));
@@ -464,7 +464,6 @@ fn equ(a: &mut Asm, syntax: Label) {
     a.rts();
     a.bind(string);
     a.jsr("asm_value");
-    a.tay();
     let text = a.local();
     a.beq(text);
     a.jmp("err_type_mismatch");
@@ -703,6 +702,8 @@ fn address(a: &mut Asm, expression: Label, byte_error: Label, index_error: Label
     a.bcc(index_error);
 }
 
+const _: () = assert!(OPT_ERRORS == 2);
+
 fn operand_helpers(a: &mut Asm) {
     // C set if the class has mode A, from 1 to 8; A and X kept.
     a.here("asm_has");
@@ -726,15 +727,13 @@ fn operand_helpers(a: &mut Asm) {
     a.pha();
     a.dex();
     a.bpl(keep);
+    // ASM_QUIET, clear here, takes bit 7 from OPT's errors bit inverted.
     a.lda(zp(z::OPT));
-    a.and(imm(OPT_ERRORS));
-    let loud = a.local();
-    a.bne(loud);
-    a.lda(imm(0x80));
-    a.sta(zp(z::ASM_QUIET));
-    a.bind(loud);
+    a.eor(imm(OPT_ERRORS));
+    a.lsr(Acc);
+    a.lsr(Acc);
+    a.ror(zp(z::ASM_QUIET));
     a.jsr("expr");
-    a.tay();
     a.ldx(imm(0));
     a.stx(zp(z::ASM_QUIET));
     let restore = a.here_local();
@@ -798,17 +797,13 @@ fn listing(a: &mut Asm) {
     a.bind(bytes_done);
     a.lda(imm(SOURCE_COLUMN));
     a.jsr("pad_to");
-    let (text, character, listed) = (a.here_local(), a.local(), a.local());
+    let (text, listed) = (a.here_local(), a.local());
     a.ldy(zp(SOURCE));
     a.cpy(zp(END));
     a.beq(listed);
     a.inc(zp(SOURCE));
     a.lda(zp(z::TEXT_A).ind_y());
-    a.bpl(character);
-    a.jsr("print_token");
-    a.jmp(text);
-    a.bind(character);
-    a.jsr("print_char");
+    a.jsr("print_byte");
     a.jmp(text);
     a.bind(listed);
     a.jmp("print_newline");

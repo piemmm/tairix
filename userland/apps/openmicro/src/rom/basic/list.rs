@@ -18,6 +18,8 @@ pub(super) const LINE: u16 = z::SCRATCH + 9;
 /// The number being converted, and its five digits.
 const NUMBER: u16 = LINE + 2;
 const DIGITS: u16 = NUMBER + 2;
+/// A byte `print_token` leaves alone, for a caller's Y.
+pub(super) const TOKEN_KEPT: u16 = z::SCRATCH + 8;
 /// The loops a listing is inside, one count for each of `Options::LOOPS`.
 const OPEN_LOOPS: u16 = LISTING_LOOPS;
 /// LISTO's space after the number is its bit 0, the one space it counts.
@@ -80,7 +82,7 @@ fn lines(a: &mut Asm) {
     a.cmp(imm(0x80));
     let character = a.local();
     a.bcc(character);
-    a.sty(zp(z::SCRATCH + 8));
+    a.sty(zp(TOKEN_KEPT));
     a.cmp(imm(lineref::MARKER));
     a.beq("list_reference");
     // A FOR or REPEAT opens its loop, a NEXT or UNTIL closes one if any
@@ -106,7 +108,7 @@ fn lines(a: &mut Asm) {
     a.inc(zp(OPEN_LOOPS).x());
     a.bind(counted);
     a.jsr("print_token");
-    a.ldy(zp(z::SCRATCH + 8));
+    a.ldy(zp(TOKEN_KEPT));
     a.jmp("list_text");
     a.bind(character);
     a.jsr("print_char");
@@ -118,7 +120,7 @@ fn lines(a: &mut Asm) {
     a.here("list_reference");
     a.jsr("decode_reference");
     a.jsr("print_unsigned");
-    a.lda(zp(z::SCRATCH + 8));
+    a.lda(zp(TOKEN_KEPT));
     a.clc();
     a.adc(imm(byte(lineref::ENCODED)));
     a.tay();
@@ -147,6 +149,11 @@ fn lines(a: &mut Asm) {
 }
 
 fn keywords(a: &mut Asm) {
+    // A printed, a token as its keyword: N from loading it.
+    a.here("print_byte");
+    a.bmi("print_token");
+    a.jmp("print_char");
+
     // The keyword A stands for, a pseudo-variable's assigning token as its
     // own.
     a.here("print_token");
