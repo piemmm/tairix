@@ -1418,10 +1418,10 @@ fn key_gather(a: &mut Asm) {
     a.inx();
     a.cpx(imm(KEY_LIMIT));
     a.bne("key_gather");
-    a.here("key_bad");
-    a.error(0xFB, "Bad key");
-    a.here("key_in_use");
-    a.error(0xFA, "Key in use");
+    a.error_run(&[
+        ("key_bad", 0xFB, "Bad key"),
+        ("key_in_use", 0xFA, "Key in use"),
+    ]);
     a.here("key_gathered");
     a.ldy(imm(0));
     a.here("key_extend");

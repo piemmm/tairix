@@ -306,10 +306,19 @@ fn loops(a: &mut Asm) {
     a.bind(given);
     a.ldy(imm(lo(FOR_STEP)));
     a.jsr("store_for_value");
-    // NEXT returns to the character the FOR ended at.
-    a.dec(zp(z::OFFSET_A));
+    // NEXT returns to the statement after the FOR: past its colon, or at
+    // the line's end it ended at.
     a.jsr("return_point");
-    a.inc(zp(z::OFFSET_A));
+    a.lda(zp(z::OP));
+    a.cmp(imm(b':'));
+    let (past, low) = (a.local(), a.local());
+    a.beq(past);
+    a.txa();
+    a.bne(low);
+    a.dey();
+    a.bind(low);
+    a.dex();
+    a.bind(past);
     a.txa();
     a.pha();
     a.jsr("for_entry");
@@ -368,11 +377,17 @@ fn next_loop(a: &mut Asm) -> (Label, Label, Label) {
     a.jmp("err_no_for");
     a.bind(some);
     a.jsr("next_a");
+    let (named, innermost, unnamed) = (a.local(), a.local(), a.local());
+    // The commonest, a NEXT before a colon or the line's end, names none.
+    a.cmp(imm(b':'));
+    a.beq(unnamed);
+    a.cmp(imm(CR));
+    a.beq(unnamed);
     a.cmp(imm(b'@'));
-    let (named, innermost) = (a.local(), a.local());
     a.beq(named);
     a.jsr("is_name");
     a.bcs(named);
+    a.bind(unnamed);
     // C is set from for_entry: the depth is at least an entry.
     a.dec(zp(z::OFFSET_A));
     a.jsr("for_entry");
@@ -489,7 +504,7 @@ fn next_real(a: &mut Asm, real: Label, carry_on: Label, finished: Label) {
     a.ldy(abs(page::STACKS + FOR_RETURN + 1).x());
     a.lda(abs(page::STACKS + FOR_RETURN).x());
     a.tax();
-    a.jmp("resume_at");
+    a.jmp("resume_statement");
 
     // VAR at the entry's field Y.
     a.here("var_at_field");
@@ -545,8 +560,8 @@ fn conditions(a: &mut Asm) {
     a.dec(zp(z::OFFSET_A));
     a.jmp("statement");
     a.bind(false_);
-    a.dec(zp(z::OFFSET_A));
     a.ldy(zp(z::OFFSET_A));
+    a.dey();
     let (scan, found) = (a.here_local(), a.local());
     a.lda(zp(z::TEXT_A).ind_y());
     a.iny();
@@ -554,9 +569,8 @@ fn conditions(a: &mut Asm) {
     a.beq(found);
     a.cmp(imm(CR));
     a.bne(scan);
-    a.dey();
     a.sty(zp(z::OFFSET_A));
-    a.jmp("statement_done");
+    a.jmp("end_of_line");
     a.bind(found);
     a.sty(zp(z::OFFSET_A));
     a.jmp("branch_part");

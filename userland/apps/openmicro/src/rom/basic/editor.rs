@@ -338,7 +338,7 @@ fn clearing(a: &mut Asm) {
     // The DATA pointer at the program's start.
     a.here("restore_data");
     a.ldx(imm(lo(z::DATA)));
-    a.jmp("page_pointer");
+    a.bne("page_pointer");
 
     // The record of the first line numbered at least LINE_NUMBER, or the
     // program's end: Z set if it is that line.
@@ -931,9 +931,7 @@ fn files(a: &mut Asm) {
     a.here("file_block");
     a.jsr("expr_string");
     a.dec(zp(z::OFFSET_A));
-    a.ldy(zp(z::STRING_LENGTH));
-    a.lda(imm(CR));
-    a.sta(abs(page::STRING).y());
+    a.jsr("string_cr");
     a.ldx(imm(FILE_BLOCK_LENGTH - 1));
     a.lda(imm(0xFF));
     let fill = a.here_local();

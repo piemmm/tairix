@@ -51,3 +51,23 @@ script type:NEW\n;type:10 PRINT "A"\n;type:20 PRINT "B"\n;type:30 PRINT "C"\n;ty
 # A variable takes a ? or ! after it only with no space between: `IF DISP ?&81=C4+C3:...` tests DISP and runs the store, as Pentominoes' fill set-up does, and `PRINT F ?1` prints F and then ?1.
 scenario a_binary_indirection_follows_its_name_directly
 script type:CLS:DIM D% 10:?D%=7:D%?1=9:E%=D%:F=D%:?&70=0:?&71=0\n;wait:0.3;type:PRINT D%?1,F?1\n;wait:0.3;type:IF E% ?&70=3:PRINT "T"\n;wait:0.3;type:PRINT ?&70\n;wait:0.3;type:X=E% ?1\n;wait:0.3;type:PRINT F ?&71\n;wait:0.3;type:E% ?1=5\n;wait:0.3
+
+# A PROC or FN is found by its whole name, from its list or its DEF line: one whose name starts another's is neither found for it nor finds it, a space may come before the actuals, a call typed at the prompt finds it too, and one never defined is No such FN/PROC.
+scenario procedures_are_found_by_their_whole_names
+script type:NEW\n;type:10 PROCAB:PROCA:PROCABC:PROCA:PROCAB:PRINT\n;type:20 PRINT FNX(2),FNXY(3),FNX(4),FNCHAIN(1)\n;type:30 PROCX (5):PROCLONGNAMEPROC:PROCLONGNAME:PRINT\n;type:40 ON ERROR PRINT ERR:END\n;type:50 PROCNONE\n;type:100 DEFPROCA:VDU 65,32:ENDPROC\n;type:110 DEFPROCAB:VDU 65,66,32:ENDPROC\n;type:120 DEFPROCABC:VDU 65,66,67,32:ENDPROC\n;type:130 DEFFNX(N)=N*10\n;type:140 DEFFNXY(N)=N*100\n;type:150 DEFPROCX(N):PRINT N:ENDPROC\n;type:160 DEFPROCLONGNAMEPROC:VDU 76,80,32:ENDPROC\n;type:170 DEFPROCLONGNAME:VDU 76,32:ENDPROC\n;type:180 DEF FNCHAIN(N)=N+FNX(N)\n;type:CLS:RUN\n;wait:1;type:PROCAB:PROCABC:PRINT FNXY(1)\n;wait:0.3
+
+# DIV and MOD take the dividend's sign for the remainder and the signs' product for the quotient, whatever the dividend's size.
+scenario integer_division_keeps_its_signs_at_every_size
+script type:CLS:PRINT 5 DIV 3,-5 DIV 3,5 DIV -3,-5 DIV -3\n;wait:0.3;type:PRINT 1000 DIV 7,100000 DIV 3,&7FFFFFFF DIV 2,0 DIV 5\n;wait:0.3;type:PRINT 255 DIV 1,256 DIV 1,65535 DIV 255,&1000000 DIV 3\n;wait:0.3;type:PRINT &FFFFFF DIV 16,-&7FFFFFFF DIV 3,7 DIV 7,6 DIV 7\n;wait:0.3;type:PRINT 5 MOD 3,-5 MOD 3,5 MOD -3,100000 MOD 7\n;wait:0.3;type:PRINT &1234567 MOD 1000,0 MOD 9,&10000 DIV &100,&FFFF DIV &FFFF\n;wait:0.3
+
+# Integer products of operands of either size and sign, a product past 31 bits a real.
+scenario integer_products_of_every_size
+script type:CLS:PRINT 5*3,3*5,0*7,7*0\n;wait:0.3;type:PRINT 255*255,255*65535,65535*255,-5*3\n;wait:0.3;type:PRINT 5*-3,-5*-3,256*256,65535*65535\n;wait:0.3;type:PRINT -255*-255,200*300,300*200,65536*2\n;wait:0.3;type:PRINT 40*1000,-128*127,32767*2,46341*46341\n;wait:0.3
+
+# A real left operand waits while its right is found, a call of an FN among it, and combines with it as BASIC II's does, a string beside it a Type mismatch.
+scenario reals_wait_as_left_operands
+script type:NEW\n;type:10 X=2.5:Y=1.25:I%=3\n;type:20 PRINT X+Y,X-Y,X*Y,X/Y\n;type:30 PRINT X^2,X+I%,I%+X,X-I%\n;type:40 PRINT X<Y,X>Y,X=2.5,X>=I%\n;type:50 PRINT X AND 1,7.9 AND 3,7.9 DIV 2,7.9 MOD 3\n;type:60 PRINT X+(Y+(X+(Y+(X+Y)))),X*(Y+X*(Y-X*(Y+1)))\n;type:70 PRINT X+FNA(Y),X*FNA(X+FNA(Y)),FNF(10)\n;type:80 PRINT -0.0+0,-0.0=0,(-0.0)*1,X*0\n;type:90 ON ERROR PRINT ERR:END\n;type:100 PRINT X+"A"\n;type:1000 DEF FNA(N)=N*2+0.5\n;type:1010 DEF FNF(N):IF N<=1 THEN =1 ELSE =N*FNF(N-1)\n;type:CLS:RUN\n;wait:1
+
+# Integers made reals keep their values at every size, and a real loop counts as BASIC II's does.
+scenario integers_made_reals_keep_their_values
+script type:CLS:FOR J%=0 TO 28 STEP 4:X=2^J%:PRINT X-1,X+1,:NEXT:PRINT\n;wait:0.5;type:PRINT 255+0.5,256-0.5,65535+0.5,-255-0.5\n;wait:0.3;type:A%=1:FOR K%=1 TO 30:A%=A%*2:NEXT:X=A%:Y=-A%:PRINT X,Y,X-1\n;wait:0.3;type:FOR I=0.1 TO 1 STEP 0.3:PRINT I,:NEXT:PRINT\n;wait:0.3;type:S=0:FOR I%=0 TO 300:X=I%:S=S+X*X:NEXT:PRINT S\n;wait:0.5

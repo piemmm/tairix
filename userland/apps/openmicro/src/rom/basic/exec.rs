@@ -146,7 +146,13 @@ fn looping(a: &mut Asm) {
     // What may follow a statement: another, the line's end, or an ELSE the
     // statement before it has passed.
     a.here("statement_done");
-    a.jsr("next_a");
+    a.ldy(zp(z::OFFSET_A));
+    let space = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(space);
+    a.sty(zp(z::OFFSET_A));
     a.tax();
     a.here("statement_done_x");
     a.cpx(imm(b':'));
@@ -206,14 +212,19 @@ fn running(a: &mut Asm) {
     a.sta(zp(z::OFFSET_A));
     a.fall_into("statement");
 
-    // The statement at the statement pointer.
+    // The statement at the statement pointer, its first character read as
+    // `next_a` reads it.
     a.here("statement");
     a.bit(zp(ESCAPE_FLAG));
-    let going = a.local();
-    a.bpl(going);
-    a.jmp("escaped");
-    a.bind(going);
-    a.jsr("next_a");
+    let escaped = a.local();
+    a.bmi(escaped);
+    a.ldy(zp(z::OFFSET_A));
+    let space = a.here_local();
+    a.lda(zp(z::TEXT_A).ind_y());
+    a.iny();
+    a.cmp(imm(b' '));
+    a.beq(space);
+    a.sty(zp(z::OFFSET_A));
     a.cmp(imm(FIRST_STATEMENT));
     let other = a.local();
     a.bcc(other);
@@ -224,6 +235,8 @@ fn running(a: &mut Asm) {
     a.lda(abs("statement_low").x());
     a.pha();
     a.rts();
+    a.bind(escaped);
+    a.jmp("escaped");
     // An assignment to a name, the commonest, looked for first.
     a.bind(other);
     let (low, high, assigning, assigned) = (a.local(), a.local(), a.local(), a.local());
@@ -287,7 +300,9 @@ fn running(a: &mut Asm) {
     a.jmp("err_mistake");
     a.bind(none);
     a.jmp("err_syntax");
+}
 
+fn statements(a: &mut Asm) {
     // *command: the rest of the line, from the star, to OSCLI.
     a.here("statement_star");
     a.jsr("return_point");
@@ -299,9 +314,7 @@ fn running(a: &mut Asm) {
     a.dex();
     a.jsr(entry::OSCLI);
     a.jmp("skip_line");
-}
 
-fn statements(a: &mut Asm) {
     // RUN: the variables cleared, then the program from its first record.
     // A program that does not start with a CR is a Syntax error before any
     // line, as BASIC II finds its first line's end there.

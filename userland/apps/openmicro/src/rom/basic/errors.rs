@@ -56,10 +56,7 @@ const ERRORS: [(&str, u8, &str); 46] = [
 ];
 
 pub fn emit(a: &mut Asm) {
-    for (routine, number, message) in ERRORS {
-        a.here(routine);
-        a.error(number, message);
-    }
+    a.error_run(&ERRORS);
 
     // BRKV: the message on a line of its own, at the line being run if a
     // program runs, then the prompt.

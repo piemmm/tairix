@@ -270,6 +270,12 @@ fn statements(a: &mut Asm) {
     a.bcc(named);
     a.jmp("err_syntax");
     a.bind(named);
+    a.jsr("iac_from_p");
+    a.jsr("store_variable");
+    a.jmp(labels);
+
+    // IAC = P%.
+    a.here("iac_from_p");
     a.ldx(imm(3));
     let copy = a.here_local();
     a.lda(abs(P_PERCENT).x());
@@ -277,8 +283,7 @@ fn statements(a: &mut Asm) {
     a.dex();
     a.bpl(copy);
     a.lda(imm(kind::INTEGER));
-    a.jsr("store_variable");
-    a.jmp(labels);
+    a.rts();
     // A comment, nothing, or an instruction; then whatever is left of the
     // statement passed over.
     a.bind(not_label);

@@ -226,6 +226,12 @@ fn comparing(a: &mut Asm, compare: Label, refused: Label, low_taken: Label) {
     a.jmp(low_taken);
 }
 
+/// The 6502 stack a right operand's level may take below its entry: its own
+/// bytes and the deepest of the functions at its foot, EVAL's, 39, with an
+/// interrupt on top, the MOS's deepest 23. A level entered with less would
+/// wrap the stack, so it is No room.
+const OPERAND_ROOM: u8 = 39 + 23;
+
 /// The right operand of the operator OP, whose precedence is A, while the
 /// left is kept: an integer on the 6502 stack, which a call copies and
 /// restores, any other on the BASIC stack. Then A the left's kind, X the
@@ -233,12 +239,15 @@ fn comparing(a: &mut Asm, compare: Label, refused: Label, low_taken: Label) {
 /// character after the right.
 fn right_operand(a: &mut Asm) {
     a.here("right_operand");
+    let (stacked, kept, full, roomy) = (a.local(), a.local(), a.local(), a.local());
+    a.tsx();
+    a.cpx(imm(OPERAND_ROOM));
+    a.bcc(full);
     a.clc();
     a.adc(imm(1));
     a.sta(zp(LEFT));
     a.lda(zp(z::TYPE));
     a.cmp(imm(kind::INTEGER));
-    let (stacked, kept, full, roomy) = (a.local(), a.local(), a.local(), a.local());
     a.bne(stacked);
     // No room unless the BASIC stack could take it, as BASIC II stacks it.
     a.lda(zp(z::STACK));
@@ -534,8 +543,15 @@ fn integers(a: &mut Asm) {
     }
     let (large, real, signed) = (a.local(), a.local(), a.local());
     a.bne(large);
-    // The product and the multiplier's remaining bits share IAC.
+    // The product and the multiplier's remaining bits share IAC. A
+    // multiplier below 256 takes eight steps, which leave the product a
+    // byte up.
     a.ldx(imm(16));
+    a.ldy(zp(z::IAC + 1));
+    let (wide, placed) = (a.local(), a.local());
+    a.bne(wide);
+    a.ldx(imm(8));
+    a.bind(wide);
     a.lsr(zp(z::IAC + 1));
     a.ror(zp(z::IAC));
     let bit = a.here_local();
@@ -554,6 +570,14 @@ fn integers(a: &mut Asm) {
     }
     a.dex();
     a.bne(bit);
+    a.tya();
+    a.bne(placed);
+    for i in 0..3 {
+        a.lda(zp(z::IAC + i + 1));
+        a.sta(zp(z::IAC + i));
+    }
+    a.sty(zp(z::IAC + 3));
+    a.bind(placed);
     a.lda(zp(z::IAC + 3));
     a.bmi(real);
     let apply_sign = a.here_local();
@@ -617,25 +641,28 @@ fn dividing(a: &mut Asm) {
     a.ldx(imm(lo(z::IAC2)));
     a.jsr("int_abs");
     // Long division: the dividend shifts through the remainder, the
-    // quotient's bits shift in behind it. A dividend below 2^16 starts at
-    // the top, sixteen steps from the end.
+    // quotient's bits shift in behind it. Each zero byte at the dividend's
+    // top is skipped whole, eight steps fewer, down to the last eight.
     a.lda(imm(0));
     for i in 0..4 {
         a.sta(zp(z::INT_WORK + i));
     }
     let bit = a.local();
     a.ldx(imm(32));
+    let skip = a.here_local();
     a.lda(zp(z::IAC2 + 3));
-    a.ora(zp(z::IAC2 + 2));
     a.bne(bit);
-    a.lda(zp(z::IAC2 + 1));
-    a.sta(zp(z::IAC2 + 3));
-    a.lda(zp(z::IAC2));
-    a.sta(zp(z::IAC2 + 2));
-    a.lda(imm(0));
-    a.sta(zp(z::IAC2 + 1));
+    a.cpx(imm(9));
+    a.bcc(bit);
+    for i in (0..3).rev() {
+        a.ldy(zp(z::IAC2 + i));
+        a.sty(zp(z::IAC2 + i + 1));
+    }
     a.sta(zp(z::IAC2));
-    a.ldx(imm(16));
+    a.txa();
+    a.sbc(imm(8));
+    a.tax();
+    a.bne(skip);
     a.bind(bit);
     a.asl(zp(z::IAC2));
     for i in 1..4 {
@@ -903,21 +930,15 @@ fn factor_name(a: &mut Asm, name: Label, named: Label) {
     a.bmi(quiet);
     a.jmp("err_no_such_variable");
     a.bind(quiet);
-    a.ldx(imm(3));
-    let copy = a.here_local();
-    a.lda(abs(page::resident(b'P')).x());
-    a.sta(zp(z::IAC).x());
-    a.dex();
-    a.bpl(copy);
-    a.lda(imm(kind::INTEGER));
+    a.jsr("iac_from_p");
     a.jmp("factor_done");
     a.bind(found);
     a.jsr("load_variable");
+    a.ldy(zp(z::OFFSET_A));
     // A variable may be followed by ? or !, an address and an offset, with
     // no space between: BASIC II reads `D% ?1` as D% and a second item.
     a.bind(loaded);
     a.sta(zp(z::TYPE));
-    a.ldy(zp(z::OFFSET_A));
     a.lda(zp(z::TEXT_A).ind_y());
     a.iny();
     a.sty(zp(z::OFFSET_A));

@@ -185,14 +185,8 @@ fn several_digits(a: &mut Asm, several: Label, full: Label) {
     a.cmp(imm(b'E'));
     a.beq(again);
     a.lda(zp(NUMBER));
-    a.sta(zp(z::IAC));
-    a.lda(zp(NUMBER + 1));
-    a.sta(zp(z::IAC + 1));
-    a.lda(imm(0));
-    a.sta(zp(z::IAC + 2));
-    a.sta(zp(z::IAC + 3));
-    a.lda(imm(kind::INTEGER));
-    a.rts();
+    a.ldx(zp(NUMBER + 1));
+    a.jmp("return_xa");
     a.bind(again);
     a.ldy(zp(END));
     a.fall_into(full);

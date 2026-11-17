@@ -599,6 +599,30 @@ fn a_call_with_its_text_and_an_error_block_are_placed_whole() {
 }
 
 #[test]
+fn a_run_of_error_blocks_shares_each_message_end_with_the_next_brk() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 4, Asm::rts);
+        asm.nop();
+        asm.error_run(&[("first", 0x11, "A"), ("second", 0x22, "BC")]);
+        asm.jmp("first");
+        asm.jmp("second");
+    })
+    .unwrap();
+    assert_eq!(image[..4], [0xEA, 0x4C, 0x05, 0xC0], "a hop over the pin");
+    assert_eq!(
+        image[5..12],
+        [0x00, 0x11, b'A', 0x00, 0x22, b'B', b'C'],
+        "each BRK the end of the message before it"
+    );
+    assert_eq!(image[12], 0, "the last message's end");
+    assert_eq!(
+        image[13..19],
+        [0x4C, 0x05, 0xC0, 0x4C, 0x08, 0xC0],
+        "each label at its BRK"
+    );
+}
+
+#[test]
 fn held_tables_fill_the_room_a_pin_leaves_and_the_rest_follow_where_placed() {
     let mut asm = Asm::new(ORIGIN, 0x100);
     asm.pin(ORIGIN + 6, Asm::rts);

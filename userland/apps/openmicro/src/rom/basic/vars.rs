@@ -329,13 +329,9 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.jsr("dim_fits");
     a.jsr("heap_claim");
     a.pla();
-    a.sta(zp(z::IAC + 1));
+    a.tay();
     a.pla();
-    a.sta(zp(z::IAC));
-    a.lda(imm(0));
-    a.sta(zp(z::IAC + 2));
-    a.sta(zp(z::IAC + 3));
-    a.lda(imm(kind::INTEGER));
+    a.jsr("return_ya");
     a.jsr("store_variable");
     a.ldx(zp(z::OP));
     a.dec(zp(z::OFFSET_A));
@@ -587,7 +583,10 @@ fn names(a: &mut Asm) {
 }
 
 fn lookup(a: &mut Asm) {
-    // The list from VAR searched for the name TNAME reads up to NAME_END.
+    // The list after the entry at VAR searched for the name TNAME reads:
+    // C clear and Y the found entry's zero; C set at the list's end. With
+    // NAME_END the name's own zero, VAR is then its value; with NAME_END 0,
+    // the entry, the caller seeing to where the name ends.
     a.here("search_list");
     let (search, compare, ended) = (a.here_local(), a.local(), a.local());
     a.ldy(imm(0));
@@ -599,17 +598,19 @@ fn lookup(a: &mut Asm) {
     a.beq(missing);
     a.sta(zp(z::VAR + 1));
     a.stx(zp(z::VAR));
-    a.ldy(imm(2));
+    a.iny();
     a.bind(compare);
-    a.cpy(zp(NAME_END));
-    a.beq(ended);
     a.lda(zp(z::VAR).ind_y());
+    a.beq(ended);
     a.cmp(zp(TNAME).ind_y());
     a.bne(search);
     a.iny();
     a.bne(compare);
     a.bind(ended);
-    a.lda(zp(z::VAR).ind_y());
+    a.clc();
+    a.lda(zp(NAME_END));
+    a.beq(RTS);
+    a.cpy(zp(NAME_END));
     a.bne(search);
     a.tya();
     a.sec();
@@ -1075,7 +1076,7 @@ fn stack(a: &mut Asm) {
     a.jsr("var_at_stack");
     a.jsr("fac2_load");
     a.lda(imm(PACKED));
-    a.jmp("stack_release");
+    a.bne("stack_release");
 
     // VAR at the BASIC stack's top.
     a.here("var_at_stack");

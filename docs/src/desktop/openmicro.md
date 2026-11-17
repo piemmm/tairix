@@ -278,14 +278,19 @@ message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
 astray; and a byte (`?`) as a PROC or FN parameter is neither kept nor put
 back, where BASIC II's damages the program. Statements over the resident
-integers A% to Z%, such as `A%=B%+C%`, array elements and a FOR's set-up take
-less time than BASIC II's, but some statements are still slower, a known
-defect: a PROC call takes 58% longer, REPEAT 77%, a false IF a third, an empty
-FOR loop's NEXT 17%, a GOSUB, a string's assignment or join, integer `*` and
-DIV, and a FOR over a real 16 to 22%, `SCORE%=SCORE%+1` and `A=B+1` 10 to 13%
-and the functions up to a tenth, while TAN and small whole powers are faster,
-so a program that paces itself against TIME with these can run out of it; and
-a long line with many names takes up to twice as long to enter.
+integers A% to Z%, such as `A%=B%+C%`, integer `*` and DIV, real products, a
+FOR over a real, array elements, FN calls and PROC calls with a long name or
+actuals take no more than 3% longer than BASIC II's, most less, but some
+statements are still slower, a known defect: REPEAT takes 73% longer, a false
+IF 28%, a string's assignment or join 14 to 37%, a GOSUB 18%, an IF with AND
+18%, a PROC call with a one-letter name and no actuals 12%, TRUE 19%, a real
+sum 3 to 13%, `SCORE%=SCORE%+1` 10% and the functions up to a tenth, while TAN
+and small whole powers are faster, so a program that paces itself against
+TIME with these can run out of it. It runs out of room at other depths than
+BASIC II's, another known defect: a recursive FN taking a real stops 3% less
+deep, and an expression nested past 12 integer operators, or 16 real, is No
+room, where BASIC II's goes to 16 or 17 before its stack wraps. A long line
+with many names takes up to twice as long to enter.
 
 `tairix_openmicro::rom::dfs::build` assembles the DFS: the whole Acorn DFS 1.20
 interface over the 8271 — the catalogue format, every `*` command, OSFILE,

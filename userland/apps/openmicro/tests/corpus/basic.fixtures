@@ -155,3 +155,82 @@ row       6402         0
 row >E% ?1=5
 row Mistake
 row >
+
+scenario procedures_are_found_by_their_whole_names
+row AB A ABC A AB
+row         20       300        40        11
+row          5
+row LP L
+row         29
+row >PROCAB:PROCABC:PRINT FNXY(1)
+row AB ABC        100
+row >
+
+scenario integer_division_keeps_its_signs_at_every_size
+row          1        -1        -1         1
+row >PRINT 1000 DIV 7,100000 DIV 3,&7FFFFFFF
+row  DIV 2,0 DIV 5
+row        142     333331.07374182E9
+row          0
+row >PRINT 255 DIV 1,256 DIV 1,65535 DIV 255
+row ,&1000000 DIV 3
+row        255       256       257   5592405
+row >PRINT &FFFFFF DIV 16,-&7FFFFFFF DIV 3,7
+row  DIV 7,6 DIV 7
+row    1048575-715827882         1         0
+row >PRINT 5 MOD 3,-5 MOD 3,5 MOD -3,100000
+row MOD 7
+row          2        -2         2         5
+row >PRINT &1234567 MOD 1000,0 MOD 9,&10000
+row DIV &100,&FFFF DIV &FFFF
+row        743         0       256         1
+row >
+
+scenario integer_products_of_every_size
+row         15        15         0         0
+row >PRINT 255*255,255*65535,65535*255,-5*3
+row      65025  16711425  16711425       -15
+row >PRINT 5*-3,-5*-3,256*256,65535*65535
+row        -15        15     655364.29483622
+row E9
+row >PRINT -255*-255,200*300,300*200,65536*2
+row      65025     60000     60000    131072
+row >PRINT 40*1000,-128*127,32767*2,46341*46
+row 341
+row      40000    -16256     655342.14748828
+row E9
+row >
+
+scenario reals_wait_as_left_operands
+row       3.75      1.25     3.125         2
+row       6.25       5.5       5.5      -0.5
+row          0        -1        -1         0
+row          0         3         3         1
+row      11.25 -24.21875
+row        5.5     28.75   3628800
+row          0        -1         0         0
+row          6
+row >
+
+scenario integers_made_reals_keep_their_values
+row        255       257
+row       4095      4097
+row      65535     65537
+row    1048575   1048577
+row   16777215  16777217
+row  268435455 268435457
+row >PRINT 255+0.5,256-0.5,65535+0.5,-255-0.
+row 5
+row      255.5     255.5   65535.5    -255.5
+row >A%=1:FOR K%=1 TO 30:A%=A%*2:NEXT:X=A%:Y
+row =-A%:PRINT X,Y,X-1
+row 1.07374182E9        -1.07374182E9
+row 1.07374182E9
+row >FOR I=0.1 TO 1 STEP 0.3:PRINT I,:NEXT:P
+row RINT
+row        0.1
+row        0.4
+row        0.7
+row          1
+row >S=0:FOR I%=0 TO 300:X=I%:S=S+X*X:NEXT:P
+row RINT S

@@ -537,8 +537,7 @@ fn print_tab(a: &mut Asm) {
     a.bne(column);
     a.lda(zp(z::IAC));
     a.pha();
-    a.jsr("expr_integer");
-    a.jsr("closing_bracket");
+    a.jsr("integer_bracketed");
     a.lda(imm(31));
     a.jsr(entry::OSWRCH);
     a.pla();
@@ -565,6 +564,9 @@ fn print_tab(a: &mut Asm) {
     a.ldx(zp(z::IAC));
     a.jmp("print_spaces");
 
+    // An integer expression, then its closing bracket.
+    a.here("integer_bracketed");
+    a.jsr("expr_integer");
     // X the character after an expression: Missing ) unless a `)`.
     a.here("closing_bracket");
     a.cpx(imm(b')'));

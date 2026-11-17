@@ -150,13 +150,23 @@ fn the_pins_lie_past_every_routine_a_program_runs() {
     }
 }
 
+/// The centiseconds a program typed as `lines`, which ends by printing how
+/// long its loop took, printed.
+fn printed_time(lines: &[&str], centiseconds: u64) -> u32 {
+    after(lines, centiseconds)
+        .iter()
+        .rev()
+        .find_map(|row| row.trim().parse().ok())
+        .expect("the loop prints its time")
+}
+
 /// The regression: integer statements took a fifth to a quarter longer
 /// than BASIC II's, so a program pacing itself against TIME, as Mine
 /// Sweeper's setup does, ran out of it. BASIC II takes this loop 282
 /// centiseconds.
 #[test]
 fn an_integer_loop_keeps_basic_ii_s_pace() {
-    let screen = after(
+    let taken = printed_time(
         &[
             "10 B%=5:C%=3:TIME=0:FORK%=1TO2000:A%=B%+C%:IFA%=9C%=1",
             "20 NEXT:PRINTTIME",
@@ -164,12 +174,87 @@ fn an_integer_loop_keeps_basic_ii_s_pace() {
         ],
         400,
     );
-    let taken: u32 = screen
-        .iter()
-        .rev()
-        .find_map(|row| row.trim().parse().ok())
-        .expect("the loop prints its time");
     assert!(taken <= 282, "the loop took {taken} centiseconds");
+}
+
+/// The regression: DIV took a step for each of a dividend's 16 bits
+/// however small it was; BASIC II takes this loop 300 centiseconds.
+#[test]
+fn integer_division_keeps_basic_ii_s_pace() {
+    let taken = printed_time(
+        &[
+            "10 B%=5:TIME=0:FORK%=1TO2000:A%=B%DIV3:NEXT:PRINTTIME",
+            "RUN",
+        ],
+        600,
+    );
+    assert!(taken <= 300, "the loop took {taken} centiseconds");
+}
+
+/// The regression: a multiplier below 256 took sixteen steps; BASIC II
+/// takes this loop, a screen address's sum, 371 centiseconds.
+#[test]
+fn integer_multiplication_keeps_basic_ii_s_pace() {
+    let taken = printed_time(
+        &[
+            "10 B%=5:TIME=0:FORK%=1TO2000:A%=B%*40+B%*8:NEXT:PRINTTIME",
+            "RUN",
+        ],
+        600,
+    );
+    assert!(taken <= 371, "the loop took {taken} centiseconds");
+}
+
+/// The centiseconds 2000 calls of a PROC named `name` take.
+fn procedure_calls(name: &str) -> u32 {
+    printed_time(
+        &[
+            &format!("10 TIME=0:FORK%=1TO2000:PROC{name}:NEXT:PRINTTIME"),
+            "20 END",
+            &format!("30 DEFPROC{name}:ENDPROC"),
+            "RUN",
+        ],
+        400,
+    )
+}
+
+/// The regression: a call took 58% longer than BASIC II's, which takes this
+/// loop 138 centiseconds; a call without actuals stacked what only actuals
+/// need, so this one is held to 120.
+#[test]
+fn a_procedure_call_keeps_its_pace() {
+    let taken = procedure_calls("X");
+    assert!(taken <= 120, "the loop took {taken} centiseconds");
+}
+
+/// The regression: a call read its name through to find its length before
+/// comparing it, 54 cycles a character as BASIC II's call costs; it is
+/// compared as it is read.
+#[test]
+fn a_procedure_s_name_is_read_once() {
+    let long = procedure_calls("MOVEPLAYER");
+    let short = procedure_calls("X");
+    // 2000 calls a loop, a centisecond 20000 cycles, nine more characters.
+    let per_character = (long - short) * 10 / 9;
+    assert!(
+        per_character <= 25,
+        "each character cost {per_character} cycles"
+    );
+}
+
+/// The regression: each of a real FOR's three integers made a real took
+/// its shifts a bit at a time, all five of its bytes in each; BASIC II
+/// takes this loop 214 centiseconds.
+#[test]
+fn a_real_for_loop_keeps_basic_ii_s_pace() {
+    let taken = printed_time(
+        &[
+            "10 TIME=0:FORK%=1TO1000:FORT=1TO1:NEXT:NEXT:PRINTTIME",
+            "RUN",
+        ],
+        400,
+    );
+    assert!(taken <= 214, "the loop took {taken} centiseconds");
 }
 
 #[test]
