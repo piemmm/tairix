@@ -20,19 +20,19 @@ das Audio des Desktops.
 Das Bibliotheksfenster zeigt jeden Rechner als Kachel mit seinem letzten
 Bildschirm oder, bis er gelaufen ist, mit dem Startbildschirm seines Modells.
 Neu legt einen Rechner unter dem gewünschten Namen an: einen BBC Micro Model
-B, mit einer neuen, leeren Diskette in Laufwerk 0 oder ohne; einen
-Acorn Electron, mit angebautem Plus 1 oder ohne; oder einen Commodore 64, PAL
-oder NTSC, mit einem SID 6581 oder 8580 und einem Laufwerk 1541, zwei oder
-keinem. Starten, ein Doppelklick oder die Eingabetaste startet den gewählten
-Rechner in einem eigenen Fenster oder holt dessen Fenster nach vorn; bis zu
-zwanzig Rechner werden aufbewahrt, und mehrere laufen zugleich. Duplizieren
-kopiert einen Rechner samt seinem gesicherten Zustand und seinem Ordner, und
-Löschen löscht einen Rechner und seinen gesicherten Zustand, sobald das
-bestätigt ist, lässt seinen Ordner aber bestehen. Ein Rechtsklick auf die
-Kachel eines Rechners bietet Starten, Einstellungen, Duplizieren, Löschen und
-Ordner anzeigen für diesen Rechner an und, solange er läuft, auch das Menü des
-Rechners. Beim ersten Start legt der Emulator einen BBC Micro Model B mit
-einer leeren Diskette an.
+B, mit Seiten-RAM in den Steckplätzen 4 bis 7 und einer neuen, leeren Diskette
+in Laufwerk 0 oder ohne; einen Acorn Electron, mit angebautem Plus 1 oder
+ohne; oder einen Commodore 64, PAL oder NTSC, mit einem SID 6581 oder 8580 und
+einem Laufwerk 1541, zwei oder keinem. Starten, ein Doppelklick oder die
+Eingabetaste startet den gewählten Rechner in einem eigenen Fenster oder holt
+dessen Fenster nach vorn; bis zu zwanzig Rechner werden aufbewahrt, und
+mehrere laufen zugleich. Duplizieren kopiert einen Rechner samt seinem
+gesicherten Zustand und seinem Ordner, und Löschen löscht einen Rechner und
+seinen gesicherten Zustand, sobald das bestätigt ist, lässt seinen Ordner aber
+bestehen. Ein Rechtsklick auf die Kachel eines Rechners bietet Starten,
+Einstellungen, Duplizieren, Löschen und Ordner anzeigen für diesen Rechner an
+und, solange er läuft, auch das Menü des Rechners. Beim ersten Start legt der
+Emulator einen BBC Micro Model B mit einer leeren Diskette an.
 
 Einstellungen ändert den Namen eines Rechners, seine Lautstärke, das schnelle
 Laden vom Band, das den Rechner so schnell wie möglich laufen lässt, solange
@@ -47,6 +47,19 @@ eigenes ROM-Abbild, das mit Abbild installieren im Speicher des Emulators
 abgelegt wurde; das Plus 1 des Electron; Fernsehnorm, SID und Laufwerke des
 Commodore 64; und die Tastaturbrücken des Model B, die seinen Bildschirmmodus
 beim Start, das Starten von Diskette und die Diskettenzeiten festlegen.
+
+Ein Model B hat außerdem VIM, einen Editor im Stil von vi, in Steckplatz 13
+eingebaut. An der Eingabe des Rechners bearbeitet `*VIM` mit dem Namen einer
+Datei diese Datei, und BREAK in VIM behält den Text, den der Editor enthält.
+VIM bearbeitet Text, etwa die `!BOOT`-Dateien, die `*BUILD` anlegt, und
+BASIC-Programme, die er als Text auflistet und tokenisiert wieder sichert, und
+färbt beides ein, soweit die Farben des Bildschirmmodus es zulassen; `:dis` mit
+dem Namen einer Datei blättert durch den Maschinencode eines Programms. In VIM
+listet `:help` seine Befehle und die Bildschirmmodi samt dem jeweils
+verbleibenden Platz auf, `:mode` mit einer Zahl wechselt den Modus, und `:q`
+kehrt zu BASIC zurück. Wo eine Bank Seiten-RAM kein ROM enthält, legt VIM dort
+ab, was es kopiert oder löscht, in der höchsten solchen Bank, sodass es nichts
+vom Speicher des Textes belegt.
 
 Das Schließen des Fensters eines Rechners versetzt den Rechner in den
 Ruhezustand: wieder gestartet, macht er dort weiter, wo er stehen blieb.

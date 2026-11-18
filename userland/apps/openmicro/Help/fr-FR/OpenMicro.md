@@ -20,18 +20,19 @@ passe par l'audio du bureau.
 La fenêtre de bibliothèque montre chaque machine sous forme de vignette de son
 dernier écran ou, tant qu'elle n'a pas encore tourné, de l'écran de démarrage
 de son modèle. Nouveau crée une machine, sous le nom demandé : un BBC Micro
-Model B, avec une nouvelle disquette vierge dans le lecteur 0 ou sans
-disquette ; un Acorn Electron, équipé ou non d'un Plus 1 ; ou un Commodore 64,
-PAL ou NTSC, avec un SID 6581 ou 8580 et un lecteur 1541, deux ou aucun.
-Démarrer, un double-clic ou la touche Entrée démarre la machine choisie dans
-une fenêtre à elle, ou fait passer sa fenêtre au premier plan ; jusqu'à vingt
-machines sont conservées, et plusieurs tournent à la fois. Dupliquer copie une
-machine avec son état enregistré et son dossier, et Supprimer supprime une
-machine et son état enregistré une fois la suppression confirmée, en laissant
-son dossier. Un clic droit sur la vignette d'une machine propose Démarrer,
-Réglages, Dupliquer, Supprimer et Afficher le dossier pour cette machine et,
-tant qu'elle tourne, le menu de la machine aussi. Au premier lancement,
-l'émulateur crée un BBC Micro Model B avec une disquette vierge.
+Model B, avec de la RAM latérale dans les emplacements 4 à 7 et une nouvelle
+disquette vierge dans le lecteur 0 ou sans disquette ; un Acorn Electron,
+équipé ou non d'un Plus 1 ; ou un Commodore 64, PAL ou NTSC, avec un SID 6581
+ou 8580 et un lecteur 1541, deux ou aucun. Démarrer, un double-clic ou la
+touche Entrée démarre la machine choisie dans une fenêtre à elle, ou fait
+passer sa fenêtre au premier plan ; jusqu'à vingt machines sont conservées, et
+plusieurs tournent à la fois. Dupliquer copie une machine avec son état
+enregistré et son dossier, et Supprimer supprime une machine et son état
+enregistré une fois la suppression confirmée, en laissant son dossier. Un clic
+droit sur la vignette d'une machine propose Démarrer, Réglages, Dupliquer,
+Supprimer et Afficher le dossier pour cette machine et, tant qu'elle tourne,
+le menu de la machine aussi. Au premier lancement, l'émulateur crée un BBC
+Micro Model B avec une disquette vierge.
 
 Réglages change le nom d'une machine, son volume, le chargement rapide des
 cassettes, qui fait tourner la machine aussi vite que possible tant que le
@@ -47,6 +48,19 @@ magasin de l'émulateur avec Installer une image ; le Plus 1 de l'Electron ; la
 norme vidéo, le SID et les lecteurs du Commodore 64 ; et les cavaliers du
 clavier du Model B, qui fixent son mode d'écran au démarrage, la façon dont une
 disquette s'amorce et les temporisations de disquette.
+
+Un Model B a aussi VIM, un éditeur dans le style de vi, installé dans
+l'emplacement 13. À l'invite de la machine, `*VIM` suivi du nom d'un fichier
+édite ce fichier, et BREAK dans VIM garde le texte qu'il contient. VIM édite du
+texte, comme les fichiers `!BOOT` que crée `*BUILD`, et des programmes BASIC,
+qu'il liste sous forme de texte et réenregistre tokenisés, en colorant chacun
+autant que le permettent les couleurs du mode d'écran ; `:dis` suivi du nom
+d'un fichier fait défiler page par page le code machine d'un programme. Dans
+VIM, `:help` liste ses commandes et les modes d'écran avec la place que laisse
+chacun, `:mode` suivi d'un nombre change de mode, et `:q` revient au BASIC. Là
+où une banque de RAM latérale ne contient aucune ROM, VIM y garde ce qu'il copie
+ou supprime, dans la plus haute de ces banques, si bien qu'il ne prend rien de
+la mémoire dont dispose le texte.
 
 Fermer la fenêtre d'une machine la met en veille : redémarrée, elle reprend là
 où elle s'était arrêtée. Éteindre, dans son menu, retire ses supports et

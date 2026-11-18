@@ -13,6 +13,7 @@ mod harness;
 pub mod mos;
 pub mod os;
 pub mod plus1;
+pub mod vim;
 
 use asm::{abs, lo, Asm, AsmError, Image};
 
@@ -37,9 +38,18 @@ pub(crate) fn service_header(a: &mut Asm, version: u8, title: &str, version_text
     a.byte(0);
 }
 
+/// A conditional jump to a target a branch cannot reach: the opposite
+/// branch over a JMP.
+pub(crate) fn far(a: &mut Asm, unless: fn(&mut Asm, asm::Label), target: impl Into<asm::Addr>) {
+    let skip = a.local();
+    unless(a, skip);
+    a.jmp(abs(target));
+    a.bind(skip);
+}
+
 /// Every image the bundle ships, by its file's name in `firmware/`, with
 /// the builder that makes it from this tree.
-pub const SHIPPED: [(&str, Build); 9] = [
+pub const SHIPPED: [(&str, Build); 10] = [
     (crate::firmware::MOS, mos::model_b),
     (crate::firmware::ELECTRON_OS, mos::electron),
     (crate::firmware::BASIC, basic::build),
@@ -49,4 +59,5 @@ pub const SHIPPED: [(&str, Build); 9] = [
     (crate::firmware::C64_BASIC, c64::basic_image),
     (crate::firmware::C64_KERNAL, c64::kernal_image),
     (crate::firmware::C1541_DOS, c1541::build),
+    (crate::firmware::VIM, vim::build),
 ];

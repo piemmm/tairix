@@ -24,6 +24,8 @@ pub const C64_BASIC: &str = "c64-basic.rom";
 pub const C64_KERNAL: &str = "c64-kernal.rom";
 /// The 1541's DOS's file.
 pub const C1541_DOS: &str = "c1541-dos.rom";
+/// The VIM editor's file.
+pub const VIM: &str = "vim.rom";
 
 /// The MOS, the Model B's operating system.
 pub const MOS_IMAGE: &[u8] = include_bytes!("../firmware/mos.rom");
@@ -44,6 +46,8 @@ pub const C64_BASIC_IMAGE: &[u8] = include_bytes!("../firmware/c64-basic.rom");
 pub const C64_KERNAL_IMAGE: &[u8] = include_bytes!("../firmware/c64-kernal.rom");
 /// The 1541's DOS, at `$C000` in the drive.
 pub const C1541_DOS_IMAGE: &[u8] = include_bytes!("../firmware/c1541-dos.rom");
+/// The VIM editor, a language in a Model B's sideways slot.
+pub const VIM_IMAGE: &[u8] = include_bytes!("../firmware/vim.rom");
 
 /// Each model's boot screen, packed, by its file's name: what the library's
 /// card of a machine never yet run shows.
@@ -61,7 +65,7 @@ pub const ELECTRON_SCREEN_IMAGE: &[u8] = include_bytes!("../firmware/electron.sc
 pub const C64_SCREEN_IMAGE: &[u8] = include_bytes!("../firmware/c64.screen");
 
 /// Each image by its file's name, the one list the gate and the tests read.
-pub const IMAGES: [(&str, &[u8]); 9] = [
+pub const IMAGES: [(&str, &[u8]); 10] = [
     (MOS, MOS_IMAGE),
     (ELECTRON_OS, ELECTRON_OS_IMAGE),
     (BASIC, BASIC_IMAGE),
@@ -71,4 +75,5 @@ pub const IMAGES: [(&str, &[u8]); 9] = [
     (C64_BASIC, C64_BASIC_IMAGE),
     (C64_KERNAL, C64_KERNAL_IMAGE),
     (C1541_DOS, C1541_DOS_IMAGE),
+    (VIM, VIM_IMAGE),
 ];

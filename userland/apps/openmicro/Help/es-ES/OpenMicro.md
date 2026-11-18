@@ -19,18 +19,18 @@ por el audio del escritorio.
 
 La ventana de la biblioteca muestra cada máquina como una ficha con su última
 pantalla o, hasta que haya funcionado, con la pantalla de arranque de su
-modelo. Nueva crea una máquina, con el nombre pedido: un BBC Micro Model B,
-con un disco nuevo en blanco en la unidad 0 o sin disco; un Acorn Electron, con
-o sin un Plus 1 instalado; o un Commodore 64, PAL o NTSC, con un SID 6581 o
-8580 y una unidad 1541, dos o ninguna. Iniciar, un doble clic o la tecla Intro
-inicia la máquina elegida en una ventana propia, o trae su ventana al frente;
-se conservan hasta veinte máquinas, y varias funcionan a la vez. Duplicar copia
-una máquina con su estado guardado y su carpeta, y Eliminar elimina una máquina
-y su estado guardado una vez confirmado, dejando su carpeta. Hacer clic con el
-botón derecho en la ficha de una máquina ofrece Iniciar, Ajustes, Duplicar,
-Eliminar y Mostrar carpeta para esa máquina y, mientras funciona, también el
-menú de la máquina. La primera vez que se inicia, el emulador crea un BBC
-Micro Model B con un disco en blanco.
+modelo. Nueva crea una máquina, con el nombre pedido: un BBC Micro Model B, con
+RAM lateral en las ranuras 4 a 7 y un disco nuevo en blanco en la unidad 0 o
+sin disco; un Acorn Electron, con o sin un Plus 1 instalado; o un Commodore 64,
+PAL o NTSC, con un SID 6581 o 8580 y una unidad 1541, dos o ninguna. Iniciar,
+un doble clic o la tecla Intro inicia la máquina elegida en una ventana propia,
+o trae su ventana al frente; se conservan hasta veinte máquinas, y varias
+funcionan a la vez. Duplicar copia una máquina con su estado guardado y su
+carpeta, y Eliminar elimina una máquina y su estado guardado una vez
+confirmado, dejando su carpeta. Hacer clic con el botón derecho en la ficha de
+una máquina ofrece Iniciar, Ajustes, Duplicar, Eliminar y Mostrar carpeta para
+esa máquina y, mientras funciona, también el menú de la máquina. La primera vez
+que se inicia, el emulador crea un BBC Micro Model B con un disco en blanco.
 
 Ajustes cambia el nombre de una máquina, su volumen, la carga rápida de cinta,
 que hace correr la máquina tan deprisa como puede mientras gira el motor del
@@ -45,6 +45,19 @@ almacén del emulador con Instalar una imagen; el Plus 1 del Electron; la norma
 de televisión, el SID y las unidades del Commodore 64; y los puentes del
 teclado del Model B, que fijan su modo de pantalla al arrancar, el arranque
 desde disco y los tiempos de disco.
+
+Un Model B tiene además VIM, un editor al estilo de vi, instalado en la
+ranura 13. En el indicador de la máquina, `*VIM` seguido del nombre de un
+archivo edita ese archivo, y BREAK en VIM conserva el texto que contiene. VIM
+edita texto, como los archivos `!BOOT` que crea `*BUILD`, y programas en BASIC,
+que lista como texto y vuelve a guardar tokenizados, coloreando cada uno según
+lo permitan los colores del modo de pantalla; `:dis` seguido del nombre de un
+archivo recorre página a página el código máquina de un programa. En VIM,
+`:help` enumera sus órdenes y los modos de pantalla con el espacio que deja
+cada uno, `:mode` seguido de un número cambia el modo, y `:q` vuelve a BASIC.
+Donde un banco de RAM lateral no contiene ninguna ROM, VIM guarda allí lo que
+copia o borra, en el banco más alto de esos, de modo que no ocupa nada de la
+memoria que tiene el texto.
 
 Cerrar la ventana de una máquina la suspende: al arrancarla de nuevo, sigue
 donde se detuvo. Apagar, en su menú, saca sus soportes y la apaga, y conserva

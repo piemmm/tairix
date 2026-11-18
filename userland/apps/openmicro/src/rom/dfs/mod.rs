@@ -48,12 +48,3 @@ pub fn build() -> Result<Image, AsmError> {
     errors::emit(&mut a);
     a.finish()
 }
-
-/// A conditional jump to a target a branch cannot reach: the opposite
-/// branch over a JMP.
-pub(super) fn far(a: &mut Asm, unless: fn(&mut Asm, crate::rom::asm::Label), target: &'static str) {
-    let skip = a.local();
-    unless(a, skip);
-    a.jmp(crate::rom::asm::abs(target));
-    a.bind(skip);
-}

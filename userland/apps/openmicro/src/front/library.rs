@@ -62,10 +62,12 @@ pub enum Shipped {
     C64Character,
     /// The 1541's DOS.
     C1541Dos,
+    /// The VIM editor.
+    Vim,
 }
 
 impl Shipped {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Mos,
         Self::ElectronOs,
         Self::Basic,
@@ -75,6 +77,7 @@ impl Shipped {
         Self::C64Basic,
         Self::C64Character,
         Self::C1541Dos,
+        Self::Vim,
     ];
 
     /// Its image, as `Run` carries it.
@@ -90,6 +93,7 @@ impl Shipped {
             Self::C64Basic => crate::firmware::C64_BASIC_IMAGE,
             Self::C64Character => crate::firmware::C64_CHARACTER_IMAGE,
             Self::C1541Dos => crate::firmware::C1541_DOS_IMAGE,
+            Self::Vim => crate::firmware::VIM_IMAGE,
         }
     }
 
@@ -106,6 +110,7 @@ impl Shipped {
             Self::C64Basic => crate::firmware::C64_BASIC,
             Self::C64Character => crate::firmware::C64_CHARACTER,
             Self::C1541Dos => crate::firmware::C1541_DOS,
+            Self::Vim => crate::firmware::VIM,
         }
     }
 
@@ -122,6 +127,7 @@ impl Shipped {
             Self::C64Basic => "OpenMicro 64 BASIC",
             Self::C64Character => "OpenMicro 64 characters",
             Self::C1541Dos => "OpenMicro DOS 1541",
+            Self::Vim => "TAIRiX VIM",
         }
     }
 
@@ -233,12 +239,16 @@ pub enum Socket {
     Dos(u8),
 }
 
+/// The slots a new Model B's sideways RAM fills.
+pub const SIDEWAYS_RAM_SLOTS: core::ops::RangeInclusive<usize> = 4..=7;
+
 const MODEL_B_OS: [Image; 1] = [Image::Shipped(Shipped::Mos)];
-const SIDEWAYS: [Image; 4] = [
+const SIDEWAYS: [Image; 5] = [
     Image::Empty,
     Image::Ram,
     Image::Shipped(Shipped::Basic),
     Image::Shipped(Shipped::Dfs),
+    Image::Shipped(Shipped::Vim),
 ];
 const ELECTRON_OS: [Image; 1] = [Image::Shipped(Shipped::ElectronOs)];
 const BASIC: [Image; 1] = [Image::Shipped(Shipped::Basic)];
@@ -385,13 +395,19 @@ pub enum Fitting {
 }
 
 impl Fitting {
-    /// A Model B as it left the factory with the DFS fitted: BASIC in slot 15
-    /// and the DFS in slot 14.
+    /// A Model B as it left the factory with the DFS fitted: BASIC in slot
+    /// 15 and the DFS in slot 14, the VIM editor in slot 13, and four banks of
+    /// sideways RAM in [`SIDEWAYS_RAM_SLOTS`], where the Master has its own and
+    /// software looks for them.
     #[must_use]
     pub fn model_b() -> Self {
         let mut slots: Box<[Image; SLOTS]> = Box::new(core::array::from_fn(|_| Image::Empty));
         slots[15] = Image::Shipped(Shipped::Basic);
         slots[14] = Image::Shipped(Shipped::Dfs);
+        slots[13] = Image::Shipped(Shipped::Vim);
+        for slot in SIDEWAYS_RAM_SLOTS {
+            slots[slot] = Image::Ram;
+        }
         Self::ModelB {
             os: Image::Shipped(Shipped::Mos),
             slots,

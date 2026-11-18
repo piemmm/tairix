@@ -18,7 +18,8 @@ audio.
 
 The library window shows each machine as a card of its last screen, or of its
 model's start-up screen until it has run. New makes a machine, named as asked:
-a BBC Micro Model B, with a new blank disc in drive 0 or none; an Acorn
+a BBC Micro Model B, with sideways RAM in slots 4 to 7 and a new blank disc in
+drive 0 or none; an Acorn
 Electron, with a Plus 1 fitted or not; or a Commodore 64, PAL or NTSC, with a
 6581 or 8580 SID and one 1541 drive, two or none. Start, a double-click or
 Return starts the chosen machine in a window of its own, or raises its window;
@@ -40,6 +41,17 @@ slot or cartridge, or a ROM image of your own, put in the emulator's store
 with Install an image; the Electron's Plus 1; the Commodore 64's standard, SID
 and drives; and the Model B's keyboard links, which set its screen mode at
 start-up, how a disc boots, and the disc timings.
+
+A Model B also has VIM, a vi-style editor, fitted in slot 13. At its prompt,
+`*VIM` and a file's name edits that file, and BREAK in VIM keeps the text it
+holds. VIM edits text, such as the `!BOOT` files `*BUILD` makes, and
+BASIC programs, which it lists as text and saves back tokenised, colouring
+each as the screen mode's colours allow; `:dis` and a file's name pages
+through a program's machine code. In VIM, `:help` lists its commands and the
+screen modes with the room each leaves, `:mode` and a number changes the
+mode, and `:q` goes back to BASIC. Where a bank of sideways RAM holds no ROM,
+VIM keeps what it yanks or deletes there, in the highest such bank, so it takes
+none of the memory the text has.
 
 Closing a machine's window suspends the machine: started again, it resumes
 where it stopped. Shut Down in its menu takes its media out and turns it off,

@@ -7,10 +7,10 @@
 //! including a name's padding, `*` for any run, and nothing past the
 //! pattern but the name's padding.
 
-use super::far;
 use super::text::{MANY, NAME_LEN, ONE};
 use super::ws::{catalogue as cat, page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::entry;
 
 const NAMES: u16 = cat::NAMES;

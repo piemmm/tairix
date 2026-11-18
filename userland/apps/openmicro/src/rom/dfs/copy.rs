@@ -8,9 +8,9 @@
 
 use super::channels::each_open;
 use super::commands::index_of;
-use super::far;
 use super::ws::{catalogue as cat, channel as ch, page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::{entry, osbyte};
 
 /// Which disc is in the drive when both are one: neither yet, the source,

@@ -19,17 +19,18 @@ larghezza ogni tre di altezza, e il suono passa per l'audio del desktop.
 La finestra della libreria mostra ogni macchina come un riquadro con il suo
 ultimo schermo o, finché non è stata in funzione, con la schermata di avvio
 del suo modello. Nuova crea una macchina, con il nome richiesto: un
-BBC Micro Model B, con un nuovo disco vuoto nell'unità 0 o senza; un
-Acorn Electron, con o senza un Plus 1 montato; oppure un Commodore 64, PAL o
-NTSC, con un SID 6581 o 8580 e un'unità 1541, due o nessuna. Avvia, un doppio
-clic o il tasto Invio avvia la macchina scelta in una finestra tutta sua, o ne
-porta in primo piano la finestra; si conservano fino a venti macchine, e
-diverse funzionano insieme. Duplica copia una macchina con il suo stato salvato
-e la sua cartella, ed Elimina elimina una macchina e il suo stato salvato una
-volta confermato, lasciandone la cartella. Un clic destro sul riquadro di una
-macchina offre Avvia, Impostazioni, Duplica, Elimina e Mostra cartella per
-quella macchina e, mentre è in funzione, anche il menu della macchina. Al
-primo avvio l'emulatore crea un BBC Micro Model B con un disco vuoto.
+BBC Micro Model B, con RAM laterale negli slot da 4 a 7 e un nuovo disco vuoto
+nell'unità 0 o senza; un Acorn Electron, con o senza un Plus 1 montato; oppure
+un Commodore 64, PAL o NTSC, con un SID 6581 o 8580 e un'unità 1541, due o
+nessuna. Avvia, un doppio clic o il tasto Invio avvia la macchina scelta in
+una finestra tutta sua, o ne porta in primo piano la finestra; si conservano
+fino a venti macchine, e diverse funzionano insieme. Duplica copia una
+macchina con il suo stato salvato e la sua cartella, ed Elimina elimina una
+macchina e il suo stato salvato una volta confermato, lasciandone la cartella.
+Un clic destro sul riquadro di una macchina offre Avvia, Impostazioni,
+Duplica, Elimina e Mostra cartella per quella macchina e, mentre è in
+funzione, anche il menu della macchina. Al primo avvio l'emulatore crea un
+BBC Micro Model B con un disco vuoto.
 
 Impostazioni cambia il nome di una macchina, il suo volume, il caricamento
 rapido da nastro, che fa girare la macchina il più veloce possibile mentre il
@@ -44,6 +45,18 @@ messa nell'archivio dell'emulatore con Installa un'immagine; il Plus 1
 dell'Electron; lo standard video, il SID e le unità del Commodore 64; e i
 ponticelli della tastiera del Model B, che fissano la modalità dello schermo
 all'avvio, il modo in cui si avvia un disco e i tempi del disco.
+
+Un Model B ha anche VIM, un editor nello stile di vi, montato nello slot 13. Al
+prompt della macchina, `*VIM` seguito dal nome di un file modifica quel file, e
+BREAK in VIM conserva il testo che contiene. VIM modifica testi, come i file
+`!BOOT` che crea `*BUILD`, e programmi BASIC, che elenca come testo e salva di
+nuovo tokenizzati, colorando ciascuno per quanto lo consentono i colori della
+modalità dello schermo; `:dis` seguito dal nome di un file scorre pagina per
+pagina il codice macchina di un programma. In VIM, `:help` elenca i suoi
+comandi e le modalità dello schermo con lo spazio che ciascuna lascia, `:mode`
+seguito da un numero cambia la modalità, e `:q` torna al BASIC. Dove un banco di
+RAM laterale non contiene alcuna ROM, VIM vi tiene ciò che copia o cancella, nel
+banco più alto fra questi, così da non togliere nulla alla memoria del testo.
 
 Chiudere la finestra di una macchina la sospende: riavviata, riprende da dove
 si era fermata. Spegni nel suo menu ne toglie i supporti e la spegne,

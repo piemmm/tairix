@@ -875,6 +875,16 @@ impl Machine {
         self.board.ram.get(usize::from(addr)).copied().unwrap_or(0)
     }
 
+    /// The sideways RAM in slot `slot`, for checks to read and set, or
+    /// `None` where the slot holds none.
+    #[cfg(test)]
+    pub(crate) fn sideways_ram(&mut self, slot: usize) -> Option<&mut [u8]> {
+        match self.board.slots.get_mut(slot)? {
+            Slot::Ram(bank) => Some(bank),
+            Slot::Empty | Slot::Rom(_) => None,
+        }
+    }
+
     /// The video system.
     #[must_use]
     pub const fn video(&self) -> &Video {

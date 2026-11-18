@@ -344,7 +344,9 @@ fn boot_and_enter(a: &mut Asm, model: Model) {
 }
 
 /// OSBYTE 142's work: page in language ROM X, print its title, and enter it
-/// with A = 1.
+/// with A = 1. MOS 1.20 enters it with interrupts disabled, for the language
+/// to enable them, so a language that never does fails here as it would
+/// there.
 fn enter_language(a: &mut Asm, model: Model) {
     a.here("enter_language");
     a.stx(abs(var::LANGUAGE));
@@ -367,7 +369,13 @@ fn enter_language(a: &mut Asm, model: Model) {
     a.jsr("osnewl");
     a.ldx(imm(0xFF));
     a.txs();
-    a.cli();
+    // The Electron's OS is not observed against its original, so it keeps
+    // the interrupts its entry had enabled.
+    if model == Model::Electron {
+        a.cli();
+    } else {
+        a.sei();
+    }
     a.lda(imm(1));
     a.jmp(abs(header::LANGUAGE));
 }

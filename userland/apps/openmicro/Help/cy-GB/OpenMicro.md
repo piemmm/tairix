@@ -18,18 +18,18 @@ uchder, ac mae'r sain yn chwarae drwy sain y bwrdd gwaith.
 
 Mae ffenestr y llyfrgell yn dangos pob peiriant fel teilsen o'i sgrin olaf,
 neu o sgrin gychwyn ei fodel nes iddo redeg. Mae Newydd yn gwneud peiriant, o
-dan yr enw a ofynnwyd amdano: BBC Micro Model B, gyda disg wag newydd yng
-ngyriant 0 neu heb un; Acorn Electron, gyda Plus 1 wedi'i osod neu hebddo; neu
-Commodore 64, PAL neu NTSC, gyda SID 6581 neu 8580 ac un gyriant 1541, dau neu
-ddim un. Mae Cychwyn, clic dwbl neu'r fysell Return yn cychwyn y peiriant a
-ddewiswyd mewn ffenestr ei hun, neu'n codi ei ffenestr; cedwir hyd at ugain
-peiriant, ac mae sawl un yn rhedeg ar yr un pryd. Mae Dyblygu yn copïo
-peiriant gyda'i gyflwr a gadwyd a'i ffolder, ac mae Dileu yn dileu peiriant
-a'i gyflwr a gadwyd unwaith y caiff hynny ei gadarnhau, gan adael ei ffolder.
-Mae clicio'r botwm de ar deilsen peiriant yn cynnig Cychwyn, Gosodiadau,
-Dyblygu, Dileu a Dangos Ffolder ar gyfer y peiriant hwnnw, a dewislen y
-peiriant hefyd tra bo'n rhedeg. Y tro cyntaf iddo gychwyn, mae'r efelychydd yn
-gwneud BBC Micro Model B gyda disg wag.
+dan yr enw a ofynnwyd amdano: BBC Micro Model B, gyda RAM ochr yn slotiau
+4 i 7 a disg wag newydd yng ngyriant 0 neu heb un; Acorn Electron, gyda Plus 1
+wedi'i osod neu hebddo; neu Commodore 64, PAL neu NTSC, gyda SID 6581 neu 8580
+ac un gyriant 1541, dau neu ddim un. Mae Cychwyn, clic dwbl neu'r fysell
+Return yn cychwyn y peiriant a ddewiswyd mewn ffenestr ei hun, neu'n codi ei
+ffenestr; cedwir hyd at ugain peiriant, ac mae sawl un yn rhedeg ar yr un
+pryd. Mae Dyblygu yn copïo peiriant gyda'i gyflwr a gadwyd a'i ffolder, ac mae
+Dileu yn dileu peiriant a'i gyflwr a gadwyd unwaith y caiff hynny ei
+gadarnhau, gan adael ei ffolder. Mae clicio'r botwm de ar deilsen peiriant yn
+cynnig Cychwyn, Gosodiadau, Dyblygu, Dileu a Dangos Ffolder ar gyfer y
+peiriant hwnnw, a dewislen y peiriant hefyd tra bo'n rhedeg. Y tro cyntaf iddo
+gychwyn, mae'r efelychydd yn gwneud BBC Micro Model B gyda disg wag.
 
 Mae Gosodiadau yn newid enw peiriant, ei lefel sain, llwytho tâp yn gyflym,
 sy'n rhedeg y peiriant mor gyflym ag y gall tra bo modur y casét yn troi, ac ar
@@ -42,6 +42,18 @@ dim byd mewn slot neu getrisen, neu eich delwedd ROM eich hun, wedi'i rhoi yn
 storfa'r efelychydd gyda Gosod Delwedd; Plus 1 yr Electron; safon deledu, SID a
 gyriannau'r Commodore 64; a chysylltiadau bysellfwrdd y Model B, sy'n gosod ei
 fodd sgrin wrth gychwyn, sut mae disg yn cychwyn, ac amseru'r disg.
+
+Mae gan Model B hefyd VIM, golygydd yn null vi, wedi'i osod yn slot 13. Wrth
+anogwr y peiriant, mae `*VIM` ac enw ffeil yn golygu'r ffeil honno, ac mae
+BREAK yn VIM yn cadw'r testun sydd ynddo. Mae VIM yn golygu testun, megis y
+ffeiliau `!BOOT` y mae `*BUILD` yn eu gwneud, a rhaglenni BASIC, y mae'n eu
+rhestru fel testun ac yn eu cadw eto wedi'u tocyneiddio, gan liwio pob un fel y
+mae lliwiau'r modd sgrin yn caniatáu; mae `:dis` ac enw ffeil yn mynd fesul
+tudalen drwy god peiriant rhaglen. Yn VIM, mae `:help` yn rhestru ei orchmynion
+a'r moddau sgrin gyda'r lle y mae pob un yn ei adael, mae `:mode` a rhif yn
+newid y modd, ac mae `:q` yn mynd yn ôl i BASIC. Lle nad oes ROM mewn banc o RAM
+ochr, mae VIM yn cadw yno yr hyn y mae'n ei gopïo neu'n ei ddileu, yn y banc
+uchaf o'r fath, felly nid yw'n cymryd dim o'r cof sydd gan y testun.
 
 Mae cau ffenestr peiriant yn atal y peiriant dros dro: o'i gychwyn eto, mae'n
 ailddechrau lle y stopiodd. Mae Cau i Lawr yn ei ddewislen yn tynnu ei

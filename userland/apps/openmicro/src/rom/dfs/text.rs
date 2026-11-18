@@ -5,9 +5,9 @@
 //! earlier, and the name is at most seven characters. `*` and `#` are kept
 //! as characters, and mark the name as wild.
 
-use super::far;
 use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::{entry, zp as os, CR};
 
 /// The name's length and the wildcards.

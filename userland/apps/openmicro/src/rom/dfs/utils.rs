@@ -6,9 +6,9 @@
 //! As DFS 1.20's do, *TYPE and *LIST end with a new line, and *DUMP shows
 //! a row past the end as `**` when a file fills its last row exactly.
 
-use super::far;
 use super::ws::{page, private, zp as z};
 use crate::rom::asm::{abs, imm, zp, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::{entry, page_d, zp as os, CR, ESCAPE_FLAG};
 
 /// OSFIND's modes for reading and writing.

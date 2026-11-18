@@ -102,6 +102,8 @@ pub mod vector {
 pub const ERROR_POINTER: u16 = 0xFD;
 /// Bit 7 set while an Escape is pending.
 pub const ESCAPE_FLAG: u16 = 0xFF;
+/// Each sideways ROM's type byte, or zero where no ROM was found there.
+pub const ROM_TYPES: u16 = 0x02A1;
 
 /// The MOS's zero page a sideways ROM reads.
 pub mod zp {
@@ -233,6 +235,8 @@ pub mod event {
 
 /// The OSBYTE calls the ROMs make or answer, by number.
 pub mod osbyte {
+    /// What the cursor keys do: X 0 edit, 1 give codes &87 to &8B.
+    pub const CURSOR_KEYS: u8 = 0x04;
     /// Flush the input buffer, or with X 0 every buffer.
     pub const FLUSH_INPUT: u8 = 0x0F;
     /// Convert the first X ADC channels in turn, none for 0.
@@ -241,6 +245,8 @@ pub mod osbyte {
     pub const FORCE_ADC: u8 = 0x11;
     /// Flush buffer X.
     pub const FLUSH_BUFFER: u8 = 0x15;
+    /// Light the keyboard's lock lamps as its status byte has them.
+    pub const LOCK_LAMPS: u8 = 0x76;
     /// On the Electron: one more paged ROM to poll.
     pub const POLL_UP: u8 = 0x16;
     /// On the Electron: one paged ROM fewer to poll.
@@ -253,6 +259,8 @@ pub mod osbyte {
     pub const PRINTER_DORMANT: u8 = 0x7B;
     /// Acknowledge an Escape.
     pub const ACKNOWLEDGE_ESCAPE: u8 = 0x7E;
+    /// The keyboard's status byte: its locks, read or written.
+    pub const KEYBOARD_STATUS: u8 = 0xCA;
     /// Whether file X is at its end.
     pub const EOF: u8 = 0x7F;
     /// ADVAL: an ADC channel's reading, the fire buttons, or a buffer's
@@ -268,10 +276,16 @@ pub mod osbyte {
     pub const HIMEM_MODE: u8 = 0x85;
     /// The text cursor's position.
     pub const CURSOR_POSITION: u8 = 0x86;
+    /// Enter the language in ROM X.
+    pub const ENTER_LANGUAGE: u8 = 0x8E;
     /// Issue service call X.
     pub const SERVICE: u8 = 0x8F;
     /// Kept for applications; X 128 is the Plus 1's.
     pub const APPLICATION: u8 = 0xA3;
+    /// What ESCAPE does: X 0 an escape condition, 1 a key giving &1B.
+    pub const ESCAPE_KEY: u8 = 0xE5;
+    /// The current language's ROM, read with X 0 and Y &FF.
+    pub const LANGUAGE: u8 = 0xFC;
     /// The last BREAK's type.
     pub const LAST_BREAK: u8 = 0xFD;
 }

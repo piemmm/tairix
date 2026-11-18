@@ -60,6 +60,7 @@ fn program(service: Option<&'static str>, body: impl FnOnce(&mut Asm)) -> Vec<u8
     let mut a = Asm::new(0x8000, 0x4000);
     header(&mut a, service);
     a.here("entry");
+    a.cli();
     body(&mut a);
     a.lda(imm(DONE_MARK));
     a.sta(abs(DONE));
@@ -83,6 +84,44 @@ fn run_rom(rom: &[u8]) -> Machine {
     machine
 }
 
+/// MOS 1.20 enters a language with interrupts disabled, at a reset and by
+/// OSBYTE 142 alike, leaving the language to enable them.
+#[test]
+fn a_language_is_entered_with_interrupts_disabled() {
+    const RECORDS: u16 = 0x0900;
+    const ENTRIES: u16 = 0x0910;
+    const SLOT: u8 = 15;
+    let mut a = Asm::new(0x8000, 0x4000);
+    header(&mut a, None);
+    a.here("entry");
+    a.php();
+    a.pla();
+    a.ldx(abs(ENTRIES));
+    a.sta(abs(RECORDS).x());
+    a.inc(abs(ENTRIES));
+    a.cpx(imm(0));
+    let entered_again = a.local();
+    a.bne(entered_again);
+    a.lda(imm(0x8E));
+    a.ldx(imm(SLOT));
+    a.jsr(OSBYTE);
+    a.bind(entered_again);
+    a.lda(imm(DONE_MARK));
+    a.sta(abs(DONE));
+    let halt = a.here_local();
+    a.jmp(halt);
+    let rom = a.finish().expect("the probe assembles").bytes;
+    let machine = run_rom(&rom);
+    for (entry, how) in ["a reset", "OSBYTE 142"].iter().enumerate() {
+        let p = machine.peek(RECORDS + u16::try_from(entry).expect("short"));
+        assert_ne!(
+            p & INTERRUPTS_OFF,
+            0,
+            "{how} entered with interrupts enabled"
+        );
+    }
+}
+
 /// Pass `command` to OSCLI from inline text, the program carrying on after.
 fn oscli(a: &mut Asm, command: &'static str) {
     let (text, after) = (a.local(), a.local());
@@ -102,6 +141,7 @@ fn language(vdu: &[u8], commands: &[&str]) -> Vec<u8> {
     let mut a = Asm::new(0x8000, 0x4000);
     header(&mut a, None);
     a.here("entry");
+    a.cli();
     a.lda(imm(lo("error")));
     a.sta(abs(BRKV));
     a.lda(imm(hi("error")));

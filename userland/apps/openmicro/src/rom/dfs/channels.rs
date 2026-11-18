@@ -10,9 +10,9 @@
 //! does, a read at the end returns &FE with C set once, and the next is an
 //! EOF error.
 
-use super::far;
 use super::ws::{catalogue as cat, channel as ch, page, zp as z};
 use crate::rom::asm::{abs, imm, lo, zp, Acc, Asm, Operand, RTS};
+use crate::rom::far;
 use crate::rom::os::{entry, filing_system, osbyte, zp as os};
 
 /// A channel block's field, by its offset from the block at X.

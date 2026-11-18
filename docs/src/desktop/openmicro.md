@@ -118,8 +118,10 @@ worker to draw it. *New…*
 opens the assistant, which offers the three models, a name, and each model's
 choices: a Model B a new blank disc in drive 0 or none, an Electron its Plus 1
 or none, and a Commodore 64 its standard (PAL or NTSC), its SID (6581 or
-8580) and its drives (one 1541, two or none). The first run makes a Model B
-with its blank disc. A card's menu
+8580) and its drives (one 1541, two or none). A new Model B has BASIC, the DFS
+and VIM in slots 15, 14 and 13, and 64 KiB of sideways RAM, four banks in slots
+4 to 7, where the Master keeps its own and software looks for them. The first
+run makes a Model B with its blank disc. A card's menu
 starts, configures, copies and deletes its machine, and carries the machine's
 own rows while it runs.
 
@@ -362,6 +364,43 @@ counted into the 100 Hz poll at each reset, it feeds the parallel printer and
 runs the ADC a conversion a poll, each reading raising event 3; it claims no
 workspace, and `*FX163,128,1` turns both ports off and `*FX163,128,0` on. Its
 title is `OpenMOS Plus 1`.
+
+`tairix_openmicro::rom::vim::build` assembles `VIM`, a vi-style editor of the
+tree's own design (`plans/BEEB-VIM.md`), which a new Model B has in slot 13. It
+is a language with a service entry: `*VIM name` from any language edits a
+file, `:q` returns to that language, `*VIM` alone starts with an empty
+text, and BREAK keeps the text, which leaving gives up to the language
+returned to. Its workspace is a language's — zero page
+&00–&6F, leaving &70–&8F to the user, and pages &04–&07 — and its text and
+undo record lie between OSHWM and HIMEM, the text a gap buffer. What it
+yanks or deletes goes to the highest bank of sideways RAM that is free — no
+ROM the MOS found at the last BREAK, no ROM image's copyright since, and a
+write holds — which it marks so that no BREAK takes the bank for a ROM, and
+where none is free, against HIMEM. The text itself never lies in sideways
+RAM, since a text held across banks paged into the window the editor runs
+from would need a text model the ROM has no room for. While it runs the cursor keys give codes, ESCAPE is a key and the
+locks are off, all three put back as they were when it leaves. It edits text
+whose lines end in CR, as `*BUILD` writes them, or in LF, CR LF or LF CR as
+`*SPOOL` writes them, each written back as found, and BASIC II programs,
+listed into the text on loading and tokenised by BASIC II's rules on saving,
+byte for byte as BASIC II tokenises the same lines typed at its prompt. A
+file is built in the free memory and saved in one OSFILE call; one that
+outgrows the free memory, a tokenised program or paired line ends, is
+written to the file in parts with OSGBPB as it is built, the line in
+progress kept back, and then given its addresses by OSFILE 1. It colours keywords, strings, numbers,
+line numbers, comments and star commands as the mode allows — teletext
+codes, each taking a cell, in MODE 7, sixteen colours in MODE 2 and four in
+MODES 1 and 5 — and `:mode` takes a mode whose screen leaves the text room.
+Normal mode has vi's motions, counts, operators, undo and repeat; the
+command line has `:w`, `:q`, `:e`, `:r`, line ranges, `:d` and `:s`, the
+options, OS commands and a paged `:help` giving each mode's size, colours
+and room in the machine as it stands; and `:dis` pages through a file of
+6502 code at its load address in the BBC assembler's syntax, its tables
+generated from the CPU's own. A line holds at most 255 characters, and a
+file with a longer one is refused. It reaches the machine only through MOS
+1.20's documented interface, and is checked beside the original MOS 1.20,
+BASIC II and DFS 1.20, observed only as opaque programs, as beside this
+tree's.
 
 The Commodore 64's four ROMs are built by the same rules, from the Commodore
 64 Programmer's Reference Guide, the 1541 User's Guide and the chips' data

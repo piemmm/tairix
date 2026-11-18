@@ -220,8 +220,7 @@ pub mod page2 {
     pub const CLOCKS: u16 = 0x0292;
     /// The interval timer.
     pub const INTERVAL: u16 = 0x029C;
-    /// Each sideways ROM's type byte, or zero.
-    pub const ROM_TYPES: u16 = 0x02A1;
+    pub use crate::rom::os::ROM_TYPES;
     /// INKEY's countdown.
     pub const INKEY_COUNT: u16 = 0x02B1;
     /// OSWORD 0's maximum line length, lowest and highest characters.

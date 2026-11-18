@@ -9,10 +9,10 @@
 //! command before was *ENABLE.
 
 use super::errors::SYNTAX;
-use super::far;
 use super::ws::{catalogue as cat, page, zp as z};
 use crate::machine::{OS_BASE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, byte, hi, imm, lo, sym, zp, Acc, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::{entry, fsc, osbyte, page_d, zp as os, CR};
 
 /// The *OPT numbers the DFS takes.

@@ -28,13 +28,20 @@ fn a_model_b_is_configured_with_its_slots_as_fitted() {
     assert_eq!(os, Shipped::Mos.image());
     assert!(matches!(slots[15], Slot::Rom(rom) if rom == Shipped::Basic.image()));
     assert!(matches!(slots[14], Slot::Rom(rom) if rom == Shipped::Dfs.image()));
+    assert!(matches!(slots[13], Slot::Rom(rom) if rom == Shipped::Vim.image()));
+    for slot in crate::front::library::SIDEWAYS_RAM_SLOTS {
+        assert!(
+            matches!(slots[slot], Slot::Ram),
+            "slot {slot}'s sideways RAM"
+        );
+    }
     assert!(matches!(slots[3], Slot::Ram));
     assert!(matches!(slots[2], Slot::Rom(b"ELITE")));
     let empty = slots
         .iter()
         .filter(|slot| matches!(slot, Slot::Empty))
         .count();
-    assert_eq!(empty, SLOTS - 4);
+    assert_eq!(empty, SLOTS - 9);
 }
 
 #[test]

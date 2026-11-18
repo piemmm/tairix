@@ -88,14 +88,14 @@ fn install_waits_for_an_image_and_fits_it_where_it_was_asked_for() {
     tairix_font::install_test_transport();
     let fitting = Fitting::model_b();
     let mut settings = Settings::new(&machine(fitting.clone()), Standing::Off, Vec::new());
-    let slot = row_of(&fitting, Socket::Slot(7));
-    let install = Socket::Slot(7).offered().len();
+    let slot = row_of(&fitting, Socket::Slot(8));
+    let install = Socket::Slot(8).offered().len();
     act(
         &mut settings,
         (at::ROMS, slot),
         FieldAction::Selected { index: install },
     );
-    assert_eq!(settings.take_install(), Some(Socket::Slot(7)));
+    assert_eq!(settings.take_install(), Some(Socket::Slot(8)));
     assert_eq!(settings.take_install(), None, "taken once");
     assert_eq!(
         selected(&settings, (at::ROMS, slot)),
@@ -104,13 +104,13 @@ fn install_waits_for_an_image_and_fits_it_where_it_was_asked_for() {
     );
     let theme = Theme::light();
     settings.installed(
-        Socket::Slot(7),
+        Socket::Slot(8),
         String::from("rom.viewsheet"),
         (Scale::ONE, &theme),
         &mut Region::new(),
     );
     assert!(settings.choices().fitting.sockets().any(|(socket, image)| {
-        socket == Socket::Slot(7) && *image == Image::Installed(String::from("rom.viewsheet"))
+        socket == Socket::Slot(8) && *image == Image::Installed(String::from("rom.viewsheet"))
     }));
     let other = row_of(&fitting, Socket::Slot(6));
     act(

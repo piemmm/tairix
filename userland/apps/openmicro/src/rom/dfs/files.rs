@@ -5,9 +5,9 @@
 //! one does, and leaves X and Y as they were; a locked file reads as not
 //! deletable, and either not writable or not deletable locks one.
 
-use super::far;
 use super::ws::{catalogue as cat, page, zp as z};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, RTS};
+use crate::rom::far;
 use crate::rom::os::zp as os;
 
 /// The block's fields, by offset.

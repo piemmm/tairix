@@ -62,6 +62,8 @@ grants), `plans/OPENFILE.md` OF12 (the subtree grant), `plans/APPDATA.md`
 | BB30 | The bundle again: the icon, help in every locale, the docs page; the fuzz harnesses; the QEMU vertical through the library | done |
 | BB31 | The Model B's reset and interrupt entries at MOS 1.20's &D9CD and &DC1C, which software reads from &FFFC to know the OS by (*Bounty Bob Strikes Back* refuses any other) | done |
 | BB32 | The front end's media and library hand-offs: each model's boot screen on a card never run, SHIFT-BREAK's row and button, snapshots kept in and *Show Folder* of a machine's folder, a dropped disc's window taking the keyboard, media locked while a machine may write them, the icon-bar click always bringing the library forward | done |
+| BB33 | The editor ROM, `vim.rom`: `plans/BEEB-VIM.md` | done |
+| BB34 | Four banks of sideways RAM in a new Model B, in slots 4 to 7 | done |
 
 Items are built in ledger order; each lands complete with its tests.
 
@@ -514,6 +516,8 @@ its scenario in the corpus:
   ROM claims to FSCV 3 at the command's start however a ROM's GSINIT left
   &E4 and Y; *HELP offers the ROMs the call before showing its version;
   *EXEC of a file the filing system cannot open is File not found.
+- A language is entered with interrupts disabled — at a reset, by BREAK
+  and by OSBYTE 142 — so it must enable them itself, as BASIC does.
 - OSBYTE and OSWORD run with interrupts disabled and return with the
   caller's interrupt state; a call that waits (INKEY, *FX19, a full printer
   or RS423 buffer, SOUND on a full queue) lets interrupts in between its
@@ -954,7 +958,10 @@ to the windows, the sessions, the audio streams and the store.
   leaves the machine's folder, the user's files, where it is.
 - **The new-machine assistant** offers the models, a name, and the model's
   one choice: the Model B a new blank disc in drive 0 or none, the Electron
-  the Plus 1 or none. The first run makes a Model B with its blank disc.
+  the Plus 1 or none. A new Model B is fitted with BASIC, the DFS and VIM in
+  slots 15, 14 and 13 and sideways RAM in slots 4 to 7, the Master's banks,
+  where loaders and utilities look for it. The first run makes a Model B with
+  its blank disc.
 - **Each machine's settings** is a `FormDialog` owner-modal to the window it
   was opened from, the library or the machine's own: its name; its ROMs — the
   Model B's OS and sixteen slots, the Electron's OS, BASIC, the Plus 1 and its
