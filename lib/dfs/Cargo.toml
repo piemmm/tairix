@@ -1,0 +1,16 @@
+[package]
+name = "tairix-dfs"
+description = "TAIRiX Acorn DFS on-disc format: each side's two-sector catalogue and its 31 entries, the names DFS makes, and where a side's sectors lie in an SSD or DSD image — the one definition the volume probe, the archive driver and the Open Micro emulator share, no_std and allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The fuzz harness's seeded stream and budget.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
