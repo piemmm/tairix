@@ -106,3 +106,25 @@ script type:CLS:*OPT 1,1\n;wait:0.5;type:A%=OPENIN"A":CLOSE#A%\n;wait:1;type:LOA
 scenario exec_and_spool_report_missing_files_and_drives
 discs testdisc
 script type:CLS:*EXEC NOPE\n;wait:1;type:P.ERR\n;wait:0.5;type:*SPOOL :1.X\n;wait:3;type:P.ERR\n;wait:0.5
+
+# Each message is shown before the data moves, so one over the catalogue is
+# still right.
+scenario opt_1_messages_come_before_the_data
+discs lowload
+script type:CLS:*OPT 1,2\n;wait:0.5;type:*LOAD K\n;wait:1;type:*RUN E\n;wait:1;type:*LOAD X\n;wait:1
+
+scenario a_save_to_a_protected_disc_shows_its_message_first
+discs testdisc
+protected
+script type:CLS:*OPT 1,2\n;wait:0.5;type:*SAVE S 3000 3100\n;wait:3;type:P.ERR\n;wait:0.5
+
+scenario run_enters_with_a_1_x_ff_y_1_and_carry_set
+discs lowload
+script type:CLS:*RUN E\n;wait:1;type:P.~?&70,~?&71,~?&72,~?&73\n;wait:0.5;type:*E\n;wait:1;type:P.~?&70,~?&71,~?&72,~?&73\n;wait:0.5
+
+# The entry is taken before the data moves; DFS 1.20 does not enter this
+# file, which loads over its workspace.
+scenario run_enters_a_file_loaded_over_the_dfs_workspace
+discs lowload
+ours
+script type:CLS:*RUN R\n;wait:2;type:P.7\n;wait:0.5

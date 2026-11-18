@@ -290,8 +290,12 @@ impl Video {
                 self.vertical_sync();
             }
         }
+        // The SAA5050 sees no sync but display enable, its LOSE: a line it
+        // counts is one displayed.
         if character.display && !self.display {
             self.teletext.start_line();
+        } else if !character.display && self.display {
+            self.teletext.end_line();
         }
         self.display = character.display;
         self.latched = self.byte;
@@ -313,21 +317,27 @@ impl Video {
         self.current = character;
     }
 
-    /// A line's sync: the beam flies back, and the SAA5050 counts the line.
+    /// A line's sync: the beam flies back.
     fn horizontal_sync(&mut self) {
         self.blank_rest(false);
         self.x = -LEFT_EDGE;
         self.y += 1;
-        self.teletext.end_line();
     }
 
     /// A field's sync: the beam returns to the top, and the field drawn is
-    /// finished.
+    /// finished. A late VSYNC's field runs a line longer, so the field after
+    /// it lies half a line lower, woven below the other; its count of lines
+    /// takes in an HSYNC the late VSYNC's own line still had to come, which
+    /// a line placed by it is not lowered for.
     fn vertical_sync(&mut self) {
         self.blank_rest(true);
         self.canvas.finish();
-        self.y = -TOP_EDGE;
-        self.lower_field = !self.crtc.vsync_late();
+        let late = self.crtc.vsync_late();
+        let line = u16::from(self.crtc.register(reg::H_TOTAL)) + 1;
+        let started = (u16::from(self.crtc.next_character()) + line - 1) % line;
+        let hsync_after = u16::from(self.crtc.register(reg::H_SYNC_POS)) >= started;
+        self.y = -TOP_EDGE - i32::from(late && hsync_after);
+        self.lower_field = late;
         self.weave = self.crtc.interlaced_video();
     }
 
@@ -491,7 +501,9 @@ impl Video {
         };
         (r.clock()..=r.clock() + 1).contains(&self.cycle)
             && (-LEFT_EDGE..LINE_TIMEOUT - LEFT_EDGE).contains(&self.x)
-            && (-TOP_EDGE..FIELD_LINES).contains(&self.y)
+            // A field whose first HSYNC comes early starts its count a line
+            // further back.
+            && (-TOP_EDGE - 1..FIELD_LINES).contains(&self.y)
             && self
                 .pen
                 .is_none_or(|(column, row)| column < CANVAS_WIDTH && row < CANVAS_HEIGHT)

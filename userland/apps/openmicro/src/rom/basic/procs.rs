@@ -38,11 +38,12 @@ const L_VALUE: u8 = 3;
 const STACK_TOP: u8 = 0xFF;
 
 /// A call's kind and count of actuals; the stack below its actuals, then a
-/// formal's location; the walk through the actuals.
-const KIND: u16 = z::STATEMENT;
+/// formal's location; the walk through the actuals, clear of the fraction a
+/// conversion to an integer marks.
+const KIND: u16 = z::IAC2;
 const COUNT: u16 = KIND + 1;
 const BASE: u16 = COUNT + 1;
-const WALK: u16 = BASE + 2;
+const WALK: u16 = z::INT_WORK + 1;
 const LOCATION: u16 = BASE;
 const LOCATION_TYPE: u16 = KIND;
 /// The definition being compared, biased as TNAME is.
@@ -52,8 +53,9 @@ pub fn emit(a: &mut Asm) {
     let (search, found) = finding(a);
     definition_search(a, search, found);
     calling(a);
-    call_frame(a);
-    actuals(a);
+    let (formals, mismatch, body) = call_frame(a);
+    binding(a, formals, mismatch, body);
+    walking(a);
     locals(a);
     clearing(a);
     leaving(a);
@@ -114,11 +116,13 @@ fn finding(a: &mut Asm) -> (Label, Label) {
 }
 
 /// The statement pointer past the name whose zero, in an entry's terms, Y
-/// is; C clear.
+/// is; C clear. The sum passes 255 for a name ending a line of the longest
+/// length, so the two it is ahead by are taken off whatever its carry.
 fn past_name(a: &mut Asm) {
     a.tya();
     a.adc(zp(z::OFFSET_A));
-    a.sbc(imm(1));
+    a.sec();
+    a.sbc(imm(2));
     a.sta(zp(z::OFFSET_A));
 }
 
@@ -273,10 +277,8 @@ fn calling(a: &mut Asm) {
     a.ldy(imm(0));
     a.lda(zp(z::TYPE));
     a.sta(zp(z::STACK).ind_y());
-    a.pla();
-    a.clc();
-    a.adc(imm(1));
-    a.pha();
+    a.tsx();
+    a.inc(abs(STACK_PAGE + 1).x());
     a.ldx(zp(z::OP));
     a.cpx(imm(b','));
     a.beq(actual);
@@ -300,7 +302,7 @@ fn calling(a: &mut Asm) {
     a.sta(zp(KIND));
 }
 
-fn call_frame(a: &mut Asm) {
+fn call_frame(a: &mut Asm) -> (Label, Label, Label) {
     // The frame, the 6502 stack copied into it from just above its pointer.
     a.tsx();
     a.stx(zp(z::OP));
@@ -361,9 +363,27 @@ fn call_frame(a: &mut Asm) {
     a.jmp("statement");
     a.bind(mismatch);
     a.jmp("err_arguments");
+    (formals, mismatch, body)
+}
+
+/// Each formal made local, then given its actual.
+fn binding(a: &mut Asm, formals: Label, mismatch: Label, body: Label) {
     a.bind(formals);
     let formal = a.here_local();
+    // A formal may be an array element, its subscripts any BASIC.
+    a.lda(zp(COUNT));
+    a.pha();
+    a.lda(zp(WALK));
+    a.pha();
+    a.lda(zp(WALK + 1));
+    a.pha();
     a.jsr("make_local");
+    a.pla();
+    a.sta(zp(WALK + 1));
+    a.pla();
+    a.sta(zp(WALK));
+    a.pla();
+    a.sta(zp(COUNT));
     a.lda(zp(z::VAR));
     a.pha();
     a.lda(zp(z::VAR + 1));
@@ -389,7 +409,7 @@ fn call_frame(a: &mut Asm) {
     a.sta(zp(LOCATION + 1));
     a.pla();
     a.sta(zp(LOCATION));
-    a.jsr("load_actual");
+    actual(a);
     a.ldx(zp(LOCATION));
     a.stx(zp(z::VAR));
     a.ldx(zp(LOCATION + 1));
@@ -400,9 +420,8 @@ fn call_frame(a: &mut Asm) {
     a.jmp(bind);
 }
 
-fn actuals(a: &mut Asm) {
-    // The actual at WALK loaded, WALK past it: A its kind.
-    a.here("load_actual");
+/// The actual at WALK loaded, WALK past it: A its kind.
+fn actual(a: &mut Asm) {
     a.ldy(imm(0));
     a.lda(zp(WALK).ind_y());
     a.pha();
@@ -434,13 +453,13 @@ fn actuals(a: &mut Asm) {
     a.lda(zp(WALK).ind_y());
     a.sta(zp(z::STRING_LENGTH));
     a.tay();
-    let text = a.here_local();
     let texted = a.local();
     a.beq(texted);
+    let text = a.here_local();
     a.lda(zp(WALK).ind_y());
     a.sta(abs(page::STRING - 1).y());
     a.dey();
-    a.jmp(text);
+    a.bne(text);
     a.bind(texted);
     a.lda(zp(z::STRING_LENGTH));
     a.sec();
@@ -448,8 +467,9 @@ fn actuals(a: &mut Asm) {
     a.bind(loaded);
     a.jsr("walk_by");
     a.pla();
-    a.rts();
+}
 
+fn walking(a: &mut Asm) {
     // WALK on one byte; and on A, 256 more with C set.
     a.here("walk_one");
     a.lda(imm(1));
@@ -493,13 +513,10 @@ fn locals(a: &mut Asm) {
     a.cmp(zp(z::HIMEM));
     a.lda(zp(z::STACK + 1));
     a.sbc(zp(z::HIMEM + 1));
-    let empty = a.local();
-    a.bcs(empty);
+    a.bcs(RTS);
     a.ldy(imm(0));
     a.lda(zp(z::STACK).ind_y());
     a.clc();
-    a.rts();
-    a.bind(empty);
     a.rts();
 
     // The variable at the statement pointer made local: its value, address

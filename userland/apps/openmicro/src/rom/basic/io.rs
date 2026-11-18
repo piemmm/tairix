@@ -5,6 +5,7 @@ use tairix_openbasic::keyword::word;
 
 use super::decimal::{FORMAT, PLACES};
 use super::ws::{kind, page, zp as z};
+use crate::cpu::STACK_PAGE;
 use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, Label, RTS};
 use crate::rom::os::{entry, CR};
 
@@ -13,8 +14,9 @@ const AT_WIDTH: u16 = page::RESIDENT;
 const AT_DIGITS: u16 = page::RESIDENT + 1;
 const AT_FORMAT: u16 = page::RESIDENT + 2;
 const AT_STR: u16 = page::RESIDENT + 3;
-/// Whether the last item was a `;`, so the line goes on.
-const GOES_ON: u16 = z::STATEMENT;
+/// Whether the last item was a `;`, so the line goes on: set and read with
+/// nothing evaluated between.
+const GOES_ON: u16 = z::IAC2;
 
 pub fn emit(a: &mut Asm) {
     printing(a);
@@ -29,12 +31,16 @@ pub fn emit(a: &mut Asm) {
     input_items(a, next);
 }
 
-/// INPUT's state: whether to ask with `?`, whether LINE was given, and
-/// where the next item starts in its line; and the line's OSWORD 0 block.
-const ASK: u16 = z::STATEMENT;
-const WHOLE: u16 = ASK + 1;
-const NEXT_ITEM: u16 = WHOLE + 1;
-const LINE_BLOCK: u16 = NEXT_ITEM + 1;
+/// INPUT's state, on the 6502 stack from just above its pointer, since an
+/// item's subscripts and TAB's and SPC's values may run any BASIC: whether
+/// LINE was given, whether to ask with `?`, and where the next item starts
+/// in its line; an item's location is stacked above it.
+const WHOLE: u16 = STACK_PAGE + 1;
+const ASK: u16 = WHOLE + 1;
+const NEXT_ITEM: u16 = ASK + 1;
+const ITEM_FRAME: u16 = 3;
+/// The line's OSWORD 0 block, made only to read it.
+const LINE_BLOCK: u16 = z::SCRATCH;
 /// The line INPUT reads, on the BASIC stack.
 const LINE_ROOM: u8 = 240;
 /// The DATA pointer, and the text an item is read from.
@@ -266,6 +272,9 @@ fn input(a: &mut Asm) -> Label {
     a.lda(imm(LINE_ROOM));
     a.sec();
     a.jsr("stack_claim");
+    a.lda(imm(0xFF));
+    a.pha();
+    a.pha();
     a.ldx(imm(0));
     a.jsr("next_a");
     a.cmp(imm(word::LINE.token));
@@ -275,10 +284,8 @@ fn input(a: &mut Asm) -> Label {
     a.inx();
     a.bind(whole);
     a.dex();
-    a.stx(zp(WHOLE));
-    a.lda(imm(0xFF));
-    a.sta(zp(ASK));
-    a.sta(zp(NEXT_ITEM));
+    a.txa();
+    a.pha();
     let (next, finished) = (a.here_local(), a.local());
     a.jsr("next_a");
     let (prompt, separator, newline, variable) = (a.local(), a.local(), a.local(), a.local());
@@ -308,19 +315,21 @@ fn input(a: &mut Asm) -> Label {
     a.jsr("factor_string");
     a.jsr("print_buffer");
     a.dec(zp(z::OFFSET_A));
+    // ASK nought keeps the `?` back; a separator's own character asks.
     a.bind(quiet);
     a.lda(imm(0));
-    a.sta(zp(ASK));
-    a.beq(next);
     a.bind(separator);
-    a.lda(imm(0xFF));
-    a.sta(zp(ASK));
-    a.bne(next);
+    a.tsx();
+    a.sta(abs(ASK).x());
+    a.jmp(next);
     a.bind(newline);
     a.jsr("print_newline");
     a.jmp(next);
     a.bind(finished);
     a.tax();
+    a.pla();
+    a.pla();
+    a.pla();
     a.lda(imm(LINE_ROOM));
     a.jsr("stack_release");
     a.jmp("statement_done_x");
@@ -342,16 +351,17 @@ fn input_items(a: &mut Asm, next: Label) {
     a.sta(zp(ITEM));
     a.lda(zp(z::STACK + 1));
     a.sta(zp(ITEM + 1));
-    a.ldy(zp(NEXT_ITEM));
+    a.tsx();
+    a.ldy(abs(NEXT_ITEM + ITEM_FRAME).x());
     let have = a.local();
-    a.bit(zp(WHOLE));
+    a.lda(abs(WHOLE + ITEM_FRAME).x());
     a.bmi("input_read");
     a.cpy(imm(0xFF));
     a.bne(have);
     a.here("input_read");
-    a.bit(zp(ASK));
+    a.lda(abs(ASK + ITEM_FRAME).x());
     let quiet = a.local();
-    a.bpl(quiet);
+    a.beq(quiet);
     a.lda(imm(b'?'));
     a.jsr("print_char");
     a.bind(quiet);
@@ -365,13 +375,15 @@ fn input_items(a: &mut Asm, next: Label) {
     a.sta(zp(LINE_BLOCK + 3));
     a.lda(imm(0xFF));
     a.sta(zp(LINE_BLOCK + 4));
-    a.sta(zp(ASK));
+    a.tsx();
+    a.sta(abs(ASK + ITEM_FRAME).x());
     a.ldx(imm(lo(LINE_BLOCK)));
     a.ldy(imm(hi(LINE_BLOCK)));
     a.jsr("read_line_quiet");
     a.bind(have);
     // The item: the whole line for LINE, else up to a comma.
-    a.bit(zp(WHOLE));
+    a.tsx();
+    a.lda(abs(WHOLE + ITEM_FRAME).x());
     let (part, taken) = (a.local(), a.local());
     a.bpl(part);
     a.ldx(imm(0));
@@ -398,7 +410,9 @@ fn input_items(a: &mut Asm, next: Label) {
     a.ldy(imm(0xFE));
     a.bind(rest);
     a.iny();
-    a.sty(zp(NEXT_ITEM));
+    a.tya();
+    a.tsx();
+    a.sta(abs(NEXT_ITEM + ITEM_FRAME).x());
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pla();
@@ -531,13 +545,6 @@ fn print_tab(a: &mut Asm) {
     a.tax();
     a.jmp("print_spaces");
 
-    // SPC n: n spaces, the token read.
-    a.here("print_spc");
-    a.jsr("factor_integer");
-    a.dec(zp(z::OFFSET_A));
-    a.ldx(zp(z::IAC));
-    a.jmp("print_spaces");
-
     // An integer expression, then its closing bracket.
     a.here("integer_bracketed");
     a.jsr("expr_integer");
@@ -563,6 +570,13 @@ fn print_tab(a: &mut Asm) {
     a.cpx(zp(z::FIELD));
     a.bne("print_spaces");
     a.rts();
+
+    // SPC n: n spaces, the token read.
+    a.here("print_spc");
+    a.jsr("factor_integer");
+    a.dec(zp(z::OFFSET_A));
+    a.ldx(zp(z::IAC));
+    a.fall_into("print_spaces");
 }
 
 fn output(a: &mut Asm) {
@@ -606,18 +620,6 @@ fn output(a: &mut Asm) {
     a.pla();
     a.bind(printed);
     a.jmp(abs(entry::OSWRCH));
-
-    // The string buffer printed.
-    a.here("print_buffer");
-    a.ldy(imm(0));
-    let character = a.here_local();
-    a.cpy(zp(z::STRING_LENGTH));
-    a.beq(RTS);
-    a.lda(abs(page::STRING).y());
-    a.jsr("print_char");
-    a.iny();
-    a.bne(character);
-    a.rts();
 }
 
 fn numbers(a: &mut Asm) {
@@ -647,7 +649,19 @@ fn numbers(a: &mut Asm) {
     a.tax();
     a.jsr("print_spaces");
     a.bind(full);
-    a.jmp("print_buffer");
+    a.fall_into("print_buffer");
+
+    // The string buffer printed.
+    a.here("print_buffer");
+    a.ldy(imm(0));
+    let character = a.here_local();
+    a.cpy(zp(z::STRING_LENGTH));
+    a.beq(RTS);
+    a.lda(abs(page::STRING).y());
+    a.jsr("print_char");
+    a.iny();
+    a.bne(character);
+    a.rts();
 
     // FAC written in the buffer by `@%`.
     a.here("format_at");

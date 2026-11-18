@@ -27,6 +27,10 @@ use crate::media::disc::{self, Disc, Sector, SectorId, Track};
 const BYTE_CYCLES: u64 = 128;
 /// Cycles per revolution.
 const REVOLUTION: u64 = disc::REVOLUTION_BYTES as u64 * BYTE_CYCLES;
+/// How long a disc turns on once its motor stops: the drive's ready logic
+/// watches the index pulses, and drops the line when two revolutions bring
+/// none, so the 8271 dropping its outputs between commands goes unseen.
+const SPIN_DOWN: u64 = 2 * REVOLUTION;
 /// How long the index hole holds INDEX active: about 4 ms at 300 rpm.
 const INDEX_PULSE: u64 = 8_000;
 /// Cycles the microcode takes to decode a command before acting on it.
@@ -355,6 +359,8 @@ pub struct Fdc {
     completion: Option<(u64, Completion)>,
     /// The cycle the idle head unloads.
     unload_at: Option<u64>,
+    /// The cycle the discs stop turning, their motor stopped.
+    spin_down_at: Option<u64>,
     /// Ready inputs seen low since the last Read Drive Status.
     not_ready: u8,
 }
@@ -422,6 +428,7 @@ impl Fdc {
             op_due: None,
             completion: None,
             unload_at: None,
+            spin_down_at: None,
             not_ready: 0,
         }
     }
@@ -479,10 +486,15 @@ impl Fdc {
     #[must_use]
     pub fn next_event(&self) -> Option<u64> {
         let operation = self.operation.as_ref().and(self.op_due);
-        [operation, self.completion.map(|(at, _)| at), self.unload_at]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            operation,
+            self.completion.map(|(at, _)| at),
+            self.unload_at,
+            self.spin_down_at,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The CPU reads register `register`: 0 status, 1 result, 4–7 data. The
@@ -514,7 +526,7 @@ impl Fdc {
             2 => {
                 self.held = value & 1 != 0;
                 if self.held {
-                    self.reset();
+                    self.reset(cycle);
                 }
             }
             4..=7 => {
@@ -525,18 +537,18 @@ impl Fdc {
         }
     }
 
-    /// The reset pin's effect: the drive outputs fall, any command is
-    /// abandoned, the status clears and the mode returns to DMA with two
+    /// The reset pin's effect at `cycle`: the drive outputs fall, any command
+    /// is abandoned, the status clears and the mode returns to DMA with two
     /// actuators.
-    pub fn reset(&mut self) {
-        self.abandon();
+    pub fn reset(&mut self, cycle: u64) {
+        self.abandon(cycle);
         self.status = 0;
         self.data_pending = false;
         self.completion = None;
         self.unload_at = None;
         self.received = 0;
         self.awaiting = 0;
-        self.registers[usize::from(register::DRIVE_OUTPUT)] = 0;
+        self.set_output(cycle, 0);
         self.registers[usize::from(register::MODE)] &= !(mode::NON_DMA | mode::SINGLE_ACTUATOR);
     }
 
@@ -544,8 +556,30 @@ impl Fdc {
         self.registers[usize::from(register::DRIVE_OUTPUT)]
     }
 
-    fn output_mut(&mut self) -> &mut u8 {
-        &mut self.registers[usize::from(register::DRIVE_OUTPUT)]
+    /// The drive outputs set at `cycle`. The BBC runs the drive motors while
+    /// the head is loaded: started they turn at once, and stopped they turn
+    /// on for `SPIN_DOWN` unless started again.
+    fn set_output(&mut self, cycle: u64, value: u8) {
+        let loaded = |out: u8| out & output::LOAD_HEAD != 0;
+        if loaded(value) {
+            self.spin_down_at = None;
+        } else if loaded(self.output()) {
+            self.spin_down_at = Some(cycle + SPIN_DOWN);
+        }
+        self.registers[usize::from(register::DRIVE_OUTPUT)] = value;
+    }
+
+    /// Whether the discs turn: their motor runs, or has not yet stopped them.
+    fn turning(&self) -> bool {
+        self.output() & output::LOAD_HEAD != 0 || self.spin_down_at.is_some()
+    }
+
+    /// The ready bits of the drives holding a disc.
+    fn holding_discs(&self) -> u8 {
+        (0..)
+            .zip(&self.drives)
+            .filter(|(_, state)| state.disc.is_some())
+            .fold(0, |bits, (drive, _)| bits | ready_bit(drive))
     }
 
     fn non_dma(&self) -> bool {
@@ -561,7 +595,7 @@ impl Fdc {
 
     fn command(&mut self, cycle: u64, value: u8) {
         // The microcode takes a command as it comes, abandoning one running.
-        self.abandon();
+        self.abandon(cycle);
         self.completion = None;
         self.data_pending = false;
         self.command = value;
@@ -587,7 +621,7 @@ impl Fdc {
     }
 
     fn execute(&mut self, cycle: u64) {
-        self.select(self.command & output::SELECT);
+        self.select(cycle, self.command & output::SELECT);
         let p = self.parameters;
         let finish = |fdc: &mut Self, immediate| {
             fdc.completion = Some((cycle + COMMAND_CYCLES, Completion::Immediate(immediate)));
@@ -596,12 +630,12 @@ impl Fdc {
             0x2C => finish(self, Immediate::DriveStatus),
             0x34 => {
                 for (offset, &value) in (0..).zip(&p[1..4]) {
-                    self.write_special(p[0].wrapping_add(offset), value);
+                    self.write_special(cycle, p[0].wrapping_add(offset), value);
                 }
                 finish(self, Immediate::Done);
             }
             0x38 => {
-                self.write_special(p[0], p[1]);
+                self.write_special(cycle, p[0], p[1]);
                 finish(self, Immediate::Done);
             }
             0x3C => finish(self, Immediate::Special(p[0])),
@@ -621,20 +655,22 @@ impl Fdc {
 
     /// A command naming other drives than are selected selects them, and
     /// every output but the side falls.
-    fn select(&mut self, select: u8) {
+    fn select(&mut self, cycle: u64, select: u8) {
         let out = self.output();
         if out & output::SELECT != select {
-            *self.output_mut() = select | (out & output::SIDE);
+            self.set_output(cycle, select | (out & output::SIDE));
             self.unload_at = None;
         }
     }
 
-    fn write_special(&mut self, at: u8, value: u8) {
+    fn write_special(&mut self, cycle: u64, at: u8, value: u8) {
         let at = at & 0x3F;
         // The microcode passes the value through the scan sector register.
         self.registers[usize::from(register::SCAN_SECTOR)] = value;
-        if at != register::DRIVE_INPUT {
-            self.registers[usize::from(at)] = value;
+        match at {
+            register::DRIVE_INPUT => {}
+            register::DRIVE_OUTPUT => self.set_output(cycle, value),
+            _ => self.registers[usize::from(at)] = value,
         }
     }
 
@@ -653,13 +689,15 @@ impl Fdc {
     }
 
     /// The drive inputs: each drive's ready line, and the selected drive's
-    /// track-0, write-protect and index lines. An empty drive's index sensor
-    /// sees light all the time.
+    /// track-0, write-protect and index lines. A drive is ready while its
+    /// disc turns, and shows the index hole only then; an empty drive's index
+    /// sensor sees light all the time.
     fn inputs(&self, cycle: u64) -> u8 {
         let out = self.output();
+        let turning = self.turning();
         let mut pins = 0;
         for (drive, state) in self.drives.iter().enumerate() {
-            if state.disc.is_some() {
+            if state.disc.is_some() && turning {
                 pins |= ready_bit(drive);
             }
             if out & select_bit(drive) == 0 {
@@ -673,7 +711,7 @@ impl Fdc {
                     if disc.write_protected() {
                         pins |= input::WRITE_PROTECT;
                     }
-                    if cycle % REVOLUTION < INDEX_PULSE {
+                    if turning && cycle % REVOLUTION < INDEX_PULSE {
                         pins |= input::INDEX;
                     }
                 }
@@ -825,7 +863,12 @@ impl Fdc {
                 self.complete(due, completion);
             } else if self.unload_at == Some(due) {
                 self.unload_at = None;
-                *self.output_mut() &= output::SIDE;
+                self.set_output(due, self.output() & output::SIDE);
+            } else if self.spin_down_at == Some(due) {
+                // A disc stopping drops its drive's ready line, which the chip
+                // latches.
+                self.spin_down_at = None;
+                self.not_ready |= self.holding_discs();
             } else {
                 self.op_due = None;
                 self.act(due);
@@ -872,7 +915,7 @@ impl Fdc {
     fn end(&mut self, cycle: u64, code: u8) {
         let deleted = self.operation.take().is_some_and(|op| op.deleted_seen);
         self.op_due = None;
-        *self.output_mut() &= !output::WRITE_ENABLE;
+        self.set_output(cycle, self.output() & !output::WRITE_ENABLE);
         let code = if deleted {
             code | result::DELETED
         } else {
@@ -934,10 +977,10 @@ impl Fdc {
         };
         op.stepped = true;
         let high = *head > LOW_CURRENT_TRACK;
-        let out = self.output_mut();
-        *out = (*out & !(output::DIRECTION | output::LOW_CURRENT))
+        let out = (self.output() & !(output::DIRECTION | output::LOW_CURRENT))
             | if inward { output::DIRECTION } else { 0 }
             | if high { output::LOW_CURRENT } else { 0 };
+        self.set_output(now, out);
         self.set_stage(Stage::Stepping, now + step);
     }
 
@@ -955,7 +998,7 @@ impl Fdc {
         } else {
             0
         };
-        *self.output_mut() |= output::LOAD_HEAD;
+        self.set_output(now, self.output() | output::LOAD_HEAD);
         if let Some(op) = &mut self.operation {
             op.stepped = false;
         }
@@ -1114,7 +1157,7 @@ impl Fdc {
             }
             Kind::Write { .. } => {
                 op.written.clear();
-                *self.output_mut() |= output::WRITE_ENABLE;
+                self.set_output(now, self.output() | output::WRITE_ENABLE);
                 self.request();
                 self.set_stage(Stage::Moving { byte: 0 }, now + BYTE_CYCLES);
             }
@@ -1240,11 +1283,11 @@ impl Fdc {
 
     /// Stop the operation without a result: a new command or a reset took
     /// over.
-    fn abandon(&mut self) {
+    fn abandon(&mut self, cycle: u64) {
         self.cut_write_short();
         self.operation = None;
         self.op_due = None;
-        *self.output_mut() &= !output::WRITE_ENABLE;
+        self.set_output(cycle, self.output() & !output::WRITE_ENABLE);
     }
 
     /// A format asks for each ID field's four bytes as it writes the address
@@ -1370,7 +1413,7 @@ impl Fdc {
                 ) {
                     track.write_data(current, written, deleted, false);
                 }
-                *self.output_mut() &= !output::WRITE_ENABLE;
+                self.set_output(now, self.output() & !output::WRITE_ENABLE);
                 self.next_sector(now);
             }
             Kind::Seek | Kind::Format(_) => {}
@@ -1666,6 +1709,7 @@ crate::snapshot::fields!(
         op_due,
         completion,
         unload_at,
+        spin_down_at,
         not_ready,
     },
     check | fdc,
@@ -1698,6 +1742,9 @@ impl Fdc {
             && self.op_due.is_none_or(|at| r.pending(at))
             && self.completion.is_none_or(|(at, _)| r.pending(at))
             && self.unload_at.is_none_or(|at| r.pending(at))
+            && self
+                .spin_down_at
+                .is_none_or(|at| r.pending(at) && self.output() & output::LOAD_HEAD == 0)
             && self.not_ready & !input::READY == 0
     }
     /// Whether a search under way gives up no later than `longest` after it

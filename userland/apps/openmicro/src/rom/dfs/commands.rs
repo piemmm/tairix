@@ -408,9 +408,10 @@ fn options(a: &mut Asm) {
 }
 
 /// `run_file`: the file named at (&F2),Y loaded to its own address and
-/// entered at its execution address, its line's tail left for OSARGS 1. A
-/// name with no directory or drive is looked for in the library too; a file
-/// in neither is a Bad command.
+/// entered at its execution address with A 1, X &FF, Y 1 and C set, as
+/// DFS 1.20 enters it, its line's tail left for OSARGS 1. A name with no
+/// directory or drive is looked for in the library too; a file in neither is
+/// a Bad command.
 ///
 /// DFS 1.20 enters an address in the sideways window with itself paged
 /// there, so a BASIC program, saved to be entered at &8023, does nothing
@@ -445,16 +446,33 @@ fn running(a: &mut Asm) {
     a.sta(abs(page::OP_ADDRESS));
     a.lda(abs(page::INFO_LOAD + 1));
     a.sta(abs(page::OP_ADDRESS + 1));
-    a.jsr("load_data");
     a.jsr("message");
+    // The entry is taken before the data moves, which may land on this
+    // workspace: left on the stack, less one, for an RTS.
     a.lda(abs(page::INFO_EXEC + 1));
     a.cmp(imm(hi(SIDEWAYS_BASE)));
     let enter = a.local();
     a.bcc(enter);
     a.cmp(imm(hi(OS_BASE)));
-    a.bcc(RTS);
+    a.bcs(enter);
+    a.jmp("load_data");
     a.bind(enter);
-    a.jmp(abs(page::INFO_EXEC).ind());
+    a.lda(abs(page::INFO_EXEC));
+    a.sec();
+    a.sbc(imm(1));
+    a.tax();
+    a.lda(abs(page::INFO_EXEC + 1));
+    a.sbc(imm(0));
+    a.pha();
+    a.txa();
+    a.pha();
+    a.jsr("load_data");
+    a.ldx(imm(0xFF));
+    a.ldy(imm(1));
+    a.lda(imm(1));
+    a.sec();
+    a.clv();
+    a.rts();
 }
 
 /// *DIR, *LIB, *DRIVE, *ENABLE and *TITLE.

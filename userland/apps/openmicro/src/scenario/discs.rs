@@ -92,6 +92,41 @@ const fn big(start: u16) -> File {
     }
 }
 
+/// A file `name` loaded and entered at `address`, `length` long, at `start`.
+const fn program(name: &'static [u8], address: u32, length: u32, start: u16) -> File {
+    File {
+        name,
+        dir: b'$',
+        load: address,
+        exec: address,
+        length,
+        start,
+        locked: false,
+    }
+}
+
+/// Code that stores the A, X, Y and P it is entered with at &70 to &73.
+const ENTRY_STATE: [u8; 11] = [
+    0x85, 0x70, 0x86, 0x71, 0x84, 0x72, 0x08, 0x68, 0x85, 0x73, 0x60,
+];
+/// Code that prints `OK`.
+const PRINT_OK: [u8; 11] = [
+    0xA9, b'O', 0x20, 0xEE, 0xFF, 0xA9, b'K', 0x20, 0xEE, 0xFF, 0x60,
+];
+/// Two tracks' worth of bytes: a linear congruential generator's top byte,
+/// so no run of them repeats another.
+const NOISE: [u8; 0x800] = {
+    let mut bytes = [0; 0x800];
+    let mut x: u32 = 1;
+    let mut i = 0;
+    while i < bytes.len() {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        bytes[i] = x.to_le_bytes()[3];
+        i += 1;
+    }
+    bytes
+};
+
 /// The disc named `name`, if a scenario may name it.
 #[must_use]
 pub fn named(name: &str) -> Option<Vec<u8>> {
@@ -178,6 +213,29 @@ pub fn named(name: &str) -> Option<Vec<u8>> {
         // A file past 64 KiB, with room after it or a file 498 sectors on.
         "big" => image(b"BIG", 800, 0, &[big(2)], &[]),
         "bigcapped" => image(b"BIG", 800, 0, &[sector(b"B", 500), big(2)], &[]),
+        // Files that land on what a load is decided from: X on the
+        // catalogue, R and W, which crosses a track, on the DFS's own
+        // workspace; K, of &55s, on a block put at &3000; and E, which
+        // records the registers it is entered with.
+        "lowload" => image(
+            b"LOWLOAD",
+            800,
+            0,
+            &[
+                program(b"W", 0x1000, 0x800, 8),
+                program(b"R", 0x1000, 0x200, 6),
+                program(b"E", 0x3000, 0x100, 5),
+                program(b"K", 0x3000, 0x100, 4),
+                program(b"X", 0x0E00, 0x200, 2),
+            ],
+            &[
+                (0x200, &[0xAA; 0x200]),
+                (0x400, &[0x55; 0x100]),
+                (0x500, &ENTRY_STATE),
+                (0x600, &PRINT_OK),
+                (0x800, &NOISE),
+            ],
+        ),
         _ => None,
     }
 }

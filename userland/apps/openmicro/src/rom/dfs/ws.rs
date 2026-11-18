@@ -109,21 +109,14 @@ pub mod page {
     pub const OP_SECTORS: u16 = OP_SECTOR + 2;
     pub const OP_ADDRESS: u16 = OP_SECTORS + 2;
     pub const OP_STORE: u16 = OP_ADDRESS + 2;
-    /// The track and sector of the command in hand.
-    pub const OP_TRACK: u16 = OP_STORE + 3;
-    pub const OP_SECTOR_ON_TRACK: u16 = OP_TRACK + 1;
-    /// Sectors and bytes the command in hand moves.
-    pub const OP_COUNT: u16 = OP_SECTOR_ON_TRACK + 1;
-    pub const OP_BYTES: u16 = OP_COUNT + 1;
-    /// Attempts the command in hand has left.
-    pub const OP_ATTEMPTS: u16 = OP_BYTES + 2;
+    /// The sectors, address and bytes stored, one run a transfer holds.
+    pub const OP_RUN_LEN: u8 = (OP_STORE + 3 - OP_SECTORS).to_le_bytes()[0];
     /// The drive's physical number and its select bits.
-    pub const OP_PHYSICAL: u16 = OP_ATTEMPTS + 1;
+    pub const OP_PHYSICAL: u16 = OP_STORE + 3;
     pub const OP_SELECT: u16 = OP_PHYSICAL + 1;
-    /// The ROM that had the NMI routine before this one claimed it.
-    pub const NMI_PREVIOUS: u16 = OP_SELECT + 1;
-    /// Per physical drive, non-zero once its head has found track 0.
-    pub const CALIBRATED: u16 = NMI_PREVIOUS + 1;
+    /// Per physical drive, whether its head has found track 0 and whether
+    /// the drive has been found stopped since.
+    pub const CALIBRATED: u16 = OP_SELECT + 1;
     /// The drive whose catalogue is at &0E00.
     pub const CAT_DRIVE: u16 = CALIBRATED + 2;
     /// The address of the rest of a *RUN command's line, for OSARGS 1.

@@ -194,12 +194,16 @@ Decimal mode reproduces NMOS flags for every input, valid BCD or not.
 **Video.** The 6845 is stepped per character clock; the ULA produces 16 MHz
 pixel slots; the SAA5050 receives one byte per 1 MHz character with the
 Model B's display delay and produces 12 half-dots per character with
-character rounding, drawn into 16 slots by coverage. The beam is locked to
+character rounding, drawn into 16 slots by coverage; it sees no sync, so it
+counts a row's lines as display enable falls, its LOSE, and restarts them on
+VSYNC, its DEW. The beam is locked to
 HSYNC and VSYNC, so a program moving sync moves the picture. The canvas is
 896 × 600: 56 µs of each line from 8 µs after the HSYNC edge, and 300 lines
-of each field from 16 lines after the VSYNC edge, fields woven for interlace:
-a late VSYNC begins the upper field, so the odd raster lines, whose
-half-lines round toward the row below, lie below the even ones. What the
+of each field from 16 lines after the VSYNC edge, fields woven for interlace.
+An interlaced even field's VSYNC comes half a line late and the field runs a
+line longer, so each VSYNC follows the last by 312.5 lines, a frame is 625,
+and the odd field's raster lines, starting half a line further from their
+VSYNC, lie below the even ones. What the
 beam flies back before reaching, the rest of a line an early HSYNC ends or
 of a field an early VSYNC ends, is black.
 
@@ -215,7 +219,11 @@ ratio 125:24. No second resampler exists.
 
 **Discs.** The 8271 runs its command set against drives modelled by rotation:
 300 rpm, ten 256-byte sectors per track of an FM single-density image, a byte
-under the head every 64 µs and an NMI per byte. SSD and DSD images are read
+under the head every 64 µs and an NMI per byte. The motors run while the
+chip's head-load output is set, as the BBC wires them: a disc turns at speed
+at once, turns on for two revolutions once its motor stops, and is ready, with
+its index hole passing, only while it turns; the chip latches the drop, so a
+DFS finds a drive left idle stopped. SSD and DSD images are read
 and written back: a disc encodes to its image's own length, longer only as far
 as a guest wrote past it, and reports any track holding what a sector dump
 cannot record. The machine reports a disc written since it was last saved, and
@@ -536,12 +544,17 @@ its scenario in the corpus:
 - With bit 1 of the VDU status byte set, as software sets it to fill a
   window's last cell, the cursor wraps to the window's opposite edge instead
   of scrolling it, as the copy cursor does.
+- A service call a ROM claims returns X 0, and one none claims X &FF, through
+  OSBYTE &8F and OSBYTE &8C and &8D's call to the ROMs alike.
 
 Deliberate divergences: the character set is this ROM's own design,
-`lib/vdu`'s BBC arrangement, so a glyph's pixels differ from MOS 1.20's; and
+`lib/vdu`'s BBC arrangement, so a glyph's pixels differ from MOS 1.20's;
 &31A, the VDU driver's scratch for the last addressed pixel's line, is not
 reproduced for a line clipped at its start or the extra plot of an open line,
-which MOS 1.20 takes from other points of its own drawing order. The 16 KiB image has no room for the rest:
+which MOS 1.20 takes from other points of its own drawing order; and OSCLI
+hands a command to the filing system with two bytes fewer on the stack than
+MOS 1.20, so a program *RUN is entered with S two higher. The 16 KiB image
+has no room for the rest:
 MOS 1.20 writes a silenced channel's attenuation twice more and steps a
 finished release's pitch twice while silent, which nothing hears; the
 two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
@@ -617,7 +630,7 @@ program format, the line editor and its commands, the five-byte floating
 point and every function to the original's accuracy, `@%` formatting, the
 inline assembler, `CALL`/`USR` conventions, errors with their numbers and
 messages, and file access through the MOS. Workspace follows BASIC II: zero
-page &00–&6F, the resident integers at &0400, the variable catalogue from
+page &00–&4E, the resident integers at &0400, the variable catalogue from
 &0480, the control stacks of page &05, the string buffer at &0600 and the
 input buffer at &0700. BRKV is BASIC II's &B402, which jumps to the error
 handler; &B433, which software sets BRKV to so any error stops the machine,
@@ -644,8 +657,9 @@ run:
   pointer &1C, COUNT &1E, LISTO &1F, TRACE &20 with its
   limit &21, WIDTH less one &23, the REPEAT, GOSUB and FOR depths &24–&26,
   the last expression's type &27 (&00 string, &40 integer, &FF real), OPT
-  &28, the integer accumulator &2A–&2D and the real one from &2E; &37–&6F are
-  the interpreter's own scratch, &70–&8F the user's.
+  &28, the integer accumulator &2A–&2D and the real one from &2E; &37–&4E are
+  the interpreter's own scratch. BASIC II never writes &4F–&8F, and programs
+  keep values there that their interrupt code reads.
 - Page 4: `@%` and A%–Z% at &400 + 4n; the catalogue at &480 + 2 × (the
   initial's code − &40), FN's list at &4F6 and PROC's at &4F8. An entry is
   a link, the name's later characters, a zero, then the value: a real's five
@@ -733,11 +747,19 @@ Behaviour pinned by observation, each with its test:
   it.
 - A variable takes `?` or `!` after it only with no space between: `PRINT F
   ?1` prints F and then `?1`, and `IF E% ?&70=3` tests E% and runs the store.
+- The scratch holds only work no evaluation outlives. What a statement keeps
+  across an expression waits on the 6502 or BASIC stack, so an FN there may
+  run any statement. That covers INPUT's items, DIM's dimensions, the
+  character after FOR's start, a call's formals and the assembler's
+  instruction.
 
 Where it differs on purpose: its copyright message is its own, as long as
 BASIC II's; an instruction whose operand calls an FN that assembles code is
-placed after that code, where BASIC II's bytes go astray; and a byte formal
-is neither kept nor restored, where BASIC II's damages the program.
+placed after that code, where BASIC II's bytes go astray; a byte formal
+is neither kept nor restored, where BASIC II's damages the program; and an
+array keeps its shape through an FN in any of its dimensions, and a loop
+through an FN that runs FOR in its limit or step, where BASIC II's loses
+both.
 Measured with their separators or alone on their lines, as a program runs
 them, its statements are as fast as BASIC II's or faster, so *Mine Sweeper*
 lays its board inside its countdown: a quoted string joins a string in
@@ -773,8 +795,14 @@ SHA-256 of each disc written, with what DFS 1.20 produced for the same steps.
 
 Behaviour pinned by observation, each with its scenario:
 
-- The catalogue is read once and kept until the drive reports its disc
-  changed; a save writes the catalogue before the data.
+- The catalogue is read once and kept until the drive is found not ready,
+  its disc changed or its motor stopped since; a drive found stopped has its
+  head loaded and, after a 48 ms pause, sent to track 0 before the catalogue
+  is read again. A save writes the catalogue before the data.
+- Each *OPT 1 message, and the catalogue entry an OSFILE load writes into its
+  block, comes before the data moves, so a load over the catalogue still
+  reports its file and one over its own block leaves the data there.
+- *RUN enters a file with A 1, X &FF, Y 1 and C set.
 - A file opened for output is given 64 sectors. One that outgrows its room
   grows to the next multiple of 256 sectors, or to the next file's start or
   the disc's end if nearer, the catalogue written at each step; with no room
@@ -790,11 +818,19 @@ Behaviour pinned by observation, each with its scenario:
   blocks while none is open, so a program may load over &1100 on once its
   files are closed; CLOSE#0 closes every one.
 - OSWORD &7F with no disc in the drive waits for one, until ESCAPE.
+- Service call &0A is claimed when the DFS gives its absolute workspace up,
+  and &12 leaves Y as it was.
 
-Where it differs on purpose: its banner and copyright are its own; V, the C
-flags the manuals leave undefined and the registers a program is *RUN with
-are not DFS 1.20's; the rest of a file's last sector is zero, where DFS 1.20
-writes whatever its buffer last held, of that file or another; a buffer is
+Where it differs on purpose: its banner and copyright are its own; V and the
+C flags the manuals leave undefined are not DFS 1.20's; a load may land
+anywhere from &0E00 up, this workspace included, and lands whole and is
+entered, since what a transfer runs on is held beside the NMI routine from
+its claim to its release, its commands' parameters are sent from there, and
+*RUN takes its entry before the data moves, where DFS 1.20 can lose the rest
+of such a load and not enter it; DFS 1.20 gives the 8271 a verify command
+before a save writes the catalogue, which this DFS does not; the rest of a
+file's last sector is zero, where DFS 1.20 writes whatever its buffer last
+held, of that file or another; a buffer is
 written back only to its file's disc, where DFS 1.20 writes it to whatever
 disc is in the drive; a channel follows its file when *COMPACT moves it; and
 a save takes up to a revolution less than DFS 1.20's.

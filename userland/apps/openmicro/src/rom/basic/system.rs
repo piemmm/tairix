@@ -6,8 +6,10 @@ use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, imm, lo, zp, Acc, Asm};
 use crate::rom::os::{entry, osbyte};
 
-/// SOUND's and ENVELOPE's OSWORD block, once every value is found.
-const BLOCK: u16 = z::STATEMENT;
+/// SOUND's and ENVELOPE's OSWORD block, once every value is found: from
+/// &37, where BASIC II builds it, since programs keep their own values in the
+/// zero page past BASIC II's.
+const BLOCK: u16 = z::VAR;
 
 pub fn emit(a: &mut Asm) {
     vdu(a);
@@ -216,7 +218,7 @@ fn lists(a: &mut Asm) {
 const WORDS: u8 = 0x80;
 const SOUND_BYTES: u8 = 8;
 const ENVELOPE_BYTES: u8 = 14;
-const _: () = assert!(BLOCK + ENVELOPE_BYTES as u16 <= 0x70);
+const _: () = assert!(BLOCK + ENVELOPE_BYTES as u16 <= z::SCRATCH_END);
 
 fn calls(a: &mut Asm) {
     // OSCLI: the string, with a CR, to the command line interpreter.

@@ -170,7 +170,7 @@ fn the_cursor_covers_its_address_on_its_lines_and_blinks_as_programmed() {
 }
 
 #[test]
-fn interlaced_sync_starts_the_odd_field_s_vsync_half_a_line_late() {
+fn interlaced_sync_starts_the_even_field_s_vsync_half_a_line_late() {
     let mut interlaced = SMALL;
     interlaced[8] = (reg::MODE, 0x01);
     let mut crtc = programmed(&interlaced);
@@ -185,8 +185,47 @@ fn interlaced_sync_starts_the_odd_field_s_vsync_half_a_line_late() {
         }
         was = c.vsync;
     }
-    // Half of the ten-character line on: the pulse first shows at 5.
-    assert_eq!(&starts[..2], [(0, false), (5, true)]);
+    // The chip powers up in an even field; half of the ten-character line on,
+    // its pulse first shows at 5.
+    assert_eq!(&starts[..2], [(5, true), (0, false)]);
+}
+
+/// The regression: both fields ran the same whole lines, so an interlaced
+/// frame was a line short and a field's VSYNC came 312 lines after the last
+/// on the BBC, not 312.5: a 20 ms timer, which Revs splits its screen by,
+/// drifted half a line a field.
+#[test]
+fn interlaced_sync_gives_every_field_the_same_period_half_a_line_over_the_rows() {
+    // The VSYNC starts, in characters, over several fields of each mode.
+    let starts = |mode: u8| {
+        let mut registers = SMALL;
+        registers[8] = (reg::MODE, mode);
+        let mut crtc = programmed(&registers);
+        let mut starts = Vec::new();
+        let mut was = false;
+        for at in 0..8 * FRAME_LINES * LINE {
+            let c = crtc.clock();
+            if c.vsync && !was {
+                starts.push(at);
+            }
+            was = c.vsync;
+        }
+        starts
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect::<Vec<_>>()
+    };
+    let periods = starts(0x01);
+    assert!(periods.len() >= 4, "{periods:?}");
+    assert!(
+        periods
+            .iter()
+            .all(|&period| period * 2 == (2 * FRAME_LINES + 1) * LINE),
+        "{periods:?}"
+    );
+    assert!(starts(0x00)
+        .iter()
+        .all(|&period| period == FRAME_LINES * LINE));
 }
 
 #[test]

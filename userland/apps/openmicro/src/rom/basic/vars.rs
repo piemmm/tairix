@@ -40,10 +40,10 @@ pub fn emit(a: &mut Asm) {
     lookup(a);
     let (subscript, range) = arrays(a);
     element_end(a, subscript, range);
-    let block = dim(a);
-    dim_block(a, block);
-    dim_room(a);
-    sizing(a);
+    let (block, bad) = dim(a);
+    dim_block(a, block, bad);
+    let too_big = dim_room(a);
+    sizing(a, too_big);
     creating(a);
     entries(a);
     loading(a);
@@ -53,10 +53,11 @@ pub fn emit(a: &mut Asm) {
 }
 
 /// An array element's subscript work: the dimension's size, and the
-/// running offset; and DIM's count of dimensions and where it goes on.
+/// running offset; and DIM's count of dimensions and where it goes on,
+/// clear of the name, the sizes and the heap work DIM's block takes.
 const SIZE: u16 = z::INT_WORK;
 const OFFSET: u16 = SIZE + 2;
-const DIMS: u16 = z::STATEMENT;
+const DIMS: u16 = z::FP_WORK + 2;
 const AFTER: u16 = DIMS + 1;
 /// The 6502 stack frame an element is found in, from the stack pointer
 /// after its pushes.
@@ -192,10 +193,10 @@ fn element_end(a: &mut Asm, subscript: Label, range: Label) {
     a.rts();
 }
 
-fn dim(a: &mut Asm) -> Label {
+fn dim(a: &mut Asm) -> (Label, Label) {
     // DIM: arrays and byte blocks, separated by commas.
     a.here("statement_dim");
-    let (absent, bad, block) = (a.local(), a.local(), a.local());
+    let (bad, block) = (a.local(), a.local());
     a.jsr("next_a");
     // A block's place starts with a name, as BASIC II has it: an indirection
     // alone is Bad DIM.
@@ -212,10 +213,7 @@ fn dim(a: &mut Asm) -> Label {
     a.lda(zp(NAME_TYPE));
     a.and(imm(ARRAY));
     a.beq(block);
-    a.bcs(absent);
-    a.bind(bad);
-    a.jmp("err_bad_dim");
-    a.bind(absent);
+    a.bcc(bad);
     // Each dimension pushed as an integer, its size one more; the count in
     // the first frame byte.
     a.lda(imm(0));
@@ -235,12 +233,10 @@ fn dim(a: &mut Asm) -> Label {
     a.pha();
     a.lda(imm(kind::INTEGER));
     a.jsr("push_value");
+    a.tsx();
+    a.inc(abs(STACK_PAGE + 2).x());
     a.pla();
     a.tax();
-    a.pla();
-    a.clc();
-    a.adc(imm(1));
-    a.pha();
     a.cpx(imm(b','));
     a.beq(dimension);
     a.jsr("closing_bracket");
@@ -281,23 +277,22 @@ fn dim(a: &mut Asm) -> Label {
     a.jmp(size);
     a.bind(sized);
     a.jmp("dim_next");
-    block
+    a.bind(bad);
+    a.jmp("err_bad_dim");
+    (block, bad)
 }
 
-fn dim_block(a: &mut Asm, block: Label) {
+fn dim_block(a: &mut Asm, block: Label, bad: Label) {
     // A byte block: the variable holds its address, the block one more than
     // the size given, so -1 takes nothing and reads the free space's start,
     // as BASIC II allows; a block of 64K or one below nothing is Bad DIM.
-    let near_bad = a.local();
-    a.bind(near_bad);
-    a.jmp("err_bad_dim");
     a.bind(block);
     a.pla();
     a.sta(zp(z::OFFSET_A));
     a.jsr("lvalue");
-    a.bcs(near_bad);
+    a.bcs(bad);
     a.lda(zp(z::VTYPE));
-    a.bmi(near_bad);
+    a.bmi(bad);
     a.lda(zp(z::VAR));
     a.pha();
     a.lda(zp(z::VAR + 1));
@@ -305,17 +300,20 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.lda(zp(z::VTYPE));
     a.pha();
     a.jsr("expr_integer");
-    a.stx(zp(z::OP));
     a.jsr("int_plus_one");
     a.lda(zp(z::IAC + 3));
     a.ora(zp(z::IAC + 2));
-    a.bne(near_bad);
+    a.bne(bad);
     a.pla();
     a.sta(zp(z::VTYPE));
     a.pla();
     a.sta(zp(z::VAR + 1));
     a.pla();
     a.sta(zp(z::VAR));
+    // The character after the size waits on the stack, as the type takes
+    // its byte.
+    a.txa();
+    a.pha();
     a.ldy(zp(z::VARTOP));
     a.ldx(zp(z::VARTOP + 1));
     a.tya();
@@ -333,7 +331,8 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.pla();
     a.jsr("return_ya");
     a.jsr("store_variable");
-    a.ldx(zp(z::OP));
+    a.pla();
+    a.tax();
     a.dec(zp(z::OFFSET_A));
     a.here("dim_next");
     a.jsr("next_comma");
@@ -343,7 +342,7 @@ fn dim_block(a: &mut Asm, block: Label) {
     a.jmp("statement_done_a");
 }
 
-fn dim_room(a: &mut Asm) {
+fn dim_room(a: &mut Asm) -> Label {
     // DIM space unless XA bytes and an entry's NAME_END + 1 fit below the
     // BASIC stack; XA kept.
     a.here("dim_fits");
@@ -419,16 +418,18 @@ fn dim_room(a: &mut Asm) {
     a.bcc(RTS);
     a.inx();
     a.bne(RTS);
+    let too_big = a.here_local();
     a.jmp("err_bad_dim");
+    too_big
 }
 
-fn sizing(a: &mut Asm) {
+fn sizing(a: &mut Asm, too_big: Label) {
     // OFFSET × SIZE, Bad DIM past sixteen bits, as BASIC II has it.
     a.here("times_size_checked");
     a.jsr("times_size");
     a.lda(zp(TO + 2));
-    a.beq(RTS);
-    a.jmp("err_bad_dim");
+    a.bne(too_big);
+    a.rts();
 
     // OFFSET × SIZE in OFFSET, sixteen bits, past them in TO + 2; an
     // element's first subscript has nothing to multiply.

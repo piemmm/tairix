@@ -258,7 +258,8 @@ fn rom_scan(a: &mut Asm, model: Model) {
 
 /// Offer service call A, with Y its parameter, to each ROM with a service
 /// entry from 15 down until one claims it by returning A zero. Returns A
-/// and X zero if claimed, Y as the ROMs leave it; the ROM paged in is kept.
+/// and X zero if claimed and &FF if not, as MOS 1.20 does, Y as the ROMs
+/// leave it; the ROM paged in is kept.
 fn service_call(a: &mut Asm, model: Model) {
     a.here("service_call");
     a.tax();
@@ -282,8 +283,8 @@ fn service_call(a: &mut Asm, model: Model) {
     a.pla();
     a.dex();
     a.bpl("service_next");
+    // X is zero from a claim, or &FF from the last ROM.
     a.here("service_done");
-    a.tax();
     a.pla();
     page(a, model, Held::A);
     a.txa();
@@ -371,24 +372,22 @@ fn enter_language(a: &mut Asm, model: Model) {
     a.jmp(abs(header::LANGUAGE));
 }
 
-/// BRK: point &FD at the error number, note the ROM it happened in, offer
-/// service call 6, then call BRKV with the language paged in.
-/// The last error's message, then a newline.
+/// The last error's message.
 fn error_text(a: &mut Asm) {
     a.here("error_text");
     a.ldy(imm(1));
     a.here("error_text_next");
     a.lda(zp(os::ERROR).ind_y());
-    a.beq("error_text_end");
+    a.beq(RTS);
     a.jsr("oswrch");
     a.iny();
     a.bne("error_text_next");
-    a.here("error_text_end");
-    a.jmp("osnewl");
+    a.rts();
 }
 
-/// BRKV's default: with no language to take it, an error is printed and the
-/// machine stops.
+/// BRKV's default: with no language to take it, an error's message is
+/// printed and the machine stops with the cursor after it, as MOS 1.20's
+/// does.
 pub(super) fn brk_default(a: &mut Asm) {
     a.here("brk_default");
     a.jsr("error_text");

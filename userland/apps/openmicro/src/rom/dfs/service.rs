@@ -134,7 +134,8 @@ fn workspace(a: &mut Asm) {
     a.rts();
 
     // Another ROM claims the absolute workspace: the open files written
-    // back and closed, the settings kept in the private page.
+    // back and closed, the settings kept in the private page, and the call
+    // claimed, as DFS 1.20 answers it once it gives the workspace up.
     a.here("service_lose");
     a.ldx(zp(os::ROM));
     a.lda(abs(page_d::PRIVATE_WORKSPACE).x());
@@ -158,6 +159,8 @@ fn workspace(a: &mut Asm) {
     a.sta(abs(page_d::PRIVATE_WORKSPACE).x());
     a.pla();
     a.tay();
+    a.lda(imm(0));
+    a.rts();
     a.bind(kept);
     a.lda(imm(service::CLAIM_WORKSPACE));
     a.rts();
@@ -228,10 +231,12 @@ fn selection(a: &mut Asm) {
         a.byte(hi(sym(routine)));
     }
 
+    // The DFS selected by its number, which comes back in Y as it went in.
     a.here("service_select");
     a.cpy(imm(DFS_NUMBER));
     a.bne(RTS);
     a.jsr("select_dfs");
+    a.ldy(imm(DFS_NUMBER));
     a.lda(imm(0));
     a.rts();
 }

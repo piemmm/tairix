@@ -78,6 +78,72 @@ fn mode_7_text_is_drawn_on_the_rows_it_occupies() {
     assert!(rows.iter().all(|&row| row < CANVAS_HEIGHT));
 }
 
+/// The regression: the field after a late VSYNC counted an HSYNC more, so
+/// with sync alone interlaced a picture drawn on both rows of each line moved
+/// a line every field; both fields draw on the same rows wherever HSYNC lies.
+#[test]
+fn with_sync_alone_interlaced_every_field_draws_on_the_same_rows() {
+    // Mode 1 as the MOS programs it; the palette left unprogrammed lights
+    // the whole picture, whose place is what is compared.
+    const MODE_1_CRTC: [u8; 14] = [
+        0x7F, 0x50, 0x62, 0x28, 0x26, 0x00, 0x20, 0x22, 0x01, 0x07, 0x67, 0x08, 0x06, 0x00,
+    ];
+    // HSYNC after the late VSYNC's start in its line, and before it.
+    for hsync in [0x62, 0x28] {
+        let ram = vec![0u8; 0x8000];
+        let mut video = Video::new();
+        for (register, &value) in MODE_1_CRTC.iter().enumerate() {
+            set_crtc(&mut video, register, value);
+        }
+        video.write_ula(false, 0xD8);
+        set_crtc(&mut video, reg::H_SYNC_POS, hsync);
+        let mut frames = Vec::new();
+        let mut cycle = 0;
+        while frames.len() < 6 {
+            cycle += 500;
+            let fields = video.fields();
+            video.catch_up(cycle, &ram, 0x4000, |_, _| {});
+            if video.fields() != fields {
+                frames.push(video.shown().to_vec());
+            }
+        }
+        // The first field drawn began before its VSYNC placed it.
+        assert!(
+            frames[1..].iter().all(|frame| *frame == frames[1]),
+            "HSYNC at {hsync}"
+        );
+        assert!(frames[1].iter().any(|&slot| shows_dot(slot)));
+    }
+}
+
+/// The regression: the SAA5050 counted every line after VSYNC, displayed or
+/// not, though it sees no sync, so a field a blank line longer drew its
+/// characters a line out of step; it counts the lines display enable ends.
+#[test]
+fn teletext_counts_only_the_lines_displayed() {
+    let widths = |adjust: u8| {
+        let mut ram = vec![0x20u8; 0x8000];
+        ram[0x7C00 + 40] = b'A';
+        let mut video = Video::new();
+        mode_7(&mut video);
+        set_crtc(&mut video, reg::V_ADJUST, adjust);
+        video.catch_up(4 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
+        let widths: Vec<usize> = video
+            .shown()
+            .as_chunks::<CANVAS_WIDTH>()
+            .0
+            .iter()
+            .map(|row| row.iter().filter(|&&slot| shows_dot(slot)).count())
+            .collect();
+        let apex = widths
+            .iter()
+            .position(|&lit| lit > 0)
+            .expect("the A is drawn");
+        widths[apex..apex + 20].to_vec()
+    };
+    assert_eq!(widths(3), widths(2));
+}
+
 /// The two fields interleave in the order of the SAA5050's half-lines: the
 /// field of odd raster lines, which round toward the row below, lies below
 /// the other, so an 'A' widens down from its apex as its half-lines do.
@@ -364,9 +430,9 @@ fn a_line_ending_early_leaves_nothing_beside_it() {
     };
     let mut video = Video::new();
     mode_7(&mut video);
-    // Characters all the way along lines of 64 µs, which reach the right
-    // edge.
-    set_crtc(&mut video, reg::H_DISPLAYED, 64);
+    // Characters along lines of 64 µs to their last, which reach the right
+    // edge; display ends on every line, for the SAA5050 to count it.
+    set_crtc(&mut video, reg::H_DISPLAYED, 63);
     video.catch_up(4 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
     // Lines of 56 µs end the canvas's last 8 µs, 128 slots, short.
     let unreached = CANVAS_WIDTH - 128;
@@ -375,6 +441,7 @@ fn a_line_ending_early_leaves_nothing_beside_it() {
         "the long lines reach the edge"
     );
     set_crtc(&mut video, reg::H_TOTAL, 55);
+    set_crtc(&mut video, reg::H_DISPLAYED, 55);
     video.catch_up(8 * FIELD_CYCLES, &ram, 0x4000, |_, _| {});
     assert!(
         !lit_beyond(&video, unreached),

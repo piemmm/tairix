@@ -1656,6 +1656,7 @@ fn osrdrm(a: &mut Asm, model: Model) {
     a.cli();
     a.jsr("error_text");
     a.jsr("osnewl");
+    a.jsr("osnewl");
     a.here("boot_restore");
     a.lda(imm(0));
     a.sta(abs(var::CFS_OR_RFS));

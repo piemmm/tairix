@@ -101,6 +101,19 @@ impl Host {
         Self::new(Some(numbered_disc()))
     }
 
+    /// Drive 0 selected with its head loaded, its motor running.
+    fn spin(&mut self) {
+        self.immediate(
+            0x3A,
+            &[register::DRIVE_OUTPUT, output::SELECT_0 | output::LOAD_HEAD],
+        );
+    }
+
+    /// Drive 0 selected with its head unloaded, its motor stopped.
+    fn stop(&mut self) {
+        self.immediate(0x3A, &[register::DRIVE_OUTPUT, output::SELECT_0]);
+    }
+
     fn status(&mut self) -> u8 {
         self.fdc.read(self.now, 0).unwrap()
     }
@@ -208,6 +221,7 @@ fn specify_writes_three_consecutive_special_registers() {
 #[test]
 fn drive_status_reports_track_0_the_ready_lines_and_the_index_hole() {
     let mut host = Host::with_disc();
+    host.spin();
     host.now = 3 * REVOLUTION;
     let at_index = host.immediate(0x6C, &[]).unwrap();
     assert_eq!(at_index, input::TRACK_0 | input::READY_0 | input::INDEX);
@@ -216,6 +230,11 @@ fn drive_status_reports_track_0_the_ready_lines_and_the_index_hole() {
         host.immediate(0x6C, &[]).unwrap(),
         input::TRACK_0 | input::READY_0
     );
+
+    // A disc whose motor has not run stands still: not ready, no hole passing.
+    let mut still = Host::with_disc();
+    still.now = 3 * REVOLUTION;
+    assert_eq!(still.immediate(0x6C, &[]).unwrap(), input::TRACK_0);
 
     let mut empty = Host::new(None);
     empty.now = REVOLUTION / 2;
@@ -229,6 +248,7 @@ fn drive_status_reports_track_0_the_ready_lines_and_the_index_hole() {
 #[test]
 fn a_disc_taken_out_leaves_the_drive_not_ready_until_its_status_is_read_twice() {
     let mut host = Host::with_disc();
+    host.spin();
     let disc = host.fdc.set_disc(host.now, PhysicalDrive::Zero, None);
     host.fdc.set_disc(host.now, PhysicalDrive::Zero, disc);
     assert_eq!(host.run(0x53, &[0, 0, 0x21], &[]).result, result::NOT_READY);
@@ -244,6 +264,7 @@ fn a_disc_taken_out_leaves_the_drive_not_ready_until_its_status_is_read_twice() 
 #[test]
 fn a_disc_put_in_another_s_place_leaves_the_drive_not_ready_once() {
     let mut host = Host::with_disc();
+    host.spin();
     let disc = host.fdc.set_disc(host.now, PhysicalDrive::Zero, None);
     host.fdc
         .set_disc(host.now, PhysicalDrive::Zero, disc.clone());
@@ -530,6 +551,87 @@ fn the_idle_head_unloads_and_the_drive_deselects_after_the_index_count() {
     assert!(
         host.fdc.head_loaded(PhysicalDrive::Zero),
         "an index count of 15 keeps the head loaded"
+    );
+}
+
+/// The regression: a drive was ready whenever it held a disc, so the idle
+/// head unloading never told a DFS its catalogue might be stale, and a
+/// program that overwrote that catalogue found its files gone.
+#[test]
+fn an_idle_head_unloading_stops_the_disc_and_latches_the_drive_not_ready() {
+    let mut host = Host::with_disc();
+    let read = host.run(0x53, &[0, 0, 0x21], &[]);
+    assert_eq!(read.result, result::OK);
+    let unload = (read.at / REVOLUTION + 12) * REVOLUTION;
+    host.now = unload + 3 * REVOLUTION;
+    host.fdc.advance(host.now);
+    assert!(!host.fdc.head_loaded(PhysicalDrive::Zero));
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & (input::READY_0 | input::INDEX),
+        0,
+        "stopped at the index hole"
+    );
+    host.spin();
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & input::READY_0,
+        0,
+        "the stop latched"
+    );
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & input::READY_0,
+        input::READY_0
+    );
+}
+
+#[test]
+fn a_disc_turns_on_for_two_revolutions_after_its_motor_stops() {
+    let mut host = Host::with_disc();
+    host.spin();
+    host.stop();
+    host.now += 2 * REVOLUTION - 1_000;
+    host.spin();
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & input::READY_0,
+        input::READY_0,
+        "started again before it stopped"
+    );
+    host.stop();
+    host.now += 2 * REVOLUTION + 1_000;
+    host.spin();
+    assert_eq!(host.immediate(0x6C, &[]).unwrap() & input::READY_0, 0);
+}
+
+#[test]
+fn a_command_naming_no_drive_drops_the_outputs_too_briefly_to_stop_the_disc() {
+    // Our DFS selects with such a command, the outputs falling before the
+    // register write raises them again.
+    let mut host = Host::with_disc();
+    host.spin();
+    host.spin();
+    assert_eq!(
+        host.immediate(0x6C, &[]).unwrap() & input::READY_0,
+        input::READY_0
+    );
+}
+
+#[test]
+fn a_stopping_disc_goes_through_a_snapshot_and_one_with_its_motor_running_is_refused() {
+    let mut host = Host::with_disc();
+    host.spin();
+    host.stop();
+    let stopping = host.fdc.spin_down_at.expect("the disc is stopping");
+    host.fdc = round_trip(&host.fdc, host.now);
+    assert_eq!(host.fdc.spin_down_at, Some(stopping));
+    let mut running = host.fdc.clone();
+    running.registers[usize::from(register::DRIVE_OUTPUT)] |= output::LOAD_HEAD;
+    assert_eq!(
+        restored_at(&running, host.now).err(),
+        Some(snapshot::SnapshotError::Malformed)
+    );
+    assert_eq!(
+        restored_at(&host.fdc, stopping + 1).err(),
+        Some(snapshot::SnapshotError::Malformed),
+        "a stop already past"
     );
 }
 

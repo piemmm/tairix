@@ -358,8 +358,8 @@ impl Saa5050 {
         self.attributes = Attributes::LINE_START;
     }
 
-    /// A line's sync: count it, and at the end of a row decide whether the
-    /// next is the lower half of a double-height pair.
+    /// A displayed line ends, LOSE falling: count it, and at the end of a row
+    /// decide whether the next is the lower half of a double-height pair.
     pub fn end_line(&mut self) {
         if self.dew {
             return;

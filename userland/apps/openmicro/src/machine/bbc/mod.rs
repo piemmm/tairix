@@ -855,7 +855,7 @@ impl Machine {
         self.board.user_via.reset(now);
         self.board.after_user_via(now);
         self.board.fdc.advance(now);
-        self.board.fdc.reset();
+        self.board.fdc.reset(now);
         if !down {
             self.cpu.reset();
         }

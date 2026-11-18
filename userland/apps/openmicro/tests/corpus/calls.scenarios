@@ -93,3 +93,16 @@ script type:CLS:VDU28,5,20,30,5:CALL&C9BD:PRINT ?&308,?&309,?&30A,?&30B\n;wait:0
 # MODE and OSBYTE &9A set the video ULA's control register and restart the flash from its space state, as MOS 1.20 does, so a flash then waits its whole period.
 scenario the_ula_s_control_register_restarts_the_flash
 script type:?&252=7:?&253=9:?&251=1:MODE7:G%=?&248:?&252=25:?&253=25:PRINT ~G%\n;wait:0.5;type:?&252=7:?&253=9:?&251=1:A%=154:X%=&4B:CALL&FFF4:F%=?&251:G%=?&248:?&252=25:?&253=25:PRINT F%,~G%\n;wait:0.3
+
+# The block is filled before the data moves, so a load over it overwrites it,
+# and one over the catalogue still reports the file.
+scenario osfile_fills_its_block_before_the_data_lands
+discs lowload
+script type:CLS:$&A00="K":!&3000=&A00:!&3002=0:!&3006=&FF:A%=&FF:X%=0:Y%=&30:CALL&FFDD:P.~!&3002,~!&3006,~!&300A,~!&300E\n;wait:1;type:$&A00="X":!&900=&A00:!&902=0:!&906=&FF:A%=&FF:X%=0:Y%=9:CALL&FFDD:P.~!&902,~!&906,~!&90A,~!&90E\n;wait:1
+
+# DFS 1.20 loses the rest of this load, which lands on its own workspace;
+# this DFS keeps what a transfer runs on beside its NMI routine.
+scenario a_load_over_the_dfs_workspace_lands_whole
+discs lowload
+ours
+script type:CLS:*LOAD W\n;wait:2;type:S%=0:FOR I%=&1000 TO &17FC STEP 4:S%=S% EOR !I%:NEXT:P.~S%,~!&1000,~!&10D4,~!&11FC,~!&1200,~!&17FC\n;wait:2

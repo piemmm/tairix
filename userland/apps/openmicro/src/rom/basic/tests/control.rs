@@ -1,9 +1,16 @@
 //! Control: loops, conditions, subroutines, procedures and functions,
 //! DATA, and ON ERROR.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
-use super::{after, assert_screen, assert_screen_from};
+use tairix_openbasic::keyword::word;
+
+use super::super::ws::page;
+use super::{after, assert_screen, assert_screen_from, typed};
 
 #[test]
 fn read_takes_data_as_it_is_written() {
@@ -53,6 +60,25 @@ fn for_loops_run_and_end_as_basic_ii_runs_them() {
             "         1",
             ">",
         ],
+    );
+}
+
+/// BASIC II mistakes an array's shape when an FN runs in a dimension but the
+/// last, and ends a loop after one pass when its limit or step runs a FOR;
+/// here each statement keeps its own.
+#[test]
+fn a_statement_keeps_its_own_through_an_fn_that_runs_dim_or_for() {
+    assert_screen_from(
+        &[
+            "10 DEF FNI(N)=N*N DIV N",
+            "20 DEF FNC(N):FOR J%=1 TO 2:NEXT:=N",
+            "30 DIM G%(FNI(2),FNC(1)):G%(2,1)=5:PRINT G%(2,1)",
+            "40 FOR I%=1 TO FNC(3) STEP FNC(1):PRINT I%;:NEXT:PRINT",
+            "RUN",
+        ],
+        150,
+        ">RUN",
+        &[">RUN", "         5", "         1         2         3", ">"],
     );
 }
 
@@ -242,6 +268,74 @@ fn a_recursing_function_takes_no_more_room_a_level_than_basic_iis() {
         .collect();
     assert_eq!(bytes.len(), 2, "{row}");
     assert!(bytes[0] <= 39 && bytes[1] <= 37, "{row}");
+}
+
+#[test]
+fn array_elements_are_formals_and_locals_any_basic_their_subscripts() {
+    assert_screen_from(
+        &[
+            "10 DIM A%(3),B(2):A%(2)=5:B(1)=1.5",
+            "20 PROCP(A%(2),B(1)):PRINT A%(1);B(2)",
+            "30 PROCQ(4):PRINT A%(1);B(2)",
+            "40 PRINT FNR(2,3);A%(3)",
+            "50 FOR I%=FNI(1) TO FNI(3) STEP FNI(1):PRINT I%;:NEXT:PRINT",
+            "60 END",
+            "70 DEF PROCP(A%(FNI(1)),B(FNI(2))):PRINT A%(1);B(2):ENDPROC",
+            "80 DEF PROCQ(N):LOCAL A%(1),B(FNI(2)):A%(1)=N:B(2)=N*2:PRINT A%(1);B(2):ENDPROC",
+            "90 DEF FNR(X,A%(X+1)):=X*A%(3)",
+            "100 DEF FNI(N)=N*N DIV N",
+            "RUN",
+        ],
+        150,
+        ">RUN",
+        &[
+            ">RUN",
+            "         51.5",
+            "         00",
+            "         48",
+            "         00",
+            "         00",
+            "         1         2         3",
+            ">",
+        ],
+    );
+}
+
+/// The regression: a call whose name ended a line of the longest length,
+/// 255 bytes, left the statement pointer at the line's start, so the line
+/// ran again, where BASIC II's goes on past it.
+#[test]
+fn a_call_ending_a_line_of_the_longest_length_returns_past_it() {
+    let fn_call = [b'Q', b'=', word::FN.token, b'A'];
+    for tail in [&[word::PROC.token, b'P'][..], &fn_call[..]] {
+        // Line 100, built over the end marker: C% counted, PRINT of X's, then
+        // the call filling the line's 255 bytes from its CR.
+        let quote_at = 255 - tail.len() - 2;
+        let mut pokes = vec![format!(
+            "20 A%=TOP-2:?A%=13:A%?1=0:A%?2=100:A%?3=255:$(A%+4)=\"C%=C%+1:\":A%?12={}:A%?13=34",
+            word::PRINT.token
+        )];
+        let mut tail_pokes = format!("31 A%?{quote_at}=34:A%?{}=58", quote_at + 1);
+        for (at, byte) in (quote_at + 2..).zip(tail) {
+            write!(tail_pokes, ":A%?{at}={byte}").expect("a String takes any text");
+        }
+        pokes.push(format!("30 FORI%=14TO{}:A%?I%=88:NEXT", quote_at - 1));
+        pokes.push(tail_pokes + ":A%?255=13:A%?256=&FF");
+        let lines: Vec<&str> = ["10 LOMEM=&5000:C%=0"]
+            .into_iter()
+            .chain(pokes.iter().map(String::as_str))
+            .chain([
+                "40 GOTO100",
+                "50 DEFPROCP:IFC%>3 END",
+                "60 ENDPROC",
+                "70 DEFFNA:IFC%>3 END",
+                "80 =3",
+                "RUN",
+            ])
+            .collect();
+        let machine = typed(&lines, 300);
+        assert_eq!(machine.peek(page::resident(b'C')), 1, "{tail:?} once");
+    }
 }
 
 #[test]

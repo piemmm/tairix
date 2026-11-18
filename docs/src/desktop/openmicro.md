@@ -18,7 +18,9 @@ up to the cycle of any access that can observe it. It holds the NMOS 6502, the
 System and User VIAs with the keyboard matrix and its links, the 6845, the
 video ULA and the SAA5050, the SN76489, the uPD7002, the 6850 and the serial
 ULA, the 8271 with two double-sided drives, the cassette interface, and
-sixteen sideways slots of ROM or RAM.
+sixteen sideways slots of ROM or RAM. The drives' motors run while the 8271
+has a head loaded, so a drive left idle stops, and a disc filing system then
+finds it not ready and reads its catalogue again.
 
 The Electron is the 6502 at 2 MHz and 32 KiB behind its ULA, cycle-exact in
 the same way: the ULA's contention of RAM (the 1 MHz modes, and the display
@@ -251,8 +253,9 @@ Its screen memory, sound chip writes and documented results match MOS 1.20's
 for the same input. Where it differs on purpose: its character set is its own
 design, [`lib/vdu`](../lib/vdu.md)'s BBC arrangement; it does not reproduce
 &31A for a clipped line's start, some private keyboard and sound workspace, or
-redundant writes to a silenced sound channel; and, with no room left in 16 KiB,
-a whole-screen clear takes 1.7 times MOS 1.20's time, a horizontal line fill
+redundant writes to a silenced sound channel; a program `*RUN` is entered with
+two bytes fewer on the stack than under MOS 1.20; and, with no room left in
+16 KiB, a whole-screen clear takes 1.7 times MOS 1.20's time, a horizontal line fill
 two and a half times and a line a fifth longer, where text output, scrolling,
 triangles and POINT are within a few percent of it, a VDU 5 cell takes a
 fifth less and its unlit pixels cost nothing. The behaviour pinned against MOS 1.20 is listed in
@@ -264,8 +267,10 @@ with AUTO, DELETE, RENUMBER, LIST and LISTO, the five-byte reals and every
 function, `@%` formatting, PROC and FN with LOCAL, the inline assembler, CALL
 and USR, errors with BASIC II's numbers and messages, and SAVE, LOAD, CHAIN
 and the file channels through the MOS — in BASIC II's workspace: zero page
-&00–&6F, the resident integers at &400, the variable catalogue from &480, the
-stacks of page 5, the string buffer at &600 and the input buffer at &700. Its
+&00–&4E, the resident integers at &400, the variable catalogue from &480, the
+stacks of page 5, the string buffer at &600 and the input buffer at &700. Like
+BASIC II, it never writes &4F–&6F, where programs keep values their interrupt
+code reads. Its
 error handler is entered at BASIC II's &B402, and &B433, where software
 points BRKV to stop the machine at any error, stops it as BASIC II does. A
 call to &AF12 with n in the integer accumulator at &2A returns RND(n), and
@@ -283,8 +288,10 @@ same input: every real it computes has BASIC II's bits, and a string is given
 BASIC II's room as it grows. Where it differs on purpose: its copyright
 message is its own, as long as BASIC II's; an instruction whose operand calls
 an FN that assembles code is placed after that code, where BASIC II's goes
-astray; and a byte (`?`) as a PROC or FN parameter is neither kept nor put
-back, where BASIC II's damages the program. Measured as a program runs
+astray; a byte (`?`) as a PROC or FN parameter is neither kept nor put
+back, where BASIC II's damages the program; and an array keeps its shape
+through an FN in any of its dimensions, and a loop through an FN that runs
+FOR in its limit or step, where BASIC II's loses both. Measured as a program runs
 them, with their separators or alone on their lines, its statements are as
 fast as BASIC II's or faster — REPEAT, a false IF, TRUE, a GOSUB's line
 search, real division, the functions and string joins among them, a quoted
@@ -304,10 +311,12 @@ MOS.
 
 Its screens and the discs it writes match DFS 1.20's for the same steps, and
 it loads as fast. Where it differs on purpose: its banner and copyright are
-its own, as are the flags the manuals leave undefined and the registers a
-program is `*RUN` with; the rest of a file's last sector is zero, where DFS
-1.20 writes whatever its buffer last held, of that file or another; a buffer
-is written back only to its file's disc, where DFS 1.20 writes it to
+its own, as are the flags the manuals leave undefined; a load may land
+anywhere from &E00 up, the DFS's own workspace included, and lands whole and
+is entered, where DFS 1.20 can lose the rest of it; the rest of a file's last
+sector is zero, where DFS 1.20 writes whatever its buffer last held, of that
+file or another; a buffer is written back only to its file's disc, where
+DFS 1.20 writes it to
 whatever disc is in the drive; a channel follows its file when `*COMPACT`
 moves it; a file to be entered in the sideways window, where DFS 1.20 runs
 its own code, is loaded and not entered; and a save can take a revolution

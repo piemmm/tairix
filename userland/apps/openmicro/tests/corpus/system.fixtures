@@ -218,3 +218,14 @@ row 2
 row 80008 10001 195012F 20002 80008 10001 19
 row 5012F 20002 80008 10001 195012F 20002
 row >
+
+scenario service_calls_return_x_0_when_claimed_and_ff_when_not
+row     FF008F    FFFF8F
+row >X%=&12:Y%=4:P.~(USR&FFF4 AND &FFFFFF)
+row      4008F
+row >X%=&21:Y%=&FF:P.~(USR&FFF4 AND &FFFFFF)
+row     FFFF8F
+row >A%=&8C:X%=0:Y%=0:P.~(USR&FFF4 AND &FFFF
+row FF)
+row       FF8C
+row >

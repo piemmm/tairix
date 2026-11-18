@@ -1,4 +1,4 @@
-# The MOS's calls from programs and from interrupt routines: OSBYTE and OSWORD dispatched with interrupts off, an interrupt routine's SOUND waiting for room, unknown OSBYTEs, the ULA palette and its copy, VDUV, OSWORD &7F waiting for a disc, the cursor's shape VDU 23,0 sets, MODE's paged line count, and the key table OSBYTE &AC names.
+# The MOS's calls from programs and from interrupt routines: OSBYTE and OSWORD dispatched with interrupts off, an interrupt routine's SOUND waiting for room, unknown OSBYTEs, the service calls OSBYTE &8F issues, the ULA palette and its copy, VDUV, OSWORD &7F waiting for a disc, the cursor's shape VDU 23,0 sets, MODE's paged line count, and the key table OSBYTE &AC names.
 
 scenario osbyte_and_osword_dispatch_with_interrupts_off
 script type:CLS:P%=&900:[OPT 0:PHP:PLA:STA &70:RTS:]:?&200=0:?&201=9\n;wait:0.5;type:A%=&88:CALL &FFF4:B%=?&70 AND 4:A%=&E0:X%=0:Y%=&A:CALL &FFF1:P.B%,?&70 AND 4\n;wait:0.5
@@ -138,3 +138,9 @@ script type:NEW\n;type:10 A%=16:X%=9:CALL &FFF4:A$=STR$?&24D:A%=16:X%=2:A$=A$+" 
 # A graphics mode's PLOT hands VDUV its code with the cursor at &310 moved and the target's pixel at &320, and 96 to 127 make it the current point at &324 too, as a graphics extension reads them; a text mode's moves nothing.
 scenario vduv_is_handed_a_plot_with_its_cursor_and_pixel_set
 script type:NEW\n;type:10 DIM B$(1):FOR Q=0 TO 2 STEP 2:P%=&900:[OPT Q:PHP:PHA:LDX #23:.L LDA &310,X:STA &3000,X:DEX:BPL L:PLA:PLP:RTS:]:NEXT:?&226=0:?&227=9\n;type:20 FOR N%=0 TO 1:MODE 1+6*N%:VDU 29,40,0,20,0:FOR K%=0 TO 2:READ C%:!&310=&80008:!&314=&10001:!&324=&20002:PLOT C%,303,405\n;type:30 B$(N%)=B$(N%)+STR$~!&3000+" "+STR$~!&3004+" "+STR$~!&3010+" "+STR$~!&3014+" ":NEXT:RESTORE:NEXT\n;type:40 DATA 32,96,200\n;type:50 MODE 7:PRINT B$(0):PRINT B$(1)\n;type:RUN\n;wait:3
+
+# OSBYTE &8F: X zero once a ROM claims the call and &FF if none does; the DFS
+# claims &0A as it gives its workspace up, and &12 leaves Y as it was.
+scenario service_calls_return_x_0_when_claimed_and_ff_when_not
+discs testdisc
+script type:CLS:A%=&8F:X%=&0A:Y%=&FF:P.~(USR&FFF4 AND &FFFFFF),~(USR&FFF4 AND &FFFFFF)\n;wait:0.5;type:X%=&12:Y%=4:P.~(USR&FFF4 AND &FFFFFF)\n;wait:1;type:X%=&21:Y%=&FF:P.~(USR&FFF4 AND &FFFFFF)\n;wait:0.5;type:A%=&8C:X%=0:Y%=0:P.~(USR&FFF4 AND &FFFFFF)\n;wait:1

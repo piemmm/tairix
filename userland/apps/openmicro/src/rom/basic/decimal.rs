@@ -23,8 +23,8 @@ const REAL: u8 = 0x40;
 /// Where the number ends.
 const END: u16 = FLAGS + 1;
 // The sixteen bits several digits are first gathered in lie past what reading
-// keeps, and below the integer left operand.
-const _: () = assert!(NUMBER > END && NUMBER + 3 < z::IAC2);
+// keeps.
+const _: () = assert!(NUMBER > END && NUMBER + 2 <= z::SCRATCH_END);
 
 /// The scaled value's decimal exponent.
 const KEXP: u16 = z::DECIMAL;
@@ -43,7 +43,7 @@ const Y_SAVE: u16 = POINT + 1;
 /// The digit being added, or the exponent being read: past both reading's
 /// and writing's own, as both add digits.
 const DIGIT: u16 = Y_SAVE + 1;
-const _: () = assert!(DIGIT < z::IAC2);
+const _: () = assert!(DIGIT < z::SCRATCH_END);
 
 pub mod format {
     pub const GENERAL: u8 = 0;

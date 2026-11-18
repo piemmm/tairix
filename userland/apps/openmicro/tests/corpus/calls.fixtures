@@ -249,3 +249,19 @@ row ALL&FFF4:F%=?&251:G%=?&248:?&252=25:?&25
 row 3=25:PRINT F%,~G%
 row          9        4B
 row >
+
+scenario osfile_fills_its_block_before_the_data_lands
+row   55555555  55555555  55555555  55555555
+row >$&A00="X":!&900=&A00:!&902=0:!&906=&FF:
+row A%=&FF:X%=0:Y%=9:CALL&FFDD:P.~!&902,~!&9
+row 06,~!&90A,~!&90E
+row        E00       E00       200         0
+row >
+
+scenario a_load_over_the_dfs_workspace_lands_whole
+row >S%=0:FOR I%=&1000 TO &17FC STEP 4:S%=S%
+row  EOR !I%:NEXT:P.~S%,~!&1000,~!&10D4,~!&1
+row 1FC,~!&1200,~!&17FC
+row   691DD545  C4279641  420F432D  FD5C7F58
+row    AB0DCD5  B7F602AE
+row >

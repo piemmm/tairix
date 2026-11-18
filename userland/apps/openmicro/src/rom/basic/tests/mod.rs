@@ -150,6 +150,57 @@ fn the_pins_lie_past_every_routine_a_program_runs() {
     }
 }
 
+/// Programs keep values in the zero page past BASIC II's workspace, read
+/// even by their interrupt code, and BASIC II never writes there.
+#[test]
+fn basic_leaves_the_zero_page_past_basic_ii_s_to_the_program() {
+    let machine = typed(
+        &[
+            "FOR I%=&4F TO &6F:?I%=I% EOR &A5:NEXT",
+            "10 DIM A%(3),B(2,2),C$(2),M% 40",
+            "20 FOR I%=0 TO 3:A%(I%)=I%*I%:NEXT",
+            "30 B(1,1)=PI/3:C$(1)=\"AB\"+STR$(SIN(B(1,1))):X=SQR(2)*LN(10)/EXP(1)",
+            "40 Y%=A%(3) DIV 2+A%(2) MOD 3:Z=ATN(1)*4+ACS(0.5)-ASN(0.5)+TAN(0.1)+LOG(7)+DEG(1)+RAD(30)",
+            "50 S$=MID$(C$(1),2,3)+LEFT$(\"XYZ\",2)+RIGHT$(\"XYZ\",1)+STRING$(3,\"Q\")+CHR$(65):L%=LEN(S$)+INSTR(S$,\"Q\")+ASC(S$)+VAL(\"12.5E1\")+EVAL(\"2^10\")",
+            "60 REPEAT L%=L%-1:UNTIL L%<10",
+            "70 ON 2 GOSUB 200,210:PROCP(A%(1),B(1,1),C$(1)):Q=FNF(3)",
+            "80 RESTORE 300:READ R%,R,R$",
+            "90 P%=M%:[OPT 0:LDA #1:STA &70:RTS:]:CALL M%",
+            "100 IF X>1 AND Y%<>0 OR NOT Z THEN W=1 ELSE W=2",
+            "110 @%=&20209:PRINT X,Y%;Z'~L%,TAB(3)S$;SPC(2)R$",
+            "120 SOUND 1,-10,50,1:ENVELOPE 1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+            "130 INPUT \"N\",N,N$:INPUT LINE L$",
+            "140 ON ERROR GOTO 160",
+            "150 E=1/0",
+            "160 ON ERROR OFF:T=TIME:V=RND(1)+RND(-5)+RND(10):Z%=12345:END",
+            "200 RETURN",
+            "210 RETURN",
+            "220 DEF PROCP(I%,R,S$):LOCAL J%,K:J%=I%+1:K=R*2:ENDPROC",
+            "230 DEF FNF(N):IF N<2 THEN =1 ELSE =N*FNF(N-1)",
+            "300 DATA 7,2.5,\"HI\"",
+            "RUN",
+            "3,AB",
+            "A LINE",
+            "LIST",
+            "LISTO 7",
+            "LIST 20,40",
+            "RENUMBER 100,5",
+            "DELETE 100,105",
+            "LIST",
+            "NEW",
+            "OLD",
+        ],
+        300,
+    );
+    let written: Vec<u16> = (0x4F..=0x6F)
+        .filter(|&at| machine.peek(at) != at.to_le_bytes()[0] ^ 0xA5)
+        .collect();
+    assert_eq!(written, [], "the bytes BASIC wrote");
+    let z = super::ws::page::resident(b'Z');
+    let z_value = u32::from_le_bytes([0, 1, 2, 3].map(|i| machine.peek(z + i)));
+    assert_eq!(z_value, 12345, "the program ran to its end");
+}
+
 /// The centiseconds a program typed as `lines`, which ends by printing how
 /// long its loop took, printed.
 fn printed_time(lines: &[&str], centiseconds: u64) -> u32 {

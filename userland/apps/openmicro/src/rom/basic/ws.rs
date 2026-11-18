@@ -69,32 +69,37 @@ pub mod zp {
     /// The location a load or store works on, and its `place` type.
     pub const VAR: u16 = 0x37;
     pub const VTYPE: u16 = 0x39;
+    /// The character after an operand while two are combined, which no code
+    /// keeps while a location's type is wanted.
+    pub const OP: u16 = VTYPE;
     /// Whether an absent variable is P%: set only while the assembler reads
     /// an operand with OPT's errors off.
     pub const ASM_QUIET: u16 = 0x3A;
+    /// The scratch, ending where BASIC II's does: programs keep values past
+    /// it that their interrupt code reads. Each part below belongs to code
+    /// that runs to its end without evaluating, and parts sharing a byte
+    /// never run at once; what outlives an evaluation waits on a stack.
+    pub const SCRATCH: u16 = 0x3B;
+    pub const SCRATCH_END: u16 = 0x4F;
     /// The second real accumulator, laid out as the first.
-    pub const FAC2: u16 = 0x3B;
-    /// The scratch, &43–&6F. The editor's routines and the interpreter's
-    /// never run at once, so each lays out its own; only the error report
-    /// runs in both, and it ends whatever it interrupts.
-    pub const SCRATCH: u16 = 0x43;
+    pub const FAC2: u16 = SCRATCH;
+    /// Name lookup, string moves and line searches, none inside a real
+    /// operation.
+    pub const RUN: u16 = SCRATCH;
     /// The real operations' multiplier or divisor.
-    pub const FP_WORK: u16 = SCRATCH;
+    pub const FP_WORK: u16 = FAC2 + 8;
     /// Decimal reading and writing.
     pub const DECIMAL: u16 = FP_WORK + 4;
     /// The functions' own, shared with decimal reading and writing, which
     /// never runs inside one.
     pub const TRANS: u16 = DECIMAL;
     /// The integer left operand, and integer multiplication's and
-    /// division's work.
-    pub const IAC2: u16 = DECIMAL + 8;
+    /// division's work: a decimal conversion does no integer arithmetic, and
+    /// the functions' own stops short of `INT_WORK`, which their conversions
+    /// to integers use.
+    pub const IAC2: u16 = DECIMAL;
     pub const INT_WORK: u16 = IAC2 + 4;
-    /// The character after an operand while two are combined.
-    pub const OP: u16 = INT_WORK + 4;
-    /// Name lookup and string moves.
-    pub const RUN: u16 = OP + 1;
-    /// The statements' own, to &6F.
-    pub const STATEMENT: u16 = RUN + 10;
+    const _: () = assert!(INT_WORK + 4 == SCRATCH_END);
 }
 
 /// The types of a location, as CALL's parameter block gives them.

@@ -18,7 +18,7 @@ use crate::rom::os::{entry, osbyte, CR, ESCAPE_FLAG};
 
 /// The record the editor works at; a move's or a walk's pointer, and the
 /// number a walked record is given; a record's length.
-pub(super) const RECORD: u16 = z::SCRATCH + 21;
+pub(super) const RECORD: u16 = z::RUN;
 const SOURCE: u16 = RECORD + 2;
 const WALKED_NUMBER: u16 = SOURCE + 2;
 const LENGTH: u16 = WALKED_NUMBER + 2;
@@ -30,20 +30,23 @@ const LINE_LIMIT: u8 = 238;
 /// Where AUTO reads a line's text: after where its number's reference
 /// would be, so the record is made as for a typed line.
 const AUTO_TEXT: u16 = page::INPUT + HEADER as u16;
-/// LIST's first and last lines and DELETE's last; AUTO's and RENUMBER's
-/// step, and while renumbering the number given and a reference's target.
-const FIRST: u16 = z::STATEMENT;
-const LAST: u16 = FIRST + 2;
-const STEP: u16 = LAST + 2;
+/// LIST's and DELETE's last line, LIST's first, and a listing's open loops,
+/// FOR's then REPEAT's: clear of the records DELETE walks and the numbers
+/// and keywords a listing writes.
+const LAST: u16 = z::VAR;
+const FIRST: u16 = z::RUN;
+pub(super) const LISTING_LOOPS: u16 = z::RUN + 4;
+/// AUTO's and RENUMBER's step, and while renumbering the number given and a
+/// reference's target: clear of the lines they read, tokenise and walk.
+const STEP: u16 = z::VAR;
 const GIVEN: u16 = STEP + 1;
-const TARGET: u16 = GIVEN + 2;
-/// A listing's open loops, FOR's then REPEAT's.
-pub(super) const LISTING_LOOPS: u16 = TARGET + 2;
+const TARGET: u16 = z::IAC2;
 /// The step a number is given without one.
 const DEFAULT_STEP: u8 = 10;
 /// OSFILE's block, and its reasons.
-const FILE_BLOCK: u16 = z::SCRATCH;
+const FILE_BLOCK: u16 = z::VAR;
 const FILE_BLOCK_LENGTH: u8 = 18;
+const _: () = assert!(FILE_BLOCK + FILE_BLOCK_LENGTH as u16 <= z::SCRATCH_END);
 const OSFILE_SAVE: u8 = 0;
 const OSFILE_LOAD: u8 = 0xFF;
 /// The highest line number is the one a line number's top bit clear allows,
@@ -68,8 +71,8 @@ const FIRST_SEED: [u8; 3] = *b"ARW";
 pub fn emit(a: &mut Asm) {
     starting(a);
     prompt(a);
-    entering(a);
     program(a);
+    entering(a);
     clearing(a);
     moves(a);
     let syntax = listing(a);
@@ -243,9 +246,9 @@ fn entering(a: &mut Asm) {
     a.beq(done);
     a.lda(abs(page::INPUT).y());
     a.sta(zp(RECORD).ind_y());
-    a.jmp(text);
+    a.bcc(text);
     a.bind(done);
-    a.jmp("clear_variables");
+    a.fall_into("clear_variables");
 }
 
 fn program(a: &mut Asm) {

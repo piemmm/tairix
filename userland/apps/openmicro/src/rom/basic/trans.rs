@@ -22,6 +22,7 @@ const TABLE: u16 = z::TRANS + 1;
 const QUADRANT: u16 = z::TRANS + 2;
 /// LN's power of two, and EXP's whole power.
 const EXPONENT: u16 = z::TRANS + 3;
+const _: () = assert!(EXPONENT < z::INT_WORK);
 /// The bits below 64: an integral power that fits takes the multiplying.
 const SMALL_BITS: u8 = 6;
 /// The exponent of 64: a power from it on is not split.

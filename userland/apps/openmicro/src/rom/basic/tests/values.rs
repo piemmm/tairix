@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use super::{after, assert_screen};
+use super::{after, assert_screen, assert_screen_from};
 
 #[test]
 fn indirection_string_comparison_and_hex() {
@@ -201,6 +201,24 @@ fn arrays_and_their_errors() {
             "        -1",
             ">",
         ],
+    );
+}
+
+#[test]
+fn a_dimension_s_fn_may_itself_dim_a_block() {
+    assert_screen_from(
+        &[
+            "10 DEF FNI(N)=N*N DIV N",
+            "20 DIM A%(FNI(3)),E%(3,FNI(2)),C% FNI(9)",
+            "30 A%(3)=7:E%(3,2)=6:PRINT A%(3);E%(3,2)",
+            "40 DEF FNB(N):DIM Q% 4:=N",
+            "50 DIM D%(FNB(3)),F% FNB(2)",
+            "60 D%(3)=4:PRINT D%(3);F%>Q%",
+            "RUN",
+        ],
+        150,
+        ">RUN",
+        &[">RUN", "         76", "         4-1", ">"],
     );
 }
 

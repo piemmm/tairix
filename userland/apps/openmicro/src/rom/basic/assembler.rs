@@ -104,21 +104,23 @@ const _: () = assert!(OPT_OFFSET == P_FROM_O);
 
 /// The statement's own, kept across its operand: its class's modes, its
 /// mnemonic's base, and an EQU's size.
-const MODE_SET: u16 = z::STATEMENT;
+const MODE_SET: u16 = z::SCRATCH;
 const BASE: u16 = MODE_SET + 2;
 const SIZE: u16 = BASE + 1;
 const KEPT: u8 = (SIZE + 1 - MODE_SET).to_le_bytes()[0];
-/// Where its bytes go, as P% and as stored, and how many it made.
+/// Where its bytes go, as P% and as stored, and how many it made: made
+/// again after each operand.
 const LISTED: u16 = SIZE + 1;
 const STORED: u16 = LISTED + 2;
 const MADE: u16 = STORED + 2;
-/// Its text's start and end, an address's zero-page mode, and the packed
-/// mnemonic.
+/// Its text's start, an address's zero-page mode, its text's end, and the
+/// packed mnemonic. The mode is wanted only while it is chosen, so the
+/// listing's keyword reading may take its byte.
 const SOURCE: u16 = MADE + 1;
-const END: u16 = SOURCE + 1;
-const MODE: u16 = END + 1;
-const PACKED: u16 = MODE + 1;
-const _: () = assert!(PACKED < 0x6F);
+const MODE: u16 = SOURCE + 1;
+const END: u16 = MODE + 1;
+const PACKED: u16 = END + 1;
+const _: () = assert!(PACKED + 2 <= z::SCRATCH_END);
 
 /// The mnemonics' tables, from `cpu::isa`.
 struct Tables {

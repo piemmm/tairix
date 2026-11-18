@@ -936,6 +936,34 @@ fn printing_a_message_leaves_the_error_pointer_naming_the_last_error() {
     );
 }
 
+/// The regression: BRKV's default printed a newline after the message, where
+/// MOS 1.20 leaves the cursor after it, as a boot program refusing the
+/// machine shows.
+#[test]
+fn an_error_no_language_takes_stops_the_machine_after_its_message() {
+    let rom = program(None, |a| {
+        for byte in *b"AB" {
+            a.lda(imm(byte));
+            a.jsr(OSWRCH);
+        }
+        a.error(7, b"XY");
+    });
+    let mut machine = boot_rom(&rom);
+    machine.run_until(BUDGET);
+    assert_ne!(
+        machine.peek(DONE),
+        DONE_MARK,
+        "the machine stopped at the error"
+    );
+    let row = usize::from(machine.peek(vdu::CURSOR_Y));
+    assert_eq!(mode7_text(&machine)[row].trim_end(), "ABXY");
+    assert_eq!(
+        machine.peek(vdu::CURSOR_X),
+        4,
+        "the cursor after the message"
+    );
+}
+
 /// What GSREAD gives for `text` after GSINIT with C clear: its characters
 /// and Y at the end, or the number of the error it raised.
 fn gs_read(text: &'static str) -> Result<(Vec<u8>, u8), u8> {

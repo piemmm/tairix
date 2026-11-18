@@ -31,7 +31,7 @@ const GOSUB_HIGH: u16 = GOSUB_LOW + GOSUB_DEPTH as u16;
 const _: () = assert!(GOSUB_HIGH + GOSUB_DEPTH as u16 <= page::STRING);
 
 /// The FOR entry being worked on.
-const ENTRY: u16 = z::STATEMENT;
+const ENTRY: u16 = z::IAC2;
 
 pub fn emit(a: &mut Asm) {
     lines(a);
@@ -270,8 +270,10 @@ fn loops(a: &mut Asm) {
     a.jsr("next_a");
     a.cmp(imm(b'='));
     a.bne(mistake);
+    // The character after each expression waits on the stack, as the
+    // variable's type takes its byte; Y keeps the start value's kind.
     a.jsr("expr");
-    a.stx(zp(z::OP));
+    a.txa();
     a.pha();
     a.jsr("for_entry");
     a.lda(abs(page::STACKS).x());
@@ -280,9 +282,9 @@ fn loops(a: &mut Asm) {
     a.sta(zp(z::VAR + 1));
     a.lda(abs(page::STACKS + FOR_TYPE).x());
     a.sta(zp(z::VTYPE));
-    a.pla();
+    a.tya();
     a.jsr("store_variable");
-    a.lda(zp(z::OP));
+    a.pla();
     a.cmp(imm(word::TO.token));
     let to = a.local();
     a.beq(to);
@@ -296,21 +298,22 @@ fn loops(a: &mut Asm) {
     a.cpx(imm(word::STEP.token));
     let (stepped, given) = (a.local(), a.local());
     a.beq(stepped);
-    a.stx(zp(z::OP));
     a.jsr("int_zero");
     a.inc(zp(z::IAC));
     a.lda(imm(kind::INTEGER));
     a.bne(given);
     a.bind(stepped);
     a.jsr("expr");
-    a.stx(zp(z::OP));
     a.bind(given);
     a.ldy(imm(lo(FOR_STEP)));
     a.jsr("store_for_value");
     // NEXT returns to the statement after the FOR: past its colon, or at
     // the line's end it ended at.
+    a.txa();
+    a.pha();
     a.jsr("return_point");
-    a.lda(zp(z::OP));
+    a.pla();
+    a.pha();
     a.cmp(imm(b':'));
     let (past, low) = (a.local(), a.local());
     a.beq(past);
@@ -327,7 +330,8 @@ fn loops(a: &mut Asm) {
     a.sta(abs(page::STACKS + FOR_RETURN).x());
     a.tya();
     a.sta(abs(page::STACKS + FOR_RETURN + 1).x());
-    a.ldx(zp(z::OP));
+    a.pla();
+    a.tax();
     a.jmp("statement_done_x");
 }
 

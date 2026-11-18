@@ -14,12 +14,15 @@ use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Asm, RTS};
 use crate::rom::os::CR;
 
 /// The record being listed.
-pub(super) const LINE: u16 = z::SCRATCH + 9;
-/// The number being converted, and its five digits.
-const NUMBER: u16 = LINE + 2;
+pub(super) const LINE: u16 = z::RUN + 2;
+/// The number being converted, and its five digits, to the scratch's end.
+const NUMBER: u16 = z::SCRATCH_END - 2 - DIGIT_COUNT as u16;
 const DIGITS: u16 = NUMBER + 2;
-/// A byte `print_token` leaves alone, for a caller's Y.
-pub(super) const TOKEN_KEPT: u16 = z::SCRATCH + 8;
+/// A byte `print_token` and the conversion leave alone, for a caller's Y.
+pub(super) const TOKEN_KEPT: u16 = READ + 2;
+const _: () = assert!(TOKEN_KEPT < NUMBER);
+/// The token `print_token` looks for, past the keyword `next_keyword` reads.
+const WANTED: u16 = KEYWORD + 2;
 /// The loops a listing is inside, one count for each of `Options::LOOPS`.
 const OPEN_LOOPS: u16 = LISTING_LOOPS;
 /// LISTO's space after the number is its bit 0, the one space it counts.
@@ -126,7 +129,7 @@ fn lines(a: &mut Asm) {
     a.tay();
     a.jmp("list_text");
 
-    // XY = the line number encoded at (&4C) + Y.
+    // XY = the line number encoded at (LINE) + Y.
     a.here("decode_reference");
     a.lda(zp(LINE).ind_y());
     a.asl(Acc);
@@ -164,7 +167,7 @@ fn keywords(a: &mut Asm) {
     a.bcs(plain);
     a.eor(imm(PSEUDO_LHS));
     a.bind(plain);
-    a.sta(zp(z::SCRATCH + 7));
+    a.sta(zp(WANTED));
     a.lda(imm(lo("keywords")));
     a.sta(zp(KEYWORD));
     a.lda(imm(hi("keywords")));
@@ -177,7 +180,7 @@ fn keywords(a: &mut Asm) {
     a.iny();
     a.cmp(imm(0x80));
     a.bcc(search);
-    a.cmp(zp(z::SCRATCH + 7));
+    a.cmp(zp(WANTED));
     a.beq(found);
     a.jsr("next_keyword");
     a.bne(search);

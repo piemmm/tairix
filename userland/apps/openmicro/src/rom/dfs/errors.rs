@@ -35,7 +35,7 @@ const ERRORS: [(&str, u8, &str); 20] = [
 ];
 
 /// A disc fault's number, and a syntax error's.
-const DISK_FAULT: u8 = 0xC7;
+pub(super) const DISK_FAULT: u8 = 0xC7;
 pub(super) const SYNTAX: u8 = 0xDC;
 
 pub(super) fn emit(a: &mut Asm) {
@@ -115,26 +115,4 @@ pub(super) fn emit(a: &mut Asm) {
     a.lda(imm(0));
     a.sta(abs(AT).x());
     a.jmp(abs(AT));
-
-    // "Disk fault" with the 8271's result in A, at the command's track and
-    // first sector.
-    a.here("disk_fault");
-    a.pha();
-    a.lda(imm(DISK_FAULT));
-    a.jsr("error_start");
-    a.jsr("error_text");
-    a.text("Disk fault ");
-    a.byte(0);
-    a.pla();
-    a.jsr("error_hex");
-    a.jsr("error_text");
-    a.text(" at ");
-    a.byte(0);
-    a.lda(abs(super::ws::page::OP_TRACK));
-    a.jsr("error_hex");
-    a.lda(imm(b'/'));
-    a.jsr("error_char");
-    a.lda(abs(super::ws::page::OP_SECTOR_ON_TRACK));
-    a.jsr("error_hex");
-    a.jmp("error_raise");
 }

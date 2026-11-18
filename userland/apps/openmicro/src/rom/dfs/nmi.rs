@@ -1,6 +1,7 @@
 //! The NMI routine the 8271 interrupts through, assembled for &0D00 and
 //! copied there while the DFS holds the NMI: each interrupt moves one byte
-//! to or from memory, or, once the command ends, takes its result.
+//! to or from memory, or, once the command ends, takes its result. What a
+//! transfer runs on is held after it, the one place a read cannot land.
 
 use super::ws::zp as z;
 use crate::machine::bbc::fdc::status;
@@ -29,6 +30,67 @@ pub(super) struct Nmi {
     /// The memory operands a read stores through and a write fetches from.
     pub store: u16,
     pub fetch: u16,
+    /// What a transfer runs on.
+    pub held: Held,
+}
+
+/// What a transfer runs on while the DFS holds the NMI, from the claim to
+/// its release: a read may land anywhere from &0E00 up, this workspace
+/// included.
+pub(super) struct Held {
+    /// The ROM that had the NMI before the DFS claimed it.
+    pub previous: u16,
+    /// The drive's select bits, and the direction, a write non-zero.
+    pub select: u16,
+    pub write: u16,
+    /// The next command's track and sector on it.
+    pub track: u16,
+    pub sector: u16,
+    /// Sectors still to move, the address the next command starts at, and
+    /// the bytes a read has still to store, three of them: one run, as the
+    /// transfer is asked for them.
+    pub sectors: u16,
+    pub address: u16,
+    pub wanted: u16,
+    /// The sectors the command in hand moves, and the bytes of them a read
+    /// stores.
+    pub count: u16,
+    pub bytes: u16,
+    /// Attempts the command in hand has left.
+    pub attempts: u16,
+}
+
+impl Held {
+    /// The state laid out from `base`, and the address past it.
+    const fn from(base: u16) -> (Self, u16) {
+        let previous = base;
+        let select = previous + 1;
+        let write = select + 1;
+        let track = write + 1;
+        let sector = track + 1;
+        let sectors = sector + 1;
+        let address = sectors + 2;
+        let wanted = address + 2;
+        let count = wanted + 3;
+        let bytes = count + 1;
+        let attempts = bytes + 2;
+        (
+            Self {
+                previous,
+                select,
+                write,
+                track,
+                sector,
+                sectors,
+                address,
+                wanted,
+                count,
+                bytes,
+                attempts,
+            },
+            attempts + 1,
+        )
+    }
 }
 
 /// Assemble the routine.
@@ -106,10 +168,13 @@ pub(super) fn build() -> Result<Nmi, AsmError> {
     a.pla();
     a.rti();
     a.here("nmi_top");
+    // Room for the held state, which each transfer sets rather than copies.
+    let (_, held_len) = Held::from(0);
+    a.fill(usize::from(held_len), 0);
 
     let image = a.finish()?;
     let at = |name: &'static str| image.symbol(name).ok_or(AsmError::Unbound { name });
-    let len = usize::from(at("nmi_top")? - page_d::NMI);
+    let top = at("nmi_top")?;
     Ok(Nmi {
         route: at("nmi")? + 1,
         read: at("nmi_read")?,
@@ -117,6 +182,7 @@ pub(super) fn build() -> Result<Nmi, AsmError> {
         discard: at("nmi_discard")?,
         store: at("nmi_store")? + 1,
         fetch: at("nmi_fetch")? + 1,
-        bytes: image.bytes[..len].to_vec(),
+        held: Held::from(top).0,
+        bytes: image.bytes[..usize::from(top - page_d::NMI)].to_vec(),
     })
 }

@@ -108,10 +108,11 @@ pub struct Crtc {
     v_display: bool,
     hsync_left: u8,
     vsync_left: u8,
-    /// The current row is VSYNC's and its pulse has yet to start: on an odd
+    /// The current row is VSYNC's and its pulse has yet to start: on an even
     /// interlaced field it starts half a line late.
     vsync_armed: bool,
-    /// Odd field of an interlaced frame.
+    /// Odd field of an interlaced frame: the one whose video takes the odd
+    /// scan lines.
     odd_field: bool,
     /// Fields since power-on, for the cursor's blink.
     fields: u32,
@@ -195,7 +196,7 @@ impl Crtc {
         self.vsync_left > 0
     }
 
-    /// Whether an odd field's VSYNC waits to start half way along this line.
+    /// Whether an even field's VSYNC waits to start half way along this line.
     #[must_use]
     pub(crate) const fn vsync_armed(&self) -> bool {
         self.vsync_armed
@@ -213,11 +214,11 @@ impl Crtc {
         self.odd_field
     }
 
-    /// Whether this field's VSYNC starts half a line late, as an odd field's
-    /// does while sync interlaces.
+    /// Whether this field's VSYNC starts half a line late and the field runs
+    /// a line longer, as an even field's do while sync interlaces.
     #[must_use]
     pub const fn vsync_late(&self) -> bool {
-        self.odd_field && self.interlaced_sync()
+        !self.odd_field && self.interlaced_sync()
     }
 
     /// Whether the chip interlaces video as well as sync, giving each field
@@ -274,7 +275,7 @@ impl Crtc {
         if self.hsync_left > 0 {
             self.hsync_left -= 1;
         }
-        // Half way along the line is where an odd interlaced field's VSYNC
+        // Half way along the line is where an even interlaced field's VSYNC
         // starts, so that the two fields' lines interleave.
         if self.vsync_armed && self.hc == self.regs[reg::H_TOTAL] / 2 {
             self.start_vsync();
@@ -315,7 +316,7 @@ impl Crtc {
         if self.vsync_left > 0 {
             self.vsync_left -= 1;
         }
-        // An odd field's pulse that was due on this line and never started
+        // An even field's pulse that was due on this line and never started
         // (its half-way point lies past a shortened line) starts now.
         if self.vsync_armed {
             self.start_vsync();
@@ -335,7 +336,10 @@ impl Crtc {
                 0
             };
             if self.vc == self.regs[reg::V_TOTAL] {
-                let adjust = self.regs[reg::V_ADJUST];
+                // The field whose VSYNC starts half a line late runs a line
+                // longer, so every VSYNC follows the last by the same
+                // number of lines and a half, and a frame is an odd count.
+                let adjust = self.regs[reg::V_ADJUST] + u8::from(self.vsync_late());
                 if adjust == 0 {
                     self.start_frame();
                     return;
@@ -373,7 +377,7 @@ impl Crtc {
     }
 
     /// A new row: display stops at the displayed-row count, and VSYNC starts
-    /// at its row: at once on an even field, half a line on for an odd one.
+    /// at its row: at once on an odd field, half a line on for an even one.
     fn start_row(&mut self) {
         if self.vc == self.regs[reg::V_DISPLAYED] {
             self.v_display = false;

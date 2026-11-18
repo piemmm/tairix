@@ -13,7 +13,7 @@ use crate::rom::asm::{byte, hi, imm, lo, zp, Acc, Asm, RTS};
 use crate::rom::os::CR;
 
 /// Where the next character is read from, and the next byte written to.
-pub(super) const READ: u16 = z::SCRATCH + 2;
+pub(super) const READ: u16 = z::FP_WORK + 2;
 pub(super) const WRITE: u16 = READ + 1;
 /// Whether a statement starts here, and whether numbers are line numbers.
 const STATE: u16 = WRITE + 1;
@@ -27,10 +27,12 @@ const FLAGS: u16 = KEYWORD + 2;
 /// number of several digits; and its value before the digit's.
 pub(super) const NUMBER: u16 = FLAGS + 1;
 const BEFORE: u16 = NUMBER + 2;
-/// The text being read.
-pub(super) const FROM: u16 = BEFORE + 2;
+const _: () = assert!(BEFORE + 2 == z::SCRATCH_END);
+/// The text being read, clear of a line's number and the step AUTO keeps
+/// through it.
+pub(super) const FROM: u16 = z::RUN + 6;
 /// Where the input goes on after a keyword.
-const END: u16 = FROM + 2;
+const END: u16 = z::RUN;
 
 /// An encoded line number's bytes, its token among them.
 pub(super) const REFERENCE: u8 = 1 + byte(lineref::ENCODED);
@@ -128,13 +130,6 @@ fn crunch(a: &mut Asm) {
     a.lda(imm(0));
     a.sta(zp(WRITE));
     a.beq("crunch_next");
-
-    a.here("crunch_end");
-    a.ldy(zp(WRITE));
-    a.sta(zp(FROM).ind_y());
-    a.tya();
-    a.tax();
-    a.rts();
 
     // A keyword: at a statement's start a pseudo-variable takes its
     // assigning token. What it leaves: no line numbers unless it takes them;
@@ -257,7 +252,13 @@ fn crunch_items(a: &mut Asm) {
     a.beq("crunch_other");
     a.cmp(imm(CR));
     a.bne("crunch_string");
-    a.jmp("crunch_end");
+
+    a.here("crunch_end");
+    a.ldy(zp(WRITE));
+    a.sta(zp(FROM).ind_y());
+    a.tya();
+    a.tax();
+    a.rts();
 
     // A hex number's digits, among which no keyword is found.
     a.here("crunch_hex");

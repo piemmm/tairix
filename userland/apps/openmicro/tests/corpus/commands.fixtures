@@ -261,3 +261,33 @@ row File not found
 row >P.ERR
 row        214
 row >*SPOOL :1.X
+
+scenario opt_1_messages_come_before_the_data
+row >*LOAD K
+row $.K           003000 003000 000100 004
+row >*RUN E
+row $.E           003000 003000 000100 005
+row >*LOAD X
+row $.X           000E00 000E00 000200 002
+row >
+
+scenario a_save_to_a_protected_disc_shows_its_message_first
+row >*SAVE S 3000 3100
+row $.S           003000 003000 000100 008
+row Disk read only
+row >P.ERR
+row        201
+row >
+
+scenario run_enters_with_a_1_x_ff_y_1_and_carry_set
+row >P.~?&70,~?&71,~?&72,~?&73
+row          1        FF         1        31
+row >*E
+row >P.~?&70,~?&71,~?&72,~?&73
+row          1        FF         1        31
+row >
+
+scenario run_enters_a_file_loaded_over_the_dfs_workspace
+row OK>P.7
+row          7
+row >

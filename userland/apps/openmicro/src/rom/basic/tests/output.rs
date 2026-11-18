@@ -1,7 +1,7 @@
 //! Input and output: PRINT's forms, INPUT's, and the machine's
 //! statements.
 
-use super::{assert_screen, basic};
+use super::{assert_screen, assert_screen_from, basic};
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::Machine;
 use crate::media::tape::Tape;
@@ -154,6 +154,37 @@ fn input_reads_items_and_lines() {
 }
 
 #[test]
+fn an_input_item_s_subscript_may_itself_input() {
+    assert_screen_from(
+        &[
+            "10 DEF FND(N):INPUT \"\"Q:=N+Q",
+            "20 DIM C(5),D$(2)",
+            "30 INPUT C(FND(1)),B$",
+            "40 PRINT C(1);C(2);C(3);B$",
+            "50 INPUT \"L\",D$(FND(0)),C$:PRINT C$;\"|\";D$(0)",
+            "60 END",
+            "RUN",
+            "1",
+            "7,XY",
+            "0",
+            "AB,CD",
+        ],
+        150,
+        ">RUN",
+        &[
+            ">RUN",
+            "1",
+            "?7,XY",
+            "         070XY",
+            "L0",
+            "?AB,CD",
+            "CD|AB",
+            ">",
+        ],
+    );
+}
+
+#[test]
 fn input_prompts() {
     assert_screen(
         &[
@@ -223,6 +254,30 @@ fn machine_statements() {
             "      1900",
             ">HIMEM=&7000:PRINT ~HIMEM:CLEAR",
             "      7000",
+            ">",
+        ],
+    );
+}
+
+#[test]
+fn sound_and_envelope_leave_the_zero_page_past_basic_ii_s_to_the_program() {
+    assert_screen(
+        &[
+            "10 !&62=&43424140:!&66=&47464544:!&6A=&4B4A4948:?&6E=&4C:?&6F=&4D",
+            "20 SOUND 1,-12,100,5:ENVELOPE 1,1,2,3,4,5,6,7,8,9,10,11,12,13:A%=!&62:B%=!&66:C%=!&6A:D%=?&6E+256*?&6F",
+            "30 PRINT ~A%;\" \";~B%;\" \";~C%;\" \";~D%",
+            "RUN",
+        ],
+        100,
+        &[
+            ">10 !&62=&43424140:!&66=&47464544:!&6A=&",
+            "4B4A4948:?&6E=&4C:?&6F=&4D",
+            ">20 SOUND 1,-12,100,5:ENVELOPE 1,1,2,3,4",
+            ",5,6,7,8,9,10,11,12,13:A%=!&62:B%=!&66:C",
+            "%=!&6A:D%=?&6E+256*?&6F",
+            ">30 PRINT ~A%;\" \";~B%;\" \";~C%;\" \";~D%",
+            ">RUN",
+            "  43424140 47464544 4B4A4948 4D4C",
             ">",
         ],
     );

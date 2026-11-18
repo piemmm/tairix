@@ -138,10 +138,11 @@ fn save(a: &mut Asm) {
     a.sta(abs(page::INFO_START));
     a.lda(zp(z::T7));
     a.sta(abs(page::INFO_START + 1));
-    // The catalogue first, then the data straight on from it, as DFS 1.20
-    // writes them.
+    // The message, the catalogue, then the data straight on from it, as
+    // DFS 1.20 gives them.
     a.jsr("make_room");
     a.jsr("set_entry");
+    a.jsr("message");
     a.jsr("write_catalogue");
     a.ldy(imm(block::START));
     a.lda(zp(z::BLOCK).ind_y());
@@ -152,8 +153,7 @@ fn save(a: &mut Asm) {
     a.jsr("sectors_of_file");
     a.lda(imm(1));
     a.sta(abs(page::OP_WRITE));
-    a.jsr("transfer");
-    a.jmp("message");
+    a.jmp("transfer");
 
     // T4 and T5: the sectors INFO_LENGTH fills.
     a.here("length_sectors");
@@ -191,8 +191,9 @@ fn save(a: &mut Asm) {
 }
 
 /// A load: the first file that matches, to the block's address unless its
-/// execution address's low byte asks for the file's own, the catalogue
-/// entry then written into the block.
+/// execution address's low byte asks for the file's own. The message and
+/// the catalogue entry written into the block come first, as DFS 1.20
+/// gives them, so the data may land on either.
 fn load(a: &mut Asm) {
     a.here("file_load");
     a.jsr("find_first");
@@ -216,9 +217,9 @@ fn load(a: &mut Asm) {
     a.lda(zp(z::BLOCK).ind_y());
     a.sta(abs(page::OP_ADDRESS + 1));
     a.bind(go);
-    a.jsr("load_data");
     a.jsr("message");
-    a.jmp("entry_to_block");
+    a.jsr("entry_to_block");
+    a.fall_into("load_data");
 
     // The file the INFO record describes read to OP_ADDRESS.
     a.here("load_data");
