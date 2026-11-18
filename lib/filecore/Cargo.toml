@@ -1,0 +1,19 @@
+[package]
+name = "tairix-filecore"
+description = "RISC OS FileCore's disc format: the disc record and boot block, the old and new maps, the fixed and big directories, a new disc's layout, and a disc's objects and directories over them — the one definition the ADFS driver and TAIRiX Bridge's FileCore share."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The block device a TAIRiX volume's disc is, and the errors its driver reports.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-bytedev = { path = "../bytedev", version = "=0.0.0" }
+# RISC OS's attribute bits and names as TAIRiX keeps them.
+tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }

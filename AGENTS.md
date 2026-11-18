@@ -669,6 +669,7 @@ tairix/
 │   ├── fat/             # FAT12/16/32 on-disk format: BPB, table, entries, names, stamps.
 │   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
 │   ├── fdt/             # Shared FDT/DTB reader.
+│   ├── filecore/        # RISC OS FileCore disc format: record, maps, directories, layout.
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
 │   ├── fontface/        # Shared glyph-coverage engine: TrueType outlines,
 │   │                    #   grid fitting, and pixel-exact line art.
@@ -813,12 +814,15 @@ tairix/
 │   │   ├── discoveryd/  # Link-local service discovery (mDNS / DNS-SD).
 │   │   └── smbfs/       # Network shares: SMB 3 listing, mounting and serving.
 │   ├── apps/            # Default apps. Each app is its own crate, but for:
-│   │   └── riscos/      #   The RISC OS emulator (plans/RISCOS-EMULATOR.md). A
-│   │       │            #   leaf subtree of one crate per subsystem: its crates
-│   │       │            #   compose each other and `lib/*`, and NOTHING outside
-│   │       │            #   it may depend on them.
-│   │       ├── arm/     #     The ARM processor, its FPA, VFP and NEON, guest MMU.
-│   │       └── kernel/  #     The RISC OS kernel: address space, slots, areas.
+│   │   └── tairix-bridge/ # TAIRiX Bridge: other systems' applications on the
+│   │       │            #   desktop, one subtree for each system.
+│   │       └── riscos/  #   RISC OS (plans/RISCOS-EMULATOR.md). A leaf
+│   │           │        #   subtree of one crate per subsystem: its crates
+│   │           │        #   compose each other and `lib/*`, and NOTHING
+│   │           │        #   outside it may depend on them.
+│   │           ├── arm/    #   The ARM processor, its FPA, VFP and NEON, guest MMU.
+│   │           ├── kernel/ #   The RISC OS kernel: address space, slots, areas.
+│   │           └── filing/ #   FileSwitch and the filing systems it calls.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.
@@ -1770,7 +1774,7 @@ You are not exempt from any rule above. In addition:
     | The Open Micro emulator (`OpenMicro.app`): the cycle-exact 6502, the BBC Micro Model B and Acorn Electron devices and the Plus 1, the sandboxed machine worker and its protocol, the clean-room MOS, Electron OS, Plus 1, BASIC and DFS ROMs and the Rust 6502 builder that emits them, the reference harness and its clean-room boundary, disc and tape media, snapshots, the machine library both emulators keep (`lib/machines`), an application's own documents folder, and the front end's pacing, key mapping and presentation | `plans/BEEB.md` |
     | The Open Micro emulator's editor ROM (`vim.rom`): the vi-style editor for the BBC Micro as a sideways language ROM, its gap buffer, the register it keeps in a free bank of sideways RAM, modes and their highlighting, text and BASIC files, the command line and the disassembler | `plans/BEEB-VIM.md`; `plans/BEEB.md` |
     | The Commodore 64 in the Open Micro emulator: the 6510 and its banking, the VIC-II, the CIAs, the SID, the datasette and cartridges, the true 1541 on the serial bus and its GCR surface, PRG, T64, TAP, D64, G64 and CRT media, and the clean-room KERNAL, BASIC V2, character and 1541 DOS ROMs | `plans/C64.md`; `plans/BEEB.md` |
-    | The RISC OS emulator (`RISCOSEmulator.app`) and the `userland/apps/riscos` subtree: the ARM processor in its 26-bit and 32-bit profiles with the FPA, VFP and NEON; the guest address space; the first-party RISC OS kernel, modules, FileSwitch and HostFS; BBC BASIC V and VI; the VDU, sprite, Draw and font systems; SharedCLibrary; the Wimp and Toolbox as TAIRiX windows, menus and hosted icon-bar slots in either look; sound, sockets and printing to PDF; machine mode's tiered models of the Archimedes and RiscPC chips for software that drives them; `!App` activation, the RISC OS application registry and isolated sessions; the session worker; the reference harness; the ARM translator; and the shared libraries and desktop facilities they bring (`lib/softfloat`, `lib/obey`, `lib/openbasic`, `lib/vdu`, hosted-environment windows and menus) | `plans/RISCOS-EMULATOR.md` |
+    | TAIRiX Bridge (`TAIRiXBridge.app`), RISC OS applications on the TAIRiX desktop, and the `userland/apps/tairix-bridge/riscos` subtree: the ARM processor in its 26-bit and 32-bit profiles with the FPA, VFP and NEON; the guest address space; the first-party RISC OS kernel, modules, FileSwitch and HostFS; BBC BASIC V and VI; the VDU, sprite, Draw and font systems; SharedCLibrary; the Wimp and Toolbox as TAIRiX windows, menus and hosted icon-bar slots in either look; sound, sockets and printing to PDF; machine mode's tiered models of the Archimedes and RiscPC chips for software that drives them; `!App` activation, the RISC OS application registry and isolated sessions; the session worker; the reference harness; the ARM translator; and the shared libraries and desktop facilities they bring (`lib/softfloat`, `lib/obey`, `lib/openbasic`, `lib/vdu`, hosted-environment windows and menus) | `plans/RISCOS-EMULATOR.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a
@@ -2601,7 +2605,7 @@ drivers/*                   → lib/abi, lib/*               (NEVER kernel/*)
 userland/*                  → lib/* and the public syscall ABI only
 userland/gui/*              → no reverse dependents (see §17.3)
 userland/games/*            → lib/*, userland/games/*; no reverse dependents
-userland/apps/riscos/*      → lib/*, userland/apps/riscos/*; no reverse dependents
+userland/apps/tairix-bridge/riscos/* → lib/*, userland/apps/tairix-bridge/riscos/*; no reverse dependents
 ```
 
 In particular: no kernel subsystem outside `kernel/core` may depend

@@ -1326,6 +1326,22 @@ fn every_listed_filetype_reads_back_and_a_new_files_comes_first() {
     }
 }
 
+/// A type with no filetype row of its own takes the nearest broader type's,
+/// and a type whose whole chain has none has none.
+#[test]
+fn a_type_without_a_filetype_takes_its_nearest_broader_types() {
+    let filetype = |media| canonical_filetype(media).map(Filetype::hex);
+    assert_eq!(filetype(MediaType::TextRust), Some(*b"fff"));
+    assert_eq!(filetype(MediaType::TextMarkdown), Some(*b"fff"));
+    assert_eq!(filetype(MediaType::AudioOpus), Some(*b"1a8"));
+    assert_eq!(
+        filetype(MediaType::JavaArchive),
+        Some(*b"ae4"),
+        "a row of its own wins"
+    );
+    assert_eq!(filetype(MediaType::InodeDirectory), None);
+}
+
 /// A file is typed by its name first and by the filetype its volume records
 /// second, so RISC OS's Data never hides a name that says more; a layout's own
 /// names, and a folder, are typed before either.

@@ -6,6 +6,13 @@
 //! the speaker's ramps, the identification and test commands, MIDI, and the
 //! reset's cold and warm paths. The card's YM3812 is [`super::opl2`].
 //!
+//! Every byte between the host and the firmware passes the card's two
+//! one-byte latches, DMA's included, and the firmware's request for a DMA
+//! cycle is itself a latch only the controller's acknowledge or a reset
+//! clears: so a byte left unread holds back a recording, a stalled transfer
+//! takes the host's byte as its sample, and a reset leaves only its ready
+//! byte.
+//!
 //! The DSP's DAC is unipolar and its output AC-coupled, as on the card, so
 //! unmuting at code 00h and ramping to 80h is silent but for the coupling.
 //! Two firmware internals are not reproduced: the on-chip RAM playback plays
@@ -31,10 +38,13 @@ const BOOT: Nanos = 50_000;
 const RAMP_STEP: Nanos = 96_000;
 /// The byte a reset ends with.
 const READY: u8 = 0xAA;
-/// The most bytes the output holds unread: the longest reply, two bytes,
-/// behind the one byte a command may be taken with unread, and a reset's
-/// ready byte. A ready byte that finds it full pushes out the oldest.
-const OUT_DEPTH: usize = 4;
+/// The most bytes the host can find waiting: one unread in the output latch,
+/// which a command may be taken with, and the longest reply the firmware
+/// waits to write behind it, two bytes. A reset leaves only its ready byte.
+pub const OUT_DEPTH: usize = 3;
+/// The DAC's mid-scale code: silence, and what the ADC converts a silent
+/// input to.
+const MID_SCALE: u8 = 0x80;
 /// The firmware's version, as E1h reports it.
 const VERSION: [u8; 2] = [0x02, 0x02];
 /// The time constant and block size a cold reset sets.
@@ -124,6 +134,42 @@ enum Reading {
     Uart,
 }
 
+/// A sample-timer handler the firmware is held in, nothing else running
+/// until its latch lets it go on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Held {
+    /// Mid-tick: for a byte in the input latch, or room in the output latch
+    /// for its sample. It goes on from its request, past the check for a
+    /// command its entry makes.
+    #[default]
+    Tick,
+    /// For the last sample of a recording told to exit to be taken, before
+    /// it interrupts.
+    End,
+}
+
+/// E2h's reply on its way out through the output latch, the firmware held in
+/// the command until it is gone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Identifying {
+    /// Waiting for room to write the reply.
+    Room(u8),
+    /// Written and asked to be taken: waiting for the host or the controller
+    /// to read it.
+    #[default]
+    Sent,
+}
+
+/// The way the transfer under way moves its bytes, so the way the controller
+/// answers a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Way {
+    /// Memory to the input latch.
+    In,
+    /// The output latch to memory.
+    Out,
+}
+
 /// The speaker's ramp in progress.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Ramp {
@@ -147,13 +193,19 @@ struct Decoder {
     reason = "each is one of the firmware's flags or lines"
 )]
 pub struct Dsp {
-    /// The host's byte in the write latch, and when the firmware takes it.
+    /// The input latch's byte, the host's or the controller's, and when the
+    /// firmware's command loop takes it.
     pending: Option<(u8, Nanos)>,
-    /// Bytes for the host: the front is in the read latch, and the firmware
-    /// takes nothing more while one waits behind it, so it holds at most a
-    /// command's replies.
+    /// Bytes for the host: the front is in the output latch, the rest are
+    /// writes the firmware waits to make there, and it takes no command while
+    /// one waits.
     out: VecDeque<u8>,
-    last_read: u8,
+    /// What the output latch gives once its byte is read: the last one the
+    /// firmware wrote.
+    register: u8,
+    /// The bus interface's DMA request latch: the firmware's pulse sets it,
+    /// and only an acknowledge while DMA is enabled, or a reset, clears it.
+    drq: bool,
     irq: bool,
     reset_held: bool,
     booting: Option<Nanos>,
@@ -171,18 +223,16 @@ pub struct Dsp {
     timer: bool,
     stream: Stream,
     next_tick: Nanos,
-    /// A DMA byte the firmware waits for.
-    stalled: bool,
-    /// An ADPCM start's first byte, still owed by the controller: whether it
-    /// is the reference.
+    held: Option<Held>,
+    /// An ADPCM start's first byte, still to come: whether it is the
+    /// reference.
     setup: Option<bool>,
     decoder: Decoder,
     dac: u8,
     muted: bool,
     speaker_flag: bool,
     ramp: Option<Ramp>,
-    /// The DMA identification's reply, waiting to go out by DMA.
-    identified: Option<u8>,
+    identifying: Option<Identifying>,
     test: u8,
     id: [u8; 2],
     tone: u8,
@@ -208,7 +258,8 @@ impl Dsp {
         let mut dsp = Self {
             pending: None,
             out: VecDeque::new(),
-            last_read: 0xFF,
+            register: 0xFF,
+            drq: false,
             irq: false,
             reset_held: false,
             booting: None,
@@ -225,18 +276,18 @@ impl Dsp {
             timer: false,
             stream: Stream::Idle,
             next_tick: 0,
-            stalled: false,
+            held: None,
             setup: None,
             decoder: Decoder::default(),
-            dac: 0x80,
+            dac: MID_SCALE,
             muted: true,
             speaker_flag: false,
             ramp: None,
-            identified: None,
+            identifying: None,
             test: 0,
             id: ID_SEEDS,
             tone: 0,
-            ram: [0x80; 64],
+            ram: [MID_SCALE; 64],
             ram_loaded: 0,
             ram_tick: 0,
             ram_passes: 0,
@@ -253,13 +304,6 @@ impl Dsp {
         self.irq
     }
 
-    /// Whether the firmware waits on a DMA cycle the controller has not
-    /// given, so that writes to the controller should retry it.
-    #[must_use]
-    pub const fn waiting_for_dma(&self) -> bool {
-        self.stalled || self.identified.is_some()
-    }
-
     /// The sample period the time constant sets.
     fn period(&self) -> Nanos {
         let constant = if self.stream == Stream::Tone {
@@ -270,16 +314,17 @@ impl Dsp {
         (256 - Nanos::from(constant)) * 1_000
     }
 
-    /// Whether the firmware takes host bytes now: not in a ramp, not in a
-    /// high-speed transfer, not waiting on DMA, not resetting, and not
-    /// waiting for the host to empty its one output latch for a reply
-    /// queued behind it.
+    /// Whether the firmware's command loop takes host bytes now: not in a
+    /// ramp, not in a high-speed transfer, not held on a latch, not
+    /// resetting, and not waiting for the host to empty its one output latch
+    /// for a reply queued behind it.
     fn taking(&self) -> bool {
         self.out.len() <= 1
             && self.ramp.is_none()
             && !self.reset_held
             && self.booting.is_none()
-            && self.identified.is_none()
+            && self.held.is_none()
+            && self.identifying.is_none()
             && !matches!(
                 self.stream,
                 Stream::Pcm {
@@ -302,7 +347,7 @@ impl Dsp {
         if let Some(ramp) = self.ramp {
             sooner(ramp.next);
         }
-        if self.timer && !self.stalled && self.ramp.is_none() && self.identified.is_none() {
+        if self.timer && self.held.is_none() && self.ramp.is_none() && self.identifying.is_none() {
             sooner(self.next_tick);
         }
         next
@@ -316,22 +361,22 @@ impl Dsp {
         memory: &mut M,
         mixer: &mut Mixer,
     ) {
-        if self.identified.is_some() {
-            self.send_identification(dma, memory);
+        // What the firmware is held on may have come since it was last
+        // brought up.
+        if self.identifying.is_some() {
+            self.identify(t, dma, memory);
         }
-        if self.stalled {
-            // The controller may have been given the byte the firmware waits
-            // for; the sample plays when it arrives.
-            self.stalled = false;
+        if self.held.is_some() {
             self.tick(t, dma, memory, mixer);
         }
+        self.serve(t, dma, memory);
         while let Some(at) = self.next_event().filter(|&at| at <= t) {
             if self.booting == Some(at) {
                 self.booting = None;
                 self.boot_ready(at, mixer);
             } else if let Some(ramp) = self.ramp.filter(|r| r.next == at) {
                 self.ramp_step(ramp, mixer);
-            } else if self.timer && self.next_tick == at && !self.stalled {
+            } else if self.timer && self.next_tick == at && self.held.is_none() {
                 self.tick(at, dma, memory, mixer);
             } else if let Some((byte, _)) = self.pending.filter(|&(_, when)| when == at) {
                 self.pending = None;
@@ -346,10 +391,8 @@ impl Dsp {
     pub fn input(&mut self, offset: u16) -> u8 {
         match offset {
             0x0A => {
-                if let Some(byte) = self.out.pop_front() {
-                    self.last_read = byte;
-                }
-                self.last_read
+                self.read_out();
+                self.register
             }
             0x0C => 0x7F | if self.busy() { 0x80 } else { 0 },
             0x0E => {
@@ -360,12 +403,13 @@ impl Dsp {
         }
     }
 
-    /// The write-busy bit: an unread host byte, or the firmware busy.
+    /// The write-busy bit: a byte in the input latch, or the firmware busy.
     fn busy(&self) -> bool {
         self.pending.is_some()
             || self.reset_held
             || self.booting.is_some()
-            || self.identified.is_some()
+            || self.held.is_some()
+            || self.identifying.is_some()
             || matches!(
                 self.stream,
                 Stream::Pcm {
@@ -381,18 +425,29 @@ impl Dsp {
             0x06 => {
                 let hold = value & 1 != 0;
                 if hold && !self.reset_held {
+                    // The firmware stops, losing the writes it was to make,
+                    // and the reset holds the request latch clear.
                     self.halt();
-                    self.pending = None;
+                    self.out.truncate(1);
+                    self.drq = false;
                     self.reading = Reading::Command;
                     self.ramp = None;
-                    self.identified = None;
+                    self.identifying = None;
                     self.setup = None;
                 } else if !hold && self.reset_held {
+                    // The release clocks both latches' flags clear: a byte in
+                    // either is lost, though the output latch still gives its
+                    // last.
+                    if let Some(&byte) = self.out.front() {
+                        self.register = byte;
+                    }
+                    self.out.clear();
+                    self.pending = None;
                     self.booting = Some(t + BOOT);
                 }
                 self.reset_held = hold;
             }
-            0x0C => self.pending = Some((value, t + TAKE)),
+            0x0C => self.latch_in(value, t),
             _ => {}
         }
     }
@@ -401,7 +456,105 @@ impl Dsp {
     fn halt(&mut self) {
         self.timer = false;
         self.dma_enabled = false;
-        self.stalled = false;
+        self.held = None;
+    }
+
+    /// A byte into the input latch, the host's or the controller's, over any
+    /// still there: the flag rose with the first, so the command loop's take
+    /// keeps its time.
+    fn latch_in(&mut self, byte: u8, t: Nanos) {
+        let at = self.pending.map_or(t + TAKE, |(_, at)| at);
+        self.pending = Some((byte, at));
+    }
+
+    /// A read of the output latch, the host's or the controller's: its byte
+    /// goes, and a write the firmware waited to make takes its place.
+    fn read_out(&mut self) {
+        if let Some(byte) = self.out.pop_front() {
+            self.register = byte;
+        }
+    }
+
+    /// The controller's acknowledge of the request latch, once DMA is
+    /// enabled and the channel answers, in the way the transfer under way
+    /// moves: memory's next byte into the input latch, or the output latch's
+    /// byte to memory.
+    fn serve<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
+        if !self.drq || !self.dma_enabled {
+            return;
+        }
+        match self.way() {
+            Some(Way::In) => {
+                let mut byte = [0u8; 1];
+                if dma.from_memory(DMA_CHANNEL, memory, &mut byte).bytes == 1 {
+                    self.drq = false;
+                    self.latch_in(byte[0], t);
+                }
+            }
+            Some(Way::Out) => {
+                let byte = self.out.front().copied().unwrap_or(self.register);
+                if dma.to_memory(DMA_CHANNEL, memory, &[byte]).bytes == 1 {
+                    self.drq = false;
+                    self.read_out();
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn way(&self) -> Option<Way> {
+        if self.identifying.is_some() {
+            return Some(Way::Out);
+        }
+        match self.stream {
+            Stream::Pcm { input: true, .. } => Some(Way::Out),
+            Stream::Pcm { input: false, .. } | Stream::Adpcm(_) => Some(Way::In),
+            Stream::Idle | Stream::Silence | Stream::Tone | Stream::RamPlayback => None,
+        }
+    }
+
+    /// The DMA-enable line on: a request the latch still holds reaches the
+    /// controller at once.
+    fn enable_dma<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
+        self.dma_enabled = true;
+        self.serve(t, dma, memory);
+    }
+
+    /// A handler's request for its next byte and its read of the input
+    /// latch: the controller's, once it answers, lands over any byte the host
+    /// left there.
+    fn next_byte<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) -> Option<u8> {
+        self.drq = true;
+        self.serve(t, dma, memory);
+        self.pending.take().map(|(byte, _)| byte)
+    }
+
+    /// The recording handler's sample, converted and then written to the
+    /// output latch once the host or the controller has emptied it, and
+    /// asked to be taken. False while the latch still holds a byte.
+    fn record<M: DmaMemory>(
+        &mut self,
+        t: Nanos,
+        dma: &mut Dma,
+        memory: &mut M,
+        mixer: &mut Mixer,
+    ) -> bool {
+        self.convert(t, mixer);
+        self.serve(t, dma, memory);
+        if !self.out.is_empty() {
+            return false;
+        }
+        self.out.push_back(MID_SCALE);
+        self.drq = true;
+        self.serve(t, dma, memory);
+        true
+    }
+
+    /// The successive approximation leaves the DAC on its result: mid-scale,
+    /// as the silent input converts.
+    fn convert(&mut self, t: Nanos, mixer: &mut Mixer) {
+        self.dac = MID_SCALE;
+        self.set_level(t, mixer);
     }
 
     /// The reset's ready byte: a warm start keeps the settings and the
@@ -416,11 +569,11 @@ impl Dsp {
         self.warm = false;
         if warm {
             if self.speaker_flag {
-                self.dac = 0x80;
+                self.dac = MID_SCALE;
                 self.muted = false;
             }
         } else {
-            self.dac = 0x80;
+            self.dac = MID_SCALE;
             self.time_constant = COLD_TIME_CONSTANT;
             self.block = COLD_BLOCK;
             self.id = ID_SEEDS;
@@ -434,7 +587,7 @@ impl Dsp {
         self.queued = None;
         self.auto = false;
         self.exit_auto = false;
-        self.put_out(READY);
+        self.reply(READY);
     }
 
     /// Tells the mix the DAC's level if it changed: the unipolar code, or
@@ -448,15 +601,19 @@ impl Dsp {
         }
     }
 
+    /// A write to the output latch the firmware waits to make until the host
+    /// has read the byte before it.
     fn reply(&mut self, byte: u8) {
-        self.put_out(byte);
+        self.out.push_back(byte);
     }
 
-    fn put_out(&mut self, byte: u8) {
-        if self.out.len() >= OUT_DEPTH {
-            self.out.pop_front();
+    /// A write to the output latch the firmware makes without waiting for
+    /// it to empty: a byte the host has not read is lost under it.
+    fn post(&mut self, byte: u8) {
+        match self.out.front_mut() {
+            Some(front) => *front = byte,
+            None => self.out.push_back(byte),
         }
-        self.out.push_back(byte);
     }
 
     /// The firmware reads host byte `byte`.
@@ -599,10 +756,10 @@ impl Dsp {
                 self.set_level(t, mixer);
             }
             0x14..=0x17 | 0x24..=0x27 | 0x74..=0x77 if self.dma_enabled => self.queue(t),
-            0x14 | 0x15 => self.start_pcm(false, false, Some(self.length()), t),
-            0x24..=0x27 => self.start_pcm(true, false, Some(self.length()), t),
-            0x18 | 0x19 | 0x1C | 0x1D => self.start_pcm(false, false, None, t),
-            0x28..=0x2F => self.start_pcm(true, false, None, t),
+            0x14 | 0x15 => self.start_pcm(false, Some(self.length()), t, dma, memory),
+            0x24..=0x27 => self.start_pcm(true, Some(self.length()), t, dma, memory),
+            0x18 | 0x19 | 0x1C | 0x1D => self.start_pcm(false, None, t, dma, memory),
+            0x28..=0x2F => self.start_pcm(true, None, t, dma, memory),
             0x16 | 0x17 => {
                 let length = Some(self.length());
                 self.start_adpcm(Adpcm::Two, command & 1 != 0, length, t, dma, memory, mixer);
@@ -627,7 +784,10 @@ impl Dsp {
                 };
                 self.start_adpcm(kind, command & 1 != 0, None, t, dma, memory, mixer);
             }
-            0x20..=0x23 => self.reply(0x80),
+            0x20..=0x23 => {
+                self.convert(t, mixer);
+                self.reply(MID_SCALE);
+            }
             0x30..=0x33 => self.reading = Reading::MidiIn,
             0x34..=0x37 => {
                 self.warm = true;
@@ -663,15 +823,14 @@ impl Dsp {
                 }
             }
             0x80..=0x8F => {
-                self.dma_enabled = true;
                 self.remaining = self.length();
                 self.start_stream(Stream::Silence, status::SILENCE, t);
+                self.enable_dma(t, dma, memory);
             }
             0x90..=0x9F => {
                 self.warm = true;
                 self.auto = command & 1 == 0;
                 self.remaining = self.block;
-                self.dma_enabled = true;
                 let input = command >= 0x98;
                 let bit = if input { status::ADC } else { status::DAC_8 };
                 self.start_stream(
@@ -682,12 +841,13 @@ impl Dsp {
                     bit,
                     t,
                 );
+                self.enable_dma(t, dma, memory);
             }
             0xD0 | 0xD2 => self.halt(),
             0xD1 => self.speaker_on(t, mixer),
             0xD3 => self.speaker_off(t, mixer),
             0xD4..=0xD7 | 0xDC..=0xDF => {
-                self.dma_enabled = true;
+                self.enable_dma(t, dma, memory);
                 self.resume(t);
             }
             0xD8 | 0xD9 => self.reply(if self.muted { 0x00 } else { 0xFF }),
@@ -704,9 +864,9 @@ impl Dsp {
                 let [first, second] = self.id;
                 let reply = (parameter ^ second).wrapping_add(first);
                 self.id = [reply, second.rotate_right(2)];
-                self.dma_enabled = true;
-                self.identified = Some(reply);
-                self.send_identification(dma, memory);
+                self.identifying = Some(Identifying::Room(reply));
+                self.enable_dma(t, dma, memory);
+                self.identify(t, dma, memory);
             }
             0xE4..=0xE7 => self.test = parameter,
             0xE8..=0xEF => {
@@ -727,10 +887,10 @@ impl Dsp {
             }
             0xF2 | 0xF3 => self.irq = true,
             0xF4..=0xF7 => {
-                self.reply(0);
+                self.post(0);
                 self.reply(0);
             }
-            0xF8..=0xFF => self.reply(0),
+            0xF8..=0xFF => self.post(0),
             _ => {}
         }
     }
@@ -746,19 +906,30 @@ impl Dsp {
         self.stream = stream;
         self.status = (self.status & status::SPEAKER) | bit;
         self.timer = true;
-        self.stalled = false;
+        self.held = None;
         self.next_tick = t + self.period();
     }
 
     /// 8-bit PCM over DMA, single-cycle for `length` or auto-initialised.
-    fn start_pcm(&mut self, input: bool, high_speed: bool, length: Option<u16>, t: Nanos) {
+    fn start_pcm<M: DmaMemory>(
+        &mut self,
+        input: bool,
+        length: Option<u16>,
+        t: Nanos,
+        dma: &mut Dma,
+        memory: &mut M,
+    ) {
         self.auto = length.is_none();
         self.exit_auto = false;
         self.queued = None;
         self.remaining = length.unwrap_or(self.block);
-        self.dma_enabled = true;
         let bit = if input { status::ADC } else { status::DAC_8 };
-        self.start_stream(Stream::Pcm { input, high_speed }, bit, t);
+        let stream = Stream::Pcm {
+            input,
+            high_speed: false,
+        };
+        self.start_stream(stream, bit, t);
+        self.enable_dma(t, dma, memory);
     }
 
     /// ADPCM over DMA: with a reference byte the decoder starts afresh from
@@ -781,13 +952,15 @@ impl Dsp {
         self.exit_auto = false;
         self.queued = None;
         self.remaining = length.unwrap_or(self.block);
-        self.dma_enabled = true;
         self.start_stream(Stream::Adpcm(kind), kind.status(), t);
+        self.enable_dma(t, dma, memory);
         self.setup = Some(reference);
-        self.first_byte(kind, t, dma, memory, mixer);
+        if !self.first_byte(kind, t, dma, memory, mixer) {
+            self.held = Some(Held::Tick);
+        }
     }
 
-    /// The first byte of an ADPCM start, which the firmware fetches before
+    /// The first byte of an ADPCM start, which the firmware waits for before
     /// its first tick: the reference as the sample, or the first codes.
     fn first_byte<M: DmaMemory>(
         &mut self,
@@ -800,7 +973,7 @@ impl Dsp {
         let Some(reference) = self.setup else {
             return true;
         };
-        if !self.fetch(dma, memory) {
+        if !self.fetch(t, dma, memory) {
             return false;
         }
         self.setup = None;
@@ -823,27 +996,40 @@ impl Dsp {
         self.start_stream(Stream::RamPlayback, 0, t);
     }
 
-    /// One tick of the sample timer at `t`.
+    /// One tick of the sample timer at `t`, or the handler it was held in
+    /// going on.
     fn tick<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M, mixer: &mut Mixer) {
         self.next_tick = t + self.period();
-        let host = self.pending.is_some();
+        let resumed = self.held.take();
+        if resumed == Some(Held::End) {
+            return self.end_recording(t, dma, memory);
+        }
+        // A byte in the input latch is a command to a normal-mode handler's
+        // entry; one held past it reads the byte as its data.
+        let command = resumed.is_none() && self.pending.is_some();
         match self.stream {
             Stream::Idle => self.timer = false,
             Stream::Pcm {
                 high_speed: true,
                 input,
             } => self.high_speed_tick(input, t, dma, memory, mixer),
-            // A host byte waiting makes a normal-mode tick do nothing.
-            _ if host => {}
-            Stream::Pcm { input, .. } => {
-                if !self.move_byte(input, dma, memory) {
-                    return self.stall(t);
-                }
+            _ if command => {}
+            Stream::Pcm { input: false, .. } => {
+                let Some(sample) = self.next_byte(t, dma, memory) else {
+                    self.held = Some(Held::Tick);
+                    return;
+                };
+                self.dac = sample;
                 self.set_level(t, mixer);
-                if self.remaining == 0 {
-                    self.block_end();
+                self.count();
+            }
+            Stream::Pcm { input: true, .. } => {
+                if !self.record(t, dma, memory, mixer) {
+                    self.held = Some(Held::Tick);
+                } else if self.remaining == 0 && self.exit_auto {
+                    self.end_recording(t, dma, memory);
                 } else {
-                    self.remaining -= 1;
+                    self.count();
                 }
             }
             Stream::Adpcm(kind) => self.adpcm_tick(kind, t, dma, memory, mixer),
@@ -862,9 +1048,9 @@ impl Dsp {
             Stream::RamPlayback => {
                 let index = usize::from(self.ram_tick);
                 self.dac = if self.ram_tick < self.ram_loaded {
-                    self.ram.get(index).copied().unwrap_or(0x80)
+                    self.ram.get(index).copied().unwrap_or(MID_SCALE)
                 } else {
-                    0x80
+                    MID_SCALE
                 };
                 self.set_level(t, mixer);
                 self.ram_tick += 1;
@@ -880,28 +1066,29 @@ impl Dsp {
         }
     }
 
-    /// The firmware waits for a DMA byte the controller has not given; it
-    /// plays on when the controller is reprogrammed.
-    fn stall(&mut self, t: Nanos) {
-        self.stalled = true;
-        self.next_tick = t;
+    /// A sample counted against the block: its end, or one fewer to go.
+    fn count(&mut self) {
+        if self.remaining == 0 {
+            self.block_end();
+        } else {
+            self.remaining -= 1;
+        }
     }
 
-    /// Moves one byte between the DAC or the silent ADC and memory.
-    fn move_byte<M: DmaMemory>(&mut self, input: bool, dma: &mut Dma, memory: &mut M) -> bool {
-        if input {
-            return dma.to_memory(DMA_CHANNEL, memory, &[0x80]).bytes == 1;
+    /// A recording told to exit: the firmware waits for its last sample to
+    /// be taken before it interrupts.
+    fn end_recording<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
+        self.serve(t, dma, memory);
+        if self.out.is_empty() {
+            self.finish();
+        } else {
+            self.held = Some(Held::End);
         }
-        let mut byte = [0u8; 1];
-        if dma.from_memory(DMA_CHANNEL, memory, &mut byte).bytes != 1 {
-            return false;
-        }
-        self.dac = byte[0];
-        true
     }
 
-    /// A high-speed tick: a host byte waiting is taken as the sample, as
-    /// the firmware cannot tell it from DMA's.
+    /// A high-speed tick: its handler makes no check for a command, so a
+    /// byte the host writes is a sample whenever the controller leaves it
+    /// waiting.
     fn high_speed_tick<M: DmaMemory>(
         &mut self,
         input: bool,
@@ -910,13 +1097,19 @@ impl Dsp {
         memory: &mut M,
         mixer: &mut Mixer,
     ) {
-        if let (Some((byte, _)), false) = (self.pending, input) {
-            self.pending = None;
-            self.dac = byte;
-        } else if !self.move_byte(input, dma, memory) {
-            return self.stall(t);
+        if input {
+            if !self.record(t, dma, memory, mixer) {
+                self.held = Some(Held::Tick);
+                return;
+            }
+        } else {
+            let Some(sample) = self.next_byte(t, dma, memory) else {
+                self.held = Some(Held::Tick);
+                return;
+            };
+            self.dac = sample;
+            self.set_level(t, mixer);
         }
-        self.set_level(t, mixer);
         if self.remaining > 0 {
             self.remaining -= 1;
             return;
@@ -975,7 +1168,7 @@ impl Dsp {
     ) {
         if self.setup.is_some() {
             if !self.first_byte(kind, t, dma, memory, mixer) {
-                self.stall(t);
+                self.held = Some(Held::Tick);
             }
             return;
         }
@@ -983,9 +1176,10 @@ impl Dsp {
         if self.decoder.left != 0 {
             self.decode(kind);
         } else if self.remaining > 0 {
-            if !self.fetch(dma, memory) {
+            if !self.fetch(t, dma, memory) {
                 self.decoder.left = 1;
-                return self.stall(t);
+                self.held = Some(Held::Tick);
+                return;
             }
             self.remaining -= 1;
             self.decoder.left = kind.codes();
@@ -994,11 +1188,12 @@ impl Dsp {
             if self.exit_auto || (self.queued.is_none() && !self.auto) {
                 return self.finish();
             }
-            // Fetched before the block's state moves on, so a retry after a
-            // stall comes back to the block's end.
-            if !self.fetch(dma, memory) {
+            // Fetched before the block's state moves on, so the handler held
+            // here comes back to the block's end.
+            if !self.fetch(t, dma, memory) {
                 self.decoder.left = 1;
-                return self.stall(t);
+                self.held = Some(Held::Tick);
+                return;
             }
             self.remaining = match self.queued.take() {
                 Some(length) => {
@@ -1015,12 +1210,12 @@ impl Dsp {
         self.set_level(t, mixer);
     }
 
-    fn fetch<M: DmaMemory>(&mut self, dma: &mut Dma, memory: &mut M) -> bool {
-        let mut byte = [0u8; 1];
-        if dma.from_memory(DMA_CHANNEL, memory, &mut byte).bytes != 1 {
+    /// The decoder's next byte of codes, false while it has not come.
+    fn fetch<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) -> bool {
+        let Some(byte) = self.next_byte(t, dma, memory) else {
             return false;
-        }
-        self.decoder.byte = byte[0];
+        };
+        self.decoder.byte = byte;
         true
     }
 
@@ -1135,13 +1330,22 @@ impl Dsp {
         });
     }
 
-    /// E2h's reply goes out by DMA once the controller takes it.
-    fn send_identification<M: DmaMemory>(&mut self, dma: &mut Dma, memory: &mut M) {
-        let Some(reply) = self.identified else {
-            return;
-        };
-        if dma.to_memory(DMA_CHANNEL, memory, &[reply]).bytes == 1 {
-            self.identified = None;
+    /// E2h's reply through the output latch: written once the latch has
+    /// room, and waited on until the host or the controller has read it,
+    /// DMA off after.
+    fn identify<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
+        self.serve(t, dma, memory);
+        if let Some(Identifying::Room(reply)) = self.identifying {
+            if !self.out.is_empty() {
+                return;
+            }
+            self.reply(reply);
+            self.drq = true;
+            self.identifying = Some(Identifying::Sent);
+            self.serve(t, dma, memory);
+        }
+        if self.out.is_empty() {
+            self.identifying = None;
             self.dma_enabled = false;
         }
     }
@@ -1152,7 +1356,7 @@ impl Dsp {
 fn tone(n: u8) -> u8 {
     let entry = f64::from((n % 8) * 8);
     let angle = 2.0 * core::f64::consts::PI * entry / 64.0;
-    u8::try_from(mathf::round_i32(128.0 + 127.0 * mathf::sin(angle))).unwrap_or(0x80)
+    u8::try_from(mathf::round_i32(128.0 + 127.0 * mathf::sin(angle))).unwrap_or(MID_SCALE)
 }
 
 crate::snapshot::state_enum!(Adpcm {
@@ -1179,6 +1383,16 @@ crate::snapshot::state_enum!(Reading {
     5 => Uart,
 });
 
+crate::snapshot::state_enum!(Held {
+    0 => Tick,
+    1 => End,
+});
+
+crate::snapshot::state_enum!(Identifying {
+    0 => Room(reply),
+    1 => Sent,
+});
+
 crate::snapshot::state!(Ramp { up, next });
 
 crate::snapshot::state!(Decoder {
@@ -1193,7 +1407,8 @@ impl State for Dsp {
         let Self {
             pending,
             out: unread,
-            last_read,
+            register,
+            drq,
             irq,
             reset_held,
             booting,
@@ -1210,14 +1425,14 @@ impl State for Dsp {
             timer,
             stream,
             next_tick,
-            stalled,
+            held,
             setup,
             decoder,
             dac,
             muted,
             speaker_flag,
             ramp,
-            identified,
+            identifying,
             test,
             id,
             tone,
@@ -1230,7 +1445,8 @@ impl State for Dsp {
         } = self;
         pending.save(out);
         save_queue(unread, out);
-        last_read.save(out);
+        register.save(out);
+        drq.save(out);
         irq.save(out);
         reset_held.save(out);
         booting.save(out);
@@ -1247,14 +1463,14 @@ impl State for Dsp {
         timer.save(out);
         stream.save(out);
         next_tick.save(out);
-        stalled.save(out);
+        held.save(out);
         setup.save(out);
         decoder.save(out);
         dac.save(out);
         muted.save(out);
         speaker_flag.save(out);
         ramp.save(out);
-        identified.save(out);
+        identifying.save(out);
         test.save(out);
         id.save(out);
         tone.save(out);
@@ -1270,7 +1486,8 @@ impl State for Dsp {
         let Self {
             pending,
             out: unread,
-            last_read,
+            register,
+            drq,
             irq,
             reset_held,
             booting,
@@ -1287,14 +1504,14 @@ impl State for Dsp {
             timer,
             stream,
             next_tick,
-            stalled,
+            held,
             setup,
             decoder,
             dac,
             muted,
             speaker_flag,
             ramp,
-            identified,
+            identifying,
             test,
             id,
             tone,
@@ -1307,7 +1524,8 @@ impl State for Dsp {
         } = self;
         pending.restore(input)?;
         restore_queue(unread, OUT_DEPTH, input)?;
-        last_read.restore(input)?;
+        register.restore(input)?;
+        drq.restore(input)?;
         irq.restore(input)?;
         reset_held.restore(input)?;
         booting.restore(input)?;
@@ -1324,14 +1542,14 @@ impl State for Dsp {
         timer.restore(input)?;
         stream.restore(input)?;
         next_tick.restore(input)?;
-        stalled.restore(input)?;
+        held.restore(input)?;
         setup.restore(input)?;
         decoder.restore(input)?;
         dac.restore(input)?;
         muted.restore(input)?;
         speaker_flag.restore(input)?;
         ramp.restore(input)?;
-        identified.restore(input)?;
+        identifying.restore(input)?;
         test.restore(input)?;
         id.restore(input)?;
         tone.restore(input)?;

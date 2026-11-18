@@ -203,7 +203,7 @@ fn reached<R: core::borrow::Borrow<TreeDir>>(
                 entry.kind == Kind::Directory
             }
             Some(Reached::Left { path, held, .. }) => {
-                let names = held.entries().map(|entries| entries.len());
+                let names = held.entries(usize::MAX).map(|entries| entries.len());
                 events.push(format!("left {path} {names:?}"));
                 false
             }

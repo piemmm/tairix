@@ -16,7 +16,8 @@
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded `Prng` draws
 //! pseudo-random images, and a structured sweep flips bytes of real
 //! formatted images — one per map flavour (old map, a bare disc record,
-//! big directories, a boot block over four zones) — to hammer the checksum
+//! big directories, a boot block over four zones, and RISC OS 5's RAM disc,
+//! whose boot block finds the map but names nothing) — to hammer the checksum
 //! and structural validation. Half of each base's stream shapes the disc
 //! record's geometry at its edges and seals it again behind its boot-block
 //! checksum or zone check, so the validation of the geometry is reached
@@ -32,8 +33,8 @@ use tairix_abi::driver::filesystem::{
     NodeSecurity,
 };
 use tairix_abi::DriverError;
-use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
-use tairix_fsprobe::adfs::{
+use tairix_drv_fs_adfs::{Adfs, Variant};
+use tairix_filecore::record::{
     boot_block_checksum, zone_check, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE,
     DISC_RECORD_BITS, DISC_RECORD_IN_BOOT_BLOCK, DISC_RECORD_SIZE, ZONE_CHECK_BYTE,
     ZONE_HEADER_SIZE,
@@ -58,11 +59,12 @@ enum RecordAt {
 }
 
 /// The smallest volume of each map flavour keeps the sweep affordable.
-const BASES: [(AdfsVariant, usize, RecordAt); 4] = [
-    (AdfsVariant::S, 160 * 1024, RecordAt::Nowhere),
-    (AdfsVariant::E, 800 * 1024, RecordAt::Bare),
-    (AdfsVariant::EPlus, 800 * 1024, RecordAt::Bare),
-    (AdfsVariant::F, 1600 * 1024, RecordAt::BootBlock),
+const BASES: [(Variant, usize, RecordAt); 5] = [
+    (Variant::S, 160 * 1024, RecordAt::Nowhere),
+    (Variant::E, 800 * 1024, RecordAt::Bare),
+    (Variant::EPlus, 800 * 1024, RecordAt::Bare),
+    (Variant::F, 1600 * 1024, RecordAt::BootBlock),
+    (Variant::RamDisc, 1024 * 1024, RecordAt::BootBlock),
 ];
 
 /// PRNG-image count for the quick smoke pass (no budget set).
@@ -296,7 +298,7 @@ fn shaped_spare(record: &DiscRecord, rng: &mut Prng) -> u16 {
 /// A populated base image of `variant`: files, a nested directory, and
 /// typed metadata, so the sweeps spend their time near genuinely valid
 /// structures rather than pure noise.
-fn formatted_image(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
+fn formatted_image(variant: Variant, bytes: usize) -> Vec<u8> {
     let mut fs = Adfs::format(
         MemBlock {
             store: vec![0u8; bytes],

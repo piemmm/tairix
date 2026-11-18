@@ -186,13 +186,18 @@ pub enum NodeKind {
 pub enum NameMatching {
     /// A name matches only the entry stored with exactly the same bytes.
     Exact,
-    /// ASCII letters match regardless of case (FAT, `FileCore`).
+    /// ASCII letters match regardless of case (FAT).
     AsciiCaseInsensitive,
     /// ASCII letters and the Latin-1 letters U+00E0–U+00FE, U+00F7 excepted,
     /// match regardless of case: AmigaDOS's international mode, which folds
     /// neither `ß` nor `ÿ`. A name that is not UTF-8 matches only its own
     /// bytes.
     Latin1CaseInsensitive,
+    /// RISC OS's names, as `FileCore` compares them: the Latin-1 rule's
+    /// letters, RISC OS's own `ŵ`, `ŷ` and `œ`, and `ÿ`, which has no capital
+    /// in RISC OS's Latin-1, as `Y`. A name that is not UTF-8 matches only
+    /// its own bytes.
+    RiscOs,
 }
 
 impl NameMatching {
@@ -203,14 +208,15 @@ impl NameMatching {
         match self {
             Self::Exact => a == b,
             Self::AsciiCaseInsensitive => a.eq_ignore_ascii_case(b),
-            Self::Latin1CaseInsensitive => match (core::str::from_utf8(a), core::str::from_utf8(b))
-            {
-                (Ok(a), Ok(b)) => a
-                    .chars()
-                    .map(|c| self.fold(c))
-                    .eq(b.chars().map(|c| self.fold(c))),
-                _ => a == b,
-            },
+            Self::Latin1CaseInsensitive | Self::RiscOs => {
+                match (core::str::from_utf8(a), core::str::from_utf8(b)) {
+                    (Ok(a), Ok(b)) => a
+                        .chars()
+                        .map(|c| self.fold(c))
+                        .eq(b.chars().map(|c| self.fold(c))),
+                    _ => a == b,
+                }
+            }
         }
     }
 
@@ -229,6 +235,13 @@ impl NameMatching {
                     }
                 }
                 _ => c,
+            },
+            Self::RiscOs => match c {
+                '\u{FF}' => 'Y',
+                '\u{153}' => '\u{152}',
+                '\u{175}' => '\u{174}',
+                '\u{177}' => '\u{176}',
+                _ => Self::Latin1CaseInsensitive.fold(c),
             },
         }
     }
@@ -2106,6 +2119,24 @@ mod tests {
         assert!(
             NameMatching::AsciiCaseInsensitive.matches(b"\xFFa", b"\xFFA"),
             "the ASCII rule folds a name's ASCII letters whether or not it is UTF-8"
+        );
+    }
+
+    #[test]
+    fn the_risc_os_rule_folds_as_filecore_does() {
+        let rule = NameMatching::RiscOs;
+        assert!(rule.matches("Ärger".as_bytes(), "äRGER".as_bytes()));
+        assert!(rule.matches("ÿx".as_bytes(), b"Yx"), "y-diaeresis is Y");
+        assert!(rule.matches("ÿx".as_bytes(), b"yx"));
+        assert!(rule.matches("ŵa".as_bytes(), "Ŵa".as_bytes()));
+        assert!(rule.matches("ŷa".as_bytes(), "Ŷa".as_bytes()));
+        assert!(rule.matches("œa".as_bytes(), "Œa".as_bytes()));
+        assert!(!rule.matches("÷".as_bytes(), "×".as_bytes()));
+        assert!(!rule.matches("ßa".as_bytes(), b"SSa"));
+        assert!(!rule.matches(b"foo", b"food"));
+        assert!(
+            !rule.matches(b"\xE9", b"\xC9"),
+            "a name that is not UTF-8 matches only its own bytes"
         );
     }
 

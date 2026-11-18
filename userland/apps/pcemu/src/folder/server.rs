@@ -10,10 +10,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
-use tairix_abi::{Errno, FileId, FileKind, FileStat, StampChange, TimesChange};
+use tairix_abi::{
+    Access as Want, Errno, FileId, FileKind, FileStat, NodeExpect, RenameFlags, StampChange,
+    TimesChange, UnlinkFlags,
+};
+use tairix_fscopy::tree::{Dir, Node, WriteAt};
+use tairix_fscopy::{Source, Target};
 
 use super::alias::{self, TRIES};
-use super::host::{HostDir, HostFile};
 use super::{
     wanted, Access, Creation, DosName, Facts, Folder, From, Op, Refusal, Reply, SharePath, IO_MOST,
 };
@@ -32,6 +36,11 @@ pub const ENTRIES: usize = 1 << 16;
 
 /// Places a search counts before a directory's entries: its `.` and `..`.
 const DOTS: usize = 2;
+
+/// What a file and a directory the machine makes are born with, less the
+/// front end's umask.
+const FILE_MODE: u32 = 0o666;
+const DIR_MODE: u32 = 0o777;
 
 /// What keys a listing: the directory's identity, or where its volume gives
 /// none, the listing it was reached from and its name there.
@@ -84,7 +93,7 @@ struct Listing<D> {
     used: u64,
 }
 
-impl<D: HostDir> Listing<D> {
+impl<D: Dir> Listing<D> {
     fn new(number: u32, key: Key, dir: D) -> Self {
         Self {
             number,
@@ -107,7 +116,7 @@ impl<D: HostDir> Listing<D> {
         if self.read == Some(read) {
             return Ok(());
         }
-        let listed = self.dir.list().map_err(refusal)?;
+        let listed = self.dir.entries(ENTRIES).map_err(refusal)?;
         let present: BTreeSet<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
         for slot in &mut self.slots {
             if let Some(host) = slot.host.take_if(|host| !present.contains(host.as_str())) {
@@ -211,7 +220,7 @@ struct Open<F> {
 }
 
 /// A folder served to one machine.
-pub struct Server<D: HostDir> {
+pub struct Server<D: Dir> {
     /// Kept in place, a let-go one `None`, so an index stays the listing it
     /// was; the root's is the first and is never let go.
     listings: Vec<Option<Listing<D>>>,
@@ -226,7 +235,7 @@ pub struct Server<D: HostDir> {
     read: Vec<u8>,
 }
 
-impl<D: HostDir> Server<D> {
+impl<D: Dir> Server<D> {
     /// The server of the folder `root`, labelled `label`, writable where the
     /// grant is; its handles carry the low 24 bits of `epoch`, drawn afresh
     /// for each share so a handle of an earlier one reaches none of this
@@ -378,7 +387,7 @@ impl<D: HostDir> Server<D> {
                 u32::try_from(stat.size).ok()?
             },
             modified: shifted(stat.times.modified, self.offset),
-            writable: self.writable && listing.dir.may_write(Some(host)),
+            writable: self.writable && may_write(&listing.dir, Some(host)),
             hidden: host.starts_with('.'),
         })
     }
@@ -392,14 +401,14 @@ impl<D: HostDir> Server<D> {
                 directory: true,
                 size: 0,
                 modified: shifted(stat.times.modified, self.offset),
-                writable: self.writable && root.dir.may_write(None),
+                writable: self.writable && may_write(&root.dir, None),
                 hidden: false,
             });
         };
         let (at, found) = self.entry(&dir, name)?;
         let (host, _) = found.ok_or(Refusal::NotFound)?;
         let listing = self.listing(at)?;
-        let stat = listing.dir.look(&host).map_err(refusal)?;
+        let stat = look(&listing.dir, &host).map_err(refusal)?;
         self.facts(listing, name, &host, &stat)
             .ok_or(Refusal::Denied)
     }
@@ -446,7 +455,7 @@ impl<D: HostDir> Server<D> {
                     directory: true,
                     size: 0,
                     modified: shifted(stat.times.modified, self.offset),
-                    writable: self.writable && listing.dir.may_write(None),
+                    writable: self.writable && may_write(&listing.dir, None),
                     hidden: false,
                 };
                 return Ok(Reply::Found {
@@ -466,7 +475,7 @@ impl<D: HostDir> Server<D> {
             }
             // An entry gone since the listing was read, or one DOS cannot
             // hold, is passed over.
-            let Ok(stat) = listing.dir.look(host) else {
+            let Ok(stat) = look(&listing.dir, host) else {
                 continue;
             };
             let Some(facts) = self.facts(listing, slot.alias, host, &stat) else {
@@ -510,7 +519,10 @@ impl<D: HostDir> Server<D> {
             (None, how) => (alias::host_name(&name), how),
         };
         let listing = self.listing(at)?;
-        let file = listing.dir.open(&host, access, how).map_err(refusal)?;
+        let file = listing
+            .dir
+            .open_reached(&host, access, how, FILE_MODE)
+            .map_err(refusal)?;
         let stat = file.stat().map_err(refusal)?;
         let facts = self
             .facts(listing, name, &host, &stat)
@@ -632,7 +644,7 @@ impl<D: HostDir> Server<D> {
                     modified: StampChange::At(shifted(at, self.offset.saturating_neg())),
                     nearest: true,
                 })
-                .map(|()| Reply::Done)
+                .map(|_| Reply::Done)
                 .map_err(refusal),
             None => Ok(Reply::Done),
         }
@@ -649,7 +661,23 @@ impl<D: HostDir> Server<D> {
         } else {
             Refusal::NotFound
         })?;
-        match self.listing(at)?.dir.remove(&host, directory) {
+        let dir = &self.listing(at)?.dir;
+        // A plain unlink takes an empty directory too, which DOS deletes as a
+        // file never may: the entry is read first and held to what was read.
+        let removed = if directory {
+            dir.unlink(&host, UnlinkFlags::DIRECTORY, None)
+        } else {
+            match dir.open_node(&host).and_then(|node| node.stat()) {
+                Ok(stat) if stat.kind == FileKind::Directory => return Err(Refusal::Denied),
+                Ok(stat) => dir.unlink(
+                    &host,
+                    UnlinkFlags::EXPECT_NODE,
+                    Some(&NodeExpect::of_node(stat.id)),
+                ),
+                Err(errno) => Err(errno),
+            }
+        };
+        match removed {
             Ok(()) => {}
             Err(Errno::NotADirectory) => return Err(Refusal::PathNotFound),
             Err(Errno::IsADirectory) => return Err(Refusal::Denied),
@@ -674,14 +702,12 @@ impl<D: HostDir> Server<D> {
         let to_host = alias::host_name(&to_name);
         let (source_dir, target_dir) = (&self.listing(source)?.dir, &self.listing(target)?.dir);
         source_dir
-            .rename(&host, target_dir, &to_host)
+            .rename(&host, target_dir, &to_host, RenameFlags::NO_REPLACE, None)
             .map_err(|errno| match errno {
                 Errno::AlreadyExists => Refusal::Denied,
                 errno => refusal(errno),
             })?;
-        let id = target_dir
-            .look(&to_host)
-            .map_or(FileId::NONE, |stat| stat.id);
+        let id = look(target_dir, &to_host).map_or(FileId::NONE, |stat| stat.id);
         if source == target {
             self.listing_mut(source)?
                 .rename(from_name, to_name, to_host, id);
@@ -703,17 +729,20 @@ impl<D: HostDir> Server<D> {
         }
         let host = alias::host_name(&name);
         let listing = self.listing(at)?;
-        listing.dir.make_dir(&host).map_err(|errno| match errno {
-            Errno::AlreadyExists => Refusal::Denied,
-            errno => refusal(errno),
-        })?;
-        let id = listing.dir.look(&host).map_or(FileId::NONE, |stat| stat.id);
+        let made = listing
+            .dir
+            .make_dir(&host, DIR_MODE)
+            .map_err(|errno| match errno {
+                Errno::AlreadyExists => Refusal::Denied,
+                errno => refusal(errno),
+            })?;
+        let id = made.stat().map_or(FileId::NONE, |stat| stat.id);
         self.listing_mut(at)?.insert(name, host, id);
         Ok(Reply::Done)
     }
 }
 
-impl<D: HostDir> Folder for Server<D> {
+impl<D: Dir> Folder for Server<D> {
     fn call(&mut self, op: &Op<'_>) -> Result<Reply<'_>, Refusal> {
         match *op {
             Op::Look { path } => self.look(&path).map(Reply::Looked),
@@ -755,11 +784,22 @@ impl<D: HostDir> Folder for Server<D> {
             Op::Space => self
                 .listing(0)?
                 .dir
-                .space()
+                .volume_stats()
                 .map(Reply::Space)
                 .map_err(refusal),
         }
     }
+}
+
+/// What `name` in `dir` leads to, through a final link.
+fn look<D: Dir>(dir: &D, name: &str) -> Result<FileStat, Errno> {
+    dir.follow(name, false)?.stat()
+}
+
+/// Whether the user may change `name` in `dir` — its bytes, or a directory's
+/// entries — or, for `None`, `dir`'s own entries.
+fn may_write<D: Dir>(dir: &D, name: Option<&str>) -> bool {
+    dir.access(name.unwrap_or(""), Want::WRITE, true).is_ok()
 }
 
 /// `at` moved by `secs` seconds: from the host's clock to the machine's, or

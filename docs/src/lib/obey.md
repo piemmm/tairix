@@ -1,7 +1,7 @@
 # `tairix-obey`
 
 RISC OS's command-line machinery as pure functions over a variable store. The
-RISC OS emulator's kernel runs it against the guest's variables
+TAIRiX Bridge's kernel runs it against the guest's variables
 (`plans/RISCOS-EMULATOR.md` §4.4). `lib/icon` reads an application's `!Boot`
 through its read-only mode, and the emulator's application registry is to do
 the same (RO32).

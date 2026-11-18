@@ -5,13 +5,14 @@ use super::*;
 use crate::asm::Reg16;
 use crate::cpu::{gpr, Bus, Regs, Seg};
 use crate::dos::harness::*;
-use crate::folder::memhost::MemHost;
 use crate::folder::server::Server;
 use crate::folder::{DosName, Refusal, Share};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use tairix_abi::time::{DosTime, Time64};
 use tairix_fat::dir::attr;
+use tairix_fscopy::fixture::Tree;
+use tairix_fscopy::tree::Roots;
 
 /// Where the tests' calls keep the bytes they move.
 const BUFFER: u16 = DATA + 0x200;
@@ -22,10 +23,15 @@ fn dos_name(text: &str) -> DosName {
 
 /// TAIRiX DOS booted with `host` as its share 0, writable where `writable`:
 /// drive C:, the first after the diskettes' A: and B:.
-fn shared(host: &MemHost, writable: bool) -> Dos {
+fn shared(host: &Tree, writable: bool) -> Dos {
     let mut m = Dos::machine(&[]);
     let label = dos_name("HOST");
-    let server = Server::new(host.root(), label, writable, 0x00AB_CDEF);
+    let server = Server::new(
+        host.open_dir("/", false).expect("the folder"),
+        label,
+        writable,
+        0x00AB_CDEF,
+    );
     m.board_mut()
         .share(0, Share::new(label, writable, Box::new(server)));
     let mut dos = Dos::shell_of(m);
@@ -122,7 +128,7 @@ fn names(found: &[(Vec<u8>, u8)]) -> Vec<&[u8]> {
 
 #[test]
 fn a_share_is_the_first_drive_free_and_a_network_drive_with_no_driver() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let mut dos = shared(&host, true);
     let flags = kernel16(&dos.m, cds_at(2) + cds::FLAGS);
     assert_eq!(flags, cds::NETWORK);
@@ -160,12 +166,12 @@ fn a_share_is_the_first_drive_free_and_a_network_drive_with_no_driver() {
 
 #[test]
 fn a_file_of_the_share_is_read_and_its_end_is_where_the_host_has_it_now() {
-    let host = MemHost::new().file("readme.txt", b"Hello, share.");
+    let host = Tree::new().file("/readme.txt", b"Hello, share.");
     let mut dos = shared(&host, true);
     let handle = on_path(&mut dos, 0x3D, 0, "C:\\README.TXT").unwrap();
     assert_eq!(read(&mut dos, handle, 100).unwrap(), b"Hello, share.");
     assert_eq!(read(&mut dos, handle, 100).unwrap(), b"", "at its end");
-    host.replace("readme.txt", b"Hello, share. Again.");
+    host.write("/readme.txt", b"Hello, share. Again.");
     let end = dos.call(|r| {
         r.gpr[gpr::AX] = 0x4202;
         r.gpr[gpr::BX] = handle;
@@ -187,7 +193,7 @@ fn a_file_of_the_share_is_read_and_its_end_is_where_the_host_has_it_now() {
 
 #[test]
 fn a_file_made_on_the_share_holds_what_dos_wrote_and_the_stamp_it_set() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let mut dos = shared(&host, true);
     let handle = create(&mut dos, "C:\\NOTES.TXT", 0).unwrap();
     assert_eq!(write(&mut dos, handle, b"Hello, host."), Ok(12));
@@ -203,11 +209,18 @@ fn a_file_made_on_the_share_holds_what_dos_wrote_and_the_stamp_it_set() {
     });
     assert!(!carry(&set));
     assert!(on_handle(&mut dos, 0x3E00, handle).is_ok());
-    assert_eq!(host.bytes("NOTES.TXT").unwrap(), b"Hello, host.");
-    assert_eq!(host.modified("NOTES.TXT"), stamp.to_time64());
+    assert_eq!(host.bytes("/NOTES.TXT").unwrap(), b"Hello, host.");
+    assert_eq!(
+        host.times("/NOTES.TXT").map(|(_, modified)| modified),
+        stamp.to_time64()
+    );
     let again = create(&mut dos, "C:\\NOTES.TXT", 0).unwrap();
     assert!(on_handle(&mut dos, 0x3E00, again).is_ok());
-    assert_eq!(host.bytes("NOTES.TXT").unwrap(), b"", "made again, emptied");
+    assert_eq!(
+        host.bytes("/NOTES.TXT").unwrap(),
+        b"",
+        "made again, emptied"
+    );
     let new = dos.call(|r| {
         with_path(0x5B, 0, DATA)(r);
         r.gpr[gpr::CX] = 0;
@@ -226,7 +239,7 @@ fn a_file_made_on_the_share_holds_what_dos_wrote_and_the_stamp_it_set() {
 
 #[test]
 fn a_write_of_nothing_ends_the_file_where_it_stands() {
-    let host = MemHost::new().file("data.bin", &[7; 100]);
+    let host = Tree::new().file("/data.bin", &[7; 100]);
     let mut dos = shared(&host, true);
     let handle = on_path(&mut dos, 0x3D, 2, "C:\\DATA.BIN").unwrap();
     dos.call(|r| {
@@ -237,14 +250,14 @@ fn a_write_of_nothing_ends_the_file_where_it_stands() {
     });
     assert_eq!(write(&mut dos, handle, &[]), Ok(0));
     assert!(on_handle(&mut dos, 0x3E00, handle).is_ok());
-    assert_eq!(host.bytes("data.bin").unwrap(), [7; 40]);
+    assert_eq!(host.bytes("/data.bin").unwrap(), [7; 40]);
 }
 
 #[test]
 fn a_host_name_dos_could_not_hold_is_reached_by_its_alias() {
-    let host = MemHost::new()
-        .file("Long Report.text", b"aliased")
-        .file("short.txt", b"own");
+    let host = Tree::new()
+        .file("/Long Report.text", b"aliased")
+        .file("/short.txt", b"own");
     let mut dos = shared(&host, true);
     let listed = found(&mut dos, "C:\\*.*", 0);
     assert_eq!(names(&listed), [&b"LONGRE~1.TEX"[..], b"SHORT.TXT"]);
@@ -255,7 +268,7 @@ fn a_host_name_dos_could_not_hold_is_reached_by_its_alias() {
 
 #[test]
 fn a_directory_of_the_share_is_made_entered_listed_and_removed() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let mut dos = shared(&host, true);
     assert!(on_path(&mut dos, 0x39, 0, "C:\\SUB").is_ok());
     assert!(on_path(&mut dos, 0x3B, 0, "C:\\SUB").is_ok());
@@ -268,7 +281,7 @@ fn a_directory_of_the_share_is_made_entered_listed_and_removed() {
     assert_eq!(dos.get(BUFFER, 4), b"SUB\0");
     let made = create(&mut dos, "C:INNER.TXT", 0).unwrap();
     assert!(on_handle(&mut dos, 0x3E00, made).is_ok());
-    assert_eq!(host.names("SUB"), ["INNER.TXT"]);
+    assert_eq!(host.names("/SUB"), ["INNER.TXT"]);
     let listed = found(&mut dos, "C:*.*", u16::from(attr::DIRECTORY));
     assert_eq!(names(&listed), [&b"."[..], b"..", b"INNER.TXT"]);
     assert_eq!(listed[0].1, attr::DIRECTORY);
@@ -284,7 +297,7 @@ fn a_directory_of_the_share_is_made_entered_listed_and_removed() {
     );
     assert!(on_path(&mut dos, 0x41, 0, "C:\\SUB\\INNER.TXT").is_ok());
     assert!(on_path(&mut dos, 0x3A, 0, "C:\\SUB").is_ok());
-    assert!(host.names("").is_empty());
+    assert!(host.names("/").is_empty());
     assert_eq!(
         on_path(&mut dos, 0x3B, 0, "C:\\SUB"),
         Err(error::PATH_NOT_FOUND)
@@ -293,7 +306,7 @@ fn a_directory_of_the_share_is_made_entered_listed_and_removed() {
 
 #[test]
 fn a_file_is_renamed_within_the_share_and_never_off_it() {
-    let host = MemHost::new().file("a.txt", b"a").dir("sub");
+    let host = Tree::new().file("/a.txt", b"a").dir("/sub");
     let mut dos = shared(&host, true);
     let from = dos.asciz(DATA, "C:\\A.TXT");
     let to = dos.asciz(DATA + 0x80, "C:\\SUB\\B.TXT");
@@ -302,7 +315,7 @@ fn a_file_is_renamed_within_the_share_and_never_off_it() {
         r.gpr[gpr::DI] = to;
     });
     assert!(!carry(&renamed), "{renamed:X?}");
-    assert_eq!(host.bytes("sub/B.TXT").unwrap(), b"a");
+    assert_eq!(host.bytes("/sub/B.TXT").unwrap(), b"a");
     let from = dos.asciz(DATA, "C:\\SUB\\B.TXT");
     let to = dos.asciz(DATA + 0x80, "A:\\B.TXT");
     let across = dos.call(|r| {
@@ -314,7 +327,10 @@ fn a_file_is_renamed_within_the_share_and_never_off_it() {
 
 #[test]
 fn a_file_the_host_keeps_from_change_is_read_only_to_dos() {
-    let host = MemHost::new().file("kept.txt", b"kept").locked("kept.txt");
+    let host = Tree::new()
+        .file("/kept.txt", b"kept")
+        .with_mode("/kept.txt", 0o444)
+        .checking_permissions();
     let mut dos = shared(&host, true);
     assert_eq!(
         on_path(&mut dos, 0x43, 0, "C:\\KEPT.TXT"),
@@ -332,7 +348,7 @@ fn a_file_the_host_keeps_from_change_is_read_only_to_dos() {
 
 #[test]
 fn a_share_given_to_read_refuses_every_change() {
-    let host = MemHost::new().file("seen.txt", b"seen");
+    let host = Tree::new().file("/seen.txt", b"seen");
     let mut dos = shared(&host, false);
     let denied = Err(error::ACCESS_DENIED);
     assert_eq!(create(&mut dos, "C:\\NEW.TXT", 0), denied);
@@ -352,12 +368,12 @@ fn a_share_given_to_read_refuses_every_change() {
     assert_eq!(outcome(&stamped), denied, "nor are its stamps kept");
     assert_eq!(read(&mut dos, handle, 10).unwrap(), b"seen");
     assert!(on_handle(&mut dos, 0x3E00, handle).is_ok());
-    assert_eq!(host.names(""), ["seen.txt"]);
+    assert_eq!(host.names("/"), ["seen.txt"]);
 }
 
 #[test]
 fn the_space_of_a_share_is_its_volumes_and_it_has_no_dpb() {
-    let host = MemHost::new().file("used.bin", &[0; 5 * 512]);
+    let host = Tree::new().file("/used.bin", &[0; 5 * 512]);
     let mut dos = shared(&host, true);
     let free = dos.call(|r| {
         r.gpr[gpr::AX] = 0x3600;
@@ -370,8 +386,8 @@ fn the_space_of_a_share_is_its_volumes_and_it_has_no_dpb() {
             free.gpr[gpr::CX],
             free.gpr[gpr::DX]
         ),
-        (1, 4096 - 5, 512, 4096),
-        "the in-memory volume's 4096 blocks of 512 bytes"
+        (2, 32765, 512, 32768),
+        "the in-memory volume's 65536 blocks of 512 bytes, counted in two-sector clusters DOS's 16 bits can hold"
     );
     let info = dos.call(|r| {
         r.gpr[gpr::AX] = 0x1C00;
@@ -383,7 +399,7 @@ fn the_space_of_a_share_is_its_volumes_and_it_has_no_dpb() {
             info.gpr[gpr::CX],
             info.gpr[gpr::DX]
         ),
-        (1, 512, 4096)
+        (2, 512, 32768)
     );
     let media = crate::cpu::linear(info.sreg(Seg::Ds), info.gpr[gpr::BX]);
     assert_eq!(dos.m.board().peek(media), tairix_fat::format::FIXED_MEDIA);
@@ -396,7 +412,7 @@ fn the_space_of_a_share_is_its_volumes_and_it_has_no_dpb() {
 
 #[test]
 fn the_label_of_a_share_is_the_name_it_was_shared_under() {
-    let host = MemHost::new().file("file.txt", b"");
+    let host = Tree::new().file("/file.txt", b"");
     let mut dos = shared(&host, true);
     let labels = found(&mut dos, "C:\\*.*", u16::from(attr::VOLUME_ID));
     assert_eq!(
@@ -418,7 +434,7 @@ fn the_label_of_a_share_is_the_name_it_was_shared_under() {
 
 #[test]
 fn a_share_withdrawn_cuts_its_open_files_off_and_its_drive_goes() {
-    let host = MemHost::new().file("open.txt", b"open");
+    let host = Tree::new().file("/open.txt", b"open");
     let mut dos = shared(&host, true);
     let handle = on_path(&mut dos, 0x3D, 0, "C:\\OPEN.TXT").unwrap();
     super::detach(&mut dos.m, 0);
@@ -437,10 +453,15 @@ fn a_share_withdrawn_cuts_its_open_files_off_and_its_drive_goes() {
 
 #[test]
 fn a_share_attached_after_the_boot_takes_its_drive_at_once() {
-    let host = MemHost::new().file("late.txt", b"late");
+    let host = Tree::new().file("/late.txt", b"late");
     let mut dos = Dos::boot(&[]);
     let label = dos_name("LATE");
-    let server = Server::new(host.root(), label, true, 9);
+    let server = Server::new(
+        host.open_dir("/", false).expect("the folder"),
+        label,
+        true,
+        9,
+    );
     dos.m
         .board_mut()
         .share(1, Share::new(label, true, Box::new(server)));
@@ -457,7 +478,7 @@ fn a_program_on_the_share_runs() {
         asm.mov_imm16(Reg16::Ax, 0x4C2A);
         asm.int(0x21);
     });
-    let host = MemHost::new().file("child.com", &child);
+    let host = Tree::new().file("/child.com", &child);
     let mut dos = shared(&host, true);
     let shell = dos.psp;
     dos.call(|r| {
@@ -488,7 +509,7 @@ fn a_program_on_the_share_runs() {
 
 #[test]
 fn an_fcb_file_of_the_share_is_made_written_read_sized_renamed_and_deleted() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let mut dos = shared(&host, true);
     let fcb = DATA;
     dos.call(|r| {
@@ -506,7 +527,7 @@ fn an_fcb_file_of_the_share_is_made_written_read_sized_renamed_and_deleted() {
         assert_eq!(fcb_call(&mut dos, 0x15, fcb), 0, "record {record} written");
     }
     assert_eq!(fcb_call(&mut dos, 0x10, fcb), 0, "closed");
-    let held = host.bytes("RECORDS.DAT").unwrap();
+    let held = host.bytes("/RECORDS.DAT").unwrap();
     assert_eq!(held.len(), 384);
     assert!(held[256..].iter().all(|&b| b == b'C'));
     on_share(&mut dos, b"RECORDS DAT");
@@ -526,18 +547,18 @@ fn an_fcb_file_of_the_share_is_made_written_read_sized_renamed_and_deleted() {
     rename[0x11..0x1C].copy_from_slice(b"????????BAK");
     dos.put(fcb, &rename);
     assert_eq!(fcb_call(&mut dos, 0x17, fcb), 0, "renamed");
-    assert_eq!(host.names(""), ["RECORDS.BAK"]);
+    assert_eq!(host.names("/"), ["RECORDS.BAK"]);
     on_share(&mut dos, b"????????BAK");
     assert_eq!(fcb_call(&mut dos, 0x11, fcb), 0, "found");
     assert_eq!(dos.get(BUFFER, 12), b"\x03RECORDS BAK");
     assert_eq!(fcb_call(&mut dos, 0x13, fcb), 0, "deleted");
-    assert!(host.names("").is_empty());
+    assert!(host.names("/").is_empty());
     assert_eq!(fcb_call(&mut dos, 0x11, fcb), 0xFF, "gone");
 }
 
 #[test]
 fn an_fcb_rename_by_a_pattern_renames_each_match_once() {
-    let host = MemHost::new().file("a.txt", b"").file("b.txt", b"");
+    let host = Tree::new().file("/a.txt", b"").file("/b.txt", b"");
     let mut dos = shared(&host, true);
     let mut rename = [0u8; 37];
     rename[0] = 3;
@@ -547,14 +568,14 @@ fn an_fcb_rename_by_a_pattern_renames_each_match_once() {
     rename[0x11..0x1C].copy_from_slice(b"?X??????TXT");
     dos.put(DATA, &rename);
     assert_eq!(fcb_call(&mut dos, 0x17, DATA), 0);
-    assert_eq!(host.names(""), ["AX.TXT", "BX.TXT"]);
+    assert_eq!(host.names("/"), ["AX.TXT", "BX.TXT"]);
 }
 
 #[test]
 fn an_fcb_search_of_the_share_keeps_its_place_in_the_fcb_and_its_drive() {
-    let host = MemHost::new()
-        .file("alpha.txt", b"a")
-        .file("beta.txt", b"bb");
+    let host = Tree::new()
+        .file("/alpha.txt", b"a")
+        .file("/beta.txt", b"bb");
     let mut dos = shared(&host, true);
     dos.call(|r| {
         r.gpr[gpr::AX] = 0x1A00;
@@ -590,16 +611,17 @@ fn an_fcb_search_of_the_share_keeps_its_place_in_the_fcb_and_its_drive() {
 
 #[test]
 fn an_fcb_delete_by_a_pattern_keeps_what_the_host_keeps() {
-    let host = MemHost::new()
-        .file("one.tmp", b"")
-        .file("two.tmp", b"")
-        .file("kept.tmp", b"")
-        .locked("kept.tmp");
+    let host = Tree::new()
+        .file("/one.tmp", b"")
+        .file("/two.tmp", b"")
+        .file("/kept.tmp", b"")
+        .with_mode("/kept.tmp", 0o444)
+        .checking_permissions();
     let mut dos = shared(&host, true);
     fcb_at(&mut dos, DATA, b"????????TMP");
     dos.put(DATA, &[3]);
     assert_eq!(fcb_call(&mut dos, 0x13, DATA), 0);
-    assert_eq!(host.names(""), ["kept.tmp"]);
+    assert_eq!(host.names("/"), ["kept.tmp"]);
     assert_eq!(
         fcb_call(&mut dos, 0x13, DATA),
         0xFF,
@@ -637,12 +659,17 @@ fn a_stamp_outside_dos_years_is_the_nearest_dos_holds() {
 
 #[test]
 fn the_shell_lists_types_and_copies_on_a_share_as_on_a_disk() {
-    let host = MemHost::new()
-        .file("readme.txt", b"From the host.\r\n")
-        .dir("docs");
+    let host = Tree::new()
+        .file("/readme.txt", b"From the host.\r\n")
+        .dir("/docs");
     let mut m = machine_of(&crate::machine::Template::IbmPc.config(), [None, None]);
     let label = dos_name("HOST");
-    let server = Server::new(host.root(), label, true, 0x0D05);
+    let server = Server::new(
+        host.open_dir("/", false).expect("the folder"),
+        label,
+        true,
+        0x0D05,
+    );
     m.board_mut()
         .share(0, Share::new(label, true, Box::new(server)));
     let mut m = prompted_in(m, &diskette(), &[]);
@@ -657,11 +684,11 @@ fn the_shell_lists_types_and_copies_on_a_share_as_on_a_disk() {
     assert!(screen(&m).contains("From the host."), "{}", screen(&m));
     typed(&mut m, "copy c:readme.txt c:docs\\copy.txt");
     assert!(screen(&m).contains("1 file(s) copied"), "{}", screen(&m));
-    assert_eq!(host.bytes("docs/COPY.TXT").unwrap(), b"From the host.\r\n");
+    assert_eq!(host.bytes("/docs/COPY.TXT").unwrap(), b"From the host.\r\n");
     typed(&mut m, "c:");
     typed(&mut m, "cd docs");
     typed(&mut m, "del copy.txt");
     let text = screen(&m);
     assert!(text.trim_end().ends_with("C:\\DOCS>"), "{text}");
-    assert!(host.names("docs").is_empty());
+    assert!(host.names("/docs").is_empty());
 }

@@ -66,7 +66,7 @@ use tairix_abi::{
     RenameFlags, UnlinkFlags,
 };
 use tairix_caps::CapabilitySet;
-use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
+use tairix_drv_fs_adfs::{Adfs, Variant};
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
@@ -4548,7 +4548,7 @@ fn a_udf_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'stat
 
 /// An ADFS volume attaches writable through the same path.
 fn an_adfs_volume_attaches_writable_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let adfs = Adfs::format(RamBlock::new(1600), AdfsVariant::E).expect("formats");
+    let adfs = Adfs::format(RamBlock::new(1600), Variant::E).expect("formats");
     let identity = adfs.volume_identity();
     let round = insert(
         window_ptr,

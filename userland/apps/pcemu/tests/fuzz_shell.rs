@@ -20,6 +20,8 @@
 //! plain `cargo test`; keeps drawing from the same seeded stream until
 //! `TAIRIX_FUZZ_BUDGET_SECS` elapses under `cargo xtask fuzz`.
 
+use tairix_fscopy::fixture::Tree;
+use tairix_fscopy::tree::Roots;
 use tairix_fuzzseed::Prng;
 use tairix_pcemu::asm::{Asm, Cond, Reg16};
 use tairix_pcemu::bios::{self, Firmware};
@@ -27,7 +29,6 @@ use tairix_pcemu::chips::keyboard::{us_key, Scan, SHIFT};
 use tairix_pcemu::cpu::Bus;
 use tairix_pcemu::dos;
 use tairix_pcemu::dos::volume::{self, File};
-use tairix_pcemu::folder::memhost::MemHost;
 use tairix_pcemu::folder::server::Server;
 use tairix_pcemu::folder::{DosName, Share};
 use tairix_pcemu::machine::{Machine, Template};
@@ -229,14 +230,19 @@ const WORDS: &[&str] = &[
 ];
 /// The folder shared as drive C: a file and a directory with one.
 fn folder() -> Share {
-    let host = MemHost::new()
-        .file("file.txt", b"shared\r\n")
-        .file("dir/inner.txt", b"inner\r\n");
+    let host = Tree::new()
+        .file("/file.txt", b"shared\r\n")
+        .file("/dir/inner.txt", b"inner\r\n");
     let label = DosName::new(*b"SHARED     ", false).unwrap();
     Share::new(
         label,
         true,
-        Box::new(Server::new(host.root(), label, true, 0x5C)),
+        Box::new(Server::new(
+            host.open_dir("/", false).expect("the folder"),
+            label,
+            true,
+            0x5C,
+        )),
     )
 }
 

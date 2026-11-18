@@ -55,7 +55,7 @@ impl TreeFs {
 impl Fs for TreeFs {
     fn list_dir(&mut self, path: &str) -> Result<Vec<FsEntry>, Errno> {
         let dir = self.tree.open_dir(path, true)?;
-        dir.entries()?
+        dir.entries(usize::MAX)?
             .into_iter()
             .map(|entry| {
                 let stat = dir.open_node(&entry.name)?.stat()?;

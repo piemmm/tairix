@@ -1633,10 +1633,23 @@ pub fn media_for_filetype(filetype: Filetype) -> Option<MediaType> {
 }
 
 /// The filetype RISC OS gives a new file of `media`: the first its row in
-/// [`FILETYPE_TABLE`] lists, the reverse of [`media_for_filetype`]. `None`
-/// for a type no filetype holds.
+/// the filetype table lists, the reverse of [`media_for_filetype`], or for a
+/// type with no row the nearest broader type's along [`MediaType::parent`].
+/// `None` where no type of the chain holds a filetype.
 #[must_use]
-pub(crate) fn canonical_filetype(media: MediaType) -> Option<Filetype> {
+pub fn canonical_filetype(media: MediaType) -> Option<Filetype> {
+    let mut held = Some(media);
+    while let Some(media) = held {
+        if let Some(filetype) = own_filetype(media) {
+            return Some(filetype);
+        }
+        held = media.parent();
+    }
+    None
+}
+
+/// The filetype `media`'s own row in [`FILETYPE_TABLE`] lists first.
+fn own_filetype(media: MediaType) -> Option<Filetype> {
     Filetype::from_hex(canonical_code(media)?.as_bytes())
 }
 
@@ -1712,11 +1725,12 @@ pub fn named_extension(media: MediaType) -> Option<&'static str> {
 }
 
 /// The format a document of `media` is saved in: the RISC OS file type a new
-/// file of it is given, and, for a type not named by its file type alone, its
+/// file of it is given — its own row's, so a format RISC OS has no type for is
+/// offered with none — and, for a type not named by its file type alone, its
 /// extensions, most usual first, as many as a save pick carries.
 #[must_use]
 pub fn save_format(media: MediaType) -> tairix_abi::window_ipc::SaveFormat {
-    let mut format = tairix_abi::window_ipc::SaveFormat::new(canonical_filetype(media));
+    let mut format = tairix_abi::window_ipc::SaveFormat::new(own_filetype(media));
     if !FILETYPE_NAMED.contains(&media) {
         let extensions = EXTENSION_TABLE
             .iter()

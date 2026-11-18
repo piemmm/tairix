@@ -44,6 +44,7 @@ use tairix_crypto::Fingerprint;
 use tairix_fat::boot::{at, Bpb, Kind, BOOT_SECTOR, LABEL_WINDOW};
 use tairix_fat::dir::{slot, Slot, ENTRY};
 use tairix_fat::name::NO_LABEL;
+use tairix_filecore::record;
 
 /// Bytes of an extent's head that hold every signature opening an extent:
 /// the FAT32 boot sector (512), the `ARXFS` metadata header (128), and the
@@ -249,7 +250,7 @@ pub fn recognise<B: Block>(dev: &mut ByteDevice<B>) -> Result<Option<Recognised>
                     let (label, len) = layout.label();
                     ProbedVolume::new(
                         VolumeFsType::Adfs,
-                        layout.identity(),
+                        adfs::identity(&layout),
                         &label[..len],
                         None,
                         None,
@@ -303,7 +304,7 @@ fn adfs_form(layout: &adfs::Layout) -> BlkForm {
     let floppy = match layout {
         adfs::Layout::NewMap { record, .. } => record.density != 0,
         adfs::Layout::OldMap { disc_sectors, .. } => {
-            u64::from(*disc_sectors) * adfs::OLD_SECTOR_SIZE <= adfs::OLD_MAP_FLOPPY_MAX
+            u64::from(*disc_sectors) * record::OLD_SECTOR_SIZE <= record::OLD_MAP_FLOPPY_MAX
         }
     };
     if floppy {

@@ -16,10 +16,11 @@ use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::DriverKind;
-use tairix_fsprobe::adfs::{BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_SIZE};
+use tairix_filecore::record::{BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_SIZE};
 
 mod label;
 mod recovery;
+mod shared;
 
 // What a test's creations ask for, which ADFS has nowhere to keep.
 const FILE_RECORD: NodeSecurity = NodeSecurity::new(0o644, 0, 0);
@@ -101,20 +102,20 @@ impl DriverHost for MockHost {
 
 /// Every supported variant with the device size the tests give it (a
 /// hard disc gets a 4 MiB device).
-const VARIANTS: [(AdfsVariant, usize); 10] = [
-    (AdfsVariant::S, 160 * 1024),
-    (AdfsVariant::M, 320 * 1024),
-    (AdfsVariant::L, 640 * 1024),
-    (AdfsVariant::D, 800 * 1024),
-    (AdfsVariant::E, 800 * 1024),
-    (AdfsVariant::EPlus, 800 * 1024),
-    (AdfsVariant::F, 1600 * 1024),
-    (AdfsVariant::FPlus, 1600 * 1024),
-    (AdfsVariant::HardDisc, 4 * 1024 * 1024),
-    (AdfsVariant::HardDiscPlus, 4 * 1024 * 1024),
+const VARIANTS: [(Variant, usize); 10] = [
+    (Variant::S, 160 * 1024),
+    (Variant::M, 320 * 1024),
+    (Variant::L, 640 * 1024),
+    (Variant::D, 800 * 1024),
+    (Variant::E, 800 * 1024),
+    (Variant::EPlus, 800 * 1024),
+    (Variant::F, 1600 * 1024),
+    (Variant::FPlus, 1600 * 1024),
+    (Variant::HardDisc, 4 * 1024 * 1024),
+    (Variant::HardDiscPlus, 4 * 1024 * 1024),
 ];
 
-fn fresh(variant: AdfsVariant, bytes: usize) -> Adfs<MemDisk> {
+fn fresh(variant: Variant, bytes: usize) -> Adfs<MemDisk> {
     match Adfs::format(MemDisk::new(bytes, 512), variant) {
         Ok(fs) => fs,
         Err(err) => panic!("{variant:?}: format failed: {err:?}"),
@@ -446,13 +447,7 @@ fn invalid_names_are_rejected() {
         let root = FilesystemRead::root(&fs);
         // A slash would reach the disc as the dot RISC OS separates a path
         // with.
-        for bad in [
-            &b"has space"[..],
-            b"slash/name",
-            b"star*",
-            b"hash#",
-            b"quo\"te",
-        ] {
+        for bad in [&b"slash/name"[..], b"star*", b"hash#", b"quo\"te"] {
             assert_eq!(
                 fs.create(root, bad, NodeKind::RegularFile, &FILE_RECORD),
                 Err(DriverError::OutOfRange),
@@ -470,7 +465,7 @@ fn invalid_names_are_rejected() {
             Err(DriverError::LengthOutOfRange),
             "{variant:?}: oversized name"
         );
-        if fs.is_big_dir() {
+        if fs.volume.is_big_dir() {
             fs.create(
                 root,
                 b"ALongBigDirectoryName",
@@ -478,11 +473,23 @@ fn invalid_names_are_rejected() {
                 &FILE_RECORD,
             )
             .expect("big directories take long names");
+            fs.create(root, b"has space", NodeKind::RegularFile, &FILE_RECORD)
+                .expect("a space is written as a hard space");
+            let disc = fs.into_device().data;
+            assert!(
+                disc.windows(9).any(|window| window == b"has\xA0space"),
+                "{variant:?}"
+            );
         } else {
             assert_eq!(
                 fs.create(root, b"ElevenChars", NodeKind::RegularFile, &FILE_RECORD),
                 Err(DriverError::LengthOutOfRange),
                 "{variant:?}: fixed directories cap names at ten bytes"
+            );
+            assert_eq!(
+                fs.create(root, b"has space", NodeKind::RegularFile, &FILE_RECORD),
+                Err(DriverError::OutOfRange),
+                "{variant:?}: a hard space is no seven-bit character"
             );
         }
     }
@@ -610,7 +617,7 @@ fn big_directories_grow_and_survive_remount() {
         assert_eq!(list(&mut fs, root).len(), count as usize, "{variant:?}");
         // The grown root (its size now lives in the disc record)
         // survives a remount, and every entry still resolves.
-        let mut fs = Adfs::open(fs.volume.into_inner()).expect("remount");
+        let mut fs = Adfs::open(fs.volume.detach().0.into_inner()).expect("remount");
         let root = FilesystemRead::root(&fs);
         for i in 0..count {
             let mut name = *b"AVeryLongObjectName-000";
@@ -633,17 +640,17 @@ fn big_directories_grow_and_survive_remount() {
 }
 
 /// Format a variant, populate it lightly, and hand back the raw image.
-fn image_of(variant: AdfsVariant, bytes: usize) -> Vec<u8> {
+fn image_of(variant: Variant, bytes: usize) -> Vec<u8> {
     let mut fs = fresh(variant, bytes);
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"File", b"survivor");
     fs.create(root, b"Dir", NodeKind::Directory, &DIR_RECORD)
         .expect("dir");
-    fs.volume.into_inner().data
+    fs.volume.detach().0.into_inner().data
 }
 
 /// Reopen an image, asserting the driver rejects it as corrupt.
-fn assert_rejected(variant: AdfsVariant, data: Vec<u8>, what: &str) {
+fn assert_rejected(variant: Variant, data: Vec<u8>, what: &str) {
     let device = MemDisk {
         data,
         block_size: 512,
@@ -663,7 +670,7 @@ fn assert_rejected(variant: AdfsVariant, data: Vec<u8>, what: &str) {
 #[test]
 fn a_disc_record_whose_first_zone_cannot_hold_it_is_refused_not_mounted() {
     for nzones in [2, 1] {
-        let mut record = tairix_fsprobe::adfs::DiscRecord::parse(&[0; DISC_RECORD_SIZE]);
+        let mut record = tairix_filecore::record::DiscRecord::parse(&[0; DISC_RECORD_SIZE]);
         record.log2secsize = 9;
         record.idlen = 15;
         record.log2bpmb = 7;
@@ -674,9 +681,9 @@ fn a_disc_record_whose_first_zone_cannot_hold_it_is_refused_not_mounted() {
         let mut data = vec![0u8; 1 << 20];
         let at = usize::try_from(BOOT_BLOCK_OFFSET).expect("fits");
         let mut block = [0u8; BOOT_BLOCK_SIZE];
-        tairix_fsprobe::adfs::seal_boot_block(&mut block, &record);
+        tairix_filecore::record::seal_boot_block(&mut block, &record);
         data[at..at + BOOT_BLOCK_SIZE].copy_from_slice(&block);
-        assert_rejected(AdfsVariant::HardDisc, data, &std::format!("{nzones} zones"));
+        assert_rejected(Variant::HardDisc, data, &std::format!("{nzones} zones"));
     }
 }
 
@@ -686,21 +693,21 @@ fn a_disc_record_whose_first_zone_cannot_hold_it_is_refused_not_mounted() {
 #[test]
 fn each_new_map_format_keeps_its_zone_geometry() {
     for (variant, bytes, map_offset, zones) in [
-        (AdfsVariant::E, 800 * 1024, 0, &[(0, 6400)][..]),
+        (Variant::E, 800 * 1024, 0, &[(0, 6400)][..]),
         (
-            AdfsVariant::F,
+            Variant::F,
             1600 * 1024,
             0xC6800,
             &[(0, 6112), (6112, 6592), (12704, 6592), (19296, 6592)][..],
         ),
         (
-            AdfsVariant::HardDisc,
+            Variant::HardDisc,
             4 * 1024 * 1024,
             0x001C_0000,
             &[(0, 3584), (3584, 4064), (7648, 4064)][..],
         ),
     ] {
-        let record = mkfs::new_map_record(variant, bytes).expect("a record");
+        let record = tairix_filecore::format::new_map_record(variant, bytes).expect("a record");
         assert_eq!(record.map_offset(), map_offset, "{variant:?}");
         assert_eq!(usize::from(record.nzones), zones.len(), "{variant:?}");
         for (zone, &(start, stream)) in (0..).zip(zones) {
@@ -715,12 +722,7 @@ fn each_new_map_format_keeps_its_zone_geometry() {
 
 #[test]
 fn corrupt_old_map_checksums_are_rejected() {
-    for variant in [
-        AdfsVariant::S,
-        AdfsVariant::M,
-        AdfsVariant::L,
-        AdfsVariant::D,
-    ] {
+    for variant in [Variant::S, Variant::M, Variant::L, Variant::D] {
         let bytes = usize::try_from(variant.fixed_size().expect("floppy")).expect("fits");
         // Sector 0 checksum (free-space starts).
         let mut data = image_of(variant, bytes);
@@ -744,8 +746,8 @@ fn corrupt_directories_are_rejected() {
     // The root's check byte, marker, and sequence bytes are validated
     // on every load; damage to any of them refuses the volume.
     for (variant, offset) in [
-        (AdfsVariant::S, 0x200usize), // root at sector 2
-        (AdfsVariant::D, 0x400),      // root at sector 4
+        (Variant::S, 0x200usize), // root at sector 2
+        (Variant::D, 0x400),      // root at sector 4
     ] {
         let bytes = usize::try_from(variant.fixed_size().expect("floppy")).expect("fits");
         // Marker byte.
@@ -767,20 +769,20 @@ fn corrupt_directories_are_rejected() {
 fn corrupt_new_map_zones_are_rejected() {
     // E: single zone at the disc start.
     let bytes = 800 * 1024;
-    let mut data = image_of(AdfsVariant::E, bytes);
+    let mut data = image_of(Variant::E, bytes);
     data[0x40] ^= 0x01; // Map bits: breaks the zone check.
-    assert_rejected(AdfsVariant::E, data, "zone check");
+    assert_rejected(Variant::E, data, "zone check");
 
     // The cross-check byte of zone 0 must XOR with the others to 0xFF.
-    let mut data = image_of(AdfsVariant::E, bytes);
+    let mut data = image_of(Variant::E, bytes);
     let map_at = 0usize;
     data[map_at + 3] ^= 0x10;
-    assert_rejected(AdfsVariant::E, data, "cross-check");
+    assert_rejected(Variant::E, data, "cross-check");
 
     // A disc record claiming an impossible geometry.
-    let mut data = image_of(AdfsVariant::E, bytes);
+    let mut data = image_of(Variant::E, bytes);
     data[4] = 42; // log2secsize
-    assert_rejected(AdfsVariant::E, data, "impossible disc record");
+    assert_rejected(Variant::E, data, "impossible disc record");
 }
 
 #[test]
@@ -789,11 +791,11 @@ fn corrupt_boot_blocks_fall_back_and_fail_closed() {
     // while fixing the checksum must still be rejected (zone checks),
     // and damaging the checksum makes the volume unrecognisable.
     let bytes = 1600 * 1024;
-    let mut data = image_of(AdfsVariant::F, bytes);
+    let mut data = image_of(Variant::F, bytes);
     data[0xC00 + 0x1FF] ^= 0xFF; // Checksum byte.
-    assert_rejected(AdfsVariant::F, data, "boot block checksum");
+    assert_rejected(Variant::F, data, "boot block checksum");
 
-    let mut data = image_of(AdfsVariant::F, bytes);
+    let mut data = image_of(Variant::F, bytes);
     // Point the root at the free-space id, re-fixing the checksum so
     // only the record's content is wrong.
     data[0xC00 + 0x1C0 + 0x0C] = 0x00;
@@ -801,15 +803,15 @@ fn corrupt_boot_blocks_fall_back_and_fail_closed() {
     let mut block = [0u8; 512];
     block.copy_from_slice(&data[0xC00..0xE00]);
     block[511] = 0;
-    let sum = tairix_fsprobe::adfs::boot_block_checksum(&block);
+    let sum = tairix_filecore::record::boot_block_checksum(&block);
     data[0xC00 + 0x1FF] = sum;
-    assert_rejected(AdfsVariant::F, data, "hostile disc record");
+    assert_rejected(Variant::F, data, "hostile disc record");
 }
 
 #[test]
 fn corrupt_big_directories_are_rejected() {
     let bytes = 800 * 1024;
-    let base = image_of(AdfsVariant::EPlus, bytes);
+    let base = image_of(Variant::EPlus, bytes);
     // Find the root directory ("SBPr") in the image.
     let root_at = base
         .windows(4)
@@ -820,23 +822,23 @@ fn corrupt_big_directories_are_rejected() {
     // Header marker.
     let mut data = base.clone();
     data[root_at + 4] = b'Z';
-    assert_rejected(AdfsVariant::EPlus, data, "big dir start marker");
+    assert_rejected(Variant::EPlus, data, "big dir start marker");
 
     // Version bytes must be zero.
     let mut data = base.clone();
     data[root_at + 1] = 9;
-    assert_rejected(AdfsVariant::EPlus, data, "big dir version");
+    assert_rejected(Variant::EPlus, data, "big dir version");
 
     // An entry count far past what the directory can hold.
     let mut data = base.clone();
     data[root_at + 16] = 0xFF;
     data[root_at + 17] = 0xFF;
-    assert_rejected(AdfsVariant::EPlus, data, "big dir entry count");
+    assert_rejected(Variant::EPlus, data, "big dir entry count");
 
     // A name heap byte breaks the check byte.
     let mut data = base.clone();
     data[root_at + 0x1C] ^= 0x01;
-    assert_rejected(AdfsVariant::EPlus, data, "big dir name heap");
+    assert_rejected(Variant::EPlus, data, "big dir name heap");
 
     // Tail marker ("oven" at the directory end).
     let oven_at = base
@@ -845,7 +847,7 @@ fn corrupt_big_directories_are_rejected() {
         .expect("root tail present");
     let mut data = base.clone();
     data[oven_at] = b'!';
-    assert_rejected(AdfsVariant::EPlus, data, "big dir tail marker");
+    assert_rejected(Variant::EPlus, data, "big dir tail marker");
 }
 
 #[test]
@@ -854,17 +856,19 @@ fn corrupt_entry_pointers_fail_closed_at_use() {
     // volume opens (the directory is structurally intact only if the
     // check byte matches, so rewrite it), and using the entry fails
     // closed instead of reading arbitrary bytes.
-    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let mut fs = fresh(Variant::E, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"File", b"data");
     // Forge the entry through the driver's own directory codec so the
     // check byte stays valid.
     let (index, mut object) = fs
+        .volume
         .dir_lookup(node_addr(root), b"File")
         .expect("io")
         .expect("found");
     object.indaddr = 0x00F0 << 8; // An id the map never allocated.
-    fs.dir_update_at(node_addr(root), index, &object)
+    fs.volume
+        .dir_update_at(node_addr(root), index, &object)
         .expect("forge");
     let node = fs.lookup(root, b"File").expect("entry resolves");
     assert_eq!(
@@ -1222,7 +1226,7 @@ fn format_open_roundtrip_every_variant() {
         // sees the identical volume.
         let listed = list(&mut fs, root);
         assert_eq!(listed, vec![(b"Data".to_vec(), false, body.len() as u64)]);
-        let device = fs.volume.into_inner();
+        let device = fs.volume.detach().0.into_inner();
         let mut reopened = Adfs::open(device).expect("reopen");
         let node = reopened
             .lookup(FilesystemRead::root(&reopened), b"Data")
@@ -1296,7 +1300,7 @@ fn adfs_has_no_link_of_either_kind_and_reports_one_name() {
 fn a_stat_reads_its_parent_alone() {
     let disk = MemDisk::new(1600 * 1024, 512);
     let reads = std::sync::Arc::clone(&disk.reads);
-    let mut fs = Adfs::format(disk, AdfsVariant::FPlus).expect("format");
+    let mut fs = Adfs::format(disk, Variant::FPlus).expect("format");
     let root = FilesystemRead::root(&fs);
     let mut deep = root;
     for level in 0..6u8 {
@@ -1313,7 +1317,7 @@ fn a_stat_reads_its_parent_alone() {
             .expect("dir");
     }
     let target = make(&mut fs, deep, b"Target", b"payload");
-    let device = fs.volume.into_inner();
+    let device = fs.volume.detach().0.into_inner();
     let mut fs = Adfs::open(device).expect("reopen");
     reads.store(0, core::sync::atomic::Ordering::Relaxed);
     let _ = list(&mut fs, deep);
@@ -1331,7 +1335,7 @@ fn a_stat_reads_its_parent_alone() {
 /// the node a listing of it was bound to.
 #[test]
 fn a_directory_keeps_its_node_as_it_grows() {
-    let mut fs = fresh(AdfsVariant::EPlus, 800 * 1024);
+    let mut fs = fresh(Variant::EPlus, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     let dir = fs
         .create(root, b"Grows", NodeKind::Directory, &DIR_RECORD)
@@ -1490,17 +1494,17 @@ fn names_sort_as_filecore_folds_them() {
 /// in it.
 #[test]
 fn a_directory_out_of_order_is_rejected() {
-    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let mut fs = fresh(Variant::E, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"QQQQ1", b"1");
     make(&mut fs, root, b"QQQQ2", b"2");
-    let image = fs.volume.into_inner().data;
+    let image = fs.volume.detach().0.into_inner().data;
     let first = image
         .windows(5)
         .position(|w| w == b"QQQQ1")
         .expect("entry present");
-    let dir_start = first - dir::ENTRIES_OFFSET;
-    let check_at = dir_start + dir::NEW_DIR_SIZE - 1;
+    let dir_start = first - tairix_filecore::dir::ENTRIES_OFFSET;
+    let check_at = dir_start + tairix_filecore::dir::NEW_DIR_SIZE - 1;
     let unchecked = |mut data: Vec<u8>| {
         data[check_at] = 0;
         data
@@ -1515,35 +1519,40 @@ fn a_directory_out_of_order_is_rejected() {
         "an unchecked sorted directory opens"
     );
     let mut swapped = unchecked(image);
-    let (a, b) = swapped[first..first + 2 * dir::ENTRY_SIZE].split_at_mut(dir::ENTRY_SIZE);
+    let (a, b) = swapped[first..first + 2 * tairix_filecore::dir::ENTRY_SIZE]
+        .split_at_mut(tairix_filecore::dir::ENTRY_SIZE);
     a.swap_with_slice(b);
-    assert_rejected(AdfsVariant::E, swapped, "entries out of order");
+    assert_rejected(Variant::E, swapped, "entries out of order");
 }
 
 /// A fragment two files share is freed with the last of them: the other
 /// sharers can only be its parent's entries, which is all that is read.
 #[test]
 fn a_shared_fragment_is_freed_with_its_last_sharer() {
-    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let mut fs = fresh(Variant::E, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     make(&mut fs, root, b"Holder", b"holder bytes");
     make(&mut fs, root, b"Sharer", b"");
     let free_before = fs.stats().expect("stats").free_blocks;
     let (holder_at, mut holder) = fs
+        .volume
         .dir_lookup(node_addr(root), b"Holder")
         .expect("io")
         .expect("found");
     let fragment = holder.indaddr & !0xFF;
     holder.indaddr = fragment | 1;
-    fs.dir_update_at(node_addr(root), holder_at, &holder)
+    fs.volume
+        .dir_update_at(node_addr(root), holder_at, &holder)
         .expect("share");
     let (sharer_at, mut sharer) = fs
+        .volume
         .dir_lookup(node_addr(root), b"Sharer")
         .expect("io")
         .expect("found");
     sharer.indaddr = fragment | 2;
     sharer.size = 4;
-    fs.dir_update_at(node_addr(root), sharer_at, &sharer)
+    fs.volume
+        .dir_update_at(node_addr(root), sharer_at, &sharer)
         .expect("share");
     fs.remove(root, b"Sharer").expect("remove a sharer");
     assert_eq!(
@@ -1562,15 +1571,15 @@ fn a_shared_fragment_is_freed_with_its_last_sharer() {
 #[test]
 fn public_access_bits_land_where_filecore_keeps_them() {
     for (variant, bytes) in [
-        (AdfsVariant::E, 800 * 1024),
-        (AdfsVariant::F, 1600 * 1024),
-        (AdfsVariant::HardDisc, 4 * 1024 * 1024),
+        (Variant::E, 800 * 1024),
+        (Variant::F, 1600 * 1024),
+        (Variant::HardDisc, 4 * 1024 * 1024),
     ] {
         let mut fs = fresh(variant, bytes);
         let root = FilesystemRead::root(&fs);
         let node = make(&mut fs, root, b"Shared", b"body");
         fs.set_attr(node, b"acorn.attr", b"RW/rw").expect("attr");
-        let mut image = fs.volume.into_inner().data;
+        let mut image = fs.volume.detach().0.into_inner().data;
         let entry = image
             .windows(7)
             .position(|w| w == b"Shared\r")
@@ -1581,7 +1590,7 @@ fn public_access_bits_land_where_filecore_keeps_them() {
         // The entry is the root's first, so the directory opens five bytes
         // before it; a zero check byte is one the format does not check.
         image[entry + 25] = 0b0001_0101;
-        image[entry - 5 + dir::NEW_DIR_SIZE - 1] = 0;
+        image[entry - 5 + tairix_filecore::dir::NEW_DIR_SIZE - 1] = 0;
         let mut disk = MemDisk::new(0, 512);
         disk.data = image;
         let mut fs = Adfs::open(disk).expect("reopen");
@@ -1800,11 +1809,12 @@ fn a_pinned_object_keeps_its_id_through_writes_and_renames() {
         fs.write_at(pinned, 0, b"first")
             .expect("a first allocation");
         let (_, object) = fs
+            .volume
             .dir_lookup(node_addr(outer), b"Grows")
             .expect("io")
             .expect("found");
         assert_ne!(
-            child_node(&object, node_addr(outer)),
+            child_node(&object, node_addr(outer), false),
             file,
             "{variant:?}: its own id moved"
         );
@@ -1985,27 +1995,35 @@ fn a_removed_pinned_files_fragments_are_left_to_the_checker_when_the_mount_ends(
 /// reads the file.
 #[test]
 fn a_pinned_file_sharing_a_fragment_takes_its_own_as_it_loses_its_name() {
-    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let mut fs = fresh(Variant::E, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     let dir = node_addr(root);
     make(&mut fs, root, b"Holder", b"holder bytes");
     make(&mut fs, root, b"Sharer", b"");
-    let (holder_at, mut holder) = fs.dir_lookup(dir, b"Holder").expect("io").expect("found");
+    let (holder_at, mut holder) = fs
+        .volume
+        .dir_lookup(dir, b"Holder")
+        .expect("io")
+        .expect("found");
     let fragment = holder.indaddr & !0xFF;
     holder.indaddr = fragment | 1;
-    fs.dir_update_at(dir, holder_at, &holder).expect("share");
-    let (sharer_at, mut sharer) = fs.dir_lookup(dir, b"Sharer").expect("io").expect("found");
+    fs.volume
+        .dir_update_at(dir, holder_at, &holder)
+        .expect("share");
+    let (sharer_at, mut sharer) = fs
+        .volume
+        .dir_lookup(dir, b"Sharer")
+        .expect("io")
+        .expect("found");
     sharer.indaddr = fragment | 2;
     sharer.size = 4;
-    fs.dir_update_at(dir, sharer_at, &sharer).expect("share");
-    fs.object_write(fragment | 2, 0, b"mine")
+    fs.volume
+        .dir_update_at(dir, sharer_at, &sharer)
+        .expect("share");
+    fs.volume
+        .object_write(fragment | 2, 0, b"mine")
         .expect("the sharer's bytes");
-    let Backing::New { map, .. } = &fs.backing else {
-        panic!("a new-map volume");
-    };
-    let (shared_byte, _) = map
-        .locate(&mut fs.volume, fragment | 2, 0)
-        .expect("located");
+    let (shared_byte, _) = fs.volume.locate(fragment | 2, 0).expect("located");
 
     let node = fs.lookup(root, b"Sharer").expect("found");
     let pinned = fs.pin(node).expect("pin");
@@ -2021,6 +2039,7 @@ fn a_pinned_file_sharing_a_fragment_takes_its_own_as_it_loses_its_name() {
         .expect("remove the last named sharer");
     assert!(free_blocks(&mut fs) > free, "the shared fragment is freed");
     fs.volume
+        .disc_mut()
         .write(shared_byte, &[0xEE; 4])
         .expect("reuse its bytes");
     let mut buf = [0u8; 4];
@@ -2070,7 +2089,7 @@ fn a_name_crosses_risc_os_latin_1_and_utf_8_both_ways() {
             NodeKind::RegularFile,
             &FILE_RECORD,
         );
-        if !fs.is_big_dir() {
+        if !fs.volume.is_big_dir() {
             assert_eq!(made, Err(DriverError::OutOfRange), "{variant:?}");
             continue;
         }
@@ -2105,7 +2124,7 @@ fn a_name_crosses_risc_os_latin_1_and_utf_8_both_ways() {
     }
     for (name, spelled) in [
         (&b"Euro\x80"[..], "Euro\u{20ac}"),
-        (b"Hard\xa0Space", "Hard\u{a0}Space"),
+        (b"Hard\xa0Space", "Hard Space"),
     ] {
         let crossed = super::listed(name).expect("spellable");
         assert_eq!(crossed.as_bytes(), spelled.as_bytes());

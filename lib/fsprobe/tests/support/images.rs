@@ -19,7 +19,8 @@ use tairix_fat::boot::{Bpb, Kind};
 use tairix_fat::dir::{ShortEntry, ENTRY};
 use tairix_fat::format;
 use tairix_fat::stamp::Stamps;
-use tairix_fsprobe::{adfs, affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC};
+use tairix_filecore::record;
+use tairix_fsprobe::{affs, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC};
 
 /// An in-memory device over a byte image, counting the transfers it serves.
 pub struct Image {
@@ -200,15 +201,15 @@ pub fn adfs_old_map(name: &[u8; 10]) -> Vec<u8> {
     for (&at, &byte) in NAME_AT.iter().zip(name) {
         image[at] = byte;
     }
-    image[255] = adfs::old_map_checksum(&image[..256]);
-    image[511] = adfs::old_map_checksum(&image[256..512]);
+    image[255] = record::old_map_checksum(&image[..256]);
+    image[511] = record::old_map_checksum(&image[256..512]);
     image[512 + 1..512 + 5].copy_from_slice(b"Hugo");
     image
 }
 
 /// The F format's disc record: 1600 KiB of 1024-byte sectors in four zones.
-pub fn adfs_f_record() -> adfs::DiscRecord {
-    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+pub fn adfs_f_record() -> record::DiscRecord {
+    let mut record = record::DiscRecord::parse(&[0; record::DISC_RECORD_SIZE]);
     record.log2secsize = 10;
     record.secspertrack = 10;
     record.heads = 2;
@@ -224,23 +225,23 @@ pub fn adfs_f_record() -> adfs::DiscRecord {
 }
 
 /// An image whose sealed boot block carries `record`, and nothing else.
-pub fn adfs_boot_block(record: &adfs::DiscRecord) -> Vec<u8> {
-    let at = adfs::BOOT_BLOCK_OFFSET as usize;
-    let mut image = vec![0u8; at + adfs::BOOT_BLOCK_SIZE];
-    let mut block = [0u8; adfs::BOOT_BLOCK_SIZE];
-    adfs::seal_boot_block(&mut block, record);
+pub fn adfs_boot_block(record: &record::DiscRecord) -> Vec<u8> {
+    let at = record::BOOT_BLOCK_OFFSET as usize;
+    let mut image = vec![0u8; at + record::BOOT_BLOCK_SIZE];
+    let mut block = [0u8; record::BOOT_BLOCK_SIZE];
+    record::seal_boot_block(&mut block, record);
     image[at..].copy_from_slice(&block);
     image
 }
 
 /// Seal again the boot block `image` carries, where it reaches that far.
 pub fn seal_adfs_boot_block(image: &mut [u8]) {
-    let at = adfs::BOOT_BLOCK_OFFSET as usize;
+    let at = record::BOOT_BLOCK_OFFSET as usize;
     if let Some(block) = image
-        .get_mut(at..at + adfs::BOOT_BLOCK_SIZE)
-        .and_then(|block| <&mut [u8; adfs::BOOT_BLOCK_SIZE]>::try_from(block).ok())
+        .get_mut(at..at + record::BOOT_BLOCK_SIZE)
+        .and_then(|block| <&mut [u8; record::BOOT_BLOCK_SIZE]>::try_from(block).ok())
     {
-        block[adfs::BOOT_BLOCK_SIZE - 1] = adfs::boot_block_checksum(block);
+        block[record::BOOT_BLOCK_SIZE - 1] = record::boot_block_checksum(block);
     }
 }
 

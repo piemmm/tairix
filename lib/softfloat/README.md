@@ -22,7 +22,7 @@ alone so every target computes the same bits.
   each computed in 128-bit significands and answered as an `Exact` to round
   once: correct unless the true value lies within 2^-120 of a rounding
   boundary, exact where the value is, and beside its leading term rounded to
-  the side it lies. PCEmulator's 8087 and the RISC OS emulator's FPA take
+  the side it lies. PCEmulator's 8087 and TAIRiX Bridge's FPA take
   their transcendentals from it.
 - **Decimal conversion** (`Decimal`): a finite value written to 1 to 38
   significant digits in any mode, and a decimal value read exactly enough to

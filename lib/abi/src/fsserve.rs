@@ -1374,6 +1374,7 @@ impl ServeFrame {
                     NameMatching::Exact => 0,
                     NameMatching::AsciiCaseInsensitive => 1,
                     NameMatching::Latin1CaseInsensitive => 2,
+                    NameMatching::RiscOs => 3,
                 };
                 out[4] = match offer.node_identity {
                     NodeIdentity::Stable => 0,
@@ -1413,6 +1414,7 @@ impl ServeFrame {
                     0 => NameMatching::Exact,
                     1 => NameMatching::AsciiCaseInsensitive,
                     2 => NameMatching::Latin1CaseInsensitive,
+                    3 => NameMatching::RiscOs,
                     _ => return Err(Errno::OutOfRange),
                 };
                 let node_identity = match bytes[4] {

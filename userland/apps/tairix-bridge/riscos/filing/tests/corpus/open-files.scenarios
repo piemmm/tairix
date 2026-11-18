@@ -1,0 +1,531 @@
+# Files held open through FileSwitch on FileCore, as RISC OS 5 holds them:
+# a file open to be written open on no other handle, a locked one opened
+# for update only to be read, catalogue changes made while it is open
+# standing once it closes, an open object never renamed but the directory
+# holding it renamed or moved, an open file grown showing its allocation;
+# a path through a missing directory or a file read as nothing there, and
+# a wildcard there or matching nothing; an object renamed in its own
+# directory. No handle or stamp is shown. Each scenario leaves the RAM
+# disc empty.
+
+scenario open-files-conflicts
+block text 16
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.U" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_Find r0=&40 r1="RAM:$.U"
+show v
+keep r0 a
+call XOS_Find r0=&40 r1="RAM:$.U"
+show v
+keep r0 b
+call XOS_Find r0=&C0 r1="RAM:$.U"
+show v
+call XOS_Find r0=&80 r1="RAM:$.U"
+show v
+call XOS_Find r0=0 r1=$b
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_Find r0=&C0 r1="RAM:$.U"
+show v
+keep r0 a
+call XOS_Find r0=&40 r1="RAM:$.U"
+show v
+call XOS_Find r0=&C0 r1="RAM:$.U"
+show v
+call XOS_Find r0=&80 r1="RAM:$.U"
+show v
+call XOS_File r0=6 r1="RAM:$.U"
+show v
+call XOS_File r0=10 r1="RAM:$.U" r2=&FFF r4=$text r5=$text+4
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-locked
+block text 16
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.L" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_File r0=4 r1="RAM:$.L" r5=&B
+show v
+call XOS_Find r0=&C0 r1="RAM:$.L"
+show v
+keep r0 a
+call XOS_Find r0=&C0 r1="RAM:$.L"
+show v
+keep r0 b
+call XOS_Find r0=&40 r1="RAM:$.L"
+show v
+keep r0 c
+call XOS_Find r0=&80 r1="RAM:$.L"
+show v
+keep r0 d
+call XOS_Args r0=2 r1=$d
+show r2 v
+call XOS_GBPB r0=2 r1=$a r2=$text r3=4
+show r3 v
+call XOS_GBPB r0=2 r1=$d r2=$text r3=4
+show r3 v
+call XOS_Args r0=3 r1=$a r2=0
+show v
+call XOS_Args r0=254 r1=$a
+show r0 v
+call XOS_Args r0=254 r1=$c
+show r0 v
+call XOS_File r0=6 r1="RAM:$.L"
+show v
+call XOS_Find r0=0 r1=$d
+show v
+call XOS_Find r0=0 r1=$c
+show v
+call XOS_Find r0=0 r1=$b
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.L"
+show r0 r4 r5 r6 v
+call XOS_File r0=4 r1="RAM:$.L" r5=3
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-catalogue
+block text 16
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.V" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.T" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.W" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_Find r0=&C0 r1="RAM:$.V"
+show v
+keep r0 a
+call XOS_File r0=18 r1="RAM:$.V" r2=&FEB
+show v
+call XOS_GBPB r0=2 r1=$a r2=$text r3=4
+show r3 v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.V"
+show r0 r4 r5 r6 v
+call XOS_Find r0=&C0 r1="RAM:$.T"
+show v
+keep r0 a
+call XOS_File r0=4 r1="RAM:$.T" r5=&13
+show v
+call XOS_File r0=1 r1="RAM:$.T" r2=&FFFFFB00 r3=0 r5=&13
+show v
+call XOS_GBPB r0=2 r1=$a r2=$text r3=4
+show r3 v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.T"
+show r0 r4 r5 r6 v
+call XOS_Find r0=&40 r1="RAM:$.W"
+show v
+keep r0 a
+call XOS_File r0=18 r1="RAM:$.W" r2=&FFB
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.W"
+show r0 r4 r5 r6 v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-renames
+block text 16
+block buf 128
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+call XOS_CLI r0="CDir RAM:$.D"
+show v
+call XOS_CLI r0="CDir RAM:$.G"
+show v
+call XOS_CLI r0="CDir RAM:$.H"
+show v
+call XOS_CLI r0="CDir RAM:$.K"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.R" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.S" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.D.F" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.G.F" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.K.F" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_Find r0=&C0 r1="RAM:$.R"
+show v
+keep r0 a
+call XOS_FSControl r0=25 r1="RAM:$.R" r2="RAM:$.R2"
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_Find r0=&40 r1="RAM:$.S"
+show v
+keep r0 a
+call XOS_FSControl r0=25 r1="RAM:$.S" r2="RAM:$.D.S2"
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_Find r0=&40 r1="RAM:$.D.F"
+show v
+keep r0 a
+call XOS_FSControl r0=25 r1="RAM:$.D" r2="RAM:$.E"
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.E.F"
+show r0 r4 r5 r6 v
+call XOS_File r0=20 r1="RAM:$.D.F"
+show r0 v
+call XOS_Find r0=&C0 r1="RAM:$.G.F"
+show v
+keep r0 a
+call XOS_FSControl r0=25 r1="RAM:$.G" r2="RAM:$.H.G"
+show v
+call XOS_GBPB r0=2 r1=$a r2=$text r3=4
+show r3 v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.H.G.F"
+show r0 r4 r5 r6 v
+call XOS_File r0=20 r1="RAM:$.G.F"
+show r0 v
+call XOS_Find r0=&40 r1="RAM:$.K.F"
+show v
+keep r0 a
+call XOS_FSControl r0=27 r1="RAM:$.K" r3=2
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_Find r0=&40 r1="RAM:$.K"
+show v
+keep r0 a
+call XOS_FSControl r0=25 r1="RAM:$.K" r2="RAM:$.K2"
+show v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_FSControl r0=25 r1="RAM:$.R" r2="RAM:$.Zed"
+show v
+call XOS_FSControl r0=25 r1="RAM:$.S" r2="RAM:$.s"
+show v
+call XOS_FSControl r0=25 r1="RAM:$.E" r2="RAM:$.Bee"
+show v
+call XOS_File r0=20 r1="RAM:$.Zed"
+show r0 r4 r5 r6 v
+call XOS_File r0=20 r1="RAM:$.Bee.F"
+show r0 r4 r5 r6 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="RAM:$" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="RAM:$" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="RAM:$" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="RAM:$" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-unreachable
+block text 16
+block buf 64
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.U" r2=&FFF r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.V" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_File r0=5 r1="RAM:$.Missing.C"
+show r0 v
+call XOS_File r0=17 r1="RAM:$.Missing.C"
+show r0 v
+call XOS_File r0=6 r1="RAM:$.Missing.C"
+show r0 v
+call XOS_File r0=1 r1="RAM:$.Missing.C" r2=&FFFFFD00 r3=0 r5=3
+show v
+call XOS_File r0=18 r1="RAM:$.Missing.C" r2=&FFF
+show v
+call XOS_File r0=9 r1="RAM:$.Missing.C"
+show v
+call XOS_File r0=255 r1="RAM:$.Missing.C" r2=$buf r3=0
+show v
+call XOS_Find r0=&40 r1="RAM:$.Missing.C"
+show r0 v
+call XOS_Find r0=&4C r1="RAM:$.Missing.C"
+show v
+call XOS_Find r0=&C0 r1="RAM:$.Missing.C"
+show r0 v
+call XOS_Find r0=&C8 r1="RAM:$.Missing.C"
+show v
+call XOS_Find r0=&80 r1="RAM:$.Missing.C"
+show v
+call XOS_File r0=0 r1="RAM:$.Missing.C" r2=0 r3=0 r4=$text r5=$text+4
+show v
+call XOS_File r0=10 r1="RAM:$.Missing.C" r2=&FFF r4=$text r5=$text+4
+show v
+call XOS_File r0=7 r1="RAM:$.Missing.C" r2=0 r3=0 r4=0 r5=4
+show v
+call XOS_File r0=11 r1="RAM:$.Missing.C" r2=&FFF r4=0 r5=4
+show v
+call XOS_File r0=8 r1="RAM:$.Missing.C" r4=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.Missing.C" r2="RAM:$.Z"
+show v
+call XOS_FSControl r0=25 r1="RAM:$.V" r2="RAM:$.Missing.C"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.V" r2="RAM:$.Missing.C" r3=0
+show v
+call XOS_CLI r0="Access RAM:$.Missing.C WR"
+show v
+call XOS_File r0=5 r1="RAM:$.U.C"
+show r0 v
+call XOS_File r0=17 r1="RAM:$.U.C"
+show r0 v
+call XOS_File r0=6 r1="RAM:$.U.C"
+show r0 v
+call XOS_File r0=1 r1="RAM:$.U.C" r2=&FFFFFD00 r3=0 r5=3
+show v
+call XOS_File r0=18 r1="RAM:$.U.C" r2=&FFF
+show v
+call XOS_File r0=9 r1="RAM:$.U.C"
+show v
+call XOS_File r0=255 r1="RAM:$.U.C" r2=$buf r3=0
+show v
+call XOS_Find r0=&40 r1="RAM:$.U.C"
+show r0 v
+call XOS_Find r0=&4C r1="RAM:$.U.C"
+show v
+call XOS_Find r0=&C0 r1="RAM:$.U.C"
+show r0 v
+call XOS_Find r0=&C8 r1="RAM:$.U.C"
+show v
+call XOS_Find r0=&80 r1="RAM:$.U.C"
+show v
+call XOS_File r0=0 r1="RAM:$.U.C" r2=0 r3=0 r4=$text r5=$text+4
+show v
+call XOS_File r0=10 r1="RAM:$.U.C" r2=&FFF r4=$text r5=$text+4
+show v
+call XOS_File r0=7 r1="RAM:$.U.C" r2=0 r3=0 r4=0 r5=4
+show v
+call XOS_File r0=11 r1="RAM:$.U.C" r2=&FFF r4=0 r5=4
+show v
+call XOS_File r0=8 r1="RAM:$.U.C" r4=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.U.C" r2="RAM:$.Z"
+show v
+call XOS_FSControl r0=25 r1="RAM:$.V" r2="RAM:$.U.C"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.V" r2="RAM:$.U.C" r3=0
+show v
+call XOS_CLI r0="Access RAM:$.U.C WR"
+show v
+call XOS_GBPB r0=10 r1="RAM:$.Missing" r2=$buf r3=1 r4=0 r5=64 r6=0
+show v
+call XOS_FSControl r0=0 r1="RAM:$.Missing"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.Missing.*" r3=0
+show v
+call XOS_FSControl r0=28 r1="RAM:$.Missing.*" r3=0
+show v
+call XOS_File r0=5 r1="RAM:$.Missing.*"
+show r0 v
+call XOS_GBPB r0=10 r1="RAM:$.Missing.X" r2=$buf r3=1 r4=0 r5=64 r6=0
+show v
+call XOS_FSControl r0=0 r1="RAM:$.Missing.X"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.Missing.X.*" r3=0
+show v
+call XOS_FSControl r0=28 r1="RAM:$.Missing.X.*" r3=0
+show v
+call XOS_File r0=5 r1="RAM:$.Missing.X.*"
+show r0 v
+call XOS_GBPB r0=10 r1="RAM:$.U" r2=$buf r3=1 r4=0 r5=64 r6=0
+show v
+call XOS_FSControl r0=0 r1="RAM:$.U"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.U.*" r3=0
+show v
+call XOS_FSControl r0=28 r1="RAM:$.U.*" r3=0
+show v
+call XOS_File r0=5 r1="RAM:$.U.*"
+show r0 v
+call XOS_CLI r0="CDir RAM:$.D"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.z*" r3=0
+show v
+call XOS_FSControl r0=28 r1="RAM:$.z*" r3=0
+show r2 r3 v
+call XOS_FSControl r0=27 r1="RAM:$.D.*" r3=0
+show v
+call XOS_FSControl r0=28 r1="RAM:$.D.*" r3=0
+show r2 r3 v
+call XOS_File r0=5 r1="RAM:$.z*.X"
+show r0 v
+call XOS_File r0=5 r1="RAM:$.U.X*.Y"
+show r0 v
+call XOS_File r0=5 r1="RAM:$.D.*"
+show r0 v
+call XOS_FSControl r0=24 r1="RAM:$.z*" r2="R"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.z*" r2="RAM:$.N" r3=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.z*" r2="RAM:$.N"
+show v
+call XOS_File r0=6 r1="RAM:$.z*"
+show v
+call XOS_FSControl r0=24 r1="RAM:$.D.*" r2="R"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.D.*" r2="RAM:$.N" r3=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.D.*" r2="RAM:$.N"
+show v
+call XOS_File r0=6 r1="RAM:$.D.*"
+show v
+call XOS_FSControl r0=24 r1="RAM:$.Missing.*" r2="R"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.Missing.*" r2="RAM:$.N" r3=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.Missing.*" r2="RAM:$.N"
+show v
+call XOS_File r0=6 r1="RAM:$.Missing.*"
+show v
+call XOS_FSControl r0=24 r1="RAM:$.U.*" r2="R"
+show v
+call XOS_FSControl r0=26 r1="RAM:$.U.*" r2="RAM:$.N" r3=0
+show v
+call XOS_FSControl r0=25 r1="RAM:$.U.*" r2="RAM:$.N"
+show v
+call XOS_File r0=6 r1="RAM:$.U.*"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-growth
+block text 16
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.V" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_Find r0=&C0 r1="RAM:$.V"
+show v
+keep r0 a
+call XOS_Args r0=3 r1=$a r2=&2000
+show v
+call XOS_Args r0=4 r1=$a
+show r2 v
+call XOS_File r0=20 r1="RAM:$.V"
+show r0 r4 v
+call XOS_Find r0=0 r1=$a
+show v
+call XOS_File r0=20 r1="RAM:$.V"
+show r0 r4 r5 r6 v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario open-files-wrong-kind
+block text 16
+write $text w=&64636261
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XOS_File r0=0 r1="RAM:$.Dir" r2=0 r3=0 r4=$text r5=$text+4
+show v
+call XOS_File r0=10 r1="RAM:$.Dir" r2=&FFF r4=$text r5=$text+4
+show v
+call XOS_File r0=7 r1="RAM:$.Dir" r2=0 r3=0 r4=0 r5=4
+show v
+call XOS_File r0=11 r1="RAM:$.Dir" r2=&FFF r4=0 r5=4
+show v
+call XOS_Find r0=&40 r1="RAM:$.Dir"
+show v
+keep r0 h
+call XOS_Find r0=&4C r1="RAM:$.Dir"
+show v
+call XOS_Find r0=&80 r1="RAM:$.Dir"
+show v
+call XOS_Find r0=&C0 r1="RAM:$.Dir"
+show v
+call XOS_Find r0=0 r1=$h
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v

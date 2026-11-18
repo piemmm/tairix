@@ -6,7 +6,7 @@ use super::*;
 use std::sync::Arc;
 use tairix_abi::driver::filesystem::WriteRefusal;
 use tairix_abi::volume::VolumeFsType;
-use tairix_fsprobe::adfs::{DiscRecord, MapCopy, OLD_SECTOR_SIZE};
+use tairix_filecore::record::{DiscRecord, MapCopy};
 use tairix_fsprobe::Recognised;
 
 fn device(data: Vec<u8>) -> MemDisk {
@@ -21,7 +21,7 @@ fn reopened(data: Vec<u8>) -> Adfs<MemDisk> {
     Adfs::open(device(data)).expect("the volume opens")
 }
 
-fn variant_bytes(variant: AdfsVariant) -> usize {
+fn variant_bytes(variant: Variant) -> usize {
     VARIANTS
         .iter()
         .find(|(listed, _)| *listed == variant)
@@ -30,7 +30,7 @@ fn variant_bytes(variant: AdfsVariant) -> usize {
 }
 
 fn map_record(fs: &Adfs<MemDisk>) -> DiscRecord {
-    match &fs.backing {
+    match fs.volume.backing() {
         Backing::New { map, .. } => map.record,
         Backing::Old { .. } => panic!("an old-map volume has no disc record"),
     }
@@ -43,11 +43,8 @@ fn zone_bytes(image: &[u8], record: &DiscRecord, copy: MapCopy, zone: u32) -> Ve
 }
 
 fn root_dir_offset(fs: &mut Adfs<MemDisk>) -> usize {
-    let root = fs.root_addr();
-    let at = match &fs.backing {
-        Backing::Old { root_sector, .. } => u64::from(*root_sector) * OLD_SECTOR_SIZE,
-        Backing::New { map, .. } => map.locate(&mut fs.volume, root, 0).expect("root").0,
-    };
+    let root = fs.volume.root_addr();
+    let (at, _) = fs.volume.locate(root, 0).expect("root");
     usize::try_from(at).expect("fits")
 }
 
@@ -67,9 +64,11 @@ fn strand(
     stranded: &[(usize, usize)],
 ) {
     let size = format.size();
-    let slot = |index: usize| dir::ENTRIES_OFFSET + index * dir::ENTRY_SIZE;
+    let slot = |index: usize| {
+        tairix_filecore::dir::ENTRIES_OFFSET + index * tairix_filecore::dir::ENTRY_SIZE
+    };
     let original = image[at..at + size].to_vec();
-    let mut raw = [0u8; dir::NEW_DIR_SIZE];
+    let mut raw = [0u8; tairix_filecore::dir::NEW_DIR_SIZE];
     raw[..size].copy_from_slice(&original);
     raw[slot(0)..slot(format.capacity())].fill(0);
     let placed = (0..)
@@ -78,7 +77,7 @@ fn strand(
     for (to, from) in placed {
         raw[slot(to)..slot(to + 1)].copy_from_slice(&original[slot(from)..slot(from + 1)]);
     }
-    let unsealed = dir::FixedDir {
+    let unsealed = tairix_filecore::dir::FixedDir {
         data: raw,
         format,
         stranded: false,
@@ -94,22 +93,22 @@ fn strand(
 #[test]
 fn entries_left_past_an_end_marker_are_listed_and_the_volume_is_not_written() {
     for variant in [
-        AdfsVariant::S,
-        AdfsVariant::L,
-        AdfsVariant::D,
-        AdfsVariant::E,
-        AdfsVariant::F,
-        AdfsVariant::HardDisc,
+        Variant::S,
+        Variant::L,
+        Variant::D,
+        Variant::E,
+        Variant::F,
+        Variant::HardDisc,
     ] {
         let mut fs = fresh(variant, variant_bytes(variant));
         let root = FilesystemRead::root(&fs);
         for name in [b"Alpha".as_slice(), b"Beta", b"Gamma"] {
             make(&mut fs, root, name, name);
         }
-        let format = fs.fixed_format();
+        let format = fs.volume.fixed_format();
         let at = root_dir_offset(&mut fs);
         let last = format.capacity() - 3;
-        let mut image = fs.volume.into_inner().data;
+        let mut image = fs.volume.detach().0.into_inner().data;
         strand(
             &mut image,
             at,
@@ -161,14 +160,14 @@ fn entries_left_past_an_end_marker_are_listed_and_the_volume_is_not_written() {
 /// refuses writes, any of which could join them to the list.
 #[test]
 fn entries_past_an_end_marker_out_of_order_are_left_out_and_still_refuse_writes() {
-    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let mut fs = fresh(Variant::E, 800 * 1024);
     let root = FilesystemRead::root(&fs);
     for name in [b"Alpha".as_slice(), b"Beta", b"Gamma"] {
         make(&mut fs, root, name, name);
     }
-    let format = fs.fixed_format();
+    let format = fs.volume.fixed_format();
     let at = root_dir_offset(&mut fs);
-    let mut image = fs.volume.into_inner().data;
+    let mut image = fs.volume.detach().0.into_inner().data;
     // Beta stays live; Alpha would follow it out of order.
     strand(&mut image, at, format, &[1], &[(9, 0), (10, 2)]);
 
@@ -186,18 +185,12 @@ fn entries_past_an_end_marker_out_of_order_are_left_out_and_still_refuse_writes(
 /// could land past its end.
 #[test]
 fn an_image_short_of_its_disc_is_read_and_never_written() {
-    for variant in [
-        AdfsVariant::S,
-        AdfsVariant::L,
-        AdfsVariant::D,
-        AdfsVariant::E,
-        AdfsVariant::F,
-    ] {
+    for variant in [Variant::S, Variant::L, Variant::D, Variant::E, Variant::F] {
         let bytes = variant_bytes(variant);
         let mut fs = fresh(variant, bytes);
         let root = FilesystemRead::root(&fs);
         make(&mut fs, root, b"Kept", b"kept bytes");
-        let mut image = fs.volume.into_inner().data;
+        let mut image = fs.volume.detach().0.into_inner().data;
         image.truncate(bytes - 5 * 1024);
 
         let mut probed = ByteDevice::new(device(image.clone())).expect("a device");
@@ -230,12 +223,12 @@ fn an_image_short_of_its_disc_is_read_and_never_written() {
 #[test]
 fn every_write_keeps_both_map_copies_identical() {
     for variant in [
-        AdfsVariant::E,
-        AdfsVariant::EPlus,
-        AdfsVariant::F,
-        AdfsVariant::FPlus,
-        AdfsVariant::HardDisc,
-        AdfsVariant::HardDiscPlus,
+        Variant::E,
+        Variant::EPlus,
+        Variant::F,
+        Variant::FPlus,
+        Variant::HardDisc,
+        Variant::HardDiscPlus,
     ] {
         let mut fs = fresh(variant, variant_bytes(variant));
         let root = FilesystemRead::root(&fs);
@@ -244,7 +237,7 @@ fn every_write_keeps_both_map_copies_identical() {
         fs.truncate(small, 9_000).expect("grows");
         fs.remove(root, b"Grown").expect("removed");
         let record = map_record(&fs);
-        let image = fs.volume.into_inner().data;
+        let image = fs.volume.detach().0.into_inner().data;
         for zone in 0..u32::from(record.nzones) {
             assert_eq!(
                 zone_bytes(&image, &record, MapCopy::First, zone),
@@ -260,10 +253,11 @@ fn every_write_keeps_both_map_copies_identical() {
 /// copies damaged the volume is refused.
 #[test]
 fn a_first_map_copy_failing_its_check_is_read_past_to_the_second() {
-    for variant in [AdfsVariant::F, AdfsVariant::HardDisc] {
+    for variant in [Variant::F, Variant::HardDisc] {
         let bytes = variant_bytes(variant);
         let record =
-            mkfs::new_map_record(variant, u64::try_from(bytes).expect("fits")).expect("a record");
+            tairix_filecore::format::new_map_record(variant, u64::try_from(bytes).expect("fits"))
+                .expect("a record");
         let flip = |copy| usize::try_from(record.zone_offset(copy, 1)).expect("fits") + 0x40;
         let mut image = image_of(variant, bytes);
         image[flip(MapCopy::First)] ^= 0x01;
@@ -275,7 +269,7 @@ fn a_first_map_copy_failing_its_check_is_read_past_to_the_second() {
         assert_eq!(read_all(&mut fs, file), b"survivor", "{variant:?}");
         let later_bytes = vec![3u8; 30_000];
         make(&mut fs, root, b"Later", &later_bytes);
-        let mut fs = reopened(fs.volume.into_inner().data);
+        let mut fs = reopened(fs.volume.detach().0.into_inner().data);
         let later = fs.lookup(root, b"Later").expect("kept");
         assert_eq!(read_all(&mut fs, later), later_bytes, "{variant:?}");
 
@@ -290,7 +284,7 @@ fn a_first_map_copy_failing_its_check_is_read_past_to_the_second() {
 /// which would allocate over what only the second records.
 #[test]
 fn map_copies_that_both_check_yet_differ_recover_objects_and_refuse_writes() {
-    for variant in [AdfsVariant::E, AdfsVariant::F] {
+    for variant in [Variant::E, Variant::F] {
         let mut fs = fresh(variant, variant_bytes(variant));
         let root = FilesystemRead::root(&fs);
         make(&mut fs, root, b"Before", b"before");
@@ -300,6 +294,7 @@ fn map_copies_that_both_check_yet_differ_recover_objects_and_refuse_writes() {
             .map(|zone| {
                 let mut bytes = vec![0u8; sector];
                 fs.volume
+                    .disc_mut()
                     .read(record.zone_offset(MapCopy::First, zone), &mut bytes)
                     .expect("zone");
                 bytes
@@ -307,7 +302,7 @@ fn map_copies_that_both_check_yet_differ_recover_objects_and_refuse_writes() {
             .collect();
         let hidden = vec![9u8; 30_000];
         make(&mut fs, root, b"Hidden", &hidden);
-        let mut image = fs.volume.into_inner().data;
+        let mut image = fs.volume.detach().0.into_inner().data;
         for (zone, bytes) in (0u32..).zip(&earlier) {
             let at = usize::try_from(record.zone_offset(MapCopy::First, zone)).expect("fits");
             image[at..at + sector].copy_from_slice(bytes);

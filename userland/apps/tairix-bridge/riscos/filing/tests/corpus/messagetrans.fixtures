@@ -1,0 +1,36 @@
+# Recorded by `cargo xtask riscos --reference` from genuine RISC OS 5.30,
+# the ROM image `riscos` of SHA-256 0068a244b85b5ea76a88ff39dae94258efd442a63608cd4732963ce7e8dce389.
+# A scenario marked `ours` holds this emulator's own observation.
+# A scenario marked `reference` reads the machine itself and is never replayed.
+
+scenario messagetrans-files
+1 r1=&00040000 v=0
+2 v=0
+3 v=0
+4 v=0
+5 r0=&00000000 r2=&00000052 v=0
+6 v=1 error=&000000D6
+7 v=1 error=&000000A8
+8 v=0
+9 r2-out=&00000000 r3=&0000000B v=0
+9 $out:12=48656C6C6F20776F726C6400
+10 r3=&0000000B v=0
+10 r2:11=5365636F6E64206C696E65
+11 r3=&00000003 v=0
+11 $out:4=6F6E6500
+12 v=1 error=&00000AC2
+13 v=1 error=&00012345
+14 v=0
+15 v=0
+16 r2-out=&00000000 r3=&0000000B v=0
+16 $out:12=48656C6C6F20776F726C6400
+17 r3=&0000000B v=0
+17 r2:11=5365636F6E64206C696E65
+18 r3=&00000003 v=0
+18 $out:4=6F6E6500
+19 v=1 error=&00000AC2
+20 v=1 error=&00012345
+21 v=0
+22 v=0
+23 v=0
+24 r1=&00040000 v=0

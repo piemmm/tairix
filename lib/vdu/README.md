@@ -17,7 +17,7 @@ designs: OpenMicro's for 32 to 126, and new ones in the same style for the rest.
 No RISC OS font is used.
 
 OpenMicro's MOS builds its character set and its control-code table from here,
-the RISC OS emulator's International draws each alphabet from it, and
+TAIRiX Bridge's International draws each alphabet from it, and
 `lib/image` reads a sprite's numbered mode through it.
 
 `no_std`, with no `unsafe`.

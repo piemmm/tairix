@@ -10,7 +10,6 @@ use crate::cpu::jit::cache::{Key, Request};
 use crate::cpu::jit::interpreted::{Compiler, Interpreted};
 use crate::dos::harness::screen;
 use crate::dos::setup::default_disk;
-use crate::folder::memhost::{MemDir, MemHost};
 use crate::folder::server::Server;
 use crate::folder::{DosName, Folder};
 use crate::link::{FixedDisk, Installed, Setup, QUEUE_MOST, RELEASES_KEPT, WORKER_INBOUND};
@@ -29,6 +28,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use tairix_abi::Errno;
+use tairix_fscopy::fixture::{Handle, Tree};
+use tairix_fscopy::tree::Roots;
 use tairix_log::DiscardSink;
 use tairix_sandbox::link::TimedChannel;
 use tairix_sandbox::loopback::HeapShare;
@@ -94,7 +95,7 @@ struct App {
     /// Each text read back: its columns, rows and codes.
     texts: Vec<Result<ShownText, Unread>>,
     /// The folders it shares, by slot.
-    folders: Vec<(u8, Server<MemDir>)>,
+    folders: Vec<(u8, Server<Handle>)>,
     /// What compiles the blocks asked for, where blocks are compiled, and
     /// how many were.
     compiler: Option<Compiler>,
@@ -418,12 +419,18 @@ fn the_default_disk_boots_to_the_prompt_through_the_host_and_its_application() {
 
 #[test]
 fn a_folder_shared_through_the_host_is_a_drive_until_it_is_unshared() {
-    let folder = MemHost::new().file("readme.txt", b"Through the host.\r\n");
+    let folder = Tree::new().file("/readme.txt", b"Through the host.\r\n");
     let (mut worker, app) = joined();
     let label = DosName::new(*b"HOST       ", false).unwrap();
-    app.borrow_mut()
-        .folders
-        .push((0, Server::new(folder.root(), label, true, 0x99)));
+    app.borrow_mut().folders.push((
+        0,
+        Server::new(
+            folder.open_dir("/", false).expect("the folder"),
+            label,
+            true,
+            0x99,
+        ),
+    ));
     app.borrow_mut().host.share(0, label, true).unwrap();
     assert_eq!(
         app.borrow_mut().host.share(0, label, true),

@@ -152,16 +152,31 @@ impl Tree {
         self.nodes.len()
     }
 
-    /// `name` as the tree indexes it.
-    fn key(&self, name: &[u8]) -> Result<Vec<u8>, DriverError> {
+    /// `name` as the tree indexes it: one key for every name its rule
+    /// matches.
+    pub(crate) fn key(&self, name: &[u8]) -> Result<Vec<u8>, DriverError> {
         let mut key = Vec::new();
         key.try_reserve_exact(name.len())
             .map_err(|_| DriverError::OutOfMemory)?;
-        match self.matching {
-            NameMatching::AsciiCaseInsensitive => {
+        match (self.matching, core::str::from_utf8(name)) {
+            (NameMatching::Exact, _) => key.extend_from_slice(name),
+            (NameMatching::AsciiCaseInsensitive, _) => {
                 key.extend(name.iter().map(u8::to_ascii_lowercase));
             }
-            _ => key.extend_from_slice(name),
+            (NameMatching::Latin1CaseInsensitive | NameMatching::RiscOs, Ok(text)) => {
+                for c in text.chars().map(|c| self.matching.fold(c)) {
+                    let mut utf8 = [0; 4];
+                    let encoded = c.encode_utf8(&mut utf8).as_bytes();
+                    key.try_reserve(encoded.len())
+                        .map_err(|_| DriverError::OutOfMemory)?;
+                    key.extend_from_slice(encoded);
+                }
+            }
+            // A name that is not UTF-8 matches only its own bytes, and no
+            // folded key, being UTF-8, can equal it.
+            (NameMatching::Latin1CaseInsensitive | NameMatching::RiscOs, Err(_)) => {
+                key.extend_from_slice(name);
+            }
         }
         Ok(key)
     }

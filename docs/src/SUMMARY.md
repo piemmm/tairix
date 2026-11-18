@@ -95,6 +95,7 @@
   - [`tairix-fat`](./lib/fat.md)
   - [`tairix-fbcon`](./lib/fbcon.md)
   - [`tairix-fdt`](./lib/fdt.md)
+  - [`tairix-filecore`](./lib/filecore.md)
   - [`tairix-fscopy`](./lib/fscopy.md)
   - [`tairix-fsserve`](./lib/fsserve.md)
   - [`tairix-font`](./lib/font.md)
@@ -280,7 +281,7 @@
 - [Patience](./desktop/patience.md)
 - [Cinder](./desktop/cinder.md)
 - [Open Micro Emulator](./desktop/openmicro.md)
-- [RISC OS Emulator](./desktop/riscos-emulator.md)
+- [TAIRiX Bridge](./desktop/tairix-bridge.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 
 # ABI

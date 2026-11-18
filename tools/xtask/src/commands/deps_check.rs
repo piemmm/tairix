@@ -5,7 +5,7 @@
 //!
 //! 1. the layering graph is violated,
 //! 2. anything outside a leaf subtree — `userland/gui/*`, `userland/games/*`,
-//!    `userland/apps/riscos/*` — transitively depends on a crate inside it, or
+//!    `userland/apps/tairix-bridge/riscos/*` — transitively depends on a crate inside it, or
 //! 3. a kernel crate outside `kernel/sched/*` / `kernel/core` names a
 //!    concrete scheduler crate.
 //!
@@ -35,7 +35,7 @@
 //! violating edge is always rejected. It is now empty — the layering is
 //! satisfied (see [`GRANDFATHERED`] for how the last edges were retired).
 //! The transitive rule into a leaf subtree has no exceptions — the desktop,
-//! games and RISC OS emulator boundaries are clean and must stay clean.
+//! games and TAIRiX Bridge boundaries are clean and must stay clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -59,7 +59,7 @@ pub enum Layer {
     Userland,
     UserGui,
     UserGame,
-    /// The RISC OS emulator's crates (`plans/RISCOS-EMULATOR.md`).
+    /// TAIRiX Bridge's crates (`plans/RISCOS-EMULATOR.md`).
     UserRiscOs,
     /// Tooling and integration tests: outside the product layering.
     Tooling,
@@ -81,7 +81,7 @@ impl Layer {
             Layer::Userland => "userland/*",
             Layer::UserGui => "userland/gui/*",
             Layer::UserGame => "userland/games/*",
-            Layer::UserRiscOs => "userland/apps/riscos/*",
+            Layer::UserRiscOs => "userland/apps/tairix-bridge/riscos/*",
             Layer::Tooling => "tooling/tests",
         }
     }
@@ -113,7 +113,7 @@ const GRANDFATHERED: &[(&str, &str)] = &[];
 
 /// The strata nothing outside may depend on, even transitively: the optional
 /// desktop, the games tree whose crates compose each other without game code
-/// ever entering the OS libraries, and the RISC OS emulator's subsystems,
+/// ever entering the OS libraries, and TAIRiX Bridge's subsystems,
 /// split into crates for their size and private to the emulator.
 const LEAF_SUBTREES: &[Layer] = &[Layer::UserGui, Layer::UserGame, Layer::UserRiscOs];
 
@@ -155,7 +155,7 @@ pub fn classify(rel_dir: &str) -> Layer {
         // `Userland` a game crate could not name its siblings, and the whole
         // subtree's internal edges would be refused.
         Layer::UserGame
-    } else if rel_dir.starts_with("userland/apps/riscos/") {
+    } else if rel_dir.starts_with("userland/apps/tairix-bridge/riscos/") {
         // Ahead of the generic arm for the same reason as the games.
         Layer::UserRiscOs
     } else if rel_dir.starts_with("userland/") {
@@ -984,7 +984,7 @@ required-features = [\n    \"model\",\n    \"slow\",\n]\n";
             "the games arm must win over the generic userland one"
         );
         assert_eq!(
-            classify("userland/apps/riscos/arm"),
+            classify("userland/apps/tairix-bridge/riscos/arm"),
             Layer::UserRiscOs,
             "the emulator's arm must win over the generic userland one"
         );
@@ -1173,22 +1173,21 @@ required-features = [\n    \"model\",\n    \"slow\",\n]\n";
             },
             Crate {
                 name: "tairix-riscos-kernel".into(),
-                rel_dir: "userland/apps/riscos/kernel".into(),
+                rel_dir: "userland/apps/tairix-bridge/riscos/kernel".into(),
                 layer: Layer::UserRiscOs,
                 deps: vec!["tairix-riscos-arm".into()],
             },
             Crate {
                 name: "tairix-riscos-arm".into(),
-                rel_dir: "userland/apps/riscos/arm".into(),
+                rel_dir: "userland/apps/tairix-bridge/riscos/arm".into(),
                 layer: Layer::UserRiscOs,
                 deps: vec![],
             },
         ];
         let violations = analyze(&crates);
         assert!(
-            violations
-                .iter()
-                .any(|v| v.starts_with("tairix-files") && v.contains("userland/apps/riscos")),
+            violations.iter().any(|v| v.starts_with("tairix-files")
+                && v.contains("userland/apps/tairix-bridge/riscos")),
             "{violations:#?}"
         );
         assert!(
@@ -1204,7 +1203,7 @@ required-features = [\n    \"model\",\n    \"slow\",\n]\n";
         let crates = vec![
             Crate {
                 name: "tairix-riscos-app".into(),
-                rel_dir: "userland/apps/riscos/app".into(),
+                rel_dir: "userland/apps/tairix-bridge/riscos/app".into(),
                 layer: Layer::UserRiscOs,
                 deps: vec!["tairix-wm".into(), "wintersun-net".into()],
             },

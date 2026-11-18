@@ -1,0 +1,19 @@
+# FileSwitch's messages, in TAIRiX Bridge's own words.
+BadName:Bad name
+PrefixNotPresent:Filing system or path %0: not present
+EndOfFile:End of file
+NotOpenForUpdate:File not open for update
+TooManyOpenFiles:Too many open files
+OutsideFile:Outside file
+BadBufferSize:A filing system opened a file with a buffer size it may not use
+WrongKindExists:'%0' exists, and is not what was asked for
+NothingMatched:Nothing matches %0
+Wildcards:An object to be made or deleted cannot be named by a wildcard
+UnknownFileType:%0 is not a file type
+BadRename:Bad rename
+WildDestination:A copy's destination may be wildcarded only as *
+ReservedReason:That OS_FSControl reason is reserved
+NoSpecialFields:That filing system takes no special field
+BadOption:Unknown option
+NoRunnerForType:No run action is set for files of type &%0
+NoRoomToRun:There is no room for %0 where it runs

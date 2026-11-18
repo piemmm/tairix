@@ -13,7 +13,7 @@ use tairix_abi::{
     Access, AtFlags, DirEntry, Errno, FileStat, LinkFlags, NodeExpect, OpenFlags, RenameFlags,
     TimesChange, TimesKept, UnlinkFlags, READDIR_BATCH_MAX,
 };
-use tairix_fscopy::tree::{self, entry_name, Entry, Kind, Roots};
+use tairix_fscopy::tree::{self, entry_name, Creation, Entry, FileAccess, Kind, Roots, WriteAt};
 use tairix_fscopy::{Source, Target};
 
 use crate::{Dir, File};
@@ -135,10 +135,16 @@ impl Target for File {
     }
 }
 
+impl WriteAt for File {
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, Errno> {
+        File::write_at(self, offset, bytes).map_err(Errno::from_syscall)
+    }
+}
+
 impl tree::Dir for Dir {
     type File = File;
 
-    fn entries(&self) -> Result<Vec<Entry>, Errno> {
+    fn entries(&self, most: usize) -> Result<Vec<Entry>, Errno> {
         let mut batch = Vec::new();
         batch
             .try_reserve_exact(READDIR_BATCH_MAX)
@@ -148,6 +154,9 @@ impl tree::Dir for Dir {
         let mut refused = None;
         self.for_each_batch(&mut batch, |records| {
             for record in DirEntries::new(records) {
+                if entries.len() == most {
+                    return ControlFlow::Break(());
+                }
                 if let Err(errno) = record.and_then(|record| decoded(&record, &mut entries)) {
                     refused = Some(errno);
                     return ControlFlow::Break(());
@@ -188,6 +197,29 @@ impl tree::Dir for Dir {
 
     fn open_node(&self, name: &str) -> Result<File, Errno> {
         Dir::open_file(self, name.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)
+    }
+
+    fn open_reached(
+        &self,
+        name: &str,
+        access: FileAccess,
+        creation: Creation,
+        mode: u32,
+    ) -> Result<File, Errno> {
+        let flags = match access {
+            FileAccess::Read => OpenFlags::READ,
+            FileAccess::Write => OpenFlags::WRITE,
+            FileAccess::Both => OpenFlags::READ.union(OpenFlags::WRITE),
+        };
+        let name = name.as_bytes();
+        match creation {
+            Creation::Existing => Dir::open_file(self, name, flags),
+            Creation::Truncate => {
+                Dir::create_file(self, name, flags.union(OpenFlags::TRUNCATE), mode)
+            }
+            Creation::New => Dir::create_file(self, name, flags.union(OpenFlags::EXCLUSIVE), mode),
+        }
+        .map_err(Errno::from_syscall)
     }
 
     fn create_file(&self, name: &str, mode: u32) -> Result<File, Errno> {
@@ -240,8 +272,15 @@ impl tree::Dir for Dir {
             .map_err(Errno::from_syscall)
     }
 
-    fn access(&self, name: &str, want: Access) -> Result<(), Errno> {
-        Dir::access(self, name.as_bytes(), want, AtFlags::NO_FOLLOW).map_err(Errno::from_syscall)
+    fn access(&self, name: &str, want: Access, follow: bool) -> Result<(), Errno> {
+        let flags = if name.is_empty() {
+            AtFlags::EMPTY_PATH
+        } else if follow {
+            AtFlags::empty()
+        } else {
+            AtFlags::NO_FOLLOW
+        };
+        Dir::access(self, name.as_bytes(), want, flags).map_err(Errno::from_syscall)
     }
 }
 
@@ -380,13 +419,25 @@ mod tests {
         );
         assert_eq!(args[4], 0o600);
         let (number, args) = capture(0, || {
-            assert_eq!(tree::Dir::access(&dir, "f", Access::WRITE), Ok(()));
+            assert_eq!(tree::Dir::access(&dir, "f", Access::WRITE, false), Ok(()));
         });
         assert_eq!(number, NUM_FS_ACCESS);
         assert_eq!(
             args[4],
             u64::from(AtFlags::NO_FOLLOW.bits()),
             "a link itself"
+        );
+        let (_, args) = capture(0, || {
+            assert_eq!(tree::Dir::access(&dir, "f", Access::WRITE, true), Ok(()));
+        });
+        assert_eq!(args[4], 0, "what a link leads to");
+        let (_, args) = capture(0, || {
+            assert_eq!(tree::Dir::access(&dir, "", Access::WRITE, false), Ok(()));
+        });
+        assert_eq!(
+            args[4],
+            u64::from(AtFlags::EMPTY_PATH.bits()),
+            "the directory itself"
         );
         core::mem::forget(dir);
     }

@@ -339,16 +339,16 @@ impl Command {
                 "Import PCEmulator's SingleStepTests CPU vectors (`--import <dir>`; developer-run)."
             }
             Command::Riscos => {
-                "Record the RISC OS emulator's corpus on a developer's genuine RISC OS \
+                "Record TAIRiX Bridge's corpus on a developer's genuine RISC OS \
                  (`--reference <dir>`; developer-run only), or draw its file-type sprites \
                  from the icon masters (`--write-sprites`)."
             }
             Command::RiscosFpa => {
-                "Hold the RISC OS emulator's FPA to a developer's own FPEmulator module \
+                "Hold TAIRiX Bridge's FPA to a developer's own FPEmulator module \
                  (`<module>`, `--write-sample` to refresh the committed sample; developer-run only)."
             }
             Command::RiscosVectors => {
-                "Hold the RISC OS emulator's ARM to the SingleStepTests ARM7TDMI suite \
+                "Hold TAIRiX Bridge's ARM to the SingleStepTests ARM7TDMI suite \
                  (`<dir>`, `--write-sample` to refresh the committed sample; developer-run only)."
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
@@ -1712,7 +1712,7 @@ const STATIC_GATES: &[(&str, StaticGate)] = &[
     // The Open Micro emulator's clean-room ROMs, each rebuilt and compared
     // byte for byte.
     ("openmicro-roms", openmicro::check_roms),
-    // The RISC OS emulator's file-type sprites, redrawn from the icon masters
+    // TAIRiX Bridge's file-type sprites, redrawn from the icon masters
     // and compared byte for byte.
     ("riscos-sprites", riscos::check_sprites),
     // Exhaustively model-check the capability + IPC state machine.

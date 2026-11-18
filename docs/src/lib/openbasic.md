@@ -3,7 +3,7 @@
 OpenBASIC: tokens, and the tokenising and listing of programs, compatible with
 BBC BASIC, for BASIC II and for BASIC V and VI, which tokenise and list alike.
 It is TAIRiX's own, neither made nor endorsed by the BBC. OpenMicro's BASIC
-ROM is built from its BASIC II tables. The RISC OS emulator's BASIC (RO20) and
+ROM is built from its BASIC II tables. TAIRiX Bridge's BASIC (RO20) and
 TextEdit (RO49) are to use its BASIC V half (`plans/RISCOS-EMULATOR.md` RO7).
 
 BASIC II's rules are its ROM's, as OpenMicro's clean-room BASIC keeps them;

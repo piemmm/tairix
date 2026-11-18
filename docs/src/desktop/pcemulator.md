@@ -442,11 +442,19 @@ steering the resampling ratio, at most ±0.5 %.
   identification, version, test and DMA-identification commands, MIDI's
   modes, and the reset's cold and warm paths. Its quirks are kept: every
   command pauses the stream until a handler resumes it, a host byte waiting
-  makes a sample tick play nothing, a high-speed transfer takes a host byte
-  as a sample and no command until it ends, and the rate and block size
-  cannot change while a transfer runs. The firmware waits at its one output
-  latch, so a guest that never reads holds it back rather than filling the
-  host's memory. The on-chip RAM playback plays the bytes loaded and then
+  makes a sample tick play nothing, a high-speed transfer takes no command
+  until it ends, and the rate and block size cannot change while a transfer
+  runs. Every byte passes the card's two one-byte latches, DMA's included,
+  and the firmware's DMA request is a latch only the controller's
+  acknowledge or a reset clears. So the firmware waits at its output latch:
+  a guest that never reads holds it back rather than filling the host's
+  memory, and a byte left there holds back a recording or the DMA
+  identification. A handler the controller leaves waiting takes a byte the
+  host writes as its sample; with the controller answering, its next byte
+  lands on the host's. The
+  ROM checksum's first byte and the RAM test's answer overwrite a byte
+  unread, and a reset loses whatever the host has not read, leaving only its
+  ready byte. The on-chip RAM playback plays the bytes loaded and then
   silence, and the ROM checksum and RAM test report a passing card.
 - **A parallel port's DACs**: a Covox Speech Thing on its data lines, or a
   Disney Sound Source — a byte latched by a short pulse on Select In into a

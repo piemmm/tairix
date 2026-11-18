@@ -1,5 +1,5 @@
 //! `cargo xtask riscos-fpa <module> [--cases <n>] [--write-sample]`: holds
-//! the RISC OS emulator's FPA to FPEmulator (`plans/RISCOS-EMULATOR.md`
+//! TAIRiX Bridge's FPA to FPEmulator (`plans/RISCOS-EMULATOR.md`
 //! §2.4).
 //!
 //! The module runs as an opaque program on the crate's own processor: the
@@ -44,7 +44,7 @@ mod accuracy;
 use accuracy::{Accepted, Difference, Left, Unheld};
 
 /// Where the sample and its record are committed.
-const SAMPLE_DIR: &str = "userland/apps/riscos/arm/tests/fpa";
+const SAMPLE_DIR: &str = "userland/apps/tairix-bridge/riscos/arm/tests/fpa";
 /// The sample's name.
 const SAMPLE: &str = "fpemulator-vectors.bin";
 /// The cases run when `--cases` does not say.

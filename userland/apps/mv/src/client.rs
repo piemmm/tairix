@@ -1184,7 +1184,7 @@ fn admit<D: Dir>(m: &Move<'_, D>, held: Option<&D>) -> Result<(), MvError> {
             let empty = m
                 .target_dir
                 .open_dir(m.target_name)
-                .and_then(|dir| dir.entries())
+                .and_then(|dir| dir.entries(1))
                 .map_err(|errno| read_error(m.target, errno))?
                 .is_empty();
             if empty {

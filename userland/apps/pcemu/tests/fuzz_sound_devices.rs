@@ -4,7 +4,8 @@
 //!
 //! 1. Nothing panics, and advancing time always ends.
 //! 2. Advancing leaves the DSP nothing due at or before then.
-//! 3. The DSP holds at most one command's replies for the host.
+//! 3. The DSP holds at most a byte unread and one command's replies for
+//!    the host, a reset included.
 //! 4. The mix stays finite, and the stream it renders bounded.
 //!
 //! Each run starts with a reset and an 8-bit block over DMA to its
@@ -19,7 +20,7 @@ use support::Flat;
 use tairix_fuzzseed::Prng;
 use tairix_pcemu::chips::dma::{channel_setup, Dma};
 use tairix_pcemu::ports::parallel::{Device, Parallel};
-use tairix_pcemu::sound::blaster::{Dsp, DMA_CHANNEL};
+use tairix_pcemu::sound::blaster::{Dsp, DMA_CHANNEL, OUT_DEPTH};
 use tairix_pcemu::sound::opl2::Opl2;
 use tairix_pcemu::sound::{Mixer, Source, TICKS_PER_SAMPLE};
 use tairix_pcemu::time::{Hertz, Nanos};
@@ -111,14 +112,13 @@ impl Machine {
         }
     }
 
-    /// Reads whatever the DSP has for the host, as a driver would; it
-    /// never holds more than a command's replies.
+    /// Reads whatever the DSP has for the host, as a driver would.
     fn collect(&mut self) {
         let mut read = 0;
         while self.dsp.input(0x0E) & 0x80 != 0 {
             self.dsp.input(0x0A);
             read += 1;
-            assert!(read <= 3, "the DSP held more than a command's replies");
+            assert!(read <= OUT_DEPTH, "the DSP held more than it can");
         }
     }
 

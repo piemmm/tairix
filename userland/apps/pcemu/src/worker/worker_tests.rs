@@ -37,9 +37,10 @@ use tairix_sandbox::wire::Writer;
 use tairix_sandbox::ProtoError;
 
 use super::testing::{memory, TestMemory, DISCARD};
-use crate::folder::memhost::{MemDir, MemHost};
 use crate::folder::server::Server;
 use crate::folder::{DosName, Folder};
+use tairix_fscopy::fixture::{Handle, Tree};
+use tairix_fscopy::tree::Roots;
 
 /// What the stand-in front-end saw and holds.
 #[derive(Default)]
@@ -85,7 +86,7 @@ struct Front {
     /// Each change to whether adapter 0 shows text.
     text_shown: Vec<bool>,
     /// The folders it shares, by slot, and each drive it was told one is.
-    folders: Vec<(u8, Server<MemDir>)>,
+    folders: Vec<(u8, Server<Handle>)>,
     shared: Vec<(u8, Option<u8>)>,
     /// What compiles the blocks the worker asks for, and the processor they
     /// are of, and whether it does: otherwise every request is left
@@ -1191,13 +1192,18 @@ fn more_to_type_than_the_window_while_a_disk_waits_ends_the_worker() {
 
 #[test]
 fn a_shared_folder_is_a_drive_the_shell_reads_and_copies_to() {
-    let host = MemHost::new().file("readme.txt", b"Hello from the host.\r\n");
+    let host = Tree::new().file("/readme.txt", b"Hello from the host.\r\n");
     let (mut worker, front) = default_machine();
     let label = DosName::new(*b"HOST       ", false).unwrap();
-    front
-        .borrow_mut()
-        .folders
-        .push((0, Server::new(host.root(), label, true, 0x77)));
+    front.borrow_mut().folders.push((
+        0,
+        Server::new(
+            host.open_dir("/", false).expect("the folder"),
+            label,
+            true,
+            0x77,
+        ),
+    ));
     front.borrow_mut().queue(&Command::Share {
         slot: 0,
         label,
@@ -1220,7 +1226,7 @@ fn a_shared_folder_is_a_drive_the_shell_reads_and_copies_to() {
         at_prompt(w) && screen(&w.run.machine).contains("1 file(s) copied")
     });
     assert_eq!(
-        host.bytes("COPY.TXT").as_deref(),
+        host.bytes("/COPY.TXT").as_deref(),
         Some(&b"Hello from the host.\r\n"[..])
     );
     front.borrow_mut().queue(&Command::Unshare { slot: 0 });
@@ -1323,14 +1329,20 @@ fn looping_running(
     setup.room = room;
     let (worker, front) = open_running(&setup, vec![(1, Box::new(disk.device))], run);
     let mut worker = worker.unwrap();
-    let host = MemHost::new().file("work.com", &LOOPING);
+    let host = Tree::new().file("/work.com", &LOOPING);
     let label = DosName::new(*b"HOST       ", false).unwrap();
     {
         let mut front = front.borrow_mut();
         front.compiling = compiling;
-        front
-            .folders
-            .push((0, Server::new(host.root(), label, false, 0x77)));
+        front.folders.push((
+            0,
+            Server::new(
+                host.open_dir("/", false).expect("the folder"),
+                label,
+                false,
+                0x77,
+            ),
+        ));
         front.queue(&Command::Share {
             slot: 0,
             label,

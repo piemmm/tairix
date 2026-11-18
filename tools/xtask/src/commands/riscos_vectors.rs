@@ -295,7 +295,7 @@ const FILES: [Upstream; 42] = [
 ];
 
 /// Where the samples and their records are committed.
-const SAMPLE_DIR: &str = "userland/apps/riscos/arm/tests/vectors";
+const SAMPLE_DIR: &str = "userland/apps/tairix-bridge/riscos/arm/tests/vectors";
 /// The upstream repository.
 const REPOSITORY: &str = "https://github.com/SingleStepTests/ARM7TDMI";
 /// The upstream files' magic number.

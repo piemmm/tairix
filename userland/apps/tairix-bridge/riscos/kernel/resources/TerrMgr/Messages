@@ -1,0 +1,69 @@
+# The Territory Manager's messages: the territories' and alphabets' names,
+# its syntax lines and its errors, in TAIRiX Bridge's own words.
+TerritoryName1:UK
+TerritoryName4:Italy
+TerritoryName5:Spain
+TerritoryName6:France
+TerritoryName7:Germany
+TerritoryName8:Portugal
+TerritoryName9:Esperanto
+TerritoryName10:Greece
+TerritoryName11:Sweden
+TerritoryName12:Finland
+TerritoryName14:Denmark
+TerritoryName15:Norway
+TerritoryName16:Iceland
+TerritoryName17:Canada1
+TerritoryName18:Canada2
+TerritoryName19:Canada
+TerritoryName20:Turkey
+TerritoryName21:Arabic
+TerritoryName22:Ireland
+TerritoryName23:Hong Kong
+TerritoryName24:Russia
+TerritoryName26:Israel
+TerritoryName27:Mexico
+TerritoryName28:Latin America
+TerritoryName29:Australia
+TerritoryName30:Austria
+TerritoryName31:Belgium
+TerritoryName32:Japan
+TerritoryName33:Middle East
+TerritoryName34:Netherlands
+TerritoryName35:Switzerland
+TerritoryName36:Wales
+TerritoryName37:Maori
+TerritoryName48:USA
+TerritoryName49:Wales2
+TerritoryName50:China
+TerritoryName51:Brazil
+TerritoryName52:South Africa
+TerritoryName53:Korea
+TerritoryName54:Taiwan
+TerritoryName70:UK (Dvorak)
+TerritoryName71:USA (Dvorak)
+TerritoryName72:UK (Colemak)
+AlphabetName100:BFont
+AlphabetName101:Latin1
+AlphabetName102:Latin2
+AlphabetName103:Latin3
+AlphabetName104:Latin4
+AlphabetName107:Greek
+AlphabetName108:Hebrew
+AlphabetName109:Latin5
+AlphabetName110:Welsh
+AlphabetName111:UTF-8
+AlphabetName112:Latin9
+AlphabetName113:Latin6
+UnnamedTerritory:(no name)
+ConfigureTerritorySyntax:Territory  <name or number>
+ConfigureTimeZoneSyntax:TimeZone   [+|-]<hours>[:<minutes>]
+ConfigureDstSyntax:DST | NoDST | AutoDST
+UnmatchedZoneName:Local
+UnknownTerritoryNumber:No territory has that number
+UnknownAlphabetNumber:No alphabet has that number
+TerritoryNotLoaded:That territory is not loaded
+NoDaylightRule:No daylight saving rule for that time zone and year
+UnknownTimeZone:That territory has no such time zone
+TimeValuesOutOfRange:Time values out of range
+UnknownTerritorySwi:Unknown Territory SWI

@@ -13432,9 +13432,8 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
     };
     let readme = NodeSecurity::new(0o644, 0, 0);
 
-    let mut acorn =
-        tairix_drv_fs_adfs::Adfs::format(device(1600)?, tairix_drv_fs_adfs::AdfsVariant::E)
-            .map_err(|err| fail("the Acorn floppy", err))?;
+    let mut acorn = tairix_drv_fs_adfs::Adfs::format(device(1600)?, tairix_drv_fs_adfs::Variant::E)
+        .map_err(|err| fail("the Acorn floppy", err))?;
     let root = acorn.root();
     let file = acorn
         .create(root, README.as_bytes(), NodeKind::RegularFile, &readme)

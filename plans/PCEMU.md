@@ -380,7 +380,10 @@ of items is finished.
   silence, the speaker's ramps, the time constant and block size,
   identification, the test register, MIDI) with the firmware's command
   gating and quirks; `220h` or `240h`, IRQ 2, 3, 5 or 7, DMA 1, the YM3812 at
-  its card and AdLib ports.
+  its card and AdLib ports. The bus interface is modelled as the card has it:
+  two one-byte latches every byte passes, DMA cycles' included, flags a
+  reset's release clears, and a DMA request latch only an acknowledge or a
+  reset clears.
 - A parallel port (§1.7) carries a Covox or the Disney Sound Source (the
   7 kHz FIFO, Select In's latch and power, Ack's full flag).
 
@@ -661,7 +664,10 @@ are silent the 80387 reference's lists of how it differs from them decide.
   its pattern, or over an FCB's search fields, its drive byte under `80h`. The
   protocol (`folder`) is in host terms (lengths, instants on the machine's
   clock); every path crosses in DOS's spelling, refused unless canonical.
-  The front-end's server names host entries in 8.3 form, keeping each name
+  The front-end's server reaches the folder through `lib/fscopy`'s tree
+  seam, and refuses a file removal that names a directory itself, since the
+  host's plain removal takes an empty one. It names host entries in 8.3 form,
+  keeping each name
   and place for as long as a directory's listing is kept, renames in place,
   and holds the folder only on the disk worker.
 

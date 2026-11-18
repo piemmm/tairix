@@ -2,19 +2,35 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
+use tairix_abi::Errno;
+use tairix_fscopy::fixture::{Handle, Tree};
+use tairix_fscopy::tree::Roots;
 
 use super::{Server, FILES};
-use crate::folder::memhost::{MemDir, MemHost};
 use crate::folder::tests::{name, path};
 use crate::folder::{wanted, Access, Creation, Facts, Folder, From, Op, Refusal, Reply};
 
 const EPOCH: u32 = 0x00AB_CDEF;
 
-fn serve(host: &MemHost, writable: bool) -> Server<MemDir> {
-    Server::new(host.root(), name("SHARED"), writable, EPOCH)
+fn serve(host: &Tree, writable: bool) -> Server<Handle> {
+    let root = host.open_dir("/", false).expect("the folder");
+    Server::new(root, name("SHARED"), writable, EPOCH)
 }
 
-fn look(server: &mut Server<MemDir>, at: &str) -> Result<Facts, Refusal> {
+/// When `path` was last written.
+fn modified(host: &Tree, path: &str) -> Option<Time64> {
+    host.times(path).map(|(_, modified)| modified)
+}
+
+/// How many times any directory was listed.
+fn listings(host: &Tree) -> usize {
+    host.calls()
+        .iter()
+        .filter(|call| call.starts_with("entries "))
+        .count()
+}
+
+fn look(server: &mut Server<Handle>, at: &str) -> Result<Facts, Refusal> {
     match server.call(&Op::Look { path: path(at) })? {
         Reply::Looked(facts) => Ok(facts),
         other => panic!("not what a look answers: {other:?}"),
@@ -23,7 +39,7 @@ fn look(server: &mut Server<MemDir>, at: &str) -> Result<Facts, Refusal> {
 
 /// Every name a search of `dir` for `pattern` finds, followed to its end.
 fn found(
-    server: &mut Server<MemDir>,
+    server: &mut Server<Handle>,
     dir: &str,
     pattern: &str,
     attributes: u8,
@@ -57,7 +73,7 @@ fn names(found: &[(String, Facts)]) -> Vec<&str> {
 }
 
 fn open(
-    server: &mut Server<MemDir>,
+    server: &mut Server<Handle>,
     at: &str,
     access: Access,
     creation: Creation,
@@ -72,7 +88,7 @@ fn open(
     }
 }
 
-fn read(server: &mut Server<MemDir>, handle: u32, offset: u32, len: u32) -> Vec<u8> {
+fn read(server: &mut Server<Handle>, handle: u32, offset: u32, len: u32) -> Vec<u8> {
     match server.call(&Op::Read {
         handle,
         offset,
@@ -85,7 +101,7 @@ fn read(server: &mut Server<MemDir>, handle: u32, offset: u32, len: u32) -> Vec<
 
 #[test]
 fn the_root_is_the_share_labelled_and_a_node_is_what_the_host_says() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/README.TXT", b"hello")
         .dir("/GAMES")
         .file("/.hidden", b"x");
@@ -95,7 +111,7 @@ fn the_root_is_the_share_labelled_and_a_node_is_what_the_host_says() {
     assert_eq!(root.name, name("SHARED"));
     let file = look(&mut server, "\\README.TXT").expect("the file");
     assert_eq!((file.directory, file.size, file.hidden), (false, 5, false));
-    assert_eq!(file.modified, host.modified("/README.TXT").expect("held"));
+    assert_eq!(file.modified, modified(&host, "/README.TXT").expect("held"));
     assert!(
         look(&mut server, "\\GAMES")
             .expect("the directory")
@@ -116,7 +132,7 @@ fn the_root_is_the_share_labelled_and_a_node_is_what_the_host_says() {
 
 #[test]
 fn a_search_finds_each_matching_entry_once_by_a_stable_name_and_kind() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/Long File Name.txt", b"1")
         .file("/Long File Number Two.txt", b"22")
         .file("/readme.txt", b"333")
@@ -189,24 +205,24 @@ fn a_search_finds_each_matching_entry_once_by_a_stable_name_and_kind() {
 
 #[test]
 fn an_entry_made_elsewhere_is_found_and_a_name_keeps_its_alias_beside_it() {
-    let host = MemHost::new().file("/Long File Name.txt", b"1");
+    let host = Tree::new().file("/Long File Name.txt", b"1");
     let mut server = serve(&host, true);
     assert_eq!(names(&found(&mut server, "", "*.*", 0)), ["LONGFI~1.TXT"]);
-    host.put("/Long File Again.txt", b"2");
+    host.write("/Long File Again.txt", b"2");
     assert_eq!(
         names(&found(&mut server, "", "*.*", 0)),
         ["LONGFI~1.TXT", "LONGFI~2.TXT"],
         "the older name keeps its alias though the newer sorts first"
     );
-    host.put("/later.txt", b"3");
+    host.write("/later.txt", b"3");
     assert!(
         look(&mut server, "\\LATER.TXT").is_ok(),
         "a lookup reads afresh"
     );
-    let lists = host.lists();
+    let lists = listings(&host);
     assert_eq!(look(&mut server, "\\NOTHERE.TXT"), Err(Refusal::NotFound));
     assert_eq!(
-        host.lists(),
+        listings(&host),
         lists,
         "an unchanged directory is not read again"
     );
@@ -214,7 +230,7 @@ fn an_entry_made_elsewhere_is_found_and_a_name_keeps_its_alias_beside_it() {
 
 #[test]
 fn a_search_under_way_keeps_its_place_as_entries_go_beside_it() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/A.TXT", b"a")
         .file("/B.TXT", b"b")
         .file("/C.TXT", b"c");
@@ -248,12 +264,12 @@ fn a_search_under_way_keeps_its_place_as_entries_go_beside_it() {
 
 #[test]
 fn an_entry_renamed_in_its_directory_keeps_its_place_and_one_moved_takes_a_new_one() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/A.TXT", b"a")
         .file("/B.TXT", b"b")
         .dir("/SUB");
     let mut server = serve(&host, true);
-    let rename = |server: &mut Server<MemDir>, from: &str, to: &str| {
+    let rename = |server: &mut Server<Handle>, from: &str, to: &str| {
         server
             .call(&Op::Rename {
                 from: path(from),
@@ -279,7 +295,7 @@ fn an_entry_renamed_in_its_directory_keeps_its_place_and_one_moved_takes_a_new_o
 
 #[test]
 fn a_file_is_made_written_read_cut_and_stamped() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let mut server = serve(&host, true);
     let (handle, facts) =
         open(&mut server, "\\NEW.TXT", Access::Both, Creation::Truncate).expect("made");
@@ -308,7 +324,7 @@ fn a_file_is_made_written_read_cut_and_stamped() {
         Ok(Reply::Done)
     );
     assert_eq!(host.bytes("/NEW.TXT").as_deref(), Some(&b"hello"[..]));
-    assert_eq!(host.modified("/NEW.TXT"), Some(stamp));
+    assert_eq!(modified(&host, "/NEW.TXT"), Some(stamp));
     assert_eq!(
         server.call(&Op::Read {
             handle,
@@ -338,11 +354,12 @@ fn a_file_is_made_written_read_cut_and_stamped() {
 
 #[test]
 fn a_read_only_share_and_a_locked_file_refuse_every_change() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/FILE.TXT", b"data")
         .file("/LOCKED.TXT", b"keep")
-        .locked("/LOCKED.TXT")
-        .dir("/D");
+        .with_mode("/LOCKED.TXT", 0o444)
+        .dir("/D")
+        .checking_permissions();
     let mut server = serve(&host, false);
     assert!(!look(&mut server, "").expect("the root").writable);
     assert!(!look(&mut server, "\\FILE.TXT").expect("the file").writable);
@@ -399,7 +416,7 @@ fn a_read_only_share_and_a_locked_file_refuse_every_change() {
 
 #[test]
 fn entries_are_removed_renamed_and_made_as_dos_asks() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/A.TXT", b"a")
         .file("/D/INSIDE.TXT", b"i")
         .dir("/EMPTY");
@@ -427,6 +444,15 @@ fn entries_are_removed_renamed_and_made_as_dos_asks() {
         Err(Refusal::PathNotFound),
         "a file is not removed as a directory"
     );
+    assert_eq!(
+        server.call(&Op::Remove {
+            path: path("\\EMPTY"),
+            directory: false,
+        }),
+        Err(Refusal::Denied),
+        "an empty directory is not deleted as a file, though the host's plain removal would take it"
+    );
+    assert!(host.exists("/EMPTY"));
     assert_eq!(
         server.call(&Op::Remove {
             path: path("\\EMPTY"),
@@ -470,7 +496,7 @@ fn entries_are_removed_renamed_and_made_as_dos_asks() {
 
 #[test]
 fn a_link_is_reached_as_what_it_names_and_a_dangling_one_is_passed_over() {
-    let host = MemHost::new()
+    let host = Tree::new()
         .file("/data/real.txt", b"through")
         .link("/alias.txt", "/data/real.txt")
         .link("/folder", "/data")
@@ -489,7 +515,7 @@ fn a_link_is_reached_as_what_it_names_and_a_dangling_one_is_passed_over() {
 
 #[test]
 fn handles_are_the_shares_own_and_bounded() {
-    let host = MemHost::new().file("/F.TXT", b"f");
+    let host = Tree::new().file("/F.TXT", b"f");
     let mut server = serve(&host, true);
     let (handle, _) =
         open(&mut server, "\\F.TXT", Access::Read, Creation::Existing).expect("opened");
@@ -522,9 +548,9 @@ fn handles_are_the_shares_own_and_bounded() {
 
 #[test]
 fn times_are_on_the_machines_clock_both_ways() {
-    let host = MemHost::new().file("/F.TXT", b"f");
+    let host = Tree::new().file("/F.TXT", b"f");
     let mut server = serve(&host, true);
-    let held = host.modified("/F.TXT").expect("held");
+    let held = modified(&host, "/F.TXT").expect("held");
     server.set_clock_offset(3600);
     let shown = look(&mut server, "\\F.TXT").expect("the file").modified;
     assert_eq!(shown.secs(), held.secs() + 3600);
@@ -539,20 +565,20 @@ fn times_are_on_the_machines_clock_both_ways() {
         Ok(Reply::Done)
     );
     assert_eq!(
-        host.modified("/F.TXT"),
+        modified(&host, "/F.TXT"),
         Some(Time64::from_secs(700_000_000))
     );
 }
 
 #[test]
 fn a_full_volume_writes_nothing_more_and_space_is_the_volumes() {
-    let host = MemHost::new().file("/F.TXT", &[1; 1024]);
+    let host = Tree::new().file("/F.TXT", &[1; 1024]);
     let mut server = serve(&host, true);
     let Ok(Reply::Space(space)) = server.call(&Op::Space) else {
         panic!("the volume's space");
     };
     assert_eq!(space.total_blocks - space.free_blocks, 2);
-    let full = host.clone().full();
+    let full = host.clone().refuse("write /F.TXT", Errno::NoSpace);
     let mut server = serve(&full, true);
     let (handle, _) =
         open(&mut server, "\\F.TXT", Access::Write, Creation::Existing).expect("opened");

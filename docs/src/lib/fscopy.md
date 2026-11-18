@@ -18,14 +18,20 @@ A tool walks a tree through directories it holds open, reaching each child by
 its name from there and never through a link it was not asked to follow, so a
 name swapped for a link between a tool's reading it and its acting on it leads
 nowhere new. `Node` is a held node (its stat, mode, owner, times, attributes, sync and
-the space of the volume it lies on); `Dir` a held directory, whose children are listed whole (`entries`,
-each `Entry` its name, kind and the identity the listing gave it), opened
-(`open_dir`, `open_file` for reading or for writing alone, `open_node`, each
-never through a link; `enter` and `follow` through a final link, where an
-operand's own path leads), made (`create_file`, `make_dir`, `symlink`, `link`
-with a final link followed or not), read (`readlink`) and removed or renamed
-(`unlink`, `rename`, each able to name the node it expects through
-`NodeExpect`). `Roots` opens a tool's operands from the working directory: a
+the space of the volume it lies on); `Dir` a held directory, whose children are listed whole up to
+a bound the caller gives (`entries`, each `Entry` its name, kind and the
+identity the listing gave it), opened (`open_dir`, `open_file` for reading or
+for writing alone, `open_node`, each never through a link; `enter` and
+`follow` through a final link, where an operand's own path leads), made
+(`create_file`, `make_dir`, `symlink`, `link` with a final link followed or
+not), read (`readlink`), removed or renamed (`unlink`, `rename`, each able to
+name the node it expects through `NodeExpect`) and asked of (`access`, of a
+link itself or what it leads to, or of the directory for an empty name). A
+server of a held folder reaches the files it serves through a final link by
+`open_reached`, for reading, writing or both (`FileAccess`), opening, making
+or emptying the file as `Creation` asks, and writes through `WriteAt`, which
+tells how much of a write a filling volume took: PCEmulator's shared folders
+and TAIRiX Bridge's HostFS are served that way. `Roots` opens a tool's operands from the working directory: a
 directory with its final link followed or not (`open_dir`), the directory
 holding an operand's last component (`parent`), or the node itself
 (`open_node`). `open_operand` opens an operand through its final link as the

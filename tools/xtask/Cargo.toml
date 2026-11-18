@@ -430,16 +430,16 @@ tairix-shaders = { path = "../../lib/shaders", version = "=0.0.0" }
 # through the crate's own vector runner, so the sample its tests replay and
 # the full suite are judged by one definition.
 tairix-openmicro = { path = "../../userland/apps/openmicro", version = "=0.0.0" }
-# The RISC OS emulator's ARM: held to the external ARM7TDMI conformance suite
+# TAIRiX Bridge's ARM: held to the external ARM7TDMI conformance suite
 # through the crate's own vector runner, so the sample its tests replay and
 # the full suite are judged by one definition.
-tairix-riscos-arm = { path = "../../userland/apps/riscos/arm", version = "=0.0.0" }
+tairix-riscos-arm = { path = "../../userland/apps/tairix-bridge/riscos/arm", version = "=0.0.0" }
 # The FPA harness reads packed decimal and weighs values through the
 # library the FPA itself rounds with.
 tairix-softfloat = { path = "../../lib/softfloat", version = "=0.0.0" }
-# The RISC OS emulator's corpus format, and the BASIC tokeniser its reference
+# TAIRiX Bridge's corpus format, and the BASIC tokeniser its reference
 # harness is written with.
-tairix-riscos-kernel = { path = "../../userland/apps/riscos/kernel", version = "=0.0.0" }
+tairix-riscos-kernel = { path = "../../userland/apps/tairix-bridge/riscos/kernel", version = "=0.0.0" }
 tairix-openbasic = { path = "../../lib/openbasic", version = "=0.0.0" }
 # The emulators' machine library: the Open Micro vertical aims at a card and
 # its menu, and declares the icon-bar menu, through the library's own layout

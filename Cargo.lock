@@ -2288,6 +2288,7 @@ dependencies = [
  "tairix-buildcfg",
  "tairix-bytedev",
  "tairix-collections",
+ "tairix-filecore",
  "tairix-fsmeta",
  "tairix-fsprobe",
  "tairix-fsserve",
@@ -2643,6 +2644,7 @@ dependencies = [
  "tairix-caps",
  "tairix-drvrt",
  "tairix-fat",
+ "tairix-filecore",
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
@@ -2699,6 +2701,7 @@ dependencies = [
  "tairix-bytedev",
  "tairix-drvrt",
  "tairix-fat",
+ "tairix-filecore",
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
@@ -2846,6 +2849,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-filecore"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-bytedev",
+ "tairix-fsmeta",
+]
+
+[[package]]
 name = "tairix-files"
 version = "0.0.0"
 dependencies = [
@@ -2973,6 +2985,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-dfs",
  "tairix-fat",
+ "tairix-filecore",
  "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-path",
@@ -4343,6 +4356,7 @@ dependencies = [
  "tairix-crt",
  "tairix-fat",
  "tairix-font",
+ "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-hash",
@@ -4648,14 +4662,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-filing"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-browse",
+ "tairix-collections",
+ "tairix-filecore",
+ "tairix-fscopy",
+ "tairix-fsmeta",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-obey",
+ "tairix-reclaim",
+ "tairix-riscos-arm",
+ "tairix-riscos-kernel",
+ "tairix-tz",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-riscos-kernel"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-collections",
+ "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-inline",
+ "tairix-log",
  "tairix-obey",
+ "tairix-reclaim",
  "tairix-riscos-arm",
  "tairix-tz",
  "tairix-tzcompile",

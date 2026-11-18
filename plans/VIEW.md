@@ -218,7 +218,7 @@ What "complete" means, per format:
   image's own depth, a new-format 1-bit mask, and a wide 8-bit alpha mask.
   It belongs in the shared crate because it has other consumers: the icon
   pipeline draws a RISC OS application from its `!Sprites` through it
-  (`plans/ICONS.md` I17), and the RISC OS emulator's sprite operations read
+  (`plans/ICONS.md` I17), and TAIRiX Bridge's sprite operations read
   its structures (`plans/RISCOS-EMULATOR.md` RO22).
 
 ### A format with no signature is recognised by the length it states

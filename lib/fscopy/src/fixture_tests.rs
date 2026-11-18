@@ -2,11 +2,89 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, NodeExpect, RenameFlags, UnlinkFlags};
+use tairix_abi::{Access, Errno, NodeExpect, RenameFlags, UnlinkFlags};
 
 use super::{resolve, Tree, USER};
-use crate::data::Target;
-use crate::tree::{Dir, Kind, Node, Roots};
+use crate::data::{Source, Target};
+use crate::tree::{Creation, Dir, FileAccess, Kind, Node, Roots, WriteAt};
+
+#[test]
+fn a_reached_file_is_opened_through_a_link_and_made_or_emptied_as_asked() {
+    let tree = Tree::new()
+        .dir("/s")
+        .file("/s/f", b"held")
+        .link("/s/l", "f")
+        .dir("/s/d");
+    let held = tree.open_dir("/s", false).expect("opens");
+    let mut both = held
+        .open_reached("l", FileAccess::Both, Creation::Existing, 0o644)
+        .expect("through the link");
+    let mut read = [0; 4];
+    assert_eq!(both.read_at(0, &mut read), Ok(4));
+    assert_eq!(&read, b"held");
+    assert_eq!(both.write_at(4, b"!"), Ok(1));
+    assert_eq!(tree.bytes("/s/f"), Some(b"held!".to_vec()));
+    assert_eq!(
+        held.open_reached("f", FileAccess::Write, Creation::New, 0o644)
+            .map(drop),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(
+        held.open_reached("gone", FileAccess::Read, Creation::Existing, 0o644)
+            .map(drop),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        held.open_reached("d", FileAccess::Read, Creation::Existing, 0o644)
+            .map(drop),
+        Err(Errno::IsADirectory)
+    );
+    held.open_reached("f", FileAccess::Write, Creation::Truncate, 0o644)
+        .expect("emptied");
+    assert_eq!(tree.bytes("/s/f"), Some(Vec::new()));
+    held.open_reached("new", FileAccess::Write, Creation::New, 0o644)
+        .expect("made");
+    assert!(tree.exists("/s/new"));
+}
+
+#[test]
+fn a_read_only_file_is_reached_to_read_alone_and_a_directory_asks_of_itself() {
+    let tree = Tree::new()
+        .dir("/s")
+        .file("/s/f", b"held")
+        .with_mode("/s/f", 0o444)
+        .with_mode("/s", 0o555)
+        .checking_permissions();
+    let held = tree.open_dir("/s", false).expect("opens");
+    held.open_reached("f", FileAccess::Read, Creation::Existing, 0o644)
+        .expect("readable");
+    assert_eq!(
+        held.open_reached("f", FileAccess::Both, Creation::Existing, 0o644)
+            .map(drop),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        held.access("", Access::WRITE, false),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(held.access("", Access::READ, false), Ok(()));
+    assert_eq!(
+        held.access("f", Access::WRITE, true),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn a_listing_stops_at_the_most_asked_for() {
+    let tree = Tree::new()
+        .dir("/s")
+        .file("/s/a", b"")
+        .file("/s/b", b"")
+        .file("/s/c", b"");
+    let held = tree.open_dir("/s", false).expect("opens");
+    assert_eq!(held.entries(2).map(|entries| entries.len()), Ok(2));
+    assert_eq!(held.entries(usize::MAX).map(|entries| entries.len()), Ok(3));
+}
 
 #[test]
 fn a_held_directory_is_its_node_wherever_its_name_goes() {
@@ -15,7 +93,7 @@ fn a_held_directory_is_its_node_wherever_its_name_goes() {
     tree.rename("/a", "/b");
     tree.relink("/a", "/b");
     let names: Vec<_> = held
-        .entries()
+        .entries(usize::MAX)
         .expect("lists")
         .into_iter()
         .map(|entry| entry.name)

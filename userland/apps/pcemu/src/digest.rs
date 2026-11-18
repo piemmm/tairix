@@ -27,7 +27,7 @@ use crate::time::{Nanos, NANOS_PER_SECOND};
 /// Any change to what the machine does moves it. The constant is the record
 /// of what the machine does, written down deliberately when it changes and
 /// never pasted out of a failure.
-pub const REFERENCE_DIGEST: u64 = 0x4962_880E_3C2A_8CB8;
+pub const REFERENCE_DIGEST: u64 = 0x1D6C_855E_F943_23F3;
 
 /// The machine the run boots: the one a new library is given.
 const MACHINE: Template = Template::TurboXt;

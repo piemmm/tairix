@@ -165,7 +165,7 @@ fn a_spark_archive_reads_as_its_nested_directories_and_risc_os_names() {
         [
             b"!App".to_vec(),
             b"DOS.TXT".to_vec(),
-            "Notes\u{a0}One".as_bytes().to_vec()
+            "Notes One".as_bytes().to_vec()
         ]
     );
     let app = walk(&mut fs, &[b"!App"]);
@@ -213,7 +213,7 @@ fn unchanged_records_are_copied_whole_and_changes_written_afresh() {
     let body = b"compressed by the writer, ".repeat(400);
     fs.write_all(added, 0, &body).unwrap();
     fs.rename(root, b"DOS.TXT", root, b"Dos.txt").unwrap();
-    let notes = walk(&mut fs, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut fs, &["Notes One".as_bytes()]);
     fs.set_attr(notes, b"acorn.filetype", b"ffd").unwrap();
     fs.flush().unwrap();
     let written = attachment.archive();
@@ -231,7 +231,7 @@ fn unchanged_records_are_copied_whole_and_changes_written_afresh() {
     );
     let dos = walk(&mut reopened, &[b"Dos.txt"]);
     assert_eq!(contents(&mut reopened, dos), b"dos");
-    let notes = walk(&mut reopened, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut reopened, &["Notes One".as_bytes()]);
     let mut value = [0u8; 16];
     let len = reopened
         .get_attr(notes, b"acorn.filetype", &mut value)
@@ -285,7 +285,7 @@ fn what_the_format_has_no_place_for_is_refused() {
     let root = fs.root();
     for refused in [
         &b"Thirteen-long"[..],
-        b"has space",
+        "no\u{a0}break".as_bytes(),
         b"dollar$",
         "\u{263a}".as_bytes(),
     ] {
@@ -299,7 +299,7 @@ fn what_the_format_has_no_place_for_is_refused() {
         fs.create_link(root, b"Link", b"Notes", &file_record()),
         Err(DriverError::Unsupported)
     );
-    let notes = walk(&mut fs, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut fs, &["Notes One".as_bytes()]);
     assert_eq!(
         fs.set_security(notes, NodeSecurity::new(0o600, 0, 0)),
         Err(DriverError::Unsupported)
@@ -373,7 +373,7 @@ fn an_archive_with_records_that_cannot_be_written_back_opens_read_only() {
 fn a_datestamp_set_is_the_members_time_through_a_commit() {
     let attachment = MemoryAttachment::new(&sample(), true, b"sample.spk");
     let mut fs = open(&attachment);
-    let notes = walk(&mut fs, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut fs, &["Notes One".as_bytes()]);
     fs.set_attr(notes, b"acorn.datestamp", b"3a1b2c3d4e")
         .unwrap();
     let dated = tairix_fsmeta::preset::acorn::centiseconds_to_time64(0x3a_1b2c_3d4e).unwrap();
@@ -384,7 +384,7 @@ fn a_datestamp_set_is_the_members_time_through_a_commit() {
         false,
         b"sample.spk",
     ));
-    let notes = walk(&mut reopened, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut reopened, &["Notes One".as_bytes()]);
     let mut value = [0u8; 16];
     let len = reopened
         .get_attr(notes, b"acorn.datestamp", &mut value)
@@ -408,7 +408,7 @@ fn a_typed_member_written_under_a_fine_clock_is_stamped_to_its_centisecond() {
         tairix_abi::driver::filesystem::clock::TestClock::volume(),
         tairix_abi::driver::filesystem::clock::TestClock::at(Some(clock)),
     );
-    let notes = walk(&mut fs, &["Notes\u{a0}One".as_bytes()]);
+    let notes = walk(&mut fs, &["Notes One".as_bytes()]);
     fs.set_attr(notes, b"acorn.filetype", b"ffd").unwrap();
     fs.write_at(notes, 0, b"typed")
         .expect("a typed member takes the write");

@@ -48,7 +48,7 @@ const WHOLE_SECONDS: StampField =
 use tairix_path::{dir_name, join, leaf_name, parse, root_len};
 
 use crate::data::{Source, Target};
-use crate::tree::{entry_name, Dir, Entry, Kind, Node, Roots};
+use crate::tree::{entry_name, Creation, Dir, Entry, FileAccess, Kind, Node, Roots, WriteAt};
 
 /// Who the tree's caller is, and who every node belongs to unless a builder
 /// says otherwise.
@@ -910,6 +910,20 @@ impl Tree {
         .flatten()
     }
 
+    /// The names the directory `path` holds, in byte order; none for
+    /// anything else.
+    #[must_use]
+    pub fn names(&self, path: &str) -> Vec<String> {
+        let mut names = self
+            .read(path, |data| match &data.body {
+                Body::Dir { entries, .. } => entries.iter().map(|(name, _)| name.clone()).collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default();
+        names.sort_unstable();
+        names
+    }
+
     /// What `path` names, a final link not followed.
     #[must_use]
     pub fn kind(&self, path: &str) -> Option<Kind> {
@@ -1459,7 +1473,7 @@ impl Node for Handle {
 impl Dir for Handle {
     type File = Self;
 
-    fn entries(&self) -> Result<Vec<Entry>, Errno> {
+    fn entries(&self, most: usize) -> Result<Vec<Entry>, Errno> {
         self.tree.begin("entries", self.node, None)?;
         let state = self.state();
         let entries = state.entries(self.node)?;
@@ -1471,6 +1485,7 @@ impl Dir for Handle {
         }
         Ok(entries
             .iter()
+            .take(most)
             .map(|(name, child)| Entry {
                 name: name.clone(),
                 kind: match state.data(*child).body {
@@ -1526,6 +1541,49 @@ impl Dir for Handle {
         self.tree.begin("open_node", self.node, Some(name))?;
         let child = self.child(name)?;
         Ok(self.tree.handle(child, false, false))
+    }
+
+    fn open_reached(
+        &self,
+        name: &str,
+        access: FileAccess,
+        creation: Creation,
+        mode: u32,
+    ) -> Result<Self, Errno> {
+        self.tree.begin("open_reached", self.node, Some(name))?;
+        let found = self.state().resolve_from(self.node, name, true, true);
+        let (node, fresh) = match (creation, found) {
+            (Creation::New, Ok(_)) => return Err(Errno::AlreadyExists),
+            (Creation::Truncate | Creation::New, Err(Errno::NotFound)) => {
+                let body = Body::File {
+                    bytes: Vec::new(),
+                    runs: None,
+                };
+                (self.make(name, body, mode)?, true)
+            }
+            (_, Err(errno)) => return Err(errno),
+            (_, Ok(node)) => (node, false),
+        };
+        if !fresh {
+            let state = self.state();
+            if state.is_dir(node) {
+                return Err(Errno::IsADirectory);
+            }
+            let wanted = [
+                (access.reads(), READ),
+                (access.writes() || creation == Creation::Truncate, WRITE),
+            ]
+            .iter()
+            .filter(|(asked, _)| *asked)
+            .fold(0, |bits, (_, bit)| bits | bit);
+            state.require(node, wanted)?;
+        }
+        if creation == Creation::Truncate && !fresh {
+            self.tree
+                .handle(node, false, true)
+                .changed_bytes(Vec::clear)?;
+        }
+        Ok(self.tree.handle(node, access.reads(), access.writes()))
     }
 
     fn create_file(&self, name: &str, mode: u32) -> Result<Self, Errno> {
@@ -1675,9 +1733,15 @@ impl Dir for Handle {
         Ok(())
     }
 
-    fn access(&self, name: &str, want: Access) -> Result<(), Errno> {
+    fn access(&self, name: &str, want: Access, follow: bool) -> Result<(), Errno> {
         self.tree.begin("access", self.node, Some(name))?;
-        let child = self.child(name)?;
+        let child = if name.is_empty() {
+            self.node
+        } else if follow {
+            self.state().resolve_from(self.node, name, true, true)?
+        } else {
+            self.child(name)?
+        };
         let bits = [
             (Access::READ, READ),
             (Access::WRITE, WRITE),
@@ -1775,6 +1839,12 @@ impl Source for Handle {
     fn size(&mut self) -> Result<u64, Errno> {
         self.tree.data_failure("size", self.node)?;
         self.file_bytes(|bytes, _| bytes.len() as u64)
+    }
+}
+
+impl WriteAt for Handle {
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, Errno> {
+        self.write_all_at(offset, bytes).map(|()| bytes.len())
     }
 }
 

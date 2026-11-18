@@ -5,15 +5,15 @@
 use super::*;
 use std::string::String;
 use tairix_abi::driver::filesystem::{FilesystemLabel, VolumeTitle, WriteRefusal};
-use tairix_fsprobe::adfs::{
+use tairix_filecore::record::{
     boot_block_checksum, old_map_checksum, validate_old_map, zone_check, DiscRecord, MapCopy,
-    DISC_RECORD_IN_BOOT_BLOCK, OLD_MAP_SIZE, OLD_NAME_BYTES, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
+    DISC_RECORD_IN_BOOT_BLOCK, OLD_DISC_ID, OLD_MAP_SIZE, OLD_NAME_BYTES, ZONE_CHECK_BYTE,
+    ZONE_HEADER_SIZE,
 };
 use tairix_fsprobe::{ProbedVolume, Recognised};
 
 /// An old-map and a new-map floppy, for what both maps share.
-const BOTH_MAPS: [(AdfsVariant, usize); 2] =
-    [(AdfsVariant::L, 640 * 1024), (AdfsVariant::F, 1600 * 1024)];
+const BOTH_MAPS: [(Variant, usize); 2] = [(Variant::L, 640 * 1024), (Variant::F, 1600 * 1024)];
 
 fn title(text: &str) -> VolumeTitle {
     VolumeTitle::new(text).expect("a title")
@@ -95,7 +95,7 @@ fn a_new_map_title_lands_in_both_map_copies_and_the_boot_block() {
         }
         let mut fs = fresh(variant, bytes);
         fs.set_label(&title("Disc1")).expect("retitled");
-        let Backing::New { map, boot_block } = &fs.backing else {
+        let Backing::New { map, boot_block } = fs.volume.backing() else {
             panic!("{variant:?} has a new map");
         };
         let (record, boot_block) = (map.record, *boot_block);
@@ -128,15 +128,25 @@ fn an_old_map_title_spans_both_sectors_and_reseals_them() {
             continue;
         }
         let mut fs = fresh(variant, bytes);
-        let before = fs.volume.device().data.clone();
+        let before = fs.volume.disc().device().data.clone();
         fs.set_label(&title("Games")).expect("retitled");
         let after = fs.into_device().data;
         let map: &[u8; OLD_MAP_SIZE] = after[..OLD_MAP_SIZE].try_into().expect("a map");
         assert_eq!(validate_old_map(map), Ok(()), "{variant:?}");
         let name: Vec<u8> = OLD_NAME_BYTES.iter().map(|&at| after[at]).collect();
         assert_eq!(name, b"Games     ", "{variant:?}");
+        let id = |image: &[u8]| u16::from_le_bytes([image[OLD_DISC_ID], image[OLD_DISC_ID + 1]]);
+        assert_eq!(
+            id(&after),
+            id(&before).wrapping_add(1),
+            "the disc's first change marks it"
+        );
+        let ids = OLD_DISC_ID..OLD_DISC_ID + 2;
         let stray = (0..after.len()).find(|&at| {
-            after[at] != before[at] && !OLD_NAME_BYTES.contains(&at) && !sums.contains(&at)
+            after[at] != before[at]
+                && !OLD_NAME_BYTES.contains(&at)
+                && !sums.contains(&at)
+                && !ids.contains(&at)
         });
         assert_eq!(stray, None, "{variant:?}");
     }
@@ -149,7 +159,7 @@ fn an_old_map_title_spans_both_sectors_and_reseals_them() {
 fn a_title_the_disc_cannot_hold_is_refused_and_nothing_written() {
     for (variant, bytes) in BOTH_MAPS {
         let mut fs = fresh(variant, bytes);
-        let before = fs.volume.device().data.clone();
+        let before = fs.volume.disc().device().data.clone();
         for (text, refusal) in [
             ("ElevenChars", DriverError::LengthOutOfRange),
             ("Two Words", DriverError::OutOfRange),
@@ -161,7 +171,7 @@ fn a_title_the_disc_cannot_hold_is_refused_and_nothing_written() {
             let refused = fs.set_label(&title(text));
             assert_eq!(refused, Err(refusal), "{variant:?}: {text}");
         }
-        assert_eq!(fs.volume.device().data, before, "{variant:?}");
+        assert_eq!(fs.volume.disc().device().data, before, "{variant:?}");
         fs.set_label(&title("TenLetters")).expect("ten fit");
         assert_eq!(label_of(&mut fs), "TenLetters", "{variant:?}");
     }
@@ -202,7 +212,7 @@ fn a_volume_served_read_only_refuses_a_title() {
 /// all the same.
 #[test]
 fn a_name_ending_at_an_undefined_byte_reads_alike_and_is_retitled() {
-    let mut disk = fresh(AdfsVariant::L, 640 * 1024).into_device();
+    let mut disk = fresh(Variant::L, 640 * 1024).into_device();
     for (&at, &byte) in OLD_NAME_BYTES.iter().zip(b"Disc\x831    ") {
         disk.data[at] = byte;
     }
@@ -267,9 +277,9 @@ impl Block for Faulting {
 /// leaves the volume refusing every later change, damaged.
 #[test]
 fn a_retitle_failing_part_way_keeps_its_name_and_damages_the_volume() {
-    let disk = fresh(AdfsVariant::F, 1600 * 1024).into_device();
+    let disk = fresh(Variant::F, 1600 * 1024).into_device();
     let mut fs = Adfs::open(Faulting { disk, writes: 1 }).expect("opens");
-    let held = |fs: &Adfs<Faulting>| match &fs.backing {
+    let held = |fs: &Adfs<Faulting>| match fs.volume.backing() {
         Backing::New { map, .. } => map.record.disc_name,
         Backing::Old { .. } => panic!("F has a new map"),
     };

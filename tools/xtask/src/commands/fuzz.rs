@@ -147,52 +147,67 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_arm",
-        description: "userland/apps/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks, and over the guest MMU without writing a host page or storing into a watched granule unreported",
+        description: "userland/apps/tairix-bridge/riscos/arm: any word decoded on every profile, encoded back exactly and given its text; any program run from any registers and mode without leaving a mode the profile lacks, and over the guest MMU without writing a host page or storing into a watched granule unreported",
     },
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_fpa",
-        description: "userland/apps/riscos/arm: the FPA's every operation, load and store on any register values and FPSR, trapping only where enabled; any FPA program run from any state",
+        description: "userland/apps/tairix-bridge/riscos/arm: the FPA's every operation, load and store on any register values and FPSR, trapping only where enabled; any FPA program run from any state",
     },
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_simdfp",
-        description: "userland/apps/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather; any built with hostile numbers encoded, shown and judged without a panic",
+        description: "userland/apps/tairix-bridge/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather; any built with hostile numbers encoded, shown and judged without a panic",
     },
     Target {
         package: "tairix-riscos-arm",
         test: "fuzz_mmu",
-        description: "userland/apps/riscos/arm guest MMU: random runs of frame, mapping, space, watch and access operations over TLB-aliasing pages and frame numbers past any limit, each answer held to a TLB-free reference model",
+        description: "userland/apps/tairix-bridge/riscos/arm guest MMU: random runs of frame, mapping, space, watch and access operations over TLB-aliasing pages and frame numbers past any limit, each answer held to a TLB-free reference model",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_areas",
-        description: "userland/apps/riscos/kernel address space: random slot, dynamic-area, sparse and pool calls with hostile arguments under handlers that answer at random and call back in; every page in use stays accounted for and every reported page mapped",
+        description: "userland/apps/tairix-bridge/riscos/kernel address space: random slot, dynamic-area, sparse and pool calls with hostile arguments under handlers that answer at random and call back in; every page in use stays accounted for and every reported page mapped",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_cli",
-        description: "userland/apps/riscos/kernel command line: random lines through OS_CLI — the kernel's commands and abbreviations with hostile parameters, aliases with random templates, prefixes, redirection groups, GSTrans escapes, conditionals and overlong lines; every refusal a value, nothing endless past the host's word, the interpreter left to run the next line",
+        description: "userland/apps/tairix-bridge/riscos/kernel command line: random lines through OS_CLI — the kernel's commands and abbreviations with hostile parameters, aliases with random templates, prefixes, redirection groups, GSTrans escapes, conditionals and overlong lines; every refusal a value, nothing endless past the host's word, the interpreter left to run the next line",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_international",
-        description: "userland/apps/riscos/kernel international surfaces: hostile message files and ResourceFS blocks through every MessageTrans call, the Territory Manager's conversions, collation and symbols over hostile strings, times and formats, and key sequences through the key handler in every keyboard's layout and alphabet; every refusal a value, nothing written past a call's room, the kernel still answering",
+        description: "userland/apps/tairix-bridge/riscos/kernel international surfaces: hostile message files and ResourceFS blocks through every MessageTrans call, the Territory Manager's conversions, collation and symbols over hostile strings, times and formats, and key sequences through the key handler in every keyboard's layout and alphabet; every refusal a value, nothing written past a call's room, the kernel still answering",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_modules",
-        description: "userland/apps/riscos/kernel module chain: module images with random headers, entries, service tables, decoding tables and squeezed data linked through OS_Module, then random reasons, service calls and module SWIs; nothing endless, the kernel answering, the chain walking to its end",
+        description: "userland/apps/tairix-bridge/riscos/kernel module chain: module images with random headers, entries, service tables, decoding tables and squeezed data linked through OS_Module, then random reasons, service calls and module SWIs; nothing endless, the kernel answering, the chain walking to its end",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_squeeze",
-        description: "userland/apps/riscos/kernel squeezed-module expander: the corpus's squeezed modules mutated, and noise carrying a squeezed length, expanded under random bounds; every refusal a value, every expansion whole pairs of words within its trailer's size and the bound, the same each time",
+        description: "userland/apps/tairix-bridge/riscos/kernel squeezed-module expander: the corpus's squeezed modules mutated, and noise carrying a squeezed length, expanded under random bounds; every refusal a value, every expansion whole pairs of words within its trailer's size and the bound, the same each time",
     },
     Target {
         package: "tairix-riscos-kernel",
         test: "fuzz_swis",
-        description: "userland/apps/riscos/kernel SWIs: random SWIs with hostile registers (pointers into application space, at the top of memory, nowhere, misaligned) and random guest code salted with SWIs; every refusal a value, nothing endless past the host's word, the kernel still answering",
+        description: "userland/apps/tairix-bridge/riscos/kernel SWIs: random SWIs with hostile registers (pointers into application space, at the top of memory, nowhere, misaligned) and random guest code salted with SWIs; every refusal a value, nothing endless past the host's word, the kernel still answering",
+    },
+    Target {
+        package: "tairix-riscos-filing",
+        test: "fuzz_hostfs",
+        description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",
+    },
+    Target {
+        package: "tairix-riscos-filing",
+        test: "fuzz_ramfs",
+        description: "userland/apps/tairix-bridge/riscos/filing FileCore over the RAM disc: its map, root and pages scribbled on as a privileged guest may, then saves, loads, opens, transfers, extents, renames, wipes, listings and namings on hostile names; and files run by *Run and *Obey with hostile lines and parameters, an Obey file obeying itself; every refusal a value, never an abort, the free space within the disc, the session still answering",
+    },
+    Target {
+        package: "tairix-riscos-filing",
+        test: "fuzz_bootcommands",
+        description: "userland/apps/tairix-bridge/riscos/filing BootCommands and the boot sequence: every command on hostile parameters (quotation marks, keywords in odd places, sizes past what a size holds, walks that become the application), and the boot over a user's own disc whose !Boot holds hostile Obey files, programs and directories; every refusal a value, every program run to its end and the boot going on after it, every kept failure naming its line, nothing outside the own disc changed, the session still answering",
     },
     Target {
         package: "tairix-softfloat",

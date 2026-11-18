@@ -430,16 +430,7 @@ impl<A: VolumeAccess> FilesystemRead for ArchiveFs<A> {
         let from = if cursor == 0 {
             core::ops::Bound::Unbounded
         } else {
-            let mut key = alloc::vec::Vec::new();
-            key.try_reserve_exact(after.len())
-                .map_err(|_| DriverError::OutOfMemory)?;
-            match self.tree.matching() {
-                NameMatching::AsciiCaseInsensitive => {
-                    key.extend(after.iter().map(u8::to_ascii_lowercase));
-                }
-                _ => key.extend_from_slice(after),
-            }
-            core::ops::Bound::Excluded(key)
+            core::ops::Bound::Excluded(self.tree.key(after)?)
         };
         for (position, (_, &id)) in entries
             .range((from, core::ops::Bound::Unbounded))

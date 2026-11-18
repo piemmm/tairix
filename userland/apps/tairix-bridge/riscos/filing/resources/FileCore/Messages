@@ -1,0 +1,45 @@
+# FileCore's messages, in TAIRiX Bridge's own words.
+ExtEscape:Escape was pressed
+Defect:That disc has a defect there
+TooManyDefects:That disc holds as many defects as it can record
+CompactReq:The disc's free space is too scattered: compact it first
+MapFull:The disc's map has no room for another object
+BadDisc:That disc is not in a form FileCore reads
+TooManyDiscs:Too many discs are in use at once
+BadUp:That directory has no parent
+AmbigDisc:More than one disc goes by that name
+NotRefDisc:That disc is not the one FileCore was using
+InUse:FileCore is busy with that disc
+BadParms:Those parameters do not make sense
+Buffer:FileCore has no room for that transfer
+Workspace:FileCore's workspace is damaged
+BrokenDir:That directory is damaged
+BadFsMap:The disc's map is damaged
+BadDefectList:The disc's defect list is damaged
+BadDrive:There is no such drive
+Size:That size does not fit the disc
+BadRename:That rename is not possible
+DirFull:That directory is full
+DirNotEmpty:That directory is not empty
+Access:That is not allowed
+TooManyOpen:Too many files are open
+Open:That object is open
+Locked:That object is locked
+Exists:That name is already taken
+DiscFull:The disc is full
+Disc:The disc could not be read or written
+WriteProt:That disc may not be changed
+BadName:FileCore cannot spell that name
+BadAtt:Those attributes do not make sense
+DriveEmpty:There is no disc in that drive
+DiscNotFound:There is no disc of that name
+DiscNotPresent:That disc is not in a drive
+NotFound:There is no object of that name
+DiscNotFileCore:That disc is not a FileCore disc
+Channel:No file is open on that handle
+NoMemory:FileCore has no memory for that
+FreeTitle:Free space on %0
+Bytes:%0 bytes free, %1 bytes used, %2 bytes in all
+MapHeader:Free areas of %0
+MapLine:%0  %1 bytes
+Verified:The disc reads correctly

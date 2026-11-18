@@ -77,16 +77,16 @@
 //! - `pcemu-vectors` — imports a vetted subset of the upstream CPU
 //!   conformance suites into `userland/apps/pcemu/assets/cpu-vectors/`
 //!   (`--import <dir>`; developer-run, never in `ci`)
-//! - `riscos` — records the RISC OS emulator's corpus on a developer's
+//! - `riscos` — records TAIRiX Bridge's corpus on a developer's
 //!   genuine RISC OS, RPCEmu run headless where it is installed
 //!   (`--reference <dir>`; developer-run only)
-//! - `riscos-fpa` — holds the RISC OS emulator's FPA to a developer's own
+//! - `riscos-fpa` — holds TAIRiX Bridge's FPA to a developer's own
 //!   FPEmulator module, run as an opaque program (`<module>`; `--write-sample`
-//!   to refresh the sample `userland/apps/riscos/arm` replays; developer-run
+//!   to refresh the sample `userland/apps/tairix-bridge/riscos/arm` replays; developer-run
 //!   only)
-//! - `riscos-vectors` — holds the RISC OS emulator's ARM to the external
+//! - `riscos-vectors` — holds TAIRiX Bridge's ARM to the external
 //!   `SingleStepTests` ARM7TDMI suite (`<dir>`; `--write-sample` to refresh the
-//!   samples `userland/apps/riscos/arm` replays; developer-run only)
+//!   samples `userland/apps/tairix-bridge/riscos/arm` replays; developer-run only)
 //! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation

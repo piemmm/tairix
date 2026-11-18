@@ -195,8 +195,9 @@ pub use layout::{
 };
 pub use marquee::Marquee;
 pub use media::{
-    entry_icon, folder_sample, icon_for_entry, media_for_document, media_for_entry,
-    media_for_filetype, media_for_name, BlankDocument, Ending, Family, MediaType, Site,
+    canonical_filetype, entry_icon, folder_sample, icon_for_entry, media_for_document,
+    media_for_entry, media_for_filetype, media_for_name, BlankDocument, Ending, Family, MediaType,
+    Site,
 };
 pub use mode_edit::{validate_mode, InvalidMode};
 pub use network::{NetworkEndpoint, NetworkItem, Omission};

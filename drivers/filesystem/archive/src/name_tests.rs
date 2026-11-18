@@ -67,6 +67,12 @@ fn a_risc_os_name_trades_its_dots_and_slashes() {
     assert_eq!(to_riscos(b"ReadMe.txt", 10), Some(b"ReadMe/txt".to_vec()));
     assert_eq!(from_riscos(b"\x80uro"), Some("€uro".as_bytes().to_vec()));
     assert_eq!(to_riscos("€uro".as_bytes(), 10), Some(b"\x80uro".to_vec()));
+    assert_eq!(
+        from_riscos(b"Read\xA0Me"),
+        Some(b"Read Me".to_vec()),
+        "a hard space is a space"
+    );
+    assert_eq!(to_riscos(b"Read Me", 10), Some(b"Read\xA0Me".to_vec()));
     // A served name holding `/` would be RISC OS's path separator `.`.
     assert_eq!(from_riscos(b"a.b"), None);
     // Nor is a name read that RISC OS itself could not have written.
@@ -77,7 +83,11 @@ fn a_risc_os_name_trades_its_dots_and_slashes() {
 
 #[test]
 fn a_name_risc_os_could_not_hold_is_not_spelled_for_it() {
-    assert_eq!(to_riscos(b"Ten chars!", 10), None, "a space");
+    assert_eq!(
+        to_riscos("No\u{a0}break".as_bytes(), 10),
+        None,
+        "a no-break space"
+    );
     assert_eq!(to_riscos(b"wild*card", 10), None, "a reserved character");
     assert_eq!(to_riscos(b"Elevenchars", 10), None, "too long");
     assert_eq!(

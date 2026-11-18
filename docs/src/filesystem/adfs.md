@@ -174,15 +174,19 @@ entry present throughout a listing is listed exactly once.
 RISC OS separates a path with `.` and writes the dot of a name from elsewhere
 as `/`, the reverse of TAIRiX, so every name crosses the driver with the two
 exchanged: a RISC OS `ReadMe/txt` is listed and found as `ReadMe.txt`, and
-`notes.txt` is written `notes/txt`. A name's characters cross between UTF-8
-and RISC OS's Latin-1 — ISO 8859-1 with RISC OS's own characters in
-`0x80`–`0x9F`. Both are the one RISC OS name conversion
+`notes.txt` is written `notes/txt`. No RISC OS name holds a space, so a space
+and the hard space RISC OS writes for one trade places too, as RISC OS's own
+filing systems for other machines' discs exchange them. A name's characters
+cross between UTF-8 and RISC OS's Latin-1 — ISO 8859-1 with RISC OS's own
+characters in `0x80`–`0x9F` — so a no-break space, the byte a space is
+written as, is refused. Both are the one RISC OS name conversion
 (`tairix_fsmeta::preset::acorn::leaf_from_riscos` and `leaf_to_riscos`), so a
 name crosses the same way here as through an archive. A big directory keeps
 the whole of that Latin-1; a fixed-format one keeps seven bits, so there a
-name is held to printable ASCII. A name holding a slash is refused, since it
-would reach the disc as a separator, as are a space, a character the
-directory cannot hold, and RISC OS's own specials (`$ & % @ \ ^ : # * " |`).
+name is held to printable ASCII, which a hard space is not. A name holding a
+slash is refused, since it would reach the disc as a separator, as are a
+character the directory cannot hold and RISC OS's own specials
+(`$ & % @ \ ^ : # * " |`).
 An entry on the disc that no path can spell, or that RISC OS could not have
 written — RISC OS's `/` or `//`, which cross to `.` and `..`, a name holding
 the `.` RISC OS keeps out, a space, a special, or a control code — is left out

@@ -19,12 +19,13 @@
 //! plain `cargo test`; keeps drawing from the same seeded stream until
 //! `TAIRIX_FUZZ_BUDGET_SECS` elapses under `cargo xtask fuzz`.
 
+use tairix_fscopy::fixture::Tree;
+use tairix_fscopy::tree::Roots;
 use tairix_fuzzseed::Prng;
 use tairix_pcemu::asm::Asm;
 use tairix_pcemu::bios::{self, Firmware};
 use tairix_pcemu::cpu::{flag, gpr, Bus, Regs, Seg};
 use tairix_pcemu::dos::volume::{self, File};
-use tairix_pcemu::folder::memhost::MemHost;
 use tairix_pcemu::folder::server::Server;
 use tairix_pcemu::folder::{DosName, Share};
 use tairix_pcemu::machine::{Machine, Template};
@@ -79,17 +80,23 @@ const PATHS: &[&str] = &[
 /// The folder shared as drive C: a file, a directory with one, a name DOS
 /// reaches by its alias, and a file the host keeps from change.
 fn folder() -> Share {
-    let host = MemHost::new()
-        .file("file.txt", &[0x42; 1500])
-        .file("DIR/inner.txt", b"inner")
-        .file("Long Name.text", b"long")
-        .file("locked.txt", b"kept")
-        .locked("locked.txt");
+    let host = Tree::new()
+        .file("/file.txt", &[0x42; 1500])
+        .file("/DIR/inner.txt", b"inner")
+        .file("/Long Name.text", b"long")
+        .file("/locked.txt", b"kept")
+        .with_mode("/locked.txt", 0o444)
+        .checking_permissions();
     let label = DosName::new(*b"SHARED     ", false).unwrap();
     Share::new(
         label,
         true,
-        Box::new(Server::new(host.root(), label, true, 0x0C)),
+        Box::new(Server::new(
+            host.open_dir("/", false).expect("the folder"),
+            label,
+            true,
+            0x0C,
+        )),
     )
 }
 

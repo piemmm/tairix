@@ -1,0 +1,547 @@
+# BootCommands, the commands boot sequences and applications rely on:
+# *X, *IfThere, *Do, *AddApp, the RMA commands, *SaveCMOS and *LoadCMOS,
+# *SafeLogon. *Repeat becomes the application, which ends the harness, so
+# it is not here. Only what is the same on every run is shown: no stamp,
+# no CMOS byte, no RMA address, no handle, no name a ROM holds. Each
+# scenario leaves the RAM disc empty and every variable it set unset. The
+# applications *AddApp adds stay in ResourceFS for the session, through
+# the module's restart, so that scenario is lasting.
+
+scenario bootcommands-x
+block buf 64
+call XOS_CLI r0="Unset X$Error"
+show v
+call XOS_CLI r0="X Error 77 Probe one"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="X$Error" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="X Error 78 Probe two"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="X$Error" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="X Set Probe$X ran"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$X" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="X"
+show v
+call XOS_CLI r0="Unset X$Error"
+show v
+call XOS_CLI r0="Unset Probe$X"
+show v
+
+scenario bootcommands-if-there
+block buf 64
+block text 16
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="CDir RAM:$.D"
+show v
+call XOS_CLI r0="IfThere RAM:$.F Then Set Probe$A yes Else Set Probe$A no"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.Missing Then Set Probe$B yes Else Set Probe$B no"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.D THEN Set Probe$C yes ELSE Set Probe$C no"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$C" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.Missing.Deeper Then Set Probe$D yes Else Set Probe$D no"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$D" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.* Then Set Probe$E yes Else Set Probe$E no"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$E" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.F Then Set Probe$G aElseb"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$G" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.F Then"
+show v
+call XOS_CLI r0="IfThere RAM:$.Missing Then Set Probe$H x"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$H" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="IfThere RAM:$.F"
+show v
+call XOS_CLI r0="IfThere"
+show v
+call XOS_CLI r0="IfThere RAM:$.F Then RAM:$.Missing"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+call XOS_CLI r0="Unset Probe$A"
+show v
+call XOS_CLI r0="Unset Probe$B"
+show v
+call XOS_CLI r0="Unset Probe$C"
+show v
+call XOS_CLI r0="Unset Probe$D"
+show v
+call XOS_CLI r0="Unset Probe$E"
+show v
+call XOS_CLI r0="Unset Probe$G"
+show v
+call XOS_CLI r0="Unset Probe$H"
+show v
+
+scenario bootcommands-do
+block buf 64
+call XOS_CLI r0="Set Probe$Y hello"
+show v
+call XOS_CLI r0="SetMacro Probe$Z <Probe$Y>"
+show v
+call XOS_CLI r0="Do Set Probe$W <Probe$Z>"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$W" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Do"
+show v
+call XOS_CLI r0="Do <Probe$Unset>"
+show v
+call XOS_CLI r0="Unset Probe$Y"
+show v
+call XOS_CLI r0="Unset Probe$Z"
+show v
+call XOS_CLI r0="Unset Probe$W"
+show v
+
+scenario bootcommands-add-app lasting
+block buf 64
+block text 16
+block load 128
+block info 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+call XOS_CLI r0="CDir RAM:$.!Pa"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Pa.!Run" r2=&FEB r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Pa.!Boot" r2=&FEB r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="CDir RAM:$.!Qa"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qa.!Run" r2=&FEB r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qa.!Sprites" r2=&FF9 r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qa.!Help" r2=&FEB r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="CDir RAM:$.!Qc"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qc.!Run" r2=&FEB r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qc.!Boot" r2=&FEB r4=$text r5=$text+&1
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qc.!Sprites" r2=&FF9 r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="CDir RAM:$.!Qd"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.!Qd.!Sprites" r2=&FF9 r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="CDir RAM:$.!Qe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.Plain" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="AddApp RAM:$.!P*"
+show v
+call XOS_CLI r0="AddApp RAM:$.!Q*"
+show v
+call XOS_CLI r0="AddApp RAM:$.Plain"
+show v
+call XOS_CLI r0="AddApp RAM:$.!Nothing*"
+show v
+call XOS_CLI r0="AddApp RAM:$.Missing"
+show v
+call XOS_CLI r0="AddApp RAM:$.Missing.!App"
+show v
+call XOS_CLI r0="AddApp RAM:$.!Pa"
+show v
+call XOS_File r0=20 r1="Resources:$.Apps.!Pa"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Pa" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Pa" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Pa" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Pa" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Pa.!Boot"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Pa.!Boot" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Pa.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Pa.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_File r0=20 r1="Resources:$.Apps.!Qa"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qa" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qa" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qa" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qa" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qa.!Boot"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qa.!Boot" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qa.!Help"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qa.!Help" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qa.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qa.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_File r0=20 r1="Resources:$.Apps.!Qc"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qc" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qc" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qc" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qc" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qc.!Boot"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qc.!Boot" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qc.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qc.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_File r0=20 r1="Resources:$.Apps.!Qd"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qd" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qd" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qd" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qd" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qd.!Boot"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qd.!Boot" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qd.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qd.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_File r0=20 r1="Resources:$.Apps.!Qe"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qe" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qe" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qe" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.!Qe" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.!Qe.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.!Qe.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_File r0=20 r1="Resources:$.Apps.Plain"
+show r0 r4 r5 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.Plain" r2=$buf r3=1 r4=0 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.Plain" r2=$buf r3=1 r4=1 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.Plain" r2=$buf r3=1 r4=2 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_GBPB r0=9 r1="Resources:$.Apps.Plain" r2=$buf r3=1 r4=3 r5=64 r6=0
+show r3 r4 v
+show $buf:12
+write $load w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_File r0=20 r1="Resources:$.Apps.Plain.!Run"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="Resources:$.Apps.Plain.!Run" r2=$load r3=0
+show r4 v
+call XOS_CRC r0=0 r1=$load r2=$load+&40 r3=1
+show r0
+call XOS_Module r0=3 r1="BootCommands"
+show v
+call XOS_File r0=20 r1="Resources:$.Apps.!Pa"
+show r0 v
+call XOS_File r0=20 r1="Resources:$.Apps"
+show r0 v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario bootcommands-rma
+call XOS_CLI r0="ShrinkRMA"
+show v
+call XOS_ReadDynamicArea r0=1
+keep r1 rma
+call XOS_CLI r0="AddToRMA 16K"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 4000"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 1M"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="ShrinkRMA"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 64K"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AppSize 16K"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA x"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 16Q"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AppSize x"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AppSlot x"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 5000M"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+call XOS_CLI r0="AddToRMA 3000M"
+show v
+call XOS_ReadDynamicArea r0=1
+show r1-rma v
+
+scenario bootcommands-save-cmos
+block buf 300
+block text 16
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+call XOS_CLI r0="SaveCMOS RAM:$.C"
+show v
+call XOS_File r0=20 r1="RAM:$.C"
+show r0 r4 r5 r6 v
+call XOS_File r0=16 r1="RAM:$.C" r2=$buf r3=0
+show r4 v
+show $buf+&100:4
+call XOS_CLI r0="SaveCMOS RAM:$.C"
+show v
+call XOS_File r0=20 r1="RAM:$.C"
+show r0 r4 r5 r6 v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.T" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_CLI r0="SaveCMOS RAM:$.T"
+show v
+call XOS_File r0=20 r1="RAM:$.T"
+show r0 r4 r5 r6 v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.L" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_File r0=4 r1="RAM:$.L" r5=&B
+show v
+call XOS_CLI r0="SaveCMOS RAM:$.L"
+show v
+call XOS_File r0=20 r1="RAM:$.L"
+show r0 r4 r5 r6 v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.O" r2=&FFF r4=$text r5=$text+&1
+show v
+call XOS_Find r0=&40 r1="RAM:$.O"
+show v
+keep r0 h
+call XOS_CLI r0="SaveCMOS RAM:$.O"
+show v
+call XOS_Find r0=0 r1=$h
+show v
+call XOS_File r0=20 r1="RAM:$.O"
+show r0 r4 r5 r6 v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XOS_CLI r0="SaveCMOS RAM:$.Dir"
+show v
+call XOS_CLI r0="SaveCMOS RAM:$.Missing.C"
+show v
+call XOS_CLI r0="LoadCMOS RAM:$.C"
+show v
+call XOS_CLI r0="LoadCMOS RAM:$.T"
+show v
+call XOS_CLI r0="LoadCMOS RAM:$.Missing"
+show v
+call XOS_File r0=4 r1="RAM:$.L" r5=3
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario bootcommands-safe-logon
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+call XOS_FSControl r0=14 r1="RAM"
+show v
+call XOS_CLI r0="SafeLogon guest"
+show v
+call XOS_CLI r0="SafeLogon :fs guest"
+show v
+call XOS_CLI r0="SafeLogon"
+show v
+call XOS_FSControl r0=14 r1="HostFS"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v

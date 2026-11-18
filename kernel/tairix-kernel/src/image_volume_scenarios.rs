@@ -549,7 +549,7 @@ fn an_acorn_floppy_image_attaches_as_adfs_scenario(
 ) {
     let (host_id, round) = host(window_ptr, facility, 4, b"imgs4");
     let path = "/Storage/imgs4/Elite.adf";
-    let acorn = Adfs::format(RamBlock::new(1600), AdfsVariant::E).expect("formats");
+    let acorn = Adfs::format(RamBlock::new(1600), Variant::E).expect("formats");
     put(0, path, &acorn.into_device().data);
     let member = plain(MEMBER_UID, STORAGE_GID);
     let volume = mounted(attached(

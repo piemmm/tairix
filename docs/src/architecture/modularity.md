@@ -25,7 +25,7 @@ needed to read it — and rejects three classes of defect:
 - **Leaf subtrees with no reverse dependents (§17.3, §17.4).** Three strata
   are leaves: `userland/gui/*`, which keeps the desktop omittable;
   `userland/games/*`, which keeps game code out of the OS libraries; and
-  `userland/apps/riscos/*`, the RISC OS emulator's subsystems, one crate each
+  `userland/apps/tairix-bridge/riscos/*`, TAIRiX Bridge's subsystems, one crate each
   for their size and private to the emulator. Crates inside a leaf compose
   each other and `lib/*`; nothing outside may reach one, even transitively,
   and no leaf reaches another. All three are checked with no exceptions.

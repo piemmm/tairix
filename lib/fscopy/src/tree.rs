@@ -135,19 +135,68 @@ pub trait Node {
     fn volume_stats(&self) -> Result<VolumeStats, Errno>;
 }
 
+/// What [`Dir::open_reached`] opens a file for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FileAccess {
+    /// Reading.
+    Read,
+    /// Writing.
+    Write,
+    /// Both.
+    Both,
+}
+
+impl FileAccess {
+    /// Whether it reads.
+    #[must_use]
+    pub const fn reads(self) -> bool {
+        !matches!(self, Self::Write)
+    }
+
+    /// Whether it writes.
+    #[must_use]
+    pub const fn writes(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
+/// What [`Dir::open_reached`] does with the name it opens.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Creation {
+    /// Open the file the name names; refused where it names none.
+    Existing,
+    /// Make the file, or empty the one the name names.
+    Truncate,
+    /// Make the file; refused where the name is taken.
+    New,
+}
+
+/// A file a server writes in place, which must know how much of a write the
+/// volume took.
+pub trait WriteAt {
+    /// Write `bytes` at `offset`: the bytes written, fewer only where the
+    /// volume filled.
+    ///
+    /// # Errors
+    ///
+    /// The write's refusal: [`Errno::NoSpace`] where nothing could be
+    /// written.
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, Errno>;
+}
+
 /// A directory a tool holds open.
 pub trait Dir: Node + Sized {
     /// A file reached beneath it; `Source` and `Target` are lib/fscopy's data
     /// seams.
-    type File: Node + Source + Target;
+    type File: Node + Source + Target + WriteAt;
 
-    /// Every entry, read once in full, so a walk is not steered by what it
-    /// changes.
+    /// Every entry, up to the first `most`, read once in full, so a walk is
+    /// not steered by what it changes.
     ///
     /// # Errors
     ///
     /// The listing's refusal.
-    fn entries(&self) -> Result<Vec<Entry>, Errno>;
+    fn entries(&self, most: usize) -> Result<Vec<Entry>, Errno>;
 
     /// The child directory `name`, never through a link (`NO_FOLLOW |
     /// DIRECTORY`).
@@ -194,6 +243,25 @@ pub trait Dir: Node + Sized {
     ///
     /// The open's refusal.
     fn open_node(&self, name: &str) -> Result<Self::File, Errno>;
+
+    /// What `name` leads to from here through a final link, opened for
+    /// `access` and made or emptied as `creation` asks, a file it makes born
+    /// with `mode` less the umask: how a server of a held folder reaches the
+    /// files it serves.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for [`Creation::Existing`] where the name names
+    /// nothing, [`Errno::AlreadyExists`] for [`Creation::New`] where it names
+    /// something, [`Errno::IsADirectory`] for a directory, or the open's
+    /// refusal.
+    fn open_reached(
+        &self,
+        name: &str,
+        access: FileAccess,
+        creation: Creation,
+        mode: u32,
+    ) -> Result<Self::File, Errno>;
 
     /// A new file `name` born with `mode` less the umask, never through a
     /// link.
@@ -264,13 +332,14 @@ pub trait Dir: Node + Sized {
     /// The link's refusal.
     fn link(&self, existing: &str, to_dir: &Self, new: &str, follow: bool) -> Result<(), Errno>;
 
-    /// Whether the caller may have `want` of `name`, a link asked about
-    /// itself.
+    /// Whether the caller may have `want` of `name` — of what a final link
+    /// leads to when `follow`, else of the link itself — or of this directory
+    /// for an empty name.
     ///
     /// # Errors
     ///
     /// [`Errno::PermissionDenied`] when it may not, or the query's refusal.
-    fn access(&self, name: &str, want: Access) -> Result<(), Errno>;
+    fn access(&self, name: &str, want: Access, follow: bool) -> Result<(), Errno>;
 }
 
 /// The last component of `path` as a name its parent holds; `None` for a path
@@ -657,7 +726,7 @@ impl<D: Dir, R: Borrow<D>> Cursor<D, R> {
 
 /// `dir`'s entries, each a name a directory can hold.
 fn listing<D: Dir>(dir: &D) -> Result<Vec<Entry>, Errno> {
-    let entries = dir.entries()?;
+    let entries = dir.entries(usize::MAX)?;
     let named = |name: &str| {
         !name.is_empty()
             && name.len() <= FS_NAME_MAX

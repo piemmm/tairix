@@ -6,12 +6,13 @@ use super::super::cache::SectorCache;
 use super::super::testing::{memory, DISCARD};
 use super::super::Memory;
 use super::*;
-use crate::folder::memhost::{MemDir, MemHost};
 use crate::folder::server::Server;
 use crate::folder::{Access, Creation, DosName, SharePath};
 use crate::link::{Command, Event};
 use crate::time::Nanos;
 use alloc::collections::VecDeque;
+use tairix_fscopy::fixture::{Handle, Tree};
+use tairix_fscopy::tree::Roots;
 use tairix_hash::HashSeed;
 use tairix_reclaim::CacheBudget;
 use tairix_sandbox::link::Waited;
@@ -21,7 +22,7 @@ use tairix_sandbox::ProtoError;
 /// The stand-in front-end: its folder, the answers waiting to be read, and
 /// each read it was asked, as its offset and length.
 struct Front {
-    server: Server<MemDir>,
+    server: Server<Handle>,
     answers: VecDeque<Vec<u8>>,
     reads: Vec<(u32, u32)>,
     /// Asked nothing more is answered: the session ends.
@@ -73,10 +74,15 @@ impl Link for ServeLink {
     }
 }
 
-fn served(host: &MemHost) -> (RemoteFolder<ServeLink>, Rc<RefCell<Front>>) {
+fn served(host: &Tree) -> (RemoteFolder<ServeLink>, Rc<RefCell<Front>>) {
     let label = DosName::new(*b"HOST       ", false).unwrap();
     let front = Rc::new(RefCell::new(Front {
-        server: Server::new(host.root(), label, true, 0x51),
+        server: Server::new(
+            host.open_dir("/", false).expect("the folder"),
+            label,
+            true,
+            0x51,
+        ),
         answers: VecDeque::new(),
         reads: Vec::new(),
         silent: false,
@@ -138,7 +144,7 @@ fn counting(len: usize) -> Vec<u8> {
 
 #[test]
 fn small_reads_are_answered_from_one_fetch_of_a_whole_piece() {
-    let host = MemHost::new().file("DATA.BIN", &counting(4000));
+    let host = Tree::new().file("/DATA.BIN", &counting(4000));
     let (mut folder, front) = served(&host);
     let handle = open(&mut folder, b"DATA    BIN");
     for record in 0..20u32 {
@@ -150,20 +156,20 @@ fn small_reads_are_answered_from_one_fetch_of_a_whole_piece() {
 
 #[test]
 fn a_read_reaching_past_what_was_fetched_asks_again_and_sees_the_file_grown() {
-    let host = MemHost::new().file("LOG.TXT", b"first ");
+    let host = Tree::new().file("/LOG.TXT", b"first ");
     let (mut folder, front) = served(&host);
     let handle = open(&mut folder, b"LOG     TXT");
     assert_eq!(read(&mut folder, handle, 0, 100), b"first ");
-    host.replace("LOG.TXT", b"first second");
+    host.write("/LOG.TXT", b"first second");
     assert_eq!(read(&mut folder, handle, 6, 100), b"second");
     assert_eq!(front.borrow().reads, [(0, piece()), (6, piece())]);
 }
 
 #[test]
 fn a_write_through_any_handle_on_the_file_forgets_what_was_fetched_of_it() {
-    let host = MemHost::new()
-        .file("DATA.BIN", &counting(1000))
-        .file("OTHER.BIN", &counting(1000));
+    let host = Tree::new()
+        .file("/DATA.BIN", &counting(1000))
+        .file("/OTHER.BIN", &counting(1000));
     let (mut folder, front) = served(&host);
     let reading = open(&mut folder, b"DATA    BIN");
     let writing = open(&mut folder, b"DATA    BIN");
@@ -187,11 +193,11 @@ fn a_write_through_any_handle_on_the_file_forgets_what_was_fetched_of_it() {
 
 #[test]
 fn a_file_opened_again_is_read_afresh() {
-    let host = MemHost::new().file("DATA.BIN", b"before");
+    let host = Tree::new().file("/DATA.BIN", b"before");
     let (mut folder, front) = served(&host);
     let handle = open(&mut folder, b"DATA    BIN");
     assert_eq!(read(&mut folder, handle, 0, 3), b"bef");
-    host.replace("DATA.BIN", b"after!");
+    host.write("/DATA.BIN", b"after!");
     let again = open(&mut folder, b"DATA    BIN");
     assert_eq!(read(&mut folder, handle, 0, 3), b"aft");
     assert_eq!(read(&mut folder, again, 3, 3), b"er!");
@@ -200,7 +206,7 @@ fn a_file_opened_again_is_read_afresh() {
 
 #[test]
 fn a_read_of_a_whole_piece_goes_straight_to_the_front_end() {
-    let host = MemHost::new().file("BIG.BIN", &counting(3 * AHEAD));
+    let host = Tree::new().file("/BIG.BIN", &counting(3 * AHEAD));
     let (mut folder, front) = served(&host);
     let handle = open(&mut folder, b"BIG     BIN");
     let bytes = read(&mut folder, handle, piece(), piece());
@@ -215,7 +221,7 @@ fn a_read_of_a_whole_piece_goes_straight_to_the_front_end() {
 
 #[test]
 fn a_refusal_is_the_folders_answer_and_an_ended_session_the_share_gone() {
-    let host = MemHost::new();
+    let host = Tree::new();
     let (mut folder, front) = served(&host);
     let missing = folder.call(&Op::Look {
         path: path(b"NOWHERE    "),

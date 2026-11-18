@@ -9,9 +9,6 @@
 //! them in.
 
 pub mod alias;
-pub mod host;
-#[cfg(any(test, feature = "test-util"))]
-pub mod memhost;
 pub mod server;
 
 use tairix_abi::driver::filesystem::VolumeStats;
@@ -260,35 +257,9 @@ impl Facts {
     }
 }
 
-/// What an open may do with the file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
-    /// Read it.
-    Read,
-    /// Write it.
-    Write,
-    /// Both.
-    Both,
-}
-
-impl Access {
-    /// Whether it writes.
-    #[must_use]
-    pub const fn writes(self) -> bool {
-        !matches!(self, Self::Read)
-    }
-}
-
-/// What an open does where the name is free, or taken.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Creation {
-    /// Open the file the name names; refused where it names none.
-    Existing,
-    /// Make the file, or empty the one the name names.
-    Truncate,
-    /// Make the file; refused where the name is taken.
-    New,
-}
+/// What an open may do with the file, and what it does where the name is
+/// free or taken: the tree seam's own vocabulary.
+pub use tairix_fscopy::tree::{Creation, FileAccess as Access};
 
 /// Where a search goes on from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

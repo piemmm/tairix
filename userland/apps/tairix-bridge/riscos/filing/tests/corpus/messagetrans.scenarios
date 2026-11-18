@@ -1,0 +1,73 @@
+# MessageTrans reading a messages file of the RAM disc through FileSwitch:
+# the file's information, the file opened into the RMA and into the
+# caller's buffer, tokens looked up with and without a buffer of the
+# caller's, an error made from a token, and the refusals of a file that
+# is not there and of a directory. No address is shown, and no file is
+# opened on a descriptor whose open could fail. The RAM disc is left
+# empty.
+
+scenario messagetrans-files
+block desc 32
+block out 64
+block file 256
+block err 32
+block messages 128
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_FSControl r0=50 r1="RAM:" r2="Probe"
+show v
+write $messages w=&3A6B6F54 w=&6C6C6548 w=&3025206F w=&6F77540A w=&6365533A w=&20646E6F w=&656E696C w=&6120230A w=&6D6F6320 w=&746E656D w=&7075440A w=&656E6F3A w=&7075440A w=&6F77743A w=&7272450A w=&6F72503A w=&25206562 w=&65722030 w=&65737566 w=&00000A64
+call XOS_File r0=10 r1="RAM:$.Msgs" r2=&FFF r4=$messages r5=$messages+&4E
+show v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XMessageTrans_FileInfo r1="RAM:$.Msgs"
+show r0 r2 v
+call XMessageTrans_FileInfo r1="RAM:$.Missing"
+show v
+call XMessageTrans_FileInfo r1="RAM:$.Dir"
+show v
+call XMessageTrans_OpenFile r0=$desc r1="RAM:$.Msgs" r2=0
+show v
+write $out w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XMessageTrans_Lookup r0=$desc r1="Tok" r2=$out r3=64 r4="world"
+show r2-out r3 v
+show $out:12
+call XMessageTrans_Lookup r0=$desc r1="Two" r2=0 r3=0
+show r3 v
+show r2:11
+call XMessageTrans_Lookup r0=$desc r1="Dup" r2=$out r3=64
+show r3 v
+show $out:4
+call XMessageTrans_Lookup r0=$desc r1="Missing" r2=$out r3=64
+show v
+write $err w=&12345 s="Err" b=0
+call XMessageTrans_ErrorLookup r0=$err r1=$desc r2=$out r3=64 r4="it"
+show v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XMessageTrans_OpenFile r0=$desc r1="RAM:$.Msgs" r2=$file
+show v
+write $out w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XMessageTrans_Lookup r0=$desc r1="Tok" r2=$out r3=64 r4="world"
+show r2-out r3 v
+show $out:12
+call XMessageTrans_Lookup r0=$desc r1="Two" r2=0 r3=0
+show r3 v
+show r2:11
+call XMessageTrans_Lookup r0=$desc r1="Dup" r2=$out r3=64
+show r3 v
+show $out:4
+call XMessageTrans_Lookup r0=$desc r1="Missing" r2=$out r3=64
+show v
+write $err w=&12345 s="Err" b=0
+call XMessageTrans_ErrorLookup r0=$err r1=$desc r2=$out r3=64 r4="it"
+show v
+call XMessageTrans_CloseFile r0=$desc
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_FSControl r0=50 r1="RAM:" r2="RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v

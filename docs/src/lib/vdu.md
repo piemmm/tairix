@@ -2,7 +2,7 @@
 
 The Acorn VDU vocabulary the BBC Micro's MOS and RISC OS share. OpenMicro's
 MOS builds its character set and control-code table from it, `lib/image` reads
-a sprite's numbered mode through it, and the RISC OS emulator's VDU drivers
+a sprite's numbered mode through it, and TAIRiX Bridge's VDU drivers
 (RO21) are to use all three parts (`plans/RISCOS-EMULATOR.md` RO8).
 
 ## Control codes
@@ -57,8 +57,8 @@ stays distinct from its small letter.
 
 `font::glyph_of` finds a character's glyph wherever it is: in RISC OS's
 arrangement, or among the other characters RISC OS's alphabets hold —
-Latin's other accented letters, Greek, Cyrillic and Hebrew — which the RISC
-OS emulator's International draws each alphabet from. Each accent and each
+Latin's other accented letters, Greek, Cyrillic and Hebrew — which TAIRiX
+Bridge's International draws each alphabet from. Each accent and each
 letter beneath one is drawn once and composed: an accented letter is its
 accent over a letter's lower six rows, a letter with a mark below has it in
 the descender row, and a Greek capital's tonos stands at its left.

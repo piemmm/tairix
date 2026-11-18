@@ -46,6 +46,8 @@ tairix-test-iso9660-image = { path = "../../../tests/integration/iso9660_image",
 tairix-test-amiga-image = { path = "../../../tests/integration/amiga_image", version = "=0.0.0" }
 # The FAT format the probe's shared test images are written through.
 tairix-fat = { path = "../../../lib/fat", version = "=0.0.0" }
+# The FileCore disc records those images' ADFS heads are built from.
+tairix-filecore = { path = "../../../lib/filecore", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the `lib` is pulled in only
 # for the bare-metal targets the binary is actually built for; on the host the

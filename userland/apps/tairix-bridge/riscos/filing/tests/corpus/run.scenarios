@@ -1,0 +1,532 @@
+# Running files: the run and load actions RISC OS 5 starts with, *Run of each kind of
+# object, run actions, Obey and its parameters, Obey$Dir, and a Utility's entry,
+# on a RAM disc renamed so no name a ROM holds is shown. Each scenario leaves the
+# area empty and the variables it set unset.
+
+scenario run-actions
+block buf 64
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFF" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFE" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFB" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFA" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FF9" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FF8" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFC" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FFD" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FEB" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FEA" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FD7" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@RunType_FD6" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@LoadType_FFB" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@LoadType_FFA" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@LoadType_FF9" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@LoadType_FEB" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Alias$@LoadType_FFD" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+call XOS_CRC r0=0 r1=$buf r2=$buf+&40 r3=1
+show r0 v
+
+scenario run-obey
+block buf 64
+block text 256
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+write $text w=&20746553 w=&626F7250 w=&20412465 w=&530A3025 w=&50207465 w=&65626F72 w=&25204224 w=&65530A31 w=&72502074 w=&2465626F w=&2A252054 w=&65530A31 w=&72502074 w=&2465626F w=&206C6C41 w=&0A302A25 w=&20746553 w=&626F7250 w=&69442465 w=&4F3C2072 w=&24796562 w=&3E726944 w=&0000000A
+call XOS_File r0=10 r1="RAM:$.Ob" r2=&FEB r4=$text r5=$text+&59
+show v
+call XOS_CLI r0="Run RAM:$.Ob one two three"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey RAM:$.Ob four five"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="RAM:$.Ob six seven"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="/RAM:$.Ob eight nine"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey -c RAM:$.Ob ten eleven"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey -v RAM:$.Ob twelve x"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="FileSwitch:Run RAM:$.Ob f s"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$B" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$T" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$All" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_FSControl r0=4 r1="RAM:$.Ob thirteen fourteen"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$A" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Obey$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_File r0=8 r1="RAM:$.D"
+show v
+write $text w=&20746553 w=&626F7250 w=&69442465 w=&4F3C2072 w=&24796562 w=&3E726944 w=&0000000A
+call XOS_File r0=10 r1="RAM:$.D.Ob" r2=&FEB r4=$text r5=$text+&19
+show v
+call XOS_CLI r0="Dir RAM:$"
+show v
+call XOS_CLI r0="Obey RAM:Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey D.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey $.D.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey @.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey RAM:D.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey RAM::Probe.$.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey RAM::0.$.D.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+call XOS_CLI r0="Obey -RAM-$.D.Ob"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Dir" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:16
+write $text w=&20746553 w=&626F7250 w=&20582465 w=&00000031
+call XOS_File r0=10 r1="RAM:$.NoEnd" r2=&FEB r4=$text r5=$text+&D
+show v
+call XOS_CLI r0="Obey RAM:$.NoEnd"
+show v
+write $text w=&20746553 w=&626F7250 w=&20592465 w=&00000D31
+call XOS_File r0=10 r1="RAM:$.CREnd" r2=&FEB r4=$text r5=$text+&E
+show v
+call XOS_CLI r0="Obey RAM:$.CREnd"
+show v
+write $text w=&20746553 w=&626F7250 w=&205A2465 w=&530A0A31 w=&50207465 w=&65626F72 w=&32205724 w=&0000000A
+call XOS_File r0=10 r1="RAM:$.Blank" r2=&FEB r4=$text r5=$text+&1D
+show v
+call XOS_CLI r0="Obey RAM:$.Blank"
+show v
+write $text w=&6F63207C w=&6E656D6D w=&65530A74 w=&72502074 w=&2465626F w=&0A332056
+call XOS_File r0=10 r1="RAM:$.Comment" r2=&FEB r4=$text r5=$text+&18
+show v
+call XOS_CLI r0="Obey RAM:$.Comment"
+show v
+write $text w=&20746553 w=&626F7250 w=&20462465 w=&6F4E0A31 w=&68637553 w=&6D6D6F43 w=&48646E61 w=&0A657265 w=&20746553 w=&626F7250 w=&20532465 w=&00000A31
+call XOS_File r0=10 r1="RAM:$.Bad" r2=&FEB r4=$text r5=$text+&2E
+show v
+call XOS_CLI r0="Obey RAM:$.Bad"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$X" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Y" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Z" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$W" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$V" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$F" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$S" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+call XOS_CLI r0="Obey"
+show v
+call XOS_CLI r0="Obey RAM:$.Missing"
+show v
+call XOS_CLI r0="Obey RAM:$.D"
+show v
+call XOS_CLI r0="Unset Probe$A"
+show v
+call XOS_CLI r0="Unset Probe$B"
+show v
+call XOS_CLI r0="Unset Probe$T"
+show v
+call XOS_CLI r0="Unset Probe$All"
+show v
+call XOS_CLI r0="Unset Probe$Dir"
+show v
+call XOS_CLI r0="Unset Obey$Dir"
+show v
+call XOS_CLI r0="Unset Probe$X"
+show v
+call XOS_CLI r0="Unset Probe$Y"
+show v
+call XOS_CLI r0="Unset Probe$Z"
+show v
+call XOS_CLI r0="Unset Probe$W"
+show v
+call XOS_CLI r0="Unset Probe$V"
+show v
+call XOS_CLI r0="Unset Probe$F"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_CLI r0="NameDisc :0 RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario run-objects
+block buf 64
+block text 256
+block code 512
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+write $text w=&00000078
+call XOS_File r0=10 r1="RAM:$.Data" r2=&FFD r4=$text r5=$text+&1
+show v
+call XOS_File r0=8 r1="RAM:$.Sub"
+show v
+call XOS_File r0=8 r1="RAM:$.!App"
+show v
+write $text w=&20746553 w=&626F7250 w=&70412465 w=&4F3C2070 w=&24796562 w=&3E726944 w=&0000000A
+call XOS_File r0=10 r1="RAM:$.!App.!Run" r2=&FEB r4=$text r5=$text+&19
+show v
+write $text w=&20746553 w=&626F7250 w=&694C2465 w=&0A312062
+call XOS_File r0=10 r1="RAM:$.Sub.Lib" r2=&FEB r4=$text r5=$text+&10
+show v
+write $text w=&20746553 w=&626F7250 w=&6F542465 w=&30252070 w=&0000000A
+call XOS_File r0=10 r1="RAM:$.Top" r2=&FEB r4=$text r5=$text+&11
+show v
+call XOS_CLI r0="Run RAM:$.Missing"
+show v
+call XOS_CLI r0="Run RAM:$.Data"
+show v
+call XOS_CLI r0="Run RAM:$.Sub"
+show v
+call XOS_CLI r0="Run"
+show v
+call XOS_FSControl r0=4 r1="RAM:$.Data"
+show v
+call XOS_CLI r0="Run RAM:$.!App x y"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$App" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:20
+call XOS_CLI r0="Set Run$Path RAM:$.Sub.,RAM:$."
+show v
+call XOS_CLI r0="Run Lib"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Lib" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+call XOS_CLI r0="Top up"
+show v
+write $buf w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_ReadVarVal r0="Probe$Top" r1=$buf r2=64 r3=0 r4=0
+show r2 v
+show $buf:4
+call XOS_CLI r0="Run Missing"
+show v
+call XOS_CLI r0="Unset Run$Path"
+show v
+write $code w=&E58F00BC w=&E58F10BC w=&E58F30BC w=&E58FE0BC w=&E04D200C w=&E58F2080 w=&E04C2003 w=&E58F207C w=&E24F2028 w=&E0422003 w=&E58F2074 w=&E10F2000 w=&E202201F w=&E58F206C w=&E5902000 w=&E58F2068 w=&E5902004 w=&E58F2064 w=&E5902008 w=&E58F2060 w=&E5912000 w=&E58F205C w=&E5912004 w=&E58F2058 w=&E5912008 w=&E3C224FF w=&E3C228FF w=&E58F204C w=&E28F0018 w=&E28F1020 w=&E3A02028 w=&E3A03000 w=&E3A04004 w=&EF020024 w=&E59FE040 w=&E1A0F00E w=&626F7250 w=&74552465 w=&00006C69 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000 w=&00000000
+call XOS_File r0=10 r1="RAM:$.Util" r2=&FFC r4=$code r5=$code+&DC
+show v
+call XOS_CLI r0="Run RAM:$.Util  alpha beta"
+show v
+call XOS_ReadVarVal r0="Probe$Util" r1=$text r2=64 r3=0 r4=0
+show r2 v
+show $text:40
+call XOS_CLI r0="Unset Probe$App"
+show v
+call XOS_CLI r0="Unset Probe$Lib"
+show v
+call XOS_CLI r0="Unset Probe$Top"
+show v
+call XOS_CLI r0="Unset Probe$Util"
+show v
+call XOS_CLI r0="Unset Obey$Dir"
+show v
+call XOS_FSControl r0=27 r1="RAM:$.*" r3=3
+show v
+call XOS_CLI r0="NameDisc :0 RamDisc0"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v

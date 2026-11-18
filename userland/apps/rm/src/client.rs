@@ -362,7 +362,7 @@ impl<R: Roots> Removing<'_, R> {
         if !asked {
             return Ok(Some(false));
         }
-        match dir.access(name, Access::WRITE) {
+        match dir.access(name, Access::WRITE, false) {
             Err(Errno::PermissionDenied) => Ok(Some(true)),
             // A read-only volume refuses the removal itself; it is no
             // protection of the file's own.
@@ -436,7 +436,7 @@ impl<R: Roots> Removing<'_, R> {
     /// GNU asks only of one that holds something, an empty one being asked
     /// about as a removal instead.
     fn descent(&mut self, held: &R::Dir, path: &str) -> Result<Descent, RmError> {
-        let entries = match held.entries() {
+        let entries = match held.entries(usize::MAX) {
             Ok(entries) => entries,
             Err(errno) => {
                 self.carried.carry(unread(path, errno))?;

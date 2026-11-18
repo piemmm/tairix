@@ -1,6 +1,0 @@
-# The messages every module shares, in the emulator's own words but for
-# Escape, which the PRM documents.
-SwiOutOfRangeForModule:Module %0 provides no such SWI
-BufferOverflow:Buffer overflow
-WrongNumberOfParameters:Invalid number of parameters
-Escape:Escape

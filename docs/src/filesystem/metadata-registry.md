@@ -39,7 +39,9 @@ and its three digits are `Filetype::hex` and `Filetype::from_hex` — the same
 spelling a name's `,xxx` suffix carries one in where its volume records none
 (`Filetype::suffix`, `Filetype::split_suffix`). A name crosses between RISC OS
 and TAIRiX through `acorn::leaf_from_riscos` and `acorn::leaf_to_riscos`, the
-one conversion ADFS, the archive driver and `lib/icon` share, and
+one conversion ADFS, the archive driver, `lib/icon` and TAIRiX Bridge's
+HostFS share — a dot and a slash trading places, as a space and RISC OS's hard
+space do — and
 `acorn::filetype_name` gives the name RISC OS gives a type it allocates itself
 (`&FFF` Text, `&AFF` DrawFile), a type elsewhere being its software's to name.
 

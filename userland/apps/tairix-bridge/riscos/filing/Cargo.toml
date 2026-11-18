@@ -1,0 +1,50 @@
+[package]
+name = "tairix-riscos-filing"
+description = "TAIRiX Bridge's filing: FileSwitch, the filing systems it calls through their entry points, HostFS, RamFS on FileCore and Choices. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The kernel: the module seam FileSwitch is built on, guest memory, SWIs and
+# calls into the filing systems' code.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# The processor's flags and profiles, which an entry's answer is read in.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The tables of filing systems, open files and their buffers, whose growth can
+# refuse.
+tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }
+# RISC OS's names and metadata as TAIRiX spells and keeps them.
+tairix-fsmeta = { path = "../../../../../lib/fsmeta", version = "=0.0.0" }
+# The ABI's file vocabulary: metadata, times, the errors a host gives.
+tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
+# The tree seam HostFS's roots are served through.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0" }
+# The content-type registry an untyped file's type is read from.
+tairix-browse = { path = "../../../../../lib/browse", version = "=0.0.0" }
+# HostFS's read cache: the one reclaimable cache, its keys hashed under a
+# seed, its decisions logged.
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+tairix-hash = { path = "../../../../../lib/hash", version = "=0.0.0" }
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
+# Fallible copies of the names and paths HostFS holds.
+tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# FileCore's disc format, which its discs and RamFS's are laid out in.
+tairix-filecore = { path = "../../../../../lib/filecore", version = "=0.0.0" }
+# An Obey file's parameters put into its lines, as RISC OS 5 puts them.
+tairix-obey = { path = "../../../../../lib/obey", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harness draws from.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The in-memory tree HostFS's tests serve.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
+# A zone for the sessions the corpus is replayed on, which no filing scenario
+# depends on.
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }

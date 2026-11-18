@@ -1,0 +1,13 @@
+# HostFS's messages, in TAIRiX Bridge's own words.
+Locked:That object is locked
+Exists:That name is already taken
+DiscFull:The disc is full
+Protected:That disc may not be changed
+BadName:RISC OS cannot spell that name
+Ambiguous:Two names differ only in case, and neither is the one asked for
+NotEmpty:That directory is not empty
+Access:That is not allowed
+NoDisc:There is no disc of that name
+TooLarge:That file is too large for RISC OS
+Unkept:That disc cannot keep what was asked of it
+Failed:HostFS could not reach its discs

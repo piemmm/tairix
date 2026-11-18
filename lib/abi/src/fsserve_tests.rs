@@ -1103,6 +1103,16 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
             write_refusal: Some(WriteRefusal::UnsupportedFeature),
             format: FormatName::Affs,
         }),
+        ServeFrame::Serve(ServeOffer {
+            root: NodeId::from_raw(0x301),
+            name_matching: NameMatching::RiscOs,
+            node_identity: NodeIdentity::ContentDerived,
+            attrs: true,
+            title: true,
+            title_apart: true,
+            write_refusal: None,
+            format: FormatName::Adfs,
+        }),
     ];
     for frame in offers {
         assert_eq!(ServeFrame::decode(&frame.encode()), Ok(frame));
@@ -1125,7 +1135,7 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
     for (at, value) in [
         (0, 9),
         (2, 3),
-        (3, 3),
+        (3, 4),
         (4, 2),
         (5, 8),
         (6, unnamed),

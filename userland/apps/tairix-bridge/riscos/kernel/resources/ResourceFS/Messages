@@ -1,0 +1,5 @@
+# ResourceFS's messages, in TAIRiX Bridge's own words.
+FilesAlreadyRegistered:%0 has these files registered already
+FilesNotRegistered:%0 has no such files registered
+ReadOnly:Resources: cannot be changed
+BadOperation:ResourceFS does not do that

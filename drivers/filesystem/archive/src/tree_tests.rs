@@ -153,6 +153,30 @@ fn names_compare_as_the_archive_compares_them() {
         b"ReadMe",
         "the spelling given is kept"
     );
+
+    for matching in [NameMatching::Latin1CaseInsensitive, NameMatching::RiscOs] {
+        let mut latin = tree(matching);
+        let cafe = file(&mut latin, ROOT, "Café".as_bytes()).unwrap();
+        assert_eq!(
+            latin.lookup(ROOT, "CAFÉ".as_bytes()),
+            Ok(cafe),
+            "{matching:?}"
+        );
+        let raw = file(&mut latin, ROOT, b"Caf\xE9").unwrap();
+        assert_eq!(latin.lookup(ROOT, b"Caf\xE9"), Ok(raw), "{matching:?}");
+        assert_eq!(
+            latin.lookup(ROOT, b"CAF\xC9"),
+            Err(DriverError::NotFound),
+            "a name that is not UTF-8 matches only its own bytes"
+        );
+    }
+    let mut risc_os = tree(NameMatching::RiscOs);
+    let rhyl = file(&mut risc_os, ROOT, "ÿ".as_bytes()).unwrap();
+    assert_eq!(
+        risc_os.lookup(ROOT, b"Y"),
+        Ok(rhyl),
+        "RISC OS capitalises ÿ as Y"
+    );
 }
 
 #[test]

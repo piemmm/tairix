@@ -18,6 +18,7 @@ use tairix_fat::dir::attr::{
     ARCHIVE, LONG_NAME as FAT_ATTR_LONG_NAME, VOLUME_ID as FAT_ATTR_VOLUME_ID,
 };
 use tairix_fat::dir::{DELETED as FAT_DELETED_ENTRY, ENTRY as FAT_DIR_ENTRY_LEN};
+use tairix_filecore::{record, Fault, Structure};
 use tairix_fsprobe::{
     adfs, affs, fingerprint, iso9660, recognise, twin_identity, udf, Evidence, ProbedVolume,
     Recognised, ARXFS_RING_BLOCKS,
@@ -812,24 +813,24 @@ fn an_adfs_disc_is_identified_without_its_name() {
     let record = images::adfs_f_record();
     let named = adfs::Layout::NewMap {
         record,
-        boot_block: true,
+        boot: Some(record),
     };
     let renamed = adfs::Layout::NewMap {
-        record: adfs::DiscRecord {
+        record: record::DiscRecord {
             disc_name: *b"Other     ",
             ..record
         },
-        boot_block: true,
+        boot: Some(record),
     };
     let smaller = adfs::Layout::NewMap {
-        record: adfs::DiscRecord {
+        record: record::DiscRecord {
             disc_size: record.disc_size / 2,
             ..record
         },
-        boot_block: true,
+        boot: Some(record),
     };
-    assert_eq!(renamed.identity(), named.identity());
-    assert_ne!(smaller.identity(), named.identity());
+    assert_eq!(adfs::identity(&renamed), adfs::identity(&named));
+    assert_ne!(adfs::identity(&smaller), adfs::identity(&named));
 }
 
 #[test]
@@ -1080,8 +1081,8 @@ fn a_sealed_amiga_block_sums_to_zero_whatever_its_checksum_slot_held() {
 }
 
 /// A record `log2secsize` 9 and `idlen` 15 with `zone_spare` and `nzones`.
-fn crafted_record(zone_spare: u16, nzones: u16) -> adfs::DiscRecord {
-    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+fn crafted_record(zone_spare: u16, nzones: u16) -> record::DiscRecord {
+    let mut record = record::DiscRecord::parse(&[0; record::DISC_RECORD_SIZE]);
     record.log2secsize = 9;
     record.idlen = 15;
     record.log2bpmb = 7;
@@ -1100,7 +1101,7 @@ fn a_disc_record_whose_first_zone_cannot_hold_it_is_no_adfs_volume() {
         let record = crafted_record(4048, nzones);
         assert_eq!(
             record.validate(),
-            Err(DriverError::BadMagic),
+            Err(Fault::Broken(Structure::Record)),
             "{nzones} zones"
         );
         let image = images::adfs_boot_block(&record);
@@ -1114,14 +1115,14 @@ fn a_disc_record_whose_first_zone_cannot_hold_it_is_no_adfs_volume() {
     assert_eq!(crafted_record(3600, 2).validate(), Ok(()));
     assert_eq!(
         crafted_record(3601, 2).validate(),
-        Err(DriverError::BadMagic)
+        Err(Fault::Broken(Structure::Record))
     );
     // A spare smaller than the zone header puts every zone's stream past its
     // sector.
     for spare in [0, 31] {
         assert_eq!(
             crafted_record(spare, 2).validate(),
-            Err(DriverError::BadMagic),
+            Err(Fault::Broken(Structure::Record)),
             "{spare}"
         );
     }
@@ -1141,7 +1142,7 @@ fn every_disc_record_validate_admits_has_a_zone_geometry() {
             let max_idlen = if format_version == 0 { 16 } else { 19 };
             for idlen in log2secsize + 3..=max_idlen {
                 let record = |zone_spare: u32, nzones, log2bpmb| {
-                    let mut record = adfs::DiscRecord::parse(&[0; adfs::DISC_RECORD_SIZE]);
+                    let mut record = record::DiscRecord::parse(&[0; record::DISC_RECORD_SIZE]);
                     record.log2secsize = log2secsize;
                     record.format_version = format_version;
                     record.idlen = idlen;
@@ -1152,7 +1153,7 @@ fn every_disc_record_validate_admits_has_a_zone_geometry() {
                     record.disc_size = 1 << 20;
                     record
                 };
-                let fits = sector_bits - adfs::DISC_RECORD_BITS - 1 - u32::from(idlen);
+                let fits = sector_bits - record::DISC_RECORD_BITS - 1 - u32::from(idlen);
                 assert_eq!(
                     record(fits, 2, 6).validate(),
                     Ok(()),
@@ -1160,7 +1161,7 @@ fn every_disc_record_validate_admits_has_a_zone_geometry() {
                 );
                 assert_eq!(
                     record(fits + 1, 2, 6).validate(),
-                    Err(DriverError::BadMagic),
+                    Err(Fault::Broken(Structure::Record)),
                     "{log2secsize} {idlen}"
                 );
                 for zone_spare in (0..=sector_bits).chain([u32::from(u16::MAX)]) {
@@ -1173,7 +1174,8 @@ fn every_disc_record_validate_admits_has_a_zone_geometry() {
                             admitted += 1;
                             assert!(record.zone_stream_bits(0) > u32::from(idlen));
                             assert!(
-                                adfs::ZONE_HEADER_SIZE_U32 * 8 + record.zone_bits() <= sector_bits
+                                record::ZONE_HEADER_SIZE_U32 * 8 + record.zone_bits()
+                                    <= sector_bits
                             );
                             let _ = record.map_offset();
                             let nzones = u32::from(nzones);

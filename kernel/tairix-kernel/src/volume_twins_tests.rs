@@ -129,7 +129,7 @@ fn insertion(slot: u64, name: &'static [u8], fstype: VolumeFsType) -> Insertion 
 /// One device carrying a floppy-sized ADFS volume of each of `variants`, back
 /// to back, and the identity each carries: discs of one variant are formatted
 /// alike, so they are twins.
-fn floppies(variants: impl IntoIterator<Item = AdfsVariant>) -> (RamBlock, Vec<[u8; 16]>) {
+fn floppies(variants: impl IntoIterator<Item = Variant>) -> (RamBlock, Vec<[u8; 16]>) {
     let mut data = Vec::new();
     let mut identities = Vec::new();
     for variant in variants {
@@ -351,8 +351,8 @@ fn identical_discs_attach_side_by_side_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let (first_disc, identities) = floppies([AdfsVariant::E]);
-    let (second_disc, second) = floppies([AdfsVariant::E]);
+    let (first_disc, identities) = floppies([Variant::E]);
+    let (second_disc, second) = floppies([Variant::E]);
     assert_eq!(second, identities, "formatted alike, one identity");
     let identity = identities[0];
     let first = insert(
@@ -398,9 +398,9 @@ fn the_first_keeps_its_identity_and_a_twin_its_key_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let identity = floppies([AdfsVariant::E]).1[0];
+    let identity = floppies([Variant::E]).1[0];
     let attach = |slot| {
-        let (disc, _) = floppies([AdfsVariant::E]);
+        let (disc, _) = floppies([Variant::E]);
         let round = insert(
             window_ptr,
             facility,
@@ -1035,7 +1035,7 @@ fn a_medium_changed_since_the_question_is_not_written_scenario(
 /// its device; a twin on an extent of its own on that device attaches beside
 /// it.
 fn the_same_medium_twice_is_busy_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
-    let (discs, identities) = floppies([AdfsVariant::E, AdfsVariant::E]);
+    let (discs, identities) = floppies([Variant::E, Variant::E]);
     let discs = Device::up(window_ptr, facility, 0x178, discs);
     pending(&discs.floppy(0, b"twin-same")).expect("the disc attaches");
     for name in [&b"twin-same"[..], b"twin-same-again"] {
@@ -1078,7 +1078,7 @@ fn an_identitys_attachments_are_bounded_scenario(
     facility: &'static TestFacility,
 ) {
     let bound = u64::from(VOLUME_TWINS_MAX);
-    let (discs, _) = floppies((0..=bound).map(|_| AdfsVariant::E));
+    let (discs, _) = floppies((0..=bound).map(|_| Variant::E));
     let discs = Device::up(window_ptr, facility, 0x179, discs);
     for at in 0..bound {
         pending(&discs.floppy(at, b"twin-limit")).expect("a twin attaches");
@@ -1113,7 +1113,7 @@ fn twin_names_hold_against_hostile_names_scenario(
     window_ptr: *mut u8,
     facility: &'static TestFacility,
 ) {
-    let (discs, _) = floppies(core::iter::repeat_n(AdfsVariant::E, 6));
+    let (discs, _) = floppies(core::iter::repeat_n(Variant::E, 6));
     let discs = Device::up(window_ptr, facility, 0x17D, discs);
     let other = ext4_image([0x7A; 16]);
     let extent = u64::try_from(other.data.len() / BLOCK_SIZE).expect("small");

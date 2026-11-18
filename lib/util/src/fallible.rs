@@ -142,6 +142,21 @@ pub fn concatenated(parts: &[&str]) -> Option<String> {
     Some(joined)
 }
 
+/// `parts` joined end to end in a buffer of exactly their length, or `None`
+/// when the allocator refuses it.
+#[must_use]
+pub fn joined<T: Copy>(parts: &[&[T]]) -> Option<Vec<T>> {
+    let len = parts
+        .iter()
+        .try_fold(0usize, |len, part| len.checked_add(part.len()))?;
+    let mut whole = Vec::new();
+    whole.try_reserve_exact(len).ok()?;
+    for part in parts {
+        whole.extend_from_slice(part);
+    }
+    Some(whole)
+}
+
 /// What `write` writes, in a string reserved once to its exact length, or
 /// `None` when the allocator refuses it or `write` fails: `write` runs
 /// twice, measuring and then filling, and a fill writing past what was

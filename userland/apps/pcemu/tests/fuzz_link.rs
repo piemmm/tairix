@@ -27,6 +27,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tairix_abi::Errno;
+use tairix_fscopy::fixture::{Handle, Tree};
+use tairix_fscopy::tree::Roots;
 use tairix_fuzzseed::Prng;
 use tairix_log::DiscardSink;
 use tairix_pcemu::cpu::jit::interpreted::Interpreted;
@@ -36,7 +38,6 @@ use tairix_pcemu::debug::probe::{
     Access as Watching, Breakpoint, Cycle, Direction, Go, Hit, Master, Reason,
 };
 use tairix_pcemu::debug::{Activity, Registers};
-use tairix_pcemu::folder::memhost::{MemDir, MemHost};
 use tairix_pcemu::folder::server::Server;
 use tairix_pcemu::folder::{
     Access, Creation, DosName, Folder, From, Op, Refusal, Reply, SharePath, IO_MOST, SHARES,
@@ -233,14 +234,15 @@ fn sharing(rng: &mut Prng) -> Command<'static> {
 }
 
 /// The folder the hostile worker's requests are answered from.
-fn served_folder() -> Server<MemDir> {
-    let host = MemHost::new()
-        .file("file.txt", &[0x41; 1500])
-        .file("DIR/inner.txt", b"inner")
-        .file("Long Name.text", b"long")
-        .locked("file.txt");
+fn served_folder() -> Server<Handle> {
+    let host = Tree::new()
+        .file("/file.txt", &[0x41; 1500])
+        .file("/DIR/inner.txt", b"inner")
+        .file("/Long Name.text", b"long")
+        .with_mode("/file.txt", 0o444)
+        .checking_permissions();
     Server::new(
-        host.root(),
+        host.open_dir("/", false).expect("the folder"),
         DosName::new(*b"HOST       ", false).unwrap(),
         true,
         EPOCH,

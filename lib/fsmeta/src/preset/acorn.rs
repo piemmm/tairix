@@ -10,7 +10,9 @@
 //! load/exec words (`acorn.loadaddr` / `acorn.execaddr`), so a copy back to
 //! ADFS reproduces the native fields byte-for-byte.
 
-use tairix_abi::driver::filesystem::StampField;
+use core::cmp::Ordering;
+
+use tairix_abi::driver::filesystem::{NameMatching, StampField};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
 
@@ -52,16 +54,24 @@ pub const RESERVED_NAME_BYTES: &[u8] = b"$&%@\\^:.#*\"|";
 /// The byte a name holds in place of `byte` once it has crossed between RISC
 /// OS and TAIRiX. RISC OS separates a path with `.` and writes a dot within a
 /// name as `/`, the reverse of TAIRiX, so the two trade places — `ReadMe/txt`
-/// there is `ReadMe.txt` here — and every other byte crosses as itself. The
-/// exchange is its own inverse, so it carries a name either way.
+/// there is `ReadMe.txt` here. No RISC OS name holds a space, so a space
+/// trades places with the hard space RISC OS writes for one, as its own
+/// filing systems for other machines' discs do. Every other byte crosses as
+/// itself, and the exchange is its own inverse, so it carries a name either
+/// way.
 #[must_use]
 pub const fn crossed_name_byte(byte: u8) -> u8 {
     match byte {
         b'.' => b'/',
         b'/' => b'.',
+        b' ' => HARD_SPACE,
+        HARD_SPACE => b' ',
         other => other,
     }
 }
+
+/// RISC OS's hard space, which a TAIRiX name's space is written as.
+const HARD_SPACE: u8 = 0xA0;
 
 /// The characters RISC OS's Latin-1 gives the bytes `0x80..=0x9F`, which ISO
 /// 8859-1 leaves to control codes; `None` where it gives none.
@@ -105,25 +115,136 @@ const LATIN1_EXTRAS: [Option<char>; 32] = [
 /// and text alike — or `None` for a byte no name or text holds: a control
 /// code, or one of those it leaves undefined.
 #[must_use]
-pub fn latin1_char(byte: u8) -> Option<char> {
+pub const fn latin1_char(byte: u8) -> Option<char> {
     match byte {
         0..=0x1F | 0x7F => None,
-        0x80..=0x9F => LATIN1_EXTRAS[usize::from(byte - 0x80)],
-        _ => Some(char::from(byte)),
+        0x80..=0x9F => LATIN1_EXTRAS[(byte - 0x80) as usize],
+        _ => Some(byte as char),
     }
 }
 
 /// The byte RISC OS's Latin-1 spells `ch` as, or `None` for a character it
 /// has none for.
 #[must_use]
-pub fn latin1_byte(ch: char) -> Option<u8> {
-    match u8::try_from(u32::from(ch)) {
-        Ok(byte @ (0x20..=0x7E | 0xA0..=0xFF)) => Some(byte),
-        _ => LATIN1_EXTRAS
-            .iter()
-            .position(|&extra| extra == Some(ch))
-            .and_then(|at| u8::try_from(0x80 + at).ok()),
+pub const fn latin1_byte(ch: char) -> Option<u8> {
+    let code = ch as u32;
+    if matches!(code, 0x20..=0x7E | 0xA0..=0xFF) {
+        return Some(code.to_le_bytes()[0]);
     }
+    let mut byte = 0x80;
+    while byte <= 0x9F {
+        if let Some(extra) = LATIN1_EXTRAS[(byte - 0x80) as usize] {
+            if extra as u32 == code {
+                return Some(byte);
+            }
+        }
+        byte += 1;
+    }
+    None
+}
+
+/// RISC OS's upper-case table, a byte of its Latin-1 to its capital: the
+/// rule its names are compared by ([`NameMatching::RiscOs`]), so `ÿ`, which
+/// has no capital, is `Y`.
+pub const UPPER_CASE: [u8; 256] = upper_case();
+
+/// RISC OS's lower-case table: each capital back to its small letter; one
+/// two small letters share, as `Y` is `ÿ`'s and `y`'s, to the lower byte's.
+pub const LOWER_CASE: [u8; 256] = lower_case();
+
+const fn upper_case() -> [u8; 256] {
+    let mut table = [0; 256];
+    let mut byte = 0;
+    loop {
+        table[byte as usize] = match latin1_char(byte) {
+            Some(ch) => match latin1_byte(NameMatching::RiscOs.fold(ch)) {
+                Some(capital) => capital,
+                None => byte,
+            },
+            None => byte,
+        };
+        if byte == u8::MAX {
+            return table;
+        }
+        byte += 1;
+    }
+}
+
+const fn lower_case() -> [u8; 256] {
+    let mut table = [0; 256];
+    let mut byte = 0;
+    loop {
+        table[byte as usize] = byte;
+        if byte == u8::MAX {
+            break;
+        }
+        byte += 1;
+    }
+    let mut small = 0;
+    loop {
+        let capital = UPPER_CASE[small as usize];
+        if capital != small && table[capital as usize] == capital {
+            table[capital as usize] = small;
+        }
+        if small == u8::MAX {
+            return table;
+        }
+        small += 1;
+    }
+}
+
+/// Whether the RISC OS names `a` and `b` are one name, as `FileCore`
+/// compares them: through [`UPPER_CASE`].
+#[must_use]
+pub fn names_match(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(&x, &y)| UPPER_CASE[usize::from(x)] == UPPER_CASE[usize::from(y)])
+}
+
+/// Whether `name` matches the RISC OS wildcard `pattern` — `*` any run of
+/// characters, `#` any one — each other byte compared through `fold`.
+#[must_use]
+pub fn wildcard_matches(pattern: &[u8], name: &[u8], fold: impl Fn(u8) -> u8) -> bool {
+    let (mut p, mut n) = (0, 0);
+    let mut resume: Option<(usize, usize)> = None;
+    while n < name.len() {
+        match pattern.get(p) {
+            Some(b'*') => {
+                resume = Some((p, n));
+                p += 1;
+            }
+            Some(&c) if c == b'#' || fold(c) == fold(name[n]) => {
+                p += 1;
+                n += 1;
+            }
+            _ => match resume {
+                Some((star, from)) => {
+                    p = star + 1;
+                    n = from + 1;
+                    resume = Some((star, from + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[p..].iter().all(|&b| b == b'*')
+}
+
+/// Whether `name` matches the RISC OS wildcard `pattern` as `FileCore`
+/// matches one, through [`UPPER_CASE`].
+#[must_use]
+pub fn names_match_wild(pattern: &[u8], name: &[u8]) -> bool {
+    wildcard_matches(pattern, name, |byte| UPPER_CASE[usize::from(byte)])
+}
+
+/// The order `FileCore` keeps a directory's names in: byte by byte through
+/// [`UPPER_CASE`], a name before the longer ones it begins.
+#[must_use]
+pub fn name_order(a: &[u8], b: &[u8]) -> Ordering {
+    let upper = |&byte: &u8| UPPER_CASE[usize::from(byte)];
+    a.iter().map(upper).cmp(b.iter().map(upper))
 }
 
 /// Why a name cannot cross between RISC OS and TAIRiX: what RISC OS reports
@@ -132,9 +253,10 @@ pub fn latin1_byte(ch: char) -> Option<u8> {
 pub enum BadName {
     /// The name is empty.
     Empty,
-    /// It holds a character no RISC OS name can: a control code, a space, one
-    /// RISC OS keeps out of a name, or one its Latin-1 lacks. A TAIRiX name
-    /// that is not UTF-8 is refused the same way.
+    /// Crossed, it holds a character no RISC OS name can — a control code, a
+    /// space, one RISC OS keeps out of a name, or one its Latin-1 lacks — as a
+    /// TAIRiX no-break space does. A TAIRiX name that is not UTF-8 is refused
+    /// the same way.
     Character,
     /// Crossed, it would be `.` or `..`, which name no entry of their own.
     NoEntry,
@@ -179,7 +301,8 @@ impl Leaf {
 }
 
 /// Whether RISC OS's Latin-1 `byte` may stand in a RISC OS name.
-fn is_name_byte(byte: u8) -> bool {
+#[must_use]
+pub fn is_name_byte(byte: u8) -> bool {
     byte != b' ' && !RESERVED_NAME_BYTES.contains(&byte) && latin1_char(byte).is_some()
 }
 
@@ -237,6 +360,12 @@ pub fn leaf_to_riscos(name: &[u8]) -> Result<Leaf, BadName> {
 /// TAIRiX spells it ([`leaf_from_riscos`]).
 pub fn path_from_riscos(path: &[u8]) -> impl Iterator<Item = Result<Leaf, BadName>> + '_ {
     path.split(|&byte| byte == b'.').map(leaf_from_riscos)
+}
+
+/// The leaves of the TAIRiX path `path`, which joins them with `/`, each as
+/// RISC OS spells it ([`leaf_to_riscos`]), to be joined with `.`.
+pub fn path_to_riscos(path: &[u8]) -> impl Iterator<Item = Result<Leaf, BadName>> + '_ {
+    path.split(|&byte| byte == b'/').map(leaf_to_riscos)
 }
 
 /// The names RISC OS gives the filetypes it allocates itself — its reserved

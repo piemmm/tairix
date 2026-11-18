@@ -45,6 +45,8 @@ doc-valid-idents = [
     "ResourceFS",
     "MessageTrans",
     "FileSwitch",
+    "FileCore",
+    "RamFS",
     "InternationalKeyboard",
     "AltGr",
     "RiscPC",

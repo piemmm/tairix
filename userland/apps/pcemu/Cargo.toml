@@ -21,9 +21,12 @@ vectors = []
 # The in-memory folder a share is served from in tests, and the translator
 # held to the interpreter through the code generator's machine models, for the
 # fuzz harnesses; never part of a production build.
-test-util = ["tairix-codegen/test-util"]
+test-util = ["tairix-codegen/test-util", "tairix-fscopy/test-support"]
 
 [dependencies]
+# The tree seam a shared folder is served through, and its in-memory fixture
+# for the tests and fuzz harnesses.
+tairix-fscopy = { path = "../../../lib/fscopy", version = "=0.0.0" }
 # The one civil calendar, which the clock card's date is set from and read as.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The one code generator, whose IR the translator lowers hot guest code to.

@@ -1,4 +1,4 @@
-//! `cargo xtask riscos --reference <dir>`: the RISC OS emulator's reference
+//! `cargo xtask riscos --reference <dir>`: TAIRiX Bridge's reference
 //! harness (`plans/RISCOS-EMULATOR.md` §17). `--write-sprites` draws the
 //! Wimp's file-type sprites its ResourceFS holds ([`sprites`]).
 //!
@@ -47,7 +47,10 @@ mod sprites;
 pub use sprites::check as check_sprites;
 
 /// Where each crate keeps its corpus, from the workspace's root.
-const CORPUS: &str = "userland/apps/riscos/kernel/tests/corpus";
+const CORPORA: [&str; 2] = [
+    "userland/apps/tairix-bridge/riscos/kernel/tests/corpus",
+    "userland/apps/tairix-bridge/riscos/filing/tests/corpus",
+];
 /// The emulator `<dir>` may hold, run headless.
 const EMULATOR: &str = "rpcemu-recompiler";
 /// The longest a recording may take.
@@ -84,13 +87,17 @@ struct Group {
 }
 
 fn groups(ctx: &Context) -> Result<Vec<Group>, String> {
-    let dir = ctx.workspace_root.join(CORPUS);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("riscos: {}: {e}", dir.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "scenarios"))
-        .collect();
-    paths.sort();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for corpus in CORPORA {
+        let dir = ctx.workspace_root.join(corpus);
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| format!("riscos: {}: {e}", dir.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "scenarios"))
+            .collect();
+        found.sort();
+        paths.extend(found);
+    }
     paths
         .into_iter()
         .map(|path| {
@@ -330,10 +337,15 @@ fn remove_found<'a>(hostfs: &Path, names: impl IntoIterator<Item = &'a str>) -> 
 }
 
 /// The harness as BASIC V's tokenised program: every scenario but those
-/// marked `ours`.
+/// marked `ours`, those marked `lasting` after all the others, since every
+/// scenario runs on the one machine.
 fn harness_program<'a>(
     scenarios: impl IntoIterator<Item = &'a Scenario>,
 ) -> Result<Vec<u8>, String> {
+    let (lasting, others): (Vec<&Scenario>, Vec<&Scenario>) = scenarios
+        .into_iter()
+        .filter(|scenario| scenario.kind != Kind::Ours)
+        .partition(|scenario| scenario.lasting);
     let mut text: Vec<String> = vec![
         "O%=OPENOUT\"HostFS:$.Observed\"".into(),
         "ON ERROR ON ERROR OFF:BPUT#O%,\"! \"+STR$ERR+\" at \"+STR$ERL:CLOSE#O%:PROCdone:END"
@@ -342,10 +354,7 @@ fn harness_program<'a>(
             "SYS\"OS_Module\",18,\"UtilityModule\" TO ,,,V%:BPUT#O%,\"{VERSION}\"+STR$(INT(VAL(FNv(V%+V%!&14))*100+0.5))"
         ),
     ];
-    for scenario in scenarios
-        .into_iter()
-        .filter(|scenario| scenario.kind != Kind::Ours)
-    {
+    for scenario in others.into_iter().chain(lasting) {
         scenario_lines(scenario, &mut text)?;
     }
     text.push(obey::run());
@@ -991,6 +1000,25 @@ mod tests {
         let holds = |name: &[u8]| image.windows(name.len()).any(|w| w == name);
         assert!(holds(b"scenario theirs"));
         assert!(!holds(b"scenario mine"), "never run on genuine RISC OS");
+    }
+
+    #[test]
+    fn a_lasting_scenario_runs_after_every_other() {
+        let scenarios = parse_scenarios(
+            "scenario stays lasting\ncall X\nscenario first\ncall Y\nscenario second\ncall Z\n",
+        )
+        .unwrap();
+        let image = harness_program(&scenarios).unwrap();
+        let at = |name: &[u8]| image.windows(name.len()).position(|w| w == name);
+        let (first, second, stays) = (
+            at(b"scenario first"),
+            at(b"scenario second"),
+            at(b"scenario stays"),
+        );
+        assert!(
+            first < second && second < stays && first.is_some(),
+            "{first:?} {second:?} {stays:?}"
+        );
     }
 
     #[test]

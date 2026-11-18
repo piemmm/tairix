@@ -1,7 +1,8 @@
-# RISCOS-EMULATOR — `RISCOSEmulator.app`: RISC OS applications on the TAIRiX desktop
+# RISCOS-EMULATOR — TAIRiX Bridge (`TAIRiXBridge.app`): RISC OS applications on the TAIRiX desktop
 
-Binding under `AGENTS.md`. This plan owns `RISCOSEmulator.app` (title *RISC
-OS*). It has six parts:
+Binding under `AGENTS.md`. This plan owns TAIRiX Bridge's RISC OS layer and
+`TAIRiXBridge.app` (title *TAIRiX Bridge*); the bridge's notices are
+`userland/apps/tairix-bridge/README.md`'s. It has six parts:
 
 - an ARM processor that runs 26-bit and 32-bit RISC OS code;
 - a first-party RISC OS — its kernel, filing, graphics and font systems, BBC
@@ -33,7 +34,7 @@ an application's own documents folder, the reference harness);
 | Item | What it is | Status |
 |---|---|---|
 | RO0 | This plan, its jump-sheet row and its `PLAN.md` row | done |
-| RO1 | The `userland/apps/riscos` leaf subtree: its rows in the charter's layout and layering, and `deps-check`'s rule with its tests | done |
+| RO1 | The `userland/apps/tairix-bridge/riscos` leaf subtree: its rows in the charter's layout and layering, and `deps-check`'s rule with its tests | done |
 | RO2 | One association path: one table the file manager and the desktop both build, one matching rule Open With, icon-bar drops and folder picks apply, one store precedence, the records of an open, and a test that browsing launches nothing | done |
 | RO3 | RISC OS names defined once: leaf and path spelling and filetype names in `lib/fsmeta::preset::acorn`, the `,xxx` suffix on `Filetype`, each content type's canonical filetype beside `lib/browse`'s table; the archive, ADFS, icon, window-protocol, picker, save-panel and document-host copies move onto them | done |
 | RO4 | RISC OS colours and font names defined once: the `&BBGGRR00` colour word in `lib/colour`, the font-name map made public in `lib/drawing`; Draw's private copy and its re-derivation of the generic families are deleted | done |
@@ -51,7 +52,14 @@ an application's own documents folder, the reference harness);
 | RO16 | Modules: the built-in inventory and its versions, guest modules in either mode, instances, `RMEnsure` and replacement | done |
 | RO17 | The command line: `OS_CLI` through `CliV` with its aliases, prefixes and redirection, and the kernel's `*` commands — output and variables, files through FileSwitch's SWIs, `*Help`, `*Configure`, `*Status` and the Supervisor | done |
 | RO18 | Territory, International, MessageTrans's SWIs with their file blocks in guest memory, ResourceFS and the built-in resources, the key handler and InternationalKeyboard | done |
-| RO19 | FileSwitch and HostFS: the SWIs, the session's discs, the documents folder as the shared session's own disc with `!Boot`, Choices and the boot sequence, names and metadata, confinement, the RAM discs; `*Obey`, `*Run` and each executable type's run action, the boot utilities, MessageTrans reading files | planned |
+| RO19.1 | FileSwitch's core, in the `filing` crate, its state kept through the kernel's seam for other crates' built-in modules: filing systems registered, selected and called through their entry points, guest or built-in alike; names, media, special fields, wildcards, path variables and canonical names; every reason of `OS_File`, `OS_Find`, `OS_Args`, `OS_GBPB`, `OS_BGet` and `OS_BPut`, open files and their buffers | done |
+| RO19.2 | `OS_FSControl` whole and FileSwitch's commands: the directories, the listings, copying, wiping, counting and renaming with their options, access, types and stamps, closing and shutting down, file type names, services and upcalls | done |
+| RO19.3 | ResourceFS as `Resources:` | done |
+| RO19.4 | HostFS: the session's discs over the front end's file relay, its requests and their server over `lib/fscopy`'s tree seam, which PCEmulator's shared folders move onto; names and case through `acorn::path_to_riscos`, metadata through `canonical_filetype` made public with its subclass walk; confinement and errors, the read cache, `Transfer` and `Scrap` | done |
+| RO19.5 | FileCore and RamFS: FileCore's disc format moved out of the ADFS driver into `lib/filecore`; FileCore's SWIs, commands and client entry points over it; RamFS's disc in a dynamic area within the memory policy | done |
+| RO19.6 | Running files: `*Run` and each executable type's run action, the Obey module | done |
+| RO19.7 | The user's own RISC OS disc: the documents folder as the shared session's own disc, `!Boot`'s skeleton, `Choices:`, the boot sequence's command-line half; BootCommands; MessageTrans reading files through FileSwitch | done |
+| RO19.8 | FileCore's facilities RamFS does not reach, each recorded first: `FloppyStructure` for multi-zone floppies, `LayoutStructure` for old maps, `*Compact` on a new map, `*Defect` and the defect lists, `DiscFormat`'s gaps, `OS_FSControl` 52's object names, `DiscOp64`'s block | planned |
 | RO20 | BBC BASIC V and VI: workspace in guest memory, the language, numbers, the machine interface, the assembler, errors, the editor | planned |
 | RO21 | The VDU drivers: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory | planned |
 | RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
@@ -71,7 +79,7 @@ an application's own documents folder, the reference harness);
 | RO36 | Hosted icon-bar slots, with clicks and menus answered on demand | planned |
 | RO37 | Save drags started by an application, and asking the desktop to open a held document | planned |
 | RO38 | Tooltips long enough for hosted interactive help | planned |
-| RO39 | The Wimp: tasks, slots, polling, messages, the Task Manager | planned |
+| RO39 | The Wimp: tasks, slots, polling, messages, the Task Manager; the boot sequence's desktop half, `Resources` booted and `Tasks` started | planned |
 | RO40 | The Wimp: windows, redraw, nested windows and panes, icons, the caret, templates, error boxes | planned |
 | RO41 | The Wimp: menus in the TAIRiX look | planned |
 | RO42 | The Wimp: drags, data transfer and the clipboard, bridged to the desktop | planned |
@@ -319,7 +327,7 @@ run of items is finished.
 
 ## 1. The crate subtree (RO1)
 
-`userland/apps/riscos/` is a leaf subtree, as `userland/games/` is: its crates
+`userland/apps/tairix-bridge/riscos/` is a leaf subtree, as `userland/games/` is: its crates
 compose each other and `lib/*`, and nothing outside it depends on them. The
 charter's layout and layering name it, and `deps-check` refuses an edge into it
 from outside, even a transitive one, and an edge out of it to anything but
@@ -771,8 +779,8 @@ is fuzzed.
   error into less than its number and a terminator, menus past their buffer —
   nothing is written past the caller's room and "Buffer overflow" is the
   answer; the room MakeMenus reports left is RISC OS's.
-- ResourceFS keeps the registered blocks and their files; its filing system,
-  `Resources:` through FileSwitch, arrives with FileSwitch (RO19). The
+- ResourceFS keeps the registered blocks and their files and serves them as
+  `Resources:` through FileSwitch, read-only as RISC OS 5's is. The
   Messages module holds the built-in resources:
   - each module's message file, authored in the tree;
   - the Wimp's file-type sprites, `Wimp.Sprites22`, drawn at RISC OS's sizes
@@ -805,17 +813,26 @@ is fuzzed.
 
   An unknown command is therefore the "not found" error the `Run$Path` fallback
   gives.
-- **Run actions** (RO19) for every executable type: Absolute, Utility, Module
-  (by `RMRun`), BASIC, Obey, TaskObey, Command (`*Exec`), TaskExec and Desktop.
-- **Obey** (RO19). The `Obey$Dir` scope, the `%0`–`%9` and `%*n` parameters,
-  and the options; `*Obey` reads its file through FileSwitch and runs it with
-  `lib/obey`'s reading. Exec and TaskExec are provided too, with TaskObey and
-  TaskExec running in TaskWindows (RO48).
+- **Run actions** (RO19). FileSwitch runs an application directory's
+  `!Run`, an untyped or Absolute file as the application and a Utility from
+  the RMA itself, and every other type through the `@RunType` alias RISC OS 5
+  starts with — Module (`RMRun`), BASIC, Obey, Command (`Exec`), Text,
+  Sprite, Desktop, TaskObey and TaskExec — handed the file's canonical name.
+- **Obey** (RO19). `*Obey` reads its file through FileSwitch a line at a time,
+  or whole with `-c`, puts the parameters in with `lib/obey`'s substitution
+  and runs each line through `OS_CLI`; `Obey$Dir` is the name as given up to
+  its last full stop and is left set. A program a line runs becomes the
+  application, and the file goes on once it exits, as on RISC OS 5; one that
+  fails ends the file. TaskObey and TaskExec run in TaskWindows (RO48), whose
+  commands their run actions name.
 - **Commands.** Every `*` command of every built-in module, each arriving with
-  its module; the kernel's own are RO17's. Also every command the RISC OS boot
-  sequence's utilities provide (RO19), since applications rely on them:
-  `IfThere`, `AddApp`, `X`, `Repeat` and their kin. They are first-party,
-  found on `Run$Path` as they are on RISC OS.
+  its module; the kernel's own are RO17's. Also BootCommands (RO19), the ROM
+  module RISC OS 5 keeps the boot sequence's and applications' commands in:
+  `X`, `IfThere`, `Do`, `Repeat`, `AddApp`, `AddToRMA`, `ShrinkRMA`,
+  `AppSize`, `AppSlot`, `FreePool`, `SaveCMOS`, `LoadCMOS` and `SafeLogon`,
+  each answering as RISC OS 5 was recorded answering; `bootcommands.scenarios`
+  holds them to it. `Repeat` becomes the application to walk its directory,
+  as RISC OS 5's does.
 - **Input during work.** The keyboard is the interrupt's work, so Escape
   reaches the kernel while a program reads nothing, and a command that runs
   as long as its work takes the interrupt due at each step. A command reading
@@ -825,8 +842,13 @@ is fuzzed.
 ## 6. Filing (RO19)
 
 - **FileSwitch.** Every SWI of `OS_File`, `OS_Find`, `OS_GBPB`, `OS_Args`,
-  `OS_BGet`/`OS_BPut` and `OS_FSControl`, each with every reason. Open-file
-  handles go up to RISC OS's bound per session.
+  `OS_BGet`/`OS_BPut` and `OS_FSControl`, each with every reason; its
+  commands, configuration keywords, services and upcalls; image filing
+  systems on their hosts; each flag of a filing system's information word.
+  The `filing` crate's corpus holds it to RISC OS 5 by a logging filing
+  system's every entry call. Open-file handles go up to
+  RISC OS's bound per session. The SWI numbers, reasons and flags it shares
+  with the kernel are the kernel's one table.
 - **HostFS.** The session's files appear as one filing system, `HostFS`, whose
   discs are the session's roots:
   - **the shared session's own disc:** the application's documents folder,
@@ -836,10 +858,31 @@ is fuzzed.
     applications, a folder from the picker;
   - a `Transfer` disc holding each file delivered by a drop or an open, under a
     directory of its own;
-  - `Scrap` and `RAM`, RAM discs in the worker bounded by the memory policy.
+  - `Scrap`, a disc in the worker's memory bounded by the memory policy,
+    which `Wimp$ScrapDir` names.
 
   ResourceFS is `Resources:`. A disc's name is its root's folder name, made
-  unique within the session.
+  unique within the session. HostFS is filing system `&99`; its calls cross
+  `Host::relay` as `hostfs::protocol` requests, answered by `hostfs::server`
+  over `lib/fscopy`'s tree seam, which the front end runs (RO27, RO28) and
+  hands each delivered file with `Server::deliver`. Its read cache keys a
+  file's blocks on the version of its data its volume names (identity and
+  content generation), and a space in a host name is a hard space.
+- **FileCore and RamFS.** `RAM:` is RamFS as on RISC OS 5: a FileCore client
+  whose disc is area 5, a pool of pages the kernel makes at reset as large as
+  `*Configure RAMFsSize` says, within the memory policy. The area's handler
+  refuses a resize while the disc holds anything and otherwise restarts RamFS
+  on a fresh disc of the new size. FileCore serves each client, guest ones
+  included, as an incarnation of its own, over `lib/filecore`, the disc format
+  the ADFS driver and the volume probe share. Placement, an open file's growth
+  and settling, moves, allocation in whole sectors, disc specifiers, the names
+  FileSwitch and FileCore refuse, and how each command reads its disc are RISC
+  OS 5's, and `ramfs.scenarios` holds them to it. So are open files: open on
+  many handles to be read but on no other while one may write, a locked file
+  opened for update only to be read, an open object never renamed while the
+  directory holding it may be, a path through a missing directory or a file
+  read as nothing there; `open-files.scenarios` holds them. RO19.8 is what is
+  left, with whether a renamed directory's own stored name follows it.
 - **Its corpus.** The scenarios that need a filing system join the corpus
   with FileSwitch, holding what genuine RISC OS 5 was recorded giving through
   a file of type `&123` registered with ResourceFS: `*Load` with no
@@ -856,18 +899,26 @@ is fuzzed.
   - the boot sequence's `PreDesk` and `Tasks`, run when the shared session
     starts (decision 16).
 
-  The emulator makes `!Boot`'s skeleton in a new folder and never writes over
-  the user's files.
+  The emulator makes `!Boot`'s skeleton where the disc has no `!Boot`, and
+  never writes over the user's files. The boot sets the boot and choices
+  variables as the boot application does, obeys `PreDesktop`, then runs each
+  object in `PreDesk` — files by their type, then directories by their
+  `!Run` — keeping each failure and going on, a program it starts becoming
+  the application and the boot resuming once it exits; a `!Boot` that is a
+  file is run instead. The desktop half is the Wimp's (RO39).
+  - **Discs.** HostFS's roots reply names the shared session's own disc
+    first. A session with none keeps `Choices:` on a memory disc beside
+    `Scrap`, under the same bound, and runs no boot.
   - **Getting the folder.** The grant is asked for on one of the
     application's windows. A shared session therefore shows the session
     window while it starts, and asks on it before the boot sequence or any
     program runs.
-  - **A refusal.** A refusal leaves the session with `Choices:` on a RAM disc,
-    and the session window says why.
+  - **A refusal.** A refusal leaves the session with `Choices:` in the
+    worker's memory, and the session window says why.
 - **Names.**
   - **Spelling.** RISC OS and TAIRiX spellings convert through
-    `lib/fsmeta::preset::acorn`'s one conversion: the `.`/`/` exchange, RISC
-    OS Latin-1 ⇄ UTF-8, and the reserved bytes. A name that cannot round-trip
+    `lib/fsmeta::preset::acorn`'s one conversion: the `.`/`/` and space/hard
+    space exchanges, RISC OS Latin-1 ⇄ UTF-8, and the reserved bytes. A name that cannot round-trip
     is RISC OS's "bad name" error, never a mangled name.
   - **Case.** Lookups ignore case and preserve it, as FileCore's do. An exact
     match wins. Two names differing only in case, with no exact match, are
@@ -898,7 +949,8 @@ is fuzzed.
     another.
 - **Choices.** `Choices:` is `!Boot.Choices` on the user's own RISC OS disc, as
   on RISC OS 5, so a guest's choices are files the user sees and backs up with
-  the rest. An isolated session's `Choices:` is a RAM disc that ends with it.
+  the rest. An isolated session's `Choices:` is in the worker's memory and
+  ends with it.
 
 ## 7. BBC BASIC V and VI (RO20)
 
@@ -1357,9 +1409,8 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     `lib/icon` share it. A Spark or ArcFS member named as no RISC OS name can
     be is left out and its archive is not written back, which would lose it;
     ADFS leaves such an entry out of its listing.
-  - **Path spelling.** `acorn::path_from_riscos` splits a RISC OS path into
-    crossed leaves. The reverse direction arrives with its first consumer,
-    HostFS (RO19).
+  - **Path spelling.** `acorn::path_from_riscos` and `acorn::path_to_riscos`
+    split a path of either side into leaves crossed to the other.
   - **The `,xxx` suffix.** `lib/abi`'s `Filetype` owns its text forms, since
     the window protocol in `lib/abi` reads them: `hex`/`from_hex` (the
     `acorn.filetype` value), the `suffix` writer and the strict
@@ -1371,10 +1422,12 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     types `&E00`–`&FFF`. A type elsewhere belongs to the software that uses it,
     several programs naming one number differently, so the save panel shows it
     by its number.
-  - **Canonical filetypes.** `canonical_filetype` in `lib/browse` is the first
-    filetype a content type's row lists, the reverse of `FILETYPE_TABLE`;
-    `save_format` and `name_endings` read it. RO19 makes it public, walking a
-    type with no row of its own up its subclass chain.
+  - **Canonical filetypes.** `canonical_filetype` in `lib/browse`, public, is
+    the first filetype a content type's row lists — the reverse of
+    `FILETYPE_TABLE` — or, for a type with no row of its own, the nearest
+    broader type's along its subclass chain. `save_format` and
+    `name_endings` read a type's own row alone, so a format RISC OS has no
+    type for is offered with none.
   - **Spark's directory test** reads its load word through
     `decode_load_exec`.
 - **RO4 — colours and font names:**
@@ -1740,7 +1793,9 @@ that request could produce.
   4. A scenario marked `ours` keeps the fixture that states the emulator's own
      behaviour. One marked `reference` reads the machine itself, the ROM's
      module list among them: it is recorded and never replayed, a test of its
-     own holding the emulator's record of the machine to it.
+     own holding the emulator's record of the machine to it. One marked
+     `lasting` changes the machine in a way RISC OS cannot undo, and the
+     harness, running every scenario on one machine, runs it last.
   5. Before the scenarios, BASIC V types `lib/openbasic`'s programs, then saves
      and lists each; after them, the harness runs `lib/obey`'s cases. Each
      crate's answers are written beside its cases, and its replay holds it to

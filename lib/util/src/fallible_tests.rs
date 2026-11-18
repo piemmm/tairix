@@ -1,8 +1,8 @@
 //! Tests for the shared fallible allocation helpers.
 
 use super::{
-    boxed_array, collected, concatenated, copied, filled, grow_to, push, read_snapshot, reserve,
-    trim, try_push, written, zeroed,
+    boxed_array, collected, concatenated, copied, filled, grow_to, joined, push, read_snapshot,
+    reserve, trim, try_push, written, zeroed,
 };
 use alloc::vec::Vec;
 use tairix_abi::Errno;
@@ -113,6 +113,14 @@ fn parts_are_joined_into_a_string_of_exactly_their_length() {
     assert_eq!(joined, "/System/icon.png");
     assert_eq!(joined.capacity(), joined.len());
     assert_eq!(concatenated(&[]).as_deref(), Some(""));
+}
+
+#[test]
+fn slices_are_joined_into_a_buffer_of_exactly_their_length() {
+    let whole = joined(&[&b"HostFS::"[..], b"Disc", b".$"]).expect("room");
+    assert_eq!(whole, b"HostFS::Disc.$");
+    assert_eq!(whole.capacity(), whole.len());
+    assert_eq!(joined::<u8>(&[]), Some(Vec::new()));
 }
 
 #[test]

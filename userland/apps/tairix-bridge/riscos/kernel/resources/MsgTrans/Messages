@@ -1,0 +1,4 @@
+# MessageTrans's messages, in TAIRiX Bridge's own words.
+MessageTokenNotFound:Message token %0 not found
+BadTokenPattern:Badly formed token pattern (%0)
+BadMessageFileDescriptor:Not a valid message file descriptor

@@ -665,6 +665,9 @@ impl Planar {
             return OPEN_BUS;
         };
         let value = blaster.dsp.input(port.wrapping_sub(blaster.base) & 0x0F);
+        // A read that empties the output latch lets a firmware held on it
+        // go on.
+        self.advance_sound();
         self.sync_lines();
         value
     }

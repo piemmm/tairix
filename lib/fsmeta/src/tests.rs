@@ -370,7 +370,7 @@ fn a_leaf_crosses_either_way_and_back_or_is_a_bad_name() {
         (b"///", "..."),
         (b"Caf\xe9", "Caf\u{e9}"),
         (b"Euro\x80", "Euro\u{20ac}"),
-        (b"Hard\xa0Space", "Hard\u{a0}Space"),
+        (b"Hard\xa0Space", "Hard Space"),
     ] {
         let crossed = acorn::leaf_from_riscos(riscos).expect("crosses");
         assert_eq!(crossed.as_bytes(), tairix.as_bytes());
@@ -394,7 +394,7 @@ fn a_leaf_crosses_either_way_and_back_or_is_a_bad_name() {
         (b".", BadName::NoEntry),
         (b"..", BadName::NoEntry),
         (b"a/b", BadName::Character),
-        (b"a b", BadName::Character),
+        ("a\u{a0}b".as_bytes(), BadName::Character),
         ("smile\u{263a}".as_bytes(), BadName::Character),
         (b"\xff", BadName::Character),
     ] {
@@ -457,6 +457,138 @@ fn a_risc_os_path_is_its_leaves_each_crossed() {
 }
 
 #[test]
+fn a_riscos_wildcard_matches_runs_and_single_characters() {
+    assert!(acorn::names_match_wild(b"RamDisc*", b"RamDisc0"));
+    assert!(acorn::names_match_wild(b"Ram#isc0", b"RamDisc0"));
+    assert!(acorn::names_match_wild(b"*", b""), "a run may be empty");
+    assert!(
+        acorn::names_match_wild(b"a*b*c", b"aXbYbZc"),
+        "a run tried again"
+    );
+    assert!(
+        acorn::names_match_wild(b"\xE9*", b"\xC9t\xE9"),
+        "through the upper case table, as a name matches"
+    );
+    assert!(
+        !acorn::names_match_wild(b"RamDisc", b"RamDisc0"),
+        "anchored at the end"
+    );
+    assert!(
+        !acorn::names_match_wild(b"#", b""),
+        "one character is not none"
+    );
+    assert!(!acorn::names_match_wild(b"a*c", b"abcd"));
+    assert!(
+        acorn::wildcard_matches(b"\xE9#", b"\xE9x", |b| b),
+        "a folding that keeps every byte"
+    );
+    assert!(!acorn::wildcard_matches(b"\xE9", b"\xC9", |b| b.to_ascii_uppercase()));
+}
+
+#[test]
+fn a_riscos_name_matches_and_sorts_through_its_upper_case_table() {
+    assert!(acorn::names_match(b"ReadMe", b"README"));
+    assert!(
+        acorn::names_match(b"\xC9t\xE9", b"\xE9T\xC9"),
+        "Latin-1's capitals fold"
+    );
+    assert!(
+        acorn::names_match(b"\xFFx", b"Yx"),
+        "y-diaeresis has no capital: it is Y"
+    );
+    assert!(
+        acorn::names_match(b"\x82a", b"\x81a"),
+        "RISC OS's own w-circumflex folds"
+    );
+    assert!(
+        !acorn::names_match(b"\xD7", b"\xF7"),
+        "the multiplication sign is no capital"
+    );
+    assert!(!acorn::names_match(b"\xDF", b"SS"), "nor is the sharp s");
+    assert!(!acorn::names_match(b"Read", b"ReadMe"));
+    let mut names: Vec<&[u8]> = vec![
+        b"\xF7x", b"\xDFx", b"\xFEx", b"\xD7x", b"\xE9y", b"\xC9x", b"\xE0y", b"\xC0x", b"~x",
+        b"{x", b"`x", b"_x", b"]x", b"[x", b"zy", b"Zx", b"\xFFx", b"Bx", b"a\xC9z", b"a\xE9",
+        b"a_", b"aZ", b"ax", b"1x",
+    ];
+    names.sort_by(|a, b| acorn::name_order(a, b));
+    let recorded: [&[u8]; 24] = [
+        b"1x", b"ax", b"aZ", b"a_", b"a\xE9", b"a\xC9z", b"Bx", b"\xFFx", b"Zx", b"zy", b"[x",
+        b"]x", b"_x", b"`x", b"{x", b"~x", b"\xC0x", b"\xE0y", b"\xC9x", b"\xE9y", b"\xD7x",
+        b"\xFEx", b"\xDFx", b"\xF7x",
+    ];
+    assert_eq!(
+        names, recorded,
+        "the order RISC OS 5's FileCore was recorded keeping them in"
+    );
+}
+
+#[test]
+fn riscos_case_tables_are_each_others_inverse_but_for_y_diaeresis() {
+    for byte in 0..=u8::MAX {
+        let (upper, lower) = (
+            acorn::UPPER_CASE[usize::from(byte)],
+            acorn::LOWER_CASE[usize::from(byte)],
+        );
+        if byte != 0xFF {
+            assert_eq!(
+                acorn::LOWER_CASE[usize::from(upper)],
+                if upper == byte { lower } else { byte },
+                "{byte:#04x}"
+            );
+        }
+        assert_eq!(
+            acorn::UPPER_CASE[usize::from(upper)],
+            upper,
+            "{byte:#04x}: a capital is its own"
+        );
+    }
+    assert_eq!(acorn::LOWER_CASE[usize::from(b'Y')], b'y');
+    assert_eq!(
+        (acorn::UPPER_CASE[0x9B], acorn::LOWER_CASE[0x9A]),
+        (0x9A, 0x9B),
+        "the oe ligature"
+    );
+}
+
+#[test]
+fn a_tairix_path_is_its_leaves_each_crossed_back() {
+    let leaves: Vec<_> = acorn::path_to_riscos(b"Sprites/Read.Me")
+        .map(|leaf| leaf.map(|leaf| leaf.as_bytes().to_vec()))
+        .collect();
+    assert_eq!(leaves, [Ok(b"Sprites".to_vec()), Ok(b"Read/Me".to_vec())]);
+    for path in [&b"a//b"[..], b"a/", b"/a", b""] {
+        assert!(
+            acorn::path_to_riscos(path).any(|leaf| leaf == Err(acorn::BadName::Empty)),
+            "{path:?}"
+        );
+    }
+    assert!(acorn::path_to_riscos("a/no\u{a0}break".as_bytes())
+        .any(|leaf| leaf == Err(acorn::BadName::Character)));
+    for path in [
+        &b"Apps/!Edit/Read.Me"[..],
+        "Caf\u{E9}/r\u{E9}sum\u{E9}".as_bytes(),
+    ] {
+        let spelt: Vec<Vec<u8>> = acorn::path_to_riscos(path)
+            .map(|leaf| leaf.map(|leaf| leaf.as_bytes().to_vec()))
+            .collect::<Result<_, _>>()
+            .expect("crosses");
+        let back: Vec<u8> = spelt
+            .join(&b'.')
+            .split(|&byte| byte == b'.')
+            .map(|leaf| {
+                acorn::leaf_from_riscos(leaf)
+                    .expect("crosses back")
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect::<Vec<_>>()
+            .join(&b'/');
+        assert_eq!(back, path, "a path that crosses turns back into itself");
+    }
+}
+
+#[test]
 fn risc_os_names_the_filetypes_it_allocates_itself() {
     for (raw, name) in [
         (0xFFF, "Text"),
@@ -493,19 +625,19 @@ fn a_filetype_is_twelve_bits() {
 }
 
 #[test]
-fn a_name_crosses_between_risc_os_and_tairix_with_dot_and_slash_exchanged() {
-    let crossed: Vec<u8> = b"ReadMe/txt"
+fn a_name_crosses_between_risc_os_and_tairix_with_dot_and_slash_and_the_spaces_exchanged() {
+    let crossed: Vec<u8> = b"Read\xA0Me/txt"
         .iter()
         .map(|&b| acorn::crossed_name_byte(b))
         .collect();
-    assert_eq!(crossed, b"ReadMe.txt");
+    assert_eq!(crossed, b"Read Me.txt");
     for byte in 0..=u8::MAX {
         assert_eq!(
             acorn::crossed_name_byte(acorn::crossed_name_byte(byte)),
             byte,
             "the exchange is its own inverse"
         );
-        if byte != b'.' && byte != b'/' {
+        if ![b'.', b'/', b' ', 0xA0].contains(&byte) {
             assert_eq!(acorn::crossed_name_byte(byte), byte);
         }
     }
@@ -1078,20 +1210,5 @@ fn risc_os_latin_1_spells_every_byte_one_way_and_back() {
     assert_eq!(acorn::latin1_byte('\u{FB02}'), Some(0x9F));
     for unspelt in ['\u{0080}', '\u{0100}', '\u{263A}', '\n'] {
         assert_eq!(acorn::latin1_byte(unspelt), None, "{unspelt:?}");
-    }
-}
-
-#[test]
-fn a_risc_os_name_crosses_its_dot_and_slash_and_nothing_else() {
-    let name: Vec<u8> = b"ReadMe/txt"
-        .iter()
-        .map(|&byte| acorn::crossed_name_byte(byte))
-        .collect();
-    assert_eq!(name, b"ReadMe.txt");
-    for byte in 0..=u8::MAX {
-        assert_eq!(
-            acorn::crossed_name_byte(acorn::crossed_name_byte(byte)),
-            byte
-        );
     }
 }

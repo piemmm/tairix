@@ -1,4 +1,4 @@
-//! The Wimp's file-type sprites for the RISC OS emulator's ResourceFS
+//! The Wimp's file-type sprites for TAIRiX Bridge's ResourceFS
 //! (`plans/RISCOS-EMULATOR.md` §4.6): each file type the content-type
 //! registry knows, and the untyped file, drawn from the TAIRiX desktop's own
 //! master for it at RISC OS's sizes — `file_xxx` 34 pixels square and
@@ -23,7 +23,7 @@ use super::super::icons::ASSETS;
 use crate::Context;
 
 /// Where the file is committed, from the workspace's root.
-const SPRITES: &str = "userland/apps/riscos/kernel/resources/Wimp/Sprites22";
+const SPRITES: &str = "userland/apps/tairix-bridge/riscos/kernel/resources/Wimp/Sprites22";
 /// The sides of a file's large and small icons.
 const LARGE: u32 = 34;
 const SMALL: u32 = 18;

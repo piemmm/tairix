@@ -2,8 +2,8 @@
 
 The one software floating point: binary16, binary32, binary64 and
 double-extended arithmetic, each result computed exactly and rounded once, in integers alone
-so every target computes the same bits. PCEmulator's 8087 and the RISC OS
-emulator's FPA, VFP and Advanced SIMD compute through it, and `lib/drawing`
+so every target computes the same bits. PCEmulator's 8087 and TAIRiX Bridge's
+FPA, VFP and Advanced SIMD compute through it, and `lib/drawing`
 stores a Draw file's doubles in the FPA's word order by it.
 
 ## The core

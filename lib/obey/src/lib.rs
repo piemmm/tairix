@@ -70,8 +70,10 @@ fn byte(bytes: &[u8], at: usize) -> u8 {
     bytes.get(at).copied().unwrap_or(0)
 }
 
-/// Whether `byte` ends a line: CR, LF or NUL.
-const fn is_terminator(byte: u8) -> bool {
+/// Whether `byte` ends a line, as an Obey file's and `OS_CLI`'s end: CR, LF
+/// or NUL.
+#[must_use]
+pub const fn is_terminator(byte: u8) -> bool {
     matches!(byte, 0 | 10 | 13)
 }
 
