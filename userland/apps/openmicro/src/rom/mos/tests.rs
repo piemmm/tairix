@@ -15,7 +15,7 @@ use crate::rom::asm::{abs, hi, imm, lo, zp, Asm};
 use crate::rom::os::entry::{
     GSINIT, GSREAD, OSARGS, OSBPUT, OSBYTE, OSCLI, OSFIND, OSRDCH, OSWORD, OSWRCH,
 };
-use crate::rom::os::{vector::BRK as BRKV, ERROR_POINTER};
+use crate::rom::os::{service, vector::BRK as BRKV, ERROR_POINTER};
 use crate::scenario::{mode7_text, wait};
 
 mod commands;
@@ -67,6 +67,26 @@ fn program(service: Option<&'static str>, body: impl FnOnce(&mut Asm)) -> Vec<u8
     a.here("halt");
     a.jmp("halt");
     a.finish().expect("the test program assembles").bytes
+}
+
+/// Where [`boot_offer_rom`]'s service entry keeps the last auto-boot
+/// offer's Y.
+const BOOT_OFFER: u16 = 0x0078;
+
+/// A ROM whose service entry keeps each auto-boot offer's Y at
+/// [`BOOT_OFFER`] and claims the offer, so nothing boots.
+fn boot_offer_rom() -> Vec<u8> {
+    program(Some("service"), |a| {
+        a.jmp("language");
+        a.here("service");
+        a.cmp(imm(service::AUTO_BOOT));
+        a.bne("unclaimed");
+        a.sty(zp(BOOT_OFFER));
+        a.lda(imm(0));
+        a.here("unclaimed");
+        a.rts();
+        a.here("language");
+    })
 }
 
 /// A machine with the MOS and `rom` in slot 15, not yet run.

@@ -1483,20 +1483,17 @@ fn devices(a: &mut Asm, model: Model) {
     a.sta(zp(os::RFS_ROM));
     a.beq("rfs_start_rom");
     a.here("cassette_read_on");
-    a.jsr("cassette_take");
     if model == Model::ModelB {
-        a.lda(imm(READING));
-        a.ora(zp(fs::BAUD));
-        a.sta(abs(sheila::ACIA_CONTROL));
+        a.ldx(imm(READING));
     }
-    a.rts();
+    a.fall_into("cassette_take");
     cassette_take(a, model);
     tones(a, model);
     osrdrm(a, model);
 }
 
-/// The cassette given the 6850, or the Electron's counter given to it,
-/// listening, its motor running.
+/// The cassette given the 6850, reading or writing as X asks, or the
+/// Electron's counter given to it, listening, its motor running.
 fn cassette_take(a: &mut Asm, model: Model) {
     a.here("cassette_take");
     a.lda(imm(0x80));
@@ -1507,6 +1504,9 @@ fn cassette_take(a: &mut Asm, model: Model) {
             a.sta(abs(sheila::ACIA_CONTROL));
             a.lda(imm(ULA_CASSETTE));
             a.sta(abs(sheila::SERIAL_ULA));
+            a.txa();
+            a.ora(zp(fs::BAUD));
+            a.sta(abs(sheila::ACIA_CONTROL));
         }
         Model::Electron => {
             ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_INPUT);
@@ -1520,14 +1520,15 @@ fn cassette_take(a: &mut Asm, model: Model) {
     // Writing begins: the 6850 or the ULA sending, a dummy byte opening the
     // tone.
     a.here("cfs_write_on");
-    a.jsr("cassette_take");
     match model {
         Model::ModelB => {
-            a.lda(imm(WRITING));
-            a.ora(zp(fs::BAUD));
-            a.sta(abs(sheila::ACIA_CONTROL));
+            a.ldx(imm(WRITING));
+            a.jsr("cassette_take");
         }
-        Model::Electron => ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_OUTPUT),
+        Model::Electron => {
+            a.jsr("cassette_take");
+            ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_OUTPUT);
+        }
     }
     a.lda(imm(DUMMY));
     a.jmp("cfs_write_byte");

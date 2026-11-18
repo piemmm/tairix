@@ -9,8 +9,9 @@
 //! TIME, *TV, the user flag and the printer's ignored character.
 
 use super::ws::{os, page2, page_d, var, vdu, vector};
-use super::Model;
+use super::{keyboard, Model};
 use super::{page, svia, Held, VECTOR_DEFAULTS};
+use crate::machine::bbc::keyboard::Key;
 use crate::machine::electron::{irq as ula_irq, sheila as ula, LOCKED_ROMS};
 use crate::machine::via::reg;
 use crate::machine::SIDEWAYS_BASE;
@@ -34,13 +35,15 @@ const HARD_SETTINGS: u8 = 15;
 const _: () = assert!(var::STARTUP_OPTIONS == var::COUNTRY + HARD_SETTINGS as u16);
 /// An RTI, what an NMI finds at &D00 until a filing system claims it.
 const RTI: u8 = 0x40;
-/// The internal key numbers reset looks at.
-const KEY_SHIFT: u8 = 0x00;
-const KEY_CTRL: u8 = 0x01;
 /// *FX200's request that BREAK clear memory.
 const BREAK_CLEARS: u8 = 0x02;
 /// The startup option inverting SHIFT-BREAK.
 const BOOT_INVERTED: u8 = 0x08;
+// The boot shifts SHIFT's status bit down onto it.
+const _: () = assert!(
+    keyboard::shift_held(Model::ModelB) >= BOOT_INVERTED
+        && keyboard::shift_held(Model::Electron) >= BOOT_INVERTED
+);
 /// The keyboard buffer code for the BREAK key, whose soft key runs after any
 /// reset.
 const BREAK_KEY_CODE: u8 = 0xCA;
@@ -91,7 +94,7 @@ fn reset(a: &mut Asm, model: Model) {
             a.bne("reset_typed");
         }
     }
-    a.ldx(imm(KEY_CTRL));
+    a.ldx(imm(Key::CTRL.number()));
     a.jsr("key_down");
     a.bmi("reset_hard");
     a.lda(abs(var::BREAK_EFFECT));
@@ -295,16 +298,18 @@ fn service_call(a: &mut Asm, model: Model) {
 /// runs !BOOT from the ROM filing system. Then enter the language.
 fn boot_and_enter(a: &mut Asm, model: Model) {
     a.here("boot_and_enter");
-    a.ldx(imm(KEY_SHIFT));
-    a.jsr("key_down");
-    a.and(imm(0x80));
-    a.sta(zp(os::TEMP));
-    a.lda(abs(var::STARTUP_OPTIONS));
-    a.and(imm(BOOT_INVERTED));
-    for _ in 0..4 {
-        a.asl(Acc);
+    // The boot reads SHIFT from the keyboard status, recording SHIFT and
+    // CTRL there as the original OSes do, with the tick held off.
+    a.php();
+    a.sei();
+    a.jsr("keyboard_status");
+    a.plp();
+    a.lda(abs(var::KEYBOARD_STATUS));
+    for _ in BOOT_INVERTED.trailing_zeros()..keyboard::shift_held(model).trailing_zeros() {
+        a.lsr(Acc);
     }
-    a.eor(zp(os::TEMP));
+    a.eor(abs(var::STARTUP_OPTIONS));
+    a.and(imm(BOOT_INVERTED));
     // Y is zero to boot.
     a.tay();
     a.lda(imm(service::AUTO_BOOT));

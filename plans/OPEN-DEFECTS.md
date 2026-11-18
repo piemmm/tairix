@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 529 open, 1471 closed, 2000 total.
+**closed**, and a partial fix stays **open**. 530 open, 1473 closed, 2003 total.
 
-### Open (529)
+### Open (530)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -557,8 +557,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1981 | `lib/vdu` gives mode 7 a screen size of 655 360 bytes, 640 by 1024, where every other mode's is its line length by its height; the test holds only a lower bound | needs `OS_ReadModeVariable` observed on RISC OS 5.30, then the value pinned exactly |
 | D1983 | the RISC OS kernel's dynamic areas follow the PRMs where observation is wanting: `Service_MemoryMoved` issued with interrupts as they stand, `OS_DynamicArea 1`'s order of handler call and removal, reason 2's bit 7, a pool's rounding, and where the active object's boundary lies | needs scenarios recorded on genuine RISC OS 5 by `cargo xtask riscos --reference` |
 | D1984 | `cargo xtask pcemu-vectors` pins each suite's revision, its `*.MOO.gz` files and the licence it copies, but not each suite's `metadata.json`, whose classifications decide what is kept, nor the 8086 and V20 suites' own `LICENSE` bytes beyond requiring them to be the MIT text: no digest of either was ever recorded | needs a fresh import at the pinned revisions to record the digests, then pinning them |
+| D2019 | OpenMicro's MOS can leave *Escape From Jail*'s split screen, timed by its interrupts, with the text band a character row lower after a RETURN pressed during its load: 6 of 40 press phases (HEAD 24) and none of 200 on MOS 1.20, with screen memory identical, so the display's timing differs — most likely its interrupts held off by the key's scans, which take longer than MOS 1.20's (a held key's 12% of the machine to its 8%) | needs a faster scan; the Model B MOS has 1 byte free |
 
-### Closed (1471)
+### Closed (1473)
 
 | ID | Subject |
 |---|---|
@@ -2033,6 +2034,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D2014 | OpenMicro's DFS entered a `*RUN` file with what A, X, Y and C last held, where DFS 1.20 enters with A 1, X &FF, Y 1 and C set, and read the entry from page &10 after the load, so a file loaded over it was entered at bytes of its own — closed: the entry is taken before the data moves and the file entered with DFS 1.20's registers (`run_enters_with_a_1_x_ff_y_1_and_carry_set`, `run_enters_a_file_loaded_over_the_dfs_workspace`) |
 | D2015 | OpenMicro's MOS returned the service call's number in X when no ROM claimed it, through OSBYTE &8F and OSBYTE &8C and &8D, where MOS 1.20 returns &FF — closed: the service loop returns X &FF unclaimed and 0 claimed (`service_calls_return_x_0_when_claimed_and_ff_when_not`) |
 | D2016 | OpenMicro's DFS passed service call &0A on after giving its absolute workspace up, where DFS 1.20 claims it, and returned Y 2 from service call &12, which DFS 1.20 leaves as given — closed: both answered as DFS 1.20 answers them (`service_calls_return_x_0_when_claimed_and_ff_when_not`) |
+| D2017 | OpenMicro's MOS kept its own key slots: &EC never held a key's bare number, the tick finding a key typed it, a tick sooner than MOS 1.20 types a first key and two sooner than a second, and &2CA was its own, so *Citadel 2*, which polls &EC for SPACE's &62, never started — closed: &EC, &ED, &E7 and &2CA follow MOS 1.20's model, a key interrupt finding its key at once, a tick confirming it, the next typing it (`a_key_shows_its_bare_number_when_found_and_when_let_go`, `a_poll_for_space_s_bare_number_ends_once_it_is_pressed`, `a_key_is_typed_a_tick_after_it_is_confirmed`, `a_second_key_makes_the_first_the_first_key_until_it_is_let_go`, `with_auto_repeat_off_a_held_key_is_typed_once`) |
+| D2018 | OpenMicro's OS read SHIFT for the boot with a key test, offering the boot with Y &80 where MOS 1.20 and Electron OS 1.00 offer Y 8, and recorded neither SHIFT nor CTRL in the keyboard status at BREAK, where both originals record them until the next scan (&28 and &60 on the Model B, &40 and &80 on the Electron) — closed: the boot records them through the tick's status routine and reads SHIFT from there (`break_records_shift_and_ctrl_in_the_status_the_boot_reads`, Model B and Electron) |
 
 ## Scope
 

@@ -7,25 +7,13 @@ use super::build;
 use crate::machine::electron::keyboard::Key;
 use crate::machine::electron::Machine;
 use crate::rom::harness::{
-    electron_with_plus1, last_number, press, screen, shows, type_text, wait,
+    electron_with_plus1, last_number, press, press_break, screen, shows, type_text, wait,
 };
 use crate::rom::mos::ws::var::POLL_SEMAPHORE;
 use crate::rom::os::page2;
 
 fn printed(machine: &mut Machine) -> Vec<u8> {
     machine.take_printer_output().collect()
-}
-
-/// BREAK, with CTRL for a hard one, and the time the machine takes to start.
-fn break_key(machine: &mut Machine, hard: bool) {
-    if hard {
-        machine.set_key(Key::CTRL, true);
-    }
-    machine.set_break(true);
-    wait(machine, 2);
-    machine.set_break(false);
-    wait(machine, 300);
-    machine.set_key(Key::CTRL, false);
 }
 
 #[test]
@@ -274,9 +262,9 @@ fn fx163_returns_the_registers_it_was_called_with() {
 fn a_break_keeps_the_ports_off_and_a_hard_break_turns_them_on() {
     let (mut machine, _) = electron_with_plus1();
     type_text(&mut machine, "*FX163,128,1\r");
-    break_key(&mut machine, false);
+    press_break(&mut machine, &[]);
     assert_eq!(machine.peek(POLL_SEMAPHORE), 0, "off through BREAK");
-    break_key(&mut machine, true);
+    press_break(&mut machine, &[Key::CTRL]);
     assert_eq!(machine.peek(POLL_SEMAPHORE), 1, "on after CTRL-BREAK");
     press(&mut machine, &[Key::RETURN]);
     type_text(&mut machine, "VDU2:PRINT \"BACK\":VDU3\r");

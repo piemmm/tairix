@@ -450,8 +450,9 @@ its scenario in the corpus:
   masks, and VDU 19 writes all sixteen ULA entries, each colour 0's. OSBYTE
   &87 reads a cell by the bytes its rows span, not by &361.
 - The keyboard interrupts on CA2 while no key is down; the interrupt stands
-  down and sets the semaphore at &242, and once every key is up the tick arms
-  it again only if the semaphore is still set. OSBYTE 178 is that semaphore.
+  down, sets the semaphore at &242 and finds its key at once, and once every
+  key is up the tick arms it again only if the semaphore is still set.
+  OSBYTE 178 is that semaphore.
 - A numeric command (`*FX`, `*OPT`, `*TV`, `*TAPE`, `*MOTOR`, `*CODE`) takes
   decimal numbers 0–255, the first after spaces and each later one after a
   comma or spaces, and nothing but spaces after them; anything else is Bad
@@ -459,6 +460,13 @@ its scenario in the corpus:
 - KEYV is entered with C clear and V set for a key press, and with both set
   by the tick only while a key is down or the keyboard waits to rearm; a scan
   leaves CA2's flag clear, so rearming takes no second press.
+- &EC holds the last key found, &ED the one before it until that is let go.
+  A tick finding the last key still down sets its top bit; one finding it up
+  clears the bit, or forgets a key whose bit is clear. A key is typed as its
+  count at &E7 runs out: 1 when it is found, so the tick after its bit is
+  set, then &2CA, the auto-repeat delay and then the period, &2CA holding the
+  count reloaded next. A lock key turns its lock over once and leaves the
+  count 0.
 - The soft keys lie at &B00 as MOS 1.20 keeps them: an offset from &B01 to
   each key's text, the text in the order it was defined, an empty key at the
   end's offset, 238 bytes in all. A definition takes the old text out first
@@ -510,8 +518,9 @@ its scenario in the corpus:
   turns itself over and CAPS LOCK off, shifting every key that has a shifted
   form, function keys included. CTRL takes the code shifting gives. The lock
   keys act as they go down and never repeat, and each scan of the keyboard
-  records SHIFT and CTRL in status bits 3 and 6. An input zone set to zero
-  ignores its codes.
+  records SHIFT and CTRL in status bits 3 and 6, the boot's too: it reads
+  SHIFT from there, offering the boot with Y 0 and otherwise Y 8. An input
+  zone set to zero ignores its codes.
 - OSCLI calls FSCV with A=8 before each command, and passes a command no
   ROM claims to FSCV 3 at the command's start however a ROM's GSINIT left
   &E4 and Y; *HELP offers the ROMs the call before showing its version;
@@ -562,19 +571,18 @@ MOS 1.20, so a program *RUN is entered with S two higher. The 16 KiB image
 has no room for the rest:
 MOS 1.20 writes a silenced channel's attenuation twice more and steps a
 finished release's pitch twice while silent, which nothing hears; the
-two-key rollover takes a second key about 1.5 cs sooner; the workspace MOS
-1.20 keeps for rollover, auto-repeat and sound (&2CA–&2CE, the sound
+workspace MOS 1.20 keeps for rollover and sound (&2CB–&2CE, the sound
 buffers' flags at &2D3–&2D6) and the &FF it leaves at &2EA–&2FF are this
 ROM's own; and, against MOS 1.20's speed with BASIC II driving each, text
 output, scrolling and triangles are within a few percent, a window's clear
 is a tenth faster and a VDU 5 cell a fifth faster, its unlit pixels costing
 nothing, but a whole-screen clear takes 1.7 times as long, a horizontal
 line fill two and a half times, lines a fifth longer and an INKEY of one
-key 30% longer, and the scan while a key is held takes 11% of the
-machine to its 7.5%. A VDU 5 row addresses its first pixel inside the
-window and steps its address and mask along to the rest. A fill finds its run by stepping one pixel's address and mask
-along its line, then plots it as a span; reaching MOS 1.20's speed would take
-a byte at a time.
+key 30% longer, and the interrupts take 5.1% of the machine to its 4.4%,
+a held key's scan 12% more to its 8%. A VDU 5 row addresses its first pixel
+inside the window and steps its address and mask along to the rest. A fill
+finds its run by stepping one pixel's address and mask along its line, then
+plots it as a span; reaching MOS 1.20's speed would take a byte at a time.
 
 **The Electron's OS.** `rom::mos::build(Target::Electron)` builds it from the
 same source: every part the two machines' interfaces share is one routine,

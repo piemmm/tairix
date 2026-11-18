@@ -229,6 +229,9 @@ pub mod page2 {
     pub const EVENTS: u16 = 0x02BF;
     /// The soft key being expanded: its offset.
     pub const SOFT_KEY_POINTER: u16 = 0x02C9;
+    /// The count auto-repeat reloads next: the delay until the key held is
+    /// first typed, then the period.
+    pub const FIRST_REPEAT: u16 = 0x02CA;
     /// Each buffer's start offset.
     pub const BUFFER_START: u16 = 0x02D8;
     /// Each buffer's end offset.

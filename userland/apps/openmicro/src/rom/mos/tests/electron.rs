@@ -3,13 +3,15 @@
 
 use alloc::vec::Vec;
 
-use super::{var, vdu};
+use super::{boot_offer_rom, var, vdu, BOOT_OFFER};
 use crate::machine::canvas::encode;
 use crate::machine::electron::keyboard::Key;
 use crate::machine::electron::Machine;
-use crate::machine::electron::{control, sheila as ula};
+use crate::machine::electron::{control, sheila as ula, CARTRIDGE_ROMS};
 use crate::media::tape::Tape;
-use crate::rom::harness::{electron, last_number, press, screen, shows, type_text, wait};
+use crate::rom::harness::{
+    electron, electron_with_plus1, last_number, press, press_break, screen, shows, type_text, wait,
+};
 
 /// The cursor flashes with TIME, so the prompt is sampled across a flash.
 #[test]
@@ -26,6 +28,30 @@ fn the_electron_starts_with_its_own_name_then_basic() {
     assert!(shown, "the prompt's cursor shows within a flash");
     assert_eq!(machine.peek(vdu::MODE), 6, "it starts in MODE 6");
     assert!(machine.caps_lock_led(), "with CAPS LOCK on");
+}
+
+/// The boot reads SHIFT from the keyboard status as it records SHIFT and CTRL
+/// there, where they stay until the next scan, offering the boot with Y 0
+/// and Y 8 otherwise, as Electron OS 1.00 does.
+#[test]
+fn break_records_shift_and_ctrl_in_the_status_the_boot_reads() {
+    let (mut machine, _) = electron_with_plus1();
+    machine
+        .insert_rom(CARTRIDGE_ROMS[0][0], &boot_offer_rom())
+        .expect("the first cartridge slot takes a ROM");
+    let offer = |machine: &Machine| (machine.peek(BOOT_OFFER), machine.peek(var::KEYBOARD_STATUS));
+    press_break(&mut machine, &[]);
+    assert_eq!(offer(&machine), (8, 0x00), "BREAK");
+    press_break(&mut machine, &[Key::SHIFT]);
+    assert_eq!(offer(&machine), (0, 0x40), "SHIFT-BREAK, SHIFT let go");
+    press(&mut machine, &[Key::A]);
+    assert_eq!(
+        machine.peek(var::KEYBOARD_STATUS),
+        0x00,
+        "the next scan finds SHIFT up"
+    );
+    press_break(&mut machine, &[Key::CTRL]);
+    assert_eq!(offer(&machine), (8, 0x80), "CTRL-BREAK");
 }
 
 #[test]

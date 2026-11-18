@@ -23,7 +23,7 @@ use crate::machine::electron::keyboard::{self as electron_keyboard, Key as Elect
 use crate::machine::electron::{control, sheila as ula, KEYBOARD_ROMS};
 use crate::machine::via::{irq, reg};
 use crate::machine::SIDEWAYS_BASE;
-use crate::rom::asm::{abs, byte, imm, sym, zp, Acc, Asm, RTS, V_SET};
+use crate::rom::asm::{abs, byte, imm, sym, zp, Acc, Asm, Label, RTS, V_SET};
 use crate::rom::os::CR;
 use tairix_openbasic::basic2;
 use tairix_openbasic::keyword::{word, Word};
@@ -244,14 +244,15 @@ const ELECTRON_KEYS: [(ElectronKey, Key); 54] = [
 
 pub fn emit(a: &mut Asm, model: Model) {
     match model {
-        Model::ModelB => matrix(a),
-        Model::Electron => electron_matrix(a),
-    }
-    keyv(a, model);
-    tick(a, model);
-    match model {
-        Model::ModelB => translate(a),
-        Model::Electron => electron_translate(a),
+        Model::ModelB => {
+            matrix(a);
+            translate(a);
+        }
+        Model::Electron => {
+            electron_matrix(a);
+            emit_keyv(a, model);
+            electron_translate(a);
+        }
     }
     leds(a, model);
     a.whole(|a| rdch(a, model));
@@ -563,6 +564,14 @@ fn electron_lines(a: &mut Asm) {
     });
 }
 
+/// KEYV and the tick it runs: the Model B's placed after the rest, clear of
+/// the pins its earlier code lies among; the Electron's, which runs into its
+/// key translation, in [`emit`].
+pub fn emit_keyv(a: &mut Asm, model: Model) {
+    keyv(a, model);
+    tick(a, model);
+}
+
 /// KEYV: C and V choose the call.
 fn keyv(a: &mut Asm, model: Model) {
     a.here("keyv_default");
@@ -570,8 +579,10 @@ fn keyv(a: &mut Asm, model: Model) {
     a.bvs("keyboard_tick");
     // C set, V clear: OSBYTE &79's scan from key X, or with X's top bit set
     // a test of the key X & &7F, X's top bit set on return if it is down.
+    // `key_state`: the same test of the key A, with or without its top bit.
     a.txa();
     a.bpl("keyv_scan");
+    a.here("key_state");
     a.and(imm(!KEY_DOWN));
     a.tax();
     a.jsr("key_down");
@@ -618,35 +629,40 @@ fn keyv(a: &mut Asm, model: Model) {
 /// scan records SHIFT and CTRL in the keyboard status, and on the Electron
 /// FUNC too.
 fn tick(a: &mut Asm, model: Model) {
-    match model {
-        Model::ModelB => {
-            // A key pressed: CA2 stands down until every key is up.
-            a.here("keyboard_interrupt");
-            a.lda(imm(irq::CA2));
-            a.sta(abs(svia(reg::IER)));
-            a.sta(abs(svia(reg::IFR)));
-            a.lda(imm(0xFF));
-            a.sta(abs(var::KEYBOARD_SEMAPHORE));
-            a.rts();
-        }
-        // No key interrupts.
-        Model::Electron => {
-            a.here("keyboard_interrupt");
-            a.rts();
-        }
+    keyboard_status(a, model);
+    if model == Model::ModelB {
+        // A key pressed: CA2 stands down until every key is up, and the key
+        // is found at once, as MOS 1.20 finds it.
+        a.here("keyboard_interrupt");
+        a.lda(imm(irq::CA2));
+        a.sta(abs(svia(reg::IER)));
+        a.sta(abs(svia(reg::IFR)));
+        a.lda(imm(0xFF));
+        a.sta(abs(var::KEYBOARD_SEMAPHORE));
+        a.bne("tick_new");
     }
 
     a.here("keyboard_tick");
-    tick_status(a, model);
+    a.jsr("keyboard_status");
     tick_keys(a, model);
 }
 
-/// The scan's SHIFT and CTRL into the keyboard status, and on the Electron
-/// FUNC.
-fn tick_status(a: &mut Asm, model: Model) {
-    let (shift, ctrl, kept) = match model {
-        Model::ModelB => (SHIFT_HELD, CTRL_HELD, !(SHIFT_HELD | CTRL_HELD)),
-        Model::Electron => (ELECTRON_SHIFT_HELD, ELECTRON_CTRL_HELD, CAPS_OFF),
+/// The keyboard status bit SHIFT held sets.
+pub const fn shift_held(model: Model) -> u8 {
+    match model {
+        Model::ModelB => SHIFT_HELD,
+        Model::Electron => ELECTRON_SHIFT_HELD,
+    }
+}
+
+/// `keyboard_status`, which the tick and the boot call: the scan's SHIFT and
+/// CTRL into the keyboard status, and on the Electron FUNC.
+fn keyboard_status(a: &mut Asm, model: Model) {
+    a.here("keyboard_status");
+    let shift = shift_held(model);
+    let (ctrl, kept) = match model {
+        Model::ModelB => (CTRL_HELD, !(SHIFT_HELD | CTRL_HELD)),
+        Model::Electron => (ELECTRON_CTRL_HELD, CAPS_OFF),
     };
     a.jsr("keyboard_modifiers");
     a.php();
@@ -673,25 +689,23 @@ fn tick_status(a: &mut Asm, model: Model) {
     a.ora(imm(shift));
     a.bind(no_shift);
     a.sta(abs(var::KEYBOARD_STATUS));
+    // The Electron has no key interrupts: KEYV's call for one returns here.
+    if model == Model::Electron {
+        a.here("keyboard_interrupt");
+    }
+    a.rts();
 }
 
-/// Releases noticed, a new key taken, auto-repeat.
+/// Releases noticed, presses confirmed, auto-repeat, and a new key taken.
 fn tick_keys(a: &mut Asm, model: Model) {
-    // A key let go is forgotten, from either slot.
-    a.ldy(imm(1));
-    a.here("tick_forget");
-    a.lda(abs(os::KEY_LAST).y());
-    a.beq("tick_forget_next");
-    a.and(imm(!KEY_DOWN));
-    a.tax();
-    a.jsr("key_down");
-    a.bmi("tick_forget_next");
-    a.lda(imm(0));
-    a.sta(abs(os::KEY_LAST).y());
-    a.here("tick_forget_next");
-    a.dey();
-    a.bpl("tick_forget");
+    let scan = a.local();
+    match model {
+        Model::ModelB => follow_keys(a, scan),
+        Model::Electron => forget_keys(a),
+    }
     // A key down that neither slot holds is the new one.
+    a.bind(scan);
+    a.here("tick_new");
     a.ldx(imm(FIRST_SCANNED));
     a.here("tick_scan");
     a.jsr("key_scan_from");
@@ -706,21 +720,107 @@ fn tick_keys(a: &mut Asm, model: Model) {
     a.inx();
     a.bpl("tick_scan");
     a.here("tick_no_new_key");
+    match model {
+        Model::ModelB => {
+            // Every key up: CA2 armed again where its interrupt stood down.
+            a.lda(zp(os::KEY_LAST));
+            a.ora(zp(os::KEY_FIRST));
+            a.bne(RTS);
+            a.lda(abs(var::KEYBOARD_SEMAPHORE));
+            a.beq(RTS);
+            a.lda(imm(irq::ANY | irq::CA2));
+            a.sta(abs(svia(reg::IER)));
+            a.lda(imm(0));
+            a.sta(abs(var::KEYBOARD_SEMAPHORE));
+            a.rts();
+            key_found(a);
+        }
+        Model::Electron => electron_repeat(a),
+    }
+}
+
+/// `tick_new_key`: key X the last key, its down bit clear, and the last key
+/// before it the first. `key_alone`: X, or 0 for none, the last key alone.
+/// Either sets the count to 1, so a key held is typed by the tick after the
+/// one confirming it, and the auto-repeat delay to follow, and returns with
+/// Z clear.
+fn key_found(a: &mut Asm) {
+    a.here("tick_new_key");
+    a.lda(zp(os::KEY_LAST));
+    a.sta(zp(os::KEY_FIRST));
+    a.here("key_alone");
+    a.stx(zp(os::KEY_LAST));
+    a.lda(abs(var::REPEAT_DELAY));
+    a.sta(abs(page2::FIRST_REPEAT));
+    a.lda(imm(1));
+    a.sta(zp(os::REPEAT_COUNT));
+    a.rts();
+}
+
+/// MOS 1.20's keys: the first key let go is forgotten. The last key's down
+/// bit follows the key, so a key found is confirmed by the next tick, and
+/// one let go is forgotten by the tick after that clears its bit. Held, its
+/// count runs down, and running out types it and reloads the count, from
+/// the delay the first time and the period after; a count of 0 runs no
+/// more.
+fn follow_keys(a: &mut Asm, scan: Label) {
+    a.lda(zp(os::KEY_FIRST));
+    let first_kept = a.local();
+    a.beq(first_kept);
+    a.jsr("key_state");
+    a.bmi(first_kept);
+    a.lda(imm(0));
+    a.sta(zp(os::KEY_FIRST));
+    a.bind(first_kept);
+    a.lda(zp(os::KEY_LAST));
+    a.beq(scan);
+    a.jsr("key_state");
+    a.cmp(zp(os::KEY_LAST));
+    a.sta(zp(os::KEY_LAST));
+    a.bne(scan);
+    // Unchanged: N from the key's own down bit, not the comparison.
+    a.tax();
+    let held = a.local();
+    a.bmi(held);
+    a.ldx(imm(0));
+    a.jsr("key_alone");
+    a.bne(scan);
+    a.bind(held);
+    a.lda(zp(os::REPEAT_COUNT));
+    a.beq(scan);
+    a.dec(zp(os::REPEAT_COUNT));
+    a.bne(scan);
+    a.lda(abs(page2::FIRST_REPEAT));
+    a.sta(zp(os::REPEAT_COUNT));
+    a.lda(abs(var::REPEAT_PERIOD));
+    a.sta(abs(page2::FIRST_REPEAT));
+    a.txa();
+    a.jsr("key_pressed");
+}
+
+/// The Electron's keys: one let go is forgotten, from either slot.
+fn forget_keys(a: &mut Asm) {
+    a.ldy(imm(1));
+    a.here("tick_forget");
+    a.lda(abs(os::KEY_LAST).y());
+    a.beq("tick_forget_next");
+    a.and(imm(!KEY_DOWN));
+    a.tax();
+    a.jsr("key_down");
+    a.bmi("tick_forget_next");
+    a.lda(imm(0));
+    a.sta(abs(os::KEY_LAST).y());
+    a.here("tick_forget_next");
+    a.dey();
+    a.bpl("tick_forget");
+}
+
+/// The Electron's auto-repeat of the key held, once its delay and then each
+/// period ends; a delay of zero turns it off. A new key is typed at once.
+fn electron_repeat(a: &mut Asm) {
     a.lda(zp(os::KEY_LAST));
     a.bne("tick_repeat");
-    if model == Model::ModelB {
-        a.ora(zp(os::KEY_FIRST));
-        a.bne(RTS);
-        a.lda(abs(var::KEYBOARD_SEMAPHORE));
-        a.beq(RTS);
-        a.lda(imm(irq::ANY | irq::CA2));
-        a.sta(abs(svia(reg::IER)));
-        a.lda(imm(0));
-        a.sta(abs(var::KEYBOARD_SEMAPHORE));
-    }
     a.rts();
-    // Auto-repeat the key held, once its delay and then each period ends;
-    // a delay of zero turns it off.
     a.here("tick_repeat");
     a.lda(abs(var::REPEAT_DELAY));
     a.beq(RTS);
@@ -954,6 +1054,9 @@ fn locks(a: &mut Asm) {
     a.ora(imm(CAPS_OFF));
     a.here("key_locks_set");
     a.sta(abs(var::KEYBOARD_STATUS));
+    // A lock key held turns its lock over once.
+    a.lda(imm(0));
+    a.sta(zp(os::REPEAT_COUNT));
     a.jmp("keyboard_leds");
 }
 

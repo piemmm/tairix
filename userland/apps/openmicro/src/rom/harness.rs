@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::machine::electron::keyboard::{Key, Modifier};
 use crate::machine::electron::{Machine, PLUS1_ROM};
-use crate::machine::CLOCK;
+use crate::machine::{BREAK_HELD_MICROS, BREAK_KEYS_HELD_CENTISECONDS, CLOCK};
 use crate::rom::mos::ws::vdu;
 
 /// Cycles in a centisecond.
@@ -60,6 +60,21 @@ pub(crate) fn press(machine: &mut Machine, keys: &[Key]) {
         machine.set_key(key, false);
     }
     wait(machine, 4);
+}
+
+/// BREAK pressed with `held` down, the keys let go once the reset has read
+/// them.
+pub(crate) fn press_break(machine: &mut Machine, held: &[Key]) {
+    for &key in held {
+        machine.set_key(key, true);
+    }
+    machine.set_break(true);
+    machine.run_until(machine.cycles() + BREAK_HELD_MICROS * CLOCK / 1_000_000);
+    machine.set_break(false);
+    wait(machine, BREAK_KEYS_HELD_CENTISECONDS);
+    for &key in held {
+        machine.set_key(key, false);
+    }
 }
 
 /// Type `text` as the keyboard types it with CAPS LOCK on.

@@ -232,6 +232,9 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
         adc::emit(&mut a);
     }
     cfs::emit(&mut a, model);
+    if model == Model::ModelB {
+        keyboard::emit_keyv(&mut a, model);
+    }
     // The top page first, so what it leaves free takes held tables.
     let flow_end = a.pc();
     high::emit(&mut a, model);
