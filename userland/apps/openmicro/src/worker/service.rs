@@ -679,6 +679,17 @@ fn owned(image: &[u8]) -> Result<Vec<u8>, Refusal> {
     fallible::copied(image).ok_or(Refusal::Memory)
 }
 
+/// The machine `configuration` builds, at power-on, as a worker builds it.
+///
+/// # Errors
+///
+/// [`Refusal::Memory`] for images the heap will not hold, [`Refusal::Rom`]
+/// for one its socket cannot.
+#[cfg(not(freestanding))]
+pub(crate) fn powered_on(configuration: &Configuration<'_>) -> Result<Machine, Refusal> {
+    build(&Built::of(configuration)?).map_err(|_| Refusal::Rom)
+}
+
 fn build(built: &Built) -> Result<Machine, RomError> {
     let mut machine = match built {
         Built::ModelB { os, slots, links } => {

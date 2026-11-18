@@ -1,10 +1,11 @@
 # ARCHIVES.md — Archives as volumes
 
 Binding under `AGENTS.md`. A user double-clicks a zip, a tar (plain, gzip'd or
-bzip2'd), a RISC OS Spark or ArcFS archive, or a RAR archive, and its contents
-appear as a volume at `/Storage/<name>`, private to them, which every program
-reads and — for every format but RAR — writes: copy in and out, rename, move,
-delete, make directories. RISC OS filetypes, load and exec addresses and
+bzip2'd), a RISC OS Spark or ArcFS archive, a RAR archive, or an Acorn DFS
+disc image, and its contents appear as a volume at `/Storage/<name>`, private
+to them, which every program reads and — for every format but RAR — writes:
+copy in and out, rename, move, delete, make directories where the format
+has them. RISC OS filetypes, load and exec addresses and
 access bits travel with each member as the `acorn.*` attributes, so a RISC OS
 file keeps its type through an archive and back. It consumes and never
 contradicts `plans/DISK-IMAGES.md` (the attach, presentation, lifetime and
@@ -27,6 +28,7 @@ volume), `plans/ARXFS-METADATA.md` §6.3 (attributes through archives) and
 | AR9 | RAR 1.5–4 and RAR 5 headers, the unpack15/20/29/50 decoders, PPMd variant H and the standard filters; read only | done |
 | AR10 | The desktop and the command line: archive content types and icons, activation mounting an archive, *Eject*, `mount ARCHIVE` | done |
 | AR11 | A QEMU vertical: an archive of each format mounted, read, written where writable, ejected, and read back with its RISC OS attributes | done |
+| AR12 | Acorn DFS disc images (`.ssd`, `.dsd`): `lib/dfs`, recognition, the sides and files served, written in place as DFS writes; activation mounting one; the emulator's lock on a disc it writes | done |
 
 ## 1. What an archive is
 
@@ -38,8 +40,9 @@ volume), `plans/ARXFS-METADATA.md` §6.3 (attributes through archives) and
 - **Recognised by content.** The kernel's probe (`lib/fsprobe`, AR1) knows each
   format by its signature: zip by its end-of-central-directory record, tar by a
   header whose checksum holds, gzip and bzip2 by their stream magic, Spark by
-  its marker and method bytes, ArcFS by `Archive\0`, RAR by `Rar!\x1a\x07`. It
-  never decompresses: whether a gzip or bzip2 stream holds a tar is the
+  its marker and method bytes, ArcFS by `Archive\0`, RAR by `Rar!\x1a\x07`, a
+  DFS disc by a first catalogue `lib/dfs` believes, tried last as the one
+  format with no signature of its own. It never decompresses: whether a gzip or bzip2 stream holds a tar is the
   driver's question, answered in its own sandboxed process. An archive must
   begin with its signature, so a self-extracting program or a RAR appended
   to another file is not an archive; a zip is found from its end, so a
@@ -171,6 +174,28 @@ no second consumer exists to put them in `lib/*`.
   archive read only.
 - **ArcFS** (AR8): the header table and data, over the same methods; the
   table is written afresh, sorted as RISC OS sorts.
+- **DFS** (AR12): the on-disc format is `lib/dfs`, shared with the volume
+  probe and the Open Micro emulator. The name's ending tells an `.ssd` from a
+  `.dsd`, an unnamed image double-sided only where it runs past its first
+  side's sectors; a `.dsd`'s sides are the folders `Drive 0` and `Drive 2`, a
+  side whose catalogue `lib/dfs` does not believe left out. A file is served
+  by its full DFS name, `D.NAME`, the name's `/` crossed to `.`, compared
+  ASCII case-insensitively as DFS compares; a new name holds only what DFS
+  makes a name of, and a side holds files alone, 31 at most. Load and exec
+  are the `acorn.*` addresses, the I/O processor's widened to `&FFFFxxxx`;
+  the lock is the attribute's `L`; no stamp is ever taken from or put into an
+  address (`Format::dates_objects`). A file's bytes are read through a
+  `Coding::Disc` run per track, and a short image's missing tail reads as
+  zeros, as OpenMicro's disc model reads it. A commit rewrites the image as
+  DFS would rewrite the disc: unchanged files keep their sectors, a written
+  file goes back to its last sector if it still fits, else to DFS's first
+  fit from the catalogue up, compacting only where nothing fits; every other
+  sector is copied as it was, a name keeps the top bits it was read with
+  while it is unchanged (`Node::notes`), a catalogue of the same entries
+  keeps its bytes and cycle number, and the image grows only to its last
+  written sector. Room and the 31 entries are held to before a change is
+  taken, so a commit never finds a side outgrown. A Watford 62-file
+  catalogue, which DFS 1.20 would write over, leaves the disc read only.
 - **RAR** (AR9): RAR 1.5–4 and RAR 5 archives, solid and not, in the driver's
   `rar` module: 1.5's adaptive coding, 2's LZ and audio modes, 3's LZ, PPMd
   variant H and its six standard filters (recognised by bytecode checksum and
@@ -199,6 +224,13 @@ no second consumer exists to put them in `lib/*`.
   its directory. Their icons are the archive masters (`plans/ICONS.md`).
 - `mount ARCHIVE [TARGET]` mounts an archive as it does an image, and
   `unmount` ejects it.
+- An `.ssd` or `.dsd` (`MediaType::AcornDfsDisc`) holds a volume, so
+  activating one mounts it; the Open Micro emulator takes it by a drop or
+  *Open With*. The emulator holds an exclusive whole-file advisory lock
+  (`plans/FILELOCK.md`) on every disc and tape it may write back, so a
+  writable mount of the file is refused while it is in a drive (the image
+  attach's own lock), and a file already mounted goes into a drive
+  write-protected, the emulator saying why.
 
 ## 6. Tests (AR11)
 
@@ -206,12 +238,15 @@ Every decoder has a fuzz harness (§19.6) and unit tests over hand-built
 archives; each format round-trips a tree with RISC OS attributes; a commit's
 failure leaves the archive whole. The least archive of each format, the
 streams members are packed in and an archive written back by the driver are
-`tests/integration/archive_image`'s, which the driver's tests, its fuzz
-harness and the disk-image vertical share. That vertical
-(`tairix-test-images-qemu-aarch64`, `plans/DISK-IMAGES.md` DI7) copies a zip,
-a tar, a gzip'd and a bzip2'd tar, a Spark and an ArcFS archive, each holding
-`ReadMe` typed as RISC OS text, into a home; mounts each with `mount`, reads
-`ReadMe` and its filetype, writes and types a file, ejects it — the commit —
-and mounts it again to read both files and their types back. A RAR archive
-the RAR encoder wrote is mounted beside them, its members read whole through
-their BLAKE2sp checks, and a write to it refused.
+`tests/integration/archive_image`'s, a DFS disc of each layout among them,
+which the driver's tests, its fuzz harness and the disk-image vertical share.
+That vertical (`tairix-test-images-qemu-aarch64`, `plans/DISK-IMAGES.md` DI7)
+copies a zip, a tar, a gzip'd and a bzip2'd tar, a Spark and an ArcFS
+archive, each holding `ReadMe` typed as RISC OS text, into a home; mounts
+each with `mount`, reads `ReadMe` and its filetype, writes and types a file,
+ejects it — the commit — and mounts it again to read both files and their
+types back. A RAR archive the RAR encoder wrote is mounted beside them, its
+members read whole through their BLAKE2sp checks, and a write to it refused.
+A DFS disc holding `$.README` at the I/O processor's &1900 is mounted last,
+read with its load address, given `$.WRITTEN` with one of its own, ejected,
+and read back.

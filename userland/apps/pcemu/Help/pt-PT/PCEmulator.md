@@ -92,8 +92,8 @@ se clica na imagem e devolve-o quando se toca brevemente na tecla Meta.
 
 Fechar a janela da biblioteca deixa as máquinas ligadas a funcionar, e fechar
 todas as janelas deixa o emulador na barra de ícones: um clique no seu ícone, ou
-Biblioteca de máquinas no seu menu, volta a abrir a biblioteca, e Sair nesse
-menu suspende todas as máquinas ligadas e termina o emulador. Cada
+Biblioteca de máquinas no seu menu, traz sempre a biblioteca para a frente, e
+Sair nesse menu suspende todas as máquinas ligadas e termina o emulador. Cada
 máquina corre num processo de trabalho próprio que não detém qualquer
 autoridade: nunca se confia nos seus programas nem nos seus discos.
 

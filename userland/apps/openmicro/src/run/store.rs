@@ -12,120 +12,15 @@ use tairix_appdata::{read_blob, write_blob, RtHost};
 use tairix_machines::record::Record;
 use tairix_machines::state::{LastScreen, Suspended};
 use tairix_machines::store::{self as kept, Resumable, Shelved};
+use tairix_openmicro::front::first_screen;
+use tairix_openmicro::front::images::{Images, Rom, NO_ROM};
 use tairix_openmicro::front::library::{Fitting, Image, Machine, Socket, INSTALLED, STATE_BOUNDS};
-use tairix_openmicro::machine::c64::{sid, Standard};
-use tairix_openmicro::worker::protocol::{Configuration, Plus1, Slot, MAX_ROM, SLOTS};
+use tairix_openmicro::machine::Model;
+use tairix_openmicro::worker::protocol::MAX_ROM;
 use tairix_rt::work::Worker;
 use tairix_rt::File;
 use tairix_util::defer::JobQueue;
-
-/// A ROM image as a machine is built from it: one `Run` carries, or one read
-/// from the store.
-pub enum Rom {
-    /// Carried in `Run`.
-    Shipped(&'static [u8]),
-    /// Read from the store.
-    Installed(Vec<u8>),
-}
-
-impl Rom {
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Shipped(bytes) => bytes,
-            Self::Installed(bytes) => bytes,
-        }
-    }
-}
-
-/// What a sideways slot or cartridge holds, read.
-pub enum Socketed {
-    /// Nothing.
-    Empty,
-    /// Sideways RAM.
-    Ram,
-    /// A ROM.
-    Rom(Rom),
-}
-
-/// The images a machine is built from, read.
-pub enum Images {
-    /// A Model B's OS, its slots and its links.
-    ModelB {
-        /// The OS.
-        os: Rom,
-        /// Each slot.
-        slots: Box<[Socketed; SLOTS]>,
-        /// The links, as OSBYTE &FF reads them.
-        links: u8,
-    },
-    /// An Electron's OS, BASIC and Plus 1.
-    Electron {
-        /// The OS.
-        os: Rom,
-        /// BASIC.
-        basic: Rom,
-        /// The Plus 1's ROM and its cartridges' images.
-        plus1: Option<(Rom, [[Option<Rom>; 2]; 2])>,
-    },
-    /// A Commodore 64's standard and SID, its ROMs and each fitted drive's
-    /// DOS.
-    C64 {
-        /// The television standard.
-        standard: Standard,
-        /// The SID.
-        sid: sid::Model,
-        /// The KERNAL, BASIC and the character ROM.
-        roms: [Rom; 3],
-        /// Each drive's DOS, where it is fitted.
-        drives: [Option<Rom>; 2],
-    },
-}
-
-impl Images {
-    /// The configuration the images build.
-    pub fn configuration(&self) -> Configuration<'_> {
-        match self {
-            Self::ModelB { os, slots, links } => {
-                let mut built = Box::new([Slot::Empty; SLOTS]);
-                for (slot, fitted) in built.iter_mut().zip(slots.iter()) {
-                    *slot = match fitted {
-                        Socketed::Empty => Slot::Empty,
-                        Socketed::Ram => Slot::Ram,
-                        Socketed::Rom(rom) => Slot::Rom(rom.bytes()),
-                    };
-                }
-                Configuration::ModelB {
-                    os: os.bytes(),
-                    slots: built,
-                    links: *links,
-                }
-            }
-            Self::Electron { os, basic, plus1 } => Configuration::Electron {
-                os: os.bytes(),
-                basic: basic.bytes(),
-                plus1: plus1.as_ref().map(|(rom, cartridges)| Plus1 {
-                    rom: rom.bytes(),
-                    cartridges: cartridges
-                        .each_ref()
-                        .map(|pair| pair.each_ref().map(|rom| rom.as_ref().map(Rom::bytes))),
-                }),
-            },
-            Self::C64 {
-                standard,
-                sid,
-                roms: [kernal, basic, character],
-                drives,
-            } => Configuration::C64 {
-                standard: *standard,
-                sid: *sid,
-                kernal: kernal.bytes(),
-                basic: basic.bytes(),
-                character: character.bytes(),
-                drives: drives.each_ref().map(|dos| dos.as_ref().map(Rom::bytes)),
-            },
-        }
-    }
-}
+use tairix_util::fallible;
 
 /// Why a machine's state is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,10 +69,11 @@ pub enum Job {
         /// Why.
         why: Keeping,
     },
-    /// Draw these machines' last screens at `picture`.
+    /// Draw these machines' last screens at `picture`, a machine never yet
+    /// run its model's boot screen.
     Pictures {
-        /// The machines.
-        ids: Vec<u32>,
+        /// The machines, and the model each is.
+        machines: Vec<(u32, Model)>,
         /// The size.
         picture: (u32, u32),
     },
@@ -281,8 +177,11 @@ pub fn serve(_: &mut (), job: &mut Job) -> Done {
             why: *why,
             result: kept::keep(*id, screen, suspended.as_ref(), &STATE_BOUNDS),
         },
-        Job::Pictures { ids, picture } => {
-            Done::Pictured(kept::pictures(ids, *picture, &STATE_BOUNDS))
+        Job::Pictures { machines, picture } => {
+            let ids: Vec<u32> = machines.iter().map(|&(id, _)| id).collect();
+            let mut pictures = kept::pictures(&ids, *picture, &STATE_BOUNDS);
+            first_screens(&mut pictures, machines.iter().copied(), *picture);
+            Done::Pictured(pictures)
         }
         Job::Start {
             id,
@@ -309,7 +208,12 @@ pub fn serve(_: &mut (), job: &mut Job) -> Done {
 /// fitted to a machine; one no machine is fitted with goes, so the store
 /// keeps only what the library uses.
 fn load(picture: Option<(u32, u32)>) -> Result<(Shelved<Machine>, Vec<String>), String> {
-    let shelved = kept::load::<Machine>(picture, &STATE_BOUNDS)?;
+    let mut shelved = kept::load::<Machine>(picture, &STATE_BOUNDS)?;
+    if let Some(picture) = picture {
+        let machines = shelved.loaded.library.machines();
+        let models = machines.iter().map(|machine| (machine.id, machine.model()));
+        first_screens(&mut shelved.pictures, models, picture);
+    }
     let listing = tairix_appdata::blobs::list(&mut RtHost)
         .map_err(|err| format!("the store could not be listed ({err})"))?;
     let fitted = |blob: &str| {
@@ -333,6 +237,29 @@ fn load(picture: Option<(u32, u32)>) -> Result<(Shelved<Machine>, Vec<String>), 
     Ok((shelved, installed))
 }
 
+/// Add to `pictures` the boot screen of each of `machines` that has no last
+/// screen to show, drawn at `size`: a machine never yet run.
+fn first_screens(
+    pictures: &mut Vec<(u32, Vec<u8>)>,
+    machines: impl Iterator<Item = (u32, Model)>,
+    size: (u32, u32),
+) {
+    let mut drawn: [Option<Option<Vec<u8>>>; Model::ALL.len()] = Default::default();
+    for (id, model) in machines {
+        if pictures.iter().any(|&(pictured, _)| pictured == id) {
+            continue;
+        }
+        let Some(at) = Model::ALL.iter().position(|&each| each == model) else {
+            continue;
+        };
+        let picture = drawn[at].get_or_insert_with(|| first_screen::picture(model, size));
+        // Short of memory, the card shows no picture rather than the app ending.
+        if let Some(copy) = picture.as_deref().and_then(fallible::copied) {
+            let _ = fallible::push(pictures, (id, copy));
+        }
+    }
+}
+
 /// What a start of a machine fitted so reads: every image, and its snapshot
 /// where it is suspended.
 fn start(fitting: &Fitting, suspended: bool, id: u32) -> Result<(Box<Images>, Resumable), String> {
@@ -345,75 +272,15 @@ fn start(fitting: &Fitting, suspended: bool, id: u32) -> Result<(Box<Images>, Re
     Ok((images, resume))
 }
 
-fn rom(image: &Image) -> Result<Rom, String> {
-    match image {
-        Image::Shipped(shipped) => Ok(Rom::Shipped(shipped.image())),
-        Image::Installed(blob) => read_blob(blob, MAX_ROM)
-            .map(Rom::Installed)
-            .map_err(|err| format!("{err}")),
-        Image::Empty | Image::Ram => Err(String::from("a socket that needs a ROM holds none")),
-    }
-}
-
-fn socketed(image: &Image) -> Result<Socketed, String> {
-    match image {
-        Image::Empty => Ok(Socketed::Empty),
-        Image::Ram => Ok(Socketed::Ram),
-        image => rom(image).map(Socketed::Rom),
-    }
-}
-
+/// The images `fitting` builds a machine from: each `Run` carries, or one
+/// read from the store.
 fn images(fitting: &Fitting) -> Result<Images, String> {
-    Ok(match fitting {
-        Fitting::ModelB { os, slots, links } => {
-            let mut read: Box<[Socketed; SLOTS]> =
-                Box::new(core::array::from_fn(|_| Socketed::Empty));
-            for (into, image) in read.iter_mut().zip(slots.iter()) {
-                *into = socketed(image)?;
-            }
-            Images::ModelB {
-                os: rom(os)?,
-                slots: read,
-                links: links.byte(),
-            }
-        }
-        Fitting::Electron { os, basic, plus1 } => Images::Electron {
-            os: rom(os)?,
-            basic: rom(basic)?,
-            plus1: match plus1 {
-                Some(plus1) => {
-                    let mut cartridges: [[Option<Rom>; 2]; 2] = Default::default();
-                    for (into, image) in cartridges
-                        .as_flattened_mut()
-                        .iter_mut()
-                        .zip(plus1.cartridges.as_flattened())
-                    {
-                        *into = match socketed(image)? {
-                            Socketed::Rom(rom) => Some(rom),
-                            Socketed::Empty | Socketed::Ram => None,
-                        };
-                    }
-                    Some((rom(&plus1.rom)?, cartridges))
-                }
-                None => None,
-            },
-        },
-        Fitting::C64 {
-            standard,
-            sid,
-            kernal,
-            basic,
-            character,
-            drives,
-        } => Images::C64 {
-            standard: *standard,
-            sid: *sid,
-            roms: [rom(kernal)?, rom(basic)?, rom(character)?],
-            drives: [
-                drives[0].as_ref().map(rom).transpose()?,
-                drives[1].as_ref().map(rom).transpose()?,
-            ],
-        },
+    Images::of(fitting, &mut |image| match image {
+        Image::Installed(blob) => read_blob(blob, MAX_ROM)
+            .map(Rom::Read)
+            .map_err(|err| format!("{err}")),
+        Image::Shipped(shipped) => Ok(Rom::Carried(shipped.image())),
+        Image::Empty | Image::Ram => Err(String::from(NO_ROM)),
     })
 }
 

@@ -2313,7 +2313,8 @@ const fn records_owners(fstype: VolumeFsType) -> bool {
         | VolumeFsType::Bzip2
         | VolumeFsType::Spark
         | VolumeFsType::ArcFs
-        | VolumeFsType::Rar => false,
+        | VolumeFsType::Rar
+        | VolumeFsType::Dfs => false,
     }
 }
 

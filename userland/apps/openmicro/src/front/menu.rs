@@ -55,6 +55,8 @@ pub enum Command {
     LoadProgram,
     /// Press BREAK; on a C64, RESTORE.
     Break,
+    /// Press BREAK with SHIFT held: an Acorn model's boot.
+    ShiftBreak,
     /// Switch the machine off and on.
     Reset,
     /// Pause or resume.
@@ -75,6 +77,8 @@ pub enum Command {
     SaveSnapshot,
     /// Take a saved machine back.
     RestoreSnapshot,
+    /// Show the machine's folder in the file manager.
+    ShowFolder,
     /// Open the machine's settings.
     Settings,
     /// Take its media out and turn it off, keeping only its last screen.
@@ -83,9 +87,12 @@ pub enum Command {
     Library,
 }
 
+/// What SHIFT-BREAK is called: on its menu row and its button.
+pub const SHIFT_BREAK: &str = "SHIFT-BREAK";
+
 /// Every command a row of fixed id is: its id is [`FIRST_ID`] plus its place
 /// here.
-const COMMANDS: [Command; 35] = [
+const COMMANDS: [Command; 37] = [
     Command::InsertDisc(PhysicalDrive::Zero),
     Command::NewDisc(PhysicalDrive::Zero),
     Command::EjectDisc(PhysicalDrive::Zero),
@@ -105,6 +112,7 @@ const COMMANDS: [Command; 35] = [
     Command::RemoveCartridge,
     Command::LoadProgram,
     Command::Break,
+    Command::ShiftBreak,
     Command::Reset,
     Command::Pause,
     Command::Speed(Speed::Normal),
@@ -119,6 +127,7 @@ const COMMANDS: [Command; 35] = [
     Command::Paste,
     Command::SaveSnapshot,
     Command::RestoreSnapshot,
+    Command::ShowFolder,
     Command::Settings,
     Command::ShutDown,
 ];
@@ -160,10 +169,26 @@ const _: () =
 pub struct Offered {
     /// Whether the application's documents folder was granted.
     pub reachable: bool,
+    /// Whether the machine's own folder is made there.
+    pub folder: bool,
     /// The disc images, at most [`FOLDER_ROWS`].
     pub discs: Vec<String>,
     /// The tape images, at most [`FOLDER_ROWS`].
     pub tapes: Vec<String>,
+}
+
+impl Offered {
+    /// What a machine's window is offered before its folder is listed: the
+    /// documents folder where `reachable`, and the machine's own folder there
+    /// where it has `folder`.
+    #[must_use]
+    pub fn unlisted(reachable: bool, folder: bool) -> Self {
+        Self {
+            reachable,
+            folder: reachable && folder,
+            ..Self::default()
+        }
+    }
 }
 
 /// What the menu shows of the machine and its window.
@@ -551,6 +576,14 @@ fn push_machine(menu: &mut AppMenu, shown: &Shown) -> Result<(), Errno> {
         AppMenuSymbol::Refresh,
         Acts::InPlace,
     )?)?;
+    if shown.model.boots_with_shift_break() {
+        menu.push(row(
+            Command::ShiftBreak,
+            SHIFT_BREAK,
+            AppMenuSymbol::Play,
+            Acts::InPlace,
+        )?)?;
+    }
     menu.push(row(
         Command::Reset,
         "Reset",
@@ -631,9 +664,16 @@ pub fn push_rows(
     menu.push(AppMenuRow::Separator)?;
     push_machine(menu, shown)?;
     menu.push(AppMenuRow::Separator)?;
+    // Kept straight into the machine's folder where it has one, else where
+    // the picker is told.
+    let save = if offered.folder {
+        "Save Snapshot"
+    } else {
+        "Save Snapshot\u{2026}"
+    };
     menu.push(row(
         Command::SaveSnapshot,
-        "Save Snapshot\u{2026}",
+        save,
         AppMenuSymbol::Save,
         Acts::Elsewhere,
     )?)?;
@@ -644,6 +684,7 @@ pub fn push_rows(
         Acts::Elsewhere,
     )?)?;
     if place == Place::Window {
+        menu.push(show_folder(offered.folder)?)?;
         menu.push(AppMenuRow::Separator)?;
         menu.push(row(
             Command::Settings,
@@ -665,6 +706,25 @@ pub fn push_rows(
         AppMenuSymbol::ShutDown,
         Acts::Elsewhere,
     )?)
+}
+
+/// The row showing the machine's folder in the file manager, offered where
+/// the machine `has_folder`.
+///
+/// # Errors
+///
+/// [`Errno`] from the menu's bounds, which this fixed row stays within.
+pub fn show_folder(has_folder: bool) -> Result<AppMenuRow, Errno> {
+    let (command, label, symbol) = (
+        Command::ShowFolder,
+        "Show Folder",
+        AppMenuSymbol::OpenFolder,
+    );
+    if has_folder {
+        row(command, label, symbol, Acts::Elsewhere)
+    } else {
+        unavailable(command, label, symbol, "The machine has no folder yet")
+    }
 }
 
 #[cfg(test)]

@@ -1819,6 +1819,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-dfs"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+]
+
+[[package]]
 name = "tairix-dirname"
 version = "0.0.0"
 dependencies = [
@@ -2318,6 +2325,7 @@ dependencies = [
  "tairix-crc16",
  "tairix-crc32",
  "tairix-crypto",
+ "tairix-dfs",
  "tairix-fsmeta",
  "tairix-fsprobe",
  "tairix-fsserve",
@@ -2963,6 +2971,7 @@ dependencies = [
  "tairix-compress",
  "tairix-crc32",
  "tairix-crypto",
+ "tairix-dfs",
  "tairix-fat",
  "tairix-fsmeta",
  "tairix-fuzzseed",
@@ -4188,6 +4197,7 @@ dependencies = [
  "tairix-crc32",
  "tairix-crt",
  "tairix-crypto",
+ "tairix-dfs",
  "tairix-font",
  "tairix-fscopy",
  "tairix-fuzzseed",
@@ -5565,6 +5575,7 @@ dependencies = [
  "tairix-compress",
  "tairix-crc16",
  "tairix-crc32",
+ "tairix-dfs",
  "tairix-drv-fs-archive",
  "tairix-fsserve",
  "tairix-log",

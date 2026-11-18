@@ -1,5 +1,7 @@
 //! Archive recognition (`plans/ARCHIVES.md` AR1): which archive format a
-//! file's bytes hold, by signature alone and never by decompressing.
+//! file's bytes hold, by signature alone and never by decompressing, and last
+//! an Acorn DFS disc image, which has none and is known by a catalogue every
+//! field of which a DFS disc could hold.
 //!
 //! An archive is a file, so it is read as its exact `len` bytes, wherever the
 //! device's last block runs past them, and nothing at or past `len` is read.
@@ -16,11 +18,13 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_abi::blkio::BlkForm;
 use tairix_abi::driver::block::Block;
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 use tairix_compress::gzip;
+use tairix_dfs::catalogue::{Catalogue, CATALOGUE_LEN};
 
 use crate::{content_identity, le_u16, le_u32, le_u64, ProbedVolume};
 
@@ -34,8 +38,8 @@ const IDENTITY_DOMAIN: &[u8] = b"tairix-archive/v1";
 /// The archive the file `dev` holds as its first `len` bytes, recognised in a
 /// fixed order: zip by the end record that closes it, then the formats whose
 /// signature opens the file — RAR, `ArcFS`, the ARC family (Spark), gzip,
-/// bzip2 — and last tar, whose header carries only a checksum. `None` when
-/// nothing matches.
+/// bzip2 — then tar, whose header carries only a checksum, and last a DFS
+/// disc, whose catalogue carries none. `None` when nothing matches.
 ///
 /// # Errors
 ///
@@ -68,6 +72,8 @@ pub fn recognise<B: Block>(
         .is_some_and(tar_header_holds)
     {
         Some(VolumeFsType::Tar)
+    } else if dfs_catalogue(&head).is_some() {
+        Some(VolumeFsType::Dfs)
     } else {
         None
     };
@@ -76,8 +82,20 @@ pub fn recognise<B: Block>(
             IDENTITY_DOMAIN,
             &[&[fstype.as_u8()], &len.to_le_bytes(), &head],
         );
-        ProbedVolume::new(fstype, identity, &[], None, None)
+        let volume = ProbedVolume::new(fstype, identity, &[], None, None);
+        if fstype == VolumeFsType::Dfs {
+            volume.laid_out_for(BlkForm::FloppyDisk)
+        } else {
+            volume
+        }
     }))
+}
+
+/// The catalogue of the first side of the DFS disc an image opening with
+/// `head` holds, where its first two sectors are one a DFS disc could hold.
+#[must_use]
+pub fn dfs_catalogue(head: &[u8]) -> Option<Catalogue> {
+    Catalogue::read(head.get(..CATALOGUE_LEN)?.try_into().ok()?)
 }
 
 /// Read `buf` from `offset` of an archive of `len` bytes, or answer `false`

@@ -11,12 +11,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Bytes in a DFS sector.
-pub const SECTOR_BYTES: usize = DFS_SECTOR as usize;
-/// Sectors on a DFS track.
-pub const SECTORS_PER_TRACK: usize = 10;
-/// Bytes a DFS track holds in a sector dump.
-pub const TRACK_BYTES: usize = SECTOR_BYTES * SECTORS_PER_TRACK;
+use tairix_dfs::image::{Layout, SECTORS_PER_TRACK, SECTOR_LEN, SECTOR_SHIFT, TRACK_LEN};
+
 /// The innermost track a drive's head reaches: 80 tracks, and the few spare
 /// beyond.
 pub const LAST_TRACK: u8 = 83;
@@ -40,7 +36,7 @@ pub const CRC_BYTES: u16 = 2;
 pub const GAP_FILL: u8 = 0xFF;
 
 /// A DFS sector's data.
-const DFS_SECTOR: u16 = 256;
+const DFS_SECTOR: u16 = 1 << SECTOR_SHIFT;
 /// The DFS format's gap 1 and gap 3, each ending in its six sync bytes.
 const DFS_GAP_1: u16 = 16 + 6;
 const DFS_GAP_3: u16 = 21 + 6;
@@ -162,9 +158,9 @@ impl Track {
         let sectors = (0..SECTORS_PER_TRACK)
             .zip((DFS_GAP_1..).step_by(usize::from(DFS_STRIDE)))
             .map(|(sector, position)| {
-                let mut data = vec![0; SECTOR_BYTES];
-                if let Some(source) = bytes.get(sector * SECTOR_BYTES..) {
-                    let len = source.len().min(SECTOR_BYTES);
+                let mut data = vec![0; SECTOR_LEN];
+                if let Some(source) = bytes.get(sector * SECTOR_LEN..) {
+                    let len = source.len().min(SECTOR_LEN);
                     data[..len].copy_from_slice(&source[..len]);
                 }
                 Sector {
@@ -207,27 +203,9 @@ impl Track {
     }
 }
 
-/// How an image was laid out on its file, which is how it is written back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageFormat {
-    /// Single-sided: tracks in order.
-    Ssd,
-    /// Double-sided: side 0 and side 1 of each track alternating.
-    Dsd,
-}
-
-impl ImageFormat {
-    pub(crate) const fn sides(self) -> usize {
-        match self {
-            Self::Ssd => 1,
-            Self::Dsd => 2,
-        }
-    }
-
-    /// The largest image of the format: every side of every track.
-    pub(crate) const fn max_bytes(self) -> usize {
-        self.sides() * MAX_TRACKS * TRACK_BYTES
-    }
+/// The largest image of `layout`: every side of every track.
+pub(crate) const fn max_image_bytes(layout: Layout) -> usize {
+    layout.sides() * MAX_TRACKS * TRACK_LEN
 }
 
 /// Why an image was refused.
@@ -268,19 +246,15 @@ impl Disc {
     /// is the start of one, the rest formatted as the DFS formats it and
     /// holding zeros, as a sector dump's missing tail means; the track count
     /// is the image's, rounded up to whole tracks and at least 40.
-    pub fn decode(
-        bytes: &[u8],
-        format: ImageFormat,
-        write_protected: bool,
-    ) -> Result<Self, DiscError> {
+    pub fn decode(bytes: &[u8], format: Layout, write_protected: bool) -> Result<Self, DiscError> {
         if bytes.is_empty() {
             return Err(DiscError::Empty);
         }
-        if bytes.len() > format.max_bytes() {
+        if bytes.len() > max_image_bytes(format) {
             return Err(DiscError::TooLarge);
         }
         let sides = format.sides();
-        let tracks = bytes.len().div_ceil(TRACK_BYTES * sides).max(40);
+        let tracks = bytes.len().div_ceil(TRACK_LEN * sides).max(40);
         let mut disc = Self {
             sides: vec![Vec::with_capacity(tracks); sides],
             write_protected,
@@ -289,7 +263,7 @@ impl Disc {
         };
         for track in 0..tracks {
             for side in 0..sides {
-                let start = (track * sides + side) * TRACK_BYTES;
+                let start = format.image_offset(side, track * TRACK_LEN);
                 disc.sides[side].push(Track::dfs(track, side, bytes.get(start..).unwrap_or(&[])));
             }
         }
@@ -308,14 +282,14 @@ impl Disc {
                 if image.len() >= len {
                     break 'dump;
                 }
-                let mut bytes = [0u8; TRACK_BYTES];
+                let mut bytes = [0u8; TRACK_LEN];
                 if let Some(held) = tracks.get(track) {
                     held.dump(&mut bytes);
                     if lost.is_none() && !held.is_dump(track) {
                         lost = Some((side, track));
                     }
                 }
-                let keep = (len - image.len()).min(TRACK_BYTES);
+                let keep = (len - image.len()).min(TRACK_LEN);
                 image.extend_from_slice(&bytes[..keep]);
             }
         }
@@ -330,7 +304,9 @@ impl Disc {
             .rev()
             .flat_map(|track| (0..sides).rev().map(move |side| (track, side)))
             .find(|&(track, side)| self.dirty[side][track])
-            .map_or(0, |(track, side)| (track * sides + side + 1) * TRACK_BYTES);
+            .map_or(0, |(track, side)| {
+                self.format().image_offset(side, track * TRACK_LEN) + TRACK_LEN
+            });
         self.image_len.max(written)
     }
 
@@ -342,11 +318,11 @@ impl Disc {
 
     /// The format [`encode`](Self::encode) gives.
     #[must_use]
-    pub fn format(&self) -> ImageFormat {
-        if self.sides() == ImageFormat::Dsd.sides() {
-            ImageFormat::Dsd
+    pub fn format(&self) -> Layout {
+        if self.sides() == Layout::Double.sides() {
+            Layout::Double
         } else {
-            ImageFormat::Ssd
+            Layout::Single
         }
     }
 
@@ -393,12 +369,12 @@ impl Disc {
 impl Track {
     /// Write the track's sectors 0–9 into `bytes` as a sector dump holds
     /// them, each as far as its data runs.
-    fn dump(&self, bytes: &mut [u8; TRACK_BYTES]) {
+    fn dump(&self, bytes: &mut [u8; TRACK_LEN]) {
         for sector in &self.sectors {
             let number = usize::from(sector.id.sector);
             if number < SECTORS_PER_TRACK {
-                let data = &sector.data[..sector.data.len().min(SECTOR_BYTES)];
-                bytes[number * SECTOR_BYTES..][..data.len()].copy_from_slice(data);
+                let data = &sector.data[..sector.data.len().min(SECTOR_LEN)];
+                bytes[number * SECTOR_LEN..][..data.len()].copy_from_slice(data);
             }
         }
     }
@@ -417,7 +393,7 @@ impl Track {
                     && usize::from(id.sector) < SECTORS_PER_TRACK
                     && usize::from(id.track) == number
                     && id.size == DFS_SIZE_CODE
-                    && sector.data.len() == SECTOR_BYTES
+                    && sector.data.len() == SECTOR_LEN
                     && !sector.deleted
                     && !sector.crc_error
             })
@@ -508,7 +484,7 @@ impl crate::snapshot::Load for Disc {
     /// flag apiece, and an image no longer than its format's.
     fn load(r: &mut crate::snapshot::Reader<'_>) -> Result<Self, crate::snapshot::SnapshotError> {
         use crate::snapshot::Reader;
-        let count = r.count_at_most(ImageFormat::Dsd.sides())?;
+        let count = r.count_at_most(Layout::Double.sides())?;
         Reader::check(count > 0)?;
         let mut sides = Vec::with_capacity(count);
         for _ in 0..count {
@@ -530,7 +506,7 @@ impl crate::snapshot::Load for Disc {
             dirty,
             image_len: r.get()?,
         };
-        Reader::check((1..=disc.format().max_bytes()).contains(&disc.image_len))?;
+        Reader::check((1..=max_image_bytes(disc.format())).contains(&disc.image_len))?;
         Ok(disc)
     }
 }
@@ -540,8 +516,8 @@ mod tests {
     use super::*;
 
     fn dump(tracks: usize, sides: usize) -> Vec<u8> {
-        (0..tracks * sides * TRACK_BYTES)
-            .map(|i| u8::try_from((i * 7 + i / SECTOR_BYTES) % 251).unwrap())
+        (0..tracks * sides * TRACK_LEN)
+            .map(|i| u8::try_from((i * 7 + i / SECTOR_LEN) % 251).unwrap())
             .collect()
     }
 
@@ -555,7 +531,7 @@ mod tests {
     #[test]
     fn an_ssd_decodes_to_ten_sectors_a_track_where_the_dfs_formats_them() {
         let image = dump(40, 1);
-        let disc = Disc::decode(&image, ImageFormat::Ssd, false).unwrap();
+        let disc = Disc::decode(&image, Layout::Single, false).unwrap();
         assert_eq!((disc.sides(), disc.tracks()), (1, 40));
         let track = disc.track(0, 3).unwrap();
         let positions: Vec<u16> = track.sectors.iter().map(|sector| sector.position).collect();
@@ -576,52 +552,48 @@ mod tests {
         );
         assert_eq!(
             last.data[..],
-            image[3 * TRACK_BYTES + 9 * SECTOR_BYTES..4 * TRACK_BYTES]
+            image[3 * TRACK_LEN + 9 * SECTOR_LEN..4 * TRACK_LEN]
         );
-        assert_eq!(disc.format(), ImageFormat::Ssd);
+        assert_eq!(disc.format(), Layout::Single);
         assert_eq!(disc.encode(), Encoded { image, lost: None });
     }
 
     #[test]
     fn a_dsd_interleaves_its_sides_and_encodes_back() {
         let image = dump(80, 2);
-        let disc = Disc::decode(&image, ImageFormat::Dsd, false).unwrap();
+        let disc = Disc::decode(&image, Layout::Double, false).unwrap();
         assert_eq!((disc.sides(), disc.tracks()), (2, 80));
         let side_1 = disc.track(1, 5).unwrap();
         assert_eq!(side_1.sectors[0].id.head, 1);
         assert_eq!(
             side_1.sectors[0].data[..],
-            image[(5 * 2 + 1) * TRACK_BYTES..][..SECTOR_BYTES]
+            image[(5 * 2 + 1) * TRACK_LEN..][..SECTOR_LEN]
         );
-        assert_eq!(disc.format(), ImageFormat::Dsd);
+        assert_eq!(disc.format(), Layout::Double);
         assert_eq!(disc.encode(), Encoded { image, lost: None });
     }
 
     #[test]
     fn a_short_image_is_the_start_of_a_forty_track_disc() {
-        let disc = Disc::decode(&[0xAA; 300], ImageFormat::Ssd, false).unwrap();
+        let disc = Disc::decode(&[0xAA; 300], Layout::Single, false).unwrap();
         assert_eq!(disc.tracks(), 40);
         let first = &disc.track(0, 0).unwrap().sectors;
-        assert_eq!(first[0].data[..], [0xAA; SECTOR_BYTES]);
+        assert_eq!(first[0].data[..], [0xAA; SECTOR_LEN]);
         assert_eq!(first[1].data[..44], [0xAA; 44]);
-        assert_eq!(first[1].data[44..], [0; SECTOR_BYTES - 44]);
+        assert_eq!(first[1].data[44..], [0; SECTOR_LEN - 44]);
         assert_eq!(
-            Disc::decode(&[], ImageFormat::Ssd, false),
+            Disc::decode(&[], Layout::Single, false),
             Err(DiscError::Empty)
         );
         assert_eq!(
-            Disc::decode(
-                &vec![0; MAX_TRACKS * TRACK_BYTES + 1],
-                ImageFormat::Ssd,
-                false
-            ),
+            Disc::decode(&vec![0; MAX_TRACKS * TRACK_LEN + 1], Layout::Single, false),
             Err(DiscError::TooLarge)
         );
     }
 
     #[test]
     fn writing_marks_a_track_dirty_until_saved() {
-        let mut disc = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false).unwrap();
+        let mut disc = Disc::decode(&dump(40, 1), Layout::Single, false).unwrap();
         assert!(!disc.is_dirty());
         disc.track_mut(0, 7).unwrap();
         assert!(disc.is_dirty());
@@ -634,39 +606,39 @@ mod tests {
     /// forty, so a short one grew on its first save.
     #[test]
     fn an_image_saves_at_its_own_length_or_as_far_as_was_written() {
-        let mut disc = Disc::decode(&[0xAA; 300], ImageFormat::Ssd, false).unwrap();
+        let mut disc = Disc::decode(&[0xAA; 300], Layout::Single, false).unwrap();
         assert_eq!(disc.encode().image, [0xAA; 300]);
         disc.track_mut(0, 2).unwrap().sectors[5].data.fill(0x55);
         let written = disc.encode().image;
-        assert_eq!(written.len(), 3 * TRACK_BYTES);
+        assert_eq!(written.len(), 3 * TRACK_LEN);
         assert_eq!(written[..300], [0xAA; 300]);
         assert_eq!(
-            written[2 * TRACK_BYTES + 5 * SECTOR_BYTES..][..SECTOR_BYTES],
-            [0x55; SECTOR_BYTES]
+            written[2 * TRACK_LEN + 5 * SECTOR_LEN..][..SECTOR_LEN],
+            [0x55; SECTOR_LEN]
         );
         disc.mark_saved();
         assert_eq!(
             disc.encode().image.len(),
-            3 * TRACK_BYTES,
+            3 * TRACK_LEN,
             "saved, it stays that long"
         );
-        let mut sides = Disc::decode(&dump(40, 2), ImageFormat::Dsd, false).unwrap();
+        let mut sides = Disc::decode(&dump(40, 2), Layout::Double, false).unwrap();
         sides.track_mut(1, 39).unwrap();
-        assert_eq!(sides.encode().image.len(), 80 * TRACK_BYTES);
+        assert_eq!(sides.encode().image.len(), 80 * TRACK_LEN);
     }
 
     /// The regression: a track a dump cannot hold was silently dropped.
     #[test]
     fn a_track_a_dump_cannot_hold_is_reported() {
-        let mut disc = Disc::decode(&dump(40, 2), ImageFormat::Dsd, false).unwrap();
+        let mut disc = Disc::decode(&dump(40, 2), Layout::Double, false).unwrap();
         assert_eq!(disc.encode().lost, None);
         disc.track_mut(1, 6).unwrap().sectors[3].deleted = true;
         disc.track_mut(0, 9).unwrap().sectors.pop();
         assert_eq!(disc.encode().lost, Some((1, 6)), "the first, in dump order");
-        let mut renumbered = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false).unwrap();
+        let mut renumbered = Disc::decode(&dump(40, 1), Layout::Single, false).unwrap();
         renumbered.track_mut(0, 4).unwrap().sectors[0].id.sector = 11;
         assert_eq!(renumbered.encode().lost, Some((0, 4)));
-        let mut moved = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false).unwrap();
+        let mut moved = Disc::decode(&dump(40, 1), Layout::Single, false).unwrap();
         moved.track_mut(0, 4).unwrap().sectors[0].position += 3;
         assert_eq!(
             moved.encode().lost,
@@ -687,7 +659,7 @@ mod tests {
     /// thousands of sectors could lie over one another.
     #[test]
     fn a_restored_track_holds_sectors_only_as_a_track_can() {
-        let dfs = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false)
+        let dfs = Disc::decode(&dump(40, 1), Layout::Single, false)
             .unwrap()
             .track(0, 0)
             .unwrap()
@@ -712,7 +684,7 @@ mod tests {
 
     #[test]
     fn a_field_read_past_its_data_runs_into_its_crc_then_the_gap() {
-        let mut disc = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false).unwrap();
+        let mut disc = Disc::decode(&dump(40, 1), Layout::Single, false).unwrap();
         let sector = disc.track_mut(0, 0).unwrap().sectors[0].clone();
         let crc = field_crc(false, sector.data.iter().copied()).to_be_bytes();
         assert_eq!([sector.field_byte(256), sector.field_byte(257)], crc);
@@ -726,7 +698,7 @@ mod tests {
 
     #[test]
     fn a_data_field_written_longer_runs_over_the_ids_after_it() {
-        let mut track = Disc::decode(&dump(40, 1), ImageFormat::Ssd, false)
+        let mut track = Disc::decode(&dump(40, 1), Layout::Single, false)
             .unwrap()
             .track(0, 0)
             .unwrap()

@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use super::library::Socket;
 use crate::machine::bbc::fdc::PhysicalDrive;
 use crate::machine::Model;
-use crate::media::disc::ImageFormat;
 use crate::worker::protocol::{DiscFormat, Media, Written};
+use tairix_dfs::image::Layout;
 
 /// A disc in a drive. One with no file is write-protected, so the machine
 /// holds nothing of it the record lacks.
@@ -92,14 +92,14 @@ impl Purpose {
     }
 }
 
-/// How a disc image named `name` holds its disc, by its extension.
+/// How a disc image named `name` holds its disc, by its extension: a DFS
+/// disc's single side where it names nothing else.
 #[must_use]
 pub fn format_of(name: &str) -> DiscFormat {
     match extension(name).as_deref() {
-        Some("dsd") => DiscFormat::Acorn(ImageFormat::Dsd),
         Some("d64") => DiscFormat::D64,
         Some("g64") => DiscFormat::G64,
-        _ => DiscFormat::Acorn(ImageFormat::Ssd),
+        ending => DiscFormat::Acorn(ending.and_then(Layout::of_ending).unwrap_or(Layout::Single)),
     }
 }
 
@@ -107,12 +107,14 @@ pub fn format_of(name: &str) -> DiscFormat {
 #[must_use]
 pub const fn disc_ending(format: DiscFormat) -> &'static str {
     match format {
-        DiscFormat::Acorn(ImageFormat::Ssd) => "ssd",
-        DiscFormat::Acorn(ImageFormat::Dsd) => "dsd",
+        DiscFormat::Acorn(layout) => layout.ending(),
         DiscFormat::D64 => "d64",
         DiscFormat::G64 => "g64",
     }
 }
+
+/// The ending a snapshot is saved with.
+pub const SNAPSHOT_ENDING: &str = "snapshot";
 
 /// The ending a tape `model` records is saved with.
 #[must_use]
@@ -428,8 +430,8 @@ impl Rack {
 #[must_use]
 pub const fn unnamed_disc(format: DiscFormat) -> &'static str {
     match format {
-        DiscFormat::Acorn(ImageFormat::Ssd) => "Disc.ssd",
-        DiscFormat::Acorn(ImageFormat::Dsd) => "Disc.dsd",
+        DiscFormat::Acorn(Layout::Single) => "Disc.ssd",
+        DiscFormat::Acorn(Layout::Double) => "Disc.dsd",
         DiscFormat::D64 => "Disk.d64",
         DiscFormat::G64 => "Disk.g64",
     }

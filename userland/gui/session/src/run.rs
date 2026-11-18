@@ -15045,7 +15045,7 @@ mod program {
             DesktopAnswer::Placed { placed, opened } => {
                 let handed = opened
                     .map_err(PlaceRefused::Unopened)
-                    .and_then(|opened| launch.place_document(&placed, &opened));
+                    .and_then(|opened| launch.place_document(shell, &placed, &opened));
                 if let Err(why) = handed {
                     desktop.refuse(placed.refusal(why));
                 }
@@ -15901,10 +15901,12 @@ mod program {
         }
 
         /// Hand the file `opened` read-only to the window `placed` names, to be
-        /// placed in its document: queued for the application owning it, or
-        /// answering why it could not be.
+        /// placed in its document: queued for the application owning it, with
+        /// the one raise the user's drop lends it, or answering why it could
+        /// not be.
         fn place_document(
             &mut self,
+            shell: &DesktopShell,
             placed: &PlacedItem,
             opened: &tairix_browse::document::Opened,
         ) -> Result<(), PlaceRefused> {
@@ -15916,17 +15918,20 @@ mod program {
                 .owner_of(placement.window_id)
                 .ok_or(PlaceRefused::WindowClosed)?;
             let fd = opened.file.fd();
-            let handed =
-                self.server
-                    .hand_over_open_target(self.sink, app, Activation::Withheld, || {
-                        let grant =
-                            RtDocumentRelay.relay(DocumentAuthority::Held { fd }, false, app)?;
-                        Ok(OpenEntry::Placed {
-                            placement: *placement,
-                            name: *name,
-                            grant,
-                        })
-                    });
+            let activation = Activation::Granted {
+                focus: self.windows.focused(shell),
+            };
+            let handed = self
+                .server
+                .hand_over_open_target(self.sink, app, activation, || {
+                    let grant =
+                        RtDocumentRelay.relay(DocumentAuthority::Held { fd }, false, app)?;
+                    Ok(OpenEntry::Placed {
+                        placement: *placement,
+                        name: *name,
+                        grant,
+                    })
+                });
             handed.map_err(PlaceRefused::Untaken)
         }
 

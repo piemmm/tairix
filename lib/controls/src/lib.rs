@@ -432,7 +432,7 @@ pub use state::{
     RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-pub use status::{StatusBand, StatusSlots, StatusTone};
+pub use status::{StatusBand, StatusLamp, StatusSlots, StatusTone};
 pub use swatch_grid::{NumberFace, SwatchAction, SwatchGrid, SwatchMark, WellSpacing};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{

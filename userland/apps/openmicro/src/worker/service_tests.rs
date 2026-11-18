@@ -7,10 +7,10 @@ use tairix_sandbox::ProtoError;
 use super::*;
 use crate::machine::electron::keyboard::Key as ElectronKey;
 use crate::machine::Model;
-use crate::media::disc::ImageFormat;
 use crate::media::tape::{Tape, Tone};
 use crate::worker::protocol::DiscFormat;
 use crate::worker::protocol::{Configuration, Reply, Request, Slot, MAX_SLICE, SLOTS};
+use tairix_dfs::image::Layout;
 
 /// A tape holding nothing.
 const BLANK_TAPE: &[u8] = b"UEF File!\0\x0A\x00";
@@ -121,7 +121,7 @@ impl Rig {
     /// Drive 0's disc replaced by one with a track written.
     fn write_disc(&mut self) {
         let image = crate::scenario::discs::named("testdisc").expect("a disc");
-        let mut disc = Disc::decode(&image, ImageFormat::Ssd, false).expect("a disc");
+        let mut disc = Disc::decode(&image, Layout::Single, false).expect("a disc");
         disc.track_mut(0, 1).expect("a track");
         self.model_b().insert_disc(PhysicalDrive::Zero, disc);
     }
@@ -137,7 +137,7 @@ fn media(reply: &[u8]) -> Media<'_> {
 fn insert(image: &[u8]) -> Request<'_> {
     Request::InsertDisc {
         drive: PhysicalDrive::Zero,
-        format: DiscFormat::Acorn(ImageFormat::Ssd),
+        format: DiscFormat::Acorn(Layout::Single),
         write_protected: false,
         image,
     }
@@ -321,10 +321,7 @@ fn a_written_disc_is_handed_over_whatever_takes_it_out() {
         "kept across a rebuild, and still unsaved when its drive was not asked for"
     );
     assert_eq!(collected.discs[0].drive, PhysicalDrive::Zero);
-    assert_eq!(
-        collected.discs[0].format,
-        DiscFormat::Acorn(ImageFormat::Ssd)
-    );
+    assert_eq!(collected.discs[0].format, DiscFormat::Acorn(Layout::Single));
     assert_eq!(collected.tape, None);
     let image = collected.discs[0].image.to_vec();
     assert_eq!(
@@ -697,7 +694,7 @@ mod commodore {
             .discs
             .is_empty());
         assert_eq!(
-            refused(&rig.ask(&disk(DiscFormat::Acorn(ImageFormat::Ssd), &image))),
+            refused(&rig.ask(&disk(DiscFormat::Acorn(Layout::Single), &image))),
             Refusal::Model,
             "an Acorn's"
         );

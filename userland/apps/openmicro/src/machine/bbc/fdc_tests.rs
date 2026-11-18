@@ -1,8 +1,9 @@
 use alloc::vec::Vec;
 
 use super::{input, output, register, result, status, Fdc, PhysicalDrive};
-use crate::media::disc::{Disc, ImageFormat, SECTOR_BYTES, TRACK_BYTES};
+use crate::media::disc::Disc;
 use crate::snapshot::{self, Reader, Writer};
+use tairix_dfs::image::{Layout, SECTOR_LEN, TRACK_LEN};
 
 /// Cycles per byte under the head, and per revolution.
 const BYTE: u64 = 128;
@@ -21,20 +22,14 @@ fn pattern(track: usize, sector: usize, offset: usize) -> u8 {
 }
 
 fn numbered_disc() -> Disc {
-    let image: Vec<u8> = (0..80 * TRACK_BYTES)
-        .map(|i| {
-            pattern(
-                i / TRACK_BYTES,
-                i % TRACK_BYTES / SECTOR_BYTES,
-                i % SECTOR_BYTES,
-            )
-        })
+    let image: Vec<u8> = (0..80 * TRACK_LEN)
+        .map(|i| pattern(i / TRACK_LEN, i % TRACK_LEN / SECTOR_LEN, i % SECTOR_LEN))
         .collect();
-    Disc::decode(&image, ImageFormat::Ssd, false).unwrap()
+    Disc::decode(&image, Layout::Single, false).unwrap()
 }
 
 fn sector_bytes(track: usize, sector: usize) -> Vec<u8> {
-    (0..SECTOR_BYTES)
+    (0..SECTOR_LEN)
         .map(|offset| pattern(track, sector, offset))
         .collect()
 }
@@ -396,7 +391,7 @@ fn read_data_and_deleted_data_moves_a_deleted_sector_and_says_so() {
     delete(&mut host, 4, 1);
     let read = host.run(0x57, &[4, 0, 0x23], &[]);
     assert_eq!(read.result, result::DELETED);
-    assert_eq!(read.bytes.len(), 3 * SECTOR_BYTES);
+    assert_eq!(read.bytes.len(), 3 * SECTOR_LEN);
 }
 
 #[test]
@@ -463,7 +458,7 @@ fn a_write_the_host_falls_behind_on_leaves_the_sector_failing_its_crc() {
 #[test]
 fn writes_to_a_protected_disc_are_refused() {
     let image = numbered_disc().encode().image;
-    let mut host = Host::new(Some(Disc::decode(&image, ImageFormat::Ssd, true).unwrap()));
+    let mut host = Host::new(Some(Disc::decode(&image, Layout::Single, true).unwrap()));
     assert_eq!(
         host.run(0x4B, &[1, 1, 0x21], &[0; 256]).result,
         result::WRITE_PROTECTED

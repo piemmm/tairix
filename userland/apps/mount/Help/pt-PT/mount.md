@@ -52,6 +52,15 @@ se encontra. Um arquivo RAR é sempre montado só de leitura. Um arquivo
 dividido em vários volumes, ou com os nomes dos elementos cifrados, não
 é montado, e um elemento cifrado não pode ser lido.
 
+Uma imagem de disco do BBC Micro (`.ssd`, `.dsd`) é montada como um
+volume com os ficheiros que contém, cada um com o nome que lhe dá o
+próprio sistema de ficheiros do disco: o seu diretório, um ponto e
+depois o seu nome (`$.ELITE`); um `.dsd` de dupla face mostra as suas
+duas faces como as pastas `Drive 0` e `Drive 2`. Os endereços de
+carregamento e de execução de um ficheiro acompanham-no, e uma alteração
+é escrita no disco tal como o BBC Micro a escreveria, mantendo-se todos
+os outros setores como estavam.
+
 O volume permanece montado até o desanexar com `unmount` ou até a sua
 sessão terminar. Uma imagem que contenha um disco particionado, um dos
 discos de uma matriz RAID ou um sistema de ficheiros cujos donos
@@ -83,8 +92,8 @@ computador.
   vírgulas, um dos quais a imagem tem de conter, tal como a listagem de
   montagens os designa (`iso9660`, `udf`, `adfs`, `affs`, `fat32`,
   `zip`, `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`,
-  `rar`), ou `auto` para o que quer que contenha; uma lista que comece
-  por `no` nomeia os que não pode conter. O que a imagem contém é
+  `rar`, `dfs`), ou `auto` para o que quer que contenha; uma lista que
+  comece por `no` nomeia os que não pode conter. O que a imagem contém é
   reconhecido pelo seu conteúdo, pelo que a ordem não escolhe nada: um
   disco ótico que contenha tanto UDF como ISO 9660 é montado como UDF, a
   menos que o seu ISO 9660 guarde registos Rock Ridge ou RISC OS. Uma

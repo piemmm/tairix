@@ -92,6 +92,7 @@ fn rows_offer_only_what_the_machine_can_do_and_mark_what_it_does() {
         },
         &Offered {
             reachable: true,
+            folder: true,
             discs: alloc::vec![String::from("Games.ssd")],
             tapes: Vec::new(),
         },
@@ -128,6 +129,101 @@ fn an_electron_has_no_drives_and_a_card_carries_no_settings_of_its_own() {
     );
 }
 
+/// A machine's window offers its folder to be shown once it has one, and
+/// says why not before, a reachable documents folder or not; a card's rows
+/// leave the row to the card itself.
+#[test]
+fn show_folder_is_offered_where_the_machine_has_a_folder() {
+    let unmade = Offered {
+        reachable: true,
+        ..Offered::default()
+    };
+    let without = built(&shown(Model::ModelB), &unmade, Place::Window);
+    let row_of = |menu: &AppMenu| {
+        menu.rows().find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == "Show Folder" => {
+                Some((item.enabled, String::from(item.reason)))
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(
+        row_of(&without),
+        Some((false, String::from("The machine has no folder yet")))
+    );
+    let made = Offered {
+        reachable: true,
+        folder: true,
+        ..Offered::default()
+    };
+    let with = built(&shown(Model::Electron), &made, Place::Window);
+    assert_eq!(row_of(&with), Some((true, String::new())));
+    let card = built(&shown(Model::ModelB), &made, Place::Card);
+    assert_eq!(
+        row_of(&card),
+        None,
+        "the card adds it whatever the machine's standing"
+    );
+    assert!(
+        labels(&with).iter().any(|label| label == "Save Snapshot"),
+        "kept in the folder"
+    );
+    assert!(
+        labels(&without)
+            .iter()
+            .any(|label| label == "Save Snapshot\u{2026}"),
+        "where the picker is told"
+    );
+    let mut alone = AppMenu::EMPTY;
+    alone.push(show_folder(true).expect("a row")).expect("fits");
+    assert_eq!(row_of(&alone), Some((true, String::new())));
+}
+
+/// A window opened once the documents folder is reached offers a blank disc
+/// and tape even before its machine has a folder, and the folder itself only
+/// once it has one; before the documents folder is reached it offers neither.
+#[test]
+fn a_new_window_is_offered_what_its_documents_and_folder_allow() {
+    let window = |reachable, folder| {
+        built(
+            &shown(Model::ModelB),
+            &Offered::unlisted(reachable, folder),
+            Place::Window,
+        )
+    };
+    let unreached = window(false, true);
+    for label in ["New Disc", "New Tape", "Show Folder"] {
+        assert!(!row(&unreached, label).enabled, "{label}");
+    }
+    assert!(labels(&unreached)
+        .iter()
+        .any(|l| l == "Save Snapshot\u{2026}"));
+    let unmade = window(true, false);
+    assert!(row(&unmade, "New Disc").enabled && row(&unmade, "New Tape").enabled);
+    assert!(!row(&unmade, "Show Folder").enabled);
+    assert!(labels(&unmade).iter().any(|l| l == "Save Snapshot\u{2026}"));
+    let made = window(true, true);
+    assert!(row(&made, "Show Folder").enabled);
+    assert!(labels(&made).iter().any(|l| l == "Save Snapshot"));
+}
+
+/// SHIFT-BREAK is offered beside BREAK on the models it boots, and a C64,
+/// whose interrupt is RESTORE, is offered neither.
+#[test]
+fn shift_break_is_offered_where_it_boots_the_machine() {
+    for model in Model::ALL {
+        let named = labels(&built(&shown(model), &Offered::default(), Place::Window));
+        let at = |label: &str| named.iter().position(|named| named == label);
+        if model.boots_with_shift_break() {
+            let interrupt = at("BREAK").expect("BREAK");
+            assert_eq!(at(SHIFT_BREAK), Some(interrupt + 1), "{model:?}");
+        } else {
+            assert_eq!(at(SHIFT_BREAK), None, "{model:?}");
+            assert!(at("RESTORE").is_some());
+        }
+    }
+}
+
 /// A folder of the most images a menu lists, each with the longest name,
 /// still fits a Model B's whole menu.
 #[test]
@@ -139,6 +235,7 @@ fn the_fullest_folder_fits_the_menu() {
     };
     let offered = Offered {
         reachable: true,
+        folder: true,
         discs: names("ssd"),
         tapes: names("uef"),
     };

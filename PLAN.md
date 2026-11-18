@@ -292,6 +292,10 @@ the new-machine assistant and a card's menu, `plans/BEEB.md` §6),
 `lib/fat` (the one FAT12/16/32 on-disk format, which the FAT32 driver, the
 volume probe, the MBR writer's FAT types and the Atari metadata preset share,
 `plans/PCEMU.md` PC9),
+`lib/dfs` (the one Acorn DFS on-disc format — each side's catalogue, the
+names DFS makes, and an SSD's and a DSD's layout — which the volume probe,
+the archive driver serving a disc image and OpenMicro's DFS ROM and discs
+share, `plans/ARCHIVES.md` AR12),
 `lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
 draws, load slots and the land generator's and ray tracer's lattices key by),
 `lib/noise` (the one gradient noise, octave-summed, ridged and cellular, which
@@ -1061,6 +1065,9 @@ plan's own text is corrected when it is next touched, or sooner.
 
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
+
+- **2026-11-18 — §3: `lib/dfs`.** The volume probe, the archive driver and
+  OpenMicro all read and write DFS discs, so the format is defined once.
 
 - **2026-11-14 — §3: `lib/vdu`.** OpenMicro's MOS, the RISC OS emulator and
   the sprite decoder share the VDU codes, the numbered modes and one system

@@ -98,10 +98,10 @@ das Bild klickt, und gibt sie zurück, wenn man kurz die Meta-Taste antippt.
 Das Schließen des Bibliotheksfensters lässt laufende Rechner weiterlaufen, und
 das Schließen aller Fenster lässt den Emulator in der Symbolleiste: Ein Klick
 auf sein Symbol oder Rechnerbibliothek in seinem Menü holt die Bibliothek
-zurück, und Beenden in diesem Menü versetzt jeden laufenden Rechner in den
-Ruhezustand und beendet den Emulator. Jeder Rechner
-läuft in einem eigenen Arbeitsprozess, der keinerlei Befugnisse hat: seiner
-Software und seinen Platten wird nie vertraut.
+immer nach vorn, und Beenden in diesem Menü versetzt jeden laufenden Rechner
+in den Ruhezustand und beendet den Emulator. Jeder Rechner läuft in einem
+eigenen Arbeitsprozess, der keinerlei Befugnisse hat: seiner Software und
+seinen Platten wird nie vertraut.
 
 ## OPTIONS
 

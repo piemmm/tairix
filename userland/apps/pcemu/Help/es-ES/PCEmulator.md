@@ -93,10 +93,10 @@ devuelve al pulsar brevemente la tecla Meta.
 
 Cerrar la ventana de la biblioteca deja funcionando las máquinas en marcha, y
 cerrar todas las ventanas deja el emulador en la barra de iconos: un clic en su
-icono, o Biblioteca de máquinas en su menú, vuelve a abrir la biblioteca, y
-Salir en ese menú suspende todas las máquinas en marcha y termina el emulador.
-Cada máquina se ejecuta en un proceso de trabajo propio que no tiene ninguna
-autoridad: nunca se confía en sus programas ni en sus discos.
+icono, o Biblioteca de máquinas en su menú, siempre trae la biblioteca al
+frente, y Salir en ese menú suspende todas las máquinas en marcha y termina el
+emulador. Cada máquina se ejecuta en un proceso de trabajo propio que no tiene
+ninguna autoridad: nunca se confía en sus programas ni en sus discos.
 
 ## OPTIONS
 

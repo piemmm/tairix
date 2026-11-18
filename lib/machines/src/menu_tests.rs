@@ -203,7 +203,7 @@ fn the_icon_bar_offers_the_library_alone() {
     assert_eq!(rows, [(LIBRARY_ROW, String::from("Machine Library"))]);
     assert_eq!(
         BAR_CLICK,
-        AppBarClick::RaiseOrOpen,
-        "the slot opens the library"
+        AppBarClick::Open,
+        "the slot brings the library forward, a machine's window open or not"
     );
 }

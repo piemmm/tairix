@@ -6,8 +6,9 @@
 //! writes and types a file where the volume can be written, ejects it with
 //! the real `unmount`, and mounts the floppies and the written archives again
 //! to read back what it wrote. It also mounts a planted original, which the
-//! user may only read, to see it mounted read-only, and a RAR archive, which
-//! no one writes.
+//! user may only read, to see it mounted read-only, a RAR archive, which no
+//! one writes, and a DFS disc image, whose files it reads and writes with
+//! their load addresses.
 //!
 //! A pass prints [`PASS_MARKER`] and exits `0`. A failure prints its reason
 //! and parks rather than exiting: the vertical arms its end on this program's
@@ -118,8 +119,32 @@ pub const WRITTEN_ARCHIVES: [Archive; 6] = [
     },
 ];
 
-/// What each written archive's [`README`] holds.
+/// What each written archive's [`README`] holds, and the DFS disc's
+/// [`DFS_README`].
 pub const ARCHIVE_TEXT: &[u8] = b"An archive holds this, typed as RISC OS text.";
+
+/// The DFS disc image the vertical plants, which the archive driver serves as
+/// a volume of its files, each by its full DFS name.
+pub const DFS_DISC: Archive = Archive {
+    file: "disc.ssd",
+    volume: "dfs",
+};
+
+/// The file the DFS disc holds.
+pub const DFS_README: &str = "$.README";
+
+/// The file the fixture writes on the DFS disc.
+pub const DFS_WRITTEN: &str = "$.WRITTEN";
+
+/// The attribute a DFS file's load address is carried as.
+pub const LOAD_ADDRESS: &str = "acorn.loadaddr";
+
+/// The load address [`DFS_README`] is planted with: the I/O processor's
+/// &1900, which reads as a typed object's would and must keep no stamp.
+pub const README_LOAD: &[u8] = b"ffff1900";
+
+/// The load address the fixture gives [`DFS_WRITTEN`].
+pub const WRITTEN_LOAD: &[u8] = b"00003000";
 
 /// The RAR archive the vertical plants, which the driver only reads: the RAR
 /// encoder's, holding [`RAR_MEMBERS`].
@@ -298,7 +323,33 @@ fn archive_steps(system: &mut dyn System) -> Result<(), String> {
         expect_filetype(system, &volume, WRITTEN, DATA_TYPE)?;
         unmount(system, archive.volume)?;
     }
-    Ok(())
+    disc_steps(system)
+}
+
+/// The DFS disc's steps: copied into the home and mounted; its file read
+/// with its load address; a file written and given one; ejected, and mounted
+/// again to read both files and their addresses back.
+fn disc_steps(system: &mut dyn System) -> Result<(), String> {
+    copy_home(system, DFS_DISC.file)?;
+    let copy = format!("{HOME}/{}", DFS_DISC.file);
+    let volume = format!("/Storage/{}", DFS_DISC.volume);
+    mount(system, &["mount", &copy, &volume])?;
+    expect_file(system, &volume, DFS_README, ARCHIVE_TEXT)?;
+    expect_attribute(system, &volume, DFS_README, LOAD_ADDRESS, README_LOAD)?;
+    let written = format!("{volume}/{DFS_WRITTEN}");
+    system
+        .write(&written, WRITTEN_TEXT)
+        .map_err(|err| format!("images: {written}: not written: {err:?}"))?;
+    system
+        .set_attribute(&written, LOAD_ADDRESS, WRITTEN_LOAD)
+        .map_err(|err| format!("images: {written}: no load address set: {err:?}"))?;
+    unmount(system, DFS_DISC.volume)?;
+    mount(system, &["mount", &copy, &volume])?;
+    expect_file(system, &volume, DFS_README, ARCHIVE_TEXT)?;
+    expect_attribute(system, &volume, DFS_README, LOAD_ADDRESS, README_LOAD)?;
+    expect_file(system, &volume, DFS_WRITTEN, WRITTEN_TEXT)?;
+    expect_attribute(system, &volume, DFS_WRITTEN, LOAD_ADDRESS, WRITTEN_LOAD)?;
+    unmount(system, DFS_DISC.volume)
 }
 
 /// Copy the planted `name` into the home, as the session user.
@@ -347,12 +398,23 @@ fn expect_filetype(
     file: &str,
     filetype: &[u8],
 ) -> Result<(), String> {
+    expect_attribute(system, dir, file, FILETYPE, filetype)
+}
+
+/// See `dir`'s `file`'s attribute `key` hold `expected`.
+fn expect_attribute(
+    system: &mut dyn System,
+    dir: &str,
+    file: &str,
+    key: &str,
+    expected: &[u8],
+) -> Result<(), String> {
     let path = format!("{dir}/{file}");
     let value = system
-        .attribute(&path, FILETYPE)
-        .map_err(|err| format!("images: {path}: no {FILETYPE}: {err:?}"))?;
-    if value != filetype {
-        return Err(format!("images: {path}: typed {value:?}, not {filetype:?}"));
+        .attribute(&path, key)
+        .map_err(|err| format!("images: {path}: no {key}: {err:?}"))?;
+    if value != expected {
+        return Err(format!("images: {path}: {key} {value:?}, not {expected:?}"));
     }
     Ok(())
 }
@@ -411,10 +473,11 @@ fn write_file(system: &mut dyn System, dir: &str) -> Result<(), String> {
 #[must_use]
 pub fn pass_line() -> String {
     format!(
-        "{PASS_MARKER}: {ACORN}, {AMIGA}, {DISC} and {} archives mounted from {HOME}, read, \
-         written where writable, ejected, and read back with their RISC OS types once mounted \
-         again\n",
-        WRITTEN_ARCHIVES.len() + 1
+        "{PASS_MARKER}: {ACORN}, {AMIGA}, {DISC}, {} archives and {} mounted from {HOME}, \
+         read, written where writable, ejected, and read back with their RISC OS fields once \
+         mounted again\n",
+        WRITTEN_ARCHIVES.len() + 1,
+        DFS_DISC.file
     )
 }
 
@@ -466,6 +529,15 @@ mod tests {
             }
             let member = vec![7u8; RAR_MEMBER_LEN];
             fake.plant(RAR.file, &RAR_MEMBERS.map(|name| (name, member.as_slice())));
+            fake.plant(DFS_DISC.file, &[(DFS_README, ARCHIVE_TEXT)]);
+            fake.attributes.insert(
+                (
+                    DFS_DISC.file.to_string(),
+                    DFS_README.to_string(),
+                    LOAD_ADDRESS.to_string(),
+                ),
+                README_LOAD.to_vec(),
+            );
             fake
         }
 
@@ -683,6 +755,45 @@ mod tests {
         let why = run_steps(&mut Untyping(Fake::planted())).expect_err("untyped");
         assert!(
             why.contains("/Storage/zip/ReadMe") && why.contains("NoData"),
+            "{why}"
+        );
+    }
+
+    /// A DFS disc that loses a file's load address on the way to its image
+    /// is caught when the disc is mounted again.
+    #[test]
+    fn a_load_address_that_did_not_reach_the_disc_is_caught_on_the_remount() {
+        struct Unaddressed(Fake);
+
+        impl System for Unaddressed {
+            fn run(&mut self, path: &str, args: &[&str]) -> Result<i32, String> {
+                if path == UNMOUNT && args.get(1) == Some(&DFS_DISC.volume) {
+                    self.0
+                        .attributes
+                        .retain(|(_, file, _), _| file != DFS_WRITTEN);
+                }
+                self.0.run(path, args)
+            }
+            fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+                self.0.read(path)
+            }
+            fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+                self.0.write(path, bytes)
+            }
+            fn exists(&mut self, path: &str) -> bool {
+                self.0.exists(path)
+            }
+            fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+                self.0.attribute(path, key)
+            }
+            fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+                self.0.set_attribute(path, key, value)
+            }
+        }
+
+        let why = run_steps(&mut Unaddressed(Fake::planted())).expect_err("unaddressed");
+        assert!(
+            why.contains("/Storage/dfs/$.WRITTEN") && why.contains("NoData"),
             "{why}"
         );
     }

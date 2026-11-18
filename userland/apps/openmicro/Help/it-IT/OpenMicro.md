@@ -17,7 +17,8 @@ al prompt del BASIC. L'immagine è quella di un televisore, quattro unità di
 larghezza ogni tre di altezza, e il suono passa per l'audio del desktop.
 
 La finestra della libreria mostra ogni macchina come un riquadro con il suo
-ultimo schermo. Nuova crea una macchina, con il nome richiesto: un
+ultimo schermo o, finché non è stata in funzione, con la schermata di avvio
+del suo modello. Nuova crea una macchina, con il nome richiesto: un
 BBC Micro Model B, con un nuovo disco vuoto nell'unità 0 o senza; un
 Acorn Electron, con o senza un Plus 1 montato; oppure un Commodore 64, PAL o
 NTSC, con un SID 6581 o 8580 e un'unità 1541, due o nessuna. Avvia, un doppio
@@ -26,9 +27,9 @@ porta in primo piano la finestra; si conservano fino a venti macchine, e
 diverse funzionano insieme. Duplica copia una macchina con il suo stato salvato
 e la sua cartella, ed Elimina elimina una macchina e il suo stato salvato una
 volta confermato, lasciandone la cartella. Un clic destro sul riquadro di una
-macchina offre Avvia, Impostazioni, Duplica ed Elimina per quella macchina e,
-mentre è in funzione, anche il menu della macchina. Al primo avvio l'emulatore
-crea un BBC Micro Model B con un disco vuoto.
+macchina offre Avvia, Impostazioni, Duplica, Elimina e Mostra cartella per
+quella macchina e, mentre è in funzione, anche il menu della macchina. Al
+primo avvio l'emulatore crea un BBC Micro Model B con un disco vuoto.
 
 Impostazioni cambia il nome di una macchina, il suo volume, il caricamento
 rapido da nastro, che fa girare la macchina il più veloce possibile mentre il
@@ -51,8 +52,11 @@ conservandone solo l'ultima schermata.
 Ogni macchina ha una cartella tutta sua, Open Micro e poi il nome della
 macchina, nella tua cartella Documents. Nuovo disco, Nuovo dischetto su un
 Commodore 64, e Nuovo nastro vi creano un disco, un dischetto o un nastro vuoto
-e lo inseriscono, e Dalla cartella offre i dischi, i dischetti e i nastri che
-vi si trovano già. I dischi, i dischetti e i nastri della sua cartella che le
+e lo inseriscono, Dalla cartella offre i dischi, i dischetti e i nastri che vi
+si trovano già, e Salva istantanea vi conserva l'intera macchina come file
+`.snapshot`. Mostra cartella apre la cartella in Files, così ciò che la
+macchina vi conserva può essere copiato su altri supporti o su un altro
+computer. I dischi, i dischetti e i nastri della sua cartella che le
 sue unità e il suo registratore contengono restano con la macchina: se è stata
 spenta, li reinserisce quando si avvia; se viene ripresa, riscrive solo su
 quelli che nessun altro programma ha modificato da quando è stata sospesa.
@@ -62,54 +66,63 @@ nastro (`.uef`, `.csw`) o, per un Commodore 64, un dischetto (`.d64`, `.g64`),
 un nastro (`.tap`), una cartuccia (`.crt`) o un programma (`.prg`, `.t64`) — va
 alla macchina accesa la cui finestra è stata attiva per ultima, o a un'altra
 macchina accesa che lo accetta, o altrimenti alla prima macchina della libreria
-che lo accetta, avviata apposta. Uno scelto con Inserisci disco,
-Inserisci dischetto o Inserisci nastro entra in quell'unità o nel registratore,
-e uno trascinato sulla finestra di una macchina entra nella sua prima unità o
-nel registratore, protetto da scrittura. Ciò che la macchina scrive su un disco
-o un dischetto torna nel suo file finché quel file può essere scritto; un disco
-o un dischetto il cui file non può esserlo è protetto da scrittura, e per un
-dischetto `.d64` che è arrivato a richiedere un `.g64` viene proposto di
-salvarlo in quel formato. Espelli toglie un disco o un dischetto, e
-Salva disco come o Salva dischetto come ne tiene una copia dove si vuole. Un
-nastro su cui si è registrato viene salvato quando lo si toglie. Su un
-Commodore 64, Riproduci, Registra, Ferma e Riavvolgi nel menu Nastro comandano
-il suo datasette; Inserisci cartuccia innesta una cartuccia e Rimuovi cartuccia
-la toglie, riavviando ogni volta la macchina; e Carica programma mette un
-programma in memoria, come farebbe LOAD, perché RUN lo avvii. Salva istantanea
-conserva l'intera macchina in un file, e Ripristina istantanea la riprende, con
-i suoi supporti.
+che lo accetta, avviata apposta, e la finestra di quella macchina passa in
+primo piano. Aprire un disco del BBC Micro in Files ne mostra i file invece di
+avviare una macchina. Uno scelto con Inserisci disco, Inserisci dischetto o
+Inserisci nastro entra in quell'unità o nel registratore, e uno trascinato
+sulla finestra di una macchina entra nella sua prima unità o nel registratore,
+protetto da scrittura, e la finestra prende la tastiera. Ciò che la macchina
+scrive su un disco o un dischetto torna nel suo file finché quel file può
+essere scritto, e mentre il supporto è nell'unità né un montaggio né un'altra
+macchina possono scrivere quel file; un disco o un dischetto il cui file non
+può esserlo, o che un altro programma sta usando, è protetto da scrittura, e
+la finestra ne dice il motivo. Per un dischetto `.d64` che è arrivato a
+richiedere un `.g64` viene proposto di salvarlo in quel formato. Espelli
+toglie un disco o un dischetto, e Salva disco come o Salva dischetto come ne
+tiene una copia dove si vuole. Un nastro su cui si è registrato viene salvato
+quando lo si toglie. Su un Commodore 64, Riproduci, Registra, Ferma e
+Riavvolgi nel menu Nastro comandano il suo datasette; Inserisci cartuccia
+innesta una cartuccia e Rimuovi cartuccia la toglie, riavviando ogni volta la
+macchina; e Carica programma mette un programma in memoria, come farebbe LOAD,
+perché RUN lo avvii. Salva istantanea conserva l'intera macchina in un file —
+nella sua cartella o, prima che ne abbia una, dove scegli —, e Ripristina
+istantanea riprende una macchina così conservata, con i suoi supporti.
 
 Il menu, aperto con un clic destro sull'immagine, offre ogni unità su un
 Model B o su un Commodore 64 e il nastro, e su un Commodore 64 la cartuccia e
-Carica programma; BREAK, o RESTORE su un Commodore 64, Reimposta, Pausa e la
-velocità; lo schermo intero, il ridimensionamento nitido o morbido e le linee
-di scansione; la mappatura della tastiera; Incolla, che digita il testo degli
-appunti, ogni lettera maiuscola o minuscola come la mostra la macchina; le
-istantanee; Impostazioni; Libreria delle macchine; e Spegni. Per carattere, i
-tasti scrivono ciò che mostrano, e il CAPS LOCK della macchina, o su un
-Commodore 64 il tasto Maiusc, decide se una lettera è maiuscola. Per posizione,
-ogni tasto è il tasto della macchina al suo posto. Su un Model B, da F1 a F9
-sono da f1 a f9, F10 è f0, Inizio è SHIFT LOCK e Ins è il tasto della barra
-rovesciata. Su un Electron, da F1 a F10 sono FUNC con i tasti da 1 a 9 e 0, Alt
-è FUNC e Bloc Maiusc è CAPS LK. Su entrambi, F12 è BREAK, Fine è COPY e le
-frecce sono i tasti cursore. Su un Commodore 64, F1, F3, F5 e F7 sono i suoi
-tasti funzione e F2, F4, F6 e F8 gli stessi con SHIFT, Esc è RUN/STOP, Alt è il
-tasto Commodore, Ctrl è CTRL, Inizio è CLR/HOME, F12 o PagSu è RESTORE e le
-frecce sono i tasti cursore; con il suo joystick sul tastierino attivo, le
-frecce del tastierino numerico muovono il joystick e i tasti 0 e 5 sparano.
+Carica programma; BREAK, o RESTORE su un Commodore 64; su un Model B e su un
+Electron, SHIFT-BREAK, che preme BREAK tenendo premuto SHIFT per avviare il
+disco o il nastro; Reimposta, Pausa e la velocità; lo schermo intero, il
+ridimensionamento nitido o morbido e le linee di scansione; la mappatura della
+tastiera; Incolla, che digita il testo degli appunti, ogni lettera maiuscola o
+minuscola come la mostra la macchina; le istantanee; Mostra cartella;
+Impostazioni; Libreria delle macchine; e Spegni. Per carattere, i tasti
+scrivono ciò che mostrano, e il CAPS LOCK della macchina, o su un Commodore 64
+il tasto Maiusc, decide se una lettera è maiuscola. Per posizione, ogni tasto
+è il tasto della macchina al suo posto. Su un Model B, da F1 a F9 sono da f1 a
+f9, F10 è f0, Inizio è SHIFT LOCK e Ins è il tasto della barra rovesciata. Su
+un Electron, da F1 a F10 sono FUNC con i tasti da 1 a 9 e 0, Alt è FUNC e Bloc
+Maiusc è CAPS LK. Su entrambi, F12 è BREAK, Fine è COPY e le frecce sono i
+tasti cursore. Su un Commodore 64, F1, F3, F5 e F7 sono i suoi tasti funzione
+e F2, F4, F6 e F8 gli stessi con SHIFT, Esc è RUN/STOP, Alt è il tasto
+Commodore, Ctrl è CTRL, Inizio è CLR/HOME, F12 o PagSu è RESTORE e le frecce
+sono i tasti cursore; con il suo joystick sul tastierino attivo, le frecce del
+tastierino numerico muovono il joystick e i tasti 0 e 5 sparano.
 
 Delle spie in fondo alla finestra di una macchina mostrano CAPS LOCK e il
 motore del registratore e, su un Model B, SHIFT LOCK e ogni unità; su un
-Commodore 64 mostrano il motore del datasette e ogni unità. Ogni macchina gira
-in un processo ausiliario tutto suo privo di qualsiasi autorità, quindi né il
-suo software né i suoi supporti sono considerati affidabili; un processo che
-fallisce viene sostituito, la macchina riparte come all'accensione e il motivo
-viene mostrato.
+Commodore 64 mostrano il motore del datasette e ogni unità. Su un Model B e su
+un Electron, il pulsante SHIFT-BREAK in fondo a destra fa ciò che fa la riga
+del menu. Ogni macchina gira in un processo ausiliario tutto suo privo di
+qualsiasi autorità, quindi né il suo software né i suoi supporti sono
+considerati affidabili; un processo che fallisce viene sostituito, la macchina
+riparte come all'accensione e il motivo viene mostrato.
 
 Chiudere la finestra della libreria lascia in funzione le macchine accese, e
 chiudere tutte le finestre lascia l'emulatore nella barra delle icone: un clic
-sulla sua icona, o Libreria delle macchine nel suo menu, riapre la libreria, ed
-Esci in quel menu sospende tutte le macchine accese e termina l'emulatore.
+sulla sua icona, o Libreria delle macchine nel suo menu, porta sempre in primo
+piano la libreria, ed Esci in quel menu sospende tutte le macchine accese e
+termina l'emulatore.
 
 ## OPTIONS
 

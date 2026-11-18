@@ -953,7 +953,8 @@ fn start_driver(facility: &'static TestFacility, node: u32, volume: u64, fstype:
         | VolumeFsType::Bzip2
         | VolumeFsType::Spark
         | VolumeFsType::ArcFs
-        | VolumeFsType::Rar => driver.start_archive::<tairix_drv_fs_archive::Served>(offered),
+        | VolumeFsType::Rar
+        | VolumeFsType::Dfs => driver.start_archive::<tairix_drv_fs_archive::Served>(offered),
     }
     // Every path of the driver's start sends, and a driver that dies first
     // drops the sender, so this waits on completion rather than the clock.

@@ -8,8 +8,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::audio::{OpenParams, StreamRole, Tenancy};
 use tairix_abi::driver::audio::{ChannelMap, Frames, Rate, SampleFormat, StreamDirection};
-use tairix_abi::fs::{FileKind, OpenFlags, UnlinkFlags, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE};
-use tairix_abi::Errno;
+use tairix_abi::fs::{
+    FileKind, NodeExpect, OpenFlags, UnlinkFlags, FS_NEW_DIR_MODE, FS_NEW_FILE_MODE,
+};
+use tairix_abi::{Errno, LockMode, LockRange, ProcId};
 use tairix_audio::live::{LiveStream, RtAudio};
 use tairix_fscopy::{DataCopy, Sparse};
 use tairix_openmicro::front::folder::{self, MOST_NAMES};
@@ -138,6 +140,28 @@ pub enum FileJob {
         /// What it held when the machine was suspended holding it.
         digest: Option<[u8; 32]>,
     },
+    /// Machine `id`'s snapshot `bytes` kept in its folder `folder`, named
+    /// `stem` or the first number after it free there.
+    SaveSnapshot {
+        /// The machine.
+        id: u32,
+        /// Its folder.
+        folder: String,
+        /// The name the snapshot is given, before its ending.
+        stem: String,
+        /// The snapshot.
+        bytes: Vec<u8>,
+    },
+    /// The folder `folder` of the documents folder told to `session`, to
+    /// show it for window `window`.
+    Locate {
+        /// The window it is shown for.
+        window: u64,
+        /// The folder.
+        folder: String,
+        /// The session told where it is.
+        session: ProcId,
+    },
     /// Machine `from`'s folder copied for machine `to`, called `name`.
     CopyFolder {
         /// The copy.
@@ -169,6 +193,9 @@ pub enum FileDone {
         writable: bool,
         /// Whether it is of the machine's folder.
         of_folder: bool,
+        /// Why a file that could be written is not: another writer's lock
+        /// on it.
+        locked_out: Option<String>,
     },
     /// The file of a medium machine `id` holds from its snapshot, still what
     /// it was: `medium` it is written back through from now on.
@@ -209,6 +236,22 @@ pub enum FileDone {
         /// The names.
         names: Result<Vec<String>, String>,
     },
+    /// Machine `id`'s snapshot kept in its folder under this name, or why
+    /// not.
+    SnapshotSaved {
+        /// The machine.
+        id: u32,
+        /// The name it was saved under.
+        saved: Result<String, String>,
+    },
+    /// Where a folder to show for window `window` is, as a location the
+    /// session redeems, or why it could not be told.
+    Located {
+        /// The window it is shown for.
+        window: u64,
+        /// The location.
+        location: Result<u64, String>,
+    },
     /// Machine `to`'s copy of a folder, or why there is none.
     FolderCopied {
         /// The copy.
@@ -230,15 +273,13 @@ fn errno(err: i64) -> Errno {
 }
 
 /// Carry out `job`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm a job: the worker's dispatch reads as the one table of what it does"
+)]
 pub fn serve(held: &mut Held, job: &mut FileJob) -> FileDone {
     match job {
-        FileJob::Documents(grant) => FileDone::Documents(match Dir::from_delegation(*grant) {
-            Ok(dir) => {
-                held.documents = Some(dir);
-                Ok(())
-            }
-            Err(err) => Err(format!("its grant could not be taken ({})", errno(err))),
-        }),
+        FileJob::Documents(grant) => FileDone::Documents(redeem_documents(held, *grant)),
         FileJob::Take {
             id,
             grant,
@@ -321,6 +362,23 @@ pub fn serve(held: &mut Held, job: &mut FileJob) -> FileDone {
             *purpose,
             *digest,
         ),
+        FileJob::SaveSnapshot {
+            id,
+            folder,
+            stem,
+            bytes,
+        } => FileDone::SnapshotSaved {
+            id: *id,
+            saved: save_in_folder(held, folder, stem, bytes),
+        },
+        FileJob::Locate {
+            window,
+            folder,
+            session,
+        } => FileDone::Located {
+            window: *window,
+            location: locate(held, folder, *session),
+        },
         FileJob::CopyFolder { to, folder, name } => FileDone::FolderCopied {
             to: *to,
             folder: copy_folder(held, folder, name),
@@ -353,25 +411,43 @@ fn keep(
         Ok(bytes) => bytes,
         Err(why) => return FileDone::Failed(format!("{name} could not be read: {why}")),
     };
-    let medium =
-        (writable && matches!(purpose, Purpose::Disc(_) | Purpose::Tape)).then(|| hold(held, file));
+    let (medium, locked_out) = match (writable, purpose) {
+        (true, Purpose::Disc(_) | Purpose::Tape) => held_or_why(hold(held, file)),
+        _ => (None, None),
+    };
     FileDone::Taken {
         id,
         purpose,
         name,
         bytes,
         medium,
-        writable,
+        writable: writable && locked_out.is_none(),
         of_folder,
+        locked_out,
     }
 }
 
-/// `file` held as a medium: its number.
-fn hold(held: &mut Held, file: File) -> u32 {
+/// A [`hold`]'s medium, or why the file may not be written.
+fn held_or_why(held: Result<u32, String>) -> (Option<u32>, Option<String>) {
+    match held {
+        Ok(medium) => (Some(medium), None),
+        Err(why) => (None, Some(why)),
+    }
+}
+
+/// `file` held as a medium, the whole of it locked against every other
+/// writer for as long as it is held: its number, or why it may not be
+/// written.
+fn hold(held: &mut Held, file: File) -> Result<u32, String> {
+    file.try_lock(LockMode::Exclusive, LockRange::WHOLE)
+        .map_err(|err| match errno(err) {
+            Errno::WouldBlock => String::from("it is in use elsewhere"),
+            other => format!("it could not be locked ({other})"),
+        })?;
     let medium = held.next;
     held.next = held.next.wrapping_add(1);
     held.files.push((medium, file));
-    medium
+    Ok(medium)
 }
 
 /// `file` read whole, refused past `most` bytes.
@@ -449,33 +525,66 @@ fn new_medium(
         let (stem, ending) = folder::blank_name(purpose, model)
             .ok_or_else(|| String::from("only a disc or a tape is made blank"))?;
         let dir = folder_dir(held, folder)?;
-        let taken = names_of(&dir, false)?;
-        let name = folder::fresh(stem, &format!(".{ending}"), |candidate| {
-            taken.iter().any(|t| t == candidate)
-        })
-        .ok_or_else(|| format!("{MOST_NAMES} {stem}s are already there"))?;
+        let (name, file) = fresh_file(&dir, stem, ending)?;
         let bytes = folder::blank_image(purpose, model, &name);
-        let flags = OpenFlags::READ
-            .union(OpenFlags::WRITE)
-            .union(OpenFlags::EXCLUSIVE);
-        let file = dir
-            .create_file(name.as_bytes(), flags, FS_NEW_FILE_MODE)
-            .map_err(|err| format!("{name} could not be made ({})", errno(err)))?;
-        overwrite(&file, &bytes)?;
+        fill_afresh(&dir, (&name, &file), &bytes)?;
         Ok::<_, String>((name, bytes, file))
     })();
-    match made {
-        Ok((name, bytes, file)) => FileDone::Taken {
-            id,
-            purpose,
-            name,
-            bytes,
-            medium: Some(hold(held, file)),
-            writable: true,
-            of_folder: true,
-        },
-        Err(why) => FileDone::Failed(why),
+    let (name, bytes, file) = match made {
+        Ok(made) => made,
+        Err(why) => return FileDone::Failed(why),
+    };
+    let (medium, locked_out) = held_or_why(hold(held, file));
+    FileDone::Taken {
+        id,
+        purpose,
+        name,
+        bytes,
+        writable: medium.is_some(),
+        medium,
+        of_folder: true,
+        locked_out,
     }
+}
+
+/// A file made afresh in `dir`, named `stem` with `ending` or the first
+/// number after `stem` free there.
+fn fresh_file(dir: &Dir, stem: &str, ending: &str) -> Result<(String, File), String> {
+    let taken = names_of(dir, false)?;
+    let name = folder::fresh(stem, &format!(".{ending}"), |candidate| {
+        taken.iter().any(|t| t == candidate)
+    })
+    .ok_or_else(|| format!("{MOST_NAMES} {stem}s are already there"))?;
+    let flags = OpenFlags::READ
+        .union(OpenFlags::WRITE)
+        .union(OpenFlags::EXCLUSIVE);
+    let file = dir
+        .create_file(name.as_bytes(), flags, FS_NEW_FILE_MODE)
+        .map_err(|err| format!("{name} could not be made ({})", errno(err)))?;
+    Ok((name, file))
+}
+
+/// `bytes` written to `file`, made afresh as `name` in `dir`; taken away
+/// again where they could not be, so nothing half-written is left to be
+/// opened.
+fn fill_afresh(dir: &Dir, (name, file): (&str, &File), bytes: &[u8]) -> Result<(), String> {
+    let Err(why) = overwrite(file, bytes) else {
+        return Ok(());
+    };
+    if let Ok(made) = file.stat() {
+        let expect = NodeExpect::of_node(made.id);
+        let _ = dir.unlink(name.as_bytes(), UnlinkFlags::EXPECT_NODE, Some(&expect));
+    }
+    Err(format!("{name} could not be written ({why})"))
+}
+
+/// The snapshot `bytes` kept afresh in `folder`, named `stem` or the first
+/// number after it free there: the name it was given.
+fn save_in_folder(held: &Held, folder: &str, stem: &str, bytes: &[u8]) -> Result<String, String> {
+    let dir = folder_dir(held, folder)?;
+    let (name, file) = fresh_file(&dir, stem, media::SNAPSHOT_ENDING)?;
+    fill_afresh(&dir, (&name, &file), bytes)?;
+    Ok(name)
 }
 
 /// The file `name` of `folder` for machine `id`: read as `purpose`, opened
@@ -513,15 +622,34 @@ fn from_folder(
         return keep(held, id, (file, writable), name, purpose, true);
     };
     match read(&file, most(purpose, &name)) {
-        Ok(bytes) if folder::digest(&bytes) == digest => FileDone::Rebound {
-            id,
-            purpose,
-            name,
-            bytes,
-            medium: hold(held, file),
+        Ok(bytes) if folder::digest(&bytes) == digest => match hold(held, file) {
+            Ok(medium) => FileDone::Rebound {
+                id,
+                purpose,
+                name,
+                bytes,
+                medium,
+            },
+            Err(why) => FileDone::Failed(format!("{name} is not saved to: {why}")),
         },
         _ => FileDone::Nothing,
     }
+}
+
+/// The documents folder `grant` delegates, held from now on.
+fn redeem_documents(held: &mut Held, grant: u64) -> Result<(), String> {
+    let dir = Dir::from_delegation(grant)
+        .map_err(|err| format!("its grant could not be taken ({})", errno(err)))?;
+    held.documents = Some(dir);
+    Ok(())
+}
+
+/// Where `folder` of the documents folder is, told to `session` as a
+/// location it redeems.
+fn locate(held: &Held, folder: &str, session: ProcId) -> Result<u64, String> {
+    let dir = folder_dir(held, folder)?;
+    tairix_rt::fd_grant_location(dir.fd(), session)
+        .map_err(|err| format!("{folder} could not be told of ({err})"))
 }
 
 /// Bytes a file is copied through at a time.

@@ -11,7 +11,9 @@ pub const LEAST_PICTURE: (u32, u32) = (320, 240);
 
 pub mod assistant;
 pub mod events;
+pub mod first_screen;
 pub mod folder;
+pub mod images;
 pub mod keys;
 pub mod library;
 pub mod media;

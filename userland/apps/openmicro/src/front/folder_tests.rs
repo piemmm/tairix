@@ -6,6 +6,7 @@ use crate::machine::bbc::fdc::PhysicalDrive;
 use crate::media::c1541::layout::{bam, DIRECTORY_TRACK};
 use crate::media::disc::Disc;
 use crate::media::tape::Tape;
+use tairix_dfs::image::{Layout, TRACK_LEN};
 
 const MODEL_B: (Model, [bool; 2]) = (Model::ModelB, [true; 2]);
 
@@ -46,13 +47,13 @@ fn a_new_disc_or_tape_takes_the_first_free_name() {
 #[test]
 fn blank_media_read_back_as_empty_images() {
     let disc = blank_disc();
-    assert_eq!(disc.len(), 80 * TRACK_BYTES);
-    assert_eq!(disc[256 + 5], 0, "no files");
-    assert_eq!(
-        u16::from(disc[256 + 6] & 3) << 8 | u16::from(disc[256 + 7]),
-        800
-    );
-    let decoded = Disc::decode(&disc, ImageFormat::Ssd, false).expect("a disc");
+    assert_eq!(disc.len(), 80 * TRACK_LEN);
+    let catalogue =
+        Catalogue::read(disc[..CATALOGUE_LEN].try_into().unwrap()).expect("a catalogue");
+    assert!(catalogue.files().is_empty());
+    assert_eq!(catalogue.sectors, 800);
+    assert_eq!(catalogue.title, [b' '; 12]);
+    let decoded = Disc::decode(&disc, Layout::Single, false).expect("a disc");
     assert_eq!(decoded.tracks(), 80);
     let image = blank_image(Purpose::Tape, Model::ModelB, "Tape.uef");
     assert!(Tape::decode(&image).expect("a tape").is_empty());
@@ -90,7 +91,7 @@ fn the_folder_offers_its_discs_and_tapes_in_name_order() {
         .map(String::from)
         .collect();
     let offered = offered(&names, MODEL_B.0, MODEL_B.1);
-    assert!(offered.reachable);
+    assert!(offered.reachable && offered.folder);
     assert_eq!(offered.discs, ["A.dsd", "b.SSD"]);
     assert_eq!(offered.tapes, ["Game.uef", "side.csw"]);
     let c64 = super::offered(&names, Model::C64, [true, false]);

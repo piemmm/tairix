@@ -110,7 +110,11 @@ fitting, its display, key mapping, volume and fast tape loading, its folder
 and the media of its folder its drives and deck hold — written to `library-a`
 and `library-b` in turn, and a state blob a machine holding its last screen
 and, while it is suspended, its snapshot, all in the application's own store.
-The library window shows each machine as a card of its last screen; *New…*
+The library window shows each machine as a card of its last screen, and a
+machine never yet run as its model's boot screen: the clean-room ROMs' own,
+drawn once on the build host by `cargo xtask openmicro --write-roms` and
+carried in `Run` beside the ROM images, so no guest code runs outside a
+worker to draw it. *New…*
 opens the assistant, which offers the three models, a name, and each model's
 choices: a Model B a new blank disc in drive 0 or none, an Electron its Plus 1
 or none, and a Commodore 64 its standard (PAL or NTSC), its SID (6581 or
@@ -136,7 +140,10 @@ Several machines run at once, each in a window of its own over a worker of its
 own with a sound stream of its own. The picture is the canvas's 4:3, the
 largest that fits the window above a strip of the model's lamps: an Acorn's
 CAPS LOCK and cassette motor, the Model B's SHIFT LOCK and each drive, and a
-Commodore 64's datasette motor and each 1541's light. It is
+Commodore 64's datasette motor and each 1541's light. On a Model B or an
+Electron the strip's trailing end holds a SHIFT-BREAK button, as the menu has
+a row: BREAK pressed and let go with SHIFT held on until the reset has read
+the keyboard, which boots the disc or tape. It is
 enlarged sharp, each dot a block of whole pixels, or smooth, optionally with
 scan lines, through `tairix_crt::screen` — the PC emulator's picture too — and
 only the rows a slice changed are expanded, scaled and presented; a lamp or
@@ -170,7 +177,17 @@ is refused, and one that arrives while the machine starts goes in once it is
 built, and one for a machine being put away is refused, the window saying so.
 A machine suspended, shut down or stopped lets go of every file its media
 came from. A disc or disk whose file may be written is written back to it as
-the machine writes, and one whose file may not be is write-protected; a D64
+the machine writes, and one whose file may not be is write-protected. A disc,
+disk or tape the machine may write back is held under an exclusive advisory
+lock on its whole file while it is in, so mounting it as a volume, or
+putting it in another machine to write, waits until it is taken out; one
+already locked elsewhere — a DFS disc mounted to show its files, or a disc
+another machine holds — goes in write-protected, the status strip saying
+why. Opening a DFS disc in Files shows its files
+([archives](../filesystem/archive.md)) rather than starting a machine; a drop
+on the window or Open With puts it in a drive. A disc dropped on a window,
+or a document opened with the emulator, brings its machine's window forward
+with the keyboard, on the one raise the user's gesture lends. A D64
 that can no longer hold its disk is let go and the disk offered to be saved
 as a G64. A tape recorded on is saved as it is taken out, back to the UEF or
 TAP it came from or offered to be saved as one. Plugging a cartridge in or
@@ -192,8 +209,9 @@ else is put in. *Shut Down* takes every medium out through the same handover —
 written discs back to their files or offered to be saved — and turns the
 machine off, keeping its last screen alone, which is what unlocks its fitting.
 Closing the library leaves machines running; closing every window leaves the
-program on the icon bar, whose slot or *Machine Library* row brings the
-library back; only *Quit* ends it, suspending every running machine first.
+program on the icon bar. Its slot's click, like its *Machine Library* row,
+always brings the library forward, a machine's window open or not; only
+*Quit* ends it, suspending every running machine first.
 
 ## Machine folders
 
@@ -209,8 +227,14 @@ first eight of each kind by name. What the drives and deck hold from the folder
 is kept with the machine: one started afresh takes them in again; one resumed
 holds its snapshot's media, written back to its folder's files only where each
 still holds what it did when the machine was suspended, its SHA-256 recorded
-then, so a file changed meanwhile is never overwritten. Duplicating a machine
-copies its folder; deleting it leaves the folder, which is the user's.
+then, so a file changed meanwhile is never overwritten. *Save Snapshot* keeps
+the whole machine in its folder as `<name>.snapshot`, the first number after
+the name where that is taken, a file cut short taken away again; a machine with
+no folder yet saves where the picker is told. *Show Folder*, on the machine's
+menu and its card's, has the desktop open the folder in Files, through a
+location grant that confers nothing, so what the machine keeps there can be
+copied to other media. Duplicating a machine copies its folder; deleting it
+leaves the folder, which is the user's.
 
 ## The ROMs
 

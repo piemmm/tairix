@@ -16,8 +16,9 @@ use crate::machine::{
     bbc, electron, LetterCase, Model, Timing, ANALOGUE_CHANNELS, CLOCK, FIRE_BUTTONS, ROM_SIZE,
 };
 use crate::media::c1541::{d64, g64};
-use crate::media::disc::{ImageFormat, LAST_TRACK};
+use crate::media::disc::{max_image_bytes, LAST_TRACK};
 use crate::media::{crt, tap};
+use tairix_dfs::image::Layout;
 
 pub use crate::machine::SLOTS;
 
@@ -42,7 +43,7 @@ pub const SAMPLE_BYTES: usize = 2;
 pub const MAX_ROM: usize = ROM_SIZE;
 /// The largest disc image: a G64 of every ring at its longest.
 pub const MAX_DISC: usize = DiscFormat::G64.max_bytes();
-const _: () = assert!(ImageFormat::Dsd.max_bytes() <= MAX_DISC && d64::MAX_IMAGE <= MAX_DISC);
+const _: () = assert!(max_image_bytes(Layout::Double) <= MAX_DISC && d64::MAX_IMAGE <= MAX_DISC);
 /// The largest tape image or snapshot either side sends: far above any
 /// real Acorn tape's, and the most a C64 tape holds.
 pub const MAX_BULK: usize = 4 << 20;
@@ -202,7 +203,7 @@ impl Configuration<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiscFormat {
     /// An Acorn DFS disc, its sides laid out so.
-    Acorn(ImageFormat),
+    Acorn(Layout),
     /// A 1541's sector dump.
     D64,
     /// A 1541's recording as it is.
@@ -214,7 +215,7 @@ impl DiscFormat {
     #[must_use]
     pub const fn max_bytes(self) -> usize {
         match self {
-            Self::Acorn(format) => format.max_bytes(),
+            Self::Acorn(layout) => max_image_bytes(layout),
             Self::D64 => d64::MAX_IMAGE,
             Self::G64 => g64::MAX_IMAGE,
         }
@@ -1077,8 +1078,8 @@ const fn drive_of(byte: u8) -> Result<PhysicalDrive, WireError> {
 }
 
 const DISC_FORMATS: [DiscFormat; 4] = [
-    DiscFormat::Acorn(ImageFormat::Ssd),
-    DiscFormat::Acorn(ImageFormat::Dsd),
+    DiscFormat::Acorn(Layout::Single),
+    DiscFormat::Acorn(Layout::Double),
     DiscFormat::D64,
     DiscFormat::G64,
 ];

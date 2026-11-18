@@ -93,10 +93,11 @@ restituisce quando si preme brevemente il tasto Meta.
 
 Chiudere la finestra della libreria lascia in funzione le macchine accese, e
 chiudere tutte le finestre lascia l'emulatore nella barra delle icone: un clic
-sulla sua icona, o Libreria delle macchine nel suo menu, riapre la libreria, ed
-Esci in quel menu sospende tutte le macchine accese e termina l'emulatore. Ogni
-macchina gira in un processo di lavoro tutto suo che non detiene alcuna
-autorità: dei suoi programmi e dei suoi dischi non ci si fida mai.
+sulla sua icona, o Libreria delle macchine nel suo menu, porta sempre in primo
+piano la libreria, ed Esci in quel menu sospende tutte le macchine accese e
+termina l'emulatore. Ogni macchina gira in un processo di lavoro tutto suo che
+non detiene alcuna autorità: dei suoi programmi e dei suoi dischi non ci si
+fida mai.
 
 ## OPTIONS
 

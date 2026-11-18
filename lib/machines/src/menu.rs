@@ -22,9 +22,10 @@ pub const CARD_ROWS: u16 = 0xFF00;
 /// The icon-bar row that brings the library back.
 pub const LIBRARY_ROW: u16 = 2;
 
-/// What a primary press on the application's icon-bar slot does: the library
-/// is the way back once every window is closed.
-pub const BAR_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
+/// What a primary press on the application's icon-bar slot does: it is
+/// always handed to the application, which brings the library forward
+/// whatever else is open.
+pub const BAR_CLICK: AppBarClick = AppBarClick::Open;
 
 /// The application's own rows on its icon-bar menu, between the information
 /// row and *Quit*: the library's.

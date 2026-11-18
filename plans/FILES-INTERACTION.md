@@ -283,7 +283,8 @@ source, are new.
 - **The source performs the drop, as the pointer showed it.** On release the
   session concludes with a `DropSite` — an application slot, a window of
   another application that places the one file (`DropSite::Placed`, which the
-  source opens read-only and hands over with `PlaceDropped`), one of the
+  source opens read-only and hands over with `PlaceDropped`, lending the
+  window it lands in the raise its own window lends, FI6), one of the
   source's windows and a point in it, or a desktop folder, with the operation
   the pointer showed — and the source runs the copy or move through the same
   interleaved, cancellable transfer Paste uses, under its own authority, after
@@ -316,8 +317,8 @@ where they stood.
   already asked. Let go over a window in the same batch that reached it, they
   stay where they stood: that window was never offered them. One regular file
   is offered as a file too, under the same number (`FileOffered`), which a
-  window answering it places has placed, read-only, by the session
-  (`plans/NEW-TASKBAR.md` T21).
+  window answering it places has placed, read-only, by the session with the
+  raise the user's drop lends (`plans/NEW-TASKBAR.md` T21).
 - **Only the offered window reads them.** Its owner reads the drag's items a
   page a round trip (`WindowRequest::OfferedItems`), each its absolute path
   and the node the desktop listed there; a drive is its volume's place in the

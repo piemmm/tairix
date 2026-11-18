@@ -12,9 +12,10 @@ use super::media::{disc_ending, tape_ending, Purpose};
 use super::menu::{Offered, FOLDER_ROWS};
 use crate::machine::Model;
 use crate::media::c1541::{d64, layout::NAME_BYTES};
-use crate::media::disc::{ImageFormat, SECTORS_PER_TRACK, TRACK_BYTES};
 use crate::media::tap;
 use crate::worker::protocol::DiscFormat;
+use tairix_dfs::catalogue::{Catalogue, CATALOGUE_LEN};
+use tairix_dfs::image::{Layout, SECTORS_PER_TRACK, SECTOR_LEN};
 
 /// The longest name a folder or a file of it is given.
 const MAX_NAME: usize = 64;
@@ -25,6 +26,14 @@ pub const MOST_NAMES: u32 = 64;
 
 /// The tracks a blank disc is formatted with: an 80-track drive's.
 const BLANK_TRACKS: usize = 80;
+
+/// The sectors a blank disc's catalogue counts.
+const BLANK_SECTORS: u16 = {
+    let sectors = BLANK_TRACKS * SECTORS_PER_TRACK;
+    assert!(sectors <= u16::MAX as usize);
+    let [low, high, ..] = sectors.to_le_bytes();
+    u16::from_le_bytes([low, high])
+};
 
 /// What a UEF image begins with: its magic and version 0.10.
 const UEF_HEADER: &[u8] = b"UEF File!\0\x0A\x00";
@@ -72,16 +81,14 @@ pub fn folder_for(machine: &str, taken: impl Fn(&str) -> bool) -> Option<String>
     fresh(&plain(machine, "Machine"), "", taken)
 }
 
-/// A blank single-sided disc, formatted as the DFS formats one: an empty
-/// catalogue of `BLANK_TRACKS` tracks.
+/// A blank single-sided disc, formatted as the DFS formats an 80-track one:
+/// an empty catalogue.
 #[must_use]
 pub fn blank_disc() -> Vec<u8> {
-    let mut image = vec![0; BLANK_TRACKS * TRACK_BYTES];
-    let sectors = BLANK_TRACKS * SECTORS_PER_TRACK;
-    image[..8].fill(b' ');
-    image[256..260].fill(b' ');
-    image[256 + 6] = u8::try_from(sectors >> 8).unwrap_or(0) & 3;
-    image[256 + 7] = u8::try_from(sectors & 0xFF).unwrap_or(0);
+    let mut image = vec![0; usize::from(BLANK_SECTORS) * SECTOR_LEN];
+    let mut catalogue = [0; CATALOGUE_LEN];
+    Catalogue::blank(BLANK_SECTORS).write(&mut catalogue);
+    image[..CATALOGUE_LEN].copy_from_slice(&catalogue);
     image
 }
 
@@ -91,7 +98,7 @@ pub fn blank_disc() -> Vec<u8> {
 pub const fn blank_name(purpose: Purpose, model: Model) -> Option<(&'static str, &'static str)> {
     match (purpose, model) {
         (Purpose::Disc(_), Model::C64) => Some(("Disk", disc_ending(DiscFormat::D64))),
-        (Purpose::Disc(_), _) => Some(("Disc", disc_ending(DiscFormat::Acorn(ImageFormat::Ssd)))),
+        (Purpose::Disc(_), _) => Some(("Disc", disc_ending(DiscFormat::Acorn(Layout::Single)))),
         (Purpose::Tape, model) => Some(("Tape", tape_ending(model))),
         _ => None,
     }
@@ -158,6 +165,7 @@ pub fn offered(names: &[String], model: Model, drives: [bool; 2]) -> Offered {
     }
     Offered {
         reachable: true,
+        folder: true,
         discs,
         tapes,
     }

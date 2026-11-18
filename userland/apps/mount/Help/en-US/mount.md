@@ -48,6 +48,13 @@ file and the folder it is in. A RAR archive is always mounted read-only.
 An archive split into several volumes, or one whose names are encrypted,
 is not mounted, and an encrypted member cannot be read.
 
+A BBC Micro disc image (`.ssd`, `.dsd`) mounts as a volume of the files
+on it, each named as the disc's own filing system names it, its
+directory, a dot, then its name (`$.ELITE`); a double-sided `.dsd` shows
+its two sides as the folders `Drive 0` and `Drive 2`. A file's load and
+execution addresses travel with it, and a change is written to the disc
+as the BBC Micro would write it, every other sector kept as it was.
+
 The volume stays mounted until you detach it with `unmount`, or your
 login session ends. An image that holds a partitioned disk, one disk of
 a RAID array, or a filesystem whose recorded owners are always honoured
@@ -74,7 +81,7 @@ also asks the user at the computer about a removable disk.
 - `-t, --types <list>` — the filesystems, comma-separated, one of which
   the image must hold, as the mount listing names them (`iso9660`,
   `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`, `tar.gz`, `tar.bz2`,
-  `gzip`, `bzip2`, `spark`, `arcfs`, `rar`), or `auto` for whatever it
+  `gzip`, `bzip2`, `spark`, `arcfs`, `rar`, `dfs`), or `auto` for whatever it
   holds; a list beginning `no` names the ones it may not hold. What the image
   holds is recognised from its contents, so the order chooses nothing:
   a disc holding both UDF and ISO 9660 is mounted as UDF, unless its

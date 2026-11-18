@@ -246,8 +246,8 @@ pub const ADFS_DRIVER: ServedFsDriver = ServedFsDriver {
 };
 
 /// The archive driver: every archive format an image attach recognises —
-/// zip, tar plain and compressed, gzip and bzip2 streams, Spark, `ArcFS` and
-/// RAR.
+/// zip, tar plain and compressed, gzip and bzip2 streams, Spark, `ArcFS`,
+/// RAR, and DFS disc images.
 pub const ARCHIVE_DRIVER: ServedFsDriver = ServedFsDriver {
     package: "tairix-drv-fs-archive",
     bind_keys: tairix_drv_fs_archive::BIND_KEYS,

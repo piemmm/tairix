@@ -1,5 +1,7 @@
 //! The status band: its height, its slots, and how its text is set.
 
+use alloc::vec::Vec;
+
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -106,4 +108,82 @@ fn a_band_is_plated_and_its_text_toned_and_elided_to_its_slot() {
     });
     assert!(!past, "nothing is drawn past the message's slot");
     assert!(marks_elision(|text| paint(text, StatusTone::Ink)));
+}
+
+#[test]
+fn a_lamp_sits_on_its_slot_s_line_with_room_before_its_text() {
+    let band = band();
+    let lamp = band.lamp();
+    let theme = Theme::light();
+    let width = lamp.slot_width("DRIVE 0");
+    let before_text = width - band.slot_width("DRIVE 0");
+    let slot = Rect::new(4, 0, width, band.height());
+    let text = lamp.text(slot);
+    assert_eq!(
+        text.left(),
+        slot.left() + i32::try_from(before_text).expect("small")
+    );
+    assert_eq!(text.right(), slot.right());
+    let mut surface = Surface::new(width + 8, band.height()).expect("a surface");
+    lamp.paint(&mut surface, slot, &theme, StatusTone::Danger);
+    let lit = Color::from(theme.palette().danger).premultiply();
+    let columns: Vec<u32> = (0..surface.width())
+        .filter(|&x| (0..surface.height()).any(|y| surface.get(x, y) == Some(lit)))
+        .collect();
+    let rows: Vec<u32> = (0..surface.height())
+        .filter(|&y| (0..surface.width()).any(|x| surface.get(x, y) == Some(lit)))
+        .collect();
+    let (left, right) = (columns[0], columns[columns.len() - 1]);
+    assert_eq!(left, 4, "at the slot's leading edge");
+    assert!(
+        i32::try_from(right).expect("small") < text.left() - 1,
+        "room between the lamp and its text"
+    );
+    let (top, bottom) = (rows[0], rows[rows.len() - 1]);
+    let line = band.face().centred_top(slot.top(), slot.height);
+    let (first, last) = band
+        .face()
+        .capital_rows()
+        .map(|(first, last)| {
+            (
+                line + i32::try_from(first).expect("small"),
+                line + i32::try_from(last).expect("small"),
+            )
+        })
+        .expect("the test face has capitals");
+    assert_eq!(
+        (
+            i32::try_from(top).expect("small"),
+            i32::try_from(bottom).expect("small")
+        ),
+        (first, last),
+        "a capital's height, where the capitals stand"
+    );
+    let cramped = Rect::new(0, 0, 3, band.height());
+    assert_eq!(
+        lamp.text(cramped).width,
+        0,
+        "a slot no wider than its lamp has no text"
+    );
+}
+
+#[test]
+fn a_band_holding_a_button_is_tall_enough_for_it_and_centres_it() {
+    let band = band();
+    let theme = Theme::light();
+    let height = band.height_holding_button(Scale::ONE, &theme);
+    let button = crate::Button::height(Scale::ONE, &theme);
+    assert!(height >= band.height() && height >= button);
+    let slot = Rect::new(100, 50, 80, height);
+    let placed = StatusBand::button_in(slot, Scale::ONE, &theme);
+    assert_eq!(
+        (placed.left(), placed.width, placed.height),
+        (100, 80, button)
+    );
+    assert_eq!(placed.top() - slot.top(), slot.bottom() - placed.bottom());
+    let short = Rect::new(0, 0, 80, button / 2);
+    assert_eq!(
+        StatusBand::button_in(short, Scale::ONE, &theme).height,
+        button / 2
+    );
 }

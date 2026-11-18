@@ -7,6 +7,7 @@ pub mod basic;
 pub mod c1541;
 pub mod c64;
 pub mod dfs;
+pub mod first_screen;
 #[cfg(test)]
 mod harness;
 pub mod mos;

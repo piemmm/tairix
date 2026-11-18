@@ -4406,6 +4406,7 @@ fn emit_attach_contract(out: &mut String) {
             VolumeFsType::Spark => "SPARK",
             VolumeFsType::ArcFs => "ARCFS",
             VolumeFsType::Rar => "RAR",
+            VolumeFsType::Dfs => "DFS",
         })
     });
     out.push_str(

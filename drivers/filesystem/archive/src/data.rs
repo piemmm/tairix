@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use tairix_abi::volume::{ARCHIVE_REGION, ARCHIVE_STAGING};
 use tairix_abi::DriverError;
 use tairix_compress::{arc, bzip2};
+use tairix_dfs::image::{Layout, TRACK_LEN};
 use tairix_fsserve::VolumeAccess;
 
 use crate::region::{ByteInput, Input, Regions};
@@ -52,6 +53,15 @@ pub(crate) enum Coding {
     Rar {
         /// Its index among the archive's entries.
         entry: u32,
+    },
+    /// As they are, on side `side` of a disc image laid out as `layout`: `at`
+    /// counts along that side, and what lies past the image's end is a
+    /// sector dump's unrecorded tail, read as zeros.
+    Disc {
+        /// How the image holds its sides.
+        layout: Layout,
+        /// The side.
+        side: u8,
     },
     /// Not readable, for the reason given — an encryption, or a method this
     /// driver does not decode — its `packed` coded bytes kept as they are.
@@ -135,13 +145,39 @@ impl Archived {
     /// How many bytes it takes in the archive.
     pub(crate) const fn packed(&self) -> u64 {
         match self.coding {
-            Coding::Stored | Coding::Stream | Coding::Rar { .. } => self.len,
+            Coding::Stored | Coding::Stream | Coding::Rar { .. } | Coding::Disc { .. } => self.len,
             Coding::Deflate { packed }
             | Coding::Bzip2 { packed }
             | Coding::Arc { packed, .. }
             | Coding::Refused { packed, .. } => packed,
         }
     }
+}
+
+/// Where `len` bytes from `offset` of a member at `at` of `side` of a disc
+/// image laid out as `layout` lie in the image: a run for each track they
+/// cross. A run past what an offset can name is not given, so a caller
+/// reading them all finds the bytes short.
+pub(crate) fn on_disc(
+    layout: Layout,
+    side: u8,
+    at: u64,
+    offset: u64,
+    len: u64,
+) -> impl Iterator<Item = (u64, u64)> {
+    let track = TRACK_LEN as u64;
+    let mut done = 0;
+    core::iter::from_fn(move || {
+        if done >= len {
+            return None;
+        }
+        let place = usize::try_from(at.checked_add(offset)?.checked_add(done)?).ok()?;
+        let into = u64::try_from(place % TRACK_LEN).ok()?;
+        let step = (len - done).min(track - into);
+        let image = layout.image_offset(usize::from(side), place);
+        done += step;
+        Some((u64::try_from(image).ok()?, step))
+    })
 }
 
 /// One run of a staged file: `len` of its bytes, from the file offset it is
@@ -161,6 +197,14 @@ pub(crate) struct Staged {
 }
 
 impl Staged {
+    /// A file of `len` bytes, every one of them at `at` of the staging file
+    /// on.
+    pub(crate) fn whole(at: u64, len: u64) -> Result<Self, DriverError> {
+        let mut staged = Self::default();
+        staged.wrote(0, len, at)?;
+        Ok(staged)
+    }
+
     /// Note that bytes `offset..offset + len` of the file now lie at `at` of
     /// the staging file, which shadows whatever run held them before.
     pub(crate) fn wrote(&mut self, offset: u64, len: u64, at: u64) -> Result<(), DriverError> {
@@ -594,6 +638,24 @@ impl Cursors {
                 self.verify((node, content_gen), archived, offset, buf)?;
                 return Ok(want);
             }
+            Coding::Disc { layout, side } => {
+                let mut done = 0;
+                for (at, len) in on_disc(layout, side, archived.at, offset, want as u64) {
+                    let len = usize::try_from(len).map_err(|_| DriverError::MediumError)?;
+                    let into = &mut buf[done..done + len];
+                    let held = usize::try_from(regions.len().saturating_sub(at))
+                        .map_or(len, |held| held.min(len));
+                    if regions.read(ARCHIVE_REGION, at, &mut into[..held])? != held {
+                        return Err(DriverError::MediumError);
+                    }
+                    into[held..].fill(0);
+                    done += len;
+                }
+                if done != want {
+                    return Err(DriverError::MediumError);
+                }
+                return Ok(want);
+            }
             Coding::Rar { entry } => {
                 let reader = self.rar.as_mut().ok_or(DriverError::DeviceFault)?;
                 let entry = usize::try_from(entry).map_err(|_| DriverError::DeviceFault)?;
@@ -672,9 +734,11 @@ impl Cursors {
                 let at = archived.at.checked_add(skip).ok_or(DriverError::BadMagic)?;
                 (arc_decoding(method)?, Input::new(at, stream)?)
             }
-            Coding::Stored | Coding::Refused { .. } | Coding::Stream | Coding::Rar { .. } => {
-                return Err(DriverError::Unsupported)
-            }
+            Coding::Stored
+            | Coding::Refused { .. }
+            | Coding::Stream
+            | Coding::Rar { .. }
+            | Coding::Disc { .. } => return Err(DriverError::Unsupported),
         };
         let cursor = Cursor {
             node,

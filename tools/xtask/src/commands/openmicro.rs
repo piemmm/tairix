@@ -10,8 +10,9 @@
 //!   own tests replay in `ci`: evenly spaced cases of every opcode, and more of
 //!   the opcodes decimal mode changes.
 //! - `cargo xtask openmicro --write-roms` rebuilds every clean-room ROM image
-//!   `Run` carries into the crate's `firmware/`; the `openmicro-roms` static gate
-//!   ([`check_roms`]) refuses a committed image the tree does not build.
+//!   `Run` carries into the crate's `firmware/`, and each model's boot screen
+//!   as those images draw it; the `openmicro-roms` static gate ([`check_roms`])
+//!   refuses a committed file the tree does not build.
 //! - `cargo xtask openmicro --reference <dir>` records the corpus's fixtures from
 //!   the original ROMs a developer holds in `<dir>` ([`mod@reference`]).
 
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 use tairix_openmicro::cpu::isa::{Mnemonic, OPCODES};
 use tairix_openmicro::cpu::vectors::{self, Cycle, Runner, Snapshot, Vector};
 use tairix_openmicro::cpu::{flag, Registers};
+use tairix_openmicro::rom::first_screen::{self, SCREENS};
 use tairix_openmicro::rom::SHIPPED;
 
 use super::json::{self, Json};
@@ -72,16 +74,22 @@ fn firmware(ctx: &Context) -> PathBuf {
         .join(tairix_openmicro::firmware::DIR)
 }
 
-/// Every shipped image as this tree builds it.
+/// Every shipped image as this tree builds it, then each model's boot screen
+/// as those images draw it.
 fn built_roms() -> Result<Vec<(&'static str, Vec<u8>)>, String> {
-    SHIPPED
+    let mut built = SHIPPED
         .iter()
         .map(|&(name, build)| {
             build()
                 .map(|image| (name, image.bytes))
                 .map_err(|e| format!("OpenMicro: {name} does not assemble: {e:?}"))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    for (name, model) in SCREENS {
+        let screen = first_screen::draw(model, &built).map_err(|e| format!("OpenMicro: {e}"))?;
+        built.push((name, screen));
+    }
+    Ok(built)
 }
 
 fn write_roms(ctx: &Context) -> Result<(), String> {
@@ -347,15 +355,17 @@ mod tests {
         let dir = firmware(&ctx);
         std::fs::write(dir.join(tairix_openmicro::firmware::MOS), [0; 16]).expect("drifted");
         std::fs::write(dir.join("old.rom"), [0; 16]).expect("left behind");
+        std::fs::write(dir.join(tairix_openmicro::firmware::C64_SCREEN), [0; 16]).expect("drifted");
+        std::fs::write(dir.join("old.screen"), [0; 16]).expect("left behind");
         let refused = check_roms(&ctx).expect_err("refused");
-        assert!(
-            refused.contains("mos.rom is not the image the tree builds"),
-            "{refused}"
-        );
-        assert!(
-            refused.contains("old.rom is not an image the bundle ships"),
-            "{refused}"
-        );
+        for named in [
+            "mos.rom is not the image the tree builds",
+            "old.rom is not an image the bundle ships",
+            "c64.screen is not the image the tree builds",
+            "old.screen is not an image the bundle ships",
+        ] {
+            assert!(refused.contains(named), "{named}: {refused}");
+        }
     }
 
     fn case(pc: u16) -> Vector {

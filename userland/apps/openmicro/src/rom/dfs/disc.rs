@@ -38,7 +38,7 @@ mod command {
 /// A sector-count parameter's size field for 256-byte sectors.
 const SECTOR_256: u8 = 0x20;
 /// Sectors a track holds.
-pub(super) const SECTORS_PER_TRACK: u8 = 10;
+pub(super) const SECTORS_PER_TRACK: u8 = byte(tairix_dfs::image::SECTORS_PER_TRACK);
 /// Attempts at a command before it is a fault; the head finds track 0 again
 /// before the last.
 const ATTEMPTS: u8 = 3;

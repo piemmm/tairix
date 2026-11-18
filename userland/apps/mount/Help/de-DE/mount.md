@@ -55,6 +55,15 @@ schreibgeschützt eingehängt. Ein auf mehrere Teile aufgeteiltes Archiv
 oder eines mit verschlüsselten Namen wird nicht eingehängt, und ein
 verschlüsselter Eintrag kann nicht gelesen werden.
 
+Ein Diskettenabbild des BBC Micro (`.ssd`, `.dsd`) wird als Datenträger
+mit den Dateien darauf eingehängt, jede so benannt, wie das eigene
+Dateisystem der Diskette sie benennt: ihr Verzeichnis, ein Punkt, dann
+ihr Name (`$.ELITE`); ein doppelseitiges `.dsd`-Abbild zeigt seine
+beiden Seiten als die Ordner `Drive 0` und `Drive 2`. Die Lade- und die
+Ausführungsadresse einer Datei werden mit ihr mitgeführt, und eine
+Änderung wird so auf die Diskette geschrieben, wie der BBC Micro sie
+schreiben würde, wobei alle übrigen Sektoren bleiben, wie sie waren.
+
 Der Datenträger bleibt eingehängt, bis Sie ihn mit `unmount` aushängen
 oder Ihre Anmeldesitzung endet. Ein Abbild, das eine partitionierte
 Platte, eine Platte eines RAID-Verbunds oder ein Dateisystem enthält,
@@ -87,11 +96,11 @@ Desktop zudem den Benutzer am Computer.
 - `-t, --types <list>` — die Dateisysteme, kommagetrennt, von denen das
   Abbild eines enthalten muss, benannt wie in der Einhängeliste
   (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`, `tar.gz`,
-  `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`), oder `auto` für
-  das, was es enthält; eine Liste, die mit `no` beginnt, nennt
-  diejenigen, die es nicht enthalten darf. Was das Abbild enthält, wird
-  an seinem Inhalt erkannt, daher wählt die Reihenfolge nichts aus: Eine
-  Disc, die sowohl UDF als auch ISO 9660 enthält, wird als UDF
+  `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`, `dfs`), oder
+  `auto` für das, was es enthält; eine Liste, die mit `no` beginnt,
+  nennt diejenigen, die es nicht enthalten darf. Was das Abbild enthält,
+  wird an seinem Inhalt erkannt, daher wählt die Reihenfolge nichts aus:
+  Eine Disc, die sowohl UDF als auch ISO 9660 enthält, wird als UDF
   eingehängt, es sei denn, ihr ISO-9660-Dateisystem enthält
   Rock-Ridge- oder RISC-OS-Datensätze. Enthält das Abbild keines dieser
   Dateisysteme oder nennt die Liste keinen Typ, den ein

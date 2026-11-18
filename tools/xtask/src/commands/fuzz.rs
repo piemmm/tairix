@@ -561,6 +561,11 @@ pub const TARGETS: &[Target] = &[
         description: "the FAT format's boot sector, directory and table decoders over hostile volumes",
     },
     Target {
+        package: "tairix-dfs",
+        test: "fuzz_dfs",
+        description: "the DFS format's catalogue and entry decoders and image layouts over hostile discs",
+    },
+    Target {
         package: "tairix-pcemu",
         test: "fuzz_cpu",
         description: "PC emulator CPU: hostile guest code on every model, decoder bounds and cycle limits",

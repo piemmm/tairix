@@ -61,7 +61,7 @@ mod program {
     use tairix_openmicro::front::assistant as offers;
     use tairix_openmicro::front::library::{self, Held, Machine, Socket};
     use tairix_openmicro::front::media::{Chosen, Disc, FileWork, Holding, Purpose, Saving, Tape};
-    use tairix_openmicro::front::menu::{self, Command, Place};
+    use tairix_openmicro::front::menu::{self, Command, Offered, Place};
     use tairix_openmicro::front::settings::{self, Settings};
     use tairix_openmicro::front::{events, folder, media};
     use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
@@ -121,6 +121,9 @@ mod program {
     /// What a machine's deletion takes with it, as its question says.
     const DELETE_TAKES: &str =
         "Its settings and saved state are deleted; its folder in Documents is kept.";
+
+    /// The headline of a machine's folder not shown.
+    const NOT_SHOWN: &str = "The machine's folder could not be shown";
 
     /// Record `id` with `message` in the system log, best-effort.
     pub(crate) fn record(id: tairix_log::EventId, message: &str) {
@@ -765,7 +768,52 @@ mod program {
             let rows = running.as_ref().map(|(shown, offered)| {
                 move |menu: &mut AppMenu| menu::push_rows(menu, (shown, offered), Place::Card)
             });
-            card_menu(self.standing(id), rows).ok()
+            let mut card = card_menu(self.standing(id), rows).ok()?;
+            card.push(tairix_abi::window_ipc::AppMenuRow::Separator)
+                .ok()?;
+            card.push(menu::show_folder(self.folder_of(id).is_some()).ok()?)
+                .ok()?;
+            Some(card)
+        }
+
+        /// Machine `id`'s folder, where it has one the documents folder reaches.
+        fn folder_of(&self, id: u32) -> Option<String> {
+            matches!(self.documents, Documents::Granted)
+                .then(|| {
+                    self.library
+                        .machine(id)
+                        .and_then(|machine| machine.folder.clone())
+                })
+                .flatten()
+        }
+
+        /// Have the desktop show machine `id`'s folder in the file manager, for
+        /// window `window`, which the user is working in.
+        fn show_folder(&mut self, id: u32, window: u64) {
+            let (Some(folder), Some(session)) = (self.folder_of(id), self.client.session()) else {
+                return;
+            };
+            self.file(
+                FileJob::Locate {
+                    window,
+                    folder,
+                    session,
+                },
+                NOT_SHOWN,
+            );
+        }
+
+        /// The location of a folder to show for `window` was minted: ask the
+        /// desktop to show it.
+        fn located(&mut self, window: u64, location: Result<u64, String>) {
+            let asked = location.and_then(|location| {
+                self.client
+                    .reveal_document(window, location)
+                    .map_err(|err| format!("{err}"))
+            });
+            if let Err(why) = asked {
+                self.refuse(NOT_SHOWN, &why);
+            }
         }
 
         fn open_card_menu(&mut self, id: u32, at: tairix_geometry::Point) {
@@ -799,11 +847,15 @@ mod program {
                 Some(CardCommand::Settings) => self.request(Request::Settings(id)),
                 Some(CardCommand::Duplicate) => self.request(Request::Duplicate(id)),
                 Some(CardCommand::Delete) => self.request(Request::Delete(id)),
-                Some(CardCommand::Machine(item)) => {
-                    if let (Some(n), Some(command)) = (self.index(id), menu::command(item)) {
-                        self.command(n, command);
+                Some(CardCommand::Machine(item)) => match (menu::command(item), self.index(id)) {
+                    (Some(Command::ShowFolder), _) => {
+                        if let Some(window) = self.shelf.as_ref().map(LibraryWindow::id) {
+                            self.show_folder(id, window);
+                        }
                     }
-                }
+                    (Some(command), Some(n)) => self.command(n, command),
+                    (None, _) | (Some(_), None) => {}
+                },
             }
         }
 
@@ -1102,6 +1154,7 @@ mod program {
                 }
             };
             let machine = Machine::new(id, String::from(name), fitting);
+            let model = machine.model();
             if let Err(err) = self.library.add(machine) {
                 self.refuse(
                     &format!("\u{201c}{name}\u{201d} could not be made"),
@@ -1111,6 +1164,12 @@ mod program {
             }
             self.save();
             self.show();
+            if let Some(picture) = self.pictures.size() {
+                self.ask(Job::Pictures {
+                    machines: alloc::vec![(id, model)],
+                    picture,
+                });
+            }
             if disc {
                 self.make_folder(id, FolderFor::FirstDisc);
             }
@@ -1285,7 +1344,7 @@ mod program {
             let ticket = self.tickets;
             let (read, write, _) = machine_tokens(slot);
             let looks = (&self.desktop, self.themes.active());
-            let window = match MachineWindow::open(
+            let mut window = match MachineWindow::open(
                 &mut self.client,
                 (self.endpoint, self.set),
                 looks,
@@ -1303,6 +1362,10 @@ mod program {
                 let _ = window.into_pane().close(&mut self.client);
                 return;
             }
+            window.offered = Offered::unlisted(
+                self.documents == Documents::Granted,
+                machine.folder.is_some(),
+            );
             self.machines.push(window);
             let suspended = self.suspended.contains(&id);
             let job = Job::Start {
@@ -1336,7 +1399,7 @@ mod program {
             &mut self,
             id: u32,
             ticket: u64,
-            read: Result<(Box<store::Images>, Resumable), String>,
+            read: Result<(Box<tairix_openmicro::front::images::Images>, Resumable), String>,
         ) {
             let Some(n) = self
                 .index(id)
@@ -1642,7 +1705,16 @@ mod program {
                     medium,
                     writable,
                     of_folder,
-                } => self.taken(id, (purpose, name, bytes), (medium, writable, of_folder)),
+                    locked_out,
+                } => {
+                    if let (Some(why), Some(n)) = (&locked_out, self.index(id)) {
+                        self.machines[n].say(
+                            format!("\u{201c}{name}\u{201d} is write-protected: {why}."),
+                            StatusTone::Warning,
+                        );
+                    }
+                    self.taken(id, (purpose, name, bytes), (medium, writable, of_folder));
+                }
                 FileDone::Rebound {
                     id,
                     purpose,
@@ -1664,6 +1736,18 @@ mod program {
                         window.offered = folder::offered(&names, window.model, window.fitted());
                     }
                 }
+                FileDone::Located { window, location } => self.located(window, location),
+                FileDone::SnapshotSaved { id, saved } => match saved {
+                    Ok(name) => {
+                        if let Some(n) = self.index(id) {
+                            self.machines[n].say(
+                                format!("Saved \u{201c}{name}\u{201d} in the machine's folder."),
+                                StatusTone::Success,
+                            );
+                        }
+                    }
+                    Err(why) => self.refuse("The snapshot could not be saved", &why),
+                },
                 FileDone::FolderCopied { to, folder } => match folder {
                     Ok(folder) => self.remember(to, |machine| machine.folder = Some(folder)),
                     Err(why) => {
@@ -1704,7 +1788,11 @@ mod program {
                 );
             }
             for window in &mut self.machines {
-                window.offered.reachable = true;
+                let folder = self
+                    .library
+                    .machine(window.id)
+                    .is_some_and(|machine| machine.folder.is_some());
+                window.offered = Offered::unlisted(true, folder);
             }
             self.ask_folders();
             for owed in core::mem::take(&mut self.media_owed) {
@@ -1733,6 +1821,9 @@ mod program {
                 }
             };
             self.remember(id, |machine| machine.folder = Some(folder.clone()));
+            if let Some(n) = self.index(id) {
+                self.machines[n].offered.folder = true;
+            }
             let Some(machine) = self.library.machine(id) else {
                 return;
             };
@@ -1981,13 +2072,27 @@ mod program {
                 Event::Nothing => {}
                 Event::Suspended(kept) => self.suspended_whole(n, kept),
                 Event::Snapshot(kept) => {
-                    let suggested = format!("{}.snapshot", self.machines[n].name);
-                    self.machines[n].offer(Saving {
-                        suggested,
-                        holding: Holding::Snapshot,
-                        bytes: kept,
-                    });
-                    self.next_save(n);
+                    let (id, name) = (self.machines[n].id, &self.machines[n].name);
+                    if let Some(folder) = self.folder_of(id) {
+                        let stem = folder::plain(name, "Machine");
+                        self.file(
+                            FileJob::SaveSnapshot {
+                                id,
+                                folder,
+                                stem,
+                                bytes: kept,
+                            },
+                            "The snapshot could not be saved",
+                        );
+                    } else {
+                        let suggested = format!("{name}.{}", media::SNAPSHOT_ENDING);
+                        self.machines[n].offer(Saving {
+                            suggested,
+                            holding: Holding::Snapshot,
+                            bytes: kept,
+                        });
+                        self.next_save(n);
+                    }
                 }
                 Event::Files(work) => {
                     self.file_work(work);
@@ -2259,6 +2364,7 @@ mod program {
                 Command::RemoveCartridge => self.machines[n].remove_cartridge(),
                 Command::LoadProgram => self.pick_open(n, Purpose::Program),
                 Command::Break => self.machines[n].press_break(),
+                Command::ShiftBreak => self.machines[n].press_shift_break(),
                 Command::Reset => self.machines[n].ask(Pending::PowerOn),
                 Command::Pause => self.machines[n].toggle_pause(),
                 Command::Speed(speed) => self.machines[n].set_speed(speed),
@@ -2287,6 +2393,10 @@ mod program {
                     self.open_settings(id, owner);
                 }
                 Command::Library => self.open_shelf(),
+                Command::ShowFolder => {
+                    let (id, window) = (self.machines[n].id, self.machines[n].window_id());
+                    self.show_folder(id, window);
+                }
                 Command::ShutDown => {
                     let work = self.machines[n]
                         .shut_down(tairix_rt::clock_get().saturating_add(SUSPEND_GRACE_NS));
@@ -2376,7 +2486,9 @@ mod program {
                         .position(|window| takes(window.model, window.fitted()))
                 });
             if let Some(n) = running {
+                let window_id = self.machines[n].window_id();
                 self.give(n, handed);
+                let _ = self.client.activate_window(window_id);
                 return;
             }
             let at_rest = self
@@ -2473,7 +2585,11 @@ mod program {
                         .iter()
                         .position(|window| window.window_id() == window_id)
                     {
-                        Some(n) => self.give(n, handed),
+                        Some(n) => {
+                            self.give(n, handed);
+                            // The drop lends the raise that takes the keyboard to the machine.
+                            let _ = self.client.activate_window(window_id);
+                        }
                         None => handed.drop_file(),
                     }
                 }
@@ -2588,6 +2704,10 @@ mod program {
                     action: PointerAction::Pressed(PointerButtonCode::Secondary),
                     ..
                 } => self.open_machine_menu(n, (x, y)),
+                WindowEvent::Pointer { x, y, action, .. } => {
+                    let looks = (self.desktop.scale(), self.themes.active());
+                    self.machines[n].pointer((x, y, action), looks);
+                }
                 WindowEvent::MenuChosen { open_id, item, .. } => {
                     self.machine_menu(n, open_id, Some(item), true);
                 }
@@ -2721,6 +2841,10 @@ mod program {
                         .client
                         .answer_file_offer(offer.window_id, offer.serial, taken);
                 }
+                // A machine's folder is all the emulator asks to be shown.
+                Answer::Revealed {
+                    shown: Err(err), ..
+                } => self.refuse(NOT_SHOWN, &format!("{err}")),
                 Answer::OpenTarget(Ok(Some(target))) => self.opened(target),
                 Answer::OpenTarget(Err(err)) => {
                     app::report(APP_NAME, format_args!("a file to open was lost ({err})"));
@@ -2814,13 +2938,13 @@ mod program {
             let size = Shelf::picture_size(self.desktop.scale(), self.themes.active());
             if self.pictures.resize(size) {
                 if let Some(picture) = size {
-                    let ids = self
+                    let machines = self
                         .library
                         .machines()
                         .iter()
-                        .map(|machine| machine.id)
+                        .map(|machine| (machine.id, machine.model()))
                         .collect();
-                    self.ask(Job::Pictures { ids, picture });
+                    self.ask(Job::Pictures { machines, picture });
                 }
             }
             let looks = (self.desktop.scale(), self.themes.active());

@@ -1204,7 +1204,7 @@ fn a_layout_names_its_own_files_and_pictures_its_programs_by_kind() {
 
 #[test]
 fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
-    const VOLUMES: [MediaType; 11] = [
+    const VOLUMES: [MediaType; 12] = [
         MediaType::RawDiskImage,
         MediaType::CdImage,
         MediaType::RawFloppyDiskImage,
@@ -1216,6 +1216,7 @@ fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
         MediaType::ArchiveSpark,
         MediaType::RiscOsArchive,
         MediaType::ArcFs,
+        MediaType::AcornDfsDisc,
     ];
     for media in VOLUMES {
         assert!(media.holds_a_volume(), "{media:?}");
@@ -1580,18 +1581,22 @@ fn an_imagedisk_archive_is_a_floppy_record_but_no_volume() {
 }
 
 #[test]
-fn bbc_micro_discs_and_tapes_are_their_own_types_and_no_volumes() {
-    for (media, spelling) in [
-        (MediaType::AcornDfsDisc, "application/x-acorn-dfs-disc"),
-        (MediaType::TapeUef, "application/x-uef-tape"),
-        (MediaType::TapeCsw, "application/x-csw-tape"),
+fn bbc_micro_discs_and_tapes_are_their_own_types_and_only_discs_volumes() {
+    for (media, spelling, volume) in [
+        (
+            MediaType::AcornDfsDisc,
+            "application/x-acorn-dfs-disc",
+            true,
+        ),
+        (MediaType::TapeUef, "application/x-uef-tape", false),
+        (MediaType::TapeCsw, "application/x-csw-tape", false),
     ] {
         assert_eq!(
             media.parent(),
             Some(MediaType::ApplicationOctetStream),
             "{spelling}"
         );
-        assert!(!media.holds_a_volume(), "{spelling}");
+        assert_eq!(media.holds_a_volume(), volume, "{spelling}");
         assert_eq!(MediaType::from_media_str(spelling), Some(media));
         assert_eq!(media.family(), Some(Family::Archive), "{spelling}");
     }

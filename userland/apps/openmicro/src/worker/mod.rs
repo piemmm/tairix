@@ -12,4 +12,6 @@ mod service;
 
 pub use client::{Busy, MachineClient};
 pub use link::Link;
+#[cfg(not(freestanding))]
+pub(crate) use service::powered_on;
 pub use service::MachineService;

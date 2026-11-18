@@ -1,5 +1,6 @@
 use super::*;
 use crate::machine::Template;
+use tairix_raster::Color;
 
 fn looks() -> (Scale, Theme) {
     tairix_font::install_test_transport();

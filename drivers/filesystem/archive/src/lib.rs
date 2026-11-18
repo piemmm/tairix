@@ -24,6 +24,7 @@ extern crate alloc;
 
 mod arcfs;
 mod data;
+mod dfs;
 mod format;
 mod fs;
 mod lone;
@@ -63,6 +64,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
     tairix_fsserve::bind_key(VolumeFsType::Spark),
     tairix_fsserve::bind_key(VolumeFsType::ArcFs),
     tairix_fsserve::bind_key(VolumeFsType::Rar),
+    tairix_fsserve::bind_key(VolumeFsType::Dfs),
 ];
 
 /// Archives, served.

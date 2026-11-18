@@ -93,6 +93,22 @@ impl Shipped {
         }
     }
 
+    /// Its file in the crate's `firmware/`.
+    #[must_use]
+    pub const fn file(self) -> &'static str {
+        match self {
+            Self::Mos => crate::firmware::MOS,
+            Self::ElectronOs => crate::firmware::ELECTRON_OS,
+            Self::Basic => crate::firmware::BASIC,
+            Self::Dfs => crate::firmware::DFS,
+            Self::Plus1 => crate::firmware::PLUS1,
+            Self::C64Kernal => crate::firmware::C64_KERNAL,
+            Self::C64Basic => crate::firmware::C64_BASIC,
+            Self::C64Character => crate::firmware::C64_CHARACTER,
+            Self::C1541Dos => crate::firmware::C1541_DOS,
+        }
+    }
+
     /// What it is called in a list.
     #[must_use]
     pub const fn called(self) -> &'static str {

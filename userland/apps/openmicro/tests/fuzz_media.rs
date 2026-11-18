@@ -20,10 +20,11 @@
 
 use tairix_compress::deflate::{Deflate, Flush};
 use tairix_compress::zlib;
+use tairix_dfs::image::{Layout, TRACK_LEN};
 use tairix_fuzzseed::Prng;
 use tairix_openmicro::machine::c64::cartridge::Cartridge;
 use tairix_openmicro::media::c1541::{d64, g64};
-use tairix_openmicro::media::disc::{Disc, ImageFormat, TRACK_BYTES};
+use tairix_openmicro::media::disc::Disc;
 use tairix_openmicro::media::tape::Tape;
 use tairix_openmicro::media::{crt, prg, tap};
 
@@ -147,8 +148,8 @@ fn disc_and_tape_images_never_panic_and_round_trip() {
     ));
     let mut iteration: u64 = 0;
     loop {
-        let format = *rng.pick(&[ImageFormat::Ssd, ImageFormat::Dsd]);
-        let len = rng.at_most(2 * 90 * TRACK_BYTES);
+        let format = *rng.pick(&[Layout::Single, Layout::Double]);
+        let len = rng.at_most(2 * 90 * TRACK_LEN);
         let image = rng.noise(len);
         if let Ok(disc) = Disc::decode(&image, format, false) {
             let encoded = disc.encode();

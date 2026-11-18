@@ -33,6 +33,14 @@ use crate::snapshot::{Reader, SnapshotError, Writer};
 /// Cycles a second: the 2 MHz the CPU runs at and the machine's time counts.
 pub const CLOCK: u64 = 2_000_000;
 
+/// How long a press of BREAK holds it down, in microseconds.
+pub const BREAK_HELD_MICROS: u64 = 1_000;
+
+/// How long a key held through a press of BREAK stays down once BREAK is let
+/// go, in centiseconds: past the reset reading the keyboard, as SHIFT is held
+/// for a boot.
+pub const BREAK_KEYS_HELD_CENTISECONDS: u64 = 50;
+
 /// The 1 MHz tick a cycle falls in: the clock the 1 MHz parts count.
 #[must_use]
 pub const fn tick(cycle: u64) -> u64 {
@@ -212,6 +220,13 @@ impl Model {
     #[must_use]
     pub const fn has_shift_lock(self) -> bool {
         matches!(self, Self::ModelB)
+    }
+
+    /// Whether SHIFT held through a press of BREAK boots it: an Acorn model's
+    /// MOS takes the medium's boot from it.
+    #[must_use]
+    pub const fn boots_with_shift_break(self) -> bool {
+        matches!(self, Self::ModelB | Self::Electron)
     }
 
     /// Record the model a snapshot is taken on: its first section.

@@ -94,11 +94,11 @@ rhoi'n ôl pan gaiff y fysell Meta ei tharo'n ysgafn.
 
 Mae cau ffenestr y llyfrgell yn gadael i beiriannau sy'n rhedeg ddal i redeg, ac
 mae cau pob ffenestr yn gadael yr efelychydd ar y bar eiconau: mae clic ar ei
-eicon, neu Llyfrgell Peiriannau yn ei ddewislen, yn dod â'r llyfrgell yn ôl, ac
-mae Gadael yn y ddewislen honno yn atal pob peiriant sy'n rhedeg dros dro ac yn
-dod â'r efelychydd i ben. Mae pob peiriant yn rhedeg mewn gweithiwr ei hun nad
-oes ganddo unrhyw awdurdod o gwbl: nid oes neb byth yn ymddiried yn ei
-feddalwedd na'i ddisgiau.
+eicon, neu Llyfrgell Peiriannau yn ei ddewislen, yn dod â'r llyfrgell i'r
+blaen bob amser, ac mae Gadael yn y ddewislen honno yn atal pob peiriant sy'n
+rhedeg dros dro ac yn dod â'r efelychydd i ben. Mae pob peiriant yn rhedeg
+mewn gweithiwr ei hun nad oes ganddo unrhyw awdurdod o gwbl: nid oes neb byth
+yn ymddiried yn ei feddalwedd na'i ddisgiau.
 
 ## OPTIONS
 

@@ -425,8 +425,63 @@ fn a_spark_header_names_a_member_that_fits() {
     assert_eq!(recognised(&[0x1A, 0x80]), Some(VolumeFsType::Spark));
 }
 
+/// A DFS disc of `sectors` sectors holding one file, as long as `len`.
+fn dfs_disc(sectors: u16, len: usize) -> Vec<u8> {
+    use tairix_dfs::catalogue::{Catalogue, Entry, CATALOGUE_LEN};
+    let mut catalogue = Catalogue::blank(sectors);
+    catalogue
+        .set_files(&[Entry {
+            name: *b"ELITE  ",
+            dir: b'$',
+            locked: true,
+            load: 0x1100,
+            exec: 0x1100,
+            length: 0x200,
+            start: 2,
+        }])
+        .unwrap();
+    let mut image = vec![0; len.max(CATALOGUE_LEN)];
+    catalogue.write((&mut image[..CATALOGUE_LEN]).try_into().unwrap());
+    image
+}
+
+#[test]
+fn a_dfs_disc_is_known_by_a_catalogue_a_dfs_disc_could_hold() {
+    // A whole disc, one cut short after its file, and one of its catalogue
+    // alone are each a floppy.
+    for len in [204_800, 1024 + 3 * 256, 512] {
+        let image = dfs_disc(800, len);
+        let mut dev = ByteDevice::new(File::new(&image, 0)).unwrap();
+        let volume = recognise(&mut dev, image.len() as u64).unwrap().unwrap();
+        assert_eq!(volume.fstype, VolumeFsType::Dfs, "{len}");
+        assert_eq!(volume.form, tairix_abi::blkio::BlkForm::FloppyDisk);
+    }
+    // Shorter than its catalogue, or a catalogue no DFS disc holds.
+    assert_eq!(recognised(&dfs_disc(800, 512)[..511]), None);
+    let mut bad = dfs_disc(800, 2048);
+    bad[256 + 5] = 3;
+    assert_eq!(recognised(&bad), None);
+    let small = dfs_disc(10, 2048);
+    assert_eq!(recognised(&small), Some(VolumeFsType::Dfs));
+    let mut past = small.clone();
+    past[256 + 7] = 3;
+    assert_eq!(recognised(&past), None, "a file past its side's end");
+    let mut over = small;
+    over[256 + 15] = 1;
+    assert_eq!(recognised(&over), None, "a file over its catalogue");
+}
+
+#[test]
+fn a_dfs_disc_is_tried_after_every_format_with_a_signature() {
+    let mut zipped = dfs_disc(800, 4096);
+    let tail = zip(b"a", b"x", b"");
+    zipped.extend_from_slice(&tail);
+    assert_eq!(recognised(&zipped), Some(VolumeFsType::Zip));
+}
+
 #[test]
 fn nothing_else_is_an_archive() {
     assert_eq!(recognised(b"plain text, nothing more"), None);
     assert_eq!(recognised(&[0; 4096]), None);
+    assert_eq!(recognised(&[0xFF; 4096]), None);
 }

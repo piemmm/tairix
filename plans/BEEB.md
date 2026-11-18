@@ -61,6 +61,7 @@ grants), `plans/OPENFILE.md` OF12 (the subtree grant), `plans/APPDATA.md`
 | BB29 | Machine folders: discs and tapes made for a machine, kept with it in the user's files | done |
 | BB30 | The bundle again: the icon, help in every locale, the docs page; the fuzz harnesses; the QEMU vertical through the library | done |
 | BB31 | The Model B's reset and interrupt entries at MOS 1.20's &D9CD and &DC1C, which software reads from &FFFC to know the OS by (*Bounty Bob Strikes Back* refuses any other) | done |
+| BB32 | The front end's media and library hand-offs: each model's boot screen on a card never run, SHIFT-BREAK's row and button, snapshots kept in and *Show Folder* of a machine's folder, a dropped disc's window taking the keyboard, media locked while a machine may write them, the icon-bar click always bringing the library forward | done |
 
 Items are built in ledger order; each lands complete with its tests.
 
@@ -942,8 +943,12 @@ to the windows, the sessions, the audio streams and the store.
   and `library-b`, and a state blob per machine, its last screen and, while
   it is suspended, its snapshot. The store holds at most 64 blobs: the two
   copies, twenty machines' states, and the ROM images installed. The library
-  window shows each machine as a card with its last screen, what it is and
-  how it stands; *New…*, *Start*, *Settings…*, *Duplicate* and *Delete…* are
+  window shows each machine as a card with its last screen — one never yet
+  run with its model's boot screen, the factory fitting as the assistant
+  offers it powered on for three seconds and drawn on the build host by
+  `--write-roms` (`rom::first_screen`), packed into `firmware/` and refused
+  by the `openmicro-roms` gate where the tree's ROMs draw otherwise — what
+  it is and how it stands; *New…*, *Start*, *Settings…*, *Duplicate* and *Delete…* are
   its commands, and a secondary press on a card opens its menu, the
   machine's own rows among them while it runs. Deleting asks first, and
   leaves the machine's folder, the user's files, where it is.
@@ -978,7 +983,8 @@ to the windows, the sessions, the audio streams and the store.
   window stays open until each save offered is answered. A machine being
   suspended or shut down takes no other command. Closing the library leaves
   machines running; closing every window leaves the program on the icon bar,
-  whose slot's click or *Machine Library* row brings the library back; only
+  whose slot's click or *Machine Library* row brings the library forward, a
+  machine's window open or not; only
   *Quit* ends it, suspending every running machine first. Starting a
   suspended machine resumes it where it stopped, its snapshot restored before
   anything else is put in; a snapshot the machine refuses leaves it running
@@ -1006,7 +1012,9 @@ to the windows, the sessions, the audio streams and the store.
   goes to the running machine whose window had the keyboard last where it
   takes it, else another running machine that does, else the first machine of
   the library that does, started for it; it is refused when none does. A drop
-  on a window is read-only, so its disc is write-protected.
+  on a window is read-only, so its disc is write-protected, and lends the
+  raise that brings the window forward with the keyboard, as a document
+  opened with the emulator brings its machine's.
   `front::media::Rack` keeps each one's record and decides what becomes of
   what the machine hands over. A disc
   whose file may be written is written back as the machine writes (collected
@@ -1033,18 +1041,25 @@ to the windows, the sessions, the audio streams and the store.
   takes them in again, and a resumed one keeps its snapshot's media
   written back to them only while the file is still what was written at the
   suspend, its digest recorded then; one that changed meanwhile leaves the
-  machine's copy its own. Duplicating a machine copies its folder.
+  machine's copy its own. Duplicating a machine copies its folder. *Save
+  Snapshot* keeps the machine there as `<name>.snapshot`, numbered where the
+  name is taken and taken away again if cut short, and goes to the picker for
+  a machine with no folder yet; *Show Folder* has the desktop open the folder
+  in Files through a location grant, so the user can copy what is kept there.
 - **Menus.** One set of rows, on the window's right click and, while the
   machine runs, its card's menu, the model's own: the drives (Insert Disc,
   From Folder, New Disc, Eject, Save Disc As), Tape (Insert, From Folder, New
-  Tape, Rewind, Record, Eject), BREAK, Reset, Pause, Speed, Full Screen,
-  Display (Sharp, Smooth, Scan Lines), Keyboard (By Character, By Position),
-  Paste, Save and Restore Snapshot, Settings and Machine Library (the
-  window's alone), and Shut Down. Eject follows what the machine reports in
-  its drives; Save Disc As needs the disc's image held. The icon bar's menu is
-  every library application's: Info, *Machine Library*, Quit.
-- **Status.** A strip beneath the picture shows the model's lamps and the
-  latest message.
+  Tape, Rewind, Record, Eject), BREAK, SHIFT-BREAK on a Model B and an
+  Electron, Reset, Pause, Speed, Full Screen, Display (Sharp, Smooth, Scan
+  Lines), Keyboard (By Character, By Position), Paste, Save and Restore
+  Snapshot, Show Folder, Settings and Machine Library (the window's alone),
+  and Shut Down; the card's menu adds Show Folder of its own, running or not.
+  Eject follows what the machine reports in its drives; Save Disc As needs the
+  disc's image held. The icon bar's menu is every library application's:
+  Info, *Machine Library*, Quit.
+- **Status.** A strip beneath the picture shows the model's lamps, each a
+  capital's height beside its word, the latest message, and on a Model B or
+  an Electron a SHIFT-BREAK button doing what the menu's row does.
 - **Diagnostics.** `front::events` in the `OPENMICRO` range of `lib/log`: a
   machine's first second run after a build, a worker replaced, the library
   read, a machine's suspend kept, and a resumed machine's state restored.
@@ -1064,8 +1079,17 @@ to the windows, the sessions, the audio streams and the store.
 - **Content types.** Acorn DFS disc images (`.ssd`, `.dsd`,
   `application/x-acorn-dfs-disc`) and UEF and CSW tape images
   (`application/x-uef-tape`, `application/x-csw-tape`) are in the `lib/browse`
-  registry, archives that hold no volume, so Files opens them with
-  `OpenMicro.app`.
+  registry. A tape holds no volume, so Files opens it with `OpenMicro.app`; a
+  DFS disc holds one (`plans/ARCHIVES.md` AR12), so activating it shows its
+  files, and the emulator takes it by a drop or *Open With*.
+- **The DFS format.** The DFS ROM's catalogue offsets, the blank and
+  scenario discs and the SSD/DSD layout are `lib/dfs`'s, the definition the
+  archive driver serves a disc image through.
+- **Locked media.** A disc or tape the emulator may write back is held under
+  an exclusive whole-file advisory lock while it is in a drive or the deck,
+  so a mount cannot write it beneath the machine; one another holder has
+  locked — a mounted disc, another machine's — goes in write-protected, the
+  status strip saying why.
 - **gzip members.** A bounded gzip member decoder joins `lib/compress`; the
   archive driver and the tape decoder share it.
 - **`FormDialog`.** `lib/controls`' dialog window whose client is a column of

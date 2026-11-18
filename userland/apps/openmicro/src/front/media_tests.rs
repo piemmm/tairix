@@ -4,10 +4,12 @@ use alloc::vec::Vec;
 
 use super::*;
 
+use tairix_dfs::image::Layout;
+
 const ZERO: PhysicalDrive = PhysicalDrive::Zero;
 const ONE: PhysicalDrive = PhysicalDrive::One;
-const SSD: DiscFormat = DiscFormat::Acorn(ImageFormat::Ssd);
-const DSD: DiscFormat = DiscFormat::Acorn(ImageFormat::Dsd);
+const SSD: DiscFormat = DiscFormat::Acorn(Layout::Single);
+const DSD: DiscFormat = DiscFormat::Acorn(Layout::Double);
 const BOTH: [bool; 2] = [true; 2];
 
 fn disc(name: &str, medium: Option<u32>) -> Disc {

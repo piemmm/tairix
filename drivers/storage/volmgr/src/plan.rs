@@ -314,7 +314,8 @@ mod tests {
             | VolumeFsType::Bzip2
             | VolumeFsType::Spark
             | VolumeFsType::ArcFs
-            | VolumeFsType::Rar => None,
+            | VolumeFsType::Rar
+            | VolumeFsType::Dfs => None,
         }
     }
 

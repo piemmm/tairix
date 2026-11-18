@@ -19,6 +19,7 @@
 //! plain `cargo test` and `cargo xtask fuzz --soak` extends it to a
 //! wall-clock budget.
 
+use tairix_dfs::image::Layout;
 use tairix_fuzzseed::Prng;
 use tairix_openmicro::firmware::{
     C1541_DOS_IMAGE, C64_BASIC_IMAGE, C64_CHARACTER_IMAGE, C64_KERNAL_IMAGE,
@@ -28,7 +29,6 @@ use tairix_openmicro::machine::c64::keyboard::{Key as C64Key, Keycap};
 use tairix_openmicro::machine::c64::{joystick, sid, Standard};
 use tairix_openmicro::machine::{bbc, electron, Model, ANALOGUE_CHANNELS, FIRE_BUTTONS};
 use tairix_openmicro::media::c1541::d64;
-use tairix_openmicro::media::disc::ImageFormat;
 use tairix_openmicro::worker::protocol::{
     Change, Configuration, DeckKey, DiscFormat, Input, ModelKey, Plus1, Reply, Request, Slot,
     MAX_INPUTS, SHARE_BYTES, SLOTS,
@@ -53,8 +53,8 @@ const TAP: &[u8] = b"C64-TAPE-RAW\x01\x00\x00\x00\x03\x00\x00\x00\x30\x30\x42";
 const PRG: &[u8] = &[0x00, 0x04, 0x01, 0x02];
 /// Every disc format a request may claim.
 const DISC_FORMATS: [DiscFormat; 4] = [
-    DiscFormat::Acorn(ImageFormat::Ssd),
-    DiscFormat::Acorn(ImageFormat::Dsd),
+    DiscFormat::Acorn(Layout::Single),
+    DiscFormat::Acorn(Layout::Double),
     DiscFormat::D64,
     DiscFormat::G64,
 ];

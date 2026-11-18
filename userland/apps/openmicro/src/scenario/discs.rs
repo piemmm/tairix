@@ -4,8 +4,14 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// A catalogue entry: name, directory, load and execution addresses,
-/// length, first sector, and lock.
+use tairix_dfs::catalogue::{
+    self, Catalogue, Entry, CATALOGUE_LEN, MAX_FILES, NAME_LEN, TITLE_LEN,
+};
+use tairix_dfs::image::SECTOR_LEN;
+use tairix_dfs::name::PAD;
+
+/// A catalogue entry: name, directory, the load and execution addresses the
+/// OS gives, length, first sector, and lock.
 struct File {
     name: &'static [u8],
     dir: u8,
@@ -14,6 +20,24 @@ struct File {
     length: u32,
     start: u16,
     locked: bool,
+}
+
+impl File {
+    /// The entry the catalogue holds it as; `None` for a name longer than
+    /// one holds or an address no entry reads back as.
+    fn entry(&self) -> Option<Entry> {
+        let mut name = [PAD; NAME_LEN];
+        name.get_mut(..self.name.len())?.copy_from_slice(self.name);
+        Some(Entry {
+            name,
+            dir: self.dir,
+            locked: self.locked,
+            load: catalogue::field(self.load)?,
+            exec: catalogue::field(self.exec)?,
+            length: self.length,
+            start: self.start,
+        })
+    }
 }
 
 /// An SSD image of `sectors` sectors titled `title`, its cycle number
@@ -26,40 +50,21 @@ fn image(
     files: &[File],
     data: &[(usize, &[u8])],
 ) -> Option<Vec<u8>> {
-    let mut image = vec![0; usize::from(sectors) * 256];
-    let (first, last) = title.split_at(title.len().min(8));
-    image.get_mut(..first.len())?.copy_from_slice(first);
-    image.get_mut(256..256 + last.len())?.copy_from_slice(last);
-    image[0x104] = cycle;
-    image[0x105] = u8::try_from(files.len() * 8)
-        .ok()
-        .filter(|&end| end < 0xF9)?;
-    let [sectors_low, sectors_high] = sectors.to_le_bytes();
-    image[0x106] = sectors_high & 3;
-    image[0x107] = sectors_low;
-    for (n, file) in files.iter().enumerate() {
-        let at = 8 + 8 * n;
-        let name = &mut image[at..at + 7];
-        name.fill(b' ');
-        name.get_mut(..file.name.len())?.copy_from_slice(file.name);
-        image[at + 7] = file.dir | if file.locked { 0x80 } else { 0 };
-        let top = |value: u32| value.to_le_bytes()[2] & 3;
-        let [load_0, load_1, ..] = file.load.to_le_bytes();
-        let [exec_0, exec_1, ..] = file.exec.to_le_bytes();
-        let [length_0, length_1, ..] = file.length.to_le_bytes();
-        let [start_0, start_1] = file.start.to_le_bytes();
-        let info = 0x100 + at;
-        image[info..info + 8].copy_from_slice(&[
-            load_0,
-            load_1,
-            exec_0,
-            exec_1,
-            length_0,
-            length_1,
-            (top(file.exec) << 6) | (top(file.length) << 4) | (top(file.load) << 2) | (start_1 & 3),
-            start_0,
-        ]);
+    let mut catalogue = Catalogue::blank(sectors);
+    catalogue.title = [0; TITLE_LEN];
+    catalogue
+        .title
+        .get_mut(..title.len())?
+        .copy_from_slice(title);
+    catalogue.cycle = cycle;
+    let mut entries = [Entry::NONE; MAX_FILES as usize];
+    let held = entries.get_mut(..files.len())?;
+    for (slot, file) in held.iter_mut().zip(files) {
+        *slot = file.entry()?;
     }
+    catalogue.set_files(held)?;
+    let mut image = vec![0; usize::from(sectors) * SECTOR_LEN];
+    catalogue.write(image.get_mut(..CATALOGUE_LEN)?.try_into().ok()?);
     for &(at, bytes) in data {
         image.get_mut(at..at + bytes.len())?.copy_from_slice(bytes);
     }

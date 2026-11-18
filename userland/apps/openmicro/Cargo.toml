@@ -51,6 +51,9 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 # Copies of the worker's answers that fail as values, and the job queue the
 # file worker's desk is built on.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The one DFS on-disc format: the catalogue the DFS ROM and the blank and
+# scenario discs are laid out by, and how an SSD or DSD holds its sides.
+tairix-dfs = { path = "../../../lib/dfs", version = "=0.0.0" }
 
 # BASIC II's keywords and tokens, which the BASIC ROM's tables are built from,
 # and the VDU codes and character set the MOS's are. The ROM sources are

@@ -2,6 +2,8 @@
 
 An archive file opens as a volume: its members are the volume's files and
 directories, read like any other, and written back where the format allows.
+An Acorn DFS disc image opens the same way, its catalogues' files served as
+an archive's members are.
 The driver is `drivers/filesystem/archive` (`tairix-drv-fs-archive`), one
 served-filesystem process per attached archive
 ([Volumes served from user space](./served.md)); the attach it is served
@@ -19,6 +21,7 @@ design is `plans/ARCHIVES.md`.
 | Spark, and plain ARC | `spark` | every ARC and Spark method: stored, packed, squeezed, crunched, squashed, compressed; nested directories; ARC 6's methods skipped, leaving the archive read only | stored or compressed | load, exec, attributes |
 | ArcFS | `arcfs` | stored, packed, crunched, compressed | stored or compressed | load, exec, attributes |
 | RAR 1.5 to 7 | `rar` | every RAR compression: 1.5's, 2's LZ and audio, 3's LZ, PPMd and standard filters, 5's and 7's; solid archives | never | none |
+| Acorn DFS disc, `.ssd` or `.dsd` | `dfs` | each side's catalogue of up to 31 files | in place, as DFS writes | load, exec, lock |
 
 The kernel's probe (`lib/fsprobe`) recognises each format by its content,
 never its name, and the driver recognises it again with the same readers, so
@@ -156,6 +159,50 @@ Latin-1 and UTF-8, a dot and a slash trading places, and no name RISC OS could
 not have written in either direction. A member named as no RISC OS name can be
 is left out, and the archive is not written back, which would lose it.
 
+## DFS disc images
+
+A DFS disc image is a dump of a BBC Micro disc's sectors: an `.ssd` holds one
+side, a `.dsd` both, alternating track by track. The image's name ending
+says which, and an image named neither way is taken as double-sided only
+where it runs past its first side's sectors. An `.ssd`'s files are the
+volume's root; a `.dsd` serves its sides as the folders `Drive 0` and
+`Drive 2`, as DFS numbers them, a side whose catalogue is not a DFS
+catalogue left out.
+
+A file is served by its full DFS name: its directory, a dot, then its name —
+`$.ELITE`, `B.DATA` — a `/` in the name served as `.`, as every Acorn name
+crosses. A name compares as DFS compares it, letters in either case. A new
+file is named the same way, its name one to seven characters none of which
+DFS reads a meaning into (`.`, `:`, `"`, `#`, `*`, a space); a side holds
+only files, at most 31 of them, and no folder is made in one. A name in the
+catalogue no served name can spell — one holding a `.` — is left out, and the
+disc is not written back. A file's load and execution addresses are its
+`acorn.loadaddr` and `acorn.execaddr`, the I/O processor's given as
+`&FFFFxxxx`, and its lock is the `L` of its `acorn.attr`; every file can be
+read and written, so an attribute without `R` and `W` is refused, as is an
+address no eighteen-bit field can hold. An address that reads as a typed
+object's is still an address: no write stamps a time into it. DFS records no
+times.
+
+A commit changes only what changed, as DFS itself would. A file whose bytes
+are unchanged keeps its sectors; a file written goes back where it was if it
+still fits there, else into the first gap from the catalogue up that holds
+it, and only where no gap does is the side compacted, every file laid end to
+end. Every other sector — free space, and whatever a loader keeps outside the
+catalogue — is copied as it was, a name keeps the top bits its catalogue held
+until it is renamed, and a catalogue holding the same entries is left as it
+was, its cycle number unstepped. An image grows only to the end of the last
+sector written; a short image's missing tail reads as zeros, as the sector
+dump's format means. A write past a side's sectors or its 31 entries is
+refused for want of space.
+
+A disc formatted by Watford DFS for 62 files keeps a second catalogue in the
+sectors DFS 1.20 counts free; one is served read only, its first catalogue's
+files alone. The Open Micro emulator locks a disc it may write
+([Open Micro](../desktop/openmicro.md)), so such a disc is not mounted while
+it is in one of the emulator's drives, and a disc already mounted goes into
+a drive write-protected.
+
 ## Refused archives
 
 - **Encrypted headers** (RAR) — `PermissionDenied`; an encrypted member is
@@ -178,8 +225,9 @@ documents it, but no archive written with it has been found to test against.
 format, RAR included, through open, walk, read and commit; the codecs carry
 their own harnesses (`lib/compress`: `fuzz_bzip2`, `fuzz_arc`). The least
 archive of each format, the streams members are packed in, and an archive
-written back by the driver are `tests/integration/archive_image`'s, shared by
-the unit tests, the fuzz harness and the disk-image vertical, which mounts an
-archive of each format in QEMU with `mount`, reads it with its RISC OS
-filetypes, writes and types a file in every one but the RAR, ejects it, and
-reads the file and its type back once it is mounted again.
+written back by the driver are `tests/integration/archive_image`'s — a DFS
+disc of each layout among them — shared by the unit tests, the fuzz harness
+and the disk-image vertical, which mounts an archive of each format and a DFS
+disc in QEMU with `mount`, reads each with its RISC OS fields, writes a file
+in every one but the RAR and gives it a filetype or a load address, ejects
+it, and reads the file and its field back once it is mounted again.

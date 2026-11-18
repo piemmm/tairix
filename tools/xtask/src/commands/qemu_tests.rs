@@ -13471,7 +13471,36 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
         rar,
         tairix_test_archive_image::RAR5_BLAKE.to_vec(),
     )?);
+    let disc = tairix_test_images::DFS_DISC.file;
+    plants.push(planted(
+        disc,
+        written_disc().map_err(|err| fail(disc, err))?,
+    )?);
     Ok(plants)
+}
+
+/// The disk-image vertical's DFS disc: the least single-sided disc, written
+/// back by the archive driver holding the fixture's `$.README` at an I/O
+/// processor load address.
+fn written_disc() -> Result<Vec<u8>, tairix_abi::DriverError> {
+    use tairix_abi::driver::filesystem::{
+        FilesystemAttrs as _, FilesystemRead as _, FilesystemWrite as _, NodeKind, NodeSecurity,
+    };
+    use tairix_test_archive_image::Format;
+    use tairix_test_images::{ARCHIVE_TEXT, DFS_DISC, DFS_README, LOAD_ADDRESS, README_LOAD};
+
+    let seed = tairix_test_archive_image::seed(Format::Ssd)?;
+    tairix_test_archive_image::written(&seed, DFS_DISC.file.as_bytes(), |fs| {
+        let root = fs.root();
+        let readme = fs.create(
+            root,
+            DFS_README.as_bytes(),
+            NodeKind::RegularFile,
+            &NodeSecurity::new(0o644, 0, 0),
+        )?;
+        fs.write_all(readme, 0, ARCHIVE_TEXT)?;
+        fs.set_attr(readme, LOAD_ADDRESS.as_bytes(), README_LOAD)
+    })
 }
 
 /// The disk-image vertical's archive `file`: the least archive of the format
@@ -23779,14 +23808,15 @@ mod tests {
     }
 
     /// Every archive the disk-image vertical plants holds what its fixture
-    /// reads: each written one its `ReadMe`, typed as text, and the RAR its
-    /// two members whole and alike.
+    /// reads: each written one its `ReadMe`, typed as text, the RAR its two
+    /// members whole and alike, and the DFS disc its `$.README` at its load
+    /// address.
     #[test]
     fn the_disk_image_verticals_archives_hold_what_its_fixture_reads() {
         use tairix_abi::driver::filesystem::{FilesystemAttrs as _, FilesystemRead as _, NodeId};
         use tairix_test_images::{
-            ARCHIVE_TEXT, FILETYPE, RAR, RAR_MEMBERS, RAR_MEMBER_LEN, README, TEXT_TYPE,
-            WRITTEN_ARCHIVES,
+            ARCHIVE_TEXT, DFS_DISC, DFS_README, FILETYPE, LOAD_ADDRESS, RAR, RAR_MEMBERS,
+            RAR_MEMBER_LEN, README, README_LOAD, TEXT_TYPE, WRITTEN_ARCHIVES,
         };
 
         fn read<F: tairix_abi::driver::filesystem::FilesystemRead>(
@@ -23839,6 +23869,18 @@ mod tests {
             .collect();
         assert!(members.iter().all(|member| member.len() == RAR_MEMBER_LEN));
         assert_eq!(members[0], members[1]);
+
+        let disc = super::written_disc().expect("written");
+        let mut fs =
+            tairix_test_archive_image::opened(&disc, DFS_DISC.file.as_bytes()).expect("opened");
+        let root = fs.root();
+        let readme = fs.lookup(root, DFS_README.as_bytes()).expect("its file");
+        assert_eq!(read(&mut fs, readme), ARCHIVE_TEXT);
+        let mut value = [0u8; 8];
+        let len = fs
+            .get_attr(readme, LOAD_ADDRESS.as_bytes(), &mut value)
+            .expect("read");
+        assert_eq!(len.map(|len| &value[..len]), Some(README_LOAD));
     }
 
     /// The audio verticals' serial-script marker is exactly the `audiotone`

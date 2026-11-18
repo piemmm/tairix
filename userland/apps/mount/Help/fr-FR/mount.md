@@ -55,6 +55,15 @@ montée en lecture seule. Une archive découpée en plusieurs parties, ou
 dont les noms sont chiffrés, n'est pas montée, et un élément chiffré ne
 peut pas être lu.
 
+Une image de disquette de BBC Micro (`.ssd`, `.dsd`) se monte comme un
+volume regroupant les fichiers qu'elle contient, chacun nommé comme le
+nomme le système de fichiers propre à la disquette : son répertoire, un
+point, puis son nom (`$.ELITE`) ; un `.dsd` double face fait apparaître
+ses deux faces comme les dossiers `Drive 0` et `Drive 2`. Les adresses
+de chargement et d'exécution d'un fichier l'accompagnent, et une
+modification est écrite sur la disquette comme le BBC Micro l'écrirait,
+tous les autres secteurs restant tels qu'ils étaient.
+
 Le volume reste monté jusqu'à ce que vous le détachiez avec `unmount`,
 ou que votre session de connexion se termine. Une image qui contient
 un disque partitionné, l'un des disques d'une grappe RAID ou un
@@ -87,11 +96,11 @@ aussi la question à l'utilisateur devant l'ordinateur.
 - `-t, --types <list>` — les systèmes de fichiers, séparés par des
   virgules, dont l'image doit contenir l'un, tels que la liste des
   montages les nomme (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`,
-  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`),
-  ou `auto` pour celui qu'elle contient, quel qu'il soit ; une liste
-  commençant par `no` nomme ceux que l'image ne doit pas contenir. Ce
-  que renferme l'image se reconnaît à son contenu, si bien que l'ordre
-  ne choisit rien : un disque optique contenant à la fois UDF et
+  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`,
+  `dfs`), ou `auto` pour celui qu'elle contient, quel qu'il soit ; une
+  liste commençant par `no` nomme ceux que l'image ne doit pas contenir.
+  Ce que renferme l'image se reconnaît à son contenu, si bien que
+  l'ordre ne choisit rien : un disque optique contenant à la fois UDF et
   ISO 9660 est monté en UDF, sauf si son ISO 9660 conserve des
   enregistrements Rock Ridge ou RISC OS. Une image n'est pas montée si
   elle ne contient aucun de ces systèmes de fichiers, ou si la liste ne

@@ -85,10 +85,10 @@ it when the picture is clicked, and gives it back when the Meta key is tapped.
 
 Closing the library window leaves running machines running, and closing every
 window leaves the emulator on the icon bar: a click on its icon, or Machine
-Library in its menu, brings the library back, and Quit in that menu suspends
-every running machine and ends the emulator. Each machine runs in a worker
-of its own that holds no authority at all: its software and its disks are
-never trusted.
+Library in its menu, always brings the library forward, and Quit in that menu
+suspends every running machine and ends the emulator. Each machine runs in a
+worker of its own that holds no authority at all: its software and its disks
+are never trusted.
 
 ## OPTIONS
 

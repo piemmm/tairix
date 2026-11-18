@@ -55,6 +55,15 @@ pub mod zp {
 /// The catalogue of the drive last read: names in its first sector, the
 /// rest in its second, eight bytes an entry from offset 8.
 pub mod catalogue {
+    use crate::rom::asm::byte;
+    use tairix_dfs::catalogue as format;
+
+    /// An entry's fields from its offset in the second sector, and where in
+    /// the mixed byte each field's top two bits sit.
+    pub use format::{
+        EXEC, EXEC_SHIFT, LENGTH, LENGTH_SHIFT, LOAD, LOAD_SHIFT, LOCKED, MIXED, START, START_SHIFT,
+    };
+
     /// Sector 0: the title's first eight characters, then each entry's name
     /// and directory, the directory's top bit the lock.
     pub const NAMES: u16 = 0x0E00;
@@ -63,40 +72,25 @@ pub mod catalogue {
     /// entry's addresses, length and start sector.
     pub const INFO: u16 = 0x0F00;
     /// The cycle number, in BCD.
-    pub const CYCLE: u16 = INFO + 4;
+    pub const CYCLE: u16 = INFO + format::CYCLE as u16;
     /// Eight times the number of entries.
-    pub const END: u16 = INFO + 5;
+    pub const END: u16 = INFO + format::END as u16;
     /// The boot option in bits 4 and 5, the sector count's top two bits in 0
     /// and 1.
-    pub const OPTION: u16 = INFO + 6;
+    pub const OPTION: u16 = INFO + format::OPTION as u16;
     /// The sector count's low byte.
-    pub const SECTORS: u16 = INFO + 7;
-    /// The first entry's offset, and the last one's past which none fits.
-    pub const FIRST: u8 = 8;
-    pub const LAST: u8 = 0xF8;
+    pub const SECTORS: u16 = INFO + format::SECTORS as u16;
+    /// The first entry's offset, and the entries' end once none more fits.
+    pub const FIRST: u8 = format::FIRST_ENTRY;
+    pub const LAST: u8 = format::FULL_END;
     /// An entry's name and directory, from its offset in the first sector.
-    pub const NAME_LEN: u8 = 7;
-    pub const ENTRY_DIR: u8 = 7;
-    /// The directory byte's lock.
-    pub const LOCKED: u8 = 0x80;
-    /// An entry's fields from its offset in the second sector: the low two
-    /// bytes of the load and execution addresses and the length, the top
-    /// bits of each with the start sector's, and the start's low byte.
-    pub const LOAD: u8 = 0;
-    pub const EXEC: u8 = 2;
-    pub const LENGTH: u8 = 4;
-    pub const MIXED: u8 = 6;
-    pub const START: u8 = 7;
-    /// Where in the mixed byte each field's top two bits sit.
-    pub const START_SHIFT: u8 = 0;
-    pub const LOAD_SHIFT: u8 = 2;
-    pub const LENGTH_SHIFT: u8 = 4;
-    pub const EXEC_SHIFT: u8 = 6;
-    /// The title's characters in each sector.
-    pub const TITLE_FIRST: u8 = 8;
-    pub const TITLE_LEN: u8 = 12;
+    pub const NAME_LEN: u8 = byte(format::NAME_LEN);
+    pub const ENTRY_DIR: u8 = format::DIR;
+    /// The title's characters in the first sector, and in all.
+    pub const TITLE_FIRST: u8 = byte(format::TITLE_HEAD_LEN);
+    pub const TITLE_LEN: u8 = byte(format::TITLE_LEN);
     /// The sectors the catalogue itself takes.
-    pub const OWN_SECTORS: u8 = 2;
+    pub const OWN_SECTORS: u8 = byte(format::CATALOGUE_SECTORS as usize);
 }
 
 /// Page &10: the operation in hand and the settings.

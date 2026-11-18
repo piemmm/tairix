@@ -52,6 +52,14 @@ ffolder sy'n ei dal. Gosodir archif RAR i'w darllen yn unig bob amser.
 Ni osodir archif wedi'i rhannu'n sawl rhan, nac un y mae ei henwau
 wedi'u hamgryptio, ac ni ellir darllen aelod wedi'i amgryptio.
 
+Gosodir delwedd ddisg BBC Micro (`.ssd`, `.dsd`) fel cyfrol o'r ffeiliau
+arni, pob un wedi'i henwi fel y mae system ffeiliau'r ddisg ei hun yn ei
+henwi: ei chyfeiriadur, dot, yna ei henw (`$.ELITE`); mae delwedd `.dsd`
+ddwyochrog yn dangos ei dwy ochr fel y ffolderi `Drive 0` a `Drive 2`.
+Mae pob ffeil yn cadw ei chyfeiriadau llwytho a gweithredu, a chaiff
+newid ei ysgrifennu i'r ddisg fel y byddai'r BBC Micro yn ei ysgrifennu,
+gyda phob sector arall yn cael ei gadw fel yr oedd.
+
 Mae'r gyfrol yn aros wedi'i gosod nes i chi ei datgysylltu gyda
 `unmount`, neu nes i'ch sesiwn fewngofnodi ddod i ben. Ni osodir
 delwedd sy'n dal disg wedi'i rhannu'n rhaniadau, un ddisg o arae
@@ -85,8 +93,8 @@ cyfrifiadur.
   y mae'n rhaid i'r ddelwedd ddal un ohonynt, fel y mae'r rhestr
   osodiadau'n eu henwi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`,
   `zip`, `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`,
-  `rar`), neu `auto` ar gyfer beth bynnag y mae'n ei ddal; mae rhestr
-  sy'n dechrau â `no` yn enwi'r rhai na chaiff y ddelwedd eu dal.
+  `rar`, `dfs`), neu `auto` ar gyfer beth bynnag y mae'n ei ddal; mae
+  rhestr sy'n dechrau â `no` yn enwi'r rhai na chaiff y ddelwedd eu dal.
   Adnabyddir yr hyn y mae'r ddelwedd yn ei ddal o'i chynnwys, felly nid
   yw'r drefn yn dewis dim: fel UDF y gosodir disg sy'n dal UDF yn
   ogystal ag ISO 9660, oni bai bod yr ISO 9660 arni yn cadw cofnodion

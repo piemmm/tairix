@@ -53,6 +53,15 @@ lo contiene. Un archivo RAR se monta siempre en modo de solo lectura. No
 se monta un archivo comprimido dividido en varias partes ni uno cuyos
 nombres estén cifrados, y un elemento cifrado no se puede leer.
 
+Una imagen de disco de BBC Micro (`.ssd`, `.dsd`) se monta como un
+volumen con los archivos que contiene, cada uno con el nombre que le da
+el propio sistema de archivos del disco: su directorio, un punto y luego
+su nombre (`$.ELITE`); un `.dsd` de doble cara muestra sus dos caras
+como las carpetas `Drive 0` y `Drive 2`. Las direcciones de carga y de
+ejecución de un archivo lo acompañan, y un cambio se escribe en el disco
+como lo escribiría el BBC Micro, con todos los demás sectores
+conservados tal como estaban.
+
 El volumen sigue montado hasta que usted lo desmonte con `unmount` o
 termine su sesión. Una imagen que contiene un disco particionado, uno
 de los discos de un conjunto RAID o un sistema de archivos cuyos
@@ -84,14 +93,14 @@ pregunta al usuario que está ante el ordenador.
 - `-t, --types <list>` — los sistemas de archivos, separados por comas,
   de los cuales la imagen debe contener uno, tal como los nombra la
   lista de montajes (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`,
-  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`),
-  o `auto` para cualquiera que contenga; una lista que empieza por `no`
-  nombra los que la imagen no debe contener. Lo que guarda la imagen se
-  reconoce por su contenido, así que el orden no elige nada: un disco
-  que contiene a la vez UDF e ISO 9660 se monta como UDF, salvo que su
-  ISO 9660 conserve registros Rock Ridge o RISC OS. Si la imagen no
-  contiene ninguno de esos sistemas de archivos o si la lista no nombra
-  ningún tipo que una imagen de disco contenga, no se monta.
+  `tar`, `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`,
+  `dfs`), o `auto` para cualquiera que contenga; una lista que empieza
+  por `no` nombra los que la imagen no debe contener. Lo que guarda la
+  imagen se reconoce por su contenido, así que el orden no elige nada:
+  un disco que contiene a la vez UDF e ISO 9660 se monta como UDF, salvo
+  que su ISO 9660 conserve registros Rock Ridge o RISC OS. Si la imagen
+  no contiene ninguno de esos sistemas de archivos o si la lista no
+  nombra ningún tipo que una imagen de disco contenga, no se monta.
 - `-o, --options <list>` — una lista separada por comas de `ro`, `rw`
   (lectura y escritura cuando sea posible, el valor predeterminado),
   `noexec`, `loop` y `name=name`, el nombre que ha de tomar el volumen.

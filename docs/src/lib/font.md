@@ -317,7 +317,9 @@ A family's line metrics — box height, baseline, line height, and the single
 advance a monospace family lays a grid out with — come from the service once
 per `(family, pixel height, weight)` and are cached beside the glyphs. A
 proportional family reports a zero monospace advance, which *is* how a caller
-knows it may not assume a grid.
+knows it may not assume a grid. `BitmapFont::capital_rows` answers the rows of
+the line box a capital inks, read from the face's own `H` at half coverage,
+for a mark sized and placed beside capitals: a status band's lamp.
 
 That cache is bounded in **bytes**, by a budget derived from the machine's
 total RAM (`tairix_procinfo::memory_total_bytes`), not by an entry count: a

@@ -5,10 +5,10 @@ use alloc::boxed::Box;
 use super::*;
 use crate::machine::c64::{sid, Standard};
 use crate::machine::LetterCase;
-use crate::media::disc::ImageFormat;
 use crate::worker::protocol::{
     Configuration, DiscFormat, Lights, Loaded, Media, Ran, Refusal, Slot, Written, ROW_MAP, SLOTS,
 };
+use tairix_dfs::image::Layout;
 
 fn sent(client: &mut MachineClient, request: &Request<'_>) {
     client.ask(request).expect("idle");
@@ -192,7 +192,7 @@ fn media(drives: &[PhysicalDrive], tape: bool) -> Vec<u8> {
             .iter()
             .map(|&drive| Written {
                 drive,
-                format: DiscFormat::Acorn(ImageFormat::Ssd),
+                format: DiscFormat::Acorn(Layout::Single),
                 image: &[1, 2],
                 lost: None,
             })
@@ -390,7 +390,7 @@ fn a_commodore_s_answers_are_believed_only_with_its_own_lamps_and_media() {
     for (drive, format, ok) in [
         (zero, DiscFormat::D64, true),
         (zero, DiscFormat::G64, true),
-        (zero, DiscFormat::Acorn(ImageFormat::Ssd), false),
+        (zero, DiscFormat::Acorn(Layout::Single), false),
         (one, DiscFormat::D64, false),
     ] {
         sent(&mut client, &Request::RestoreSnapshot(&[]));

@@ -25,6 +25,8 @@ tairix-compress = { path = "../compress", version = "=0.0.0" }
 # The one FAT on-disk format, whose boot sector and label entry the probe
 # reads through it.
 tairix-fat = { path = "../fat", version = "=0.0.0" }
+# The one DFS on-disc format, whose catalogue a DFS disc image is known by.
+tairix-dfs = { path = "../dfs", version = "=0.0.0" }
 # The identity fingerprint a content-derived identity is taken from for a
 # format that records no unique identifier.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }

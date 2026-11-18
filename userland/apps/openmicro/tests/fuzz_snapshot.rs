@@ -23,6 +23,7 @@
 
 use std::ops::Range;
 
+use tairix_dfs::image::{Layout, TRACK_LEN};
 use tairix_fuzzseed::Prng;
 use tairix_openmicro::firmware::C1541_DOS_IMAGE;
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
@@ -35,7 +36,7 @@ use tairix_openmicro::machine::{
 };
 use tairix_openmicro::media::c1541::d64;
 use tairix_openmicro::media::crt;
-use tairix_openmicro::media::disc::{Disc, ImageFormat, TRACK_BYTES};
+use tairix_openmicro::media::disc::Disc;
 use tairix_openmicro::snapshot::{self, Writer};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -223,8 +224,8 @@ fn running(rng: &mut Prng, model: Model, os: &[u8]) -> Machine {
     match &mut machine {
         Machine::ModelB(machine) => {
             machine.set_tape_record(record);
-            let len = rng.at_most(40 * TRACK_BYTES);
-            if let Ok(disc) = Disc::decode(&rng.noise(len), ImageFormat::Dsd, rng.below(2) == 0) {
+            let len = rng.at_most(40 * TRACK_LEN);
+            if let Ok(disc) = Disc::decode(&rng.noise(len), Layout::Double, rng.below(2) == 0) {
                 machine.insert_disc(*rng.pick(&PhysicalDrive::ALL), disc);
             }
             for _ in 0..rng.below(3) {

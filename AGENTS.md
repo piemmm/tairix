@@ -655,6 +655,7 @@ tairix/
 │   ├── der/             # The one strict DER codec (SPNEGO, Kerberos).
 │   ├── devids/          # Hardware-identity databases: PCI, USB, IEEE OUI.
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table match.
+│   ├── dfs/             # Acorn DFS on-disc format: catalogues, names, SSD/DSD layout.
 │   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs.
 │   ├── discovery/       # Link-local service discovery client (discovery-v1).
 │   ├── display/         # Display-service protocol engine.

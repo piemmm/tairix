@@ -72,11 +72,14 @@ pub enum VolumeFsType {
     ArcFs = 12,
     /// A RAR archive.
     Rar = 13,
+    /// An Acorn DFS disc image, single or double sided: its catalogues'
+    /// files, served as an archive's members are.
+    Dfs = 14,
 }
 
 impl VolumeFsType {
     /// Every filesystem type, in wire order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ARXFS,
         Self::Ext4,
         Self::Fat32,
@@ -91,6 +94,7 @@ impl VolumeFsType {
         Self::Spark,
         Self::ArcFs,
         Self::Rar,
+        Self::Dfs,
     ];
 
     /// The wire byte for this filesystem type.
@@ -120,6 +124,7 @@ impl VolumeFsType {
             11 => Ok(Self::Spark),
             12 => Ok(Self::ArcFs),
             13 => Ok(Self::Rar),
+            14 => Ok(Self::Dfs),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -142,7 +147,8 @@ impl VolumeFsType {
             | Self::Bzip2
             | Self::Spark
             | Self::ArcFs
-            | Self::Rar => true,
+            | Self::Rar
+            | Self::Dfs => true,
         }
     }
 
@@ -168,7 +174,8 @@ impl VolumeFsType {
             | Self::Bzip2
             | Self::Spark
             | Self::ArcFs
-            | Self::Rar => false,
+            | Self::Rar
+            | Self::Dfs => false,
         }
     }
 
@@ -191,6 +198,7 @@ impl VolumeFsType {
             Self::Spark => b"tairix,volume-spark",
             Self::ArcFs => b"tairix,volume-arcfs",
             Self::Rar => b"tairix,volume-rar",
+            Self::Dfs => b"tairix,volume-dfs",
         }
     }
 }
@@ -285,11 +293,13 @@ pub enum FormatName {
     ArcFs = 18,
     /// A RAR archive.
     Rar = 19,
+    /// An Acorn DFS disc image.
+    Dfs = 20,
 }
 
 impl FormatName {
     /// Every name, in wire order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Arxfs,
         Self::Ext2,
         Self::Ext3,
@@ -309,6 +319,7 @@ impl FormatName {
         Self::Spark,
         Self::ArcFs,
         Self::Rar,
+        Self::Dfs,
     ];
 
     /// The format a user and `mount` call `name`, as [`as_str`](Self::as_str)
@@ -341,6 +352,7 @@ impl FormatName {
             Self::Spark => "spark",
             Self::ArcFs => "arcfs",
             Self::Rar => "rar",
+            Self::Dfs => "dfs",
         }
     }
 
@@ -363,6 +375,7 @@ impl FormatName {
             Self::Spark => VolumeFsType::Spark,
             Self::ArcFs => VolumeFsType::ArcFs,
             Self::Rar => VolumeFsType::Rar,
+            Self::Dfs => VolumeFsType::Dfs,
             Self::Smb3 => return None,
         })
     }
@@ -399,6 +412,7 @@ impl FormatName {
             17 => Self::Spark,
             18 => Self::ArcFs,
             19 => Self::Rar,
+            20 => Self::Dfs,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -652,7 +666,8 @@ pub struct VolumeInfo {
 }
 
 /// The name of the file an archive volume was attached from: what a format
-/// that records no name of its own names its one member by.
+/// that records no name of its own names its one member by, and what a disc
+/// image's ending says of how it holds its sides.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ArchiveName {
     len: u8,
@@ -1604,8 +1619,9 @@ mod tests {
         assert_eq!(FormatName::Ext2.family(), Some(VolumeFsType::Ext4));
         assert_eq!(FormatName::Affs.family(), Some(VolumeFsType::Affs));
         assert_eq!(FormatName::TarGzip.family(), Some(VolumeFsType::Gzip));
+        assert_eq!(FormatName::Dfs.family(), Some(VolumeFsType::Dfs));
         assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
-        assert_eq!(FormatName::from_u8(20), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(21), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -1634,7 +1650,7 @@ mod tests {
             assert_eq!(usize::from(fstype.as_u8()), at);
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
-        assert_eq!(VolumeFsType::from_u8(14), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(15), Err(Errno::OutOfRange));
         assert_eq!(VolumeFsType::from_u8(u8::MAX), Err(Errno::OutOfRange));
         let archives: alloc::vec::Vec<VolumeFsType> = VolumeFsType::ALL
             .into_iter()
@@ -1650,6 +1666,7 @@ mod tests {
                 VolumeFsType::Spark,
                 VolumeFsType::ArcFs,
                 VolumeFsType::Rar,
+                VolumeFsType::Dfs,
             ]
         );
     }

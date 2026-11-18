@@ -975,8 +975,9 @@ still being copied.
   *Duplicate* and *Delete…*, and while it runs the machine's own rows (below).
   A change repaints only the cards it touched. Closing the library window
   leaves running machines running, and closing every window leaves the program
-  on the icon bar: a click on its slot (`AppBarClick::RaiseOrOpen`) or the
-  *Machine Library* row brings the library back, and only *Quit* ends it,
+  on the icon bar: a click on its slot (`AppBarClick::Open`) or the
+  *Machine Library* row brings the library forward, whatever else is open,
+  and only *Quit* ends it,
   suspending every running machine first. A suspending machine's window stays
   open, its bar saying *Saving…*, until its snapshot and the images it was
   taken against are kept (`app::keeping::Suspends`), so a session logging out —

@@ -78,6 +78,7 @@ members = [
     "lib/der",
     "lib/devids",
     "lib/devmatch",
+    "lib/dfs",
     "lib/disasm",
     "lib/discovery",
     "lib/display",

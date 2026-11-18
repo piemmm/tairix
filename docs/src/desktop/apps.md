@@ -831,12 +831,13 @@ identically (`AGENTS.md` §2.2). It is exhaustive over the three entry kinds:
   naming the bundle for the caller to launch through the ordinary signed
   app-load gate;
 - a **regular file** returns `OpenFile { path }`, naming the file for the
-  caller to open in the associated viewer — unless it is a **disk image**
-  (`MediaType::holds_a_volume`: `.iso`, `.adf`, `.adl`, `.adm`, `.ads`,
-  `.ima`, `.vfd`, `.flp`, `.img`, `.hdf`), which returns `MountImage { path }`
-  for the caller to mount on its mount worker and show
-  ([disk images](../filesystem/images.md)), whatever application claims the
-  type;
+  caller to open in the associated viewer — unless it **holds a volume**
+  (`MediaType::holds_a_volume`): a disk image (`.iso`, `.adf`, `.img`, …), an
+  archive the system serves as one (`.zip`, `.tar`, `.rar`, …), or an Acorn
+  DFS disc image (`.ssd`, `.dsd`), which returns `MountImage { path }` for
+  the caller to mount on its mount worker and show
+  ([disk images](../filesystem/images.md), [archives](../filesystem/archive.md)),
+  whatever application claims the type;
 - at the network, an **endpoint** that can be reached returns
   `MountEndpoint`, naming it as it was displayed for the caller to mount
   (`plans/ZEROCONF.md` §6.3); one with no known address is `Unreachable`,

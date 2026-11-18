@@ -95,11 +95,11 @@ et la rend quand on appuie brièvement sur la touche Méta.
 
 Fermer la fenêtre de bibliothèque laisse tourner les machines en marche, et
 fermer toutes les fenêtres laisse l'émulateur dans la barre d'icônes : un clic
-sur son icône, ou Bibliothèque de machines dans son menu, rouvre la
-bibliothèque, et Quitter dans ce menu met en veille toutes les machines en
-marche et met fin à l'émulateur. Chaque machine tourne dans un processus de
-travail à part qui ne détient aucune autorité : ses logiciels et ses disques ne
-sont jamais considérés comme fiables.
+sur son icône, ou Bibliothèque de machines dans son menu, fait toujours passer
+la bibliothèque au premier plan, et Quitter dans ce menu met en veille toutes
+les machines en marche et met fin à l'émulateur. Chaque machine tourne dans un
+processus de travail à part qui ne détient aucune autorité : ses logiciels et
+ses disques ne sont jamais considérés comme fiables.
 
 ## OPTIONS
 

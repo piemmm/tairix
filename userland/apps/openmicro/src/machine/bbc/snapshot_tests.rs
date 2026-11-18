@@ -4,9 +4,10 @@ use alloc::vec::Vec;
 use super::fdc::PhysicalDrive;
 use super::keyboard::Key;
 use super::{Machine, ROM_SIZE};
-use crate::media::disc::{Disc, ImageFormat};
+use crate::media::disc::Disc;
 use crate::media::tape::Tape;
 use crate::snapshot::SnapshotError;
+use tairix_dfs::image::Layout;
 
 /// A program keeping most of the machine busy: mode 7 on the 6845 and ULA,
 /// the keyboard autoscanning, a tone, System VIA timer 1 interrupting, the
@@ -66,7 +67,7 @@ fn disc() -> Disc {
     let image: Vec<u8> = (0..40 * 2560)
         .map(|at: usize| u8::try_from(at * 7 % 251).unwrap())
         .collect();
-    Disc::decode(&image, ImageFormat::Ssd, false).unwrap()
+    Disc::decode(&image, Layout::Single, false).unwrap()
 }
 
 /// The machine running the program with a disc, a tape, a key held, the

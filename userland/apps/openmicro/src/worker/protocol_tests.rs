@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::machine::{bbc, electron, LetterCase};
+use tairix_dfs::image::Layout;
 
 fn round_trip(request: &Request<'_>) {
     assert_eq!(
@@ -38,7 +39,7 @@ fn every_request_survives_its_wire_form() {
         })),
         Request::InsertDisc {
             drive: PhysicalDrive::One,
-            format: DiscFormat::Acorn(ImageFormat::Dsd),
+            format: DiscFormat::Acorn(Layout::Double),
             write_protected: true,
             image: &[1, 2, 3],
         },
@@ -115,13 +116,13 @@ fn every_reply_survives_its_wire_form() {
             discs: vec![
                 Written {
                     drive: PhysicalDrive::One,
-                    format: DiscFormat::Acorn(ImageFormat::Dsd),
+                    format: DiscFormat::Acorn(Layout::Double),
                     image: &[5; 3],
                     lost: Some((1, LAST_TRACK)),
                 },
                 Written {
                     drive: PhysicalDrive::Zero,
-                    format: DiscFormat::Acorn(ImageFormat::Ssd),
+                    format: DiscFormat::Acorn(Layout::Single),
                     image: &[],
                     lost: None,
                 },
@@ -353,7 +354,7 @@ fn a_reply_out_of_bounds_does_not_decode() {
         bytes.push(0);
         bytes
     };
-    let largest = ImageFormat::Ssd.max_bytes();
+    let largest = crate::media::disc::max_image_bytes(Layout::Single);
     assert!(Reply::decode(&single(largest)).is_ok());
     assert!(
         Reply::decode(&single(largest + 1)).is_err(),
@@ -388,10 +389,10 @@ fn the_largest_message_is_both_drives_and_the_deck_taken_out_whole() {
     let encoded = reply.encode();
     assert_eq!(encoded.len(), MAX_MESSAGE);
     assert_eq!(Reply::decode(&encoded), Ok(reply));
-    let acorn = vec![0xE5; ImageFormat::Dsd.max_bytes()];
+    let acorn = vec![0xE5; crate::media::disc::max_image_bytes(Layout::Double)];
     let lost = |drive| Written {
         drive,
-        format: DiscFormat::Acorn(ImageFormat::Dsd),
+        format: DiscFormat::Acorn(Layout::Double),
         image: &acorn,
         lost: Some((1, LAST_TRACK)),
     };

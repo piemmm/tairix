@@ -970,7 +970,9 @@ impl Zip {
                     central.dos_time = central.notes.dos_time;
                     Some((central.notes.method, central.notes.needed))
                 }
-                Coding::Arc { .. } | Coding::Stream | Coding::Rar { .. } => None,
+                Coding::Arc { .. } | Coding::Stream | Coding::Rar { .. } | Coding::Disc { .. } => {
+                    None
+                }
             };
             if let (Some((method, needed)), Check::Crc32(crc)) = (method, archived.check) {
                 let source = located(content.regions, *archived)?;

@@ -18,12 +18,12 @@ use tairix_abi::DriverError;
 use tairix_fsmeta::preset::acorn;
 use tairix_fsserve::VolumeAccess;
 
-use crate::data::{Archived, Coding, Cursors, Data};
+use crate::data::{on_disc, Archived, Coding, Cursors, Data};
 use crate::region::{Regions, Sink};
 use crate::riscos;
 use crate::stream::{Compression, Packing, Stream, Writer};
 use crate::tree::{Kept, Meta, Tree};
-use crate::{arcfs, lone, rar, spark, tar, zip};
+use crate::{arcfs, dfs, lone, rar, spark, tar, zip};
 
 /// What a member's record keeps of its modification and access times, `None`
 /// for a time it keeps nothing of.
@@ -63,6 +63,8 @@ pub(crate) enum Format {
     ArcFs(arcfs::ArcFs),
     /// A RAR archive, read only.
     Rar(rar::Rar),
+    /// An Acorn DFS disc image.
+    Dfs(dfs::Dfs),
 }
 
 /// An archive read: its members, its format, why it may not be written, and
@@ -113,6 +115,7 @@ impl Format {
             VolumeFsType::Spark => return spark::read(regions),
             VolumeFsType::ArcFs => return arcfs::read(regions),
             VolumeFsType::Rar => return rar::read(regions),
+            VolumeFsType::Dfs => return dfs::read(regions, name),
             VolumeFsType::Gzip => Compression::Gzip,
             VolumeFsType::Bzip2 => Compression::Bzip2,
             _ => return Err(DriverError::Unsupported),
@@ -137,6 +140,7 @@ impl Format {
             Self::Spark(_) => FormatName::Spark,
             Self::ArcFs(_) => FormatName::ArcFs,
             Self::Rar(_) => FormatName::Rar,
+            Self::Dfs(_) => FormatName::Dfs,
         }
     }
 
@@ -147,6 +151,7 @@ impl Format {
             Self::Lone(lone) => lone.admits_name(name),
             Self::Spark(_) => spark::admits_name(name),
             Self::ArcFs(_) => arcfs::admits_name(name),
+            Self::Dfs(_) => dfs::admits_name(name),
         }
     }
 
@@ -156,12 +161,14 @@ impl Format {
     }
 
     /// The longest member the format can record: four gigabytes less a byte
-    /// in an ARC header's sizes, two in the reach of an `ArcFS` data offset.
+    /// in an ARC header's sizes, two in the reach of an `ArcFS` data offset,
+    /// what eighteen bits count in a DFS entry.
     pub(crate) const fn largest_member(&self) -> u64 {
         match self {
             Self::Zip(_) | Self::Tar(_) | Self::Lone(_) | Self::Rar(_) => u64::MAX,
             Self::Spark(_) => u32::MAX as u64,
             Self::ArcFs(_) => i32::MAX as u64,
+            Self::Dfs(_) => tairix_dfs::catalogue::MAX_FIELD as u64,
         }
     }
 
@@ -198,7 +205,7 @@ impl Format {
                 modified: riscos::stamp_field(meta),
                 accessed: None,
             },
-            Self::Rar(_) => MemberTimes::NONE,
+            Self::Rar(_) | Self::Dfs(_) => MemberTimes::NONE,
         }
     }
 
@@ -218,12 +225,66 @@ impl Format {
     }
 
     /// The RISC OS attribute bits a member's record holds: a tar's records
-    /// spell every one, the others' a `FileSwitch` byte beside the object's
+    /// spell every one, a DFS entry its lock beside the reading and writing
+    /// every file allows, the others' a `FileSwitch` byte beside the object's
     /// kind.
     pub(crate) const fn acorn_attr_bits(&self) -> u16 {
         match self {
             Self::Tar(_) => acorn::ATTR_BITS,
+            Self::Dfs(_) => dfs::ATTR_BITS,
             _ => acorn::FILESWITCH_ATTR_BITS | acorn::ATTR_DIRECTORY,
+        }
+    }
+
+    /// Whether a typed object's RISC OS stamp is its member's modification
+    /// time: not on a DFS disc, whose addresses a stamp would overwrite.
+    pub(crate) const fn dates_objects(&self) -> bool {
+        !matches!(self, Self::Dfs(_))
+    }
+
+    /// Refuse a node of `kind` put at `name` in `dir` — made, or `moving`
+    /// there by a rename — where the format has no place for it.
+    pub(crate) fn places(
+        &self,
+        tree: &Tree,
+        dir: u64,
+        name: &[u8],
+        kind: tairix_abi::driver::filesystem::NodeKind,
+        moving: Option<u64>,
+    ) -> Result<(), DriverError> {
+        match self {
+            Self::Dfs(dfs) => dfs.places(tree, dir, name, kind, moving),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuse the file `id` holding `len` bytes where the archive has no
+    /// room for them.
+    pub(crate) fn room(&self, tree: &Tree, id: u64, len: u64) -> Result<(), DriverError> {
+        match self {
+            Self::Dfs(dfs) => dfs.room(tree, id, len),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuse removing `id` where the format holds it fixed.
+    pub(crate) fn removable(&self, tree: &Tree, id: u64) -> Result<(), DriverError> {
+        match self {
+            Self::Dfs(_) => dfs::Dfs::removable(tree, id),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuse RISC OS fields `object` for `id` that its record cannot keep.
+    pub(crate) fn keeps_object(
+        &self,
+        tree: &Tree,
+        id: u64,
+        object: &acorn::Object,
+    ) -> Result<(), DriverError> {
+        match self {
+            Self::Dfs(_) => dfs::Dfs::keeps_object(tree, id, object),
+            _ => Ok(()),
         }
     }
 
@@ -273,6 +334,7 @@ impl Format {
             }
             Self::Spark(spark) => (spark.write(tree, &mut content, &mut sink)?, None),
             Self::ArcFs(_) => (arcfs::write(tree, &mut content, &mut sink)?, None),
+            Self::Dfs(dfs) => (dfs.write(tree, &mut content, &mut sink)?, None),
             // The format is never written; its refusal stops every change first.
             Self::Rar(_) => return Err(DriverError::Unsupported),
         };
@@ -367,7 +429,7 @@ pub(crate) enum Span {
 impl<A: VolumeAccess> Content<'_, A> {
     /// The bytes of `data` as spans a writer copies, or `None` where they
     /// are compressed apart from the archive and must be decoded.
-    pub(crate) fn spans(data: &Data) -> Option<Vec<Span>> {
+    pub(crate) fn spans(&self, data: &Data) -> Option<Vec<Span>> {
         let mut spans = Vec::new();
         match data {
             Data::Archived(Archived {
@@ -380,6 +442,32 @@ impl<A: VolumeAccess> Content<'_, A> {
                 at: *at,
                 len: *len,
             }),
+            Data::Archived(Archived {
+                at,
+                len,
+                coding: Coding::Disc { layout, side },
+                ..
+            }) => {
+                let image_len = self.regions.len();
+                let mut covered = 0;
+                for (at, len) in on_disc(*layout, *side, *at, 0, *len) {
+                    let held = image_len.saturating_sub(at).min(len);
+                    if held > 0 {
+                        spans.push(Span::In {
+                            region: ARCHIVE_REGION,
+                            at,
+                            len: held,
+                        });
+                    }
+                    if held < len {
+                        spans.push(Span::Zeros(len - held));
+                    }
+                    covered += len;
+                }
+                if covered != *len {
+                    return None;
+                }
+            }
             Data::Archived(_) => return None,
             Data::Staged(staged) => {
                 let mut covered = 0;
@@ -410,7 +498,7 @@ impl<A: VolumeAccess> Content<'_, A> {
         data: &Data,
         out: &mut O,
     ) -> Result<(), DriverError> {
-        if let Some(spans) = Self::spans(data) {
+        if let Some(spans) = self.spans(data) {
             for span in spans {
                 match span {
                     Span::In { region, at, len } => out.copy(self, region, at, len)?,

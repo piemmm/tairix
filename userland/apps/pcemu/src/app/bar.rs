@@ -14,7 +14,7 @@ use tairix_controls::{
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::board::{BoardConfig, Lights};
@@ -62,10 +62,6 @@ pub struct Shared {
 const MACHINE: (IconKind, &str) = (IconKind::Display, "Machine");
 const PAUSED: (IconKind, &str) = (IconKind::Pause, "Paused");
 const SAVING: (IconKind, &str) = (IconKind::Display, "Saving\u{2026}");
-
-/// The room the machine's button keeps above and below it in the bar, in
-/// logical pixels.
-const BUTTON_INSET: u32 = 2;
 
 fn machine_content((icon, label): (IconKind, &str)) -> ButtonContent {
     ButtonContent::IconLabel {
@@ -186,16 +182,13 @@ impl MachineBar {
     /// needs it.
     #[must_use]
     pub fn height(scale: Scale, theme: &Theme) -> u32 {
-        let button = Button::height(scale, theme)
-            .saturating_add(scale.scale_length(BUTTON_INSET).saturating_mul(2));
-        StatusBand::new(theme, scale).height().max(button)
+        StatusBand::new(theme, scale).height_holding_button(scale, theme)
     }
 
     /// Lay the bar out along `bounds`.
     pub fn place(&mut self, bounds: Rect, (scale, theme): (Scale, &Theme)) {
         self.bounds = bounds;
         let band = StatusBand::new(theme, scale);
-        let lamp = band.face().line_height();
         let gap = scale.scale_length(theme.metrics().control_gap);
         // As wide as the widest it ever shows, so a pause never moves it.
         let machine_width = [MACHINE, PAUSED, SAVING]
@@ -208,18 +201,9 @@ impl MachineBar {
             .max()
             .unwrap_or(0)
             .min(bounds.width.saturating_sub(gap));
-        let machine_height = Button::height(scale, theme).min(bounds.height);
-        self.machine_at = Rect::new(
-            bounds
-                .right()
-                .saturating_sub_unsigned(machine_width.saturating_add(gap)),
-            bounds
-                .top()
-                .saturating_add_unsigned(bounds.height.saturating_sub(machine_height) / 2),
-            machine_width,
-            machine_height,
-        );
-        let fixed_width = band.slot_width("C:") + lamp;
+        let trailing = band.slots::<0, 1>(bounds, [], [machine_width]).trailing[0];
+        self.machine_at = StatusBand::button_in(trailing, scale, theme);
+        let fixed_width = band.lamp().slot_width("C:");
         let fixed = self
             .drives
             .iter()
@@ -363,22 +347,13 @@ impl MachineBar {
     /// Paint the bar: its band, each drive's lamp, letter and image.
     pub fn render(&self, surface: &mut Surface, (scale, theme): (Scale, &Theme)) {
         let band = StatusBand::new(theme, scale);
-        let lamp = band.face().line_height();
-        let palette = theme.palette();
+        let lamp = band.lamp();
         let texts: Vec<(Rect, String, StatusTone)> = self
             .drives
             .iter()
             .map(|drive| {
                 let (text, tone) = shown(drive);
-                let slot = drive.slot;
-                let after = lamp.saturating_add(lamp / 2);
-                let text_slot = Rect::new(
-                    slot.left().saturating_add_unsigned(after),
-                    slot.top(),
-                    slot.width.saturating_sub(after),
-                    slot.height,
-                );
-                (text_slot, text, tone)
+                (lamp.text(drive.slot), text, tone)
             })
             .collect();
         let parts: Vec<(Rect, &str, StatusTone)> = texts
@@ -387,22 +362,14 @@ impl MachineBar {
             .collect();
         band.paint(surface, self.bounds, theme, &parts);
         self.machine.render(surface, self.machine_at, scale, theme);
-        let side = (lamp * 2 / 3).max(2);
         for drive in &self.drives {
-            let colour = match (lit(self.lights, drive), drive.kind) {
+            let tone = match (lit(self.lights, drive), drive.kind) {
                 (_, Kind::Share(_)) => continue,
-                (true, Kind::Diskette) => palette.success,
-                (true, Kind::Fixed) => palette.warning,
-                (false, _) => palette.on_surface_muted,
+                (true, Kind::Diskette) => StatusTone::Success,
+                (true, Kind::Fixed) => StatusTone::Warning,
+                (false, _) => StatusTone::Muted,
             };
-            let x = drive.slot.left().saturating_add_unsigned(lamp / 3);
-            let y = drive
-                .slot
-                .top()
-                .saturating_add_unsigned(drive.slot.height.saturating_sub(side) / 2);
-            if let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) {
-                surface.fill_round_rect(x, y, side, side, side / 2, Color::from(colour));
-            }
+            lamp.paint(surface, drive.slot, theme, tone);
         }
     }
 

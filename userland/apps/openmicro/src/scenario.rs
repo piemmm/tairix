@@ -28,14 +28,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use tairix_dfs::image::Layout;
+
 use crate::machine::bbc::fdc::PhysicalDrive;
 use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::Machine;
-use crate::machine::RomError;
-use crate::media::disc::{Disc, ImageFormat};
+use crate::machine::{RomError, BREAK_HELD_MICROS, BREAK_KEYS_HELD_CENTISECONDS, CLOCK};
+use crate::media::disc::Disc;
 
 /// 2 MHz cycles in a centisecond.
-const CENTISECOND: u64 = 20_000;
+const CENTISECOND: u64 = CLOCK / 100;
 /// The teletext screen, and where the VDU drivers keep its first
 /// character's address.
 const TELETEXT: u16 = 0x7C00;
@@ -44,10 +46,9 @@ const SCREEN_START: u16 = 0x0350;
 /// How long a typed key is held, and then left up, for the keyboard scan
 /// to take it, in centiseconds.
 const KEY_HELD: u64 = 3;
-/// Cycles BREAK is held, then centiseconds the machine runs on with any
-/// key held with it still down, then without.
-const BREAK_HELD: u64 = 2_000;
-const BREAK_KEYS_HELD: u64 = 50;
+/// Cycles BREAK is held.
+const BREAK_HELD: u64 = BREAK_HELD_MICROS * CLOCK / 1_000_000;
+/// Centiseconds the machine runs on once the keys held with BREAK are let go.
 const BREAK_SETTLED: u64 = 100;
 /// Centiseconds a scenario's machine runs before its first step.
 const STARTED: u64 = 100;
@@ -186,7 +187,7 @@ pub fn press_break(machine: &mut Machine, held: &[Key]) {
     machine.set_break(true);
     machine.run_until(machine.cycles() + BREAK_HELD);
     machine.set_break(false);
-    wait(machine, BREAK_KEYS_HELD);
+    wait(machine, BREAK_KEYS_HELD_CENTISECONDS);
     for &key in held {
         machine.set_key(key, false);
     }
@@ -246,7 +247,7 @@ pub fn run(roms: Roms<'_>, scenario: &Scenario) -> Result<Observation, ScenarioE
 
 fn disc(name: &str, protected: bool) -> Result<Disc, ScenarioError> {
     let image = discs::named(name).ok_or_else(|| ScenarioError::Disc(String::from(name)))?;
-    Disc::decode(&image, ImageFormat::Ssd, protected)
+    Disc::decode(&image, Layout::Single, protected)
         .map_err(|_| ScenarioError::Disc(String::from(name)))
 }
 

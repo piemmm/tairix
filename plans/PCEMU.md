@@ -884,8 +884,8 @@ are silent the 80387 reference's lists of how it differs from them decide.
   change repaints only the cards it touched. Several machines run at once,
   each in a window of its own over a worker of its own; closing the library
   leaves them running, closing every window leaves the program on the icon
-  bar — its slot's click or the *Machine Library* row brings the library back
-  — and only *Quit* ends it, suspending every running machine first. A
+  bar — its slot's click or the *Machine Library* row brings the library
+  forward, a machine's window open or not — and only *Quit* ends it, suspending every running machine first. A
   suspending machine's window stays open until its state is kept
   (`app::keeping::Suspends`), so a session logging out waits for the write. The first run makes the Turbo XT
   with the default disk. **The new-machine assistant** is an owner-modal

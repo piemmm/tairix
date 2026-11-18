@@ -27,7 +27,7 @@ use tairix_fsmeta::preset::acorn;
 use tairix_fsserve::VolumeAccess;
 use tairix_writeback::CommitScheduler;
 
-use crate::data::{Check, Coding, Cursors, Data, Lead, Staged};
+use crate::data::{on_disc, Check, Coding, Cursors, Data, Lead, Staged};
 use crate::format::Format;
 use crate::region::Regions;
 use crate::riscos;
@@ -231,9 +231,8 @@ impl<A: VolumeAccess> ArchiveFs<A> {
         if let Data::Archived(archived) = data {
             let archived = *archived;
             let archived = crate::zip::located(&self.regions, archived)?;
-            let mut staged = Staged::default();
             let at = self.staged_end;
-            match archived.coding {
+            let staged = match archived.coding {
                 // Bytes held to a check pass through it, so a changed copy
                 // never takes a fresh check over damaged bytes.
                 Coding::Stored if archived.check == Check::None => {
@@ -242,7 +241,9 @@ impl<A: VolumeAccess> ArchiveFs<A> {
                         (ARCHIVE_STAGING, at),
                         archived.len,
                     )?;
+                    Staged::whole(at, archived.len)?
                 }
+                Coding::Disc { layout, side } => self.stage_disc(&archived, layout, side)?,
                 Coding::Refused { why, .. } => return Err(why),
                 Coding::Stored
                 | Coding::Deflate { .. }
@@ -268,10 +269,14 @@ impl<A: VolumeAccess> ArchiveFs<A> {
                             .write(ARCHIVE_STAGING, at + offset, &buf[..got])?;
                         offset += got as u64;
                     }
+                    Staged::whole(at, archived.len)?
                 }
-            }
-            staged.wrote(0, archived.len, at)?;
-            self.staged_end = at + archived.len;
+            };
+            self.staged_end = staged
+                .runs
+                .values()
+                .map(|run| run.at + run.len)
+                .fold(at, u64::max);
             self.cursors.forget(id);
             let node = self.tree.node_mut(id)?;
             node.body = Body::File(Data::Staged(staged));
@@ -280,6 +285,39 @@ impl<A: VolumeAccess> ArchiveFs<A> {
             Body::File(Data::Staged(staged)) => Ok(staged),
             _ => Err(DriverError::Unsupported),
         }
+    }
+
+    /// A disc member's bytes, `archived` on `side` of an image laid out as
+    /// `layout`, copied by the kernel to the staging file's end a track's run
+    /// at a time; what lies past the image's end stays unstaged and reads as
+    /// the zeros it is.
+    fn stage_disc(
+        &self,
+        archived: &crate::data::Archived,
+        layout: tairix_dfs::image::Layout,
+        side: u8,
+    ) -> Result<Staged, DriverError> {
+        let mut staged = Staged::default();
+        let mut put = self.staged_end;
+        let mut offset = 0;
+        for (from, len) in on_disc(layout, side, archived.at, 0, archived.len) {
+            let held = self.regions.len().saturating_sub(from).min(len);
+            if held > 0 {
+                self.regions.copy(
+                    (tairix_abi::volume::ARCHIVE_REGION, from),
+                    (ARCHIVE_STAGING, put),
+                    held,
+                )?;
+                staged.wrote(offset, held, put)?;
+                put += held;
+            }
+            offset += len;
+        }
+        if offset != archived.len {
+            return Err(DriverError::MediumError);
+        }
+        staged.truncate(archived.len);
+        Ok(staged)
     }
 
     /// The structural record of `id`.
@@ -530,10 +568,10 @@ impl<A: VolumeAccess> ArchiveFs<A> {
     fn stamp(&self, id: u64) -> Result<(Time64, Option<acorn::Object>), DriverError> {
         let meta = &self.tree.node(id)?.meta;
         let now = self.held_now(meta, id == ROOT);
-        let acorn = meta
-            .acorn
-            .map(|object| riscos::dated(object, now))
-            .transpose()?;
+        let acorn = match meta.acorn {
+            Some(object) if self.format.dates_objects() => Some(riscos::dated(object, now)?),
+            kept => kept,
+        };
         Ok((now, acorn))
     }
 
@@ -567,6 +605,9 @@ impl<A: VolumeAccess> ArchiveFs<A> {
         after: acorn::Object,
     ) -> Result<(acorn::Object, Time64), DriverError> {
         let modified = self.tree.node(id)?.meta.times.modified;
+        if !self.format.dates_objects() {
+            return Ok((after, modified));
+        }
         Ok(match (riscos::date_of(&before), riscos::date_of(&after)) {
             (None, Some(_)) => (riscos::dated(after, modified)?, modified),
             (Some(old), Some(new)) if old != new => (after, new),
@@ -585,6 +626,8 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
     ) -> Result<NodeId, DriverError> {
         supported(self.format.holds_tree())?;
         self.spellable(name)?;
+        self.format
+            .places(&self.tree, dir.raw(), name, kind, None)?;
         let meta = self.born(kind, record);
         let body = match kind {
             NodeKind::Directory => Body::Dir(BTreeMap::new()),
@@ -621,6 +664,11 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
             .checked_add(data.len() as u64)
             .ok_or(DriverError::LengthOutOfRange)?;
         self.recordable(end)?;
+        let len = match &self.file_node(id)?.body {
+            Body::File(held) => held.len().max(end),
+            _ => return Err(DriverError::Unsupported),
+        };
+        self.format.room(&self.tree, id, len)?;
         self.change(|fs| {
             let stamp = fs.stamp(id)?;
             fs.stage(id)?;
@@ -678,6 +726,7 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
         let id = file.raw();
         self.file_node(id)?;
         self.recordable(size)?;
+        self.format.room(&self.tree, id, size)?;
         self.change(|fs| {
             let stamp = fs.stamp(id)?;
             let node = fs.tree.node_mut(id)?;
@@ -686,8 +735,10 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
                 // shorter length, needs no bytes moved.
                 Body::File(Data::Archived(_)) if size == 0 => node.body = Body::File(Data::empty()),
                 Body::File(Data::Archived(archived))
-                    if matches!(archived.coding, Coding::Stored | Coding::Stream)
-                        && archived.check == Check::None
+                    if matches!(
+                        archived.coding,
+                        Coding::Stored | Coding::Stream | Coding::Disc { .. }
+                    ) && archived.check == Check::None
                         && size <= archived.len =>
                 {
                     archived.len = size;
@@ -700,6 +751,8 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         supported(self.format.holds_tree())?;
+        let removing = self.tree.lookup(dir.raw(), name)?;
+        self.format.removable(&self.tree, removing)?;
         self.change(|fs| {
             let id = fs.tree.unlink(dir.raw(), name)?;
             if fs.tree.node(id).is_err() {
@@ -719,6 +772,9 @@ impl<A: VolumeAccess> FilesystemWrite for ArchiveFs<A> {
         self.spellable(dst_name)?;
         let moving = self.tree.lookup(src_dir.raw(), src_name)?;
         self.rewritable(moving)?;
+        let kind = self.tree.node(moving)?.kind();
+        self.format
+            .places(&self.tree, dst_dir.raw(), dst_name, kind, Some(moving))?;
         self.change(|fs| {
             if let Some(replaced) =
                 fs.tree
@@ -861,6 +917,7 @@ impl<A: VolumeAccess> FilesystemAttrs for ArchiveFs<A> {
         let mut object = before;
         object.set(key.as_bytes(), value, self.format.acorn_attr_bits())?;
         let (object, modified) = self.dating(id, before, object)?;
+        self.format.keeps_object(&self.tree, id, &object)?;
         self.change(|fs| {
             let node = fs.tree.node_mut(id)?;
             node.meta.acorn = Some(object);
@@ -900,6 +957,7 @@ impl<A: VolumeAccess> FilesystemAttrs for ArchiveFs<A> {
         let mut object = before;
         object.remove(key.as_bytes())?;
         let (object, modified) = self.dating(id, before, object)?;
+        self.format.keeps_object(&self.tree, id, &object)?;
         self.change(|fs| {
             let node = fs.tree.node_mut(id)?;
             node.meta.acorn = Some(object);

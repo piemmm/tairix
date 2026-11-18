@@ -247,6 +247,18 @@ impl BitmapFont {
         top.saturating_add_unsigned(height.saturating_sub(self.pixel_height) / 2)
     }
 
+    /// The rows of the line box a capital inks, first and last, as this face
+    /// draws an `H`: what a mark set beside capitals is sized and placed by.
+    /// `None` where no glyph can be had, or the `H` inks nothing.
+    #[must_use]
+    pub fn capital_rows(self) -> Option<(u32, u32)> {
+        client::with_client(|client| {
+            client
+                .with_glyph('H', self.family, self.pixel_height, self.weight, inked_rows)
+                .flatten()
+        })
+    }
+
     /// The advance every glyph of this font shares, or `None` when the
     /// family is proportional.
     #[must_use]
@@ -925,6 +937,21 @@ impl BitmapFont {
         }
         pen
     }
+}
+
+/// The first and last rows of `glyph` with ink of at least half coverage.
+fn inked_rows(glyph: &CachedGlyph) -> Option<(u32, u32)> {
+    let width = usize::try_from(glyph.width)
+        .ok()
+        .filter(|&width| width > 0)?;
+    let inked = |row: &[u8]| row.iter().any(|&coverage| coverage >= 0x80);
+    let mut rows = glyph.data.chunks_exact(width).enumerate();
+    let first = rows.find(|(_, row)| inked(row))?.0;
+    let last = rows
+        .rev()
+        .find(|(_, row)| inked(row))
+        .map_or(first, |(at, _)| at);
+    Some((u32::try_from(first).ok()?, u32::try_from(last).ok()?))
 }
 
 /// One laid-out line of wrapped text.
@@ -1643,5 +1670,31 @@ mod blit_tests {
                 }
             }
         }
+    }
+
+    /// A glyph's inked rows are those of at least half coverage: a faint
+    /// anti-aliased row at either end of a capital is not its ink.
+    #[test]
+    fn a_glyph_s_inked_rows_are_its_rows_of_half_coverage_or_more() {
+        let rows = |coverage: &[u8]| {
+            super::inked_rows(&CachedGlyph {
+                width: 2,
+                height: u32::try_from(coverage.len()).expect("small"),
+                advance: 2,
+                left: 0,
+                data: coverage.iter().flat_map(|&row| [0, row]).collect(),
+            })
+        };
+        assert_eq!(rows(&[0, 0x40, 0xFF, 0x90, 0xFF, 0x7F, 0]), Some((2, 4)));
+        assert_eq!(rows(&[0x80]), Some((0, 0)));
+        assert_eq!(rows(&[0, 0x7F, 0]), None, "nothing of half coverage");
+        let empty = CachedGlyph {
+            width: 0,
+            height: 14,
+            advance: 0,
+            left: 0,
+            data: Box::default(),
+        };
+        assert_eq!(super::inked_rows(&empty), None);
     }
 }

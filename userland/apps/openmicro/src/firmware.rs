@@ -1,7 +1,8 @@
-//! The clean-room ROM images `OpenMicro.app` carries, compiled into `Run` so the
-//! front end needs no filesystem authority to fit them. `cargo xtask openmicro
-//! --write-roms` writes them into this crate's `firmware/` from the sources
-//! in `rom`, and the `openmicro-roms` gate refuses one the tree does not build.
+//! The clean-room ROM images `OpenMicro.app` carries, and each model's boot
+//! screen as they draw it, compiled into `Run` so the front end needs no
+//! filesystem authority to fit them. `cargo xtask openmicro --write-roms`
+//! writes them into this crate's `firmware/` from the sources in `rom`, and
+//! the `openmicro-roms` gate refuses one the tree does not build.
 
 /// The crate's directory the images are committed in.
 pub const DIR: &str = "firmware";
@@ -43,6 +44,21 @@ pub const C64_BASIC_IMAGE: &[u8] = include_bytes!("../firmware/c64-basic.rom");
 pub const C64_KERNAL_IMAGE: &[u8] = include_bytes!("../firmware/c64-kernal.rom");
 /// The 1541's DOS, at `$C000` in the drive.
 pub const C1541_DOS_IMAGE: &[u8] = include_bytes!("../firmware/c1541-dos.rom");
+
+/// Each model's boot screen, packed, by its file's name: what the library's
+/// card of a machine never yet run shows.
+pub const MODEL_B_SCREEN: &str = "model-b.screen";
+/// The Electron's.
+pub const ELECTRON_SCREEN: &str = "electron.screen";
+/// The Commodore 64's.
+pub const C64_SCREEN: &str = "c64.screen";
+
+/// The Model B's boot screen.
+pub const MODEL_B_SCREEN_IMAGE: &[u8] = include_bytes!("../firmware/model-b.screen");
+/// The Electron's boot screen.
+pub const ELECTRON_SCREEN_IMAGE: &[u8] = include_bytes!("../firmware/electron.screen");
+/// The Commodore 64's boot screen.
+pub const C64_SCREEN_IMAGE: &[u8] = include_bytes!("../firmware/c64.screen");
 
 /// Each image by its file's name, the one list the gate and the tests read.
 pub const IMAGES: [(&str, &[u8]); 9] = [

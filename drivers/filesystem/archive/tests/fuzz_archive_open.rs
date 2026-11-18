@@ -9,9 +9,10 @@
 //!
 //! Each writable format's base is written by the driver itself, from the
 //! least archive of its format, so the bases carry what the writer writes:
-//! directories, compressed and stored members, RISC OS fields. RAR, which is
-//! only read, takes its bases from the test fixtures: every version's
-//! compression, solid runs, PPMd and the filters. A seeded stream then
+//! directories, compressed and stored members, RISC OS fields, a DFS disc's
+//! files on each side of it. RAR, which is only read, takes its bases from
+//! the test fixtures: every version's compression, solid runs, PPMd and the
+//! filters. A seeded stream then
 //! flips, cuts and overwrites their bytes; a plain `cargo test` runs a quick
 //! smoke sample, and the soak (`TAIRIX_FUZZ_BUDGET_SECS`) gives each base an
 //! equal share of the budget.
@@ -94,9 +95,20 @@ fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize) {
     }
 }
 
-/// Open `archive`, walk it, and where it may be written, change it, commit
-/// and walk what the commit wrote.
-fn exercise(archive: &[u8], name: &[u8]) {
+/// One base: the archive, the name it is attached by, and the path of the
+/// file a change makes in it, as its format names files.
+struct Base {
+    archive: Vec<u8>,
+    name: &'static [u8],
+    fresh: &'static [&'static [u8]],
+}
+
+/// The file a change makes in an archive of a format naming files freely.
+const FRESH: &[&[u8]] = &[b"Fuzz"];
+
+/// Open `archive`, walk it, and where it may be written, make the file
+/// `fresh`, commit and walk what the commit wrote.
+fn exercise(archive: &[u8], name: &[u8], fresh: &[&[u8]]) {
     let Some(Open {
         attachment,
         mut fs,
@@ -110,7 +122,15 @@ fn exercise(archive: &[u8], name: &[u8]) {
     if !writable {
         return;
     }
-    if let Ok(file) = fs.create(root, b"Fuzz", NodeKind::RegularFile, &RECORD) {
+    let Some((leaf, dirs)) = fresh.split_last() else {
+        return;
+    };
+    let dir = dirs
+        .iter()
+        .try_fold(root, |dir, part| fs.lookup(dir, part).ok());
+    if let Some(file) =
+        dir.and_then(|dir| fs.create(dir, leaf, NodeKind::RegularFile, &RECORD).ok())
+    {
         let _ = fs.write_at(file, 0, b"fuzzed and committed");
     }
     if fs.flush().is_ok() {
@@ -144,21 +164,64 @@ fn written(seed: &[u8], name: &[u8]) -> Vec<u8> {
     .expect("the seed archive is written back")
 }
 
+/// `seed`, a DFS disc attached by `name`, written back by the driver with
+/// files on each side it has — one of them locked, at an I/O processor
+/// address, one in a directory of its own, one crossing tracks — and one
+/// removed again, leaving a gap.
+fn written_disc(seed: &[u8], name: &[u8], sides: &[&[u8]]) -> Vec<u8> {
+    tairix_test_archive_image::written(seed, name, |fs| {
+        let root = fs.root();
+        for side in sides {
+            let dir = if side.is_empty() {
+                root
+            } else {
+                fs.lookup(root, side)?
+            };
+            let code = fs.create(dir, b"$.CODE", NodeKind::RegularFile, &RECORD)?;
+            fs.write_all(code, 0, &b"machine code ".repeat(400))?;
+            fs.set_attr(code, b"acorn.loadaddr", b"ffff1900")?;
+            fs.set_attr(code, b"acorn.attr", b"RWL/")?;
+            let gap = fs.create(dir, b"$.GAP", NodeKind::RegularFile, &RECORD)?;
+            fs.write_all(gap, 0, &[0x5A; 700])?;
+            let data = fs.create(dir, b"B.DATA", NodeKind::RegularFile, &RECORD)?;
+            fs.write_all(data, 0, b"data")?;
+            fs.remove(dir, b"$.GAP")?;
+        }
+        Ok(())
+    })
+    .expect("the seed disc is written back")
+}
+
 /// The bases: each writable format's least archive written back by the
 /// driver, a lone gzip stream, and the RAR fixtures.
-fn bases() -> Vec<(Vec<u8>, &'static [u8])> {
+fn bases() -> Vec<Base> {
     let seed = |format| tairix_test_archive_image::seed(format).expect("a seed");
+    let base = |archive, name| Base {
+        archive,
+        name,
+        fresh: FRESH,
+    };
     let mut bases = vec![
-        (written(&seed(Format::Zip), b"seed.zip"), &b"seed.zip"[..]),
-        (written(&seed(Format::Tar), b"seed.tar"), b"seed.tar"),
-        (written(&seed(Format::TarGzip), b"seed.tgz"), b"seed.tgz"),
-        (written(&seed(Format::TarBzip2), b"seed.tbz2"), b"seed.tbz2"),
-        (
+        base(written(&seed(Format::Zip), b"seed.zip"), b"seed.zip"),
+        base(written(&seed(Format::Tar), b"seed.tar"), b"seed.tar"),
+        base(written(&seed(Format::TarGzip), b"seed.tgz"), b"seed.tgz"),
+        base(written(&seed(Format::TarBzip2), b"seed.tbz2"), b"seed.tbz2"),
+        base(
             tairix_test_archive_image::gzip(b"one file, compressed alone").expect("a stream"),
             b"lone.gz",
         ),
-        (written(&seed(Format::Spark), b"seed.spk"), b"seed.spk"),
-        (written(&seed(Format::ArcFs), b"seed.arc"), b"seed.arc"),
+        base(written(&seed(Format::Spark), b"seed.spk"), b"seed.spk"),
+        base(written(&seed(Format::ArcFs), b"seed.arc"), b"seed.arc"),
+        Base {
+            archive: written_disc(&seed(Format::Ssd), b"seed.ssd", &[b""]),
+            name: b"seed.ssd",
+            fresh: &[b"$.FUZZ"],
+        },
+        Base {
+            archive: written_disc(&seed(Format::Dsd), b"seed.dsd", &[b"Drive 0", b"Drive 2"]),
+            name: b"seed.dsd",
+            fresh: &[b"Drive 2", b"$.FUZZ"],
+        },
     ];
     let rar: [&[u8]; 11] = [
         include_bytes!("fixtures/rar/rarfile/rar15-comment.rar"),
@@ -175,7 +238,7 @@ fn bases() -> Vec<(Vec<u8>, &'static [u8])> {
     ];
     bases.extend(
         rar.into_iter()
-            .map(|archive| (archive.to_vec(), &b"seed.rar"[..])),
+            .map(|archive| base(archive.to_vec(), b"seed.rar")),
     );
     bases
 }
@@ -190,8 +253,16 @@ fn fuzz_archive_open() {
     let bases = bases();
     let parts = u32::try_from(bases.len()).unwrap();
     let slices = tairix_fuzzseed::budget_slices(deadline, parts);
-    for (index, (base, name)) in bases.iter().enumerate() {
-        exercise(base, name);
+    for (
+        index,
+        Base {
+            archive: base,
+            name,
+            fresh,
+        },
+    ) in bases.iter().enumerate()
+    {
+        exercise(base, name, fresh);
         let until = slices(u32::try_from(index).unwrap());
         let mut iteration = 0u64;
         loop {
@@ -219,7 +290,7 @@ fn fuzz_archive_open() {
                     mutated[at..end].copy_from_slice(&edge.to_le_bytes()[..end - at]);
                 }
             }
-            exercise(&mutated, name);
+            exercise(&mutated, name, fresh);
             iteration += 1;
             if !tairix_fuzzseed::within_budget(until) && iteration >= SMOKE_ITERATIONS {
                 break;

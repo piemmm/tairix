@@ -8,9 +8,9 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::KeyboardMode;
+use tairix_abi::window_ipc::{KeyboardMode, PointerAction};
 use tairix_abi::Errno;
-use tairix_controls::{StatusBand, StatusTone};
+use tairix_controls::{Button, ButtonAction, StatusBand, StatusTone};
 use tairix_crt::screen::{fit, Drawing, Picture, Scaling, DOT};
 use tairix_crt::Tube;
 use tairix_geometry::{Rect, Region, Scale};
@@ -18,7 +18,7 @@ use tairix_machines::menu::{Effect, Followed};
 use tairix_openmicro::front::keys::{self, Keyboard, MachineKey, Mapping, Press, Stick};
 use tairix_openmicro::front::library::Joystick;
 use tairix_openmicro::front::media::{Disc, FileWork, Handover, Holding, Rack, Saving, Tape};
-use tairix_openmicro::front::menu::{Offered, Shown};
+use tairix_openmicro::front::menu::{Offered, Shown, SHIFT_BREAK};
 use tairix_openmicro::front::pacing::{Next, Pacer};
 use tairix_openmicro::front::picture::{expand, palette_of};
 use tairix_openmicro::front::{events, LEAST_PICTURE, OPEN_PICTURE};
@@ -26,7 +26,9 @@ use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
 use tairix_openmicro::machine::c64::joystick;
 use tairix_openmicro::machine::c64::keyboard::Keycap;
 use tairix_openmicro::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
-use tairix_openmicro::machine::{bbc, electron, LetterCase, Model};
+use tairix_openmicro::machine::{
+    bbc, electron, LetterCase, Model, BREAK_HELD_MICROS, BREAK_KEYS_HELD_CENTISECONDS,
+};
 use tairix_openmicro::worker::protocol::{
     session_bounds, Change, DeckKey, DiscFormat, Input, Lights, Loaded, Media, ModelKey, Ran,
     Refusal as Refused, Reply, Request, MAX_INPUTS, SHARE_BYTES,
@@ -40,11 +42,11 @@ use tairix_sandbox::session::Share;
 use tairix_sandbox::{SupervisedSession, WorkerMemory};
 use tairix_theme::Theme;
 use tairix_window::app::{self, Fitted, LazyPool, WindowPane};
-use tairix_window::{Desktop, Owed, Repaint, WindowSizing};
+use tairix_window::{pointer_input_events, pointer_point, Desktop, Owed, Repaint, WindowSizing};
 
 use crate::files::Speaker;
 use crate::program::{record, unwatch_sound, Client, APP_NAME};
-use crate::store::Images;
+use tairix_openmicro::front::images::Images;
 
 /// A control port's joystick lines.
 const STICK_LINES: usize = joystick::ALL.count_ones() as usize;
@@ -362,6 +364,19 @@ pub struct MachineWindow {
     /// Whether it was ever run, so a stop keeps its last screen.
     pub ran: bool,
     running_from: Option<u64>,
+    /// The strip's SHIFT-BREAK button, on a model it boots.
+    boot: Option<Button>,
+}
+
+/// The status strip's height on a `model`'s window: a band's, or one holding
+/// the SHIFT-BREAK button on a model it boots.
+fn strip_height(model: Model, (scale, theme): (Scale, &Theme)) -> u32 {
+    let band = StatusBand::new(theme, scale);
+    if model.boots_with_shift_break() {
+        band.height_holding_button(scale, theme)
+    } else {
+        band.height()
+    }
 }
 
 /// The window's opening size and the least it takes, a strip beneath the
@@ -369,8 +384,9 @@ pub struct MachineWindow {
 fn window_sizing(
     desktop: &Desktop,
     theme: &Theme,
+    model: Model,
 ) -> (tairix_abi::driver::display::DisplayMode, WindowSizing) {
-    let strip = StatusBand::new(theme, desktop.scale()).height();
+    let strip = strip_height(model, (desktop.scale(), theme));
     let (width, height) = desktop.window_size(OPEN_PICTURE.0, OPEN_PICTURE.1);
     let least = desktop.window_size(LEAST_PICTURE.0, LEAST_PICTURE.1);
     let mode = app::mode_for(width, height.saturating_add(strip));
@@ -399,7 +415,8 @@ impl MachineWindow {
         (slot, ticket): (usize, u64),
         tokens: (u64, u64),
     ) -> Result<Self, String> {
-        let (mode, sizing) = window_sizing(desktop, theme);
+        let model = machine.model();
+        let (mode, sizing) = window_sizing(desktop, theme, model);
         let surface = Surface::new(mode.width_px, mode.height_px)
             .ok_or_else(|| String::from("there is not enough memory for its window"))?;
         let mut picture = Picture::new(machine.tube);
@@ -419,7 +436,6 @@ impl MachineWindow {
                 format_args!("the keyboard cannot be read raw ({err}); keys type text"),
             );
         }
-        let model = machine.model();
         let mut window = Self {
             id: machine.id,
             life: Life::Starting(ticket),
@@ -468,6 +484,9 @@ impl MachineWindow {
             offered: Offered::default(),
             ran: false,
             running_from: None,
+            boot: model
+                .boots_with_shift_break()
+                .then(|| Button::labelled(SHIFT_BREAK)),
         };
         window.owe_whole();
         Ok(window)
@@ -541,10 +560,9 @@ impl MachineWindow {
     }
 
     /// The window's picture and status strip.
-    fn layout(&self, (scale, theme): (Scale, &Theme)) -> Option<(Target, Rect)> {
+    fn layout(&self, looks: (Scale, &Theme)) -> Option<(Target, Rect)> {
         let mode = self.mode();
-        let band = StatusBand::new(theme, scale);
-        let strip = band.height().min(mode.height_px);
+        let strip = strip_height(self.model, looks).min(mode.height_px);
         let room = mode.height_px - strip;
         let picture = fit(mode.width_px, room)?;
         Some((
@@ -1034,6 +1052,61 @@ impl MachineWindow {
         }
     }
 
+    /// SHIFT held as BREAK is pressed and let go, and on until the reset has
+    /// read it: the boot of the medium in the machine, on a model it boots.
+    pub fn press_shift_break(&mut self) {
+        let shift = match self.model {
+            Model::ModelB => ModelKey::ModelB(bbc::keyboard::Key::SHIFT),
+            Model::Electron => ModelKey::Electron(electron::keyboard::Key::SHIFT),
+            Model::C64 => return,
+        };
+        let clock = self.pacer.timing().clock();
+        let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
+        let down = self.timeline.max(last);
+        let up = down + clock * BREAK_HELD_MICROS / 1_000_000;
+        let let_go = up + clock * BREAK_KEYS_HELD_CENTISECONDS / 100;
+        self.pressed_at[key_number(shift) % keys::KEY_NUMBERS] = down;
+        self.inputs.extend([
+            (down, Change::Key(shift, true)),
+            (down, Change::Break(true)),
+            (up, Change::Break(false)),
+            (let_go, Change::Key(shift, false)),
+        ]);
+    }
+
+    /// Where the strip's SHIFT-BREAK button lies, on a model it boots.
+    fn boot_at(&self, looks: (Scale, &Theme)) -> Option<Rect> {
+        let (scale, theme) = looks;
+        let width = self.boot.as_ref()?.measured_width(scale, theme);
+        let (_, strip) = self.layout(looks)?;
+        let slot = StatusBand::new(theme, scale)
+            .slots::<0, 1>(strip, [], [width])
+            .trailing[0];
+        Some(StatusBand::button_in(slot, scale, theme))
+    }
+
+    /// Take a pointer event at `(x, y)` doing `action` over the window: the
+    /// strip's SHIFT-BREAK button's, pressing SHIFT-BREAK once clicked.
+    pub fn pointer(&mut self, (x, y, action): (u32, u32, PointerAction), looks: (Scale, &Theme)) {
+        let Some(at) = self.boot_at(looks) else {
+            return;
+        };
+        let Some(button) = self.boot.as_mut() else {
+            return;
+        };
+        let mut redrawn = Region::new();
+        let mut clicked = false;
+        for input in pointer_input_events(action, pointer_point(x, y)) {
+            clicked |= button.on_pointer(&input, at, &mut redrawn) == Some(ButtonAction::Activated);
+        }
+        if !redrawn.is_empty() {
+            self.owe_strip();
+        }
+        if clicked {
+            self.press_shift_break();
+        }
+    }
+
     /// BREAK pressed and let go; on a C64, RESTORE.
     pub fn press_break(&mut self) {
         if self.model == Model::C64 {
@@ -1273,6 +1346,8 @@ impl MachineWindow {
         if damage.intersects(strip) {
             let message = message_of(self.message.as_ref(), &self.pacer);
             let (lights, drives) = (self.lights, self.drives);
+            let boot = self.boot.as_ref();
+            let surface = &mut self.surface;
             match self.model {
                 Model::ModelB => {
                     let lamps = [
@@ -1282,29 +1357,30 @@ impl MachineWindow {
                         ("DRIVE 0", drives[0]),
                         ("DRIVE 1", drives[1]),
                     ];
-                    paint_strip(&mut self.surface, strip, looks, (lamps, &message));
+                    paint_strip(surface, strip, looks, (lamps, &message), boot);
                 }
                 Model::Electron => {
                     let lamps = [("CAPS LOCK", lights.caps_lock), ("MOTOR", lights.motor)];
-                    paint_strip(&mut self.surface, strip, looks, (lamps, &message));
+                    paint_strip(surface, strip, looks, (lamps, &message), boot);
                 }
                 Model::C64 => {
                     let motor = ("MOTOR", lights.motor);
-                    let surface = &mut self.surface;
                     match self.fitted {
                         [true, true] => {
                             let lamps = [motor, ("DRIVE 8", drives[0]), ("DRIVE 9", drives[1])];
-                            paint_strip(surface, strip, looks, (lamps, &message));
+                            paint_strip(surface, strip, looks, (lamps, &message), boot);
                         }
                         [true, false] => {
                             let lamps = [motor, ("DRIVE 8", drives[0])];
-                            paint_strip(surface, strip, looks, (lamps, &message));
+                            paint_strip(surface, strip, looks, (lamps, &message), boot);
                         }
                         [false, true] => {
                             let lamps = [motor, ("DRIVE 9", drives[1])];
-                            paint_strip(surface, strip, looks, (lamps, &message));
+                            paint_strip(surface, strip, looks, (lamps, &message), boot);
                         }
-                        [false, false] => paint_strip(surface, strip, looks, ([motor], &message)),
+                        [false, false] => {
+                            paint_strip(surface, strip, looks, ([motor], &message), boot);
+                        }
                     }
                 }
             }
@@ -1419,49 +1495,38 @@ fn message_of(message: Option<&(String, StatusTone)>, pacer: &Pacer) -> (String,
     }
 }
 
-/// The status strip: each of the model's lamps, lit or not, and the message.
+/// The status strip: each of the model's lamps, lit or not, the message,
+/// and the SHIFT-BREAK button at its trailing end where the model has one.
 fn paint_strip<const N: usize>(
     surface: &mut Surface,
     strip: Rect,
     (scale, theme): (Scale, &Theme),
     (lamps, message): ([(&'static str, bool); N], &(String, StatusTone)),
+    boot: Option<&Button>,
 ) {
     let band = StatusBand::new(theme, scale);
-    let lamp = band.face().line_height() * 2 / 3;
-    let widths = lamps.map(|(label, _)| band.slot_width(label) + lamp);
-    let slots = band.slots::<N, 0>(strip, widths, []);
+    let lamp = band.lamp();
+    let widths = lamps.map(|(label, _)| lamp.slot_width(label));
+    let button = boot.map_or(0, |button| button.measured_width(scale, theme));
+    let slots = band.slots::<N, 1>(strip, widths, [button]);
     let mut parts: Vec<(Rect, &str, StatusTone)> = slots
         .leading
         .iter()
         .zip(lamps.iter())
-        .map(|(slot, (label, _))| {
-            let text = Rect::new(
-                slot.left() + i32::try_from(lamp).unwrap_or(0),
-                slot.top(),
-                slot.width.saturating_sub(lamp),
-                slot.height,
-            );
-            (text, *label, StatusTone::Muted)
-        })
+        .map(|(slot, (label, _))| (lamp.text(*slot), *label, StatusTone::Muted))
         .collect();
     parts.push((slots.message, message.0.as_str(), message.1));
     band.paint(surface, strip, theme, &parts);
-    let palette = theme.palette();
-    let side = lamp.max(2);
     for (slot, (_, lit)) in slots.leading.iter().zip(lamps.iter()) {
-        let colour = if *lit {
-            palette.danger
+        let tone = if *lit {
+            StatusTone::Danger
         } else {
-            palette.on_surface_muted
+            StatusTone::Muted
         };
-        let (Ok(x), Ok(y)) = (
-            u32::try_from(slot.left()),
-            u32::try_from(
-                slot.top() + i32::try_from(slot.height.saturating_sub(side) / 2).unwrap_or(0),
-            ),
-        ) else {
-            continue;
-        };
-        surface.fill_round_rect(x, y, side, side, side / 2, Color::from(colour));
+        lamp.paint(surface, *slot, theme, tone);
+    }
+    if let Some(button) = boot {
+        let at = StatusBand::button_in(slots.trailing[0], scale, theme);
+        button.render(surface, at, scale, theme);
     }
 }

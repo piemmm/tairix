@@ -1112,9 +1112,16 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
         ServeFrame::decode(&good[..SERVE_FRAME_LEN - 1]),
         Err(Errno::LengthOutOfRange)
     );
-    // The first refusal code past the closed set.
+    // The first refusal code and format byte past each closed set.
     let unnamed = WriteRefusal::Truncated.as_u8() + 1;
     assert!(WriteRefusal::from_u8(unnamed).is_err());
+    let unformatted = FormatName::ALL
+        .map(FormatName::as_u8)
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+        + 1;
+    assert!(FormatName::from_u8(unformatted).is_err());
     for (at, value) in [
         (0, 9),
         (2, 3),
@@ -1123,7 +1130,7 @@ fn a_serve_frame_round_trips_and_refuses_what_it_cannot_name() {
         (5, 8),
         (6, unnamed),
         (7, 0),
-        (7, 20),
+        (7, unformatted),
     ] {
         let mut bad = good;
         bad[at] = value;

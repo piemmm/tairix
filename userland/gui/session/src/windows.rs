@@ -2967,10 +2967,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             }
         };
         // Relayed read-only and only as a regular file: a placed file is read
-        // into a document, never written, and a pipe end is no file.
+        // into a document, never written, and a pipe end is no file. The drop
+        // is the user's, so its target may come forward as a launch would.
+        let activation = self.hand_over_activation(desk, caller);
         let relay = &mut *self.relay;
         let mut refused = None;
-        let taken = desk.hand_over(app, Activation::Withheld, &mut || {
+        let taken = desk.hand_over(app, activation, &mut || {
             let grant = relay
                 .relay(
                     DocumentAuthority::Delegated {
@@ -4035,28 +4037,12 @@ mod tests {
         }
 
         fn host(&mut self) -> ShellWindowHost<'_> {
-            ShellWindowHost {
-                shell: &mut self.shell,
-                compositor: &mut self.compositor,
-                windows: &mut self.windows,
-                picker: &mut self.picker,
-                apps: &mut self.bar,
-                menu: &mut self.menu,
-                seat_held: self.seat_held,
-                screensaver: None,
-                relay: &mut self.relay,
-                wallpapers: &mut self.gallery,
-                cursor_sets: &[],
-                clipboard: &mut self.clipboard,
-                authorise: None,
-                documents: &mut self.documents,
-            }
+            self.host_and_desk().0
         }
 
-        /// Ask the session to hand `target` over for [`caller`].
-        fn ask(&mut self, target: &HandOverTarget) -> Result<HandOverOutcome, Errno> {
-            let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
-            let mut host = ShellWindowHost {
+        /// The host, beside the desk it hands over through.
+        fn host_and_desk(&mut self) -> (ShellWindowHost<'_>, &mut RecordingDesk) {
+            let host = ShellWindowHost {
                 shell: &mut self.shell,
                 compositor: &mut self.compositor,
                 windows: &mut self.windows,
@@ -4072,7 +4058,30 @@ mod tests {
                 authorise: None,
                 documents: &mut self.documents,
             };
-            host.hand_over_requested(&mut self.desk, caller(), &run_path, target)
+            (host, &mut self.desk)
+        }
+
+        /// Ask the session to hand `target` over for [`caller`].
+        fn ask(&mut self, target: &HandOverTarget) -> Result<HandOverOutcome, Errno> {
+            let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
+            let (mut host, desk) = self.host_and_desk();
+            host.hand_over_requested(desk, caller(), &run_path, target)
+        }
+
+        /// The caller drops a file on [`resident`]'s window 5.
+        fn drop_placed(&mut self) -> Result<(), Errno> {
+            let name = tairix_abi::window_ipc::DocumentName::new("disc.ssd").expect("a name");
+            let placement = tairix_window::Placement {
+                window_id: 5,
+                x: 3,
+                y: 4,
+            };
+            let file = PlacedFile {
+                name: &name,
+                grant: core::num::NonZeroU64::new(31).expect("a handle"),
+            };
+            let (mut host, desk) = self.host_and_desk();
+            host.place_dropped(desk, caller(), Ok((resident(), placement)), file)
         }
 
         /// Open and show window `id` for `owner`, which takes the keyboard.
@@ -4137,6 +4146,28 @@ mod tests {
             ]
         );
         assert_eq!(bench.desk.handed.len(), 4, "every document still arrived");
+    }
+
+    /// A file dropped from a window the user works in brings forward the
+    /// window it is placed in, as a launch would; dropped from one they do
+    /// not, or over a held seat, it is still placed.
+    #[test]
+    fn a_placed_drop_lends_a_raise_from_the_window_dragged_from() {
+        let mut bench = HandOverBench::with_resident();
+        bench.open(caller(), 9);
+        assert_eq!(bench.drop_placed(), Ok(()));
+        bench.work_in(9);
+        assert_eq!(bench.drop_placed(), Ok(()));
+        bench.seat_held = true;
+        assert_eq!(bench.drop_placed(), Ok(()));
+        assert_eq!(
+            bench.desk.activations,
+            [
+                Activation::Withheld,
+                Activation::Granted { focus: Some(9) },
+                Activation::Withheld,
+            ]
+        );
     }
 
     /// A hand-over spends the activation a gesture at its caller minted, so a

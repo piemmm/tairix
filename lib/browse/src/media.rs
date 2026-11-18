@@ -256,7 +256,7 @@ pub enum MediaType {
     ImageDisk,
     /// An Acorn DFS disc's image, one side's sectors or both sides' tracks
     /// in turn (`application/x-acorn-dfs-disc`): a BBC Micro's disc, served
-    /// as no volume.
+    /// as a volume of its files.
     AcornDfsDisc,
     /// A cassette tape in the Unified Emulator Format, its blocks and tones
     /// (`application/x-uef-tape`).
@@ -867,9 +867,10 @@ impl MediaType {
     }
 
     /// Whether a file of this type holds a volume, so opening it is mounting
-    /// it: a disk image of any kind, or an archive of a format the system
-    /// serves as one (`plans/ARCHIVES.md`). A format built on an archive — a
-    /// Java archive is a zip — is its own document, not one.
+    /// it: a disk image of any kind, a DFS disc's image, or an archive of a
+    /// format the system serves as one (`plans/ARCHIVES.md`). A format built
+    /// on an archive — a Java archive is a zip — is its own document, not
+    /// one.
     #[must_use]
     pub fn holds_a_volume(self) -> bool {
         matches!(
@@ -882,6 +883,7 @@ impl MediaType {
                 | Self::ArchiveSpark
                 | Self::RiscOsArchive
                 | Self::ArcFs
+                | Self::AcornDfsDisc
         ) || ancestry(self).any(|media| media == Self::RawDiskImage)
     }
 

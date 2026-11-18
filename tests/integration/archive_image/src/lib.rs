@@ -22,6 +22,8 @@ use tairix_abi::DriverError;
 use tairix_compress::bzip2::{self, BlockIndex};
 use tairix_compress::deflate::{Deflate, Flush};
 use tairix_compress::Output;
+use tairix_dfs::catalogue::{Catalogue, CATALOGUE_LEN};
+use tairix_dfs::image::Layout;
 use tairix_drv_fs_archive::{ArchiveFs, Served};
 use tairix_fsserve::{
     GrantedVolume, MemoryAccess, MemoryAttachment, ServedArchive, WritebackBudget,
@@ -54,11 +56,18 @@ pub enum Format {
     Spark,
     /// A RISC OS `ArcFS` archive.
     ArcFs,
+    /// An Acorn DFS disc image, single-sided.
+    Ssd,
+    /// An Acorn DFS disc image, double-sided.
+    Dsd,
 }
 
-/// The least archive of `format`: a zip of no member; for every other
-/// format, one stored member [`SEED`] holding [`SEED`], as a tar, Spark or
-/// `ArcFS` archive is only told from other data by a member.
+/// The sectors each side of a [`seed`] DFS disc counts: forty tracks.
+pub const DFS_SEED_SECTORS: u16 = 400;
+
+/// The least archive of `format`: a zip of no member, a DFS disc of no file;
+/// for every other format, one stored member [`SEED`] holding [`SEED`], as a
+/// tar, Spark or `ArcFS` archive is only told from other data by a member.
 ///
 /// # Errors
 ///
@@ -75,7 +84,23 @@ pub fn seed(format: Format) -> Result<Vec<u8>, DriverError> {
         Format::TarBzip2 => bzip2(&tar(), 1)?,
         Format::Spark => spark(),
         Format::ArcFs => arcfs(),
+        Format::Ssd => dfs(Layout::Single),
+        Format::Dsd => dfs(Layout::Double),
     })
+}
+
+/// A DFS disc of `layout` holding no file, [`DFS_SEED_SECTORS`] a side:
+/// each side's empty catalogue alone, the image's missing tail the rest of
+/// the disc.
+fn dfs(layout: Layout) -> Vec<u8> {
+    let mut catalogue = [0u8; CATALOGUE_LEN];
+    Catalogue::blank(DFS_SEED_SECTORS).write(&mut catalogue);
+    let mut image = vec![0u8; layout.image_end(layout.sides() - 1, CATALOGUE_LEN)];
+    for side in 0..layout.sides() {
+        let at = layout.image_offset(side, 0);
+        image[at..at + CATALOGUE_LEN].copy_from_slice(&catalogue);
+    }
+    image
 }
 
 /// A ustar archive of [`SEED`].
@@ -268,26 +293,23 @@ mod tests {
     /// file the driver writes back.
     #[test]
     fn every_seed_opens_and_is_written_back_with_a_new_member() {
-        for (format, name) in [
-            (Format::Zip, &b"seed.zip"[..]),
-            (Format::Tar, b"seed.tar"),
-            (Format::TarGzip, b"seed.tgz"),
-            (Format::TarBzip2, b"seed.tbz2"),
-            (Format::Spark, b"seed.spk"),
-            (Format::ArcFs, b"seed.arc"),
+        for (format, name, held, added) in [
+            (Format::Zip, &b"seed.zip"[..], 0, &b"Added"[..]),
+            (Format::Tar, b"seed.tar", 1, b"Added"),
+            (Format::TarGzip, b"seed.tgz", 1, b"Added"),
+            (Format::TarBzip2, b"seed.tbz2", 1, b"Added"),
+            (Format::Spark, b"seed.spk", 1, b"Added"),
+            (Format::ArcFs, b"seed.arc", 1, b"Added"),
+            (Format::Ssd, b"seed.ssd", 0, b"$.ADDED"),
         ] {
             let seed = seed(format).unwrap();
-            let held = names(&seed, name);
-            assert_eq!(
-                held.len(),
-                usize::from(format != Format::Zip),
-                "{format:?}: {held:?}"
-            );
+            let names_held = names(&seed, name);
+            assert_eq!(names_held.len(), held, "{format:?}: {names_held:?}");
             let archive = written(&seed, name, |fs| {
                 let root = fs.root();
                 let file = fs.create(
                     root,
-                    b"Added",
+                    added,
                     NodeKind::RegularFile,
                     &NodeSecurity::new(0o644, 0, 0),
                 )?;
@@ -295,10 +317,37 @@ mod tests {
             })
             .unwrap();
             assert!(
-                names(&archive, name).contains(&b"Added".to_vec()),
+                names(&archive, name).contains(&added.to_vec()),
                 "{format:?}"
             );
         }
+    }
+
+    /// A double-sided seed serves each side as a drive, and a file written
+    /// to the second lands there.
+    #[test]
+    fn a_double_sided_seed_takes_a_file_on_its_second_side() {
+        let seed = seed(Format::Dsd).unwrap();
+        assert_eq!(
+            names(&seed, b"seed.dsd"),
+            [b"Drive 0".to_vec(), b"Drive 2".to_vec()]
+        );
+        let archive = written(&seed, b"seed.dsd", |fs| {
+            let root = fs.root();
+            let side = fs.lookup(root, b"Drive 2")?;
+            let file = fs.create(
+                side,
+                b"$.ADDED",
+                NodeKind::RegularFile,
+                &NodeSecurity::new(0o644, 0, 0),
+            )?;
+            fs.write_at(file, 0, b"added").map(drop)
+        })
+        .unwrap();
+        let mut fs = opened(&archive, b"seed.dsd").unwrap();
+        let root = fs.root();
+        let side = fs.lookup(root, b"Drive 2").unwrap();
+        assert!(fs.lookup(side, b"$.ADDED").is_ok());
     }
 
     #[test]

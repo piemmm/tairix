@@ -52,6 +52,15 @@ contiene. Un archivio RAR è sempre montato in sola lettura. Un archivio
 suddiviso in più volumi, o con i nomi degli elementi cifrati, non viene
 montato, e un elemento cifrato non può essere letto.
 
+Un'immagine di disco del BBC Micro (`.ssd`, `.dsd`) viene montata come
+un volume con i file che contiene, ciascuno con il nome che gli dà il
+filesystem del disco stesso: la sua directory, un punto, poi il suo nome
+(`$.ELITE`); un `.dsd` a doppia faccia mostra le sue due facce come le
+cartelle `Drive 0` e `Drive 2`. Gli indirizzi di caricamento e di
+esecuzione di un file lo accompagnano, e una modifica viene scritta sul
+disco come la scriverebbe il BBC Micro, mantenendo tutti gli altri
+settori com'erano.
+
 Il volume resta montato finché non lo scollegate con `unmount` o non
 termina la vostra sessione di accesso. Un'immagine che contiene un
 disco partizionato, uno dei dischi di un array RAID o un filesystem
@@ -82,12 +91,12 @@ anche all'utente davanti al computer.
 - `-t, --types <list>` — i filesystem, separati da virgole, uno dei
   quali l'immagine deve contenere, con i nomi che dà loro l'elenco dei
   montaggi (`iso9660`, `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`,
-  `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`), oppure
-  `auto` per qualunque filesystem contenga; una lista che comincia con
-  `no` nomina quelli che non deve contenere. Ciò che l'immagine
-  racchiude è riconosciuto dal suo contenuto, perciò l'ordine non
-  sceglie nulla: un disco ottico che contiene sia UDF sia ISO 9660 viene
-  montato come UDF, a meno che il suo ISO 9660 non conservi record
+  `tar.gz`, `tar.bz2`, `gzip`, `bzip2`, `spark`, `arcfs`, `rar`, `dfs`),
+  oppure `auto` per qualunque filesystem contenga; una lista che
+  comincia con `no` nomina quelli che non deve contenere. Ciò che
+  l'immagine racchiude è riconosciuto dal suo contenuto, perciò l'ordine
+  non sceglie nulla: un disco ottico che contiene sia UDF sia ISO 9660
+  viene montato come UDF, a meno che il suo ISO 9660 non conservi record
   Rock Ridge o RISC OS. Un'immagine che non ne contiene nessuno, o una
   lista che non nomina alcun tipo che un'immagine disco possa contenere,
   non viene montata.

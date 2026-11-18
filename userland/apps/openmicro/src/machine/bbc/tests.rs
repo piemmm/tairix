@@ -435,9 +435,10 @@ fn the_machine_hands_out_the_rows_its_picture_changed() {
 
 #[test]
 fn a_disc_comes_back_out_as_it_was_written_and_saving_it_clears_its_marks() {
-    use crate::media::disc::{Disc, ImageFormat};
+    use crate::media::disc::Disc;
+    use tairix_dfs::image::Layout;
     let mut machine = Machine::new(&os_with(&[])).expect("a 16 KiB OS");
-    let mut disc = Disc::decode(&[0x11; 2560], ImageFormat::Ssd, false).unwrap();
+    let mut disc = Disc::decode(&[0x11; 2560], Layout::Single, false).unwrap();
     disc.track_mut(0, 1).unwrap();
     machine.insert_disc(PhysicalDrive::One, disc.clone());
     assert!(machine.disc(PhysicalDrive::One).is_some_and(Disc::is_dirty));
